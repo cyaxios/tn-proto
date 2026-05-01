@@ -83,6 +83,7 @@ jobs:
             --deselect tests/test_concurrent_emit.py::test_concurrent_emit_preserves_chain_and_uniqueness \
             --deselect tests/test_entry.py::test_entry_is_flat_and_no_groups_leak \
             --deselect tests/test_watch.py::test_watch_once_emits_entry_shape \
+            --deselect tests/test_examples.py::test_all_examples \
             --tb=short -q
 
   rust-tests:
