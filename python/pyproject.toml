@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "tn-protocol"
-version         = "0.2.0a1"
+version         = "0.2.0a2"
 description     = "TestigoNodo protocol: attested logging with JWE + btn ciphers"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -41,10 +41,11 @@ dependencies = [
     "mcp>=1.0",                 # Model Context Protocol SDK (tn-mcp-server)
     "base58>=2.1",              # did:key / base58 encoding
     # Rust-backed ciphers. Built with maturin from ../crypto/tn-btn-py/
-    # and ../crypto/tn-core-py/; published as separate wheels. Pinned to
-    # the same alpha as this package so an installer pulls a coherent set.
-    "tn-btn==0.2.0a1",
-    "tn-core==0.2.0a1",
+    # and ../crypto/tn-core-py/; published as separate wheels. The
+    # range allows alpha sub-package patches to flow without forcing a
+    # tn-protocol republish — tighten to == on stable.
+    "tn-btn>=0.2.0a1,<0.3",
+    "tn-core>=0.2.0a1,<0.3",
 ]
 
 [project.optional-dependencies]

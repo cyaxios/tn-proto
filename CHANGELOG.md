@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0a2] - 2026-05-01
+
+Loosened sub-package version constraints for rapid alpha iteration.
+Functionally identical to 0.2.0a1.
+
+### Changed
+
+- `tn-btn` / `tn-core` deps now `>=0.2.0a1,<0.3` (was `==0.2.0a1`).
+  Patches to either wheel flow into tn-protocol installs without
+  forcing a coordinated bump. Tighten back to `==` for stable.
+
+[0.2.0a2]: https://github.com/cyaxios/tn-proto/releases/tag/v0.2.0a2
+
 ## [0.2.0a1] - 2026-05-01
 
 First public alpha. Initial release of tn-proto under the `cyaxios`
