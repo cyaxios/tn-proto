@@ -87,7 +87,7 @@ test("mixed substitutions in a yaml fragment", () => {
     const out = substituteEnvVars(text, SOURCE);
     assert.match(out, /id: did:key:zABC/);
     assert.match(out, /literal: \$\{LITERAL_TEMPLATE\}/);
-    assert.match(out, /path: \.\/\.tn/logs\/tn\.ndjson/);
+    assert.match(out, /path: \.\/\.tn\/logs\/tn\.ndjson/);
   });
 });
 

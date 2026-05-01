@@ -803,7 +803,7 @@ function rotateLogOnSessionStart(
   }
   if (!rotateOnInit) return;
   if (!existsSync(logPath)) return;
-  let size = 0;
+  let size: number;
   try {
     size = statSync(logPath).size;
   } catch {
