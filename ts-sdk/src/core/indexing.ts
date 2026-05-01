@@ -1,4 +1,4 @@
-import { deriveGroupIndexKey, indexToken } from "./raw.js";
+import { deriveGroupIndexKey, indexToken } from "../raw.js";
 
 /**
  * Derive the per-group HKDF-SHA256 index key. `master` must be 32 bytes.

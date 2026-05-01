@@ -3,13 +3,13 @@
 // not re-exported here, pull from `@tn/sdk/raw`.
 
 export * from "./types.js";
-export * from "./canonical.js";
-export * from "./chain.js";
-export * from "./envelope.js";
-export * from "./indexing.js";
-export * from "./signing.js";
+export * from "./core/canonical.js";
+export * from "./core/chain.js";
+export * from "./core/envelope.js";
+export * from "./core/indexing.js";
+export * from "./core/signing.js";
 export * as admin from "./admin.js";
-export * as primitives from "./primitives.js";
+export * as primitives from "./core/primitives.js";
 export { NodeRuntime } from "./runtime/node_runtime.js";
 export type { ReadEntry, EmitReceipt } from "./runtime/node_runtime.js";
 export {

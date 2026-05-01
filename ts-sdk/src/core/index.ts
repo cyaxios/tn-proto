@@ -5,9 +5,10 @@
 // `crypto` module. Random bytes come from globalThis.crypto (Web Crypto API)
 // or via the wasm core's getrandom binding. ESLint enforces this rule;
 // see ../../eslint.config.js.
-//
-// This barrel re-exports the public surface of every Layer 1 module.
-// Phase 1 of the 0.3.0 refresh is moving modules in here one by one;
-// see docs/superpowers/plans/2026-05-01-ts-sdk-refresh.md.
 
-export {};  // populated by subsequent tasks in this phase
+export * from "./canonical.js";
+export * from "./chain.js";
+export * from "./signing.js";
+export * from "./indexing.js";
+export * from "./envelope.js";
+export * from "./primitives.js";
