@@ -26,7 +26,7 @@ import io
 import json
 import sys
 import zipfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -72,7 +72,7 @@ def _signed_contact_update_zip(
         from_did=signer.did,
         to_did=to_did,
         ceremony_id=ceremony_id,
-        as_of=datetime.now(UTC).isoformat(),
+        as_of=datetime.now(timezone.utc).isoformat(),
         scope="default",
         clock={},
         event_count=1,
