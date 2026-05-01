@@ -56,15 +56,8 @@ interface ChainSlot {
  *               rowHash   — recomputed row_hash matches envelope
  *               chain     — prev_hash of this entry matches last row_hash seen
  */
-export interface ReadEntry {
-  envelope: Record<string, unknown>;
-  plaintext: Record<string, Record<string, unknown>>;
-  valid: {
-    signature: boolean;
-    rowHash: boolean;
-    chain: boolean;
-  };
-}
+import type { ReadEntry } from "../core/read_shape.js";
+export type { ReadEntry };
 
 // Envelope fields that are NOT public fields and NOT group payloads.
 const _ENVELOPE_RESERVED = new Set([
