@@ -12,3 +12,5 @@ export * from "./signing.js";
 export * from "./indexing.js";
 export * from "./envelope.js";
 export * from "./primitives.js";
+export * from "./tnpkg.js";
+export * from "./tnpkg_archive.js";
