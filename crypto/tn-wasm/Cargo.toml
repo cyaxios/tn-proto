@@ -1,0 +1,31 @@
+[package]
+name = "tn-wasm"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WebAssembly bindings for tn-core. Node and browser."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Pure-compute modules only. No fs feature, no filesystem I/O.
+tn-core = { path = "../tn-core", default-features = false }
+tn-btn = { path = "../tn-btn" }
+wasm-bindgen = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+# getrandom needs the `js` feature so `rand_core` can pull entropy from
+# the host (crypto.getRandomValues) on wasm32-unknown-unknown.
+getrandom = { version = "0.2", features = ["js"] }
+base64 = { workspace = true }
+bs58 = "0.5"
+
+[features]
+default = []
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

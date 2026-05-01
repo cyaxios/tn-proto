@@ -1,0 +1,41 @@
+[
+  {
+    "name": "empty_public_empty_groups",
+    "inputs": {
+      "did": "did:key:zABC",
+      "timestamp": "2026-04-21T12:00:00.000000Z",
+      "event_id": "00000000-0000-0000-0000-000000000001",
+      "event_type": "order.created",
+      "level": "info",
+      "prev_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "public_fields": {},
+      "groups": {}
+    },
+    "expected_row_hash": "sha256:2f3c025206d6c66c1a8746144be384ceb5ca1fa340eb75be0c7d92f4695a0b25"
+  },
+  {
+    "name": "with_public_and_one_group",
+    "inputs": {
+      "did": "did:key:zXYZ",
+      "timestamp": "2026-04-21T12:00:01.000000Z",
+      "event_id": "00000000-0000-0000-0000-000000000002",
+      "event_type": "order.paid",
+      "level": "info",
+      "prev_hash": "sha256:abababababababababababababababababababababababababababababababab",
+      "public_fields": {
+        "method": "POST",
+        "path": "/x"
+      },
+      "groups": {
+        "default": {
+          "ciphertext_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "field_hashes": {
+            "amount": "hmac-sha256:v1:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "currency": "hmac-sha256:v1:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+          }
+        }
+      }
+    },
+    "expected_row_hash": "sha256:d2893f098f3f6e2e37a52c09b9cc5d4c8901e2e8a0382e04b1146f3a24384064"
+  }
+]

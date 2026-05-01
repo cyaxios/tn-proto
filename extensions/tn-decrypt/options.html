@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>TN Decrypt - options</title>
+    <style>
+      body { font: 14px/1.45 system-ui, sans-serif; margin: 2rem auto; max-width: 720px; color: #1f1b16; padding: 0 1rem; }
+      h1 { font-size: 18px; margin-bottom: 4px; }
+      h2 { font-size: 15px; margin-top: 0; }
+      p.hint { color: #65605a; font-size: 13px; margin-top: 0; }
+      section { border: 1px solid #d9d6d1; border-radius: 8px; padding: 18px 22px; margin-bottom: 18px; background: #fff; }
+      label { display: block; font-weight: 600; margin-top: 10px; }
+      input[type="password"], input[type="text"], input[type="file"] { display: block; margin-top: 4px; padding: 6px 8px; border: 1px solid #d9d6d1; border-radius: 4px; font: inherit; }
+      input[type="password"], input[type="text"] { width: 100%; box-sizing: border-box; }
+      button { padding: 6px 14px; margin-top: 6px; background: #1a5cad; color: #fff; border: none; border-radius: 4px; cursor: pointer; font: inherit; }
+      button.danger { background: #b30000; }
+      button.secondary { background: #fff; color: #1a5cad; border: 1px solid #1a5cad; }
+      button.small { padding: 3px 10px; font-size: 12px; }
+      button:disabled { background: #aaa; }
+      .ok { color: #007a3d; }
+      .err { color: #b30000; }
+      .warn { color: #8a5f00; }
+      pre { background: #f2efe9; padding: 8px 10px; border-radius: 4px; font-size: 12px; max-height: 240px; overflow: auto; }
+      table.ks { width: 100%; border-collapse: collapse; margin-top: 6px; }
+      table.ks th, table.ks td { border: 1px solid #e0ddd7; padding: 6px 8px; text-align: left; font-size: 13px; vertical-align: middle; }
+      table.ks th { background: #fafaf7; font-weight: 600; }
+      table.ks input[type="text"] { margin: 0; padding: 3px 6px; width: 98%; }
+      .ks-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+      .src-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+      .src-badge.src-local { background: #eef2f7; color: #2a4a73; border: 1px solid #c0cee0; }
+      .src-badge.src-vault { background: #f0e7f7; color: #5a2e7a; border: 1px solid #d0bce0; }
+      .src-badge.src-paired { background: #e0f0e7; color: #1f5a3a; border: 1px solid #aacdb6; }
+      .src-filename { font-size: 10px; color: #65605a; margin-top: 3px; word-break: break-all; }
+    </style>
+  </head>
+  <body>
+    <h1>TN Decrypt options</h1>
+    <p class="hint">
+      Keystores live in this browser only. Files imported from disk
+      are stored as plaintext (the source file is already on your
+      filesystem, so passphrase-wrapping the copy here would just be
+      theatre). Bundles received via vault claim are encrypted under
+      the extension master key. Decryption order is top-to-bottom in
+      the list below; order only matters when more than one keystore
+      holds kits for the same publisher.
+    </p>
+
+    <section>
+      <h2>Keystores</h2>
+      <div id="ks-list">Loading...</div>
+    </section>
+
+    <section>
+      <h2>Add a keystore from disk</h2>
+      <p class="hint">
+        Pick one of:
+        <br />&bull; a <code>.tnpkg</code> file produced by <code>tn-js compile</code> or the vault's invite flow (a zip of kits + manifest; preferred),
+        <br />&bull; a raw <code>*.btn.mykit</code> file (one kit, the smallest possible shortcut),
+        <br />&bull; a legacy invitation <code>.zip</code> or plaintext <code>.keystore.json</code> bundle.
+        <br /><br />
+        Stored as plaintext (badge: <span class="src-badge src-local">On disk</span>). No passphrase prompt &mdash; the source file is already on disk.
+      </p>
+      <label>File
+        <input id="file" type="file" accept=".tnpkg,.json,application/json,.zip,application/zip,.mykit,application/octet-stream,*" />
+      </label>
+      <label>Label (how this shows up in the popup)
+        <input id="label" type="text" placeholder="e.g. Customer orders kit" />
+      </label>
+      <button id="btn-import">Add keystore</button>
+      <div id="import-msg" class="hint" style="margin-top:8px;"></div>
+    </section>
+
+    <section>
+      <h2>Inspect what's stored</h2>
+      <button id="btn-status" class="secondary small">Refresh</button>
+      <pre id="status-pre">(click Refresh)</pre>
+    </section>
+
+    <script src="options.js"></script>
+  </body>
+</html>

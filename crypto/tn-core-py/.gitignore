@@ -1,0 +1,8 @@
+# PyO3 build artifacts — rebuilt via `maturin develop`
+*.pyd
+*.so
+*.dylib
+__pycache__/
+*.egg-info/
+build/
+dist/

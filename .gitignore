@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.venv/
+venv/
+env/
+
+# Rust
+target/
+Cargo.lock.bak
+
+# Node
+node_modules/
+*.tsbuildinfo
+ts-sdk/dist/
+ts-sdk/coverage/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# TN runtime artifacts (per-stem ceremony state)
+.tn/
+.tn_admin/
+.tn_logs/
+*.ndjson.bak
+vault_blobs/
+
+# Generated docs / reports
+**/run_report.txt
+
+# Local env / secrets — should never be committed
+.env
+.env.local
+*.pem
+*.key
+identity.json

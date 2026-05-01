@@ -1,0 +1,113 @@
+ceremony:
+  id: local_9345a567
+  mode: local
+  cipher: jwe
+  sign: true
+  admin_log_location: ./.tn/tn/admin/admin.ndjson
+  log_level: debug
+logs:
+  path: ./.tn/tn/logs/tn.ndjson
+keystore:
+  path: ./.tn/tn/keys
+me:
+  did: did:key:z6MkkqfnrrEsgoisHMf2ouZ4JevpsUNVqGYhTeRW3QEkyexp
+handlers:
+- kind: file.rotating
+  name: main
+  path: ./.tn/tn/logs/tn.ndjson
+  max_bytes: 5242880
+  backup_count: 5
+  rotate_on_init: true
+- kind: stdout
+public_fields:
+- timestamp
+- event_id
+- event_type
+- level
+- server_did
+- user_did
+- request_id
+- method
+- path
+- ceremony_id
+- cipher
+- device_did
+- created_at
+- group
+- publisher_did
+- added_at
+- leaf_index
+- recipient_did
+- kit_sha256
+- slot
+- to_did
+- issued_to
+- generation
+- previous_kit_sha256
+- old_pool_size
+- new_pool_size
+- rotated_at
+- peer_did
+- package_sha256
+- compiled_at
+- from_did
+- absorbed_at
+- vault_did
+- project_id
+- linked_at
+- reason
+- unlinked_at
+- policy_uri
+- content_hash
+- event_types_covered
+- policy_text
+- envelope_event_id
+- envelope_did
+- envelope_event_type
+- envelope_sequence
+- invalid_reasons
+default_policy: private
+groups:
+  default:
+    policy: private
+    cipher: jwe
+    recipients:
+    - did: did:key:z6MkkqfnrrEsgoisHMf2ouZ4JevpsUNVqGYhTeRW3QEkyexp
+  tn.agents:
+    policy: private
+    cipher: btn
+    recipients:
+    - did: did:key:z6MkkqfnrrEsgoisHMf2ouZ4JevpsUNVqGYhTeRW3QEkyexp
+    fields:
+    - instruction
+    - use_for
+    - do_not_use_for
+    - consequences
+    - on_violation_or_error
+    - policy
+    auto_populated_by_policy: true
+  pii:
+    policy: private
+    pool_size: 4
+    cipher: jwe
+    recipients:
+    - did: did:key:z6MkkqfnrrEsgoisHMf2ouZ4JevpsUNVqGYhTeRW3QEkyexp
+    - did: did:key:z6MkFrank
+      pub_b64: 722oCicKiRBkTsUIzRLPwqd4vaAQFYz38IZUZ0zbxz0=
+    - did: did:key:z6MkAcme
+      pub_b64: bxkSO1O7h1lM2LDx8EG2wLzdnj70qwPQlt0lGxIJf3c=
+    fields:
+    - email
+    - ip
+    - user_agent
+fields:
+  email:
+    group: pii
+  ip:
+    group: pii
+  user_agent:
+    group: pii
+llm_classifier:
+  enabled: false
+  provider: ''
+  model: ''

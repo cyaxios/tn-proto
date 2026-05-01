@@ -1,0 +1,64 @@
+[
+  {
+    "inputs": {
+      "seed_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+      "timestamp": "2026-04-21T12:00:00.000000Z",
+      "event_id": "00000000-0000-0000-0000-00000000000a",
+      "event_type": "order.created",
+      "level": "info",
+      "sequence": 1,
+      "prev_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "public_fields": {
+        "method": "POST"
+      },
+      "private_fields": {
+        "amount": 100,
+        "note": "first"
+      },
+      "group": "default",
+      "ceremony_id": "cer_golden",
+      "master_index_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 0,
+      "cipher": "identity"
+    },
+    "expected_field_hashes": {
+      "amount": "hmac-sha256:v1:c51cff2c32e88adec1c04dec2961697f5928579199f3cd092292dec8f0b2fa09",
+      "note": "hmac-sha256:v1:552df10259617f99c834679a691e9a3c9c0aba23067f841717caf28cf3a30669"
+    },
+    "expected_ciphertext_hex": "7b22616d6f756e74223a3130302c226e6f7465223a226669727374227d",
+    "expected_row_hash": "sha256:573a0ccdf6ecb6db2266fc97597c4661dce0f664b71e1772532ba22fc3554e73",
+    "expected_signature_b64url": "Qz8ODjhVq3ig4DZbYu5KIS7uholg46nSgHhZTBT3ikKob3FhvfuJFKouFbMce1RqK2hBPECTrzWZMBpPE5UpCQ",
+    "expected_envelope_ndjson": "{\"did\":\"did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z\",\"timestamp\":\"2026-04-21T12:00:00.000000Z\",\"event_id\":\"00000000-0000-0000-0000-00000000000a\",\"event_type\":\"order.created\",\"level\":\"info\",\"sequence\":1,\"prev_hash\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"row_hash\":\"sha256:573a0ccdf6ecb6db2266fc97597c4661dce0f664b71e1772532ba22fc3554e73\",\"signature\":\"Qz8ODjhVq3ig4DZbYu5KIS7uholg46nSgHhZTBT3ikKob3FhvfuJFKouFbMce1RqK2hBPECTrzWZMBpPE5UpCQ\",\"method\":\"POST\",\"default\":{\"ciphertext\":\"eyJhbW91bnQiOjEwMCwibm90ZSI6ImZpcnN0In0=\",\"field_hashes\":{\"amount\":\"hmac-sha256:v1:c51cff2c32e88adec1c04dec2961697f5928579199f3cd092292dec8f0b2fa09\",\"note\":\"hmac-sha256:v1:552df10259617f99c834679a691e9a3c9c0aba23067f841717caf28cf3a30669\"}}}\n"
+  },
+  {
+    "inputs": {
+      "seed_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+      "timestamp": "2026-04-21T12:00:01.000000Z",
+      "event_id": "00000000-0000-0000-0000-00000000000b",
+      "event_type": "order.created",
+      "level": "info",
+      "sequence": 2,
+      "prev_hash": "sha256:573a0ccdf6ecb6db2266fc97597c4661dce0f664b71e1772532ba22fc3554e73",
+      "public_fields": {
+        "method": "POST"
+      },
+      "private_fields": {
+        "amount": 200,
+        "currency": "USD"
+      },
+      "group": "default",
+      "ceremony_id": "cer_golden",
+      "master_index_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 0,
+      "cipher": "identity"
+    },
+    "expected_field_hashes": {
+      "amount": "hmac-sha256:v1:c0b7599e189c90ea829ee84366c323253d45dad921dde7a16a521179bd1c8c4f",
+      "currency": "hmac-sha256:v1:dd73cfc9925da0545d68cafa182eccd7aea04b1a337e9bbf76476afa989709f1"
+    },
+    "expected_ciphertext_hex": "7b22616d6f756e74223a3230302c2263757272656e6379223a22555344227d",
+    "expected_row_hash": "sha256:dd560b143bee74475df14350485f12996e7ab63dda2d48233333679f601a7a46",
+    "expected_signature_b64url": "On-OUTnSr9SKfVPAaZ_MNK9hdeeg4K_7LcM8C1UA4LOhhMrA6GG2dm-Gi-EoTwA19SKGtFIxrcXSfd7mkRbeAw",
+    "expected_envelope_ndjson": "{\"did\":\"did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z\",\"timestamp\":\"2026-04-21T12:00:01.000000Z\",\"event_id\":\"00000000-0000-0000-0000-00000000000b\",\"event_type\":\"order.created\",\"level\":\"info\",\"sequence\":2,\"prev_hash\":\"sha256:573a0ccdf6ecb6db2266fc97597c4661dce0f664b71e1772532ba22fc3554e73\",\"row_hash\":\"sha256:dd560b143bee74475df14350485f12996e7ab63dda2d48233333679f601a7a46\",\"signature\":\"On-OUTnSr9SKfVPAaZ_MNK9hdeeg4K_7LcM8C1UA4LOhhMrA6GG2dm-Gi-EoTwA19SKGtFIxrcXSfd7mkRbeAw\",\"method\":\"POST\",\"default\":{\"ciphertext\":\"eyJhbW91bnQiOjIwMCwiY3VycmVuY3kiOiJVU0QifQ==\",\"field_hashes\":{\"amount\":\"hmac-sha256:v1:c0b7599e189c90ea829ee84366c323253d45dad921dde7a16a521179bd1c8c4f\",\"currency\":\"hmac-sha256:v1:dd73cfc9925da0545d68cafa182eccd7aea04b1a337e9bbf76476afa989709f1\"}}}\n"
+  }
+]

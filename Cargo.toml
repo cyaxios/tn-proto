@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crypto/tn-btn",
+    "crypto/tn-btn-py",
+    "crypto/tn-core",
+    "crypto/tn-core-py",
+    "crypto/tn-wasm",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+ed25519-dalek = { version = "2", features = ["fast"] }
+subtle = "2.6"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+thiserror = "1"
+hex = "0.4"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

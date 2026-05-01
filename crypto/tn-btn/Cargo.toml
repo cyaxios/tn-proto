@@ -1,0 +1,42 @@
+[package]
+name = "tn-btn"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+description = "Broadcast-Transaction encryption: NNL subset-difference with selective revocation."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["cryptography", "broadcast", "encryption", "revocation", "nnl"]
+categories = ["cryptography"]
+
+[dependencies]
+sha2 = { workspace = true }
+hkdf = { workspace = true }
+aes-gcm = { version = "0.10", features = ["aes"] }
+aes-kw = "0.2.1"
+subtle = { workspace = true }
+zeroize = { workspace = true }
+rand_core = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "btn_bench"
+harness = false
+
+[features]
+default = []
+blake3 = ["dep:blake3"]
+chacha = ["dep:chacha20poly1305"]
+
+[dependencies.blake3]
+version = "1.5"
+optional = true
+
+[dependencies.chacha20poly1305]
+version = "0.10"
+optional = true

@@ -1,0 +1,11 @@
+Architectural preview: full pipeline in Rust vs Python
+  Python:  3.12.4  Platform: win32
+  Payload: 4096B  Events: 2000  Cipher: btn (h=8)
+-------------------------------------------------------------------------------------
+  Python pipeline (tn.info() phases, orchestrated from Python):
+  python_pipeline               3,668/s   per-event  272.6µs   p50  248.7µs   p99  585.9µs
+
+  Rust pipeline (btn._core.build_envelope_line, one FFI call):
+  rust_pipeline                 8,221/s   per-event  121.6µs   p50  110.3µs   p99  233.4µs
+
+  Speedup:  2.24×  (per-event dropped from 272.6µs to 121.6µs)

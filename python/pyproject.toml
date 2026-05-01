@@ -1,0 +1,214 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "tn-protocol"
+version         = "0.2.0a1"
+description     = "TestigoNodo protocol: attested logging with JWE + btn ciphers"
+readme          = "README.md"
+requires-python = ">=3.10"
+license         = { text = "Apache-2.0" }
+authors         = [{ name = "cyaxios contributors", email = "dev@cyaxios.com" }]
+keywords        = ["cryptography", "broadcast-encryption", "attestation", "audit-log"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+]
+
+dependencies = [
+    "PyYAML>=6.0",
+    "cryptography>=41.0",
+    "typing_extensions>=4.0",
+    # Handler infrastructure
+    "persist-queue>=1.0",       # durable outbox for async handlers
+    "pathvalidate>=3.0",        # cross-platform path sanitization
+    # Identity + wallet-link story is in the core SDK (tn/identity.py,
+    # tn/vault_client.py are imported at tn init time). These are small
+    # pure-Python deps; bundling them in core keeps `import tn` clean.
+    "mnemonic>=0.21",           # BIP-39 recovery phrase
+    "httpx>=0.27",              # vault_client HTTP
+    "mcp>=1.0",                 # Model Context Protocol SDK (tn-mcp-server)
+    "base58>=2.1",              # did:key / base58 encoding
+    # Rust-backed ciphers. Built with maturin from ../crypto/tn-btn-py/
+    # and ../crypto/tn-core-py/; published as separate wheels. Pinned to
+    # the same alpha as this package so an installer pulls a coherent set.
+    "tn-btn==0.2.0a1",
+    "tn-core==0.2.0a1",
+]
+
+[project.optional-dependencies]
+# Installed on demand; keep the base wheel lean.
+kafka   = ["confluent-kafka>=2.3"]
+atproto = ["atproto>=0.0.60"]
+delta   = ["databricks-sql-connector>=3.0", "databricks-sdk>=0.20"]
+s3      = ["boto3>=1.34"]
+# Everything at once (for dev / CI).
+all     = [
+    "confluent-kafka>=2.3",
+    "atproto>=0.0.60",
+    "databricks-sql-connector>=3.0",
+    "databricks-sdk>=0.20",
+    "boto3>=1.34",
+]
+
+[project.urls]
+Homepage   = "https://github.com/cyaxios/tn-proto"
+Repository = "https://github.com/cyaxios/tn-proto"
+Issues     = "https://github.com/cyaxios/tn-proto/issues"
+Changelog  = "https://github.com/cyaxios/tn-proto/blob/main/CHANGELOG.md"
+
+[project.scripts]
+tn-mcp-server = "tn.mcp:main"
+
+# ---------------------------------------------------------------------------
+# Pure-Python wheel. The Rust-backed cipher + runtime extensions (btn,
+# tn_core) are their own maturin-built wheels shipped separately; see
+# ../crypto/btn-py/pyproject.toml and ../crypto/tn-core-py/pyproject.toml.
+# Workstream G (2026-04-24) consolidated distribution to this three-wheel
+# model so consumers get `pip install tn-protocol` and the install pulls
+# all three pieces without any C toolchain / OpenSSL / vcpkg setup.
+# ---------------------------------------------------------------------------
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["tn*"]
+exclude = ["tests*", "tools*", "scenarios*", "examples*", "bench*", "docs*"]
+
+# ---------------------------------------------------------------------------
+# Lint / format / type-check config.
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+# Default line length from black; prettier-compatible.
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+    "build",
+    "tools/tn_annotate",          # vendored tool + harvested corpus (~14k files); not ours
+    "docs/agent-prompts",         # LLM evaluation samples (intentional undefined refs)
+    "stage-personas-workspace",   # runtime state
+]
+
+[tool.ruff.lint]
+# Opinionated but practical. "E,F,W" = pyflakes + pycodestyle baseline.
+# "I" = import sorting (replaces isort). "B" = bugbear (real bug patterns).
+# "UP" = pyupgrade (modernize syntax). "RUF" = ruff's own rules.
+# Add "ANN" for type-annotations-required once mypy is clean.
+select = ["E", "F", "W", "I", "B", "UP", "RUF", "S101", "BLE001", "E722"]
+ignore = [
+    "E501",   # Line too long — delegate to the formatter.
+    "B008",   # Function calls in arg defaults — pydantic/fastapi-style APIs use this.
+    "RUF012", # Mutable class attrs without ClassVar — common and harmless here.
+    "RUF001", # Ambiguous chars in strings  — intentional typography.
+    "RUF002", # Ambiguous chars in docstrings — same.
+    "RUF003", # Ambiguous chars in comments — same.
+    "RUF015", # Prefer next(iter()) over [0] — pedantic, slice is clear enough.
+    "RUF043", # Regex metacharacters in pytest.raises match= — tests-only concern.
+    "RUF046", # Useless int cast on int value — pedantic.
+    "RUF059", # Unused destructured var — often clearer to keep the name.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests + examples + scripts use `sys.path.insert(...)` + late imports and
+# condensed import groups as a matter of course. Opt out of those specific
+# nits there rather than fighting the pattern.
+"tests/**"     = ["B", "E402", "E702", "E701", "E741", "S101", "BLE001", "E722"]
+"examples/**"  = ["B", "E402", "E702", "E701", "S101", "BLE001"]
+"scenarios/**" = ["B", "E402", "E702", "E701", "S101", "BLE001"]
+"bench/**"     = ["B", "E402", "E702", "E701", "S101", "BLE001"]
+"tools/**"     = ["E402", "S101", "BLE001"]
+# cookbook contract test — uses asserts and broad except for friendly per-case reporting
+"docs/_verify_cookbook.py" = ["S101", "BLE001", "E402", "B", "F841"]
+
+[tool.ruff.format]
+# Match black defaults. Keep this in lockstep with pyproject's line-length.
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.10"
+# Gradual typing: start permissive, tighten over time. See the remediation plan.
+strict = false
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+# warn_return_any is aggressive for a library that pulls typed values out of
+# untyped JSON / dict payloads (envelopes, vault responses, PyO3 binding output).
+# Turn back on once either the dict-sourced sites adopt TypedDict models or
+# the individual returns gain explicit casts. Tracked in D6.
+warn_return_any = false
+no_implicit_optional = true
+show_error_codes = true
+files = ["tn"]
+exclude = [
+    "^build/",
+    "^tools/tn_annotate/",
+    "^tests/",          # tests untyped for now; tighten later.
+    "^scenarios/",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "confluent_kafka.*",
+    "databricks.*",
+    "boto3.*",
+    "mnemonic.*",
+    "base58.*",
+    "atproto.*",
+    "persist_queue.*",
+    # PyO3 native extensions — built by maturin from crypto/tn-btn-py/ and
+    # crypto/tn-core-py/. Typing them properly means adding py.typed or
+    # hand-written stubs, tracked in Workstream B/F. Until then mypy treats
+    # them as Any at the import boundary.
+    "tn_btn",
+    "tn_btn.*",
+    "tn_core",
+    "tn_core.*",
+    "opentelemetry.*",
+]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Coverage — Workstream B4 (tn-protocol/docs/sdk-parity.md).
+# Tiered thresholds: crypto-adjacent code has the highest bar; the rollout
+# floor (70%) is below the per-module targets so CI doesn't block on
+# pre-existing gaps. Raise module-by-module as B1/B2/B3 land.
+#
+# Run:
+#   pytest --cov=tn --cov-report=term-missing --cov-report=xml
+# CI enforcement: wire the per-module floors into the pipeline; local
+# runs print the report without failing so you can iterate quickly.
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["tn"]
+# branch=false so coverage's `sysmon` core can be used (COVERAGE_CORE=sysmon).
+# That core avoids the PyO3 double-init crash from the `cryptography` wheel.
+# Re-enable branch coverage once the upstream wheel ships a PyO3 >=0.21 build.
+branch = false
+omit = [
+    "tn/cli.py",                 # interactive CLI; covered by scenarios, not unit tests.
+    "tn/handlers/kafka.py",      # live-service handlers deferred per plan (B1).
+    "tn/handlers/delta.py",
+    "tn/handlers/s3.py",
+]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false
+fail_under = 70                  # rollout floor; raise as B1 modules land.
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

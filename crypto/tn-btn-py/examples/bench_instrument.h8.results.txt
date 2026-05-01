@@ -1,0 +1,52 @@
+Instrumented tn.info() pipeline breakdown
+  Python:  3.12.4  Platform: win32
+  Payload: 4096B  Events: 2000  N=1 recipient
+----------------------------------------------------------------------
+=== BGW: 2000 events, 4096B payload ===
+  Total:            1600.9 ms  (    1249/s,  800.5 탎/event)
+
+  Phase               탎/event   % of total
+  10_write                43.10     5.4%
+  1_classify               2.93     0.4%
+  3_hmac_tokens           46.29     5.8%
+  4a_canonical_body       20.66     2.6%
+  4b_cipher_encrypt      494.66    61.8%
+  5_chain_advance         23.99     3.0%
+  6_row_hash              21.79     2.7%
+  7_ed25519_sign          96.05    12.0%
+  8_envelope_build        15.22     1.9%
+  9_json_dump             23.19     2.9%
+  (loop overhead)         12.57     1.6%
+
+=== JWE: 2000 events, 4096B payload ===
+  Total:             635.7 ms  (    3146/s,  317.9 탎/event)
+
+  Phase               탎/event   % of total
+  10_write                34.84    11.0%
+  1_classify               2.33     0.7%
+  3_hmac_tokens           42.05    13.2%
+  4a_canonical_body       18.55     5.8%
+  4b_cipher_encrypt       59.35    18.7%
+  5_chain_advance         14.60     4.6%
+  6_row_hash              16.85     5.3%
+  7_ed25519_sign          85.40    26.9%
+  8_envelope_build        14.05     4.4%
+  9_json_dump             19.85     6.2%
+  (loop overhead)          9.97     3.1%
+
+=== BTN: 2000 events, 4096B payload ===
+  Total:             494.2 ms  (    4047/s,  247.1 탎/event)
+
+  Phase               탎/event   % of total
+  10_write                31.59    12.8%
+  1_classify               2.14     0.9%
+  3_hmac_tokens           39.35    15.9%
+  4a_canonical_body       17.42     7.0%
+  4b_cipher_encrypt        7.34     3.0%
+  5_chain_advance         13.05     5.3%
+  6_row_hash              14.02     5.7%
+  7_ed25519_sign          79.62    32.2%
+  8_envelope_build        13.50     5.5%
+  9_json_dump             18.85     7.6%
+  (loop overhead)         10.24     4.1%
+

@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>TN decrypt test fixture</title>
+    <style>
+      :root {
+        --bg: #f7f5ef;
+        --fg: #1f1b16;
+        --muted: #65605a;
+        --accent: #1a5cad;
+        --border: #d9d6d1;
+        --sub: #f2efe9;
+        --pill: #e9f3e7;
+        --head: #fafaf7;
+      }
+      * { box-sizing: border-box; }
+      body { font: 13px/1.45 system-ui, sans-serif; margin: 0; padding: 2rem; background: var(--bg); color: var(--fg); }
+      .wrap { max-width: 1100px; margin: 0 auto; }
+      h1 { font-size: 17px; margin-bottom: 6px; }
+      p.hint { color: var(--muted); margin-top: 0; font-size: 13px; max-width: 72ch; }
+      .log-row {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: #fff;
+        margin-block: 14px;
+        overflow: hidden;
+      }
+      .log-row > .head {
+        background: var(--head);
+        padding: 8px 14px;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 12px;
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+      }
+      .log-row > .head strong { color: var(--fg); font-weight: 600; }
+      table.fields {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 12px;
+      }
+      table.fields td {
+        padding: 5px 14px;
+        vertical-align: top;
+        border-top: 1px solid var(--border);
+      }
+      table.fields tr:first-child td { border-top: none; }
+      table.fields td.k {
+        width: 26%;
+        color: var(--muted);
+        background: var(--sub);
+        white-space: nowrap;
+      }
+      table.fields td.v { word-break: break-all; }
+      .raw-section { margin-top: 18px; }
+      .raw-section pre {
+        background: #1a1a1a;
+        color: #ddd;
+        padding: 10px 14px;
+        border-radius: 6px;
+        font-size: 11px;
+        overflow-x: auto;
+        max-height: 140px;
+      }
+      .dl-card {
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 14px 18px;
+        margin-top: 16px;
+      }
+      .dl-card a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Pretend this is a log viewer</h1>
+      <p class="hint">
+        Three log entries below. The first two carry TN envelopes (from
+        two different publishers). The third is an ordinary line with
+        no envelope. Install the extension, import publisher A's
+        keystore, and watch only row 1 light up. Row 2's ciphertext
+        stays sealed (no kit). Row 3 is untouched.
+      </p>
+
+      <div id="rows"></div>
+
+      <div class="dl-card">
+        <h3 style="margin:0 0 6px 0; font-size:14px;">Publisher A keystore</h3>
+        <p class="hint" style="margin-top:0;">
+          Download this, then import it on the extension Options page.
+          (Publisher B's keystore is intentionally NOT offered; that's
+          how you see the extension handle a foreign envelope.)
+        </p>
+        <div id="download-spot"></div>
+      </div>
+
+      <details class="raw-section">
+        <summary style="cursor:pointer; color:var(--muted);">Raw envelope JSON (reference)</summary>
+        <pre id="raw"></pre>
+      </details>
+    </div>
+
+    <script type="module">
+      import init, {
+        BtnPublisher,
+        deviceKeyFromSeed,
+        canonicalBytes,
+        computeRowHash,
+        deriveGroupIndexKey,
+        indexToken,
+        signMessage,
+        signatureB64,
+        zeroHash,
+      } from "./wasm/tn_wasm.js";
+
+      await init();
+
+      function b64(b) { const a = b instanceof Uint8Array ? b : new Uint8Array(b); let s=""; for (const x of a) s += String.fromCharCode(x); return btoa(s); }
+
+      function makeCeremony(seedByte, label) {
+        const devSeed = new Uint8Array(32);
+        for (let i = 0; i < 32; i += 1) devSeed[i] = (seedByte + i) & 0xff;
+        const btnSeed = new Uint8Array(32);
+        for (let i = 0; i < 32; i += 1) btnSeed[i] = (seedByte + i * 3 + 7) & 0xff;
+        const idx = new Uint8Array(32);
+        for (let i = 0; i < 32; i += 1) idx[i] = (seedByte + i * 5) & 0xff;
+        const dk = deviceKeyFromSeed(devSeed);
+        const pub = new BtnPublisher(btnSeed);
+        const mykit = pub.mint();
+        return { label, devSeed, btnSeed, idx, dk, pub, mykit, ceremony: `fixture_${label}` };
+      }
+
+      function sealEnvelope(c, pubF, privF, eventType) {
+        const gk = deriveGroupIndexKey(c.idx, c.ceremony, "default", 0n);
+        const fieldHashes = {};
+        for (const [k, v] of Object.entries(privF)) fieldHashes[k] = indexToken(gk, k, v);
+        const ct = c.pub.encrypt(canonicalBytes(privF));
+        const ts = new Date().toISOString().replace(/\.\d+Z$/, ".000000Z");
+        const eid = "00000000-0000-0000-0000-" + Date.now().toString().padStart(12, "0") + Math.floor(Math.random() * 99).toString();
+        const rh = computeRowHash({
+          did: c.dk.did, timestamp: ts, event_id: eid,
+          event_type: eventType, level: "info",
+          prev_hash: zeroHash(),
+          public_fields: pubF,
+          groups: { default: { ciphertext_b64: b64(ct), field_hashes: fieldHashes } },
+        });
+        const sig = signatureB64(signMessage(c.devSeed, new TextEncoder().encode(rh)));
+        return {
+          did: c.dk.did,
+          timestamp: ts,
+          event_id: eid,
+          event_type: eventType,
+          level: "info",
+          sequence: 1,
+          prev_hash: zeroHash(),
+          row_hash: rh,
+          signature: sig,
+          public_fields: pubF,
+          group: "default",
+          ciphertext: b64(ct),
+          field_hashes: fieldHashes,
+        };
+      }
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      }
+
+      // Render a single entry as a per-field table so vendors don't have
+      // to guess. Real tools do something close to this; the cells you
+      // see here are the same cells Datadog would generate.
+      function renderEntryRow(env, heading) {
+        const fhEntries = Object.entries(env.field_hashes || {});
+        const pubEntries = Object.entries(env.public_fields || {});
+        const cells = [
+          ["timestamp", env.timestamp],
+          ["did", env.did],
+          ["event_type", env.event_type],
+          ["level", env.level],
+          ["sequence", String(env.sequence)],
+          ["prev_hash", env.prev_hash],
+          ["row_hash", env.row_hash],
+          ["signature", env.signature],
+          ...pubEntries.map(([k, v]) => [k, String(v)]),
+          ["default.ciphertext", env.ciphertext],
+          ...fhEntries.map(([k, v]) => [`default.field_hashes.${k}`, v]),
+        ];
+        return `
+          <div class="log-row">
+            <div class="head"><strong>${escapeHtml(heading)}</strong>  &middot; ${escapeHtml(env.event_type)} &middot; <span style="color:var(--muted)">${escapeHtml(env.timestamp)}</span></div>
+            <table class="fields"><tbody>
+              ${cells.map(([k, v]) => `<tr><td class="k">${escapeHtml(k)}</td><td class="v">${escapeHtml(v)}</td></tr>`).join("")}
+            </tbody></table>
+          </div>
+        `;
+      }
+
+      function renderPlainRow(heading, line) {
+        return `
+          <div class="log-row">
+            <div class="head"><strong>${escapeHtml(heading)}</strong></div>
+            <table class="fields"><tbody>
+              <tr><td class="k">raw</td><td class="v">${escapeHtml(line)}</td></tr>
+            </tbody></table>
+          </div>
+        `;
+      }
+
+      const A = makeCeremony(13, "A");
+      const B = makeCeremony(97, "B");
+
+      const envA = sealEnvelope(A,
+        { region: "us-east-1", service: "orders" },
+        { customer_name: "Alice", amount: 99.50, order_id: "ORD-42" },
+        "order.created",
+      );
+      const envB = sealEnvelope(B,
+        { region: "eu-west-1", service: "orders" },
+        { customer_name: "Bob", amount: 12, order_id: "ORD-43" },
+        "order.created",
+      );
+
+      const rowsHost = document.getElementById("rows");
+      rowsHost.innerHTML = [
+        renderEntryRow(envA, "Row 1 (publisher A)"),
+        renderEntryRow(envB, "Row 2 (publisher B)"),
+        renderPlainRow("Row 3 (no envelope)", '2026-04-23T19:15:03Z INFO service=orders msg="startup complete"'),
+      ].join("");
+
+      // Publisher A keystore download link
+      const bundleA = {
+        version: "keystore-v1",
+        did: A.dk.did,
+        ceremony_id: A.ceremony,
+        yaml: "",
+        files: {
+          "local.private": b64(A.devSeed),
+          "local.public": b64(new TextEncoder().encode(A.dk.did)),
+          "index_master.key": b64(A.idx),
+          "default.btn.state": b64(A.pub.toBytes()),
+          "default.btn.mykit": b64(A.mykit),
+        },
+      };
+      const blob = new Blob([JSON.stringify(bundleA, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "publisher-A.keystore.json";
+      a.textContent = "Download publisher-A.keystore.json";
+      document.getElementById("download-spot").appendChild(a);
+
+      document.getElementById("raw").textContent = JSON.stringify(envA, null, 2);
+
+      A.pub.free(); B.pub.free();
+    </script>
+  </body>
+</html>

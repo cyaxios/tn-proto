@@ -1,0 +1,71 @@
+[
+  {
+    "name": "empty_object",
+    "input_json": {},
+    "output_hex": "7b7d",
+    "output_str": "{}"
+  },
+  {
+    "name": "single_string",
+    "input_json": {
+      "a": "hello"
+    },
+    "output_hex": "7b2261223a2268656c6c6f227d",
+    "output_str": "{\"a\":\"hello\"}"
+  },
+  {
+    "name": "nested_sort",
+    "input_json": {
+      "b": 1,
+      "a": {
+        "z": 2,
+        "y": 1
+      }
+    },
+    "output_hex": "7b2261223a7b2279223a312c227a223a327d2c2262223a317d",
+    "output_str": "{\"a\":{\"y\":1,\"z\":2},\"b\":1}"
+  },
+  {
+    "name": "utf8_unicode",
+    "input_json": {
+      "name": "café ☕"
+    },
+    "output_hex": "7b226e616d65223a22636166c3a920e29895227d",
+    "output_str": "{\"name\":\"café ☕\"}"
+  },
+  {
+    "name": "bytes_wrap_via_sentinel",
+    "input_json": {
+      "k": {
+        "$b64": "AAEC"
+      }
+    },
+    "output_hex": "7b226b223a7b2224623634223a2241414543227d7d",
+    "output_str": "{\"k\":{\"$b64\":\"AAEC\"}}",
+    "rust_builder_hint": "wrap_bytes(&[0u8, 1, 2])"
+  },
+  {
+    "name": "list_of_mixed",
+    "input_json": {
+      "xs": [
+        1,
+        "two",
+        null,
+        true,
+        3.5
+      ]
+    },
+    "output_hex": "7b227873223a5b312c2274776f222c6e756c6c2c747275652c332e355d7d",
+    "output_str": "{\"xs\":[1,\"two\",null,true,3.5]}"
+  },
+  {
+    "name": "bool_and_null",
+    "input_json": {
+      "a": true,
+      "b": false,
+      "c": null
+    },
+    "output_hex": "7b2261223a747275652c2262223a66616c73652c2263223a6e756c6c7d",
+    "output_str": "{\"a\":true,\"b\":false,\"c\":null}"
+  }
+]

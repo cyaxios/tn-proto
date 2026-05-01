@@ -1,0 +1,51 @@
+[package]
+name = "tn-core"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "TN protocol runtime: canonical JSON, row-hash chain, HMAC index, Ed25519 signing, envelope build, cipher dispatch, log I/O."
+readme = "README.md"
+
+[dependencies]
+tn-btn = { path = "../tn-btn" }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hkdf = { workspace = true }
+ed25519-dalek = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+rand_core = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yml = "0.0.12"
+uuid = { version = "1", features = ["v4"], optional = true }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+bs58 = "0.5"
+clap = { version = "4", features = ["derive"], optional = true }
+log = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# tempfile is used by Runtime::ephemeral(); gated to the `fs` feature so a
+# `no_std`/wasm consumer that disables `fs` doesn't pull it in.
+tempfile = { version = "3", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[features]
+default = ["fs"]
+fs = ["dep:uuid", "dep:clap", "dep:tempfile"] # enables filesystem-backed modules (log_file, identity, FsStorage, Runtime, CLI bin)
+bgw = []
+
+[[bench]]
+name = "pipeline"
+harness = false
+
+[[bin]]
+name = "tn-core-cli"
+path = "bin/tn-core-cli.rs"
+required-features = ["fs"]

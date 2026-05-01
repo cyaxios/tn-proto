@@ -1,0 +1,34 @@
+Cipher primitive head-to-head (cipher.encrypt / cipher.decrypt only,
+no envelope pipeline / no signature / no chain / no index tokens).
+Python: 3.12.4  Platform: win32
+
+--- Payload:    256 B, 5000 iterations per variant ---
+  JWE         seal     8,732/s p50   67.7탎  open     6,339/s p50  130.1탎  ct    363 B
+  BGW         seal     1,848/s p50  494.2탎  open       584/s p50 1567.4탎  ct    392 B
+  btn (r=0)   seal   355,015/s p50    2.2탎  open   318,010/s p50    2.7탎  ct    370 B
+  btn (r=1)   seal    35,972/s p50   24.1탎  open   165,834/s p50    3.6탎  ct    801 B
+
+--- Payload:   1024 B, 5000 iterations per variant ---
+  JWE         seal    11,860/s p50   65.6탎  open     6,553/s p50  126.6탎  ct   1131 B
+  BGW         seal     1,615/s p50  542.4탎  open       569/s p50 1614.0탎  ct   1160 B
+  btn (r=0)   seal   274,148/s p50    3.2탎  open   251,066/s p50    3.3탎  ct   1138 B
+  btn (r=1)   seal    36,076/s p50   24.9탎  open   184,865/s p50    4.4탎  ct   1569 B
+
+--- Payload:   4096 B, 2000 iterations per variant ---
+  JWE         seal    14,297/s p50   66.7탎  open     7,796/s p50  126.5탎  ct   4203 B
+  BGW         seal     1,528/s p50  608.3탎  open       543/s p50 1720.0탎  ct   4232 B
+  btn (r=0)   seal   124,569/s p50    5.6탎  open   156,961/s p50    6.0탎  ct   4210 B
+  btn (r=1)   seal    28,595/s p50   27.5탎  open    79,129/s p50    7.3탎  ct   4641 B
+
+--- Payload:  16384 B, 1000 iterations per variant ---
+  JWE         seal     9,549/s p50   69.0탎  open     5,782/s p50  129.2탎  ct  16491 B
+  BGW         seal       793/s p50 1029.9탎  open       443/s p50 2051.7탎  ct  16520 B
+  btn (r=0)   seal    44,858/s p50   16.0탎  open    38,857/s p50   17.0탎  ct  16498 B
+  btn (r=1)   seal    22,198/s p50   37.8탎  open    46,175/s p50   17.1탎  ct  16929 B
+
+--- Payload:  65536 B, 300 iterations per variant ---
+  JWE         seal    10,192/s p50   79.1탎  open     4,286/s p50  150.3탎  ct  65643 B
+  BGW         seal       391/s p50 2310.3탎  open       413/s p50 2083.7탎  ct  65672 B
+  btn (r=0)   seal    12,702/s p50   58.1탎  open    15,195/s p50   59.5탎  ct  65650 B
+  btn (r=1)   seal    10,142/s p50   81.9탎  open    14,234/s p50   60.9탎  ct  66081 B
+

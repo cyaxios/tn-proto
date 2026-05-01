@@ -1,0 +1,48 @@
+[
+  {
+    "master_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "ceremony": "cer_a",
+    "group": "default",
+    "epoch": 0,
+    "field": "amount",
+    "value": 123,
+    "derived_key_hex": "eec1ab3fecde162da6f66ed6d57e184fae3615a83279b79a601393e30b3be44f",
+    "expected_token": "hmac-sha256:v1:b99bc69fbc1bac866cee86f6ff7ea9ae92848bf0323e451cb09316aafac68dcc"
+  },
+  {
+    "master_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "ceremony": "cer_a",
+    "group": "default",
+    "epoch": 0,
+    "field": "note",
+    "value": "hello",
+    "derived_key_hex": "eec1ab3fecde162da6f66ed6d57e184fae3615a83279b79a601393e30b3be44f",
+    "expected_token": "hmac-sha256:v1:5efb7fe8e72a5301f22c630de01ee7c9ee4f21708b387ed4dc3989c2badeb8a0"
+  },
+  {
+    "master_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "ceremony": "cer_a",
+    "group": "billing",
+    "epoch": 7,
+    "field": "card_last4",
+    "value": "4242",
+    "derived_key_hex": "94441a24fd8aaf9957f906f803c5c0b4b5ed97481c9cd8f3c1558f87033a77f1",
+    "expected_token": "hmac-sha256:v1:1d4d904f2d004800a3e0b9558ebac8f235eff58b14cf47bc565a2833eebe410a"
+  },
+  {
+    "master_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "ceremony": "cer_b",
+    "group": "default",
+    "epoch": 0,
+    "field": "obj",
+    "value": {
+      "a": 1,
+      "b": [
+        2,
+        3
+      ]
+    },
+    "derived_key_hex": "0e5592fc4187193d1211cae9f6f9821641caf060433b88998eac618b0bd0ca4b",
+    "expected_token": "hmac-sha256:v1:a96d9014643d1bc541c5e8c2d546189b42e41f42e192962eea4566a40318f2ba"
+  }
+]

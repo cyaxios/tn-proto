@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>TN Decrypt</title>
+    <style>
+      body { font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 14px; width: 340px; color: #1f1b16; }
+      h1 { font-size: 14px; margin: 0 0 8px 0; }
+      .banner { padding: 6px 10px; border-radius: 6px; margin-bottom: 10px; font-size: 11px; }
+      .banner.ok { background: #e9f3e7; color: #17381e; border: 1px solid #bcd8b5; }
+      .banner.warn { background: #f7efdf; color: #8a5f00; border: 1px solid #e5d28c; }
+      .banner.err { background: #f3e7e9; color: #b30000; border: 1px solid #e2b8bc; }
+
+      .ext-unlock {
+        border: 1px solid #d5e1f0;
+        background: #f3f7fc;
+        border-radius: 6px;
+        padding: 10px;
+        margin-bottom: 10px;
+        font-size: 12px;
+      }
+      .ext-unlock h2 { font-size: 12px; margin: 0 0 6px 0; color: #1a5cad; }
+      .ext-unlock p { margin: 0 0 6px 0; color: #3a3a3a; }
+      .ext-unlock .row { display: flex; gap: 6px; align-items: center; }
+      .ext-unlock input[type="password"] { flex: 1; padding: 4px 6px; font-size: 12px; border: 1px solid #d9d6d1; border-radius: 3px; }
+      .ext-unlock .small-actions { display: flex; gap: 6px; margin-top: 6px; font-size: 11px; }
+      .ext-unlock .small-actions a { color: #1a5cad; cursor: pointer; text-decoration: underline; }
+
+      .ks-row { border: 1px solid #e0ddd7; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; background: #fff; }
+      .ks-row.unlocked { border-left: 3px solid #1f7a34; }
+      .ks-row.locked { border-left: 3px solid #aaa; }
+      .ks-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+      .ks-label { font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+      .ks-meta { color: #65605a; font-size: 10px; margin-left: 6px; }
+      .ks-form { display: flex; gap: 4px; align-items: center; }
+      .ks-bound-pill { font-size: 9px; color: #1a5cad; border: 1px solid #1a5cad; border-radius: 8px; padding: 1px 6px; margin-left: 4px; }
+      .ks-source-pill { font-size: 9px; border-radius: 8px; padding: 1px 6px; margin-left: 4px; font-weight: 600; }
+      .ks-source-pill.ks-source-local { background: #eef2f7; color: #2a4a73; border: 1px solid #c0cee0; }
+      .ks-source-pill.ks-source-vault { background: #f0e7f7; color: #5a2e7a; border: 1px solid #d0bce0; }
+      .ks-source-pill.ks-source-paired { background: #e0f0e7; color: #1f5a3a; border: 1px solid #aacdb6; }
+
+      .vault-pair {
+        border: 1px solid #c9d9c0;
+        background: #f5faf3;
+        border-radius: 6px;
+        padding: 10px;
+        margin-bottom: 10px;
+        font-size: 12px;
+      }
+      .vault-pair h2 { font-size: 12px; margin: 0 0 6px 0; color: #1f5a3a; }
+      .vault-pair p { margin: 0 0 6px 0; color: #3a3a3a; }
+      .vault-pair .row { display: flex; gap: 6px; align-items: center; }
+      .vault-pair .pair-meta { font-size: 11px; color: #65605a; margin-top: 4px; }
+      .vault-pair .small-actions { display: flex; gap: 6px; margin-top: 6px; font-size: 11px; }
+      .vault-pair .small-actions a { color: #1a5cad; cursor: pointer; text-decoration: underline; }
+      input[type="password"] { flex: 1; padding: 4px 6px; font-size: 12px; border: 1px solid #d9d6d1; border-radius: 3px; }
+      button { padding: 4px 10px; font-size: 11px; border: none; border-radius: 3px; background: #1a5cad; color: #fff; cursor: pointer; }
+      button.secondary { background: #fff; color: #1a5cad; border: 1px solid #1a5cad; }
+      button.small { padding: 2px 8px; font-size: 10px; }
+      button:disabled { background: #aaa; cursor: not-allowed; }
+      .toolbar { display: flex; gap: 6px; margin-top: 10px; padding-top: 8px; border-top: 1px solid #eee; }
+      .toolbar a { color: #1a5cad; text-decoration: none; font-size: 11px; align-self: center; margin-right: auto; }
+      .empty-note { font-size: 11px; color: #65605a; padding: 10px; text-align: center; }
+      .hidden { display: none !important; }
+
+      /* Paste-and-decrypt card. Mirrors the dashboard widget at
+         tnproto-org/static/account/decrypt.js (D-1, D-22). */
+      .decrypt-card {
+        border: 1px solid #e0ddd7;
+        background: #fff;
+        border-radius: 6px;
+        padding: 10px;
+        margin-top: 10px;
+        font-size: 12px;
+      }
+      .decrypt-card h2 { font-size: 12px; margin: 0 0 6px 0; color: #1f1b16; }
+      .decrypt-card p { margin: 0 0 6px 0; color: #65605a; font-size: 11px; }
+      .decrypt-card textarea {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+        border: 1px solid #d9d6d1;
+        border-radius: 3px;
+        resize: vertical;
+        min-height: 56px;
+      }
+      .decrypt-card .row { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+      .decrypt-card .out {
+        margin-top: 8px;
+        padding: 6px 8px;
+        background: #f7f5f0;
+        border: 1px solid #e0ddd7;
+        border-radius: 3px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+        max-height: 120px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .decrypt-card .meta { color: #65605a; font-size: 10px; margin-top: 4px; }
+      .decrypt-card .err {
+        margin-top: 8px;
+        padding: 6px 8px;
+        background: #f3e7e9;
+        color: #b30000;
+        border: 1px solid #e2b8bc;
+        border-radius: 3px;
+        font-size: 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>TN Decrypt</h1>
+    <div id="banner" class="banner warn">Loading...</div>
+    <div id="ext-unlock" class="ext-unlock hidden"></div>
+    <div id="vault-pair" class="vault-pair"></div>
+    <div id="keystores"></div>
+    <div id="decrypt-card" class="decrypt-card">
+      <h2>Decrypt a TN ciphertext</h2>
+      <p>Paste a TN ciphertext below — the extension tries every loaded kit.</p>
+      <textarea id="dec-input" placeholder="paste base64 or hex..." rows="4" spellcheck="false"></textarea>
+      <div class="row">
+        <button id="btn-decrypt">Decrypt</button>
+        <span id="dec-hint" class="meta"></span>
+      </div>
+      <div id="dec-err" class="err hidden"></div>
+      <div id="dec-out-wrap" class="hidden">
+        <div id="dec-out" class="out"></div>
+        <div id="dec-out-meta" class="meta"></div>
+      </div>
+    </div>
+    <div class="toolbar">
+      <a href="options.html" target="_blank">Manage keystores</a>
+      <button id="btn-rescan" class="secondary small">Rescan page</button>
+      <button id="btn-lock-all" class="secondary small">Lock all</button>
+    </div>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

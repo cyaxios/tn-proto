@@ -1,0 +1,9 @@
+Full TN pipeline head-to-head — BGW vs JWE vs btn
+  Python:  3.12.4  Platform: win32
+  Payload: 4096 B  Events: 2000  N=1 recipient
+  Each variant: full tn.info() pipeline (HMAC index tokens +
+  Ed25519 row_hash signature + chain + cipher seal + ndjson).
+------------------------------------------------------------------------------------------
+  bgw   seal    898/s p50 1022.3µs   open  2,832/s p50    0.9µs   bytes/event   6541   lines 2000
+  jwe   seal  2,750/s p50  304.1µs   open 18,300/s p50    0.3µs   bytes/event   6501   lines 2000
+  btn   seal  3,832/s p50  223.5µs   open 25,761/s p50    0.3µs   bytes/event   6513   lines 2000
