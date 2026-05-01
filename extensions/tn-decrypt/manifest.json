@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TN Decrypt",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "description": "Decrypt TN envelopes in the current browser tab. The vendor page (Datadog, Splunk, Kibana, webmail, etc.) keeps storing opaque bytes; this extension rewrites what you see using your local kit. Keys never leave this browser.",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": ["<all_urls>"],

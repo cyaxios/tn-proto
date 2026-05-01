@@ -1,0 +1,83 @@
+name: release-extension
+
+# Triggered on a chrome-specific tag (ext-v*), separate from the Python
+# release pipeline so the SDK and the extension release on independent
+# cadences. Builds a zip of extensions/tn-decrypt/ and attaches it to
+# a GitHub Release.
+#
+# Users install with:
+#   1. Download the zip from the Release page
+#   2. Unzip
+#   3. chrome://extensions  → enable Developer mode  → Load unpacked  → point at the unzipped dir
+#
+# Or wait for the Chrome Web Store listing (separate, manual submission).
+
+on:
+  push:
+    tags:
+      - 'ext-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required to create releases + upload assets
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from manifest
+        id: version
+        run: |
+          VERSION=$(python -c "import json; print(json.load(open('extensions/tn-decrypt/manifest.json'))['version'])")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Manifest version: ${VERSION}"
+          echo "Tag: ${TAG}"
+
+      - name: Verify manifest version matches tag
+        run: |
+          # The tag is `ext-v<X>` and the manifest says `<X>` — they must agree.
+          EXPECTED="ext-v${{ steps.version.outputs.version }}"
+          if [ "${{ steps.version.outputs.tag }}" != "${EXPECTED}" ]; then
+            echo "::error::tag '${{ steps.version.outputs.tag }}' does not match manifest version '${{ steps.version.outputs.version }}' (expected '${EXPECTED}')"
+            exit 1
+          fi
+
+      - name: Build extension zip
+        run: |
+          # Strip test fixtures + README from the bundle. Chrome doesn't
+          # care, but they bloat the download.
+          cd extensions/tn-decrypt
+          zip -r "../../tn-decrypt-${{ steps.version.outputs.version }}.zip" . \
+            --exclude "test/*" \
+            --exclude "*.md"
+          cd ../..
+          ls -la "tn-decrypt-${{ steps.version.outputs.version }}.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: tn-decrypt extension ${{ steps.version.outputs.version }}
+          body: |
+            **TN Decrypt** Chrome extension — decrypts TN envelopes in any browser tab using a local kit.
+
+            ## Install (manual, until Chrome Web Store listing is live)
+
+            1. Download `tn-decrypt-${{ steps.version.outputs.version }}.zip` below.
+            2. Unzip into a directory.
+            3. Open `chrome://extensions`, toggle **Developer mode** (top-right).
+            4. Click **Load unpacked**, point at the unzipped directory.
+
+            The extension scans pages for TN ciphertexts and rewrites them in-place using whatever kits you've imported via the popup. Keys never leave the browser.
+
+            ## Test page
+
+            Local fixture at `test-page.html` (in the source tree) shows a sample envelope; load it via `file:///` after install to confirm decryption.
+          files: |
+            tn-decrypt-${{ steps.version.outputs.version }}.zip
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, 'a') || contains(steps.version.outputs.version, 'b') || contains(steps.version.outputs.version, 'rc') }}
