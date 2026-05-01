@@ -38,6 +38,7 @@
     "tn-js": "./bin/tn-js.mjs"
   },
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
     "fflate": "^0.8.2",
     "tn-wasm": "file:../crypto/tn-wasm/pkg",
     "yaml": "^2.6.0"
