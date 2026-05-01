@@ -1,0 +1,17 @@
+[package]
+name = "tn-core-py"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Python bindings for tn-core: btn-backed TN runtime."
+
+[lib]
+name = "tn_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+tn-core = { path = "../tn-core" }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+serde_json = { workspace = true }
+base64 = { workspace = true }

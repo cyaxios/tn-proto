@@ -1,0 +1,20 @@
+[package]
+name = "tn-btn-py"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+description = "Python bindings for tn-btn broadcast-transaction encryption."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "tn_btn"
+crate-type = ["cdylib"]
+
+[dependencies]
+tn-btn = { path = "../tn-btn" }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+ed25519-dalek = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }

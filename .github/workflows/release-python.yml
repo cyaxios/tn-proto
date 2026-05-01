@@ -1,0 +1,165 @@
+name: release-python
+
+# Triggered on tag push (e.g. v0.2.0a1). Builds wheels for the three
+# Python packages (tn-btn, tn-core, tn-protocol) across Linux/macOS/Windows
+# and Python 3.10+, then uploads them to TestPyPI by default. Promote to
+# real PyPI by editing the `repository_url` step below.
+#
+# Required repo secrets:
+#   TESTPYPI_API_TOKEN  — generated at https://test.pypi.org/manage/account/token/
+#   PYPI_API_TOKEN      — only needed when promoting to real PyPI
+#
+# Manual trigger: workflow_dispatch, useful to dry-run without tagging.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Where to upload (testpypi | pypi | none)'
+        required: true
+        default: 'testpypi'
+        type: choice
+        options:
+          - testpypi
+          - pypi
+          - none
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Rust-backed wheels (tn-btn, tn-core) — maturin handles the cross-compile.
+  # abi3-py39 means ONE wheel per OS/arch covers Python 3.9+.
+  # ---------------------------------------------------------------------------
+  build-pyo3-wheels:
+    name: Build ${{ matrix.package }} wheel (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [tn-btn-py, tn-core-py]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build wheels with maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crypto/${{ matrix.package }}
+          # abi3 means we don't need a per-Python matrix on the maturin side;
+          # one wheel per OS works across 3.9+.
+          args: --release --out dist
+          # Linux gets a manylinux-compatible wheel via the default container.
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.package }}-${{ matrix.os }}
+          path: crypto/${{ matrix.package }}/dist/*.whl
+
+  # ---------------------------------------------------------------------------
+  # Source distribution for the pyo3 packages — lets `pip install` from
+  # a system that has Rust installed (covers exotic platforms not in our wheel
+  # matrix).
+  # ---------------------------------------------------------------------------
+  build-pyo3-sdists:
+    name: sdist for ${{ matrix.package }}
+    strategy:
+      matrix:
+        package: [tn-btn-py, tn-core-py]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crypto/${{ matrix.package }}
+          command: sdist
+          args: --out dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist-${{ matrix.package }}
+          path: crypto/${{ matrix.package }}/dist/*.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Pure-Python tn-protocol wheel — single wheel works on any platform with
+  # Python 3.10+. No native deps in this package; just imports tn-btn and
+  # tn-core at runtime.
+  # ---------------------------------------------------------------------------
+  build-tn-protocol:
+    name: Build tn-protocol wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build
+
+      - name: Build wheel + sdist
+        working-directory: python
+        run: python -m build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-tn-protocol
+          path: python/dist/*
+
+  # ---------------------------------------------------------------------------
+  # Collect every artifact and upload to TestPyPI (or PyPI on a manual run).
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish to ${{ github.event.inputs.target || 'testpypi' }}
+    needs: [build-pyo3-wheels, build-pyo3-sdists, build-tn-protocol]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.target != 'none'
+    environment:
+      name: ${{ github.event.inputs.target == 'pypi' && 'pypi' || 'testpypi' }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Publish to TestPyPI
+        if: github.event.inputs.target != 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.TESTPYPI_API_TOKEN }}
+          packages-dir: dist/
+          skip-existing: true
+
+      - name: Publish to PyPI
+        if: github.event.inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/
+          skip-existing: true
