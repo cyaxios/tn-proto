@@ -50,15 +50,21 @@ export {
   manifestSigningBytes,
   newManifest,
   nowIsoMillis,
-  readTnpkg,
   signManifest,
   verifyManifest,
-  writeTnpkg,
   type Manifest,
   type ManifestKind,
   type VectorClock,
   type BodyContents,
-} from "./tnpkg.js";
+} from "./core/tnpkg.js";
+export {
+  readTnpkg,
+  writeTnpkg,
+  packTnpkg,
+  parseTnpkg,
+  type ZipEntry,
+  type ParsedZipEntry,
+} from "./tnpkg_io.js";
 export {
   DEFAULT_ADMIN_LOG_LOCATION,
   appendAdminEnvelopes,

@@ -17,7 +17,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { join } from "node:path";
 
 import { BaseTNHandler, type FilterSpec } from "./base.js";
-import { type Manifest, readTnpkg } from "../tnpkg.js";
+import { type Manifest } from "../core/tnpkg.js";
+import { readTnpkg } from "../tnpkg_io.js";
 
 /** Default filename template — must match `python/tn/handlers/fs_drop.py`. */
 export const DEFAULT_FS_DROP_FILENAME_TEMPLATE =
