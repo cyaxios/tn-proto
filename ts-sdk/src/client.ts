@@ -48,7 +48,7 @@ import {
   type EmitReceipt,
   type ReadEntry,
 } from "./runtime/node_runtime.js";
-import { signatureFromB64, verify as verifySig } from "./signing.js";
+import { signatureFromB64, verify as verifySig } from "./core/signing.js";
 import {
   KNOWN_KINDS,
   type Manifest,

@@ -20,9 +20,9 @@ import { Buffer } from "node:buffer";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve as pathResolve } from "node:path";
 
-import { canonicalize } from "./canonical.js";
-import type { DeviceKey } from "./signing.js";
-import { signatureB64, signatureFromB64, verify as verifySig } from "./signing.js";
+import { canonicalize } from "./core/canonical.js";
+import type { DeviceKey } from "./core/signing.js";
+import { signatureB64, signatureFromB64, verify as verifySig } from "./core/signing.js";
 import { asDid, asSignatureB64 } from "./types.js";
 
 /** Manifest schema version. Bump if required fields change incompatibly. */

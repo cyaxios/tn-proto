@@ -13,7 +13,7 @@
 import { readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { DeviceKey } from "../signing.js";
+import { DeviceKey } from "../core/signing.js";
 
 export interface LoadedKeystore {
   device: DeviceKey;

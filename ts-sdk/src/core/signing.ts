@@ -1,4 +1,3 @@
-import { Buffer } from "node:buffer";
 import {
   deriveDidKey,
   deviceKeyFromSeed,
@@ -7,8 +6,8 @@ import {
   signatureB64 as rawSignatureB64,
   signatureFromB64 as rawSignatureFromB64,
   verifyDid,
-} from "./raw.js";
-import { asDid, type Did, type SignatureB64, asSignatureB64 } from "./types.js";
+} from "../raw.js";
+import { asDid, type Did, type SignatureB64, asSignatureB64 } from "../types.js";
 
 interface RawDeviceKey {
   seed_b64: string;

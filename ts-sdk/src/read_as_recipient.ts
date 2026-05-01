@@ -20,7 +20,7 @@ import { Buffer } from "node:buffer";
 import { join } from "node:path";
 
 import { btnDecrypt } from "./raw.js";
-import { signatureFromB64, verify } from "./signing.js";
+import { signatureFromB64, verify } from "./core/signing.js";
 import { asDid, asSignatureB64 } from "./types.js";
 
 export interface ReadAsRecipientOptions {

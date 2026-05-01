@@ -20,7 +20,7 @@ import { dirname, join } from "node:path";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
-import { DeviceKey } from "../signing.js";
+import { DeviceKey } from "../core/signing.js";
 
 import { loadPolicyFile, type PolicyDocument } from "../agents_policy.js";
 import { BtnPublisher, btnDecrypt, btnKitLeaf } from "../raw.js";
@@ -29,11 +29,11 @@ import type { TNHandler } from "../handlers/index.js";
 function readKitLeaf(kitBytes: Uint8Array): bigint {
   return btnKitLeaf(kitBytes);
 }
-import { canonicalize } from "../canonical.js";
-import { ZERO_HASH, rowHash } from "../chain.js";
-import { buildEnvelopeLine } from "../envelope.js";
-import { deriveGroupKey, indexTokenFor } from "../indexing.js";
-import { signatureB64, signatureFromB64, verify } from "../signing.js";
+import { canonicalize } from "../core/canonical.js";
+import { ZERO_HASH, rowHash } from "../core/chain.js";
+import { buildEnvelopeLine } from "../core/envelope.js";
+import { deriveGroupKey, indexTokenFor } from "../core/indexing.js";
+import { signatureB64, signatureFromB64, verify } from "../core/signing.js";
 import { asDid, asRowHash, asSignatureB64, type RowHash } from "../types.js";
 import { loadConfig, type CeremonyConfig, type GroupConfig } from "./config.js";
 import { loadKeystore, type LoadedKeystore } from "./keystore.js";

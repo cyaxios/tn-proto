@@ -13,7 +13,7 @@
 // inputs in one place and prevents drift between the regenerate script
 // and the byte-compare tests.
 
-import { canonicalize } from "../../src/canonical.js";
+import { canonicalize } from "../../src/core/canonical.js";
 import { parsePolicyText } from "../../src/agents_policy.js";
 import type { ReadEntry } from "../../src/runtime/node_runtime.js";
 

@@ -1,4 +1,4 @@
-import { canonicalBytes, canonicalJson } from "./raw.js";
+import { canonicalBytes, canonicalJson } from "../raw.js";
 
 /** Recursively reject NaN / +Infinity / -Infinity so we match Python's
  * `canonical_bytes` contract. Without this check, JSON.stringify (which the
