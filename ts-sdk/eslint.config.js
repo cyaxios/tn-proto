@@ -36,4 +36,28 @@ export default tseslint.config(
       "@typescript-eslint/no-explicit-any": "error",
     },
   },
+  {
+    files: ["src/core/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["node:*"],
+              message: "Layer 1 (src/core/) is browser-safe — no node:* imports.",
+            },
+          ],
+          paths: [
+            { name: "fs", message: "Use Layer 2 for filesystem I/O." },
+            { name: "path", message: "Use Layer 2 for filesystem I/O." },
+            { name: "os", message: "Use Layer 2 for OS-specific code." },
+            { name: "child_process", message: "Layer 1 must not spawn processes." },
+            { name: "crypto", message: "Use the wasm RNG or globalThis.crypto." },
+            { name: "zlib", message: "Use a wasm-backed compressor in Layer 1, or move to Layer 2." },
+          ],
+        },
+      ],
+    },
+  },
 );
