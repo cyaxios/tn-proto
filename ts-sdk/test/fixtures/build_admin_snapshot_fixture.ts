@@ -27,7 +27,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { DeviceKey, TNClient } from "../../src/index.js";
+import { DeviceKey } from "../../src/index.js";
+import { Tn } from "../../src/tn.js";
 import { BtnPublisher } from "../../src/raw.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -63,26 +64,24 @@ function makeCeremony(): { yamlPath: string; tmpDir: string } {
   return { yamlPath, tmpDir: dir };
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const { yamlPath, tmpDir } = makeCeremony();
-  const client = TNClient.init(yamlPath);
+  const tn = await Tn.init(yamlPath);
   const kitsDir = mkdtempSync(join(tmpdir(), "tn-tnpkg-kits-"));
-  const leafA = client.adminAddRecipient(
+  const resA = await tn.admin.addRecipient(
     "default",
-    join(kitsDir, "default.btn.mykit"),
-    "did:key:zAlice",
+    { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zAlice" },
   );
-  client.adminAddRecipient(
+  await tn.admin.addRecipient(
     "default",
-    join(kitsDir, "default_bob.btn.mykit"),
-    "did:key:zBob",
+    { outKitPath: join(kitsDir, "default_bob.btn.mykit"), recipientDid: "did:key:zBob" },
   );
-  client.adminRevokeRecipient("default", leafA, "did:key:zAlice");
-  client.vaultLink("did:web:vault.example", "demo");
+  await tn.admin.revokeRecipient("default", { leafIndex: resA.leafIndex, recipientDid: "did:key:zAlice" });
+  await tn.vault.link("did:web:vault.example", "demo");
 
   const fixturePath = resolve(__dirname, "ts_admin_snapshot.tnpkg");
-  client.export({ kind: "admin_log_snapshot" }, fixturePath);
-  client.close();
+  await tn.pkg.export({ adminLogSnapshot: { outPath: fixturePath } }, fixturePath);
+  await tn.close();
 
   const bytes = statSync(fixturePath).size;
   // eslint-disable-next-line no-console
@@ -91,4 +90,4 @@ function main(): void {
   void tmpDir;
 }
 
-main();
+void main();

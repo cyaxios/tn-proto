@@ -6,14 +6,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { TNClient, readTnpkg } from "../src/index.js";
+import { readTnpkg } from "../src/index.js";
+import { Tn } from "../src/tn.js";
 
-test("adminAddAgentRuntime: bundle contains N+1 kits (groups + tn.agents)", () => {
-  const client = TNClient.ephemeral();
+test("adminAddAgentRuntime: bundle contains N+1 kits (groups + tn.agents)", async () => {
+  const tn = await Tn.ephemeral();
   try {
     const td = mkdtempSync(join(tmpdir(), "tn-agent-out-"));
     try {
-      const out = client.adminAddAgentRuntime({
+      const out = await tn.agents.addRuntime({
         runtimeDid: "did:key:z6MkRuntimeAAA",
         groups: ["default"],
         outPath: join(td, "runtime.tnpkg"),
@@ -35,16 +36,16 @@ test("adminAddAgentRuntime: bundle contains N+1 kits (groups + tn.agents)", () =
       rmSync(td, { recursive: true, force: true });
     }
   } finally {
-    client.close();
+    await tn.close();
   }
 });
 
-test("adminAddAgentRuntime: dedup when caller passes tn.agents in groups", () => {
-  const client = TNClient.ephemeral();
+test("adminAddAgentRuntime: dedup when caller passes tn.agents in groups", async () => {
+  const tn = await Tn.ephemeral();
   try {
     const td = mkdtempSync(join(tmpdir(), "tn-agent-out-"));
     try {
-      const out = client.adminAddAgentRuntime({
+      const out = await tn.agents.addRuntime({
         runtimeDid: "did:key:z6MkRuntimeBBB",
         groups: ["default", "tn.agents"],
         outPath: join(td, "runtime.tnpkg"),
@@ -57,18 +58,18 @@ test("adminAddAgentRuntime: dedup when caller passes tn.agents in groups", () =>
       rmSync(td, { recursive: true, force: true });
     }
   } finally {
-    client.close();
+    await tn.close();
   }
 });
 
-test("adminAddAgentRuntime: rejects unknown groups", () => {
-  const client = TNClient.ephemeral();
+test("adminAddAgentRuntime: rejects unknown groups", async () => {
+  const tn = await Tn.ephemeral();
   try {
     const td = mkdtempSync(join(tmpdir(), "tn-agent-out-"));
     try {
-      assert.throws(
+      await assert.rejects(
         () =>
-          client.adminAddAgentRuntime({
+          tn.agents.addRuntime({
             runtimeDid: "did:key:z6MkRuntimeCCC",
             groups: ["nonexistent"],
             outPath: join(td, "runtime.tnpkg"),
@@ -79,6 +80,6 @@ test("adminAddAgentRuntime: rejects unknown groups", () => {
       rmSync(td, { recursive: true, force: true });
     }
   } finally {
-    client.close();
+    await tn.close();
   }
 });

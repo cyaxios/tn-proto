@@ -6,10 +6,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { TNClient } from "../src/index.js";
+import { Tn } from "../src/tn.js";
 
-test("setContext / updateContext / clearContext / getContext flow", () => {
-  const c = TNClient.ephemeral({ stdout: false });
+test("setContext / updateContext / clearContext / getContext flow", async () => {
+  const c = await Tn.ephemeral({ stdout: false });
   try {
     // Empty by default.
     assert.deepEqual(c.getContext(), {});
@@ -31,12 +31,12 @@ test("setContext / updateContext / clearContext / getContext flow", () => {
     c.clearContext();
     assert.deepEqual(c.getContext(), {});
   } finally {
-    c.close();
+    await c.close();
   }
 });
 
-test("scope() overlays compose with setContext (long-lived bottom layer)", () => {
-  const c = TNClient.ephemeral({ stdout: false });
+test("scope() overlays compose with setContext (long-lived bottom layer)", async () => {
+  const c = await Tn.ephemeral({ stdout: false });
   try {
     c.setContext({ request_id: "req_outer" });
 
@@ -50,12 +50,12 @@ test("scope() overlays compose with setContext (long-lived bottom layer)", () =>
     // After the scope: long-lived survives, overlay is gone.
     assert.deepEqual(c.getContext(), { request_id: "req_outer" });
   } finally {
-    c.close();
+    await c.close();
   }
 });
 
-test("setContext fields land on emitted entries", () => {
-  const c = TNClient.ephemeral({ stdout: false });
+test("setContext fields land on emitted entries", async () => {
+  const c = await Tn.ephemeral({ stdout: false });
   try {
     c.setContext({ request_id: "req_check", user_id: "u_check" });
     c.info("evt.ctx", { marker: "m1" });
@@ -75,6 +75,6 @@ test("setContext fields land on emitted entries", () => {
     // assertion and proves setContext fields propagate.
     assert.equal(env["request_id"], "req_check", "request_id missing on envelope");
   } finally {
-    c.close();
+    await c.close();
   }
 });

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { TNClient } from "../src/index.js";
+import { Tn } from "../src/tn.js";
 
 function captureStdout<T>(fn: () => T): { value: T; output: string } {
   const original = process.stdout.write.bind(process.stdout);
@@ -27,13 +27,13 @@ function captureStdout<T>(fn: () => T): { value: T; output: string } {
   }
 }
 
-test("removing stdout from yaml's handlers list silences user emits (FINDINGS S0.4)", () => {
+test("removing stdout from yaml's handlers list silences user emits (FINDINGS S0.4)", async () => {
   const root = mkdtempSync(join(tmpdir(), "tn-s04-"));
   const yamlPath = join(root, "register.yaml");
   try {
     // Mint a fresh ceremony so we can edit its yaml.
-    const c1 = TNClient.init(yamlPath);
-    c1.close();
+    const c1 = await Tn.init(yamlPath);
+    await c1.close();
 
     // Strip `- kind: stdout` from the yaml so the operator's intent is
     // "no stdout for ANY emit." We do a regex-level edit because yaml
@@ -49,14 +49,17 @@ test("removing stdout from yaml's handlers list silences user emits (FINDINGS S0
     delete process.env["TN_NO_STDOUT"];
 
     try {
-      const { output } = captureStdout(() => {
-        const c2 = TNClient.init(yamlPath);
-        try {
+      // Pre-init c2 before captureStdout so the async init doesn't race
+      // with stdout capture.
+      const c2 = await Tn.init(yamlPath);
+      let output = "";
+      try {
+        ({ output } = captureStdout(() => {
           c2.info("evt.silent", { marker: "should_not_appear" });
-        } finally {
-          c2.close();
-        }
-      });
+        }));
+      } finally {
+        await c2.close();
+      }
 
       // ``event_type`` is a public envelope field — visible in the
       // stdout JSON line if any was emitted. Field values like the
@@ -75,25 +78,27 @@ test("removing stdout from yaml's handlers list silences user emits (FINDINGS S0
   }
 });
 
-test("keeping stdout in yaml's handlers list lets stdout fire (S0.4 happy path)", () => {
+test("keeping stdout in yaml's handlers list lets stdout fire (S0.4 happy path)", async () => {
   const root = mkdtempSync(join(tmpdir(), "tn-s04-on-"));
   const yamlPath = join(root, "register.yaml");
   try {
-    const c1 = TNClient.init(yamlPath);
-    c1.close();
+    const c1 = await Tn.init(yamlPath);
+    await c1.close();
 
     // Yaml comes with stdout enabled by default. Don't edit.
     const priorEnv = process.env["TN_NO_STDOUT"];
     delete process.env["TN_NO_STDOUT"];
     try {
-      const { output } = captureStdout(() => {
-        const c2 = TNClient.init(yamlPath);
-        try {
+      // Pre-init c2 before captureStdout.
+      const c2 = await Tn.init(yamlPath);
+      let output = "";
+      try {
+        ({ output } = captureStdout(() => {
           c2.info("evt.loud", { marker: "should_appear" });
-        } finally {
-          c2.close();
-        }
-      });
+        }));
+      } finally {
+        await c2.close();
+      }
       assert.ok(
         output.includes("evt.loud"),
         `yaml kept stdout but no JSON line landed on stdout. ` +

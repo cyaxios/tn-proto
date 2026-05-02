@@ -5,15 +5,16 @@ import { strict as assert } from "node:assert";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
 
-import { TNClient, type ReadEntry } from "../src/index.js";
+import { type ReadEntry } from "../src/index.js";
+import { Tn } from "../src/tn.js";
 
-function makeEphemeral(): { client: TNClient; cleanup: () => void } {
-  const client = TNClient.ephemeral();
+async function makeEphemeral(): Promise<{ client: Tn; cleanup: () => Promise<void> }> {
+  const client = await Tn.ephemeral();
   return {
     client,
-    cleanup: () => {
+    cleanup: async () => {
       try {
-        client.close();
+        await client.close();
       } catch {
         /* ignore */
       }
@@ -21,8 +22,8 @@ function makeEphemeral(): { client: TNClient; cleanup: () => void } {
   };
 }
 
-test("client.read() default returns flat dict with envelope basics + decrypted fields", () => {
-  const { client, cleanup } = makeEphemeral();
+test("client.read() default returns flat dict with envelope basics + decrypted fields", async () => {
+  const { client, cleanup } = await makeEphemeral();
   try {
     client.info("order.created", { amount: 99, currency: "USD" });
     const entries = [...client.read()] as Array<Record<string, unknown>>;
@@ -47,12 +48,12 @@ test("client.read() default returns flat dict with envelope basics + decrypted f
     assert.equal(biz!["envelope"], undefined);
     assert.equal(biz!["plaintext"], undefined);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-test("client.read({verify: true}) adds _valid block", () => {
-  const { client, cleanup } = makeEphemeral();
+test("client.read({verify: true}) adds _valid block", async () => {
+  const { client, cleanup } = await makeEphemeral();
   try {
     client.info("evt.test", { k: 1 });
     const entries = [...client.read({ verify: true })] as Array<Record<string, unknown>>;
@@ -64,12 +65,12 @@ test("client.read({verify: true}) adds _valid block", () => {
     assert.equal(valid!["row_hash"], true);
     assert.equal(valid!["chain"], true);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-test("client.read({raw: true}) returns the {envelope, plaintext, valid} shape", () => {
-  const { client, cleanup } = makeEphemeral();
+test("client.read({raw: true}) returns the {envelope, plaintext, valid} shape", async () => {
+  const { client, cleanup } = await makeEphemeral();
   try {
     client.info("evt.test", { k: 1 });
     const entries = [...client.read({ raw: true })] as ReadEntry[];
@@ -82,12 +83,12 @@ test("client.read({raw: true}) returns the {envelope, plaintext, valid} shape", 
     assert.equal(evt!.valid.rowHash, true);
     assert.equal(evt!.valid.chain, true);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-test("client.readRaw is an alias for read({raw: true})", () => {
-  const { client, cleanup } = makeEphemeral();
+test("client.readRaw is an alias for read({raw: true})", async () => {
+  const { client, cleanup } = await makeEphemeral();
   try {
     client.info("evt.alias", { x: 1 });
     const entries = [...client.readRaw()];
@@ -95,12 +96,12 @@ test("client.readRaw is an alias for read({raw: true})", () => {
     assert.ok(evt, "readRaw yields the audit-grade shape");
     assert.ok(evt!.envelope);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-test("flat dict omits empty _hidden_groups / _decrypt_errors keys", () => {
-  const { client, cleanup } = makeEphemeral();
+test("flat dict omits empty _hidden_groups / _decrypt_errors keys", async () => {
+  const { client, cleanup } = await makeEphemeral();
   try {
     client.info("evt.test", { k: 1 });
     const entries = [...client.read()] as Array<Record<string, unknown>>;
@@ -109,12 +110,12 @@ test("flat dict omits empty _hidden_groups / _decrypt_errors keys", () => {
     assert.equal(evt!["_hidden_groups"], undefined);
     assert.equal(evt!["_decrypt_errors"], undefined);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-test("a row with only public fields returns just envelope basics in flat dict", () => {
-  const { client, cleanup } = makeEphemeral();
+test("a row with only public fields returns just envelope basics in flat dict", async () => {
+  const { client, cleanup } = await makeEphemeral();
   try {
     // No groups — just envelope basics + a public field.
     // request_id is in the auto-injected public_fields list.
@@ -125,12 +126,12 @@ test("a row with only public fields returns just envelope basics in flat dict", 
     // Public field flat at top level.
     assert.equal(evt!["request_id"], "req-123");
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
-test("read({verify: true, raw: true}) — raw wins; no error", () => {
-  const { client, cleanup } = makeEphemeral();
+test("read({verify: true, raw: true}) — raw wins; no error", async () => {
+  const { client, cleanup } = await makeEphemeral();
   try {
     client.info("evt.compose", { x: 1 });
     const entries = [...client.read({ verify: true, raw: true })] as ReadEntry[];
@@ -139,7 +140,7 @@ test("read({verify: true, raw: true}) — raw wins; no error", () => {
     // raw=true returns the audit-grade shape; valid is on the entry.
     assert.equal(evt!.valid.signature, true);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 void rmSync; // keep typed import alive for potential future cleanup helpers
