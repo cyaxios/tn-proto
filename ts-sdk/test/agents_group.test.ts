@@ -8,22 +8,23 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { loadConfig } from "../src/index.js";
-import { TNClient } from "../src/index.js";
+import type { CeremonyConfig } from "../src/runtime/config.js";
+import { Tn } from "../src/tn.js";
 import { parsePolicyText } from "../src/agents_policy.js";
 
-function ephemeralClient(): { client: TNClient; close: () => void } {
-  const client = TNClient.ephemeral();
+async function ephemeralClient(): Promise<{ client: Tn; close: () => Promise<void> }> {
+  const client = await Tn.ephemeral();
   return { client, close: () => client.close() };
 }
 
 /** Make a fresh ceremony in a tempdir we own (so it survives close+reinit). */
-function makeOwnedCeremony(): { yamlPath: string; cleanup: () => void } {
+async function makeOwnedCeremony(): Promise<{ yamlPath: string; cleanup: () => void }> {
   const td = mkdtempSync(join(tmpdir(), "tn-owned-"));
   const yamlPath = join(td, "tn.yaml");
-  // Use TNClient.init to seed the ceremony, then close immediately so
+  // Use Tn.init to seed the ceremony, then close immediately so
   // we own the lifecycle. The init creates the keystore + yaml + log dir.
-  const c = TNClient.init(yamlPath);
-  c.close();
+  const c = await Tn.init(yamlPath);
+  await c.close();
   return {
     yamlPath,
     cleanup: () => {
@@ -36,12 +37,12 @@ function makeOwnedCeremony(): { yamlPath: string; cleanup: () => void } {
   };
 }
 
-test("loadConfig rejects user-declared `tn.X` group names (reserved namespace)", () => {
+test("loadConfig rejects user-declared `tn.X` group names (reserved namespace)", async () => {
   // Reach into the inner ephemeral yaml + tweak it. Easier: write a yaml from
   // scratch into a tempdir and try to load it.
-  const td = TNClient.ephemeral();
+  const td = await Tn.ephemeral();
   try {
-    const cfg = td.config;
+    const cfg = td.config() as CeremonyConfig;
     const yamlPath = cfg.yamlPath;
     // Replace the yaml with one that declares a forbidden tn.* group.
     const bad = `ceremony:
@@ -75,28 +76,30 @@ fields: {}
       "loadConfig must reject tn.* groups other than tn.agents",
     );
   } finally {
-    td.close();
+    await td.close();
   }
 });
 
-test("a fresh ceremony auto-injects the tn.agents group", () => {
-  const { client, close } = ephemeralClient();
+test("a fresh ceremony auto-injects the tn.agents group", async () => {
+  const { client, close } = await ephemeralClient();
   try {
+    const cfg = client.config() as CeremonyConfig;
     assert.ok(
-      client.config.groups.has("tn.agents"),
+      cfg.groups.has("tn.agents"),
       "tn.agents must be auto-injected at fresh-create",
     );
-    const g = client.config.groups.get("tn.agents")!;
+    const g = cfg.groups.get("tn.agents")!;
     assert.equal(g.cipher, "btn");
   } finally {
-    close();
+    await close();
   }
 });
 
-test("the six tn.agents fields route exclusively to the tn.agents group", () => {
-  const { client, close } = ephemeralClient();
+test("the six tn.agents fields route exclusively to the tn.agents group", async () => {
+  const { client, close } = await ephemeralClient();
   try {
-    const map = client.config.fieldToGroups;
+    const cfg = client.config() as CeremonyConfig;
+    const map = cfg.fieldToGroups;
     for (const f of [
       "instruction",
       "use_for",
@@ -110,7 +113,7 @@ test("the six tn.agents fields route exclusively to the tn.agents group", () => 
       assert.deepEqual(groups, ["tn.agents"], `field ${f} must route only to tn.agents`);
     }
   } finally {
-    close();
+    await close();
   }
 });
 
@@ -160,8 +163,8 @@ text
   );
 });
 
-test("emit-side splice: writer with .tn/config/agents.md fills tn.agents fields", () => {
-  const { yamlPath, cleanup } = makeOwnedCeremony();
+test("emit-side splice: writer with .tn/config/agents.md fills tn.agents fields", async () => {
+  const { yamlPath, cleanup } = await makeOwnedCeremony();
   try {
     const yamlDir = dirname(yamlPath);
     const policyDir = `${yamlDir}/.tn/config`;
@@ -188,10 +191,10 @@ POST https://merchant.example.com/escalate.
       "utf8",
     );
 
-    const client = TNClient.init(yamlPath);
+    const tn = await Tn.init(yamlPath);
     try {
-      client.info("payment.completed", { amount: 4999, currency: "USD" });
-      const entries = [...client.read({ raw: true })];
+      tn.info("payment.completed", { amount: 4999, currency: "USD" });
+      const entries = [...tn.read({ raw: true })];
       const pay = entries.find((e) => e.envelope["event_type"] === "payment.completed");
       assert.ok(pay, "must emit payment.completed");
       const agents = pay!.plaintext["tn.agents"];
@@ -202,15 +205,15 @@ POST https://merchant.example.com/escalate.
       assert.match(String(a["do_not_use_for"]), /Credit decisions/);
       assert.match(String(a["policy"]), /payment\.completed@/);
     } finally {
-      client.close();
+      await tn.close();
     }
   } finally {
     cleanup();
   }
 });
 
-test("emit-side splice: per-emit override wins over policy template", () => {
-  const { yamlPath, cleanup } = makeOwnedCeremony();
+test("emit-side splice: per-emit override wins over policy template", async () => {
+  const { yamlPath, cleanup } = await makeOwnedCeremony();
   try {
     const yamlDir = dirname(yamlPath);
     mkdirSync(`${yamlDir}/.tn/config`, { recursive: true });
@@ -230,15 +233,15 @@ default
 `,
       "utf8",
     );
-    const client = TNClient.init(yamlPath);
+    const tn = await Tn.init(yamlPath);
     try {
-      client.info("evt.x", { instruction: "OVERRIDDEN" });
-      const entries = [...client.read({ raw: true })];
+      tn.info("evt.x", { instruction: "OVERRIDDEN" });
+      const entries = [...tn.read({ raw: true })];
       const evt = entries.find((e) => e.envelope["event_type"] === "evt.x");
       const a = evt!.plaintext["tn.agents"] as Record<string, unknown>;
       assert.equal(a["instruction"], "OVERRIDDEN", "per-emit override wins");
     } finally {
-      client.close();
+      await tn.close();
     }
   } finally {
     cleanup();

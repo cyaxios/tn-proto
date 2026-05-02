@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { TNClient } from "../src/index.js";
+import { Tn } from "../src/tn.js";
 
 const POLICY_MD = `## evt.published
 ### instruction
@@ -30,11 +30,11 @@ text-5
  * and break the assertion. Pin `rotate_on_init: false` on the file
  * handler so the legacy "append everything" behavior applies for these
  * tests. */
-function makeOwnedCeremony(): { yamlPath: string; cleanup: () => void } {
+async function makeOwnedCeremony(): Promise<{ yamlPath: string; cleanup: () => void }> {
   const td = mkdtempSync(join(tmpdir(), "tn-policy-pub-"));
   const yamlPath = join(td, "tn.yaml");
-  const c = TNClient.init(yamlPath);
-  c.close();
+  const c = await Tn.init(yamlPath);
+  await c.close();
   // Edit the just-created yaml to disable session rotation. The
   // generated file has `handlers: [{kind: file.rotating, ..., rotate_on_init: true}, {kind: stdout}]`;
   // rewrite the rotate_on_init line to false. Simple textual replace
@@ -54,16 +54,16 @@ function makeOwnedCeremony(): { yamlPath: string; cleanup: () => void } {
   };
 }
 
-test("init emits tn.agents.policy_published when a policy file is present", () => {
-  const { yamlPath, cleanup } = makeOwnedCeremony();
+test("init emits tn.agents.policy_published when a policy file is present", async () => {
+  const { yamlPath, cleanup } = await makeOwnedCeremony();
   try {
     const yamlDir = dirname(yamlPath);
     mkdirSync(`${yamlDir}/.tn/config`, { recursive: true });
     writeFileSync(`${yamlDir}/.tn/config/agents.md`, POLICY_MD, "utf8");
 
-    const client = TNClient.init(yamlPath);
+    const tn = await Tn.init(yamlPath);
     try {
-      const entries = [...client.read({ raw: true })];
+      const entries = [...tn.read({ raw: true })];
       const pub = entries.filter(
         (e) => e.envelope["event_type"] === "tn.agents.policy_published",
       );
@@ -71,24 +71,24 @@ test("init emits tn.agents.policy_published when a policy file is present", () =
       assert.equal(pub[0]!.envelope["policy_uri"], ".tn/config/agents.md");
       assert.match(String(pub[0]!.envelope["content_hash"]), /^sha256:/);
     } finally {
-      client.close();
+      await tn.close();
     }
   } finally {
     cleanup();
   }
 });
 
-test("idempotent: re-init on unchanged policy file does NOT re-emit", () => {
-  const { yamlPath, cleanup } = makeOwnedCeremony();
+test("idempotent: re-init on unchanged policy file does NOT re-emit", async () => {
+  const { yamlPath, cleanup } = await makeOwnedCeremony();
   try {
     const yamlDir = dirname(yamlPath);
     mkdirSync(`${yamlDir}/.tn/config`, { recursive: true });
     writeFileSync(`${yamlDir}/.tn/config/agents.md`, POLICY_MD, "utf8");
 
-    const c1 = TNClient.init(yamlPath);
-    c1.close();
+    const c1 = await Tn.init(yamlPath);
+    await c1.close();
 
-    const c2 = TNClient.init(yamlPath);
+    const c2 = await Tn.init(yamlPath);
     try {
       // FINDINGS #4 parity: read({raw:true}) defaults to strict run_id
       // matching, so events emitted by c1 are filtered out from c2's
@@ -100,26 +100,26 @@ test("idempotent: re-init on unchanged policy file does NOT re-emit", () => {
       );
       assert.equal(pub.length, 1, "second init must not re-emit on unchanged content_hash");
     } finally {
-      c2.close();
+      await c2.close();
     }
   } finally {
     cleanup();
   }
 });
 
-test("re-emits on policy content change", () => {
-  const { yamlPath, cleanup } = makeOwnedCeremony();
+test("re-emits on policy content change", async () => {
+  const { yamlPath, cleanup } = await makeOwnedCeremony();
   try {
     const yamlDir = dirname(yamlPath);
     mkdirSync(`${yamlDir}/.tn/config`, { recursive: true });
     writeFileSync(`${yamlDir}/.tn/config/agents.md`, POLICY_MD, "utf8");
 
-    TNClient.init(yamlPath).close();
+    await (await Tn.init(yamlPath)).close();
 
     const NEW_POLICY = POLICY_MD.replace("text-1", "text-1-MODIFIED");
     writeFileSync(`${yamlDir}/.tn/config/agents.md`, NEW_POLICY, "utf8");
 
-    const c2 = TNClient.init(yamlPath);
+    const c2 = await Tn.init(yamlPath);
     try {
       // FINDINGS #4 parity — see sibling test for explanation.
       const entries = [...c2.read({ raw: true, allRuns: true })];
@@ -128,22 +128,22 @@ test("re-emits on policy content change", () => {
       );
       assert.equal(pub.length, 2, "policy change must trigger a fresh policy_published");
     } finally {
-      c2.close();
+      await c2.close();
     }
   } finally {
     cleanup();
   }
 });
 
-test("no policy file present: no policy_published event ever", () => {
-  const client = TNClient.ephemeral();
+test("no policy file present: no policy_published event ever", async () => {
+  const tn = await Tn.ephemeral();
   try {
-    const entries = [...client.read({ raw: true })];
+    const entries = [...tn.read({ raw: true })];
     const pub = entries.filter(
       (e) => e.envelope["event_type"] === "tn.agents.policy_published",
     );
     assert.equal(pub.length, 0, "absent policy file → never emitted");
   } finally {
-    client.close();
+    await tn.close();
   }
 });

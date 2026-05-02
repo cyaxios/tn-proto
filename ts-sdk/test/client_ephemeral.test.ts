@@ -1,4 +1,4 @@
-// TNClient.ephemeral() — fresh ceremony in a private tempdir, cleanup on close.
+// Tn.ephemeral() — fresh ceremony in a private tempdir, cleanup on close.
 //
 // Mirrors Rust's `Runtime::ephemeral()` test
 // (crypto/tn-core/tests/runtime_ephemeral.rs) and Python's `tn.session()`
@@ -10,10 +10,10 @@ import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { test } from "node:test";
 
-import { TNClient } from "../src/index.js";
+import { Tn } from "../src/tn.js";
 
-test("TNClient.ephemeral creates a usable runtime", () => {
-  const c = TNClient.ephemeral();
+test("Tn.ephemeral creates a usable runtime", async () => {
+  const c = await Tn.ephemeral();
   try {
     // Sanity: real DID, real log path under the tempdir.
     assert.ok(c.did.startsWith("did:key:"), `unexpected did: ${c.did}`);
@@ -30,12 +30,12 @@ test("TNClient.ephemeral creates a usable runtime", () => {
     );
     assert.equal(read.length, 1, "expected exactly one user event");
   } finally {
-    c.close();
+    await c.close();
   }
 });
 
-test("TNClient.ephemeral cleans up its tempdir on close", () => {
-  const c = TNClient.ephemeral();
+test("Tn.ephemeral cleans up its tempdir on close", async () => {
+  const c = await Tn.ephemeral();
   c.info("evt.cleanup", { k: 1 });
   const logPath = c.logPath;
   // logPath is somewhere under the owned tempdir; the dir-of-dir-of(logPath)
@@ -43,7 +43,7 @@ test("TNClient.ephemeral cleans up its tempdir on close", () => {
   const tempRoot = dirname(dirname(logPath));
   assert.ok(existsSync(tempRoot), "tempdir should exist before close");
 
-  c.close();
+  await c.close();
   // Cleanup is best-effort. Allow either fully-removed or empty —
   // Windows occasionally races with file handles even after close().
   if (existsSync(tempRoot)) {
@@ -55,22 +55,22 @@ test("TNClient.ephemeral cleans up its tempdir on close", () => {
   assert.ok(!existsSync(tempRoot), "tempdir should be gone after close");
 });
 
-test("TNClient.ephemeral instances are isolated", () => {
-  const a = TNClient.ephemeral();
-  const b = TNClient.ephemeral();
+test("Tn.ephemeral instances are isolated", async () => {
+  const a = await Tn.ephemeral();
+  const b = await Tn.ephemeral();
   try {
     assert.notEqual(a.did, b.did, "ephemeral clients should have distinct DIDs");
     assert.notEqual(a.logPath, b.logPath, "ephemeral clients should have distinct log paths");
   } finally {
-    a.close();
-    b.close();
+    await a.close();
+    await b.close();
   }
 });
 
-test("TNClient.ephemeral close is idempotent", () => {
-  const c = TNClient.ephemeral();
-  c.close();
+test("Tn.ephemeral close is idempotent", async () => {
+  const c = await Tn.ephemeral();
+  await c.close();
   // Second close() must not throw — close clears the tempdir handle
   // first specifically so a re-call doesn't try to rm a missing dir.
-  c.close();
+  await c.close();
 });

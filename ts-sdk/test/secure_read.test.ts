@@ -7,19 +7,20 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { TNClient, VerificationError } from "../src/index.js";
+import { VerificationError } from "../src/index.js";
+import { Tn } from "../src/tn.js";
 
-function ephemeralClient(): { client: TNClient; close: () => void } {
-  const client = TNClient.ephemeral();
+async function ephemeralClient(): Promise<{ client: Tn; close: () => Promise<void> }> {
+  const client = await Tn.ephemeral();
   return { client, close: () => client.close() };
 }
 
 /** Fresh ceremony in a tempdir we own — for tests that close+reinit. */
-function makeOwnedCeremony(): { yamlPath: string; cleanup: () => void } {
+async function makeOwnedCeremony(): Promise<{ yamlPath: string; cleanup: () => void }> {
   const td = mkdtempSync(join(tmpdir(), "tn-sec-"));
   const yamlPath = join(td, "tn.yaml");
-  const c = TNClient.init(yamlPath);
-  c.close();
+  const c = await Tn.init(yamlPath);
+  await c.close();
   return {
     yamlPath,
     cleanup: () => {
@@ -32,8 +33,8 @@ function makeOwnedCeremony(): { yamlPath: string; cleanup: () => void } {
   };
 }
 
-test("secureRead: all-valid entries are surfaced as flat dicts", () => {
-  const { client, close } = ephemeralClient();
+test("secureRead: all-valid entries are surfaced as flat dicts", async () => {
+  const { client, close } = await ephemeralClient();
   try {
     client.info("order.created", { amount: 99 });
     const out = [...client.secureRead()];
@@ -41,12 +42,12 @@ test("secureRead: all-valid entries are surfaced as flat dicts", () => {
     assert.ok(evt, "verified entry must be yielded");
     assert.equal(evt!["amount"], 99);
   } finally {
-    close();
+    await close();
   }
 });
 
-test("secureRead default skips tampered rows + emits tn.read.tampered_row_skipped", () => {
-  const { client, close } = ephemeralClient();
+test("secureRead default skips tampered rows + emits tn.read.tampered_row_skipped", async () => {
+  const { client, close } = await ephemeralClient();
   try {
     client.info("evt.good", { x: 1 });
     // Append a malformed envelope to corrupt the chain. Easiest: break the
@@ -68,12 +69,12 @@ test("secureRead default skips tampered rows + emits tn.read.tampered_row_skippe
     const tampered = out.find((e) => e["event_type"] === "evt.good");
     assert.equal(tampered, undefined, "tampered row must be skipped");
   } finally {
-    close();
+    await close();
   }
 });
 
-test("secureRead({onInvalid: 'raise'}) throws VerificationError", () => {
-  const { client, close } = ephemeralClient();
+test("secureRead({onInvalid: 'raise'}) throws VerificationError", async () => {
+  const { client, close } = await ephemeralClient();
   try {
     client.info("evt.good", { x: 1 });
     const path = client.logPath;
@@ -89,12 +90,12 @@ test("secureRead({onInvalid: 'raise'}) throws VerificationError", () => {
       (e: unknown) => e instanceof VerificationError,
     );
   } finally {
-    close();
+    await close();
   }
 });
 
-test("secureRead({onInvalid: 'forensic'}) yields entries with _valid + _invalid_reasons", () => {
-  const { client, close } = ephemeralClient();
+test("secureRead({onInvalid: 'forensic'}) yields entries with _valid + _invalid_reasons", async () => {
+  const { client, close } = await ephemeralClient();
   try {
     client.info("evt.good", { x: 1 });
     const path = client.logPath;
@@ -117,12 +118,12 @@ test("secureRead({onInvalid: 'forensic'}) yields entries with _valid + _invalid_
       `expected at least one verification failure, got ${JSON.stringify(reasons)}`,
     );
   } finally {
-    close();
+    await close();
   }
 });
 
-test("secureRead surfaces `instructions` block when caller holds tn.agents kit", () => {
-  const { yamlPath, cleanup } = makeOwnedCeremony();
+test("secureRead surfaces `instructions` block when caller holds tn.agents kit", async () => {
+  const { yamlPath, cleanup } = await makeOwnedCeremony();
   try {
     const yamlDir = dirname(yamlPath);
     mkdirSync(`${yamlDir}/.tn/config`, { recursive: true });
@@ -142,10 +143,10 @@ N/A
 `,
       "utf8",
     );
-    const client = TNClient.init(yamlPath);
+    const tn = await Tn.init(yamlPath);
     try {
-      client.info("evt.policied", { x: 1 });
-      const out = [...client.secureRead()];
+      tn.info("evt.policied", { x: 1 });
+      const out = [...tn.secureRead()];
       const evt = out.find((e) => e["event_type"] === "evt.policied");
       assert.ok(evt);
       const ins = evt!["instructions"];
@@ -156,15 +157,15 @@ N/A
       assert.equal(evt!["instruction"], undefined);
       assert.equal(evt!["use_for"], undefined);
     } finally {
-      client.close();
+      await tn.close();
     }
   } finally {
     cleanup();
   }
 });
 
-test("secureRead omits instructions when entry has no tn.agents body", () => {
-  const { client, close } = ephemeralClient();
+test("secureRead omits instructions when entry has no tn.agents body", async () => {
+  const { client, close } = await ephemeralClient();
   try {
     client.info("evt.no_policy", { x: 1 });
     const out = [...client.secureRead()];
@@ -172,6 +173,6 @@ test("secureRead omits instructions when entry has no tn.agents body", () => {
     assert.ok(evt);
     assert.equal(evt!["instructions"], undefined);
   } finally {
-    close();
+    await close();
   }
 });

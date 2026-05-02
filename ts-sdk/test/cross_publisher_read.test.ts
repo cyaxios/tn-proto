@@ -16,11 +16,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { TNClient, readAsRecipient } from "../src/index.js";
+import { readAsRecipient } from "../src/index.js";
+import type { CeremonyConfig } from "../src/runtime/config.js";
+import { Tn } from "../src/tn.js";
 
 const PROFESSOR_DID = "did:key:z6MkfakefakefakefakefakefakefakefakefakefakeProfDID";
 
-test("client.read({logPath}) auto-routes cross-publisher btn logs (FINDINGS S6.2)", () => {
+test("client.read({logPath}) auto-routes cross-publisher btn logs (FINDINGS S6.2)", async () => {
   const root = mkdtempSync(join(tmpdir(), "tn-cross-pub-"));
   const aliceDir = join(root, "alice");
   const bobDir = join(root, "bob");
@@ -29,18 +31,18 @@ test("client.read({logPath}) auto-routes cross-publisher btn logs (FINDINGS S6.2
 
   try {
     // Alice publishes a log + bundles a kit for Bob.
-    const alice = TNClient.init(join(aliceDir, "alice.yaml"));
+    const alice = await Tn.init(join(aliceDir, "alice.yaml"));
     alice.info("evt.cross", { marker: "alpha" });
     alice.info("evt.cross", { marker: "beta" });
     const aliceLog = alice.logPath;
 
     const bundle = join(aliceDir, "bob.tnpkg");
-    alice.bundleForRecipient(PROFESSOR_DID, bundle);
-    alice.close();
+    await alice.pkg.bundleForRecipient({ recipientDid: PROFESSOR_DID, outPath: bundle });
+    await alice.close();
 
     // Bob inits + absorbs.
-    const bob = TNClient.init(join(bobDir, "bob.yaml"));
-    const receipt = bob.absorb(bundle);
+    const bob = await Tn.init(join(bobDir, "bob.yaml"));
+    const receipt = await bob.pkg.absorb(bundle);
     assert.equal(receipt.kind, "kit_bundle", `unexpected absorb kind: ${receipt.kind}`);
     assert.ok(receipt.acceptedCount >= 1, "absorb didn't apply kit");
 
@@ -57,7 +59,7 @@ test("client.read({logPath}) auto-routes cross-publisher btn logs (FINDINGS S6.2
         markers.push(flat["marker"] as string);
       }
     }
-    bob.close();
+    await bob.close();
 
     assert.deepEqual(
       markers.sort(),
@@ -69,7 +71,7 @@ test("client.read({logPath}) auto-routes cross-publisher btn logs (FINDINGS S6.2
   }
 });
 
-test("readAsRecipient standalone verb decrypts a foreign btn log", () => {
+test("readAsRecipient standalone verb decrypts a foreign btn log", async () => {
   const root = mkdtempSync(join(tmpdir(), "tn-foreign-read-"));
   const aliceDir = join(root, "alice");
   const bobDir = join(root, "bob");
@@ -77,18 +79,18 @@ test("readAsRecipient standalone verb decrypts a foreign btn log", () => {
   mkdirSync(bobDir, { recursive: true });
 
   try {
-    const alice = TNClient.init(join(aliceDir, "alice.yaml"));
+    const alice = await Tn.init(join(aliceDir, "alice.yaml"));
     alice.info("evt.solo", { marker: "x" });
     const aliceLog = alice.logPath;
     const bundle = join(aliceDir, "frank.tnpkg");
-    alice.bundleForRecipient(PROFESSOR_DID, bundle);
-    alice.close();
+    await alice.pkg.bundleForRecipient({ recipientDid: PROFESSOR_DID, outPath: bundle });
+    await alice.close();
 
     // Bob inits + absorbs to get the kit on disk.
-    const bob = TNClient.init(join(bobDir, "bob.yaml"));
-    bob.absorb(bundle);
-    const bobKeystore = bob.config.keystorePath;
-    bob.close();
+    const bob = await Tn.init(join(bobDir, "bob.yaml"));
+    await bob.pkg.absorb(bundle);
+    const bobKeystore = (bob.config() as CeremonyConfig).keystorePath;
+    await bob.close();
 
     // Use the standalone verb — no client instance, just (logPath, keystorePath).
     const entries = [...readAsRecipient(aliceLog, bobKeystore, { group: "default" })];
