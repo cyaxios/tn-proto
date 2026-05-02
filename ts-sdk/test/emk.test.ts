@@ -8,6 +8,8 @@ import {
   checkVerifier,
   wrapKeystoreSecret,
   unwrapKeystoreSecret,
+  wrapBytes,
+  unwrapBytes,
 } from "../src/core/emk.js";
 import { randomBytes } from "../src/core/encoding.js";
 
@@ -67,4 +69,29 @@ test("unwrap fails when AAD doesn't match", async () => {
   const aad2 = new TextEncoder().encode("tn-vault-body-v2");
   const wrapped = await wrapKeystoreSecret(emk, "secret", aad1);
   await assert.rejects(() => unwrapKeystoreSecret(emk, wrapped, aad2));
+});
+
+test("wrapBytes/unwrapBytes round-trips arbitrary binary payloads", async () => {
+  const emk = await importEmk(randomBytes(32));
+  const plaintext = new Uint8Array([0, 1, 2, 0xff, 0xfe, 0xfd, 42]);
+  const wrapped = await wrapBytes(emk, plaintext);
+  const recovered = await unwrapBytes(emk, wrapped);
+  assert.deepEqual(Array.from(recovered), Array.from(plaintext));
+});
+
+test("wrapBytes/unwrapBytes with custom AAD round-trips", async () => {
+  const emk = await importEmk(randomBytes(32));
+  const aad = new TextEncoder().encode("tn-vault-body-v1");
+  const plaintext = new Uint8Array([1, 2, 3, 4, 5]);
+  const wrapped = await wrapBytes(emk, plaintext, aad);
+  const recovered = await unwrapBytes(emk, wrapped, aad);
+  assert.deepEqual(Array.from(recovered), Array.from(plaintext));
+});
+
+test("unwrapBytes throws on AAD mismatch", async () => {
+  const emk = await importEmk(randomBytes(32));
+  const aad1 = new TextEncoder().encode("aad-1");
+  const aad2 = new TextEncoder().encode("aad-2");
+  const wrapped = await wrapBytes(emk, new Uint8Array([1, 2, 3]), aad1);
+  await assert.rejects(() => unwrapBytes(emk, wrapped, aad2));
 });
