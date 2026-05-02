@@ -17,6 +17,7 @@
 // TNClient `export` / `absorb` methods.
 
 import { canonicalize } from "./canonical.js";
+import { bytesToB64, b64ToBytes } from "./encoding.js";
 import type { DeviceKey } from "./signing.js";
 import { verify as verifySig } from "./signing.js";
 import { asDid } from "./types.js";
@@ -158,36 +159,11 @@ export function manifestSigningBytes(m: Manifest): Uint8Array {
   return canonicalize(toWireDict(m, false));
 }
 
-/** Encode a Uint8Array to standard (non-URL-safe) base64. Works in both
- * browsers and Node (btoa is a global in Node 16+). */
-function uint8ArrayToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]!);
-  }
-  return btoa(binary);
-}
-
-/** Decode standard base64 (handles both padded and URL-safe variants) to
- * a Uint8Array. Works in both browsers and Node (atob is a global in
- * Node 16+). */
-function base64ToUint8Array(b64: string): Uint8Array {
-  // Normalise URL-safe → standard, and add padding if needed.
-  const std = b64.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = std + "=".repeat((4 - (std.length % 4)) % 4);
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
 /** Sign a manifest in place. Returns the same object with
  * `manifestSignatureB64` populated. */
 export function signManifest(m: Manifest, deviceKey: DeviceKey): Manifest {
   const sig = deviceKey.sign(manifestSigningBytes(m));
-  m.manifestSignatureB64 = uint8ArrayToBase64(sig);
+  m.manifestSignatureB64 = bytesToB64(sig);
   return m;
 }
 
@@ -199,9 +175,9 @@ export function verifyManifest(m: Manifest): void {
   }
   let sigBytes: Uint8Array;
   try {
-    // Python uses standard base64; our internal helper expects URL-safe
-    // no-padding. We accept both by normalizing through base64ToUint8Array.
-    sigBytes = base64ToUint8Array(m.manifestSignatureB64);
+    // Python uses standard base64; our internal helper accepts both
+    // standard and URL-safe by normalizing through b64ToBytes.
+    sigBytes = b64ToBytes(m.manifestSignatureB64);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(`verifyManifest: signature is not valid base64: ${msg}`, { cause: e });

@@ -8,6 +8,8 @@
 
 export * from "./types.js";
 export * from "./canonical.js";
+export * from "./encoding.js";
+export * from "./emk.js";
 export * from "./chain.js";
 export * from "./signing.js";
 export * from "./indexing.js";
