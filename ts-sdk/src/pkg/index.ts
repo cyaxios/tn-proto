@@ -6,7 +6,6 @@ import { Buffer } from "node:buffer";
 import type { NodeRuntime } from "../runtime/node_runtime.js";
 import { sha256HexBytes } from "../core/chain.js";
 import { compileKitBundleToFile } from "../compile.js";
-import { TNClient } from "../client.js";
 import type {
   AbsorbReceipt,
   BundleResult,
@@ -53,38 +52,32 @@ export class PkgNamespace {
 
   /**
    * Pack a `.tnpkg` from local ceremony state and write it to `outPath`.
-   * Delegates to `TNClient.export` which handles all manifest kind variants
-   * (admin_log_snapshot, kit_bundle, full_keystore, offer, enrolment).
+   * Delegates to `NodeRuntime.exportPkg` which handles all manifest kind
+   * variants (admin_log_snapshot, kit_bundle, full_keystore, offer, enrolment).
    * Returns the absolute path to the written file.
    */
   async export(opts: ExportOptions, outPath: string): Promise<string> {
-    // Map the namespace ExportOptions shape onto TNClient.ExportOptions.
-    // TNClient.export uses a discriminated `kind` field rather than optional
-    // sub-objects, so we inspect which sub-object the caller provided.
-    const client = TNClient._fromRuntime(this._rt);
-
     if (opts.adminLogSnapshot) {
-      return client.export({ kind: "admin_log_snapshot" }, outPath);
+      return this._rt.exportPkg({ kind: "admin_log_snapshot" }, outPath);
     }
     if (opts.selfKit) {
-      // full_keystore = self-backup bundle; requires secrets acknowledgement.
-      return client.export(
+      return this._rt.exportPkg(
         { kind: "full_keystore", confirmIncludesSecrets: true },
         outPath,
       );
     }
     if (opts.bundle) {
       const b = opts.bundle;
-      const bundleExportOpts: Parameters<typeof client.export>[0] = {
+      const exportOpts: Parameters<typeof this._rt.exportPkg>[0] = {
         kind: "kit_bundle",
         toDid: b.recipientDid,
       };
-      if (b.groups !== undefined) bundleExportOpts.groups = b.groups;
-      return client.export(bundleExportOpts, outPath);
+      if (b.groups !== undefined) exportOpts.groups = b.groups;
+      return this._rt.exportPkg(exportOpts, outPath);
     }
     if (opts.kit) {
       const k = opts.kit;
-      return client.export({ kind: "kit_bundle", toDid: k.recipientDid }, outPath);
+      return this._rt.exportPkg({ kind: "kit_bundle", toDid: k.recipientDid }, outPath);
     }
     throw new Error(
       "tn.pkg.export: must supply one of opts.kit, opts.bundle, opts.adminLogSnapshot, or opts.selfKit",
@@ -93,11 +86,10 @@ export class PkgNamespace {
 
   /**
    * Apply a `.tnpkg` file or raw bytes to local state. Idempotent.
-   * Delegates to `TNClient.absorb`.
+   * Delegates to `NodeRuntime.absorbPkg`.
    */
   async absorb(source: string | Uint8Array): Promise<AbsorbReceipt> {
-    const client = TNClient._fromRuntime(this._rt);
-    return client.absorb(source);
+    return this._rt.absorbPkg(source);
   }
 
   /**
@@ -105,14 +97,13 @@ export class PkgNamespace {
    * (or all non-internal groups if omitted), bundle them into a `.tnpkg`,
    * and return a `BundleResult` with path + sha256 + group list.
    *
-   * Delegates to `TNClient.bundleForRecipient` which avoids FINDINGS #5
+   * Delegates to `NodeRuntime.bundleForRecipient` which avoids FINDINGS #5
    * (accidentally shipping the publisher's own self-kit).
    */
   async bundleForRecipient(opts: BundleForRecipientOptions): Promise<BundleResult> {
-    const client = TNClient._fromRuntime(this._rt);
     const bundleOpts: { groups?: string[] } = {};
     if (opts.groups !== undefined) bundleOpts.groups = opts.groups;
-    const bundlePath = client.bundleForRecipient(
+    const bundlePath = this._rt.bundleForRecipient(
       opts.recipientDid,
       opts.outPath,
       bundleOpts,

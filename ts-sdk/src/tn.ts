@@ -54,6 +54,13 @@ const _LOG_LEVELS = {
   error: 40,
 } as const;
 
+/**
+ * Standard log-level numeric values. Mirror stdlib Python `logging`.
+ * Public so external callers can pass either `"info"` strings or the int
+ * directly through `setLevel`. Matches the values that were on TNClient.
+ */
+export const LOG_LEVELS: typeof _LOG_LEVELS = _LOG_LEVELS;
+
 /** Process-wide level threshold for the Tn class. Default: debug (10). */
 let _tnLogLevelThreshold: number = _LOG_LEVELS.debug;
 

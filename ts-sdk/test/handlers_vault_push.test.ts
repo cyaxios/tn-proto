@@ -18,12 +18,19 @@ import { test } from "node:test";
 
 import {
   DeviceKey,
-  TNClient,
   VaultPushHandler,
   makeFetchVaultPostClient,
   makeTNClientSnapshotBuilder,
   readTnpkg,
 } from "../src/index.js";
+import { Tn } from "../src/tn.js";
+
+/** Thin adapter: wraps a Tn instance as the interface makeTNClientSnapshotBuilder expects. */
+function tnAsExporter(tn: Tn): { export: (opts: { kind: string; scope?: string }, outPath: string) => string } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rt = (tn as any)._rt;
+  return { export: (opts, outPath) => rt.exportPkg(opts, outPath) };
+}
 import { BtnPublisher } from "../src/raw.js";
 
 interface RecordedRequest {
@@ -102,10 +109,10 @@ test("vault.push POSTs a signed snapshot to the mock endpoint", async () => {
   const cer = makeCeremony();
   const vault = await startMockVault();
   try {
-    const client = TNClient.init(cer.yamlPath);
+    const tn = await Tn.init(cer.yamlPath);
     const kitsDir = mkdtempSync(join(tmpdir(), "vpush-kits-"));
     try {
-      client.adminAddRecipient("default", join(kitsDir, "default.btn.mykit"), "did:key:zAlice");
+      await tn.admin.addRecipient("default", { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zAlice" });
     } finally {
       rmSync(kitsDir, { recursive: true, force: true });
     }
@@ -113,7 +120,7 @@ test("vault.push POSTs a signed snapshot to the mock endpoint", async () => {
     const h = new VaultPushHandler("push", {
       endpoint: vault.baseUrl,
       projectId: "proj_xxx",
-      builder: makeTNClientSnapshotBuilder(client),
+      builder: makeTNClientSnapshotBuilder(tnAsExporter(tn)),
       client: httpClient,
       outboxDir: join(cer.tmpDir, ".tn/admin", "outbox"),
       trigger: "on_emit",
@@ -130,10 +137,10 @@ test("vault.push POSTs a signed snapshot to the mock endpoint", async () => {
     // Body parses as a valid signed manifest of kind admin_log_snapshot.
     const { manifest } = readTnpkg(new Uint8Array(call.body));
     assert.equal(manifest.kind, "admin_log_snapshot");
-    assert.equal(manifest.fromDid, client.did);
+    assert.equal(manifest.fromDid, tn.did);
 
     h.close();
-    client.close();
+    await tn.close();
   } finally {
     await vault.close();
     cer.cleanup();
@@ -144,10 +151,10 @@ test("vault.push is idempotent when head_row_hash is unchanged", async () => {
   const cer = makeCeremony();
   const vault = await startMockVault();
   try {
-    const client = TNClient.init(cer.yamlPath);
+    const tn = await Tn.init(cer.yamlPath);
     const kitsDir = mkdtempSync(join(tmpdir(), "vpush-kits-"));
     try {
-      client.adminAddRecipient("default", join(kitsDir, "default.btn.mykit"), "did:key:zA");
+      await tn.admin.addRecipient("default", { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zA" });
     } finally {
       rmSync(kitsDir, { recursive: true, force: true });
     }
@@ -155,7 +162,7 @@ test("vault.push is idempotent when head_row_hash is unchanged", async () => {
     const h = new VaultPushHandler("push", {
       endpoint: vault.baseUrl,
       projectId: "proj_xxx",
-      builder: makeTNClientSnapshotBuilder(client),
+      builder: makeTNClientSnapshotBuilder(tnAsExporter(tn)),
       client: httpClient,
       outboxDir: join(cer.tmpDir, ".tn/admin", "outbox"),
       trigger: "on_emit",
@@ -167,7 +174,7 @@ test("vault.push is idempotent when head_row_hash is unchanged", async () => {
     assert.equal(b, false, "second push should noop");
     assert.equal(vault.calls.length, 1);
     h.close();
-    client.close();
+    await tn.close();
   } finally {
     await vault.close();
     cer.cleanup();

@@ -1,4 +1,4 @@
-// Tests for `tnpkg`, `TNClient.export`, and `TNClient.absorb`.
+// Tests for `tnpkg`, `NodeRuntime.exportPkg`, and `NodeRuntime.absorbPkg`.
 //
 // Mirrors the Python coverage in
 // `tn-protocol/python/tests/test_export_absorb.py` and the parts of
@@ -13,7 +13,6 @@ import { test } from "node:test";
 
 import {
   DeviceKey,
-  TNClient,
   isManifestSignatureValid,
   newManifest,
   readTnpkg,
@@ -21,6 +20,8 @@ import {
   verifyManifest,
   writeTnpkg,
 } from "../src/index.js";
+import { Tn } from "../src/tn.js";
+import type { CeremonyConfig } from "../src/runtime/config.js";
 import { BtnPublisher } from "../src/raw.js";
 
 function makeCeremony(): { yamlPath: string; tmpDir: string; cleanup: () => void } {
@@ -88,15 +89,17 @@ test("tampered manifest fails signature verification", () => {
   assert.throws(() => verifyManifest(m), /signature does not verify/);
 });
 
-test("zip round-trip preserves manifest fields and body bytes", () => {
+test("zip round-trip preserves manifest fields and body bytes", async () => {
   const { yamlPath, tmpDir, cleanup } = makeCeremony();
   try {
-    const client = TNClient.init(yamlPath);
-    const dk = client.runtime.keystore.device;
+    const tn = await Tn.init(yamlPath);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dk = (tn as any)._rt.keystore.device as DeviceKey;
+    const cfg = tn.config() as CeremonyConfig;
     const m = newManifest({
       kind: "admin_log_snapshot",
       fromDid: dk.did,
-      ceremonyId: client.runtime.config.ceremonyId,
+      ceremonyId: cfg.ceremonyId,
       toDid: "did:key:zRecipient",
     });
     m.eventCount = 1;
@@ -122,7 +125,7 @@ test("zip round-trip preserves manifest fields and body bytes", () => {
     const ndjson = body.get("body/admin.ndjson");
     assert.ok(ndjson, "body must contain admin.ndjson");
     assert.equal(new TextDecoder("utf-8").decode(ndjson!), "hello world\n");
-    client.close();
+    await tn.close();
   } finally {
     cleanup();
   }
@@ -130,45 +133,43 @@ test("zip round-trip preserves manifest fields and body bytes", () => {
 
 // ---- export / absorb full round-trip ----------------------------------
 
-test("export(admin_log_snapshot) → absorb on a fresh peer applies envelopes", () => {
+test("export(admin_log_snapshot) → absorb on a fresh peer applies envelopes", async () => {
   // Producer ceremony.
   const a = makeCeremony();
   // Consumer ceremony.
   const b = makeCeremony();
   try {
-    const producer = TNClient.init(a.yamlPath);
-    const consumer = TNClient.init(b.yamlPath);
+    const producer = await Tn.init(a.yamlPath);
+    const consumer = await Tn.init(b.yamlPath);
 
     const kitsDir = mkdtempSync(join(tmpdir(), "tnpkg-kits-"));
     try {
-      producer.adminAddRecipient(
+      await producer.admin.addRecipient(
         "default",
-        join(kitsDir, "default.btn.mykit"),
-        "did:key:zAlice",
+        { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zAlice" },
       );
-      producer.adminAddRecipient(
+      await producer.admin.addRecipient(
         "default",
-        join(kitsDir, "default_bob.btn.mykit"),
-        "did:key:zBob",
+        { outKitPath: join(kitsDir, "default_bob.btn.mykit"), recipientDid: "did:key:zBob" },
       );
 
       const pkgPath = join(a.tmpDir, "snapshot.tnpkg");
-      producer.export({ kind: "admin_log_snapshot" }, pkgPath);
+      await producer.pkg.export({ adminLogSnapshot: { outPath: pkgPath } }, pkgPath);
       assert.ok(existsSync(pkgPath));
 
       // First absorb: applies new envelopes.
-      const r1 = consumer.absorb(pkgPath);
+      const r1 = await consumer.pkg.absorb(pkgPath);
       assert.equal(r1.kind, "admin_log_snapshot");
       assert.ok(r1.acceptedCount >= 2, `expected ≥2 accepted, got ${r1.acceptedCount}`);
       assert.equal(r1.noop, false);
 
       // Second absorb: noop (clock dominates).
-      const r2 = consumer.absorb(pkgPath);
+      const r2 = await consumer.pkg.absorb(pkgPath);
       assert.equal(r2.noop, true);
       assert.equal(r2.acceptedCount, 0);
 
-      producer.close();
-      consumer.close();
+      await producer.close();
+      await consumer.close();
     } finally {
       rmSync(kitsDir, { recursive: true, force: true });
     }
@@ -180,27 +181,28 @@ test("export(admin_log_snapshot) → absorb on a fresh peer applies envelopes", 
 
 // ---- equivocation -----------------------------------------------------
 
-test("absorb surfaces leaf reuse when add(L) → revoke(L) → add(L)", () => {
+test("absorb surfaces leaf reuse when add(L) → revoke(L) → add(L)", async () => {
   const a = makeCeremony();
   const b = makeCeremony();
   try {
-    const producer = TNClient.init(a.yamlPath);
-    const consumer = TNClient.init(b.yamlPath);
+    const producer = await Tn.init(a.yamlPath);
+    const consumer = await Tn.init(b.yamlPath);
 
     const kitsDir = mkdtempSync(join(tmpdir(), "tnpkg-equiv-"));
     try {
-      const leaf = producer.adminAddRecipient(
+      const resA = await producer.admin.addRecipient(
         "default",
-        join(kitsDir, "default.btn.mykit"),
-        "did:key:zAlice",
+        { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zAlice" },
       );
-      producer.adminRevokeRecipient("default", leaf, "did:key:zAlice");
+      const leaf = resA.leafIndex;
+      await producer.admin.revokeRecipient("default", { leafIndex: leaf, recipientDid: "did:key:zAlice" });
 
       // Forge a third "added" for the same (group, leaf) by appending
       // directly to the producer's main log. We sign with the producer's
       // device key so the envelope passes signature verification — the
       // reducer is what flags the reuse.
-      const mainLog = producer.runtime.config.logPath;
+      const cfg = producer.config() as CeremonyConfig;
+      const mainLog = cfg.logPath;
       const lines = readFileSync(mainLog, "utf8").split(/\r?\n/);
       let lastAddRow: string | null = null;
       for (const ln of lines) {
@@ -216,36 +218,27 @@ test("absorb surfaces leaf reuse when add(L) → revoke(L) → add(L)", () => {
       }
       assert.ok(lastAddRow, "producer log must have an existing add to chain off");
 
-      const dk = producer.runtime.keystore.device;
-      const ts = new Date().toISOString();
-      const evtId = "forged-" + ts.replace(/[:.]/g, "");
       const publicFields = {
-        ceremony_id: producer.runtime.config.ceremonyId,
+        ceremony_id: cfg.ceremonyId,
         group: "default",
         leaf_index: leaf,
         recipient_did: "did:key:zForged",
         kit_sha256: "sha256:" + "0".repeat(64),
         cipher: "btn",
       };
-      // We don't need to recompute row_hash here — the absorb side
-      // will verify the signature; for the leaf-reuse code path, the
-      // envelope just needs to have a row_hash + signature that pass.
-      // Use the existing forge approach: emit via the producer client.
-      // Easiest: emit a fresh recipient.added directly via the runtime
+      // Easiest: emit a fresh recipient.added directly via the Tn instance
       // and post-edit the leaf_index to collide.
       const receipt = producer.emit("info", "tn.recipient.added", {
         ...publicFields,
         leaf_index: leaf,
       });
       assert.ok(receipt.rowHash, "emit must produce a row_hash");
-      void dk;
-      void evtId;
 
       // Now export an admin snapshot that contains add+revoke+forged-add
       // and absorb it on the consumer.
       const pkgPath = join(a.tmpDir, "equiv.tnpkg");
-      producer.export({ kind: "admin_log_snapshot" }, pkgPath);
-      const r = consumer.absorb(pkgPath);
+      await producer.pkg.export({ adminLogSnapshot: { outPath: pkgPath } }, pkgPath);
+      const r = await consumer.pkg.absorb(pkgPath);
       assert.equal(r.kind, "admin_log_snapshot");
       const reuses = r.conflicts.filter((c) => c.type === "leaf_reuse_attempt");
       assert.ok(
@@ -253,8 +246,8 @@ test("absorb surfaces leaf reuse when add(L) → revoke(L) → add(L)", () => {
         `expected at least one leaf_reuse_attempt, got ${JSON.stringify(r.conflicts)}`,
       );
 
-      producer.close();
-      consumer.close();
+      await producer.close();
+      await consumer.close();
     } finally {
       rmSync(kitsDir, { recursive: true, force: true });
     }
@@ -266,44 +259,49 @@ test("absorb surfaces leaf reuse when add(L) → revoke(L) → add(L)", () => {
 
 // ---- secrets guard ----------------------------------------------------
 
-test("export(full_keystore) without confirmIncludesSecrets throws", () => {
+test("export(full_keystore) without confirmIncludesSecrets throws", async () => {
   const a = makeCeremony();
   try {
-    const client = TNClient.init(a.yamlPath);
+    const tn = await Tn.init(a.yamlPath);
     const out = join(a.tmpDir, "full.tnpkg");
+    // NodeRuntime.exportPkg enforces the secrets guard directly.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rt = (tn as any)._rt;
     assert.throws(
-      () => client.export({ kind: "full_keystore" }, out),
+      () => rt.exportPkg({ kind: "full_keystore" }, out),
       /confirmIncludesSecrets/,
     );
-    client.close();
+    await tn.close();
   } finally {
     a.cleanup();
   }
 });
 
-test("export(full_keystore, confirmIncludesSecrets=true) bundles private material", () => {
+test("export(full_keystore, confirmIncludesSecrets=true) bundles private material", async () => {
   const a = makeCeremony();
   try {
-    const client = TNClient.init(a.yamlPath);
+    const tn = await Tn.init(a.yamlPath);
     const out = join(a.tmpDir, "full.tnpkg");
-    client.export({ kind: "full_keystore", confirmIncludesSecrets: true }, out);
+    await tn.pkg.export({ selfKit: { outPath: out } }, out);
     const { manifest, body } = readTnpkg(out);
     assert.equal(manifest.kind, "full_keystore");
     assert.ok(body.has("body/local.private"), "private seed must be bundled");
     assert.ok(body.has("body/index_master.key"));
     assert.ok(body.has("body/WARNING_CONTAINS_PRIVATE_KEYS"));
-    client.close();
+    await tn.close();
   } finally {
     a.cleanup();
   }
 });
 
-test("export(kit_bundle) round-trips reader kits without private material", () => {
+test("export(kit_bundle) round-trips reader kits without private material", async () => {
   const a = makeCeremony();
   try {
-    const client = TNClient.init(a.yamlPath);
+    const tn = await Tn.init(a.yamlPath);
     const out = join(a.tmpDir, "kits.tnpkg");
-    client.export({ kind: "kit_bundle" }, out);
+    // kit_bundle without a toDid — call NodeRuntime.exportPkg directly.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (tn as any)._rt.exportPkg({ kind: "kit_bundle" }, out);
     const { manifest, body } = readTnpkg(out);
     assert.equal(manifest.kind, "kit_bundle");
     // Find the .mykit entry.
@@ -315,7 +313,7 @@ test("export(kit_bundle) round-trips reader kits without private material", () =
       }
     }
     assert.ok(kitFound, "kit_bundle must include at least one .btn.mykit");
-    client.close();
+    await tn.close();
   } finally {
     a.cleanup();
   }
@@ -345,14 +343,14 @@ test("Python-produced .tnpkg parses + signature verifies in TS", () => {
   assert.ok(manifest.eventCount >= 1, "Python fixture should contain ≥1 admin envelope");
 });
 
-test("absorb rejects a tampered manifest", () => {
+test("absorb rejects a tampered manifest", async () => {
   const a = makeCeremony();
   const b = makeCeremony();
   try {
-    const producer = TNClient.init(a.yamlPath);
-    const consumer = TNClient.init(b.yamlPath);
+    const producer = await Tn.init(a.yamlPath);
+    const consumer = await Tn.init(b.yamlPath);
     const out = join(a.tmpDir, "snapshot.tnpkg");
-    producer.export({ kind: "admin_log_snapshot" }, out);
+    await producer.pkg.export({ adminLogSnapshot: { outPath: out } }, out);
 
     // Open the zip, mutate the manifest event_count, repack with the
     // same manifest signature → signature should fail.
@@ -363,10 +361,10 @@ test("absorb rejects a tampered manifest", () => {
     for (const [k, v] of body) bodyDict[k] = v;
     writeTnpkg(tampered, manifest, bodyDict);
 
-    const r = consumer.absorb(tampered);
+    const r = await consumer.pkg.absorb(tampered);
     assert.match(r.rejectedReason ?? "", /signature does not verify/);
-    producer.close();
-    consumer.close();
+    await producer.close();
+    await consumer.close();
   } finally {
     a.cleanup();
     b.cleanup();

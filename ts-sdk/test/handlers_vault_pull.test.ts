@@ -21,12 +21,19 @@ import { test } from "node:test";
 
 import {
   DeviceKey,
-  TNClient,
   VaultPullHandler,
   makeFetchVaultInboxClient,
   type VaultInboxItem,
   type VaultPullAbsorber,
 } from "../src/index.js";
+import { Tn } from "../src/tn.js";
+
+/** Thin adapter: wraps a Tn instance as the interface NodeRuntime.absorbPkg expects. */
+function tnAsAbsorber(tn: Tn): { absorb: (source: string | Uint8Array) => { rejectedReason?: string | null } } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rt = (tn as any)._rt;
+  return { absorb: (source: string | Uint8Array) => rt.absorbPkg(source) };
+}
 import { BtnPublisher } from "../src/raw.js";
 
 interface MockVault {
@@ -132,17 +139,17 @@ test("vault.pull absorbs a mock-served snapshot and persists a cursor", async ()
   const vault = await startMockVault();
   try {
     // Producer makes a real signed snapshot.
-    const producer = TNClient.init(sender.yamlPath);
+    const producer = await Tn.init(sender.yamlPath);
     const kitsDir = mkdtempSync(join(tmpdir(), "vpull-kits-"));
     try {
-      producer.adminAddRecipient("default", join(kitsDir, "default.btn.mykit"), "did:key:zAlice");
+      await producer.admin.addRecipient("default", { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zAlice" });
     } finally {
       rmSync(kitsDir, { recursive: true, force: true });
     }
     const snapPath = join(sender.tmpDir, "snap.tnpkg");
-    producer.export({ kind: "admin_log_snapshot" }, snapPath);
+    await producer.pkg.export({ adminLogSnapshot: { outPath: snapPath } }, snapPath);
     const snapBytes = readFileSync(snapPath);
-    producer.close();
+    await producer.close();
 
     const inboxItem: VaultInboxItem = {
       path: "/api/v1/inbox/abc/snapshots/cer/2026.tnpkg",
@@ -151,10 +158,10 @@ test("vault.pull absorbs a mock-served snapshot and persists a cursor", async ()
     };
     vault.setItems([inboxItem], new Map([[inboxItem.path, snapBytes]]));
 
-    const consumer = TNClient.init(receiver.yamlPath);
+    const consumer = await Tn.init(receiver.yamlPath);
     const absorber: VaultPullAbsorber = {
       absorb(bytes) {
-        const r = consumer.absorb(bytes);
+        const r = tnAsAbsorber(consumer).absorb(bytes);
         return { rejectedReason: r.rejectedReason ?? null };
       },
     };
@@ -183,7 +190,7 @@ test("vault.pull absorbs a mock-served snapshot and persists a cursor", async ()
     assert.equal(vault.listedSince[1], inboxItem.received_at);
 
     h.close();
-    consumer.close();
+    await consumer.close();
   } finally {
     await vault.close();
     sender.cleanup();
@@ -196,7 +203,7 @@ test("vault.pull empty inbox does not create cursor", async () => {
   const vault = await startMockVault();
   try {
     vault.setItems([], new Map());
-    const consumer = TNClient.init(receiver.yamlPath);
+    const consumer = await Tn.init(receiver.yamlPath);
     const absorber: VaultPullAbsorber = {
       absorb: () => ({ rejectedReason: null }),
     };
@@ -216,7 +223,7 @@ test("vault.pull empty inbox does not create cursor", async () => {
     const cursorFile = join(cursorDir, "vault_pull.cursor.json");
     assert.ok(!existsSync(cursorFile));
     h.close();
-    consumer.close();
+    await consumer.close();
   } finally {
     await vault.close();
     receiver.cleanup();
@@ -229,17 +236,17 @@ test("vault.pull cursor advances by since_marker when present (§4.1)", async ()
   const vault = await startMockVault();
   try {
     // Producer makes a real signed snapshot.
-    const producer = TNClient.init(sender.yamlPath);
+    const producer = await Tn.init(sender.yamlPath);
     const kitsDir = mkdtempSync(join(tmpdir(), "vpull-marker-kits-"));
     try {
-      producer.adminAddRecipient("default", join(kitsDir, "default.btn.mykit"), "did:key:zMarker");
+      await producer.admin.addRecipient("default", { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zMarker" });
     } finally {
       rmSync(kitsDir, { recursive: true, force: true });
     }
     const snapPath = join(sender.tmpDir, "snap.tnpkg");
-    producer.export({ kind: "admin_log_snapshot" }, snapPath);
+    await producer.pkg.export({ adminLogSnapshot: { outPath: snapPath } }, snapPath);
     const snapBytes = readFileSync(snapPath);
-    producer.close();
+    await producer.close();
 
     // since_marker is intentionally distinct from received_at so the
     // next-poll cursor reveals which field the SDK trusts.
@@ -251,10 +258,10 @@ test("vault.pull cursor advances by since_marker when present (§4.1)", async ()
     };
     vault.setItems([inboxItem], new Map([[inboxItem.path, snapBytes]]));
 
-    const consumer = TNClient.init(receiver.yamlPath);
+    const consumer = await Tn.init(receiver.yamlPath);
     const absorber: VaultPullAbsorber = {
       absorb(bytes) {
-        const r = consumer.absorb(bytes);
+        const r = tnAsAbsorber(consumer).absorb(bytes);
         return { rejectedReason: r.rejectedReason ?? null };
       },
     };
@@ -290,7 +297,7 @@ test("vault.pull cursor advances by since_marker when present (§4.1)", async ()
     );
 
     h.close();
-    consumer.close();
+    await consumer.close();
   } finally {
     await vault.close();
     sender.cleanup();

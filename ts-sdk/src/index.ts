@@ -23,18 +23,6 @@ export type {
   OfferReceipt,
 } from "./core/results.js";
 export {
-  LOG_LEVELS,
-  TNClient,
-  type AdminAddAgentRuntimeOptions,
-  type ChainConflict,
-  type ExportOptions,
-  type Instructions,
-  type LeafReuseAttempt,
-  type LogLevel,
-  type SecureEntry,
-  type SecureReadOptions,
-} from "./client.js";
-export {
   VerificationError,
   ChainConflictError,
   RotationConflictError,
@@ -42,8 +30,7 @@ export {
   SameCoordinateForkError,
 } from "./core/errors.js";
 
-// 0.3.0 surface — the new shape replacing TNClient. TNClient stays alive
-// alongside Tn until Task 2.12 deletes it. Bare-function exports of the
+// 0.3.0 surface — Tn is the public class. Bare-function exports of the
 // process-global toggles let callers do `import { setLevel } from
 // "@tnproto/sdk"` without needing the class.
 export { Tn } from "./tn.js";
@@ -53,6 +40,25 @@ export type {
   ReadAsRecipientOptions as TnReadAsRecipientOptions,
   SecureReadOptions as TnSecureReadOptions,
 } from "./tn.js";
+// SecureReadOptions was previously re-exported from client.js; now re-exported
+// from tn.js under the same name for backwards-compat.
+export type { SecureReadOptions } from "./tn.js";
+export { LOG_LEVELS } from "./tn.js";
+export type {
+  AddRuntimeOptions,
+  AddRuntimeOptions as AdminAddAgentRuntimeOptions,
+} from "./agents/index.js";
+export type {
+  ExportOptions as PkgExportOptions,
+} from "./pkg/index.js";
+export type {
+  Instructions,
+  SecureEntry,
+} from "./core/read_shape.js";
+export type {
+  ChainConflict,
+  LeafReuseAttempt,
+} from "./core/admin/state.js";
 
 import { Tn as _Tn } from "./tn.js";
 export const setLevel: typeof _Tn.setLevel = _Tn.setLevel.bind(_Tn);

@@ -17,9 +17,16 @@ import { test } from "node:test";
 import {
   DeviceKey,
   FsScanHandler,
-  TNClient,
   makeTNClientAbsorber,
 } from "../src/index.js";
+import { Tn } from "../src/tn.js";
+
+/** Thin adapter: wraps a Tn instance as the interface makeTNClientAbsorber expects. */
+function tnAsAbsorber(tn: Tn): { absorb: (source: string) => { rejectedReason?: string | null } } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rt = (tn as any)._rt;
+  return { absorb: (source: string) => rt.absorbPkg(source) };
+}
 import { BtnPublisher } from "../src/raw.js";
 
 function makeCeremony(prefix: string): { yamlPath: string; tmpDir: string; cleanup: () => void } {
@@ -61,25 +68,25 @@ function makeCeremony(prefix: string): { yamlPath: string; tmpDir: string; clean
   return { yamlPath, tmpDir: dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-test("fs.scan absorbs a dropped snapshot and archives it", () => {
+test("fs.scan absorbs a dropped snapshot and archives it", async () => {
   const sender = makeCeremony("tn-fsscan-tx-");
   const receiver = makeCeremony("tn-fsscan-rx-");
   const inbox = mkdtempSync(join(tmpdir(), "tn-fsscan-inbox-"));
   try {
-    const producer = TNClient.init(sender.yamlPath);
-    const consumer = TNClient.init(receiver.yamlPath);
+    const producer = await Tn.init(sender.yamlPath);
+    const consumer = await Tn.init(receiver.yamlPath);
     const kitsDir = mkdtempSync(join(tmpdir(), "fsscan-kits-"));
     try {
-      producer.adminAddRecipient("default", join(kitsDir, "default.btn.mykit"), "did:key:zAlice");
+      await producer.admin.addRecipient("default", { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zAlice" });
     } finally {
       rmSync(kitsDir, { recursive: true, force: true });
     }
     const snapPath = join(inbox, "snap.tnpkg");
-    producer.export({ kind: "admin_log_snapshot" }, snapPath);
+    await producer.pkg.export({ adminLogSnapshot: { outPath: snapPath } }, snapPath);
 
     const h = new FsScanHandler("fs", {
       inDir: inbox,
-      absorber: makeTNClientAbsorber(consumer),
+      absorber: makeTNClientAbsorber(tnAsAbsorber(consumer)),
       autostart: false,
     });
     const n = h.tickOnce();
@@ -89,8 +96,8 @@ test("fs.scan absorbs a dropped snapshot and archives it", () => {
     const archive = readdirSync(join(inbox, ".processed"));
     assert.equal(archive.length, 1);
     h.close();
-    producer.close();
-    consumer.close();
+    await producer.close();
+    await consumer.close();
   } finally {
     sender.cleanup();
     receiver.cleanup();
@@ -98,37 +105,37 @@ test("fs.scan absorbs a dropped snapshot and archives it", () => {
   }
 });
 
-test("fs.scan ignores non-tnpkg files", () => {
+test("fs.scan ignores non-tnpkg files", async () => {
   const receiver = makeCeremony("tn-fsscan-rx-skip-");
   const inbox = mkdtempSync(join(tmpdir(), "tn-fsscan-skip-"));
   try {
     writeFileSync(join(inbox, "junk.txt"), "noise");
-    const consumer = TNClient.init(receiver.yamlPath);
+    const consumer = await Tn.init(receiver.yamlPath);
     const h = new FsScanHandler("fs", {
       inDir: inbox,
-      absorber: makeTNClientAbsorber(consumer),
+      absorber: makeTNClientAbsorber(tnAsAbsorber(consumer)),
       autostart: false,
     });
     assert.equal(h.tickOnce(), 0);
     assert.ok(existsSync(join(inbox, "junk.txt")), "non-tnpkg file should be left alone");
-    consumer.close();
+    await consumer.close();
   } finally {
     receiver.cleanup();
     rmSync(inbox, { recursive: true, force: true });
   }
 });
 
-test("fs.scan returns 0 when in_dir does not exist", () => {
+test("fs.scan returns 0 when in_dir does not exist", async () => {
   const receiver = makeCeremony("tn-fsscan-rx-missing-");
   try {
-    const consumer = TNClient.init(receiver.yamlPath);
+    const consumer = await Tn.init(receiver.yamlPath);
     const h = new FsScanHandler("fs", {
       inDir: join(receiver.tmpDir, "does_not_exist"),
-      absorber: makeTNClientAbsorber(consumer),
+      absorber: makeTNClientAbsorber(tnAsAbsorber(consumer)),
       autostart: false,
     });
     assert.equal(h.tickOnce(), 0);
-    consumer.close();
+    await consumer.close();
   } finally {
     receiver.cleanup();
   }
