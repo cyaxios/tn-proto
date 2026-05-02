@@ -98,9 +98,10 @@ test("Layer 1 verb surface is reachable at runtime", () => {
   ]) {
     assert.equal(typeof fn, "function", `expected function, got ${typeof fn} for ${fn?.name ?? "<unnamed>"}`);
   }
-  // Constants
-  assert.equal(typeof ZERO_HASH, "string");
-  assert.equal(ZERO_HASH.length, 71);  // "sha256:" + 64 hex chars
+  // ZERO_HASH is now a function (lazy getter) — check it returns the right string
+  assert.equal(typeof ZERO_HASH, "function");
+  assert.equal(typeof ZERO_HASH(), "string");
+  assert.equal(ZERO_HASH().length, 71);  // "sha256:" + 64 hex chars
   assert.ok(typeof MANIFEST_VERSION === "number" || typeof MANIFEST_VERSION === "string");
   assert.equal(typeof POLICY_RELATIVE_PATH, "string");
   assert.ok(Array.isArray(REQUIRED_FIELDS) || REQUIRED_FIELDS instanceof Set);
@@ -127,8 +128,8 @@ test("canonicalize produces stable bytes for a fixed input", () => {
 });
 
 test("rowHash + ZERO_HASH have the expected shapes", () => {
-  // ZERO_HASH is "sha256:" + 64 zeros (the standard zero-hash form).
-  assert.match(ZERO_HASH, /^sha256:[0-9a-f]{64}$/);
+  // ZERO_HASH() is "sha256:" + 64 zeros (the standard zero-hash form).
+  assert.match(ZERO_HASH(), /^sha256:[0-9a-f]{64}$/);
   // rowHash takes a structured input and returns "sha256:..."
   const h = rowHash({
     did: asDid("did:key:zNobody"),
@@ -136,7 +137,7 @@ test("rowHash + ZERO_HASH have the expected shapes", () => {
     eventId: "00000000-0000-0000-0000-000000000000",
     eventType: "test.fixture",
     level: "info",
-    prevHash: ZERO_HASH,
+    prevHash: ZERO_HASH(),
   });
   assert.match(h, /^sha256:[0-9a-f]{64}$/);
 });

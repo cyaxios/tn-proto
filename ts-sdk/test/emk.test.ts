@@ -51,3 +51,20 @@ test("emkFromPrfOutput produces a usable EMK", async () => {
   const ok = await checkVerifier(emk, verifier);
   assert.equal(ok, true);
 });
+
+test("wrap/unwrap with custom AAD round-trips", async () => {
+  const emk = await importEmk(randomBytes(32));
+  const aad = new TextEncoder().encode("tn-vault-body-v1");
+  const secret = "ceremonial-passphrase-with-aad";
+  const wrapped = await wrapKeystoreSecret(emk, secret, aad);
+  const recovered = await unwrapKeystoreSecret(emk, wrapped, aad);
+  assert.equal(recovered, secret);
+});
+
+test("unwrap fails when AAD doesn't match", async () => {
+  const emk = await importEmk(randomBytes(32));
+  const aad1 = new TextEncoder().encode("tn-vault-body-v1");
+  const aad2 = new TextEncoder().encode("tn-vault-body-v2");
+  const wrapped = await wrapKeystoreSecret(emk, "secret", aad1);
+  await assert.rejects(() => unwrapKeystoreSecret(emk, wrapped, aad2));
+});

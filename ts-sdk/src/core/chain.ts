@@ -4,8 +4,16 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { computeRowHash, zeroHash as rawZeroHash } from "../raw.js";
 import { asRowHash, type RowHash, type RowHashInput } from "./types.js";
 
-/** Zero-initialized prev_hash for the first entry in any chain. */
-export const ZERO_HASH: RowHash = asRowHash(rawZeroHash());
+let _zeroHash: RowHash | null = null;
+/** Zero-initialized prev_hash for the first entry in any chain.
+ *
+ * Lazy-evaluated on first access so consumers that import this module
+ * before tn-wasm has been initialized (notably browser bundles loaded
+ * before their wasm-pack init) don't crash at module-load. */
+export function ZERO_HASH(): RowHash {
+  if (_zeroHash === null) _zeroHash = asRowHash(rawZeroHash());
+  return _zeroHash;
+}
 
 /** Hex-encoded SHA-256 of the UTF-8 bytes of a string. Browser-safe via
  * @noble/hashes (audited, pure-JS). Used by core/agents_policy.ts to
