@@ -27,19 +27,19 @@
 import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve as pathResolve } from "node:path";
 
-import { isAdminEventType, resolveAdminLogPath } from "./admin_log.js";
+import { isAdminEventType, resolveAdminLogPath } from "./log.js";
 import type {
   AdminCeremonyState,
   AdminState,
   RecipientEntry,
-} from "./client.js";
-import type { TNClient } from "./client.js";
-import type { CeremonyConfig } from "./runtime/config.js";
+} from "../client.js";
+import type { TNClient } from "../client.js";
+import type { CeremonyConfig } from "../runtime/config.js";
 import {
   AdminStateReducer,
   emptyState,
   type ChainConflict,
-} from "./core/admin_state.js";
+} from "../core/admin/state.js";
 
 /** Bump if the on-disk LKV layout changes incompatibly. */
 export const LKV_VERSION = 1;
@@ -51,14 +51,14 @@ export type {
   LeafReuseAttempt,
   RotationConflict,
   SameCoordinateFork,
-} from "./core/admin_state.js";
+} from "../core/admin/state.js";
 
 // ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
 
 // emptyState is re-exported from core/admin_state; keep the alias private.
-export { emptyState } from "./core/admin_state.js";
+export { emptyState } from "../core/admin/state.js";
 
 function lkvPathFor(cfg: CeremonyConfig): string {
   return pathResolve(cfg.yamlDir, ".tn", "admin", "admin.lkv.json");

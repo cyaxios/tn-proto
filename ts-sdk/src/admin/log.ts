@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, resolve as pathResolve } from "node:path";
 
-import type { CeremonyConfig } from "./runtime/config.js";
+import type { CeremonyConfig } from "../runtime/config.js";
 
 export const DEFAULT_ADMIN_LOG_LOCATION = "./.tn/admin/admin.ndjson";
 

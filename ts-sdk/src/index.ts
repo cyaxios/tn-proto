@@ -8,7 +8,7 @@ export * from "./core/chain.js";
 export * from "./core/envelope.js";
 export * from "./core/indexing.js";
 export * from "./core/signing.js";
-export * as admin from "./admin.js";
+export * as admin from "./core/admin/catalog.js";
 export * as primitives from "./core/primitives.js";
 export { NodeRuntime } from "./runtime/node_runtime.js";
 export type { ReadEntry, EmitReceipt } from "./runtime/node_runtime.js";
@@ -46,8 +46,8 @@ export {
   LKV_VERSION,
   type RotationConflict,
   type SameCoordinateFork,
-} from "./admin_cache.js";
-export { AdminStateReducer, emptyState } from "./core/admin_state.js";
+} from "./admin/cache.js";
+export { AdminStateReducer, emptyState } from "./core/admin/state.js";
 export {
   KNOWN_KINDS,
   MANIFEST_VERSION,
@@ -78,7 +78,7 @@ export {
   existingRowHashes,
   isAdminEventType,
   resolveAdminLogPath,
-} from "./admin_log.js";
+} from "./admin/log.js";
 export { loadConfig } from "./runtime/config.js";
 export { loadKeystore } from "./runtime/keystore.js";
 export {

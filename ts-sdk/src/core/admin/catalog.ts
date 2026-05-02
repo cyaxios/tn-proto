@@ -2,7 +2,7 @@ import {
   adminCatalogKinds as rawCatalogKinds,
   adminReduce as rawReduce,
   adminValidateEmit as rawValidateEmit,
-} from "./raw.js";
+} from "../../raw.js";
 
 export type StateDeltaKind =
   | "ceremony_init"
