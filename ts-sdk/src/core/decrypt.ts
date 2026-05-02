@@ -1,9 +1,16 @@
 // Pure envelope-decrypt helper. Browser-safe — no fs, no Node imports.
-// Wraps `btnDecrypt` (the wasm-backed cipher primitive in `../raw.js`)
-// with per-group kit-trying and plaintext markers, so callers don't
-// duplicate the bookkeeping.
+// Branches on the kit's declared cipher, then wraps the cipher's primitive
+// (today: `btnDecrypt` from `../raw.js`; soon: `jweDecrypt`) with per-group
+// kit-trying and plaintext markers, so callers don't duplicate the
+// bookkeeping.
 
 import { btnDecrypt } from "../raw.js";
+
+/** Cipher kinds the decrypt path knows how to handle. New ciphers add a
+ * variant here and a `case` in `_runKit` below. Wire this in lockstep
+ * with the matching publisher path (the cipher names match Python's
+ * `tn.yaml`'s `groups.*.cipher` field byte-identically). */
+export type CipherKind = "btn" | "jwe";
 
 /** Per-group ciphertext bytes the runtime extracts from an envelope. */
 export interface GroupCiphertext {
@@ -11,8 +18,10 @@ export interface GroupCiphertext {
 }
 
 /** Set of decrypt kits the caller holds for one group. The caller picks
- * the kit list off its own keystore and hands it in. */
+ * the kit list off its own keystore and hands it in along with the
+ * declared cipher (loaded from the ceremony yaml). */
 export interface GroupKits {
+  cipher: CipherKind;
   /** One or more kits to try (publisher might have rotated). The first
    * kit that successfully decrypts wins. */
   kits: Uint8Array[];
@@ -21,11 +30,32 @@ export interface GroupKits {
 /** Outcome marker on a per-group plaintext entry when decrypt fails. */
 export type DecryptMarker =
   | { $no_read_key: true }
-  | { $decrypt_error: true };
+  | { $decrypt_error: true }
+  | { $unsupported_cipher: true; cipher: string };
+
+/** Run one kit against the ciphertext for the given cipher. Throws if the
+ * kit doesn't match (caller catches and tries the next kit). Returns
+ * `null` if the cipher is recognized but its primitive isn't wired yet
+ * (e.g., JWE pre-implementation), so callers can surface
+ * `$unsupported_cipher` instead of mistaking it for `$no_read_key`. */
+function _runKit(cipher: CipherKind, kit: Uint8Array, ct: Uint8Array): Uint8Array | null {
+  switch (cipher) {
+    case "btn":
+      return btnDecrypt(kit, ct);
+    case "jwe":
+      // jweDecrypt isn't wired yet — landing in a follow-up. The signature
+      // here will be `return jweDecrypt(kit, ct)`. For now: signal that the
+      // cipher is recognized but not implemented so callers can flag it.
+      return null;
+  }
+}
 
 /** Try each kit in `kits.kits` against `cipher.ct`. Return the JSON-parsed
  * plaintext if one succeeds; `{$decrypt_error: true}` if a kit decrypts
- * but JSON.parse fails; `{$no_read_key: true}` if no kit decrypts.
+ * but JSON.parse fails; `{$no_read_key: true}` if no kit decrypts;
+ * `{$unsupported_cipher, cipher}` if the cipher kind is recognized but
+ * the wasm primitive for it isn't wired yet (e.g., jwe before its
+ * decrypter lands).
  *
  * Layer 1: no fs, no global state. The caller is responsible for
  * assembling `kits` from its own keystore (Layer 2 work).
@@ -38,13 +68,22 @@ export function decryptGroup(
     return { $no_read_key: true };
   }
   let pt: Uint8Array | null = null;
+  let cipherUnsupported = false;
   for (const kit of kits.kits) {
     try {
-      pt = btnDecrypt(kit, cipher.ct);
+      const result = _runKit(kits.cipher, kit, cipher.ct);
+      if (result === null) {
+        cipherUnsupported = true;
+        break;
+      }
+      pt = result;
       break;
     } catch {
       /* try next kit */
     }
+  }
+  if (cipherUnsupported) {
+    return { $unsupported_cipher: true, cipher: kits.cipher };
   }
   if (!pt) {
     return { $no_read_key: true };
@@ -65,7 +104,11 @@ export function decryptAllGroups(
 ): Record<string, Record<string, unknown>> {
   const out: Record<string, Record<string, unknown>> = {};
   for (const [gname, cipher] of groups) {
-    const kits = kitsByGroup.get(gname) ?? { kits: [] };
+    const kits = kitsByGroup.get(gname);
+    if (!kits) {
+      out[gname] = { $no_read_key: true };
+      continue;
+    }
     out[gname] = decryptGroup(cipher, kits) as Record<string, unknown>;
   }
   return out;

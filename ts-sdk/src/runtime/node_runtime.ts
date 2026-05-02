@@ -673,7 +673,9 @@ export class NodeRuntime {
       const plaintext: Record<string, Record<string, unknown>> = {};
       for (const [gname, g] of groupRaw) {
         const gk = this.keystore.groups.get(gname);
-        const kits: GroupKits = { kits: gk?.kits ?? [] };
+        const gcfg = this.config.groups.get(gname);
+        const cipherKind = (gcfg?.cipher ?? "btn") as "btn" | "jwe";
+        const kits: GroupKits = { cipher: cipherKind, kits: gk?.kits ?? [] };
         plaintext[gname] = decryptGroup({ ct: g.ct }, kits) as Record<string, unknown>;
       }
 

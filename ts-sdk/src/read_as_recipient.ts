@@ -111,7 +111,10 @@ export function* readAsRecipient(
       const ct = gObj["ciphertext"];
       if (typeof ct === "string") {
         const ctBytes = new Uint8Array(Buffer.from(ct, "base64"));
-        plaintext[group] = decryptGroup({ ct: ctBytes }, { kits: [kit] }) as Record<string, unknown>;
+        plaintext[group] = decryptGroup(
+          { ct: ctBytes },
+          { cipher: "btn", kits: [kit] },
+        ) as Record<string, unknown>;
       }
     }
 
