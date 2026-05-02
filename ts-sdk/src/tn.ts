@@ -177,12 +177,12 @@ export class Tn {
   private constructor(rt: NodeRuntime, ownedTempdir?: string) {
     this._rt = rt;
     this._ownedTempdir = ownedTempdir;
+    this._runId = randomUUID().replace(/-/g, "");
     this.admin = new AdminNamespace(rt);
     this.pkg = new PkgNamespace(rt);
-    this.vault = new VaultNamespace(rt);
+    this.vault = new VaultNamespace(rt, (f) => this._mergeForEmit(f));
     this.agents = new AgentsNamespace(rt);
     this.handlers = new HandlersNamespace(rt);
-    this._runId = randomUUID().replace(/-/g, "");
     // Best-effort policy bookkeeping — mirrors TNClient constructor.
     try {
       this._maybeEmitPolicyPublished();
@@ -502,6 +502,44 @@ export class Tn {
    */
   emit(level: string, eventType: string, fields: Record<string, unknown>): EmitReceipt {
     return this._rt.emit(level, eventType, this._mergeForEmit(fields));
+  }
+
+  /**
+   * `emit` with explicit `timestamp` / `eventId` overrides — useful for
+   * deterministic tests and replay tooling. Mirrors Python's `_timestamp`
+   * / `_event_id` kwargs and Rust's `Runtime::emit_with`.
+   */
+  emitWith(
+    level: string,
+    eventType: string,
+    fields: Record<string, unknown>,
+    opts?: { timestamp?: string; eventId?: string },
+  ): EmitReceipt {
+    return this._rt.emitWith(level, eventType, this._mergeForEmit(fields), opts);
+  }
+
+  /**
+   * Per-call signing override. `true` forces signing, `false` skips it,
+   * `null` falls back to the session/yaml default.
+   * Mirrors Python's `_sign=` kwarg + Rust `Runtime::emit_override_sign`.
+   */
+  emitOverrideSign(
+    level: string,
+    eventType: string,
+    fields: Record<string, unknown>,
+    sign: boolean | null,
+  ): EmitReceipt {
+    return this._rt.emitOverrideSign(level, eventType, this._mergeForEmit(fields), sign);
+  }
+
+  /** Full-control emit — timestamp + event_id + sign override. */
+  emitWithOverrideSign(
+    level: string,
+    eventType: string,
+    fields: Record<string, unknown>,
+    opts?: { timestamp?: string; eventId?: string; sign?: boolean | null },
+  ): EmitReceipt {
+    return this._rt.emitWithOverrideSign(level, eventType, this._mergeForEmit(fields), opts);
   }
 
   // -------------------------------------------------------------------------
