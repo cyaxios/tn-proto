@@ -21,7 +21,7 @@ import { join } from "node:path";
 
 import { btnDecrypt } from "./raw.js";
 import { signatureFromB64, verify } from "./core/signing.js";
-import { asDid, asSignatureB64 } from "./types.js";
+import { asDid, asSignatureB64 } from "./core/types.js";
 
 export interface ReadAsRecipientOptions {
   /** Group name to decrypt. Default: "default". */

@@ -7,7 +7,7 @@ import {
   signatureFromB64 as rawSignatureFromB64,
   verifyDid,
 } from "../raw.js";
-import { asDid, type Did, type SignatureB64, asSignatureB64 } from "../types.js";
+import { asDid, type Did, type SignatureB64, asSignatureB64 } from "./types.js";
 
 interface RawDeviceKey {
   seed_b64: string;

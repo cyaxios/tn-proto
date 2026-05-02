@@ -34,7 +34,7 @@ import { ZERO_HASH, rowHash } from "../core/chain.js";
 import { buildEnvelopeLine } from "../core/envelope.js";
 import { deriveGroupKey, indexTokenFor } from "../core/indexing.js";
 import { signatureB64, signatureFromB64, verify } from "../core/signing.js";
-import { asDid, asRowHash, asSignatureB64, type RowHash } from "../types.js";
+import { asDid, asRowHash, asSignatureB64, type RowHash } from "../core/types.js";
 import { loadConfig, type CeremonyConfig, type GroupConfig } from "./config.js";
 import { loadKeystore, type LoadedKeystore } from "./keystore.js";
 import { scanAttestedEventRecords, yamlRecipientDids } from "./reconcile.js";
@@ -341,7 +341,7 @@ export class NodeRuntime {
     const levelNorm = level.toLowerCase();
 
     // 4. row_hash.
-    const groupsForHash: Record<string, import("../types.js").GroupHashInput> = {};
+    const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
     for (const [gname, g] of Object.entries(groupHashInputs)) {
       groupsForHash[gname] = {
         ciphertext: g.ciphertext,
@@ -367,7 +367,7 @@ export class NodeRuntime {
         : (_sessionSignOverride ?? this.config.sign);
     const sigB64 = resolvedSign
       ? signatureB64(this.keystore.device.sign(new Uint8Array(Buffer.from(rh, "utf8"))))
-      : ("" as import("../types.js").SignatureB64);
+      : ("" as import("../core/types.js").SignatureB64);
 
     // 6. build + append to primary log file.
     const line = buildEnvelopeLine({
@@ -638,7 +638,7 @@ export class NodeRuntime {
       }
 
       // 4. Recompute row_hash (Python: compute_row_hash).
-      const groupsForHash: Record<string, import("../types.js").GroupHashInput> = {};
+      const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
       for (const [gname, g] of groupRaw) {
         groupsForHash[gname] = { ciphertext: g.ct, fieldHashes: g.fieldHashes };
       }

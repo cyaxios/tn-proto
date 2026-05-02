@@ -2,7 +2,7 @@
 // which is compiled from the tn-core Rust crate. If you need a primitive
 // not re-exported here, pull from `@tn/sdk/raw`.
 
-export * from "./types.js";
+export * from "./core/types.js";
 export * from "./core/canonical.js";
 export * from "./core/chain.js";
 export * from "./core/envelope.js";

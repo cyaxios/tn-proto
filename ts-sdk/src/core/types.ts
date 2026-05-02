@@ -62,3 +62,27 @@ export interface Envelope {
   publicFields?: Record<string, unknown>;
   groupPayloads?: Record<string, GroupPayload>;
 }
+
+// ---------------------------------------------------------------------------
+// Read-shape types — moved from core/read_shape.ts in Task 1.8.
+// ---------------------------------------------------------------------------
+
+/** What the runtime hands to Layer 1 read-shape projection: a decrypted
+ * envelope plus per-group plaintext plus a validity record. */
+export interface ReadEntry {
+  envelope: Record<string, unknown>;
+  plaintext: Record<string, Record<string, unknown>>;
+  valid: { signature: boolean; rowHash: boolean; chain: boolean };
+}
+
+/** Alias for ReadEntry — used in places where "raw" reads more clearly than "Read". */
+export type RawEntry = ReadEntry;
+
+/** The flat dict shape produced by `flattenRawEntry`. The default `tn.read()`
+ * yields these. Keys are snake_case throughout — wire-defined envelope keys
+ * (`event_type`, `event_id`, ...) and user-supplied payload keys are not the
+ * SDK's to rewrite. */
+export type Entry = Record<string, unknown>;
+
+/** Log-level threshold value. Matches the constants in client.ts. */
+export type LogLevel = "debug" | "info" | "warning" | "error";
