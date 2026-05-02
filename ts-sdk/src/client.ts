@@ -339,6 +339,20 @@ export class TNClient {
   }
 
   /**
+   * Wrap an already-initialised NodeRuntime in a TNClient. Used by
+   * PkgNamespace (and other Layer-2 namespaces) to delegate to the
+   * full TNClient verb surface without re-loading the ceremony from disk.
+   * The caller owns the runtime's lifecycle — close() on this client is
+   * a no-op (it does not close the underlying runtime).
+   *
+   * @internal — not part of the public API; callers should prefer the
+   * Tn class. Underscore prefix signals package-internal use.
+   */
+  static _fromRuntime(rt: NodeRuntime): TNClient {
+    return new TNClient(rt);
+  }
+
+  /**
    * Load or create a ceremony from a yaml manifest and return a client
    * bound to it. Matches Python `tn.init` and Rust `Runtime::init`.
    *
