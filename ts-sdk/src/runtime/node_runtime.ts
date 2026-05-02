@@ -719,9 +719,27 @@ export class NodeRuntime {
   }
 
   /** Return the full local admin state for this ceremony (or filtered to a
-   * single group). Derived by replaying the log through AdminStateCache. */
+   * single group). Derived by replaying the log through AdminStateCache.
+   *
+   * When no `tn.ceremony.init` event has been written to the log yet (common
+   * for btn ceremonies where Rust writes ceremony info to yaml rather than the
+   * log), the ceremony record is auto-derived from the current config —
+   * matching TNClient.adminState's fallback behavior. */
   adminState(group?: string): AdminState {
-    const state = this.adminCache().state();
+    const raw = this.adminCache().state();
+    // Auto-derive ceremony from config when cache hasn't seen tn.ceremony.init.
+    const state: AdminState =
+      raw.ceremony === null
+        ? {
+            ...raw,
+            ceremony: {
+              ceremonyId: this.config.ceremonyId,
+              cipher: this.config.cipher,
+              deviceDid: this.config.me.did,
+              createdAt: null,
+            },
+          }
+        : raw;
     if (group === undefined) return state;
     return {
       ...state,
@@ -733,9 +751,15 @@ export class NodeRuntime {
     };
   }
 
-  /** Return the recipient roster for a group via the AdminStateCache. */
+  /** Return the recipient roster for a group via the AdminStateCache.
+   * Sorted active-first (revoked === false), then by leafIndex ascending —
+   * matching TNClient.recipients sort order. */
   recipients(group: string, opts?: { includeRevoked?: boolean }): RecipientEntry[] {
-    return this.adminCache().recipients(group, opts);
+    const list = this.adminCache().recipients(group, opts);
+    return list.slice().sort((a, b) => {
+      if (a.revoked !== b.revoked) return a.revoked ? 1 : -1;
+      return a.leafIndex - b.leafIndex;
+    });
   }
 
   /** Emit `tn.group.added` for a group that isn't yet attested in the log.
