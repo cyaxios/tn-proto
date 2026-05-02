@@ -4,7 +4,7 @@
 // stable name (`primitives.foo`) so app code doesn't pin against the
 // flat top-level surface, which we want to be free to reorganize later.
 //
-// Top-level re-exports (e.g. `import { canonicalize } from "@tn/sdk"`)
+// Top-level re-exports (e.g. `import { canonicalize } from "@tnproto/sdk"`)
 // remain in place for backward compatibility with existing consumers.
 
 export * from "./canonical.js";

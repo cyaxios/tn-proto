@@ -1,6 +1,6 @@
-// Public entry point for @tn/sdk. All crypto is delegated to tn-wasm,
+// Public entry point for @tnproto/sdk. All crypto is delegated to tn-wasm,
 // which is compiled from the tn-core Rust crate. If you need a primitive
-// not re-exported here, pull from `@tn/sdk/raw`.
+// not re-exported here, pull from `@tnproto/sdk/raw`.
 
 export * from "./core/types.js";
 export * from "./core/canonical.js";

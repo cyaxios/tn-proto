@@ -1,7 +1,7 @@
 {
-  "name": "@tn/sdk",
-  "version": "0.0.1",
-  "description": "TestigoNodo protocol SDK for TypeScript. Wraps tn-wasm (Rust) with idiomatic types.",
+  "name": "@tnproto/sdk",
+  "version": "0.3.0-alpha.1",
+  "description": "TN protocol SDK for TypeScript — attested logging with broadcast encryption. Wraps tn-wasm (Rust) with idiomatic types.",
   "type": "module",
   "engines": {
     "node": ">=20"

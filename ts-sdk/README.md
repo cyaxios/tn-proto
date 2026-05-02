@@ -1,4 +1,4 @@
-# @tn/sdk
+# @tnproto/sdk
 
 TypeScript SDK for TN. Thin, typed wrapper over `tn-wasm` (which is
 compiled from the `tn-core` Rust crate). One Rust core, three bindings:
@@ -32,7 +32,7 @@ import {
   deriveGroupKey, indexTokenFor,
   buildEnvelopeLine,
   admin,
-} from "@tn/sdk";
+} from "@tnproto/sdk";
 ```
 
 - `DeviceKey` wraps an Ed25519 seed; `generate()` / `fromSeed(bytes)` /
@@ -46,7 +46,7 @@ import {
 - `admin.reduce`, `admin.catalogKinds`, `admin.validateEmit` for the
   admin catalog.
 
-Need something lower-level? `@tn/sdk/raw` re-exports every tn-wasm
+Need something lower-level? `@tnproto/sdk/raw` re-exports every tn-wasm
 function verbatim.
 
 ## Performance and log levels
@@ -91,6 +91,6 @@ diff, including whitespace or key ordering.
 
 ## Open questions
 
-- Package name: `@tn/sdk` is a placeholder; could be `@tnproto/sdk`.
+- Package name: `@tnproto/sdk` is a placeholder; could be `@tnproto/sdk`.
 - When published, the `tn-wasm` dep becomes a real npm package rather
   than a `file:` link.
