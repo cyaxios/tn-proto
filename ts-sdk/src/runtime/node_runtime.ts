@@ -10,12 +10,14 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -23,6 +25,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { DeviceKey } from "../core/signing.js";
 
 import { loadPolicyFile, type PolicyDocument } from "../agents_policy.js";
+import { newManifest, signManifest } from "../core/tnpkg.js";
+import { writeTnpkg } from "../tnpkg_io.js";
 import { BtnPublisher, btnKitLeaf } from "../raw.js";
 import { decryptGroup, type GroupKits } from "../core/decrypt.js";
 import type { TNHandler } from "../handlers/index.js";
@@ -516,6 +520,173 @@ export class NodeRuntime {
         h.close();
       } catch {
         /* best-effort */
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Handlers namespace accessors — used by HandlersNamespace (tn.handlers.*).
+  // ---------------------------------------------------------------------------
+
+  /** Return a defensive copy of the registered handler list. */
+  listHandlers(): TNHandler[] {
+    return [...this.handlers];
+  }
+
+  /** Flush any handler that exposes a `flush()` method; handlers without one
+   * are skipped. Always resolves (errors are swallowed per the contract). */
+  async flushHandlers(): Promise<void> {
+    for (const h of this.handlers) {
+      const withFlush = h as TNHandler & { flush?: () => Promise<void> | void };
+      if (typeof withFlush.flush === "function") {
+        try {
+          await withFlush.flush();
+        } catch {
+          // A failing flush must not take down the caller.
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agents namespace accessors — used by AgentsNamespace (tn.agents.*).
+  // ---------------------------------------------------------------------------
+
+  /** Return the cached agent policy doc (`null` when no agents.md is present). */
+  getAgentPolicy(): PolicyDocument | null {
+    return this.agentPolicy;
+  }
+
+  /** Re-read `.tn/config/agents.md`, refresh the cache, and emit
+   * `tn.agents.policy_published` if the content hash changed. */
+  reloadAgentPolicy(): PolicyDocument | null {
+    const fresh = loadPolicyFile(this.config.yamlDir);
+    const prev = this.agentPolicy;
+    this.agentPolicy = fresh;
+    if (fresh !== null && (prev === null || prev.contentHash !== fresh.contentHash)) {
+      this.emit("info", "tn.agents.policy_published", {
+        policy_uri: fresh.path,
+        version: fresh.version,
+        content_hash: fresh.contentHash,
+        event_types_covered: [...fresh.templates.keys()].sort(),
+        policy_text: fresh.body,
+      });
+    }
+    return fresh;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Vault namespace helpers — used by VaultNamespace (tn.vault.*).
+  // ---------------------------------------------------------------------------
+
+  /** Emit a signed `tn.vault.linked` event. */
+  vaultLink(vaultDid: string, projectId: string): EmitReceipt {
+    return this.emit("info", "tn.vault.linked", {
+      vault_did: vaultDid,
+      project_id: projectId,
+      linked_at: new Date().toISOString(),
+    });
+  }
+
+  /** Emit a signed `tn.vault.unlinked` event. */
+  vaultUnlink(vaultDid: string, projectId: string, reason?: string): EmitReceipt {
+    const fields: Record<string, unknown> = {
+      vault_did: vaultDid,
+      project_id: projectId,
+      unlinked_at: new Date().toISOString(),
+    };
+    if (reason !== undefined) fields["reason"] = reason;
+    return this.emit("info", "tn.vault.unlinked", fields);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agent runtime kit bundler — used by AgentsNamespace.addRuntime.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Mint reader kits for `opts.groups` (plus the implicit `tn.agents` group),
+   * bundle them into a `.tnpkg` at `opts.outPath`, and return the written path.
+   * Mirrors TNClient.adminAddAgentRuntime.
+   */
+  adminAddAgentRuntime(opts: {
+    runtimeDid: string;
+    groups: string[];
+    outPath: string;
+    label?: string;
+  }): string {
+    // Dedup: tn.agents is always added; skip duplicates.
+    const seen = new Set<string>();
+    const requested: string[] = [];
+    for (const g of opts.groups) {
+      if (g === "tn.agents") continue;
+      if (seen.has(g)) continue;
+      seen.add(g);
+      requested.push(g);
+    }
+    requested.push("tn.agents");
+
+    for (const gname of requested) {
+      if (!this.config.groups.has(gname)) {
+        throw new Error(
+          `adminAddAgentRuntime: group ${JSON.stringify(gname)} is not ` +
+            `declared in this ceremony's yaml ` +
+            `(known: ${JSON.stringify([...this.config.groups.keys()].sort())})`,
+        );
+      }
+    }
+
+    const td = mkdtempSync(join(tmpdir(), "tn-agent-bundle-"));
+    try {
+      for (const gname of requested) {
+        const kitPath = join(td, `${gname}.btn.mykit`);
+        this.addRecipient(gname, kitPath, opts.runtimeDid);
+      }
+
+      const body: Record<string, Uint8Array> = {};
+      const kitsMeta: Array<{ name: string; sha256: string; bytes: number }> = [];
+      for (const gname of [...requested].sort()) {
+        const name = `${gname}.btn.mykit`;
+        const p = join(td, name);
+        if (!existsSync(p)) continue;
+        const data = new Uint8Array(readFileSync(p));
+        body[`body/${name}`] = data;
+        kitsMeta.push({
+          name,
+          sha256: "sha256:" + createHash("sha256").update(Buffer.from(data)).digest("hex"),
+          bytes: data.length,
+        });
+      }
+      if (kitsMeta.length === 0) {
+        throw new Error(
+          `adminAddAgentRuntime: no kits minted for groups ${JSON.stringify(requested)}`,
+        );
+      }
+
+      const manifest = newManifest({
+        kind: "kit_bundle",
+        fromDid: this.config.me.did,
+        ceremonyId: this.config.ceremonyId,
+        scope: "kit_bundle",
+        toDid: opts.runtimeDid,
+      });
+      manifest.state = { kits: kitsMeta, kind: "readers-only" };
+      signManifest(manifest, this.keystore.device);
+      const out = writeTnpkg(opts.outPath, manifest, body);
+
+      if (opts.label !== undefined) {
+        try {
+          writeFileSync(`${out}.label`, opts.label, "utf8");
+        } catch {
+          // Best-effort sidecar.
+        }
+      }
+
+      return out;
+    } finally {
+      try {
+        rmSync(td, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup.
       }
     }
   }

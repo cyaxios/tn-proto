@@ -8,18 +8,21 @@ export interface AddRuntimeOptions {
   runtimeDid: string;
   groups: string[];
   outPath: string;
+  label?: string;
 }
 
 export class AgentsNamespace {
   constructor(private readonly _rt: NodeRuntime) {}
 
-  async addRuntime(_opts: AddRuntimeOptions): Promise<string> {
-    throw new Error("tn.agents.addRuntime: not implemented (Task 2.9)");
+  async addRuntime(opts: AddRuntimeOptions): Promise<string> {
+    return this._rt.adminAddAgentRuntime(opts);
   }
+
   policy(): PolicyDocument | null {
-    throw new Error("tn.agents.policy: not implemented (Task 2.9)");
+    return this._rt.getAgentPolicy();
   }
+
   async reloadPolicy(): Promise<PolicyDocument | null> {
-    throw new Error("tn.agents.reloadPolicy: not implemented (Task 2.9)");
+    return this._rt.reloadAgentPolicy();
   }
 }

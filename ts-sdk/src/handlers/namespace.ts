@@ -7,13 +7,15 @@ import type { TNHandler } from "./index.js";
 export class HandlersNamespace {
   constructor(private readonly _rt: NodeRuntime) {}
 
-  add(_handler: TNHandler): void {
-    throw new Error("tn.handlers.add: not implemented (Task 2.10)");
+  add(handler: TNHandler): void {
+    this._rt.addHandler(handler);
   }
+
   list(): TNHandler[] {
-    throw new Error("tn.handlers.list: not implemented (Task 2.10)");
+    return this._rt.listHandlers();
   }
+
   async flush(): Promise<void> {
-    throw new Error("tn.handlers.flush: not implemented (Task 2.10)");
+    await this._rt.flushHandlers();
   }
 }
