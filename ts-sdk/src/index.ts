@@ -40,6 +40,7 @@ export type {
   ReadAsRecipientOptions as TnReadAsRecipientOptions,
   SecureReadOptions as TnSecureReadOptions,
 } from "./tn.js";
+export type { WatchOptions, WatchSince } from "./watch.js";
 // SecureReadOptions was previously re-exported from client.js; now re-exported
 // from tn.js under the same name for backwards-compat.
 export type { SecureReadOptions } from "./tn.js";
