@@ -47,6 +47,7 @@ export {
   type RotationConflict,
   type SameCoordinateFork,
 } from "./admin_cache.js";
+export { AdminStateReducer, emptyState } from "./core/admin_state.js";
 export {
   KNOWN_KINDS,
   MANIFEST_VERSION,
