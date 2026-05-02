@@ -138,3 +138,33 @@ export async function unwrapKeystoreSecret(
   ));
   return new TextDecoder().decode(pt);
 }
+
+/** Wrap arbitrary bytes (vs `wrapKeystoreSecret` which wraps a string).
+ * Use this for body-encryption / payload-encryption paths where the
+ * plaintext is binary. The optional `aad` is bound into the AES-GCM
+ * authentication tag — pass the same value when unwrapping. */
+export async function wrapBytes(
+  emk: CryptoKey,
+  plaintext: Uint8Array,
+  aad?: Uint8Array,
+): Promise<WrappedBlob> {
+  const nonce = randomBytes(12);
+  const params: AesGcmParams = { name: "AES-GCM", iv: nonce };
+  if (aad !== undefined) params.additionalData = aad;
+  const ct = new Uint8Array(await globalThis.crypto.subtle.encrypt(params, emk, plaintext));
+  return { nonce_b64: bytesToB64(nonce), ciphertext_b64: bytesToB64(ct) };
+}
+
+/** Unwrap a `wrapBytes`-produced blob to its original plaintext bytes.
+ * Throws on AES-GCM authentication failure (wrong EMK or wrong AAD). */
+export async function unwrapBytes(
+  emk: CryptoKey,
+  wrapped: WrappedBlob,
+  aad?: Uint8Array,
+): Promise<Uint8Array> {
+  const params: AesGcmParams = { name: "AES-GCM", iv: b64ToBytes(wrapped.nonce_b64) };
+  if (aad !== undefined) params.additionalData = aad;
+  return new Uint8Array(await globalThis.crypto.subtle.decrypt(
+    params, emk, b64ToBytes(wrapped.ciphertext_b64),
+  ));
+}
