@@ -14,10 +14,17 @@ release:
 
 | Channel       | Package                       | Status              |
 |---------------|-------------------------------|---------------------|
-| Python        | `pip install tn-protocol`     | 0.2.0a1 alpha       |
-| TypeScript    | `npm install @tn/sdk`         | in tree, not yet published |
+| Python        | `pip install tn-protocol`     | 0.2.0a2 alpha       |
+| TypeScript    | `npm install @tnproto/sdk`    | 0.3.0-alpha.1       |
 | Rust          | `cargo add tn-core`           | in tree, not yet published |
 | Chrome ext    | `extensions/tn-decrypt/`      | unpacked load only  |
+
+The TypeScript SDK split off from a pre-Phase-2 `TNClient` god-class
+into a `Tn` class with namespaced sub-objects (`tn.admin/pkg/vault/agents/handlers`),
+a browser-safe Layer 1 entry at `@tnproto/sdk/core` that the Chrome
+extension consumes for audited crypto + EMK + zip primitives, and a
+new `tn.watch()` async-iterable verb (mirrored on Python). See
+[`docs/sdk-parity.md`](docs/sdk-parity.md) for the cross-language verb table.
 
 ## Quick start (Python)
 
@@ -47,8 +54,12 @@ crypto/
   tn-wasm/               # WASM build for browser / Node
   tn-core-py/            # pyo3 bindings  (PyPI: tn-core)
   tn-btn-py/             # pyo3 bindings  (PyPI: tn-btn)
-ts-sdk/                  # @tn/sdk + tn-js CLI
-extensions/tn-decrypt/   # Chrome MV3 extension
+ts-sdk/                  # @tnproto/sdk + tn-js CLI
+                         #   src/core/  — Layer 1 (browser-safe, used by extensions)
+                         #   src/       — Layer 2 (Node entry; Tn class + namespaces)
+extensions/tn-decrypt/   # Chrome MV3 extension (consumes @tnproto/sdk/core)
+docs/sdk-parity.md       # Cross-language verb parity table (CI gate)
+tools/check_parity.py    # CI script that fails on missing parity rows
 ```
 
 ## License
