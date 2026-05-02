@@ -1,17 +1,28 @@
 // Handler registry — mirrors `python/tn/handlers/registry.py`.
 //
-// Consumes the YAML `handlers:` block and instantiates the matching
-// handler classes. The four kinds wired here (`vault.push`,
-// `vault.pull`, `fs.drop`, `fs.scan`) match the Python four byte-for-
-// byte in field names + defaults; the `file.*` / `kafka` / `delta` /
-// `s3` / `otel` kinds remain Python-only for now (out of scope for the
-// admin-log push/pull set landed in commit 78f5617).
+// Wires YAML `handlers:` blocks to TS handler classes. Currently
+// recognized kinds:
+//
+//   stdout              StdoutHandler
+//   vault.push          VaultPushHandler
+//   vault.pull          VaultPullHandler
+//   fs.drop             FsDropHandler
+//   fs.scan             FsScanHandler
+//   file.rotating       FileHandler (size-based rotation; max_bytes + backup_count)
+//   otel                OpenTelemetryHandler (host injects OtelLogger via adapters)
+//
+// Not yet ported from Python: file.timed_rotating, kafka, delta, s3.
+// Tracked as follow-up work; use the corresponding Python handler in
+// the meantime, or add via `tn.handlers.add(new FileHandler(...))`
+// programmatically.
 
 import { resolve as pathResolve, isAbsolute as pathIsAbsolute, join } from "node:path";
 
 import type { TNHandler, FilterSpec } from "./base.js";
+import { FileHandler } from "./file.js";
 import { FsDropHandler, type SnapshotBuilder } from "./fs_drop.js";
 import { FsScanHandler, type FsScanAbsorber } from "./fs_scan.js";
+import { OpenTelemetryHandler, type OtelLogger } from "./otel.js";
 import { StdoutHandler } from "./stdout.js";
 import {
   VaultPullHandler,
@@ -35,6 +46,10 @@ export interface HandlerAdapters {
   makeVaultInboxClient?: (endpoint: string) => VaultInboxClient;
   /** Acting DID (for vault.pull `list_incoming`). */
   did: string;
+  /** OTel logger injected by the host. Required when yaml declares
+   * `kind: otel`. Pass via `addHandler(new OpenTelemetryHandler(...))`
+   * directly if you don't want yaml-driven config. */
+  otelLogger?: OtelLogger;
 }
 
 /** Parse a duration as ms. Accepts numbers (assumed seconds) or strings
@@ -78,10 +93,64 @@ function resolvePath(p: string, yamlDir: string): string {
 /** Spec entry as produced by `yaml.parse`. */
 export type HandlerSpec = Record<string, unknown>;
 
-/** Build handler instances from the YAML `handlers:` block. */
+/**
+ * Translate a raw yaml `filter:` block to a `FilterSpec`.
+ *
+ * Supports both the Python yaml shape (nested `event_type.starts_with`)
+ * and the flat TS-native `FilterSpec` property names so that either form
+ * works in tn.yaml:
+ *
+ *   filter:
+ *     event_type:
+ *       starts_with: "auth."   # → eventTypePrefix
+ *
+ *   filter:
+ *     eventTypePrefix: "auth." # TS-native flat form
+ */
+function parseFilter(raw: unknown): FilterSpec | undefined {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const spec: FilterSpec = {};
+  let hasAny = false;
+
+  // Python yaml nested shape: event_type.starts_with
+  const eventTypeBlock = r["event_type"];
+  if (eventTypeBlock != null && typeof eventTypeBlock === "object" && !Array.isArray(eventTypeBlock)) {
+    const etb = eventTypeBlock as Record<string, unknown>;
+    if (typeof etb["starts_with"] === "string") {
+      spec.eventTypePrefix = etb["starts_with"];
+      hasAny = true;
+    }
+    if (typeof etb["exact"] === "string") {
+      spec.eventType = etb["exact"];
+      hasAny = true;
+    }
+    if (typeof etb["not_starts_with"] === "string") {
+      spec.notEventTypePrefix = etb["not_starts_with"];
+      hasAny = true;
+    }
+  }
+
+  // Flat TS-native property names (pass-through).
+  if (typeof r["eventType"] === "string") { spec.eventType = r["eventType"]; hasAny = true; }
+  if (typeof r["eventTypePrefix"] === "string") { spec.eventTypePrefix = r["eventTypePrefix"]; hasAny = true; }
+  if (typeof r["notEventTypePrefix"] === "string") { spec.notEventTypePrefix = r["notEventTypePrefix"]; hasAny = true; }
+  if (Array.isArray(r["eventTypeIn"])) { spec.eventTypeIn = r["eventTypeIn"] as string[]; hasAny = true; }
+  if (typeof r["level"] === "string") { spec.level = r["level"]; hasAny = true; }
+  if (Array.isArray(r["levelIn"])) { spec.levelIn = r["levelIn"] as string[]; hasAny = true; }
+
+  return hasAny ? spec : undefined;
+}
+
+/** Build handler instances from the YAML `handlers:` block.
+ *
+ * `adapters` may be a partial object when only handler kinds that don't
+ * need host adapters are declared (e.g. `file.rotating`, `stdout`). The
+ * individual handler branches throw a descriptive error if a required
+ * adapter field is absent. */
 export function buildHandlers(
   specs: readonly HandlerSpec[],
-  adapters: HandlerAdapters,
+  adapters: Partial<HandlerAdapters>,
   yamlDir: string,
 ): TNHandler[] {
   const out: TNHandler[] = [];
@@ -100,6 +169,11 @@ export function buildHandlers(
       }
       const pollIntervalMs = parseDurationMs(raw["poll_interval"], 60);
       const scope = (raw["scope"] as string | undefined) ?? "admin";
+      if (!adapters.snapshotBuilder) {
+        throw new Error(
+          `tn.yaml: handler ${JSON.stringify(name)} of kind "vault.push" requires adapters.snapshotBuilder.`,
+        );
+      }
       const client = adapters.makeVaultPostClient?.(endpoint);
       out.push(
         new VaultPushHandler(name, {
@@ -131,13 +205,18 @@ export function buildHandlers(
           "vault.pull: HandlerAdapters.makeVaultInboxClient is required (no built-in default).",
         );
       }
+      if (!adapters.vaultAbsorber) {
+        throw new Error(
+          `tn.yaml: handler ${JSON.stringify(name)} of kind "vault.pull" requires adapters.vaultAbsorber.`,
+        );
+      }
       const client = adapters.makeVaultInboxClient(endpoint);
       const cursorDir = join(yamlDir, ".tn", "admin");
       out.push(
         new VaultPullHandler(name, {
           endpoint,
           projectId,
-          did: adapters.did,
+          did: adapters.did ?? "",
           client,
           absorber: adapters.vaultAbsorber,
           cursorDir,
@@ -159,6 +238,11 @@ export function buildHandlers(
       const scope = (raw["scope"] as string | undefined) ?? "admin";
       const filenameTemplate = raw["filename_template"] as string | undefined;
       const on = (raw["on"] as readonly string[] | undefined) ?? undefined;
+      if (!adapters.snapshotBuilder) {
+        throw new Error(
+          `tn.yaml: handler ${JSON.stringify(name)} of kind "fs.drop" requires adapters.snapshotBuilder.`,
+        );
+      }
       out.push(
         new FsDropHandler(name, {
           outDir,
@@ -194,6 +278,11 @@ export function buildHandlers(
         raw["rejected_dir"] !== undefined
           ? resolvePath(raw["rejected_dir"] as string, yamlDir)
           : undefined;
+      if (!adapters.fsAbsorber) {
+        throw new Error(
+          `tn.yaml: handler ${JSON.stringify(name)} of kind "fs.scan" requires adapters.fsAbsorber.`,
+        );
+      }
       out.push(
         new FsScanHandler(name, {
           inDir,
@@ -205,6 +294,34 @@ export function buildHandlers(
           filter: filterSpec,
         } as ConstructorParameters<typeof FsScanHandler>[1]),
       );
+      continue;
+    }
+    if (kind === "file.rotating") {
+      const path = String(raw["path"] ?? "");
+      if (!path) {
+        throw new Error(
+          `tn.yaml: handler ${JSON.stringify(name)} of kind ${JSON.stringify(kind)} is missing required field "path"`,
+        );
+      }
+      const resolved = pathIsAbsolute(path) ? path : pathResolve(yamlDir, path);
+      const fileOpts: import("./file.js").FileHandlerOptions = {};
+      if (typeof raw["max_bytes"] === "number") fileOpts.maxBytes = raw["max_bytes"];
+      if (typeof raw["backup_count"] === "number") fileOpts.backupCount = raw["backup_count"];
+      const fileFilter = parseFilter(raw["filter"]);
+      if (fileFilter !== undefined) fileOpts.filter = fileFilter;
+      out.push(new FileHandler(name, resolved, fileOpts));
+      continue;
+    }
+    if (kind === "otel") {
+      if (!adapters.otelLogger) {
+        throw new Error(
+          `tn.yaml: handler ${JSON.stringify(name)} of kind "otel" requires an OtelLogger adapter — pass adapters.otelLogger when calling buildHandlers().`,
+        );
+      }
+      const otelOpts: import("./otel.js").OpenTelemetryHandlerOptions = {};
+      const otelFilter = parseFilter(raw["filter"]);
+      if (otelFilter !== undefined) otelOpts.filter = otelFilter;
+      out.push(new OpenTelemetryHandler(name, adapters.otelLogger, otelOpts));
       continue;
     }
     throw new Error(`tn.yaml: unknown handler kind ${JSON.stringify(kind)} on handler ${JSON.stringify(name)}`);
