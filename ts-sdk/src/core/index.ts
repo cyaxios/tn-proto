@@ -17,3 +17,4 @@ export * from "./tnpkg.js";
 export * from "./tnpkg_archive.js";
 export * from "./agents_policy.js";
 export * from "./read_shape.js";
+export * from "./errors.js";

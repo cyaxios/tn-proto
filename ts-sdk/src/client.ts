@@ -62,6 +62,7 @@ import {
 } from "./core/tnpkg.js";
 import { readTnpkg, writeTnpkg } from "./tnpkg_io.js";
 import { asDid, asSignatureB64 } from "./core/types.js";
+import { VerificationError } from "./core/errors.js";
 
 export type { EmitReceipt, ReadEntry } from "./runtime/node_runtime.js";
 import {
@@ -115,24 +116,7 @@ export interface SecureReadOptions {
   logPath?: string;
 }
 
-/** Thrown by `secureRead({onInvalid: "raise"})` on the first verification
- * failure. Mirrors Python `tn.VerificationError`. */
-export class VerificationError extends Error {
-  readonly envelope: Record<string, unknown>;
-  readonly invalidReasons: string[];
-  constructor(envelope: Record<string, unknown>, invalidReasons: string[]) {
-    const et = envelope["event_type"];
-    const eid = envelope["event_id"];
-    super(
-      `secureRead: envelope event_type=${JSON.stringify(et)} ` +
-        `event_id=${JSON.stringify(eid)} failed verification: ` +
-        JSON.stringify(invalidReasons),
-    );
-    this.name = "VerificationError";
-    this.envelope = envelope;
-    this.invalidReasons = [...invalidReasons];
-  }
-}
+export { VerificationError } from "./core/errors.js";
 
 /** Roster entry yielded by `TNClient.recipients`. Matches Python `tn.recipients`. */
 export interface RecipientEntry {

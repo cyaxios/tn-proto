@@ -15,7 +15,6 @@ export type { ReadEntry, EmitReceipt } from "./runtime/node_runtime.js";
 export {
   LOG_LEVELS,
   TNClient,
-  VerificationError,
   type AbsorbReceipt,
   type AdminAddAgentRuntimeOptions,
   type ChainConflict,
@@ -26,6 +25,13 @@ export {
   type SecureEntry,
   type SecureReadOptions,
 } from "./client.js";
+export {
+  VerificationError,
+  ChainConflictError,
+  RotationConflictError,
+  LeafReuseError,
+  SameCoordinateForkError,
+} from "./core/errors.js";
 export {
   loadPolicyFile,
   parsePolicyText,
