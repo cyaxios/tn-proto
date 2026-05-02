@@ -666,6 +666,7 @@ from .read import (  # noqa: E402, F401
     read_as_recipient,
     read_raw,
     secure_read,
+    watch,
 )
 
 
@@ -842,4 +843,5 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "vault_client",
     "wallet",
     "warning",
+    "watch",
 ]

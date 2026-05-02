@@ -27,3 +27,40 @@ def read_as_recipient(log_path, keystore_dir, *, group: str = "default", verify_
 def secure_read(*, on_invalid: str = "skip", log_path: Any = None, cfg: Any = None, all_runs: bool = False, where=None):
     from . import _secure_read_impl
     yield from _secure_read_impl(on_invalid=on_invalid, log_path=log_path, cfg=cfg, all_runs=all_runs, where=where)
+
+
+async def watch(*, since: str | int = "now", verify: bool = False, poll_interval: float = 0.3, log_path=None):
+    """Tail the local TN log, yielding decoded entries as they're appended.
+
+    Async generator. Use as ``async for entry in tn.watch(...)``.
+
+    Parameters
+    ----------
+    since : "start" | "now" | int | str
+        Where to begin yielding from. "start" replays from byte 0;
+        "now" (default) yields only new appends; an int is a sequence
+        number (resumes at first envelope with sequence >= N); a str
+        is an ISO-8601 timestamp.
+    verify : bool
+        Pass entries through signature-verify validation. Default False.
+    poll_interval : float
+        Seconds between polls. Default 0.3.
+    log_path : str | PathLike | None
+        Override the log path (defaults to cfg.resolve_log_path()).
+
+    Yields
+    ------
+    dict
+        Decoded entry — same flat shape as ``tn.read()``.
+
+    Notes
+    -----
+    Stat-poll based; no watchdog dependency. On rotation (inode change)
+    the watcher resumes at offset 0 of the new file. On truncation a
+    ``tn.watch.truncation_observed`` admin event is emitted.
+    """
+    from . import _watch_impl
+    async for entry in _watch_impl._watch_impl(
+        since=since, verify=verify, poll_interval=poll_interval, log_path=log_path
+    ):
+        yield entry
