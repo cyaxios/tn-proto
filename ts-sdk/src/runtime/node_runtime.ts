@@ -76,6 +76,10 @@ const _ENVELOPE_RESERVED = new Set([
 import type { EmitReceipt } from "../core/results.js";
 export type { EmitReceipt };
 
+import type { AdminState, RecipientEntry } from "../core/types.js";
+import { AdminStateCache } from "../admin/cache.js";
+import type { TNClient } from "../client.js";
+
 // ---------------------------------------------------------------------------
 // Session-level signing override.
 // ---------------------------------------------------------------------------
@@ -523,6 +527,57 @@ export class NodeRuntime {
       throw new Error(`revokedCount: group ${group} is not a btn publisher in this runtime`);
     }
     return pub.revokedCount();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Admin-state helpers — used by AdminNamespace (tn.admin.*).
+  // ---------------------------------------------------------------------------
+
+  private _adminCache: AdminStateCache | null = null;
+
+  /** Lazy-initialized AdminStateCache. Uses a thin shim so the cache can
+   * read config without requiring a full TNClient instance. */
+  adminCache(): AdminStateCache {
+    if (this._adminCache === null) {
+      // AdminStateCache only accesses client.runtime.config in its constructor
+      // and stores it as this.cfg. We satisfy that with a minimal duck-type shim.
+      const shim = { runtime: { config: this.config } } as unknown as TNClient;
+      this._adminCache = new AdminStateCache(shim);
+    }
+    return this._adminCache;
+  }
+
+  /** Return the full local admin state for this ceremony (or filtered to a
+   * single group). Derived by replaying the log through AdminStateCache. */
+  adminState(group?: string): AdminState {
+    const state = this.adminCache().state();
+    if (group === undefined) return state;
+    return {
+      ...state,
+      groups: state.groups.filter((g) => g.group === group),
+      recipients: state.recipients.filter((r) => r.group === group),
+      rotations: state.rotations.filter((r) => r.group === group),
+      coupons: state.coupons.filter((c) => c.group === group),
+      enrolments: state.enrolments.filter((e) => e.group === group),
+    };
+  }
+
+  /** Return the recipient roster for a group via the AdminStateCache. */
+  recipients(group: string, opts?: { includeRevoked?: boolean }): RecipientEntry[] {
+    return this.adminCache().recipients(group, opts);
+  }
+
+  /** Emit `tn.group.added` for a group that isn't yet attested in the log.
+   * Returns the emit receipt. Caller is responsible for checking idempotency
+   * before calling. */
+  adminEnsureGroup(group: string, cipher: "btn" | "jwe"): EmitReceipt {
+    const addedAt = new Date().toISOString();
+    return this.emit("info", "tn.group.added", {
+      group,
+      cipher,
+      publisher_did: this.did,
+      added_at: addedAt,
+    });
   }
 
   /**
