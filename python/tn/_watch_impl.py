@@ -29,7 +29,6 @@ async def _watch_impl(
     log_path: str | os.PathLike | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     from . import current_config
-    from . import emit as _emit_mod
     from .reader import flatten_raw_entry, parse_envelope_line
 
     cfg = current_config()

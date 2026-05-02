@@ -59,8 +59,8 @@ async def watch(*, since: str | int = "now", verify: bool = False, poll_interval
     the watcher resumes at offset 0 of the new file. On truncation a
     ``tn.watch.truncation_observed`` admin event is emitted.
     """
-    from . import _watch_impl
-    async for entry in _watch_impl._watch_impl(
+    from ._watch_impl import _watch_impl as _impl
+    async for entry in _impl(
         since=since, verify=verify, poll_interval=poll_interval, log_path=log_path
     ):
         yield entry
