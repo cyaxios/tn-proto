@@ -6,14 +6,8 @@
 // All logic here is pure: no fs, no network, no global state.
 // ESLint enforces that this file does NOT import from `node:*`.
 
-/** Shape Layer 1 consumes from a decrypted envelope. Layer 2 produces this
- * (NodeRuntime.read returns ReadEntry); the canonical declaration lives in
- * `core/types.ts` as part of Task 1.8. For now, define inline. */
-export interface ReadEntry {
-  envelope: Record<string, unknown>;
-  plaintext: Record<string, Record<string, unknown>>;
-  valid: { signature: boolean; rowHash: boolean; chain: boolean };
-}
+import type { ReadEntry } from "./types.js";
+export type { ReadEntry } from "./types.js";
 
 /** Public envelope keys that always surface flat in the new shape (§1.1). */
 export const FLAT_ENVELOPE_KEYS: readonly string[] = [

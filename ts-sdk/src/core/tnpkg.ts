@@ -19,7 +19,7 @@
 import { canonicalize } from "./canonical.js";
 import type { DeviceKey } from "./signing.js";
 import { verify as verifySig } from "./signing.js";
-import { asDid } from "../types.js";
+import { asDid } from "./types.js";
 
 /** Manifest schema version. Bump if required fields change incompatibly. */
 export const MANIFEST_VERSION = 1;

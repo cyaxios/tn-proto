@@ -6,6 +6,7 @@
 // or via the wasm core's getrandom binding. ESLint enforces this rule;
 // see ../../eslint.config.js.
 
+export * from "./types.js";
 export * from "./canonical.js";
 export * from "./chain.js";
 export * from "./signing.js";

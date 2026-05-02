@@ -2,7 +2,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
 import { computeRowHash, zeroHash as rawZeroHash } from "../raw.js";
-import { asRowHash, type RowHash, type RowHashInput } from "../types.js";
+import { asRowHash, type RowHash, type RowHashInput } from "./types.js";
 
 /** Zero-initialized prev_hash for the first entry in any chain. */
 export const ZERO_HASH: RowHash = asRowHash(rawZeroHash());

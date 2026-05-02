@@ -1,5 +1,5 @@
 import { buildEnvelope as rawBuildEnvelope } from "../raw.js";
-import type { Envelope } from "../types.js";
+import type { Envelope } from "./types.js";
 
 /**
  * Render an envelope to an ndjson line (ends with `\n`).

@@ -61,7 +61,7 @@ import {
   verifyManifest,
 } from "./core/tnpkg.js";
 import { readTnpkg, writeTnpkg } from "./tnpkg_io.js";
-import { asDid, asSignatureB64 } from "./types.js";
+import { asDid, asSignatureB64 } from "./core/types.js";
 
 export type { EmitReceipt, ReadEntry } from "./runtime/node_runtime.js";
 import {
