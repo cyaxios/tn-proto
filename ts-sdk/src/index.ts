@@ -41,6 +41,25 @@ export {
   LeafReuseError,
   SameCoordinateForkError,
 } from "./core/errors.js";
+
+// 0.3.0 surface — the new shape replacing TNClient. TNClient stays alive
+// alongside Tn until Task 2.12 deletes it. Bare-function exports of the
+// process-global toggles let callers do `import { setLevel } from
+// "@tnproto/sdk"` without needing the class.
+export { Tn } from "./tn.js";
+export type {
+  TnInitOptions,
+  ReadOptions,
+  ReadAsRecipientOptions as TnReadAsRecipientOptions,
+  SecureReadOptions as TnSecureReadOptions,
+} from "./tn.js";
+
+import { Tn as _Tn } from "./tn.js";
+export const setLevel: typeof _Tn.setLevel = _Tn.setLevel.bind(_Tn);
+export const getLevel: typeof _Tn.getLevel = _Tn.getLevel.bind(_Tn);
+export const isEnabledFor: typeof _Tn.isEnabledFor = _Tn.isEnabledFor.bind(_Tn);
+export const setSigning: typeof _Tn.setSigning = _Tn.setSigning.bind(_Tn);
+export const setStrict: typeof _Tn.setStrict = _Tn.setStrict.bind(_Tn);
 export {
   loadPolicyFile,
   parsePolicyText,
