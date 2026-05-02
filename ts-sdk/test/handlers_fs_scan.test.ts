@@ -17,11 +17,11 @@ import { test } from "node:test";
 import {
   DeviceKey,
   FsScanHandler,
-  makeTNClientAbsorber,
+  makePackageAbsorber,
 } from "../src/index.js";
 import { Tn } from "../src/tn.js";
 
-/** Thin adapter: wraps a Tn instance as the interface makeTNClientAbsorber expects. */
+/** Thin adapter: wraps a Tn instance as the interface makePackageAbsorber expects. */
 function tnAsAbsorber(tn: Tn): { absorb: (source: string) => { rejectedReason?: string | null } } {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rt = (tn as any)._rt;
@@ -86,7 +86,7 @@ test("fs.scan absorbs a dropped snapshot and archives it", async () => {
 
     const h = new FsScanHandler("fs", {
       inDir: inbox,
-      absorber: makeTNClientAbsorber(tnAsAbsorber(consumer)),
+      absorber: makePackageAbsorber(tnAsAbsorber(consumer)),
       autostart: false,
     });
     const n = h.tickOnce();
@@ -113,7 +113,7 @@ test("fs.scan ignores non-tnpkg files", async () => {
     const consumer = await Tn.init(receiver.yamlPath);
     const h = new FsScanHandler("fs", {
       inDir: inbox,
-      absorber: makeTNClientAbsorber(tnAsAbsorber(consumer)),
+      absorber: makePackageAbsorber(tnAsAbsorber(consumer)),
       autostart: false,
     });
     assert.equal(h.tickOnce(), 0);
@@ -131,7 +131,7 @@ test("fs.scan returns 0 when in_dir does not exist", async () => {
     const consumer = await Tn.init(receiver.yamlPath);
     const h = new FsScanHandler("fs", {
       inDir: join(receiver.tmpDir, "does_not_exist"),
-      absorber: makeTNClientAbsorber(tnAsAbsorber(consumer)),
+      absorber: makePackageAbsorber(tnAsAbsorber(consumer)),
       autostart: false,
     });
     assert.equal(h.tickOnce(), 0);
