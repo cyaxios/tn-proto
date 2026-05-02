@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Minimal Node CLI for TN.
 //
-// Two subcommands, both JSON-lines on stdin/stdout so they compose:
+// Subcommands:
 //
 //   tn-js seal < seal-input.json > envelope.ndjson
 //   tn-js verify < envelope.ndjson
+//   tn-js watch --yaml ./tn.yaml [--since start|now|<seq>|<iso-ts>] [--verify] [--poll <ms>] [--once]
 //
 // `seal` expects one JSON object per line with this shape:
 //   {
@@ -290,6 +291,92 @@ function readCmd() {
   }
 }
 
+async function watchCmd() {
+  // Args after the subcommand: --yaml <path>, --since <start|now|<seq>|<iso-ts>>,
+  // --verify, --poll <ms>, --once.
+  const args = argv.slice(3);
+  let yamlPath = null;
+  let since = "now";
+  let verify = false;
+  let pollMs = 300;
+  let once = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--yaml") yamlPath = args[++i];
+    else if (a === "--since") since = args[++i];
+    else if (a === "--verify") verify = true;
+    else if (a === "--poll") pollMs = Number(args[++i]);
+    else if (a === "--once") once = true;
+    else die(`watch: unknown arg ${a}`);
+  }
+
+  // Coerce --since: "start" | "now" stay as strings; pure-digit value
+  // becomes a sequence number; otherwise treat as ISO-8601 timestamp.
+  let sinceVal = since;
+  if (since !== "start" && since !== "now" && /^\d+$/.test(since)) {
+    sinceVal = Number(since);
+  }
+
+  const { Tn } = await import("../dist/index.js");
+  const tn = yamlPath ? await Tn.init(yamlPath) : await Tn.init();
+
+  // Set up SIGINT to stop cleanly. We can't easily abort an in-flight
+  // for-await iteration without an AbortSignal, so flip a flag and
+  // break on the next yield.
+  let stopping = false;
+  const onSigint = () => {
+    stopping = true;
+    process.stderr.write("\ntn-js watch: stopping (SIGINT)\n");
+  };
+  process.on("SIGINT", onSigint);
+
+  try {
+    if (once) {
+      // --once: drain everything currently in the log starting from
+      // `since`, then exit. Use tn.read for the snapshot read; this
+      // matches Python's `python -m tn.watch --once` shape.
+      const opts = {};
+      if (verify) opts.verify = true;
+      const startAt =
+        sinceVal === "start" ? null :
+        sinceVal === "now" ? "skip" :
+        sinceVal;
+      // Walk the snapshot. For "now", we'd skip everything — that's
+      // a no-op, exit 0. For "start", iterate everything. For a
+      // seq/timestamp, filter.
+      if (startAt === "skip") {
+        // no-op; exit 0
+      } else if (startAt === null) {
+        opts.allRuns = true;
+        for (const entry of tn.read(opts)) {
+          stdout.write(JSON.stringify(entry) + "\n");
+        }
+      } else {
+        opts.allRuns = true;
+        for (const entry of tn.read(opts)) {
+          const matches =
+            typeof startAt === "number"
+              ? typeof entry.sequence === "number" && entry.sequence >= startAt
+              : typeof entry.timestamp === "string" && entry.timestamp >= startAt;
+          if (matches) {
+            stdout.write(JSON.stringify(entry) + "\n");
+          }
+        }
+      }
+    } else {
+      // Tail forever (until SIGINT).
+      const watchOpts = { since: sinceVal, verify, pollIntervalMs: pollMs };
+      for await (const entry of tn.watch(watchOpts)) {
+        if (stopping) break;
+        stdout.write(JSON.stringify(entry) + "\n");
+      }
+    }
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+    await tn.close();
+  }
+}
+
 function compileCmd() {
   // Thin CLI over sdk's compileKitBundleToFile.
   const rest = argv.slice(3);
@@ -398,11 +485,14 @@ switch (cmd) {
   case "compile":
     compileCmd();
     break;
+  case "watch":
+    await watchCmd();
+    break;
   case undefined:
   case "--help":
   case "-h":
     process.stderr.write(
-      "tn-js <seal|verify|canonical|info|read>\n" +
+      "tn-js <seal|verify|canonical|info|read|watch>\n" +
         "  seal       stdin JSON -> ndjson envelope line on stdout\n" +
         "  verify     ndjson envelope line -> {ok, ...} on stdout\n" +
         "  canonical  stdin JSON -> canonical UTF-8 line on stdout\n" +
@@ -412,6 +502,12 @@ switch (cmd) {
         "             Iterate decoded entries as pretty JSON on stdout.\n" +
         "             Includes plaintext (per-group) and valid {signature,rowHash,chain}.\n" +
         "             --compact: one JSON line per entry instead of pretty-print.\n" +
+        "  watch      --yaml <path> [--since start|now|<seq>|<iso-ts>] [--verify] [--poll <ms>] [--once]\n" +
+        "             Tail the log and write one decoded entry per line to stdout.\n" +
+        "             --since controls the starting point (default: now, only new appends).\n" +
+        "             --once: snapshot mode — dump matching entries and exit.\n" +
+        "             --verify: include signature/rowHash/chain validity in output.\n" +
+        "             --poll <ms>: polling interval in ms (default: 300).\n" +
         "  admin add-recipient     --yaml <path> [--group default] --out <kit-path>\n" +
         "                          [--recipient-did did:key:...]\n" +
         "  admin revoke-recipient  --yaml <path> [--group default] --leaf <index>\n" +
