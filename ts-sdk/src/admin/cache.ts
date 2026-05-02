@@ -32,8 +32,7 @@ import type {
   AdminCeremonyState,
   AdminState,
   RecipientEntry,
-} from "../client.js";
-import type { TNClient } from "../client.js";
+} from "../core/types.js";
 import type { CeremonyConfig } from "../runtime/config.js";
 import {
   AdminStateReducer,
@@ -72,16 +71,14 @@ const SEP = " ";
 // ---------------------------------------------------------------------
 
 export class AdminStateCache {
-  private readonly client: TNClient;
   private readonly cfg: CeremonyConfig;
   private readonly lkvPath: string;
 
   private readonly _reducer: AdminStateReducer;
   private _atOffset = 0;
 
-  constructor(client: TNClient) {
-    this.client = client;
-    this.cfg = client.runtime.config;
+  constructor(cfg: CeremonyConfig) {
+    this.cfg = cfg;
     this.lkvPath = lkvPathFor(this.cfg);
     this._reducer = new AdminStateReducer();
     this._loadFromDisk();

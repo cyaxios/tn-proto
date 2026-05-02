@@ -10,11 +10,18 @@ import { test } from "node:test";
 import {
   DeviceKey,
   FsDropHandler,
-  TNClient,
   makeTNClientSnapshotBuilder,
   formatFilename,
   readTnpkg,
 } from "../src/index.js";
+import { Tn } from "../src/tn.js";
+
+/** Thin adapter: wraps a Tn instance as the interface makeTNClientSnapshotBuilder expects. */
+function tnAsExporter(tn: Tn): { export: (opts: { kind: string; scope?: string }, outPath: string) => string } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rt = (tn as any)._rt;
+  return { export: (opts, outPath) => rt.exportPkg(opts, outPath) };
+}
 import { BtnPublisher } from "../src/raw.js";
 
 function makeCeremony(): { yamlPath: string; tmpDir: string; cleanup: () => void } {
@@ -54,21 +61,21 @@ function makeCeremony(): { yamlPath: string; tmpDir: string; cleanup: () => void
   return { yamlPath, tmpDir: dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-test("fs.drop writes a signed snapshot when an admin event is emitted", () => {
+test("fs.drop writes a signed snapshot when an admin event is emitted", async () => {
   const { yamlPath, tmpDir, cleanup } = makeCeremony();
   try {
-    const client = TNClient.init(yamlPath);
+    const tn = await Tn.init(yamlPath);
     // Produce an admin event so the snapshot has content.
     const kitsDir = mkdtempSync(join(tmpdir(), "fsdrop-kits-"));
     try {
-      client.adminAddRecipient("default", join(kitsDir, "default.btn.mykit"), "did:key:zAlice");
+      await tn.admin.addRecipient("default", { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zAlice" });
     } finally {
       rmSync(kitsDir, { recursive: true, force: true });
     }
     const outDir = join(tmpDir, "outbox");
     const h = new FsDropHandler("fd", {
       outDir,
-      builder: makeTNClientSnapshotBuilder(client),
+      builder: makeTNClientSnapshotBuilder(tnAsExporter(tn)),
     });
     h.emit({ event_type: "tn.recipient.added" }, "");
     const files = readdirSync(outDir).filter((n) => n.endsWith(".tnpkg"));
@@ -77,45 +84,45 @@ test("fs.drop writes a signed snapshot when an admin event is emitted", () => {
     const { manifest } = readTnpkg(bytes);
     assert.equal(manifest.kind, "admin_log_snapshot");
     assert.ok(manifest.headRowHash, "head_row_hash should be set");
-    client.close();
+    await tn.close();
   } finally {
     cleanup();
   }
 });
 
-test("fs.drop is idempotent when head_row_hash hasn't advanced", () => {
+test("fs.drop is idempotent when head_row_hash hasn't advanced", async () => {
   const { yamlPath, tmpDir, cleanup } = makeCeremony();
   try {
-    const client = TNClient.init(yamlPath);
+    const tn = await Tn.init(yamlPath);
     const kitsDir = mkdtempSync(join(tmpdir(), "fsdrop-kits-"));
     try {
-      client.adminAddRecipient("default", join(kitsDir, "default.btn.mykit"), "did:key:zA");
+      await tn.admin.addRecipient("default", { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zA" });
     } finally {
       rmSync(kitsDir, { recursive: true, force: true });
     }
     const outDir = join(tmpDir, "outbox");
     const h = new FsDropHandler("fd", {
       outDir,
-      builder: makeTNClientSnapshotBuilder(client),
+      builder: makeTNClientSnapshotBuilder(tnAsExporter(tn)),
     });
     h.emit({ event_type: "tn.recipient.added" }, "");
     h.emit({ event_type: "tn.recipient.added" }, "");
     const files = readdirSync(outDir).filter((n) => n.endsWith(".tnpkg"));
     assert.equal(files.length, 1, "second drop with unchanged head should noop");
-    client.close();
+    await tn.close();
   } finally {
     cleanup();
   }
 });
 
-test("fs.drop allowlist filters event types", () => {
+test("fs.drop allowlist filters event types", async () => {
   const { yamlPath, tmpDir, cleanup } = makeCeremony();
   try {
-    const client = TNClient.init(yamlPath);
+    const tn = await Tn.init(yamlPath);
     const outDir = join(tmpDir, "outbox");
     const h = new FsDropHandler("fd", {
       outDir,
-      builder: makeTNClientSnapshotBuilder(client),
+      builder: makeTNClientSnapshotBuilder(tnAsExporter(tn)),
       on: ["tn.recipient.added"],
     });
     assert.equal(h.accepts({ event_type: "tn.recipient.added" }), true);
@@ -125,7 +132,7 @@ test("fs.drop allowlist filters event types", () => {
       const stale = readdirSync(outDir);
       assert.equal(stale.length, 0, "no files should have been written");
     }
-    client.close();
+    await tn.close();
   } finally {
     cleanup();
   }
