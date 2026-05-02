@@ -101,12 +101,12 @@ test("emit encrypts a field into every group it's declared under", () => {
     assert.equal(e.plaintext["a"]?.email, "alice@example.com");
     assert.equal(e.plaintext["b"]?.email, "alice@example.com");
     // Each group's index token is independent (different group key).
-    // Note the envelope uses camelCase `fieldHashes` (Python ndjson uses
-    // `field_hashes`); the TS NodeRuntime keeps the JS-idiomatic shape.
-    const aHashes = (e.envelope["a"] as { fieldHashes: Record<string, string> })
-      .fieldHashes;
-    const bHashes = (e.envelope["b"] as { fieldHashes: Record<string, string> })
-      .fieldHashes;
+    // The wire shape uses snake_case `field_hashes` (matching Python and
+    // the protocol spec — see noderuntime emitInternal groupPayloadsForEnvelope).
+    const aHashes = (e.envelope["a"] as { field_hashes: Record<string, string> })
+      .field_hashes;
+    const bHashes = (e.envelope["b"] as { field_hashes: Record<string, string> })
+      .field_hashes;
     assert.notEqual(aHashes["email"], bHashes["email"]);
   } finally {
     c.cleanup();
