@@ -17,7 +17,8 @@ import {
   setSigning as _runtimeSetSigning,
 } from "./runtime/node_runtime.js";
 import type { EmitReceipt } from "./core/results.js";
-import { asRowHash, type LogLevel } from "./core/types.js";
+import { watch, type WatchOptions } from "./watch.js";
+import { asRowHash, type Entry, type LogLevel } from "./core/types.js";
 import type { ReadEntry } from "./core/read_shape.js";
 import {
   flattenRawEntry,
@@ -41,6 +42,7 @@ import { readAsRecipient } from "./read_as_recipient.js";
 export type { LogLevel } from "./core/types.js";
 export type { EmitReceipt } from "./core/results.js";
 export type { SecureEntry } from "./core/read_shape.js";
+export type { WatchOptions, WatchSince } from "./watch.js";
 
 // ---------------------------------------------------------------------------
 // Module-level log-level state — own copy for Tn (does not share with
@@ -723,6 +725,27 @@ export class Tn {
       attachInstructions(flat, r);
       yield flat;
     }
+  }
+
+  /**
+   * Async-iterable over live log appends. Opens the log, yields existing
+   * entries from the chosen starting point, then keeps watching for new bytes.
+   *
+   * Tracks byte offset so we never re-read prior bytes on append. Survives
+   * rotation (inode change) and emits a tamper-class admin event on
+   * unexpected truncation.
+   *
+   * `since` controls the starting point:
+   * - `"now"` (default) — yields only new appends after `watch()` is called.
+   * - `"start"` — replays from the beginning of the current log file.
+   * - A sequence number — resumes at the first envelope with sequence >= N.
+   * - An ISO-8601 string — resumes at the first envelope with timestamp >= S.
+   *
+   * Break out of the `for await` loop to stop watching. The underlying
+   * chokidar watcher is closed automatically when the generator is done.
+   */
+  watch(opts?: WatchOptions): AsyncIterable<Entry> {
+    return watch(this._rt, opts ?? {});
   }
 
   // -------------------------------------------------------------------------

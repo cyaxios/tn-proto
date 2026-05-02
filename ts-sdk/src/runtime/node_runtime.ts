@@ -1532,6 +1532,113 @@ export class NodeRuntime {
     }
   }
 
+  /**
+   * Parse a single ndjson line into a ReadEntry without chain-continuity
+   * tracking. Returns null when the line is empty or malformed JSON.
+   *
+   * Used by tn.watch to decode incremental tail bytes without re-reading
+   * the full log. The `verify` option controls whether signature and
+   * row_hash checks are applied (the validity flags are always populated;
+   * `verify` only controls whether a failed check surfaces a warning).
+   */
+  parseEnvelopeLine(
+    line: string,
+    opts: { verify: boolean },
+  ): ReadEntry | null {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    let env: Record<string, unknown>;
+    try {
+      env = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+
+    const eventType = String(env["event_type"] ?? "");
+    const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH);
+    const envRowHash = String(env["row_hash"] ?? "");
+    const envSig = String(env["signature"] ?? "");
+    const envDid = String(env["did"] ?? "");
+    const envTs = String(env["timestamp"] ?? "");
+    const envEventId = String(env["event_id"] ?? "");
+    const envLevel = String(env["level"] ?? "");
+
+    // Chain continuity is unknown for a single out-of-context line.
+    const chainOk = true;
+
+    // Identify group payloads in the envelope.
+    const groupRaw = new Map<string, { ct: Uint8Array; fieldHashes: Record<string, string> }>();
+    for (const [k, v] of Object.entries(env)) {
+      if (isGroupPayload(v)) {
+        const ct = new Uint8Array(Buffer.from(v.ciphertext, "base64"));
+        const fh =
+          ((v as Record<string, unknown>)["field_hashes"] as Record<string, string> | undefined) ??
+          ((v as Record<string, unknown>)["fieldHashes"] as Record<string, string> | undefined) ??
+          {};
+        groupRaw.set(k, { ct, fieldHashes: fh });
+      }
+    }
+
+    // Public fields.
+    const publicFields: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(env)) {
+      if (!_ENVELOPE_RESERVED.has(k) && !groupRaw.has(k) && this.config.publicFields.has(k)) {
+        publicFields[k] = v;
+      }
+    }
+
+    // Recompute row_hash.
+    const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
+    for (const [gname, g] of groupRaw) {
+      groupsForHash[gname] = { ciphertext: g.ct, fieldHashes: g.fieldHashes };
+    }
+    let rowHashOk: boolean;
+    try {
+      const recomputed = rowHash({
+        did: asDid(envDid),
+        timestamp: envTs,
+        eventId: envEventId,
+        eventType,
+        level: envLevel,
+        prevHash: asRowHash(envPrevHash),
+        publicFields,
+        groups: groupsForHash,
+      });
+      rowHashOk = recomputed === envRowHash;
+    } catch {
+      rowHashOk = false;
+    }
+
+    // Signature verification.
+    let sigOk: boolean;
+    if (opts.verify) {
+      try {
+        const sig = signatureFromB64(asSignatureB64(envSig));
+        sigOk = verify(asDid(envDid), new Uint8Array(Buffer.from(envRowHash, "utf8")), sig);
+      } catch {
+        sigOk = false;
+      }
+    } else {
+      sigOk = true;
+    }
+
+    // Decrypt each group we hold kits for.
+    const plaintext: Record<string, Record<string, unknown>> = {};
+    for (const [gname, g] of groupRaw) {
+      const gk = this.keystore.groups.get(gname);
+      const gcfg = this.config.groups.get(gname);
+      const cipherKind = (gcfg?.cipher ?? "btn") as "btn" | "jwe";
+      const kits: GroupKits = { cipher: cipherKind, kits: gk?.kits ?? [] };
+      plaintext[gname] = decryptGroup({ ct: g.ct }, kits) as Record<string, unknown>;
+    }
+
+    return {
+      envelope: env,
+      plaintext,
+      valid: { signature: sigOk, rowHash: rowHashOk, chain: chainOk },
+    };
+  }
+
   /** Seed chain slots by scanning the log for the last row_hash per event_type. */
   private seedChainFromLog(): void {
     const path = this.config.logPath;
