@@ -347,7 +347,7 @@ export class NodeRuntime {
     }
 
     // 3. chain advance.
-    const slot = this.chain.get(eventType) ?? { seq: 0, prevHash: ZERO_HASH };
+    const slot = this.chain.get(eventType) ?? { seq: 0, prevHash: ZERO_HASH() };
     slot.seq += 1;
     const seq = slot.seq;
     const prevHash = slot.prevHash;
@@ -1444,7 +1444,7 @@ export class NodeRuntime {
       }
 
       const eventType = String(env["event_type"] ?? "");
-      const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH);
+      const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH());
       const envRowHash = String(env["row_hash"] ?? "");
       const envSig = String(env["signature"] ?? "");
       const envDid = String(env["did"] ?? "");

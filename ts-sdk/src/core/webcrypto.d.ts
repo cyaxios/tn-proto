@@ -21,6 +21,13 @@ interface CryptoKey {
   readonly usages: KeyUsage[];
 }
 
+/** AES-GCM algorithm parameters. `additionalData` is the W3C-spec AAD field. */
+interface AesGcmParams {
+  name: "AES-GCM";
+  iv: Uint8Array;
+  additionalData?: BufferSource;
+}
+
 interface SubtleCrypto {
   importKey(
     format: "raw",
@@ -43,12 +50,12 @@ interface SubtleCrypto {
   ): Promise<CryptoKey>;
   digest(algorithm: string, data: Uint8Array): Promise<ArrayBuffer>;
   encrypt(
-    algorithm: { name: "AES-GCM"; iv: Uint8Array },
+    algorithm: AesGcmParams,
     key: CryptoKey,
     data: Uint8Array,
   ): Promise<ArrayBuffer>;
   decrypt(
-    algorithm: { name: "AES-GCM"; iv: Uint8Array },
+    algorithm: AesGcmParams,
     key: CryptoKey,
     data: Uint8Array,
   ): Promise<ArrayBuffer>;

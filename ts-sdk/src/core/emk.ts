@@ -106,34 +106,35 @@ export async function checkVerifier(
 }
 
 /** Wrap a per-keystore secret string under the EMK. Returns the wrapped
- * blob for storage. */
+ * blob for storage. Optional `aad` enables domain-separated bindings
+ * (e.g. `"tn-vault-body-v1"`) so ciphertexts from one layer cannot be
+ * replayed against another. Backward-compatible: callers without `aad`
+ * produce the same output as before. */
 export async function wrapKeystoreSecret(
   emk: CryptoKey,
   secretText: string,
+  aad?: Uint8Array,
 ): Promise<WrappedBlob> {
   const nonce = randomBytes(12);
   const pt = new TextEncoder().encode(secretText);
-  const ct = new Uint8Array(
-    await globalThis.crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: nonce },
-      emk,
-      pt,
-    ),
-  );
+  const params: AesGcmParams = { name: "AES-GCM", iv: nonce };
+  if (aad !== undefined) params.additionalData = aad;
+  const ct = new Uint8Array(await globalThis.crypto.subtle.encrypt(params, emk, pt));
   return { nonce_b64: bytesToB64(nonce), ciphertext_b64: bytesToB64(ct) };
 }
 
-/** Unwrap a wrapped keystore-secret blob. Throws on decrypt failure. */
+/** Unwrap a wrapped keystore-secret blob. Throws on decrypt failure.
+ * If `aad` was supplied to `wrapKeystoreSecret`, the same value must be
+ * passed here; mismatched AAD causes a decrypt error. */
 export async function unwrapKeystoreSecret(
   emk: CryptoKey,
   wrapped: WrappedBlob,
+  aad?: Uint8Array,
 ): Promise<string> {
-  const pt = new Uint8Array(
-    await globalThis.crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: b64ToBytes(wrapped.nonce_b64) },
-      emk,
-      b64ToBytes(wrapped.ciphertext_b64),
-    ),
-  );
+  const params: AesGcmParams = { name: "AES-GCM", iv: b64ToBytes(wrapped.nonce_b64) };
+  if (aad !== undefined) params.additionalData = aad;
+  const pt = new Uint8Array(await globalThis.crypto.subtle.decrypt(
+    params, emk, b64ToBytes(wrapped.ciphertext_b64),
+  ));
   return new TextDecoder().decode(pt);
 }

@@ -70,7 +70,7 @@ test("rowHash + buildEnvelopeLine round-trip a public-only entry", () => {
     eventId: "11111111-2222-3333-4444-555555555555",
     eventType: "order.created",
     level: "info",
-    prevHash: ZERO_HASH,
+    prevHash: ZERO_HASH(),
     publicFields: { amount: 100, status: "paid" },
   });
   assert.ok(/^sha256:[0-9a-f]{64}$/.test(rh));
@@ -83,7 +83,7 @@ test("rowHash + buildEnvelopeLine round-trip a public-only entry", () => {
     eventType: "order.created",
     level: "info",
     sequence: 1,
-    prevHash: ZERO_HASH,
+    prevHash: ZERO_HASH(),
     rowHash: rh,
     signatureB64: signatureB64(sig),
     publicFields: { amount: 100, status: "paid" },
