@@ -1,17 +1,19 @@
 // extensions/tn-decrypt/unlock.js — thin re-export wrapper around the
 // SDK's audited EMK module. The actual implementations live at
-// ts-sdk/src/core/emk.ts (compiled to ../../ts-sdk/dist/core/emk.js).
+// ts-sdk/src/core/emk.ts (compiled and vendored into
+// ./vendor/sdk-core/emk.js by tools/build-extension.sh).
 //
-// Production Chrome Web Store packaging will vendor ts-sdk/dist/core/
-// into ./vendor/sdk-core/ as part of the build script. For dev-install
-// (load unpacked from this directory inside the repo), the relative
-// path resolves to the built SDK directly.
+// The extension imports ONLY from ./vendor/sdk-core/ so the directory
+// is self-contained: zip extensions/tn-decrypt/, load unpacked from
+// anywhere, and it works without the sibling ts-sdk/ tree being present.
+// Re-run tools/build-extension.sh after every SDK change to refresh the
+// vendored copies.
 
 export {
   bytesToB64,
   b64ToBytes,
   randomBytes as rand,
-} from "../../ts-sdk/dist/core/encoding.js";
+} from "./vendor/sdk-core/encoding.js";
 
 export {
   importEmk,
@@ -21,7 +23,7 @@ export {
   checkVerifier,
   wrapKeystoreSecret,
   unwrapKeystoreSecret,
-} from "../../ts-sdk/dist/core/emk.js";
+} from "./vendor/sdk-core/emk.js";
 
 // probePrfSupport stays inline — pure feature-detect, no crypto.
 export async function probePrfSupport() {

@@ -22,26 +22,38 @@ implementation. There is no JS reimplementation of any crypto primitive.
 
 ## Install for development
 
-1. Build `tn-wasm` for the web target (or copy the prebuilt `wasm/` files):
+1. Build the SDK and vendor it into the extension. From the repo root:
 
    ```
-   cd tn-protocol/crypto/tn-wasm
+   bash tools/build-extension.sh
+   ```
+
+   That compiles `ts-sdk/` and copies `dist/core/encoding.js` +
+   `dist/core/emk.js` into `extensions/tn-decrypt/vendor/sdk-core/`. After
+   it runs, this directory has no out-of-tree imports — it's complete on
+   its own.
+
+2. (Only if `wasm/tn_wasm.js` and `wasm/tn_wasm_bg.wasm` are missing or
+   stale.) Build `tn-wasm` for the web target:
+
+   ```
+   cd crypto/tn-wasm
    wasm-pack build --target web --release --out-dir pkg-web
-   cp pkg-web/tn_wasm.js   ../../extensions/tn-decrypt/wasm/
+   cp pkg-web/tn_wasm.js     ../../extensions/tn-decrypt/wasm/
    cp pkg-web/tn_wasm_bg.wasm ../../extensions/tn-decrypt/wasm/
    ```
 
-2. In Chrome: `chrome://extensions`, turn on **Developer mode**, click
+3. In Chrome: `chrome://extensions`, turn on **Developer mode**, click
    **Load unpacked**, pick this directory.
 
-3. Click the extension icon, go to **Manage keystore**, import a plaintext
+4. Click the extension icon, go to **Manage keystore**, import a plaintext
    keystore bundle (from tnproto-org's "Coming from another device?" step
    or any `*.keystore.json` file you produced with `tn-js` or the Python
    SDK). Pick a passphrase for this extension's stored copy.
 
-4. Click the extension icon again and **Unlock** with that passphrase.
+5. Click the extension icon again and **Unlock** with that passphrase.
 
-5. Open any page that displays a TN envelope. Entries with ciphertexts
+6. Open any page that displays a TN envelope. Entries with ciphertexts
    the imported kit can open are highlighted with a green `TN` badge and
    the decrypted fields are shown inline. Entries from other publishers
    you don't hold kits for are left alone.
