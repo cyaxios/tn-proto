@@ -26,19 +26,19 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve } from "node:path";
 
-import * as admin from "./admin.js";
+import * as admin from "./core/admin/catalog.js";
 import { normalizeLogFields } from "./_log_fields.js";
 import {
   AdminStateCache,
   type ChainConflict,
   type LeafReuseAttempt,
-} from "./admin_cache.js";
+} from "./admin/cache.js";
 import {
   appendAdminEnvelopes,
   existingRowHashes,
   isAdminEventType,
   resolveAdminLogPath,
-} from "./admin_log.js";
+} from "./admin/log.js";
 import type { TNHandler } from "./handlers/index.js";
 import { StdoutHandler } from "./handlers/stdout.js";
 import { readAsRecipient } from "./read_as_recipient.js";
@@ -2078,7 +2078,7 @@ export interface AbsorbReceipt {
   rejectedReason?: string;
 }
 
-export type { ChainConflict, LeafReuseAttempt } from "./admin_cache.js";
+export type { ChainConflict, LeafReuseAttempt } from "./admin/cache.js";
 
 // ---------------------------------------------------------------------
 // Local helpers
