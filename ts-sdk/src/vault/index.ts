@@ -7,13 +7,27 @@ import type { EmitReceipt } from "../core/results.js";
 export class VaultNamespace {
   constructor(private readonly _rt: NodeRuntime) {}
 
-  async link(_vaultDid: string, _projectId: string): Promise<EmitReceipt> {
-    throw new Error("tn.vault.link: not implemented (Task 2.8)");
+  async link(vaultDid: string, projectId: string): Promise<EmitReceipt> {
+    return this._rt.vaultLink(vaultDid, projectId);
   }
-  async unlink(_vaultDid: string, _projectId: string, _reason?: string): Promise<EmitReceipt> {
-    throw new Error("tn.vault.unlink: not implemented (Task 2.8)");
+
+  async unlink(vaultDid: string, projectId: string, reason?: string): Promise<EmitReceipt> {
+    return this._rt.vaultUnlink(vaultDid, projectId, reason);
   }
-  async setLinkState(_state: "linked" | "unlinked"): Promise<EmitReceipt> {
-    throw new Error("tn.vault.setLinkState: not implemented (Task 2.8)");
+
+  /**
+   * Not ported. Python's `tn.admin.set_link_state` mutates the ceremony
+   * yaml file (flipping ceremony.mode between "local" and "linked") — it is
+   * a config-mutation operation, not a log-event verb. The TS SDK does not
+   * yet expose yaml mutation; use `tn.vault.link(...)` or
+   * `tn.vault.unlink(...)` to emit the corresponding log events instead.
+   */
+  async setLinkState(state: "linked" | "unlinked"): Promise<EmitReceipt> {
+    throw new Error(
+      `tn.vault.setLinkState: not yet ported from Python. ` +
+        `Python's set_link_state mutates the ceremony yaml (ceremony.mode), ` +
+        `not the event log. Use tn.vault.link(...) or tn.vault.unlink(...) ` +
+        `to emit the corresponding log events instead (state=${state}).`,
+    );
   }
 }
