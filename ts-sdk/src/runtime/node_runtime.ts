@@ -23,7 +23,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { DeviceKey } from "../core/signing.js";
 
 import { loadPolicyFile, type PolicyDocument } from "../agents_policy.js";
-import { BtnPublisher, btnDecrypt, btnKitLeaf } from "../raw.js";
+import { BtnPublisher, btnKitLeaf } from "../raw.js";
+import { decryptGroup, type GroupKits } from "../core/decrypt.js";
 import type { TNHandler } from "../handlers/index.js";
 
 function readKitLeaf(kitBytes: Uint8Array): bigint {
@@ -672,31 +673,8 @@ export class NodeRuntime {
       const plaintext: Record<string, Record<string, unknown>> = {};
       for (const [gname, g] of groupRaw) {
         const gk = this.keystore.groups.get(gname);
-        if (!gk || gk.kits.length === 0) {
-          plaintext[gname] = { $no_read_key: true };
-          continue;
-        }
-        let pt: Uint8Array | null = null;
-        for (const kit of gk.kits) {
-          try {
-            pt = btnDecrypt(kit, g.ct);
-            break;
-          } catch {
-            /* try next */
-          }
-        }
-        if (!pt) {
-          plaintext[gname] = { $no_read_key: true };
-          continue;
-        }
-        try {
-          plaintext[gname] = JSON.parse(Buffer.from(pt).toString("utf8")) as Record<
-            string,
-            unknown
-          >;
-        } catch {
-          plaintext[gname] = { $decrypt_error: true };
-        }
+        const kits: GroupKits = { kits: gk?.kits ?? [] };
+        plaintext[gname] = decryptGroup({ ct: g.ct }, kits) as Record<string, unknown>;
       }
 
       // 7. Advance chain state.

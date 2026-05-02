@@ -19,7 +19,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { join } from "node:path";
 
-import { btnDecrypt } from "./raw.js";
+import { decryptGroup } from "./core/decrypt.js";
 import { signatureFromB64, verify } from "./core/signing.js";
 import { asDid, asSignatureB64 } from "./core/types.js";
 
@@ -110,20 +110,8 @@ export function* readAsRecipient(
       const gObj = gBlock as Record<string, unknown>;
       const ct = gObj["ciphertext"];
       if (typeof ct === "string") {
-        try {
-          const ctBytes = new Uint8Array(Buffer.from(ct, "base64"));
-          const ptBytes = btnDecrypt(kit, ctBytes);
-          try {
-            plaintext[group] = JSON.parse(Buffer.from(ptBytes).toString("utf8")) as Record<
-              string,
-              unknown
-            >;
-          } catch {
-            plaintext[group] = { $decrypt_error: true };
-          }
-        } catch {
-          plaintext[group] = { $no_read_key: true };
-        }
+        const ctBytes = new Uint8Array(Buffer.from(ct, "base64"));
+        plaintext[group] = decryptGroup({ ct: ctBytes }, { kits: [kit] }) as Record<string, unknown>;
       }
     }
 
