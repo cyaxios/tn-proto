@@ -20,12 +20,12 @@ import {
   DeviceKey,
   VaultPushHandler,
   makeFetchVaultPostClient,
-  makeTNClientSnapshotBuilder,
+  makePackageSnapshotBuilder,
   readTnpkg,
 } from "../src/index.js";
 import { Tn } from "../src/tn.js";
 
-/** Thin adapter: wraps a Tn instance as the interface makeTNClientSnapshotBuilder expects. */
+/** Thin adapter: wraps a Tn instance as the interface makePackageSnapshotBuilder expects. */
 function tnAsExporter(tn: Tn): { export: (opts: { kind: string; scope?: string }, outPath: string) => string } {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rt = (tn as any)._rt;
@@ -120,7 +120,7 @@ test("vault.push POSTs a signed snapshot to the mock endpoint", async () => {
     const h = new VaultPushHandler("push", {
       endpoint: vault.baseUrl,
       projectId: "proj_xxx",
-      builder: makeTNClientSnapshotBuilder(tnAsExporter(tn)),
+      builder: makePackageSnapshotBuilder(tnAsExporter(tn)),
       client: httpClient,
       outboxDir: join(cer.tmpDir, ".tn/admin", "outbox"),
       trigger: "on_emit",
@@ -162,7 +162,7 @@ test("vault.push is idempotent when head_row_hash is unchanged", async () => {
     const h = new VaultPushHandler("push", {
       endpoint: vault.baseUrl,
       projectId: "proj_xxx",
-      builder: makeTNClientSnapshotBuilder(tnAsExporter(tn)),
+      builder: makePackageSnapshotBuilder(tnAsExporter(tn)),
       client: httpClient,
       outboxDir: join(cer.tmpDir, ".tn/admin", "outbox"),
       trigger: "on_emit",

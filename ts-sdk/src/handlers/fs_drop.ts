@@ -131,7 +131,7 @@ export class FsDropHandler extends BaseTNHandler {
 }
 
 /** Helper used by tests/hosts to build a snapshot via TNClient. */
-export function makeTNClientSnapshotBuilder(client: {
+export function makePackageSnapshotBuilder(client: {
   export: (opts: { kind: string; scope?: string }, outPath: string) => string;
 }): SnapshotBuilder {
   return {

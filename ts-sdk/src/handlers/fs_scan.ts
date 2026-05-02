@@ -4,7 +4,7 @@
 // files, calls a host-supplied `absorb` adapter for each, then archives
 // or deletes. Bad-signature / rejected files always go to `.rejected/`.
 //
-// The host wires `absorb` via [`makeTNClientAbsorber`] (or a mock in tests).
+// The host wires `absorb` via [`makePackageAbsorber`] (or a mock in tests).
 
 import {
   existsSync,
@@ -173,7 +173,7 @@ export class FsScanHandler extends BaseTNHandler {
 }
 
 /** Adapter that maps a TNClient-shaped absorb to the receipt this handler reads. */
-export function makeTNClientAbsorber(client: {
+export function makePackageAbsorber(client: {
   absorb: (source: string) => { rejectedReason?: string | null };
 }): FsScanAbsorber {
   return {

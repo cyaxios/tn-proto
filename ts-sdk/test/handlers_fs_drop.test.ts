@@ -10,13 +10,13 @@ import { test } from "node:test";
 import {
   DeviceKey,
   FsDropHandler,
-  makeTNClientSnapshotBuilder,
+  makePackageSnapshotBuilder,
   formatFilename,
   readTnpkg,
 } from "../src/index.js";
 import { Tn } from "../src/tn.js";
 
-/** Thin adapter: wraps a Tn instance as the interface makeTNClientSnapshotBuilder expects. */
+/** Thin adapter: wraps a Tn instance as the interface makePackageSnapshotBuilder expects. */
 function tnAsExporter(tn: Tn): { export: (opts: { kind: string; scope?: string }, outPath: string) => string } {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rt = (tn as any)._rt;
@@ -75,7 +75,7 @@ test("fs.drop writes a signed snapshot when an admin event is emitted", async ()
     const outDir = join(tmpDir, "outbox");
     const h = new FsDropHandler("fd", {
       outDir,
-      builder: makeTNClientSnapshotBuilder(tnAsExporter(tn)),
+      builder: makePackageSnapshotBuilder(tnAsExporter(tn)),
     });
     h.emit({ event_type: "tn.recipient.added" }, "");
     const files = readdirSync(outDir).filter((n) => n.endsWith(".tnpkg"));
@@ -103,7 +103,7 @@ test("fs.drop is idempotent when head_row_hash hasn't advanced", async () => {
     const outDir = join(tmpDir, "outbox");
     const h = new FsDropHandler("fd", {
       outDir,
-      builder: makeTNClientSnapshotBuilder(tnAsExporter(tn)),
+      builder: makePackageSnapshotBuilder(tnAsExporter(tn)),
     });
     h.emit({ event_type: "tn.recipient.added" }, "");
     h.emit({ event_type: "tn.recipient.added" }, "");
@@ -122,7 +122,7 @@ test("fs.drop allowlist filters event types", async () => {
     const outDir = join(tmpDir, "outbox");
     const h = new FsDropHandler("fd", {
       outDir,
-      builder: makeTNClientSnapshotBuilder(tnAsExporter(tn)),
+      builder: makePackageSnapshotBuilder(tnAsExporter(tn)),
       on: ["tn.recipient.added"],
     });
     assert.equal(h.accepts({ event_type: "tn.recipient.added" }), true);

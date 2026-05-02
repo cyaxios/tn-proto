@@ -11,10 +11,10 @@ export {
   FsDropHandler,
   DEFAULT_FS_DROP_FILENAME_TEMPLATE,
   formatFilename,
-  makeTNClientSnapshotBuilder,
+  makePackageSnapshotBuilder,
 } from "./fs_drop.js";
 export type { FsDropHandlerOptions, FsDropSpec, SnapshotBuilder } from "./fs_drop.js";
-export { FsScanHandler, makeTNClientAbsorber } from "./fs_scan.js";
+export { FsScanHandler, makePackageAbsorber } from "./fs_scan.js";
 export type {
   FsScanHandlerOptions,
   FsScanSpec,
