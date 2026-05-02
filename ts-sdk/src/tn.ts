@@ -9,7 +9,7 @@
 
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as pathResolve, isAbsolute as pathIsAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -34,6 +34,7 @@ import { AgentsNamespace } from "./agents/index.js";
 import { HandlersNamespace } from "./handlers/namespace.js";
 import { normalizeLogFields } from "./_log_fields.js";
 import { StdoutHandler } from "./handlers/stdout.js";
+import { buildHandlers } from "./handlers/registry.js";
 import { readAsRecipient } from "./read_as_recipient.js";
 
 // ---------------------------------------------------------------------------
@@ -254,6 +255,39 @@ export class Tn {
     }
 
     const rt = NodeRuntime.init(resolvedPath);
+    // Wire yaml-declared handlers (e.g. file.rotating, otel) into the
+    // runtime. Two kinds are excluded from buildHandlers here because the
+    // runtime handles them separately:
+    //   - stdout  → managed by _shouldEnableStdoutFor below (avoids dup)
+    //   - file.rotating pointing at config.logPath → the runtime already
+    //     appends every event to the main log via appendFileSync; a
+    //     FileHandler for the same path would double-write every line.
+    // Kinds that need host-injected adapters (vault.push/pull, fs.drop/scan)
+    // will throw at buildHandlers time if the adapter is absent — callers
+    // that need those must use rt.addHandler() directly.
+    if (rt.config.handlers.length > 0) {
+      const mainLog = rt.config.logPath;
+      const filteredSpecs = rt.config.handlers.filter((h) => {
+        const kind = String(h["kind"] ?? "").toLowerCase();
+        if (kind === "stdout") return false;
+        if (kind === "file.rotating" || kind === "file") {
+          const rawPath = String(h["path"] ?? "");
+          if (rawPath) {
+            const resolved = pathIsAbsolute(rawPath)
+              ? rawPath
+              : pathResolve(rt.config.yamlDir, rawPath);
+            if (resolved === mainLog) return false;
+          }
+        }
+        return true;
+      });
+      if (filteredSpecs.length > 0) {
+        const yamlHandlers = buildHandlers(filteredSpecs, {}, rt.config.yamlDir);
+        for (const h of yamlHandlers) {
+          rt.addHandler(h);
+        }
+      }
+    }
     if (_shouldEnableStdoutFor(rt.config, opts?.stdout)) {
       rt.addHandler(new StdoutHandler());
     }
