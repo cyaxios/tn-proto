@@ -2001,29 +2001,8 @@ export interface ExportOptions {
   packageBody?: Uint8Array;
 }
 
-export interface AbsorbReceipt {
-  kind: string;
-  acceptedCount: number;
-  dedupedCount: number;
-  noop: boolean;
-  derivedState: AdminState | null;
-  conflicts: ChainConflict[];
-  /**
-   * Paths in the local keystore whose existing contents were renamed
-   * to a `.previous.<UTC_TS>` sidecar to make room for kits from the
-   * absorbed package. Empty when nothing was overwritten.
-   *
-   * Mirrors Python `AbsorbReceipt.replaced_kit_paths` (FINDINGS #6
-   * cross-binding parity). Iterate this field after absorb to decide
-   * whether to alert / restore / accept the swap rather than relying
-   * on a printed warning. Optional: omitted (or empty) when nothing
-   * was overwritten.
-   */
-  replacedKitPaths?: string[];
-  /** Set when the package was rejected (signature failure, missing body,
-   * unsupported kind). Otherwise undefined. */
-  rejectedReason?: string;
-}
+import type { AbsorbReceipt } from "./core/results.js";
+export type { AbsorbReceipt } from "./core/results.js";
 
 export type { ChainConflict, LeafReuseAttempt } from "./admin/cache.js";
 
