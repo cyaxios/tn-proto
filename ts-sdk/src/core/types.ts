@@ -86,3 +86,86 @@ export type Entry = Record<string, unknown>;
 
 /** Log-level threshold value. Matches the constants in client.ts. */
 export type LogLevel = "debug" | "info" | "warning" | "error";
+
+// ---------------------------------------------------------------------------
+// Admin state — derived state shape produced by the AdminStateReducer in
+// core/admin/state.ts. SDK-public types; camelCase per TS convention; the
+// wire (manifest) form uses snake_case which is converted at the manifest
+// boundary in client.ts.
+// ---------------------------------------------------------------------------
+
+export interface RecipientEntry {
+  leafIndex: number;
+  recipientDid: string | null;
+  mintedAt: string | null;
+  kitSha256: string | null;
+  revoked: boolean;
+  revokedAt: string | null;
+}
+
+export interface AdminCeremonyState {
+  ceremonyId: string;
+  cipher: string;
+  deviceDid: string;
+  createdAt: string | null;
+}
+
+export interface AdminGroupState {
+  group: string;
+  cipher: string;
+  publisherDid: string;
+  addedAt: string;
+}
+
+export interface AdminRecipientState {
+  group: string;
+  leafIndex: number;
+  recipientDid: string | null;
+  kitSha256: string;
+  mintedAt: string | null;
+  activeStatus: "active" | "revoked" | "retired";
+  revokedAt: string | null;
+  retiredAt: string | null;
+}
+
+export interface AdminRotationState {
+  group: string;
+  cipher: string;
+  generation: number;
+  previousKitSha256: string;
+  rotatedAt: string;
+}
+
+export interface AdminCouponState {
+  group: string;
+  slot: number;
+  toDid: string;
+  issuedTo: string;
+  issuedAt: string | null;
+}
+
+export interface AdminEnrolmentState {
+  group: string;
+  peerDid: string;
+  packageSha256: string;
+  status: "offered" | "absorbed";
+  compiledAt: string | null;
+  absorbedAt: string | null;
+}
+
+export interface AdminVaultLinkState {
+  vaultDid: string;
+  projectId: string;
+  linkedAt: string;
+  unlinkedAt: string | null;
+}
+
+export interface AdminState {
+  ceremony: AdminCeremonyState | null;
+  groups: AdminGroupState[];
+  recipients: AdminRecipientState[];
+  rotations: AdminRotationState[];
+  coupons: AdminCouponState[];
+  enrolments: AdminEnrolmentState[];
+  vaultLinks: AdminVaultLinkState[];
+}

@@ -118,82 +118,29 @@ export interface SecureReadOptions {
 
 export { VerificationError } from "./core/errors.js";
 
-/** Roster entry yielded by `TNClient.recipients`. Matches Python `tn.recipients`. */
-export interface RecipientEntry {
-  leafIndex: number;
-  recipientDid: string | null;
-  mintedAt: string | null;
-  kitSha256: string | null;
-  revoked: boolean;
-  revokedAt: string | null;
-}
+// Admin state types live in core/types.ts (Layer 1) so the AdminStateReducer
+// has no upward dependency on this Layer 2 file. Import the ones referenced
+// internally; re-export the full set so callers who imported from
+// `client.ts` keep working.
+import type {
+  RecipientEntry,
+  AdminRecipientState,
+  AdminEnrolmentState,
+  AdminVaultLinkState,
+  AdminState,
+} from "./core/types.js";
 
-export interface AdminCeremonyState {
-  ceremonyId: string;
-  cipher: string;
-  deviceDid: string;
-  createdAt: string | null;
-}
-
-export interface AdminGroupState {
-  group: string;
-  cipher: string;
-  publisherDid: string;
-  addedAt: string;
-}
-
-export interface AdminRecipientState {
-  group: string;
-  leafIndex: number;
-  recipientDid: string | null;
-  kitSha256: string;
-  mintedAt: string | null;
-  activeStatus: "active" | "revoked" | "retired";
-  revokedAt: string | null;
-  retiredAt: string | null;
-}
-
-export interface AdminRotationState {
-  group: string;
-  cipher: string;
-  generation: number;
-  previousKitSha256: string;
-  rotatedAt: string;
-}
-
-export interface AdminCouponState {
-  group: string;
-  slot: number;
-  toDid: string;
-  issuedTo: string;
-  issuedAt: string | null;
-}
-
-export interface AdminEnrolmentState {
-  group: string;
-  peerDid: string;
-  packageSha256: string;
-  status: "offered" | "absorbed";
-  compiledAt: string | null;
-  absorbedAt: string | null;
-}
-
-export interface AdminVaultLinkState {
-  vaultDid: string;
-  projectId: string;
-  linkedAt: string;
-  unlinkedAt: string | null;
-}
-
-export interface AdminState {
-  ceremony: AdminCeremonyState | null;
-  groups: AdminGroupState[];
-  recipients: AdminRecipientState[];
-  rotations: AdminRotationState[];
-  coupons: AdminCouponState[];
-  enrolments: AdminEnrolmentState[];
-  vaultLinks: AdminVaultLinkState[];
-}
+export type {
+  RecipientEntry,
+  AdminCeremonyState,
+  AdminGroupState,
+  AdminRecipientState,
+  AdminRotationState,
+  AdminCouponState,
+  AdminEnrolmentState,
+  AdminVaultLinkState,
+  AdminState,
+} from "./core/types.js";
 
 // --- AdminState wire-format conversion --------------------------------
 //
