@@ -73,11 +73,8 @@ const _ENVELOPE_RESERVED = new Set([
   "sequence",
 ]);
 
-export interface EmitReceipt {
-  eventId: string;
-  rowHash: RowHash;
-  sequence: number;
-}
+import type { EmitReceipt } from "../core/results.js";
+export type { EmitReceipt };
 
 // ---------------------------------------------------------------------------
 // Session-level signing override.

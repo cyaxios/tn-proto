@@ -11,11 +11,20 @@ export * from "./core/signing.js";
 export * as admin from "./core/admin/catalog.js";
 export * as primitives from "./core/primitives.js";
 export { NodeRuntime } from "./runtime/node_runtime.js";
-export type { ReadEntry, EmitReceipt } from "./runtime/node_runtime.js";
+export type { ReadEntry } from "./runtime/node_runtime.js";
+export type {
+  EmitReceipt,
+  AbsorbReceipt,
+  AddRecipientResult,
+  RevokeRecipientResult,
+  RotateGroupResult,
+  EnsureGroupResult,
+  BundleResult,
+  OfferReceipt,
+} from "./core/results.js";
 export {
   LOG_LEVELS,
   TNClient,
-  type AbsorbReceipt,
   type AdminAddAgentRuntimeOptions,
   type ChainConflict,
   type ExportOptions,

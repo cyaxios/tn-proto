@@ -21,3 +21,4 @@ export * from "./errors.js";
 export * from "./admin/state.js";
 export * from "./admin/catalog.js";
 export * from "./decrypt.js";
+export * from "./results.js";
