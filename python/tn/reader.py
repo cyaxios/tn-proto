@@ -345,6 +345,113 @@ def read_as_recipient(
             }
 
 
+def parse_envelope_line(
+    line: str,
+    cfg: LoadedConfig,
+    *,
+    verify: bool = False,
+    prev_hash_by_event: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Parse a single NDJSON line into the raw ``{envelope, plaintext, valid}`` shape.
+
+    Returns ``None`` on empty / whitespace-only lines or JSON parse errors.
+
+    ``prev_hash_by_event`` is an optional dict tracking chain state across
+    successive calls (keyed by ``event_type``). Pass the same dict on every
+    call from the same tailing session to get correct ``valid.chain`` values.
+    If ``None``, chain checking is skipped (chain=False for that entry).
+
+    ``verify`` controls whether row_hash recomputation and signature
+    verification are performed. When ``False``, ``valid.signature`` and
+    ``valid.row_hash`` are ``False`` (not computed), and ``valid.chain`` is
+    set based on ``prev_hash_by_event`` if supplied.
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        env = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+    event_type = env.get("event_type", "")
+
+    # Chain integrity.
+    if prev_hash_by_event is not None:
+        last = prev_hash_by_event.get(event_type)
+        chain_ok: bool = (last is None) or (env.get("prev_hash") == last)
+        prev_hash_by_event[event_type] = env.get("row_hash", "")
+    else:
+        chain_ok = False
+
+    # Decrypt groups.
+    groups_from_env: dict[str, dict[str, Any]] = {}
+    plaintext: dict[str, dict[str, Any]] = {}
+    for gname in env:
+        if isinstance(env[gname], dict) and "ciphertext" in env[gname]:
+            ct_bytes = base64.b64decode(env[gname]["ciphertext"])
+            groups_from_env[gname] = {
+                "ciphertext": ct_bytes,
+                "field_hashes": env[gname].get("field_hashes", {}),
+            }
+    for gname, gcfg in cfg.groups.items():
+        if gname not in groups_from_env:
+            continue
+        ct_bytes = groups_from_env[gname]["ciphertext"]
+        try:
+            pt = gcfg.cipher.decrypt(ct_bytes)
+            plaintext[gname] = json.loads(pt.decode("utf-8"))
+        except _cipher.NotARecipientError:
+            plaintext[gname] = {"$no_read_key": True}
+        except Exception:  # noqa: BLE001
+            plaintext[gname] = {"$decrypt_error": True}
+
+    if verify:
+        _envelope_reserved = {
+            "did", "timestamp", "event_id", "event_type", "level",
+            "prev_hash", "row_hash", "signature", "sequence",
+        }
+        public_out = {
+            k: v
+            for k, v in env.items()
+            if k in cfg.public_fields
+            and k not in _envelope_reserved
+            and k not in cfg.groups
+        }
+        expected_row_hash = _compute_row_hash(
+            did=env.get("did", ""),
+            timestamp=env.get("timestamp", ""),
+            event_id=env.get("event_id", ""),
+            event_type=event_type,
+            level=env.get("level", ""),
+            prev_hash=env.get("prev_hash", ""),
+            public_fields=public_out,
+            groups=groups_from_env,
+        )
+        row_hash_ok: bool = expected_row_hash == env.get("row_hash", "")
+        try:
+            sig_ok: bool = DeviceKey.verify(
+                env["did"],
+                env["row_hash"].encode("ascii"),
+                _signature_from_b64(env["signature"]),
+            )
+        except Exception:  # noqa: BLE001
+            sig_ok = False
+    else:
+        row_hash_ok = False
+        sig_ok = False
+
+    return {
+        "envelope": env,
+        "plaintext": plaintext,
+        "valid": {
+            "signature": sig_ok,
+            "row_hash": row_hash_ok,
+            "chain": chain_ok,
+        },
+    }
+
+
 def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
     """Yield one dict per log entry.
 
