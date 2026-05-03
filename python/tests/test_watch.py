@@ -71,9 +71,13 @@ def test_watch_since_start_replays_existing(tmp_path):
     seen: list[str] = []
 
     async def reader():
+        # Break when we've seen both pre-events. tn.init() emits admin
+        # envelopes (tn.ceremony.init / tn.group.added) into the same
+        # log, so a fixed counter would race those — assert on
+        # observation, not position.
         async for entry in tn.watch(since="start", poll_interval=0.05):
             seen.append(entry["event_type"])
-            if len(seen) >= 3:
+            if "pre.1" in seen and "pre.2" in seen:
                 break
 
     async def run():
@@ -83,9 +87,6 @@ def test_watch_since_start_replays_existing(tmp_path):
         await asyncio.wait_for(task, timeout=5.0)
 
     asyncio.run(run())
-    # pre.1 and pre.2 must be replayed; post.1 may or may not be included
-    # depending on timing, but the watcher breaks at 3 entries so at least
-    # the pre-existing ones are present.
     assert "pre.1" in seen
     assert "pre.2" in seen
 
