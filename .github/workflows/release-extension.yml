@@ -46,16 +46,54 @@ jobs:
             exit 1
           fi
 
+      - name: Setup Node (for ts-sdk build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build SDK + vendor into extension
+        # tools/build-extension.sh compiles ts-sdk/, copies dist/core/
+        # encoding.js + emk.js into extensions/tn-decrypt/vendor/sdk-core/,
+        # and verifies no out-of-tree imports remain. Without this step
+        # the published zip ships a unlock.js that imports from
+        # ../../ts-sdk/dist/core/... — a path that doesn't exist when
+        # the user unzips and points Chrome at the directory.
+        run: |
+          cd ts-sdk
+          npm ci
+          cd ..
+          bash tools/build-extension.sh
+
       - name: Build extension zip
         run: |
           # Strip test fixtures + README from the bundle. Chrome doesn't
-          # care, but they bloat the download.
+          # care, but they bloat the download. The vendor/sdk-core/
+          # directory MUST be included — that's the audited EMK code the
+          # extension imports.
           cd extensions/tn-decrypt
           zip -r "../../tn-decrypt-${{ steps.version.outputs.version }}.zip" . \
             --exclude "test/*" \
             --exclude "*.md"
           cd ../..
           ls -la "tn-decrypt-${{ steps.version.outputs.version }}.zip"
+
+      - name: Verify zip contains the vendored SDK
+        # Belt-and-suspenders check: if the build step above silently
+        # failed to populate vendor/, we'd publish a broken zip again.
+        # Fail loudly here instead.
+        run: |
+          ZIP="tn-decrypt-${{ steps.version.outputs.version }}.zip"
+          if ! unzip -l "$ZIP" | grep -q 'vendor/sdk-core/encoding.js'; then
+            echo "::error::$ZIP missing vendor/sdk-core/encoding.js"
+            unzip -l "$ZIP"
+            exit 1
+          fi
+          if ! unzip -l "$ZIP" | grep -q 'vendor/sdk-core/emk.js'; then
+            echo "::error::$ZIP missing vendor/sdk-core/emk.js"
+            unzip -l "$ZIP"
+            exit 1
+          fi
+          echo "OK: vendored SDK present in zip"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

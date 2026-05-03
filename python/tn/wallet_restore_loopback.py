@@ -316,7 +316,7 @@ class LoopbackReceiver:
         port between print-and-fetch).
 
         ``allow_origin`` is the vault page origin (e.g.
-        ``http://localhost:8790``). When set, the server emits
+        ``https://vault.tn-proto.org``). When set, the server emits
         ``Access-Control-Allow-Origin`` headers so the browser fetch
         can run with ``mode: "cors"`` and observe real status codes
         instead of opaque "no-cors" responses (S4 fix).

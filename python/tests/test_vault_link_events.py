@@ -25,14 +25,14 @@ def _clean_tn():
 def test_vault_link_emits_event(tmp_path):
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
-    tn.vault.link("did:web:tnproto.org", "proj_test")
+    tn.vault.link("did:web:tn-proto.org", "proj_test")
     tn.flush_and_close()
 
     tn.init(yaml)
     events = [e for e in tn.read() if e["event_type"] == "tn.vault.linked"]
     assert len(events) == 1, f"expected 1 link event, got {len(events)}"
     e = events[0]
-    assert e["vault_did"] == "did:web:tnproto.org"
+    assert e["vault_did"] == "did:web:tn-proto.org"
     assert e["project_id"] == "proj_test"
     assert e["linked_at"]  # non-empty ISO 8601
 
@@ -40,8 +40,8 @@ def test_vault_link_emits_event(tmp_path):
 def test_vault_unlink_emits_event_with_reason(tmp_path):
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
-    tn.vault.link("did:web:tnproto.org", "proj_test")
-    tn.vault.unlink("did:web:tnproto.org", "proj_test", reason="user_request")
+    tn.vault.link("did:web:tn-proto.org", "proj_test")
+    tn.vault.unlink("did:web:tn-proto.org", "proj_test", reason="user_request")
     tn.flush_and_close()
 
     tn.init(yaml)
@@ -53,8 +53,8 @@ def test_vault_unlink_emits_event_with_reason(tmp_path):
 def test_vault_unlink_without_reason(tmp_path):
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
-    tn.vault.link("did:web:tnproto.org", "proj_test")
-    tn.vault.unlink("did:web:tnproto.org", "proj_test")  # reason=None
+    tn.vault.link("did:web:tn-proto.org", "proj_test")
+    tn.vault.unlink("did:web:tn-proto.org", "proj_test")  # reason=None
     tn.flush_and_close()
 
     tn.init(yaml)
@@ -66,8 +66,8 @@ def test_vault_unlink_without_reason(tmp_path):
 def test_vault_link_is_idempotent(tmp_path):
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
-    tn.vault.link("did:web:tnproto.org", "proj_test")
-    tn.vault.link("did:web:tnproto.org", "proj_test")  # duplicate
+    tn.vault.link("did:web:tn-proto.org", "proj_test")
+    tn.vault.link("did:web:tn-proto.org", "proj_test")  # duplicate
     tn.flush_and_close()
 
     tn.init(yaml)
@@ -79,8 +79,8 @@ def test_vault_link_to_different_project_emits_again(tmp_path):
     """Changing either vault_did or project_id is a new link."""
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
-    tn.vault.link("did:web:tnproto.org", "proj_a")
-    tn.vault.link("did:web:tnproto.org", "proj_b")  # different project
+    tn.vault.link("did:web:tn-proto.org", "proj_a")
+    tn.vault.link("did:web:tn-proto.org", "proj_b")  # different project
     tn.flush_and_close()
 
     tn.init(yaml)
@@ -92,9 +92,9 @@ def test_vault_link_after_unlink_emits_again(tmp_path):
     """Re-linking after an unlink is a new event."""
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
-    tn.vault.link("did:web:tnproto.org", "proj_test")
-    tn.vault.unlink("did:web:tnproto.org", "proj_test", reason="temp")
-    tn.vault.link("did:web:tnproto.org", "proj_test")  # re-link
+    tn.vault.link("did:web:tn-proto.org", "proj_test")
+    tn.vault.unlink("did:web:tn-proto.org", "proj_test", reason="temp")
+    tn.vault.link("did:web:tn-proto.org", "proj_test")  # re-link
     tn.flush_and_close()
 
     tn.init(yaml)

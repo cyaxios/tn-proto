@@ -11,8 +11,8 @@ section is absent, a single `file.rotating` at `./.tn/logs/tn.ndjson`
 (5 MB, 5 backups) is synthesized automatically.
 
 Future blob-store handlers (S3, Azure Blob, GCS, R2) will subclass
-AsyncHandler just like KafkaHandler and PDSHandler — the outbox shape
-is already right for them.
+AsyncHandler just like KafkaHandler — the outbox shape is already
+right for them.
 """
 
 from __future__ import annotations

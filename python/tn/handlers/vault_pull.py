@@ -18,7 +18,7 @@ persists the cursor; a future ``tn sync`` CLI verb can call
 Config shape (tn.yaml)::
 
     - kind: vault.pull
-      endpoint: https://api.cyaxios.com
+      endpoint: https://vault.tn-proto.org
       project_id: proj_xxx
       poll_interval: 60s
       on_absorb_error: log | raise        # default: log

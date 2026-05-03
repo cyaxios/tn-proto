@@ -249,7 +249,7 @@ class LoadedConfig:
     handler_specs: list[dict[str, Any]] | None = None  # raw YAML; built lazily
     # Wallet-link fields (spec 2026-04-20-tn-identity-wallet-link §7):
     mode: str = "local"  # "local" | "linked"
-    linked_vault: str | None = None  # e.g. "https://api.cyaxios.com"
+    linked_vault: str | None = None  # e.g. "https://vault.tn-proto.org"
     linked_project_id: str | None = None  # vault-side project id
     sync_logs: bool = False  # §9.4 option B: also sync ndjson logs
     # Where ``tn.*`` admin envelopes are written. The canonical attribute is

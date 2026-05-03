@@ -9,7 +9,7 @@ for t in tests/test_native_roundtrip.py \
          tests/test_tnlog_roundtrip.py \
          tests/test_admin_and_log.py \
          tests/test_handlers.py \
-         tests/test_kafka_pds_stubs.py \
+         tests/test_kafka_stubs.py \
          tests/test_examples.py; do
     echo "=== $t ==="
     if $PY "$t" > /tmp/_tn_test_out 2>&1; then

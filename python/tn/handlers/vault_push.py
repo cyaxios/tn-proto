@@ -38,7 +38,7 @@ module-level pure) for the same reason.
 Config shape (tn.yaml)::
 
     - kind: vault.push
-      endpoint: https://api.cyaxios.com
+      endpoint: https://vault.tn-proto.org
       project_id: proj_xxx
       trigger: on_emit | on_schedule    # default: on_schedule
       poll_interval: 60s                # only for on_schedule
@@ -404,7 +404,7 @@ class VaultPushHandler(TNHandler):
     name
         Handler name (for logging / outbox path).
     endpoint
-        Base URL of the vault (e.g. ``https://api.cyaxios.com``).
+        Base URL of the vault (e.g. ``https://vault.tn-proto.org``).
     project_id
         Project enrolled in the vault.
     cfg_provider

@@ -10,7 +10,7 @@ Schema (all fields optional; presence-based):
 
 ```json
 {
-    "vault_endpoint": "https://tnproto.org",
+    "vault_endpoint": "https://vault.tn-proto.org",
     "last_pushed_admin_head": "sha256:...",
     "last_pushed_yaml_sha": "sha256:...",
     "last_synced_generation": 7,
@@ -23,7 +23,7 @@ Schema (all fields optional; presence-based):
     "pending_claim": {
         "vault_id": "01J...",
         "expires_at": "2026-04-29T13:30:00+00:00",
-        "claim_url": "https://tnproto.org/claim/01J.../#abc...",
+        "claim_url": "https://vault.tn-proto.org/claim/01J.../#abc...",
         "password_b64": "abc..."
     }
 }

@@ -1,9 +1,9 @@
-"""Kafka + PDS handlers — structural tests.
+"""Kafka handler — structural tests.
 
-These run without `confluent-kafka` or `atproto` installed. They verify:
+These run without `confluent-kafka` installed. They verify:
   - Missing extras raise a clear ImportError at import_module time.
-  - With a monkey-patched Producer / Client, the publish path actually
-    runs: outbox queue -> _publish() -> (mocked) broker/PDS call.
+  - With a monkey-patched Producer, the publish path actually
+    runs: outbox queue -> _publish() -> (mocked) broker call.
 """
 
 from __future__ import annotations
@@ -55,34 +55,8 @@ def test_kafka_missing_extra_raises():
     print("kafka missing extra: clear ImportError raised")
 
 
-def test_pds_missing_extra_raises():
-    try:
-        import atproto  # noqa: F401
-
-        print("atproto extra already installed — skipping missing-extra test")
-        return
-    except ImportError:
-        pass
-
-    from tn.handlers.pds import PDSHandler
-
-    try:
-        PDSHandler(
-            name="fail",
-            outbox_path="/tmp/tn-nowhere",
-            endpoint="https://bsky.social",
-            did="did:plc:abcd",
-            collection="org.tnproto.log",
-        )
-    except ImportError as e:
-        assert "atproto" in str(e), e
-    else:
-        raise AssertionError("expected ImportError without atproto")
-    print("pds missing extra: clear ImportError raised")
-
-
 # ---------------------------------------------------------------------
-# 2. Happy-path with a monkey-patched broker / PDS
+# 2. Happy-path with a monkey-patched broker
 # ---------------------------------------------------------------------
 
 
@@ -141,67 +115,10 @@ def test_kafka_happy_path_with_fake_producer(monkeypatch=None):
         print(f"kafka happy path: 2/2 produced to {topics}")
 
 
-class _FakePDSClient:
-    def __init__(self, base_url=None):
-        self.base_url = base_url
-        self.created: list[dict] = []
-        self.logged_in_as = None
-        # nested namespace imitation: client.com.atproto.repo.create_record(...)
-        self.com = types.SimpleNamespace(
-            atproto=types.SimpleNamespace(
-                repo=types.SimpleNamespace(
-                    create_record=lambda data: self.created.append(data),
-                ),
-            ),
-        )
-
-    def login(self, user, pwd):
-        self.logged_in_as = user
-
-
-def test_pds_happy_path_with_fake_client():
-    fake_mod = types.ModuleType("atproto")
-    fake_mod.Client = _FakePDSClient  # type: ignore[attr-defined]
-    sys.modules["atproto"] = fake_mod
-    for k in list(sys.modules):
-        if k.startswith("tn.handlers.pds"):
-            del sys.modules[k]
-    from tn.handlers.pds import PDSHandler
-
-    with tempfile.TemporaryDirectory(prefix="tnpds_") as td:
-        h = PDSHandler(
-            name="fake-pds",
-            outbox_path=Path(td) / "pds-outbox",
-            endpoint="https://bsky.social",
-            did="did:plc:abcd",
-            handle="alice",
-            password="app-password",
-            collection="org.tnproto.log",
-        )
-        h.emit(
-            {"event_type": "test.ok", "event_id": "pds1"},
-            b'{"event_id":"pds1"}\n',
-        )
-        for _ in range(40):
-            if len(h._client.created) == 1:  # type: ignore[attr-defined]
-                break
-            time.sleep(0.05)
-        h.close(timeout=2.0)
-
-        created = h._client.created  # type: ignore[attr-defined]
-        assert len(created) == 1
-        assert created[0]["collection"] == "org.tnproto.log"
-        assert created[0]["repo"] == "did:plc:abcd"
-        assert created[0]["record"]["event_id"] == "pds1"
-        print("pds happy path: 1 record created")
-
-
 def main() -> int:
     test_kafka_missing_extra_raises()
-    test_pds_missing_extra_raises()
     test_kafka_happy_path_with_fake_producer()
-    test_pds_happy_path_with_fake_client()
-    print("\nkafka + pds stubs: all passed")
+    print("\nkafka stubs: all passed")
     return 0
 
 

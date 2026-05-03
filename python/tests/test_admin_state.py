@@ -69,15 +69,15 @@ def test_admin_state_marks_retired_after_rotation(tmp_path):
 def test_admin_state_records_vault_link_and_unlink(tmp_path):
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
-    tn.vault.link("did:web:tnproto.org", "proj_test")
-    tn.vault.unlink("did:web:tnproto.org", "proj_test", reason="user_request")
+    tn.vault.link("did:web:tn-proto.org", "proj_test")
+    tn.vault.unlink("did:web:tn-proto.org", "proj_test", reason="user_request")
     tn.flush_and_close()
 
     tn.init(yaml)
     s = tn.admin.state()
     assert len(s["vault_links"]) == 1
     link = s["vault_links"][0]
-    assert link["vault_did"] == "did:web:tnproto.org"
+    assert link["vault_did"] == "did:web:tn-proto.org"
     assert link["unlinked_at"] is not None
 
 
