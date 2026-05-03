@@ -30,10 +30,10 @@ from .sealing import SealedBlob, _seal, _unseal
 DEFAULT_TIMEOUT = 30.0
 
 # Default vault URL when caller doesn't specify one and no TN_VAULT_URL
-# env var is set. Points at a locally-running tnproto-org instance
-# (the default port from `tnproto-org/src/config.py` and `runme.bat`).
-# Override with TN_VAULT_URL env var or by passing base_url explicitly.
-DEFAULT_VAULT_URL = "http://localhost:8790"
+# env var is set. Points at the hosted tn-proto vault. Set TN_VAULT_URL
+# to ``http://localhost:8790`` (or any other base) for local dev against
+# a self-hosted tnproto-org instance.
+DEFAULT_VAULT_URL = "https://vault.tn-proto.org"
 ENV_VAULT_URL = "TN_VAULT_URL"
 
 
@@ -89,9 +89,9 @@ class VaultClient:
         """Build a vault client for `identity` against `base_url`.
 
         If `base_url` is None, falls back to the TN_VAULT_URL env var
-        and finally to DEFAULT_VAULT_URL (a local tnproto-org dev
-        instance at http://localhost:8790). Pass an explicit base_url
-        for production use.
+        and finally to DEFAULT_VAULT_URL (the hosted tn-proto vault at
+        https://vault.tn-proto.org). Set TN_VAULT_URL to point at a
+        self-hosted tnproto-org instance for local dev.
         """
         c = cls(base_url=resolve_vault_url(base_url), identity=identity)
         if auto_auth:

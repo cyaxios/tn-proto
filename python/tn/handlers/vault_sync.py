@@ -7,7 +7,7 @@ implements in ``routes_auth.py``.
 Config shape (tn.yaml)::
 
     - kind: vault.sync
-      vault_did: did:web:tnproto.org        # or did:key:z...
+      vault_did: did:web:tn-proto.org       # or did:key:z...
       project_id: proj_abc123               # project enrolled in the vault
       batch_interval_ms: 5000               # flush cadence (default 5000)
       batch_max_events: 1000                # flush size threshold (default 100)

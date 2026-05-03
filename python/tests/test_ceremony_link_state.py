@@ -44,19 +44,19 @@ def test_set_link_state_flips_to_linked_and_persists():
         tn.set_link_state(
             cfg,
             mode="linked",
-            linked_vault="https://api.cyaxios.com",
+            linked_vault="https://vault.tn-proto.org",
             linked_project_id="proj_abc",
         )
         # In-memory cfg is mutated
         assert cfg.mode == "linked"
-        assert cfg.linked_vault == "https://api.cyaxios.com"
+        assert cfg.linked_vault == "https://vault.tn-proto.org"
         assert cfg.linked_project_id == "proj_abc"
         assert cfg.is_linked() is True
 
         # Persisted to yaml
         doc = yaml_mod.safe_load(cfg.yaml_path.read_text(encoding="utf-8"))
         assert doc["ceremony"]["mode"] == "linked"
-        assert doc["ceremony"]["linked_vault"] == "https://api.cyaxios.com"
+        assert doc["ceremony"]["linked_vault"] == "https://vault.tn-proto.org"
         assert doc["ceremony"]["linked_project_id"] == "proj_abc"
     finally:
         tn.flush_and_close()
@@ -69,7 +69,7 @@ def test_set_link_state_back_to_local_drops_fields():
         tn.set_link_state(
             cfg,
             mode="linked",
-            linked_vault="https://api.cyaxios.com",
+            linked_vault="https://vault.tn-proto.org",
             linked_project_id="proj_abc",
         )
         tn.set_link_state(cfg, mode="local")
@@ -93,7 +93,7 @@ def test_linked_persists_across_reload():
         tn.set_link_state(
             cfg,
             mode="linked",
-            linked_vault="https://api.cyaxios.com",
+            linked_vault="https://vault.tn-proto.org",
             linked_project_id="proj_xyz",
         )
         tn.flush_and_close()
@@ -101,7 +101,7 @@ def test_linked_persists_across_reload():
         tn.init(yaml_path, log_path=log_path, cipher="jwe")
         reloaded = tn.current_config()
         assert reloaded.mode == "linked"
-        assert reloaded.linked_vault == "https://api.cyaxios.com"
+        assert reloaded.linked_vault == "https://vault.tn-proto.org"
         assert reloaded.linked_project_id == "proj_xyz"
     finally:
         tn.flush_and_close()
@@ -137,13 +137,13 @@ def test_set_link_state_idempotent_same_vault():
         tn.set_link_state(
             cfg,
             mode="linked",
-            linked_vault="https://api.cyaxios.com",
+            linked_vault="https://vault.tn-proto.org",
             linked_project_id="p1",
         )
         tn.set_link_state(
             cfg,
             mode="linked",
-            linked_vault="https://api.cyaxios.com",
+            linked_vault="https://vault.tn-proto.org",
             linked_project_id="p1",
         )
         assert cfg.linked_project_id == "p1"
@@ -158,7 +158,7 @@ def test_set_link_state_rejects_relink_to_different_vault():
         tn.set_link_state(
             cfg,
             mode="linked",
-            linked_vault="https://api.cyaxios.com",
+            linked_vault="https://vault.tn-proto.org",
             linked_project_id="p1",
         )
         with pytest.raises(RuntimeError, match="already linked"):

@@ -16,7 +16,7 @@ CORE_TESTS=(
     tests/test_jwe_roundtrip.py
     tests/test_revoke_recipient.py
     tests/test_handlers.py
-    tests/test_kafka_pds_stubs.py
+    tests/test_kafka_stubs.py
 )
 
 # BGW-path tests. Opt-in via WITH_BGW=1 for anyone specifically

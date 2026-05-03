@@ -8,7 +8,6 @@ Kind                                       Notes
 ``file.rotating`` / ``file``               Size-based rotation (default)
 ``file.timed_rotating``                    Time-based rotation
 ``kafka``                                  Confluent / self-hosted Kafka
-``atproto.pds`` / ``pds`` / ``atproto``   AT Protocol PDS
 ``s3`` / ``aws.s3``                        AWS S3 (or compatible)
 ``delta`` / ``delta_table`` / ``databricks`` Databricks Delta tables
 ``vault.sync``                             tnproto-org cloud vault (RFC §4)
@@ -122,21 +121,6 @@ def build_handlers(
                     client_id=raw.get("client_id", "tn-protocol"),
                     compression_type=raw.get("compression_type", "zstd"),
                     acks=raw.get("acks", "all"),
-                    filter_spec=filter_spec,
-                )
-            )
-        elif kind in ("atproto.pds", "pds", "atproto"):
-            from .pds import PDSHandler
-
-            out.append(
-                PDSHandler(
-                    name=name,
-                    outbox_path=_outbox_path(yaml_dir, name),
-                    endpoint=raw["endpoint"],
-                    did=raw.get("did"),
-                    handle=raw.get("handle"),
-                    password=raw.get("password"),
-                    collection=raw.get("collection", "org.tnproto.log"),
                     filter_spec=filter_spec,
                 )
             )

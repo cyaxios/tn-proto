@@ -222,12 +222,12 @@ def test_default_identity_dir_respects_appdata_on_windows(monkeypatch, tmp_path)
 
 def test_linked_vault_and_prefs_persist(tmp_path):
     a = Identity.create_new()
-    a.linked_vault = "https://api.cyaxios.com"
+    a.linked_vault = "https://vault.tn-proto.org"
     a.prefs.default_new_ceremony_mode = "linked"
     a.prefs_version = 3
     p = a.ensure_written(tmp_path / "identity.json")
     b = Identity.load(p)
-    assert b.linked_vault == "https://api.cyaxios.com"
+    assert b.linked_vault == "https://vault.tn-proto.org"
     assert b.prefs.default_new_ceremony_mode == "linked"
     assert b.prefs_version == 3
 

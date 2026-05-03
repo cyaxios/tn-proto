@@ -389,8 +389,9 @@ def _resolve_did_endpoint(did_str: str) -> str:
     ``did:key:z...``
         The key is self-describing; no document to fetch. Transport URL
         comes from the ``TN_VAULT_DEFAULT_BASE`` environment variable
-        (default ``http://localhost:8790``). Useful for local dev and
-        tests that point at a local tnproto-org instance.
+        (default ``https://vault.tn-proto.org`` — the hosted tn-proto
+        vault). Set the env var to ``http://localhost:8790`` to point at
+        a local tnproto-org instance for dev/tests.
 
     ``did:web:<host>`` or ``did:web:<host>:<path:segments>``
         Fetch ``https://<host>/.well-known/did.json`` once per process,
@@ -406,7 +407,7 @@ def _resolve_did_endpoint(did_str: str) -> str:
         return _did_endpoint_cache[did_str]
 
     if did_str.startswith("did:key:"):
-        base = os.environ.get("TN_VAULT_DEFAULT_BASE", "http://localhost:8790").rstrip("/")
+        base = os.environ.get("TN_VAULT_DEFAULT_BASE", "https://vault.tn-proto.org").rstrip("/")
         _did_endpoint_cache[did_str] = base
         return base
 

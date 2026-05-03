@@ -18,7 +18,7 @@ ephemeral identity that dies with the process. V2 upgrades that path:
    - pass it to `tn.init(..., identity=session.identity)` so the app
      continues to work
    - let the user visit the URL, write down the mnemonic, choose
-     "Register with tnproto.org" button on the page to bind the
+     "Register with tn-proto.org" button on the page to bind the
      identity to a vault account
 6. After TTL (default 600s) the temp file is wiped. If the user
    never claimed, the identity becomes unrecoverable — but the app
@@ -275,7 +275,7 @@ def _render_claim_page(
   </p>
   <p>
     <label>Vault URL:
-      <input id="vaultUrl" value="https://api.cyaxios.com" style="width: 280px">
+      <input id="vaultUrl" value="https://vault.tn-proto.org" style="width: 280px">
     </label>
     <button id="_register">Register</button>
   </p>

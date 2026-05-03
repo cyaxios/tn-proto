@@ -103,7 +103,7 @@ def test_reduce_vault_unlinked_null_reason():
     envelope = {
         "event_type": "tn.vault.unlinked",
         "did": "did:key:zA",
-        "vault_did": "did:web:tnproto.org",
+        "vault_did": "did:web:tn-proto.org",
         "project_id": "proj_test",
         "reason": None,
         "unlinked_at": "2026-04-22T12:00:00Z",

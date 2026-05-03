@@ -172,7 +172,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     #   1. ``--link <url>``                  (explicit override)
     #   2. ``identity.linked_vault``         (remembered from a prior init)
     #   3. ``TN_VAULT_URL`` env var          (machine-wide default)
-    #   4. ``http://localhost:8790``         (built-in dev default)
+    #   4. ``https://vault.tn-proto.org``    (hosted tn-proto vault)
     #
     # ``--no-link`` opts out entirely (offline-only ceremonies).
     #
@@ -551,8 +551,7 @@ def _cmd_wallet_restore_account_bound(args: argparse.Namespace) -> int:
     if out_dir is None:
         _die("an output directory is required for account-bound restore")
 
-    vault_url = args.vault or "http://localhost:8790"
-    vault_url = vault_url.rstrip("/")
+    vault_url = resolve_vault_url(args.vault).rstrip("/")
 
     # ── Passphrase path (D-22 fallback) ──
     if getattr(args, "passphrase", False):
@@ -976,7 +975,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Vault URL to link this ceremony to. Defaults to identity.linked_vault, "
-            "then $TN_VAULT_URL, then http://localhost:8790."
+            "then $TN_VAULT_URL, then https://vault.tn-proto.org."
         ),
     )
     p_init.add_argument(

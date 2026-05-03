@@ -51,3 +51,6 @@ vault_blobs/
 *.pem
 *.key
 identity.json
+
+#superpowers
+docs/superpowers/*
