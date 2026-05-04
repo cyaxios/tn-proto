@@ -11,7 +11,10 @@ Resolution rules for an ``extends:`` entry::
     2. Otherwise treat it as a pack id and probe, in order:
          - <tn.yaml dir>/industry-agents/<id>.yaml
          - <tn.yaml dir>/packs/<id>.yaml
-         - <repo-root>/tnproto-org/static/industry-agents/<id>.yaml
+         - sibling repo: walks upward from tn.yaml (and from this source
+           file as a final fallback) looking for either
+           ``tn_proto_web/static/industry-agents/<id>.yaml`` or
+           ``tn-proto-org/static/industry-agents/<id>.yaml``
 
 Merge order: pack groups/fields are applied first, then the project's own
 groups/fields override them. A project may NOT override the group of a
@@ -124,13 +127,46 @@ def find_config(start: Path) -> Path:
         cur = cur.parent
 
 
-def _repo_root_industry_dir() -> Path:
-    """Path to the in-repo industry-agents dir, used as a dev fallback."""
-    # tn-protocol/python/tn/lint/config.py
-    #   parents: [0]=lint [1]=tn [2]=python [3]=tn-protocol [4]=repo root
-    here = Path(__file__).resolve()
-    repo_root = here.parents[4]
-    return repo_root / "tnproto-org" / "static" / "industry-agents"
+_SIBLING_PACK_DIRS: tuple[tuple[str, ...], ...] = (
+    ("tn_proto_web", "static", "industry-agents"),
+    ("tn-proto-org", "static", "industry-agents"),
+)
+
+
+def _iter_sibling_industry_dirs(base_dir: Path) -> list[Path]:
+    """Walk up from ``base_dir`` (and from this source file) looking for
+    a sibling repo's published industry-agents dir.
+
+    The packs live in the sibling ``tn_proto_web`` / ``tn-proto-org``
+    repo (https://github.com/cyaxios/tn-proto-org). Local clones may
+    use either directory name. Returns every existing candidate.
+    """
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    starts: list[Path] = []
+    try:
+        starts.append(base_dir.resolve())
+    except OSError:
+        pass
+    starts.append(Path(__file__).resolve().parent)
+
+    for start in starts:
+        cur = start
+        while True:
+            for parts in _SIBLING_PACK_DIRS:
+                cand = cur.joinpath(*parts)
+                rcand = cand if cand.exists() else None
+                if rcand is None:
+                    continue
+                if rcand in seen:
+                    continue
+                seen.add(rcand)
+                candidates.append(rcand)
+            if cur.parent == cur:
+                break
+            cur = cur.parent
+    return candidates
 
 
 def _resolve_extends_entry(entry: str, base_dir: Path) -> Path:
@@ -141,11 +177,12 @@ def _resolve_extends_entry(entry: str, base_dir: Path) -> Path:
             raise ConfigError(f"extends path not found: {entry} (looked at {candidate})")
         return candidate
 
-    probes = [
+    probes: list[Path] = [
         base_dir / "industry-agents" / f"{entry}.yaml",
         base_dir / "packs" / f"{entry}.yaml",
-        _repo_root_industry_dir() / f"{entry}.yaml",
     ]
+    for sibling_dir in _iter_sibling_industry_dirs(base_dir):
+        probes.append(sibling_dir / f"{entry}.yaml")
     for p in probes:
         if p.is_file():
             return p.resolve()
