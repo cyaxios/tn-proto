@@ -494,3 +494,24 @@ def _read_as_recipient_impl(log_path, keystore_dir, *, group: str = "default",
     yield from _raw_read_as_recipient(
         log_path, keystore_dir, group=group, verify_signatures=verify_signatures,
     )
+
+
+def _read_as_recipient_flat_impl(
+    log_path,
+    keystore_dir,
+    *,
+    group: str = "default",
+    verify_signatures: bool = True,
+    verify: bool = False,
+):
+    """Flat-shape sibling of ``_read_as_recipient_impl``.
+
+    Runs each raw entry through ``flatten_raw_entry`` so the surface matches
+    ``tn.read()`` — flat dicts where ``e['event_type']`` works directly.
+    """
+    from . import reader as _reader
+    raw_iter = _reader.read_as_recipient(
+        log_path, keystore_dir, group=group, verify_signatures=verify_signatures,
+    )
+    for r in raw_iter:
+        yield _reader.flatten_raw_entry(r, include_valid=verify)

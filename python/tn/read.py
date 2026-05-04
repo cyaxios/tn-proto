@@ -24,6 +24,38 @@ def read_as_recipient(log_path, keystore_dir, *, group: str = "default", verify_
     yield from _read_as_recipient_impl(log_path, keystore_dir, group=group, verify_signatures=verify_signatures)
 
 
+def read_as_recipient_flat(
+    log_path,
+    keystore_dir,
+    *,
+    group: str = "default",
+    verify_signatures: bool = True,
+    verify: bool = False,
+):
+    """Same as ``tn.read_as_recipient`` but yields **flat dicts** matching
+    ``tn.read()``.
+
+    Where ``tn.read_as_recipient`` returns ``{envelope, plaintext, valid}``
+    triples (the audit/raw shape), this verb projects each entry into the
+    flat shape novices expect — ``e['event_type']``, ``e['amount']``, etc.
+    Groups in the envelope you can't decrypt land in
+    ``e.get('_hidden_groups')``. Pass ``verify=True`` to surface a flat
+    ``_valid`` block carrying ``{signature, chain}`` (``read_as_recipient``
+    does not recompute ``row_hash``, so it isn't included).
+
+    Use ``read_as_recipient`` directly when you need the raw shape (for
+    auditors, signature inspection, or chain debugging).
+    """
+    from . import _read_as_recipient_flat_impl
+    yield from _read_as_recipient_flat_impl(
+        log_path,
+        keystore_dir,
+        group=group,
+        verify_signatures=verify_signatures,
+        verify=verify,
+    )
+
+
 def secure_read(*, on_invalid: str = "skip", log_path: Any = None, cfg: Any = None, all_runs: bool = False, where=None):
     from . import _secure_read_impl
     yield from _secure_read_impl(on_invalid=on_invalid, log_path=log_path, cfg=cfg, all_runs=all_runs, where=where)
