@@ -285,6 +285,94 @@ export async function sealBekForRecipient(
   };
 }
 
+/** Result shape from {@link buildRecipientWraps}. The caller embeds
+ * `manifest` into the final tnpkg (after signing it), uses `aad` only
+ * for debug / cross-language verification, and gets `wraps` separately
+ * so it can attach them somewhere other than `state.body_encryption`
+ * if a future kind needs that. */
+export interface BuildRecipientWrapsResult {
+  manifest: JsonObject;
+  aad: Uint8Array;
+  wraps: RecipientWrap[];
+}
+
+/** Build the producer-side multi-recipient wrap set for a manifest.
+ *
+ * Mirrors the fanout block in `tn_proto/python/tn/export.py`:
+ *
+ *   * Dedupes `recipientDids` while preserving first-seen order.
+ *   * Sets `manifest.to_did` to the first DID (arbitrary but
+ *     deterministic; matches the preview AAD).
+ *   * Computes AAD via {@link manifestAadForWrap}.
+ *   * Seals the BEK once per DID, all bound against the same AAD.
+ *   * Writes the plural `state.body_encryption.recipient_wraps[]`
+ *     array unconditionally; ALSO writes the singular
+ *     `state.body_encryption.recipient_wrap` shadow when there's
+ *     exactly one entry, so consumers on older absorbers keep working.
+ *
+ * The returned `manifest` is a structured clone of the input — the
+ * caller's manifest is not mutated.
+ */
+export async function buildRecipientWraps(
+  bek: Uint8Array,
+  recipientDids: readonly string[],
+  manifestSkeleton: JsonObject,
+): Promise<BuildRecipientWrapsResult> {
+  if (bek.length !== 32) {
+    throw new Error(`buildRecipientWraps: BEK must be 32 bytes; got ${bek.length}`);
+  }
+  if (!recipientDids || recipientDids.length === 0) {
+    throw new Error("buildRecipientWraps: at least one recipient DID required");
+  }
+  // Dedupe while preserving first-seen order; validate each is a
+  // did:key string (sealBekForRecipient enforces the multicodec).
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const d of recipientDids) {
+    if (typeof d !== "string" || !d.startsWith("did:key:z")) {
+      throw new Error(`buildRecipientWraps: ${JSON.stringify(d)} is not a did:key string`);
+    }
+    if (seen.has(d)) continue;
+    seen.add(d);
+    merged.push(d);
+  }
+  if (merged.length === 0) {
+    // Defensive — would only fire if the input was empty after dedupe,
+    // which the length check above already rejects. Keep it for symmetry
+    // with the Python error path.
+    throw new Error("buildRecipientWraps: no valid recipient DIDs after dedupe");
+  }
+
+  // Manifest is mutated locally; never touch the caller's copy.
+  const manifest = deepCopyPlainJson(manifestSkeleton);
+  manifest.to_did = merged[0];
+
+  const aad = manifestAadForWrap(manifest);
+
+  const wraps: RecipientWrap[] = [];
+  for (const did of merged) {
+    wraps.push(await sealBekForRecipient(bek, did, aad));
+  }
+
+  // Inject into state.body_encryption. Create the path if absent.
+  const state =
+    manifest.state && typeof manifest.state === "object" && !Array.isArray(manifest.state)
+      ? (manifest.state as JsonObject)
+      : ({} as JsonObject);
+  const bodyEnc =
+    state.body_encryption && typeof state.body_encryption === "object" && !Array.isArray(state.body_encryption)
+      ? (state.body_encryption as JsonObject)
+      : ({} as JsonObject);
+  bodyEnc.recipient_wraps = wraps;
+  if (wraps.length === 1) {
+    bodyEnc.recipient_wrap = wraps[0];
+  }
+  state.body_encryption = bodyEnc;
+  manifest.state = state;
+
+  return { manifest, aad, wraps };
+}
+
 /** Recover the BEK from a recipient_wrap. `devicePrivSeed` is the
  * 32-byte Ed25519 seed (same bytes the runtime stores in
  * `<keystore>/local.private`). Throws {@link UnsealError} on any

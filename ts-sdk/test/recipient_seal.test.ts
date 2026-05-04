@@ -19,6 +19,7 @@ import { test } from "node:test";
 import {
   WRAP_FRAME,
   UnsealError,
+  buildRecipientWraps,
   manifestAadForWrap,
   sealBekForRecipient,
   unsealBekFromWrap,
@@ -205,6 +206,115 @@ test("didKeyToEd25519Pub: round-trips through DeviceKey.fromSeed", () => {
 });
 
 // ── frame check: bad frame string surfaces UnsealError ────────────
+
+// ── buildRecipientWraps: producer-side fanout helper ───────────────
+
+test("buildRecipientWraps: multi-recipient fanout, every recipient unseals to the same BEK", async () => {
+  const seedA = new Uint8Array(32).fill(0xa0);
+  const seedB = new Uint8Array(32).fill(0xb0);
+  const seedC = new Uint8Array(32).fill(0xc0);
+  const a = DeviceKey.fromSeed(seedA);
+  const b = DeviceKey.fromSeed(seedB);
+  const c = DeviceKey.fromSeed(seedC);
+
+  const bek = new Uint8Array(32);
+  for (let i = 0; i < 32; i += 1) bek[i] = i + 0x80;
+
+  const skeleton = {
+    kind: "kit_bundle",
+    from_did: "did:key:zPublisher",
+    ceremony_id: "ceremony-x",
+    state: { body_encryption: { alg: "AES-256-GCM" } },
+  };
+
+  const r = await buildRecipientWraps(bek, [a.did, b.did, c.did], skeleton);
+  assert.equal(r.wraps.length, 3);
+  // Plural array always emitted.
+  const be = (r.manifest.state as { body_encryption: { recipient_wraps: RecipientWrap[]; recipient_wrap?: RecipientWrap } }).body_encryption;
+  assert.equal(be.recipient_wraps.length, 3);
+  // Singular shadow only emitted when len === 1.
+  assert.equal(be.recipient_wrap, undefined);
+  // to_did becomes the first recipient (deterministic).
+  assert.equal(r.manifest.to_did, a.did);
+
+  // Each device's seed unseals exactly its own wrap entry; cross-device
+  // entries fail (libsodium's AEAD tag check, surfaced as UnsealError).
+  for (const [seed, dk, idx] of [
+    [seedA, a, 0],
+    [seedB, b, 1],
+    [seedC, c, 2],
+  ] as const) {
+    const own = be.recipient_wraps[idx] as RecipientWrap;
+    assert.equal(own.recipient_did, dk.did);
+    const recovered = await unsealBekFromWrap(own, seed, r.aad);
+    assert.equal(bytesToHex(recovered), bytesToHex(bek));
+  }
+});
+
+test("buildRecipientWraps: single recipient emits singular shadow", async () => {
+  const seed = new Uint8Array(32).fill(0xd0);
+  const dk = DeviceKey.fromSeed(seed);
+  const bek = new Uint8Array(32).fill(0x33);
+  const skeleton = { kind: "kit_bundle", state: { body_encryption: { alg: "AES-256-GCM" } } };
+  const r = await buildRecipientWraps(bek, [dk.did], skeleton);
+  const be = (r.manifest.state as { body_encryption: { recipient_wraps: RecipientWrap[]; recipient_wrap?: RecipientWrap } }).body_encryption;
+  assert.equal(be.recipient_wraps.length, 1);
+  assert.notEqual(be.recipient_wrap, undefined);
+  assert.equal(be.recipient_wrap?.recipient_did, dk.did);
+  // Singular shadow has the same body as the array entry.
+  assert.equal(be.recipient_wrap?.wrapped_bek_b64, be.recipient_wraps[0]?.wrapped_bek_b64);
+});
+
+test("buildRecipientWraps: dedupes repeated DIDs preserving first-seen order", async () => {
+  const seedA = new Uint8Array(32).fill(0x11);
+  const seedB = new Uint8Array(32).fill(0x22);
+  const a = DeviceKey.fromSeed(seedA);
+  const b = DeviceKey.fromSeed(seedB);
+  const bek = new Uint8Array(32).fill(0x44);
+  const skeleton = { kind: "kit_bundle", state: { body_encryption: { alg: "AES-256-GCM" } } };
+
+  const r = await buildRecipientWraps(bek, [a.did, b.did, a.did, b.did, a.did], skeleton);
+  assert.equal(r.wraps.length, 2);
+  assert.equal(r.wraps[0]?.recipient_did, a.did);
+  assert.equal(r.wraps[1]?.recipient_did, b.did);
+  assert.equal(r.manifest.to_did, a.did);
+});
+
+test("buildRecipientWraps: empty list throws", async () => {
+  await assert.rejects(
+    () => buildRecipientWraps(new Uint8Array(32), [], { kind: "kit_bundle" }),
+    /at least one recipient DID required/,
+  );
+});
+
+test("buildRecipientWraps: rejects non-did:key entries", async () => {
+  await assert.rejects(
+    () => buildRecipientWraps(new Uint8Array(32), ["did:vault:dev:x"], { kind: "kit_bundle" }),
+    /not a did:key string/,
+  );
+});
+
+test("buildRecipientWraps: does not mutate caller's manifest", async () => {
+  const seed = new Uint8Array(32).fill(0x99);
+  const dk = DeviceKey.fromSeed(seed);
+  const skeleton = {
+    kind: "kit_bundle",
+    state: { body_encryption: { alg: "AES-256-GCM" } },
+  };
+  const before = canonicalize(skeleton);
+  await buildRecipientWraps(new Uint8Array(32).fill(0x77), [dk.did], skeleton);
+  const after = canonicalize(skeleton);
+  assert.deepEqual(Array.from(before), Array.from(after));
+});
+
+test("buildRecipientWraps: creates body_encryption path when missing", async () => {
+  const seed = new Uint8Array(32).fill(0xaa);
+  const dk = DeviceKey.fromSeed(seed);
+  const skeleton = { kind: "kit_bundle" };
+  const r = await buildRecipientWraps(new Uint8Array(32).fill(0xbb), [dk.did], skeleton);
+  const be = (r.manifest.state as { body_encryption: { recipient_wraps: RecipientWrap[] } }).body_encryption;
+  assert.equal(be.recipient_wraps.length, 1);
+});
 
 test("unseal rejects unknown frame string", async () => {
   const seed = new Uint8Array(32).fill(0x77);
