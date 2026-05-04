@@ -1,0 +1,361 @@
+// Sealed-box recipient wrap over Ed25519 device keys.
+//
+// Browser-safe port of `tn_proto/python/tn/recipient_seal.py`. The
+// scheme matches byte-for-byte:
+//
+//   * Ed25519 -> X25519 conversion via libsodium's birational map
+//     (here: @noble/curves' `edwardsToMontgomery*` helpers, which
+//     implement the same map). Used so a recipient's only existing
+//     asymmetric key (the `did:key:z...` Ed25519 device key) becomes
+//     a usable X25519 key.
+//   * Ephemeral X25519 keypair on the producer side; ECDH against the
+//     recipient's converted public key.
+//   * HKDF-SHA256 with salt = ephemeral_pub || recipient_x_pub and
+//     info = utf8("tn-kit-seal-v1"). Length 32.
+//   * AES-256-GCM with the derived key, a 12-byte nonce, and AAD =
+//     canonical bytes of the manifest with manifest_signature_b64,
+//     state.body_encryption.recipient_wrap, and
+//     state.body_encryption.recipient_wraps removed.
+//
+// The wrap output dict has the exact same keys (and base64 padding
+// shape) as Python's so a wrap produced here unseals via Python and
+// vice versa.
+//
+// Layer 1: no node:* imports. AES-GCM goes through globalThis.crypto
+// (Web Crypto API; Node 20+ ships it as a global). HKDF goes through
+// @noble/hashes/hkdf. Curve ops go through @noble/curves.
+
+import { hkdf } from "@noble/hashes/hkdf";
+import { sha256 } from "@noble/hashes/sha2";
+import { x25519, edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from "@noble/curves/ed25519";
+
+import { canonicalize } from "./canonical.js";
+import { bytesToB64, b64ToBytes, randomBytes } from "./encoding.js";
+
+export const WRAP_FRAME = "tn-sealed-box-v1";
+const WRAP_HKDF_INFO = new TextEncoder().encode("tn-kit-seal-v1");
+
+// Multicodec prefix bytes for Ed25519 public keys per
+// https://github.com/multiformats/multicodec/blob/master/table.csv
+// (0xed, 0x01) varint-encoded.
+const ED25519_MULTICODEC = new Uint8Array([0xed, 0x01]);
+
+// ── Errors ──────────────────────────────────────────────────────────
+
+/** Raised on any failure path of {@link unsealBekFromWrap} — bad
+ * frame, bad recipient_did, AEAD auth failure, malformed base64,
+ * wrong-length fields, etc. Callers that walk a `recipient_wraps[]`
+ * array catch this per-entry and try the next one. */
+export class UnsealError extends Error {
+  override name = "UnsealError";
+}
+
+// ── base58btc decode ────────────────────────────────────────────────
+//
+// The TS-SDK has `deriveDidKey` (pub bytes -> did:key:z...) via wasm
+// but no inverse. Multibase-prefixed base58btc decoding is small and
+// keeps the SDK's wasm-init independence: we don't want a sealed-box
+// path that fails on cold start because wasm hasn't loaded yet.
+
+const B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const B58_INDEX: Record<string, number> = (() => {
+  const m: Record<string, number> = {};
+  for (let i = 0; i < B58_ALPHABET.length; i += 1) {
+    const ch = B58_ALPHABET.charAt(i);
+    m[ch] = i;
+  }
+  return m;
+})();
+
+function base58Decode(s: string): Uint8Array {
+  if (s.length === 0) return new Uint8Array(0);
+  // Count leading "1"s (each represents one leading zero byte).
+  let zeros = 0;
+  while (zeros < s.length && s.charAt(zeros) === "1") zeros += 1;
+
+  // Accumulate big-endian byte array via repeated multiplication.
+  const bytes: number[] = [];
+  for (let i = zeros; i < s.length; i += 1) {
+    const ch = s.charAt(i);
+    const digit = B58_INDEX[ch];
+    if (digit === undefined) {
+      throw new Error(`base58 decode: invalid char ${JSON.stringify(ch)} at offset ${i}`);
+    }
+    let carry = digit;
+    for (let j = 0; j < bytes.length; j += 1) {
+      carry += (bytes[j] as number) * 58;
+      bytes[j] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+
+  const out = new Uint8Array(zeros + bytes.length);
+  for (let i = 0; i < bytes.length; i += 1) {
+    out[zeros + i] = bytes[bytes.length - 1 - i] as number;
+  }
+  return out;
+}
+
+// ── DID + curve helpers ─────────────────────────────────────────────
+
+function bytesEq(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** Decode a `did:key:z...` Ed25519 identity to its 32-byte public key.
+ * Throws on non-key DIDs, non-Ed25519 multicodecs, or bad lengths. */
+export function didKeyToEd25519Pub(did: string): Uint8Array {
+  if (!did.startsWith("did:key:z")) {
+    throw new Error(`sealed-box recipient must be a did:key Ed25519 identity; got ${JSON.stringify(did)}`);
+  }
+  const decoded = base58Decode(did.slice("did:key:z".length));
+  if (decoded.length < 2) {
+    throw new Error(`did:key payload too short for ${JSON.stringify(did)}`);
+  }
+  const prefix = decoded.slice(0, 2);
+  const pub = decoded.slice(2);
+  if (!bytesEq(prefix, ED25519_MULTICODEC)) {
+    throw new Error(
+      `sealed-box requires Ed25519 (multicodec 0xed) recipient DID; got prefix [${prefix[0]},${prefix[1]}] on ${JSON.stringify(did)}`,
+    );
+  }
+  if (pub.length !== 32) {
+    throw new Error(`DID ${JSON.stringify(did)} carries non-32-byte Ed25519 pubkey (${pub.length} bytes)`);
+  }
+  return pub;
+}
+
+function ed25519PubToX25519Pub(edPub: Uint8Array): Uint8Array {
+  if (edPub.length !== 32) {
+    throw new Error(`ed25519PubToX25519Pub: expected 32-byte pub, got ${edPub.length}`);
+  }
+  return edwardsToMontgomeryPub(edPub);
+}
+
+function ed25519SeedToX25519Priv(seed: Uint8Array): Uint8Array {
+  if (seed.length !== 32) {
+    throw new Error(`ed25519SeedToX25519Priv: expected 32-byte seed, got ${seed.length}`);
+  }
+  // @noble/curves' edwardsToMontgomeryPriv takes the 32-byte seed (the
+  // ed25519 private "scalar"). It internally hashes the seed per the
+  // EdDSA spec and returns the resulting X25519 private scalar — same
+  // output as libsodium's crypto_sign_ed25519_sk_to_curve25519 over the
+  // 64-byte expanded secret key.
+  return edwardsToMontgomeryPriv(seed);
+}
+
+// ── AAD: manifest minus signature minus recipient_wrap[s] ───────────
+
+interface JsonObject {
+  [key: string]: unknown;
+}
+
+function deepCopyPlainJson<T>(v: T): T {
+  // Round-trip through JSON. The producer/consumer paths only ever
+  // hand us plain JSON-shaped data (number/string/bool/null/array/
+  // object), so this is safe and matches Python's
+  // `json.loads(json.dumps(...))` deep copy.
+  return JSON.parse(JSON.stringify(v)) as T;
+}
+
+/** Compute the AES-GCM AAD that binds a recipient_wrap to its
+ * manifest. Strips:
+ *
+ *   - manifest_signature_b64 (signature is set after the wrap; can't
+ *     be in AAD).
+ *   - state.body_encryption.recipient_wrap (singular shadow).
+ *   - state.body_encryption.recipient_wraps (plural array).
+ *
+ * Each entry in recipient_wraps[] binds against the same AAD; the
+ * holder of any single matching key recovers the BEK independently.
+ */
+export function manifestAadForWrap(manifest: JsonObject): Uint8Array {
+  const m = deepCopyPlainJson(manifest);
+  delete (m as JsonObject).manifest_signature_b64;
+  const state = (m as JsonObject).state;
+  if (state && typeof state === "object" && !Array.isArray(state)) {
+    const be = (state as JsonObject).body_encryption;
+    if (be && typeof be === "object" && !Array.isArray(be)) {
+      delete (be as JsonObject).recipient_wrap;
+      delete (be as JsonObject).recipient_wraps;
+    }
+  }
+  return canonicalize(m);
+}
+
+// ── AES-GCM via WebCrypto ───────────────────────────────────────────
+
+async function aesGcmEncrypt(
+  key: Uint8Array,
+  nonce: Uint8Array,
+  plaintext: Uint8Array,
+  aad: Uint8Array,
+): Promise<Uint8Array> {
+  const k = await globalThis.crypto.subtle.importKey(
+    "raw",
+    key,
+    { name: "AES-GCM" },
+    false,
+    ["encrypt"],
+  );
+  const ct = await globalThis.crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: nonce, additionalData: aad },
+    k,
+    plaintext,
+  );
+  return new Uint8Array(ct);
+}
+
+async function aesGcmDecrypt(
+  key: Uint8Array,
+  nonce: Uint8Array,
+  ciphertext: Uint8Array,
+  aad: Uint8Array,
+): Promise<Uint8Array> {
+  const k = await globalThis.crypto.subtle.importKey(
+    "raw",
+    key,
+    { name: "AES-GCM" },
+    false,
+    ["decrypt"],
+  );
+  const pt = await globalThis.crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: nonce, additionalData: aad },
+    k,
+    ciphertext,
+  );
+  return new Uint8Array(pt);
+}
+
+// ── Wrap / unwrap ───────────────────────────────────────────────────
+
+/** Wire shape of a single recipient wrap. Lives in
+ * `manifest.state.body_encryption.recipient_wrap` (singular shadow when
+ * len === 1) or as one entry of
+ * `manifest.state.body_encryption.recipient_wraps[]`. */
+export interface RecipientWrap {
+  frame: string;
+  recipient_did: string;
+  ephemeral_x25519_pub_b64: string;
+  wrap_nonce_b64: string;
+  wrapped_bek_b64: string;
+}
+
+/** Wrap `bek` so only `recipientDid`'s holder can recover it. The
+ * returned object is suitable for embedding directly into the
+ * manifest's recipient-wrap slot. */
+export async function sealBekForRecipient(
+  bek: Uint8Array,
+  recipientDid: string,
+  aad: Uint8Array,
+): Promise<RecipientWrap> {
+  if (bek.length !== 32) {
+    throw new Error(`sealBekForRecipient: BEK must be 32 bytes; got ${bek.length}`);
+  }
+
+  const recipientEdPub = didKeyToEd25519Pub(recipientDid);
+  const recipientXPub = ed25519PubToX25519Pub(recipientEdPub);
+
+  const ephPriv = x25519.utils.randomSecretKey();
+  const ephPub = x25519.getPublicKey(ephPriv);
+
+  const shared = x25519.getSharedSecret(ephPriv, recipientXPub);
+
+  const salt = new Uint8Array(ephPub.length + recipientXPub.length);
+  salt.set(ephPub, 0);
+  salt.set(recipientXPub, ephPub.length);
+
+  const key = hkdf(sha256, shared, salt, WRAP_HKDF_INFO, 32);
+
+  const nonce = randomBytes(12);
+  const wrapped = await aesGcmEncrypt(key, nonce, bek, aad);
+
+  return {
+    frame: WRAP_FRAME,
+    recipient_did: recipientDid,
+    ephemeral_x25519_pub_b64: bytesToB64(ephPub),
+    wrap_nonce_b64: bytesToB64(nonce),
+    wrapped_bek_b64: bytesToB64(wrapped),
+  };
+}
+
+/** Recover the BEK from a recipient_wrap. `devicePrivSeed` is the
+ * 32-byte Ed25519 seed (same bytes the runtime stores in
+ * `<keystore>/local.private`). Throws {@link UnsealError} on any
+ * failure — wrap caller decides whether to treat that as "outsider"
+ * (try the next entry) or "decrypt error" (surface to user). */
+export async function unsealBekFromWrap(
+  wrap: RecipientWrap | unknown,
+  devicePrivSeed: Uint8Array,
+  aad: Uint8Array,
+): Promise<Uint8Array> {
+  if (!wrap || typeof wrap !== "object") {
+    throw new UnsealError(`recipient_wrap is not an object: ${typeof wrap}`);
+  }
+  const w = wrap as Partial<RecipientWrap>;
+  if (w.frame !== WRAP_FRAME) {
+    throw new UnsealError(`unsupported sealed-box frame ${JSON.stringify(w.frame)}; expected ${WRAP_FRAME}`);
+  }
+  if (typeof w.recipient_did !== "string") {
+    throw new UnsealError("recipient_wrap.recipient_did missing or not a string");
+  }
+
+  let ephPub: Uint8Array;
+  let nonce: Uint8Array;
+  let wrapped: Uint8Array;
+  try {
+    ephPub = b64ToBytes(w.ephemeral_x25519_pub_b64 ?? "");
+    nonce = b64ToBytes(w.wrap_nonce_b64 ?? "");
+    wrapped = b64ToBytes(w.wrapped_bek_b64 ?? "");
+  } catch (e) {
+    throw new UnsealError(`recipient_wrap fields malformed: ${(e as Error).message}`);
+  }
+
+  if (ephPub.length !== 32) {
+    throw new UnsealError(`ephemeral_x25519_pub_b64 decoded to ${ephPub.length} bytes; expected 32`);
+  }
+  if (nonce.length !== 12) {
+    throw new UnsealError(`wrap_nonce_b64 decoded to ${nonce.length} bytes; expected 12`);
+  }
+
+  let xPriv: Uint8Array;
+  try {
+    xPriv = ed25519SeedToX25519Priv(devicePrivSeed);
+  } catch (e) {
+    throw new UnsealError(`could not derive X25519 priv from device seed: ${(e as Error).message}`);
+  }
+
+  // Recipient's X25519 PUBLIC key is derived from the wrap's recipient_did
+  // (NOT from the device seed). Defends against a malicious wrap that names
+  // a different DID than the device holds.
+  let recipientXPub: Uint8Array;
+  try {
+    const edPub = didKeyToEd25519Pub(w.recipient_did);
+    recipientXPub = ed25519PubToX25519Pub(edPub);
+  } catch (e) {
+    throw new UnsealError(`could not derive recipient X25519 pub: ${(e as Error).message}`);
+  }
+
+  const shared = x25519.getSharedSecret(xPriv, ephPub);
+  const salt = new Uint8Array(ephPub.length + recipientXPub.length);
+  salt.set(ephPub, 0);
+  salt.set(recipientXPub, ephPub.length);
+  const key = hkdf(sha256, shared, salt, WRAP_HKDF_INFO, 32);
+
+  let bek: Uint8Array;
+  try {
+    bek = await aesGcmDecrypt(key, nonce, wrapped, aad);
+  } catch (e) {
+    throw new UnsealError(`sealed-box decrypt failed: ${(e as Error).message}`);
+  }
+  if (bek.length !== 32) {
+    throw new UnsealError(`recovered BEK is not 32 bytes (got ${bek.length})`);
+  }
+  return bek;
+}

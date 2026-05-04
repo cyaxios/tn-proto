@@ -42,6 +42,7 @@
     "tn-js": "./bin/tn-js.mjs"
   },
   "dependencies": {
+    "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "chokidar": "^4.0.3",
     "fflate": "^0.8.2",
