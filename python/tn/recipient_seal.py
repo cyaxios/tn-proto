@@ -148,9 +148,14 @@ def manifest_aad_for_wrap(manifest_dict: dict[str, Any]) -> bytes:
 
     * ``manifest_signature_b64`` — the signature is set AFTER the wrap is
       built; can't be in AAD.
-    * ``state.body_encryption.recipient_wrap`` — the wrap binds to
-      everything in the manifest EXCEPT itself; otherwise it'd be
-      self-referential.
+    * ``state.body_encryption.recipient_wrap`` — singular, single-key
+      wrap. Removed because the wrap binds to everything in the
+      manifest EXCEPT itself.
+    * ``state.body_encryption.recipient_wraps`` — plural, multi-key
+      array (federation work, decisions log
+      2026-05-04-federation-and-management-decisions.md D-5). Same
+      reasoning. Each entry binds against the same AAD; the holder of
+      any single matching key can recover the BEK independently.
 
     Everything else (kind, from_did, to_did, ceremony_id, scope, clock,
     event_count, head_row_hash, the rest of body_encryption) is bound.
@@ -163,6 +168,7 @@ def manifest_aad_for_wrap(manifest_dict: dict[str, Any]) -> bytes:
         be = state.get("body_encryption")
         if isinstance(be, dict):
             be.pop("recipient_wrap", None)
+            be.pop("recipient_wraps", None)
     return _canonical_bytes(m)
 
 

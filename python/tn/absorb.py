@@ -393,8 +393,22 @@ def _maybe_unseal_recipient_wrap(
     manifest: TnpkgManifest,
     body: dict[str, bytes],
 ) -> tuple[dict[str, bytes], AbsorbReceipt | None]:
-    """If the manifest carries a sealed-box recipient_wrap, unseal it and
+    """If the manifest carries a sealed-box recipient wrap, unseal it and
     replace ``body['body/encrypted.bin']`` with the decrypted body files.
+
+    Supports both wire shapes:
+
+    * ``state.body_encryption.recipient_wrap`` — singular, single-key.
+      Existing shape from the original second-release encrypted-kit-bundle
+      spec; still emitted by producers when there's exactly one
+      recipient.
+    * ``state.body_encryption.recipient_wraps`` — plural, array.
+      Federation work (decisions log
+      2026-05-04-federation-and-management-decisions.md D-5). Producer
+      emits one entry per recipient key. Consumer walks the array and
+      uses the entry whose ``recipient_did`` matches this device.
+
+    When both are present, plural wins (it's the canonical form).
 
     Returns ``(new_body, None)`` on success or pass-through.
     Returns ``(body, AbsorbReceipt[rejected])`` on failure.
@@ -402,7 +416,7 @@ def _maybe_unseal_recipient_wrap(
     Pass-through cases (no unsealing attempted, body unchanged):
       * No ``state`` on the manifest.
       * ``state.body_encryption`` absent.
-      * ``state.body_encryption.recipient_wrap`` absent (e.g. the
+      * Both ``recipient_wrap`` and ``recipient_wraps`` absent (e.g. the
         init-upload pattern where the BEK rides in the URL fragment;
         absorb on that path doesn't reach here in normal flow, but if
         it did we'd let the kind-specific handler see the still-encrypted
@@ -412,8 +426,9 @@ def _maybe_unseal_recipient_wrap(
     body_encryption = state.get("body_encryption") if isinstance(state, dict) else None
     if not isinstance(body_encryption, dict):
         return body, None
-    wrap = body_encryption.get("recipient_wrap")
-    if wrap is None:
+    wraps_array = body_encryption.get("recipient_wraps")
+    wrap_singular = body_encryption.get("recipient_wrap")
+    if wraps_array is None and wrap_singular is None:
         return body, None
 
     # Late import — recipient_seal pulls in pynacl.bindings; we only want
@@ -425,30 +440,14 @@ def _maybe_unseal_recipient_wrap(
     )
     from .export import decrypt_body_blob
 
-    # Recipient identity check.
-    expected_did = wrap.get("recipient_did") if isinstance(wrap, dict) else None
     our_did = getattr(getattr(cfg, "device", None), "did", None)
-    if not isinstance(expected_did, str) or not isinstance(our_did, str):
-        return body, AbsorbReceipt(
-            kind=manifest.kind,
-            legacy_status="rejected",
-            legacy_reason=(
-                "sealed-box wrap is malformed (recipient_did missing) or this "
-                "config has no device DID."
-            ),
-        )
-    if expected_did != our_did:
-        return body, AbsorbReceipt(
-            kind=manifest.kind,
-            legacy_status="rejected",
-            legacy_reason=(
-                f"sealed-box wrap is addressed to {expected_did!r}; this "
-                f"runtime is {our_did!r}. Refusing to attempt unwrap."
-            ),
-        )
-
-    aad = manifest_aad_for_wrap(manifest.to_dict())
     device_priv = getattr(cfg.device, "private_bytes", None)
+    if not isinstance(our_did, str):
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason="cfg.device has no DID; cannot match a sealed-box wrap.",
+        )
     if not isinstance(device_priv, (bytes, bytearray)) or len(device_priv) != 32:
         return body, AbsorbReceipt(
             kind=manifest.kind,
@@ -458,13 +457,68 @@ def _maybe_unseal_recipient_wrap(
                 "cannot unwrap sealed-box body."
             ),
         )
-    try:
-        bek = unseal_bek_from_wrap(wrap, bytes(device_priv), aad)
-    except UnsealError as exc:
+
+    # Build the candidate-wrap list. Plural takes precedence if both
+    # are present. Plural items are dicts with a recipient_did field;
+    # we filter to entries that name this device.
+    candidates: list[dict[str, Any]] = []
+    if isinstance(wraps_array, list):
+        for entry in wraps_array:
+            if not isinstance(entry, dict):
+                continue
+            rdid = entry.get("recipient_did")
+            if rdid == our_did:
+                candidates.append(entry)
+    elif isinstance(wrap_singular, dict):
+        rdid = wrap_singular.get("recipient_did")
+        if rdid == our_did:
+            candidates.append(wrap_singular)
+
+    if not candidates:
+        # Wire shape was present but no entry names us. The publisher
+        # didn't intend us as a recipient. We can't open the body — but
+        # this isn't a "tampered" rejection, just "not for me." Surface
+        # a clear reason.
+        if isinstance(wraps_array, list):
+            recipients = [
+                e.get("recipient_did")
+                for e in wraps_array
+                if isinstance(e, dict)
+            ]
+        else:
+            recipients = [
+                wrap_singular.get("recipient_did")
+                if isinstance(wrap_singular, dict)
+                else None
+            ]
         return body, AbsorbReceipt(
             kind=manifest.kind,
             legacy_status="rejected",
-            legacy_reason=f"sealed-box unwrap failed: {exc}",
+            legacy_reason=(
+                f"sealed-box wrap is addressed to {recipients!r}; this "
+                f"runtime is {our_did!r}. Refusing to attempt unwrap."
+            ),
+        )
+
+    aad = manifest_aad_for_wrap(manifest.to_dict())
+
+    # Try each matching candidate. First successful unwrap wins. With
+    # the AAD binding the manifest, an attacker can't usefully forge a
+    # wrap that names us — the AEAD will reject it.
+    bek: bytes | None = None
+    last_err: str = ""
+    for cand in candidates:
+        try:
+            bek = unseal_bek_from_wrap(cand, bytes(device_priv), aad)
+            break
+        except UnsealError as exc:
+            last_err = str(exc)
+            continue
+    if bek is None:
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=f"sealed-box unwrap failed: {last_err}",
         )
 
     encrypted = body.get("body/encrypted.bin")

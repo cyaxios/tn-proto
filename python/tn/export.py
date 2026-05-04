@@ -388,6 +388,7 @@ def export(
     nickname: str | None = None,
     ceremony_id_stub: str | None = None,
     seal_for_recipient: bool = False,
+    to_dids: list[str] | None = None,
 ) -> Path:
     """Pack a `.tnpkg` from local ceremony state.
 
@@ -566,10 +567,30 @@ def export(
     # ``tn.recipient_seal``. Only callers who hold the recipient's
     # device key can recover the BEK and decrypt the body.
     if seal_for_recipient:
-        if to_did is None or not str(to_did).startswith("did:key:z"):
+        # Resolve the recipient set from to_did (singular) and to_dids
+        # (plural) per the federation spec. Either or both may be
+        # provided; we dedupe and require at least one valid did:key.
+        merged_dids: list[str] = []
+        if to_did is not None:
+            if not str(to_did).startswith("did:key:z"):
+                raise ValueError(
+                    f"export(seal_for_recipient=True): to_did={to_did!r} is not a "
+                    f"did:key string."
+                )
+            merged_dids.append(str(to_did))
+        if to_dids:
+            for d in to_dids:
+                if not isinstance(d, str) or not d.startswith("did:key:z"):
+                    raise ValueError(
+                        f"export(seal_for_recipient=True): to_dids contains "
+                        f"non-did:key entry {d!r}."
+                    )
+                if d not in merged_dids:
+                    merged_dids.append(d)
+        if not merged_dids:
             raise ValueError(
-                "export(seal_for_recipient=True) requires to_did=<did:key:z...> "
-                "naming the intended recipient."
+                "export(seal_for_recipient=True) requires at least one recipient "
+                "in to_did=... or to_dids=[...]."
             )
         if kind not in ("kit_bundle", "full_keystore"):
             raise ValueError(
@@ -585,36 +606,46 @@ def export(
 
         bek = _secrets.token_bytes(32)
         body, extras = _encrypt_body_in_place(body, extras, bek)
-        # AAD = canonical(manifest_dict_without_signature_or_wrap). Build
-        # a preview manifest so the canonical bytes match what the
-        # consumer will compute against the final signed manifest.
+        # AAD = canonical(manifest_dict_without_signature_or_wrap-set).
+        # Build a preview manifest so the canonical bytes match what the
+        # consumer will compute against the final signed manifest. The
+        # AAD function strips both ``recipient_wrap`` and
+        # ``recipient_wraps`` from the canonical bytes, so each entry
+        # in the array binds against the same AAD.
         preview = TnpkgManifest(
             kind=str(kind),
             from_did=cfg.device.did if cfg is not None else "",
             ceremony_id=cfg.ceremony_id if cfg is not None else "",
             as_of=_now_iso(),
             scope=str(scope or extras.get("scope") or _default_scope(kind)),
-            to_did=to_did,
+            to_did=merged_dids[0],  # display addressee = first entry
             clock=dict(extras.get("clock", {})),
             event_count=int(extras.get("event_count", 0)),
             head_row_hash=extras.get("head_row_hash"),
             state=extras.get("state"),
         )
-        # Stash the as_of so the FINAL manifest matches byte-for-byte.
-        # Without this, _now_iso() ticks between preview and final and
-        # the consumer's AAD would differ (they only have the final).
         _preview_as_of = preview.as_of
         aad = _aad_for_wrap(preview.to_dict())
-        wrap_block = _seal_bek(bek, to_did, aad)
-        # Inject the wrap back into extras.state.body_encryption so the
-        # final manifest carries it. Defensive copy to avoid sharing.
+        # One wrap per recipient DID. All bind against the same AAD.
+        wraps_array = [_seal_bek(bek, did, aad) for did in merged_dids]
+        # Inject the wrap set into extras.state.body_encryption. We
+        # always emit the plural ``recipient_wraps`` array (even for a
+        # single recipient — that's the canonical shape going forward).
+        # We ALSO emit a singular ``recipient_wrap`` shadow when there's
+        # exactly one entry, so consumers running against an older
+        # absorber that only knows the singular shape keep working.
         state = dict(extras.get("state") or {})
         body_enc = dict(state.get("body_encryption") or {})
-        body_enc["recipient_wrap"] = wrap_block
+        body_enc["recipient_wraps"] = wraps_array
+        if len(wraps_array) == 1:
+            body_enc["recipient_wrap"] = wraps_array[0]
         state["body_encryption"] = body_enc
         extras["state"] = state
-        # Stash as_of so the final manifest reuses it.
         extras["_seal_for_recipient_as_of"] = _preview_as_of
+        # Final manifest's to_did is the first recipient in the set —
+        # arbitrary but deterministic, matches the preview we used to
+        # compute the AAD.
+        to_did = merged_dids[0]
 
     # identity_seed self-addresses: from_did == to_did. For other kinds,
     # to_did is whatever the caller passed (or None).
