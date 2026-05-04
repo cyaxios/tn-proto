@@ -56,7 +56,7 @@ extends:
 
 1. `<tn.yaml dir>/industry-agents/<id>.yaml`
 2. `<tn.yaml dir>/packs/<id>.yaml`
-3. `<repo root>/tnproto-org/static/industry-agents/<id>.yaml` (dev fallback for in-tree work)
+3. Sibling-repo dev fallback: walks upward from the `tn.yaml` dir (and from this source file) looking for `tn_proto_web/static/industry-agents/<id>.yaml` or `tn-proto-org/static/industry-agents/<id>.yaml`. Local clones may use either directory name.
 
 ### Merge semantics
 

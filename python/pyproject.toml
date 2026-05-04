@@ -53,12 +53,17 @@ dependencies = [
 kafka   = ["confluent-kafka>=2.3"]
 delta   = ["databricks-sql-connector>=3.0", "databricks-sdk>=0.20"]
 s3      = ["boto3>=1.34"]
+# Test runner + coverage. Required to run `pytest tn/lint/tests/` and the
+# `--cov=tn` invocation declared in [tool.coverage.run] below.
+test    = ["pytest>=7", "pytest-cov>=4"]
 # Everything at once (for dev / CI).
 all     = [
     "confluent-kafka>=2.3",
     "databricks-sql-connector>=3.0",
     "databricks-sdk>=0.20",
     "boto3>=1.34",
+    "pytest>=7",
+    "pytest-cov>=4",
 ]
 
 [project.urls]
