@@ -151,13 +151,19 @@ def flatten_raw_entry(raw: dict[str, Any], *, include_valid: bool = False) -> di
         out["_decrypt_errors"] = sorted(decrypt_errors)
 
     # 6. _valid block (verify=True path).
+    #
+    # Only surface keys the upstream raw dict actually carried. The regular
+    # `tn.read(verify=True)` path always sets all three (signature, row_hash,
+    # chain) so its surface is unchanged. `read_as_recipient` only computes
+    # signature + chain — surfacing a hardcoded `row_hash: False` there
+    # would lie about a check that never ran.
     if include_valid:
         v = raw.get("valid") or {}
-        out["_valid"] = {
-            "signature": bool(v.get("signature", False)),
-            "row_hash": bool(v.get("row_hash", False)),
-            "chain": bool(v.get("chain", False)),
-        }
+        valid_out: dict[str, Any] = {}
+        for k in ("signature", "row_hash", "chain"):
+            if k in v:
+                valid_out[k] = bool(v[k])
+        out["_valid"] = valid_out
 
     return out
 
