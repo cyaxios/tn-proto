@@ -253,6 +253,8 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
         return _absorb_kit_bundle(cfg, manifest, body)
     if kind == "contact_update":
         return _absorb_contact_update(cfg, manifest, body)
+    if kind == "identity_seed":
+        return _absorb_identity_seed(cfg, manifest, body)
     if kind == "recipient_invite":
         return AbsorbReceipt(
             kind=kind,
@@ -375,6 +377,140 @@ def _absorb_enrolment_kind(
             legacy_reason="inner Package signature failed verification",
         )
     return _apply_enrolment(cfg, pkg)
+
+
+def _absorb_identity_seed(
+    cfg: LoadedConfig, manifest: TnpkgManifest, body: dict[str, bytes]
+) -> AbsorbReceipt:
+    """Install a freshly-minted identity into ``cfg.keystore``.
+
+    The identity_seed bundle contains exactly:
+
+    ``body/local.private`` — the 32-byte Ed25519 seed.
+    ``body/local.public``  — the matching ``did:key:z...`` string.
+    ``body/tn.yaml``       — a stub yaml naming the DID.
+
+    Behavior:
+
+    * If the keystore has no ``local.private`` yet, install the bundle
+      and return ``accepted_count=1``.
+    * If ``local.private`` already exists AND matches the bundle's bytes
+      byte-for-byte (idempotent re-absorb of the same identity), return
+      ``noop=True``, ``accepted_count=0``.
+    * Otherwise (different identity already present) reject. We don't
+      silently overwrite an existing device key — that would orphan
+      every signed log entry.
+
+    The manifest's signature has already been verified by the caller
+    (``_absorb_dispatch``). One extra cross-check we do here: the
+    manifest's ``from_did`` MUST match the public key derived from the
+    body's ``local.private`` AND must equal the contents of
+    ``body/local.public``. This guards against a tampered body
+    (signature still valid, body privately swapped to a different key).
+    """
+    priv_bytes = body.get("body/local.private")
+    pub_text = body.get("body/local.public")
+    yaml_bytes = body.get("body/tn.yaml")
+    if priv_bytes is None or pub_text is None or yaml_bytes is None:
+        missing = [
+            name
+            for name, present in (
+                ("body/local.private", priv_bytes),
+                ("body/local.public", pub_text),
+                ("body/tn.yaml", yaml_bytes),
+            )
+            if present is None
+        ]
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"identity_seed body is missing required members: {missing}"
+            ),
+        )
+
+    if len(priv_bytes) != 32:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"identity_seed body/local.private must be 32 bytes (Ed25519 "
+                f"seed); got {len(priv_bytes)}"
+            ),
+        )
+
+    # Cross-check: the bundle's body must agree with the manifest's
+    # from_did. This is the load-bearing tamper guard for identity_seed.
+    from .signing import DeviceKey as _DeviceKey
+
+    derived = _DeviceKey.from_private_bytes(priv_bytes)
+    bundle_did = pub_text.decode("utf-8").strip()
+    if derived.did != bundle_did or derived.did != manifest.from_did:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"identity_seed integrity check failed: manifest.from_did="
+                f"{manifest.from_did!r}, body/local.public={bundle_did!r}, "
+                f"derived-from-private={derived.did!r}. The bundle's body and "
+                f"manifest disagree about which identity this is — refuse to "
+                f"install."
+            ),
+        )
+    if manifest.from_did != manifest.to_did:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"identity_seed must be self-addressed (from_did == to_did); "
+                f"got from_did={manifest.from_did!r}, to_did={manifest.to_did!r}."
+            ),
+        )
+
+    keystore = cfg.keystore
+    keystore.mkdir(parents=True, exist_ok=True)
+    priv_path = keystore / "local.private"
+    pub_path = keystore / "local.public"
+    yaml_target = cfg.yaml_path
+
+    if priv_path.exists():
+        existing = priv_path.read_bytes()
+        if existing == priv_bytes:
+            return AbsorbReceipt(
+                kind=manifest.kind,
+                noop=True,
+                legacy_status="no_op",
+                legacy_reason=(
+                    f"identity_seed already installed at {priv_path} (same "
+                    f"DID, bytes match)."
+                ),
+            )
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"refusing to overwrite existing identity at {priv_path}. The "
+                f"keystore already has a different device key. To replace, "
+                f"delete the keystore directory first; the existing identity's "
+                f"signed log entries will become unverifiable."
+            ),
+        )
+
+    priv_path.write_bytes(priv_bytes)
+    pub_path.write_text(bundle_did, encoding="utf-8")
+
+    # tn.yaml: only write if missing — don't clobber an existing
+    # ceremony yaml that might already be fully populated.
+    if not yaml_target.exists():
+        yaml_target.parent.mkdir(parents=True, exist_ok=True)
+        yaml_target.write_bytes(yaml_bytes)
+
+    return AbsorbReceipt(
+        kind=manifest.kind,
+        accepted_count=1,
+        legacy_status="enrolment_applied",
+        legacy_reason=f"installed identity {bundle_did} into {keystore}",
+    )
 
 
 def _absorb_kit_bundle(
