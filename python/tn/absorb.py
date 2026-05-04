@@ -242,6 +242,15 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
             ),
         )
 
+    # Recipient-direction sealed-box unwrap. If the manifest carries
+    # state.body_encryption.recipient_wrap, the body was encrypted by
+    # the producer with a fresh BEK that's been wrapped to this
+    # recipient's identity. Unwrap before kind-specific dispatch so
+    # downstream branches see the body in the clear.
+    body, unwrap_err = _maybe_unseal_recipient_wrap(cfg, manifest, body)
+    if unwrap_err is not None:
+        return unwrap_err
+
     kind = manifest.kind
     if kind == "admin_log_snapshot":
         return _absorb_admin_log_snapshot(cfg, manifest, body)
@@ -377,6 +386,110 @@ def _absorb_enrolment_kind(
             legacy_reason="inner Package signature failed verification",
         )
     return _apply_enrolment(cfg, pkg)
+
+
+def _maybe_unseal_recipient_wrap(
+    cfg: LoadedConfig,
+    manifest: TnpkgManifest,
+    body: dict[str, bytes],
+) -> tuple[dict[str, bytes], AbsorbReceipt | None]:
+    """If the manifest carries a sealed-box recipient_wrap, unseal it and
+    replace ``body['body/encrypted.bin']`` with the decrypted body files.
+
+    Returns ``(new_body, None)`` on success or pass-through.
+    Returns ``(body, AbsorbReceipt[rejected])`` on failure.
+
+    Pass-through cases (no unsealing attempted, body unchanged):
+      * No ``state`` on the manifest.
+      * ``state.body_encryption`` absent.
+      * ``state.body_encryption.recipient_wrap`` absent (e.g. the
+        init-upload pattern where the BEK rides in the URL fragment;
+        absorb on that path doesn't reach here in normal flow, but if
+        it did we'd let the kind-specific handler see the still-encrypted
+        body and reject it).
+    """
+    state = manifest.state or {}
+    body_encryption = state.get("body_encryption") if isinstance(state, dict) else None
+    if not isinstance(body_encryption, dict):
+        return body, None
+    wrap = body_encryption.get("recipient_wrap")
+    if wrap is None:
+        return body, None
+
+    # Late import — recipient_seal pulls in pynacl.bindings; we only want
+    # to take that hit on the unwrap path.
+    from .recipient_seal import (
+        UnsealError,
+        manifest_aad_for_wrap,
+        unseal_bek_from_wrap,
+    )
+    from .export import decrypt_body_blob
+
+    # Recipient identity check.
+    expected_did = wrap.get("recipient_did") if isinstance(wrap, dict) else None
+    our_did = getattr(getattr(cfg, "device", None), "did", None)
+    if not isinstance(expected_did, str) or not isinstance(our_did, str):
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                "sealed-box wrap is malformed (recipient_did missing) or this "
+                "config has no device DID."
+            ),
+        )
+    if expected_did != our_did:
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"sealed-box wrap is addressed to {expected_did!r}; this "
+                f"runtime is {our_did!r}. Refusing to attempt unwrap."
+            ),
+        )
+
+    aad = manifest_aad_for_wrap(manifest.to_dict())
+    device_priv = getattr(cfg.device, "private_bytes", None)
+    if not isinstance(device_priv, (bytes, bytearray)) or len(device_priv) != 32:
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                "cfg.device does not expose a 32-byte Ed25519 private seed; "
+                "cannot unwrap sealed-box body."
+            ),
+        )
+    try:
+        bek = unseal_bek_from_wrap(wrap, bytes(device_priv), aad)
+    except UnsealError as exc:
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=f"sealed-box unwrap failed: {exc}",
+        )
+
+    encrypted = body.get("body/encrypted.bin")
+    if encrypted is None:
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                "manifest declares body_encryption but body/encrypted.bin is "
+                "missing from the zip."
+            ),
+        )
+
+    try:
+        decoded = decrypt_body_blob(encrypted, bek)
+    except Exception as exc:  # noqa: BLE001 — wrap any decrypt error
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=f"body decrypt with unwrapped BEK failed: {exc}",
+        )
+
+    # Replace body with the decrypted member dict. Keys come back as
+    # body/<name> (stored zip preserves the original layout).
+    return decoded, None
 
 
 def _absorb_identity_seed(

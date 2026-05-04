@@ -387,6 +387,7 @@ def export(
     device: Any | None = None,
     nickname: str | None = None,
     ceremony_id_stub: str | None = None,
+    seal_for_recipient: bool = False,
 ) -> Path:
     """Pack a `.tnpkg` from local ceremony state.
 
@@ -446,6 +447,17 @@ def export(
         ``IDENTITY_SEED_CEREMONY_PLACEHOLDER`` ("_identity_seed"). Identity
         bundles aren't tied to a real ceremony — the operator picks one
         once a host installs the identity and starts a ceremony.
+    seal_for_recipient:
+        For ``kind="kit_bundle"`` (and conceivably future kinds): mint a
+        fresh per-export AES-256-GCM BEK, encrypt the body with it via
+        the existing ``_encrypt_body_in_place`` machinery, AND wrap the
+        BEK to the recipient's identity (named by ``to_did``) using the
+        sealed-box construction in ``tn.recipient_seal``. The result is a
+        ``.tnpkg`` whose body is unreadable to anyone but the holder of
+        ``to_did``'s device key. Requires ``to_did`` to be set.
+        Mutually exclusive with ``encrypt_body_with``: caller can either
+        bring their own BEK (init-upload self-backup pattern) or ask the
+        export to mint+wrap one (recipient-direction pattern), not both.
     """
     if kind not in KNOWN_KINDS:
         raise ValueError(f"export: unknown kind {kind!r}; expected one of {sorted(KNOWN_KINDS)}")
@@ -534,6 +546,12 @@ def export(
     # the encrypted-blob hash + cipher suite. AAD is empty here (the
     # manifest is what's signed; the manifest itself records the
     # ciphertext hash, which acts as the integrity binding).
+    if encrypt_body_with is not None and seal_for_recipient:
+        raise ValueError(
+            "export: encrypt_body_with= and seal_for_recipient= are mutually "
+            "exclusive. Either bring your own BEK (init-upload pattern) or ask "
+            "the export to mint+wrap one (recipient-direction pattern)."
+        )
     if encrypt_body_with is not None:
         if not isinstance(encrypt_body_with, (bytes, bytearray)) or len(encrypt_body_with) != 32:
             raise ValueError(
@@ -541,15 +559,77 @@ def export(
             )
         body, extras = _encrypt_body_in_place(body, extras, bytes(encrypt_body_with))
 
+    # Recipient-direction sealed-box body wrap (per the second-release
+    # encrypted-kit-bundle spec). Mints a fresh BEK, encrypts the body
+    # with it, then wraps the BEK to ``to_did``'s identity using the
+    # X25519-derived-from-Ed25519 sealed-box construction in
+    # ``tn.recipient_seal``. Only callers who hold the recipient's
+    # device key can recover the BEK and decrypt the body.
+    if seal_for_recipient:
+        if to_did is None or not str(to_did).startswith("did:key:z"):
+            raise ValueError(
+                "export(seal_for_recipient=True) requires to_did=<did:key:z...> "
+                "naming the intended recipient."
+            )
+        if kind not in ("kit_bundle", "full_keystore"):
+            raise ValueError(
+                f"export(seal_for_recipient=True) is currently scoped to "
+                f"kit_bundle / full_keystore; got kind={kind!r}."
+            )
+        import secrets as _secrets
+
+        from .recipient_seal import (
+            manifest_aad_for_wrap as _aad_for_wrap,
+            seal_bek_for_recipient as _seal_bek,
+        )
+
+        bek = _secrets.token_bytes(32)
+        body, extras = _encrypt_body_in_place(body, extras, bek)
+        # AAD = canonical(manifest_dict_without_signature_or_wrap). Build
+        # a preview manifest so the canonical bytes match what the
+        # consumer will compute against the final signed manifest.
+        preview = TnpkgManifest(
+            kind=str(kind),
+            from_did=cfg.device.did if cfg is not None else "",
+            ceremony_id=cfg.ceremony_id if cfg is not None else "",
+            as_of=_now_iso(),
+            scope=str(scope or extras.get("scope") or _default_scope(kind)),
+            to_did=to_did,
+            clock=dict(extras.get("clock", {})),
+            event_count=int(extras.get("event_count", 0)),
+            head_row_hash=extras.get("head_row_hash"),
+            state=extras.get("state"),
+        )
+        # Stash the as_of so the FINAL manifest matches byte-for-byte.
+        # Without this, _now_iso() ticks between preview and final and
+        # the consumer's AAD would differ (they only have the final).
+        _preview_as_of = preview.as_of
+        aad = _aad_for_wrap(preview.to_dict())
+        wrap_block = _seal_bek(bek, to_did, aad)
+        # Inject the wrap back into extras.state.body_encryption so the
+        # final manifest carries it. Defensive copy to avoid sharing.
+        state = dict(extras.get("state") or {})
+        body_enc = dict(state.get("body_encryption") or {})
+        body_enc["recipient_wrap"] = wrap_block
+        state["body_encryption"] = body_enc
+        extras["state"] = state
+        # Stash as_of so the final manifest reuses it.
+        extras["_seal_for_recipient_as_of"] = _preview_as_of
+
     # identity_seed self-addresses: from_did == to_did. For other kinds,
     # to_did is whatever the caller passed (or None).
     final_to_did = signer_did if kind == "identity_seed" else to_did
+
+    # If the seal-for-recipient path stashed a preview as_of, reuse it so
+    # the final manifest is byte-equal to the one we computed AAD over.
+    sealed_as_of = extras.pop("_seal_for_recipient_as_of", None)
+    final_as_of = sealed_as_of or _now_iso()
 
     manifest = TnpkgManifest(
         kind=str(kind),
         from_did=signer_did,
         ceremony_id=signer_ceremony,
-        as_of=_now_iso(),
+        as_of=final_as_of,
         scope=str(scope or extras.get("scope") or _default_scope(kind)),
         to_did=final_to_did,
         clock=dict(extras.get("clock", {})),
