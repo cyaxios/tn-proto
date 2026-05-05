@@ -932,6 +932,606 @@ def cmd_read(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------
+# `tn show env` — reflective env-var inventory
+# ---------------------------------------------------------------------
+#
+# Source of truth lives in two places:
+#   1. ``docs/env-schema.md`` — the human reference.
+#   2. ``_ENV_SCHEMA`` below — what the CLI reflects at runtime.
+#
+# Keep them in sync. Adding a new env-var read in ``tn/`` means a row in
+# both. The ``read_today`` field controls whether a row shows up as a
+# live environment knob or a *(proposed)* future binding.
+#
+# Reflective-only by design: this verb does NOT install any new env-var
+# behavior. It reads what's already wired and prints. YAML-sourced rows
+# (``yaml_field`` set) are best-effort: the verb tries to load the
+# auto-discovered ceremony to fill in current values, but a missing /
+# unparseable yaml is non-fatal — those cells just render ``(unset)``.
+
+# Categories used for the human table. Order matters — we render in
+# this sequence.
+_ENV_CATEGORIES: tuple[str, ...] = (
+    "identity",
+    "vault",
+    "ceremony",
+    "runtime",
+    "logging",
+    "deployment",
+    "handlers",
+)
+
+
+# Each entry: name, category, purpose, read_today flag, default-string,
+# secret flag, precedence string, and an optional yaml_field for rows
+# whose authoritative value lives in tn.yaml today.
+#
+# ``read_today`` carries the file:line of the first authoritative read
+# when wired, or ``None`` when this is a *(proposed)* future binding.
+_ENV_SCHEMA: tuple[dict[str, Any], ...] = (
+    # -- identity -----------------------------------------------------
+    {
+        "name": "TN_IDENTITY_DIR",
+        "category": "identity",
+        "purpose": "Override the directory holding identity.json.",
+        "read_today": "tn/identity.py:97",
+        "default": "OS data dir + /tn",
+        "secret": False,
+        "precedence": "env > XDG_DATA_HOME > APPDATA > home",
+    },
+    {
+        "name": "XDG_DATA_HOME",
+        "category": "identity",
+        "purpose": "POSIX user-data root; TN appends /tn.",
+        "read_today": "tn/identity.py:100",
+        "default": "~/.local/share",
+        "secret": False,
+        "precedence": "TN_IDENTITY_DIR > env > home",
+    },
+    {
+        "name": "APPDATA",
+        "category": "identity",
+        "purpose": "Windows roaming profile root; TN appends \\tn.",
+        "read_today": "tn/identity.py:104",
+        "default": "~/AppData/Roaming",
+        "secret": False,
+        "precedence": "TN_IDENTITY_DIR > XDG_DATA_HOME > env > home",
+    },
+    {
+        "name": "TN_IDENTITY_DID",
+        "category": "identity",
+        "purpose": "Pin which DID this process uses when multiple identities are on disk.",
+        "read_today": None,
+        "default": "first identity in TN_IDENTITY_DIR",
+        "secret": False,
+        "precedence": "env > implicit-single-identity",
+    },
+    {
+        "name": "TN_IDENTITY_PASSPHRASE",
+        "category": "identity",
+        "purpose": "Unlock a passphrase-sealed identity.json non-interactively.",
+        "read_today": None,
+        "default": "TTY prompt",
+        "secret": True,
+        "precedence": "env > prompt",
+    },
+    # -- vault --------------------------------------------------------
+    {
+        "name": "TN_VAULT_URL",
+        "category": "vault",
+        "purpose": "Base URL for the cloud vault (auth, sealed blobs, projects).",
+        "read_today": "tn/vault_client.py:49",
+        "default": "https://vault.tn-proto.org",
+        "secret": False,
+        "precedence": "explicit arg > env > default",
+    },
+    {
+        "name": "TN_VAULT_DEFAULT_BASE",
+        "category": "vault",
+        "purpose": "Base for did:web identity vault discovery.",
+        "read_today": "tn/identity.py:410",
+        "default": "https://vault.tn-proto.org",
+        "secret": False,
+        "precedence": "env > default",
+    },
+    {
+        "name": "TN_VAULT_PROJECT_ID",
+        "category": "vault",
+        "purpose": "Pin the linked vault project id.",
+        "read_today": None,
+        "default": "from yaml: linked_project_id",
+        "secret": False,
+        "precedence": "env > yaml > unset",
+        "yaml_field": "linked_project_id",
+    },
+    {
+        "name": "TN_VAULT_JWT",
+        "category": "vault",
+        "purpose": "Pre-auth JWT for non-interactive vault calls.",
+        "read_today": None,
+        "default": "challenge/verify on demand",
+        "secret": True,
+        "precedence": "env > interactive challenge",
+    },
+    {
+        "name": "TN_VAULT_TIMEOUT",
+        "category": "vault",
+        "purpose": "HTTP timeout (seconds) for the vault client.",
+        "read_today": None,
+        "default": "30.0",
+        "secret": False,
+        "precedence": "env > default",
+    },
+    # -- ceremony / config -------------------------------------------
+    {
+        "name": "TN_YAML",
+        "category": "ceremony",
+        "purpose": "Explicit path to tn.yaml for autoinit / discovery.",
+        "read_today": "tn/_autoinit.py:180",
+        "default": "discovery chain",
+        "secret": False,
+        "precedence": "env > ./tn.yaml > $TN_HOME/tn.yaml > mint-fresh",
+    },
+    {
+        "name": "TN_HOME",
+        "category": "ceremony",
+        "purpose": "Root for shared TN state; holds tn.yaml when minted fresh.",
+        "read_today": "tn/_autoinit.py:89",
+        "default": "~/.tn",
+        "secret": False,
+        "precedence": "env > home fallback",
+    },
+    {
+        "name": "TN_STRICT",
+        "category": "ceremony",
+        "purpose": "Block ceremony auto-discovery; init() needs an explicit yaml.",
+        "read_today": "tn/_autoinit.py:66",
+        "default": "unset (autodiscover allowed)",
+        "secret": False,
+        "precedence": "python override > env > default",
+    },
+    {
+        "name": "TN_RUN_ID",
+        "category": "ceremony",
+        "purpose": "Run id shared between Python and Rust runtimes; stamped on envelopes.",
+        "read_today": "tn/__init__.py:209 (write)",
+        "default": "minted per tn.init()",
+        "secret": False,
+        "precedence": "parent env > minted",
+    },
+    {
+        "name": "TN_AUTOINIT_QUIET",
+        "category": "ceremony",
+        "purpose": "Silence the loud autoinit / fresh-ceremony banner.",
+        "read_today": "tn/_autoinit.py:96",
+        "default": "unset (banner on)",
+        "secret": False,
+        "precedence": "env > default",
+    },
+    {
+        "name": "TN_CEREMONY_ID",
+        "category": "ceremony",
+        "purpose": "Pin the ceremony id without round-tripping through tn.yaml.",
+        "read_today": None,
+        "default": "from yaml: ceremony.id",
+        "secret": False,
+        "precedence": "env > yaml",
+        "yaml_field": "ceremony_id",
+    },
+    # -- runtime / dispatch ------------------------------------------
+    {
+        "name": "TN_FORCE_PYTHON",
+        "category": "runtime",
+        "purpose": "Disable the Rust extension; pure-Python emit/read paths.",
+        "read_today": "tn/_dispatch.py:43",
+        "default": "unset (Rust if available)",
+        "secret": False,
+        "precedence": "env > available-extension",
+    },
+    {
+        "name": "TN_READER_LEGACY",
+        "category": "runtime",
+        "purpose": "Revert tn.read to legacy flat-tuple shape (pre-WS-G).",
+        "read_today": "tn/reader.py:42",
+        "default": "unset (new shape)",
+        "secret": False,
+        "precedence": "env > default",
+    },
+    {
+        "name": "TN_CLAIM_ON_MISSING_IDENTITY",
+        "category": "runtime",
+        "purpose": "Auto-claim a fresh identity if init's yaml DID isn't on disk.",
+        "read_today": "tn/logger.py:430",
+        "default": "unset (raise IdentityError)",
+        "secret": False,
+        "precedence": "explicit arg > env > default",
+    },
+    {
+        "name": "TN_WALLET_AUTOSYNC",
+        "category": "runtime",
+        "purpose": "After every emit, push the new envelope to the linked vault.",
+        "read_today": "tn/admin/__init__.py:537",
+        "default": "unset (manual sync)",
+        "secret": False,
+        "precedence": "env > default",
+    },
+    # -- logging / observability -------------------------------------
+    {
+        "name": "TN_NO_STDOUT",
+        "category": "logging",
+        "purpose": "Suppress the default-on stdout JSON envelope mirror.",
+        "read_today": "tn/logger.py:542",
+        "default": "unset (stdout handler attached)",
+        "secret": False,
+        "precedence": "explicit arg > env > default",
+    },
+    {
+        "name": "TN_SURFACE_LOG",
+        "category": "logging",
+        "purpose": "File path: append every public-API ENTER/EXIT to this file.",
+        "read_today": "tn/__init__.py:88",
+        "default": "unset (no surface log)",
+        "secret": False,
+        "precedence": "env > default",
+    },
+    {
+        "name": "TN_LOG_PATH",
+        "category": "logging",
+        "purpose": "Override logs.path (main log file destination).",
+        "read_today": None,
+        "default": "from yaml: logs.path",
+        "secret": False,
+        "precedence": "env > yaml > default",
+        "yaml_field": "log_path",
+    },
+    {
+        "name": "TN_ADMIN_LOG_PATH",
+        "category": "logging",
+        "purpose": "Override admin.log path (admin / state ndjson).",
+        "read_today": None,
+        "default": "./.tn/admin/admin.ndjson",
+        "secret": False,
+        "precedence": "env > yaml > default",
+        "yaml_field": "admin_log_location",
+    },
+    {
+        "name": "TN_LOG_LEVEL",
+        "category": "logging",
+        "purpose": "Surface logger verbosity (info / debug / trace).",
+        "read_today": None,
+        "default": "info",
+        "secret": False,
+        "precedence": "env > default",
+    },
+    {
+        "name": "TN_DEBUG",
+        "category": "logging",
+        "purpose": "Master debug switch — enable verbose internal traces.",
+        "read_today": None,
+        "default": "unset",
+        "secret": False,
+        "precedence": "env > default",
+    },
+    # -- deployment / storage ---------------------------------------
+    {
+        "name": "TN_STATE_DIR",
+        "category": "deployment",
+        "purpose": "Override the per-user state dir (sync-failure queue, etc.).",
+        "read_today": "tn/admin/__init__.py:570",
+        "default": "XDG_STATE_HOME/tn or %APPDATA%/tn",
+        "secret": False,
+        "precedence": "env > XDG_STATE_HOME > APPDATA > home",
+    },
+    {
+        "name": "XDG_STATE_HOME",
+        "category": "deployment",
+        "purpose": "POSIX user-state root; TN appends /tn.",
+        "read_today": "tn/admin/__init__.py:574",
+        "default": "~/.local/state",
+        "secret": False,
+        "precedence": "TN_STATE_DIR > env > home",
+    },
+    {
+        "name": "TN_CACHE_DIR",
+        "category": "deployment",
+        "purpose": "Override cache root (admin state cache, manifest cache).",
+        "read_today": None,
+        "default": "derived from yaml dir",
+        "secret": False,
+        "precedence": "env > yaml > default",
+    },
+    {
+        "name": "TN_KEYS_DIR",
+        "category": "deployment",
+        "purpose": "Override keys/ path (per-group keys).",
+        "read_today": None,
+        "default": "from yaml: ./keys/",
+        "secret": False,
+        "precedence": "env > yaml > default",
+        "yaml_field": "keystore",
+    },
+    {
+        "name": "TN_OUTBOX_DIR",
+        "category": "deployment",
+        "purpose": "Override durable outbox root (durable handler queue).",
+        "read_today": None,
+        "default": "./.tn/outbox/durable",
+        "secret": False,
+        "precedence": "env > yaml > default",
+    },
+    # -- handlers (env:NAME indirection) -----------------------------
+    {
+        "name": "TN_KAFKA_BOOTSTRAP",
+        "category": "handlers",
+        "purpose": "Kafka handler bootstrap.servers.",
+        "read_today": "tn/handlers/kafka.py:26 (indirect)",
+        "default": "none",
+        "secret": False,
+        "precedence": "yaml > env-indirect",
+    },
+    {
+        "name": "TN_KAFKA_USERNAME",
+        "category": "handlers",
+        "purpose": "SASL username for Kafka handler.",
+        "read_today": "tn/handlers/kafka.py:26 (indirect)",
+        "default": "none",
+        "secret": False,
+        "precedence": "yaml > env-indirect",
+    },
+    {
+        "name": "TN_KAFKA_PASSWORD",
+        "category": "handlers",
+        "purpose": "SASL password for Kafka handler.",
+        "read_today": "tn/handlers/kafka.py:26 (indirect)",
+        "default": "none",
+        "secret": True,
+        "precedence": "yaml > env-indirect",
+    },
+    {
+        "name": "TN_S3_ENDPOINT",
+        "category": "handlers",
+        "purpose": "S3 handler endpoint URL (e.g. MinIO / R2).",
+        "read_today": "tn/handlers/s3.py:46 (indirect)",
+        "default": "AWS default",
+        "secret": False,
+        "precedence": "yaml > env-indirect",
+    },
+    {
+        "name": "TN_S3_BUCKET",
+        "category": "handlers",
+        "purpose": "Destination bucket for the S3 handler.",
+        "read_today": "tn/handlers/s3.py:46 (indirect)",
+        "default": "none",
+        "secret": False,
+        "precedence": "yaml > env-indirect",
+    },
+    {
+        "name": "TN_S3_ACCESS_KEY_ID",
+        "category": "handlers",
+        "purpose": "S3 access key id.",
+        "read_today": "tn/handlers/s3.py:46 (indirect)",
+        "default": "AWS default chain",
+        "secret": False,
+        "precedence": "yaml > env-indirect",
+    },
+    {
+        "name": "TN_S3_SECRET_ACCESS_KEY",
+        "category": "handlers",
+        "purpose": "S3 secret access key.",
+        "read_today": "tn/handlers/s3.py:46 (indirect)",
+        "default": "AWS default chain",
+        "secret": True,
+        "precedence": "yaml > env-indirect",
+    },
+    {
+        "name": "TN_DELTA_TOKEN",
+        "category": "handlers",
+        "purpose": "Databricks Delta personal access token.",
+        "read_today": "tn/handlers/delta.py:63 (indirect)",
+        "default": "none",
+        "secret": True,
+        "precedence": "yaml > env-indirect",
+    },
+    {
+        "name": "TN_DELTA_HOST",
+        "category": "handlers",
+        "purpose": "Databricks workspace host.",
+        "read_today": "tn/handlers/delta.py:63 (indirect)",
+        "default": "none",
+        "secret": False,
+        "precedence": "yaml > env-indirect",
+    },
+)
+
+
+def _resolve_yaml_values() -> dict[str, str]:
+    """Best-effort: load the auto-discovered ceremony and pull yaml-sourced
+    fields so ``tn show env`` can render them as ``(from yaml: ...)``.
+
+    Returns an empty dict when no ceremony is reachable. Never raises —
+    a malformed yaml or missing keystore must not break the inventory
+    output.
+    """
+    out: dict[str, str] = {}
+    try:
+        import os as _os
+        from . import _autoinit
+        from . import config as _config
+
+        path = _autoinit._resolve_existing_yaml()
+        if path is None:
+            return out
+        # Load yaml without env substitution failures masking the call:
+        # if any required env-var ref is missing, _substitute_env_vars
+        # raises ValueError. Treat that as "yaml unavailable".
+        try:
+            cfg = _config.load(path)
+        except Exception:
+            return out
+        out["ceremony_id"] = cfg.ceremony_id
+        out["log_path"] = str(cfg.resolve_log_path())
+        out["admin_log_location"] = cfg.admin_log_location
+        out["keystore"] = str(cfg.keystore)
+        if cfg.linked_project_id:
+            out["linked_project_id"] = cfg.linked_project_id
+        if cfg.linked_vault:
+            out["linked_vault"] = cfg.linked_vault
+    except Exception:
+        # Defensive: any import / discovery error must not break the verb.
+        return out
+    return out
+
+
+def _redact(value: str) -> str:
+    """Render a secret value as ``*** (length: N)`` for human display."""
+    return f"*** (length: {len(value)})"
+
+
+def _resolve_entry_value(
+    entry: dict[str, Any],
+    env: dict[str, str],
+    yaml_vals: dict[str, str],
+) -> tuple[str, str]:
+    """Return ``(value, source)`` for one schema row.
+
+    ``source`` is one of ``"env"``, ``"yaml"``, ``"unset"``. ``"unset"`` carries
+    the row's documented default in parentheses for human display.
+    """
+    name = entry["name"]
+    if name in env and env[name] != "":
+        return env[name], "env"
+    yaml_field = entry.get("yaml_field")
+    if yaml_field and yaml_field in yaml_vals:
+        return yaml_vals[yaml_field], "yaml"
+    return "", "unset"
+
+
+def _render_human(
+    schema: tuple[dict[str, Any], ...],
+    env: dict[str, str],
+    yaml_vals: dict[str, str],
+) -> str:
+    lines: list[str] = []
+    lines.append("# tn show env — canonical TN_* environment surface")
+    lines.append("# Reflective only. Secrets are redacted; use --format=env to paste.")
+    lines.append("")
+    by_cat: dict[str, list[dict[str, Any]]] = {c: [] for c in _ENV_CATEGORIES}
+    for entry in schema:
+        by_cat.setdefault(entry["category"], []).append(entry)
+
+    name_w = max(len(e["name"]) for e in schema)
+    val_w = 28
+
+    for cat in _ENV_CATEGORIES:
+        rows = by_cat.get(cat, [])
+        if not rows:
+            continue
+        lines.append(f"## {cat}")
+        lines.append("")
+        for entry in rows:
+            value, source = _resolve_entry_value(entry, env, yaml_vals)
+            proposed = entry.get("read_today") is None
+            if source == "unset":
+                shown = "(unset)"
+                tail = f"  default: {entry['default']}"
+            else:
+                if entry.get("secret") and value:
+                    shown = _redact(value)
+                else:
+                    shown = value if value else "(empty)"
+                if source == "yaml":
+                    tail = f"  (from yaml: {entry.get('yaml_field')})"
+                else:
+                    tail = ""
+            tags = " (proposed)" if proposed else ""
+            lines.append(
+                f"  {entry['name']:<{name_w}}  {shown:<{val_w}}{tail}"
+            )
+            lines.append(
+                f"  {'':<{name_w}}  {entry['purpose']}{tags}"
+            )
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_env_format(
+    schema: tuple[dict[str, Any], ...],
+    env: dict[str, str],
+    yaml_vals: dict[str, str],
+) -> str:
+    """Bash-style block: ``TN_FOO=value`` per line, secrets fully present.
+
+    Only emits rows with a resolvable value (env or yaml). Unset rows are
+    skipped so the output is paste-able straight into a shell or .env file.
+    """
+    out_lines: list[str] = []
+    for entry in schema:
+        value, source = _resolve_entry_value(entry, env, yaml_vals)
+        if source == "unset":
+            continue
+        out_lines.append(f"{entry['name']}={value}")
+    return "\n".join(out_lines) + ("\n" if out_lines else "")
+
+
+def _render_json(
+    schema: tuple[dict[str, Any], ...],
+    env: dict[str, str],
+    yaml_vals: dict[str, str],
+    *,
+    redact_secrets: bool,
+) -> str:
+    import json as _json
+
+    rows: list[dict[str, Any]] = []
+    for entry in schema:
+        value, source = _resolve_entry_value(entry, env, yaml_vals)
+        rendered: str | None
+        if source == "unset":
+            rendered = None
+        elif entry.get("secret") and redact_secrets and value:
+            rendered = _redact(value)
+        else:
+            rendered = value
+        rows.append(
+            {
+                "name": entry["name"],
+                "category": entry["category"],
+                "purpose": entry["purpose"],
+                "value": rendered,
+                "source": source,
+                "secret": bool(entry.get("secret")),
+                "read_today": entry.get("read_today"),
+                "default": entry["default"],
+                "precedence": entry.get("precedence"),
+                "yaml_field": entry.get("yaml_field"),
+                "proposed": entry.get("read_today") is None,
+            }
+        )
+    return _json.dumps({"entries": rows}, indent=2, sort_keys=False) + "\n"
+
+
+def cmd_show_env(args: argparse.Namespace) -> int:
+    import os
+
+    env = dict(os.environ)
+    yaml_vals = _resolve_yaml_values()
+
+    fmt = getattr(args, "format", "human") or "human"
+    if fmt == "human":
+        sys.stdout.write(_render_human(_ENV_SCHEMA, env, yaml_vals))
+    elif fmt == "env":
+        # Deploy-paste form: secrets fully present.
+        sys.stdout.write(_render_env_format(_ENV_SCHEMA, env, yaml_vals))
+    elif fmt == "json":
+        sys.stdout.write(
+            _render_json(_ENV_SCHEMA, env, yaml_vals, redact_secrets=True)
+        )
+    else:
+        _die(f"unknown --format: {fmt!r}. Use human / env / json.")
+    return 0
+
+
+# ---------------------------------------------------------------------
 # Shared helper
 # ---------------------------------------------------------------------
 
@@ -1173,6 +1773,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include entries from previous runs (default: this run only).",
     )
     p_read.set_defaults(func=cmd_read)
+
+    # --- tn show env ------------------------------------------------
+    # Reflective inventory of every TN_* env var the install reads or
+    # would meaningfully accept. ``tn show env`` mirrors the canonical
+    # surface documented in ``docs/env-schema.md``. Three formats:
+    #   human (default) — pretty table, secrets redacted
+    #   env             — bash-style ``TN_FOO=value`` block, paste-able
+    #   json            — programmatic / LLM consumption
+    p_show = sub.add_parser("show", help="Reflective inspection commands.")
+    show_sub = p_show.add_subparsers(dest="show_verb", required=True)
+    p_show_env = show_sub.add_parser(
+        "env",
+        help="Print the canonical TN_* env-var surface (human / env / json).",
+    )
+    p_show_env.add_argument(
+        "--format",
+        default="human",
+        choices=["human", "env", "json"],
+        help="human (default) for the pretty table; env for a paste-able "
+             "TN_FOO=value block (secrets present); json for programmatic use.",
+    )
+    p_show_env.set_defaults(func=cmd_show_env)
 
     return p
 

@@ -242,6 +242,15 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
             ),
         )
 
+    # Recipient-direction sealed-box unwrap. If the manifest carries
+    # state.body_encryption.recipient_wrap, the body was encrypted by
+    # the producer with a fresh BEK that's been wrapped to this
+    # recipient's identity. Unwrap before kind-specific dispatch so
+    # downstream branches see the body in the clear.
+    body, unwrap_err = _maybe_unseal_recipient_wrap(cfg, manifest, body)
+    if unwrap_err is not None:
+        return unwrap_err
+
     kind = manifest.kind
     if kind == "admin_log_snapshot":
         return _absorb_admin_log_snapshot(cfg, manifest, body)
@@ -253,6 +262,8 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
         return _absorb_kit_bundle(cfg, manifest, body)
     if kind == "contact_update":
         return _absorb_contact_update(cfg, manifest, body)
+    if kind == "identity_seed":
+        return _absorb_identity_seed(cfg, manifest, body)
     if kind == "recipient_invite":
         return AbsorbReceipt(
             kind=kind,
@@ -375,6 +386,298 @@ def _absorb_enrolment_kind(
             legacy_reason="inner Package signature failed verification",
         )
     return _apply_enrolment(cfg, pkg)
+
+
+def _maybe_unseal_recipient_wrap(
+    cfg: LoadedConfig,
+    manifest: TnpkgManifest,
+    body: dict[str, bytes],
+) -> tuple[dict[str, bytes], AbsorbReceipt | None]:
+    """If the manifest carries a sealed-box recipient wrap, unseal it and
+    replace ``body['body/encrypted.bin']`` with the decrypted body files.
+
+    Supports both wire shapes:
+
+    * ``state.body_encryption.recipient_wrap`` — singular, single-key.
+      Existing shape from the original second-release encrypted-kit-bundle
+      spec; still emitted by producers when there's exactly one
+      recipient.
+    * ``state.body_encryption.recipient_wraps`` — plural, array.
+      Federation work (decisions log
+      2026-05-04-federation-and-management-decisions.md D-5). Producer
+      emits one entry per recipient key. Consumer walks the array and
+      uses the entry whose ``recipient_did`` matches this device.
+
+    When both are present, plural wins (it's the canonical form).
+
+    Returns ``(new_body, None)`` on success or pass-through.
+    Returns ``(body, AbsorbReceipt[rejected])`` on failure.
+
+    Pass-through cases (no unsealing attempted, body unchanged):
+      * No ``state`` on the manifest.
+      * ``state.body_encryption`` absent.
+      * Both ``recipient_wrap`` and ``recipient_wraps`` absent (e.g. the
+        init-upload pattern where the BEK rides in the URL fragment;
+        absorb on that path doesn't reach here in normal flow, but if
+        it did we'd let the kind-specific handler see the still-encrypted
+        body and reject it).
+    """
+    state = manifest.state or {}
+    body_encryption = state.get("body_encryption") if isinstance(state, dict) else None
+    if not isinstance(body_encryption, dict):
+        return body, None
+    wraps_array = body_encryption.get("recipient_wraps")
+    wrap_singular = body_encryption.get("recipient_wrap")
+    if wraps_array is None and wrap_singular is None:
+        return body, None
+
+    # Late import — recipient_seal pulls in pynacl.bindings; we only want
+    # to take that hit on the unwrap path.
+    from .recipient_seal import (
+        UnsealError,
+        manifest_aad_for_wrap,
+        unseal_bek_from_wrap,
+    )
+    from .export import decrypt_body_blob
+
+    our_did = getattr(getattr(cfg, "device", None), "did", None)
+    device_priv = getattr(cfg.device, "private_bytes", None)
+    if not isinstance(our_did, str):
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason="cfg.device has no DID; cannot match a sealed-box wrap.",
+        )
+    if not isinstance(device_priv, (bytes, bytearray)) or len(device_priv) != 32:
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                "cfg.device does not expose a 32-byte Ed25519 private seed; "
+                "cannot unwrap sealed-box body."
+            ),
+        )
+
+    # Build the candidate-wrap list. Plural takes precedence if both
+    # are present. Plural items are dicts with a recipient_did field;
+    # we filter to entries that name this device.
+    candidates: list[dict[str, Any]] = []
+    if isinstance(wraps_array, list):
+        for entry in wraps_array:
+            if not isinstance(entry, dict):
+                continue
+            rdid = entry.get("recipient_did")
+            if rdid == our_did:
+                candidates.append(entry)
+    elif isinstance(wrap_singular, dict):
+        rdid = wrap_singular.get("recipient_did")
+        if rdid == our_did:
+            candidates.append(wrap_singular)
+
+    if not candidates:
+        # Wire shape was present but no entry names us. The publisher
+        # didn't intend us as a recipient. We can't open the body — but
+        # this isn't a "tampered" rejection, just "not for me." Surface
+        # a clear reason.
+        if isinstance(wraps_array, list):
+            recipients = [
+                e.get("recipient_did")
+                for e in wraps_array
+                if isinstance(e, dict)
+            ]
+        else:
+            recipients = [
+                wrap_singular.get("recipient_did")
+                if isinstance(wrap_singular, dict)
+                else None
+            ]
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"sealed-box wrap is addressed to {recipients!r}; this "
+                f"runtime is {our_did!r}. Refusing to attempt unwrap."
+            ),
+        )
+
+    aad = manifest_aad_for_wrap(manifest.to_dict())
+
+    # Try each matching candidate. First successful unwrap wins. With
+    # the AAD binding the manifest, an attacker can't usefully forge a
+    # wrap that names us — the AEAD will reject it.
+    bek: bytes | None = None
+    last_err: str = ""
+    for cand in candidates:
+        try:
+            bek = unseal_bek_from_wrap(cand, bytes(device_priv), aad)
+            break
+        except UnsealError as exc:
+            last_err = str(exc)
+            continue
+    if bek is None:
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=f"sealed-box unwrap failed: {last_err}",
+        )
+
+    encrypted = body.get("body/encrypted.bin")
+    if encrypted is None:
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                "manifest declares body_encryption but body/encrypted.bin is "
+                "missing from the zip."
+            ),
+        )
+
+    try:
+        decoded = decrypt_body_blob(encrypted, bek)
+    except Exception as exc:  # noqa: BLE001 — wrap any decrypt error
+        return body, AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=f"body decrypt with unwrapped BEK failed: {exc}",
+        )
+
+    # Replace body with the decrypted member dict. Keys come back as
+    # body/<name> (stored zip preserves the original layout).
+    return decoded, None
+
+
+def _absorb_identity_seed(
+    cfg: LoadedConfig, manifest: TnpkgManifest, body: dict[str, bytes]
+) -> AbsorbReceipt:
+    """Install a freshly-minted identity into ``cfg.keystore``.
+
+    The identity_seed bundle contains exactly:
+
+    ``body/local.private`` — the 32-byte Ed25519 seed.
+    ``body/local.public``  — the matching ``did:key:z...`` string.
+    ``body/tn.yaml``       — a stub yaml naming the DID.
+
+    Behavior:
+
+    * If the keystore has no ``local.private`` yet, install the bundle
+      and return ``accepted_count=1``.
+    * If ``local.private`` already exists AND matches the bundle's bytes
+      byte-for-byte (idempotent re-absorb of the same identity), return
+      ``noop=True``, ``accepted_count=0``.
+    * Otherwise (different identity already present) reject. We don't
+      silently overwrite an existing device key — that would orphan
+      every signed log entry.
+
+    The manifest's signature has already been verified by the caller
+    (``_absorb_dispatch``). One extra cross-check we do here: the
+    manifest's ``from_did`` MUST match the public key derived from the
+    body's ``local.private`` AND must equal the contents of
+    ``body/local.public``. This guards against a tampered body
+    (signature still valid, body privately swapped to a different key).
+    """
+    priv_bytes = body.get("body/local.private")
+    pub_text = body.get("body/local.public")
+    yaml_bytes = body.get("body/tn.yaml")
+    if priv_bytes is None or pub_text is None or yaml_bytes is None:
+        missing = [
+            name
+            for name, present in (
+                ("body/local.private", priv_bytes),
+                ("body/local.public", pub_text),
+                ("body/tn.yaml", yaml_bytes),
+            )
+            if present is None
+        ]
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"identity_seed body is missing required members: {missing}"
+            ),
+        )
+
+    if len(priv_bytes) != 32:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"identity_seed body/local.private must be 32 bytes (Ed25519 "
+                f"seed); got {len(priv_bytes)}"
+            ),
+        )
+
+    # Cross-check: the bundle's body must agree with the manifest's
+    # from_did. This is the load-bearing tamper guard for identity_seed.
+    from .signing import DeviceKey as _DeviceKey
+
+    derived = _DeviceKey.from_private_bytes(priv_bytes)
+    bundle_did = pub_text.decode("utf-8").strip()
+    if derived.did != bundle_did or derived.did != manifest.from_did:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"identity_seed integrity check failed: manifest.from_did="
+                f"{manifest.from_did!r}, body/local.public={bundle_did!r}, "
+                f"derived-from-private={derived.did!r}. The bundle's body and "
+                f"manifest disagree about which identity this is — refuse to "
+                f"install."
+            ),
+        )
+    if manifest.from_did != manifest.to_did:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"identity_seed must be self-addressed (from_did == to_did); "
+                f"got from_did={manifest.from_did!r}, to_did={manifest.to_did!r}."
+            ),
+        )
+
+    keystore = cfg.keystore
+    keystore.mkdir(parents=True, exist_ok=True)
+    priv_path = keystore / "local.private"
+    pub_path = keystore / "local.public"
+    yaml_target = cfg.yaml_path
+
+    if priv_path.exists():
+        existing = priv_path.read_bytes()
+        if existing == priv_bytes:
+            return AbsorbReceipt(
+                kind=manifest.kind,
+                noop=True,
+                legacy_status="no_op",
+                legacy_reason=(
+                    f"identity_seed already installed at {priv_path} (same "
+                    f"DID, bytes match)."
+                ),
+            )
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"refusing to overwrite existing identity at {priv_path}. The "
+                f"keystore already has a different device key. To replace, "
+                f"delete the keystore directory first; the existing identity's "
+                f"signed log entries will become unverifiable."
+            ),
+        )
+
+    priv_path.write_bytes(priv_bytes)
+    pub_path.write_text(bundle_did, encoding="utf-8")
+
+    # tn.yaml: only write if missing — don't clobber an existing
+    # ceremony yaml that might already be fully populated.
+    if not yaml_target.exists():
+        yaml_target.parent.mkdir(parents=True, exist_ok=True)
+        yaml_target.write_bytes(yaml_bytes)
+
+    return AbsorbReceipt(
+        kind=manifest.kind,
+        accepted_count=1,
+        legacy_status="enrolment_applied",
+        legacy_reason=f"installed identity {bundle_did} into {keystore}",
+    )
 
 
 def _absorb_kit_bundle(

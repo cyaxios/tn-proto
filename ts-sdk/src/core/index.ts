@@ -24,3 +24,4 @@ export * from "./admin/state.js";
 export * from "./admin/catalog.js";
 export * from "./decrypt.js";
 export * from "./results.js";
+export * from "./recipient_seal.js";
