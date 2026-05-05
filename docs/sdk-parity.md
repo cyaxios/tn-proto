@@ -29,6 +29,7 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 | `tn.read_all(...)` | `tn.read({allRuns: true})` | ✓ | TS folds into a flag. |
 | `tn.read_raw(...)` | `tn.readRaw(...)` | ✓ | |
 | `tn.read_as_recipient(...)` | `tn.readAsRecipient(...)` | ✓ | |
+| `tn.read_as_recipient_flat(...)` | — | TS-pending | Novice-friendly wrapper that flattens one entry per (group_name, plaintext) pair. Python-only in 0.3.0a2. |
 | `tn.secure_read(...)` | `tn.secureRead(...)` | ✓ | |
 | `async tn.watch(since=, verify=, poll_interval=, log_path=)` | `tn.watch({ since, verify, pollIntervalMs, logPath })` | ✓ | Async iterable in both. NEW in 0.3.0a1. Stat-poll based; rotation + truncation handled. |
 

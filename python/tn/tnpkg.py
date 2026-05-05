@@ -24,6 +24,12 @@ Kinds shipped in v1:
     full_keystore          body/keys/* — every keystore file, including
                            private material. Producer must opt in via
                            ``confirm_includes_secrets=True``.
+    identity_seed          body/local.private + body/local.public + body/tn.yaml
+                           — the minimal "this is who I am" bundle a fresh
+                           recipient absorbs to bootstrap a TN identity.
+                           Self-signed by the very key it carries (from_did
+                           == to_did). See
+                           docs/superpowers/specs/2026-05-03-identity-issuance-design.md.
 
 The legacy three-format ``.tnpkg`` situation (pretty JSON, kit-bundle zip,
 raw kit body inside ``tn-invite-*.zip``) is replaced. Old callers like
@@ -69,6 +75,12 @@ KNOWN_KINDS = frozenset(
         # after a counterparty claims a share-link or backup-link. Body
         # schema lives in tn.contacts._validate_contact_update_body.
         "contact_update",
+        # identity_seed (2026-05-03 second-release, spec
+        # docs/superpowers/specs/2026-05-03-identity-issuance-design.md):
+        # the minimal "fresh recipient identity" bundle. Body has
+        # local.private + local.public + a stub tn.yaml. Self-signed by
+        # the carried Ed25519 key (from_did == to_did).
+        "identity_seed",
     }
 )
 

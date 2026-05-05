@@ -52,7 +52,11 @@ from .context import (
     set_context,
     update_context,
 )
-from .export import export as _raw_export
+from .export import (
+    IDENTITY_SEED_CEREMONY_PLACEHOLDER,
+    export as _raw_export,
+    export_identity_seed,
+)
 from .offer import offer
 from .reader import read_all as _raw_read_all
 from .reader import read_as_recipient as _raw_read_as_recipient
