@@ -22,7 +22,11 @@ from pathlib import Path
 
 import pytest
 
-import zenoh
+# zenoh is an optional runtime dep — only the .pull handler imports it,
+# and only when running on a host that actually wants Zenoh transport.
+# Skip the whole test module when the wheel isn't installed (CI matrix,
+# minimal sandbox, etc.) instead of crashing pytest at collection time.
+zenoh = pytest.importorskip("zenoh")
 
 from tn.absorb import _absorb_dispatch
 from tn.config import load_or_create
