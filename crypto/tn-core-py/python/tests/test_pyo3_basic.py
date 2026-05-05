@@ -33,9 +33,13 @@ def test_init_emit_read(btn_ceremony):
     rt = Runtime.init(str(btn_ceremony))
     assert rt.did().startswith("did:key:z")
 
-    receipt = rt.emit("info", "order.created", {"amount": 100, "note": "hello"})
-    assert receipt["sequence"] == 1
-    assert receipt["row_hash"].startswith("sha256:")
+    # emit returns the canonical envelope NDJSON line as bytes (or None when
+    # filtered by the level threshold). Used by the Python DispatchRuntime to
+    # fan out to user-registered Python handlers without re-deriving the line.
+    raw_line = rt.emit("info", "order.created", {"amount": 100, "note": "hello"})
+    assert isinstance(raw_line, bytes)
+    assert raw_line.endswith(b"\n")
+    assert b'"event_type":"order.created"' in raw_line
 
     entries = rt.read()
     assert len(entries) == 1

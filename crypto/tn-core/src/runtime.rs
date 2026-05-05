@@ -613,14 +613,26 @@ impl Runtime {
         //     so the operator can edit/remove the entry to silence stdout
         //     for both admin and user emits without having to set the
         //     env var.
-        let yaml_silences_stdout = !rt.cfg.handlers.is_empty()
-            && !rt
-                .cfg
-                .handlers
-                .iter()
-                .any(|h| h.get("kind").and_then(|v| v.as_str()) == Some("stdout"));
+        let stdout_entry = rt
+            .cfg
+            .handlers
+            .iter()
+            .find(|h| h.get("kind").and_then(|v| v.as_str()) == Some("stdout"));
+        let yaml_silences_stdout = !rt.cfg.handlers.is_empty() && stdout_entry.is_none();
         if std::env::var("TN_NO_STDOUT").as_deref() != Ok("1") && !yaml_silences_stdout {
-            rt.add_handler(Arc::new(crate::handlers::StdoutHandler::new()));
+            // Honour an explicit ``format:`` on the yaml stdout entry so a
+            // yaml that asks for json gets json by default. The
+            // ``TN_STDOUT_FORMAT`` env var still wins (resolved per-emit
+            // inside the handler).
+            let format = stdout_entry
+                .and_then(|h| h.get("format"))
+                .and_then(|v| v.as_str())
+                .map(crate::handlers::StdoutFormat::parse)
+                .unwrap_or_default();
+            rt.add_handler(Arc::new(crate::handlers::StdoutHandler::with_format_and_filter(
+                format,
+                crate::handlers::spec::FilterSpec::default(),
+            )));
         }
 
         // Honor an optional yaml `ceremony.log_level` so operators can
@@ -721,6 +733,7 @@ impl Runtime {
         fields: Map<String, Value>,
     ) -> Result<()> {
         self.emit_inner(level, event_type, fields, None, None, None)
+            .map(|_| ())
     }
 
     /// Emit with explicit timestamp and event_id; used by deterministic tests.
@@ -741,6 +754,7 @@ impl Runtime {
         event_id: Option<&str>,
     ) -> Result<()> {
         self.emit_inner(level, event_type, fields, timestamp, event_id, None)
+            .map(|_| ())
     }
 
     /// Emit with an explicit `sign` override and current timestamp / fresh UUID.
@@ -755,6 +769,7 @@ impl Runtime {
         sign: Option<bool>,
     ) -> Result<()> {
         self.emit_inner(level, event_type, fields, None, None, sign)
+            .map(|_| ())
     }
 
     /// Full-control emit: explicit timestamp, event_id, and sign override.
@@ -770,6 +785,30 @@ impl Runtime {
         event_id: Option<&str>,
         sign: Option<bool>,
     ) -> Result<()> {
+        self.emit_inner(level, event_type, fields, timestamp, event_id, sign)
+            .map(|_| ())
+    }
+
+    /// Same as [`Runtime::emit_with_override_sign`] but returns the canonical
+    /// envelope NDJSON line (newline-terminated) so the host can fan out to
+    /// its own handlers without re-deriving it. `Ok(None)` means the emit
+    /// was filtered by the log-level threshold and produced no envelope.
+    ///
+    /// Used by the Python `DispatchRuntime` to run user-registered Python
+    /// handlers (kafka, S3, vault.sync, etc.) after the Rust runtime has
+    /// already written the entry, signed it, advanced the chain, and fanned
+    /// out to its own native handlers (file, stdout). Mirrors what TS does
+    /// natively in-process — Python pays the JSON-parse cost once on the
+    /// returned line rather than re-encrypting + re-signing in pure Python.
+    pub fn emit_with_override_sign_returning_line(
+        &self,
+        level: &str,
+        event_type: &str,
+        fields: Map<String, Value>,
+        timestamp: Option<&str>,
+        event_id: Option<&str>,
+        sign: Option<bool>,
+    ) -> Result<Option<String>> {
         self.emit_inner(level, event_type, fields, timestamp, event_id, sign)
     }
 
@@ -813,7 +852,7 @@ impl Runtime {
         timestamp: Option<&str>,
         event_id: Option<&str>,
         sign: Option<bool>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         // Log-level filter (AVL J3.2). Drop emits whose level is below
         // the active threshold before any work happens. Severity-less
         // ("") always passes — it's an explicit "this is a fact"
@@ -821,7 +860,7 @@ impl Runtime {
         if !level.is_empty() {
             let lv = level_value(level);
             if lv >= 0 && lv < LOG_LEVEL_THRESHOLD.load(Ordering::Relaxed) {
-                return Ok(());
+                return Ok(None);
             }
         }
 
@@ -1017,11 +1056,14 @@ impl Runtime {
         //     succeeds for the caller.
         self.fan_out_to_handlers(line.as_bytes(), event_type, &eid);
 
-        // event_id, row_hash, and sequence are not surfaced — emit*()
-        // returns Result<()> for cross-language parity with Python (None)
-        // and TypeScript (void). The envelope on disk carries them.
+        // event_id, row_hash, and sequence are not surfaced through the
+        // public emit*() facades (which discard the line and return
+        // Result<()> for cross-language parity with Python None / TS void).
+        // The on-disk envelope carries them. The `_returning_line` variant
+        // hands the canonical NDJSON back so a host runtime (PyO3) can fan
+        // out to its own handlers without re-deriving it.
         let _ = (eid, row_hash, seq);
-        Ok(())
+        Ok(Some(line))
     }
 
     /// Register a handler to receive every subsequent emit fan-out.

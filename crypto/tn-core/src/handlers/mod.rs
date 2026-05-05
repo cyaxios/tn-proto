@@ -70,7 +70,7 @@ use crate::Result;
 
 pub use fs_drop::FsDropHandler;
 pub use fs_scan::FsScanHandler;
-pub use stdout::StdoutHandler;
+pub use stdout::{StdoutFormat, StdoutHandler};
 pub use vault_pull::{VaultInboxClient, VaultInboxItem, VaultPullHandler};
 pub use vault_push::{VaultPostClient, VaultPushHandler};
 
@@ -143,7 +143,18 @@ pub fn build_handlers(
                 runtime.clone(),
                 yaml_dir,
             )?),
-            "stdout" => Arc::new(stdout::StdoutHandler::with_filter(parsed.filter.clone())),
+            "stdout" => {
+                let format = raw
+                    .as_mapping()
+                    .and_then(|m| m.get("format"))
+                    .and_then(|v| v.as_str())
+                    .map(stdout::StdoutFormat::parse)
+                    .unwrap_or_default();
+                Arc::new(stdout::StdoutHandler::with_format_and_filter(
+                    format,
+                    parsed.filter.clone(),
+                ))
+            }
             other => {
                 return Err(crate::Error::InvalidConfig(format!(
                     "tn.yaml: unknown handler kind {other:?} on handler {:?}",

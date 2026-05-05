@@ -75,36 +75,42 @@ def main() -> int:
             yaml_path = ws / "tn.yaml"
 
             tn.init(yaml_path)
-            base = yaml_path.read_text(encoding="utf-8")
-
-            # Three handlers with different filters.
-            block = """
-handlers:
-  - name: everything
-    kind: file.rotating
-    path: ./.tn/logs/tn.ndjson
-    max_bytes: 524288
-    backup_count: 7
-
-  - name: auth_stream
-    kind: file.timed_rotating
-    path: ./.tn/logs/auth.ndjson
-    when: midnight
-    backup_count: 30
-    filter:
-      event_type:
-        starts_with: "auth."
-
-  - name: pages_only
-    kind: file.rotating
-    path: ./.tn/logs/pages.ndjson
-    max_bytes: 524288
-    filter:
-      event_type:
-        starts_with: "page."
-"""
-            yaml_path.write_text(base + block, encoding="utf-8")
             tn.flush_and_close()
+
+            # Replace the auto-generated handlers list with three handlers
+            # of our own. We parse + edit + re-dump the YAML so there's
+            # exactly one top-level `handlers:` key — Rust's strict YAML
+            # parser (and the spec) reject duplicate top-level keys.
+            import yaml as _yaml
+
+            doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            doc["handlers"] = [
+                {
+                    "name": "everything",
+                    "kind": "file.rotating",
+                    "path": "./.tn/logs/tn.ndjson",
+                    "max_bytes": 524288,
+                    "backup_count": 7,
+                },
+                {
+                    "name": "auth_stream",
+                    "kind": "file.timed_rotating",
+                    "path": "./.tn/logs/auth.ndjson",
+                    "when": "midnight",
+                    "backup_count": 30,
+                    "filter": {"event_type": {"starts_with": "auth."}},
+                },
+                {
+                    "name": "pages_only",
+                    "kind": "file.rotating",
+                    "path": "./.tn/logs/pages.ndjson",
+                    "max_bytes": 524288,
+                    "filter": {"event_type": {"starts_with": "page."}},
+                },
+            ]
+            yaml_path.write_text(
+                _yaml.safe_dump(doc, sort_keys=False), encoding="utf-8"
+            )
             tn.init(yaml_path)
 
             events = [

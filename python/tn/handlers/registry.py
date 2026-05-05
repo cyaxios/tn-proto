@@ -259,12 +259,16 @@ def build_handlers(
         elif kind == "stdout":
             from .stdout import StdoutHandler
 
-            handler = StdoutHandler(name=name, filter_spec=filter_spec)
-            # Same rationale as file.rotating above — declarative stdout is
-            # the canonical default sink, so it does NOT preclude the Rust
-            # dispatch path. (Rust currently doesn't fan to stdout itself,
-            # so on btn ceremonies stdout is silent — pre-existing gap
-            # tracked separately; doesn't change with this flag.)
+            handler = StdoutHandler(
+                name=name,
+                filter_spec=filter_spec,
+                format=raw.get("format"),
+            )
+            # Marker preserved for back-compat with any caller still
+            # introspecting it. The dispatch fan-out no longer reads it
+            # for the skip rule (see DispatchRuntime._fan_out_python_handlers
+            # for the path-equality + StdoutHandler-class rule it uses
+            # instead). Removing the attribute is a separate cleanup.
             handler._tn_default = True  # type: ignore[attr-defined]
             out.append(handler)
         elif kind in ("otel", "opentelemetry"):
