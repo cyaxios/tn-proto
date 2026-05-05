@@ -42,7 +42,15 @@ ExportKind = Literal[
     "kit_bundle",
     "full_keystore",
     "recipient_invite",
+    "identity_seed",
 ]
+
+# Sentinel ceremony_id for identity_seed bundles. The kind doesn't belong
+# to any ceremony — the bundle is the operator's per-device identity, not
+# a per-publisher artifact. The string is lowercase + underscore so it
+# passes the inbox CEREMONY_RE (``^[a-z0-9_]{1,128}$``) without special
+# routing.
+IDENTITY_SEED_CEREMONY_PLACEHOLDER = "_identity_seed"
 
 
 def _now_iso() -> str:
@@ -247,6 +255,118 @@ def _build_kit_bundle_body(
     return body, extras
 
 
+def _build_identity_seed_body(
+    device: Any,
+    *,
+    nickname: str | None = None,
+) -> tuple[dict[str, bytes], dict[str, Any]]:
+    """Body for ``kind="identity_seed"`` — minimal "this is who I am" bundle.
+
+    Body shape:
+
+    ``body/local.private`` (32 bytes)
+        Ed25519 seed. Treat as secret. The ABSORB side installs this verbatim
+        into ``<keystore>/local.private``.
+
+    ``body/local.public`` (utf-8 text)
+        The bundle's ``did:key:z...`` string. Mirrors the convention used
+        by ``config._create_fresh()`` so a freshly-installed keystore is
+        indistinguishable from one created by ``tn init``.
+
+    ``body/tn.yaml`` (utf-8 text)
+        A minimal stub that names the DID and leaves group/cipher/etc.
+        unspecified. The host running absorb is expected to either accept
+        the stub as the ceremony skeleton or to overlay it during a later
+        ceremony enrolment. The stub is written so the absorb branch can
+        drop a complete tn.yaml + keystore pair without requiring the
+        caller to construct one themselves.
+
+    Extras carried into the manifest:
+
+    ``state.identity = {"nickname": ..., "minted_at": ..., "schema": "tn-identity-seed-v1"}``
+
+    Reads ``device`` ducktyped — anything exposing ``.did`` and
+    ``.private_bytes`` works (the ``DeviceKey`` shape from
+    ``tn.signing``).
+    """
+    if device is None:
+        raise ValueError("_build_identity_seed_body: device is required")
+
+    private_bytes = bytes(device.private_bytes)
+    if len(private_bytes) != 32:
+        raise ValueError(
+            f"_build_identity_seed_body: device.private_bytes must be 32 bytes "
+            f"(Ed25519 seed); got {len(private_bytes)}"
+        )
+
+    did = str(device.did)
+    if not did.startswith("did:key:z"):
+        raise ValueError(
+            f"_build_identity_seed_body: device.did must be a did:key:z... "
+            f"identifier; got {did!r}"
+        )
+
+    # tn.yaml stub. Keep this minimal — anything more would lock a fresh
+    # absorb into a particular cipher / group shape that the operator
+    # may not want.
+    stub_yaml = (
+        "# Identity seed stub written by tn.export(kind='identity_seed').\n"
+        "# Replace this file with a real ceremony tn.yaml when joining one.\n"
+        f"identity:\n"
+        f"  did: {did}\n"
+    )
+    if nickname:
+        stub_yaml += f"  nickname: {json.dumps(nickname)}\n"
+
+    body: dict[str, bytes] = {
+        "body/local.private": private_bytes,
+        "body/local.public": did.encode("utf-8"),
+        "body/tn.yaml": stub_yaml.encode("utf-8"),
+    }
+
+    extras: dict[str, Any] = {
+        "scope": "identity",
+        "state": {
+            "identity": {
+                "schema": "tn-identity-seed-v1",
+                "nickname": nickname,
+                "minted_at": _now_iso(),
+            },
+        },
+    }
+    return body, extras
+
+
+def export_identity_seed(
+    out_path: Path | str,
+    *,
+    device: Any | None = None,
+    nickname: str | None = None,
+    ceremony_id_stub: str | None = None,
+) -> Path:
+    """Convenience wrapper for the identity_seed kind.
+
+    If ``device`` is None, generate a fresh ``DeviceKey`` and use it. The
+    caller can recover the freshly-generated DID by reading
+    ``manifest.from_did`` from the resulting tnpkg, or by passing in their
+    own DeviceKey if they already have one.
+
+    Returns the output path. The caller is responsible for protecting the
+    file (it carries a private Ed25519 seed).
+    """
+    from .signing import DeviceKey as _DeviceKey
+
+    if device is None:
+        device = _DeviceKey.generate()
+    return export(
+        out_path,
+        kind="identity_seed",
+        device=device,
+        nickname=nickname,
+        ceremony_id_stub=ceremony_id_stub,
+    )
+
+
 # --------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------
@@ -264,6 +384,11 @@ def export(
     keystore: Path | str | None = None,
     groups: list[str] | None = None,
     encrypt_body_with: bytes | None = None,
+    device: Any | None = None,
+    nickname: str | None = None,
+    ceremony_id_stub: str | None = None,
+    seal_for_recipient: bool = False,
+    to_dids: list[str] | None = None,
 ) -> Path:
     """Pack a `.tnpkg` from local ceremony state.
 
@@ -311,6 +436,29 @@ def export(
         distinguishes…"): the handler generates a fresh BEK per upload,
         passes it here, and that key travels in the URL fragment to the
         browser claim page (D-5). The vault stores ciphertext only (D-1).
+    device:
+        Required for ``kind="identity_seed"``. A ``DeviceKey`` whose
+        Ed25519 keypair becomes BOTH the bundle's ``from_did`` /
+        ``to_did`` AND the manifest signer. The bundle is self-issued.
+    nickname:
+        Optional human-readable label for ``kind="identity_seed"``. Lands
+        in ``manifest.state.identity.nickname``.
+    ceremony_id_stub:
+        Optional ``ceremony_id`` for ``kind="identity_seed"``. Defaults to
+        ``IDENTITY_SEED_CEREMONY_PLACEHOLDER`` ("_identity_seed"). Identity
+        bundles aren't tied to a real ceremony — the operator picks one
+        once a host installs the identity and starts a ceremony.
+    seal_for_recipient:
+        For ``kind="kit_bundle"`` (and conceivably future kinds): mint a
+        fresh per-export AES-256-GCM BEK, encrypt the body with it via
+        the existing ``_encrypt_body_in_place`` machinery, AND wrap the
+        BEK to the recipient's identity (named by ``to_did``) using the
+        sealed-box construction in ``tn.recipient_seal``. The result is a
+        ``.tnpkg`` whose body is unreadable to anyone but the holder of
+        ``to_did``'s device key. Requires ``to_did`` to be set.
+        Mutually exclusive with ``encrypt_body_with``: caller can either
+        bring their own BEK (init-upload self-backup pattern) or ask the
+        export to mint+wrap one (recipient-direction pattern), not both.
     """
     if kind not in KNOWN_KINDS:
         raise ValueError(f"export: unknown kind {kind!r}; expected one of {sorted(KNOWN_KINDS)}")
@@ -325,6 +473,12 @@ def export(
 
     if cfg is None and kind in {"admin_log_snapshot", "offer", "enrolment"}:
         raise ValueError(f"export(kind={kind!r}) requires cfg=...")
+
+    if kind == "identity_seed" and device is None:
+        raise ValueError(
+            "export(kind='identity_seed') requires device=<DeviceKey>; the bundle "
+            "is self-issued by the carried Ed25519 key (from_did == to_did)."
+        )
 
     body: dict[str, bytes] = {}
     extras: dict[str, Any] = {}
@@ -365,19 +519,40 @@ def export(
             f"export(kind={kind!r}) is reserved in the manifest schema but not "
             f"implemented in this Python session — see the plan doc for next steps."
         )
+    elif kind == "identity_seed":
+        # device guaranteed non-None by the early check above.
+        body, extras = _build_identity_seed_body(device, nickname=nickname)
 
     # Build manifest. The producer's DID is the signing authority; we
     # always sign with cfg.device. For kits-without-cfg (rare) the caller
     # passes a keystore-only path; we still need an Ed25519 signer, so
-    # require cfg in those cases too.
-    if cfg is None:
-        raise ValueError(f"export(kind={kind!r}) requires cfg=... for manifest signing")
+    # require cfg in those cases too. identity_seed is the one exception:
+    # it carries its own Ed25519 device key (the one being bundled), and
+    # signs the manifest with that key — there is no enclosing ceremony.
+    if kind == "identity_seed":
+        if device is None:
+            raise ValueError("export(kind='identity_seed') requires device=...")
+        signing_key_priv = device.signing_key()
+        signer_did = device.did
+        signer_ceremony = ceremony_id_stub or IDENTITY_SEED_CEREMONY_PLACEHOLDER
+    else:
+        if cfg is None:
+            raise ValueError(f"export(kind={kind!r}) requires cfg=... for manifest signing")
+        signing_key_priv = cfg.device.signing_key()
+        signer_did = cfg.device.did
+        signer_ceremony = cfg.ceremony_id
 
     # Body-level encryption (per D-19 / D-5 / plan §"Body wrapping").
     # We do this BEFORE the manifest is built so the manifest can record
     # the encrypted-blob hash + cipher suite. AAD is empty here (the
     # manifest is what's signed; the manifest itself records the
     # ciphertext hash, which acts as the integrity binding).
+    if encrypt_body_with is not None and seal_for_recipient:
+        raise ValueError(
+            "export: encrypt_body_with= and seal_for_recipient= are mutually "
+            "exclusive. Either bring your own BEK (init-upload pattern) or ask "
+            "the export to mint+wrap one (recipient-direction pattern)."
+        )
     if encrypt_body_with is not None:
         if not isinstance(encrypt_body_with, (bytes, bytearray)) or len(encrypt_body_with) != 32:
             raise ValueError(
@@ -385,19 +560,115 @@ def export(
             )
         body, extras = _encrypt_body_in_place(body, extras, bytes(encrypt_body_with))
 
+    # Recipient-direction sealed-box body wrap (per the second-release
+    # encrypted-kit-bundle spec). Mints a fresh BEK, encrypts the body
+    # with it, then wraps the BEK to ``to_did``'s identity using the
+    # X25519-derived-from-Ed25519 sealed-box construction in
+    # ``tn.recipient_seal``. Only callers who hold the recipient's
+    # device key can recover the BEK and decrypt the body.
+    if seal_for_recipient:
+        # Resolve the recipient set from to_did (singular) and to_dids
+        # (plural) per the federation spec. Either or both may be
+        # provided; we dedupe and require at least one valid did:key.
+        merged_dids: list[str] = []
+        if to_did is not None:
+            if not str(to_did).startswith("did:key:z"):
+                raise ValueError(
+                    f"export(seal_for_recipient=True): to_did={to_did!r} is not a "
+                    f"did:key string."
+                )
+            merged_dids.append(str(to_did))
+        if to_dids:
+            for d in to_dids:
+                if not isinstance(d, str) or not d.startswith("did:key:z"):
+                    raise ValueError(
+                        f"export(seal_for_recipient=True): to_dids contains "
+                        f"non-did:key entry {d!r}."
+                    )
+                if d not in merged_dids:
+                    merged_dids.append(d)
+        if not merged_dids:
+            raise ValueError(
+                "export(seal_for_recipient=True) requires at least one recipient "
+                "in to_did=... or to_dids=[...]."
+            )
+        if kind not in ("kit_bundle", "full_keystore"):
+            raise ValueError(
+                f"export(seal_for_recipient=True) is currently scoped to "
+                f"kit_bundle / full_keystore; got kind={kind!r}."
+            )
+        import secrets as _secrets
+
+        from .recipient_seal import (
+            manifest_aad_for_wrap as _aad_for_wrap,
+            seal_bek_for_recipient as _seal_bek,
+        )
+
+        bek = _secrets.token_bytes(32)
+        body, extras = _encrypt_body_in_place(body, extras, bek)
+        # AAD = canonical(manifest_dict_without_signature_or_wrap-set).
+        # Build a preview manifest so the canonical bytes match what the
+        # consumer will compute against the final signed manifest. The
+        # AAD function strips both ``recipient_wrap`` and
+        # ``recipient_wraps`` from the canonical bytes, so each entry
+        # in the array binds against the same AAD.
+        preview = TnpkgManifest(
+            kind=str(kind),
+            from_did=cfg.device.did if cfg is not None else "",
+            ceremony_id=cfg.ceremony_id if cfg is not None else "",
+            as_of=_now_iso(),
+            scope=str(scope or extras.get("scope") or _default_scope(kind)),
+            to_did=merged_dids[0],  # display addressee = first entry
+            clock=dict(extras.get("clock", {})),
+            event_count=int(extras.get("event_count", 0)),
+            head_row_hash=extras.get("head_row_hash"),
+            state=extras.get("state"),
+        )
+        _preview_as_of = preview.as_of
+        aad = _aad_for_wrap(preview.to_dict())
+        # One wrap per recipient DID. All bind against the same AAD.
+        wraps_array = [_seal_bek(bek, did, aad) for did in merged_dids]
+        # Inject the wrap set into extras.state.body_encryption. We
+        # always emit the plural ``recipient_wraps`` array (even for a
+        # single recipient — that's the canonical shape going forward).
+        # We ALSO emit a singular ``recipient_wrap`` shadow when there's
+        # exactly one entry, so consumers running against an older
+        # absorber that only knows the singular shape keep working.
+        state = dict(extras.get("state") or {})
+        body_enc = dict(state.get("body_encryption") or {})
+        body_enc["recipient_wraps"] = wraps_array
+        if len(wraps_array) == 1:
+            body_enc["recipient_wrap"] = wraps_array[0]
+        state["body_encryption"] = body_enc
+        extras["state"] = state
+        extras["_seal_for_recipient_as_of"] = _preview_as_of
+        # Final manifest's to_did is the first recipient in the set —
+        # arbitrary but deterministic, matches the preview we used to
+        # compute the AAD.
+        to_did = merged_dids[0]
+
+    # identity_seed self-addresses: from_did == to_did. For other kinds,
+    # to_did is whatever the caller passed (or None).
+    final_to_did = signer_did if kind == "identity_seed" else to_did
+
+    # If the seal-for-recipient path stashed a preview as_of, reuse it so
+    # the final manifest is byte-equal to the one we computed AAD over.
+    sealed_as_of = extras.pop("_seal_for_recipient_as_of", None)
+    final_as_of = sealed_as_of or _now_iso()
+
     manifest = TnpkgManifest(
         kind=str(kind),
-        from_did=cfg.device.did,
-        ceremony_id=cfg.ceremony_id,
-        as_of=_now_iso(),
+        from_did=signer_did,
+        ceremony_id=signer_ceremony,
+        as_of=final_as_of,
         scope=str(scope or extras.get("scope") or _default_scope(kind)),
-        to_did=to_did,
+        to_did=final_to_did,
         clock=dict(extras.get("clock", {})),
         event_count=int(extras.get("event_count", 0)),
         head_row_hash=extras.get("head_row_hash"),
         state=extras.get("state"),
     )
-    manifest.sign(cfg.device.signing_key())
+    manifest.sign(signing_key_priv)
     return _write_tnpkg(Path(out_path), manifest, body)
 
 
@@ -523,6 +794,8 @@ def _default_scope(kind: str) -> str:
         return "kit_bundle"
     if kind == "full_keystore":
         return "full"
+    if kind == "identity_seed":
+        return "identity"
     return "admin"
 
 
@@ -549,9 +822,11 @@ def canonical_manifest_bytes(manifest: TnpkgManifest) -> bytes:
 
 __all__ = [
     "ExportKind",
+    "IDENTITY_SEED_CEREMONY_PLACEHOLDER",
     "canonical_manifest_bytes",
     "decrypt_body_blob",
     "export",
+    "export_identity_seed",
     "package_from_body_bytes",
 ]
 
