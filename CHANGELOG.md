@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0a3] - 2026-05-05
+
+Dispatch refactor + stdout cosmetic cleanup. Requires `tn-core` 0.2.0a2.
+
+### Python SDK (tn-protocol)
+
+- `DispatchRuntime` no longer disables the Rust path when custom Python
+  handlers are registered. Btn ceremonies stay on Rust; user-registered
+  handlers (kafka, S3, vault.sync, fs.drop, etc.) are fanned out
+  post-Rust-emit. Closes the long-standing limitation where mixing
+  custom handlers with btn admin verbs (`add_recipient_btn` etc.)
+  raised `NotImplementedError`.
+- The post-emit fan-out skips handlers whose write target Rust has
+  already covered: `StdoutHandler`-class instances (Rust auto-registers
+  its native one) and file handlers whose `path` resolves to Rust's
+  `cfg.logs.path` (Rust's internal log_writer wrote it). The skip rule
+  is path-equality + class-match, replacing the imprecise
+  `_tn_default` flag that incorrectly swallowed multi-file-handler
+  fan-outs.
+- `StdoutHandler` default format is now a terse single line:
+  `HH:MM:SS.mmm LEVEL  seq=N  event_type`. No DID, no hashes, no
+  signatures, no ciphertext on a developer's terminal. Opt back into
+  the canonical NDJSON envelope via `TN_STDOUT_FORMAT=json` env var or
+  `format: json` on the yaml stdout entry. Same setting honored by the
+  Rust-side `StdoutHandler`.
+
+### Bug fixes
+
+- `examples/ex06_multi_handler.py`: parse-replace-dump yaml instead of
+  appending a duplicate top-level `handlers:` key (latent bug — the
+  prior append-string pattern produced malformed yaml that strict
+  parsers reject; only worked before because the user-handler gate
+  forced the whole dispatch to Python's lenient yaml loader).
+
+[0.3.0a3]: https://github.com/cyaxios/tn-proto/releases/tag/v0.3.0a3
+
 ## [0.2.0a2] - 2026-05-01
 
 Loosened sub-package version constraints for rapid alpha iteration.
