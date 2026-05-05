@@ -21,11 +21,12 @@ import tn
 # Unit: StdoutHandler writes raw_line to its stream
 # -----------------------------------------------------------------------
 
-def test_stdout_handler_writes_raw_line_to_stream():
+def test_stdout_handler_json_format_writes_raw_line(monkeypatch):
     from tn.handlers.stdout import StdoutHandler
 
+    monkeypatch.delenv("TN_STDOUT_FORMAT", raising=False)
     captured = io.BytesIO()
-    h = StdoutHandler(name="stdout", stream=captured)
+    h = StdoutHandler(name="stdout", stream=captured, format="json")
     raw = b'{"event_type":"test.evt","sequence":1}\n'
     envelope = {"event_type": "test.evt", "sequence": 1}
     h.emit(envelope, raw)
@@ -34,25 +35,86 @@ def test_stdout_handler_writes_raw_line_to_stream():
     assert out == raw, f"expected raw bytes, got {out!r}"
 
 
-def test_stdout_handler_appends_newline_if_missing():
-    """Defensive: even if a caller hands us a line without trailing \\n,
-    we don't run two entries together on screen."""
+def test_stdout_handler_pretty_format_is_terse(monkeypatch):
+    """Pretty format is the default — terse single line, no crypto."""
     from tn.handlers.stdout import StdoutHandler
 
+    monkeypatch.delenv("TN_STDOUT_FORMAT", raising=False)
+    captured = io.BytesIO()
+    h = StdoutHandler(name="stdout", stream=captured)  # default = pretty
+    envelope = {
+        "did": "did:key:z6MkLong",
+        "timestamp": "2026-05-05T22:27:23.712506Z",
+        "event_type": "page_viewed",
+        "level": "info",
+        "sequence": 12,
+        "row_hash": "sha256:bde8e3",
+        "signature": "UcTuis0",
+    }
+    h.emit(envelope, b"raw line bytes irrelevant in pretty mode\n")
+
+    text = captured.getvalue().decode("utf-8")
+    # Time of day, level, seq, event type — and nothing cryptographic.
+    assert "22:27:23.712" in text
+    assert "INFO" in text
+    assert "seq=12" in text
+    assert "page_viewed" in text
+    assert "did:key" not in text
+    assert "sha256" not in text
+    assert "signature" not in text.lower()
+    assert text.endswith("\n")
+
+
+def test_stdout_handler_env_var_overrides_kwarg(monkeypatch):
+    """TN_STDOUT_FORMAT wins over the constructor kwarg."""
+    from tn.handlers.stdout import StdoutHandler
+
+    monkeypatch.setenv("TN_STDOUT_FORMAT", "json")
+    captured = io.BytesIO()
+    h = StdoutHandler(name="stdout", stream=captured, format="pretty")
+    raw = b'{"event_type":"x","sequence":1}\n'
+    h.emit({"event_type": "x", "sequence": 1}, raw)
+    assert captured.getvalue() == raw, "env var should force json over kwarg"
+
+
+def test_stdout_handler_severityless_log_renders_as_LOG(monkeypatch):
+    """tn.log() emits with level="" — pretty format must not show empty."""
+    from tn.handlers.stdout import StdoutHandler
+
+    monkeypatch.delenv("TN_STDOUT_FORMAT", raising=False)
     captured = io.BytesIO()
     h = StdoutHandler(name="stdout", stream=captured)
+    h.emit(
+        {"event_type": "fact.attested", "level": "", "sequence": 7,
+         "timestamp": "2026-05-05T01:02:03.000Z"},
+        b"raw",
+    )
+    text = captured.getvalue().decode("utf-8")
+    assert "LOG" in text, f"severity-less should render as LOG, got: {text!r}"
+
+
+def test_stdout_handler_appends_newline_if_missing(monkeypatch):
+    """Defensive: even if a caller hands us a line without trailing \\n,
+    we don't run two entries together on screen. (json format only — the
+    pretty format always adds its own newline.)"""
+    from tn.handlers.stdout import StdoutHandler
+
+    monkeypatch.delenv("TN_STDOUT_FORMAT", raising=False)
+    captured = io.BytesIO()
+    h = StdoutHandler(name="stdout", stream=captured, format="json")
     h.emit({"event_type": "a"}, b'{"event_type":"a"}')
     h.emit({"event_type": "b"}, b'{"event_type":"b"}')
     text = captured.getvalue().decode("utf-8")
     assert text.count("\n") == 2, f"expected 2 newlines, got {text!r}"
 
 
-def test_stdout_handler_respects_filter():
+def test_stdout_handler_respects_filter(monkeypatch):
     """SyncHandler filter spec should suppress non-matching events."""
     from tn.handlers.stdout import StdoutHandler
 
+    monkeypatch.delenv("TN_STDOUT_FORMAT", raising=False)
     captured = io.BytesIO()
-    h = StdoutHandler(name="stdout", stream=captured,
+    h = StdoutHandler(name="stdout", stream=captured, format="json",
                       filter_spec={"event_type_prefix": "kept."})
     if h.accepts({"event_type": "kept.a"}):
         h.emit({"event_type": "kept.a"}, b'{"event_type":"kept.a"}\n')
@@ -81,24 +143,45 @@ def _reset_runtime():
         pass
 
 
-def test_default_on_writes_to_stdout(tmp_path, capfd, monkeypatch):
-    """Out of the box, tn.init() + tn.info() should land a JSON line on stdout.
+def test_default_on_writes_pretty_to_stdout(tmp_path, capfd, monkeypatch):
+    """Out of the box, tn.init() + tn.info() lands a terse pretty line on
+    stdout — no DID, no hashes, no signature, no ciphertext. Just
+    ``HH:MM:SS.mmm LEVEL  seq=N  event_type``.
 
-    Uses capfd (file-descriptor capture) instead of capsys because the default
-    cipher (btn) routes through the Rust runtime, which writes the JSON line
-    via Rust's StdoutHandler (writes to fd 1 directly, bypasses sys.stdout).
+    Uses capfd (file-descriptor capture) instead of capsys because btn
+    ceremonies route through the Rust runtime, which writes via Rust's
+    StdoutHandler (writes to fd 1 directly, bypasses sys.stdout).
     """
     monkeypatch.delenv("TN_NO_STDOUT", raising=False)
+    monkeypatch.delenv("TN_STDOUT_FORMAT", raising=False)
     tn.init(tmp_path / "tn.yaml")
     tn.info("evt.default_on", x=1)
     tn.flush_and_close()
     out = capfd.readouterr().out
-    assert "evt.default_on" in out, f"stdout missing event: {out!r}"
-    # Should be parseable JSON
-    json_lines = [ln for ln in out.splitlines() if "evt.default_on" in ln]
-    assert json_lines, "no candidate line found"
+    user_lines = [ln for ln in out.splitlines() if "evt.default_on" in ln]
+    assert user_lines, f"stdout missing event: {out!r}"
+    line = user_lines[0]
+    assert "INFO" in line
+    assert "evt.default_on" in line
+    # Crypto-form fields stay off-screen.
+    assert "did:key" not in line
+    assert "sha256" not in line
+
+
+def test_format_json_env_var_emits_canonical_envelope(tmp_path, capfd, monkeypatch):
+    """TN_STDOUT_FORMAT=json restores the canonical NDJSON line for the
+    log-shipper / ``jq`` pipeline use case."""
+    monkeypatch.delenv("TN_NO_STDOUT", raising=False)
+    monkeypatch.setenv("TN_STDOUT_FORMAT", "json")
+    tn.init(tmp_path / "tn.yaml")
+    tn.info("evt.json_form", x=1)
+    tn.flush_and_close()
+    out = capfd.readouterr().out
+    json_lines = [ln for ln in out.splitlines() if "evt.json_form" in ln]
+    assert json_lines, f"stdout missing event: {out!r}"
     parsed = json.loads(json_lines[0])
-    assert parsed["event_type"] == "evt.default_on"
+    assert parsed["event_type"] == "evt.json_form"
+    assert parsed["sequence"] >= 1
 
 
 def test_opt_out_via_env_var(tmp_path, capfd, monkeypatch):

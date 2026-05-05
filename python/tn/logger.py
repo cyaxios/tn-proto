@@ -552,14 +552,17 @@ def init(
             from .handlers.stdout import StdoutHandler
 
             stdout_handler = StdoutHandler()
-            # Mark as a "default" handler so DispatchRuntime does NOT switch
-            # to the Python emit path on its account — the btn admin verbs
-            # require the Rust path, and dropping back to Python would break
-            # them (NotImplementedError on add_recipient_btn etc.). Side effect:
-            # on btn ceremonies that activate the Rust runtime, stdout output
-            # is currently silent because Rust writes only to the file and
-            # doesn't fan out to Python handlers. The cross-language port will
-            # close this gap by adding stdout to the Rust runtime directly.
+            # Mark as a "default" handler so DispatchRuntime skips it during
+            # the post-Rust-emit Python fan-out: on btn ceremonies the Rust
+            # runtime auto-registers its own native StdoutHandler (see
+            # crypto/tn-core/src/runtime.rs `Runtime::init`, gated on
+            # ``TN_NO_STDOUT`` and yaml-silences-stdout), so running the
+            # Python copy too would print every envelope twice. Same rule
+            # holds for the file.rotating default sink — Rust writes the
+            # log file via its internal log_writer, the Python handler is
+            # marked ``_tn_default`` and skipped to avoid a double-write.
+            # Custom Python handlers (kafka, S3, vault.sync, etc.) are NOT
+            # marked default and run as expected after the Rust emit.
             stdout_handler._tn_default = True  # type: ignore[attr-defined]
             extra_handlers = [stdout_handler, *(extra_handlers or [])]
 
