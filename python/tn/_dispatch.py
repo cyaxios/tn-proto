@@ -6,6 +6,8 @@ to the pure-Python implementation (current behavior unchanged).
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -18,6 +20,8 @@ try:
 except ImportError:
     _RustRuntime = None
     _RUST_OK = False
+
+_log = logging.getLogger("tn._dispatch")
 
 
 def _ceremony_is_btn_only(yaml_path: Path) -> bool:
@@ -145,24 +149,23 @@ class DispatchRuntime:
         directly (avoids a double-init when called from tn/logger.py where
         the TNRuntime has already been built).
 
-        Rust is used for emit only when no Python handlers are registered.
-        Handlers require the full sealed envelope at emit time; the Rust
-        runtime returns only a receipt (event_id, row_hash, sequence), so
-        the Python path is used when handlers are present.
+        Rust is used for emit on every btn-only ceremony when the tn_core
+        extension is available — even when the operator has registered
+        custom Python handlers (kafka, S3, vault.sync, etc.). The Rust
+        runtime hands back the canonical envelope NDJSON line on each
+        emit so this dispatcher can fan out to those Python handlers
+        after the Rust path has already written, signed, and chained the
+        entry.
+
+        During the post-Rust Python fan-out, handlers whose write target
+        Rust has already covered are skipped to prevent double-writes /
+        double-stdout. See ``_fan_out_python_handlers`` for the precise
+        rule (path-equality for file handlers, class-match for stdout).
         """
         self._yaml = Path(yaml_path)
         self._py_rt = _logger_runtime  # always kept — used for handlers + config
 
-        # Use Rust iff available AND no user-registered Python handlers need
-        # the sealed envelope. The zero-config default file handler is
-        # excluded: the Rust runtime writes to the same log file itself, so
-        # routing through Python for that handler would double-write.
-        user_handlers = (
-            [h for h in _logger_runtime.handlers if not getattr(h, "_tn_default", False)]
-            if _logger_runtime is not None and hasattr(_logger_runtime, "handlers")
-            else []
-        )
-        self._use_rust = should_use_rust(self._yaml) and not user_handlers
+        self._use_rust = should_use_rust(self._yaml)
         if self._use_rust:
             self._rt = _RustRuntime.init(str(self._yaml))
         else:
@@ -175,12 +178,17 @@ class DispatchRuntime:
         fields: dict[str, Any],
         *,
         sign: bool | None = None,
-    ) -> dict[str, Any]:
+    ) -> None:
         if self._use_rust:
             if self._rt is None:
                 raise RuntimeError("DispatchRuntime: Rust runtime not initialized")
             # sign=None → Rust uses ceremony.sign default; True/False overrides.
-            return self._rt.emit(level, event_type, fields, None, None, sign)
+            # Returns the canonical NDJSON line as bytes (or None if filtered
+            # by Rust's level threshold).
+            raw_line = self._rt.emit(level, event_type, fields, None, None, sign)
+            if raw_line is not None:
+                self._fan_out_python_handlers(raw_line)
+            return None
         if self._py_rt is None:
             raise RuntimeError("DispatchRuntime: Python runtime not set")
         # Python path doesn't support per-call sign override yet (JWE path
@@ -188,6 +196,91 @@ class DispatchRuntime:
         # until the legacy logger gains it. Ignore sign on the Python path
         # for now; document in set_signing() docstring.
         return self._py_rt.emit(level, event_type, fields)
+
+    def _fan_out_python_handlers(self, raw_line: bytes) -> None:
+        """Run user-registered Python handlers on a Rust-produced envelope.
+
+        Mirrors Rust's ``fan_out_to_handlers`` behaviour: per-handler
+        ``accepts()`` filter, errors logged + swallowed so a downstream
+        handler issue never aborts a publish that is already on disk.
+
+        Skips handlers whose target Rust has already covered:
+
+          * Any ``StdoutHandler``-class instance — Rust's
+            ``Runtime::init`` auto-registers its own native
+            ``StdoutHandler`` (gated on ``TN_NO_STDOUT`` and
+            yaml-silences-stdout) that writes to fd 1 directly. Running
+            the Python copy would print every envelope twice. Python's
+            registry / auto-add only puts a ``StdoutHandler`` in the
+            handler list under the same conditions Rust does, so the
+            two are in lockstep — unconditionally skip on the Python
+            side when the Rust path is active.
+          * Any file handler whose ``path`` resolves to the same file
+            Rust's internal ``log_writer`` is appending to (i.e.
+            ``cfg.logs.path``). Running the Python copy would
+            double-write that file. Other file handlers — including a
+            second ``file.rotating`` at a different path, or
+            ``file.timed_rotating`` for an audit split — run as
+            expected.
+
+        Everything else (kafka, S3, vault.sync, fs.drop, etc.) runs.
+        """
+        if self._py_rt is None or not getattr(self._py_rt, "handlers", None):
+            return
+        # Snapshot handlers so a handler that re-enters emit doesn't
+        # observe a half-mutated list mid-iteration.
+        handlers = list(self._py_rt.handlers)
+
+        # Compute what Rust covers exactly once per emit. The PyO3
+        # ``log_path()`` returns the resolved string path; we re-resolve
+        # to normalise drive-letter case + separators on Windows so the
+        # path-equality check below is robust.
+        rust_log_path: Path | None = None
+        if self._rt is not None:
+            try:
+                rust_log_path = Path(self._rt.log_path()).resolve()
+            except Exception:  # noqa: BLE001 — best-effort; older bindings may lack log_path
+                rust_log_path = None
+
+        envelope: dict[str, Any] | None = None
+        # Lazy import to avoid a circular dependency with tn.handlers.*.
+        from tn.handlers.stdout import StdoutHandler as _StdoutHandler  # noqa: PLC0415
+
+        for h in handlers:
+            # Skip Python's StdoutHandler — Rust's native one already wrote.
+            if isinstance(h, _StdoutHandler):
+                continue
+
+            # Skip file handler whose path matches Rust's log_writer target.
+            h_path = getattr(h, "path", None)
+            if h_path is not None and rust_log_path is not None:
+                try:
+                    if Path(h_path).resolve() == rust_log_path:
+                        continue
+                except (OSError, ValueError):
+                    pass
+
+            if envelope is None:
+                # Lazy-parse: only pay the JSON-load cost when at least
+                # one user handler is going to look at the envelope.
+                try:
+                    envelope = json.loads(raw_line)
+                except (ValueError, TypeError) as e:
+                    _log.warning(
+                        "DispatchRuntime: failed to parse Rust-produced "
+                        "envelope line for fan-out: %s; skipping handlers.",
+                        e,
+                    )
+                    return
+            try:
+                if not h.accepts(envelope):
+                    continue
+                h.emit(envelope, raw_line)
+            except Exception:  # noqa: BLE001 — swallow per handler-fanout contract
+                _log.exception(
+                    "DispatchRuntime: handler %r raised during fan-out; swallowed.",
+                    getattr(h, "name", type(h).__name__),
+                )
 
     def read(self, log_path=None) -> Iterator[dict[str, Any]]:
         if self._use_rust:

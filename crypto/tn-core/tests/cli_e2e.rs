@@ -27,7 +27,11 @@ fn cli_init_log_read_roundtrip() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("did=did:key:z"), "init stdout: {stdout}");
 
-    // log
+    // log — request the json format on stdout so we can assert against
+    // the canonical envelope shape. Default is the pretty single-line
+    // format ("HH:MM:SS.mmm INFO  seq=1  order.created"); the env-var
+    // override matches what an operator piping CLI output to a log
+    // shipper would set.
     let out = Command::new(bin)
         .args([
             "--yaml",
@@ -38,6 +42,7 @@ fn cli_init_log_read_roundtrip() {
             "amount=100",
             "note=hello",
         ])
+        .env("TN_STDOUT_FORMAT", "json")
         .output()
         .unwrap();
     assert!(

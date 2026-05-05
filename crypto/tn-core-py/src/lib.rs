@@ -11,7 +11,7 @@ mod admin;
 
 use pyo3::exceptions::{PyException, PyIOError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3::{create_exception, intern};
 use std::path::Path;
 use std::sync::Arc;
@@ -71,9 +71,16 @@ impl PyRuntime {
         self.inner.log_path().display().to_string()
     }
 
-    /// Emit an event. `fields` is a Python dict; returns `None` for
-    /// cross-language parity with Python `tn.log` (returns `None`) and
-    /// TS `tn.log` (returns `void`).
+    /// Emit an event. `fields` is a Python dict.
+    ///
+    /// Returns the canonical envelope NDJSON line (newline-terminated bytes)
+    /// so the Python `DispatchRuntime` can fan out to user-registered Python
+    /// handlers (kafka, S3, vault.sync, etc.) without re-deriving it. Returns
+    /// `None` when the emit was filtered by the log-level threshold and no
+    /// envelope was produced.
+    ///
+    /// Note: this is a 0.0.x API change from the previous `-> None` return.
+    /// Callers that don't need the line just discard the result.
     ///
     /// `sign` overrides the ceremony's yaml `ceremony.sign` default for this
     /// single call. `None` uses the configured default (typically `True`).
@@ -81,19 +88,29 @@ impl PyRuntime {
     // surface individual args to keep the Python callsite ergonomic.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (level, event_type, fields, timestamp=None, event_id=None, sign=None))]
-    fn emit(
+    fn emit<'py>(
         &self,
+        py: Python<'py>,
         level: &str,
         event_type: &str,
         fields: &Bound<'_, PyDict>,
         timestamp: Option<&str>,
         event_id: Option<&str>,
         sign: Option<bool>,
-    ) -> PyResult<()> {
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         let fields_json = pydict_to_json(fields)?;
-        self.inner
-            .emit_with_override_sign(level, event_type, fields_json, timestamp, event_id, sign)
-            .map_err(err_to_py)
+        let line = self
+            .inner
+            .emit_with_override_sign_returning_line(
+                level,
+                event_type,
+                fields_json,
+                timestamp,
+                event_id,
+                sign,
+            )
+            .map_err(err_to_py)?;
+        Ok(line.map(|s| PyBytes::new_bound(py, s.as_bytes())))
     }
 
     /// Read all entries as flat dicts (the default 2026-04-25 shape).
