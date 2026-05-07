@@ -393,7 +393,7 @@ async function streamsCmd() {
 
   const rows = [];
   if (existsSync(root)) {
-    const _NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$/;
+    const _NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/;
     const names = [];
     for (const child of readdirSync(root)) {
       if (!_NAME_RE.test(child) && child !== "tn") continue;
@@ -458,7 +458,7 @@ async function validateCmd() {
     return;
   }
 
-  const _NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$/;
+  const _NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/;
   const names = [];
   for (const child of readdirSync(root)) {
     if (!_NAME_RE.test(child) && child !== "tn") continue;

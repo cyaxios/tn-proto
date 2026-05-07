@@ -65,9 +65,10 @@ export class StdoutHandler extends BaseTNHandler {
 // Stable id-per-function for the resolved_address sentinel of custom
 // write targets. Preserves dedup semantics when the *same* function is
 // passed to two handlers.
-const _fnIdMap = new WeakMap<Function, number>();
+type _WriteFn = (s: string) => void;
+const _fnIdMap = new WeakMap<_WriteFn, number>();
 let _fnIdCounter = 0;
-function _idForFn(fn: Function): number {
+function _idForFn(fn: _WriteFn): number {
   let id = _fnIdMap.get(fn);
   if (id === undefined) {
     id = ++_fnIdCounter;
