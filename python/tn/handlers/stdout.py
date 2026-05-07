@@ -52,31 +52,90 @@ def _resolve_format(explicit: str | None) -> str:
     return "pretty"
 
 
+# Envelope keys that are *crypto* and never belong on stdout. The
+# pretty format suppresses these by name; everything else is fair
+# game (modulo ciphertext-object values, see below).
+_CRYPTO_KEYS = frozenset(
+    {
+        "prev_hash",
+        "row_hash",
+        "signature",
+        # ``did`` is the publisher's full DID — shown truncated only.
+        "did",
+        # Already rendered into the line header.
+        "timestamp",
+        "level",
+        "event_type",
+        "sequence",
+        "event_id",
+    }
+)
+
+
+def _is_group_ciphertext(value: Any) -> bool:
+    """True iff a value looks like a group ciphertext block (a dict
+    with a ``ciphertext`` key). These are the encrypted payloads;
+    they don't belong on stdout."""
+    return isinstance(value, dict) and "ciphertext" in value
+
+
+def _short(s: str, n: int = 12) -> str:
+    """Truncate a long identifier (DID, event_id) for compact display."""
+    if not s or len(s) <= n:
+        return s
+    return s[:n] + "…"
+
+
 def _format_pretty(envelope: dict[str, Any]) -> bytes:
     """Render an envelope as a terse human-readable line.
 
-    Format: ``HH:MM:SS.mmm LEVEL  seq=N  event_type\\n``.
+    Header: ``HH:MM:SS.mmm LEVEL  seq=N  event_type``.
 
-    ``level=""`` (severity-less ``tn.log``) renders as ``LOG`` to match
-    the public verb name. Fields are intentionally absent — they are
-    encrypted in the envelope at this layer and recoverable via
-    ``tn.read()``. Bytes output (not str) for parity with the
-    ``json`` format and the file sinks.
+    Trailer: every public envelope field rendered as ``key=value``,
+    sorted by key. Crypto fields (signatures, hashes, full DID) and
+    group ciphertext blocks are suppressed — those live on disk for
+    audit, not on a developer's terminal. ``event_id`` and ``did``
+    (when present) are shown truncated as ``id=<short>`` /
+    ``did=<short>`` so the operator can correlate without seeing
+    the whole opaque string.
+
+    ``level=""`` (severity-less ``tn.log``) renders as ``LOG``.
+    Bytes output for parity with the ``json`` format.
     """
     ts = str(envelope.get("timestamp", ""))
-    # Trim "2026-05-05T22:27:23.712506Z" -> "22:27:23.712"
     if "T" in ts:
         ts = ts.split("T", 1)[1]
     if ts.endswith("Z"):
         ts = ts[:-1]
-    # Truncate fractional to milliseconds for readability.
     if "." in ts:
         head, frac = ts.split(".", 1)
         ts = f"{head}.{frac[:3]}"
     level = str(envelope.get("level") or "log").upper()
     seq = envelope.get("sequence", "")
     event_type = str(envelope.get("event_type", ""))
-    line = f"{ts:<12} {level:<5}  seq={seq}  {event_type}\n"
+
+    parts = [f"{ts:<12} {level:<5}  seq={seq}  {event_type}"]
+
+    # Truncated correlation identifiers (operator-useful, terminal-safe).
+    eid = envelope.get("event_id")
+    if isinstance(eid, str) and eid:
+        parts.append(f"id={_short(eid, 8)}")
+    did = envelope.get("did")
+    if isinstance(did, str) and did:
+        parts.append(f"did={_short(did, 16)}")
+
+    # Public fields: anything not crypto, not ciphertext-shaped.
+    extras: list[str] = []
+    for k, v in sorted(envelope.items()):
+        if k in _CRYPTO_KEYS:
+            continue
+        if _is_group_ciphertext(v):
+            continue
+        extras.append(f"{k}={v!r}")
+    if extras:
+        parts.append(" ".join(extras))
+
+    line = "  ".join(parts) + "\n"
     return line.encode("utf-8")
 
 
@@ -113,6 +172,15 @@ class StdoutHandler(SyncHandler):
         # constructed before capsys took effect.
         self._stream_override = stream
         self._format_kwarg = format
+
+    def resolved_address(self) -> str:
+        """Stdout handlers dedup by a single sentinel — every
+        StdoutHandler instance writes to the same process stdout
+        (or to whatever stream override was injected, in which
+        case dedup happens by the override's ``id``)."""
+        if self._stream_override is not None:
+            return f"<stream:{id(self._stream_override)}>"
+        return "<stdout>"
 
     def emit(self, envelope: dict[str, Any], raw_line: bytes) -> None:
         if self._stream_override is not None:

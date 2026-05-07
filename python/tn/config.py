@@ -400,6 +400,9 @@ def create_fresh(
     pool_size: int = DEFAULT_POOL_SIZE,
     cipher: str = "btn",
     device_private_bytes: bytes | None = None,
+    keystore_dir: Path | None = None,
+    log_path: Path | None = None,
+    admin_log_path: Path | None = None,
 ) -> LoadedConfig:
     """Generate a fresh ceremony: device key + default group.
 
@@ -410,6 +413,13 @@ def create_fresh(
     ceremonies that need no Rust dependency at all).
     Once chosen, the whole ceremony uses that cipher. Change it by
     creating a new ceremony.
+
+    `keystore_dir`, `log_path`, `admin_log_path` — optional explicit
+    directories that override the stem-derived ``.tn/<stem>/...``
+    defaults. Used by the multi-ceremony layout (``.tn/<name>/keys``
+    instead of ``.tn/<name>/.tn/tn/keys``). All three should be passed
+    together when overriding; mixing leaves you with paths that don't
+    line up.
 
     `device_private_bytes` — optional 32-byte Ed25519 seed. If provided,
     the ceremony binds to that key (so the DID written into tn.yaml
@@ -426,11 +436,44 @@ def create_fresh(
     # whatever path they were created with, and load_config resolves
     # whatever the yaml literally says.
     yaml_stem = yaml_path.stem
-    keystore = yaml_path.parent / ".tn" / yaml_stem / "keys"
+    if keystore_dir is not None:
+        keystore = Path(keystore_dir).resolve()
+    else:
+        keystore = yaml_path.parent / ".tn" / yaml_stem / "keys"
     # Single source of truth for the main log path; reused below for
     # both ``logs.path`` and the file.rotating handler so an operator
     # editing one place stays in sync with the other automatically.
-    _log_path_default = f"./.tn/{yaml_stem}/logs/tn.ndjson"
+    if log_path is not None:
+        # Yaml stores log path relative to the yaml's parent for
+        # portability. Fall back to absolute if not under that parent.
+        _log_path_resolved = Path(log_path).resolve()
+        try:
+            _log_path_default = "./" + str(
+                _log_path_resolved.relative_to(yaml_path.parent)
+            ).replace("\\", "/")
+        except ValueError:
+            _log_path_default = str(_log_path_resolved)
+    else:
+        _log_path_default = f"./.tn/{yaml_stem}/logs/tn.ndjson"
+    if admin_log_path is not None:
+        _admin_log_resolved = Path(admin_log_path).resolve()
+        try:
+            _admin_log_default = "./" + str(
+                _admin_log_resolved.relative_to(yaml_path.parent)
+            ).replace("\\", "/")
+        except ValueError:
+            _admin_log_default = str(_admin_log_resolved)
+    else:
+        _admin_log_default = f"./.tn/{yaml_stem}/admin/admin.ndjson"
+    if keystore_dir is not None:
+        try:
+            _keystore_path_str = "./" + str(
+                Path(keystore_dir).resolve().relative_to(yaml_path.parent)
+            ).replace("\\", "/")
+        except ValueError:
+            _keystore_path_str = str(Path(keystore_dir).resolve())
+    else:
+        _keystore_path_str = f"./.tn/{yaml_stem}/keys"
 
     # Refuse to clobber an existing keystore. If .tn/keys/local.private
     # already exists but tn.yaml does not, the caller is either
@@ -533,7 +576,7 @@ def create_fresh(
             # namespaced by yaml stem so two yamls in the same folder
             # don't share the same admin file. Set to ``"main_log"`` to
             # fold them back into the main log (pre-2026-04-24 behavior).
-            "admin_log_location": f"./.tn/{yaml_stem}/admin/admin.ndjson",
+            "admin_log_location": _admin_log_default,
             # Active log-level threshold. ``debug`` (the floor) lets
             # every emit through; ``info`` drops debug-level emits;
             # ``warning`` drops debug+info; ``error`` drops everything
@@ -546,7 +589,7 @@ def create_fresh(
         # substitution. For event-type-based file splitting use a `handlers:`
         # block or `protocol_events_location` (see advanced docs).
         "logs": {"path": _log_path_default},
-        "keystore": {"path": f"./.tn/{yaml_stem}/keys"},
+        "keystore": {"path": _keystore_path_str},
         "me": {"did": device.did},
         # Output sinks. Both sinks are declared explicitly so they're
         # auditable + editable from the yaml — no hidden in-code defaults
@@ -735,11 +778,203 @@ def _build_field_to_groups(doc: dict[str, Any], yaml_path: Path) -> dict[str, li
     return field_to_groups
 
 
-def load(yaml_path: Path) -> LoadedConfig:
+def _read_yaml_doc(yaml_path: Path) -> dict[str, Any]:
+    """Read + env-var-expand + yaml-parse a single tn.yaml file.
+
+    Used by both ``load`` and the extends resolver. Does not validate;
+    returns the raw doc dict (or raises ValueError on bad shape)."""
     yaml_path = yaml_path.resolve()
     raw_text = yaml_path.read_text(encoding="utf-8")
     expanded = _substitute_env_vars(raw_text, yaml_path)
     doc = yaml.safe_load(expanded)
+    if not isinstance(doc, dict):
+        raise ValueError(f"{yaml_path}: expected top-level mapping")
+    return doc
+
+
+# Fields that come from the parent (default) ceremony and cannot be
+# overridden by an extending stream. If a child yaml sets one of
+# these, a warning is logged and the parent's value is used.
+# Identity, groups, recipient relationships are project-scoped.
+_PARENT_OWNED_KEYS = (
+    "me",
+    "keystore",
+    "groups",
+    "fields",
+    "public_fields",
+    "default_policy",
+    "llm_classifier",
+)
+
+# Fields that the child can fully override (no merge with parent's value).
+_CHILD_OWNED_KEYS = ("logs",)
+
+
+def _absolutize_path(p: str, base: Path) -> str:
+    """Resolve a possibly-relative path string against ``base`` and
+    return an absolute path string. Pass-through if already absolute.
+
+    Used during extends merging: a parent yaml's ``keystore.path``
+    is recorded relative to the parent's own directory, but the
+    merged result will be loaded against the child's directory.
+    Absolutizing at merge time makes the final paths location-
+    independent and consistent regardless of which yaml in the
+    chain triggered the load.
+    """
+    pp = Path(p)
+    if pp.is_absolute():
+        return str(pp)
+    return str((base / pp).resolve())
+
+
+def _absolutize_parent_doc(parent_doc: dict[str, Any], parent_path: Path) -> dict[str, Any]:
+    """Walk parent_doc and convert relative paths to absolute paths
+    rooted at ``parent_path.parent``. Mutates and returns a fresh
+    copy. Conservative: only paths in known fields are touched.
+    """
+    out = dict(parent_doc)
+    base = parent_path.parent
+
+    if isinstance(out.get("keystore"), dict) and "path" in out["keystore"]:
+        ks = dict(out["keystore"])
+        ks["path"] = _absolutize_path(str(ks["path"]), base)
+        out["keystore"] = ks
+
+    if isinstance(out.get("logs"), dict) and "path" in out["logs"]:
+        lg = dict(out["logs"])
+        lg["path"] = _absolutize_path(str(lg["path"]), base)
+        out["logs"] = lg
+
+    cer = out.get("ceremony")
+    if isinstance(cer, dict) and "admin_log_location" in cer:
+        cer = dict(cer)
+        loc = cer["admin_log_location"]
+        if isinstance(loc, str) and loc != "main_log":
+            cer["admin_log_location"] = _absolutize_path(loc, base)
+        out["ceremony"] = cer
+
+    if isinstance(out.get("handlers"), list):
+        new_handlers = []
+        for h in out["handlers"]:
+            if isinstance(h, dict) and "path" in h:
+                hh = dict(h)
+                hh["path"] = _absolutize_path(str(hh["path"]), base)
+                new_handlers.append(hh)
+            else:
+                new_handlers.append(h)
+        out["handlers"] = new_handlers
+
+    return out
+
+
+def _resolve_extends(yaml_path: Path, doc: dict[str, Any], _seen: set[Path] | None = None) -> dict[str, Any]:
+    """If ``doc`` declares ``extends: <path>``, recursively load the
+    parent yaml and return a merged dict.
+
+    Merge rules (see directory-layout.md):
+      - parent-owned keys (identity, groups, recipients): parent wins.
+        Child values logged + ignored.
+      - child-owned keys (logs.path): child wins outright.
+      - ``ceremony``: shallow-merged per subfield, child wins.
+      - ``handlers``: additive, deduped by name. Child handlers come
+        first; parent handlers append unless name already present.
+      - all other top-level keys: child wins if set, else parent's.
+
+    Path absolutization: parent's relative paths (keystore.path,
+    logs.path, handler.path, admin_log_location) are converted to
+    absolute paths rooted at the parent's directory before merge.
+    The child's relative paths remain relative to its own directory.
+    This keeps load semantics correct regardless of which yaml in
+    the chain triggers the load.
+
+    Cycles are detected (via the ``_seen`` set) and raise ValueError.
+    """
+    extends = doc.get("extends")
+    if not extends:
+        return doc
+
+    if _seen is None:
+        _seen = set()
+    if yaml_path in _seen:
+        raise ValueError(
+            f"{yaml_path}: extends cycle detected. "
+            "extends: chains cannot loop back on themselves."
+        )
+    _seen = _seen | {yaml_path}
+
+    if not isinstance(extends, str):
+        raise ValueError(
+            f"{yaml_path}: extends must be a string path, got {type(extends).__name__}"
+        )
+    parent_path = (yaml_path.parent / extends).resolve()
+    if not parent_path.is_file():
+        raise ValueError(
+            f"{yaml_path}: extends target {parent_path} does not exist"
+        )
+
+    parent_doc = _read_yaml_doc(parent_path)
+    parent_resolved = _resolve_extends(parent_path, parent_doc, _seen)
+    # Absolutize parent's relative paths so they survive the merge
+    # into the child's coordinate system.
+    parent_resolved = _absolutize_parent_doc(parent_resolved, parent_path)
+
+    # Start from parent's view, then apply child's overrides.
+    merged: dict[str, Any] = dict(parent_resolved)
+
+    import logging as _log
+    log = _log.getLogger("tn")
+
+    for key, child_val in doc.items():
+        if key == "extends":
+            continue
+        if key in _PARENT_OWNED_KEYS:
+            if key in parent_resolved:
+                if child_val != parent_resolved[key]:
+                    log.warning(
+                        "%s: child sets parent-owned key %r; parent wins. "
+                        "Identity / groups / recipients live at the project "
+                        "root only. Remove the override from the stream yaml.",
+                        yaml_path, key,
+                    )
+                continue
+            # Parent didn't set it; child's value can stand.
+            merged[key] = child_val
+            continue
+        if key == "ceremony":
+            base = dict(parent_resolved.get("ceremony") or {})
+            if isinstance(child_val, dict):
+                base.update(child_val)
+            merged["ceremony"] = base
+            continue
+        if key == "handlers":
+            base_h = list(parent_resolved.get("handlers") or [])
+            child_h = list(child_val) if isinstance(child_val, list) else []
+            seen_names: set[str] = set()
+            out: list[Any] = []
+            for h in child_h + base_h:
+                if not isinstance(h, dict):
+                    continue
+                name = h.get("name") or h.get("kind")
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                out.append(h)
+            merged["handlers"] = out
+            continue
+        # Default: child wins.
+        merged[key] = child_val
+
+    return merged
+
+
+def load(yaml_path: Path) -> LoadedConfig:
+    yaml_path = yaml_path.resolve()
+    doc = _read_yaml_doc(yaml_path)
+
+    # Resolve extends: chain *before* validation. After this point the
+    # merged doc carries identity, groups, recipients from the root
+    # of the chain; the per-stream child supplied only its overrides.
+    doc = _resolve_extends(yaml_path, doc)
 
     if not isinstance(doc, dict):
         raise ValueError(f"{yaml_path}: expected top-level mapping")

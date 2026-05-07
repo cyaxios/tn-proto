@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve as pathResolve } from "node:path";
+import { dirname, join, relative, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
@@ -418,8 +418,25 @@ export class NodeRuntime {
         ...publicOut,
         ...groupPayloadsForEnvelope,
       };
+      // Per-emit address dedup. Mirrors Python TNRuntime.emit
+      // (logger.py:_emit_locked). When two handlers in the effective
+      // set resolve to the same sink address (file path, stdout
+      // sentinel, network endpoint), only the first writes for this
+      // emit. Handlers that opt out (resolved_address returns null
+      // or the method is absent) are always fired.
+      const seenAddresses = new Set<string>();
       for (const h of this.handlers) {
         if (!h.accepts(envelope)) continue;
+        let addr: string | null = null;
+        try {
+          addr = h.resolved_address?.() ?? null;
+        } catch {
+          addr = null;
+        }
+        if (addr !== null) {
+          if (seenAddresses.has(addr)) continue;
+          seenAddresses.add(addr);
+        }
         try {
           h.emit(envelope, line);
         } catch {
@@ -1809,14 +1826,32 @@ function _verifyEnvelopeSignature(env: Record<string, unknown>): boolean {
  * self-kit, index master; writes tn.yaml + .tn/keys/*; refuses to
  * clobber an existing keystore.
  */
-export function createFreshCeremony(yamlPath: string): void {
+export interface CreateFreshOptions {
+  /** Explicit keystore directory. Overrides the stem-derived default
+   *  (``./.tn/<stem>/keys`` relative to the yaml). Used by the multi-
+   *  ceremony layout to point at a flat ``.tn/<name>/keys`` instead. */
+  keystoreDir?: string;
+  /** Explicit log file path. Overrides the stem-derived default
+   *  (``./.tn/<stem>/logs/tn.ndjson``). */
+  logPath?: string;
+  /** Explicit admin log path. Overrides the stem-derived default. */
+  adminLogPath?: string;
+  /** Optional ``ceremony.profile`` to stamp into the freshly-written
+   *  yaml. Mirrors Python's profile catalog. */
+  profile?: string;
+}
+
+export function createFreshCeremony(
+  yamlPath: string,
+  opts: CreateFreshOptions = {},
+): void {
   const yamlDir = dirname(yamlPath);
   // Namespace .tn/ by yaml stem so two yamls in the same directory don't
   // collide on the same keys/logs/admin paths (FINDINGS #2 — Python parity).
   // Stem == basename without the trailing .yaml/.yml.
   const yamlBasename = yamlPath.split(/[\\/]/).pop() ?? "tn.yaml";
   const yamlStem = yamlBasename.replace(/\.ya?ml$/i, "");
-  const keysDir = join(yamlDir, ".tn", yamlStem, "keys");
+  const keysDir = opts.keystoreDir ?? join(yamlDir, ".tn", yamlStem, "keys");
   const privatePath = join(keysDir, "local.private");
 
   if (existsSync(privatePath)) {
@@ -1868,6 +1903,36 @@ export function createFreshCeremony(yamlPath: string): void {
   writeFileSync(join(keysDir, "tn.agents.btn.state"), Buffer.from(agentsStateBytes));
   writeFileSync(join(keysDir, "tn.agents.btn.mykit"), Buffer.from(agentsSelfKit));
 
+  // Resolve all four path slots. When opts override the stem-
+  // derived defaults, write the override paths into the yaml as
+  // *relative* (rooted at yamlDir) so the on-disk record stays
+  // portable.
+  function rel(absOrRel: string, fallback: string): string {
+    if (!absOrRel) return fallback;
+    const target = absOrRel;
+    // If already relative-looking, pass through.
+    if (!target.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(target)) {
+      return target.startsWith("./") ? target : `./${target}`;
+    }
+    // Compute relative-from-yamlDir if possible; otherwise leave absolute.
+    try {
+      const rel = relative(yamlDir, target).replace(/\\/g, "/");
+      return rel ? `./${rel}` : "./";
+    } catch {
+      return target.replace(/\\/g, "/");
+    }
+  }
+  const _keystorePathStr = opts.keystoreDir
+    ? rel(opts.keystoreDir, `./.tn/${yamlStem}/keys`)
+    : `./.tn/${yamlStem}/keys`;
+  const _logPathStr = opts.logPath
+    ? rel(opts.logPath, `./.tn/${yamlStem}/logs/tn.ndjson`)
+    : `./.tn/${yamlStem}/logs/tn.ndjson`;
+  const _adminLogStr = opts.adminLogPath
+    ? rel(opts.adminLogPath, `./.tn/${yamlStem}/admin/admin.ndjson`)
+    : `./.tn/${yamlStem}/admin/admin.ndjson`;
+  const _profileLine = opts.profile ? `\n  profile: ${opts.profile}` : "";
+
   // Write the yaml. Public fields list covers both the business
   // defaults and the entire admin-catalog field set so catalog events
   // never land in a group ciphertext by accident. Mirrors the
@@ -1876,17 +1941,17 @@ export function createFreshCeremony(yamlPath: string): void {
   id: ${cid}
   mode: local
   cipher: btn
-  sign: true
-  admin_log_location: ./.tn/${yamlStem}/admin/admin.ndjson
+  sign: true${_profileLine}
+  admin_log_location: ${_adminLogStr}
   log_level: debug
 logs:
-  path: ./.tn/${yamlStem}/logs/tn.ndjson
+  path: ${_logPathStr}
 keystore:
-  path: ./.tn/${yamlStem}/keys
+  path: ${_keystorePathStr}
 handlers:
 - kind: file.rotating
   name: main
-  path: ./.tn/${yamlStem}/logs/tn.ndjson
+  path: ${_logPathStr}
   max_bytes: 5242880
   backup_count: 5
   rotate_on_init: true

@@ -112,6 +112,10 @@ class FileRotatingHandler(SyncHandler):
         with self._lock:
             self._h.close()
 
+    def resolved_address(self) -> str:
+        """File handlers dedup by resolved absolute path."""
+        return str(self.path.resolve())
+
 
 class FileTimedRotatingHandler(SyncHandler):
     """Time-based rotation. `when` follows stdlib conventions: 'midnight',
@@ -148,3 +152,6 @@ class FileTimedRotatingHandler(SyncHandler):
     def close(self, *, timeout: float = 30.0) -> None:
         with self._lock:
             self._h.close()
+
+    def resolved_address(self) -> str:
+        return str(self.path.resolve())

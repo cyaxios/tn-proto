@@ -377,6 +377,140 @@ async function watchCmd() {
   }
 }
 
+async function streamsCmd() {
+  // List ceremonies under .tn/ for the project. Mirrors Python's
+  // ``tn streams`` subcommand (python/tn/cli.py:cmd_streams).
+  const rest = argv.slice(3);
+  const opts = { projectDir: null, format: "human" };
+  for (let i = 0; i < rest.length; i += 1) {
+    if (rest[i] === "--project-dir") opts.projectDir = rest[++i];
+    else if (rest[i] === "--format") opts.format = rest[++i];
+  }
+  const { existsSync, readdirSync, readFileSync } = await import("node:fs");
+  const { join, resolve: pathResolve } = await import("node:path");
+  const projectDir = opts.projectDir ? pathResolve(opts.projectDir) : process.cwd();
+  const root = join(projectDir, ".tn");
+
+  const rows = [];
+  if (existsSync(root)) {
+    const _NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$/;
+    const names = [];
+    for (const child of readdirSync(root)) {
+      if (!_NAME_RE.test(child) && child !== "tn") continue;
+      const yp = join(root, child, "tn.yaml");
+      if (existsSync(yp)) names.push(child);
+    }
+    names.sort();
+    for (const name of names) {
+      const yp = join(root, name, "tn.yaml");
+      let profile = "(unspecified)";
+      try {
+        const text = readFileSync(yp, "utf8");
+        const m = text.match(/^\s+profile:\s*(\S+)/m);
+        if (m) profile = m[1];
+      } catch {
+        // ignore
+      }
+      rows.push({ name, profile, yaml_path: yp });
+    }
+  }
+
+  if (opts.format === "json") {
+    process.stdout.write(JSON.stringify(rows, null, 2) + "\n");
+    return;
+  }
+  if (rows.length === 0) {
+    process.stdout.write(`(no ceremonies found under ${root})\n`);
+    return;
+  }
+  const nameW = Math.max(4, ...rows.map((r) => r.name.length));
+  const profW = Math.max(7, ...rows.map((r) => r.profile.length));
+  process.stdout.write(
+    `${"NAME".padEnd(nameW)}  ${"PROFILE".padEnd(profW)}  YAML\n`,
+  );
+  process.stdout.write(
+    `${"-".repeat(nameW)}  ${"-".repeat(profW)}  ----\n`,
+  );
+  for (const r of rows) {
+    process.stdout.write(
+      `${r.name.padEnd(nameW)}  ${r.profile.padEnd(profW)}  ${r.yaml_path}\n`,
+    );
+  }
+}
+
+async function validateCmd() {
+  // Static check of the project's .tn/ tree. Mirrors Python's
+  // ``tn validate`` subcommand (python/tn/cli.py:cmd_validate).
+  const rest = argv.slice(3);
+  const opts = { projectDir: null };
+  for (let i = 0; i < rest.length; i += 1) {
+    if (rest[i] === "--project-dir") opts.projectDir = rest[++i];
+  }
+  const { existsSync, readdirSync, readFileSync } = await import("node:fs");
+  const { join, resolve: pathResolve } = await import("node:path");
+  const { parse: parseYaml } = await import("yaml");
+  const { isKnownProfile, allProfileNames } = await import("../dist/profiles.js");
+
+  const projectDir = opts.projectDir ? pathResolve(opts.projectDir) : process.cwd();
+  const root = join(projectDir, ".tn");
+  if (!existsSync(root)) {
+    process.stdout.write(`(no .tn/ directory at ${projectDir} — nothing to validate)\n`);
+    return;
+  }
+
+  const _NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$/;
+  const names = [];
+  for (const child of readdirSync(root)) {
+    if (!_NAME_RE.test(child) && child !== "tn") continue;
+    const yp = join(root, child, "tn.yaml");
+    if (existsSync(yp)) names.push(child);
+  }
+  names.sort();
+  if (names.length === 0) {
+    process.stdout.write(`(no ceremonies under ${root} — nothing to validate)\n`);
+    return;
+  }
+
+  const errors = [];
+  const warnings = [];
+  if (!names.includes("default")) {
+    warnings.push(
+      "no 'default' ceremony at .tn/default/. The project's identity " +
+        "should live there; named streams normally extend from it.",
+    );
+  }
+
+  for (const name of names) {
+    const yp = join(root, name, "tn.yaml");
+    let doc;
+    try {
+      const text = readFileSync(yp, "utf8");
+      doc = parseYaml(text);
+    } catch (e) {
+      errors.push(`${yp}: read/parse failed: ${e.message}`);
+      continue;
+    }
+    if (!doc || typeof doc !== "object") {
+      errors.push(`${yp}: top-level must be a mapping`);
+      continue;
+    }
+    const profile = (doc.ceremony ?? {}).profile;
+    if (profile !== undefined && !isKnownProfile(profile)) {
+      errors.push(
+        `${yp}: unknown profile ${JSON.stringify(profile)}; ` +
+          `catalog: ${JSON.stringify(allProfileNames())}`,
+      );
+    }
+  }
+
+  for (const w of warnings) process.stderr.write(`WARNING: ${w}\n`);
+  if (errors.length > 0) {
+    for (const e of errors) process.stderr.write(`ERROR: ${e}\n`);
+    exit(1);
+  }
+  process.stdout.write(`OK: ${names.length} ceremon${names.length === 1 ? "y" : "ies"} valid.\n`);
+}
+
 function compileCmd() {
   // Thin CLI over sdk's compileKitBundleToFile.
   const rest = argv.slice(3);
@@ -487,6 +621,12 @@ switch (cmd) {
     break;
   case "watch":
     await watchCmd();
+    break;
+  case "streams":
+    await streamsCmd();
+    break;
+  case "validate":
+    await validateCmd();
     break;
   case undefined:
   case "--help":

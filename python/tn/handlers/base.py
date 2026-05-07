@@ -43,6 +43,21 @@ class TNHandler(ABC):
         be free to inherit the no-op rather than forced to restate it.
         """
 
+    def resolved_address(self) -> str | None:
+        """Return a string identifying this handler's sink — file
+        path, stdout sentinel, network endpoint URL, etc.
+
+        Used for runtime de-duplication: when two handlers in a
+        single emit's effective fan-out resolve to the same address,
+        the second write is suppressed (per the no-side-effect-dupes
+        rule in directory-layout.md).
+
+        Returning ``None`` opts the handler out of dedup — the
+        runtime treats it as having a unique address every time.
+        Subclasses with a meaningful sink (file, stdout, etc.)
+        should override and return a stable string."""
+        return None
+
 
 class SyncHandler(TNHandler):
     """File-like handler: emit synchronously on the caller thread."""
