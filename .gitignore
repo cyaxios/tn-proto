@@ -5,7 +5,9 @@ __pycache__/
 .Python
 *.egg-info/
 dist/
+dist-wheelhouse/
 build/
+.venv-test/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -41,6 +43,10 @@ Thumbs.db
 .tn_logs/
 *.ndjson.bak
 vault_blobs/
+# Resolved-extends snapshot the dispatch wrapper writes for the
+# Rust runtime (which doesn't know about extends:); regenerated
+# every init, never hand-edited.
+**/.resolved.yaml
 
 # Generated docs / reports
 **/run_report.txt
