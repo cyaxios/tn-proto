@@ -1,70 +1,39 @@
 #!/usr/bin/env bash
-# Rebuild every wheel and stage it in dist-wheelhouse/ so a downstream
-# `pip install --find-links dist-wheelhouse tn-protocol` picks up the
-# latest Rust + Python source. Run this after any change to:
+# Compatibility shim — delegates to the Makefile's standard targets.
 #
-#   - crypto/tn-core/src/      (Rust runtime)
-#   - crypto/tn-btn/src/       (Rust btn primitive)
-#   - crypto/tn-core-py/src/   (PyO3 bindings)
-#   - crypto/tn-btn-py/src/    (PyO3 bindings)
-#   - python/tn/               (Python SDK)
+# The real build orchestration lives in ./Makefile. Standard tooling
+# (maturin / build / twine), standard output dir (./dist/), standard
+# wheel layout. See ``make help`` for the full target list.
 #
-# Without this step, students/operators installing from the wheelhouse
-# get stale Rust binaries that don't reflect source-tree fixes — see
-# the FINDINGS S0.4 stale-wheel root cause.
-#
-# Usage:
-#   ./build_wheels.sh              # build all three wheels into dist-wheelhouse/
-#   ./build_wheels.sh tn_core      # build a subset
-#
+# Kept around so existing muscle memory and any external scripts that
+# call ``./build_wheels.sh`` continue to work without surprise.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_PY="$SCRIPT_DIR/../.venv/Scripts/python.exe"
-DIST="$SCRIPT_DIR/dist-wheelhouse"
-WHEELS_OUT="$SCRIPT_DIR/target/wheels"
-mkdir -p "$DIST"
-mkdir -p "$WHEELS_OUT"
-
-build_tn_core() {
-    echo "==> Building tn_core (Rust + PyO3)"
-    cd "$SCRIPT_DIR/crypto/tn-core-py"
-    "$VENV_PY" -m maturin build --release
-    cp "$WHEELS_OUT/tn_core-"*.whl "$DIST/"
-}
-
-build_tn_btn() {
-    echo "==> Building tn_btn (Rust + PyO3)"
-    cd "$SCRIPT_DIR/crypto/tn-btn-py"
-    "$VENV_PY" -m maturin build --release
-    cp "$WHEELS_OUT/tn_btn-"*.whl "$DIST/"
-}
-
-build_tn_protocol() {
-    echo "==> Building tn_protocol (pure Python)"
-    cd "$SCRIPT_DIR/python"
-    "$VENV_PY" -m build --wheel --outdir "$WHEELS_OUT"
-    cp "$WHEELS_OUT/tn_protocol-"*.whl "$DIST/"
-}
+cd "$SCRIPT_DIR"
 
 if [ $# -eq 0 ]; then
-    build_tn_btn
-    build_tn_core
-    build_tn_protocol
-else
-    for arg in "$@"; do
-        case "$arg" in
-            tn_core|core)       build_tn_core ;;
-            tn_btn|btn)         build_tn_btn ;;
-            tn_protocol|python) build_tn_protocol ;;
-            *) echo "unknown target: $arg (try tn_core / tn_btn / tn_protocol)"; exit 2 ;;
-        esac
-    done
+    exec make build
 fi
 
-echo
-echo "==> Wheels in $DIST:"
-ls -la "$DIST" | awk 'NR>1 {print "    " $NF}'
-echo
-echo "Install locally with:"
-echo "    pip install --find-links $DIST tn-protocol"
+# Map legacy positional args to make targets.
+TARGETS=()
+for arg in "$@"; do
+    case "$arg" in
+        tn_core|core)        TARGETS+=("build-core") ;;
+        tn_btn|btn)          TARGETS+=("build-btn") ;;
+        tn_protocol|python)  TARGETS+=("build-protocol") ;;
+        clean)               TARGETS+=("clean") ;;
+        check)               TARGETS+=("check") ;;
+        publish-test)        TARGETS+=("publish-test") ;;
+        publish)             TARGETS+=("publish") ;;
+        *)
+            echo "build_wheels.sh: unknown target '$arg'"
+            echo ""
+            make help
+            exit 2
+            ;;
+    esac
+done
+
+exec make "${TARGETS[@]}"
