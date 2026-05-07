@@ -7,7 +7,7 @@
 // Method bodies populated in Task 2.4 (statics, log/read/context),
 // Task 2.6–2.10 (namespaces), Phase 3 Task 3.2 (watch).
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve, isAbsolute as pathIsAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -124,6 +124,60 @@ function _isForeignLog(logPath: string, ownDid: string): boolean {
   return false;
 }
 
+// Multi-ceremony name validation: ascii alphanumeric + underscore + dash,
+// must not start with a dash, must not be the reserved legacy directory
+// name "tn". Mirrors the Python ``tn._layout.is_valid_ceremony_name``.
+const _CEREMONY_NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$/;
+function _isValidCeremonyName(name: string): boolean {
+  if (!name) return false;
+  if (name === "tn") return false;
+  return _CEREMONY_NAME_RE.test(name);
+}
+
+// Process-local handle registry — Bug 8 fix. Keyed by
+// (resolved projectDir + "::" + name). Mirrors Python's tn._registry
+// so two ``Tn.use("payments")`` calls return the same instance.
+// Closed instances evict themselves on close() so the next ``use``
+// call mints a fresh one.
+const _registry: Map<string, Tn> = new Map();
+
+// Emit a one-time loud notice when ``Tn.use(name)`` auto-mints a
+// fresh default ceremony as a side effect of opening a stream. Bug 2
+// fix: silently creating a new device DID is the wrong default;
+// surfacing it gives the operator a chance to recover before they
+// emit anything.
+let _autoMintNoticePrinted = false;
+function _emitAutoMintNotice(defaultYaml: string, projectDir: string): void {
+  if (_autoMintNoticePrinted) return;
+  if (process.env["TN_AUTOINIT_QUIET"] === "1") {
+    _autoMintNoticePrinted = true;
+    return;
+  }
+  const banner =
+    "\n" +
+    "================================================================\n" +
+    "  TN: A NEW DEFAULT CEREMONY HAS BEEN CREATED\n" +
+    "================================================================\n" +
+    `  Location:  ${defaultYaml}\n` +
+    `  Project:   ${projectDir}\n` +
+    "  This was auto-created as a side effect of opening a stream\n" +
+    "  in a project that had no existing default ceremony. The\n" +
+    "  device DID is fresh and unique to this project directory.\n" +
+    "\n" +
+    "  If you intended to attach to an EXISTING ceremony, stop now\n" +
+    "  and either restore the prior ceremony to .tn/default/ or\n" +
+    "  point your project elsewhere.\n" +
+    "\n" +
+    "  Silence this notice with TN_AUTOINIT_QUIET=1.\n" +
+    "================================================================\n";
+  try {
+    process.stderr.write(banner);
+  } catch {
+    /* ignore broken stderr */
+  }
+  _autoMintNoticePrinted = true;
+}
+
 /** Sentinel receipt returned when a level-filtered emit short-circuits. */
 function _nullReceipt(): EmitReceipt {
   return {
@@ -215,9 +269,14 @@ export class Tn {
    * When `yamlPath` is omitted the discovery chain is consulted:
    *   1. `TN_YAML` env var
    *   2. `./tn.yaml`
-   *   3. `$TN_HOME/tn.yaml`
+   *   3. `./.tn/default/tn.yaml`  (multi-ceremony layout, see
+   *      docs/directory-layout.md)
+   *   4. `$TN_HOME/tn.yaml`
    * If strict mode is active (`Tn.setStrict(true)`) and no file is found,
    * an error is thrown. Otherwise a fresh ephemeral ceremony is minted.
+   *
+   * For named multi-ceremony projects, prefer `Tn.openCeremony(name)`
+   * which resolves directly against `.tn/<name>/tn.yaml`.
    */
   static async init(yamlPath?: string, opts?: TnInitOptions): Promise<Tn> {
     let resolvedPath = yamlPath;
@@ -235,7 +294,15 @@ export class Tn {
         if (existsSync(candidate)) resolvedPath = candidate;
       }
 
-      // 3. $TN_HOME/tn.yaml
+      // 3. ./.tn/default/tn.yaml — the multi-ceremony default.
+      // Picked up automatically for projects that have migrated off
+      // the legacy single-ceremony layout. See docs/directory-layout.md.
+      if (resolvedPath === undefined) {
+        const candidate = join(process.cwd(), ".tn", "default", "tn.yaml");
+        if (existsSync(candidate)) resolvedPath = candidate;
+      }
+
+      // 4. $TN_HOME/tn.yaml
       if (resolvedPath === undefined && process.env["TN_HOME"]) {
         const candidate = join(process.env["TN_HOME"], "tn.yaml");
         if (existsSync(candidate)) resolvedPath = candidate;
@@ -318,6 +385,110 @@ export class Tn {
     return new Tn(rt, td);
   }
 
+  /**
+   * Get-or-create a named TN ceremony at ``.tn/<name>/tn.yaml``.
+   *
+   * Mirrors Python's ``tn.use(name)``. Same semantics, same
+   * verb. ``Tn.openCeremony`` is kept as a deprecated alias.
+   *
+   * The reserved name ``"default"`` resolves the default ceremony.
+   * Any other valid name resolves under ``.tn/<name>/``. If the
+   * directory does not exist on disk, it is auto-created — for the
+   * default ceremony, a fresh identity + keystore + full yaml are
+   * minted; for named streams, a lightweight extends-based yaml is
+   * written and identity is inherited from default (which is created
+   * first if absent).
+   *
+   * **Handle interning.** Per-(projectDir, name), this call returns
+   * the same ``Tn`` instance across repeated invocations within the
+   * same process. Two calls with the same arguments give you the
+   * same handle — matching Python's ``tn.use`` registry contract.
+   * Calling ``close()`` on the cached instance evicts it; subsequent
+   * calls mint a fresh one.
+   */
+  static async use(
+    name: string,
+    opts?: TnInitOptions & { projectDir?: string; profile?: string },
+  ): Promise<Tn> {
+    const { ensureCeremonyOnDisk, ceremonyYamlPath, checkProfileConflict, migrateLegacyLayout } =
+      await import("./multi.js");
+    if (!_isValidCeremonyName(name)) {
+      throw new Error(
+        `Tn.use: invalid ceremony name ${JSON.stringify(name)}; ` +
+          "must match [a-zA-Z0-9_][a-zA-Z0-9_-]* and not be 'tn' (reserved).",
+      );
+    }
+    const projectDir = opts?.projectDir ?? process.cwd();
+
+    // Handle interning — Bug 8 fix. Cache by (resolved projectDir,
+    // name). If we've already minted a Tn for this pair in this
+    // process, return it. Matches Python's ``tn.use`` interning.
+    const { resolve: pathResolve } = await import("node:path");
+    const cacheKey = `${pathResolve(projectDir)}::${name}`;
+    const cached = _registry.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    // Opportunistic legacy migration of ``.tn/tn/`` -> ``.tn/default/``.
+    try {
+      migrateLegacyLayout(projectDir);
+    } catch (e) {
+      throw new Error(
+        `Tn.use: legacy layout migration failed: ${(e as Error).message}`,
+      );
+    }
+
+    const yamlPath = ceremonyYamlPath(name, projectDir);
+    checkProfileConflict(yamlPath, opts?.profile);
+    const ensureOpts: { projectDir?: string; profile?: string } = { projectDir };
+    if (opts?.profile !== undefined) ensureOpts.profile = opts.profile;
+
+    // Will the default ceremony get auto-minted as a side effect?
+    // Bug 2 fix: surface a loud, one-time notice so the operator
+    // sees that a fresh project DID was just created.
+    const defaultYamlBefore = ceremonyYamlPath("default", projectDir);
+    const willMintDefault = !existsSync(defaultYamlBefore);
+
+    ensureCeremonyOnDisk(name, ensureOpts);
+
+    if (willMintDefault) {
+      _emitAutoMintNotice(ceremonyYamlPath("default", projectDir), projectDir);
+    }
+
+    const tn = await Tn.init(yamlPath, opts);
+    _registry.set(cacheKey, tn);
+    return tn;
+  }
+
+  /**
+   * @deprecated Use ``Tn.use(name, opts)`` instead. Same semantics,
+   * matches Python's ``tn.use`` verb. This alias will be removed in
+   * a future release.
+   */
+  static async openCeremony(
+    name: string,
+    opts?: TnInitOptions & { projectDir?: string; profile?: string },
+  ): Promise<Tn> {
+    return Tn.use(name, opts);
+  }
+
+  /**
+   * List ceremony names found on disk under `.tn/` for `projectDir`
+   * (default: cwd). Returns the immediate subdirectories of `.tn/`
+   * that contain a `tn.yaml`. Sorted for deterministic output.
+   */
+  static listCeremonies(projectDir?: string): string[] {
+    const root = join(projectDir ?? process.cwd(), ".tn");
+    if (!existsSync(root)) return [];
+    const out: string[] = [];
+    for (const child of readdirSync(root)) {
+      if (!_isValidCeremonyName(child) && child !== "tn") continue;
+      const yp = join(root, child, "tn.yaml");
+      if (existsSync(yp)) out.push(child);
+    }
+    out.sort();
+    return out;
+  }
+
   // -------------------------------------------------------------------------
   // Static configuration methods
   // -------------------------------------------------------------------------
@@ -386,17 +557,29 @@ export class Tn {
     return false;
   }
 
-  /** Flush handlers and (for ephemeral instances) remove the tempdir. */
+  /** Flush handlers and (for ephemeral instances) remove the tempdir.
+   *
+   * Also evicts this instance from the process-level handle registry
+   * so a subsequent ``Tn.use(name, opts)`` call mints a fresh
+   * runtime rather than returning a stale closed handle.
+   */
   async close(): Promise<void> {
     this._rt.close();
     if (this._ownedTempdir !== undefined) {
       const td = this._ownedTempdir;
-      // Clear first so a double-close doesn't try to rm a missing dir.
       this._ownedTempdir = undefined;
       try {
         rmSync(td, { recursive: true, force: true });
       } catch {
         // Best-effort: Windows file-handle races, etc.
+      }
+    }
+    // Evict from registry. Linear scan is fine — registry size is
+    // O(ceremonies in this project), not O(emits).
+    for (const [k, v] of _registry) {
+      if (v === this) {
+        _registry.delete(k);
+        break;
       }
     }
   }
@@ -601,6 +784,16 @@ export class Tn {
    * - `verify: true` adds a `_valid` block to the flat shape
    */
   read(opts?: ReadOptions): Iterable<Record<string, unknown> | ReadEntry> {
+    // Bug 3 fix: streams whose profile has no replay surface (e.g.
+    // ``telemetry`` writes only to stdout) yield an empty iterator
+    // rather than going to the reader. Mirrors Python's
+    // ``TN.read``: "this stream has nothing to replay" is a
+    // different shape, not an error.
+    if (!this._hasReplaySurface()) {
+      return (function* () {
+        // intentionally empty
+      })();
+    }
     const verify = opts?.verify ?? false;
     const raw = opts?.raw ?? false;
     const logPath = opts?.logPath;
@@ -779,12 +972,36 @@ export class Tn {
    * chokidar watcher is closed automatically when the generator is done.
    */
   watch(opts?: WatchOptions): AsyncIterable<Entry> {
+    // Bug 3 fix: empty async-iterable for no-replay-surface streams.
+    if (!this._hasReplaySurface()) {
+      return (async function* () {
+        // intentionally empty
+      })();
+    }
     return watch(this._rt, opts ?? {});
   }
 
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /** True iff this ceremony's profile has a readable backlog.
+   *  Mirrors python/tn/_handle.py:_has_replay_surface. */
+  private _hasReplaySurface(): boolean {
+    try {
+      const yamlPath = this._rt.config.yamlPath;
+      const text = readFileSync(yamlPath, "utf8");
+      const m = text.match(/^\s+profile:\s*(\S+)/m);
+      const profileName = m?.[1];
+      if (!profileName) return true;
+      // Avoid sync require of profiles module on hot read paths;
+      // hardcode the catalog property mirror. Matches profiles.ts.
+      const noReplay: ReadonlySet<string> = new Set(["telemetry"]);
+      return !noReplay.has(profileName);
+    } catch {
+      return true;
+    }
+  }
 
   /** Append a `tn.read.tampered_row_skipped` admin event — public fields only. */
   private _emitTamperedRowSkipped(
