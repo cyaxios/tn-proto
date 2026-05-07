@@ -10,6 +10,19 @@ verb-for-verb; divergence between the two is a bug. See
 [`docs/sdk-parity.md`](https://github.com/cyaxios/tn-proto/blob/main/docs/sdk-parity.md)
 for the full table.
 
+## Directory layout (multi-ceremony)
+
+The Python SDK is moving to a multi-ceremony layout under a single
+`.tn/` root, with one subdirectory per ceremony. The TS rebuild should
+adopt the same shape so both bindings agree on what's on disk.
+
+The contract — directory shape, registry semantics, safe defaults,
+legacy `.tn/tn/` migration, and the `init` / `use` / `list_ceremonies`
+verb shape — is documented in
+[`docs/directory-layout.md`](https://github.com/cyaxios/tn-proto/blob/main/docs/directory-layout.md).
+Read that before changing anything in this SDK that touches disk
+paths or the `Tn.init` surface.
+
 ## Install
 
 ```bash

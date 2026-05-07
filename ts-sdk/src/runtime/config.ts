@@ -126,11 +126,200 @@ export function substituteEnvVars(text: string, sourcePath: string): string {
   return substituted.replace(/\$\$/g, "$");
 }
 
+// ---------------------------------------------------------------------------
+// extends: resolution
+//
+// Mirrors python/tn/config.py:_resolve_extends. A child yaml that declares
+// ``extends: <relpath>`` pulls identity, keystore, groups, recipients, and
+// other parent-owned blocks from the referenced parent. Stream yamls written
+// by the Python multi-ceremony layer are minimal — they carry only what is
+// stream-specific (ceremony.profile, logs.path, handlers) and rely on this
+// resolver to fill in the rest.
+//
+// Merge rules (must stay in lockstep with the Python implementation):
+//   - parent-owned keys (me, keystore, groups, fields, public_fields,
+//     default_policy, llm_classifier): parent wins; child override warns.
+//   - ``ceremony``: shallow-merged per subfield, child wins.
+//   - ``handlers``: additive, deduped by handler name. Child first wins.
+//   - ``logs``: child wins outright if set.
+//   - other top-level keys: child wins if set, else parent's.
+//
+// Path absolutization: parent's relative paths in keystore.path,
+// logs.path, handlers[*].path, and ceremony.admin_log_location are
+// converted to absolute paths rooted at the parent's directory before
+// merge, so they survive the merge into the child's coordinate system.
+// ---------------------------------------------------------------------------
+
+const PARENT_OWNED_KEYS: ReadonlyArray<string> = [
+  "me",
+  "keystore",
+  "groups",
+  "fields",
+  "public_fields",
+  "default_policy",
+  "llm_classifier",
+];
+
+function absolutizePath(p: string, base: string): string {
+  if (isAbsolute(p)) return p;
+  return resolve(base, p);
+}
+
+function absolutizeParentDoc(
+  parentDoc: Record<string, unknown>,
+  parentPath: string,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...parentDoc };
+  const baseDir = dirname(parentPath);
+
+  if (out.keystore && typeof out.keystore === "object") {
+    const ks = { ...(out.keystore as Record<string, unknown>) };
+    if (typeof ks.path === "string") {
+      ks.path = absolutizePath(ks.path, baseDir);
+    }
+    out.keystore = ks;
+  }
+
+  if (out.logs && typeof out.logs === "object") {
+    const lg = { ...(out.logs as Record<string, unknown>) };
+    if (typeof lg.path === "string") {
+      lg.path = absolutizePath(lg.path, baseDir);
+    }
+    out.logs = lg;
+  }
+
+  if (out.ceremony && typeof out.ceremony === "object") {
+    const cer = { ...(out.ceremony as Record<string, unknown>) };
+    const loc = cer.admin_log_location;
+    if (typeof loc === "string" && loc !== "main_log") {
+      cer.admin_log_location = absolutizePath(loc, baseDir);
+    }
+    out.ceremony = cer;
+  }
+
+  if (Array.isArray(out.handlers)) {
+    out.handlers = out.handlers.map((h: unknown) => {
+      if (h && typeof h === "object" && "path" in (h as Record<string, unknown>)) {
+        const hh = { ...(h as Record<string, unknown>) };
+        if (typeof hh.path === "string") {
+          hh.path = absolutizePath(hh.path, baseDir);
+        }
+        return hh;
+      }
+      return h;
+    });
+  }
+
+  return out;
+}
+
+function readYamlDoc(path: string): Record<string, unknown> {
+  const rawText = readFileSync(path, "utf8");
+  const text = substituteEnvVars(rawText, path);
+  const doc = parseYaml(text);
+  if (!doc || typeof doc !== "object") {
+    throw new Error(`${path}: expected top-level mapping`);
+  }
+  return doc as Record<string, unknown>;
+}
+
+function resolveExtends(
+  yamlPath: string,
+  doc: Record<string, unknown>,
+  seen: Set<string> = new Set(),
+): Record<string, unknown> {
+  const extendsField = doc.extends;
+  if (!extendsField) return doc;
+
+  if (seen.has(yamlPath)) {
+    throw new Error(
+      `${yamlPath}: extends cycle detected. ` +
+        "extends: chains cannot loop back on themselves.",
+    );
+  }
+  const newSeen = new Set(seen);
+  newSeen.add(yamlPath);
+
+  if (typeof extendsField !== "string") {
+    throw new Error(
+      `${yamlPath}: extends must be a string path, got ${typeof extendsField}`,
+    );
+  }
+  const parentPath = resolve(dirname(yamlPath), extendsField);
+
+  let parentDoc: Record<string, unknown>;
+  try {
+    parentDoc = readYamlDoc(parentPath);
+  } catch (e) {
+    throw new Error(
+      `${yamlPath}: extends target ${parentPath} could not be read: ${(e as Error).message}`,
+    );
+  }
+  let parentResolved = resolveExtends(parentPath, parentDoc, newSeen);
+  parentResolved = absolutizeParentDoc(parentResolved, parentPath);
+
+  const merged: Record<string, unknown> = { ...parentResolved };
+
+  for (const [key, childVal] of Object.entries(doc)) {
+    if (key === "extends") continue;
+
+    if (PARENT_OWNED_KEYS.includes(key)) {
+      if (key in parentResolved) {
+        if (JSON.stringify(parentResolved[key]) !== JSON.stringify(childVal)) {
+          console.warn(
+            `${yamlPath}: child sets parent-owned key '${key}'; parent wins. ` +
+              "Identity / groups / recipients live at the project root only. " +
+              "Remove the override from the stream yaml.",
+          );
+        }
+        continue;
+      }
+      merged[key] = childVal;
+      continue;
+    }
+
+    if (key === "ceremony") {
+      const base = { ...((parentResolved.ceremony as Record<string, unknown>) ?? {}) };
+      if (childVal && typeof childVal === "object") {
+        Object.assign(base, childVal);
+      }
+      merged.ceremony = base;
+      continue;
+    }
+
+    if (key === "handlers") {
+      const baseH = (parentResolved.handlers as unknown[]) ?? [];
+      const childH = Array.isArray(childVal) ? childVal : [];
+      const seenNames = new Set<string>();
+      const out: unknown[] = [];
+      for (const h of [...childH, ...baseH]) {
+        if (!h || typeof h !== "object") continue;
+        const hr = h as Record<string, unknown>;
+        const nm = String(hr.name ?? hr.kind ?? "");
+        if (!nm || seenNames.has(nm)) continue;
+        seenNames.add(nm);
+        out.push(hr);
+      }
+      merged.handlers = out;
+      continue;
+    }
+
+    merged[key] = childVal;
+  }
+
+  return merged;
+}
+
 export function loadConfig(yamlPath: string): CeremonyConfig {
   const resolved = resolve(yamlPath);
   const rawText = readFileSync(resolved, "utf8");
   const text = substituteEnvVars(rawText, resolved);
-  const doc = parseYaml(text) as Record<string, unknown>;
+  let doc = parseYaml(text) as Record<string, unknown>;
+  // Resolve ``extends:`` chain before validation. After this point the
+  // merged doc carries identity, groups, recipients, and other
+  // parent-owned blocks from the chain root; the child supplied only
+  // its own overrides.
+  doc = resolveExtends(resolved, doc);
   const yamlDir = dirname(resolved);
 
   const ceremony = (doc.ceremony ?? {}) as Record<string, unknown>;
