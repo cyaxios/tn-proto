@@ -36,33 +36,42 @@ def test_stdout_handler_json_format_writes_raw_line(monkeypatch):
 
 
 def test_stdout_handler_pretty_format_is_terse(monkeypatch):
-    """Pretty format is the default — terse single line, no crypto."""
+    """Pretty format prints meaningful headers + public fields,
+    suppresses crypto (signatures, hashes) and ciphertext."""
     from tn.handlers.stdout import StdoutHandler
 
     monkeypatch.delenv("TN_STDOUT_FORMAT", raising=False)
     captured = io.BytesIO()
     h = StdoutHandler(name="stdout", stream=captured)  # default = pretty
     envelope = {
-        "did": "did:key:z6MkLong",
+        "did": "did:key:z6MkLongIdentifierStringHere",
         "timestamp": "2026-05-05T22:27:23.712506Z",
         "event_type": "page_viewed",
         "level": "info",
         "sequence": 12,
-        "row_hash": "sha256:bde8e3",
-        "signature": "UcTuis0",
+        "event_id": "abc123def456",
+        "row_hash": "sha256:bde8e3deadbeef",
+        "signature": "UcTuis0SignatureBytesHere",
+        "default": {"ciphertext": "AAAA...", "field_hashes": {}},
     }
     h.emit(envelope, b"raw line bytes irrelevant in pretty mode\n")
 
     text = captured.getvalue().decode("utf-8")
-    # Time of day, level, seq, event type — and nothing cryptographic.
+    # Header
     assert "22:27:23.712" in text
     assert "INFO" in text
     assert "seq=12" in text
     assert "page_viewed" in text
-    assert "did:key" not in text
-    assert "sha256" not in text
-    assert "signature" not in text.lower()
+    # Truncated identifiers — useful for correlation, not full leak
+    assert "id=abc123de" in text         # truncated event_id
+    assert "did=did:key:z6MkLong" in text  # truncated DID
+    # Crypto stuff is suppressed
+    assert "sha256:bde8e3" not in text
+    assert "UcTuis0SignatureBytesHere" not in text
+    assert "ciphertext" not in text
+    # Single line
     assert text.endswith("\n")
+    assert text.count("\n") == 1
 
 
 def test_stdout_handler_env_var_overrides_kwarg(monkeypatch):

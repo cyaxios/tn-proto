@@ -25,12 +25,21 @@ _log = logging.getLogger("tn._dispatch")
 
 
 def _ceremony_is_btn_only(yaml_path: Path) -> bool:
-    """True iff every group in the yaml uses `cipher: btn`."""
-    import yaml as _yaml
+    """True iff every group in the yaml uses ``cipher: btn``.
+
+    Resolves ``extends:`` first so streams that inherit groups from
+    a parent yaml are correctly detected as btn-only based on the
+    parent's groups.
+    """
+    from . import config as _config
 
     try:
-        doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-    except (OSError, _yaml.YAMLError):
+        doc = _config._read_yaml_doc(yaml_path)
+    except (OSError, ValueError):
+        return False
+    try:
+        doc = _config._resolve_extends(yaml_path, doc)
+    except ValueError:
         return False
     if not isinstance(doc, dict):
         return False
@@ -167,9 +176,47 @@ class DispatchRuntime:
 
         self._use_rust = should_use_rust(self._yaml)
         if self._use_rust:
-            self._rt = _RustRuntime.init(str(self._yaml))
+            # The Rust runtime reads yaml directly and doesn't know
+            # about ``extends:``. If the source yaml uses extends,
+            # resolve it in Python and hand the resolved view to Rust
+            # via a sibling ``.resolved.yaml`` file. The source stays
+            # minimal; the resolved file is regenerated on every
+            # init so it can't drift.
+            self._rt = _RustRuntime.init(str(self._yaml_for_rust()))
         else:
             self._rt = None
+
+    def _yaml_for_rust(self) -> Path:
+        """Return a yaml path the Rust runtime can load.
+
+        For sources without ``extends:``, returns the source path
+        unchanged. For sources with extends, resolves the chain in
+        Python and writes the merged doc to a sibling
+        ``.resolved.yaml`` file, returning that path.
+        """
+        from . import config as _config
+        import yaml as _yaml
+
+        try:
+            doc = _config._read_yaml_doc(self._yaml)
+        except (OSError, ValueError):
+            return self._yaml
+        if not doc.get("extends"):
+            return self._yaml
+        try:
+            resolved = _config._resolve_extends(self._yaml, doc)
+        except ValueError:
+            return self._yaml
+        # Drop the ``extends`` marker — Rust doesn't need it and
+        # would not recognize it.
+        resolved.pop("extends", None)
+        out_path = self._yaml.parent / ".resolved.yaml"
+        try:
+            with out_path.open("w", encoding="utf-8") as fh:
+                _yaml.safe_dump(resolved, fh, sort_keys=False)
+        except OSError:
+            return self._yaml
+        return out_path
 
     def emit(
         self,

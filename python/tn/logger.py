@@ -340,16 +340,29 @@ class TNRuntime:
             return envelope
 
         # Fan out to every handler whose filter accepts this envelope.
+        # Per-emit address dedup: if two handlers in the effective set
+        # resolve to the same address (file path, stdout sentinel,
+        # network endpoint), the second is skipped. This is the
+        # "no-side-effect-dupes" runtime guarantee — see
+        # docs/directory-layout.md. Handlers that opt out (return
+        # None from resolved_address) are always fired.
         delivered = 0
+        seen_addresses: set[str] = set()
         for h in self.handlers:
             if not h.accepts(envelope):
                 continue
             try:
+                addr = h.resolved_address()
+            except Exception:  # noqa: BLE001 — defensive
+                addr = None
+            if addr is not None:
+                if addr in seen_addresses:
+                    continue
+                seen_addresses.add(addr)
+            try:
                 h.emit(envelope, raw)
                 delivered += 1
             except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
-                # A failing sync handler must not take down the caller.
-                # Async handlers already swallow + retry internally.
                 _log.exception(
                     "handler %r raised on %s/%s; entry already sealed",
                     h.name,

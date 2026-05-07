@@ -2,7 +2,7 @@
 // Rotation renames tn.ndjson -> tn.ndjson.1 -> ... -> tn.ndjson.N (oldest dropped).
 
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { BaseTNHandler, type FilterSpec } from "./base.js";
 
@@ -50,5 +50,10 @@ export class FileHandler extends BaseTNHandler {
       if (existsSync(src)) renameSync(src, dst);
     }
     renameSync(this._path, join(dir, `${base}.1`));
+  }
+
+  /** File handlers dedup by absolute resolved path. */
+  override resolved_address(): string {
+    return resolve(this._path);
   }
 }

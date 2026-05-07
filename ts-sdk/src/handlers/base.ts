@@ -16,6 +16,20 @@ export interface TNHandler {
   accepts(envelope: Record<string, unknown>): boolean;
   emit(envelope: Record<string, unknown>, rawLine: string): void;
   close(): void;
+  /**
+   * Return a string identifying this handler's sink — file path,
+   * stdout sentinel, network endpoint URL, etc. Used for runtime
+   * de-duplication: when two handlers in a single emit's effective
+   * fan-out resolve to the same address, the second write is
+   * suppressed (per the no-side-effect-dupes rule).
+   *
+   * Returning ``null`` opts the handler out of dedup — the runtime
+   * treats it as having a unique address every time. Subclasses with
+   * a meaningful sink (file, stdout, etc.) should override.
+   *
+   * Mirrors python/tn/handlers/base.py:resolved_address.
+   */
+  resolved_address?(): string | null;
 }
 
 export function compileFilter(
@@ -65,5 +79,10 @@ export abstract class BaseTNHandler implements TNHandler {
 
   close(): void {
     // no-op by default; stateful handlers override
+  }
+
+  /** Default opt-out: subclasses with a meaningful sink override. */
+  resolved_address(): string | null {
+    return null;
   }
 }

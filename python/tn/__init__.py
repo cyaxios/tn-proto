@@ -570,25 +570,57 @@ def _coerce_for_wire(value: Any) -> Any:
     return value
 
 
-def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign: bool | None) -> dict[str, Any]:
-    """Build the merged-fields dict, splice ``tn.agents`` policy text if
-    a template applies, then dispatch the emit.
+def _ensure_run_id() -> str:
+    """Return the per-process ``_run_id``, minting it lazily on first
+    use. Without this the per-instance dispatch path (TN.info on a
+    named ceremony) emits entries with no run_id, which the default
+    read filter ("this run only") then drops. Mirrors the run_id
+    minting in ``_init_impl`` for the legacy / default ceremony path.
+    """
+    global _run_id
+    if _run_id is None:
+        import os as _os
+        import uuid as _uuid
+        _run_id = _uuid.uuid4().hex
+        _os.environ["TN_RUN_ID"] = _run_id
+    return _run_id
 
-    Auto-injects ``run_id`` (a per-process UUID minted at first init) as
-    a public field unless the caller already supplied one. Lets
-    ``tn.read()`` default-filter to "this run only" so naive filters
-    don't pull in entries from prior runs (FINDINGS.md #12).
 
-    Coerces Decimal values to strings before dispatch so they survive
-    the PyO3 boundary and the canonical hash with full precision
-    (FINDINGS.md #9, #10, #13).
+def _emit_via(
+    rt: DispatchRuntime,
+    level: str,
+    event_type: str,
+    fields: dict[str, Any],
+    sign: bool | None,
+) -> dict[str, Any]:
+    """Build the merged-fields dict, splice tn.agents policy text if a
+    template applies, then dispatch the emit through the supplied
+    runtime.
+
+    Used by both the module-level ``tn.info`` (which passes the global
+    singleton) and the per-TN ``payments.info`` (which passes its own
+    runtime). Splitting the dispatch target out is what makes
+    multi-ceremony non-default emits independent of the global
+    singleton — the user's no-rebinding contract.
     """
     merged: dict[str, Any] = {**get_context(), **fields}
-    if "run_id" not in merged and _run_id is not None:
-        merged["run_id"] = _run_id
+    if "run_id" not in merged:
+        merged["run_id"] = _ensure_run_id()
     merged = _coerce_for_wire(merged)
     _splice_agent_policy(event_type, merged)
-    return _require_dispatch().emit(level, event_type, merged, sign=sign)
+    return rt.emit(level, event_type, merged, sign=sign)
+
+
+def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign: bool | None) -> dict[str, Any]:
+    """Module-level emit: routes through the singleton dispatch runtime.
+
+    Used by the bare ``tn.info(...)`` / ``tn.log(...)`` API which is
+    bound to whichever ceremony was most recently bound to the
+    singleton (typically ``default``). Per-TN methods bypass this
+    and call ``_emit_via`` with their own runtime — see
+    ``tn._handle.TN``.
+    """
+    return _emit_via(_require_dispatch(), level, event_type, fields, sign)
 
 
 def _yaml_log_level(py_rt) -> str | None:
@@ -656,10 +688,29 @@ from .emit import debug, error, info, log, warning  # noqa: E402, F401
 from .lifecycle import (  # noqa: E402, F401
     current_config,
     flush_and_close,
-    init,
     session,
     using_rust,
 )
+
+# --------------------------------------------------------------------------
+# Multi-ceremony module verbs — see tn._multi and docs/directory-layout.md.
+# tn.init is sourced from _multi (which delegates legacy yaml-path calls
+# through to lifecycle.init for backwards compat). tn.use and tn.list
+# are new with the multi-ceremony work.
+# --------------------------------------------------------------------------
+from ._multi import (  # noqa: E402, F401
+    TNConfigConflict,
+    TNCreateFailed,
+    TNInvalidName,
+    init,
+    list_ceremonies,
+    use,
+)
+from ._handle import (  # noqa: E402, F401
+    TN,
+    MultiCeremonyEmitNotImplemented,
+)
+from ._registry import TNNotFound  # noqa: E402, F401
 
 # --------------------------------------------------------------------------
 # Read verbs — public API lives in tn.read.
@@ -711,6 +762,12 @@ def _flush_and_close_impl(*, timeout: float = 30.0) -> None:
         if _dispatch_rt is not None:
             _dispatch_rt.close(timeout=timeout)
             _dispatch_rt = None
+        # Close per-TN runtimes (named ceremonies that own their own
+        # dispatch runtime — Bug 1 fix). Their file handlers won't
+        # flush otherwise.
+        from ._handle import _close_per_tn_runtimes
+        _close_per_tn_runtimes(timeout=timeout)
+
         # Reset the lazy admin cache singleton so a re-init() re-creates it
         # bound to the new ceremony's LoadedConfig.
         _cached_admin_state = None
@@ -721,6 +778,13 @@ def _flush_and_close_impl(*, timeout: float = 30.0) -> None:
 
         with _lg._runtime_lock:
             _lg._runtime = None
+        # Clear the multi-ceremony registry so test isolation is
+        # tight: a later ``tn.init('default', yaml=...)`` won't
+        # collide with the prior handle. Disk state for named
+        # ceremonies under ``.tn/<name>/`` is unaffected; a
+        # subsequent ``tn.use(name)`` re-attaches to it.
+        from ._registry import clear_registry_for_tests as _clear_reg
+        _clear_reg()
     _surface.info(
         "tn.flush_and_close() EXIT _run_id=%s (run_id intentionally NOT reset; "
         "TN_RUN_ID env still set so re-init keeps stamping consistent run_id)",
@@ -796,10 +860,16 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "ChainConflict",
     "Entry",
     "LeafReuseAttempt",
+    "MultiCeremonyEmitNotImplemented",
     "PolicyDocument",
     "PolicyTemplate",
     "RotationConflict",
     "SameCoordinateFork",
+    "TN",
+    "TNConfigConflict",
+    "TNCreateFailed",
+    "TNInvalidName",
+    "TNNotFound",
     "VerificationError",
     "VerifyError",
     # admin subpackage (cipher-agnostic verbs + cache accessors)
@@ -824,6 +894,8 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "info",
     # high-level logging
     "init",
+    # multi-ceremony module verbs (see docs/directory-layout.md)
+    "list_ceremonies",
     "log",
     # Bilateral lifecycle (JWE + btn unified read)
     "offer",
@@ -845,6 +917,7 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "get_level",
     "is_enabled_for",
     "update_context",
+    "use",
     # dispatch diagnostic
     "using_rust",
     "vault_client",

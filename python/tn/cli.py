@@ -1548,6 +1548,140 @@ def _load_identity_or_die(path: Path) -> Identity:
 
 
 # ---------------------------------------------------------------------
+# tn streams / tn validate — multi-ceremony introspection
+# ---------------------------------------------------------------------
+
+
+def cmd_streams(args: argparse.Namespace) -> int:
+    """List ceremonies declared under ``.tn/`` for the project.
+
+    Reads ``.tn/<name>/tn.yaml`` for each subdirectory and surfaces
+    name, stamped profile (if any), and yaml path. Cheap, read-only.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    import yaml as _yaml
+
+    from . import _layout
+
+    project_dir = _Path(args.project_dir).resolve() if args.project_dir else _Path.cwd()
+    names = _layout.list_ceremonies_on_disk(project_dir)
+
+    rows: list[dict] = []
+    for name in names:
+        yaml_path = _layout.ceremony_yaml_path(name, project_dir=project_dir)
+        profile: str | None = None
+        try:
+            with yaml_path.open("r", encoding="utf-8") as fh:
+                doc = _yaml.safe_load(fh) or {}
+            profile = (doc.get("ceremony") or {}).get("profile")
+        except (OSError, _yaml.YAMLError):
+            pass
+        rows.append(
+            {
+                "name": name,
+                "profile": profile or "(unspecified)",
+                "yaml_path": str(yaml_path),
+            }
+        )
+
+    if args.format == "json":
+        print(_json.dumps(rows, indent=2))
+        return 0
+
+    # Human format: simple aligned table.
+    if not rows:
+        print(f"(no ceremonies found under {project_dir / '.tn'})")
+        return 0
+    name_w = max(len("NAME"), max(len(r["name"]) for r in rows))
+    prof_w = max(len("PROFILE"), max(len(r["profile"]) for r in rows))
+    print(f"{'NAME':<{name_w}}  {'PROFILE':<{prof_w}}  YAML")
+    print(f"{'-' * name_w}  {'-' * prof_w}  {'-' * 4}")
+    for r in rows:
+        print(f"{r['name']:<{name_w}}  {r['profile']:<{prof_w}}  {r['yaml_path']}")
+    return 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Validate the project's ``.tn/`` configuration tree.
+
+    Read-only checks:
+      - every ``.tn/<name>/tn.yaml`` parses as a mapping
+      - every stamped ceremony.profile is in the SDK catalog
+      - the default ceremony exists if any others do (identity must
+        live at the project root)
+
+    Returns 0 if everything is well-formed; 1 with errors printed
+    to stderr otherwise. Suitable for use in a pre-commit hook or
+    CI pipeline. Adds a non-zero exit on the *first* error so CI
+    output stays compact.
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    import yaml as _yaml
+
+    from . import _layout, _profiles
+
+    project_dir = _Path(args.project_dir).resolve() if args.project_dir else _Path.cwd()
+    root = project_dir / _layout.TN_ROOT_DIRNAME
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not root.is_dir():
+        print(f"(no .tn/ directory at {project_dir} — nothing to validate)")
+        return 0
+
+    names = _layout.list_ceremonies_on_disk(project_dir)
+    if not names:
+        print(f"(no ceremonies under {root} — nothing to validate)")
+        return 0
+
+    if "default" not in names:
+        warnings.append(
+            "no 'default' ceremony at .tn/default/. The project's "
+            "identity should live there; named streams normally "
+            "extend from it."
+        )
+
+    for name in names:
+        yaml_path = _layout.ceremony_yaml_path(name, project_dir=project_dir)
+        try:
+            with yaml_path.open("r", encoding="utf-8") as fh:
+                doc = _yaml.safe_load(fh)
+        except OSError as exc:
+            errors.append(f"{yaml_path}: read failed: {exc}")
+            continue
+        except _yaml.YAMLError as exc:
+            errors.append(f"{yaml_path}: yaml parse failed: {exc}")
+            continue
+
+        if not isinstance(doc, dict):
+            errors.append(f"{yaml_path}: top-level must be a mapping")
+            continue
+
+        profile = (doc.get("ceremony") or {}).get("profile")
+        if profile is not None and not _profiles.is_known(profile):
+            errors.append(
+                f"{yaml_path}: unknown profile {profile!r}; "
+                f"catalog: {list(_profiles.all_profile_names())}"
+            )
+
+    if warnings:
+        for w in warnings:
+            print(f"WARNING: {w}", file=sys.stderr)
+    if errors:
+        for e in errors:
+            print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    print(f"OK: {len(names)} ceremon{'y' if len(names) == 1 else 'ies'} valid.")
+    return 0
+
+
+# ---------------------------------------------------------------------
 # argparse wiring
 # ---------------------------------------------------------------------
 
@@ -1781,6 +1915,44 @@ def build_parser() -> argparse.ArgumentParser:
     #   human (default) — pretty table, secrets redacted
     #   env             — bash-style ``TN_FOO=value`` block, paste-able
     #   json            — programmatic / LLM consumption
+    # --- tn streams --------------------------------------------
+    # List ceremonies (streams) declared on disk under .tn/. Cheap
+    # introspection for operators auditing what got registered as
+    # code ran. Matches the multi-ceremony directory contract in
+    # docs/directory-layout.md.
+    p_streams = sub.add_parser(
+        "streams",
+        help="List ceremonies/streams under .tn/ for the project.",
+    )
+    p_streams.add_argument(
+        "--project-dir",
+        default=None,
+        help="Project root containing .tn/. Default: current directory.",
+    )
+    p_streams.add_argument(
+        "--format",
+        default="human",
+        choices=["human", "json"],
+        help="Output format. ``human`` is a table; ``json`` is a list "
+             "of {name, profile, yaml_path} objects.",
+    )
+    p_streams.set_defaults(func=cmd_streams)
+
+    # --- tn validate -------------------------------------------
+    # Static check of the project's .tn/ tree: profile names valid,
+    # yamls parseable, identity declared at default. Read-only;
+    # exits non-zero on failure. Suitable as a pre-commit / CI step.
+    p_validate = sub.add_parser(
+        "validate",
+        help="Validate the project's .tn/ configuration tree.",
+    )
+    p_validate.add_argument(
+        "--project-dir",
+        default=None,
+        help="Project root containing .tn/. Default: current directory.",
+    )
+    p_validate.set_defaults(func=cmd_validate)
+
     p_show = sub.add_parser("show", help="Reflective inspection commands.")
     show_sub = p_show.add_subparsers(dest="show_verb", required=True)
     p_show_env = show_sub.add_parser(
