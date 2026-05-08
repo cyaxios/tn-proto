@@ -729,6 +729,7 @@ from ._read_impl import (  # noqa: F401, E402
     _entry_in_current_run_raw,
     _is_foreign_log,
     _is_protocol_admin_event,
+    _read_raw_admin_aware,
     _read_raw_inner,
     _rotated_backup_paths,
 )

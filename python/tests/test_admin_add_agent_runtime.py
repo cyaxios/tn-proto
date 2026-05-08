@@ -154,4 +154,4 @@ POST https://example.com/escalate
     # `instructions` key. Look at the field directly.
     assert "payment row" in payments[0].fields.get("instruction", "")
     # The decrypted data field is also visible.
-    assert payments[0]["amount"] == 4999
+    assert payments[0].fields["amount"] == 4999

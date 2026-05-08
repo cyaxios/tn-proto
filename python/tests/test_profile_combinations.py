@@ -156,8 +156,9 @@ class TestReadAcrossProfiles:
         h = tn.init("s_" + profile_name, profile=profile_name, project_dir=tmp_path)
         # Just verify the read iterator is consumable.
         result = list(h.read())
-        # Each entry should be a dict (the legacy reader's flat shape).
-        assert all(isinstance(e, dict) for e in result)
+        # Each entry should be an Entry (post-0.4.0a1 typed surface).
+        from tn import Entry
+        assert all(isinstance(e, Entry) for e in result)
 
     def test_read_returns_empty_for_telemetry(self, tmp_path):
         h = tn.init("t", profile="telemetry", project_dir=tmp_path)

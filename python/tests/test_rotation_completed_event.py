@@ -128,9 +128,11 @@ def test_rotation_completed_catalog_fields_present(tmp_path):
     assert len(rotation_envs) == 1
     # btn ceremonies route the catalog fields through the encrypted
     # ``default`` payload; reload the entry through tn.read so the
-    # plaintext is decoded into Entry.fields for us.
+    # plaintext is decoded into Entry.fields for us. Admin events live
+    # in the dedicated admin log post-2026-04-24.
+    admin_log = yaml.parent / ".tn/tn/admin" / "admin.ndjson"
     entry = next(
-        e for e in tn.read(all_runs=True)
+        e for e in tn.read(log=admin_log, all_runs=True)
         if e.event_type == "tn.rotation.completed"
     )
     flat = {

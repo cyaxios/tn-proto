@@ -29,7 +29,7 @@ def _clean_tn():  # pyright: ignore[reportUnusedFunction]
 
 def _user_entries():
     """Filter bootstrap tn.* attestations so tests assert on user events only."""
-    return [e for e in tn.read() if not e["event_type"].startswith("tn.")]
+    return [e for e in tn.read() if not e.event_type.startswith("tn.")]
 
 
 def test_default_log_path_is_yaml_dir_logs_tn_ndjson(tmp_path):
@@ -45,7 +45,7 @@ def test_default_log_path_is_yaml_dir_logs_tn_ndjson(tmp_path):
     tn.init(yaml)
     entries = _user_entries()
     assert len(entries) == 1
-    assert entries[0]["event_type"] == "x.test"
+    assert entries[0].event_type == "x.test"
 
 
 def test_yaml_advertises_log_path(tmp_path):
@@ -90,7 +90,7 @@ def test_custom_relative_log_path(tmp_path):
     tn.init(yaml)
     entries = _user_entries()
     assert len(entries) == 1
-    assert entries[0]["event_type"] == "custom.path"
+    assert entries[0].event_type == "custom.path"
 
 
 def test_custom_absolute_log_path(tmp_path):
@@ -113,4 +113,4 @@ def test_custom_absolute_log_path(tmp_path):
 
     tn.init(yaml)
     entries = _user_entries()
-    assert entries and entries[0]["event_type"] == "absolute.path"
+    assert entries and entries[0].event_type == "absolute.path"
