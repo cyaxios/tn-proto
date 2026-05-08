@@ -77,10 +77,11 @@ def main() -> int:
         tn.init(yaml_path, cipher="btn")
 
         # Capture pre-revocation `analytics` ciphertexts so we can later
-        # prove the analyst's kit still decrypts them.
+        # prove the analyst's kit still decrypts them. raw=True yields
+        # the on-disk envelope dict; the analytics group ciphertext
+        # block lives at env["analytics"]["ciphertext"].
         pre_revocation_cts = []
-        for raw in tn.read_raw():
-            env = raw["envelope"]
+        for env in tn.read(raw=True):
             if env.get("event_type") == "request.served" and "analytics" in env:
                 pre_revocation_cts.append(env["analytics"]["ciphertext"])
         assert pre_revocation_cts, "no pre-revocation ciphertexts captured"
@@ -95,8 +96,7 @@ def main() -> int:
         tn.init(yaml_path, cipher="btn")
 
         post_revocation_cts = []
-        for raw in tn.read_raw():
-            env = raw["envelope"]
+        for env in tn.read(raw=True):
             if env.get("event_type") == "request.served" and "analytics" in env:
                 ct_b64 = env["analytics"]["ciphertext"]
                 if ct_b64 not in pre_revocation_cts:
@@ -122,16 +122,28 @@ def main() -> int:
             print("[ok] analyst's kit cannot decrypt data written AFTER revocation")
 
         # ---- the revocation itself is an attested chain entry --------
+        # The revoke event is just another row in the log: signed,
+        # chained, verifiable. We pull it back as a typed Entry, then
+        # re-walk with verify=True to confirm the integrity sweep
+        # passes across the whole log (including the revoke event).
         revoke_entries = [
-            r for r in tn.read_raw()
-            if r["envelope"].get("event_type") == "tn.recipient.revoked"
+            e for e in tn.read() if e.event_type == "tn.recipient.revoked"
         ]
         print(f"\nrevocation chain entries in the log: {len(revoke_entries)}")
-        for r in revoke_entries:
-            valid = all(r["valid"].values())
-            env = r["envelope"]
-            print(f"  event_id={env.get('event_id')} valid={valid} "
-                  f"sequence={env.get('sequence')}")
+        for e in revoke_entries:
+            print(f"  event_id={e.event_id} sequence={e.sequence} "
+                  f"row_hash={e.row_hash[:18]}...")
+
+        # tn.read(verify=True) walks every row and re-checks
+        # signature/row_hash/chain. Clean log → silent. Tampered → raises.
+        try:
+            checked = sum(1 for _ in tn.read(verify=True))
+            print(f"  [ok] {checked} rows pass full integrity verify "
+                  f"(signature, row_hash, chain)")
+        except tn.VerifyError as exc:
+            print(f"  [FAIL] verify error at seq={exc.sequence} "
+                  f"event={exc.event_type!r} failed={exc.failed_checks}")
+            return 1
 
         tn.flush_and_close()
     return 0
