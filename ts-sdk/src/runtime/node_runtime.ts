@@ -979,6 +979,10 @@ export class NodeRuntime {
       receipt = this._absorbAdminLogSnapshot(manifest, body);
     } else if (kind === "kit_bundle" || kind === "full_keystore") {
       receipt = this._absorbKitBundle(manifest, body);
+    } else if (kind === "identity_seed") {
+      receipt = this._absorbIdentitySeed(manifest, body);
+    } else if (kind === "project_seed") {
+      receipt = this._absorbProjectSeed(manifest, body);
     } else if (kind === "offer" || kind === "enrolment") {
       receipt = {
         kind,
@@ -1342,6 +1346,397 @@ export class NodeRuntime {
       noop: false,
       derivedState: (manifest.state as unknown as AdminState) ?? null,
       conflicts,
+    };
+  }
+
+  /**
+   * Count user-emitted entries in the local main log. A "user event"
+   * is anything whose ``event_type`` does NOT start with ``tn.`` —
+   * the ``tn.*`` namespace is reserved for admin / protocol bookkeeping
+   * which the runtime emits at init time.
+   *
+   * Used by the bootstrap-kind handlers (`_absorbIdentitySeed`,
+   * `_absorbProjectSeed`) to distinguish "fresh ceremony just minted"
+   * from "real user activity already exists" when deciding whether
+   * to overwrite an existing identity (Bug 3 in the 0.4.0a2 brief).
+   */
+  private _userEventCount(): number {
+    // Walk the main log plus any rotated backups (.1, .2, ...). The
+    // session-start rotation in `rotateLogOnSessionStart` moves the
+    // previous session's content to `<logPath>.1`, so just looking at
+    // `<logPath>` after a re-init undercounts.
+    const candidates: string[] = [this.config.logPath];
+    for (let n = 1; n <= 10; n += 1) {
+      const p = `${this.config.logPath}.${n}`;
+      if (!existsSync(p)) break;
+      candidates.push(p);
+    }
+    let count = 0;
+    for (const path of candidates) {
+      if (!existsSync(path)) continue;
+      try {
+        for (const rawLine of readFileSync(path, "utf8").split(/\r?\n/)) {
+          const s = rawLine.trim();
+          if (!s) continue;
+          let env: Record<string, unknown>;
+          try {
+            env = JSON.parse(s) as Record<string, unknown>;
+          } catch {
+            continue;
+          }
+          const et = env["event_type"];
+          if (typeof et === "string" && !et.startsWith("tn.")) count += 1;
+        }
+      } catch {
+        continue;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Install an identity_seed (`tn.export(kind="identity_seed")`)
+   * bundle. Body shape:
+   *
+   *   body/local.private  — 32-byte Ed25519 seed
+   *   body/local.public   — utf-8 did:key:z...
+   *   body/tn.yaml        — minimal stub
+   *
+   * Mirrors Python's `_absorb_identity_seed`:
+   * 1. Validates required body members.
+   * 2. Cross-checks: manifest.fromDid == manifest.toDid;
+   *    body/local.public == manifest.fromDid; the DID derived from
+   *    body/local.private agrees with both. Catches a tampered body
+   *    that swaps in a different key.
+   * 3. Writes local.private + local.public + tn.yaml. Idempotent if
+   *    bytes match. Refuses to overwrite an existing different
+   *    identity unless `_userEventCount() === 0` (the dirt-easy
+   *    "I just initialized empty" case — Bug 3).
+   */
+  private _absorbIdentitySeed(
+    manifest: Manifest,
+    body: Map<string, Uint8Array>,
+  ): AbsorbReceipt {
+    const priv = body.get("body/local.private");
+    const pub = body.get("body/local.public");
+    const yamlBytes = body.get("body/tn.yaml");
+    const missing: string[] = [];
+    if (priv === undefined) missing.push("body/local.private");
+    if (pub === undefined) missing.push("body/local.public");
+    if (yamlBytes === undefined) missing.push("body/tn.yaml");
+    if (priv === undefined || pub === undefined || yamlBytes === undefined) {
+      return {
+        kind: manifest.kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason: `identity_seed body is missing required members: ${JSON.stringify(missing)}`,
+      };
+    }
+
+    if (priv.length !== 32) {
+      return {
+        kind: manifest.kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason: `identity_seed body/local.private must be 32 bytes (Ed25519 seed); got ${priv.length}`,
+      };
+    }
+
+    const derivedKey = DeviceKey.fromSeed(priv);
+    const bundleDid = new TextDecoder("utf-8").decode(pub).trim();
+    if (
+      derivedKey.did !== bundleDid ||
+      derivedKey.did !== manifest.fromDid
+    ) {
+      return {
+        kind: manifest.kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason:
+          `identity_seed integrity check failed: manifest.fromDid=${JSON.stringify(manifest.fromDid)}, ` +
+          `body/local.public=${JSON.stringify(bundleDid)}, derived-from-private=${JSON.stringify(derivedKey.did)}. ` +
+          `The bundle's body and manifest disagree about which identity this is — refuse to install.`,
+      };
+    }
+    if (manifest.fromDid !== manifest.toDid) {
+      return {
+        kind: manifest.kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason:
+          `identity_seed must be self-addressed (fromDid === toDid); ` +
+          `got fromDid=${JSON.stringify(manifest.fromDid)}, toDid=${JSON.stringify(manifest.toDid)}.`,
+      };
+    }
+
+    const keystore = this.config.keystorePath;
+    if (!existsSync(keystore)) mkdirSync(keystore, { recursive: true });
+    const privPath = pathResolve(keystore, "local.private");
+    const pubPath = pathResolve(keystore, "local.public");
+    const yamlTarget = this.config.yamlPath;
+    const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15) + "Z";
+
+    if (existsSync(privPath)) {
+      const existing = readFileSync(privPath);
+      if (Buffer.from(existing).equals(Buffer.from(priv))) {
+        return {
+          kind: manifest.kind,
+          acceptedCount: 0,
+          dedupedCount: 0,
+          noop: true,
+          derivedState: null,
+          conflicts: [],
+        };
+      }
+      // Bug 3: differ + zero user events → fresh-ceremony, overwrite.
+      if (this._userEventCount() === 0) {
+        try {
+          renameSync(privPath, pathResolve(keystore, `local.private.previous.${ts}`));
+        } catch {
+          /* best effort */
+        }
+        try {
+          if (existsSync(pubPath)) {
+            renameSync(pubPath, pathResolve(keystore, `local.public.previous.${ts}`));
+          }
+        } catch {
+          /* best effort */
+        }
+      } else {
+        return {
+          kind: manifest.kind,
+          acceptedCount: 0,
+          dedupedCount: 0,
+          noop: false,
+          derivedState: null,
+          conflicts: [],
+          rejectedReason:
+            `refusing to overwrite existing identity at ${privPath}. The keystore already ` +
+            `has a different device key and the local log already contains user-emitted ` +
+            `entries signed by it. To replace, delete the keystore directory first.`,
+        };
+      }
+    }
+
+    writeFileSync(privPath, Buffer.from(priv));
+    writeFileSync(pubPath, bundleDid, "utf8");
+
+    if (!existsSync(yamlTarget)) {
+      mkdirSync(dirname(yamlTarget), { recursive: true });
+      writeFileSync(yamlTarget, Buffer.from(yamlBytes));
+    } else if (
+      this._userEventCount() === 0 &&
+      !Buffer.from(readFileSync(yamlTarget)).equals(Buffer.from(yamlBytes))
+    ) {
+      try {
+        renameSync(yamlTarget, `${yamlTarget}.previous.${ts}`);
+      } catch {
+        /* best effort */
+      }
+      mkdirSync(dirname(yamlTarget), { recursive: true });
+      writeFileSync(yamlTarget, Buffer.from(yamlBytes));
+    }
+
+    return {
+      kind: manifest.kind,
+      acceptedCount: 1,
+      dedupedCount: 0,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+    };
+  }
+
+  /**
+   * Install a project_seed bundle (dashboard "Create Project" flow).
+   *
+   * Body shape (nested under `body/keys/`, NOT flat under `body/`
+   * like `kit_bundle`):
+   *
+   *   body/tn.yaml
+   *   body/keys/local.private
+   *   body/keys/local.public
+   *   body/keys/index_master.key
+   *   body/keys/<group>.btn.mykit
+   *   body/keys/<group>.btn.state
+   *
+   * Mirrors Python's `_absorb_project_seed`. Same tamper guard as
+   * identity_seed (manifest.fromDid == manifest.toDid; body's
+   * local.public agrees; DID derived from body's local.private
+   * agrees). Flat-only nesting under `body/keys/` — `body/keys/foo/bar`
+   * is silently skipped.
+   */
+  private _absorbProjectSeed(
+    manifest: Manifest,
+    body: Map<string, Uint8Array>,
+  ): AbsorbReceipt {
+    const yamlBytes = body.get("body/tn.yaml");
+    const priv = body.get("body/keys/local.private");
+    const pub = body.get("body/keys/local.public");
+    const missing: string[] = [];
+    if (yamlBytes === undefined) missing.push("body/tn.yaml");
+    if (priv === undefined) missing.push("body/keys/local.private");
+    if (pub === undefined) missing.push("body/keys/local.public");
+    if (yamlBytes === undefined || priv === undefined || pub === undefined) {
+      return {
+        kind: manifest.kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason: `project_seed body is missing required members: ${JSON.stringify(missing)}`,
+      };
+    }
+
+    if (priv.length !== 32) {
+      return {
+        kind: manifest.kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason: `project_seed body/keys/local.private must be 32 bytes; got ${priv.length}`,
+      };
+    }
+
+    const derivedKey = DeviceKey.fromSeed(priv);
+    const bundleDid = new TextDecoder("utf-8").decode(pub).trim();
+    if (derivedKey.did !== bundleDid || derivedKey.did !== manifest.fromDid) {
+      return {
+        kind: manifest.kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason:
+          `project_seed integrity check failed: manifest.fromDid=${JSON.stringify(manifest.fromDid)}, ` +
+          `body/keys/local.public=${JSON.stringify(bundleDid)}, derived-from-private=${JSON.stringify(derivedKey.did)}.`,
+      };
+    }
+    if (manifest.fromDid !== manifest.toDid) {
+      return {
+        kind: manifest.kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason: `project_seed must be self-addressed (fromDid === toDid).`,
+      };
+    }
+
+    let accepted = 0;
+    let deduped = 0;
+    const replaced: string[] = [];
+    const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15) + "Z";
+
+    // Step A: tn.yaml.
+    const yamlTarget = this.config.yamlPath;
+    if (existsSync(yamlTarget)) {
+      const existing = readFileSync(yamlTarget);
+      if (Buffer.from(existing).equals(Buffer.from(yamlBytes))) {
+        deduped += 1;
+      } else if (this._userEventCount() === 0) {
+        try {
+          renameSync(yamlTarget, `${yamlTarget}.previous.${ts}`);
+        } catch {
+          /* best effort */
+        }
+        replaced.push(yamlTarget);
+        mkdirSync(dirname(yamlTarget), { recursive: true });
+        writeFileSync(yamlTarget, Buffer.from(yamlBytes));
+        accepted += 1;
+      } else {
+        return {
+          kind: manifest.kind,
+          acceptedCount: 0,
+          dedupedCount: 0,
+          noop: false,
+          derivedState: null,
+          conflicts: [],
+          rejectedReason:
+            `refusing to overwrite existing tn.yaml at ${yamlTarget}: contents differ and the local ` +
+            `log already contains user-emitted entries.`,
+        };
+      }
+    } else {
+      mkdirSync(dirname(yamlTarget), { recursive: true });
+      writeFileSync(yamlTarget, Buffer.from(yamlBytes));
+      accepted += 1;
+    }
+
+    // Step B: keys.
+    const keystore = this.config.keystorePath;
+    if (!existsSync(keystore)) mkdirSync(keystore, { recursive: true });
+
+    // Existing local.private guard.
+    const existingPriv = pathResolve(keystore, "local.private");
+    if (existsSync(existingPriv)) {
+      const existingBytes = readFileSync(existingPriv);
+      if (
+        !Buffer.from(existingBytes).equals(Buffer.from(priv)) &&
+        this._userEventCount() > 0
+      ) {
+        return {
+          kind: manifest.kind,
+          acceptedCount: 0,
+          dedupedCount: 0,
+          noop: false,
+          derivedState: null,
+          conflicts: [],
+          rejectedReason:
+            `refusing to overwrite existing identity at ${existingPriv}: a different device key is ` +
+            `already installed and the local log contains user events signed by it.`,
+        };
+      }
+    }
+
+    for (const [name, data] of body) {
+      if (!name.startsWith("body/keys/")) continue;
+      const rel = name.slice("body/keys/".length);
+      if (!rel) continue;
+      if (rel.includes("/") || rel.includes("\\")) continue; // flat only
+      const dest = pathResolve(keystore, rel);
+      if (existsSync(dest)) {
+        const existing = readFileSync(dest);
+        if (Buffer.from(existing).equals(Buffer.from(data))) {
+          deduped += 1;
+          continue;
+        }
+        try {
+          renameSync(dest, pathResolve(keystore, `${rel}.previous.${ts}`));
+        } catch {
+          /* best effort */
+        }
+        replaced.push(dest);
+      }
+      writeFileSync(dest, Buffer.from(data));
+      accepted += 1;
+    }
+
+    return {
+      kind: manifest.kind,
+      acceptedCount: accepted,
+      dedupedCount: deduped,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+      replacedKitPaths: replaced,
     };
   }
 

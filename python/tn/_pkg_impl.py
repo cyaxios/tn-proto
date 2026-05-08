@@ -32,13 +32,24 @@ def _absorb_impl(*args: Any, **kwargs: Any):
     types, plus a best-effort post-write refresh so subsequent
     ``tn.admin.cache.cached_admin_state()`` calls observe the absorbed
     envelopes.
+
+    Bug 3 dirt-easy fix: if the input is a self-contained bootstrap
+    bundle (``identity_seed`` / ``project_seed``) and no ceremony is
+    bound to this process yet, skip the load-only autoinit. The
+    underlying ``absorb()`` will synthesize a minimal ``LoadedConfig``
+    from cwd + the bundle's body/tn.yaml so the user can absorb in a
+    fresh directory without a prior ``tn.init()``.
     """
     import tn
     from .absorb import absorb as _raw_absorb
     _surface.info(
         "tn.absorb(args=%d, kwargs=%s)", len(args), sorted(kwargs.keys()),
     )
-    tn._maybe_autoinit_load_only()
+    # Skip the load-only autoinit when no runtime is bound and the
+    # bundle is a self-contained bootstrap kind (Bug 3): the
+    # underlying absorb() synthesizes a cfg from cwd + body/tn.yaml.
+    if tn._dispatch_rt is not None or not _is_bootstrap_kind_source(args, kwargs):
+        tn._maybe_autoinit_load_only()
     receipt = _raw_absorb(*args, **kwargs)
     tn._refresh_admin_cache_if_present()
     _surface.info(
@@ -49,6 +60,29 @@ def _absorb_impl(*args: Any, **kwargs: Any):
         getattr(receipt, "deduped_count", None),
     )
     return receipt
+
+
+def _is_bootstrap_kind_source(args: tuple, kwargs: dict) -> bool:
+    """Best-effort peek at the absorb source's manifest kind, returning
+    True iff this is an ``identity_seed`` or ``project_seed`` bundle —
+    the two kinds for which absorb is allowed to bootstrap a fresh
+    directory without an active runtime.
+
+    Returns False on any error (in which case the caller falls through
+    to the standard load-only autoinit).
+    """
+    from .absorb import _try_bootstrap_cfg  # late import; module circularity
+
+    if len(args) == 1 and not kwargs:
+        source = args[0]
+    elif "source" in kwargs:
+        source = kwargs.get("source")
+    else:
+        return False
+    try:
+        return _try_bootstrap_cfg(source) is not None
+    except Exception:
+        return False
 
 
 def _bundle_for_recipient_impl(

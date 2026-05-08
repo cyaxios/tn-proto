@@ -564,6 +564,26 @@ export class Tn {
     _strictMode = enabled;
   }
 
+  /**
+   * Static absorb path for self-contained bootstrap bundles
+   * (``identity_seed`` / ``project_seed``).
+   *
+   * In a fresh directory with no prior ``Tn.init()``, call this to
+   * install the bundle's tn.yaml + keystore — the follow-up
+   * ``Tn.init()`` then picks them up. Mirrors Python
+   * ``tn.pkg.absorb(file)``-without-init.
+   *
+   * For non-bootstrap kinds (kit_bundle, admin_log_snapshot, etc.),
+   * use an instance method on ``Tn`` instead.
+   */
+  static async absorb(
+    source: string | Uint8Array,
+    opts: { cwd?: string } = {},
+  ): Promise<import("./core/results.js").AbsorbReceipt> {
+    const { absorbBootstrap } = await import("./runtime/absorb_bootstrap.js");
+    return absorbBootstrap(source, opts);
+  }
+
   // -------------------------------------------------------------------------
   // Identity / lifecycle
   // -------------------------------------------------------------------------
