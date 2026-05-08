@@ -28,7 +28,7 @@ on:
           - none
 
 permissions:
-  contents: read
+  contents: write   # gh release create needs write
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -163,3 +163,50 @@ jobs:
           password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: dist/
           skip-existing: true
+
+  # ---------------------------------------------------------------------------
+  # Create a GitHub Release for the tag so the repo's "Releases" widget
+  # reflects the latest published version. Tag-push only — manual dispatch
+  # without a tag has no ref to release against. Auto-flags alpha/beta/rc
+  # as prerelease.
+  # ---------------------------------------------------------------------------
+  github-release:
+    name: Create GitHub Release
+    needs: [publish]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Detect prerelease from PEP 440 segments in the tag.
+          if [[ "$TAG" =~ (a|b|rc)[0-9]+ ]]; then
+            PRE_FLAG="--prerelease"
+          else
+            PRE_FLAG="--latest"
+          fi
+          # Use the tag's annotation/commit subject + body as release notes.
+          NOTES=$(git tag -l --format='%(contents)' "$TAG")
+          if [[ -z "$NOTES" ]]; then
+            NOTES=$(git log -1 --format=%B "$TAG")
+          fi
+          # Idempotent: skip if a release already exists for this tag.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping creation."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            $PRE_FLAG \
+            --title "tn-protocol $TAG" \
+            --notes "$NOTES" \
+            dist/*
