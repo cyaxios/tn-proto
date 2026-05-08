@@ -202,8 +202,10 @@ class TestVaultPullHappyPath:
         body = admin_log.read_text(encoding="utf-8")
         assert "tn.recipient.added" in body
 
-        # Cursor file persisted
-        cursor_path = cfg.yaml_path.parent / ".tn/tn/admin" / "vault_pull.cursor.json"
+        # Cursor file persisted (vault_pull writes to <yaml_dir>/.tn/admin/,
+        # which is a flat layout rather than the per-stem .tn/<stem>/admin/
+        # the rest of the SDK uses; matches handler source).
+        cursor_path = cfg.yaml_path.parent / ".tn/admin" / "vault_pull.cursor.json"
         assert cursor_path.exists()
         cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
         assert cursor["last_seen"] == "2026-04-24T10:00:00Z"

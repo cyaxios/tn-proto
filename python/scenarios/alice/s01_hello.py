@@ -11,6 +11,7 @@ import json
 import statistics
 
 import tn
+from tn._read_impl import _read_raw_inner
 from scenarios._harness import Scenario, ScenarioContext
 
 
@@ -68,7 +69,7 @@ class AliceHello(Scenario):
             "O000500",
         ]
 
-        entries = list(tn.read(ctx.log_path, cfg, raw=True))
+        entries = list(_read_raw_inner(ctx.log_path, cfg))
 
         # Pair each entry with its input by sequence number. `tn.info`
         # assigns sequence per-event-type starting at 1, so order.created[i]

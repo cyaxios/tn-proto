@@ -69,7 +69,7 @@ class CarolWebRevocation(Scenario):
         carol_sk = X25519PrivateKey.generate()
         carol_pub = carol_sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
         carol_did = f"did:key:zCarol{carol_pub[:8].hex()}"
-        tn.add_recipient(cfg, "default", carol_did, carol_pub)
+        tn.admin.add_recipient("default", recipient_did=carol_did, public_key=carol_pub, cfg=cfg)
 
         with ctx.timer("pre_sync_ms"):
             r1 = _wallet.sync_ceremony(cfg, client)
@@ -81,7 +81,7 @@ class CarolWebRevocation(Scenario):
 
         # --- Revoke + re-sync ---------------------------------------
         with ctx.timer("revoke_ms"):
-            tn.revoke_recipient(cfg, "default", carol_did)
+            tn.admin.revoke_recipient("default", recipient_did=carol_did, cfg=cfg)
 
         with ctx.timer("post_sync_ms"):
             r2 = _wallet.sync_ceremony(cfg, client)
@@ -139,7 +139,8 @@ class CarolWebRevocation(Scenario):
         post_decrypted = 0
         pre_total = 0
         post_total = 0
-        for entry in tn.read_as_recipient(carol_log, carol_ks, group="default"):
+        from tn.reader import read_as_recipient as _read_as_recipient
+        for entry in _read_as_recipient(carol_log, carol_ks, group="default"):
             event = entry["envelope"].get("event_type")
             is_pre = event == "pre.revoke"
             is_post = event == "post.revoke"

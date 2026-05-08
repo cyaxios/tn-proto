@@ -137,7 +137,7 @@ class TestEmitReadRoundtrip:
         _registry_clear_again(tn)
         h2 = tn.init("orders", profile="transaction", project_dir=tmp_path)
         entries = list(h2.read())
-        types = [e.get("event_type") for e in entries]
+        types = [e.event_type for e in entries]
         # At least the two we wrote.
         assert types.count("order.created") >= 2
 

@@ -180,8 +180,20 @@ def run_scenario(
         vault_cm = None
         vault_handle = None
         if scenario.needs_vault and vault_factory is not None:
-            vault_cm = vault_factory(Path(td) / "vault_harness")
-            vault_handle = vault_cm.__enter__()
+            # Vault setup failure (e.g. tnproto-org not checked out, port
+            # bind error) shouldn't crash pytest — surface it as a
+            # scenario-level errored status with an explanatory note.
+            try:
+                vault_cm = vault_factory(Path(td) / "vault_harness")
+                vault_handle = vault_cm.__enter__()
+            except Exception as exc:
+                vault_cm = None
+                vault_handle = None
+                _vault_setup_error = traceback.format_exc()
+            else:
+                _vault_setup_error = None
+        else:
+            _vault_setup_error = None
 
         ctx = ScenarioContext(
             persona=scenario.persona,
@@ -193,8 +205,16 @@ def run_scenario(
             results_root=results_root,
         )
         try:
-            scenario.run(ctx)
-            ctx.snapshot_yaml()
+            if _vault_setup_error is not None:
+                # Vault unavailable in this environment; record and skip body.
+                status = "errored"
+                error = _vault_setup_error
+                ctx.store.add_note(
+                    f"vault_setup_failed:{_vault_setup_error.splitlines()[-1]}"
+                )
+            else:
+                scenario.run(ctx)
+                ctx.snapshot_yaml()
         except Exception:
             status = "errored"
             error = traceback.format_exc()

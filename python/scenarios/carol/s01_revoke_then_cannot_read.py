@@ -61,7 +61,7 @@ class CarolRevokeThenCannotRead(Scenario):
             PublicFormat.Raw,
         )
         carol_did = f"did:key:zCarol{carol_pub[:8].hex()}"
-        tn.add_recipient(cfg, "default", carol_did, carol_pub)
+        tn.admin.add_recipient("default", recipient_did=carol_did, public_key=carol_pub, cfg=cfg)
 
         # --- Alice writes pre-revoke entries ------------------------
         for i in range(self.PRE_COUNT):
@@ -73,7 +73,7 @@ class CarolRevokeThenCannotRead(Scenario):
 
         # --- Alice revokes Carol ------------------------------------
         with ctx.timer("revoke_ms"):
-            tn.revoke_recipient(cfg, "default", carol_did)
+            tn.admin.revoke_recipient("default", recipient_did=carol_did, cfg=cfg)
         epoch_after = cfg.groups["default"].index_epoch
         ctx.record("epoch_after_revoke", epoch_after)
         ctx.assert_invariant(
@@ -102,7 +102,8 @@ class CarolRevokeThenCannotRead(Scenario):
         post_decrypted = 0
         pre_total = 0
         post_total = 0
-        for entry in tn.read_as_recipient(carol_log, carol_ks, group="default"):
+        from tn.reader import read_as_recipient as _read_as_recipient
+        for entry in _read_as_recipient(carol_log, carol_ks, group="default"):
             event = entry["envelope"].get("event_type")
             is_pre = event == "pre.revoke"
             is_post = event == "post.revoke"

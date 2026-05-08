@@ -19,6 +19,7 @@ Steps:
 from __future__ import annotations
 
 import tn
+from tn._read_impl import _read_raw_inner
 from scenarios._harness import Scenario, ScenarioContext
 from scenarios._harness.vault import vault_fixture  # noqa: F401
 from tn import wallet as _wallet
@@ -139,7 +140,7 @@ class ErinLinkExistingCeremony(Scenario):
             identity=ident,
         )
         cfg2 = tn.current_config()
-        decrypted_entries = list(tn.read(ctx.log_path, cfg2, raw=True))
+        decrypted_entries = list(_read_raw_inner(ctx.log_path, cfg2))
         ctx.record("decrypted_entry_count", len(decrypted_entries))
         ctx.assert_invariant(
             "pre_link_entries_decryptable",
