@@ -76,6 +76,33 @@ def test_message_is_none_when_no_positional(tmp_path):
     assert e.message is None
 
 
+def test_positional_message_hoists_to_typed_slot(tmp_path):
+    """Positional messages on tn.info / tn.log / etc. must surface on
+    `entry.message` (the typed envelope slot), not in `entry.fields`.
+
+    The writer encrypts the joined positional into the plaintext payload
+    under a `"message"` key for confidentiality; the reader hoists it
+    out so callers read `e.message` instead of `e.fields["message"]`.
+    """
+    _setup(tmp_path)
+    tn.info("auth.login", "alice signed in from web", user_id="u123")
+    e = next(e for e in tn.read() if e.event_type == "auth.login")
+    assert e.message == "alice signed in from web"
+    assert "message" not in e.fields
+    assert e.fields == {"user_id": "u123"}
+
+
+def test_multiple_positionals_join_into_message(tmp_path):
+    """Multiple positionals after the event_type are joined with a space
+    and surface as one `entry.message`. Mirrors stdlib `logging.info`."""
+    _setup(tmp_path)
+    tn.info("debug.note", "short note", "second positional", tag="x")
+    e = next(e for e in tn.read() if e.event_type == "debug.note")
+    assert e.message == "short note second positional"
+    assert "message" not in e.fields
+    assert e.fields == {"tag": "x"}
+
+
 # ---------------------------------------------------------------------
 # Human-readable dunders
 # ---------------------------------------------------------------------

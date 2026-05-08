@@ -129,17 +129,22 @@ class Entry(BaseModel):
             # Non-group public envelope extra (e.g. handler-injected).
             fields[k] = v
 
-        # ``run_id`` is emitted as part of the plaintext payload (so it
-        # encrypts with the rest of a user's kwargs). Pull it out of
-        # ``fields`` and into the typed envelope slot. Empty string when
-        # absent (admin events emitted before run-id minting).
+        # ``run_id`` and the positional ``message`` are both emitted as
+        # part of the plaintext payload (so they encrypt with the rest
+        # of a user's kwargs). Pull them out of ``fields`` and into
+        # their typed envelope slots so callers can use ``e.message``
+        # / ``e.run_id`` instead of having to reach into ``e.fields``.
+        # Empty string for run_id when absent (admin events emitted
+        # before run-id minting); ``None`` for message when the user
+        # called info / log / etc. without a positional argument.
         run_id = fields.pop("run_id", env.get("run_id", "")) or ""
+        message = fields.pop("message", env.get("message"))
 
         return cls(
             event_type=env["event_type"],
             timestamp=env["timestamp"],
             level=env.get("level", ""),
-            message=env.get("message"),
+            message=message,
             fields=fields,
             did=env["did"],
             event_id=env["event_id"],
@@ -185,11 +190,16 @@ class Entry(BaseModel):
                     f"missing from input dict (keys={sorted(d.keys())!r})"
                 )
 
-        # ``run_id`` is plaintext-payload, not envelope, so it shows up
-        # under whichever bucket the upstream populated. Hoist to the
-        # typed slot.
+        # ``run_id`` and ``message`` are plaintext-payload, not
+        # envelope, so they show up under whichever bucket the upstream
+        # populated. Hoist them into their typed slots so callers use
+        # ``e.run_id`` / ``e.message`` rather than reaching into
+        # ``e.fields``.
         kwargs["run_id"] = (
             kwargs.pop("run_id", None) or user_fields.pop("run_id", None) or ""
+        )
+        kwargs["message"] = (
+            kwargs.pop("message", None) or user_fields.pop("message", None)
         )
         kwargs.setdefault("level", "")
         kwargs["fields"] = user_fields

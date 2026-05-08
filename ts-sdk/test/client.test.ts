@@ -565,19 +565,23 @@ test("log/info/warning/error/debug accept a positional message string", async ()
     const entries = readEntries(tn);
     const find = (et: string) => entries.find((x) => x.event_type === et)!;
 
-    // `message` is part of the encrypted plaintext payload, so it
-    // surfaces under fields["message"] (typed-slot Entry.message stays
-    // null for emits where the writer encrypts the message — matches Python).
+    // The writer puts the positional message into the encrypted
+    // plaintext payload under a `message` key for confidentiality, but
+    // `Entry.fromRaw` hoists it out into the typed `entry.message`
+    // slot so callers don't have to reach into `entry.fields`.
+    // Mirrors Python's behavior.
     const msgOnly = find("evt.msg.only");
-    assert.equal(msgOnly.fields["message"], "name = hi");
+    assert.equal(msgOnly.message, "name = hi");
+    assert.ok(!("message" in msgOnly.fields), "message should not leak into fields");
 
     const msgPlus = find("evt.msg.plus");
-    assert.equal(msgPlus.fields["message"], "starting");
+    assert.equal(msgPlus.message, "starting");
     assert.equal(msgPlus.fields["port"], 8080);
+    assert.ok(!("message" in msgPlus.fields), "message should not leak into fields");
 
     const kwOnly = find("evt.kw.only");
     assert.equal(kwOnly.fields["foo"], "bar");
-    assert.equal(kwOnly.fields["message"], undefined, "object-form must NOT inject a message");
+    assert.equal(kwOnly.message, null, "object-form must NOT inject a message");
 
     await tn.close();
   } finally {

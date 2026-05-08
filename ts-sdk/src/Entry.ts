@@ -9,7 +9,12 @@
 // Pass `raw: true` to `Tn.read` / `Tn.watch` to skip Entry construction
 // and yield the on-disk envelope dict instead.
 
-import { inspect } from "node:util";
+// Node's `util.inspect.custom` is just a well-known symbol —
+// `Symbol.for("nodejs.util.inspect.custom")`. Reach for the symbol
+// directly so this module loads in browsers without pulling in
+// `node:util`. Node still recognizes the method and uses it for
+// `console.log` pretty-printing; browsers ignore it harmlessly.
+const NODE_INSPECT_CUSTOM = Symbol.for("nodejs.util.inspect.custom");
 
 /**
  * Raised when a `Tn.read({verify: true | "raise"})` iterator hits an
@@ -230,7 +235,9 @@ export class Entry {
       fields[k] = v;
     }
 
-    // run_id is plaintext-payload but hoisted to the typed envelope slot.
+    // run_id and message are plaintext-payload but hoisted to typed
+    // envelope slots so callers use `e.run_id` / `e.message` rather
+    // than reaching into `e.fields`.
     let runId: string;
     if ("run_id" in fields) {
       runId = String(fields["run_id"] ?? "");
@@ -239,13 +246,21 @@ export class Entry {
       runId = String(env["run_id"] ?? "");
     }
 
+    let message: string | null;
+    if ("message" in fields) {
+      const v = fields["message"];
+      message = v === null || v === undefined ? null : String(v);
+      delete fields["message"];
+    } else {
+      const ev = env["message"];
+      message = ev === undefined || ev === null ? null : String(ev);
+    }
+
     return new Entry({
       event_type: String(env["event_type"] ?? ""),
       timestamp: _coerceTimestamp(env["timestamp"]),
       level: String(env["level"] ?? ""),
-      message: env["message"] === undefined || env["message"] === null
-        ? null
-        : String(env["message"]),
+      message,
       fields,
       did: String(env["did"] ?? ""),
       event_id: String(env["event_id"] ?? ""),
@@ -294,7 +309,7 @@ export class Entry {
       }
     }
 
-    // run_id may live in either bucket — hoist either way.
+    // run_id and message may live in either bucket — hoist either way.
     let runId: string;
     if ("run_id" in kwargs) {
       runId = String(kwargs["run_id"] ?? "");
@@ -306,13 +321,24 @@ export class Entry {
       runId = "";
     }
 
+    let message: string | null;
+    if ("message" in kwargs) {
+      const v = kwargs["message"];
+      message = v === null || v === undefined ? null : String(v);
+      delete kwargs["message"];
+    } else if ("message" in userFields) {
+      const v = userFields["message"];
+      message = v === null || v === undefined ? null : String(v);
+      delete userFields["message"];
+    } else {
+      message = null;
+    }
+
     return new Entry({
       event_type: String(kwargs["event_type"]),
       timestamp: _coerceTimestamp(kwargs["timestamp"]),
       level: String(kwargs["level"] ?? ""),
-      message: kwargs["message"] === undefined || kwargs["message"] === null
-        ? null
-        : String(kwargs["message"]),
+      message,
       fields: userFields,
       did: String(kwargs["did"]),
       event_id: String(kwargs["event_id"]),
@@ -362,7 +388,7 @@ export class Entry {
   }
 
   /** Developer-facing — used by `console.log` / Node's `util.inspect`. */
-  [inspect.custom](): string {
+  [NODE_INSPECT_CUSTOM](): string {
     const didShort =
       this.did.length > 30 ? `${this.did.slice(0, 16)}...${this.did.slice(-8)}` : this.did;
     const fieldsDump = JSON.stringify(this.fields);
