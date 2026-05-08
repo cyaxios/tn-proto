@@ -145,11 +145,13 @@ POST https://example.com/escalate
     tn.init(rt_yaml, cipher="btn")
     # Now read the publisher's log file.
     payments = []
-    for entry in tn.secure_read(log_path=pub_log):
-        if entry.get("event_type") == "payment.completed":
+    for entry in tn.read(log=pub_log, verify="skip"):
+        if entry.event_type == "payment.completed":
             payments.append(entry)
     assert len(payments) == 1
-    inst = payments[0].get("instructions") or {}
-    assert "payment row" in inst.get("instruction", "")
+    # Per 0.4.0a1, instructions plaintext from the tn.agents group merges
+    # into entry.fields rather than getting hoisted to a separate
+    # `instructions` key. Look at the field directly.
+    assert "payment row" in payments[0].fields.get("instruction", "")
     # The decrypted data field is also visible.
     assert payments[0]["amount"] == 4999

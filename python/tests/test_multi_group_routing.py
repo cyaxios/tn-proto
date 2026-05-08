@@ -100,7 +100,8 @@ def test_field_in_two_groups_routes_into_both(tmp_path):
     tn.log("evt.multi", email="alice@example.com")
     # Reader walks while runtime is still live (current_config() requires it).
     log_path = yaml_path.parent / ".tn/tn/logs" / "tn.ndjson"
-    entries_read = list(tn.read_raw(log_path))
+    from tn._read_impl import _read_raw_inner
+    entries_read = list(_read_raw_inner(log_path, tn.current_config()))
     tn.flush_and_close()
 
     entries = _read_user_envelopes(yaml_path.parent / ".tn/tn/logs" / "tn.ndjson")

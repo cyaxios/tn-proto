@@ -114,7 +114,8 @@ def test_absorb_enrolment_makes_recipient_read(tmp_path: Path):
     tn.info("hello", body="from_alice")
     tn.flush_and_close()
     tn.init(str(bob_cfg.yaml_path))
-    entries = list(tn.read_raw(alice_dir / ".tn/tn/logs" / "tn.ndjson"))
+    from tn._read_impl import _read_raw_inner
+    entries = list(_read_raw_inner(alice_dir / ".tn/tn/logs" / "tn.ndjson", bob_cfg))
     decrypted = [
         e
         for e in entries

@@ -127,17 +127,19 @@ def test_rotation_completed_catalog_fields_present(tmp_path):
     rotation_envs = _rotation_events(yaml)
     assert len(rotation_envs) == 1
     # btn ceremonies route the catalog fields through the encrypted
-    # ``default`` payload; reload the entry through tn.read_all() so
-    # plaintext is decoded for us.
-    raw = next(
-        r
-        for r in tn.read_all()
-        if r["envelope"].get("event_type") == "tn.rotation.completed"
+    # ``default`` payload; reload the entry through tn.read so the
+    # plaintext is decoded into Entry.fields for us.
+    entry = next(
+        e for e in tn.read(all_runs=True)
+        if e.event_type == "tn.rotation.completed"
     )
-    flat = dict(raw["envelope"])
-    for gname, gfields in (raw.get("plaintext") or {}).items():
-        if isinstance(gfields, dict):
-            flat.update(gfields)
+    flat = {
+        "event_type": entry.event_type,
+        "did": entry.did,
+        "level": entry.level,
+        "sequence": entry.sequence,
+        **entry.fields,
+    }
     required_fields = [
         "group",
         "cipher",

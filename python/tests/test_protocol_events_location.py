@@ -306,8 +306,8 @@ def test_read_all_merges_by_timestamp(tmp_path):
     tn.flush_and_close()
     tn.init(tmp_path / "tn.yaml")
 
-    entries = list(tn.read_all())
-    event_types = [e["envelope"]["event_type"] for e in entries]
+    entries = list(tn.read(all_runs=True))
+    event_types = [e.event_type for e in entries]
     assert "order.created" in event_types
     assert "tn.rotation.completed" in event_types
     assert "order.shipped" in event_types

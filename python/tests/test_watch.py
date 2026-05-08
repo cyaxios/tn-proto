@@ -45,7 +45,7 @@ def test_watch_yields_new_appends(tmp_path):
 
     async def reader():
         async for entry in tn.watch(poll_interval=0.05):
-            seen.append(entry["event_type"])
+            seen.append(entry.event_type)
             if len(seen) >= 2:
                 break
 
@@ -76,7 +76,7 @@ def test_watch_since_start_replays_existing(tmp_path):
         # log, so a fixed counter would race those — assert on
         # observation, not position.
         async for entry in tn.watch(since="start", poll_interval=0.05):
-            seen.append(entry["event_type"])
+            seen.append(entry.event_type)
             if "pre.1" in seen and "pre.2" in seen:
                 break
 
@@ -118,18 +118,23 @@ def test_watch_once_emits_entry_shape(tmp_path):
     assert order_lines, f"no order.created in output: {lines!r}"
 
     parsed = json.loads(order_lines[0])
-    # Shape: Entry keys present.
+    # Shape: Entry.model_dump_json keys present.
     assert "timestamp" in parsed
     assert "level" in parsed
     assert "event_type" in parsed
     assert "fields" in parsed
-    assert "valid" in parsed
+    assert "did" in parsed
+    assert "row_hash" in parsed
+    assert "signature" in parsed
     assert parsed["event_type"] == "order.created"
     assert parsed["fields"]["amount"] == 100
     assert parsed["fields"]["order_id"] == "A100"
-    # No crypto internals.
-    line_blob = json.dumps(parsed)
-    assert "ciphertext" not in line_blob
-    assert "signature" not in parsed
-    assert "row_hash" not in parsed
-    assert "prev_hash" not in parsed
+    # Crypto plumbing is preserved on Entry.model_dump_json so chain
+    # tools / forensics keep working. (The previous shape stripped it;
+    # 0.4.0a1 surfaces it as typed Entry attributes.)
+    assert parsed["signature"]
+    assert parsed["row_hash"].startswith("sha256:")
+    assert parsed["prev_hash"].startswith("sha256:")
+    # The on-disk ciphertext block stays out of the dump — only raw=True
+    # surfaces that.
+    assert "ciphertext" not in json.dumps(parsed)

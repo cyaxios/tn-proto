@@ -24,8 +24,8 @@ def main() -> int:
         # ---- severity-less tn.log() ----------------------------------------
         tn.log("system.boot", node="alpha", version="0.1.0")
         # tn.log returns None; verify the entry by reading back the envelope.
-        envs = [r["envelope"] for r in tn.read_raw()
-                if r["envelope"].get("event_type") == "system.boot"]
+        envs = [r for r in tn.read(raw=True)
+                if r.get("event_type") == "system.boot"]
         assert envs and envs[-1].get("level") == "", (
             f"expected empty level on tn.log() entry, got envs={envs!r}"
         )

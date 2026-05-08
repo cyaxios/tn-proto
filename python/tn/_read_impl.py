@@ -85,7 +85,7 @@ def _secure_read_impl(
 
     from . import reader as _reader
 
-    raw_iter = tn.read_raw(log_path, cfg, all_runs=all_runs, where=where)
+    raw_iter = _read_raw_inner(log_path, cfg, all_runs=all_runs, where=where)
     for r in raw_iter:
         valid = r.get("valid") or {}
         all_valid = (
@@ -308,7 +308,7 @@ def _read_impl(
             yield flat
         return
 
-    raw_iter = tn.read_raw(log_path, cfg, all_runs=all_runs)
+    raw_iter = _read_raw_inner(log_path, cfg, all_runs=all_runs)
 
     if raw:
         for r in raw_iter:
@@ -457,7 +457,7 @@ def _read_raw_admin_aware(cfg=None):
     seen: set = set()
     if main_path.exists():
         seen.add(main_path.resolve())
-        yield from tn.read_raw(main_path, cfg, all_runs=True)
+        yield from _read_raw_inner(main_path, cfg, all_runs=True)
 
     # Admin log (and any other PEL files materialized so far).
     from .reader import _pel_glob_files
@@ -469,7 +469,7 @@ def _read_raw_admin_aware(cfg=None):
         if rp in seen:
             continue
         seen.add(rp)
-        yield from tn.read_raw(pel_file, cfg, all_runs=True)
+        yield from _read_raw_inner(pel_file, cfg, all_runs=True)
 
 
 def _read_all_impl(log_path=None, cfg=None, *, all_runs: bool = False, where=None):
