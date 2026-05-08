@@ -12,14 +12,12 @@ the top-level ``tn.absorb`` / ``tn.export`` aliases.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 import tn
 from tn import _autoinit
-
 
 _HERE = Path(__file__).resolve().parent
 FIXTURE_PROJECT_SEED = _HERE / "fixtures" / "Agentic20.project.tnpkg"

@@ -265,7 +265,7 @@ def test_export_identity_seed_with_default_device(tmp_path: Path):
     """export_identity_seed() generates a fresh DeviceKey when none provided."""
     out = tmp_path / "fresh.tnpkg"
     export_identity_seed(out)
-    manifest, _body = _read_manifest(out)
+    manifest, _ = _read_manifest(out)
     assert manifest.kind == "identity_seed"
     assert manifest.from_did.startswith("did:key:z")
     assert manifest.from_did == manifest.to_did
@@ -286,6 +286,7 @@ def test_init_then_absorb_succeeds_on_fresh_ceremony(tmp_path: Path):
     tn.yaml minted by init are treated as fresh state and overwritten.
     """
     import os
+
     import tn
 
     device = DeviceKey.generate()
@@ -324,6 +325,7 @@ def test_init_emit_then_absorb_refuses(tmp_path: Path):
     cross-identity absorb is refused. The signature trail is real.
     """
     import os
+
     import tn
 
     device = DeviceKey.generate()
@@ -366,6 +368,7 @@ def test_absorb_before_init_in_fresh_dir(tmp_path: Path):
     so a follow-up ``tn.init()`` picks up the seeded keystore.
     """
     import os
+
     import tn
 
     device = DeviceKey.generate()

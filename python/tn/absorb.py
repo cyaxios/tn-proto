@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from datetime import timezone as _tz
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 from .admin.log import (
     append_admin_envelopes,
@@ -136,10 +136,20 @@ class AbsorbResult:
 # ---------------------------------------------------------------------------
 
 
+@overload
+def absorb(source: Path | str | bytes | bytearray, /) -> AbsorbReceipt: ...
+@overload
+def absorb(cfg: LoadedConfig, source: Path | str | bytes | bytearray, /) -> AbsorbResult: ...
+@overload
+def absorb(*, source: Path | str | bytes | bytearray) -> AbsorbReceipt: ...
+@overload
+def absorb(
+    *, cfg: LoadedConfig, source: Path | str | bytes | bytearray
+) -> AbsorbResult: ...
 def absorb(
     *args: Any,
     **kwargs: Any,
-):
+) -> AbsorbReceipt | AbsorbResult:
     """Absorb a `.tnpkg`. Accepts two call shapes::
 
         absorb(source)             # returns AbsorbReceipt; uses tn.current_config()
@@ -194,10 +204,14 @@ def absorb(
     if legacy:
         # Translate to the older shape so existing tests keep working.
         if receipt.legacy_status:
+            # peer_did is populated by handlers that have one (e.g. _absorb_offer,
+            # _absorb_enrolment populate it via the dedicated wrapper paths).
+            # Snapshot/seed kinds don't carry a single peer_did, so leave it None
+            # on the legacy shape and let callers read receipt fields if needed.
             return AbsorbResult(
                 status=receipt.legacy_status,
                 reason=receipt.legacy_reason,
-                peer_did=_extract_peer_did(receipt),
+                peer_did=None,
             )
         # Default mapping for snapshot kinds the old callers never saw.
         if receipt.kind == "admin_log_snapshot":
@@ -205,11 +219,6 @@ def absorb(
             return AbsorbResult(status=status, reason=receipt.legacy_reason)
         return AbsorbResult(status="rejected", reason=receipt.legacy_reason or "unknown kind")
     return receipt
-
-
-def _extract_peer_did(receipt: AbsorbReceipt) -> str | None:
-    """For legacy AbsorbResult.peer_did: pull from the manifest's from_did."""
-    return None  # set by individual handlers when they have one
 
 
 def _try_bootstrap_cfg(source: Path | str | bytes | bytearray) -> LoadedConfig | None:
@@ -526,12 +535,12 @@ def _maybe_unseal_recipient_wrap(
 
     # Late import — recipient_seal pulls in pynacl.bindings; we only want
     # to take that hit on the unwrap path.
+    from .export import decrypt_body_blob
     from .recipient_seal import (
         UnsealError,
         manifest_aad_for_wrap,
         unseal_bek_from_wrap,
     )
-    from .export import decrypt_body_blob
 
     our_did = getattr(getattr(cfg, "device", None), "did", None)
     device_priv = getattr(cfg.device, "private_bytes", None)
@@ -1452,21 +1461,3 @@ __all__ = [
 ]
 
 
-# Keep the old internal helper names available for any in-tree caller that
-# imports them directly. Both still drive the legacy AbsorbResult shape.
-def _absorb_offer(cfg: LoadedConfig, pkg: Package) -> AbsorbResult:
-    receipt = _stash_offer(cfg, pkg)
-    return AbsorbResult(
-        status=receipt.legacy_status,
-        reason=receipt.legacy_reason,
-        peer_did=pkg.signer_did,
-    )
-
-
-def _absorb_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbResult:
-    receipt = _apply_enrolment(cfg, pkg)
-    return AbsorbResult(
-        status=receipt.legacy_status,
-        reason=receipt.legacy_reason,
-        peer_did=pkg.signer_did,
-    )

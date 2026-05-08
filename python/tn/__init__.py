@@ -35,7 +35,18 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from . import _agents_policy, _autoinit, classifier, identity, sealing, vault_client, wallet
+from . import (
+    _agents_policy,
+    _autoinit,
+    admin,
+    classifier,
+    identity,
+    pkg,
+    sealing,
+    vault,
+    vault_client,
+    wallet,
+)
 from ._agents_policy import PolicyDocument, PolicyTemplate
 from ._autoinit import set_strict
 from ._dispatch import (  # should_use_rust re-exported for diagnostics
@@ -49,9 +60,6 @@ from .admin import (
     ensure_group,
     set_link_state,
 )
-from . import admin  # noqa: F401
-from . import pkg  # noqa: F401
-from . import vault  # noqa: F401
 from .admin.cache import (
     AdminStateCache,
     ChainConflict,
@@ -69,8 +77,10 @@ from .context import (
 )
 from .export import (
     IDENTITY_SEED_CEREMONY_PLACEHOLDER,
-    export as _raw_export,
     export_identity_seed,
+)
+from .export import (
+    export as _raw_export,
 )
 from .offer import offer
 from .reader import read_all as _raw_read_all
@@ -99,6 +109,7 @@ _surface = logging.getLogger("tn.surface")
 # trace. Path is printed to stderr at module import.
 import os as _os_for_surface
 import tempfile as _tempfile_for_surface
+
 _surface_log_path = (
     _os_for_surface.environ.get("TN_SURFACE_LOG")
     or str(_os_for_surface.path.join(
@@ -614,7 +625,7 @@ def _emit_via(
     event_type: str,
     fields: dict[str, Any],
     sign: bool | None,
-) -> dict[str, Any]:
+) -> None:
     """Build the merged-fields dict, splice tn.agents policy text if a
     template applies, then dispatch the emit through the supplied
     runtime.
@@ -633,7 +644,7 @@ def _emit_via(
     return rt.emit(level, event_type, merged, sign=sign)
 
 
-def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign: bool | None) -> dict[str, Any]:
+def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign: bool | None) -> None:
     """Module-level emit: routes through the singleton dispatch runtime.
 
     Used by the bare ``tn.info(...)`` / ``tn.log(...)`` API which is
@@ -701,17 +712,9 @@ def __getattr__(name: str):
 # the helpers (_emit_with_splice, _resolve_sign) still live in this
 # package init; emit.py imports them back when called.
 # --------------------------------------------------------------------------
-from .emit import debug, error, info, log, warning  # noqa: E402, F401
-
-# --------------------------------------------------------------------------
-# Lifecycle verbs — public API lives in tn.lifecycle, re-exported here.
-# The _impl bodies are private and used by lifecycle.py via the package init.
-# --------------------------------------------------------------------------
-from .lifecycle import (  # noqa: E402, F401
-    current_config,
-    flush_and_close,
-    session,
-    using_rust,
+from ._handle import (  # noqa: E402
+    TN,
+    MultiCeremonyEmitNotImplemented,
 )
 
 # --------------------------------------------------------------------------
@@ -720,7 +723,7 @@ from .lifecycle import (  # noqa: E402, F401
 # through to lifecycle.init for backwards compat). tn.use and tn.list
 # are new with the multi-ceremony work.
 # --------------------------------------------------------------------------
-from ._multi import (  # noqa: E402, F401
+from ._multi import (  # noqa: E402
     TNConfigConflict,
     TNCreateFailed,
     TNInvalidName,
@@ -728,20 +731,6 @@ from ._multi import (  # noqa: E402, F401
     list_ceremonies,
     use,
 )
-from ._handle import (  # noqa: E402, F401
-    TN,
-    MultiCeremonyEmitNotImplemented,
-)
-from ._registry import TNNotFound  # noqa: E402, F401
-
-# --------------------------------------------------------------------------
-# Read verbs — public API lives in tn.read.
-# --------------------------------------------------------------------------
-from .read import (  # noqa: E402, F401
-    read,
-    watch,
-)
-
 
 # Internal helpers from the legacy read-impl module that other parts of
 # the SDK still import. The user-facing read verbs (read/read_raw/...)
@@ -755,7 +744,27 @@ from ._read_impl import (  # noqa: F401, E402
     _read_raw_inner,
     _rotated_backup_paths,
 )
+from ._registry import TNNotFound  # noqa: E402
+from .emit import debug, error, info, log, warning  # noqa: E402
 
+# --------------------------------------------------------------------------
+# Lifecycle verbs — public API lives in tn.lifecycle, re-exported here.
+# The _impl bodies are private and used by lifecycle.py via the package init.
+# --------------------------------------------------------------------------
+from .lifecycle import (  # noqa: E402
+    current_config,
+    flush_and_close,
+    session,
+    using_rust,
+)
+
+# --------------------------------------------------------------------------
+# Read verbs — public API lives in tn.read.
+# --------------------------------------------------------------------------
+from .read import (  # noqa: E402
+    read,
+    watch,
+)
 
 
 def _flush_and_close_impl(*, timeout: float = 30.0) -> None:
@@ -843,27 +852,10 @@ def _get_or_create_cache() -> AdminStateCache:
     return _cached_admin_state
 
 
-from ._pkg_impl import _absorb_impl, _export_impl  # noqa: F401, E402
+from ._pkg_impl import _absorb_impl, _export_impl  # noqa: E402
 
-
-def absorb(*args: Any, **kwargs: Any):
-    """Top-level shortcut for :func:`tn.pkg.absorb`.
-
-    The bundle / package surface lives under ``tn.pkg`` for organisation,
-    but the most common operation — installing a freshly-downloaded
-    ``.tnpkg`` from the dashboard — is short and load-bearing enough that
-    it gets a direct entry point too. Equivalent to::
-
-        import tn
-        tn.absorb('Agentic20.project.tnpkg')          # same as
-        tn.pkg.absorb('Agentic20.project.tnpkg')      # this
-    """
-    return _absorb_impl(*args, **kwargs)
-
-
-def export(*args: Any, **kwargs: Any):
-    """Top-level shortcut for :func:`tn.pkg.export`. See :func:`absorb`."""
-    return _export_impl(*args, **kwargs)
+absorb = _absorb_impl
+export = _export_impl
 
 
 def _refresh_admin_cache_if_present() -> None:
@@ -881,9 +873,8 @@ def _refresh_admin_cache_if_present() -> None:
 
 
 from ._pkg_impl import _bundle_for_recipient_impl  # noqa: F401, E402
+from ._session_impl import _Session, _session_impl, _SessionHandle  # noqa: F401, E402
 from ._vault_impl import _vault_link_impl, _vault_unlink_impl  # noqa: F401, E402
-from ._session_impl import _Session, _SessionHandle, _session_impl  # noqa: F401, E402
-
 
 __all__ = [  # noqa: RUF022 — intentional category grouping (see inline comments)
     "AbsorbReceipt",

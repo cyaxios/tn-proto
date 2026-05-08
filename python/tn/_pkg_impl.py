@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, overload
+
+if TYPE_CHECKING:
+    from .absorb import AbsorbReceipt, AbsorbResult
+    from .config import LoadedConfig
 
 _logger = logging.getLogger("tn")
 _surface = logging.getLogger("tn.surface")
@@ -20,6 +24,7 @@ def _export_impl(*args: Any, **kwargs: Any):
     ``enrolment``, ``kit_bundle``) work transparently.
     """
     import tn
+
     from .export import export as _raw_export
     _surface.info(
         "tn.export(args=%d, kwargs=%s)", len(args), sorted(kwargs.keys()),
@@ -37,7 +42,19 @@ def _export_impl(*args: Any, **kwargs: Any):
     return _raw_export(*args, **kwargs)
 
 
-def _absorb_impl(*args: Any, **kwargs: Any):
+@overload
+def _absorb_impl(source: Path | str | bytes | bytearray, /) -> AbsorbReceipt: ...
+@overload
+def _absorb_impl(
+    cfg: LoadedConfig, source: Path | str | bytes | bytearray, /
+) -> AbsorbResult: ...
+@overload
+def _absorb_impl(*, source: Path | str | bytes | bytearray) -> AbsorbReceipt: ...
+@overload
+def _absorb_impl(
+    *, cfg: LoadedConfig, source: Path | str | bytes | bytearray
+) -> AbsorbResult: ...
+def _absorb_impl(*args: Any, **kwargs: Any) -> AbsorbReceipt | AbsorbResult:
     """Absorb a `.tnpkg` and refresh the lazy admin LKV cache, if any.
 
     Thin wrapper over ``tn.absorb.absorb``: same call shapes, same return
@@ -63,6 +80,7 @@ def _absorb_impl(*args: Any, **kwargs: Any):
         overwrite a populated ceremony, accept on a fresh one.
     """
     import tn
+
     from .absorb import absorb as _raw_absorb
     _surface.info(
         "tn.absorb(args=%d, kwargs=%s)", len(args), sorted(kwargs.keys()),
@@ -136,6 +154,7 @@ def _bind_after_bootstrap_absorb(kind: str) -> None:
     on rejection or when a runtime is already bound.
     """
     import tn
+
     from . import config as _config
 
     yaml_path = (Path.cwd() / "tn.yaml").resolve()
@@ -198,6 +217,8 @@ def _is_bootstrap_kind_source(args: tuple, kwargs: dict) -> bool:
         source = kwargs.get("source")
     else:
         return False
+    if source is None or not isinstance(source, (Path, str, bytes, bytearray)):
+        return False
     try:
         return _try_bootstrap_cfg(source) is not None
     except Exception:
@@ -237,7 +258,9 @@ def _bundle_for_recipient_impl(
     decrypts the publisher's log per group.
     """
     import tempfile
+
     import tn
+
     from . import admin as _admin
     from . import current_config
 
