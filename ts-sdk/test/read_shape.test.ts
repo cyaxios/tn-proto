@@ -1,11 +1,11 @@
-// Tests for `client.read()` shape — flat default + verify + raw flags
-// per the 2026-04-25 read-ergonomics spec §1.
+// Tests for `Tn.read()` shape — Entry default + raw + verify modes
+// (post-0.4.0a1 thin read/watch refactor).
 
 import { strict as assert } from "node:assert";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
 
-import { type ReadEntry } from "../src/index.js";
+import { Entry } from "../src/Entry.js";
 import { Tn } from "../src/tn.js";
 
 async function makeEphemeral(): Promise<{ client: Tn; cleanup: () => Promise<void> }> {
@@ -22,109 +22,67 @@ async function makeEphemeral(): Promise<{ client: Tn; cleanup: () => Promise<voi
   };
 }
 
-test("client.read() default returns flat dict with envelope basics + decrypted fields", async () => {
+test("Tn.read() default returns Entry instances with envelope basics + decrypted fields", async () => {
   const { client, cleanup } = await makeEphemeral();
   try {
     client.info("order.created", { amount: 99, currency: "USD" });
-    const entries = [...client.read()] as Array<Record<string, unknown>>;
-    const biz = entries.find((e) => e["event_type"] === "order.created");
+    const entries: Entry[] = [];
+    for (const e of client.read()) {
+      if (e instanceof Entry) entries.push(e);
+    }
+    const biz = entries.find((e) => e.event_type === "order.created");
     assert.ok(biz, "must find the order.created entry");
-    // Envelope basics flat at top-level (snake_case).
-    assert.equal(biz!["event_type"], "order.created");
-    assert.equal(biz!["level"], "info");
-    assert.ok(typeof biz!["did"] === "string");
-    assert.ok(typeof biz!["timestamp"] === "string");
-    assert.ok(typeof biz!["sequence"] === "number");
-    assert.ok(typeof biz!["event_id"] === "string");
+    assert.equal(biz!.event_type, "order.created");
+    assert.equal(biz!.level, "info");
+    assert.ok(typeof biz!.did === "string");
+    assert.ok(biz!.timestamp instanceof Date);
+    assert.ok(typeof biz!.sequence === "number");
+    assert.ok(typeof biz!.event_id === "string");
 
-    // Decrypted fields surface flat.
-    assert.equal(biz!["amount"], 99);
-    assert.equal(biz!["currency"], "USD");
+    // Decrypted fields are in fields.
+    assert.equal(biz!.fields["amount"], 99);
+    assert.equal(biz!.fields["currency"], "USD");
 
-    // Crypto plumbing absent.
-    assert.equal(biz!["row_hash"], undefined);
-    assert.equal(biz!["prev_hash"], undefined);
-    assert.equal(biz!["signature"], undefined);
-    assert.equal(biz!["envelope"], undefined);
-    assert.equal(biz!["plaintext"], undefined);
+    // Crypto plumbing surfaces as typed attributes (not fields).
+    assert.ok(typeof biz!.row_hash === "string");
+    assert.ok(typeof biz!.prev_hash === "string");
+    assert.ok(typeof biz!.signature === "string");
   } finally {
     await cleanup();
   }
 });
 
-test("client.read({verify: true}) adds _valid block", async () => {
+test("Tn.read({raw: true}) returns the {envelope, ...} shape", async () => {
   const { client, cleanup } = await makeEphemeral();
   try {
     client.info("evt.test", { k: 1 });
-    const entries = [...client.read({ verify: true })] as Array<Record<string, unknown>>;
+    const entries: Record<string, unknown>[] = [];
+    for (const env of client.read({ raw: true })) {
+      entries.push(env as Record<string, unknown>);
+    }
     const evt = entries.find((e) => e["event_type"] === "evt.test");
     assert.ok(evt, "must find evt.test");
-    const valid = evt!["_valid"] as Record<string, unknown> | undefined;
-    assert.ok(valid, "_valid must be present");
-    assert.equal(valid!["signature"], true);
-    assert.equal(valid!["row_hash"], true);
-    assert.equal(valid!["chain"], true);
+    // raw=true yields the on-disk envelope dict directly.
+    assert.ok(evt!["default"], "envelope carries group ciphertext");
+    const grp = evt!["default"] as Record<string, unknown>;
+    assert.ok("ciphertext" in grp);
+    assert.ok(typeof evt!["row_hash"] === "string");
   } finally {
     await cleanup();
   }
 });
 
-test("client.read({raw: true}) returns the {envelope, plaintext, valid} shape", async () => {
+test("a row with only public fields surfaces as Entry with empty fields beyond public extras", async () => {
   const { client, cleanup } = await makeEphemeral();
   try {
-    client.info("evt.test", { k: 1 });
-    const entries = [...client.read({ raw: true })] as ReadEntry[];
-    const evt = entries.find((e) => e.envelope["event_type"] === "evt.test");
-    assert.ok(evt, "must find evt.test");
-    assert.ok(evt!.envelope, "raw shape carries envelope");
-    assert.ok(evt!.plaintext, "raw shape carries plaintext");
-    assert.ok(evt!.valid, "raw shape carries valid");
-    assert.equal(evt!.valid.signature, true);
-    assert.equal(evt!.valid.rowHash, true);
-    assert.equal(evt!.valid.chain, true);
-  } finally {
-    await cleanup();
-  }
-});
-
-test("client.readRaw is an alias for read({raw: true})", async () => {
-  const { client, cleanup } = await makeEphemeral();
-  try {
-    client.info("evt.alias", { x: 1 });
-    const entries = [...client.readRaw()];
-    const evt = entries.find((e) => e.envelope["event_type"] === "evt.alias");
-    assert.ok(evt, "readRaw yields the audit-grade shape");
-    assert.ok(evt!.envelope);
-  } finally {
-    await cleanup();
-  }
-});
-
-test("flat dict omits empty _hidden_groups / _decrypt_errors keys", async () => {
-  const { client, cleanup } = await makeEphemeral();
-  try {
-    client.info("evt.test", { k: 1 });
-    const entries = [...client.read()] as Array<Record<string, unknown>>;
-    const evt = entries.find((e) => e["event_type"] === "evt.test");
-    assert.ok(evt);
-    assert.equal(evt!["_hidden_groups"], undefined);
-    assert.equal(evt!["_decrypt_errors"], undefined);
-  } finally {
-    await cleanup();
-  }
-});
-
-test("a row with only public fields returns just envelope basics in flat dict", async () => {
-  const { client, cleanup } = await makeEphemeral();
-  try {
-    // No groups — just envelope basics + a public field.
-    // request_id is in the auto-injected public_fields list.
     client.info("evt.public", { request_id: "req-123" });
-    const entries = [...client.read()] as Array<Record<string, unknown>>;
-    const evt = entries.find((e) => e["event_type"] === "evt.public");
+    const entries: Entry[] = [];
+    for (const e of client.read()) {
+      if (e instanceof Entry) entries.push(e);
+    }
+    const evt = entries.find((e) => e.event_type === "evt.public");
     assert.ok(evt);
-    // Public field flat at top level.
-    assert.equal(evt!["request_id"], "req-123");
+    assert.equal(evt!.fields["request_id"], "req-123");
   } finally {
     await cleanup();
   }
@@ -134,13 +92,15 @@ test("read({verify: true, raw: true}) — raw wins; no error", async () => {
   const { client, cleanup } = await makeEphemeral();
   try {
     client.info("evt.compose", { x: 1 });
-    const entries = [...client.read({ verify: true, raw: true })] as ReadEntry[];
-    const evt = entries.find((e) => e.envelope["event_type"] === "evt.compose");
+    const entries: Record<string, unknown>[] = [];
+    for (const env of client.read({ verify: true, raw: true })) {
+      entries.push(env as Record<string, unknown>);
+    }
+    const evt = entries.find((e) => e["event_type"] === "evt.compose");
     assert.ok(evt);
-    // raw=true returns the audit-grade shape; valid is on the entry.
-    assert.equal(evt!.valid.signature, true);
   } finally {
     await cleanup();
   }
 });
+
 void rmSync; // keep typed import alive for potential future cleanup helpers

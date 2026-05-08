@@ -1,4 +1,4 @@
-// TNClient acceptance test — parity target for SDK matrix.
+// Tn acceptance test — parity target for SDK matrix.
 //
 // Mirrors tn-protocol/crypto/tn-core/tests/runtime_emit.rs::
 //   log_level_wrappers_emit_with_expected_level
@@ -12,6 +12,7 @@ import { Buffer } from "node:buffer";
 import { test } from "node:test";
 
 import { canonicalize, DeviceKey, primitives } from "../src/index.js";
+import { Entry, VerifyError } from "../src/Entry.js";
 import { Tn } from "../src/tn.js";
 import { BtnPublisher } from "../src/raw.js";
 
@@ -46,6 +47,22 @@ function makeCeremony(): { yamlPath: string; cleanup: () => void } {
     yamlPath,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
+}
+
+function readEnvs(tn: Tn): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const env of tn.read({ raw: true, allRuns: true })) {
+    out.push(env as Record<string, unknown>);
+  }
+  return out;
+}
+
+function readEntries(tn: Tn): Entry[] {
+  const out: Entry[] = [];
+  for (const e of tn.read({ allRuns: true })) {
+    if (e instanceof Entry) out.push(e);
+  }
+  return out;
 }
 
 test("log-level wrappers emit with expected level", async () => {
@@ -107,18 +124,22 @@ test("read yields an entry the client just emitted", async () => {
   const { yamlPath, cleanup } = makeCeremony();
   try {
     const tn = await Tn.init(yamlPath);
-    // log/info/warning/error/debug return void (parity with Python).
-    // Use `emit(level, ...)` when a receipt is needed.
+    // log/info/warning/error/debug return EmitReceipt.
     const receipt = tn.emit("info", "order.created", { amount: 99, status: "paid" });
     assert.match(receipt.rowHash, /^sha256:[0-9a-f]{64}$/);
 
-    const entries = Array.from(tn.read({ raw: true }));
-    const biz = entries.find((e) => e.envelope["event_type"] === "order.created");
+    const entries = readEntries(tn);
+    const biz = entries.find((e) => e.event_type === "order.created");
     assert.ok(biz, "just-emitted entry must be readable");
-    assert.equal(biz!.plaintext["default"]!["amount"], 99);
-    assert.equal(biz!.valid.signature, true);
-    assert.equal(biz!.valid.rowHash, true);
-    assert.equal(biz!.valid.chain, true);
+    assert.equal(biz!.fields["amount"], 99);
+
+    // verify=true must succeed on a clean log.
+    let n = 0;
+    for (const _ of tn.read({ verify: true, allRuns: true })) {
+      n += 1;
+      void _;
+    }
+    assert.ok(n >= 1);
 
     await tn.close();
   } finally {
@@ -157,10 +178,8 @@ test("vault.link emits a signed tn.vault.linked event", async () => {
     const receipt = await tn.vault.link("did:key:z6MkVault", "proj-alpha");
     assert.match(receipt.rowHash, /^sha256:[0-9a-f]{64}$/);
 
-    // vault.link routes through _mergeForEmit so run_id is present;
-    // allRuns: false (default) is sufficient.
-    const entries = Array.from(tn.read({ raw: true }));
-    const linked = entries.find((e) => e.envelope["event_type"] === "tn.vault.linked");
+    const entries = readEntries(tn);
+    const linked = entries.find((e) => e.event_type === "tn.vault.linked");
     assert.ok(linked, "tn.vault.linked event must be present");
 
     await tn.close();
@@ -175,9 +194,8 @@ test("read yields nothing on an empty log", async () => {
   const { yamlPath, cleanup } = makeCeremony();
   try {
     const tn = await Tn.init(yamlPath);
-    // Overwrite the log file with empty bytes immediately after init.
     writeFileSync(tn.logPath, "");
-    const entries = Array.from(tn.read({ raw: true }));
+    const entries = readEnvs(tn);
     assert.equal(entries.length, 0, "empty log must yield zero entries");
     await tn.close();
   } finally {
@@ -190,10 +208,9 @@ test("read skips blank lines without throwing", async () => {
   try {
     const tn = await Tn.init(yamlPath);
     tn.info("blankline.test", { k: 1 });
-    // Append some blank lines; reader must tolerate them.
     writeFileSync(tn.logPath, "\n\n\n", { flag: "a" });
-    const entries = Array.from(tn.read({ raw: true }));
-    const blank = entries.find((e) => e.envelope["event_type"] === "blankline.test");
+    const entries = readEnvs(tn);
+    const blank = entries.find((e) => e["event_type"] === "blankline.test");
     assert.ok(blank, "emitted entry must still be readable past blank lines");
     await tn.close();
   } finally {
@@ -207,20 +224,15 @@ test("read surfaces parse errors on a corrupted line", async () => {
     const tn = await Tn.init(yamlPath);
     tn.info("corruption.before", { k: 1 });
     writeFileSync(tn.logPath, "not-json-at-all\n", { flag: "a" });
-    // Reading through the corrupted line must throw so callers cannot silently
-    // skip tampered content. Matches Python `tn.read()` strict-by-default behavior.
-    assert.throws(() => Array.from(tn.read({ raw: true })), /parse|JSON|unexpected/i);
+    // Reading must throw so callers cannot silently skip tampered content.
+    assert.throws(() => readEnvs(tn), /parse|JSON|unexpected|invalid/i);
     await tn.close();
   } finally {
     cleanup();
   }
 });
 
-// ----- B3: primitives byte-compare against Python canonical ----------------
-//
-// The TS SDK and Python SDK must produce byte-identical canonical
-// serialization; any drift silently breaks row_hash + index_token parity.
-// Golden vectors here match python/tests/test_canonical.py assertions.
+// ----- B3: primitives byte-compare ----------------------------------------
 
 test("canonicalize matches Python canonical bytes for primitives", () => {
   const td = new TextDecoder("utf-8");
@@ -286,7 +298,6 @@ test("recipients yields active entry after add, removes it after revoke", async 
       assert.equal(revoked!.revoked, true);
       assert.ok(revoked!.revokedAt, "revokedAt must be set");
 
-      // AdminStateCache.recipients sorts by leafIndex ascending (lower leaf first).
       const sorted = all.slice().sort((a, b) => a.leafIndex - b.leafIndex);
       assert.equal(sorted[0]!.leafIndex, aliceLeaf, "alice has lower leaf index");
       assert.equal(sorted[1]!.leafIndex, bobLeaf, "bob has higher leaf index");
@@ -330,8 +341,6 @@ test("admin.state rolls up ceremony, recipients, and vault links", async () => {
 
       const state = tn.admin.state();
 
-      // tn.admin.state() now auto-derives ceremony from config when no
-      // tn.ceremony.init event has been emitted (common for btn ceremonies).
       assert.ok(state.ceremony, "ceremony must be auto-derived from config");
       assert.ok(state.ceremony!.ceremonyId, "ceremony id must be set");
       assert.equal(state.ceremony!.deviceDid, tn.did);
@@ -347,7 +356,6 @@ test("admin.state rolls up ceremony, recipients, and vault links", async () => {
       assert.equal(link!.projectId, "proj-42");
       assert.equal(link!.unlinkedAt, null);
 
-      // Filter by group: ceremony stays, recipients narrow.
       const onlyDefault = tn.admin.state("default");
       assert.equal(onlyDefault.recipients.length, state.recipients.length);
       const otherGroup = tn.admin.state("ghost-group");
@@ -389,17 +397,13 @@ test("admin.state marks recipients revoked after revoke", async () => {
 // ----- primitives sub-namespace -------------------------------------------
 
 test("primitives namespace exposes canonicalize and DeviceKey alongside top-level", () => {
-  // Top-level re-export must keep working (back-compat).
   const td = new TextDecoder("utf-8");
   assert.equal(td.decode(canonicalize({ a: 1 })), '{"a":1}');
 
-  // Same surface must be reachable via primitives.* — the matrix target.
   assert.equal(typeof primitives.canonicalize, "function");
   assert.equal(typeof primitives.DeviceKey.fromSeed, "function");
   assert.equal(td.decode(primitives.canonicalize({ a: 1 })), '{"a":1}');
 
-  // Sanity: top-level and namespaced refs are the same function reference,
-  // so behavior cannot drift between the two paths.
   assert.strictEqual(primitives.canonicalize, canonicalize);
   assert.strictEqual(primitives.DeviceKey, DeviceKey);
 });
@@ -419,11 +423,18 @@ test("Tn.emitWith honors timestamp + eventId overrides", async () => {
     });
     assert.equal(receipt.eventId, eid);
 
-    const entries = Array.from(tn.read({ raw: true }));
-    const e = entries.find((x) => x.envelope["event_id"] === eid);
+    const envs = readEnvs(tn);
+    const e = envs.find((x) => x["event_id"] === eid);
     assert.ok(e, "entry with overridden event_id must be readable");
-    assert.equal(e!.envelope["timestamp"], ts);
-    assert.equal(e!.valid.signature, true, "row_hash must be signature-valid");
+    assert.equal(e!["timestamp"], ts);
+
+    // Verify mode passes for clean entries.
+    let count = 0;
+    for (const _ of tn.read({ verify: true, allRuns: true })) {
+      count += 1;
+      void _;
+    }
+    assert.ok(count >= 1);
 
     await tn.close();
   } finally {
@@ -437,13 +448,20 @@ test("Tn.emitOverrideSign(false) writes an unsigned entry", async () => {
     const tn = await Tn.init(yamlPath);
     tn.emitOverrideSign("info", "evt.unsigned", { n: 1 }, false);
 
-    const entries = Array.from(tn.read({ raw: true }));
-    const e = entries.find((x) => x.envelope["event_type"] === "evt.unsigned");
+    const envs = readEnvs(tn);
+    const e = envs.find((x) => x["event_type"] === "evt.unsigned");
     assert.ok(e, "unsigned entry must still be readable");
-    assert.equal(e!.envelope["signature"], "", "signature field must be empty");
-    assert.equal(e!.valid.signature, false);
-    assert.equal(e!.valid.rowHash, true);
-    assert.equal(e!.valid.chain, true);
+    assert.equal(e!["signature"], "", "signature field must be empty");
+
+    // verify=true should reject the unsigned row.
+    assert.throws(
+      () => {
+        for (const _ of tn.read({ verify: true, allRuns: true })) {
+          void _;
+        }
+      },
+      (err: unknown) => err instanceof VerifyError,
+    );
 
     await tn.close();
   } finally {
@@ -463,13 +481,12 @@ test("Tn.setSigning(false) makes subsequent emits unsigned", async () => {
     }
     tn.info("evt.session.signed", { n: 2 });
 
-    const entries = Array.from(tn.read({ raw: true }));
-    const skipped = entries.find((x) => x.envelope["event_type"] === "evt.session.skip");
-    const signed = entries.find((x) => x.envelope["event_type"] === "evt.session.signed");
+    const envs = readEnvs(tn);
+    const skipped = envs.find((x) => x["event_type"] === "evt.session.skip");
+    const signed = envs.find((x) => x["event_type"] === "evt.session.signed");
     assert.ok(skipped && signed, "both entries must be readable");
-    assert.equal(skipped!.envelope["signature"], "");
-    assert.notEqual(signed!.envelope["signature"], "");
-    assert.equal(signed!.valid.signature, true);
+    assert.equal(skipped!["signature"], "");
+    assert.notEqual(signed!["signature"], "");
 
     await tn.close();
   } finally {
@@ -488,11 +505,10 @@ test("Tn.emitOverrideSign per-call wins over session-level setSigning", async ()
       Tn.setSigning(null);
     }
 
-    const entries = Array.from(tn.read({ raw: true }));
-    const e = entries.find((x) => x.envelope["event_type"] === "evt.percall.win");
+    const envs = readEnvs(tn);
+    const e = envs.find((x) => x["event_type"] === "evt.percall.win");
     assert.ok(e, "entry must be readable");
-    assert.notEqual(e!.envelope["signature"], "");
-    assert.equal(e!.valid.signature, true);
+    assert.notEqual(e!["signature"], "");
 
     await tn.close();
   } finally {
@@ -512,55 +528,56 @@ test("every log-level wrapper produces a signature-valid readable entry", async 
     tn.warning("evt.warn", { k: 4 });
     tn.error("evt.err", { k: 5 });
 
-    const entries = Array.from(tn.read({ raw: true }));
+    const entries = readEntries(tn);
     const wanted = ["evt.bare", "evt.dbg", "evt.inf", "evt.warn", "evt.err"];
     for (const et of wanted) {
-      const e = entries.find((x) => x.envelope["event_type"] === et);
+      const e = entries.find((x) => x.event_type === et);
       assert.ok(e, `entry for ${et} must be readable`);
-      assert.equal(e!.valid.signature, true, `${et} signature must verify`);
-      assert.equal(e!.valid.rowHash, true, `${et} row_hash must verify`);
-      assert.equal(e!.valid.chain, true, `${et} chain must verify`);
     }
+
+    // verify=true should succeed across the whole batch.
+    let count = 0;
+    for (const _ of tn.read({ verify: true, allRuns: true })) {
+      count += 1;
+      void _;
+    }
+    assert.ok(count >= wanted.length);
+
     await tn.close();
   } finally {
     cleanup();
   }
 });
 
-// ----- B4: positional `message` ergonomic (parity with Python) ------------
+// ----- B4: positional `message` ergonomic ---------------------------------
 
 test("log/info/warning/error/debug accept a positional message string", async () => {
   const { yamlPath, cleanup } = makeCeremony();
   try {
     const tn = await Tn.init(yamlPath);
 
-    // Form 1: just a message string -> {message: <str>}
     tn.info("evt.msg.only", "name = hi");
-    // Form 2: message + extra fields -> {message: ..., port: 8080}
     tn.info("evt.msg.plus", "starting", { port: 8080 });
-    // Form 3: just an object -> fields directly (no `message` key)
     tn.info("evt.kw.only", { foo: "bar" });
-    // Form 4: Tn log-level wrappers return an EmitReceipt (unlike TNClient which returns void).
     const ret = tn.info("evt.void", "x");
     assert.ok(ret && typeof ret.rowHash === "string", "Tn log-level wrappers return EmitReceipt");
 
-    const entries = Array.from(tn.read({ raw: true }));
-    const find = (et: string) => entries.find((x) => x.envelope["event_type"] === et)!;
+    const entries = readEntries(tn);
+    const find = (et: string) => entries.find((x) => x.event_type === et)!;
 
+    // `message` is part of the encrypted plaintext payload, so it
+    // surfaces under fields["message"] (typed-slot Entry.message stays
+    // null for emits where the writer encrypts the message — matches Python).
     const msgOnly = find("evt.msg.only");
-    assert.equal(msgOnly.plaintext["default"]!["message"], "name = hi");
+    assert.equal(msgOnly.fields["message"], "name = hi");
 
     const msgPlus = find("evt.msg.plus");
-    assert.equal(msgPlus.plaintext["default"]!["message"], "starting");
-    assert.equal(msgPlus.plaintext["default"]!["port"], 8080);
+    assert.equal(msgPlus.fields["message"], "starting");
+    assert.equal(msgPlus.fields["port"], 8080);
 
     const kwOnly = find("evt.kw.only");
-    assert.equal(kwOnly.plaintext["default"]!["foo"], "bar");
-    assert.equal(
-      kwOnly.plaintext["default"]!["message"],
-      undefined,
-      "object-form must NOT inject a message key",
-    );
+    assert.equal(kwOnly.fields["foo"], "bar");
+    assert.equal(kwOnly.fields["message"], undefined, "object-form must NOT inject a message");
 
     await tn.close();
   } finally {

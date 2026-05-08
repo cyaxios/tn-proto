@@ -26,7 +26,7 @@ test("Tn.ephemeral creates a usable runtime", async () => {
 
     // Read back what we just wrote (ignore bootstrap tn.* events).
     const read = [...c.read({ raw: true })].filter(
-      (e) => (e.envelope["event_type"] as string) === "evt.ephemeral",
+      (e) => ((e as Record<string, unknown>)["event_type"] as string) === "evt.ephemeral",
     );
     assert.equal(read.length, 1, "expected exactly one user event");
   } finally {

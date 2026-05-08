@@ -27,7 +27,11 @@ import { join } from "node:path";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
 
-import { DeviceKey, NodeRuntime, readAsRecipient } from "../../../src/index.js";
+import { DeviceKey, NodeRuntime } from "../../../src/index.js";
+// readAsRecipient is no longer exported from index — import the internal
+// helper directly. This test exercises raw-keystore decryption semantics
+// with no Tn instance for the partner side.
+import { readAsRecipient } from "../../../src/read_as_recipient.js";
 import { BtnPublisher } from "../../../src/raw.js";
 
 const GROUP_NAMES = ["default", "pii", "internal"];

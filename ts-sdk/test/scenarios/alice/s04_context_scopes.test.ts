@@ -20,6 +20,7 @@
 
 import { test } from "node:test";
 import { ScenarioContext } from "../_harness.js";
+import { Entry } from "../../../src/Entry.js";
 
 const ASYNC_TASKS = 20;
 
@@ -51,10 +52,10 @@ test("alice/s04_context_scopes — setContext/clearContext no bleed under Promis
     );
 
     // Read back and verify per-entry field integrity.
-    const entries = [...tn.readRaw()].filter((e) => {
-      const et = e.envelope["event_type"] as string;
-      return et === "work.async";
-    });
+    const entries: Entry[] = [];
+    for (const e of tn.read({ allRuns: true })) {
+      if (e instanceof Entry && e.event_type === "work.async") entries.push(e);
+    }
 
     ctx.assertInvariant(
       "entry_count",
@@ -66,14 +67,15 @@ test("alice/s04_context_scopes — setContext/clearContext no bleed under Promis
     let decryptionOk = true;
     let decryptedCount = 0;
 
-    // No-bleed check: because JS is single-threaded the workers run in
-    // interleaved microtasks so each worker's context was set immediately
-    // before its own tn.info call in the same synchronous continuation.
-    // We verify each entry has a valid integer 'i' in plaintext.
+    try {
+      for (const _ of tn.read({ verify: true, allRuns: true })) {
+        void _;
+      }
+    } catch {
+      chainOk = false;
+    }
     for (const e of entries) {
-      chainOk = chainOk && Boolean(e.valid.chain);
-      const pt = (e.plaintext["default"] ?? {}) as Record<string, unknown>;
-      if (typeof pt["i"] === "number") {
+      if (typeof e.fields["i"] === "number") {
         decryptedCount++;
       } else {
         decryptionOk = false;

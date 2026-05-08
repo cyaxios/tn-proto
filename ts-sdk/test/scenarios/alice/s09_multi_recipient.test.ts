@@ -25,7 +25,12 @@ import { join } from "node:path";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
 
-import { DeviceKey, readAsRecipient } from "../../../src/index.js";
+import { DeviceKey } from "../../../src/index.js";
+// readAsRecipient is no longer exported from index — import the internal
+// helper directly. This test pre-dates the public Tn.read({asRecipient})
+// surface and exercises raw-keystore decryption semantics that
+// `Tn.read` would obscure (no Tn instance for Bob).
+import { readAsRecipient } from "../../../src/read_as_recipient.js";
 import { BtnPublisher } from "../../../src/raw.js";
 import { NodeRuntime } from "../../../src/index.js";
 

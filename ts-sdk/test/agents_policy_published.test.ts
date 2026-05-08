@@ -65,11 +65,12 @@ test("init emits tn.agents.policy_published when a policy file is present", asyn
     try {
       const entries = [...tn.read({ raw: true })];
       const pub = entries.filter(
-        (e) => e.envelope["event_type"] === "tn.agents.policy_published",
+        (e) => (e as Record<string, unknown>)["event_type"] === "tn.agents.policy_published",
       );
       assert.equal(pub.length, 1, "exactly one policy_published event after first init");
-      assert.equal(pub[0]!.envelope["policy_uri"], ".tn/config/agents.md");
-      assert.match(String(pub[0]!.envelope["content_hash"]), /^sha256:/);
+      const env0 = pub[0] as Record<string, unknown>;
+      assert.equal(env0["policy_uri"], ".tn/config/agents.md");
+      assert.match(String(env0["content_hash"]), /^sha256:/);
     } finally {
       await tn.close();
     }
@@ -96,7 +97,7 @@ test("idempotent: re-init on unchanged policy file does NOT re-emit", async () =
       // Python `tn.read(all_runs=True)` shape).
       const entries = [...c2.read({ raw: true, allRuns: true })];
       const pub = entries.filter(
-        (e) => e.envelope["event_type"] === "tn.agents.policy_published",
+        (e) => (e as Record<string, unknown>)["event_type"] === "tn.agents.policy_published",
       );
       assert.equal(pub.length, 1, "second init must not re-emit on unchanged content_hash");
     } finally {
@@ -124,7 +125,7 @@ test("re-emits on policy content change", async () => {
       // FINDINGS #4 parity — see sibling test for explanation.
       const entries = [...c2.read({ raw: true, allRuns: true })];
       const pub = entries.filter(
-        (e) => e.envelope["event_type"] === "tn.agents.policy_published",
+        (e) => (e as Record<string, unknown>)["event_type"] === "tn.agents.policy_published",
       );
       assert.equal(pub.length, 2, "policy change must trigger a fresh policy_published");
     } finally {
