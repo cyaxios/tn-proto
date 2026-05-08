@@ -253,6 +253,7 @@ function resolveExtends(
   } catch (e) {
     throw new Error(
       `${yamlPath}: extends target ${parentPath} could not be read: ${(e as Error).message}`,
+      { cause: e },
     );
   }
   let parentResolved = resolveExtends(parentPath, parentDoc, newSeen);

@@ -49,6 +49,22 @@ KNOWN_OMISSIONS = {
     # Class / namespace handles (each covered by its verbs).
     # ------------------------------------------------------------------
     "Tn", "NodeRuntime", "AdminStateCache",
+    # The TN class handle on Python — its verbs (tn.use,
+    # tn.list_ceremonies, tn.info, tn.read, etc.) are listed in the
+    # parity table; the class itself is internal plumbing.
+    "TN",
+    # Multi-ceremony error classes — covered by the verbs that raise
+    # them (tn.use, tn.init). Each is a focused exception subclass;
+    # users catch them but don't construct them directly. NEW in
+    # 0.3.0a4 alongside the multi-ceremony layer.
+    "TNConfigConflict", "TNCreateFailed", "TNInvalidName", "TNNotFound",
+    # Reserved exception class. The earlier multi-ceremony sprint
+    # raised this from non-default emit verbs; per-instance dispatch
+    # (Bug 1 fix) made every emit path work and the class is now
+    # unreachable. Kept exported so existing user code that catches
+    # it continues to compile, and so a future per-stream feature
+    # gate can re-use the name without a breaking change.
+    "MultiCeremonyEmitNotImplemented",
 
     # ------------------------------------------------------------------
     # Python module re-exports — the doc references the namespace, not

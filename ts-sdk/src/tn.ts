@@ -127,7 +127,7 @@ function _isForeignLog(logPath: string, ownDid: string): boolean {
 // Multi-ceremony name validation: ascii alphanumeric + underscore + dash,
 // must not start with a dash, must not be the reserved legacy directory
 // name "tn". Mirrors the Python ``tn._layout.is_valid_ceremony_name``.
-const _CEREMONY_NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$/;
+const _CEREMONY_NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/;
 function _isValidCeremonyName(name: string): boolean {
   if (!name) return false;
   if (name === "tn") return false;
@@ -434,6 +434,7 @@ export class Tn {
     } catch (e) {
       throw new Error(
         `Tn.use: legacy layout migration failed: ${(e as Error).message}`,
+        { cause: e },
       );
     }
 

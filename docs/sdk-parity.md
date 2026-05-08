@@ -19,6 +19,8 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 | Python | TS | Status | Notes |
 |--------|------|--------|-------|
 | `tn.init(yaml_path?, ...)` | `await Tn.init(yamlPath?, opts?)` | ✓ | TS is async to future-proof bootstrap; Python is sync. Same ceremony-discovery semantics on both. |
+| `tn.use(name?, profile?, ...)` | `await Tn.use(name, opts?)` | ✓ | Get-or-create a multi-ceremony handle by registry name. TS interns by `(projectDir, name)`; Python interns by name. NEW in 0.3.0a4. `Tn.openCeremony` is a deprecated alias on the TS side. |
+| `tn.list_ceremonies()` | `Tn.listCeremonies(projectDir?)` | ✓ | Return ceremony names registered/found under `.tn/<name>/`. Sync on both. NEW in 0.3.0a4. |
 | `tn.flush_and_close()` | `await tn.close()` | ✓ | TS async; Python sync. |
 | `tn.log(event_type, **fields)` | `tn.log(eventType, fields?)` | ✓ | Sync on both. |
 | `tn.debug(...)` | `tn.debug(...)` | ✓ | Sync. |

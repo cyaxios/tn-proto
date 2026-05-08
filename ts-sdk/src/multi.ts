@@ -35,7 +35,7 @@ export const TN_ROOT_DIRNAME = ".tn";
 export const DEFAULT_CEREMONY_NAME = "default";
 export const LEGACY_DEFAULT_DIRNAME = "tn";
 
-const _CEREMONY_NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$/;
+const _CEREMONY_NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/;
 
 export class TNInvalidName extends Error {
   constructor(message: string) {
