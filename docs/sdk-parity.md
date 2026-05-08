@@ -27,13 +27,8 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 | `tn.info(...)` | `tn.info(...)` | ✓ | Sync. |
 | `tn.warning(...)` | `tn.warning(...)` | ✓ | Sync. |
 | `tn.error(...)` | `tn.error(...)` | ✓ | Sync. |
-| `tn.read(...)` | `tn.read(...)` | ✓ | Sync iterable in both. |
-| `tn.read_all(...)` | `tn.read({allRuns: true})` | ✓ | TS folds into a flag. |
-| `tn.read_raw(...)` | `tn.readRaw(...)` | ✓ | |
-| `tn.read_as_recipient(...)` | `tn.readAsRecipient(...)` | ✓ | |
-| `tn.read_as_recipient_flat(...)` | — | TS-pending | Novice-friendly wrapper that flattens one entry per (group_name, plaintext) pair. Python-only in 0.3.0a2. |
-| `tn.secure_read(...)` | `tn.secureRead(...)` | ✓ | |
-| `async tn.watch(since=, verify=, poll_interval=, log_path=)` | `tn.watch({ since, verify, pollIntervalMs, logPath })` | ✓ | Async iterable in both. NEW in 0.3.0a1. Stat-poll based; rotation + truncation handled. |
+| `tn.read(*, where, verify, raw, log, as_recipient, group, all_runs)` | `tn.read({ where, verify, raw, log, asRecipient, group, allRuns })` | ✓ | **0.4.0a1 unified read.** Sync iterable in both. Returns typed `Entry` (Python pydantic v2, TS class) by default; `raw=True` yields the on-disk envelope dict. `verify` accepts `False` (default), `True`/`"raise"`, or `"skip"` (silently drops integrity-failing rows + emits `tn.read.tampered_row_skipped` admin event). |
+| `async tn.watch(*, where, verify, raw, log, as_recipient, group, since, poll_interval)` | `tn.watch({ where, verify, raw, log, asRecipient, group, since, pollIntervalMs })` | ✓ | **0.4.0a1 unified watch.** Async iterable in both. Same return shape (`Entry` / envelope dict) and kwargs as `read`, plus `since=` (`"now"` / `"start"` / int / iso-string) and `poll_interval=`. Stat-poll based; rotation + truncation handled. |
 
 ## Context verbs
 
@@ -110,11 +105,32 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 | (n/a) | `tn.handlers.list()` | ⊝ | New in TS 0.3.0a1; not yet on Python. |
 | (n/a) | `await tn.handlers.flush()` | ⊝ | New in TS 0.3.0a1; not yet on Python. |
 
+## Read return type — `Entry`
+
+| Python | TS | Status | Notes |
+|--------|------|--------|-------|
+| `tn.Entry` (pydantic v2 model) | `Entry` (TS class) | ✓ | **NEW in 0.4.0a1.** What `tn.read()` and `tn.watch()` yield by default. Typed envelope attributes (`event_type`, `timestamp`, `level`, `message`, `did`, `event_id`, `sequence`, `run_id`, `prev_hash`, `row_hash`, `signature`, `hidden_groups`); user-emitted kwargs in `entry.fields`. Both sides hoist the positional `message` and `run_id` from the encrypted plaintext into typed slots so callers use `e.message` / `e.run_id` rather than `e.fields[...]`. Python: `__str__` / `__repr__` / `_repr_html_` / `_repr_markdown_` for Jupyter/Databricks. TS: `toString()` / `toJSON()`; `Entry.ts` is browser-safe (no `node:*` imports — uses `Symbol.for("nodejs.util.inspect.custom")`). |
+
+## Deleted in 0.4.0a1 — folded into `tn.read` / `tn.watch` kwargs
+
+These were separate verbs in 0.3.x. Their replacements are listed in the migration column.
+
+| Old verb (gone) | Replacement |
+|---|---|
+| `tn.read_raw(...)` / `tn.readRaw(...)` | `tn.read(raw=True)` / `tn.read({ raw: true })` — yields the on-disk envelope dict. |
+| `tn.read_all(...)` | `tn.read(all_runs=True)` / `tn.read({ allRuns: true })`. |
+| `tn.read_as_recipient(log, ks, group)` / `tn.readAsRecipient(...)` | `tn.read(log=, as_recipient=, group=, raw=True)` / `tn.read({ log, asRecipient, group, raw: true })`. The `raw=True` keeps the legacy `{envelope, plaintext, valid}` triple shape; without `raw`, yields `Entry`. |
+| `tn.read_as_recipient_flat(...)` | `tn.read(log=, as_recipient=, group=)` / `tn.read({ log, asRecipient, group })`. |
+| `tn.secure_read(on_invalid=)` / `tn.secureRead(...)` | `tn.read(verify=...)` / `tn.read({ verify })`. `verify="skip"` matches the legacy `on_invalid="skip"`; `verify=True` / `"raise"` matches `on_invalid="raise"`. |
+| `tn.Audit` class (Python) | Folded into `Entry` typed attributes. `e.signature`, `e.row_hash`, `e.prev_hash`, etc. are direct attrs now. |
+
+No compat shims — the deletions are hard. The branch is the alpha-track.
+
 ## Errors
 
 | Python | TS | Status | Notes |
 |--------|------|--------|-------|
-| `tn.VerifyError` / `tn.VerificationError` | `VerificationError` | ✓ | Real Exception / Error subclass on both. |
+| `tn.VerifyError` | `VerifyError` | ✓ | Raised by `verify=True`/`"raise"` when an entry fails one or more of (signature, row_hash, chain). Carries `.sequence`, `.event_type`, `.failed_checks`. Also raised by parse-level decrypt failures wrapped under `verify="skip"` or `verify=True` so consumers get one error type for "this row didn't validate." |
 | `tn.admin.cache.LeafReuseAttempt` (dataclass) | `LeafReuseError` (Error class) + `LeafReuseAttempt` (data) | ⚠ | Both languages keep the dataclass for accumulator paths; TS adds an Error class for throw paths. Python may add the parallel Exception in a future release. |
 | `tn.admin.cache.SameCoordinateFork` (dataclass) | `SameCoordinateForkError` + `SameCoordinateFork` | ⚠ | Same pattern. |
 | `tn.admin.cache.RotationConflict` (dataclass) | `RotationConflictError` + `RotationConflict` | ⚠ | Same pattern. |

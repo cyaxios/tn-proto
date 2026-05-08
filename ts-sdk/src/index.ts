@@ -37,13 +37,11 @@ export { Tn } from "./tn.js";
 export type {
   TnInitOptions,
   ReadOptions,
-  ReadAsRecipientOptions as TnReadAsRecipientOptions,
-  SecureReadOptions as TnSecureReadOptions,
+  WatchOptions,
+  VerifyMode,
 } from "./tn.js";
-export type { WatchOptions, WatchSince } from "./watch.js";
-// SecureReadOptions was previously re-exported from client.js; now re-exported
-// from tn.js under the same name for backwards-compat.
-export type { SecureReadOptions } from "./tn.js";
+export type { WatchSince } from "./watch.js";
+export { Entry, VerifyError } from "./Entry.js";
 export { LOG_LEVELS } from "./tn.js";
 export type {
   AddRuntimeOptions,
@@ -52,10 +50,6 @@ export type {
 export type {
   ExportOptions as PkgExportOptions,
 } from "./pkg/index.js";
-export type {
-  Instructions,
-  SecureEntry,
-} from "./core/read_shape.js";
 export type {
   ChainConflict,
   LeafReuseAttempt,
@@ -116,11 +110,8 @@ export {
 } from "./admin/log.js";
 export { loadConfig } from "./runtime/config.js";
 export { loadKeystore } from "./runtime/keystore.js";
-export {
-  readAsRecipient,
-  type ForeignReadEntry,
-  type ReadAsRecipientOptions,
-} from "./read_as_recipient.js";
+// readAsRecipient is no longer exported from the public surface;
+// use `Tn.read({asRecipient})` for foreign-publisher reads.
 export {
   iterLogFiles,
   scanAttestedEvents,

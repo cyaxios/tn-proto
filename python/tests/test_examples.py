@@ -44,9 +44,9 @@ _EXPECTATIONS: list[tuple[str, list[str]]] = [
         [
             "envelope shape",
             "event_type=page.view",
-            "sig=ok",
-            "chain=ok",
-            "row_hash_recomputes=ok",
+            # 0.4.0a1: per-row sig/chain/row_hash flags are gone; ex02
+            # uses tn.read(verify=True) for an integrity sweep instead.
+            "all 7 rows pass: signature, row_hash, chain",
             "verify   = True",
         ],
     ),

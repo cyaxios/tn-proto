@@ -10,6 +10,7 @@ import { test } from "node:test";
 import { loadConfig } from "../src/index.js";
 import type { CeremonyConfig } from "../src/runtime/config.js";
 import { Tn } from "../src/tn.js";
+import { Entry } from "../src/Entry.js";
 import { parsePolicyText } from "../src/agents_policy.js";
 
 async function ephemeralClient(): Promise<{ client: Tn; close: () => Promise<void> }> {
@@ -194,16 +195,18 @@ POST https://merchant.example.com/escalate.
     const tn = await Tn.init(yamlPath);
     try {
       tn.info("payment.completed", { amount: 4999, currency: "USD" });
-      const entries = [...tn.read({ raw: true })];
-      const pay = entries.find((e) => e.envelope["event_type"] === "payment.completed");
+      // Entry default mode: tn.agents plaintext merges into fields when
+      // the writer holds the kit (alphabetical group order, last-write-wins).
+      const entries: Entry[] = [];
+      for (const e of tn.read()) {
+        if (e instanceof Entry) entries.push(e);
+      }
+      const pay = entries.find((e) => e.event_type === "payment.completed");
       assert.ok(pay, "must emit payment.completed");
-      const agents = pay!.plaintext["tn.agents"];
-      assert.ok(agents, "tn.agents group plaintext must be present (writer holds the kit)");
-      const a = agents as Record<string, unknown>;
-      assert.match(String(a["instruction"]), /completed payment/);
-      assert.match(String(a["use_for"]), /Aggregate/);
-      assert.match(String(a["do_not_use_for"]), /Credit decisions/);
-      assert.match(String(a["policy"]), /payment\.completed@/);
+      assert.match(String(pay!.fields["instruction"]), /completed payment/);
+      assert.match(String(pay!.fields["use_for"]), /Aggregate/);
+      assert.match(String(pay!.fields["do_not_use_for"]), /Credit decisions/);
+      assert.match(String(pay!.fields["policy"]), /payment\.completed@/);
     } finally {
       await tn.close();
     }
@@ -236,10 +239,13 @@ default
     const tn = await Tn.init(yamlPath);
     try {
       tn.info("evt.x", { instruction: "OVERRIDDEN" });
-      const entries = [...tn.read({ raw: true })];
-      const evt = entries.find((e) => e.envelope["event_type"] === "evt.x");
-      const a = evt!.plaintext["tn.agents"] as Record<string, unknown>;
-      assert.equal(a["instruction"], "OVERRIDDEN", "per-emit override wins");
+      const entries: Entry[] = [];
+      for (const e of tn.read()) {
+        if (e instanceof Entry) entries.push(e);
+      }
+      const evt = entries.find((e) => e.event_type === "evt.x");
+      assert.ok(evt);
+      assert.equal(evt!.fields["instruction"], "OVERRIDDEN", "per-emit override wins");
     } finally {
       await tn.close();
     }

@@ -77,24 +77,24 @@ def test_read_spans_rotation_boundary(tmp_path):
 
     # Read everything — pre- AND post-rotation entries should decrypt.
     tn.init(yaml)
-    entries = list(tn.read())  # tn.rotation.completed is itself in the log
+    entries = list(tn.read(all_runs=True))  # tn.rotation.completed is itself in the log
     # We expect at least 4 order.created entries plus 1 tn.rotation.completed.
-    order_entries = [e for e in entries if e["event_type"] == "order.created"]
+    order_entries = [e for e in entries if e.event_type == "order.created"]
     assert len(order_entries) == 4, (
         f"expected 4 order.created entries, got {len(order_entries)}:\n"
-        + "\n".join(f"  {e['event_type']} seq={e['sequence']} fields={e}" for e in entries)
+        + "\n".join(f"  {e.event_type} seq={e.sequence} fields={e.fields}" for e in entries)
     )
 
     # Sort by sequence; verify we got the stages right.
-    order_entries.sort(key=lambda e: e["sequence"])
-    assert order_entries[0]["order_id"] == "A100"
-    assert order_entries[0]["stage"] == "pre"
-    assert order_entries[1]["order_id"] == "A101"
-    assert order_entries[1]["stage"] == "pre"
-    assert order_entries[2]["order_id"] == "A102"
-    assert order_entries[2]["stage"] == "post"
-    assert order_entries[3]["order_id"] == "A103"
-    assert order_entries[3]["stage"] == "post"
+    order_entries.sort(key=lambda e: e.sequence)
+    assert order_entries[0].fields["order_id"] == "A100"
+    assert order_entries[0].fields["stage"] == "pre"
+    assert order_entries[1].fields["order_id"] == "A101"
+    assert order_entries[1].fields["stage"] == "pre"
+    assert order_entries[2].fields["order_id"] == "A102"
+    assert order_entries[2].fields["stage"] == "post"
+    assert order_entries[3].fields["order_id"] == "A103"
+    assert order_entries[3].fields["stage"] == "post"
 
 
 def test_multiple_rotations_accumulate_preserved_kits(tmp_path):
@@ -124,8 +124,8 @@ def test_multiple_rotations_accumulate_preserved_kits(tmp_path):
 
     # Read everything — all three eras' data entries decrypt.
     tn.init(yaml)
-    entries = list(tn.read())
-    eras_seen = {e["event_type"] for e in entries if e["event_type"].startswith("era.")}
+    entries = list(tn.read(all_runs=True))
+    eras_seen = {e.event_type for e in entries if e.event_type.startswith("era.")}
     assert eras_seen == {"era.one", "era.two", "era.three"}, (
         f"expected all three eras readable, saw {eras_seen}"
     )

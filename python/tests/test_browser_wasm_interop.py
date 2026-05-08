@@ -28,7 +28,32 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-WASM_TEST_PATH = REPO_ROOT / "tnproto-org" / "static" / "dashboard" / "test" / "wasm_e2e.test.mjs"
+
+
+def _resolve_sibling_repo_root() -> Path | None:
+    """Find the sibling tnproto-org checkout regardless of local clone name.
+
+    The repo is published as ``cyaxios/tn-proto-org`` on GitHub but is
+    cloned under various names in the wild — ``tnproto-org`` (no internal
+    hyphen), ``tn-proto-org`` (canonical), and ``tn_proto_web`` (the
+    underscore-with-_web naming that was in use during the alpha sprint).
+    Return whichever directory exists alongside ``tn_proto`` and
+    contains the wasm e2e test, or None if no candidate is found.
+    """
+    candidates = ("tnproto-org", "tn-proto-org", "tn_proto_web")
+    for name in candidates:
+        candidate = REPO_ROOT / name / "static" / "dashboard" / "test" / "wasm_e2e.test.mjs"
+        if candidate.exists():
+            return candidate.parents[3]
+    return None
+
+
+_SIBLING_ROOT = _resolve_sibling_repo_root()
+WASM_TEST_PATH = (
+    _SIBLING_ROOT / "static" / "dashboard" / "test" / "wasm_e2e.test.mjs"
+    if _SIBLING_ROOT is not None
+    else REPO_ROOT / "tnproto-org" / "static" / "dashboard" / "test" / "wasm_e2e.test.mjs"
+)
 INTEROP_DIR = Path(tempfile.gettempdir()) / "wasm-interop"
 
 
@@ -214,9 +239,9 @@ def test_browser_extracts_package_key_from_python_built_full_keystore_body(tmp_p
     (work / "expected_did.txt").write_text(expected_did, encoding="utf-8")
     (work / "msg.bin").write_bytes(msg)
 
+    sibling_root = _SIBLING_ROOT or (REPO_ROOT / "tnproto-org")
     runner_path = (
-        REPO_ROOT
-        / "tnproto-org"
+        sibling_root
         / "static"
         / "dashboard"
         / "test"
@@ -314,9 +339,9 @@ def test_python_encrypted_body_zip_round_trips_through_browser_parser(tmp_path):
     (work / "blob.bin").write_bytes(blob)
     (work / "key.bin").write_bytes(key)
 
+    sibling_root = _SIBLING_ROOT or (REPO_ROOT / "tnproto-org")
     runner_path = (
-        REPO_ROOT
-        / "tnproto-org"
+        sibling_root
         / "static"
         / "dashboard"
         / "test"

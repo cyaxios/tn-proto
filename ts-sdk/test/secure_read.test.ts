@@ -1,13 +1,16 @@
-// Tests for `client.secureRead()` — fail-closed verification, three modes,
-// instructions block, tampered-row events.
+// Tests for `Tn.read({verify})` — fail-closed verification, three modes.
+//
+// Migrated from the legacy `Tn.secureRead()` suite as part of the
+// 0.4.0a1 read-side refactor. The forensic-mode test is dropped (no
+// equivalent in the new surface — verify maps to false / true / "skip"
+// only). The instructions-block test is dropped (instructions surfacing
+// belongs to a separate concern that no longer ships through read).
 
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { VerificationError } from "../src/index.js";
+import { VerifyError } from "../src/Entry.js";
 import { Tn } from "../src/tn.js";
 
 async function ephemeralClient(): Promise<{ client: Tn; close: () => Promise<void> }> {
@@ -15,65 +18,33 @@ async function ephemeralClient(): Promise<{ client: Tn; close: () => Promise<voi
   return { client, close: () => client.close() };
 }
 
-/** Fresh ceremony in a tempdir we own — for tests that close+reinit. */
-async function makeOwnedCeremony(): Promise<{ yamlPath: string; cleanup: () => void }> {
-  const td = mkdtempSync(join(tmpdir(), "tn-sec-"));
-  const yamlPath = join(td, "tn.yaml");
-  const c = await Tn.init(yamlPath);
-  await c.close();
-  return {
-    yamlPath,
-    cleanup: () => {
-      try {
-        rmSync(td, { recursive: true, force: true });
-      } catch {
-        /* ignore */
-      }
-    },
-  };
-}
-
-test("secureRead: all-valid entries are surfaced as flat dicts", async () => {
-  const { client, close } = await ephemeralClient();
-  try {
-    client.info("order.created", { amount: 99 });
-    const out = [...client.secureRead()];
-    const evt = out.find((e) => e["event_type"] === "order.created");
-    assert.ok(evt, "verified entry must be yielded");
-    assert.equal(evt!["amount"], 99);
-  } finally {
-    await close();
-  }
-});
-
-test("secureRead default skips tampered rows + emits tn.read.tampered_row_skipped", async () => {
+test("read({verify: 'skip'}) skips tampered rows + emits tn.read.tampered_row_skipped", async () => {
   const { client, close } = await ephemeralClient();
   try {
     client.info("evt.good", { x: 1 });
-    // Append a malformed envelope to corrupt the chain. Easiest: break the
-    // signature on a fresh emit by hand-rewriting the file.
     const path = client.logPath;
     const text = readFileSync(path, "utf8");
     const lines = text.trim().split("\n");
-    // Tamper the last line: flip a bit in the ciphertext (so row_hash
-    // recomputation fails).
+    // Tamper the last line by replacing row_hash with a clearly-wrong value.
     const last = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>;
-    // Replace row_hash with a clearly-wrong sha256 so recomputation fails.
-    // secureRead's fail-closed semantics require ALL three checks pass.
     last["row_hash"] = "sha256:" + "0".repeat(64);
     lines[lines.length - 1] = JSON.stringify(last);
     writeFileSync(path, lines.join("\n") + "\n", "utf8");
 
-    const out = [...client.secureRead()];
+    const out = [...client.read({ verify: "skip", allRuns: true })];
     // The tampered row is dropped.
-    const tampered = out.find((e) => e["event_type"] === "evt.good");
+    const tampered = out.find((e) => {
+      if ("event_type" in e) return e.event_type === "evt.good";
+      const r = e as Record<string, unknown>;
+      return r["event_type"] === "evt.good";
+    });
     assert.equal(tampered, undefined, "tampered row must be skipped");
   } finally {
     await close();
   }
 });
 
-test("secureRead({onInvalid: 'raise'}) throws VerificationError", async () => {
+test("read({verify: 'raise'}) throws VerifyError on tampered ciphertext", async () => {
   const { client, close } = await ephemeralClient();
   try {
     client.info("evt.good", { x: 1 });
@@ -86,15 +57,15 @@ test("secureRead({onInvalid: 'raise'}) throws VerificationError", async () => {
     writeFileSync(path, lines.join("\n") + "\n", "utf8");
 
     assert.throws(
-      () => [...client.secureRead({ onInvalid: "raise" })],
-      (e: unknown) => e instanceof VerificationError,
+      () => [...client.read({ verify: "raise", allRuns: true })],
+      (e: unknown) => e instanceof VerifyError,
     );
   } finally {
     await close();
   }
 });
 
-test("secureRead({onInvalid: 'forensic'}) yields entries with _valid + _invalid_reasons", async () => {
+test("read({verify: true}) is equivalent to verify: 'raise'", async () => {
   const { client, close } = await ephemeralClient();
   try {
     client.info("evt.good", { x: 1 });
@@ -106,72 +77,35 @@ test("secureRead({onInvalid: 'forensic'}) yields entries with _valid + _invalid_
     lines[lines.length - 1] = JSON.stringify(last);
     writeFileSync(path, lines.join("\n") + "\n", "utf8");
 
-    const out = [...client.secureRead({ onInvalid: "forensic" })];
-    const bad = out.find((e) => e["event_type"] === "evt.good");
-    assert.ok(bad, "forensic mode must surface tampered entries");
-    assert.ok(bad!["_invalid_reasons"], "_invalid_reasons must be set");
-    const reasons = bad!["_invalid_reasons"] as string[];
-    assert.ok(
-      reasons.includes("signature") ||
-        reasons.includes("row_hash") ||
-        reasons.includes("chain"),
-      `expected at least one verification failure, got ${JSON.stringify(reasons)}`,
+    assert.throws(
+      () => [...client.read({ verify: true, allRuns: true })],
+      (e: unknown) => e instanceof VerifyError,
     );
   } finally {
     await close();
   }
 });
 
-test("secureRead surfaces `instructions` block when caller holds tn.agents kit", async () => {
-  const { yamlPath, cleanup } = await makeOwnedCeremony();
-  try {
-    const yamlDir = dirname(yamlPath);
-    mkdirSync(`${yamlDir}/.tn/config`, { recursive: true });
-    writeFileSync(
-      `${yamlDir}/.tn/config/agents.md`,
-      `## evt.policied
-### instruction
-This row is policied.
-### use_for
-Read only.
-### do_not_use_for
-Anything else.
-### consequences
-None.
-### on_violation_or_error
-N/A
-`,
-      "utf8",
-    );
-    const tn = await Tn.init(yamlPath);
-    try {
-      tn.info("evt.policied", { x: 1 });
-      const out = [...tn.secureRead()];
-      const evt = out.find((e) => e["event_type"] === "evt.policied");
-      assert.ok(evt);
-      const ins = evt!["instructions"];
-      assert.ok(ins, "instructions must surface when caller holds the kit");
-      const i = ins as Record<string, unknown>;
-      assert.match(String(i["instruction"]), /policied/);
-      // The six tn.agents fields should NOT appear at top level.
-      assert.equal(evt!["instruction"], undefined);
-      assert.equal(evt!["use_for"], undefined);
-    } finally {
-      await tn.close();
-    }
-  } finally {
-    cleanup();
-  }
-});
-
-test("secureRead omits instructions when entry has no tn.agents body", async () => {
+test("read with no verify option does not check integrity (default false)", async () => {
   const { client, close } = await ephemeralClient();
   try {
-    client.info("evt.no_policy", { x: 1 });
-    const out = [...client.secureRead()];
-    const evt = out.find((e) => e["event_type"] === "evt.no_policy");
-    assert.ok(evt);
-    assert.equal(evt!["instructions"], undefined);
+    client.info("evt.good", { x: 1 });
+    const path = client.logPath;
+    const text = readFileSync(path, "utf8");
+    const lines = text.trim().split("\n");
+    const last = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>;
+    last["row_hash"] = "sha256:" + "0".repeat(64);
+    lines[lines.length - 1] = JSON.stringify(last);
+    writeFileSync(path, lines.join("\n") + "\n", "utf8");
+
+    // No throw, no skip. The entry comes through.
+    const out = [...client.read({ allRuns: true })];
+    const evt = out.find((e) => {
+      if ("event_type" in e) return e.event_type === "evt.good";
+      const r = e as Record<string, unknown>;
+      return r["event_type"] === "evt.good";
+    });
+    assert.ok(evt, "verify=false (default) must not drop tampered rows");
   } finally {
     await close();
   }

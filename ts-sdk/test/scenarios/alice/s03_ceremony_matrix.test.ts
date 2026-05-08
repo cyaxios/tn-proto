@@ -15,6 +15,7 @@
 
 import { test } from "node:test";
 import { Tn } from "../../../src/tn.js";
+import { Entry } from "../../../src/Entry.js";
 import { ScenarioContext } from "../_harness.js";
 
 // (groups, recipients_per_group, context_keys, field_count)
@@ -80,20 +81,27 @@ test("alice/s03_ceremony_matrix — 15-cell matrix, each cell passes chain+sig+d
       }
 
       // Read back and assert per-cell invariants.
-      const entries = [...tn.readRaw()].filter(
-        (e) => (e.envelope["event_type"] as string) === "matrix.row",
-      );
+      const entries: Entry[] = [];
+      for (const e of tn.read({ allRuns: true })) {
+        if (e instanceof Entry && e.event_type === "matrix.row") entries.push(e);
+      }
 
+      // Verify chain + signature collectively via verify: true.
       let chainOk = true;
       let sigOk = true;
+      try {
+        for (const _ of tn.read({ verify: true, allRuns: true })) {
+          void _;
+        }
+      } catch {
+        chainOk = false;
+        sigOk = false;
+      }
       let decryptionOk = true;
       let decryptedCount = 0;
 
       for (const e of entries) {
-        chainOk = chainOk && Boolean(e.valid.chain);
-        sigOk = sigOk && Boolean(e.valid.signature);
-        const pt = (e.plaintext["default"] ?? {}) as Record<string, unknown>;
-        if (Object.entries(evt).every(([k, v]) => pt[k] === v)) {
+        if (Object.entries(evt).every(([k, v]) => e.fields[k] === v)) {
           decryptedCount++;
         } else {
           decryptionOk = false;

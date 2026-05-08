@@ -1,12 +1,12 @@
-// Scenario ex02 — audit-grade tn.readRaw() shape, signature verification,
+// Scenario ex02 — audit-grade Tn.read({raw}) shape, signature verification,
 // chain integrity.
 //
 // Python original: tn_proto/python/examples/ex02_reading.py
 //
 // What this tests:
 //   1. Envelope shape: every reserved key is present on a raw entry.
-//   2. All entries verify: valid.signature === true, valid.chain === true,
-//      valid.rowHash === true for every user event.
+//   2. All entries verify: tn.read({verify: true}) doesn't throw on a clean
+//      log (covers signature + chain + row_hash collectively).
 //   3. Per-event_type chain coherence: page.view sequences are [1,2,3] in
 //      order; auth.login sequence is [1].
 //   4. Independent verification using ONLY public material (did + row_hash +
@@ -43,31 +43,34 @@ test("ex02/envelope-shape — every reserved envelope key is present on first us
     tn.info("auth.login", { user: "alice" });
     tn.info("page.view", { path: "/checkout", user: "alice" });
 
-    // First user entry (skip tn.* bootstrap events).
-    const firstUser = [...tn.readRaw()].find(
-      (e) => !String(e.envelope["event_type"] ?? "").startsWith("tn."),
-    );
-
+    // First user entry (skip tn.* bootstrap events) — raw envelope dict.
+    let firstUser: Record<string, unknown> | undefined;
+    for (const env of tn.read({ raw: true, allRuns: true })) {
+      const e = env as Record<string, unknown>;
+      if (!String(e["event_type"] ?? "").startsWith("tn.")) {
+        firstUser = e;
+        break;
+      }
+    }
     assert.ok(firstUser !== undefined, "expected at least one user entry");
 
-    const env = firstUser.envelope;
     for (const key of RESERVED_ENVELOPE_KEYS) {
       assert.ok(
-        key in env,
+        key in firstUser!,
         `reserved envelope key "${key}" missing from envelope`,
       );
     }
 
     // Sanity-check types.
-    assert.strictEqual(typeof env["did"], "string");
-    assert.strictEqual(typeof env["timestamp"], "string");
-    assert.strictEqual(typeof env["event_type"], "string");
-    assert.strictEqual(typeof env["event_id"], "string");
-    assert.strictEqual(typeof env["level"], "string");
-    assert.strictEqual(typeof env["sequence"], "number");
-    assert.strictEqual(typeof env["prev_hash"], "string");
-    assert.strictEqual(typeof env["row_hash"], "string");
-    assert.strictEqual(typeof env["signature"], "string");
+    assert.strictEqual(typeof firstUser!["did"], "string");
+    assert.strictEqual(typeof firstUser!["timestamp"], "string");
+    assert.strictEqual(typeof firstUser!["event_type"], "string");
+    assert.strictEqual(typeof firstUser!["event_id"], "string");
+    assert.strictEqual(typeof firstUser!["level"], "string");
+    assert.strictEqual(typeof firstUser!["sequence"], "number");
+    assert.strictEqual(typeof firstUser!["prev_hash"], "string");
+    assert.strictEqual(typeof firstUser!["row_hash"], "string");
+    assert.strictEqual(typeof firstUser!["signature"], "string");
   } finally {
     await tn.close();
   }
@@ -81,18 +84,13 @@ test("ex02/all-entries-verify — signature, chain, rowHash all pass for every u
     tn.info("auth.login", { user: "alice" });
     tn.info("page.view", { path: "/checkout", user: "alice" });
 
-    const userEntries = [...tn.readRaw()].filter(
-      (e) => !String(e.envelope["event_type"] ?? "").startsWith("tn."),
-    );
-
-    assert.ok(userEntries.length === 4, `expected 4 user entries, got ${userEntries.length}`);
-
-    for (const e of userEntries) {
-      const et = String(e.envelope["event_type"] ?? "");
-      assert.strictEqual(e.valid.signature, true, `signature failed for ${et} seq=${e.envelope["sequence"]}`);
-      assert.strictEqual(e.valid.chain, true, `chain broken for ${et} seq=${e.envelope["sequence"]}`);
-      assert.strictEqual(e.valid.rowHash, true, `row_hash mismatch for ${et} seq=${e.envelope["sequence"]}`);
+    // verify: true raises VerifyError on failure. A clean log must not throw.
+    let userCount = 0;
+    for (const env of tn.read({ verify: true, raw: true, allRuns: true })) {
+      const e = env as Record<string, unknown>;
+      if (!String(e["event_type"] ?? "").startsWith("tn.")) userCount += 1;
     }
+    assert.equal(userCount, 4, `expected 4 user entries, got ${userCount}`);
   } finally {
     await tn.close();
   }
@@ -106,12 +104,12 @@ test("ex02/chain-coherence — page.view sequences [1,2,3] and auth.login sequen
     tn.info("auth.login", { user: "alice" });
     tn.info("page.view", { path: "/checkout", user: "alice" });
 
-    // Build per-event_type sequence lists (mirrors Python chains dict).
     const chains = new Map<string, number[]>();
-    for (const e of tn.readRaw()) {
-      const et = String(e.envelope["event_type"] ?? "");
-      if (et.startsWith("tn.")) continue; // skip bootstrap events
-      const seq = e.envelope["sequence"] as number;
+    for (const env of tn.read({ raw: true, allRuns: true })) {
+      const e = env as Record<string, unknown>;
+      const et = String(e["event_type"] ?? "");
+      if (et.startsWith("tn.")) continue;
+      const seq = e["sequence"] as number;
       const list = chains.get(et) ?? [];
       list.push(seq);
       chains.set(et, list);
@@ -132,22 +130,21 @@ test("ex02/independent-verify — verify signature with public material only (di
   try {
     tn.info("page.view", { path: "/", user: "alice" });
 
-    // Grab the first user entry.
-    const entry = [...tn.readRaw()].find(
-      (e) => !String(e.envelope["event_type"] ?? "").startsWith("tn."),
-    );
-    assert.ok(entry !== undefined, "expected a user entry");
+    let firstUser: Record<string, unknown> | undefined;
+    for (const env of tn.read({ raw: true, allRuns: true })) {
+      const e = env as Record<string, unknown>;
+      if (!String(e["event_type"] ?? "").startsWith("tn.")) {
+        firstUser = e;
+        break;
+      }
+    }
+    assert.ok(firstUser !== undefined, "expected a user entry");
 
-    const env = entry.envelope;
-    const did = asDid(String(env["did"]));
-    const rowHashStr = asRowHash(String(env["row_hash"]));
-    const sigStr = String(env["signature"]);
+    const did = asDid(String(firstUser!["did"]));
+    const rowHashStr = asRowHash(String(firstUser!["row_hash"]));
+    const sigStr = String(firstUser!["signature"]);
 
-    // Decode the base64url signature bytes.
     const sigBytes = signatureFromB64(sigStr);
-
-    // Verify using ONLY the DID + row_hash (public material). No Tn instance,
-    // no keystore, no network. Mirrors Python: DeviceKey.verify(did, row_hash, sig).
     const ok = verify(did, new Uint8Array(Buffer.from(rowHashStr, "utf8")), sigBytes);
 
     assert.strictEqual(ok, true, "independent public-key verification failed");

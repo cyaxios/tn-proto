@@ -18,6 +18,7 @@ import hashlib
 import shutil
 
 import tn
+from tn._read_impl import _read_raw_inner
 from scenarios._harness import Scenario, ScenarioContext
 from tn import wallet as _wallet
 from tn.identity import Identity
@@ -74,7 +75,7 @@ class GraceRotateAndSync(Scenario):
 
         # --- Rotate -------------------------------------------------
         with ctx.timer("rotate_ms"):
-            tn.rotate("default")
+            tn.admin.rotate("default")
 
         # sender file should have changed on disk
         post_sender_hash = hashlib.sha256(
@@ -140,7 +141,7 @@ class GraceRotateAndSync(Scenario):
         # --- On B: read + decrypt ----------------------------------
         tn.init(laptop_b / "tn.yaml", log_path=b_log, cipher="jwe", identity=ident_b)
         cfg_b = tn.current_config()
-        entries = list(tn.read(b_log, cfg_b, raw=True))
+        entries = list(_read_raw_inner(b_log, cfg_b))
         pre = [e for e in entries if e["envelope"]["event_type"] == "pre.rotate"]
         post = [e for e in entries if e["envelope"]["event_type"] == "post.rotate"]
         ctx.record("total_entries_read", len(entries))

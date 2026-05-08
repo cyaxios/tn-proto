@@ -110,14 +110,15 @@ def test_stage6_cross_publisher_btn(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     tn.flush_and_close()
 
     # ---------------- Decrypt the publisher's log ----------------
-    # Use read_as_recipient with the professor's keystore. After the FINDINGS
-    # #7 fix this dispatches on the kit type (.btn.mykit → BtnGroupCipher).
+    # Use the new tn.read with as_recipient= (replaces the deleted
+    # tn.read_as_recipient verb in 0.4.0a1). It dispatches on the kit
+    # type the same way; rows the professor can't decrypt show up in
+    # entry.hidden_groups instead of as a $no_read_key sentinel in
+    # plaintext.
     decrypted = []
-    for entry in tn.read_as_recipient(student_log_path, prof_keystore, group="default"):
-        env = entry["envelope"]
-        plaintext = entry["plaintext"]
-        if "default" in plaintext and not plaintext["default"].get("$no_read_key"):
-            decrypted.append((env["event_type"], plaintext["default"]))
+    for entry in tn.read(log=student_log_path, as_recipient=prof_keystore, group="default"):
+        if "default" not in entry.hidden_groups:
+            decrypted.append((entry.event_type, dict(entry.fields)))
 
     # We logged 3 events; the prof should be able to decrypt all 3.
     event_types = [t for t, _ in decrypted]

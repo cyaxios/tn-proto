@@ -910,21 +910,16 @@ def cmd_read(args: argparse.Namespace) -> int:
     tn_init(yaml_path)
     try:
         log_path = Path(args.log).resolve() if args.log else None
-        kwargs: dict[str, Any] = {"all_runs": args.all_runs}
-        for entry in tn_read(log_path, **kwargs):
-            ts = entry.get("timestamp", "?")
-            level = entry.get("level", "")
-            et = entry.get("event_type", "?")
-            # Inline a few important non-envelope fields so the operator can
-            # eyeball the log without piping to jq for every command.
-            extras = {
-                k: v
-                for k, v in entry.items()
-                if k not in {"timestamp", "level", "event_type", "did", "sequence",
-                              "event_id", "row_hash", "prev_hash", "signature",
-                              "_hidden_groups", "_decrypt_errors", "run_id"}
-            }
-            extra_str = " ".join(f"{k}={v!r}" for k, v in extras.items())
+        for entry in tn_read(log=log_path, all_runs=args.all_runs):
+            ts = entry.timestamp.isoformat() if entry.timestamp else "?"
+            level = entry.level or ""
+            et = entry.event_type or "?"
+            # Inline user-emitted kwargs so the operator can eyeball the
+            # log without piping to jq for every command. Envelope /
+            # chain plumbing (did, sequence, hashes, signature, run_id,
+            # hidden_groups) lives on typed attributes and is omitted
+            # from the one-line view by design.
+            extra_str = " ".join(f"{k}={v!r}" for k, v in entry.fields.items())
             print(f"{ts}  {level:<7} {et}  {extra_str}".rstrip())
     finally:
         flush_and_close()

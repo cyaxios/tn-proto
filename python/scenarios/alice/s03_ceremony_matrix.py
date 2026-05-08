@@ -22,6 +22,7 @@ import shutil
 import statistics
 
 import tn
+from tn._read_impl import _read_raw_inner
 from scenarios._harness import Scenario, ScenarioContext
 
 # (groups, recipients_per_group, context_keys, field_count)
@@ -101,7 +102,7 @@ class AliceCeremonyMatrix(Scenario):
                 tn.init(cell_yaml, log_path=cell_log, cipher="jwe")
                 cfg = tn.current_config()
                 envelope_bytes = []
-                entries = list(tn.read(cell_log, cfg, raw=True))
+                entries = list(_read_raw_inner(cell_log, cfg))
 
                 # Per-cell round-trip: every decrypted field must equal
                 # what we wrote in `evt`. All unrouted fields land in

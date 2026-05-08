@@ -25,6 +25,15 @@ export {
   unwrapKeystoreSecret,
 } from "./vendor/sdk-core/emk.js";
 
+// Entry + VerifyError surface here so popup.js / content.js can render a
+// pasted-or-decrypted TN envelope as a one-line `entry.toString()` view
+// instead of the raw JSON blob. Vendored from ts-sdk/dist/Entry.js by
+// tools/build-extension.sh — browser-safe (no node:* imports).
+export {
+  Entry,
+  VerifyError,
+} from "./vendor/sdk-core/Entry.js";
+
 // probePrfSupport stays inline — pure feature-detect, no crypto.
 export async function probePrfSupport() {
   if (typeof PublicKeyCredential === "undefined") {

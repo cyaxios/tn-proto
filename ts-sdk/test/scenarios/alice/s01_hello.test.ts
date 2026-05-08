@@ -1,17 +1,18 @@
 // Alice s01 — emit 200 events, read back, verify chain + signature + decrypt + no-plaintext-leak.
 //
 // Python original: python/scenarios/alice/s01_hello.py
-// LOG_COUNT reduced from 1000 → 200 to keep the test fast; assertion shape
-// is identical and all behavioral guarantees are exercised at any count >= 1.
+// LOG_COUNT reduced from 1000 → 200 to keep the test fast.
 //
-// TS lifecycle note: Python does tn.flush_and_close() then tn.init(same yaml)
-// for the read pass.  With Tn.ephemeral the tempdir is cleaned on close(), so
-// we cannot reopen.  Instead we read within the same instance's lifetime
-// using readRaw() which bypasses run_id filtering and sees every persisted
-// entry, mirroring Python's post-close re-init read exactly.
+// 0.4.0a1 read refactor: `tn.readRaw()` was removed. We use
+// `tn.read({allRuns: true})` to bypass run_id filtering and get Entry
+// instances; signature/chain integrity is verified collectively via
+// `tn.read({verify: true, allRuns: true})` (raises VerifyError on
+// failure). For the no-leak check we re-read with `raw: true` to get
+// the on-disk envelope dict and assert plaintext samples are absent.
 
 import { test } from "node:test";
 import { ScenarioContext } from "../_harness.js";
+import { Entry, VerifyError } from "../../../src/Entry.js";
 
 const LOG_COUNT = 200;
 
@@ -20,7 +21,6 @@ test("alice/s01_hello — emit 200 events, read back, verify chain+sig+decrypt+n
   const tn = await ScenarioContext.newTn();
 
   try {
-    // Emit LOG_COUNT order.created events.
     const inputs: Array<{ order_id: string; amount: number; email: string }> = [];
     for (let i = 0; i < LOG_COUNT; i++) {
       const event = {
@@ -33,11 +33,12 @@ test("alice/s01_hello — emit 200 events, read back, verify chain+sig+decrypt+n
     }
     ctx.record("log_count", LOG_COUNT);
 
-    // Read back via readRaw() — yields {envelope, plaintext, valid} per entry.
-    // Filter to only "order.created" events (ignore bootstrap tn.* events).
-    const entries = [...tn.readRaw()].filter(
-      (e) => (e.envelope["event_type"] as string) === "order.created",
-    );
+    // Read back as Entry instances. allRuns=true to see every persisted
+    // entry across runs, mirroring Python's post-close re-init read.
+    const entries: Entry[] = [];
+    for (const e of tn.read({ allRuns: true })) {
+      if (e instanceof Entry && e.event_type === "order.created") entries.push(e);
+    }
 
     ctx.assertInvariant(
       "entry_count",
@@ -45,43 +46,35 @@ test("alice/s01_hello — emit 200 events, read back, verify chain+sig+decrypt+n
       `expected ${LOG_COUNT} order.created entries, got ${entries.length}`,
     );
 
-    let allValidSig = true;
-    let allValidChain = true;
-    let noPlaintextLeak = true;
+    // Sig + chain verification: a clean log under verify: true must not throw.
+    let chainAndSigOk = true;
+    try {
+      let n = 0;
+      for (const _ of tn.read({ verify: true, allRuns: true })) {
+        n += 1;
+        void _;
+      }
+      ctx.record("verified_count", n);
+    } catch (e) {
+      if (e instanceof VerifyError) chainAndSigOk = false;
+      else throw e;
+    }
+    ctx.assertInvariant("chain_verified", chainAndSigOk);
+    ctx.assertInvariant("signature_verified", chainAndSigOk);
+
+    // Decrypt round-trip: sequence maps to inputs[seq-1].
     let decryptionVerified = true;
     let decryptedCount = 0;
-
-    // Strings that must NOT appear in the raw envelope JSON (plaintext-leak check).
-    const leakSamples = [
-      "u0@ex.com",
-      "u100@ex.com",
-      "O000000",
-      "O000100",
-    ];
-
     for (const e of entries) {
-      allValidSig = allValidSig && Boolean(e.valid.signature);
-      allValidChain = allValidChain && Boolean(e.valid.chain);
-
-      const rawEnv = JSON.stringify(e.envelope);
-      for (const leak of leakSamples) {
-        if (rawEnv.includes(leak)) {
-          noPlaintextLeak = false;
-          break;
-        }
-      }
-
-      // Decrypt round-trip: sequence maps to inputs[seq-1].
-      const seq = e.envelope["sequence"] as number | undefined;
-      const ptDefault = (e.plaintext["default"] ?? {}) as Record<string, unknown>;
-      if (seq !== undefined && seq >= 1 && seq <= inputs.length) {
+      const seq = e.sequence;
+      if (seq >= 1 && seq <= inputs.length) {
         const expected = inputs[seq - 1]!;
         if (
-          ptDefault["order_id"] === expected.order_id &&
-          ptDefault["amount"] === expected.amount &&
-          ptDefault["email"] === expected.email
+          e.fields["order_id"] === expected.order_id &&
+          e.fields["amount"] === expected.amount &&
+          e.fields["email"] === expected.email
         ) {
-          decryptedCount++;
+          decryptedCount += 1;
         } else {
           decryptionVerified = false;
         }
@@ -89,15 +82,28 @@ test("alice/s01_hello — emit 200 events, read back, verify chain+sig+decrypt+n
         decryptionVerified = false;
       }
     }
-
-    ctx.assertInvariant("chain_verified", allValidChain);
-    ctx.assertInvariant("signature_verified", allValidSig);
-    ctx.assertInvariant("no_plaintext_in_envelope", noPlaintextLeak);
     ctx.assertInvariant(
       "decryption_verified",
       decryptionVerified && decryptedCount === LOG_COUNT,
       `decrypted ${decryptedCount}/${LOG_COUNT} entries correctly`,
     );
+
+    // No-plaintext-leak check via raw envelope.
+    const leakSamples = ["u0@ex.com", "u100@ex.com", "O000000", "O000100"];
+    let noPlaintextLeak = true;
+    for (const env of tn.read({ raw: true, allRuns: true })) {
+      const e = env as Record<string, unknown>;
+      if (e["event_type"] !== "order.created") continue;
+      const rawEnv = JSON.stringify(env);
+      for (const leak of leakSamples) {
+        if (rawEnv.includes(leak)) {
+          noPlaintextLeak = false;
+          break;
+        }
+      }
+      if (!noPlaintextLeak) break;
+    }
+    ctx.assertInvariant("no_plaintext_in_envelope", noPlaintextLeak);
 
     ctx.record("decrypted_count", decryptedCount);
     ctx.record("entry_count_read", entries.length);
