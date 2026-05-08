@@ -1,21 +1,27 @@
 // @tnproto/sdk — main Layer 2 class, the 0.3.0 replacement for TNClient.
 //
+// Lifecycle (the four-line dirt-easy summary):
+//
+//   1. const tn = await Tn.absorb('Agentic20.project.tnpkg');
+//   2. tn.info("hello.world", { who: "alice" });
+//   3. for (const e of tn.read()) console.log(`${e}`);
+//   4. await tn.close();
+//
+// Step 1 is optional once a ceremony is on disk; ``Tn.init()`` will
+// discover ``./tn.yaml`` (legacy) or ``./.tn/default/tn.yaml`` (multi-
+// ceremony) on first call. Step 4 is best-practice in long-running
+// processes; ephemeral ceremonies need it to clean their tempdir.
+//
 // Splits into namespaced sub-objects (tn.admin, tn.pkg, tn.vault,
 // tn.agents, tn.handlers). I/O verbs are async; emit/read stay sync.
 // See docs/superpowers/specs/2026-05-01-ts-sdk-refresh-design.md.
-//
-// Method bodies populated in Task 2.4 (statics, log/read/context),
-// Task 2.6–2.10 (namespaces), Phase 3 Task 3.2 (watch).
 
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve, isAbsolute as pathIsAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import {
-  NodeRuntime,
-  setSigning as _runtimeSetSigning,
-} from "./runtime/node_runtime.js";
+import { NodeRuntime, setSigning as _runtimeSetSigning } from "./runtime/node_runtime.js";
 import type { EmitReceipt } from "./core/results.js";
 import { watch as _watchFlat, type WatchOptions as _WatchFlatOptions } from "./watch.js";
 import { asRowHash, type LogLevel } from "./core/types.js";
@@ -83,8 +89,7 @@ function _shouldEnableStdoutFor(
   const list = cfg?.handlers ?? [];
   if (list.length > 0) {
     return list.some(
-      (h) =>
-        h != null && typeof h === "object" && (h as Record<string, unknown>).kind === "stdout",
+      (h) => h != null && typeof h === "object" && (h as Record<string, unknown>).kind === "stdout",
     );
   }
   return true;
@@ -174,9 +179,7 @@ function _emitAutoMintNotice(defaultYaml: string, projectDir: string): void {
 
 function _checkVerifyKwarg(v: unknown): asserts v is VerifyMode {
   if (v === false || v === true || v === "skip" || v === "raise") return;
-  throw new Error(
-    `verify must be false | true | 'skip' | 'raise'; got ${JSON.stringify(v)}`,
-  );
+  throw new Error(`verify must be false | true | 'skip' | 'raise'; got ${JSON.stringify(v)}`);
 }
 
 /** Sentinel receipt returned when a level-filtered emit short-circuits. */
@@ -460,10 +463,9 @@ export class Tn {
     try {
       migrateLegacyLayout(projectDir);
     } catch (e) {
-      throw new Error(
-        `Tn.use: legacy layout migration failed: ${(e as Error).message}`,
-        { cause: e },
-      );
+      throw new Error(`Tn.use: legacy layout migration failed: ${(e as Error).message}`, {
+        cause: e,
+      });
     }
 
     const yamlPath = ceremonyYamlPath(name, projectDir);
@@ -565,24 +567,95 @@ export class Tn {
   }
 
   /**
-   * Static absorb path for self-contained bootstrap bundles
-   * (``identity_seed`` / ``project_seed``).
+   * Static dirt-easy entry point: absorb a self-contained bootstrap
+   * bundle (``identity_seed`` / ``project_seed``) and return a usable
+   * ``Tn`` bound to the freshly-absorbed layout.
    *
-   * In a fresh directory with no prior ``Tn.init()``, call this to
-   * install the bundle's tn.yaml + keystore — the follow-up
-   * ``Tn.init()`` then picks them up. Mirrors Python
-   * ``tn.pkg.absorb(file)``-without-init.
+   *     const tn = await Tn.absorb('Agentic20.project.tnpkg');
+   *     tn.info("hello.world", { who: "alice" });
+   *     for (const e of tn.read()) console.log(`${e}`);
+   *
+   * The returned instance behaves exactly like ``await Tn.init(yamlPath)``
+   * would, where ``yamlPath`` is the just-written ``./tn.yaml``. The
+   * absorb receipt is exposed on the instance as ``tn.lastAbsorbReceipt``
+   * for callers that need to inspect ``acceptedCount`` /
+   * ``rejectedReason`` / etc.
+   *
+   * Bootstrap kinds:
+   *
+   * * ``project_seed`` — the dashboard's "Create Project" bundle. Ships
+   *   a complete ``tn.yaml`` + keystore. Loaded as-is.
+   * * ``identity_seed`` — minimal "I am DID X" bundle. The yaml stub
+   *   isn't a loadable ceremony; this method promotes it to a real
+   *   ceremony bound to the absorbed identity (similar to running
+   *   ``tn init`` against a pre-existing keystore).
    *
    * For non-bootstrap kinds (kit_bundle, admin_log_snapshot, etc.),
-   * use an instance method on ``Tn`` instead.
+   * call ``await Tn.init(yamlPath)`` first then use the instance
+   * method ``tn.pkg.absorb(source)``.
+   *
+   * Throws if the bundle is rejected (signature failure, tamper, kind
+   * not supported standalone). Inspect ``e.message`` for the reason.
    */
   static async absorb(
     source: string | Uint8Array,
-    opts: { cwd?: string } = {},
-  ): Promise<import("./core/results.js").AbsorbReceipt> {
+    opts: { cwd?: string } & TnInitOptions = {},
+  ): Promise<Tn> {
     const { absorbBootstrap } = await import("./runtime/absorb_bootstrap.js");
-    return absorbBootstrap(source, opts);
+    const { createFreshCeremony } = await import("./runtime/node_runtime.js");
+    const cwd = pathResolve(opts.cwd ?? process.cwd());
+    const receipt = absorbBootstrap(source, { cwd });
+    if (receipt.rejectedReason) {
+      throw new Error(`Tn.absorb: bundle rejected: ${receipt.rejectedReason}`);
+    }
+
+    const yamlPath = pathResolve(cwd, "tn.yaml");
+
+    if (receipt.kind === "identity_seed") {
+      // Stub yaml from identity_seed is not a loadable ceremony.
+      // Replace it with a real ceremony bound to the absorbed device
+      // key (mirrors Python ``_bind_after_bootstrap_absorb``).
+      const keysDir = pathResolve(cwd, ".tn", "tn", "keys");
+      const privPath = pathResolve(keysDir, "local.private");
+      if (existsSync(privPath)) {
+        const seed = new Uint8Array(readFileSync(privPath));
+        // createFreshCeremony refuses if local.private already
+        // exists; remove the absorbed keypair, then mint with the
+        // same seed so the ceremony adopts the absorbed identity.
+        try {
+          rmSync(privPath, { force: true });
+        } catch {
+          /* best effort */
+        }
+        const pubPath = pathResolve(keysDir, "local.public");
+        try {
+          rmSync(pubPath, { force: true });
+        } catch {
+          /* best effort */
+        }
+        try {
+          rmSync(yamlPath, { force: true });
+        } catch {
+          /* best effort */
+        }
+        createFreshCeremony(yamlPath, { devicePrivateBytes: seed });
+      }
+    }
+
+    const initOpts: TnInitOptions = {};
+    if (opts.stdout !== undefined) initOpts.stdout = opts.stdout;
+    const tn = await Tn.init(yamlPath, initOpts);
+    tn._lastAbsorbReceipt = receipt;
+    return tn;
   }
+
+  /** Receipt from the most recent ``Tn.absorb`` static-factory call,
+   *  or ``undefined`` for instances minted via ``Tn.init`` /
+   *  ``Tn.use`` / ``Tn.ephemeral``. */
+  get lastAbsorbReceipt(): import("./core/results.js").AbsorbReceipt | undefined {
+    return this._lastAbsorbReceipt;
+  }
+  private _lastAbsorbReceipt: import("./core/results.js").AbsorbReceipt | undefined;
 
   // -------------------------------------------------------------------------
   // Identity / lifecycle
@@ -858,10 +931,7 @@ export class Tn {
     // Choose the source of {envelope, plaintext, valid} triples.
     let triples: Iterable<ReadEntry>;
     let usingRecipient = false;
-    if (
-      asRecipient !== undefined ||
-      (logPath !== undefined && _isForeignLog(logPath, this.did))
-    ) {
+    if (asRecipient !== undefined || (logPath !== undefined && _isForeignLog(logPath, this.did))) {
       const keystorePath = asRecipient ?? this._rt.config.keystorePath;
       const path = logPath ?? this._rt.config.logPath;
       usingRecipient = true;
@@ -903,7 +973,7 @@ export class Tn {
     };
 
     // Iterator wrapper that handles parser-level errors per `verify` policy.
-    const safeIter = (function* (this: Tn): IterableIterator<ReadEntry> {
+    const safeIter = function* (this: Tn): IterableIterator<ReadEntry> {
       const it = (triples as Iterable<ReadEntry>)[Symbol.iterator]();
       while (true) {
         let next: IteratorResult<ReadEntry>;
@@ -912,28 +982,25 @@ export class Tn {
         } catch (exc) {
           if (verify === "skip") {
             try {
-              this._emitTamperedRowSkipped(
-                { event_type: "<parse-error>" },
-                [`parse: ${(exc as Error).name}: ${(exc as Error).message}`],
-              );
+              this._emitTamperedRowSkipped({ event_type: "<parse-error>" }, [
+                `parse: ${(exc as Error).name}: ${(exc as Error).message}`,
+              ]);
             } catch {
               // best-effort
             }
             continue;
           }
           if (verify === true || verify === "raise") {
-            throw new VerifyError(
-              0,
-              "<parse-error>",
-              [`parse: ${(exc as Error).name}: ${(exc as Error).message}`],
-            );
+            throw new VerifyError(0, "<parse-error>", [
+              `parse: ${(exc as Error).name}: ${(exc as Error).message}`,
+            ]);
           }
           throw exc;
         }
         if (next.done) return;
         yield next.value;
       }
-    }).call(this);
+    }.call(this);
 
     for (const r of safeIter) {
       // run_id filter — only on local reads. Recipient-mode reads cross
@@ -1060,10 +1127,7 @@ export class Tn {
   }
 
   /** Append a `tn.read.tampered_row_skipped` admin event — public fields only. */
-  private _emitTamperedRowSkipped(
-    envelope: Record<string, unknown>,
-    reasons: string[],
-  ): void {
+  private _emitTamperedRowSkipped(envelope: Record<string, unknown>, reasons: string[]): void {
     this._rt.emit(
       "warning",
       "tn.read.tampered_row_skipped",

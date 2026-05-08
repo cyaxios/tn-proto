@@ -37,7 +37,12 @@ import {
   type VectorClock,
 } from "../core/tnpkg.js";
 import { readTnpkg, writeTnpkg } from "../tnpkg_io.js";
-import { appendAdminEnvelopes, existingRowHashes, isAdminEventType, resolveAdminLogPath } from "../admin/log.js";
+import {
+  appendAdminEnvelopes,
+  existingRowHashes,
+  isAdminEventType,
+  resolveAdminLogPath,
+} from "../admin/log.js";
 import { BtnPublisher, btnKitLeaf } from "../raw.js";
 import { decryptGroup, type GroupKits } from "../core/decrypt.js";
 import type { TNHandler } from "../handlers/index.js";
@@ -832,9 +837,8 @@ export class NodeRuntime {
     vaultLinks: "vault_links",
   };
 
-  private static readonly _ADMIN_STATE_FIELD_MAP_REVERSE: Record<string, string> = Object.fromEntries(
-    Object.entries(NodeRuntime._ADMIN_STATE_FIELD_MAP).map(([k, v]) => [v, k]),
-  );
+  private static readonly _ADMIN_STATE_FIELD_MAP_REVERSE: Record<string, string> =
+    Object.fromEntries(Object.entries(NodeRuntime._ADMIN_STATE_FIELD_MAP).map(([k, v]) => [v, k]));
 
   private static _convertKeysDeep(value: unknown, map: Record<string, string>): unknown {
     if (Array.isArray(value)) return value.map((v) => NodeRuntime._convertKeysDeep(v, map));
@@ -849,12 +853,18 @@ export class NodeRuntime {
   }
 
   private adminStateToWire(state: AdminState): Record<string, unknown> {
-    return NodeRuntime._convertKeysDeep(state, NodeRuntime._ADMIN_STATE_FIELD_MAP) as Record<string, unknown>;
+    return NodeRuntime._convertKeysDeep(state, NodeRuntime._ADMIN_STATE_FIELD_MAP) as Record<
+      string,
+      unknown
+    >;
   }
 
   private adminStateFromWire(wire: unknown): AdminState | null {
     if (wire === null || typeof wire !== "object") return null;
-    return NodeRuntime._convertKeysDeep(wire, NodeRuntime._ADMIN_STATE_FIELD_MAP_REVERSE) as unknown as AdminState;
+    return NodeRuntime._convertKeysDeep(
+      wire,
+      NodeRuntime._ADMIN_STATE_FIELD_MAP_REVERSE,
+    ) as unknown as AdminState;
   }
 
   // ---------------------------------------------------------------------------
@@ -877,9 +887,7 @@ export class NodeRuntime {
       );
     }
     if (kind === "recipient_invite") {
-      throw new Error(
-        `export(kind=${JSON.stringify(kind)}) is reserved but not implemented yet.`,
-      );
+      throw new Error(`export(kind=${JSON.stringify(kind)}) is reserved but not implemented yet.`);
     }
 
     let body: Record<string, Uint8Array> = {};
@@ -900,9 +908,7 @@ export class NodeRuntime {
       extras.state = this.adminStateToWire(this.adminCache().state());
     } else if (kind === "offer" || kind === "enrolment") {
       if (!opts.packageBody) {
-        throw new Error(
-          `export(kind=${JSON.stringify(kind)}) requires packageBody=<bytes>.`,
-        );
+        throw new Error(`export(kind=${JSON.stringify(kind)}) requires packageBody=<bytes>.`);
       }
       body["body/package.json"] = opts.packageBody;
     } else if (kind === "kit_bundle" || kind === "full_keystore") {
@@ -1032,9 +1038,7 @@ export class NodeRuntime {
       }
     }
     if (requested.length === 0) {
-      throw new Error(
-        "bundleForRecipient: no groups to bundle. Declare a regular group first.",
-      );
+      throw new Error("bundleForRecipient: no groups to bundle. Declare a regular group first.");
     }
     const unknown = requested.filter((g) => !cfg.groups.has(g));
     if (unknown.length > 0) {
@@ -1148,10 +1152,10 @@ export class NodeRuntime {
     return { body, clock, eventCount: lines.length, headRowHash };
   }
 
-  private _buildKitBundleBody(opts: {
-    full: boolean;
-    groups: string[] | undefined;
-  }): { body: Record<string, Uint8Array>; state: Record<string, unknown> } {
+  private _buildKitBundleBody(opts: { full: boolean; groups: string[] | undefined }): {
+    body: Record<string, Uint8Array>;
+    state: Record<string, unknown>;
+  } {
     const keystore = this.config.keystorePath;
     if (!existsSync(keystore) || !statSync(keystore).isDirectory()) {
       throw new Error(`kit_bundle: keystore directory not found: ${keystore}`);
@@ -1174,11 +1178,7 @@ export class NodeRuntime {
           bytes: data.length,
         });
       } else if (opts.full) {
-        if (
-          entry === "local.private" ||
-          entry === "local.public" ||
-          entry === "index_master.key"
-        ) {
+        if (entry === "local.private" || entry === "local.public" || entry === "index_master.key") {
           body[`body/${entry}`] = new Uint8Array(readFileSync(join(keystore, entry)));
         } else if (entry.endsWith(".btn.state")) {
           const group = entry.slice(0, -".btn.state".length);
@@ -1190,9 +1190,7 @@ export class NodeRuntime {
     }
 
     if (kitsMeta.length === 0) {
-      const suffix = groupFilter
-        ? ` matching groups [${[...groupFilter].sort().join(", ")}]`
-        : "";
+      const suffix = groupFilter ? ` matching groups [${[...groupFilter].sort().join(", ")}]` : "";
       throw new Error(`kit_bundle: no *.btn.mykit files in ${keystore}${suffix}`);
     }
 
@@ -1413,10 +1411,7 @@ export class NodeRuntime {
    *    identity unless `_userEventCount() === 0` (the dirt-easy
    *    "I just initialized empty" case — Bug 3).
    */
-  private _absorbIdentitySeed(
-    manifest: Manifest,
-    body: Map<string, Uint8Array>,
-  ): AbsorbReceipt {
+  private _absorbIdentitySeed(manifest: Manifest, body: Map<string, Uint8Array>): AbsorbReceipt {
     const priv = body.get("body/local.private");
     const pub = body.get("body/local.public");
     const yamlBytes = body.get("body/tn.yaml");
@@ -1450,10 +1445,7 @@ export class NodeRuntime {
 
     const derivedKey = DeviceKey.fromSeed(priv);
     const bundleDid = new TextDecoder("utf-8").decode(pub).trim();
-    if (
-      derivedKey.did !== bundleDid ||
-      derivedKey.did !== manifest.fromDid
-    ) {
+    if (derivedKey.did !== bundleDid || derivedKey.did !== manifest.fromDid) {
       return {
         kind: manifest.kind,
         acceptedCount: 0,
@@ -1578,10 +1570,7 @@ export class NodeRuntime {
    * agrees). Flat-only nesting under `body/keys/` — `body/keys/foo/bar`
    * is silently skipped.
    */
-  private _absorbProjectSeed(
-    manifest: Manifest,
-    body: Map<string, Uint8Array>,
-  ): AbsorbReceipt {
+  private _absorbProjectSeed(manifest: Manifest, body: Map<string, Uint8Array>): AbsorbReceipt {
     const yamlBytes = body.get("body/tn.yaml");
     const priv = body.get("body/keys/local.private");
     const pub = body.get("body/keys/local.public");
@@ -1688,10 +1677,7 @@ export class NodeRuntime {
     const existingPriv = pathResolve(keystore, "local.private");
     if (existsSync(existingPriv)) {
       const existingBytes = readFileSync(existingPriv);
-      if (
-        !Buffer.from(existingBytes).equals(Buffer.from(priv)) &&
-        this._userEventCount() > 0
-      ) {
+      if (!Buffer.from(existingBytes).equals(Buffer.from(priv)) && this._userEventCount() > 0) {
         return {
           kind: manifest.kind,
           acceptedCount: 0,
@@ -1740,10 +1726,7 @@ export class NodeRuntime {
     };
   }
 
-  private _absorbKitBundle(
-    manifest: Manifest,
-    body: Map<string, Uint8Array>,
-  ): AbsorbReceipt {
+  private _absorbKitBundle(manifest: Manifest, body: Map<string, Uint8Array>): AbsorbReceipt {
     const keystore = this.config.keystorePath;
     if (!existsSync(keystore)) mkdirSync(keystore, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15) + "Z";
@@ -1953,10 +1936,7 @@ export class NodeRuntime {
    * row_hash checks are applied (the validity flags are always populated;
    * `verify` only controls whether a failed check surfaces a warning).
    */
-  parseEnvelopeLine(
-    line: string,
-    opts: { verify: boolean },
-  ): ReadEntry | null {
+  parseEnvelopeLine(line: string, opts: { verify: boolean }): ReadEntry | null {
     const trimmed = line.trim();
     if (!trimmed) return null;
     let env: Record<string, unknown>;
@@ -2120,10 +2100,7 @@ export function groupForField(_cfg: CeremonyConfig, _fieldName: string): GroupCo
  * `backupCount` (default 5). Best-effort: filesystem errors are
  * swallowed so a rotation hiccup never blocks `init()`.
  */
-function rotateLogOnSessionStart(
-  logPath: string,
-  handlers: Array<Record<string, unknown>>,
-): void {
+function rotateLogOnSessionStart(logPath: string, handlers: Array<Record<string, unknown>>): void {
   // Default: rotate, keep 5 backups. Yaml's first file.rotating entry
   // can override either knob.
   let rotateOnInit = true;
@@ -2189,10 +2166,14 @@ export interface ExportPkgOptions {
 
 function _defaultScope(kind: ManifestKind | string): string {
   switch (kind) {
-    case "admin_log_snapshot": return "admin";
-    case "kit_bundle": return "kit_bundle";
-    case "full_keystore": return "full";
-    default: return "admin";
+    case "admin_log_snapshot":
+      return "admin";
+    case "kit_bundle":
+      return "kit_bundle";
+    case "full_keystore":
+      return "full";
+    default:
+      return "admin";
   }
 }
 
@@ -2234,12 +2215,16 @@ export interface CreateFreshOptions {
   /** Optional ``ceremony.profile`` to stamp into the freshly-written
    *  yaml. Mirrors Python's profile catalog. */
   profile?: string;
+  /** Optional 32-byte Ed25519 seed. If set, the ceremony binds to
+   *  that key (so the DID written into tn.yaml matches a previously
+   *  installed identity). If omitted, a fresh random seed is generated.
+   *  Used by the dirt-easy ``identity_seed`` bootstrap path: the
+   *  caller has the absorbed device key and wants to mint a real
+   *  ceremony around it. */
+  devicePrivateBytes?: Uint8Array;
 }
 
-export function createFreshCeremony(
-  yamlPath: string,
-  opts: CreateFreshOptions = {},
-): void {
+export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions = {}): void {
   const yamlDir = dirname(yamlPath);
   // Namespace .tn/ by yaml stem so two yamls in the same directory don't
   // collide on the same keys/logs/admin paths (FINDINGS #2 — Python parity).
@@ -2261,8 +2246,20 @@ export function createFreshCeremony(
 
   mkdirSync(keysDir, { recursive: true });
 
-  // Fresh Ed25519 device seed.
-  const seed = new Uint8Array(randomBytes(32));
+  // Ed25519 device seed: caller-supplied (identity_seed bootstrap path)
+  // or freshly minted.
+  let seed: Uint8Array;
+  if (opts.devicePrivateBytes !== undefined) {
+    if (opts.devicePrivateBytes.length !== 32) {
+      throw new Error(
+        `createFreshCeremony: devicePrivateBytes must be 32 bytes ` +
+          `(Ed25519 seed); got ${opts.devicePrivateBytes.length}`,
+      );
+    }
+    seed = new Uint8Array(opts.devicePrivateBytes);
+  } else {
+    seed = new Uint8Array(randomBytes(32));
+  }
   const dk = DeviceKey.fromSeed(seed);
 
   // Fresh btn publisher + self-kit (default group).

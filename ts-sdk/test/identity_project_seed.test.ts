@@ -18,24 +18,12 @@
 
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as pathResolve } from "node:path";
 import { test } from "node:test";
 
-import {
-  DeviceKey,
-  newManifest,
-  readTnpkg,
-  signManifest,
-  writeTnpkg,
-} from "../src/index.js";
+import { DeviceKey, newManifest, readTnpkg, signManifest, writeTnpkg } from "../src/index.js";
 import { Tn } from "../src/tn.js";
 import { NodeRuntime } from "../src/runtime/node_runtime.js";
 
@@ -93,8 +81,7 @@ function deviceWithKnownSeed(): { device: DeviceKey; seed: Uint8Array } {
 }
 
 function buildIdentitySeedTnpkg(outPath: string, device: DeviceKey, seed: Uint8Array): string {
-  const yamlText =
-    `# identity_seed stub\nidentity:\n  did: ${device.did}\n`;
+  const yamlText = `# identity_seed stub\nidentity:\n  did: ${device.did}\n`;
   const body: Record<string, Uint8Array> = {
     "body/local.private": new Uint8Array(seed),
     "body/local.public": new TextEncoder().encode(device.did),
@@ -128,7 +115,8 @@ test("project_seed real-fixture round-trip via Tn.absorb in a fresh dir", async 
   }
   const dir = mkTempDir("tn-bootstrap-real-");
   try {
-    const receipt = await Tn.absorb(FIXTURE, { cwd: dir });
+    const tn = await Tn.absorb(FIXTURE, { cwd: dir });
+    const receipt = tn.lastAbsorbReceipt!;
     assert.equal(receipt.kind, "project_seed");
     assert.equal(
       receipt.rejectedReason,
@@ -141,10 +129,7 @@ test("project_seed real-fixture round-trip via Tn.absorb in a fresh dir", async 
     const yamlPath = join(dir, "tn.yaml");
     assert.ok(existsSync(yamlPath));
     const { body } = readTnpkg(FIXTURE);
-    assert.deepEqual(
-      Buffer.from(readFileSync(yamlPath)),
-      Buffer.from(body.get("body/tn.yaml")!),
-    );
+    assert.deepEqual(Buffer.from(readFileSync(yamlPath)), Buffer.from(body.get("body/tn.yaml")!));
 
     // Every body/keys/<rel> entry exists in the synthetic keystore.
     for (const [name, data] of body) {
@@ -154,12 +139,13 @@ test("project_seed real-fixture round-trip via Tn.absorb in a fresh dir", async 
       assert.ok(existsSync(dest), `${dest} should be installed`);
       assert.deepEqual(Buffer.from(readFileSync(dest)), Buffer.from(data));
     }
+    await tn.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("project_seed hand-built bundle round-trips via Tn.absorb", async () => {
+test("project_seed hand-built bundle round-trips via absorbBootstrap", async () => {
   const { device, seed } = deviceWithKnownSeed();
   const dir = mkTempDir("tn-bootstrap-hand-");
   try {
@@ -170,7 +156,12 @@ test("project_seed hand-built bundle round-trips via Tn.absorb", async () => {
 
     const work = join(dir, "fresh");
     mkdirSync(work, { recursive: true });
-    const receipt = await Tn.absorb(pkgPath, { cwd: work });
+    // Hand-built bundles ship synthetic ``FAKE_BTN_STATE_*`` bytes that
+    // don't load as a real btn publisher. Use the ``absorbBootstrap``
+    // file-only path for these — ``Tn.absorb`` runs an implicit init
+    // that requires a loadable keystore.
+    const { absorbBootstrap } = await import("../src/runtime/absorb_bootstrap.js");
+    const receipt = absorbBootstrap(pkgPath, { cwd: work });
     assert.equal(receipt.kind, "project_seed");
     assert.equal(receipt.rejectedReason, undefined);
     assert.ok(receipt.acceptedCount >= 8); // yaml + 7 key files
@@ -196,10 +187,11 @@ test("project_seed hand-built bundle is idempotent on re-absorb", async () => {
 
     const work = join(dir, "fresh");
     mkdirSync(work, { recursive: true });
-    const r1 = await Tn.absorb(pkgPath, { cwd: work });
+    const { absorbBootstrap } = await import("../src/runtime/absorb_bootstrap.js");
+    const r1 = absorbBootstrap(pkgPath, { cwd: work });
     assert.ok(r1.acceptedCount > 0);
 
-    const r2 = await Tn.absorb(pkgPath, { cwd: work });
+    const r2 = absorbBootstrap(pkgPath, { cwd: work });
     assert.equal(r2.acceptedCount, 0);
     assert.equal(r2.dedupedCount, r1.acceptedCount);
   } finally {
@@ -225,9 +217,7 @@ test("project_seed rejects swapped local.private (tamper guard)", async () => {
 
     const work = join(dir, "fresh");
     mkdirSync(work, { recursive: true });
-    const receipt = await Tn.absorb(pkgPath, { cwd: work });
-    assert.ok(receipt.rejectedReason);
-    assert.match(receipt.rejectedReason!.toLowerCase(), /integrity/);
+    await assert.rejects(() => Tn.absorb(pkgPath, { cwd: work }), /integrity/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -246,16 +236,24 @@ test("identity_seed bootstrap absorb in a fresh dir", async () => {
 
     const work = join(dir, "fresh");
     mkdirSync(work, { recursive: true });
-    const receipt = await Tn.absorb(pkgPath, { cwd: work });
+    const tn = await Tn.absorb(pkgPath, { cwd: work });
+    const receipt = tn.lastAbsorbReceipt!;
     assert.equal(receipt.kind, "identity_seed");
     assert.equal(receipt.rejectedReason, undefined);
     assert.equal(receipt.acceptedCount, 1);
     assert.ok(existsSync(join(work, "tn.yaml")));
     assert.ok(existsSync(join(work, ".tn/tn/keys/local.private")));
+    // After implicit-init promotes the stub yaml to a real ceremony,
+    // the keystore's local.private holds the absorbed seed (the
+    // identity is preserved across the stub-to-real transition).
     assert.deepEqual(
       Buffer.from(readFileSync(join(work, ".tn/tn/keys/local.private"))),
       Buffer.from(seed),
     );
+    // The runtime is bound — emit + read should work end-to-end.
+    assert.equal(tn.did, device.did);
+    tn.info("hello.world");
+    await tn.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -331,9 +329,7 @@ test("project_seed signature must verify (manifest tamper rejected)", async () =
 
     const work = join(dir, "fresh");
     mkdirSync(work, { recursive: true });
-    const receipt = await Tn.absorb(pkgPath, { cwd: work });
-    assert.ok(receipt.rejectedReason);
-    assert.match(receipt.rejectedReason!.toLowerCase(), /signature does not verify/);
+    await assert.rejects(() => Tn.absorb(pkgPath, { cwd: work }), /signature does not verify/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
