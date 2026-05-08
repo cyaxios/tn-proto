@@ -55,6 +55,21 @@ for mod in "${SDK_MODULES[@]}"; do
   echo "[ext-build]   vendored $mod ($(wc -c < "$src") bytes)"
 done
 
+# Entry.js lives one level up from core/ (ts-sdk/src/Entry.ts -> dist/Entry.js).
+# Browser-safe by construction (no node:* imports — util.inspect.custom is
+# reached via Symbol.for("nodejs.util.inspect.custom"), which Node still
+# recognises and browsers ignore harmlessly). Vendor it next to encoding.js
+# / emk.js so unlock.js can re-export Entry + VerifyError to popup.js and
+# content.js, powering the Entry-render path when a decrypted plaintext is
+# a full TN envelope.
+ENTRY_SRC="$SDK_DIR/dist/Entry.js"
+if [[ ! -f "$ENTRY_SRC" ]]; then
+  echo "[ext-build] MISSING: $ENTRY_SRC — did the build fail?" >&2
+  exit 1
+fi
+cp "$ENTRY_SRC" "$VENDOR_DIR/Entry.js"
+echo "[ext-build]   vendored Entry.js ($(wc -c < "$ENTRY_SRC") bytes)"
+
 # 3. Sanity-check: no extension file should import from outside the
 #    extension dir. Catches accidental "../" path regressions in
 #    unlock.js or any future helper.
