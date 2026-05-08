@@ -1,13 +1,28 @@
 """tn-protocol: TN protocol Python SDK.
 
+Lifecycle (the four-line dirt-easy summary):
+
+    1. tn.absorb('Agentic20.project.tnpkg')   # install layout from dashboard
+    2. tn.info('hello.world', who='alice')    # emit an attested entry
+    3. for e in tn.read(): print(e)           # iterate + decrypt
+    4. tn.flush_and_close()                   # drain handlers (optional)
+
+Step 1 is optional once a ceremony is on disk; ``tn.info`` will discover
+``./tn.yaml`` (legacy) or ``./.tn/default/tn.yaml`` (multi-ceremony) on
+first use. Step 4 is optional in short scripts but recommended in
+long-running processes.
+
 Public API:
     tn.init(yaml_path)          # load or create ceremony + open log file
+    tn.absorb(source)           # install a .tnpkg (alias for tn.pkg.absorb)
+    tn.export(...)              # produce a .tnpkg (alias for tn.pkg.export)
     tn.debug/info/warning/error # emit attested log entries
     tn.set_context(**kwargs)    # per-request context (PRD §13)
     tn.update_context / clear_context / get_context
     tn.read(log_path, cfg)      # iterate + decrypt entries (flat dicts;
                                 # raw=True for the {envelope, plaintext,
                                 # valid} audit shape)
+    tn.flush_and_close()        # drain handlers, release runtime
 
 Ciphers: "jwe" (pure-Python static-ECDH + AES-KW + AES-GCM) and "btn"
 (NNL subset-difference broadcast, via the Rust tn_core extension).
@@ -155,9 +170,10 @@ def _init_impl(
     same discovery chain that auto-init uses:
 
       1. ``$TN_YAML`` env var
-      2. ``./tn.yaml`` in the current working directory
-      3. ``$TN_HOME/tn.yaml`` (default ``~/.tn/tn.yaml``)
-      4. None of the above → mint a fresh ceremony at ``$TN_HOME``
+      2. ``./tn.yaml`` in the current working directory (legacy layout)
+      3. ``./.tn/default/tn.yaml`` (multi-ceremony layout)
+      4. ``$TN_HOME/tn.yaml`` (default ``~/.tn/tn.yaml``)
+      5. None of the above → mint a fresh ceremony at ``./.tn/default/``
 
     With an explicit path, that path is used verbatim and the discovery
     chain is skipped. ``TN_STRICT=1`` blocks the no-arg form (raises
@@ -531,7 +547,13 @@ def _maybe_autoinit_load_only() -> None:
 
 def _require_dispatch() -> DispatchRuntime:
     if _dispatch_rt is None:
-        raise RuntimeError("tn.init(yaml_path) must be called before tn.log")
+        raise RuntimeError(
+            "tn: no active runtime. Call one of:\n"
+            "  - tn.init()                            # discover or auto-create a ceremony\n"
+            "  - tn.init(yaml_path)                   # bind to an existing ceremony\n"
+            "  - tn.absorb('Agentic20.project.tnpkg') # install + bind in one call\n"
+            "Then retry."
+        )
     return _dispatch_rt
 
 
@@ -785,7 +807,10 @@ def _current_config_impl():
     from . import logger as _lg
 
     if _lg._runtime is None:
-        raise RuntimeError("tn.init(yaml_path) must be called first")
+        raise RuntimeError(
+            "tn: no active runtime. Call tn.init() (or tn.absorb(<bundle>) "
+            "for a freshly-downloaded project_seed / identity_seed) first."
+        )
     cfg = _lg._runtime.cfg
     _surface.info(
         "tn.current_config() yaml=%s log_path=%s keystore=%s",
@@ -821,6 +846,26 @@ def _get_or_create_cache() -> AdminStateCache:
 from ._pkg_impl import _absorb_impl, _export_impl  # noqa: F401, E402
 
 
+def absorb(*args: Any, **kwargs: Any):
+    """Top-level shortcut for :func:`tn.pkg.absorb`.
+
+    The bundle / package surface lives under ``tn.pkg`` for organisation,
+    but the most common operation — installing a freshly-downloaded
+    ``.tnpkg`` from the dashboard — is short and load-bearing enough that
+    it gets a direct entry point too. Equivalent to::
+
+        import tn
+        tn.absorb('Agentic20.project.tnpkg')          # same as
+        tn.pkg.absorb('Agentic20.project.tnpkg')      # this
+    """
+    return _absorb_impl(*args, **kwargs)
+
+
+def export(*args: Any, **kwargs: Any):
+    """Top-level shortcut for :func:`tn.pkg.export`. See :func:`absorb`."""
+    return _export_impl(*args, **kwargs)
+
+
 def _refresh_admin_cache_if_present() -> None:
     """Post-write hook used by emit + absorb paths. Best-effort: never
     raises. If the cache hasn't been instantiated yet (no caller has
@@ -843,6 +888,8 @@ from ._session_impl import _Session, _SessionHandle, _session_impl  # noqa: F401
 __all__ = [  # noqa: RUF022 — intentional category grouping (see inline comments)
     "AbsorbReceipt",
     "AbsorbResult",
+    "absorb",
+    "export",
     "AdminStateCache",
     "ChainConflict",
     "Entry",

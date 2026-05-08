@@ -14,7 +14,10 @@ def _export_impl(*args: Any, **kwargs: Any):
 
     Thin wrapper over ``tn.export.export``. Calls ``_maybe_autoinit()``
     so module-level use without an explicit ``tn.init()`` works the
-    same way every other public verb does.
+    same way every other public verb does. If the caller didn't pass
+    ``cfg=``, fill it in from the active runtime so the kind-specific
+    branches that need a config (``admin_log_snapshot``, ``offer``,
+    ``enrolment``, ``kit_bundle``) work transparently.
     """
     import tn
     from .export import export as _raw_export
@@ -22,6 +25,15 @@ def _export_impl(*args: Any, **kwargs: Any):
         "tn.export(args=%d, kwargs=%s)", len(args), sorted(kwargs.keys()),
     )
     tn._maybe_autoinit_load_only()
+    if "cfg" not in kwargs:
+        try:
+            kwargs["cfg"] = tn.current_config()
+        except RuntimeError:
+            # current_config raises only when no init has happened; the
+            # autoinit_load_only above would already have raised if
+            # discovery failed. Fall through and let raw_export raise
+            # its own argument-shape error (some kinds don't need cfg).
+            pass
     return _raw_export(*args, **kwargs)
 
 
@@ -33,25 +45,68 @@ def _absorb_impl(*args: Any, **kwargs: Any):
     ``tn.admin.cache.cached_admin_state()`` calls observe the absorbed
     envelopes.
 
-    Bug 3 dirt-easy fix: if the input is a self-contained bootstrap
-    bundle (``identity_seed`` / ``project_seed``) and no ceremony is
-    bound to this process yet, skip the load-only autoinit. The
-    underlying ``absorb()`` will synthesize a minimal ``LoadedConfig``
-    from cwd + the bundle's body/tn.yaml so the user can absorb in a
-    fresh directory without a prior ``tn.init()``.
+    Dirt-easy bootstrap (the headline UX, see brief):
+
+      * If the bundle is a self-contained bootstrap kind
+        (``identity_seed`` / ``project_seed``) and no runtime is bound
+        to this process yet, the underlying ``absorb()`` synthesizes a
+        minimal ``LoadedConfig`` from cwd + the bundle's body/tn.yaml
+        so the layout lands on disk without a prior ``tn.init()``.
+
+      * Once the bootstrap absorb succeeds, this wrapper *automatically
+        binds the runtime* to the freshly-absorbed ``./tn.yaml``. The
+        caller can immediately do ``tn.info(...)`` / ``tn.read()``
+        without an explicit ``tn.init()`` step.
+
+      * If a runtime is already bound (the user called ``tn.init()``
+        first), absorb stays in the existing safety logic — refuse to
+        overwrite a populated ceremony, accept on a fresh one.
     """
     import tn
     from .absorb import absorb as _raw_absorb
     _surface.info(
         "tn.absorb(args=%d, kwargs=%s)", len(args), sorted(kwargs.keys()),
     )
+    # Track whether we're on the "no runtime yet, bundle is self-contained
+    # bootstrap" path so we can auto-init after absorb completes. Capture
+    # the decision *before* calling absorb because absorb writes ./tn.yaml
+    # to disk, which would change the autoinit-load-only decision after.
+    is_pre_init_bootstrap = (
+        tn._dispatch_rt is None and _is_bootstrap_kind_source(args, kwargs)
+    )
     # Skip the load-only autoinit when no runtime is bound and the
-    # bundle is a self-contained bootstrap kind (Bug 3): the
-    # underlying absorb() synthesizes a cfg from cwd + body/tn.yaml.
-    if tn._dispatch_rt is not None or not _is_bootstrap_kind_source(args, kwargs):
+    # bundle is a self-contained bootstrap kind: the underlying
+    # absorb() synthesizes a cfg from cwd + body/tn.yaml.
+    if not is_pre_init_bootstrap:
         tn._maybe_autoinit_load_only()
     receipt = _raw_absorb(*args, **kwargs)
     tn._refresh_admin_cache_if_present()
+
+    # Implicit init on bootstrap absorb. After the layout has been
+    # written to disk, bind the runtime to the freshly-absorbed yaml so
+    # the user can immediately call tn.info / tn.read without a separate
+    # tn.init step. Only fires when:
+    #   - We took the no-prior-init bootstrap path above, AND
+    #   - The absorb actually succeeded (accepted_count > 0 OR a noop).
+    # On rejection we leave the runtime unbound; the caller can inspect
+    # receipt.legacy_reason and decide what to do.
+    if is_pre_init_bootstrap and getattr(receipt, "kind", None) in (
+        "identity_seed",
+        "project_seed",
+    ):
+        rejected = getattr(receipt, "legacy_status", None) == "rejected"
+        if not rejected:
+            try:
+                _bind_after_bootstrap_absorb(receipt.kind)
+            except Exception:
+                # Best-effort: a follow-up failure to bind shouldn't
+                # silently swallow the absorb result. Surface in the
+                # logs but leave the receipt intact for the caller.
+                _logger.exception(
+                    "implicit init after bootstrap absorb failed; "
+                    "call tn.init() explicitly to investigate"
+                )
+
     _surface.info(
         "tn.absorb returning kind=%r noop=%s accepted=%s deduped=%s",
         getattr(receipt, "kind", None),
@@ -60,6 +115,70 @@ def _absorb_impl(*args: Any, **kwargs: Any):
         getattr(receipt, "deduped_count", None),
     )
     return receipt
+
+
+def _bind_after_bootstrap_absorb(kind: str) -> None:
+    """Implicit-init helper: bind the SDK runtime to a freshly-absorbed
+    bootstrap layout in cwd.
+
+    Behavior depends on the bundle kind:
+
+    * ``project_seed`` ships a complete ``tn.yaml`` — load it directly.
+    * ``identity_seed`` ships a *stub* yaml (just ``identity.did:``)
+      that's not a loadable ceremony. Replace the stub with a fresh
+      real ceremony yaml that adopts the absorbed identity, then load.
+      This is the moral equivalent of "running ``tn init`` against a
+      pre-existing keystore" — the keys came from the absorbed bundle,
+      everything else (groups, cipher, log paths) is minted with safe
+      defaults.
+
+    Called from ``_absorb_impl`` only on the implicit-init path; never
+    on rejection or when a runtime is already bound.
+    """
+    import tn
+    from . import config as _config
+
+    yaml_path = (Path.cwd() / "tn.yaml").resolve()
+    if not yaml_path.exists():
+        return
+
+    if kind == "identity_seed":
+        # Stub yaml from export_identity_seed has only ``identity.did``
+        # — not a loadable ceremony. Promote it to a real one bound to
+        # the just-installed device key.
+        keystore = (yaml_path.parent / ".tn" / "tn" / "keys").resolve()
+        priv_path = keystore / "local.private"
+        if not priv_path.exists():
+            # Defensive: identity_seed absorb should always land
+            # local.private here; if it didn't, fall through to a
+            # plain init attempt and let it raise the real error.
+            tn.init(str(yaml_path))
+            return
+        seed_bytes = priv_path.read_bytes()
+        # create_fresh refuses if local.private is already present;
+        # delete the stub yaml + the keystore's keypair, then mint a
+        # real ceremony with the absorbed seed. The keypair is
+        # re-written by create_fresh (deterministic from the seed).
+        try:
+            yaml_path.unlink()
+        except OSError:
+            pass
+        try:
+            priv_path.unlink()
+        except OSError:
+            pass
+        pub_path = keystore / "local.public"
+        try:
+            pub_path.unlink()
+        except OSError:
+            pass
+        _config.create_fresh(yaml_path, device_private_bytes=seed_bytes)
+        tn.init(str(yaml_path))
+        return
+
+    # project_seed and any future complete-yaml bootstrap kinds:
+    # the absorbed yaml is loadable as-is.
+    tn.init(str(yaml_path))
 
 
 def _is_bootstrap_kind_source(args: tuple, kwargs: dict) -> bool:
