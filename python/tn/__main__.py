@@ -1,18 +1,17 @@
 """``python -m tn`` — quick-look at the current ceremony's log.
 
 Auto-discovers an EXISTING ceremony via the standard chain ($TN_YAML →
-./tn.yaml → ~/.tn/tn.yaml). Prints each entry as one JSON line per row
-(the same canonical envelope the file/stdout handlers produce).
+./tn.yaml → ~/.tn/tn.yaml). Prints each entry as one JSON line per row.
 
 Refuses to mint a fresh ceremony — read paths never auto-create. Run
 ``python -c "import tn; tn.init()"`` once if you want to scaffold one.
 
 Examples
 --------
-    python -m tn                # bare iteration of tn.read() across the live log
-    python -m tn --raw          # envelope+plaintext+valid (audit shape)
-    python -m tn --secure       # secure_read (skip mode)
-    python -m tn --secure raise # secure_read on_invalid='raise'
+    python -m tn                  # tn.read() — Entry.model_dump_json per row
+    python -m tn --raw            # tn.read(raw=True) — on-disk envelope dicts
+    python -m tn --verify skip    # tn.read(verify="skip")
+    python -m tn --verify raise   # tn.read(verify="raise")
     TN_YAML=./tn.yaml python -m tn
 
 The opt-out for stdout handler stays the same: ``TN_NO_STDOUT=1``.
@@ -30,9 +29,11 @@ import tn
 def _emit_jsonl(rows) -> int:
     n = 0
     for row in rows:
-        # tn.read() returns flat dicts; tn.read_raw() returns
-        # {envelope, plaintext, valid}. Either serializes cleanly.
-        sys.stdout.write(json.dumps(row, separators=(",", ":")) + "\n")
+        if hasattr(row, "model_dump_json"):
+            sys.stdout.write(row.model_dump_json() + "\n")
+        else:
+            # raw=True path — row is a dict.
+            sys.stdout.write(json.dumps(row, separators=(",", ":")) + "\n")
         n += 1
     sys.stdout.flush()
     return n
@@ -43,12 +44,14 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m tn",
         description="Read the current TN ceremony's log to stdout.",
     )
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--raw", action="store_true",
-                      help="emit raw {envelope, plaintext, valid} entries")
-    mode.add_argument("--secure", nargs="?", const="skip",
-                      choices=("skip", "raise", "forensic"),
-                      help="use tn.secure_read with the given on_invalid mode")
+    parser.add_argument(
+        "--raw", action="store_true",
+        help="emit on-disk envelope dicts (raw=True) instead of Entry rows",
+    )
+    parser.add_argument(
+        "--verify", choices=("skip", "raise"), default=None,
+        help="run integrity checks; 'skip' drops invalid rows, 'raise' aborts",
+    )
     args = parser.parse_args(argv)
 
     # Quiet stdout handler so the read output isn't interleaved with init
@@ -56,12 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("TN_NO_STDOUT", "1")
 
     try:
-        if args.raw:
-            n = _emit_jsonl(tn.read_raw())
-        elif args.secure:
-            n = _emit_jsonl(tn.secure_read(on_invalid=args.secure))
-        else:
-            n = _emit_jsonl(tn.read())
+        n = _emit_jsonl(tn.read(raw=args.raw, verify=args.verify or False))
     except RuntimeError as e:
         print(f"tn: {e}", file=sys.stderr)
         return 1

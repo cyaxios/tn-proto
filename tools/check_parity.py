@@ -38,7 +38,7 @@ KNOWN_OMISSIONS = {
     "TnInitOptions", "ReadOptions", "TnReadAsRecipientOptions",
     "ReadAsRecipientOptions", "ForeignReadEntry",
     "TnSecureReadOptions", "SecureReadOptions",
-    "WatchOptions", "WatchSince", "AddRuntimeOptions",
+    "WatchOptions", "WatchSince", "VerifyMode", "AddRuntimeOptions",
     "AdminAddAgentRuntimeOptions", "PkgExportOptions",
     "Instructions", "SecureEntry", "ChainConflict", "LeafReuseAttempt",
     "ChainConflictError", "RotationConflictError", "LeafReuseError",

@@ -19,7 +19,7 @@ class AliceRotate(Scenario):
             tn.info("evt.pre", seq=i)
 
         with ctx.timer("rotation_ms"):
-            tn.rotate("default")
+            tn.admin.rotate("default")
 
         for i in range(200):
             tn.info("evt.post", seq=i)
@@ -28,7 +28,8 @@ class AliceRotate(Scenario):
 
         tn.init(ctx.yaml_path, log_path=ctx.log_path, cipher="jwe")
         cfg = tn.current_config()
-        entries = list(tn.read(ctx.log_path, cfg, raw=True))
+        from tn._read_impl import _read_raw_inner
+        entries = list(_read_raw_inner(ctx.log_path, cfg))
 
         chain_ok = all(e["valid"]["chain"] for e in entries)
         sig_ok = all(e["valid"]["signature"] for e in entries)

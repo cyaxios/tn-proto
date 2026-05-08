@@ -70,9 +70,10 @@ def _write_policy(yaml_dir: Path, text: str) -> None:
     p.write_text(text, encoding="utf-8")
 
 
-def _published_events() -> list[dict]:
+def _published_events() -> list:
     return [
-        e for e in tn.read() if e.get("event_type") == "tn.agents.policy_published"
+        e for e in tn.read(all_runs=True)
+        if e.event_type == "tn.agents.policy_published"
     ]
 
 
@@ -89,10 +90,10 @@ def test_first_init_with_policy_emits_event(tmp_path):
     tn.init(yaml, cipher="btn")
     events = _published_events()
     assert len(events) == 1
-    assert events[0]["policy_uri"] == ".tn/config/agents.md"
-    assert events[0]["content_hash"].startswith("sha256:")
+    assert events[0].fields["policy_uri"] == ".tn/config/agents.md"
+    assert events[0].fields["content_hash"].startswith("sha256:")
     # Event types covered list is sorted.
-    assert events[0]["event_types_covered"] == ["payment.completed"]
+    assert events[0].fields["event_types_covered"] == ["payment.completed"]
 
 
 def test_second_init_unchanged_does_not_re_emit(tmp_path):
@@ -115,7 +116,7 @@ def test_init_with_changed_policy_emits_new_event(tmp_path):
     _write_policy(tmp_path, _POLICY_V1)
     tn.init(yaml, cipher="btn")
     first = _published_events()
-    h1 = first[0]["content_hash"]
+    h1 = first[0].fields["content_hash"]
     tn.flush_and_close()
 
     # Edit the policy.
@@ -123,4 +124,4 @@ def test_init_with_changed_policy_emits_new_event(tmp_path):
     tn.init(yaml, cipher="btn")
     events = _published_events()
     assert len(events) == 2
-    assert events[1]["content_hash"] != h1
+    assert events[1].fields["content_hash"] != h1

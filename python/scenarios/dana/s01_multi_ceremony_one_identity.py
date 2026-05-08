@@ -21,6 +21,7 @@ from __future__ import annotations
 import shutil
 
 import tn
+from tn._read_impl import _read_raw_inner
 from scenarios._harness import Scenario, ScenarioContext
 from tn import wallet as _wallet
 from tn.identity import Identity
@@ -126,7 +127,7 @@ class DanaMultiCeremonyOneIdentity(Scenario):
             identity=ident_d,
         )
         cfg_ra = tn.current_config()
-        entries_a = list(tn.read(restore_a_dir / ".tn/tn/logs" / "tn.ndjson", cfg_ra, raw=True))
+        entries_a = list(_read_raw_inner(restore_a_dir / ".tn/tn/logs" / "tn.ndjson", cfg_ra))
         a_event_types = {e["envelope"]["event_type"] for e in entries_a}
         a_correct = sum(
             1
@@ -150,7 +151,7 @@ class DanaMultiCeremonyOneIdentity(Scenario):
             identity=ident_d,
         )
         cfg_rb = tn.current_config()
-        entries_b = list(tn.read(restore_b_dir / ".tn/tn/logs" / "tn.ndjson", cfg_rb, raw=True))
+        entries_b = list(_read_raw_inner(restore_b_dir / ".tn/tn/logs" / "tn.ndjson", cfg_rb))
         b_event_types = {e["envelope"]["event_type"] for e in entries_b}
         b_correct = sum(
             1

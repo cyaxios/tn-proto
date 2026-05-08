@@ -191,7 +191,7 @@ class IvanCLIBootstrap(Scenario):
             )
             cfg_b = tn.current_config()
             log_path = restored_yamls[0].parent / ".tn/tn/logs" / "tn.ndjson"
-            entries = list(tn.read(log_path, cfg_b, raw=True))
+            entries = list(_read_raw_inner(log_path, cfg_b))
             ctx.record("post_restore_entries", len(entries))
             ctx.assert_invariant("post_restore_entries_read", len(entries) == 1)
             if entries:

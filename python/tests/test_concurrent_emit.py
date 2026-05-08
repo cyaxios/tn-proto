@@ -131,16 +131,15 @@ def test_concurrent_emit_preserves_chain_and_uniqueness(tmp_path):
         )
 
         # Verify chain + signatures via the standard reader.
-        # Use verify=True so the _valid block surfaces; assert each entry is sound.
+        # verify=True raises on tamper; reaching the count assertion below
+        # implies every entry passed signature + row_hash + chain checks.
         # all_runs=True because flush_and_close + first-read re-init mints a
         # fresh run_id, so the strict default would filter out our 800 events
         # (FINDINGS #4 / #12).
         count = 0
-        for entry in tn.read(log_path, verify=True, all_runs=True):
-            if entry["event_type"] != "evt.race":
+        for entry in tn.read(log=log_path, verify=True, all_runs=True):
+            if entry.event_type != "evt.race":
                 continue
-            valid = entry.get("_valid") or {}
-            assert all(valid.values()), f"corrupt evt.race entry: {entry}"
             count += 1
         assert count == total_expected
     finally:

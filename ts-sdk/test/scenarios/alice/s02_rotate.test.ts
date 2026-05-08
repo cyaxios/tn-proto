@@ -23,6 +23,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { ScenarioContext } from "../_harness.js";
+import { Entry } from "../../../src/Entry.js";
 
 test("alice/s02_rotate — structural placeholder (rotation not yet supported in TS SDK)", async (t) => {
   const ctx = new ScenarioContext();
@@ -76,21 +77,30 @@ test("alice/s02_rotate — structural placeholder (rotation not yet supported in
       tn.info("evt.post", { seq: i });
     }
 
-    const allEntries = [...tn.readRaw()].filter(
-      (e) => !String(e.envelope["event_type"]).startsWith("tn."),
-    );
-    const pre = allEntries.filter((e) => e.envelope["event_type"] === "evt.pre");
-    const post = allEntries.filter((e) => e.envelope["event_type"] === "evt.post");
+    const allEntries: Entry[] = [];
+    for (const e of tn.read({ allRuns: true })) {
+      if (e instanceof Entry && !e.event_type.startsWith("tn.")) allEntries.push(e);
+    }
+    const pre = allEntries.filter((e) => e.event_type === "evt.pre");
+    const post = allEntries.filter((e) => e.event_type === "evt.post");
 
-    ctx.assertInvariant("chain_verified", allEntries.every((e) => Boolean(e.valid.chain)));
-    ctx.assertInvariant("signature_verified", allEntries.every((e) => Boolean(e.valid.signature)));
+    // Verify chain + signature collectively via verify: true (raises on failure).
+    let chainAndSigOk = true;
+    try {
+      for (const _ of tn.read({ verify: true, allRuns: true })) {
+        void _;
+      }
+    } catch {
+      chainAndSigOk = false;
+    }
+    ctx.assertInvariant("chain_verified", chainAndSigOk);
+    ctx.assertInvariant("signature_verified", chainAndSigOk);
 
     let postDecryptedCount = 0;
     let postDecryptOk = true;
     for (let idx = 0; idx < post.length; idx++) {
       const e = post[idx]!;
-      const pt = (e.plaintext["default"] ?? {}) as Record<string, unknown>;
-      if (pt["seq"] === idx) {
+      if (e.fields["seq"] === idx) {
         postDecryptedCount++;
       } else {
         postDecryptOk = false;

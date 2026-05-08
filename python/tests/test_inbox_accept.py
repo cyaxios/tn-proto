@@ -52,11 +52,17 @@ def _sha256(data: bytes) -> str:
 
 
 def _minimal_tn_yaml(keystore_dir: Path) -> dict:
-    """Minimal tn.yaml structure enough for accept() to parse."""
+    """Minimal tn.yaml structure enough for accept() to parse.
+
+    Pin ``keystore.path`` explicitly so the test doesn't depend on the
+    inbox.py default (which is ``./.tn/keys`` and predates the per-stem
+    namespacing default that other parts of the SDK now use).
+    """
     return {
         "me": {"did": "did:key:z6Mkfrank"},
         "ceremony": {"id": "test-ceremony", "mode": "local"},
         "groups": {},
+        "keystore": {"path": str(keystore_dir).replace("\\", "/")},
     }
 
 
@@ -167,7 +173,7 @@ def test_accept_backs_up_existing_kit(tmp_path):
     """Existing kit is renamed to .previous.<ts> before installing new one."""
     # Pre-install an old kit.
     keystore_dir = tmp_path / ".tn/tn/keys"
-    keystore_dir.mkdir()
+    keystore_dir.mkdir(parents=True)
     old_kit = keystore_dir / "default.btn.mykit"
     old_kit.write_bytes(b"\xde\xad" * 8)
 

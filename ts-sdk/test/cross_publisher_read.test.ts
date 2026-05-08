@@ -2,13 +2,10 @@
 //
 // Mirrors Python's `tests/integration/test_cash_register_stage6.py`. Two
 // independent ceremonies (Alice + Bob); Alice mints a kit for Bob,
-// bundles it, Bob absorbs it, then Bob reads Alice's log. The runtime's
-// own decrypt path is bound to Bob's btn state, so a naive read raises;
-// `client.read({logPath})` must auto-route through `readAsRecipient`
-// using Bob's keystore where the absorbed kit lives.
-//
-// Also exercises the standalone `readAsRecipient` export — the verb the
-// cross-binding survey flagged as missing in TS.
+// bundles it, Bob absorbs it, then Bob reads Alice's log via
+// `Tn.read({log, asRecipient})` — the new public surface for foreign-log
+// reads (post-0.4.0a1; replaces the now-internal `readAsRecipient`
+// free function).
 
 import { strict as assert } from "node:assert";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
@@ -16,13 +13,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { readAsRecipient } from "../src/index.js";
+import { Entry } from "../src/Entry.js";
 import type { CeremonyConfig } from "../src/runtime/config.js";
 import { Tn } from "../src/tn.js";
 
 const PROFESSOR_DID = "did:key:z6MkfakefakefakefakefakefakefakefakefakefakeProfDID";
 
-test("client.read({logPath}) auto-routes cross-publisher btn logs (FINDINGS S6.2)", async () => {
+test("Tn.read({log}) auto-routes cross-publisher btn logs (FINDINGS S6.2)", async () => {
   const root = mkdtempSync(join(tmpdir(), "tn-cross-pub-"));
   const aliceDir = join(root, "alice");
   const bobDir = join(root, "bob");
@@ -30,7 +27,6 @@ test("client.read({logPath}) auto-routes cross-publisher btn logs (FINDINGS S6.2
   mkdirSync(bobDir, { recursive: true });
 
   try {
-    // Alice publishes a log + bundles a kit for Bob.
     const alice = await Tn.init(join(aliceDir, "alice.yaml"));
     alice.info("evt.cross", { marker: "alpha" });
     alice.info("evt.cross", { marker: "beta" });
@@ -40,23 +36,16 @@ test("client.read({logPath}) auto-routes cross-publisher btn logs (FINDINGS S6.2
     await alice.pkg.bundleForRecipient({ recipientDid: PROFESSOR_DID, outPath: bundle });
     await alice.close();
 
-    // Bob inits + absorbs.
     const bob = await Tn.init(join(bobDir, "bob.yaml"));
     const receipt = await bob.pkg.absorb(bundle);
     assert.equal(receipt.kind, "kit_bundle", `unexpected absorb kind: ${receipt.kind}`);
     assert.ok(receipt.acceptedCount >= 1, "absorb didn't apply kit");
 
-    // Direct read of Alice's log — this is the historically broken path.
-    // Without auto-routing, the runtime tries to decrypt with Bob's btn
-    // state and Rust raises "kit not entitled". With the fix in
-    // client.read({logPath}), the verb peeks at the first envelope's
-    // publisher did, sees it's not Bob's, and routes through
-    // readAsRecipient using Bob's keystore.
     const markers: string[] = [];
-    for (const entry of bob.read({ logPath: aliceLog })) {
-      const flat = entry as Record<string, unknown>;
-      if (flat["event_type"] === "evt.cross" && typeof flat["marker"] === "string") {
-        markers.push(flat["marker"] as string);
+    for (const entry of bob.read({ log: aliceLog })) {
+      if (entry instanceof Entry && entry.event_type === "evt.cross") {
+        const m = entry.fields["marker"];
+        if (typeof m === "string") markers.push(m);
       }
     }
     await bob.close();
@@ -71,7 +60,7 @@ test("client.read({logPath}) auto-routes cross-publisher btn logs (FINDINGS S6.2
   }
 });
 
-test("readAsRecipient standalone verb decrypts a foreign btn log", async () => {
+test("Tn.read({asRecipient}) decrypts a foreign btn log via the recipient verb", async () => {
   const root = mkdtempSync(join(tmpdir(), "tn-foreign-read-"));
   const aliceDir = join(root, "alice");
   const bobDir = join(root, "bob");
@@ -86,41 +75,38 @@ test("readAsRecipient standalone verb decrypts a foreign btn log", async () => {
     await alice.pkg.bundleForRecipient({ recipientDid: PROFESSOR_DID, outPath: bundle });
     await alice.close();
 
-    // Bob inits + absorbs to get the kit on disk.
     const bob = await Tn.init(join(bobDir, "bob.yaml"));
     await bob.pkg.absorb(bundle);
     const bobKeystore = (bob.config() as CeremonyConfig).keystorePath;
-    await bob.close();
 
-    // Use the standalone verb — no client instance, just (logPath, keystorePath).
-    const entries = [...readAsRecipient(aliceLog, bobKeystore, { group: "default" })];
-    const decrypted = entries
-      .map((e) => e.plaintext["default"])
-      .filter((pt): pt is Record<string, unknown> => !!pt && !pt["$no_read_key"] && !pt["$decrypt_error"]);
-
+    const entries: Entry[] = [];
+    for (const e of bob.read({ log: aliceLog, asRecipient: bobKeystore, group: "default" })) {
+      if (e instanceof Entry) entries.push(e);
+    }
+    const markers = entries.map((e) => e.fields["marker"]).filter((m) => typeof m === "string");
     assert.ok(
-      decrypted.some((pt) => pt["marker"] === "x"),
-      `expected marker='x' to round-trip, got ${JSON.stringify(decrypted)}`,
+      markers.includes("x"),
+      `expected marker='x' to round-trip, got ${JSON.stringify(markers)}`,
     );
 
-    // Sig + chain validity should be true for a non-tampered log.
-    for (const entry of entries) {
-      assert.equal(entry.valid.signature, true, `signature failed for ${JSON.stringify(entry.envelope)}`);
-      assert.equal(entry.valid.chain, true, `chain failed for ${JSON.stringify(entry.envelope)}`);
-    }
+    await bob.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("readAsRecipient raises when no kit is present", () => {
+test("Tn.read({asRecipient}) raises when no kit is present", async () => {
   const root = mkdtempSync(join(tmpdir(), "tn-no-kit-"));
   try {
-    // Empty keystore dir — no .btn.mykit, no .jwe.mykey.
-    assert.throws(
-      () => [...readAsRecipient("/no/such/log.ndjson", root, { group: "default" })],
-      /no recipient kit for group/i,
-    );
+    const tn = await Tn.ephemeral();
+    try {
+      assert.throws(
+        () => [...tn.read({ log: "/no/such/log.ndjson", asRecipient: root, group: "default" })],
+        /no recipient kit for group/i,
+      );
+    } finally {
+      await tn.close();
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

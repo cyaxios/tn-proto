@@ -37,12 +37,18 @@ def test_add_recipient_with_did_emits_attested_event(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    added = [e for e in tn.read() if e["event_type"] == "tn.recipient.added"]
+    # tn.recipient.added in btn-cipher ceremonies still routes to the
+    # main log under ``logs.path`` (admin-log routing is JWE-only at
+    # the moment). Read with all_runs=True so prior-run events surface.
+    added = [
+        e for e in tn.read(all_runs=True)
+        if e.event_type == "tn.recipient.added"
+    ]
     assert len(added) == 1, f"expected one recipient.added event, got {len(added)}"
-    assert added[0]["group"] == "default"
-    assert added[0]["leaf_index"] == leaf
-    assert added[0]["recipient_did"] == "did:key:zFrank"
-    assert added[0]["kit_sha256"].startswith("sha256:")
+    assert added[0].fields["group"] == "default"
+    assert added[0].fields["leaf_index"] == leaf
+    assert added[0].fields["recipient_did"] == "did:key:zFrank"
+    assert added[0].fields["kit_sha256"].startswith("sha256:")
 
 
 def test_add_recipient_without_did_still_emits_event_without_did_field(tmp_path):
@@ -52,10 +58,13 @@ def test_add_recipient_without_did_still_emits_event_without_did_field(tmp_path)
     tn.flush_and_close()
 
     tn.init(yaml)
-    added = [e for e in tn.read() if e["event_type"] == "tn.recipient.added"]
+    added = [
+        e for e in tn.read(all_runs=True)
+        if e.event_type == "tn.recipient.added"
+    ]
     assert len(added) == 1
     # DID field is absent (or None) when not provided.
-    assert added[0].get("recipient_did") is None
+    assert added[0].fields.get("recipient_did") is None
 
 
 def test_recipients_returns_active_only_by_default(tmp_path):

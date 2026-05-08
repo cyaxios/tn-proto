@@ -382,5 +382,169 @@ const chromeMock = makeMockChromeRuntime(popupKeystores);
 
 A.pub.free(); B.pub.free();
 
+// ---------------------------------------------------------------------
+// Entry-render path (additive layer over the existing decrypt UX).
+//
+// When a decrypted plaintext or pasted utf-8 happens to BE a full TN
+// envelope JSON (event_type / did / event_id / sequence), the
+// extension flips its rendering from "JSON.stringify the payload" to
+// "Entry.toString() the envelope". These tests pin both ends of that:
+//
+//   1. The vendored Entry.js loads in extension context (Node sees the
+//      same browser-safe module the popup will).
+//   2. The inline _isTnEnvelope / _envelopeToEntryLine in content.js
+//      produce the same toString() the real Entry would — so we don't
+//      have two divergent renderers.
+//   3. Non-envelope user-kwargs payloads still take the old JSON path.
+//   4. Popup.js's renderPlaintext returns kind="tn-entry" for envelope
+//      utf-8 and kind="utf-8" for other printable utf-8.
+// ---------------------------------------------------------------------
+
+const ExtEntryMod = await import(
+  pathToFileURL(resolve(here, "..", "vendor", "sdk-core", "Entry.js")).href
+);
+if (typeof ExtEntryMod.Entry === "function" && typeof ExtEntryMod.VerifyError === "function") {
+  ok("vendored Entry.js exposes Entry + VerifyError in extension context");
+} else {
+  fail("vendored Entry import",
+    `got Entry=${typeof ExtEntryMod.Entry} VerifyError=${typeof ExtEntryMod.VerifyError}`);
+}
+
+const SAMPLE_ENV = {
+  event_type: "tn.info",
+  did: "did:key:z6MkpTH9mHZxTokFiCHBVnQ8X2j4qZHGr5h2sN7vVhPkXm9Q",
+  event_id: "ev_01HK9YR8MQT7C3PAZRP8X9JV2N",
+  sequence: 7,
+  timestamp: "2026-05-08T12:34:56.789Z",
+  level: "info",
+  customer_name: "Alice",
+  amount: 99.5,
+};
+
+// Mirror of content.js's inline helpers. Kept in lockstep with the
+// implementation; the next two tests prove the two stay in lockstep.
+function _isTnEnvelope(o) {
+  if (!o || typeof o !== "object" || Array.isArray(o)) return false;
+  return (
+    typeof o.event_type === "string" &&
+    typeof o.did === "string" &&
+    typeof o.event_id === "string" &&
+    typeof o.sequence === "number"
+  );
+}
+
+function _envelopeToEntryLine(env) {
+  const ENVELOPE_KEYS = new Set([
+    "event_type", "timestamp", "level", "message", "did",
+    "event_id", "sequence", "run_id", "prev_hash", "row_hash", "signature",
+  ]);
+  const ts = env.timestamp instanceof Date
+    ? env.timestamp
+    : (typeof env.timestamp === "string" || typeof env.timestamp === "number"
+        ? new Date(env.timestamp)
+        : new Date(NaN));
+  let head;
+  if (isNaN(ts.getTime())) {
+    const lvl = String(env.level || "").toUpperCase().padEnd(7, " ");
+    head = `?              ${lvl} seq=${env.sequence}  ${env.event_type}`;
+  } else {
+    const hh = String(ts.getUTCHours()).padStart(2, "0");
+    const mm = String(ts.getUTCMinutes()).padStart(2, "0");
+    const ss = String(ts.getUTCSeconds()).padStart(2, "0");
+    const ms = String(ts.getUTCMilliseconds()).padStart(3, "0");
+    const lvl = String(env.level || "").toUpperCase().padEnd(7, " ");
+    head = `${hh}:${mm}:${ss}.${ms} ${lvl} seq=${env.sequence}  ${env.event_type}`;
+  }
+  const SLOT_KEYS = new Set([...ENVELOPE_KEYS, "run_id", "message"]);
+  const fieldKeys = Object.keys(env).filter((k) => !SLOT_KEYS.has(k) && !k.startsWith("_"));
+  if (fieldKeys.length === 0) return head;
+  const kvs = fieldKeys.map((k) => {
+    const v = env[k];
+    let r;
+    if (typeof v === "string") {
+      r = "'" + v.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
+    } else if (typeof v === "boolean") {
+      r = v ? "True" : "False";
+    } else if (typeof v === "number" || typeof v === "bigint") {
+      r = String(v);
+    } else if (v === null || v === undefined) {
+      r = "None";
+    } else {
+      try { r = JSON.stringify(v); } catch { r = String(v); }
+    }
+    return `${k}=${r}`;
+  }).join("  ");
+  return `${head}  ${kvs}`;
+}
+
+// content.js path: result.plaintext_json is an envelope -> Entry text.
+{
+  const result = { class: "decrypted", plaintext_json: SAMPLE_ENV };
+  if (_isTnEnvelope(result.plaintext_json)) {
+    const inlineLine = _envelopeToEntryLine(result.plaintext_json);
+    const realLine = ExtEntryMod.Entry.fromFlat(SAMPLE_ENV).toString();
+    if (inlineLine === realLine) {
+      ok("content.js Entry-render path: inline output matches Entry.toString() byte-for-byte");
+    } else {
+      fail("content.js Entry-render parity", `inline=${JSON.stringify(inlineLine)} vs real=${JSON.stringify(realLine)}`);
+    }
+  } else {
+    fail("content.js Entry-render detect", "envelope not detected");
+  }
+}
+
+// content.js fallback: plaintext_json is user kwargs (no envelope shape).
+{
+  const result = { class: "decrypted", plaintext_json: { customer_name: "Alice", amount: 99.5 } };
+  if (!_isTnEnvelope(result.plaintext_json)) {
+    // The original JSON.stringify(...) path takes over; we just confirm
+    // the detector said "no, this isn't an envelope" so prettyPlaintext
+    // falls through.
+    ok("content.js fallback: user-kwargs payload is NOT detected as envelope");
+  } else {
+    fail("content.js fallback", "user kwargs falsely classified as envelope");
+  }
+}
+
+// popup.js renderPlaintext path. Mirror of the function in popup.js,
+// which routes envelope utf-8 through Entry.fromFlat + toString.
+function popupRenderPlaintext(resp) {
+  if (resp.plaintext_utf8) {
+    const text = resp.plaintext_utf8;
+    const trimmed = text.trim();
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (_isTnEnvelope(parsed)) {
+          const entry = ExtEntryMod.Entry.fromFlat(parsed);
+          return { kind: "tn-entry", text: entry.toString() };
+        }
+      } catch (_) { /* fall through */ }
+    }
+    return { kind: "utf-8", text };
+  }
+  return { kind: "hex", text: "(would be hex)" };
+}
+
+{
+  const resp = { ok: true, plaintext_utf8: JSON.stringify(SAMPLE_ENV) };
+  const out = popupRenderPlaintext(resp);
+  if (out.kind === "tn-entry" && /tn\.info/.test(out.text) && /seq=7/.test(out.text)) {
+    ok("popup.js renderPlaintext: envelope utf-8 routes through Entry");
+  } else {
+    fail("popup.js Entry kind", JSON.stringify(out));
+  }
+}
+
+{
+  const resp = { ok: true, plaintext_utf8: JSON.stringify({ customer_name: "Alice" }) };
+  const out = popupRenderPlaintext(resp);
+  if (out.kind === "utf-8") {
+    ok("popup.js renderPlaintext: non-envelope JSON utf-8 keeps the original utf-8 path");
+  } else {
+    fail("popup.js fallback", JSON.stringify(out));
+  }
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

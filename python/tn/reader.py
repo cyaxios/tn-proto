@@ -49,7 +49,10 @@ def _flat_default_active() -> bool:
     return _READ_FLAT_DEFAULT
 
 
-# Public envelope keys that always surface flat in the new shape.
+# Public envelope keys that surface flat. As of 0.4.0a1 this includes the
+# crypto plumbing (prev_hash, row_hash, signature) since Entry exposes
+# them as typed attributes. Callers who want bytes-on-disk should use
+# tn.read(raw=True) which yields the envelope dict directly.
 _FLAT_ENVELOPE_KEYS: tuple[str, ...] = (
     "timestamp",
     "event_type",
@@ -57,12 +60,14 @@ _FLAT_ENVELOPE_KEYS: tuple[str, ...] = (
     "did",
     "sequence",
     "event_id",
+    "prev_hash",
+    "row_hash",
+    "signature",
 )
 
-# Crypto-plumbing envelope keys that NEVER surface flat (only via raw=True).
-_CRYPTO_ENVELOPE_KEYS: frozenset[str] = frozenset(
-    {"prev_hash", "row_hash", "signature"}
-)
+# Reserved for backward compat with code that still imports it; no
+# envelope keys are reserved-out of the flat shape now.
+_CRYPTO_ENVELOPE_KEYS: frozenset[str] = frozenset()
 
 # Reserved envelope keys (used to identify "what's a public field" vs
 # "what's an envelope basic" vs "what's a group payload").

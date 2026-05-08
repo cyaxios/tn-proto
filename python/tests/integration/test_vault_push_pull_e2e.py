@@ -50,10 +50,41 @@ import yaml as _yaml
 # importable. Must precede the ``tn`` and ``src`` imports below.
 
 _HERE = Path(__file__).resolve().parent
-_REPO_ROOT = _HERE.parent.parent.parent.parent  # content_platform/
-_TN_SDK = _REPO_ROOT / "tn-protocol" / "python"
-_VAULT = _REPO_ROOT / "tnproto-org"
 
+# Discover the sibling vault repo regardless of clone-naming. This test
+# was originally written under the legacy ``content_platform/`` layout
+# (siblings: ``tn-protocol``, ``tnproto-org``); the alpha-track sibling
+# layout is ``C:/codex/tn/{tn_proto,tn_proto_web,tn_skills}``. Probe the
+# ancestors for any directory containing a ``src/`` package and a
+# ``tn.yaml`` — that's the vault repo.
+def _find_vault_repo() -> Path | None:
+    candidates_relative = (
+        Path("..") / ".." / ".." / ".." / "tnproto-org",
+        Path("..") / ".." / ".." / ".." / "tn-proto-org",
+        Path("..") / ".." / ".." / ".." / "tn_proto_web",
+        Path("..") / ".." / ".." / "tnproto-org",
+        Path("..") / ".." / ".." / "tn-proto-org",
+        Path("..") / ".." / ".." / "tn_proto_web",
+    )
+    for rel in candidates_relative:
+        candidate = (_HERE / rel).resolve()
+        if (candidate / "src" / "app.py").exists() and (candidate / "tn.yaml").exists():
+            return candidate
+    return None
+
+
+_VAULT = _find_vault_repo()
+if _VAULT is None:
+    import pytest
+    pytest.skip(
+        "vault sibling repo (tnproto-org / tn-proto-org / tn_proto_web) not "
+        "found alongside tn_proto; skipping e2e test that needs the vault "
+        "server source. Set up the sibling clone to enable this test.",
+        allow_module_level=True,
+    )
+
+# Add the in-tree tn package and the vault src to sys.path.
+_TN_SDK = _HERE.parent.parent.parent  # python/
 for p in (_TN_SDK, _VAULT):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
@@ -75,7 +106,7 @@ from tn.handlers.vault_pull import VaultPullHandler
 from tn.handlers.vault_push import VaultPushHandler
 
 API = "/api/v1"
-_VAULT_YAML = str(_REPO_ROOT / "tnproto-org" / "tn.yaml")
+_VAULT_YAML = str(_VAULT / "tn.yaml")
 
 
 # ── Lifecycle housekeeping ────────────────────────────────────────────
@@ -260,6 +291,34 @@ class _AsgiPushClient:
                 )
 
         _run(_go())
+
+    def post_pending_claim(self, body: bytes) -> dict[str, Any]:
+        """Mirror the real client's unauthenticated init-upload POST.
+
+        Endpoint is explicitly unauthenticated per spec; we send
+        ``X-Publisher-Did`` so the vault can emit a contact_update back
+        to this package's inbox at bind time (D-25).
+        """
+        async def _go():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as ac:
+                r = await ac.post(
+                    "/api/v1/pending-claims",
+                    content=body,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "X-Publisher-Did": self._did,
+                    },
+                )
+                if r.status_code >= 400:
+                    raise AssertionError(
+                        f"vault POST /api/v1/pending-claims -> "
+                        f"{r.status_code}: {r.text}"
+                    )
+                return r.json()
+
+        return _run(_go())
 
     def close(self) -> None:
         return
@@ -547,7 +606,28 @@ def test_alice_to_frank_round_trip(tmp_path: Path, _shared_loop) -> None:
         to_did=frank["did"],
     )
     try:
-        # 4. Trigger one snapshot push. Returns True iff a POST happened.
+        # 4. Drive the D-19 two-phase push:
+        #
+        #    a. First tick runs init-upload — the ceremony isn't yet
+        #       account-bound, so the handler POSTs to /pending-claims
+        #       (unauthenticated) to register a vault_id. Returns True
+        #       on a successful POST but doesn't hit /inbox.../snapshots
+        #       yet.
+        #
+        #    b. Mark the account bound (in production this happens after
+        #       the user clicks the claim URL or after the handler
+        #       probes /accounts/by-package-did/{did}). The test
+        #       short-circuits that ceremony.
+        #
+        #    c. Second tick runs the steady-state snapshot push that
+        #       this assertion is checking — POSTs the encrypted
+        #       admin-log snapshot to /inbox/{did}/snapshots/{...}.
+        init_pushed = push._push_snapshot()
+        assert init_pushed is True, "expected init-upload tick to POST /pending-claims"
+
+        from tn.sync_state import update_sync_state
+        update_sync_state(alice["cfg"].yaml_path, account_bound=True)
+
         pushed = push._push_snapshot()
         assert pushed is True, "expected vault.push to POST a snapshot"
     finally:
@@ -622,48 +702,54 @@ def test_alice_to_frank_round_trip(tmp_path: Path, _shared_loop) -> None:
     #    ``crypto/tn-core/tests/secure_read_interop.rs`` pins canonical
     #    parity for every admin event type so this branch should not
     #    fire under normal operation.
-    entries = list(tn.secure_read(log_path=frank_admin_log, cfg=frank_cfg))
+    # 0.4.0a1: tn.secure_read was folded into tn.read(verify=...). Use
+    # verify="skip" — the legacy secure_read defaulted to skip-mode,
+    # which is the right policy for cross-publisher absorbs (the chain
+    # spans Alice's and Frank's events, so per-row chain validation
+    # against Frank's local prev_hash chain doesn't recompute for
+    # absorbed rows). Skip-mode emits a tn.read.tampered_row_skipped
+    # admin event for any failure rather than aborting the iteration.
+    entries = list(
+        tn.read(log=frank_admin_log, verify="skip")
+    )
     recipient_added = [
-        e for e in entries if e.get("event_type") == "tn.recipient.added"
+        e for e in entries if e.event_type == "tn.recipient.added"
     ]
     assert len(recipient_added) >= 3, (
-        f"secure_read should yield Alice's three tn.recipient.added events, "
-        f"got {len(recipient_added)}; entries={entries!r}"
+        f"verified read should yield Alice's three tn.recipient.added events, "
+        f"got {len(recipient_added)}; entry types={[e.event_type for e in entries]!r}"
     )
-    # The publisher's DID is on the envelope -- proves it really came from Alice.
+    # The publisher's DID is on the envelope — proves it really came from Alice.
     for e in recipient_added:
-        assert e["did"] == alice["did"], (
-            f"event came from {e.get('did')!r}, expected Alice ({alice['did']!r})"
+        assert e.did == alice["did"], (
+            f"event came from {e.did!r}, expected Alice ({alice['did']!r})"
         )
 
     # The agents policy declares a template for ``tn.recipient.added``,
-    # so when Frank holds the ``tn.agents`` kit ``secure_read`` MUST
-    # surface an ``instructions`` block alongside the data. This is a
-    # hard assertion — the Rust runtime's emit-side splice fires
-    # unconditionally for any event_type that has a policy template
-    # loaded, and the cross-language ``test_agents_group.py`` /
-    # ``crypto/tn-core/tests/agents_group.rs`` regression tests pin
-    # that contract.
-    with_instructions = [e for e in recipient_added if "instructions" in e]
-    assert with_instructions, (
-        "secure_read returned no ``instructions`` block on any absorbed "
+    # so when Frank holds the ``tn.agents`` kit the splice populates
+    # the tn.agents group plaintext on every admin event. In 0.4.0a1
+    # the previously-separate "instructions" hoisting is gone — the
+    # plaintext fields (instruction, use_for, etc.) merge into
+    # ``entry.fields`` along with the rest of the decrypted payload.
+    # The contract being tested is still "Frank's tn.agents kit
+    # decrypts the policy splice"; only the surface shape changed.
+    with_instruction = [
+        e for e in recipient_added if e.fields.get("instruction")
+    ]
+    assert with_instruction, (
+        "verified read found no ``instruction`` field on any absorbed "
         "tn.recipient.added entry. The agents policy was loaded "
         "(Alice's tn.agents.policy_published is in the log) and Frank's "
         "tn.agents kit is in his keystore, so the splice MUST have "
         "populated the tn.agents group on every admin event. If this "
         "assertion fires the splice has regressed — see "
         "``test_admin_events_splice_tn_agents`` in "
-        "``tn-protocol/crypto/tn-core/tests/agents_group.rs`` and the "
-        "Python sibling in ``tests/test_agents_group.py`` for the "
+        "``tn-protocol/crypto/tn-core/tests/agents_group.rs`` for the "
         "minimal repro."
     )
-    inst = with_instructions[0]["instructions"]
-    assert "newly-issued recipient kit" in inst["instruction"]
-    assert "Replication" in inst["use_for"]
-    # The bare six fields must NOT be flattened to top-level
-    # (per spec §3.1).
-    assert "instruction" not in with_instructions[0]
-    assert "use_for" not in with_instructions[0]
+    fields = with_instruction[0].fields
+    assert "newly-issued recipient kit" in fields["instruction"]
+    assert "Replication" in fields["use_for"]
 
 
 # ── Phase B: Playwright UI wrapper -- DEFERRED ────────────────────────

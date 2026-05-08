@@ -8,7 +8,7 @@
 // in the service worker's memory until the SW unloads or the user
 // clicks "Lock all".
 
-import { bytesToB64, b64ToBytes, rand } from "./unlock.js";
+import { bytesToB64, b64ToBytes, rand, Entry } from "./unlock.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -574,11 +574,42 @@ $("btn-lock-all").addEventListener("click", async () => {
 // the user's input to the SW which sweeps every loaded kit.
 // ---------------------------------------------------------------------------
 
+// Cheap envelope-shape probe — same shape used by content.js's
+// _isTnEnvelope and tnproto-org/static/account/log_viewer.js's
+// looksLikeEnvelope. When the decrypted utf-8 parses as a full TN
+// envelope, we route through Entry.toString() instead of showing the
+// raw JSON blob.
+function _looksLikeEnvelope(o) {
+  if (!o || typeof o !== "object" || Array.isArray(o)) return false;
+  return (
+    typeof o.event_type === "string" &&
+    typeof o.did === "string" &&
+    typeof o.event_id === "string" &&
+    typeof o.sequence === "number"
+  );
+}
+
 // Render bytes (base64) as utf-8 if the SW handed us printable utf-8,
 // else fall back to a hex dump derived from plaintext_b64.
+//
+// New: if the printable utf-8 parses as a full TN envelope JSON line,
+// render via Entry.toString() rather than the raw JSON. Keeps the
+// pasted-ciphertext UX consistent with the dashboard widget and the
+// new TN log viewer.
 function renderPlaintext(resp) {
   if (resp.plaintext_utf8) {
-    return { kind: "utf-8", text: resp.plaintext_utf8 };
+    const text = resp.plaintext_utf8;
+    const trimmed = text.trim();
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (_looksLikeEnvelope(parsed)) {
+          const entry = Entry.fromFlat(parsed);
+          return { kind: "tn-entry", text: entry.toString() };
+        }
+      } catch (_) { /* fall through */ }
+    }
+    return { kind: "utf-8", text };
   }
   const bytes = b64ToBytes(resp.plaintext_b64);
   const hex = Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join(" ");

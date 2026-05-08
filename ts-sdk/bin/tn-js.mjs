@@ -354,10 +354,18 @@ async function watchCmd() {
       } else {
         opts.allRuns = true;
         for (const entry of tn.read(opts)) {
+          // entry.timestamp is a Date (Entry); coerce to ISO for the
+          // string-comparison branch. entry.sequence is a number.
+          const tsIso =
+            entry.timestamp instanceof Date
+              ? entry.timestamp.toISOString()
+              : typeof entry.timestamp === "string"
+                ? entry.timestamp
+                : "";
           const matches =
             typeof startAt === "number"
               ? typeof entry.sequence === "number" && entry.sequence >= startAt
-              : typeof entry.timestamp === "string" && entry.timestamp >= startAt;
+              : tsIso !== "" && tsIso >= startAt;
           if (matches) {
             stdout.write(JSON.stringify(entry) + "\n");
           }

@@ -18,13 +18,14 @@ Pipe into any JSON-aware tailer, e.g.:
     python -m tn.watch ./alice/tn.yaml | fblog
     python -m tn.watch ./alice/tn.yaml | lnav
 
-Each emitted object is a flat dict matching `tn.read()` / `tn.watch()`.
+Each emitted line is the JSON form of an :class:`tn.Entry`
+(``model_dump_json``). The shape matches what ``tn.read()`` /
+``tn.watch()`` yield from Python code.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -40,21 +41,20 @@ async def _async_main(args) -> int:
             since = int(since)
 
         if args.once:
-            cfg = tn.current_config()
-            log_path = Path(args.log).resolve() if args.log else cfg.resolve_log_path()
-            for entry in tn.read(log_path, cfg, verify=True, all_runs=True):
+            log_arg = Path(args.log).resolve() if args.log else None
+            for entry in tn.read(log=log_arg, verify=True, all_runs=True):
                 # Filter by --since for snapshot mode.
                 if since == "start":
                     pass
                 elif since == "now":
                     continue   # --once + --since now = no-op
                 elif isinstance(since, int):
-                    if entry.get("sequence", 0) < since:
+                    if entry.sequence < since:
                         continue
                 else:
-                    if entry.get("timestamp", "") < since:
+                    if entry.timestamp.isoformat() < str(since):
                         continue
-                sys.stdout.write(json.dumps(entry, default=str) + "\n")
+                sys.stdout.write(entry.model_dump_json() + "\n")
                 sys.stdout.flush()
             return 0
 
@@ -63,9 +63,9 @@ async def _async_main(args) -> int:
             since=since,
             verify=True,
             poll_interval=args.interval,
-            log_path=Path(args.log).resolve() if args.log else None,
+            log=Path(args.log).resolve() if args.log else None,
         ):
-            sys.stdout.write(json.dumps(entry, default=str) + "\n")
+            sys.stdout.write(entry.model_dump_json() + "\n")
             sys.stdout.flush()
         return 0
     finally:

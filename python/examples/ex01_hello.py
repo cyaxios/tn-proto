@@ -49,19 +49,17 @@ def main() -> int:
         tn.info("page.view", path="/checkout", user="u_42")
         tn.warning("auth.retry", attempts=3)
 
-        # Read them back. tn.read() returns flat dicts — the same shape
-        # you'd hand-write. Defaults to the current run's events only,
-        # so naive filters don't pick up entries from prior test runs.
-        print("\n--- log entries (flat shape) ---")
+        # Read them back. tn.read() yields typed Entry instances — typed
+        # attribute access (e.event_type, e.timestamp), with your
+        # emitted kwargs in e.fields. Defaults to the current run's
+        # events only, so naive filters don't pick up entries from
+        # prior test runs.
+        print("\n--- log entries (typed Entry) ---")
         for e in tn.read():
-            if e["event_type"].startswith("tn."):
+            if e.event_type.startswith("tn."):
                 continue  # skip bootstrap attestations for demo clarity
-            # Pull out everything that isn't envelope plumbing
-            crypto_fields = {"did", "timestamp", "event_id", "sequence", "level",
-                             "event_type", "run_id", "_hidden_groups"}
-            payload = {k: v for k, v in e.items() if k not in crypto_fields}
-            print(f"[{e['level']:7}] {e['event_type']:16} seq={e['sequence']} "
-                  f"fields={payload}")
+            print(f"[{e.level:7}] {e.event_type:16} seq={e.sequence} "
+                  f"fields={e.fields}")
 
         tn.flush_and_close()
     return 0

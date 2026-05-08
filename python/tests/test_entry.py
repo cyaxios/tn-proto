@@ -1,13 +1,4 @@
-"""Entry object and VerifyError: shape, attributes, formatting, tamper handling.
-
-After the 2026-04-25 ``tn.read()`` reshape, the default verb returns flat
-dicts and no longer raises on tampered rows. This file exercises the
-``Entry`` wrapper class directly: it reads via ``tn.read(raw=True)`` (the
-``{envelope, plaintext, valid}`` shape) and constructs ``Entry`` objects
-explicitly. The tamper tests use ``tn.read(verify=True)`` and assert the
-``_valid`` block instead of catching ``VerifyError``.
-"""
-
+"""Entry pydantic model — shape, attributes, dunders, round-trip."""
 from __future__ import annotations
 
 import json
@@ -15,13 +6,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest  # type: ignore[import-not-found]
+import pytest
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
 import tn
-from tn import Audit, Entry
+from tn import Entry, VerifyError
 
 
 @pytest.fixture(autouse=True)
@@ -39,202 +30,250 @@ def _setup(tmp_path: Path) -> Path:
     return yaml
 
 
-def _user_entries():
-    """User-level Entry objects, wrapped from tn.read(raw=True)."""
-    return [
-        Entry(r)
-        for r in tn.read(raw=True)
-        if not r["envelope"]["event_type"].startswith("tn.")
-    ]
+# ---------------------------------------------------------------------
+# Default tn.read() yields Entry instances with typed attribute access
+# ---------------------------------------------------------------------
 
 
-def _user_raw():
-    """tn.read(raw=True) filtered to user-level events."""
-    return [e for e in tn.read(raw=True) if not e["envelope"]["event_type"].startswith("tn.")]
-
-
-def test_entry_is_flat_and_no_groups_leak(tmp_path):
+def test_read_yields_entry_instances(tmp_path):
     _setup(tmp_path)
     tn.info("order.created", amount=100, note="first", currency="USD")
 
-    entries = _user_entries()
+    entries = [e for e in tn.read() if e.event_type == "order.created"]
     assert len(entries) == 1
     e = entries[0]
 
     assert isinstance(e, Entry)
-    # Envelope metadata surfaces as attributes, not nested dicts.
-    assert isinstance(e.timestamp, datetime)
-    assert e.timestamp.tzinfo is timezone.utc
-    assert e.level == "INFO"
     assert e.event_type == "order.created"
-    assert e.sequence == 1
+    assert isinstance(e.timestamp, datetime)
+    assert e.timestamp.tzinfo is not None
+    assert e.level == "info"
+    assert e.message is None
+    assert e.sequence >= 1
     assert e.did.startswith("did:key:z")
-    assert len(e.event_id) == 36  # uuid v4
+    assert len(e.event_id) == 36
+    assert e.run_id  # non-empty
+    assert e.prev_hash.startswith("sha256:")
+    assert e.row_hash.startswith("sha256:")
+    assert e.signature  # non-empty
 
-    # Fields are merged and flat: no "default" or any other group name appears.
+
+def test_user_kwargs_land_in_fields(tmp_path):
+    _setup(tmp_path)
+    tn.info("order.created", amount=100, note="first", currency="USD")
+
+    e = next(e for e in tn.read() if e.event_type == "order.created")
     assert e.fields == {"amount": 100, "note": "first", "currency": "USD"}
+    # User kwargs do NOT collide with envelope attributes.
     assert "default" not in e.fields
-    assert "pii" not in e.fields
-
-    # Dict-style access delegates to fields.
-    assert e["amount"] == 100
-    assert "note" in e
-    assert e.get("missing", 42) == 42
-
-    # valid is a single bool, not a dict.
-    assert e.valid is True
+    assert "signature" not in e.fields
 
 
-def test_entry_str_is_log_shaped(tmp_path):
+def test_message_is_none_when_no_positional(tmp_path):
     _setup(tmp_path)
-    tn.info("order.created", amount=100, note="first test")
-
-    e = _user_entries()[0]
-    line = str(e)
-
-    # Expected shape: "2026-04-22 14:44:26.267 INFO    order.created  amount=100  note=\"first test\""
-    assert " INFO " in line
-    assert " order.created" in line
-    assert "amount=100" in line
-    # Strings with spaces get quoted for parseability.
-    assert 'note="first test"' in line
+    tn.info("session.opened")
+    e = next(e for e in tn.read() if e.event_type == "session.opened")
+    assert e.message is None
 
 
-def test_entry_to_logfmt_and_to_json(tmp_path):
+def test_positional_message_hoists_to_typed_slot(tmp_path):
+    """Positional messages on tn.info / tn.log / etc. must surface on
+    `entry.message` (the typed envelope slot), not in `entry.fields`.
+
+    The writer encrypts the joined positional into the plaintext payload
+    under a `"message"` key for confidentiality; the reader hoists it
+    out so callers read `e.message` instead of `e.fields["message"]`.
+    """
     _setup(tmp_path)
-    tn.info("order.created", amount=100, currency="USD")
-
-    e = _user_entries()[0]
-
-    lf = e.to_logfmt()
-    assert "event=order.created" in lf
-    assert "level=INFO" in lf
-    assert "amount=100" in lf
-    assert "currency=USD" in lf
-
-    js = e.to_json()
-    parsed = json.loads(js)
-    assert parsed["event_type"] == "order.created"
-    assert parsed["level"] == "INFO"
-    assert parsed["amount"] == 100
-    assert parsed["currency"] == "USD"
-    assert parsed["valid"] is True
-    # JSON form is flat, no nested envelope/plaintext keys.
-    assert "envelope" not in parsed
-    assert "plaintext" not in parsed
+    tn.info("auth.login", "alice signed in from web", user_id="u123")
+    e = next(e for e in tn.read() if e.event_type == "auth.login")
+    assert e.message == "alice signed in from web"
+    assert "message" not in e.fields
+    assert e.fields == {"user_id": "u123"}
 
 
-def test_audit_exposes_crypto_details(tmp_path):
+def test_multiple_positionals_join_into_message(tmp_path):
+    """Multiple positionals after the event_type are joined with a space
+    and surface as one `entry.message`. Mirrors stdlib `logging.info`."""
+    _setup(tmp_path)
+    tn.info("debug.note", "short note", "second positional", tag="x")
+    e = next(e for e in tn.read() if e.event_type == "debug.note")
+    assert e.message == "short note second positional"
+    assert "message" not in e.fields
+    assert e.fields == {"tag": "x"}
+
+
+# ---------------------------------------------------------------------
+# Human-readable dunders
+# ---------------------------------------------------------------------
+
+
+def test_str_one_line_format(tmp_path):
     _setup(tmp_path)
     tn.info("order.created", amount=100)
-
-    e = _user_entries()[0]
-    a = e.audit
-    assert isinstance(a, Audit)
-
-    # Crypto details reachable through audit.
-    assert a.signature  # base64url string
-    assert a.row_hash.startswith("sha256:")
-    assert a.prev_hash.startswith("sha256:")
-    assert isinstance(a.validity, dict)
-    assert set(a.validity.keys()) == {"signature", "row_hash", "chain"}
-
-    # Per-group breakdown surfaces the group name for auditors who need it.
-    assert "default" in a.per_group
-    assert a.per_group["default"]["amount"] == 100
-
-    # Field hashes per group.
-    fh = a.field_hashes
-    assert "default" in fh
-    assert fh["default"]["amount"].startswith("hmac-sha256:v1:")
-
-    # Ciphertext as raw bytes.
-    ct = a.ciphertext
-    assert isinstance(ct["default"], bytes)
-    assert len(ct["default"]) > 0
+    e = next(e for e in tn.read() if e.event_type == "order.created")
+    s = str(e)
+    # Format: "HH:MM:SS.mmm LEVEL  seq=N  event_type  k=v"
+    assert "INFO" in s
+    assert "order.created" in s
+    assert "amount=100" in s
+    # millisecond precision (one period in the timestamp segment)
+    head = s.split(" ", 1)[0]
+    assert head.count(":") == 2 and head.count(".") == 1
 
 
-def test_read_raw_returns_dict_form(tmp_path):
+def test_repr_truncates_did(tmp_path):
     _setup(tmp_path)
-    tn.info("order.created", amount=100)
-
-    raw = _user_raw()
-    assert len(raw) == 1
-    r = raw[0]
-    assert isinstance(r, dict)
-    assert set(r.keys()) == {"envelope", "plaintext", "valid"}
-    assert r["envelope"]["event_type"] == "order.created"
-    assert r["plaintext"]["default"]["amount"] == 100
-    assert r["valid"] == {"signature": True, "row_hash": True, "chain": True}
+    tn.info("x.y")
+    e = next(iter(tn.read()))
+    r = repr(e)
+    assert r.startswith("Entry(")
+    assert "event_type=" in r
+    # DID should be truncated like z6Mk...8FAZ
+    assert "..." in r
 
 
-def test_multiple_entries_iterate_in_order(tmp_path):
+def test_repr_html_renders_table(tmp_path):
     _setup(tmp_path)
-    tn.info("a.test", n=1)
-    tn.info("a.test", n=2)
-    tn.info("b.test", n=10)
+    tn.info("dash.event", click="ok")
+    e = next(e for e in tn.read() if e.event_type == "dash.event")
+    html = e._repr_html_()
+    assert "<table" in html
+    assert "dash.event" in html
+    assert "click" in html
 
-    entries = _user_entries()
-    assert [(e.event_type, e.sequence) for e in entries] == [
-        ("a.test", 1),
-        ("a.test", 2),
-        ("b.test", 1),  # b.test has its own sequence
+
+def test_repr_markdown_renders(tmp_path):
+    _setup(tmp_path)
+    tn.info("md.event", val=42)
+    e = next(e for e in tn.read() if e.event_type == "md.event")
+    md = e._repr_markdown_()
+    assert "**md.event**" in md
+    assert "`val`" in md or "val" in md
+
+
+# ---------------------------------------------------------------------
+# Pydantic model_dump round-trip
+# ---------------------------------------------------------------------
+
+
+def test_model_dump_json_round_trips(tmp_path):
+    _setup(tmp_path)
+    tn.info("rt.event", x=1, y="hi")
+    e = next(e for e in tn.read() if e.event_type == "rt.event")
+    raw = e.model_dump_json()
+    parsed = json.loads(raw)
+    assert parsed["event_type"] == "rt.event"
+    assert parsed["fields"]["x"] == 1
+    assert parsed["fields"]["y"] == "hi"
+    assert "row_hash" in parsed
+    assert "did" in parsed
+
+
+# ---------------------------------------------------------------------
+# raw=True returns the on-disk envelope dict (not Entry)
+# ---------------------------------------------------------------------
+
+
+def test_raw_true_yields_envelope_dict(tmp_path):
+    _setup(tmp_path)
+    tn.info("evt.x", k=1)
+    envs = [
+        env for env in tn.read(raw=True)
+        if env.get("event_type") == "evt.x"
     ]
-    assert [e["n"] for e in entries] == [1, 2, 10]
+    assert len(envs) == 1
+    env = envs[0]
+    assert isinstance(env, dict)
+    # Envelope has the group-keyed ciphertext block intact.
+    assert "default" in env
+    assert "ciphertext" in env["default"]
 
 
-def test_tampered_row_surfaces_via_valid_block(tmp_path):
-    """``tn.read(verify=True)`` no longer raises on tamper — instead it
-    surfaces the failed check via the ``_valid`` block. (The fail-closed
-    behavior moves to the upcoming ``tn.secure_read()`` verb per the
-    2026-04-25 read-ergonomics spec.)"""
+# ---------------------------------------------------------------------
+# verify=True raises on tamper; verify="skip" handles validation
+# failures (signature/row_hash/chain). Parse-level failures still raise
+# under all verify modes since the iter terminates.
+# ---------------------------------------------------------------------
+
+
+def test_verify_true_passes_clean_log(tmp_path):
     _setup(tmp_path)
-    tn.info("order.created", amount=100)
-    tn.info("order.paid", amount=100)
+    tn.info("a.x"); tn.info("b.x")
+    n = sum(1 for _ in tn.read(verify=True))
+    assert n >= 2  # admin events + 2 user events
+
+
+def test_verify_true_raises_on_tampered_ciphertext(tmp_path):
+    yaml = _setup(tmp_path)
+    tn.info("v.x", payload="orig")
     tn.flush_and_close()
 
-    log = tmp_path / ".tn/tn/logs" / "tn.ndjson"
-    lines = log.read_text(encoding="utf-8").splitlines()
-    # Log contains bootstrap events plus the two user events — tamper the
-    # last line (order.paid).
-    user_line_idx = len(lines) - 1
-    target = json.loads(lines[user_line_idx])
-    sig = target["signature"]
-    target["signature"] = ("A" if sig[0] != "A" else "B") + sig[1:]
-    lines[user_line_idx] = json.dumps(target, separators=(",", ":"))
-    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log = yaml.parent / ".tn/tn/logs/tn.ndjson"
+    lines = log.read_text(encoding="utf-8").splitlines(keepends=True)
+    victim_idx = next(i for i, ln in enumerate(lines) if "v.x" in ln)
+    obj = json.loads(lines[victim_idx])
+    ct = obj["default"]["ciphertext"]
+    obj["default"]["ciphertext"] = ct[:-2] + ("Z" if ct[-2] != "Z" else "Y") + ct[-1]
+    lines[victim_idx] = json.dumps(obj, separators=(",", ":")) + "\n"
+    log.write_text("".join(lines), encoding="utf-8")
 
-    tn.init(tmp_path / "tn.yaml")
-    entries = [
-        e for e in tn.read(verify=True) if not e["event_type"].startswith("tn.")
-    ]
-    # Both user events surface; the tampered one fails its signature check.
-    bad = [e for e in entries if not all(e["_valid"].values())]
-    assert len(bad) == 1
-    assert bad[0]["_valid"]["signature"] is False
+    tn.init(yaml)
+    with pytest.raises(VerifyError):
+        list(tn.read(verify=True))
 
 
-def test_raw_true_exposes_per_check_validity_on_tamper(tmp_path):
-    """``tn.read(raw=True)`` keeps today's per-check validity dict so audit
-    tooling can introspect tampered rows without losing structure."""
+# ---------------------------------------------------------------------
+# Where filter receives Entry (not dict) by default; receives envelope
+# dict when raw=True
+# ---------------------------------------------------------------------
+
+
+def test_where_receives_entry(tmp_path):
     _setup(tmp_path)
-    tn.info("order.created", amount=100)
-    tn.flush_and_close()
+    tn.info("filter.match", n=1)
+    tn.info("filter.skip", n=2)
+    seen = list(tn.read(where=lambda e: e.event_type == "filter.match"))
+    assert len(seen) == 1
+    assert seen[0].event_type == "filter.match"
 
-    log = tmp_path / ".tn/tn/logs" / "tn.ndjson"
-    lines = log.read_text(encoding="utf-8").splitlines()
-    user_idx = len(lines) - 1
-    env = json.loads(lines[user_idx])
-    sig = env["signature"]
-    env["signature"] = ("A" if sig[0] != "A" else "B") + sig[1:]
-    lines[user_idx] = json.dumps(env, separators=(",", ":"))
-    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    tn.init(tmp_path / "tn.yaml")
-    raw_entries = [
-        r for r in tn.read(raw=True) if not r["envelope"]["event_type"].startswith("tn.")
-    ]
-    assert len(raw_entries) == 1
-    e = Entry(raw_entries[0])
-    assert e.valid is False
-    assert e.audit.validity["signature"] is False
+def test_where_receives_envelope_dict_when_raw(tmp_path):
+    _setup(tmp_path)
+    tn.info("raw.match", n=1)
+    tn.info("raw.skip", n=2)
+    seen = list(tn.read(raw=True, where=lambda env: env.get("event_type") == "raw.match"))
+    assert len(seen) == 1
+    assert seen[0]["event_type"] == "raw.match"
+
+
+# ---------------------------------------------------------------------
+# Entry.from_raw constructs from {envelope, plaintext, valid} triple
+# ---------------------------------------------------------------------
+
+
+def test_from_raw_constructor():
+    raw = {
+        "envelope": {
+            "event_type": "x.y",
+            "timestamp": "2026-05-08T03:30:20.184000Z",
+            "level": "info",
+            "did": "did:key:zABC123",
+            "event_id": "abc-123",
+            "sequence": 1,
+            "prev_hash": "sha256:000",
+            "row_hash": "sha256:111",
+            "signature": "sig",
+            "default": {"ciphertext": "...", "field_hashes": {}},
+        },
+        "plaintext": {
+            "default": {"amount": 100, "run_id": "rid-1"},
+        },
+        "valid": {"signature": True, "row_hash": True, "chain": True},
+    }
+    e = Entry.from_raw(raw)
+    assert e.event_type == "x.y"
+    assert e.fields == {"amount": 100}  # run_id hoisted to top
+    assert e.run_id == "rid-1"
+    assert e.did == "did:key:zABC123"
+    assert e.row_hash == "sha256:111"

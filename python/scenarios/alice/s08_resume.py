@@ -4,6 +4,7 @@ verify a single coherent chain."""
 from __future__ import annotations
 
 import tn
+from tn._read_impl import _read_raw_inner
 from scenarios._harness import Scenario, ScenarioContext
 
 
@@ -25,7 +26,7 @@ class AliceResume(Scenario):
 
         tn.init(ctx.yaml_path, log_path=ctx.log_path, cipher="jwe")
         cfg = tn.current_config()
-        entries = list(tn.read(ctx.log_path, cfg, raw=True))
+        entries = list(_read_raw_inner(ctx.log_path, cfg))
 
         before = [e for e in entries if e["envelope"]["event_type"] == "before.restart"]
         after = [e for e in entries if e["envelope"]["event_type"] == "after.restart"]

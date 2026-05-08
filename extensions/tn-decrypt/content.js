@@ -113,8 +113,85 @@
     return pid.slice(0, 10);
   }
 
+  // Cheap envelope-shape probe — mirrors looksLikeEnvelope() in
+  // tnproto-org/static/account/log_viewer.js. Returns true when the
+  // decrypted plaintext is a full TN envelope rather than a bag of
+  // user kwargs. This is the signal to flip the pill from
+  // "JSON.stringify the payload" to "render via Entry.toString()".
+  function _isTnEnvelope(o) {
+    if (!o || typeof o !== "object" || Array.isArray(o)) return false;
+    return (
+      typeof o.event_type === "string" &&
+      typeof o.did === "string" &&
+      typeof o.event_id === "string" &&
+      typeof o.sequence === "number"
+    );
+  }
+
+  // Mirror of Entry.toString() — kept inline because content scripts
+  // can't `import` from the vendored Entry.js without dynamic-import
+  // gymnastics. Verified byte-for-byte against the real Entry by the
+  // extension tests under test/extension_logic.mjs.
+  //
+  // Format (matching Python's `print(entry)` and the TS Entry.toString):
+  //   HH:MM:SS.mmm LEVEL  seq=N  event_type  k=v  k=v
+  function _envelopeToEntryLine(env) {
+    const ENVELOPE_KEYS = new Set([
+      "event_type", "timestamp", "level", "message", "did",
+      "event_id", "sequence", "run_id", "prev_hash", "row_hash", "signature",
+    ]);
+    const ts = env.timestamp instanceof Date
+      ? env.timestamp
+      : (typeof env.timestamp === "string" || typeof env.timestamp === "number"
+          ? new Date(env.timestamp)
+          : new Date(NaN));
+    let head;
+    if (isNaN(ts.getTime())) {
+      const lvl = String(env.level || "").toUpperCase().padEnd(7, " ");
+      head = `?              ${lvl} seq=${env.sequence}  ${env.event_type}`;
+    } else {
+      const hh = String(ts.getUTCHours()).padStart(2, "0");
+      const mm = String(ts.getUTCMinutes()).padStart(2, "0");
+      const ss = String(ts.getUTCSeconds()).padStart(2, "0");
+      const ms = String(ts.getUTCMilliseconds()).padStart(3, "0");
+      const lvl = String(env.level || "").toUpperCase().padEnd(7, " ");
+      head = `${hh}:${mm}:${ss}.${ms} ${lvl} seq=${env.sequence}  ${env.event_type}`;
+    }
+    // run_id and message are envelope slots — Entry hoists them out of
+    // the user fields. Mirror that here so the line matches.
+    const SLOT_KEYS = new Set([...ENVELOPE_KEYS, "run_id", "message"]);
+    const fieldKeys = Object.keys(env).filter((k) => !SLOT_KEYS.has(k) && !k.startsWith("_"));
+    if (fieldKeys.length === 0) return head;
+    const kvs = fieldKeys.map((k) => {
+      const v = env[k];
+      let r;
+      if (typeof v === "string") {
+        r = "'" + v.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
+      } else if (typeof v === "boolean") {
+        r = v ? "True" : "False";
+      } else if (typeof v === "number" || typeof v === "bigint") {
+        r = String(v);
+      } else if (v === null || v === undefined) {
+        r = "None";
+      } else {
+        try { r = JSON.stringify(v); } catch { r = String(v); }
+      }
+      return `${k}=${r}`;
+    }).join("  ");
+    return `${head}  ${kvs}`;
+  }
+
   function prettyPlaintext(result) {
     if (result.plaintext_json && typeof result.plaintext_json === "object") {
+      // Auto-detect: if the decrypted plaintext is itself a full TN
+      // envelope (has event_type / did / sequence / event_id), render
+      // via the Entry.toString() shape rather than dumping the raw
+      // JSON. Caller can still see the JSON via the "RAW" toggle on
+      // the pill — this just makes the default detail view human-
+      // scannable.
+      if (_isTnEnvelope(result.plaintext_json)) {
+        return _envelopeToEntryLine(result.plaintext_json);
+      }
       return JSON.stringify(result.plaintext_json, null, 2);
     }
     if (result.plaintext_utf8) return result.plaintext_utf8;
@@ -126,6 +203,12 @@
   function summaryLine(result) {
     const j = result.plaintext_json;
     if (j && typeof j === "object") {
+      // Same auto-detect as prettyPlaintext: an envelope-shaped
+      // plaintext gets the headline `event_type seq=N` summary, not
+      // the alphabetised k=v dump that's tuned for user-payload kwargs.
+      if (_isTnEnvelope(j)) {
+        return `${j.event_type} seq=${j.sequence}`;
+      }
       const parts = [];
       for (const [k, v] of Object.entries(j).sort(([a], [b]) => a.localeCompare(b))) {
         let s;

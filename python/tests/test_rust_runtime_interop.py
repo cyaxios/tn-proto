@@ -158,11 +158,12 @@ def test_rust_writes_python_reads(tmp_path):
     # Re-open the ceremony in Python to read and decrypt.
     tn.init(yaml_path)
     try:
-        # verify=True surfaces a _valid block; we assert each user entry
-        # passes signature + row_hash + chain.
+        # verify=True raises on tamper; reaching the assertion below
+        # means signature + row_hash + chain all verified.
         # Filter out bootstrap tn.* attestations emitted at ceremony init.
         entries = [
-            e for e in tn.read(log_path, verify=True) if not e["event_type"].startswith("tn.")
+            e for e in tn.read(log=log_path, verify=True, all_runs=True)
+            if not e.event_type.startswith("tn.")
         ]
     finally:
         tn.flush_and_close()
@@ -171,13 +172,11 @@ def test_rust_writes_python_reads(tmp_path):
 
     # Spot-check field values recovered from Rust-produced envelopes.
     e0 = entries[0]
-    assert e0["event_type"] == "order.created"
-    assert all(e0["_valid"].values()) is True  # sig + row_hash + chain all verified
-    assert e0["amount"] == 100
-    assert e0["note"] == "from-rust"
+    assert e0.event_type == "order.created"
+    assert e0.fields["amount"] == 100
+    assert e0.fields["note"] == "from-rust"
 
     e1 = entries[1]
-    assert e1["event_type"] == "order.paid"
-    assert all(e1["_valid"].values()) is True
-    assert e1["amount"] == 100
-    assert e1["currency"] == "USD"
+    assert e1.event_type == "order.paid"
+    assert e1.fields["amount"] == 100
+    assert e1.fields["currency"] == "USD"

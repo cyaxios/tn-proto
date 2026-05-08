@@ -24,6 +24,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Tn } from "../../../src/tn.js";
+import { Entry } from "../../../src/Entry.js";
 import { ScenarioContext } from "../_harness.js";
 
 /** Patch the yaml at `yamlPath` to disable log rotation across re-inits. */
@@ -69,10 +70,13 @@ test("alice/s06_rollover — two sessions on same yaml, both segments decrypt", 
     {
       const tn = await Tn.init(yamlPath, { stdout: false });
       try {
-        // readRaw() returns all entries across all sessions (no run_id filter).
-        const allEntries = [...tn.readRaw()];
-        const seg1 = allEntries.filter((e) => e.envelope["event_type"] === "segment.one");
-        const seg2 = allEntries.filter((e) => e.envelope["event_type"] === "segment.two");
+        // tn.read({allRuns}) yields Entry across all sessions.
+        const allEntries: Entry[] = [];
+        for (const e of tn.read({ allRuns: true })) {
+          if (e instanceof Entry) allEntries.push(e);
+        }
+        const seg1 = allEntries.filter((e) => e.event_type === "segment.one");
+        const seg2 = allEntries.filter((e) => e.event_type === "segment.two");
 
         ctx.assertInvariant(
           "seg1_count",
@@ -90,16 +94,19 @@ test("alice/s06_rollover — two sessions on same yaml, both segments decrypt", 
         let decryptionOk = true;
         let decryptedCount = 0;
 
-        for (const entry of allEntries) {
-          chainOk = chainOk && Boolean(entry.valid.chain);
-          sigOk = sigOk && Boolean(entry.valid.signature);
+        try {
+          for (const _ of tn.read({ verify: true, allRuns: true })) {
+            void _;
+          }
+        } catch {
+          chainOk = false;
+          sigOk = false;
         }
 
         for (const bucket of [seg1, seg2]) {
           for (let idx = 0; idx < bucket.length; idx++) {
             const e = bucket[idx]!;
-            const pt = (e.plaintext["default"] ?? {}) as Record<string, unknown>;
-            if (pt["seq"] === idx) {
+            if (e.fields["seq"] === idx) {
               decryptedCount++;
             } else {
               decryptionOk = false;

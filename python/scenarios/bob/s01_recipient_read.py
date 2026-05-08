@@ -58,7 +58,7 @@ class BobRecipientRead(Scenario):
 
         # Alice adds Bob as a recipient to the default group
         with ctx.timer("add_recipient_ms"):
-            tn.add_recipient(cfg, "default", bob_did, bob_pub_bytes)
+            tn.admin.add_recipient("default", recipient_did=bob_did, public_key=bob_pub_bytes, cfg=cfg)
 
         # --- Alice writes log entries --------------------------------
         inputs: list[dict] = []
@@ -87,7 +87,8 @@ class BobRecipientRead(Scenario):
         bob_readable_events = 0
         sig_verified = 0
         chain_verified = 0
-        for entry in tn.read_as_recipient(bob_log, bob_keystore, group="default"):
+        from tn.reader import read_as_recipient as _read_as_recipient
+        for entry in _read_as_recipient(bob_log, bob_keystore, group="default"):
             if entry["envelope"].get("event_type") != "order.created":
                 continue
             bob_readable_events += 1

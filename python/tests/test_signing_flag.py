@@ -40,14 +40,40 @@ def _btn_ceremony(tmp_path: Path) -> Path:
     return yaml
 
 
-def _user_entries(verify: bool = True):
-    """tn.read(verify=True) filtered to user events (skips tn.* bootstrap)."""
-    return [e for e in tn.read(verify=verify) if not e["event_type"].startswith("tn.")]
+def _user_entries(verify: bool = False):
+    """tn.read() filtered to user events (skips tn.* bootstrap).
+
+    Note: with the 0.4.0a1 surface ``verify=True`` raises on integrity
+    failure rather than annotating each entry — tests that need to inspect
+    per-entry validity use ``_user_triples`` below.
+    """
+    return [e for e in tn.read(verify=verify) if not e.event_type.startswith("tn.")]
 
 
 def _user_raw():
-    """tn.read(raw=True) filtered to user events."""
-    return [e for e in tn.read(raw=True) if not e["envelope"]["event_type"].startswith("tn.")]
+    """tn.read(raw=True) filtered to user events. Yields envelope dicts."""
+    return [
+        env for env in tn.read(raw=True)
+        if not env.get("event_type", "").startswith("tn.")
+    ]
+
+
+def _user_triples():
+    """Internal {envelope, plaintext, valid} triples for the current run,
+    filtered to user events. Used to assert per-entry validity flags
+    that the public ``tn.read`` no longer surfaces post-0.4.0a1.
+    """
+    from tn._read_impl import _read_raw_inner, _entry_in_current_run_raw
+    cfg = tn.current_config()
+    log = cfg.resolve_log_path()
+    out = []
+    for r in _read_raw_inner(log, cfg):
+        if not _entry_in_current_run_raw(r):
+            continue
+        env = r.get("envelope") or {}
+        if not str(env.get("event_type", "")).startswith("tn."):
+            out.append(r)
+    return out
 
 
 def _set_yaml_sign(yaml_path: Path, value: bool) -> None:
@@ -82,12 +108,12 @@ def _set_yaml_sign(yaml_path: Path, value: bool) -> None:
 def test_default_is_signed(tmp_path):
     _btn_ceremony(tmp_path)
     tn.info("test.default", k=1)
-    entries = _user_entries()
-    assert len(entries) == 1
-    assert entries[0]["_valid"]["signature"] is True
+    triples = _user_triples()
+    assert len(triples) == 1
+    assert triples[0]["valid"]["signature"] is True
     # Raw signature field is non-empty.
     raw = _user_raw()[0]
-    assert raw["envelope"]["signature"] != ""
+    assert raw["signature"] != ""
 
 
 def test_set_signing_false_produces_unsigned_entry(tmp_path):
@@ -96,17 +122,17 @@ def test_set_signing_false_produces_unsigned_entry(tmp_path):
     tn.info("test.unsigned", k=1)
     tn.flush_and_close()
 
-    # Reopen and read with verify=True so the _valid block surfaces
-    # (unsigned entries' signature check fails on the empty string).
+    # Reopen and read the triples directly so we can inspect per-row
+    # validity flags (the public ``tn.read`` no longer surfaces these).
     tn.init(tmp_path / "tn.yaml")
-    entries = _user_entries(verify=True)
-    assert len(entries) == 1
-    e = entries[0]
+    triples = _user_triples()
+    assert len(triples) == 1
+    valid = triples[0]["valid"]
     # Signature is absent — valid.signature is False (sig verify fails on empty).
-    assert e["_valid"]["signature"] is False
+    assert valid["signature"] is False
     # Chain still verifies (row_hash was still computed).
-    assert e["_valid"]["chain"] is True
-    assert e["_valid"]["row_hash"] is True
+    assert valid["chain"] is True
+    assert valid["row_hash"] is True
 
 
 def test_per_call_sign_false_overrides_default(tmp_path):
@@ -119,9 +145,9 @@ def test_per_call_sign_false_overrides_default(tmp_path):
     tn.init(tmp_path / "tn.yaml")
     raw = _user_raw()
     assert len(raw) == 3
-    assert raw[0]["envelope"]["signature"] != ""  # signed
-    assert raw[1]["envelope"]["signature"] == ""  # unsigned
-    assert raw[2]["envelope"]["signature"] != ""  # signed again
+    assert raw[0]["signature"] != ""  # signed
+    assert raw[1]["signature"] == ""  # unsigned
+    assert raw[2]["signature"] != ""  # signed again
 
 
 def test_yaml_sign_false_default(tmp_path):
@@ -140,8 +166,8 @@ def test_yaml_sign_false_default(tmp_path):
     tn.init(yaml)
     raw = _user_raw()
     assert len(raw) == 2
-    assert raw[0]["envelope"]["signature"] == ""  # yaml default = false
-    assert raw[1]["envelope"]["signature"] != ""  # per-call override = true
+    assert raw[0]["signature"] == ""  # yaml default = false
+    assert raw[1]["signature"] != ""  # per-call override = true
 
 
 def test_set_signing_none_reverts_to_yaml_default(tmp_path):
@@ -154,8 +180,8 @@ def test_set_signing_none_reverts_to_yaml_default(tmp_path):
 
     tn.init(tmp_path / "tn.yaml")
     raw = _user_raw()
-    assert raw[0]["envelope"]["signature"] == ""
-    assert raw[1]["envelope"]["signature"] != ""
+    assert raw[0]["signature"] == ""
+    assert raw[1]["signature"] != ""
 
 
 def test_precedence_per_call_beats_session_and_yaml(tmp_path):
@@ -171,4 +197,4 @@ def test_precedence_per_call_beats_session_and_yaml(tmp_path):
 
     tn.init(tmp_path / "tn.yaml")
     raw = _user_raw()
-    assert raw[0]["envelope"]["signature"] != ""
+    assert raw[0]["signature"] != ""

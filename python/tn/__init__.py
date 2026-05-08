@@ -27,7 +27,7 @@ from ._dispatch import (  # should_use_rust re-exported for diagnostics
     DispatchRuntime,
     should_use_rust,
 )
-from ._entry import Audit, Entry, VerifyError
+from ._entry import Entry, VerifyError
 from .absorb import AbsorbReceipt, AbsorbResult, LeafReuseAttempt
 from .absorb import absorb as _raw_absorb
 from .admin import (
@@ -717,33 +717,21 @@ from ._registry import TNNotFound  # noqa: E402, F401
 # --------------------------------------------------------------------------
 from .read import (  # noqa: E402, F401
     read,
-    read_all,
-    read_as_recipient,
-    read_as_recipient_flat,
-    read_raw,
-    secure_read,
     watch,
 )
 
 
+# Internal helpers from the legacy read-impl module that other parts of
+# the SDK still import. The user-facing read verbs (read/read_raw/...)
+# are gone — there's now exactly one ``tn.read`` and one ``tn.watch``.
 from ._read_impl import (  # noqa: F401, E402
     VerificationError,
-    _attach_instructions,
-    _emit_tampered_row_skipped,
-    _entry_in_current_run_flat,
     _entry_in_current_run_raw,
-    _invalid_reasons_from_valid,
     _is_foreign_log,
     _is_protocol_admin_event,
-    _read_all_impl,
-    _read_as_recipient_flat_impl,
-    _read_as_recipient_impl,
-    _read_impl,
     _read_raw_admin_aware,
-    _read_raw_impl,
     _read_raw_inner,
     _rotated_backup_paths,
-    _secure_read_impl,
 )
 
 
@@ -856,7 +844,6 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "AbsorbReceipt",
     "AbsorbResult",
     "AdminStateCache",
-    "Audit",
     "ChainConflict",
     "Entry",
     "LeafReuseAttempt",
@@ -900,11 +887,6 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     # Bilateral lifecycle (JWE + btn unified read)
     "offer",
     "read",
-    "read_all",
-    "read_as_recipient",
-    "read_as_recipient_flat",
-    "read_raw",
-    "secure_read",
     "sealing",
     # context
     "scope",

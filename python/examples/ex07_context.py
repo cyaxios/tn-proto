@@ -78,18 +78,21 @@ def main() -> int:
 
         # Group entries by request_id to prove each request's context
         # stayed with IT, not bleeding into other concurrent requests.
-        # tn.read_raw yields {envelope, plaintext, valid} dicts so we can
-        # pull request_id straight off the envelope. The four requests
-        # were emitted in the prior run before flush_and_close, so we need
-        # all_runs=True to surface them after re-init (default-strict
-        # run_id filter would otherwise drop them — FINDINGS #4 / #12).
+        # tn.read yields Entry objects; request_id is a user kwarg so it
+        # lives in e.fields. The four requests were emitted in the prior
+        # run before flush_and_close, so we need all_runs=True to
+        # surface them after re-init (default-strict run_id filter would
+        # otherwise drop them).
         by_req: dict[str, list[dict]] = {}
-        for e in tn.read_raw(log_path, cfg, all_runs=True):
-            env = e["envelope"]
-            if env.get("event_type", "").startswith("tn."):
+        for entry in tn.read(log=log_path, all_runs=True):
+            if entry.event_type.startswith("tn."):
                 continue  # skip bootstrap attestations
-            rid = env.get("request_id", "?")
-            by_req.setdefault(rid, []).append(env)
+            rid = entry.fields.get("request_id", "?")
+            by_req.setdefault(rid, []).append({
+                "event_type": entry.event_type,
+                "sequence": entry.sequence,
+                **entry.fields,
+            })
 
         for rid, entries in sorted(by_req.items()):
             types = [e["event_type"] for e in entries]

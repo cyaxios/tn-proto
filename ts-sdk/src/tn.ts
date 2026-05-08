@@ -17,16 +17,10 @@ import {
   setSigning as _runtimeSetSigning,
 } from "./runtime/node_runtime.js";
 import type { EmitReceipt } from "./core/results.js";
-import { watch, type WatchOptions } from "./watch.js";
-import { asRowHash, type Entry, type LogLevel } from "./core/types.js";
+import { watch as _watchFlat, type WatchOptions as _WatchFlatOptions } from "./watch.js";
+import { asRowHash, type LogLevel } from "./core/types.js";
 import type { ReadEntry } from "./core/read_shape.js";
-import {
-  flattenRawEntry,
-  invalidReasonsFromValid,
-  attachInstructions,
-} from "./core/read_shape.js";
-import type { SecureEntry } from "./core/read_shape.js";
-import { VerificationError } from "./core/errors.js";
+import { Entry, VerifyError } from "./Entry.js";
 import { AdminNamespace } from "./admin/index.js";
 import { PkgNamespace } from "./pkg/index.js";
 import { VaultNamespace } from "./vault/index.js";
@@ -42,8 +36,8 @@ import { readAsRecipient } from "./read_as_recipient.js";
 // ---------------------------------------------------------------------------
 export type { LogLevel } from "./core/types.js";
 export type { EmitReceipt } from "./core/results.js";
-export type { SecureEntry } from "./core/read_shape.js";
-export type { WatchOptions, WatchSince } from "./watch.js";
+export { Entry, VerifyError } from "./Entry.js";
+export type { WatchSince } from "./watch.js";
 
 // ---------------------------------------------------------------------------
 // Module-level log-level state — own copy for Tn (does not share with
@@ -178,6 +172,13 @@ function _emitAutoMintNotice(defaultYaml: string, projectDir: string): void {
   _autoMintNoticePrinted = true;
 }
 
+function _checkVerifyKwarg(v: unknown): asserts v is VerifyMode {
+  if (v === false || v === true || v === "skip" || v === "raise") return;
+  throw new Error(
+    `verify must be false | true | 'skip' | 'raise'; got ${JSON.stringify(v)}`,
+  );
+}
+
 /** Sentinel receipt returned when a level-filtered emit short-circuits. */
 function _nullReceipt(): EmitReceipt {
   return {
@@ -195,23 +196,50 @@ export interface TnInitOptions {
   stdout?: boolean;
 }
 
+/** Verify mode for `Tn.read` / `Tn.watch`.
+ *
+ * - `false` (default): no integrity check.
+ * - `true` or `"raise"`: raise `VerifyError` on the first failure.
+ * - `"skip"`: drop validation-failed rows AND emit a
+ *   `tn.read.tampered_row_skipped` admin event. Parse-level errors
+ *   (malformed JSON, structurally broken envelopes) still throw.
+ */
+export type VerifyMode = false | true | "skip" | "raise";
+
 export interface ReadOptions {
-  verify?: boolean;
+  /** Predicate applied per entry; rejected entries are skipped. */
+  where?: (entry: Entry | Record<string, unknown>) => boolean;
+  /** Integrity-check policy. Default: `false`. */
+  verify?: VerifyMode;
+  /** Yield the on-disk envelope dict instead of an `Entry`. */
   raw?: boolean;
-  logPath?: string;
-  allRuns?: boolean;
-  where?: (entry: Record<string, unknown>) => boolean;
-}
-
-export interface ReadAsRecipientOptions {
-  logPath: string;
+  /** Override the log path. Defaults to the bound ceremony's log. */
+  log?: string;
+  /** Read using a foreign-publisher kit from this keystore directory. */
+  asRecipient?: string;
+  /** Group whose plaintext to surface (only with `asRecipient`). Default: `"default"`. */
   group?: string;
-  verifySignatures?: boolean;
+  /** Scan across all runs in the file. Default: false (current run only). */
+  allRuns?: boolean;
 }
 
-export interface SecureReadOptions {
-  onInvalid?: "skip" | "raise" | "forensic";
-  logPath?: string;
+export interface WatchOptions {
+  /** Predicate applied per entry; rejected entries are skipped. */
+  where?: (entry: Entry | Record<string, unknown>) => boolean;
+  /** Integrity-check policy. Default: `false`. */
+  verify?: VerifyMode;
+  /** Yield the on-disk envelope dict instead of an `Entry`. */
+  raw?: boolean;
+  /** Override the log path. Defaults to the bound ceremony's log. */
+  log?: string;
+  /** Recipient mode is not yet supported on `Tn.watch`. */
+  asRecipient?: string;
+  /** Group whose plaintext to surface. Default: `"default"`. */
+  group?: string;
+  /** Starting point. Default: `"now"`. */
+  since?: "start" | "now" | number | string;
+  /** Polling fallback interval. Default: 300ms. */
+  pollIntervalMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -770,63 +798,60 @@ export class Tn {
   }
 
   // -------------------------------------------------------------------------
-  // Read verbs
+  // Read verbs (0.4.0a1 — single thin verb)
   // -------------------------------------------------------------------------
 
   /**
-   * Iterate decoded log entries. Default shape: flat decrypted dict per entry
-   * (matching the 2026-04-25 read-ergonomics spec §1.1).
+   * Iterate log entries. Default mode yields `Entry` instances. Pass
+   * `raw: true` to yield the on-disk envelope dict (group-keyed
+   * ciphertext blocks intact), useful for forensics and chain auditors.
    *
-   * Mirrors `TNClient.read()` behavior including:
-   * - `allRuns` filter (default: current run only)
-   * - `where` predicate
-   * - foreign-log auto-routing via `readAsRecipient` (FINDINGS S6.2)
-   * - `raw: true` for the `{envelope, plaintext, valid}` shape
-   * - `verify: true` adds a `_valid` block to the flat shape
+   * Mirrors Python `tn.read`. Kwargs:
+   * - `where`        — predicate `(Entry) -> bool`; non-matching skipped.
+   * - `verify`       — `false` (default), `true` / `"raise"` (throw
+   *                    `VerifyError` on first failure), `"skip"` (drop
+   *                    validation failures and emit a
+   *                    `tn.read.tampered_row_skipped` admin event).
+   * - `raw`          — yield envelope dict instead of `Entry`.
+   * - `log`          — alternate log path.
+   * - `asRecipient`  — keystore directory to decrypt with (foreign-log mode).
+   * - `group`        — group plaintext to surface (with `asRecipient`).
+   * - `allRuns`      — scan across all runs.
    */
-  read(opts?: ReadOptions): Iterable<Record<string, unknown> | ReadEntry> {
+  *read(opts: ReadOptions = {}): IterableIterator<Entry | Record<string, unknown>> {
     // Bug 3 fix: streams whose profile has no replay surface (e.g.
     // ``telemetry`` writes only to stdout) yield an empty iterator
-    // rather than going to the reader. Mirrors Python's
-    // ``TN.read``: "this stream has nothing to replay" is a
-    // different shape, not an error.
-    if (!this._hasReplaySurface()) {
-      return (function* () {
-        // intentionally empty
-      })();
-    }
-    const verify = opts?.verify ?? false;
-    const raw = opts?.raw ?? false;
-    const logPath = opts?.logPath;
-    const allRuns = opts?.allRuns ?? false;
-    const where = opts?.where;
+    // rather than going to the reader.
+    if (!this._hasReplaySurface()) return;
+
+    const verify = opts.verify ?? false;
+    _checkVerifyKwarg(verify);
+    const raw = opts.raw ?? false;
+    const logPath = opts.log;
+    const asRecipient = opts.asRecipient;
+    const group = opts.group ?? "default";
+    const allRuns = opts.allRuns ?? false;
+    const where = opts.where;
     const rt = this._rt;
     const runId = this._runId;
 
-    const inCurrentRun = (entry: Record<string, unknown>): boolean => {
-      const rid = entry["run_id"];
-      return typeof rid === "string" && rid === runId;
-    };
-
-    // FINDINGS S6.2 — auto-route foreign logs through readAsRecipient.
-    if (logPath !== undefined && _isForeignLog(logPath, this.did)) {
-      const keystorePath = this._rt.config.keystorePath;
-      const foreign = readAsRecipient(logPath, keystorePath, {
-        group: "default",
-        verifySignatures: verify,
+    // Choose the source of {envelope, plaintext, valid} triples.
+    let triples: Iterable<ReadEntry>;
+    let usingRecipient = false;
+    if (
+      asRecipient !== undefined ||
+      (logPath !== undefined && _isForeignLog(logPath, this.did))
+    ) {
+      const keystorePath = asRecipient ?? this._rt.config.keystorePath;
+      const path = logPath ?? this._rt.config.logPath;
+      usingRecipient = true;
+      const foreignIter = readAsRecipient(path, keystorePath, {
+        group,
+        verifySignatures: verify !== false,
       });
-      if (raw) {
-        return (function* () {
-          for (const entry of foreign) {
-            const r = entry as unknown as ReadEntry;
-            if (where && !where(r as unknown as Record<string, unknown>)) continue;
-            yield r;
-          }
-        })();
-      }
-      return (function* () {
-        for (const entry of foreign) {
-          const rEntry = {
+      triples = (function* () {
+        for (const entry of foreignIter) {
+          const rEntry: ReadEntry = {
             envelope: entry.envelope,
             plaintext: entry.plaintext,
             valid: {
@@ -834,152 +859,162 @@ export class Tn {
               rowHash: true,
               chain: entry.valid.chain,
             },
-          } as unknown as ReadEntry;
-          const flat = flattenRawEntry(rEntry, { includeValid: verify });
-          if (where && !where(flat)) continue;
-          yield flat;
+          };
+          yield rEntry;
         }
       })();
+    } else {
+      triples = rt.read(logPath);
     }
 
-    if (raw) {
-      return (function* () {
-        for (const r of rt.read(logPath)) {
-          if (!allRuns) {
-            const pt = (r as { plaintext?: Record<string, Record<string, unknown>> }).plaintext ?? {};
-            let matchedRun = false;
-            for (const grp of Object.values(pt)) {
-              if (grp && typeof grp === "object" && "run_id" in grp) {
-                matchedRun = grp["run_id"] === runId;
-                break;
-              }
-            }
-            if (!matchedRun) continue;
-          }
-          if (where && !where(r as unknown as Record<string, unknown>)) continue;
-          yield r;
+    // Helper: per-row run-id filter (only applies to local reads).
+    const matchesRun = (r: ReadEntry): boolean => {
+      if (allRuns) return true;
+      const pt = r.plaintext ?? {};
+      const env = r.envelope;
+      // run_id is plaintext-payload; check every group's body.
+      for (const body of Object.values(pt)) {
+        if (body && typeof body === "object" && "run_id" in body) {
+          return body["run_id"] === runId;
         }
-      })();
-    }
-
-    return (function* () {
-      for (const r of rt.read(logPath)) {
-        const flat = flattenRawEntry(r, { includeValid: verify });
-        if (!allRuns && !inCurrentRun(flat)) continue;
-        if (where && !where(flat)) continue;
-        yield flat;
       }
-    })();
-  }
+      const envRid = env["run_id"];
+      return typeof envRid === "string" && envRid === runId;
+    };
 
-  /**
-   * Audit-grade alias: returns the `{envelope, plaintext, valid}` shape.
-   * Equivalent to `read({raw: true})`.
-   */
-  *readRaw(logPath?: string): Generator<ReadEntry, void, void> {
-    yield* this._rt.read(logPath);
-  }
+    // Iterator wrapper that handles parser-level errors per `verify` policy.
+    const safeIter = (function* (this: Tn): IterableIterator<ReadEntry> {
+      const it = (triples as Iterable<ReadEntry>)[Symbol.iterator]();
+      while (true) {
+        let next: IteratorResult<ReadEntry>;
+        try {
+          next = it.next();
+        } catch (exc) {
+          if (verify === "skip") {
+            try {
+              this._emitTamperedRowSkipped(
+                { event_type: "<parse-error>" },
+                [`parse: ${(exc as Error).name}: ${(exc as Error).message}`],
+              );
+            } catch {
+              // best-effort
+            }
+            continue;
+          }
+          if (verify === true || verify === "raise") {
+            throw new VerifyError(
+              0,
+              "<parse-error>",
+              [`parse: ${(exc as Error).name}: ${(exc as Error).message}`],
+            );
+          }
+          throw exc;
+        }
+        if (next.done) return;
+        yield next.value;
+      }
+    }).call(this);
 
-  /**
-   * Read a foreign publisher's log file using a kit from the local keystore.
-   * Useful after absorbing a `kit_bundle` from a foreign publisher.
-   */
-  *readAsRecipient(opts: ReadAsRecipientOptions): Generator<Record<string, unknown>, void, void> {
-    const entries = readAsRecipient(opts.logPath, this._rt.config.keystorePath, {
-      group: opts.group ?? "default",
-      verifySignatures: opts.verifySignatures ?? true,
-    });
-    for (const entry of entries) {
-      const rEntry = {
-        envelope: entry.envelope,
-        plaintext: entry.plaintext,
-        valid: {
-          signature: entry.valid.signature,
-          rowHash: true,
-          chain: entry.valid.chain,
-        },
-      } as unknown as ReadEntry;
-      yield flattenRawEntry(rEntry, { includeValid: false });
-    }
-  }
+    for (const r of safeIter) {
+      // run_id filter — only on local reads. Recipient-mode reads cross
+      // publishers, so filtering by your local run_id makes no sense.
+      if (!usingRecipient && !matchesRun(r)) continue;
 
-  /**
-   * Iterate verified log entries — fail-closed on any (sig, row_hash, chain)
-   * failure. Mirrors `TNClient.secureRead()`.
-   *
-   * `onInvalid` modes:
-   * * `"skip"` (default) — silently drop non-verifying entries.
-   * * `"raise"` — throw `VerificationError` on the first failure.
-   * * `"forensic"` — yield the entry with `_valid` and `_invalid_reasons` exposed.
-   */
-  *secureRead(opts?: SecureReadOptions): Generator<SecureEntry, void, void> {
-    const onInvalid = opts?.onInvalid ?? "skip";
-    if (onInvalid !== "skip" && onInvalid !== "raise" && onInvalid !== "forensic") {
-      throw new Error(
-        `secureRead: unknown onInvalid=${JSON.stringify(onInvalid)}; ` +
-          `expected 'skip' | 'raise' | 'forensic'`,
-      );
-    }
-    const logPath = opts?.logPath;
-    for (const r of this._rt.read(logPath)) {
       const v = r.valid;
       const allValid = Boolean(v.signature) && Boolean(v.rowHash) && Boolean(v.chain);
-      if (!allValid) {
-        const reasons = invalidReasonsFromValid(v);
-        const env = r.envelope;
-        if (onInvalid === "raise") {
-          throw new VerificationError(env, reasons);
+      if (!allValid && verify !== false) {
+        const reasons: string[] = [];
+        if (!v.signature) reasons.push("signature");
+        if (!v.rowHash) reasons.push("row_hash");
+        if (!v.chain) reasons.push("chain");
+        if (verify === true || verify === "raise") {
+          throw new VerifyError(
+            Number(r.envelope["sequence"] ?? 0),
+            String(r.envelope["event_type"] ?? ""),
+            reasons,
+          );
         }
-        if (onInvalid === "skip") {
-          // Avoid looping our own tampered-row event back through secureRead.
-          if (String(env["event_type"] ?? "") === "tn.read.tampered_row_skipped") {
+        if (verify === "skip") {
+          // Avoid looping our own tampered-row event back through.
+          if (String(r.envelope["event_type"] ?? "") === "tn.read.tampered_row_skipped") {
             continue;
           }
           try {
-            this._emitTamperedRowSkipped(env, reasons);
+            this._emitTamperedRowSkipped(r.envelope, reasons);
           } catch {
-            // Best-effort.
+            // best-effort
           }
           continue;
         }
-        // forensic — yield with augmentation.
-        const flat = flattenRawEntry(r, { includeValid: true }) as SecureEntry;
-        flat["_invalid_reasons"] = [...new Set(reasons)].sort();
-        attachInstructions(flat, r);
-        yield flat;
+      }
+
+      if (raw) {
+        const env = r.envelope;
+        if (where && !where(env)) continue;
+        yield env;
         continue;
       }
-      const flat = flattenRawEntry(r, { includeValid: false }) as SecureEntry;
-      attachInstructions(flat, r);
-      yield flat;
+
+      let entry: Entry;
+      try {
+        entry = Entry.fromRaw(r);
+      } catch {
+        // malformed entry, skip rather than abort
+        continue;
+      }
+      if (where && !where(entry)) continue;
+      yield entry;
     }
   }
 
   /**
-   * Async-iterable over live log appends. Opens the log, yields existing
-   * entries from the chosen starting point, then keeps watching for new bytes.
+   * Tail the log live, yielding entries as they arrive. Async generator.
    *
-   * Tracks byte offset so we never re-read prior bytes on append. Survives
-   * rotation (inode change) and emits a tamper-class admin event on
-   * unexpected truncation.
+   * Same options as `Tn.read` plus:
+   * - `since`        — `"now"` (default) | `"start"` | sequence number | ISO timestamp
+   * - `pollIntervalMs` — fallback poll interval (default 300ms)
    *
-   * `since` controls the starting point:
-   * - `"now"` (default) — yields only new appends after `watch()` is called.
-   * - `"start"` — replays from the beginning of the current log file.
-   * - A sequence number — resumes at the first envelope with sequence >= N.
-   * - An ISO-8601 string — resumes at the first envelope with timestamp >= S.
-   *
-   * Break out of the `for await` loop to stop watching. The underlying
-   * chokidar watcher is closed automatically when the generator is done.
+   * Recipient-mode watch (`asRecipient`) is not yet supported. Use
+   * `Tn.read({asRecipient})` for one-shot foreign-log reads.
    */
-  watch(opts?: WatchOptions): AsyncIterable<Entry> {
-    // Bug 3 fix: empty async-iterable for no-replay-surface streams.
-    if (!this._hasReplaySurface()) {
-      return (async function* () {
-        // intentionally empty
-      })();
+  async *watch(opts: WatchOptions = {}): AsyncIterableIterator<Entry | Record<string, unknown>> {
+    if (!this._hasReplaySurface()) return;
+
+    if (opts.asRecipient !== undefined) {
+      throw new Error(
+        "Tn.watch with asRecipient is not yet supported. Use Tn.read for foreign-keystore reads.",
+      );
     }
-    return watch(this._rt, opts ?? {});
+
+    const verify = opts.verify ?? false;
+    _checkVerifyKwarg(verify);
+    const raw = opts.raw ?? false;
+    const where = opts.where;
+
+    const flatOpts: _WatchFlatOptions = {};
+    if (opts.since !== undefined) flatOpts.since = opts.since;
+    if (opts.log !== undefined) flatOpts.logPath = opts.log;
+    if (opts.pollIntervalMs !== undefined) flatOpts.pollIntervalMs = opts.pollIntervalMs;
+    // _watchFlat does its own sig check when `verify` is truthy. We
+    // currently best-effort verify on watch (Python parity — there's no
+    // raw-triples access post-flatten on this path).
+    flatOpts.verify = verify !== false;
+
+    for await (const flat of _watchFlat(this._rt, flatOpts)) {
+      if (raw) {
+        if (where && !where(flat)) continue;
+        yield flat;
+        continue;
+      }
+      let entry: Entry;
+      try {
+        entry = Entry.fromFlat(flat);
+      } catch {
+        continue;
+      }
+      if (where && !where(entry)) continue;
+      yield entry;
+    }
   }
 
   // -------------------------------------------------------------------------

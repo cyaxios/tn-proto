@@ -29,12 +29,12 @@ def test_vault_link_emits_event(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e["event_type"] == "tn.vault.linked"]
+    events = [e for e in tn.read() if e.event_type == "tn.vault.linked"]
     assert len(events) == 1, f"expected 1 link event, got {len(events)}"
     e = events[0]
-    assert e["vault_did"] == "did:web:tn-proto.org"
-    assert e["project_id"] == "proj_test"
-    assert e["linked_at"]  # non-empty ISO 8601
+    assert e.fields["vault_did"] == "did:web:tn-proto.org"
+    assert e.fields["project_id"] == "proj_test"
+    assert e.fields["linked_at"]  # non-empty ISO 8601
 
 
 def test_vault_unlink_emits_event_with_reason(tmp_path):
@@ -45,9 +45,9 @@ def test_vault_unlink_emits_event_with_reason(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e["event_type"] == "tn.vault.unlinked"]
+    events = [e for e in tn.read() if e.event_type == "tn.vault.unlinked"]
     assert len(events) == 1
-    assert events[0]["reason"] == "user_request"
+    assert events[0].fields["reason"] == "user_request"
 
 
 def test_vault_unlink_without_reason(tmp_path):
@@ -58,9 +58,9 @@ def test_vault_unlink_without_reason(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e["event_type"] == "tn.vault.unlinked"]
+    events = [e for e in tn.read() if e.event_type == "tn.vault.unlinked"]
     assert len(events) == 1
-    assert events[0].get("reason") is None
+    assert events[0].fields.get("reason") is None
 
 
 def test_vault_link_is_idempotent(tmp_path):
@@ -71,7 +71,7 @@ def test_vault_link_is_idempotent(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e["event_type"] == "tn.vault.linked"]
+    events = [e for e in tn.read() if e.event_type == "tn.vault.linked"]
     assert len(events) == 1, f"vault_link should be idempotent; got {len(events)} events"
 
 
@@ -84,7 +84,7 @@ def test_vault_link_to_different_project_emits_again(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e["event_type"] == "tn.vault.linked"]
+    events = [e for e in tn.read() if e.event_type == "tn.vault.linked"]
     assert len(events) == 2
 
 
@@ -98,5 +98,5 @@ def test_vault_link_after_unlink_emits_again(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e["event_type"] == "tn.vault.linked"]
+    events = [e for e in tn.read() if e.event_type == "tn.vault.linked"]
     assert len(events) == 2

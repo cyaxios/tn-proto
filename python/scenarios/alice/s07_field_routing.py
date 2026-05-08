@@ -8,6 +8,7 @@ which groups appear in plaintext.
 from __future__ import annotations
 
 import tn
+from tn._read_impl import _read_raw_inner
 from scenarios._harness import Scenario, ScenarioContext
 
 
@@ -42,7 +43,7 @@ class AliceFieldRouting(Scenario):
 
         tn.init(ctx.yaml_path, log_path=ctx.log_path, cipher="jwe")
         cfg = tn.current_config()
-        entries = list(tn.read(ctx.log_path, cfg, raw=True))
+        entries = list(_read_raw_inner(ctx.log_path, cfg))
 
         groups_seen: set[str] = set()
         # Per-group round-trip: each routed field must decrypt from its

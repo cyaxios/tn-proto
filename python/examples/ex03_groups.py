@@ -13,8 +13,12 @@ What this shows
   - `tn.ensure_group("pii", fields=[...])` adds a group after init.
   - Logging a field routed to a group encrypts it under that group's
     key. Unrouted fields go to `default`.
-  - A partner who only holds the `default` reader kit sees the envelope
-    and `default` plaintext but the `pii`/`internal` groups stay opaque.
+  - As publisher: `tn.read()` decrypts every group the runtime holds
+    keys for and merges the plaintext into ``Entry.fields``.
+  - As partner (only the `default` kit): `tn.read(log=foreign_log)`
+    decrypts what they can and surfaces the rest under
+    ``Entry.hidden_groups``. The on-disk ciphertext bytes for the
+    opaque groups are visible via ``tn.read(log=..., raw=True)``.
 
 Run it
 ------
@@ -69,14 +73,29 @@ def main() -> int:
         log_path = ws / ".tn" / "logs" / "tn.ndjson"
         tn.flush_and_close()
 
-        # 4) Read back as PUBLISHER (all groups decrypt).
+        # 4) Read back as PUBLISHER (all groups decrypt). Default
+        #    tn.read() yields Entry instances; ``e.fields`` carries
+        #    the merged plaintext from every group the runtime holds
+        #    keys for.
         tn.init(yaml_path, cipher="btn")
         print("\n--- as publisher (hold every group's keys) ---")
-        for raw in tn.read_raw():
-            if raw["envelope"].get("event_type", "").startswith("tn."):
+        for e in tn.read():
+            if e.event_type.startswith("tn."):
                 continue
-            for gname, pt in sorted(raw["plaintext"].items()):
-                print(f"  {gname:8}: {pt}")
+            print(f"  event_type: {e.event_type}")
+            print(f"  fields:     {e.fields}")
+            print(f"  hidden:     {e.hidden_groups}  (none — we hold every kit)")
+
+        #     For the audit/forensic shape, raw=True yields the on-disk
+        #     envelope dict with each group's ciphertext block intact.
+        print("\n--- audit shape via raw=True (group ciphertext blocks) ---")
+        for env in tn.read(raw=True):
+            if str(env.get("event_type", "")).startswith("tn."):
+                continue
+            for gname in ("default", "pii", "internal"):
+                if gname in env:
+                    ct_len = len(env[gname]["ciphertext"])
+                    print(f"  {gname:8}: <{ct_len}-byte ciphertext blob>")
         tn.flush_and_close()
 
         # 5) Read back as a PARTNER who only holds the `default` kit.
@@ -110,13 +129,25 @@ def main() -> int:
         tn.init(partner_yaml, cipher="btn")
 
         print("\n--- as partner (only the `default` kit) ---")
-        for raw in tn.read_raw(log_path):
-            env = raw["envelope"]
-            if env.get("event_type", "").startswith("tn."):
+        # tn.read(log=foreign_log) walks the publisher's log under the
+        # partner's runtime. Groups the partner can't decrypt land in
+        # ``Entry.hidden_groups``; everything decryptable merges into
+        # ``Entry.fields``.
+        for e in tn.read(log=log_path):
+            if e.event_type.startswith("tn."):
+                continue
+            print(f"  event_type:    {e.event_type}")
+            print(f"  fields:        {e.fields}  (decrypted from default)")
+            print(f"  hidden_groups: {e.hidden_groups}  (opaque without the kit)")
+
+        # Forensic shape: the ciphertext bytes for the hidden groups
+        # are still visible on disk. The partner can see they exist
+        # and how big they are — they just can't decrypt them.
+        print("\n--- partner sees opaque ciphertext blobs (raw=True) ---")
+        for env in tn.read(log=log_path, raw=True):
+            if str(env.get("event_type", "")).startswith("tn."):
                 continue
             print(f"  event_type: {env['event_type']}")
-            default_plain = raw["plaintext"].get("default", {})
-            print(f"  default (decrypted): {default_plain}")
             for g in ("pii", "internal"):
                 if g in env:
                     ct_len = len(env[g]["ciphertext"])

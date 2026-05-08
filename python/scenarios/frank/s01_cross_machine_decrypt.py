@@ -25,6 +25,7 @@ from __future__ import annotations
 import shutil
 
 import tn
+from tn._read_impl import _read_raw_inner
 from scenarios._harness import Scenario, ScenarioContext
 from tn import wallet as _wallet
 from tn.identity import Identity
@@ -143,7 +144,7 @@ class FrankCrossMachineDecrypt(Scenario):
         tn.init(laptop_b_dir / "tn.yaml", log_path=b_log, cipher="jwe")
         cfg_b = tn.current_config()
 
-        entries = list(tn.read(b_log, cfg_b, raw=True))
+        entries = list(_read_raw_inner(b_log, cfg_b))
         ctx.record("entries_read_on_b", len(entries))
         ctx.assert_invariant(
             "entry_count_matches",
