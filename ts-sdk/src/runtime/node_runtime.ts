@@ -427,7 +427,7 @@ export class NodeRuntime {
       const seenAddresses = new Set<string>();
       for (const h of this.handlers) {
         if (!h.accepts(envelope)) continue;
-        let addr: string | null = null;
+        let addr: string | null;
         try {
           addr = h.resolved_address?.() ?? null;
         } catch {
