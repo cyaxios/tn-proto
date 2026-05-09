@@ -1,12 +1,14 @@
 """Tests for tn._autoinit — discovery chain, loud notice, strict mode.
 
 Coverage:
-  * Step 5 (auto-create) fires when no env var, no ./tn.yaml, no
-    $TN_HOME yaml exist; loud notice prints once; subsequent emits
-    reuse the same runtime.
+  * Step 6 (auto-create) fires when no env var, no ./tn.yaml, no
+    ./.tn/default/tn.yaml, no $TN_HOME yaml exist; loud notice prints
+    once; subsequent emits reuse the same runtime. New ceremonies are
+    minted at ``./.tn/default/tn.yaml`` (the multi-ceremony layout).
   * Step 2 ($TN_YAML) loads an existing ceremony; no notice.
   * Step 3 (./tn.yaml) loads an existing ceremony; no notice.
-  * Step 4 ($TN_HOME yaml) loads an existing ceremony; no notice.
+  * Step 4 (./.tn/default/tn.yaml) loads an existing ceremony; no notice.
+  * Step 5 ($TN_HOME yaml) loads an existing ceremony; no notice.
   * Strict mode (TN_STRICT=1 env var or tn.set_strict(True)) raises the
     standard "tn.init must be called" error and skips auto-init.
   * The loud notice fires exactly once per process even across multiple
@@ -56,7 +58,8 @@ def _reset_runtime_and_autoinit_state(monkeypatch):
 
 
 def test_autoinit_creates_fresh_ceremony_when_nothing_found(tmp_path, monkeypatch, capsys):
-    """No env var, no cwd yaml, no $TN_HOME yaml → step 5 auto-creates."""
+    """No env var, no cwd yaml, no ./.tn/default/, no $TN_HOME yaml →
+    step 6 auto-creates at ./.tn/default/tn.yaml."""
     cwd = tmp_path / "project"
     cwd.mkdir()
     home = tmp_path / "tnhome"
@@ -65,19 +68,24 @@ def test_autoinit_creates_fresh_ceremony_when_nothing_found(tmp_path, monkeypatc
 
     # Pre-condition: nothing on disk.
     assert not (cwd / "tn.yaml").exists()
+    assert not (cwd / ".tn" / "default" / "tn.yaml").exists()
     assert not (home / "tn.yaml").exists()
 
     tn.info("evt.first", k=1)
     # tn.info returns None (REPL-friendly); verify init worked via state.
     assert tn._dispatch_rt is not None
 
-    # The yaml should now exist at $TN_HOME/tn.yaml.
-    assert (home / "tn.yaml").exists()
+    # The yaml should now exist at ./.tn/default/tn.yaml (multi-ceremony layout).
+    minted = cwd / ".tn" / "default" / "tn.yaml"
+    assert minted.exists()
+    # Legacy locations are NOT touched on a fresh project.
+    assert not (cwd / "tn.yaml").exists()
+    assert not (home / "tn.yaml").exists()
 
     # Loud banner went to stderr.
     captured = capsys.readouterr()
     assert "TN: A NEW CEREMONY HAS BEEN CREATED" in captured.err
-    assert str(home / "tn.yaml") in captured.err
+    assert str(minted) in captured.err
 
 
 def test_autoinit_notice_prints_once_per_process(tmp_path, monkeypatch, capsys):

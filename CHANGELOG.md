@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0a2] - 2026-05-08
+
+Cross-language dirt-easy lifecycle. Same release in Python (`tn-protocol`
+0.4.0a2) and TS (`@tnproto/sdk` 0.4.0-alpha.2).
+
+### Lifecycle UX
+
+- **`tn.absorb('bundle.tnpkg')` now bootstraps a runtime when nothing is
+  bound yet.** For self-contained bundle kinds (`project_seed`,
+  `identity_seed`) the absorb writes the layout to disk *and* binds the
+  runtime to the freshly-absorbed `./tn.yaml`. The user can immediately
+  call `tn.info(...)` / `tn.read()` without a separate `tn.init()` step.
+- **`tn.init()` no-args discovery chain expanded** to walk
+  `$TN_YAML` → `./tn.yaml` → `./.tn/default/tn.yaml` → `~/.tn/tn.yaml`,
+  then mint a fresh `.tn/default/` ceremony if nothing is found.
+- **Top-level `tn.absorb` / `tn.export` aliases** (Python) and
+  **`Tn.absorb(source)` static factory** (TS) returning a usable Tn
+  bound to the absorbed dir.
+
+### Cross-language interop
+
+- **`project_seed` and `identity_seed` absorb** is wired up in both
+  languages with shared manifest-kind handlers. Closes the gap where the
+  deployed dashboard at `https://vault.tn-proto.org` could mint these
+  bundles but neither SDK could install them.
+
+### Type surface
+
+- `tn.absorb(source)` narrows to `AbsorbReceipt`; legacy
+  `tn.absorb(cfg, source)` narrows to `AbsorbResult` (Python @overload).
+- `tn.read()` narrows to `Iterator[Entry]`; `tn.read(raw=True)` narrows
+  to `Iterator[dict[str, Any]]` (Python @overload).
+- TS: `Tn.absorb()` returns `Promise<Tn>` instead of a receipt-or-Tn
+  union.
+
+### Cleanup
+
+- Drop dead `_absorb_offer` / `_absorb_enrolment` / `_extract_peer_did`
+  legacy compat helpers (no in-tree importers).
+- Correct `_emit_via` / `_emit_with_splice` annotation from
+  `-> dict[str, Any]` to `-> None` (stale since the dispatch refactor).
+- Widen `_open_zip` / `_read_manifest` `source:` to also accept `str`.
+
 ## [0.3.0a3] - 2026-05-05
 
 Dispatch refactor + stdout cosmetic cleanup. Requires `tn-core` 0.2.0a2.

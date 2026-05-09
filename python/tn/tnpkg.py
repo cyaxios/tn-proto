@@ -253,7 +253,7 @@ def _write_tnpkg(
     return out_path
 
 
-def _open_zip(source: Path | bytes | bytearray) -> zipfile.ZipFile:
+def _open_zip(source: Path | str | bytes | bytearray) -> zipfile.ZipFile:
     """Open a `.tnpkg` zip from a path or in-memory bytes. Raises
     ValueError with a friendly message on a non-zip input.
     """
@@ -271,7 +271,7 @@ def _open_zip(source: Path | bytes | bytearray) -> zipfile.ZipFile:
         raise ValueError(f"absorb: {p} is not a valid `.tnpkg` zip: {exc}") from exc
 
 
-def _read_manifest(source: Path | bytes | bytearray) -> tuple[TnpkgManifest, dict[str, bytes]]:
+def _read_manifest(source: Path | str | bytes | bytearray) -> tuple[TnpkgManifest, dict[str, bytes]]:
     """Open a `.tnpkg` and return ``(manifest, body_files)``.
 
     ``body_files`` maps every non-manifest entry name to its raw bytes.

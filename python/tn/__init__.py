@@ -1,13 +1,28 @@
 """tn-protocol: TN protocol Python SDK.
 
+Lifecycle (the four-line dirt-easy summary):
+
+    1. tn.absorb('Agentic20.project.tnpkg')   # install layout from dashboard
+    2. tn.info('hello.world', who='alice')    # emit an attested entry
+    3. for e in tn.read(): print(e)           # iterate + decrypt
+    4. tn.flush_and_close()                   # drain handlers (optional)
+
+Step 1 is optional once a ceremony is on disk; ``tn.info`` will discover
+``./tn.yaml`` (legacy) or ``./.tn/default/tn.yaml`` (multi-ceremony) on
+first use. Step 4 is optional in short scripts but recommended in
+long-running processes.
+
 Public API:
     tn.init(yaml_path)          # load or create ceremony + open log file
+    tn.absorb(source)           # install a .tnpkg (alias for tn.pkg.absorb)
+    tn.export(...)              # produce a .tnpkg (alias for tn.pkg.export)
     tn.debug/info/warning/error # emit attested log entries
     tn.set_context(**kwargs)    # per-request context (PRD §13)
     tn.update_context / clear_context / get_context
     tn.read(log_path, cfg)      # iterate + decrypt entries (flat dicts;
                                 # raw=True for the {envelope, plaintext,
                                 # valid} audit shape)
+    tn.flush_and_close()        # drain handlers, release runtime
 
 Ciphers: "jwe" (pure-Python static-ECDH + AES-KW + AES-GCM) and "btn"
 (NNL subset-difference broadcast, via the Rust tn_core extension).
@@ -20,7 +35,18 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from . import _agents_policy, _autoinit, classifier, identity, sealing, vault_client, wallet
+from . import (
+    _agents_policy,
+    _autoinit,
+    admin,
+    classifier,
+    identity,
+    pkg,
+    sealing,
+    vault,
+    vault_client,
+    wallet,
+)
 from ._agents_policy import PolicyDocument, PolicyTemplate
 from ._autoinit import set_strict
 from ._dispatch import (  # should_use_rust re-exported for diagnostics
@@ -34,9 +60,6 @@ from .admin import (
     ensure_group,
     set_link_state,
 )
-from . import admin  # noqa: F401
-from . import pkg  # noqa: F401
-from . import vault  # noqa: F401
 from .admin.cache import (
     AdminStateCache,
     ChainConflict,
@@ -54,8 +77,10 @@ from .context import (
 )
 from .export import (
     IDENTITY_SEED_CEREMONY_PLACEHOLDER,
-    export as _raw_export,
     export_identity_seed,
+)
+from .export import (
+    export as _raw_export,
 )
 from .offer import offer
 from .reader import read_all as _raw_read_all
@@ -84,6 +109,7 @@ _surface = logging.getLogger("tn.surface")
 # trace. Path is printed to stderr at module import.
 import os as _os_for_surface
 import tempfile as _tempfile_for_surface
+
 _surface_log_path = (
     _os_for_surface.environ.get("TN_SURFACE_LOG")
     or str(_os_for_surface.path.join(
@@ -155,9 +181,10 @@ def _init_impl(
     same discovery chain that auto-init uses:
 
       1. ``$TN_YAML`` env var
-      2. ``./tn.yaml`` in the current working directory
-      3. ``$TN_HOME/tn.yaml`` (default ``~/.tn/tn.yaml``)
-      4. None of the above → mint a fresh ceremony at ``$TN_HOME``
+      2. ``./tn.yaml`` in the current working directory (legacy layout)
+      3. ``./.tn/default/tn.yaml`` (multi-ceremony layout)
+      4. ``$TN_HOME/tn.yaml`` (default ``~/.tn/tn.yaml``)
+      5. None of the above → mint a fresh ceremony at ``./.tn/default/``
 
     With an explicit path, that path is used verbatim and the discovery
     chain is skipped. ``TN_STRICT=1`` blocks the no-arg form (raises
@@ -531,7 +558,13 @@ def _maybe_autoinit_load_only() -> None:
 
 def _require_dispatch() -> DispatchRuntime:
     if _dispatch_rt is None:
-        raise RuntimeError("tn.init(yaml_path) must be called before tn.log")
+        raise RuntimeError(
+            "tn: no active runtime. Call one of:\n"
+            "  - tn.init()                            # discover or auto-create a ceremony\n"
+            "  - tn.init(yaml_path)                   # bind to an existing ceremony\n"
+            "  - tn.absorb('Agentic20.project.tnpkg') # install + bind in one call\n"
+            "Then retry."
+        )
     return _dispatch_rt
 
 
@@ -592,7 +625,7 @@ def _emit_via(
     event_type: str,
     fields: dict[str, Any],
     sign: bool | None,
-) -> dict[str, Any]:
+) -> None:
     """Build the merged-fields dict, splice tn.agents policy text if a
     template applies, then dispatch the emit through the supplied
     runtime.
@@ -611,7 +644,7 @@ def _emit_via(
     return rt.emit(level, event_type, merged, sign=sign)
 
 
-def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign: bool | None) -> dict[str, Any]:
+def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign: bool | None) -> None:
     """Module-level emit: routes through the singleton dispatch runtime.
 
     Used by the bare ``tn.info(...)`` / ``tn.log(...)`` API which is
@@ -679,17 +712,9 @@ def __getattr__(name: str):
 # the helpers (_emit_with_splice, _resolve_sign) still live in this
 # package init; emit.py imports them back when called.
 # --------------------------------------------------------------------------
-from .emit import debug, error, info, log, warning  # noqa: E402, F401
-
-# --------------------------------------------------------------------------
-# Lifecycle verbs — public API lives in tn.lifecycle, re-exported here.
-# The _impl bodies are private and used by lifecycle.py via the package init.
-# --------------------------------------------------------------------------
-from .lifecycle import (  # noqa: E402, F401
-    current_config,
-    flush_and_close,
-    session,
-    using_rust,
+from ._handle import (  # noqa: E402
+    TN,
+    MultiCeremonyEmitNotImplemented,
 )
 
 # --------------------------------------------------------------------------
@@ -698,7 +723,7 @@ from .lifecycle import (  # noqa: E402, F401
 # through to lifecycle.init for backwards compat). tn.use and tn.list
 # are new with the multi-ceremony work.
 # --------------------------------------------------------------------------
-from ._multi import (  # noqa: E402, F401
+from ._multi import (  # noqa: E402
     TNConfigConflict,
     TNCreateFailed,
     TNInvalidName,
@@ -706,20 +731,6 @@ from ._multi import (  # noqa: E402, F401
     list_ceremonies,
     use,
 )
-from ._handle import (  # noqa: E402, F401
-    TN,
-    MultiCeremonyEmitNotImplemented,
-)
-from ._registry import TNNotFound  # noqa: E402, F401
-
-# --------------------------------------------------------------------------
-# Read verbs — public API lives in tn.read.
-# --------------------------------------------------------------------------
-from .read import (  # noqa: E402, F401
-    read,
-    watch,
-)
-
 
 # Internal helpers from the legacy read-impl module that other parts of
 # the SDK still import. The user-facing read verbs (read/read_raw/...)
@@ -733,7 +744,27 @@ from ._read_impl import (  # noqa: F401, E402
     _read_raw_inner,
     _rotated_backup_paths,
 )
+from ._registry import TNNotFound  # noqa: E402
+from .emit import debug, error, info, log, warning  # noqa: E402
 
+# --------------------------------------------------------------------------
+# Lifecycle verbs — public API lives in tn.lifecycle, re-exported here.
+# The _impl bodies are private and used by lifecycle.py via the package init.
+# --------------------------------------------------------------------------
+from .lifecycle import (  # noqa: E402
+    current_config,
+    flush_and_close,
+    session,
+    using_rust,
+)
+
+# --------------------------------------------------------------------------
+# Read verbs — public API lives in tn.read.
+# --------------------------------------------------------------------------
+from .read import (  # noqa: E402
+    read,
+    watch,
+)
 
 
 def _flush_and_close_impl(*, timeout: float = 30.0) -> None:
@@ -785,7 +816,10 @@ def _current_config_impl():
     from . import logger as _lg
 
     if _lg._runtime is None:
-        raise RuntimeError("tn.init(yaml_path) must be called first")
+        raise RuntimeError(
+            "tn: no active runtime. Call tn.init() (or tn.absorb(<bundle>) "
+            "for a freshly-downloaded project_seed / identity_seed) first."
+        )
     cfg = _lg._runtime.cfg
     _surface.info(
         "tn.current_config() yaml=%s log_path=%s keystore=%s",
@@ -818,7 +852,10 @@ def _get_or_create_cache() -> AdminStateCache:
     return _cached_admin_state
 
 
-from ._pkg_impl import _absorb_impl, _export_impl  # noqa: F401, E402
+from ._pkg_impl import _absorb_impl, _export_impl  # noqa: E402
+
+absorb = _absorb_impl
+export = _export_impl
 
 
 def _refresh_admin_cache_if_present() -> None:
@@ -836,13 +873,14 @@ def _refresh_admin_cache_if_present() -> None:
 
 
 from ._pkg_impl import _bundle_for_recipient_impl  # noqa: F401, E402
+from ._session_impl import _Session, _session_impl, _SessionHandle  # noqa: F401, E402
 from ._vault_impl import _vault_link_impl, _vault_unlink_impl  # noqa: F401, E402
-from ._session_impl import _Session, _SessionHandle, _session_impl  # noqa: F401, E402
-
 
 __all__ = [  # noqa: RUF022 — intentional category grouping (see inline comments)
     "AbsorbReceipt",
     "AbsorbResult",
+    "absorb",
+    "export",
     "AdminStateCache",
     "ChainConflict",
     "Entry",
