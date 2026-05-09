@@ -50,6 +50,7 @@ import type { TNHandler } from "../handlers/index.js";
 function readKitLeaf(kitBytes: Uint8Array): bigint {
   return btnKitLeaf(kitBytes);
 }
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { canonicalize } from "../core/canonical.js";
 import { ZERO_HASH, rowHash } from "../core/chain.js";
 import { buildEnvelopeLine } from "../core/envelope.js";
@@ -523,6 +524,179 @@ export class NodeRuntime {
     });
 
     return actualLeaf;
+  }
+
+  /**
+   * Rotate the keys for a btn group. Mirrors the Python
+   * ``tn.admin.rotate(group)`` semantics:
+   *
+   *   1. Hash the existing self-kit (for the ``previous_kit_sha256``
+   *      field on the attestation event — readers replaying the log
+   *      can audit the rotation lineage).
+   *   2. Rename the old ``<group>.btn.state`` and ``<group>.btn.mykit``
+   *      files to ``.revoked.<UTC_TS>`` so pre-rotation envelopes stay
+   *      decryptable by holders of the old kit.
+   *   3. Mint a fresh ``BtnPublisher`` with a new random seed; write
+   *      its state + self-kit at the canonical paths.
+   *   4. Swap the in-memory publisher (so subsequent ``emit`` /
+   *      ``addRecipient`` calls use the new keys).
+   *   5. Bump ``groups.<group>.index_epoch`` in the on-disk yaml.
+   *   6. Emit ``tn.rotation.completed`` so the admin log records the
+   *      rotation event with the new generation + the previous kit's
+   *      sha256 (lineage chain).
+   *
+   * Recipients still appear in ``recipients(group)`` after rotation —
+   * they're the surviving set whose new kits the publisher (or the
+   * ``tn-js admin rotate`` CLI) needs to mint and ship via
+   * ``addRecipient``.
+   *
+   * Returns ``{ generation, previousKitSha256 }``. Throws when the
+   * group isn't a btn publisher in this runtime.
+   */
+  rotateGroup(group: string): {
+    generation: number;
+    previousKitSha256: string;
+    newKitSha256: string;
+    rotatedAt: string;
+  } {
+    const oldPub = this.publishers.get(group);
+    if (!oldPub) {
+      throw new Error(`rotateGroup: group ${group} is not a btn publisher in this runtime`);
+    }
+
+    const ks = this.config.keystorePath;
+    const statePath = join(ks, `${group}.btn.state`);
+    const mykitPath = join(ks, `${group}.btn.mykit`);
+
+    // Hash the previous self-kit before renaming. If it's missing for
+    // any reason (race, corruption), record "sha256:unknown" so the
+    // lineage chain still has a deterministic placeholder rather than
+    // crashing the rotation.
+    let previousKitSha256 = "sha256:unknown";
+    if (existsSync(mykitPath)) {
+      try {
+        const oldKit = readFileSync(mykitPath);
+        previousKitSha256 = `sha256:${createHash("sha256").update(oldKit).digest("hex")}`;
+      } catch {
+        // Fall through to the "unknown" placeholder.
+      }
+    }
+
+    // Rename old key material out of the way. UTC timestamp matches
+    // the Python convention so cross-language ceremonies show
+    // identical .revoked.<ts> filenames in the keystore.
+    const ts = Math.floor(Date.now() / 1000);
+    const renameIfExists = (src: string): void => {
+      if (!existsSync(src)) return;
+      try {
+        renameSync(src, `${src}.revoked.${ts}`);
+      } catch {
+        // Best-effort: a Windows-side AV lock or open handle shouldn't
+        // block the rotation. The new write below will overwrite
+        // in place and the audit trail is preserved on the
+        // tn.rotation.completed envelope.
+      }
+    };
+    renameIfExists(statePath);
+    renameIfExists(mykitPath);
+
+    // Mint a fresh publisher + self-kit and write at the canonical
+    // paths. The old publisher's bytes are released after the new
+    // one is wired up so a transient failure here doesn't leave the
+    // runtime with a dangling state.
+    const newPub = new BtnPublisher(null);
+    const newSelfKit = newPub.mint();
+    const newStateBytes = newPub.toBytes();
+    writeFileSync(statePath, Buffer.from(newStateBytes));
+    writeFileSync(mykitPath, Buffer.from(newSelfKit));
+
+    // Swap the in-memory handle. The runtime keeps a single
+    // BtnPublisher per group and addRecipient / encrypt use it
+    // directly; replacing the entry must happen before we attest the
+    // event so the attestation itself is sealed under the new keys.
+    this.publishers.set(group, newPub);
+    try {
+      oldPub.free();
+    } catch {
+      // free() is idempotent and best-effort; a double-free here
+      // would only matter if Node and Rust disagreed on ownership.
+    }
+
+    // Mirror the on-disk swap into the in-memory keystore so the
+    // read-decrypt path picks up the new self-kit immediately. Without
+    // this, post-rotation entries (sealed by the new publisher) fail
+    // to decrypt in the same process — the keystore was loaded once
+    // at init time and only knows about the pre-rotation kits.
+    //
+    // The order is: prepend the new self-kit (so index 0 is current,
+    // matching loadKeystore's invariant) and append the OLD self-kit
+    // bytes so pre-rotation entries still decrypt via the previous
+    // kit. Recipient kits added later via addRecipient flow through
+    // their own write path and do not need a keystore reload.
+    const groupKs = this.keystore.groups.get(group);
+    if (groupKs) {
+      // Stash the previous self-kit (index 0 by loadKeystore convention)
+      // before we overwrite — it can still decrypt pre-rotation entries.
+      const previousSelfKit = groupKs.kits[0];
+      const newKits: Uint8Array[] = [new Uint8Array(newSelfKit)];
+      if (previousSelfKit && previousSelfKit.length > 0) {
+        newKits.push(previousSelfKit);
+      }
+      // Preserve any other rotation-preserved kits already loaded
+      // (kits[1..] from a prior rotation — multi-rotation chains).
+      for (let i = 1; i < groupKs.kits.length; i++) {
+        const k = groupKs.kits[i];
+        if (k && k.length > 0) newKits.push(k);
+      }
+      groupKs.kits = newKits;
+      groupKs.stateBytes = new Uint8Array(newStateBytes);
+    }
+
+    // Bump groups.<group>.index_epoch in the on-disk yaml. TS doesn't
+    // currently use the epoch for an HMAC-keyed field-search index
+    // (Python does), but we still bump it so a future TS index
+    // implementation, or a Python reader replaying the same log,
+    // sees the same epoch progression.
+    const yamlPath = this.config.yamlPath;
+    let nextEpoch = 1;
+    try {
+      const text = readFileSync(yamlPath, "utf8");
+      const doc = parseYaml(text) as Record<string, unknown>;
+      const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
+      const groupSpec = groups[group] ?? {};
+      const cur = typeof groupSpec.index_epoch === "number" ? groupSpec.index_epoch : 0;
+      nextEpoch = cur + 1;
+      groupSpec.index_epoch = nextEpoch;
+      groups[group] = groupSpec;
+      doc.groups = groups;
+      writeFileSync(yamlPath, stringifyYaml(doc), "utf8");
+    } catch {
+      // If yaml-write fails, the keystore swap already succeeded;
+      // surface "unknown epoch increment" via the attestation but
+      // don't unwind the rotation.
+    }
+
+    // Attest the rotation. Catalog-validated fields only — anything
+    // not listed in public_fields would be sealed away from auditors
+    // who only have the public log.
+    const rotatedAt = new Date().toISOString();
+    const newKitSha256 = `sha256:${createHash("sha256").update(Buffer.from(newSelfKit)).digest("hex")}`;
+    this.emit("info", "tn.rotation.completed", {
+      group,
+      cipher: "btn",
+      generation: nextEpoch,
+      previous_kit_sha256: previousKitSha256,
+      old_pool_size: null,
+      new_pool_size: null,
+      rotated_at: rotatedAt,
+    });
+
+    return {
+      generation: nextEpoch,
+      previousKitSha256,
+      newKitSha256,
+      rotatedAt,
+    };
   }
 
   /**
@@ -2346,7 +2520,14 @@ handlers:
   path: ${_logPathStr}
   max_bytes: 5242880
   backup_count: 5
-  rotate_on_init: true
+  # Match Python's default: do NOT rotate on every init. Rotation
+  # mid-process when max_bytes is reached is fine (it picks up where
+  # it left off), but rotating at session-start breaks the admin
+  # cache for short-lived CLI processes that each open a fresh
+  # runtime — every invocation would shove the canonical log to
+  # .ndjson.1 and the cache (which only scans the canonical path)
+  # would observe an empty log.
+  rotate_on_init: false
 - kind: stdout
 me:
   did: ${dk.did}

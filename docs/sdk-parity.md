@@ -65,7 +65,7 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 |--------|------|--------|-------|
 | `tn.admin.add_recipient(group, ...)` | `await tn.admin.addRecipient(group, opts)` | ✓ | TS returns `AddRecipientResult`; Python returns `AddRecipientResult` dataclass. |
 | `tn.admin.revoke_recipient(group, ...)` | `await tn.admin.revokeRecipient(group, opts)` | ✓ | Returns `RevokeRecipientResult`. |
-| `tn.admin.rotate(group)` | `await tn.admin.rotate(group)` | ⚠ | TS throws on btn ("not supported in-band rotation"); Python may have different semantics for jwe groups. Verify per cipher. |
+| `tn.admin.rotate(group)` | `await tn.admin.rotate(group)` | ✓ (btn) / ⚠ (jwe) | Both languages bump `index_epoch`, regenerate the publisher's self-kit, rename old material `.revoked.<ts>`, and emit `tn.rotation.completed`. JWE rotation is Python-only today. |
 | `tn.admin.ensure_group(group, ...)` | `await tn.admin.ensureGroup(group, opts?)` | ⚠ | Python rewrites yaml on first call; TS only emits the attested event (no yaml-write). |
 | `tn.admin.set_link_state(state)` | `await tn.vault.setLinkState(state)` | ⊝ | TS: stub-throws ("yaml-write not yet ported"). Python mutates `ceremony.mode` in yaml. |
 | `tn.admin.recipients(group)` | `tn.admin.recipients(group, opts?)` | ✓ | Sync on both. Active-first sort. |
@@ -158,6 +158,19 @@ No compat shims — the deletions are hard. The branch is the alpha-track.
 | `parsePolicyText` | Pure markdown parser for `.tn/config/agents.md`. |
 
 Python doesn't have a Layer 1 / Layer 2 split because it's not a browser concern; everything in `python/tn/` runs on Python's standard library.
+
+## CLI verbs
+
+| Python                      | TS                            | Status | Notes |
+|-----------------------------|-------------------------------|--------|-------|
+| `tn init <project>`         | (n/a — TS uses lib `Tn.init`) | ⊝      | Python ships the scaffold-from-scratch flow; non-TTY safe (mnemonic to identity.json). TS callers init programmatically. |
+| `tn add_recipient <g> <did>`| `tn-js admin add-recipient`   | ✓      | Same shape, different verb naming convention per language. |
+| `tn bundle <did> <out>`     | (via lib `pkg.bundleForRecipient`) | ⊝ | TS bundle CLI not yet ported; library API is parity. |
+| `tn rotate [<group>]`       | `tn-js admin rotate [<group>]`| ✓ (btn) | Both emit per-recipient `.tnpkg` artifacts; vault autosync fires when ceremony is linked. |
+| `tn absorb <pkg>`           | (via lib `pkg.absorb`)        | ⊝      | TS absorb CLI not yet ported; library API + `Tn.absorb` factory cover it. |
+| `tn read [<log>]`           | `tn-js read --yaml <path>`    | ✓      | Both decode envelopes to flat JSON. |
+| `tn watch ...`              | `tn-js watch ...`             | ✓      | Identical kwargs (`--since`, `--verify`, `--poll`, `--once`). |
+| `tn wallet ...`             | (n/a)                         | ⊝      | Vault flows are Python-only today. |
 
 ## CI parity gate
 

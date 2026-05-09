@@ -47,13 +47,37 @@ test("tn.admin.state returns AdminState", async () => {
   }
 });
 
-test("tn.admin.rotate throws on btn cipher (not supported)", async () => {
+test("tn.admin.rotate(group) succeeds on btn — bumps generation, swaps state", async () => {
+  // 0.4.0a3+: TS BTN rotation is implemented. mints a fresh BtnPublisher,
+  // swaps the on-disk state + self-kit, bumps groups.<g>.index_epoch in
+  // the yaml, and emits tn.rotation.completed. Verify the result shape +
+  // that it doesn't reject.
   const tn = await Tn.ephemeral({ stdout: false });
   try {
-    await assert.rejects(
-      tn.admin.rotate("default"),
-      /btn cipher does not support in-band rotation/,
+    const result = await tn.admin.rotate("default");
+    assert.equal(result.cipher, "btn");
+    assert.equal(result.group, "default");
+    assert.ok(result.generation >= 1, `generation should be >= 1, got ${result.generation}`);
+    assert.match(
+      result.previousKitSha256,
+      /^sha256:/,
+      "previousKitSha256 should be sha256-prefixed",
     );
+    assert.match(result.newKitSha256, /^sha256:/, "newKitSha256 should be sha256-prefixed");
+    assert.notEqual(
+      result.previousKitSha256,
+      result.newKitSha256,
+      "rotation must produce new key material (different sha)",
+    );
+  } finally {
+    await tn.close();
+  }
+});
+
+test("tn.admin.rotate(group) rejects unknown group", async () => {
+  const tn = await Tn.ephemeral({ stdout: false });
+  try {
+    await assert.rejects(tn.admin.rotate("nonexistent"), /unknown group/);
   } finally {
     await tn.close();
   }

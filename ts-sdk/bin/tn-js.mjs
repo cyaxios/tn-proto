@@ -32,6 +32,9 @@
 import { createInterface } from "node:readline";
 import { Buffer } from "node:buffer";
 import { stdin, stdout, argv, exit } from "node:process";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve as pathResolve } from "node:path";
 
 import {
   DeviceKey,
@@ -557,16 +560,33 @@ function compileCmd() {
   }
 }
 
-function adminCmd() {
+async function adminCmd() {
   const sub = argv[3];
   const rest = argv.slice(4);
-  const opts = { yaml: null, group: "default", out: null, did: null, leaf: null };
+  const opts = {
+    yaml: null,
+    group: "default",
+    out: null,
+    did: null,
+    leaf: null,
+    groups: null,
+    /** Set when --group / --groups was explicitly passed (vs the
+     *  hard-coded default of "default") so `admin rotate` knows whether
+     *  to expand to "all non-internal groups" or honor the user's choice. */
+    groupSpecified: false,
+  };
   for (let i = 0; i < rest.length; i += 1) {
     if (rest[i] === "--yaml") opts.yaml = rest[++i];
-    else if (rest[i] === "--group") opts.group = rest[++i];
-    else if (rest[i] === "--out") opts.out = rest[++i];
+    else if (rest[i] === "--group") {
+      opts.group = rest[++i];
+      opts.groupSpecified = true;
+    } else if (rest[i] === "--out") opts.out = rest[++i];
     else if (rest[i] === "--recipient-did") opts.did = rest[++i];
     else if (rest[i] === "--leaf") opts.leaf = Number.parseInt(rest[++i], 10);
+    else if (rest[i] === "--groups") {
+      opts.groups = rest[++i];
+      opts.groupSpecified = true;
+    }
   }
   if (!opts.yaml) die("admin: --yaml <path> is required");
   const rt = NodeRuntime.init(opts.yaml);
@@ -599,8 +619,149 @@ function adminCmd() {
       stdout.write(JSON.stringify({ ok: true, group: opts.group, count }) + "\n");
       break;
     }
+    case "rotate": {
+      // Resolve target groups. Unlike add-recipient/revoke-recipient
+      // (which require an explicit --group), rotate defaults to "every
+      // non-internal group in the ceremony" — the deploy-shaped flow.
+      const cfg = rt.config;
+      let targets;
+      if (opts.groups) {
+        targets = opts.groups.split(",").map((s) => s.trim()).filter(Boolean);
+      } else if (opts.groupSpecified) {
+        targets = [opts.group];
+      } else {
+        targets = [...cfg.groups.keys()].filter((g) => g !== "tn.agents");
+      }
+      const unknown = targets.filter((g) => !cfg.groups.has(g));
+      if (unknown.length) {
+        die(
+          `admin rotate: unknown group(s) ${JSON.stringify(unknown)}; ` +
+            `ceremony declares ${JSON.stringify([...cfg.groups.keys()].sort())}.`,
+        );
+      }
+
+      // Snapshot surviving recipients PRE-rotation. (BTN keeps the
+      // recipient list unchanged across rotation; reading the
+      // snapshot here makes the intent explicit and survives any
+      // future semantic change.)
+      // Force a fresh log-replay first — each CLI invocation is a
+      // distinct process, and the AdminStateCache's _refreshIfLogAdvanced
+      // tripwire can stay stale across processes when the cache state
+      // file lags the log. Explicit refresh() is cheap (the on-disk
+      // log scan is the expensive part either way).
+      rt.adminCache().refresh();
+      const recipientGroups = new Map();
+      for (const g of targets) {
+        for (const rec of rt.recipients(g)) {
+          if (rec.revoked) continue;
+          const did = rec.recipientDid;
+          if (typeof did !== "string") continue;
+          const list = recipientGroups.get(did) ?? [];
+          list.push(g);
+          recipientGroups.set(did, list);
+        }
+      }
+
+      // Rotate each group. NodeRuntime.rotateGroup mints a new
+      // BtnPublisher, swaps the on-disk state + self-kit, bumps
+      // groups.<g>.index_epoch in the yaml, and emits
+      // tn.rotation.completed.
+      const rotated = [];
+      for (const g of targets) {
+        const r = rt.rotateGroup(g);
+        rotated.push({ group: g, generation: r.generation });
+      }
+
+      if (recipientGroups.size === 0) {
+        stdout.write(
+          JSON.stringify({
+            ok: true,
+            rotated,
+            artifacts: [],
+            note: "no surviving recipients to bundle for; rotation recorded",
+          }) + "\n",
+        );
+        break;
+      }
+
+      // Resolve output destination. Mirrors `tn rotate` in Python:
+      //   * absent           → ./rotated_<UTC_TS>/
+      //   * existing dir / no-extension path → that dir
+      //   * <something>.tnpkg + single recipient → that file
+      //   * <something>.tnpkg + multi recipient → reject
+      const tsStamp = new Date()
+        .toISOString()
+        .replace(/[-:]/g, "")
+        .replace(/\..*$/, "Z");
+      let outDir;
+      let singleFile = null;
+      if (!opts.out) {
+        outDir = pathResolve(process.cwd(), `rotated_${tsStamp}`);
+      } else {
+        const resolved = pathResolve(process.cwd(), opts.out);
+        if (resolved.endsWith(".tnpkg")) {
+          if (recipientGroups.size > 1) {
+            die(
+              `admin rotate: --out ${opts.out} is a single .tnpkg path but ` +
+                `this rotation has ${recipientGroups.size} surviving recipient(s). ` +
+                `Pass a directory path (or omit --out) to write one .tnpkg per recipient.`,
+            );
+          }
+          outDir = dirname(resolved);
+          singleFile = resolved;
+        } else {
+          outDir = resolved;
+        }
+      }
+      mkdirSync(outDir, { recursive: true });
+
+      // Per recipient: re-mint kits across their groups (via
+      // addRecipient, which uses the post-rotation publisher
+      // state) and bundle into a kit_bundle .tnpkg the recipient
+      // can absorb.
+      const artifacts = [];
+      for (const [did, groupList] of recipientGroups.entries()) {
+        const safe = did.replace(/[^A-Za-z0-9._-]/g, "_");
+        const pkgPath = singleFile ?? join(outDir, `${safe}.tnpkg`);
+        const tmpDir = mkdtempSync(join(tmpdir(), "tn-rot-bundle-"));
+        try {
+          // Write fresh kits for this recipient into a temp staging
+          // dir, then compile a kit_bundle from it. Using a temp
+          // keystore (not the publisher's live one) avoids the
+          // "ship the publisher's self-kit by accident" footgun
+          // documented in the Python `bundle_for_recipient` path.
+          for (const g of groupList) {
+            const stagedKit = join(tmpDir, `${g}.btn.mykit`);
+            rt.addRecipient(g, stagedKit, did);
+          }
+          const result = compileKitBundleToFile({
+            keystoreDir: tmpDir,
+            outPath: pkgPath,
+            groups: groupList,
+            label: `rotation@${tsStamp}`,
+            full: false,
+          });
+          artifacts.push(result.outPath);
+        } finally {
+          rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+
+      stdout.write(
+        JSON.stringify({
+          ok: true,
+          rotated,
+          artifacts,
+          out_dir: outDir,
+        }) + "\n",
+      );
+      break;
+    }
     default:
-      die(`admin: unknown subcommand ${sub}. try add-recipient | revoke-recipient | revoked-count`);
+      die(
+        `admin: unknown subcommand ${sub}. ` +
+          "try add-recipient | revoke-recipient | revoked-count | rotate",
+      );
   }
 }
 
@@ -622,7 +783,7 @@ switch (cmd) {
     readCmd();
     break;
   case "admin":
-    adminCmd();
+    await adminCmd();
     break;
   case "compile":
     compileCmd();
@@ -661,6 +822,13 @@ switch (cmd) {
         "  admin revoke-recipient  --yaml <path> [--group default] --leaf <index>\n" +
         "                          [--recipient-did did:key:...]\n" +
         "  admin revoked-count     --yaml <path> [--group default]\n" +
+        "  admin rotate            --yaml <path> [--group <g> | --groups a,b,c]\n" +
+        "                          [--out <dir>|<file.tnpkg>]\n" +
+        "                          The deploy primitive — rotates each target group\n" +
+        "                          (default: every non-internal group), bumps\n" +
+        "                          index_epoch in the yaml, and emits one\n" +
+        "                          .tnpkg per surviving recipient under\n" +
+        "                          ./rotated_<UTC_TS>/ (or --out).\n" +
         "  compile    --keystore <dir>  --out <file.tnpkg>  [--kit <group>]... [--label <text>] [--full]\n" +
         "             Package *.btn.mykit files into a .tnpkg (zip w/ manifest.json + kits) that the\n" +
         "             Chrome extension, Python SDK, and tn-js can all import.\n" +
