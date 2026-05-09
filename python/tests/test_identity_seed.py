@@ -104,11 +104,61 @@ def test_identity_seed_idempotent(tmp_path: Path):
     assert receipt2.legacy_status == "no_op"
 
 
-def test_identity_seed_rejects_cross_identity(tmp_path: Path):
-    """Absorbing identity B into a keystore holding identity A must fail."""
+def test_identity_seed_rejects_cross_identity_after_user_events(tmp_path: Path):
+    """Absorbing identity B over identity A must fail once A has signed
+    user events.
+
+    Updated semantics (Bug 3 in the 0.4.0a2 brief): the cross-identity
+    overwrite guard is gated on whether any user-emitted entries exist
+    in the local main log. When the local log only has admin (`tn.*`)
+    events from init — or nothing at all — re-absorbing a different
+    identity is the dirt-easy "I just downloaded my identity, set it
+    up" flow and proceeds. Once a user has emitted real events signed
+    by identity A, identity B can no longer overwrite (signature trail
+    would be orphaned).
+    """
+    import tn
+
     device_a = DeviceKey.generate()
     device_b = DeviceKey.generate()
     assert device_a.did != device_b.did
+
+    pkg_b = tmp_path / "b.tnpkg"
+    export_identity_seed(pkg_b, device=device_b)
+
+    # Stand up a fully-formed ceremony bound to identity A (private +
+    # yaml minted by load_or_create so tn.init can reload it later).
+    yaml_path = tmp_path / "agent" / "tn.yaml"
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg = load_or_create(yaml_path, cipher="btn", device_private_bytes=device_a.private_bytes)
+
+    # Emit a real user event so local.private's signature trail is
+    # load-bearing (B would orphan it).
+    tn.init(str(cfg.yaml_path))
+    tn.info("hello.world", note="from_a")
+    tn.flush_and_close()
+
+    # Reload cfg to pick up post-init mutations.
+    from tn.config import load as _load_cfg
+
+    cfg = _load_cfg(cfg.yaml_path)
+    r2 = _absorb_dispatch(cfg, pkg_b)
+    assert r2.legacy_status == "rejected", (
+        f"cross-identity install must fail once user events exist, "
+        f"got {r2.legacy_status} ({r2.legacy_reason})"
+    )
+    assert "refusing to overwrite" in r2.legacy_reason.lower()
+    # Original identity remains untouched.
+    assert (cfg.keystore / "local.private").read_bytes() == device_a.private_bytes
+
+
+def test_identity_seed_overwrites_fresh_install(tmp_path: Path):
+    """When the local log has no user events yet, re-absorbing a
+    different identity overwrites cleanly. Mirrors the dashboard
+    "downloaded the wrong seed, downloaded the right one" flow.
+    """
+    device_a = DeviceKey.generate()
+    device_b = DeviceKey.generate()
 
     pkg_a = tmp_path / "a.tnpkg"
     export_identity_seed(pkg_a, device=device_a)
@@ -117,15 +167,14 @@ def test_identity_seed_rejects_cross_identity(tmp_path: Path):
 
     cfg = _fresh_keystore(tmp_path, name="agent")
     r1 = _absorb_dispatch(cfg, pkg_a)
-    assert r1.accepted_count == 1, "first identity should install"
+    assert r1.accepted_count == 1
 
     r2 = _absorb_dispatch(cfg, pkg_b)
-    assert r2.legacy_status == "rejected", (
-        f"cross-identity install must fail, got {r2.legacy_status}"
+    assert r2.legacy_status == "enrolment_applied", (
+        f"fresh-state overwrite should succeed; got {r2.legacy_status} "
+        f"({r2.legacy_reason})"
     )
-    assert "refusing to overwrite" in r2.legacy_reason.lower()
-    # Original identity remains untouched.
-    assert (cfg.keystore / "local.private").read_bytes() == device_a.private_bytes
+    assert (cfg.keystore / "local.private").read_bytes() == device_b.private_bytes
 
 
 def test_identity_seed_rejects_swapped_private(tmp_path: Path):
@@ -216,7 +265,7 @@ def test_export_identity_seed_with_default_device(tmp_path: Path):
     """export_identity_seed() generates a fresh DeviceKey when none provided."""
     out = tmp_path / "fresh.tnpkg"
     export_identity_seed(out)
-    manifest, _body = _read_manifest(out)
+    manifest, _ = _read_manifest(out)
     assert manifest.kind == "identity_seed"
     assert manifest.from_did.startswith("did:key:z")
     assert manifest.from_did == manifest.to_did
@@ -229,3 +278,122 @@ def test_export_kind_validation(tmp_path: Path):
 
     with pytest.raises(ValueError, match="device="):
         export(tmp_path / "x.tnpkg", kind="identity_seed")
+
+
+def test_init_then_absorb_succeeds_on_fresh_ceremony(tmp_path: Path):
+    """Bug 3 dirt-easy fix: init() then absorb(identity_seed) succeeds
+    when no user events have been emitted yet. The local.private and
+    tn.yaml minted by init are treated as fresh state and overwritten.
+    """
+    import os
+
+    import tn
+
+    device = DeviceKey.generate()
+    pkg = tmp_path / "downloaded.identity.tnpkg"
+    export_identity_seed(pkg, device=device)
+
+    work = tmp_path / "ceremony"
+    work.mkdir()
+    old_cwd = os.getcwd()
+    os.chdir(work)
+    try:
+        try:
+            tn.flush_and_close()
+        except Exception:
+            pass
+        tn.init(str(work / "tn.yaml"))
+        # No user emit has happened yet — only init-time admin events.
+        receipt = tn.pkg.absorb(str(pkg))
+        assert receipt.legacy_status in ("enrolment_applied", "no_op"), (
+            f"init+absorb of identity_seed should succeed, got "
+            f"{receipt.legacy_status} ({receipt.legacy_reason})"
+        )
+        # The keystore now holds the absorbed identity.
+        keystore = tn.current_config().keystore
+        assert keystore.joinpath("local.private").read_bytes() == device.private_bytes
+    finally:
+        try:
+            tn.flush_and_close()
+        except Exception:
+            pass
+        os.chdir(old_cwd)
+
+
+def test_init_emit_then_absorb_refuses(tmp_path: Path):
+    """The flip side of Bug 3: once a user event has been emitted, a
+    cross-identity absorb is refused. The signature trail is real.
+    """
+    import os
+
+    import tn
+
+    device = DeviceKey.generate()
+    pkg = tmp_path / "downloaded.identity.tnpkg"
+    export_identity_seed(pkg, device=device)
+
+    work = tmp_path / "ceremony"
+    work.mkdir()
+    old_cwd = os.getcwd()
+    os.chdir(work)
+    try:
+        try:
+            tn.flush_and_close()
+        except Exception:
+            pass
+        tn.init(str(work / "tn.yaml"))
+        tn.info("hello.user.event", marker="real_user_activity")
+        tn.flush_and_close()
+
+        # Re-init so absorb sees the now-populated log.
+        tn.init(str(work / "tn.yaml"))
+        receipt = tn.pkg.absorb(str(pkg))
+        assert receipt.legacy_status == "rejected", (
+            f"absorb of a different identity over a ceremony with user "
+            f"events should be rejected, got {receipt.legacy_status} "
+            f"({receipt.legacy_reason})"
+        )
+        assert "refusing to overwrite" in receipt.legacy_reason.lower()
+    finally:
+        try:
+            tn.flush_and_close()
+        except Exception:
+            pass
+        os.chdir(old_cwd)
+
+
+def test_absorb_before_init_in_fresh_dir(tmp_path: Path):
+    """The dirt-easy bootstrap: in an empty directory with no
+    ``tn.init()``, ``tn.pkg.absorb(identity_seed)`` installs everything
+    so a follow-up ``tn.init()`` picks up the seeded keystore.
+    """
+    import os
+
+    import tn
+
+    device = DeviceKey.generate()
+    pkg = tmp_path / "downloaded.identity.tnpkg"
+    export_identity_seed(pkg, device=device)
+
+    work = tmp_path / "fresh"
+    work.mkdir()
+    old_cwd = os.getcwd()
+    os.chdir(work)
+    try:
+        try:
+            tn.flush_and_close()
+        except Exception:
+            pass
+        receipt = tn.pkg.absorb(str(pkg))
+        assert receipt.kind == "identity_seed"
+        assert receipt.legacy_status == "enrolment_applied"
+        # local.private landed under the synthesized keystore path.
+        candidates = list(work.rglob("local.private"))
+        assert candidates, f"local.private should be installed under {work}"
+        assert candidates[0].read_bytes() == device.private_bytes
+    finally:
+        try:
+            tn.flush_and_close()
+        except Exception:
+            pass
+        os.chdir(old_cwd)

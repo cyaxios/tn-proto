@@ -8,9 +8,10 @@ already bound (someone called ``tn.init()`` explicitly, or we're inside a
 Discovery order (mirrors the plan doc's "Design"):
 
     1. ``$TN_YAML``                       (env var, absolute or relative)
-    2. ``./tn.yaml``                      (cwd-relative)
-    3. ``$TN_HOME/tn.yaml``               (default ``~/.tn/tn.yaml``)
-    4. CREATE FRESH at the same $TN_HOME path and emit a loud notice.
+    2. ``./tn.yaml``                      (cwd, legacy single-ceremony layout)
+    3. ``./.tn/default/tn.yaml``          (cwd, multi-ceremony layout)
+    4. ``$TN_HOME/tn.yaml``               (default ``~/.tn/tn.yaml``)
+    5. CREATE FRESH at ``./.tn/default/tn.yaml`` and emit a loud notice.
 
 Strict mode disables steps 2-4: ``TN_STRICT=1`` (env) or
 ``tn.set_strict(True)`` (Python). When strict is on and no explicit init
@@ -189,6 +190,9 @@ def _resolve_existing_yaml() -> Path | None:
     cwd_yaml = (Path.cwd() / "tn.yaml").resolve()
     if cwd_yaml.exists():
         return cwd_yaml
+    multi_yaml = (Path.cwd() / ".tn" / "default" / "tn.yaml").resolve()
+    if multi_yaml.exists():
+        return multi_yaml
     home_yaml = _tn_home() / "tn.yaml"
     if home_yaml.exists():
         return home_yaml
@@ -224,20 +228,26 @@ def _resolve_discovery_yaml() -> tuple[Path, bool] | None:
         p.parent.mkdir(parents=True, exist_ok=True)
         return (p, True)
 
-    # Step 3: ./tn.yaml
+    # Step 3: ./tn.yaml (legacy single-ceremony layout).
     cwd_yaml = (Path.cwd() / "tn.yaml").resolve()
     if cwd_yaml.exists():
         return (cwd_yaml, False)
 
-    # Step 4: $TN_HOME/tn.yaml
+    # Step 4: ./.tn/default/tn.yaml (multi-ceremony layout).
+    multi_yaml = (Path.cwd() / ".tn" / "default" / "tn.yaml").resolve()
+    if multi_yaml.exists():
+        return (multi_yaml, False)
+
+    # Step 5: $TN_HOME/tn.yaml
     home_dir = _tn_home()
     home_yaml = home_dir / "tn.yaml"
     if home_yaml.exists():
         return (home_yaml, False)
 
-    # Step 5: create fresh at $TN_HOME.
-    home_dir.mkdir(parents=True, exist_ok=True)
-    return (home_yaml, True)
+    # Step 6: create fresh at ./.tn/default/tn.yaml — the multi-ceremony
+    # layout is the new default for fresh projects.
+    multi_yaml.parent.mkdir(parents=True, exist_ok=True)
+    return (multi_yaml, True)
 
 
 def maybe_autoinit_load_only() -> None:

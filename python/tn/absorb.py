@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from datetime import timezone as _tz
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 from .admin.log import (
     append_admin_envelopes,
@@ -136,10 +136,20 @@ class AbsorbResult:
 # ---------------------------------------------------------------------------
 
 
+@overload
+def absorb(source: Path | str | bytes | bytearray, /) -> AbsorbReceipt: ...
+@overload
+def absorb(cfg: LoadedConfig, source: Path | str | bytes | bytearray, /) -> AbsorbResult: ...
+@overload
+def absorb(*, source: Path | str | bytes | bytearray) -> AbsorbReceipt: ...
+@overload
+def absorb(
+    *, cfg: LoadedConfig, source: Path | str | bytes | bytearray
+) -> AbsorbResult: ...
 def absorb(
     *args: Any,
     **kwargs: Any,
-):
+) -> AbsorbReceipt | AbsorbResult:
     """Absorb a `.tnpkg`. Accepts two call shapes::
 
         absorb(source)             # returns AbsorbReceipt; uses tn.current_config()
@@ -176,20 +186,32 @@ def absorb(
         try:
             cfg = _current_config()
         except RuntimeError as exc:
-            raise RuntimeError(
-                "absorb: no LoadedConfig available — call tn.init(yaml_path) "
-                "first, or pass cfg explicitly via the legacy two-arg form."
-            ) from exc
+            # Bug 3 dirt-easy fix: if there's no active runtime, peek at the
+            # bundle and see if it's a self-contained bootstrap kind
+            # (identity_seed / project_seed). If so, derive a synthetic cfg
+            # from the cwd + bundle's body/tn.yaml so absorb can install
+            # everything end-to-end without a prior tn.init(). The user's
+            # subsequent tn.init() then picks up the freshly-absorbed yaml.
+            cfg = _try_bootstrap_cfg(source)
+            if cfg is None:
+                raise RuntimeError(
+                    "absorb: no LoadedConfig available — call tn.init(yaml_path) "
+                    "first, or pass cfg explicitly via the legacy two-arg form."
+                ) from exc
 
     receipt = _absorb_dispatch(cfg, source)
 
     if legacy:
         # Translate to the older shape so existing tests keep working.
         if receipt.legacy_status:
+            # peer_did is populated by handlers that have one (e.g. _absorb_offer,
+            # _absorb_enrolment populate it via the dedicated wrapper paths).
+            # Snapshot/seed kinds don't carry a single peer_did, so leave it None
+            # on the legacy shape and let callers read receipt fields if needed.
             return AbsorbResult(
                 status=receipt.legacy_status,
                 reason=receipt.legacy_reason,
-                peer_did=_extract_peer_did(receipt),
+                peer_did=None,
             )
         # Default mapping for snapshot kinds the old callers never saw.
         if receipt.kind == "admin_log_snapshot":
@@ -199,9 +221,87 @@ def absorb(
     return receipt
 
 
-def _extract_peer_did(receipt: AbsorbReceipt) -> str | None:
-    """For legacy AbsorbResult.peer_did: pull from the manifest's from_did."""
-    return None  # set by individual handlers when they have one
+def _try_bootstrap_cfg(source: Path | str | bytes | bytearray) -> LoadedConfig | None:
+    """If ``source`` is an ``identity_seed`` or ``project_seed`` tnpkg,
+    synthesize a minimal ``LoadedConfig`` from the current working
+    directory + the bundle's ``body/tn.yaml`` so absorb can install
+    everything without a prior ``tn.init()``.
+
+    Returns ``None`` if the bundle is not a recognised bootstrap kind
+    (in which case the caller raises the original "call tn.init() first"
+    error).
+
+    The synthesized cfg only needs to satisfy what the bootstrap
+    handlers (`_absorb_identity_seed`, `_absorb_project_seed`) read:
+    ``yaml_path``, ``keystore``, and ``resolve_log_path()``. Everything
+    else stays at field-level defaults — the handlers don't touch them.
+    """
+    import os as _os
+
+    try:
+        manifest, body = _read_manifest(source)
+    except (ValueError, FileNotFoundError):
+        return None
+
+    if manifest.kind not in ("identity_seed", "project_seed"):
+        return None
+
+    cwd = Path(_os.getcwd()).resolve()
+    yaml_path = cwd / "tn.yaml"
+
+    # Default keystore + log paths. Read the bundle's body/tn.yaml when
+    # present so we honor whatever layout the dashboard / minter chose
+    # (project_seed bundles say ``keystore.path: ./.tn/tn/keys``;
+    # identity_seed stubs don't carry a keystore block, so we fall back
+    # to the create_fresh-style ``./.tn/tn/keys``).
+    keystore_rel = "./.tn/tn/keys"
+    log_rel = "./.tn/tn/logs/tn.ndjson"
+    admin_rel = "./.tn/tn/admin/admin.ndjson"
+
+    yaml_blob = body.get("body/tn.yaml")
+    if yaml_blob is not None:
+        try:
+            import yaml as _yaml
+
+            doc = _yaml.safe_load(yaml_blob.decode("utf-8")) or {}
+            if isinstance(doc, dict):
+                ks_block = doc.get("keystore") or {}
+                if isinstance(ks_block, dict) and isinstance(ks_block.get("path"), str):
+                    keystore_rel = ks_block["path"]
+                logs_block = doc.get("logs") or {}
+                if isinstance(logs_block, dict) and isinstance(logs_block.get("path"), str):
+                    log_rel = logs_block["path"]
+                cer_block = doc.get("ceremony") or {}
+                if isinstance(cer_block, dict) and isinstance(
+                    cer_block.get("admin_log_location"), str
+                ):
+                    admin_rel = cer_block["admin_log_location"]
+        except Exception:  # noqa: BLE001 — synthetic-cfg derivation is best-effort
+            pass
+
+    keystore = (yaml_path.parent / keystore_rel).resolve()
+
+    # Build a minimal LoadedConfig. The bootstrap handlers only read
+    # `yaml_path`, `keystore`, and `resolve_log_path()` — everything else
+    # is filled with placeholder defaults that won't be touched.
+    from .signing import DeviceKey as _DeviceKey
+
+    placeholder_priv = b"\x00" * 32
+    return LoadedConfig(
+        yaml_path=yaml_path,
+        keystore=keystore,
+        device=_DeviceKey.from_private_bytes(placeholder_priv),
+        ceremony_id="_bootstrap_absorb",
+        master_index_key=b"",
+        cipher_name="btn",
+        public_fields=[],
+        default_policy="private",
+        groups={},
+        field_to_groups={},
+        handler_specs=None,
+        admin_log_location=admin_rel,
+        log_path=log_rel,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +364,8 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
         return _absorb_contact_update(cfg, manifest, body)
     if kind == "identity_seed":
         return _absorb_identity_seed(cfg, manifest, body)
+    if kind == "project_seed":
+        return _absorb_project_seed(cfg, manifest, body)
     if kind == "recipient_invite":
         return AbsorbReceipt(
             kind=kind,
@@ -433,12 +535,12 @@ def _maybe_unseal_recipient_wrap(
 
     # Late import — recipient_seal pulls in pynacl.bindings; we only want
     # to take that hit on the unwrap path.
+    from .export import decrypt_body_blob
     from .recipient_seal import (
         UnsealError,
         manifest_aad_for_wrap,
         unseal_bek_from_wrap,
     )
-    from .export import decrypt_body_blob
 
     our_did = getattr(getattr(cfg, "device", None), "did", None)
     device_priv = getattr(cfg.device, "private_bytes", None)
@@ -652,23 +754,55 @@ def _absorb_identity_seed(
                     f"DID, bytes match)."
                 ),
             )
-        return AbsorbReceipt(
-            kind=manifest.kind,
-            legacy_status="rejected",
-            legacy_reason=(
-                f"refusing to overwrite existing identity at {priv_path}. The "
-                f"keystore already has a different device key. To replace, "
-                f"delete the keystore directory first; the existing identity's "
-                f"signed log entries will become unverifiable."
-            ),
-        )
+        # Bug 3 — UX trap. The local.private differs, but if no user events
+        # have ever been emitted under this ceremony, the active "identity"
+        # is just whatever tn.init() minted on a fresh directory. There is
+        # nothing meaningful to orphan, so let absorb overwrite. Admin-only
+        # events (event_type starting with "tn.") are emitted by init itself
+        # and don't count as user activity.
+        if _user_event_count(cfg) == 0:
+            # Best-effort: rename the prior keys aside so a confused operator
+            # can recover. We don't bother with a backup if the rename fails.
+            ts = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+            try:
+                priv_path.rename(priv_path.with_name(f"local.private.previous.{ts}"))
+            except OSError:
+                pass
+            try:
+                if pub_path.exists():
+                    pub_path.rename(pub_path.with_name(f"local.public.previous.{ts}"))
+            except OSError:
+                pass
+        else:
+            return AbsorbReceipt(
+                kind=manifest.kind,
+                legacy_status="rejected",
+                legacy_reason=(
+                    f"refusing to overwrite existing identity at {priv_path}. The "
+                    f"keystore already has a different device key and the local "
+                    f"log already contains user-emitted entries signed by it. "
+                    f"To replace, delete the keystore directory first; the "
+                    f"existing identity's signed log entries will become "
+                    f"unverifiable."
+                ),
+            )
 
     priv_path.write_bytes(priv_bytes)
     pub_path.write_text(bundle_did, encoding="utf-8")
 
-    # tn.yaml: only write if missing — don't clobber an existing
-    # ceremony yaml that might already be fully populated.
+    # tn.yaml: write if missing OR when the local ceremony has no user
+    # events yet (the dirt-easy fresh-init case — see Bug 3). Don't
+    # clobber an existing ceremony yaml that's already accumulated user
+    # activity.
     if not yaml_target.exists():
+        yaml_target.parent.mkdir(parents=True, exist_ok=True)
+        yaml_target.write_bytes(yaml_bytes)
+    elif _user_event_count(cfg) == 0 and yaml_target.read_bytes() != yaml_bytes:
+        ts = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+        try:
+            yaml_target.rename(yaml_target.with_name(f"{yaml_target.name}.previous.{ts}"))
+        except OSError:
+            pass
         yaml_target.parent.mkdir(parents=True, exist_ok=True)
         yaml_target.write_bytes(yaml_bytes)
 
@@ -1063,6 +1197,262 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
     )
 
 
+def _user_event_count(cfg: LoadedConfig) -> int:
+    """Count user-emitted entries in the local main log.
+
+    A user entry is anything whose ``event_type`` does NOT start with
+    ``tn.``. The ``tn.*`` namespace is reserved for admin / protocol
+    bookkeeping (group.added, ceremony.init, ...) and gets emitted by
+    ``tn.init()`` itself — those don't represent meaningful user
+    activity.
+
+    Used by absorb's Bug-3 UX fix: when the user calls
+    ``tn.init()`` and *then* ``tn.pkg.absorb(<identity_seed>)``, we
+    detect "the local log only has init-time admin events" and treat
+    that as a fresh ceremony — proceeding with the overwrite rather
+    than refusing because ``local.private`` exists.
+
+    Reads cfg.resolve_log_path() — the main log file. Admin (``tn.*``)
+    events live in a separate ``./.tn/admin/admin.ndjson`` by default,
+    so the main log already excludes them; the explicit
+    ``startswith("tn.")`` filter is belt-and-braces for the legacy
+    ``protocol_events_location: main_log`` ceremony shape.
+    """
+    # Walk the main log plus any rotated backups (.1, .2, ...). Some
+    # ceremonies enable session-start rotation, in which case the
+    # previous session's content moves to ``<logPath>.1``; just looking
+    # at ``<logPath>`` after a re-init would undercount.
+    log_path = cfg.resolve_log_path()
+    candidates: list[Path] = [log_path]
+    for n in range(1, 11):
+        backup = log_path.with_name(f"{log_path.name}.{n}")
+        if not backup.exists():
+            break
+        candidates.append(backup)
+
+    count = 0
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        env = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    et = env.get("event_type")
+                    if isinstance(et, str) and not et.startswith("tn."):
+                        count += 1
+        except OSError:
+            continue
+    return count
+
+
+def _absorb_project_seed(
+    cfg: LoadedConfig, manifest: TnpkgManifest, body: dict[str, bytes]
+) -> AbsorbReceipt:
+    """Install a project-seed bundle (dashboard "Create Project" flow).
+
+    The dashboard mints these with body shape::
+
+        body/tn.yaml
+        body/keys/local.private
+        body/keys/local.public
+        body/keys/index_master.key
+        body/keys/<group>.btn.mykit
+        body/keys/<group>.btn.state
+        body/keys/tn.agents.btn.mykit
+        body/keys/tn.agents.btn.state
+
+    Files are nested under ``body/keys/`` (not flat under ``body/`` like
+    ``kit_bundle``). This handler:
+
+    1. Validates ``body/tn.yaml`` and at least
+       ``body/keys/local.private`` + ``body/keys/local.public`` are
+       present.
+    2. Cross-checks: the manifest must be self-addressed
+       (``from_did == to_did``), the body's local.public must equal the
+       manifest's from_did, and the DID derived from
+       ``body/keys/local.private`` must match — same tamper guard as
+       ``identity_seed``.
+    3. Installs ``body/tn.yaml`` to ``cfg.yaml_path`` (idempotent if
+       byte-identical; refuses on a different existing yaml unless the
+       local log has zero user events — see Bug 3 in the brief).
+    4. Installs every ``body/keys/<rel>`` flat-path entry into
+       ``cfg.keystore / <rel>``. Existing files are renamed to
+       ``.previous.<UTC_TS>`` (same semantics as
+       ``_absorb_kit_bundle``). Deeper nesting (``body/keys/foo/bar``)
+       is skipped.
+    5. Returns an ``AbsorbReceipt(kind="project_seed", ...)`` with the
+       count of installed vs deduped files.
+    """
+    yaml_bytes = body.get("body/tn.yaml")
+    priv_bytes = body.get("body/keys/local.private")
+    pub_text = body.get("body/keys/local.public")
+    if yaml_bytes is None or priv_bytes is None or pub_text is None:
+        missing = [
+            name
+            for name, present in (
+                ("body/tn.yaml", yaml_bytes),
+                ("body/keys/local.private", priv_bytes),
+                ("body/keys/local.public", pub_text),
+            )
+            if present is None
+        ]
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"project_seed body is missing required members: {missing}"
+            ),
+        )
+
+    if len(priv_bytes) != 32:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"project_seed body/keys/local.private must be 32 bytes "
+                f"(Ed25519 seed); got {len(priv_bytes)}"
+            ),
+        )
+
+    # Cross-check: tamper guard. Same logic as _absorb_identity_seed —
+    # the manifest's signature already verified, but a tampered body
+    # could still swap in a different private key. Catch it here.
+    from .signing import DeviceKey as _DeviceKey
+
+    derived = _DeviceKey.from_private_bytes(priv_bytes)
+    bundle_did = pub_text.decode("utf-8").strip()
+    if derived.did != bundle_did or derived.did != manifest.from_did:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"project_seed integrity check failed: manifest.from_did="
+                f"{manifest.from_did!r}, body/keys/local.public={bundle_did!r}, "
+                f"derived-from-private={derived.did!r}. The bundle's body and "
+                f"manifest disagree about which identity this is — refuse to "
+                f"install."
+            ),
+        )
+    if manifest.from_did != manifest.to_did:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=(
+                f"project_seed must be self-addressed (from_did == to_did); "
+                f"got from_did={manifest.from_did!r}, to_did={manifest.to_did!r}."
+            ),
+        )
+
+    accepted = 0
+    deduped = 0
+    replaced: list[Path] = []
+    ts = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    # Step A: tn.yaml. Idempotent if byte-identical. Different yaml +
+    # zero user events → fresh ceremony, overwrite. Different yaml +
+    # user events → refuse (would orphan signed log entries).
+    yaml_target = cfg.yaml_path
+    yaml_action = "deduped"
+    if yaml_target.exists():
+        existing_yaml = yaml_target.read_bytes()
+        if existing_yaml == yaml_bytes:
+            deduped += 1
+        elif _user_event_count(cfg) == 0:
+            backup = yaml_target.with_name(f"{yaml_target.name}.previous.{ts}")
+            try:
+                yaml_target.rename(backup)
+            except OSError:
+                pass
+            replaced.append(yaml_target)
+            yaml_target.parent.mkdir(parents=True, exist_ok=True)
+            yaml_target.write_bytes(yaml_bytes)
+            accepted += 1
+            yaml_action = "replaced"
+        else:
+            return AbsorbReceipt(
+                kind=manifest.kind,
+                legacy_status="rejected",
+                legacy_reason=(
+                    f"refusing to overwrite existing tn.yaml at {yaml_target}: "
+                    f"contents differ from the project_seed bundle and the local "
+                    f"log already contains user-emitted entries. Delete the "
+                    f"directory or absorb in a fresh location."
+                ),
+            )
+    else:
+        yaml_target.parent.mkdir(parents=True, exist_ok=True)
+        yaml_target.write_bytes(yaml_bytes)
+        accepted += 1
+        yaml_action = "written"
+
+    _ = yaml_action  # currently unused; keeps the branch labels readable
+
+    # Step B: keys. body/keys/<rel> -> cfg.keystore / <rel>. Flat
+    # under keys/ only — deeper nesting is skipped (the spec doesn't
+    # ship anything nested, but we don't want to silently install a
+    # smuggled-in path).
+    keystore = cfg.keystore
+    keystore.mkdir(parents=True, exist_ok=True)
+
+    # Special case: local.private. Same tamper guard as identity_seed —
+    # if the keystore already has a different local.private, refuse
+    # unless _user_event_count is 0 (fresh-ceremony, see Bug 3).
+    existing_priv = keystore / "local.private"
+    if existing_priv.exists():
+        existing_priv_bytes = existing_priv.read_bytes()
+        if existing_priv_bytes != priv_bytes and _user_event_count(cfg) > 0:
+            return AbsorbReceipt(
+                kind=manifest.kind,
+                legacy_status="rejected",
+                legacy_reason=(
+                    f"refusing to overwrite existing identity at "
+                    f"{existing_priv}: a different device key is already "
+                    f"installed and the local log contains user events "
+                    f"signed by it. To replace, delete {keystore} first."
+                ),
+            )
+
+    for name, data in body.items():
+        if not name.startswith("body/keys/"):
+            continue
+        rel = name[len("body/keys/"):]
+        if not rel:
+            continue
+        # Reject deeper nesting — body/keys/foo/bar would smuggle a
+        # path. The dashboard only emits flat names under keys/.
+        if "/" in rel or "\\" in rel:
+            continue
+        dest = keystore / rel
+        if dest.exists() and dest.read_bytes() == data:
+            deduped += 1
+            continue
+        if dest.exists():
+            backup = dest.with_name(f"{rel}.previous.{ts}")
+            try:
+                dest.rename(backup)
+            except OSError:
+                pass
+            replaced.append(dest)
+        dest.write_bytes(data)
+        accepted += 1
+
+    return AbsorbReceipt(
+        kind=manifest.kind,
+        accepted_count=accepted,
+        deduped_count=deduped,
+        legacy_status="enrolment_applied" if accepted else "no_op",
+        legacy_reason=f"installed project seed for {bundle_did} into {keystore.parent}",
+        replaced_kit_paths=replaced,
+    )
+
+
 __all__ = [
     "AbsorbReceipt",
     "AbsorbResult",
@@ -1071,21 +1461,3 @@ __all__ = [
 ]
 
 
-# Keep the old internal helper names available for any in-tree caller that
-# imports them directly. Both still drive the legacy AbsorbResult shape.
-def _absorb_offer(cfg: LoadedConfig, pkg: Package) -> AbsorbResult:
-    receipt = _stash_offer(cfg, pkg)
-    return AbsorbResult(
-        status=receipt.legacy_status,
-        reason=receipt.legacy_reason,
-        peer_did=pkg.signer_did,
-    )
-
-
-def _absorb_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbResult:
-    receipt = _apply_enrolment(cfg, pkg)
-    return AbsorbResult(
-        status=receipt.legacy_status,
-        reason=receipt.legacy_reason,
-        peer_did=pkg.signer_did,
-    )

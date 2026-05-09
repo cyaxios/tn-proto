@@ -516,6 +516,31 @@ def init(
         )
 
     if name is None:
+        # Discovery chain — see ``tn._autoinit._resolve_existing_yaml``
+        # and ``__init__._init_impl``. No-args ``tn.init()`` should pick
+        # up an existing ceremony in the cwd before falling through to
+        # auto-creating ``.tn/default/``. This is what makes the dirt-easy
+        # ``tn.absorb(file); tn.init()`` flow work — absorb writes
+        # ``./tn.yaml`` to disk, and a follow-up no-args init must find it.
+        #
+        # Skip the legacy-layout branch when ``project_dir`` is set: a
+        # caller pointing at an explicit project root is asking for the
+        # multi-ceremony layout under that root, not whatever happens
+        # to be in cwd.
+        if project_path is None:
+            from ._autoinit import _resolve_existing_yaml
+
+            existing = _resolve_existing_yaml()
+            if existing is not None:
+                from .lifecycle import init as _legacy_init
+
+                _legacy_init(str(existing), **legacy_kwargs)
+                return _ensure_default_handle_for_legacy_init(
+                    yaml_path_arg=str(existing)
+                )
+        # Nothing on disk yet (or project_dir is set) — fall through to
+        # the default-named flow, which mints ``.tn/default/`` as the
+        # safe-defaults home under the right project root.
         name = DEFAULT_CEREMONY_NAME
 
     # `name` is now narrowed to ``str``.

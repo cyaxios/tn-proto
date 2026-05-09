@@ -35,11 +35,11 @@ Watch-only kwargs:
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterator
+from typing import Any, Literal, overload
 
 from ._entry import Entry, VerifyError
-
 
 # ---------------------------------------------------------------------
 # Internal helpers
@@ -99,7 +99,7 @@ def _wrap_parse_errors(triple_iter, verify):
             r = next(triple_iter)
         except StopIteration:
             return
-        except Exception as exc:  # noqa: BLE001 — surface per-row parse errors
+        except Exception as exc:
             if verify == "skip":
                 _emit_tampered_row(
                     {"event_type": "<parse-error>"},
@@ -123,6 +123,28 @@ def _wrap_parse_errors(triple_iter, verify):
 # ---------------------------------------------------------------------
 
 
+@overload
+def read(
+    *,
+    where: Callable[[Any], bool] | None = ...,
+    verify: bool | str = ...,
+    raw: Literal[False] = ...,
+    log: str | Path | None = ...,
+    as_recipient: str | Path | None = ...,
+    group: str = ...,
+    all_runs: bool = ...,
+) -> Iterator[Entry]: ...
+@overload
+def read(
+    *,
+    where: Callable[[Any], bool] | None = ...,
+    verify: bool | str = ...,
+    raw: Literal[True],
+    log: str | Path | None = ...,
+    as_recipient: str | Path | None = ...,
+    group: str = ...,
+    all_runs: bool = ...,
+) -> Iterator[dict[str, Any]]: ...
 def read(
     *,
     where: Callable[[Any], bool] | None = None,
@@ -154,7 +176,7 @@ def read(
             log, Path(as_recipient), group=group, verify_signatures=verify_sigs,
         )
     else:
-        from ._read_impl import _read_raw_inner, _entry_in_current_run_raw
+        from ._read_impl import _entry_in_current_run_raw, _read_raw_inner
         triples = (
             r for r in _read_raw_inner(log, None, all_runs=all_runs)
             if all_runs or _entry_in_current_run_raw(r)

@@ -121,6 +121,15 @@ KNOWN_OMISSIONS = {
     # "process-global" sections rather than per-verb rows.
     # ------------------------------------------------------------------
     "current_config", "session", "using_rust",
+
+    # ------------------------------------------------------------------
+    # Low-level bootstrap-absorb plumbing exported from the TS SDK for
+    # advanced callers (CI tooling, migration scripts) that want raw
+    # receipts without a Tn handle. The user-facing entry point is
+    # Tn.absorb (which uses these internally) — covered in the parity
+    # table by the absorb / Tn.absorb rows. NEW in 0.4.0a2.
+    # ------------------------------------------------------------------
+    "absorbBootstrap", "isBootstrapKind",
 }
 
 

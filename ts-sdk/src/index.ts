@@ -110,6 +110,7 @@ export {
 } from "./admin/log.js";
 export { loadConfig } from "./runtime/config.js";
 export { loadKeystore } from "./runtime/keystore.js";
+export { absorbBootstrap, isBootstrapKind } from "./runtime/absorb_bootstrap.js";
 // readAsRecipient is no longer exported from the public surface;
 // use `Tn.read({asRecipient})` for foreign-publisher reads.
 export {
