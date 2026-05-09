@@ -86,14 +86,30 @@ def cmd_init(args: argparse.Namespace) -> int:
     import os
     os.environ.setdefault("TN_NO_STDOUT", "1")
 
-    # Refuse to print mnemonic in non-TTY contexts — defense against
-    # leaking the recovery phrase into logs, CI pipelines, build artifacts.
-    if not _is_tty() and args.mnemonic_file is None:
-        _die(
-            "tn init requires an interactive terminal. "
-            "For non-interactive provisioning, pass --mnemonic-file <path> "
-            "with a pre-generated mnemonic.",
-            code=2,
+    # In non-TTY contexts (CI, container builds, scripts), `tn init` runs
+    # unattended: no Enter-prompt to wait for, no mnemonic banner printed
+    # to logs (which would leak the recovery phrase into CI artifacts).
+    # The mnemonic is instead persisted into identity.json so the operator
+    # can recover it later via `tn wallet export-mnemonic`. Identity.json
+    # is then the secret-handling boundary — protect it the way you'd
+    # protect any other secret material.
+    #
+    # Pre-existing identities skip this entirely: nothing is generated and
+    # nothing is printed.
+    non_tty_provision = (
+        not _is_tty()
+        and args.mnemonic_file is None
+        and not _default_identity_path().exists()
+    )
+    if non_tty_provision:
+        args.skip_confirm = True
+        args.keep_mnemonic = True
+        # Suppress the mnemonic banner; it would land in CI logs.
+        global _print_mnemonic_banner  # noqa: PLW0603 — local override for non-TTY init
+        _print_mnemonic_banner = lambda _m: None  # type: ignore[assignment]
+        print(
+            "[tn init] non-interactive mode: mnemonic will be persisted "
+            "into identity.json (treat that file as a secret).",
         )
 
     project_dir = Path(args.project).resolve()
@@ -899,6 +915,164 @@ def cmd_absorb(args: argparse.Namespace) -> int:
             "in the same directory."
         )
     return 0 if accepted >= 0 else 1
+
+
+def cmd_rotate(args: argparse.Namespace) -> int:
+    """Rotate group key material and emit per-recipient kit_bundle .tnpkg
+    artifacts so the publisher can hand new kits to surviving recipients.
+
+    The rotation primitive is the deploy event for a TN ceremony: it
+    bumps the per-group ``index_epoch``, regenerates the publisher's
+    self-kit, renames the prior key material to ``.revoked.<ts>``, and
+    appends a ``tn.rotation.completed`` attestation to the admin log.
+    Existing kits keep working for *pre-rotation* entries; *post-rotation*
+    reads require a freshly-minted kit, which this verb produces.
+
+    Vault-linked ceremonies push the new state on autosync as a side
+    effect of the underlying ``tn.admin.rotate`` call (see
+    ``_maybe_autosync``); the vault then drives recipient notification.
+    Vault-less ceremonies rely on this CLI's per-recipient .tnpkg
+    artifacts as the distribution channel — upload the directory as a
+    CI artifact (``actions/upload-artifact`` or equivalent) and hand the
+    individual files to recipients out-of-band.
+
+    Group selection (in priority order):
+
+      * positional ``<group>`` — single group only
+      * ``--groups a,b,c``    — explicit subset
+      * neither              — every non-internal group in the ceremony
+                               (excludes ``tn.agents``, same convention
+                               as ``tn bundle``).
+
+    Output (``--out``):
+
+      * absent                       → ``./rotated_<UTC_TS>/`` directory,
+                                       one ``<recipient_safe>.tnpkg`` per
+                                       surviving recipient.
+      * existing directory           → same shape, in that directory.
+      * path ending in ``.tnpkg``    → that exact file. Single-recipient
+                                       only; rejected if the rotation
+                                       affected more than one recipient.
+    """
+    import re
+    import time
+
+    from . import current_config, flush_and_close
+    from . import init as tn_init
+    from .pkg import bundle_for_recipient
+
+    yaml_path = _resolve_yaml_or_discover(args.yaml)
+    tn_init(yaml_path)
+    try:
+        cfg = current_config()
+        if cfg.cipher_name != "btn":
+            _die(
+                f"tn rotate currently supports btn ceremonies only; "
+                f"this ceremony uses {cfg.cipher_name!r}.",
+                code=2,
+            )
+
+        if args.group is not None and args.groups is not None:
+            _die(
+                "pass either a positional <group> or --groups, not both.",
+                code=2,
+            )
+        if args.group is not None:
+            target_groups = [args.group]
+        elif args.groups is not None:
+            target_groups = [g.strip() for g in args.groups.split(",") if g.strip()]
+        else:
+            target_groups = [g for g in cfg.groups if g != "tn.agents"]
+
+        unknown = [g for g in target_groups if g not in cfg.groups]
+        if unknown:
+            _die(
+                f"unknown group(s) {unknown!r}; ceremony declares "
+                f"{sorted(cfg.groups)}.",
+                code=2,
+            )
+
+        # Snapshot surviving recipients PRE-rotation so we know who to
+        # mint new kits for. (Post-rotation the recipient list is
+        # unchanged for btn — recipients are still active in the new
+        # epoch — but reading the snapshot here makes the intent
+        # explicit and survives any future semantic change.)
+        recipient_groups: dict[str, list[str]] = {}
+        for g in target_groups:
+            for rec in _admin.recipients(g):
+                if rec.get("revoked"):
+                    continue
+                rdid = rec.get("recipient_did")
+                if not isinstance(rdid, str):
+                    continue
+                recipient_groups.setdefault(rdid, []).append(g)
+
+        # Rotate each group. Each call also fires _maybe_autosync, so
+        # vault-linked ceremonies push state as a side effect.
+        rotated: list[tuple[str, int]] = []
+        for g in target_groups:
+            res = _admin.rotate(g)
+            rotated.append((g, res.generation or 0))
+
+        # Resolve output destination.
+        if not recipient_groups:
+            print(
+                "[tn rotate] rotated "
+                f"{len(rotated)} group(s); no surviving recipients to "
+                "bundle for. New kits will be minted on the next "
+                "`tn add_recipient` / `tn bundle` call.",
+            )
+            for g, gen in rotated:
+                print(f"             {g}: epoch={gen}")
+            return 0
+
+        ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        out_arg = Path(args.out).resolve() if args.out else None
+        if out_arg is None:
+            out_dir = Path.cwd() / f"rotated_{ts}"
+            single_file = None
+        elif out_arg.suffix == ".tnpkg":
+            if len(recipient_groups) > 1:
+                _die(
+                    f"--out {out_arg.name} is a single .tnpkg path but "
+                    f"this rotation has {len(recipient_groups)} surviving "
+                    "recipient(s). Pass a directory path (or omit --out) "
+                    "to write one .tnpkg per recipient.",
+                    code=2,
+                )
+            out_dir = out_arg.parent
+            single_file = out_arg
+        else:
+            out_dir = out_arg
+            single_file = None
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Bundle per recipient. bundle_for_recipient internally loops
+        # admin.add_recipient (which mints fresh kits using the
+        # post-rotation key material), so the artifact contains kits
+        # the recipient can absorb to read post-rotation entries.
+        artifacts: list[Path] = []
+        for rdid, groups in recipient_groups.items():
+            if single_file is not None:
+                pkg_path = single_file
+            else:
+                safe = re.sub(r"[^A-Za-z0-9._-]", "_", rdid)
+                pkg_path = out_dir / f"{safe}.tnpkg"
+            written = bundle_for_recipient(rdid, pkg_path, groups=groups)
+            artifacts.append(Path(written))
+
+        print(
+            f"[tn rotate] rotated {len(rotated)} group(s); "
+            f"emitted {len(artifacts)} .tnpkg artifact(s) "
+            f"into {out_dir}",
+        )
+        for g, gen in rotated:
+            print(f"             {g}: epoch={gen}")
+        for art in artifacts:
+            print(f"             -> {art.name}")
+        return 0
+    finally:
+        flush_and_close()
 
 
 def cmd_read(args: argparse.Namespace) -> int:
@@ -1879,6 +2053,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the absorber's tn.yaml. Default: discover via the standard chain.",
     )
     p_absorb.set_defaults(func=cmd_absorb)
+
+    # --- tn rotate [<group>] [--groups a,b,c] [--out path] -----
+    # The deploy-shaped verb: rotate one or more groups and emit
+    # per-recipient kit_bundle .tnpkg artifacts so CI can upload them.
+    # See cmd_rotate docstring for output shape and vault interaction.
+    p_rotate = sub.add_parser(
+        "rotate",
+        help="Rotate group keys and emit per-recipient .tnpkg artifacts.",
+    )
+    p_rotate.add_argument(
+        "group",
+        nargs="?",
+        default=None,
+        help=(
+            "Group to rotate. Omit (and skip --groups) to rotate every "
+            "non-internal group in the ceremony — the default deploy shape."
+        ),
+    )
+    p_rotate.add_argument(
+        "--groups",
+        default=None,
+        help=(
+            "Comma-separated subset of groups to rotate. Mutually "
+            "exclusive with the positional <group>."
+        ),
+    )
+    p_rotate.add_argument(
+        "--out",
+        default=None,
+        help=(
+            "Where to write the per-recipient .tnpkg artifacts. "
+            "A directory (default: ./rotated_<UTC_TS>/) writes one .tnpkg "
+            "per surviving recipient. A path ending in .tnpkg writes a "
+            "single file (single-recipient rotations only)."
+        ),
+    )
+    p_rotate.add_argument(
+        "--yaml", default=None,
+        help="Path to your tn.yaml. Default: discover via the standard chain.",
+    )
+    p_rotate.set_defaults(func=cmd_rotate)
 
     # --- tn read [<log>] ---------------------------------------
     p_read = sub.add_parser(
