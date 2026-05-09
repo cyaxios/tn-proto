@@ -68,9 +68,17 @@ def test_init_non_tty_announces_mode(tmp_path: Path):
 
 def test_init_non_tty_does_not_print_mnemonic(tmp_path: Path):
     """The 12-word mnemonic must NOT land in stdout — that's the whole
-    point of the non-TTY path. We can't easily detect "is this a
-    mnemonic?" generically, so we assert on the absent banner heading
-    + that the persisted mnemonic words don't appear in stdout."""
+    point of the non-TTY path. The realistic leak shape is the banner
+    which prints all 12 words on a single line; test that.
+
+    We deliberately do NOT do a word-by-word substring scan: BIP-39
+    wordlists contain everyday English words ("side", "alone", "host",
+    "hand", "next", ...) that legitimately appear in the CLI's prose
+    (e.g. "stored alongside your keys"), and matching them produces
+    flaky-by-random-seed failures with no actual security signal.
+    A real leak is a contiguous run of mnemonic words; that's what
+    we assert against.
+    """
     project = tmp_path / "proj"
     res = _run_init_non_tty(project)
     assert res.returncode == 0
@@ -78,23 +86,29 @@ def test_init_non_tty_does_not_print_mnemonic(tmp_path: Path):
     # Banner heading from _print_mnemonic_banner is suppressed.
     assert "WRITE THIS DOWN NOW" not in res.stdout
 
-    # Stronger check: read the persisted mnemonic and confirm none of
-    # its words show up in stdout. (12 BIP-39 words + one or two
-    # English stop-words like "the" / "you" might collide; we filter
-    # those before comparing.)
     identity_path = tmp_path / ".tnhome" / "tn" / "identity.json"
     identity = json.loads(identity_path.read_text())
-    words = identity["mnemonic_stored"].split()
-    # BIP-39 wordlists contain some short common English words; ignore
-    # the truly common ones to avoid false positives from CLI prose.
-    common = {"a", "an", "the", "you", "i", "is", "are", "as", "at", "be", "by",
-              "do", "in", "of", "on", "or", "so", "to", "up", "us", "we", "if",
-              "it", "no", "any", "all", "for", "into", "next"}
-    leaked = [w for w in words if w.lower() not in common and w in res.stdout]
-    assert not leaked, (
-        f"non-TTY init leaked mnemonic word(s) {leaked!r} into stdout — "
-        f"these would land in CI logs."
+    full_mnemonic = identity["mnemonic_stored"].strip()
+
+    # The full mnemonic phrase as a single space-separated string would
+    # be the unmistakable leak (it's how _print_mnemonic_banner formats
+    # it). Assert the contiguous phrase is absent.
+    assert full_mnemonic not in res.stdout, (
+        "non-TTY init leaked the full mnemonic into stdout — "
+        "this would land in CI logs."
     )
+
+    # And: no contiguous run of 4+ mnemonic words (in order) should
+    # appear in stdout. 4 BIP-39 words in sequence is statistically
+    # ~impossible to produce as English prose — that's the actual
+    # leak signal, distinct from individual lexical collisions like
+    # "side" inside "alongside".
+    words = full_mnemonic.split()
+    for i in range(len(words) - 3):
+        run = " ".join(words[i : i + 4])
+        assert run not in res.stdout, (
+            f"non-TTY init leaked a 4-word mnemonic run {run!r} into stdout"
+        )
 
 
 def test_init_non_tty_persists_mnemonic_for_recovery(tmp_path: Path):
