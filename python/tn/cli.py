@@ -1,12 +1,43 @@
 """TN command-line interface.
 
-Two top-level verbs:
+Top-level verbs (CI-shaped — every verb runs unattended, machine output,
+no interactive prompts unless a TTY is detected):
 
     tn init <project>        One-time scaffold of identity + ceremony.
-                             Generates a BIP-39 mnemonic (shown ONCE to
-                             the user — TTY-only), writes identity.json
-                             to $XDG_DATA_HOME/tn/, and creates
-                             <project>/tn.yaml + <project>/keys/.
+                             Generates a BIP-39 mnemonic; in a TTY it's
+                             shown once on stdout, in CI / non-TTY it's
+                             persisted into identity.json and a one-line
+                             status is printed (treat identity.json as
+                             a secret then). Creates <project>/tn.yaml
+                             + <project>/.tn/tn/keys/ and writes
+                             identity.json to $XDG_DATA_HOME/tn/.
+
+    tn add_recipient         One-shot mint+bundle for a new recipient.
+        <group> <did|label>  Friendly wrapper over tn.pkg.bundle_for_recipient
+        [--out path]         (the explicit verb is `tn bundle`).
+
+    tn bundle <did> <out>    Mint a kit_bundle .tnpkg for one recipient.
+        [--groups a,b,c]     Defaults to every non-internal group.
+
+    tn rotate [<group>]      The deploy primitive. Bumps each target
+        [--groups a,b,c]     group's index_epoch via tn.admin.rotate,
+        [--out path]         then emits one kit_bundle .tnpkg per
+                             surviving recipient — the artifact CI
+                             uploads (or the publisher hands off
+                             directly) so recipients get the new keys.
+                             No arg = rotate every non-internal group.
+                             Vault-linked ceremonies push state to the
+                             vault as a side effect (autosync hook).
+
+    tn absorb <package>      Install a .tnpkg into the active ceremony.
+                             Bootstrap kinds (project_seed, identity_seed)
+                             auto-bind the runtime when no init is bound.
+
+    tn read [<log>]          Print a log in flat decoded form.
+
+    tn streams ...           Multi-ceremony stream listing / validation.
+    tn validate ...          Schema / catalog validation helpers.
+    tn show ...              Reflective inspection (env, config, etc.).
 
     tn wallet ...            Subcommands for an already-scaffolded identity:
         link <yaml>          Create a vault project + flip ceremony to
@@ -22,7 +53,7 @@ Two top-level verbs:
                              if identity.json doesn't keep it).
 
 Python module entry point: `python -m tn.cli [verb] ...`
-Installed console script (future): `tn [verb] ...`
+Installed console script: `tn [verb] ...`
 """
 
 from __future__ import annotations

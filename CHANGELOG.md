@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0a3] - 2026-05-09
+
+CI-shaped CLI surface: rotation as a deploy primitive + non-TTY safe init.
+Same release in Python (`tn-protocol` 0.4.0a3) and TS (`@tnproto/sdk`
+0.4.0-alpha.3).
+
+### Rotation as the deploy primitive
+
+- **`tn rotate [<group>] [--groups a,b,c] [--out path]`** (Python CLI)
+  and **`tn-js admin rotate ...`** (TS CLI). No-arg form rotates every
+  non-internal group in the ceremony — the deploy-shaped default. Per-
+  group it bumps `index_epoch`, regenerates the publisher state, renames
+  the prior key material to `.revoked.<UTC_TS>`, and emits
+  `tn.rotation.completed` to the admin log.
+- **Per-recipient `.tnpkg` artifacts**: after rotation the verb mints a
+  fresh `kit_bundle` for every surviving recipient and writes one
+  `.tnpkg` per recipient under `./rotated_<UTC_TS>/` by default
+  (override via `--out <dir>` or `--out <single>.tnpkg`). CI uploads
+  the directory as a build artifact and the publisher hands the
+  individual files to recipients out-of-band.
+- **Vault path is free**: `tn.admin.rotate` already calls
+  `_maybe_autosync(cfg)` post-rotation; vault-linked ceremonies push
+  the new state automatically and the vault drives recipient
+  notification from there. Vault-less ceremonies use the artifact
+  channel.
+- **TS BTN rotation now actually works**: pre-0.4.0a3 the TS
+  `tn.admin.rotate(group)` threw `"btn cipher does not support in-band
+  rotation"`. It now mirrors Python end-to-end (mint a fresh
+  `BtnPublisher`, swap on disk, bump epoch, attest). JWE rotation
+  remains Python-only.
+
+### Non-TTY safe `tn init`
+
+- `tn init <project>` no longer requires a TTY for first-time
+  provisioning. In CI / containers / scripts it auto-skips the
+  "Press Enter" prompt, suppresses the mnemonic banner (would have
+  leaked into CI logs), and persists the mnemonic into
+  `identity.json`. The operator treats `identity.json` as the
+  secret-handling boundary and can recover the mnemonic later via
+  `tn wallet export-mnemonic`.
+
+### Documentation
+
+- README and CLI top-of-file docstrings updated to cover the new
+  verbs and CI-shaped behavior.
+- `docs/sdk-parity.md` gains a CLI parity table.
+
 ## [0.4.0a2] - 2026-05-08
 
 Cross-language dirt-easy lifecycle. Same release in Python (`tn-protocol`

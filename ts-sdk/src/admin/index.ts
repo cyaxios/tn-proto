@@ -99,13 +99,30 @@ export class AdminNamespace {
     return match.leafIndex;
   }
 
-  async rotate(_group: string): Promise<RotateGroupResult> {
-    const cipher = (this._rt.config.groups.get(_group)?.cipher ?? "btn") as "btn" | "jwe";
+  async rotate(group: string): Promise<RotateGroupResult> {
+    const groupSpec = this._rt.config.groups.get(group);
+    if (!groupSpec) {
+      throw new Error(`tn.admin.rotate: unknown group ${JSON.stringify(group)}`);
+    }
+    const cipher = (groupSpec.cipher ?? "btn") as "btn" | "jwe";
+
     if (cipher === "btn") {
-      throw new Error(
-        "tn.admin.rotate: btn cipher does not support in-band rotation. " +
-          "Use tn.admin.revokeRecipient + tn.admin.addRecipient instead.",
-      );
+      // 0.4.0a3+: TS BTN rotation now mirrors Python end-to-end.
+      // NodeRuntime.rotateGroup mints a fresh BtnPublisher, swaps the
+      // on-disk state + self-kit, bumps groups.<g>.index_epoch in the
+      // yaml, and emits tn.rotation.completed. Surviving recipients
+      // appear unchanged in `recipients(group)` — the publisher (or the
+      // `tn-js admin rotate` CLI) re-mints kits for them via
+      // addRecipient and ships per-recipient .tnpkg artifacts.
+      const result = this._rt.rotateGroup(group);
+      return {
+        group,
+        cipher: "btn",
+        generation: result.generation,
+        previousKitSha256: result.previousKitSha256,
+        newKitSha256: result.newKitSha256,
+        rotatedAt: result.rotatedAt,
+      };
     }
     if (cipher === "jwe") {
       throw new Error("tn.admin.rotate: jwe cipher rotation not yet implemented in TS SDK.");
