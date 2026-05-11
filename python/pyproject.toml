@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "tn-protocol"
-version         = "0.4.0a3"
+version         = "0.4.0a4"
 description     = "TestigoNodo protocol: attested logging with JWE + btn ciphers"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -78,6 +78,10 @@ Issues     = "https://github.com/cyaxios/tn-proto/issues"
 Changelog  = "https://github.com/cyaxios/tn-proto/blob/main/CHANGELOG.md"
 
 [project.scripts]
+# The top-level CLI. Use as `tn rotate`, `tn init`, `tn bundle`, etc. —
+# the docstring at python/tn/cli.py lists every verb. Pre-0.4.0a4 this
+# script wasn't installed and users had to run `python -m tn.cli ...`.
+tn            = "tn.cli:main"
 tn-mcp-server = "tn.mcp:main"
 
 # ---------------------------------------------------------------------------
