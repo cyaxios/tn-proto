@@ -619,6 +619,7 @@ def init(
 def use(
     name: str | None = None,
     *,
+    profile: str | None = None,
     project_dir: str | Path | None = None,
 ) -> TN:
     """Get or create a TN handle by registry name.
@@ -626,6 +627,15 @@ def use(
     Looks up the in-process registry first; returns the handle if
     found. Falls through to disk attach (``.tn/<name>/`` exists with a
     yaml) and finally to safe-defaults auto-create.
+
+    ``profile`` selects a ceremony profile (``transaction`` / ``audit``
+    / ``secure_log`` / ``telemetry`` — see ``tn._profiles``). The
+    profile is honored ONLY at creation time. If the named ceremony
+    already exists on disk, the on-disk profile wins (operator
+    authority); a code-supplied profile that disagrees is logged as a
+    conflict warning. Registry-cached handles ignore ``profile``
+    entirely — restart the process to re-bind under different
+    settings.
 
     Friendly: for valid names, never raises ``TNNotFound``. The only
     failure modes are ``TNInvalidName`` (bad name) and
@@ -640,17 +650,20 @@ def use(
             "[a-zA-Z0-9_][a-zA-Z0-9_-]* and is not 'tn' (reserved)."
         )
 
-    # Registry hit: nothing else to do.
+    # Registry hit: nothing else to do. A code-supplied profile here
+    # would have no effect (the handle is already bound), so we don't
+    # surface a warning — common pattern is "use everywhere, pin the
+    # profile once at the first call site or via the yaml."
     try:
         return _registry_get(name)
     except _TNNotFound:
         pass
 
-    # Registry miss: defer to ``init`` (without kwargs) so the
-    # disk-attach-or-create path is exactly the same as explicit
-    # init with no config. This keeps the two verbs convergent on
-    # the on-disk reality.
-    return init(name, project_dir=project_dir)
+    # Registry miss: defer to ``init`` so the disk-attach-or-create
+    # path is exactly the same as explicit init. ``profile`` flows
+    # through; init handles the validate-then-on-disk-wins semantics
+    # via ``_check_no_conflict``.
+    return init(name, profile=profile, project_dir=project_dir)
 
 
 def list_ceremonies() -> list[str]:
