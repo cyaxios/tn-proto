@@ -366,6 +366,31 @@ class TestInitUseList:
         with pytest.raises(TNInvalidName):
             tn.use("bad/name", project_dir=tmp_path)
 
+    def test_use_accepts_profile_kwarg_on_creation(self, tmp_path):
+        """0.4.0a5+: ``tn.use(name, profile=...)`` stamps the profile
+        at creation time, same as ``tn.init(name, profile=...)``."""
+        import yaml as _yaml
+        handle = tn.use("audit_stream", profile="audit", project_dir=tmp_path)
+        assert handle.name == "audit_stream"
+        doc = _yaml.safe_load(handle.yaml_path.read_text(encoding="utf-8"))
+        assert (doc.get("ceremony") or {}).get("profile") == "audit"
+
+    def test_use_profile_kwarg_validates_unknown_profile(self, tmp_path):
+        """Typo'd profile names fail fast (delegates to init's validation)."""
+        with pytest.raises(TNConfigConflict, match="unknown profile"):
+            tn.use("oops", profile="nonsense", project_dir=tmp_path)
+
+    def test_use_profile_kwarg_ignored_on_registry_hit(self, tmp_path):
+        """A code-supplied profile on a registry-cached handle has no
+        effect — the handle is already bound. (Operator authority:
+        on-disk yaml is the source of truth; you can't change profile
+        via a runtime kwarg.)"""
+        h1 = tn.init("payments", profile="transaction", project_dir=tmp_path)
+        # Second call with a *different* profile must NOT raise or
+        # rebind; it just returns the cached handle.
+        h2 = tn.use("payments", profile="audit", project_dir=tmp_path)
+        assert h1 is h2
+
     def test_list_ceremonies_empty_initially(self):
         assert tn.list_ceremonies() == []
 
