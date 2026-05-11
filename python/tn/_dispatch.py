@@ -293,9 +293,25 @@ class DispatchRuntime:
         # Lazy import to avoid a circular dependency with tn.handlers.*.
         from tn.handlers.stdout import StdoutHandler as _StdoutHandler  # noqa: PLC0415
 
+        # IPython/Jupyter/Databricks capture sys.stdout at the Python
+        # object level. Rust's native StdoutHandler writes to fd 1
+        # directly, which bypasses that capture — emits never land in
+        # cell output, only get flushed to the kernel's underlying
+        # stdout (visible in the driver log, not the notebook).
+        #
+        # When a kernel is detected we DO NOT skip Python's
+        # StdoutHandler: it writes through sys.stdout (text mode, see
+        # handlers/stdout.py) which the kernel captures and renders in
+        # the originating cell. The Rust handler's fd-1 writes still
+        # happen but are invisible to the user — no perceived double-print.
+        from . import _in_ipython as _detect_ipython  # noqa: PLC0415
+        _stdout_in_notebook = _detect_ipython()
+
         for h in handlers:
             # Skip Python's StdoutHandler — Rust's native one already wrote.
-            if isinstance(h, _StdoutHandler):
+            # Exception: in a notebook kernel, run the Python handler so
+            # emits land in cell output (see comment above).
+            if isinstance(h, _StdoutHandler) and not _stdout_in_notebook:
                 continue
 
             # Skip file handler whose path matches Rust's log_writer target.
