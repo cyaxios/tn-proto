@@ -18,9 +18,15 @@ def init(
     identity=None,
     extra_handlers=None,
     stdout: bool | None = None,
+    link: bool | None = None,
 ) -> None:
     """Initialize TN for this process. See tn/__init__.py:_init_impl for the
-    full discovery chain behavior; this is the same function, relocated."""
+    full discovery chain behavior; this is the same function, relocated.
+
+    ``link`` controls the post-init vault upload + claim URL surfacing
+    (parity with the ``tn init`` CLI verb). ``None`` (default) auto-runs
+    best-effort; ``False`` suppresses (CLI uses this to keep its own
+    block); ``True`` forces. Env opt-out: ``TN_NO_LINK=1``."""
     from . import _init_impl
     return _init_impl(
         yaml_path,
@@ -30,6 +36,7 @@ def init(
         identity=identity,
         extra_handlers=extra_handlers,
         stdout=stdout,
+        link=link,
     )
 
 
