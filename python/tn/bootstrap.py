@@ -43,6 +43,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from .absorb import _absorb_dispatch
 from .identity import _resolve_did_endpoint
 from .sync_state import update_sync_state
 
@@ -310,12 +311,10 @@ def bootstrap_from_api_key(
         # one-arg shape, which is what we want.
         try:
             # ``tn.absorb`` (the symbol on the package) is the bound
-            # function ``_absorb_impl``, not the submodule. Import the
-            # underlying module via importlib to get at
-            # ``_absorb_dispatch`` directly.
-            import importlib
-
-            _absorb_mod = importlib.import_module("tn.absorb")
+            # function ``_absorb_impl``, not the submodule. We pull
+            # ``_absorb_dispatch`` straight from the submodule at the
+            # top of this file so we can hit the dispatch entry-point
+            # directly, bypassing the package-level rebind.
             from .config import LoadedConfig
             from .signing import DeviceKey as _DeviceKey
         except Exception:  # noqa: BLE001 — import failure can't be allowed to escape
@@ -346,7 +345,7 @@ def bootstrap_from_api_key(
             log_path="./.tn/tn/logs/tn.ndjson",
         )
 
-        receipt = _absorb_mod._absorb_dispatch(cfg, sealed_bytes)
+        receipt = _absorb_dispatch(cfg, sealed_bytes)
         if receipt.legacy_status == "rejected":
             _log.warning(
                 "bootstrap: absorb rejected sealed bundle: %s",
