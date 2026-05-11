@@ -206,6 +206,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         yaml_path,
         cipher=args.cipher,
         identity=identity,
+        link=False,  # CLI runs its own link/print block below; suppress SDK auto-link
     )
     cfg = current_config()
     print(f"[tn init] Ceremony {cfg.ceremony_id} created at {yaml_path}")
@@ -246,7 +247,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             from .handlers.vault_push import init_upload, _default_client_factory
             client = _default_client_factory(vault_url, identity)
             # Re-open cfg so init_upload reads the just-written ceremony.
-            tn_init(yaml_path, cipher=args.cipher, identity=identity)
+            tn_init(yaml_path, cipher=args.cipher, identity=identity, link=False)
             cfg = current_config()
             result = init_upload(cfg, client, vault_base=vault_url)
             print()
