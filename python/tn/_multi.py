@@ -211,6 +211,15 @@ def _create_stream_yaml(
     """Write a minimal per-stream yaml that references the default
     ceremony via ``extends:``.
 
+    NOTE: Stream-yaml structure is also packed into ``full_keystore``
+    (and vault-minted ``project_seed``) manifests by ``tn.export`` and
+    restored verbatim by ``tn.absorb._restore_stream_yamls``. A schema
+    change here needs to land in three places:
+        1. this writer (for fresh local mints),
+        2. the packer in ``export.py`` (still verbatim today),
+        3. a migration step for older on-disk stream yamls.
+    See ``docs/superpowers/specs/2026-05-12-cold-start-completeness-design.md``.
+
     Side effect: ensures the default ceremony exists first (creating
     it if absent), since named streams cannot exist without a project
     identity to anchor them to.
