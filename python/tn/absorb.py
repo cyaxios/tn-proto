@@ -832,6 +832,10 @@ def _absorb_kit_bundle(
         rel = name[len("body/") :]
         if not rel:
             continue
+        if rel.startswith("streams/"):
+            # Stream-yaml entries are absorbed below in a dedicated
+            # block; skip them in the flat keystore-install path.
+            continue
         # We only honor a flat layout (no nested directories) for kit
         # bundles. Skip anything that smuggles in a path separator.
         if "/" in rel or "\\" in rel:
@@ -851,6 +855,10 @@ def _absorb_kit_bundle(
             replaced.append(dest)
         dest.write_bytes(data)
         accepted += 1
+    # Stream yamls: restore each ``body/streams/<name>/tn.yaml`` to
+    # ``<project_root>/<name>/tn.yaml`` verbatim, preserving the
+    # packed ``ceremony.id``. See #33.
+    _restore_stream_yamls(cfg, body, ts)
     return AbsorbReceipt(
         kind=manifest.kind,
         accepted_count=accepted,
@@ -858,6 +866,64 @@ def _absorb_kit_bundle(
         legacy_status="enrolment_applied" if accepted else "no_op",
         replaced_kit_paths=replaced,
     )
+
+
+def _restore_stream_yamls(
+    cfg: LoadedConfig,
+    body: dict[str, bytes],
+    ts: str,
+) -> None:
+    """Restore stream yamls packed under ``body/streams/<name>/tn.yaml``
+    into ``<project_root>/<name>/tn.yaml`` verbatim.
+
+    Project root resolution mirrors the packer: if cfg.yaml_path lives
+    under a ``default/`` subdir, root = cfg.yaml_path.parent.parent;
+    otherwise root = cfg.yaml_path.parent.
+
+    Existing stream yamls (e.g. older versions absorbed earlier) are
+    renamed to ``tn.yaml.previous.<UTC_TS>`` before overwrite, matching
+    the keystore behavior elsewhere in this module.
+
+    Stream names are validated against ``is_valid_ceremony_name`` to
+    refuse path-smuggling entries (``..``, ``/``, etc.).
+    """
+    from ._defaults import DEFAULT_CEREMONY_NAME
+    from ._layout import is_valid_ceremony_name
+
+    default_dir = cfg.yaml_path.parent
+    if default_dir.name == DEFAULT_CEREMONY_NAME:
+        project_root = default_dir.parent
+    else:
+        project_root = default_dir
+
+    for name, data in body.items():
+        if not name.startswith("body/streams/"):
+            continue
+        rel = name[len("body/streams/") :]
+        # Shape we accept: ``<stream-name>/tn.yaml``. Anything else is
+        # skipped to refuse smuggling.
+        parts = rel.split("/")
+        if len(parts) != 2 or parts[1] != "tn.yaml":
+            continue
+        stream_name = parts[0]
+        if not is_valid_ceremony_name(stream_name):
+            continue
+        stream_dir = project_root / stream_name
+        stream_dir.mkdir(parents=True, exist_ok=True)
+        # Structural contract from _create_stream_yaml
+        (stream_dir / "logs").mkdir(exist_ok=True)
+        (stream_dir / "admin").mkdir(exist_ok=True)
+        dest = stream_dir / "tn.yaml"
+        if dest.exists():
+            existing = dest.read_bytes()
+            if existing == data:
+                continue
+            backup = dest.with_name(f"tn.yaml.previous.{ts}")
+            try:
+                dest.rename(backup)
+            except OSError:
+                pass
+        dest.write_bytes(data)
 
 
 def _absorb_contact_update(
@@ -1442,6 +1508,11 @@ def _absorb_project_seed(
             replaced.append(dest)
         dest.write_bytes(data)
         accepted += 1
+
+    # Restore stream yamls packed under body/streams/<name>/tn.yaml.
+    # See _restore_stream_yamls for invariants. Project root resolves
+    # off cfg.yaml_path. See #33.
+    _restore_stream_yamls(cfg, body, ts)
 
     return AbsorbReceipt(
         kind=manifest.kind,

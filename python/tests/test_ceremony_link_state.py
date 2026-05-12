@@ -23,13 +23,25 @@ def _fresh_local_ceremony():
 # --- Defaults --------------------------------------------------------
 
 
-def test_fresh_ceremony_is_local():
+def test_fresh_ceremony_is_linked_to_default_vault():
+    """Fresh ceremonies mint vault-linked by default. The yaml points at
+    the canonical hosted vault; ``linked_project_id`` is empty until the
+    operator calls ``tn.vault.link`` to claim one. Nothing reaches the
+    network until an explicit vault verb runs.
+    """
+    from tn.vault_client import DEFAULT_VAULT_URL
+
     td, cfg = _fresh_local_ceremony()
     try:
-        assert cfg.mode == "local"
-        assert cfg.linked_vault is None
+        assert cfg.mode == "linked"
+        assert cfg.linked_vault == DEFAULT_VAULT_URL
+        # linked_project_id is unset until claim — yaml writes "" and
+        # the loader coerces empty string to None.
         assert cfg.linked_project_id is None
-        assert cfg.is_linked() is False
+        # is_linked() returns True as soon as mode=linked AND vault is
+        # set — project_id is not part of the gate. The gate matters for
+        # which operations the vault verbs permit, not for routing.
+        assert cfg.is_linked() is True
     finally:
         tn.flush_and_close()
         td.cleanup()
@@ -180,7 +192,11 @@ def test_load_rejects_linked_mode_without_vault(tmp_path):
     tn.init(yaml_path, log_path=tmp_path / ".tn/tn/logs/tn.ndjson", cipher="jwe")
     tn.flush_and_close()
     doc = yaml_mod.safe_load(yaml_path.read_text(encoding="utf-8"))
-    doc["ceremony"]["mode"] = "linked"  # but no linked_vault
+    # Fresh ceremonies mint as ``mode: linked`` with linked_vault set;
+    # to exercise the "linked-without-vault" rejection, drop the vault
+    # url while keeping mode=linked.
+    doc["ceremony"]["mode"] = "linked"
+    doc["ceremony"].pop("linked_vault", None)
     yaml_path.write_text(yaml_mod.safe_dump(doc, sort_keys=False))
 
     with pytest.raises(ValueError, match="requires ceremony.linked_vault"):

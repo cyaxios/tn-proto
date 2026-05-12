@@ -258,34 +258,22 @@ def bootstrap_from_api_key(
             _log.warning("bootstrap: sealed-bundle response malformed: %s", exc)
             return False
 
-        # tn.absorb handles _maybe_unseal_recipient_wrap so the body
-        # opens under our device seed. The seed lives in memory only
-        # on this call; the unwrap path reads cfg.device.private_bytes
-        # which we set up by writing the seed to the keystore BEFORE
-        # absorb so the dispatch synthesises the right cfg.
+        # Cold-start contract: empty keystore. The bearer's seed lives
+        # in ``cfg.device`` (in-memory) for the duration of absorb.
+        # ``_absorb_dispatch`` -> ``_maybe_unseal_recipient_wrap`` reads
+        # ``cfg.device.private_bytes`` exclusively from memory (see
+        # python/tn/absorb.py:545); nothing in the absorb path requires
+        # the seed to be on disk.
         #
-        # The bundle is a project_seed tnpkg whose body carries the
-        # *publisher's* keys (local.private/public). So we need a
-        # ``cfg.device`` that holds OUR ephemeral seed (to unwrap the
-        # sealed BEK), and absorb then OVERWRITES local.private with
-        # the publisher's seed from the body. After absorb, the
-        # keystore is keyed to the publisher (the original project
-        # owner), not us — which is what the vault.sync handler needs.
-        #
-        # We achieve this by writing our seed to local.private at a
-        # *throwaway* location, importing tn, calling absorb with a
-        # synthesized cfg, then deleting that throwaway file. Or,
-        # simpler: drop our seed into the real keystore_path/local.private,
-        # let absorb's project_seed handler overwrite it on success,
-        # and on failure rip it back out so the caller's INIT-UPLOAD
-        # path sees an empty keystore.
+        # The sealed bundle is a project_seed tnpkg whose body carries
+        # the *publisher's* keys. On success, ``_absorb_project_seed``
+        # writes ``local.private`` / ``local.public`` to ``cfg.keystore``
+        # itself (python/tn/absorb.py:1443). On failure, nothing was
+        # ever written here, so there's nothing to clean up.
         keystore_path.mkdir(parents=True, exist_ok=True)
         priv_path = keystore_path / "local.private"
         pub_path = keystore_path / "local.public"
 
-        # Cold-start contract: empty keystore. We refuse to clobber an
-        # existing identity (caller is supposed to gate on emptiness).
-        # If the caller violates that, log and fail fast.
         if priv_path.exists():
             _log.warning(
                 "bootstrap: %s already exists; refusing to overwrite via api-key",
@@ -294,40 +282,17 @@ def bootstrap_from_api_key(
             return False
 
         try:
-            priv_path.write_bytes(seed)
-            pub_path.write_text(did, encoding="utf-8")
-        except OSError as exc:
-            _log.warning("bootstrap: writing seed to keystore failed: %s", exc)
-            return False
-
-        # Now call absorb. The signature is ``absorb(source)`` (new)
-        # or ``absorb(cfg, source)`` (legacy). We use the legacy form
-        # because the SDK's global dispatch isn't initialised yet —
-        # the whole point of this bootstrap is to make tn.init()
-        # succeed afterward. ``tn.absorb`` is invoked with the bytes
-        # source so the bundle is read directly from memory.
-        # Build a minimal cfg via the bootstrap-cfg synthesiser in
-        # absorb.py itself: passing bytes triggers it through the
-        # one-arg shape, which is what we want.
-        try:
-            # ``tn.absorb`` (the symbol on the package) is the bound
-            # function ``_absorb_impl``, not the submodule. We pull
-            # ``_absorb_dispatch`` straight from the submodule at the
-            # top of this file so we can hit the dispatch entry-point
-            # directly, bypassing the package-level rebind.
+            # ``tn.absorb`` (the package-level symbol) rebinds to
+            # ``_absorb_impl``; we go straight to ``_absorb_dispatch``
+            # since the global SDK dispatch isn't initialised yet.
             from .config import LoadedConfig
             from .signing import DeviceKey as _DeviceKey
         except Exception:  # noqa: BLE001 — import failure can't be allowed to escape
             _log.warning("bootstrap: tn imports failed", exc_info=True)
-            _clear_keystore(priv_path, pub_path)
             return False
 
-        # Build a synthetic cfg directly with our device key so the
-        # absorb's _maybe_unseal_recipient_wrap can match recipient_did.
-        # The cfg matches what _try_bootstrap_cfg would synthesise but
-        # we control the device DeviceKey explicitly. Once absorb's
-        # project_seed handler runs it overwrites the keystore with
-        # the publisher's identity.
+        # Build a synthetic cfg directly with our device key so
+        # ``_maybe_unseal_recipient_wrap`` can match recipient_did.
         device = _DeviceKey.from_private_bytes(seed)
         cfg = LoadedConfig(
             yaml_path=yaml_path,
@@ -351,7 +316,6 @@ def bootstrap_from_api_key(
                 "bootstrap: absorb rejected sealed bundle: %s",
                 receipt.legacy_reason,
             )
-            _clear_keystore(priv_path, pub_path)
             return False
 
         # absorb may have replaced our seed with the publisher's seed;
@@ -389,23 +353,6 @@ def bootstrap_from_api_key(
             exc_info=True,
         )
         return False
-
-
-def _clear_keystore(priv_path: Path, pub_path: Path) -> None:
-    """Best-effort cleanup when bootstrap aborts after writing the
-    ephemeral seed but before absorb succeeded.
-
-    Leaving the ephemeral seed on disk would let the caller's
-    fall-through path (INIT-UPLOAD) accidentally publish under our
-    throwaway DID instead of minting a fresh one. Yanking both files
-    keeps the keystore "empty" so INIT-UPLOAD does the right thing.
-    """
-    for p in (priv_path, pub_path):
-        try:
-            if p.exists():
-                p.unlink()
-        except OSError:
-            pass
 
 
 __all__ = [

@@ -154,8 +154,17 @@ pub struct Ceremony {
     /// Sync logs flag for wallet-linked ceremonies.
     #[serde(default)]
     pub sync_logs: bool,
-    /// Where to route `tn.*` protocol events: `"main_log"` or path template.
-    #[serde(default = "default_pel")]
+    /// Where to route `tn.*` admin events: `"main_log"` or path template.
+    ///
+    /// Yaml key: `admin_log_location` (preferred) or legacy
+    /// `protocol_events_location`. Default is the dedicated admin log
+    /// file alongside the main log, matching Python's
+    /// `LoadedConfig.admin_log_location`.
+    #[serde(
+        default = "default_pel",
+        alias = "protocol_events_location",
+        rename = "admin_log_location"
+    )]
     pub protocol_events_location: String,
     /// Whether each emitted entry is signed by the publisher's Ed25519
     /// device key. `true` (default) produces fully attested logs. `false`
@@ -179,7 +188,12 @@ fn default_local() -> String {
     "local".into()
 }
 fn default_pel() -> String {
-    "main_log".into()
+    // Matches Python LoadedConfig.admin_log_location default
+    // (python/tn/config.py:263). Pre-2026-04-24 default was "main_log";
+    // changed when admin events got their own dedicated file alongside
+    // the main user log. Legacy yamls with `protocol_events_location: main_log`
+    // still keep that explicit value.
+    "./.tn/admin/admin.ndjson".into()
 }
 fn default_private() -> String {
     "private".into()

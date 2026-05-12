@@ -27,32 +27,49 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+_REL_WASM_TEST = Path("static") / "dashboard" / "test" / "wasm_e2e.test.mjs"
+_SIBLING_CANDIDATES = ("tnproto-org", "tn-proto-org", "tn_proto_web")
 
 
 def _resolve_sibling_repo_root() -> Path | None:
-    """Find the sibling tnproto-org checkout regardless of local clone name.
+    """Find the sibling tnproto-org checkout regardless of local clone name
+    OR which directory layer the test happens to be running from.
 
     The repo is published as ``cyaxios/tn-proto-org`` on GitHub but is
     cloned under various names in the wild — ``tnproto-org`` (no internal
     hyphen), ``tn-proto-org`` (canonical), and ``tn_proto_web`` (the
     underscore-with-_web naming that was in use during the alpha sprint).
-    Return whichever directory exists alongside ``tn_proto`` and
-    contains the wasm e2e test, or None if no candidate is found.
+
+    The test also runs from two different parent depths depending on
+    where ``tn-proto`` is checked out:
+      * Normal checkout: ``<root>/tn-proto/python/tests/`` → parents[3] is <root>.
+      * Worktree:        ``<root>/tn-proto/.worktrees/<branch>/python/tests/``
+                         → parents[3] is ``<root>/tn-proto/.worktrees`` (one too deep).
+      * Other nesting (CI, monorepos): unknown.
+
+    So we walk up the parent chain from this file and pick the FIRST
+    ancestor that has a sibling matching one of the candidate names AND
+    that sibling contains the wasm e2e test. This is layout-agnostic.
     """
-    candidates = ("tnproto-org", "tn-proto-org", "tn_proto_web")
-    for name in candidates:
-        candidate = REPO_ROOT / name / "static" / "dashboard" / "test" / "wasm_e2e.test.mjs"
-        if candidate.exists():
-            return candidate.parents[3]
+    here = Path(__file__).resolve()
+    for ancestor in here.parents:
+        for name in _SIBLING_CANDIDATES:
+            candidate = ancestor / name / _REL_WASM_TEST
+            if candidate.exists():
+                return ancestor / name
     return None
 
 
 _SIBLING_ROOT = _resolve_sibling_repo_root()
-WASM_TEST_PATH = (
-    _SIBLING_ROOT / "static" / "dashboard" / "test" / "wasm_e2e.test.mjs"
+REPO_ROOT = (
+    _SIBLING_ROOT.parent
     if _SIBLING_ROOT is not None
-    else REPO_ROOT / "tnproto-org" / "static" / "dashboard" / "test" / "wasm_e2e.test.mjs"
+    else Path(__file__).resolve().parents[3]
+)
+WASM_TEST_PATH = (
+    _SIBLING_ROOT / _REL_WASM_TEST
+    if _SIBLING_ROOT is not None
+    else REPO_ROOT / "tnproto-org" / _REL_WASM_TEST
 )
 INTEROP_DIR = Path(tempfile.gettempdir()) / "wasm-interop"
 
