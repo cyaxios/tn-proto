@@ -237,6 +237,36 @@ def _build_kit_bundle_body(
 
     if full and cfg is not None and cfg.yaml_path is not None and cfg.yaml_path.exists():
         body["body/tn.yaml"] = cfg.yaml_path.read_bytes()
+        # Pack every named stream's yaml verbatim. Streams live in named
+        # sibling subdirectories of the project root, each with its own
+        # ``tn.yaml`` carrying the chain's ``ceremony.id``. We pack the
+        # yaml as-is so absorb can restore the same chain identity on
+        # the receiving node. Streams have no key material of their own
+        # (they extend default), so we don't recurse into logs/ or admin/.
+        #
+        # Project root location depends on the on-disk layout:
+        # * New (preferred): ``<root>/default/tn.yaml`` → root is parent.parent
+        # * Legacy: ``<root>/tn.yaml`` → root is parent
+        # We pick the root by walking up until we find subdirs with
+        # tn.yaml siblings (other than default's own dir).
+        from ._defaults import DEFAULT_CEREMONY_NAME
+
+        default_dir = cfg.yaml_path.parent
+        if default_dir.name == DEFAULT_CEREMONY_NAME:
+            project_root = default_dir.parent
+            default_dir_name: str | None = default_dir.name
+        else:
+            project_root = default_dir
+            default_dir_name = None
+        if project_root.is_dir():
+            for entry in sorted(project_root.iterdir()):
+                if not entry.is_dir():
+                    continue
+                if default_dir_name is not None and entry.name == default_dir_name:
+                    continue
+                stream_yaml = entry / "tn.yaml"
+                if stream_yaml.is_file():
+                    body[f"body/streams/{entry.name}/tn.yaml"] = stream_yaml.read_bytes()
 
     if full:
         # Loud zero-byte marker. Keeping it under ``body/`` matches the new
