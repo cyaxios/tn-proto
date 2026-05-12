@@ -27,6 +27,7 @@ keys (``event_type_prefix``, ``not_event_type_prefix``, ``event_type_in``,
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +176,19 @@ def build_handlers(
             # path is expected to contain ``local.private`` (raw 32-byte
             # Ed25519 seed) and ``local.public`` (did:key string).
             keystore_path = _resolve_keystore(raw, yaml_dir)
+
+            # API-key cold-start (2026-05-11 design): if the keystore
+            # is empty AND ``$TN_API_KEY`` is set, try to bootstrap from
+            # the bearer before falling through to _load_device_key.
+            # Success leaves the keystore populated; failure logs and
+            # we proceed to _load_device_key's normal "missing
+            # local.private — run `tn init`" error.
+            _maybe_bootstrap_from_api_key(
+                yaml_dir=yaml_dir,
+                keystore_path=keystore_path,
+                vault_did=raw["vault_did"],
+            )
+
             alice_did, alice_priv = _load_device_key(keystore_path)
             out.append(
                 VaultSyncHandler(
@@ -361,6 +375,44 @@ def _resolve_keystore(raw: dict[str, Any], yaml_dir: Path) -> Path:
         return _resolve_path(ks, yaml_dir)
     # Default: <yaml_dir>/.tn/keys (matches tn config layout).
     return (yaml_dir / ".tn" / "keys").resolve()
+
+
+def _maybe_bootstrap_from_api_key(
+    *,
+    yaml_dir: Path,
+    keystore_path: Path,
+    vault_did: str,
+) -> bool:
+    """Cold-start bootstrap from ``$TN_API_KEY`` if the keystore is empty.
+
+    Returns True iff the keystore is now populated (either it already
+    was, or bootstrap succeeded). False means the caller's
+    ``_load_device_key`` will raise a "missing local.private" error
+    that surfaces as a friendly "run `tn init`" hint.
+
+    Why here and not in ``tn.init``: a ``vault.sync`` handler that's
+    declared in tn.yaml but lacks a keystore is the *only* place where
+    a missing local.private is an error (offline runs without
+    vault.sync are fine without one). Gating on the handler kind keeps
+    other init paths unchanged.
+    """
+    priv = keystore_path / "local.private"
+    if priv.exists():
+        return True  # keystore already populated; no bootstrap needed
+    api_key = os.environ.get("TN_API_KEY")
+    if not api_key:
+        return False
+    # Late import to keep registry.py import cost low when this branch
+    # isn't exercised (offline / dev envs without TN_API_KEY).
+    from ..bootstrap import bootstrap_from_api_key
+
+    yaml_path = yaml_dir / "tn.yaml"
+    return bootstrap_from_api_key(
+        yaml_path=yaml_path,
+        keystore_path=keystore_path,
+        vault_did=vault_did,
+        api_key=api_key,
+    )
 
 
 def _load_device_key(keystore_path: Path) -> tuple[str, bytes]:

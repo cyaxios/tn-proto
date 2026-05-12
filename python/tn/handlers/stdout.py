@@ -185,9 +185,25 @@ class StdoutHandler(SyncHandler):
     def emit(self, envelope: dict[str, Any], raw_line: bytes) -> None:
         if self._stream_override is not None:
             stream = self._stream_override
+            text_mode = False
         else:
-            # capsys-friendly: read sys.stdout fresh on every emit
-            stream = sys.stdout.buffer if hasattr(sys.stdout, "buffer") else sys.stdout  # type: ignore[assignment]
+            # capsys-friendly: read sys.stdout fresh on every emit.
+            #
+            # In an IPython/Jupyter/Databricks kernel ``sys.stdout`` is
+            # an ``ipykernel.iostream.OutStream`` whose ``.buffer`` is
+            # the underlying file descriptor — writes there bypass the
+            # kernel's cell-output capture and end up in the driver log
+            # rather than the originating cell. Force text-mode writes
+            # through ``sys.stdout`` itself so the kernel sees them.
+            if _in_ipython_kernel():
+                stream = sys.stdout
+                text_mode = True
+            elif hasattr(sys.stdout, "buffer"):
+                stream = sys.stdout.buffer  # type: ignore[assignment]
+                text_mode = False
+            else:
+                stream = sys.stdout  # type: ignore[assignment]
+                text_mode = True
         # Resolve format every emit so mid-process env-var flips are
         # honored — same pattern stdlib logging uses for level checks.
         fmt = _resolve_format(self._format_kwarg)
@@ -195,12 +211,35 @@ class StdoutHandler(SyncHandler):
             payload = raw_line if raw_line.endswith(b"\n") else raw_line + b"\n"
         else:
             payload = _format_pretty(envelope)
-        try:
-            stream.write(payload)
-        except TypeError:
-            # capsys's captured stdout may be text-mode, not bytes-mode
-            stream.write(payload.decode("utf-8", errors="replace"))  # type: ignore[arg-type]
+        if text_mode:
+            try:
+                stream.write(payload.decode("utf-8", errors="replace"))  # type: ignore[arg-type]
+            except TypeError:
+                stream.write(payload)  # type: ignore[arg-type]
+        else:
+            try:
+                stream.write(payload)
+            except TypeError:
+                # capsys's captured stdout may be text-mode, not bytes-mode
+                stream.write(payload.decode("utf-8", errors="replace"))  # type: ignore[arg-type]
         try:
             stream.flush()
         except Exception:  # noqa: BLE001 — flush is best-effort; underlying stream may be unflushable in test capture
             pass
+
+
+def _in_ipython_kernel() -> bool:
+    """True iff running inside an IPython kernel (Jupyter, Databricks).
+
+    Conservative detection: only returns True when IPython is importable
+    AND ``get_ipython()`` returns a non-None instance. Plain CPython,
+    pytest runs, and tn CLI invocations all return False.
+    """
+    try:
+        from IPython import get_ipython  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    try:
+        return get_ipython() is not None
+    except Exception:
+        return False
