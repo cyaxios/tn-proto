@@ -71,8 +71,12 @@ def _write_policy(yaml_dir: Path, text: str) -> None:
 
 
 def _published_events() -> list:
+    from tn.admin.log import resolve_admin_log_path
     return [
-        e for e in tn.read(all_runs=True)
+        e for e in tn.read(
+            log=resolve_admin_log_path(tn.current_config()),
+            all_runs=True,
+        )
         if e.event_type == "tn.agents.policy_published"
     ]
 

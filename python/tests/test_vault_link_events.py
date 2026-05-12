@@ -29,7 +29,11 @@ def test_vault_link_emits_event(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e.event_type == "tn.vault.linked"]
+    from tn.admin.log import resolve_admin_log_path
+    events = [
+        e for e in tn.read(log=resolve_admin_log_path(tn.current_config()))
+        if e.event_type == "tn.vault.linked"
+    ]
     assert len(events) == 1, f"expected 1 link event, got {len(events)}"
     e = events[0]
     assert e.fields["vault_did"] == "did:web:tn-proto.org"
@@ -45,7 +49,11 @@ def test_vault_unlink_emits_event_with_reason(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e.event_type == "tn.vault.unlinked"]
+    from tn.admin.log import resolve_admin_log_path
+    events = [
+        e for e in tn.read(log=resolve_admin_log_path(tn.current_config()))
+        if e.event_type == "tn.vault.unlinked"
+    ]
     assert len(events) == 1
     assert events[0].fields["reason"] == "user_request"
 
@@ -58,7 +66,11 @@ def test_vault_unlink_without_reason(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e.event_type == "tn.vault.unlinked"]
+    from tn.admin.log import resolve_admin_log_path
+    events = [
+        e for e in tn.read(log=resolve_admin_log_path(tn.current_config()))
+        if e.event_type == "tn.vault.unlinked"
+    ]
     assert len(events) == 1
     assert events[0].fields.get("reason") is None
 
@@ -71,7 +83,11 @@ def test_vault_link_is_idempotent(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e.event_type == "tn.vault.linked"]
+    from tn.admin.log import resolve_admin_log_path
+    events = [
+        e for e in tn.read(log=resolve_admin_log_path(tn.current_config()))
+        if e.event_type == "tn.vault.linked"
+    ]
     assert len(events) == 1, f"vault_link should be idempotent; got {len(events)} events"
 
 
@@ -84,7 +100,11 @@ def test_vault_link_to_different_project_emits_again(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e.event_type == "tn.vault.linked"]
+    from tn.admin.log import resolve_admin_log_path
+    events = [
+        e for e in tn.read(log=resolve_admin_log_path(tn.current_config()))
+        if e.event_type == "tn.vault.linked"
+    ]
     assert len(events) == 2
 
 
@@ -98,5 +118,9 @@ def test_vault_link_after_unlink_emits_again(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    events = [e for e in tn.read() if e.event_type == "tn.vault.linked"]
+    from tn.admin.log import resolve_admin_log_path
+    events = [
+        e for e in tn.read(log=resolve_admin_log_path(tn.current_config()))
+        if e.event_type == "tn.vault.linked"
+    ]
     assert len(events) == 2

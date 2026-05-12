@@ -105,16 +105,28 @@ def test_slice1_scan_covers_main_and_pel() -> None:
         tn.init(yaml_path, cipher="btn")
         tn.flush_and_close()
 
-        # Step 2: inject protocol_events_location so tn.* events route
-        # to a dedicated file template on subsequent emits.
+        # Step 2: override admin_log_location with a {event_type} template
+        # so tn.* events route to per-event files. The default yaml minted
+        # by step 1 already sets ``admin_log_location: ./admin/admin.ndjson``,
+        # so we replace that line in place rather than inject a duplicate
+        # (which Rust's serde rejects).
+        import re as _re
+
         yaml_text = yaml_path.read_text(encoding="utf-8")
-        if "protocol_events_location:" not in yaml_text:
-            yaml_text = yaml_text.replace(
+        new_yaml_text = _re.sub(
+            r"admin_log_location:.*",
+            "admin_log_location: ./.tn/logs/admin/{event_type}.ndjson",
+            yaml_text,
+            count=1,
+        )
+        if new_yaml_text == yaml_text:
+            # Field wasn't present (older mint?) — inject it.
+            new_yaml_text = yaml_text.replace(
                 "ceremony:\n",
-                "ceremony:\n  protocol_events_location: ./.tn/logs/admin/{event_type}.ndjson\n",
+                "ceremony:\n  admin_log_location: ./.tn/logs/admin/{event_type}.ndjson\n",
                 1,
             )
-            yaml_path.write_text(yaml_text, encoding="utf-8")
+        yaml_path.write_text(new_yaml_text, encoding="utf-8")
 
         # Step 3: trigger a new emit so the PEL file is created. Any
         # hand-edited recipient works as the trigger; the test for
