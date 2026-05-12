@@ -26,6 +26,7 @@ class TestCatalogShape:
             "audit",
             "secure_log",
             "telemetry",
+            "stdout",
         }
 
     def test_default_is_transaction(self):

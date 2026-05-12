@@ -77,7 +77,7 @@ from typing import Literal, get_args
 # Profile names (Literal for type safety; SDK-fixed)
 # ---------------------------------------------------------------------------
 
-ProfileName = Literal["transaction", "audit", "secure_log", "telemetry"]
+ProfileName = Literal["transaction", "audit", "secure_log", "telemetry", "stdout"]
 
 
 def all_profile_names() -> tuple[str, ...]:
@@ -201,6 +201,24 @@ _CATALOG: dict[str, Profile] = {
             "for high-volume traces, metrics, debug noise where "
             "evidence is overkill. Will be regression-tested for "
             "near-zero perf impact vs Python's logging.Logger."
+        ),
+    ),
+    "stdout": Profile(
+        name="stdout",
+        encrypts=True,
+        signs=False,
+        chains=False,
+        flush="async",
+        default_sink="stdout",
+        intended_use=(
+            "Dev-friendly default. The profile users reach for when "
+            "they just want a logger that prints — no on-disk file, "
+            "no signing/chain ceremony, the same shape as Python's "
+            "``print()``. Encryption is still on (the protocol floor); "
+            "everything else is dialed back. Use for local dev, "
+            "notebook scratchpads, demos, and any context where the "
+            "user wants ``tn.use(name, profile='stdout')`` to behave "
+            "like a familiar logger."
         ),
     ),
 }
