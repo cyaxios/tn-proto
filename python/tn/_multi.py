@@ -273,8 +273,12 @@ def _create_stream_yaml(
                 "rotate_on_init": False,
             }
         )
-    elif p.default_sink == "stdout":
-        declared.append({"kind": "stdout", "name": "stdout"})
+    # stdout is declared on every stream yaml so dev-time visibility
+    # of emits matches the default ceremony's auto-stdout. Operators
+    # silence per-stream by removing this entry; TN_NO_STDOUT=1 is
+    # the env-level override. For telemetry (default_sink=stdout)
+    # this is the only sink.
+    declared.append({"kind": "stdout", "name": "stdout"})
 
     # Reference to default's yaml by relative path. ``extends:`` is
     # resolved at load time in ``config.load`` -> ``_resolve_extends``;

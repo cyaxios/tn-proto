@@ -18,9 +18,21 @@ def init(
     identity=None,
     extra_handlers=None,
     stdout: bool | None = None,
+    link: bool | None = None,
 ) -> None:
     """Initialize TN for this process. See tn/__init__.py:_init_impl for the
-    full discovery chain behavior; this is the same function, relocated."""
+    full discovery chain behavior; this is the same function, relocated.
+
+    ``link`` controls the post-init vault upload + claim URL surfacing
+    (parity with the ``tn init`` CLI verb).
+
+      * ``None`` (default) — run iff inside an IPython/Jupyter/Databricks
+        kernel; plain Python callers (scripts, tests, library use) get
+        a clean ceremony with no vault contact.
+      * ``True`` — force run regardless of context.
+      * ``False`` — never run (CLI uses this to keep its own block).
+
+    Env opt-out: ``TN_NO_LINK=1`` skips the upload even when ``link=True``."""
     from . import _init_impl
     return _init_impl(
         yaml_path,
@@ -30,6 +42,7 @@ def init(
         identity=identity,
         extra_handlers=extra_handlers,
         stdout=stdout,
+        link=link,
     )
 
 

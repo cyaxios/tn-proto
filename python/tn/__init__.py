@@ -174,6 +174,7 @@ def _init_impl(
     identity=None,
     extra_handlers=None,
     stdout: bool | None = None,
+    link: bool | None = None,
 ) -> None:
     """Initialize TN for this process.
 
@@ -327,6 +328,188 @@ def _init_impl(
             _maybe_emit_policy_published(py_rt, _agent_policy_doc)
         except Exception:
             _logger.exception("tn.agents.policy_published emit failed; continuing")
+
+    # ------------------------------------------------------------------
+    # SDK auto-link — parity with the ``tn init`` CLI verb.
+    #
+    # The CLI's ``cmd_wallet_init`` block uploads the fresh ceremony to
+    # the vault and prints a CLAIM URL. That block lived only in the
+    # CLI, so notebook callers of ``tn.init()`` got no URL.
+    #
+    # Resolution of the ``link`` kwarg:
+    #
+    #   * ``True``  — force run (works in any context).
+    #   * ``False`` — never run (CLI passes this to keep its own block).
+    #   * ``None``  — auto: run iff inside an IPython/Jupyter/Databricks
+    #                 kernel. Plain Python scripts, pytest runs,
+    #                 examples, and library callers get a clean
+    #                 ceremony with no surprise vault contact; the
+    #                 notebook UX the change was written for still
+    #                 fires automatically.
+    #
+    # ``TN_NO_LINK=1`` is a hard env-level opt-out checked by the
+    # helper itself.
+    # ------------------------------------------------------------------
+    if link is True or (link is None and _in_ipython()):
+        try:
+            _auto_link_after_init(yaml_path=yaml_p, identity=identity)
+        except Exception:
+            _logger.exception("tn.init auto-link wrapper raised; continuing")
+
+
+# Module-level latch so re-entrant ``tn.init()`` calls in the same
+# process don't reprint the claim URL on every call.
+_link_done_this_process: bool = False
+
+
+def _in_ipython() -> bool:
+    """True iff running inside an IPython/Jupyter/Databricks kernel.
+
+    Used to (a) route the auto-link banner through ``IPython.display.HTML``
+    so the claim URL renders as a clickable hyperlink in the cell, and
+    (b) keep the stdout handler in the dispatch fan-out so emits land
+    in cell output rather than the Rust-side fd-1 sink the kernel
+    doesn't capture.
+    """
+    try:
+        from IPython import get_ipython  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    try:
+        return get_ipython() is not None
+    except Exception:
+        return False
+
+
+def _display_claim_url(
+    *,
+    url: str,
+    vault_id: str,
+    expires_at: str,
+    reused: bool,
+) -> None:
+    """Render the claim URL. HTML hyperlink in IPython, plain print elsewhere."""
+    if _in_ipython():
+        try:
+            from IPython.display import HTML, display  # type: ignore[import-not-found]
+
+            reuse_note = (
+                '  <em>(reusing live pending claim within TTL)</em>'
+                if reused
+                else ''
+            )
+            display(HTML(
+                '<div style="border-left:3px solid #2b7;padding:0.5em 0.75em;'
+                'margin:0.5em 0;font-family:sans-serif;">'
+                '<div style="font-weight:600;margin-bottom:0.25em;">'
+                'TN — claim this project under your account</div>'
+                f'<div><a href="{url}" target="_blank" rel="noopener">{url}</a></div>'
+                '<div style="font-size:0.85em;color:#666;margin-top:0.25em;">'
+                f'vault_id: <code>{vault_id}</code> · expires: '
+                f'<code>{expires_at}</code>{reuse_note}'
+                '</div></div>'
+            ))
+            return
+        except Exception:
+            pass  # fall through to plain print below
+    print()
+    print("[tn.init] Backed up to vault")
+    print(f"[tn.init]   vault_id: {vault_id}")
+    print(f"[tn.init]   expires:  {expires_at}")
+    if reused:
+        print("[tn.init]   (reusing live pending-claim within TTL)")
+    print()
+    print(
+        "[tn.init] CLAIM URL — open this in your browser to attach the "
+        "project to your account:"
+    )
+    print(f"  {url}")
+    print()
+
+
+def _auto_link_after_init(*, yaml_path: Path, identity: Any | None) -> None:
+    """Best-effort vault upload + claim URL surfacing.
+
+    Mirrors the link/print block from ``cli.cmd_wallet_init`` so plain
+    Python callers (notebooks, scripts, REPL) get the same onboarding
+    URL the CLI does. Failures are warned-but-not-raised: a vault that
+    is unreachable does not invalidate the on-disk ceremony.
+
+    Identity resolution:
+      * Caller-supplied ``identity`` wins.
+      * Else load from ``_default_identity_path()`` if it exists.
+      * Else mint a fresh identity (mnemonic NOT stored — back up
+        ``identity.json`` directly or run ``tn wallet backup`` later).
+
+    Env opt-out: ``TN_NO_LINK=1`` skips entirely.
+    """
+    global _link_done_this_process
+    if _link_done_this_process:
+        return
+    if __import__("os").environ.get("TN_NO_LINK", "").strip() == "1":
+        return
+
+    from .identity import Identity, _default_identity_path
+    from .vault_client import resolve_vault_url
+
+    identity_path = _default_identity_path()
+    if identity is None:
+        if identity_path.exists():
+            try:
+                identity = Identity.load(identity_path)
+            except Exception as e:
+                _logger.warning(
+                    "auto-link: failed to load identity at %s: %s; skipping.",
+                    identity_path, e,
+                )
+                return
+        else:
+            try:
+                identity = Identity.create_new(word_count=12)
+                identity.ensure_written(identity_path)
+            except Exception as e:
+                _logger.warning(
+                    "auto-link: failed to mint identity at %s: %s; skipping.",
+                    identity_path, e,
+                )
+                return
+
+    vault_url = identity.linked_vault or resolve_vault_url(None)
+    if identity.linked_vault is None:
+        try:
+            identity.linked_vault = vault_url
+            identity.ensure_written(identity_path)
+        except Exception:
+            _logger.exception(
+                "auto-link: failed to persist linked_vault; continuing"
+            )
+
+    client = None
+    try:
+        from .handlers.vault_push import _default_client_factory, init_upload
+
+        client = _default_client_factory(vault_url, identity)
+        cfg = _current_config_impl()
+        result = init_upload(cfg, client, vault_base=vault_url)
+        _display_claim_url(
+            url=result["claim_url"],
+            vault_id=result["vault_id"],
+            expires_at=result["expires_at"],
+            reused=bool(result.get("reused", False)),
+        )
+        _link_done_this_process = True
+    except Exception as e:
+        _logger.warning(
+            "auto-link: vault upload failed: %s; ceremony is still valid "
+            "locally. Retry with `tn wallet link %s --vault %s`.",
+            e, yaml_path, vault_url,
+        )
+    finally:
+        if client is not None:
+            try:
+                client._vc.close()
+            except Exception:
+                pass
 
 
 def _iter_log_files(cfg) -> list:
