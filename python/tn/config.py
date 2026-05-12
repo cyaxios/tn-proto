@@ -557,6 +557,8 @@ def create_fresh(
         "auto_populated_by_policy": True,
     }
 
+    from .vault_client import DEFAULT_VAULT_URL
+
     doc = {
         # All ceremony defaults are written explicitly so the yaml is a
         # complete, auditable contract — every behavior the runtime
@@ -564,7 +566,17 @@ def create_fresh(
         # in-code defaults. Closes FINDINGS #10.
         "ceremony": {
             "id": ceremony_id,
-            "mode": "local",
+            # Default ceremonies are vault-linked at mint time. The
+            # ``linked_vault`` URL points at the hosted cyaxios vault;
+            # ``linked_project_id`` is empty until ``tn.vault.link()``
+            # claims one. Nothing reaches the network until an explicit
+            # vault verb runs — ``mode: linked`` only gates which
+            # operations are permitted, not whether they fire. Set
+            # ``mode: local`` to opt out and operate fully offline.
+            "mode": "linked",
+            "linked_vault": DEFAULT_VAULT_URL,
+            "linked_project_id": "",
+            "sync_logs": False,
             "cipher": cipher,
             # Sign every entry's row_hash with the device's Ed25519 key.
             # ``sign: false`` flips chain-only mode (still tamper-evident

@@ -29,6 +29,9 @@ node_modules/
 ts-sdk/dist/
 ts-sdk/coverage/
 
+# Worktrees
+.worktrees/
+
 # Editors / OS
 .vscode/
 .idea/

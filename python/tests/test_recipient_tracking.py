@@ -40,8 +40,12 @@ def test_add_recipient_with_did_emits_attested_event(tmp_path):
     # tn.recipient.added in btn-cipher ceremonies still routes to the
     # main log under ``logs.path`` (admin-log routing is JWE-only at
     # the moment). Read with all_runs=True so prior-run events surface.
+    from tn.admin.log import resolve_admin_log_path
     added = [
-        e for e in tn.read(all_runs=True)
+        e for e in tn.read(
+            log=resolve_admin_log_path(tn.current_config()),
+            all_runs=True,
+        )
         if e.event_type == "tn.recipient.added"
     ]
     assert len(added) == 1, f"expected one recipient.added event, got {len(added)}"
@@ -58,8 +62,12 @@ def test_add_recipient_without_did_still_emits_event_without_did_field(tmp_path)
     tn.flush_and_close()
 
     tn.init(yaml)
+    from tn.admin.log import resolve_admin_log_path
     added = [
-        e for e in tn.read(all_runs=True)
+        e for e in tn.read(
+            log=resolve_admin_log_path(tn.current_config()),
+            all_runs=True,
+        )
         if e.event_type == "tn.recipient.added"
     ]
     assert len(added) == 1

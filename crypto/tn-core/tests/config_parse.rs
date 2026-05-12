@@ -54,7 +54,13 @@ groups:
 "#;
     let cfg = tn_core::config::parse(yaml).unwrap();
     assert_eq!(cfg.ceremony.mode, "local"); // default
-    assert_eq!(cfg.ceremony.protocol_events_location, "main_log"); // default
+    // Default flipped from the legacy "main_log" sentinel to a dedicated
+    // admin-log path (matches Python's LoadedConfig.admin_log_location
+    // default at python/tn/config.py and aligns with #26).
+    assert_eq!(
+        cfg.ceremony.protocol_events_location,
+        "./.tn/admin/admin.ndjson"
+    );
     assert_eq!(cfg.default_policy, "private"); // default
     assert_eq!(cfg.groups["default"].index_epoch, 0); // default
     assert_eq!(cfg.groups["default"].policy, "private"); // default

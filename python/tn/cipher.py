@@ -448,11 +448,13 @@ class BtnGroupCipher:
         """Mint a fresh btn ceremony and write its key files."""
         import tn_btn as _btn
 
+        from ._keystore_backend import atomic_write_bytes
+
         state = _btn.PublisherState()
         self_kit = state.mint()
         keystore.mkdir(parents=True, exist_ok=True)
-        (keystore / f"{group_name}.btn.state").write_bytes(state.to_bytes())
-        (keystore / f"{group_name}.btn.mykit").write_bytes(self_kit)
+        atomic_write_bytes(keystore / f"{group_name}.btn.state", state.to_bytes())
+        atomic_write_bytes(keystore / f"{group_name}.btn.mykit", self_kit)
         return cls(
             _state=state,
             _self_kit=self_kit,
@@ -496,5 +498,7 @@ class BtnGroupCipher:
     def _persist_state(self) -> None:
         """Called by admin verbs after mutating state (add/revoke/mint)."""
         if self._state is not None and self._keystore is not None:
+            from ._keystore_backend import atomic_write_bytes
+
             p = self._keystore / f"{self._group_name}.btn.state"
-            p.write_bytes(self._state.to_bytes())
+            atomic_write_bytes(p, self._state.to_bytes())
