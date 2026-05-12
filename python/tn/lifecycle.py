@@ -24,9 +24,15 @@ def init(
     full discovery chain behavior; this is the same function, relocated.
 
     ``link`` controls the post-init vault upload + claim URL surfacing
-    (parity with the ``tn init`` CLI verb). ``None`` (default) auto-runs
-    best-effort; ``False`` suppresses (CLI uses this to keep its own
-    block); ``True`` forces. Env opt-out: ``TN_NO_LINK=1``."""
+    (parity with the ``tn init`` CLI verb).
+
+      * ``None`` (default) — run iff inside an IPython/Jupyter/Databricks
+        kernel; plain Python callers (scripts, tests, library use) get
+        a clean ceremony with no vault contact.
+      * ``True`` — force run regardless of context.
+      * ``False`` — never run (CLI uses this to keep its own block).
+
+    Env opt-out: ``TN_NO_LINK=1`` skips the upload even when ``link=True``."""
     from . import _init_impl
     return _init_impl(
         yaml_path,

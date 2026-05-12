@@ -332,18 +332,25 @@ def _init_impl(
     # ------------------------------------------------------------------
     # SDK auto-link — parity with the ``tn init`` CLI verb.
     #
-    # The CLI's ``cmd_wallet_init`` block (cli.py) uploads the fresh
-    # ceremony to the vault and prints a CLAIM URL the user opens in a
-    # browser to attach the project to their account. That block lived
-    # only in the CLI, so notebook / scripted callers of ``tn.init()``
-    # got a worse onboarding: no URL, no link.
+    # The CLI's ``cmd_wallet_init`` block uploads the fresh ceremony to
+    # the vault and prints a CLAIM URL. That block lived only in the
+    # CLI, so notebook callers of ``tn.init()`` got no URL.
     #
-    # ``link=None`` (default) runs auto-link best-effort; ``link=False``
-    # suppresses (used by the CLI to keep its own block); ``link=True``
-    # forces. Once per process — repeat ``tn.init()`` calls in a
-    # notebook session stay quiet.
+    # Resolution of the ``link`` kwarg:
+    #
+    #   * ``True``  — force run (works in any context).
+    #   * ``False`` — never run (CLI passes this to keep its own block).
+    #   * ``None``  — auto: run iff inside an IPython/Jupyter/Databricks
+    #                 kernel. Plain Python scripts, pytest runs,
+    #                 examples, and library callers get a clean
+    #                 ceremony with no surprise vault contact; the
+    #                 notebook UX the change was written for still
+    #                 fires automatically.
+    #
+    # ``TN_NO_LINK=1`` is a hard env-level opt-out checked by the
+    # helper itself.
     # ------------------------------------------------------------------
-    if link is not False:
+    if link is True or (link is None and _in_ipython()):
         try:
             _auto_link_after_init(yaml_path=yaml_p, identity=identity)
         except Exception:
