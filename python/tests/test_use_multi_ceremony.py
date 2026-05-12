@@ -322,6 +322,25 @@ def test_use_writes_signed_envelopes_when_profile_signs():
 
 
 @requires_btn
+def test_use_with_stdout_profile_is_dev_friendly():
+    """The ``stdout`` profile is the friendlier name for the
+    "just print, no ceremony" shape. Same wire behavior as
+    ``telemetry``: encrypted (floor), unsigned, unchained, stdout
+    sink. The name change is the whole point — users see
+    ``profile='stdout'`` and know what they're getting."""
+    import tn
+
+    dev = tn.use("dev_scratch", profile="stdout")
+    dev.info("debug.note", note="quick check")
+
+    yaml_doc = _ceremony_yaml(dev)
+    assert yaml_doc["ceremony"]["profile"] == "stdout"
+    assert yaml_doc["ceremony"]["sign"] is False
+    # No on-disk replay surface (default sink is stdout) — read is empty.
+    assert list(dev.read()) == []
+
+
+@requires_btn
 def test_use_keeps_each_profile_independent_in_the_same_process():
     """The whole point of multi-ceremony: one app can run a strict
     ``transaction`` stream and a fast ``telemetry`` stream at the
