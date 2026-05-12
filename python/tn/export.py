@@ -122,26 +122,21 @@ def _scan_admin_envelopes(sources: list[Path]) -> tuple[bytes, dict[str, Any]]:
 def _build_admin_log_snapshot_body(
     cfg: LoadedConfig,
 ) -> tuple[dict[str, bytes], dict[str, Any]]:
-    """Body for ``kind=admin_log_snapshot`` — every admin envelope plus the
-    materialized AdminState at point-of-export.
+    """Body for ``kind=admin_log_snapshot`` — every admin envelope plus
+    the materialized AdminState at point-of-export.
 
-    Sources scanned (in order, deduped by ``row_hash``):
-
-    * The main log (``cfg.resolve_log_path()``) — admin events ride here
-      today on every configured ceremony, and the Rust runtime writes
-      here unconditionally.
-    * The dedicated admin log (``resolve_admin_log_path(cfg)``), if it
-      differs from the main log — picked up once we wire admin emit
-      routing to it in a follow-up session.
+    Single source: the dedicated admin log
+    (``resolve_admin_log_path(cfg)``). With the Rust runtime now routing
+    ``tn.*`` events to the admin log natively (#26), the historical
+    dual-scan-and-dedup of main+admin is no longer needed. The "vault
+    never sees user content" invariant is now a property of the source
+    list, not of the ``is_admin_event_type`` filter.
     """
     from .admin import state as _admin_state  # late import to avoid cycles
     from .admin.log import resolve_admin_log_path
 
-    main_log = cfg.resolve_log_path()
     admin_log = resolve_admin_log_path(cfg)
-    sources: list[Path] = [main_log]
-    if admin_log != main_log:
-        sources.append(admin_log)
+    sources: list[Path] = [admin_log]
     ndjson, extras = _scan_admin_envelopes(sources)
     body: dict[str, bytes] = {"body/admin.ndjson": ndjson}
     # Materialize current AdminState. Requires an active runtime — the
