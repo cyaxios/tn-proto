@@ -243,6 +243,12 @@ def _init_impl(
         _run_id = _uuid.uuid4().hex
         _os.environ["TN_RUN_ID"] = _run_id
 
+    # Register the atexit drain hook on first init so handlers flush
+    # on normal interpreter shutdown without the caller having to
+    # remember tn.flush_and_close(). Idempotent — repeat inits don't
+    # re-register. See _atexit_flush + _register_atexit_flush_once.
+    _register_atexit_flush_once()
+
     # Serialize init() across threads so two callers on a fresh process
     # don't both build their own runtime (and then leak one). The second
     # caller waits, sees the now-bound _dispatch_rt, and short-circuits
@@ -956,8 +962,51 @@ from .read import (  # noqa: E402
 )
 
 
+# atexit registration: tn.init() registers _atexit_flush once per
+# process so handlers drain on normal interpreter exit without the
+# caller needing to remember tn.flush_and_close(). The flag prevents
+# double-registration on subsequent init() calls.
+_atexit_registered = False
+
+
+def _atexit_flush() -> None:
+    """Best-effort drain at process exit. Idempotent — safe to run after
+    an explicit ``tn.flush_and_close()`` (it's a no-op when the
+    runtime is already closed). Swallows exceptions so a flush failure
+    can't taint the interpreter shutdown.
+    """
+    try:
+        if _dispatch_rt is not None:
+            _flush_and_close_impl()
+    except Exception:
+        # atexit must never raise — leftover state will be cleaned up
+        # by the OS when the process exits anyway.
+        pass
+
+
+def _register_atexit_flush_once() -> None:
+    """Register ``_atexit_flush`` exactly once for the lifetime of this
+    process. Called from ``_init_impl`` on first init.
+    """
+    global _atexit_registered
+    if _atexit_registered:
+        return
+    import atexit
+    atexit.register(_atexit_flush)
+    _atexit_registered = True
+
+
 def _flush_and_close_impl(*, timeout: float = 30.0) -> None:
-    """Close all handlers (drains async outboxes best-effort)."""
+    """Close all handlers (drains async outboxes best-effort).
+
+    You usually don't need to call ``tn.flush_and_close()`` explicitly
+    — ``tn.init()`` registers an ``atexit`` hook that drains handlers
+    on normal interpreter shutdown. Call this only when you need
+    deterministic flush *before* the process exits (e.g., before
+    forking, before assertion checks in tests, or in long-running
+    services that re-init periodically). For deterministic scoping
+    use ``with tn.session(): ...`` instead.
+    """
     global _dispatch_rt, _cached_admin_state, _agent_policy_doc
     _surface.info(
         "tn.flush_and_close() ENTER prior_dispatch=%s timeout=%s",
@@ -998,6 +1047,17 @@ def _flush_and_close_impl(*, timeout: float = 30.0) -> None:
         "TN_RUN_ID env still set so re-init keeps stamping consistent run_id)",
         _run_id,
     )
+
+
+# Note: tn.session() already exists as a context manager (see
+# python/tn/_session_impl.py). It handles init + tmpdir + close +
+# nested-session restore. For explicit lifecycle scoping, use:
+#
+#     with tn.session() as handle:
+#         handle.log("evt", k=1)
+#
+# For most callers the atexit hook above means you never need to call
+# flush_and_close() at all.
 
 
 def _current_config_impl():
