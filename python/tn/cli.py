@@ -463,6 +463,107 @@ def cmd_wallet_pull_prefs(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------
 
 
+def _is_new_flow_restore(args: argparse.Namespace) -> bool:
+    """Detect the account-bound / passphrase-fallback restore path.
+
+    The legacy mnemonic flow is selected by passing ``--mnemonic`` /
+    ``--mnemonic-file``; the absence of either, combined with an
+    ``--out-dir`` (or the ``--passphrase`` flag), routes us to the new
+    flow handler in :func:`_cmd_wallet_restore_account_bound`.
+    """
+    return (
+        args.mnemonic is None
+        and args.mnemonic_file is None
+        and (args.out_dir is not None or getattr(args, "passphrase", False))
+    )
+
+
+def _resolve_restore_mnemonic(args: argparse.Namespace) -> str:
+    """Resolve the 12/24-word recovery phrase from CLI args.
+
+    Precedence: ``--mnemonic-file`` > ``--mnemonic`` > interactive
+    prompt. In non-TTY contexts (CI, docker, ssh-without-tty) the
+    prompt path is forbidden and we exit with code 2 so the operator
+    fixes their invocation instead of the script hanging on stdin.
+    """
+    if args.mnemonic_file is not None:
+        return Path(args.mnemonic_file).read_text(encoding="utf-8").strip()
+    if args.mnemonic is not None:
+        return args.mnemonic.strip()
+    if not _is_tty():
+        _die(
+            "--mnemonic or --mnemonic-file required in non-TTY contexts "
+            "(or pass an output directory to use the new account-bound flow)",
+            code=2,
+        )
+    return getpass.getpass("Enter your 12/24-word recovery phrase: ").strip()
+
+
+def _restore_identity_only(
+    identity: Identity, identity_path: Path, vault_url: str | None
+) -> int:
+    """Write the recovered identity to disk and stop.
+
+    Used in the vault-less case (no ``--vault`` passed): we restore
+    just the device key from the mnemonic and exit so the operator can
+    bootstrap a fresh ceremony manually.
+    """
+    if vault_url is not None:
+        identity.linked_vault = vault_url
+    identity.ensure_written(identity_path)
+    print(f"Identity restored to {identity_path}")
+    print(f"  DID: {identity.did}")
+    if vault_url is not None:
+        print(f"  vault: {vault_url}")
+    return 0
+
+
+def _select_projects_to_restore(
+    args: argparse.Namespace, projects: list[dict[str, Any]]
+) -> set[Any]:
+    """Pick which vault-side projects to pull.
+
+    Precedence: ``--project-ids`` > ``--all-projects`` (or non-TTY) >
+    interactive comma-separated indexes prompt. Always returns a set
+    of project ids that the caller can intersect against the
+    ``projects`` list.
+    """
+    if args.project_ids:
+        return set(args.project_ids.split(","))
+    if args.all_projects or not _is_tty():
+        return {p.get("id") or p.get("_id") for p in projects}
+    picks = input("Enter comma-separated indexes to restore (or 'all'): ").strip()
+    if picks.lower() == "all":
+        return {p.get("id") or p.get("_id") for p in projects}
+    idx = [int(x) for x in picks.split(",") if x.strip()]
+    return {(projects[i].get("id") or projects[i].get("_id")) for i in idx}
+
+
+def _pull_selected_projects(
+    client: VaultClient,
+    projects: list[dict[str, Any]],
+    selected_ids: set[Any],
+    out_dir: Path,
+) -> None:
+    """For each selected project, fetch its ceremony bundle into a
+    sibling directory under ``out_dir`` and print a per-project summary.
+
+    Errors are surfaced inline as ``WARN`` lines rather than raised —
+    one bad project shouldn't block the others.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for p in projects:
+        pid = p.get("id") or p.get("_id")
+        if pid is None or pid not in selected_ids:
+            continue
+        target = out_dir / str(p.get("name") or pid)
+        print(f"Restoring {pid} -> {target}")
+        result = _wallet.restore_ceremony(client, str(pid), target_dir=target)
+        print(f"  pulled {len(result.files_restored)} files: {result.files_restored}")
+        if result.errors:
+            print(f"  WARN {len(result.errors)} errors: {result.errors}")
+
+
 def cmd_wallet_restore(args: argparse.Namespace) -> int:
     """Restore a ceremony from the vault.
 
@@ -485,30 +586,13 @@ def cmd_wallet_restore(args: argparse.Namespace) -> int:
     if getattr(args, "out_dir_flag", None) and not args.out_dir:
         args.out_dir = args.out_dir_flag
 
-    # New-flow dispatch. The presence of an out_dir + absence of a
-    # mnemonic are the cue. Passphrase fallback (--passphrase) is also
-    # the new flow with a different secret-derivation path.
-    using_new_flow = (
-        args.mnemonic is None
-        and args.mnemonic_file is None
-        and (args.out_dir is not None or getattr(args, "passphrase", False))
-    )
-    if using_new_flow:
+    if _is_new_flow_restore(args):
         return _cmd_wallet_restore_account_bound(args)
 
-    if args.mnemonic is None and args.mnemonic_file is None:
-        if not _is_tty():
-            _die(
-                "--mnemonic or --mnemonic-file required in non-TTY contexts "
-                "(or pass an output directory to use the new account-bound flow)",
-                code=2,
-            )
-        mnemonic = getpass.getpass("Enter your 12/24-word recovery phrase: ").strip()
-    elif args.mnemonic_file is not None:
-        mnemonic = Path(args.mnemonic_file).read_text(encoding="utf-8").strip()
-    else:
-        mnemonic = args.mnemonic.strip()
-
+    # Legacy mnemonic path. Resolve the phrase, build the identity,
+    # refuse to clobber an existing one without --force, then either
+    # stop (no vault) or list+select+restore projects.
+    mnemonic = _resolve_restore_mnemonic(args)
     try:
         identity = Identity.from_mnemonic(mnemonic)
     except IdentityError as e:
@@ -522,21 +606,13 @@ def cmd_wallet_restore(args: argparse.Namespace) -> int:
             code=2,
         )
 
-    vault_url = args.vault
-    if vault_url is None:
+    if args.vault is None:
         print("No --vault passed; restoring identity only (no ceremonies).")
-        identity.ensure_written(identity_path)
-        print(f"Identity restored to {identity_path}")
-        print(f"  DID: {identity.did}")
-        return 0
+        return _restore_identity_only(identity, identity_path, vault_url=None)
 
-    identity.linked_vault = vault_url
-    identity.ensure_written(identity_path)
-    print(f"Identity restored to {identity_path}")
-    print(f"  DID: {identity.did}")
-    print(f"  vault: {vault_url}")
+    _restore_identity_only(identity, identity_path, vault_url=args.vault)
 
-    client = VaultClient.for_identity(identity, vault_url)
+    client = VaultClient.for_identity(identity, args.vault)
     try:
         projects = client.list_projects()
         if not projects:
@@ -546,35 +622,11 @@ def cmd_wallet_restore(args: argparse.Namespace) -> int:
         print(f"Found {len(projects)} linked ceremonies:")
         for i, p in enumerate(projects):
             pid = p.get("id") or p.get("_id")
-            name = p.get("name", "(unnamed)")
-            print(f"  [{i}] {pid}  name={name}")
+            print(f"  [{i}] {pid}  name={p.get('name', '(unnamed)')}")
 
-        if args.project_ids:
-            selected_ids = set(args.project_ids.split(","))
-        elif args.all_projects or not _is_tty():
-            selected_ids = {p.get("id") or p.get("_id") for p in projects}
-        else:
-            picks = input("Enter comma-separated indexes to restore (or 'all'): ").strip()
-            if picks.lower() == "all":
-                selected_ids = {p.get("id") or p.get("_id") for p in projects}
-            else:
-                idx = [int(x) for x in picks.split(",") if x.strip()]
-                selected_ids = {(projects[i].get("id") or projects[i].get("_id")) for i in idx}
-
+        selected_ids = _select_projects_to_restore(args, projects)
         base_restore_dir = Path(args.out_dir or "./restored").resolve()
-        base_restore_dir.mkdir(parents=True, exist_ok=True)
-
-        for p in projects:
-            pid = p.get("id") or p.get("_id")
-            if pid is None or pid not in selected_ids:
-                continue
-            name = p.get("name") or pid
-            target = base_restore_dir / str(name)
-            print(f"Restoring {pid} -> {target}")
-            result = _wallet.restore_ceremony(client, str(pid), target_dir=target)
-            print(f"  pulled {len(result.files_restored)} files: {result.files_restored}")
-            if result.errors:
-                print(f"  WARN {len(result.errors)} errors: {result.errors}")
+        _pull_selected_projects(client, projects, selected_ids, base_restore_dir)
     finally:
         client.close()
     return 0
