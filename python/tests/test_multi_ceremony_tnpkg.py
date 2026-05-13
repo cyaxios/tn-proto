@@ -68,15 +68,19 @@ def _isolation(monkeypatch, tmp_path):
 
 @requires_btn
 class TestNonDefaultCeremonyHasRealCfg:
-    def test_named_ceremony_loads_cfg_without_singleton(self, tmp_path):
-        # Create a named ceremony. Verify .cfg loads independently.
+    def test_named_ceremony_loads_cfg_and_binds_singleton(self, tmp_path):
+        # Create a named ceremony. Verify .cfg loads + the module
+        # singleton rebinds onto it (post-#a7: last init wins for
+        # the module-level state, mirroring stdlib `logging`).
         h = tn.init("payments", project_dir=tmp_path)
         cfg = h.cfg
         assert cfg.yaml_path == h.yaml_path
         # Each ceremony has its own DID (we mint fresh per-ceremony).
         assert cfg.device.did.startswith("did:key:z")
-        # Singleton is NOT bound by named-ceremony init.
-        assert tn._dispatch_rt is None
+        # Singleton IS bound: tn.info / tn.current_config now route
+        # through this named ceremony until a subsequent tn.init.
+        assert tn._dispatch_rt is not None
+        assert tn.current_config().yaml_path == h.yaml_path
 
     def test_two_named_ceremonies_share_project_did(self, tmp_path):
         # Shared identity: every stream's DID is the project's DID.

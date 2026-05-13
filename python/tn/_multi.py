@@ -699,12 +699,19 @@ def _init_named_ceremony(
     yaml_path: str | Path | None,
     profile: str | None,
     legacy_kwargs: dict[str, Any],
+    bind: bool = True,
 ) -> TN:
     """Handle the named-ceremony shape (``tn.init("payments")``).
 
     Validates the ceremony name, auto-migrates legacy layouts if any,
     honours an explicit ``yaml_path=`` override, otherwise mints
     ``.tn/<name>/`` via ``_ensure_ceremony_on_disk``.
+
+    ``bind=True`` (the default and the ``tn.init(name=...)`` path)
+    rebinds the module singleton onto this ceremony. ``bind=False``
+    is for ``tn.use(name)`` which is the lazy attach-by-name flow:
+    it returns a handle without disturbing whatever the module-level
+    ``tn.info`` / ``tn.current_config`` are currently bound to.
     """
     if not isinstance(name, str) or not is_valid_ceremony_name(name):
         raise TNInvalidName(
@@ -726,6 +733,7 @@ def _init_named_ceremony(
             profile=profile,
             existing=existing,
             legacy_kwargs=legacy_kwargs,
+            bind=bind,
         )
 
     return _init_named_default_layout(
@@ -734,6 +742,7 @@ def _init_named_ceremony(
         profile=profile,
         existing=existing,
         legacy_kwargs=legacy_kwargs,
+        bind=bind,
     )
 
 
@@ -744,17 +753,23 @@ def _init_named_with_explicit_yaml(
     profile: str | None,
     existing: TN | None,
     legacy_kwargs: dict[str, Any],
+    bind: bool = True,
 ) -> TN:
     """Named ceremony with an explicit yaml-path override.
 
     The caller pinned a yaml location; we honour it and skip the
     default ``.tn/<name>/`` placement. Profile-conflict checks still
     apply against the on-disk yaml.
+
+    ``bind`` controls whether the module singleton is rebound. ``True``
+    on the ``tn.init(name=)`` path; ``False`` for ``tn.use(name)``.
     """
     explicit_yaml = Path(yaml_path).resolve()
     _check_no_conflict(explicit_yaml, profile=profile)
 
     if existing is not None:
+        if bind:
+            _bind_default_singleton(explicit_yaml, **legacy_kwargs)
         return existing
 
     handle = TN(
@@ -763,7 +778,11 @@ def _init_named_with_explicit_yaml(
         directory=explicit_yaml.parent,
     )
     _registry_register(name, handle)
-    if name == DEFAULT_CEREMONY_NAME:
+    if bind:
+        # Last `tn.init(...)` call wins for module-level state.
+        # Callers that want to keep an explicit handle to a non-
+        # current ceremony retain the returned `TN` and use
+        # `handle.info(...)`.
         _bind_default_singleton(explicit_yaml, **legacy_kwargs)
     return handle
 
@@ -775,19 +794,26 @@ def _init_named_default_layout(
     profile: str | None,
     existing: TN | None,
     legacy_kwargs: dict[str, Any],
+    bind: bool = True,
 ) -> TN:
     """Named ceremony mounted at the canonical ``.tn/<name>/`` location.
 
-    Mints on disk if absent. The default ceremony binds the module
-    singleton; named streams do not.
+    Mints on disk if absent. With ``bind=True`` (the default, taken by
+    the ``tn.init(name=...)`` path) the module singleton is rebound
+    onto this ceremony so post-call ``tn.info(...)`` /
+    ``tn.current_config()`` / ``tn.read(...)`` operate against it —
+    last init wins, mirroring stdlib ``logging``. With ``bind=False``
+    (the ``tn.use(name)`` path) the singleton is left alone; this
+    is for the lazy attach-by-name flow that wants a handle without
+    disturbing module-level state.
     """
     yaml_p = ceremony_yaml_path(name, project_dir=project_path)
     _check_no_conflict(yaml_p, profile=profile)
 
     if existing is not None:
+        if bind:
+            _bind_default_singleton(yaml_p, **legacy_kwargs)
         return existing
-
-    is_default = name == DEFAULT_CEREMONY_NAME
 
     if not yaml_p.is_file():
         # Single source of truth for on-disk layout.
@@ -810,10 +836,8 @@ def _init_named_default_layout(
 
     handle = _new_handle(name, project_dir=project_path)
     _registry_register(name, handle)
-
-    if is_default:
+    if bind:
         _bind_default_singleton(yaml_p, **legacy_kwargs)
-
     return handle
 
 
@@ -1093,11 +1117,21 @@ def use(
     except _TNNotFound:
         pass
 
-    # Registry miss: defer to ``init`` so the disk-attach-or-create
-    # path is exactly the same as explicit init. ``profile`` flows
-    # through; init handles the validate-then-on-disk-wins semantics
-    # via ``_check_no_conflict``.
-    return init(name, profile=profile, project_dir=project_dir)
+    # Registry miss: defer to the same disk-attach-or-create code path
+    # as ``init`` but with ``bind=False``. ``tn.use`` is the lazy
+    # registry-attach verb; it returns a handle without disturbing
+    # the module-level singleton. Callers that explicitly want their
+    # named ceremony to BE the module-level singleton call
+    # ``tn.init(name=...)`` instead.
+    project_path = Path(project_dir).resolve() if project_dir is not None else None
+    return _init_named_ceremony(
+        name=name,
+        project_path=project_path,
+        yaml_path=None,
+        profile=profile,
+        legacy_kwargs={},
+        bind=False,
+    )
 
 
 def list_ceremonies() -> list[str]:

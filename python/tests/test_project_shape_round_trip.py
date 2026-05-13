@@ -44,12 +44,19 @@ def test_full_keystore_packs_stream_yamls(tmp_path: Path) -> None:
     payments_yaml_bytes = payments.yaml_path.read_bytes()
     audits_yaml_bytes = audits.yaml_path.read_bytes()
 
+    # Re-bind the module singleton to the default ceremony before
+    # exporting: post-#a7 each tn.use(...) rebinds the singleton
+    # (last-init-wins), so the trailing singleton would be audits'.
+    # full_keystore export uses cfg.yaml_path.parent.parent as the
+    # project root for stream discovery, so we need the default cfg
+    # for the walk to find payments/ and audits/ as siblings.
+    tn.init()
+
     out = tmp_path / "snapshot.tnpkg"
-    cfg = tn.current_config()
     tn.export(
         out,
         kind="full_keystore",
-        cfg=cfg,
+        cfg=tn.current_config(),
         confirm_includes_secrets=True,
     )
 
@@ -92,6 +99,9 @@ def test_full_keystore_absorbs_stream_yamls(
     payments_id_a = _yaml.safe_load(payments.yaml_path.read_text())["ceremony"]["id"]
     audits_id_a = _yaml.safe_load(audits.yaml_path.read_text())["ceremony"]["id"]
 
+    # Re-bind to default before exporting (see sibling test for the
+    # rationale: each tn.use(...) rebinds the singleton post-#a7).
+    tn.init()
     out = tmp_path / "snapshot.tnpkg"
     cfg_a = tn.current_config()
     tn.export(

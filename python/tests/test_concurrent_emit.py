@@ -105,6 +105,13 @@ def test_concurrent_emit_preserves_chain_and_uniqueness(tmp_path):
         log_path = tmp_path / ".tn" / "tn" / "logs" / "tn.ndjson"
         assert log_path.exists(), "no log file produced"
 
+        # Re-bind the runtime against the same yaml before reading. The
+        # post-#a7 discovery chain is cwd-scoped (no $TN_HOME implicit
+        # attach), so tn.read after flush_and_close needs an explicit
+        # init — otherwise auto-init load-only walks the chain, finds
+        # nothing in tmp_path, and raises.
+        tn.init(yaml, cipher="btn")
+
         # Every line must parse as JSON: no torn lines, no interleaved bytes.
         raw_lines = [
             line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()
