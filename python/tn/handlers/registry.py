@@ -32,7 +32,11 @@ from pathlib import Path
 from typing import Any
 
 from .base import TNHandler
-from .file import FileRotatingHandler, FileTimedRotatingHandler
+from .file import (
+    FileRotatingHandler,
+    FileTemplatedRotatingHandler,
+    FileTimedRotatingHandler,
+)
 
 _log = logging.getLogger("tn.handlers")
 
@@ -57,9 +61,18 @@ def build_handlers(
     *,
     yaml_dir: Path,
     default_log_dir: Path,
+    cfg: Any | None = None,
 ) -> list[TNHandler]:
-    """Instantiate handlers from YAML. If `specs` is None, synthesize the
-    default. Empty list means user explicitly opted out — honor it."""
+    """Instantiate handlers from YAML. If ``specs`` is None, synthesize the
+    default. Empty list means user explicitly opted out — honor it.
+
+    ``cfg`` (the :class:`LoadedConfig` for this ceremony) is required to
+    build a :class:`FileTemplatedRotatingHandler`: that handler needs
+    ``cfg.resolve_log_path_for(event_type)`` to render the template
+    per-envelope. When ``cfg`` is missing and a templated path is
+    requested we surface a clear ``ValueError`` rather than silently
+    write to a literal "./logs/{event_type}.ndjson" file.
+    """
     if specs is None:
         return [default_file_handler(default_log_dir)]
     if not specs:
@@ -76,20 +89,42 @@ def build_handlers(
         filter_spec = raw.get("filter")
 
         if kind in ("file.rotating", "file"):
-            path = _resolve_path(raw["path"], yaml_dir)
-            handler = FileRotatingHandler(
-                name=name,
-                path=path,
-                max_bytes=int(raw.get("max_bytes", 5 * 1024 * 1024)),
-                backup_count=int(raw.get("backup_count", 5)),
-                # Default off: TN log is an attestation chain;
-                # rotation at session start breaks chain verification
-                # across the rotation boundary. Yaml
-                # `rotate_on_init: true` opts in for operators who
-                # want a separate file per session.
-                rotate_on_init=bool(raw.get("rotate_on_init", False)),
-                filter_spec=filter_spec,
-            )
+            raw_path = raw["path"]
+            handler: TNHandler
+            if isinstance(raw_path, str) and "{" in raw_path:
+                # Templated main-log path. Render per-envelope via
+                # cfg.resolve_log_path_for; the handler caches one
+                # rotating-file inner handler per resolved path.
+                if cfg is None:
+                    raise ValueError(
+                        f"handler {name!r}: templated path {raw_path!r} "
+                        f"requires a LoadedConfig (build_handlers was "
+                        f"called without cfg=...)."
+                    )
+                handler = FileTemplatedRotatingHandler(
+                    name=name,
+                    template=raw_path,
+                    cfg=cfg,
+                    max_bytes=int(raw.get("max_bytes", 5 * 1024 * 1024)),
+                    backup_count=int(raw.get("backup_count", 5)),
+                    rotate_on_init=bool(raw.get("rotate_on_init", False)),
+                    filter_spec=filter_spec,
+                )
+            else:
+                path = _resolve_path(raw_path, yaml_dir)
+                handler = FileRotatingHandler(
+                    name=name,
+                    path=path,
+                    max_bytes=int(raw.get("max_bytes", 5 * 1024 * 1024)),
+                    backup_count=int(raw.get("backup_count", 5)),
+                    # Default off: TN log is an attestation chain;
+                    # rotation at session start breaks chain
+                    # verification across the rotation boundary. Yaml
+                    # ``rotate_on_init: true`` opts in for operators
+                    # who want a separate file per session.
+                    rotate_on_init=bool(raw.get("rotate_on_init", False)),
+                    filter_spec=filter_spec,
+                )
             # The yaml-declared file handler is the canonical default sink
             # for ceremonies — Rust writes to the same log file itself, so
             # this handler must be marked as a "default" so the dispatch
