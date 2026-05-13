@@ -973,155 +973,232 @@ def recipients(group: str, *, include_revoked: bool = False) -> list[dict[str, A
     that have been revoked.
 
     Source of truth is the attested log — `tn.recipient.added` and
-    `tn.recipient.revoked` events. Uses the Rust reducer
-    (tn_core.admin.reduce) to derive per-event state changes; reducer
-    errors on admin events are warned and skipped rather than aborting
-    the whole replay.
+    `tn.recipient.revoked` events. Implementation delegates to
+    :func:`state` (group-filtered) and reshapes the result to this
+    function's narrower contract.
     """
-    from .. import _maybe_autoinit_load_only, _read_raw_admin_aware, _surface
+    from .. import _surface
 
     _surface.info("tn.recipients(group=%r, include_revoked=%s)", group, include_revoked)
-    _maybe_autoinit_load_only()
-    import warnings
+    full = state(group=group)
+    out: list[dict[str, Any]] = []
+    revoked_rows: list[dict[str, Any]] = []
+    for r in full["recipients"]:
+        is_revoked = r.get("active_status") in ("revoked", "retired")
+        row = {
+            "leaf_index": r["leaf_index"],
+            "recipient_did": r.get("recipient_did"),
+            "minted_at": r.get("minted_at"),
+            "kit_sha256": r.get("kit_sha256"),
+            "revoked": is_revoked,
+            "revoked_at": r.get("revoked_at") or r.get("retired_at"),
+        }
+        if is_revoked:
+            revoked_rows.append(row)
+        else:
+            out.append(row)
+    out.sort(key=lambda r: r["leaf_index"])
+    if include_revoked:
+        revoked_rows.sort(key=lambda r: r["leaf_index"])
+        out.extend(revoked_rows)
+    return out
 
-    try:
-        import tn_core  # PyO3 extension
 
-        _have_rust_reducer = True
-    except ImportError:
-        _have_rust_reducer = False
+_ADMIN_EVENT_PREFIXES = (
+    "tn.ceremony.",
+    "tn.group.",
+    "tn.recipient.",
+    "tn.rotation.",
+    "tn.coupon.",
+    "tn.enrolment.",
+    "tn.vault.",
+)
 
-    active: dict[int, dict[str, Any]] = {}
-    revoked_map: dict[int, dict[str, Any]] = {}
 
-    for raw in _read_raw_admin_aware():
-        # _read_raw_admin_aware yields {"envelope": {...}, "plaintext": {...}, "valid": {...}}
-        # from BOTH the main log and the admin log (the dedicated
-        # `.tn/admin/admin.ndjson` file the new default routes admin
-        # events to). Pre-2026-04-24 this used read_raw() which only sees
-        # the main log; the admin-log default flip required this widening.
-        env = raw["envelope"]
-        valid = raw.get("valid", {})
-        plaintext = raw.get("plaintext") or {}
+def _is_admin_event(event_type: str) -> bool:
+    return any(event_type.startswith(p) for p in _ADMIN_EVENT_PREFIXES)
 
-        event_type = env.get("event_type", "")
 
-        # Only process recipient-lifecycle events.
-        if not event_type.startswith("tn.recipient."):
-            continue
-
-        # Admin events must be cryptographically sound. The valid dict has
-        # per-check booleans; all three must pass.
-        all_valid = (
-            valid.get("signature", False)
-            and valid.get("row_hash", False)
-            and valid.get("chain", False)
-        )
-        if not all_valid:
-            warnings.warn(
-                f"tn.recipients: skipping tampered admin event event={event_type!r}",
-                stacklevel=2,
-            )
-            continue
-
-        # Build a flattened envelope suitable for the reducer.
-        # The Rust runtime stores all per-event fields in the encrypted group
-        # payload; after read_raw() decrypts them, they appear in
-        # plaintext[<group_name>]. Merge all group plaintext fields into a
-        # copy of the envelope so the reducer sees a flat dict.
-        merged: dict[str, Any] = dict(env)
+def _merge_envelope_for_reducer(
+    env: dict[str, Any], plaintext: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Flatten the encrypted-payload fields onto the envelope so the
+    reducer sees one dict.
+    """
+    merged: dict[str, Any] = dict(env)
+    if plaintext:
         for group_fields in plaintext.values():
             if isinstance(group_fields, dict):
                 merged.update(group_fields)
+    return merged
 
-        ts = env.get("timestamp")
 
-        if _have_rust_reducer:
-            # The catalog schema requires 'cipher' on tn.recipient.added and
-            # 'recipient_did' on tn.recipient.revoked, but the Rust emitter
-            # stores these as optional/implicit. Supply safe defaults so the
-            # reducer's schema check passes without altering semantics.
-            if event_type == "tn.recipient.added" and "cipher" not in merged:
-                # btn ceremonies are the only ones that route through this
-                # path (Rust runtime). Fall back to "btn" as the implicit default.
-                merged.setdefault("cipher", "btn")
-            if event_type == "tn.recipient.revoked" and "recipient_did" not in merged:
-                merged.setdefault("recipient_did", None)
+def _fill_reducer_schema_defaults(
+    event_type: str, merged: dict[str, Any]
+) -> None:
+    """Supply the schema defaults the Rust emitter omits.
 
-            try:
-                delta = tn_core.admin.reduce(merged)
-            except ValueError as exc:
-                warnings.warn(
-                    f"tn.recipients: admin event failed reduce: {event_type!r}: {exc}",
-                    stacklevel=2,
-                )
-                continue
+    The catalog schema requires ``cipher`` on ``tn.recipient.added``
+    and ``recipient_did`` on ``tn.recipient.revoked``, but the Rust
+    emitter stores them as optional/implicit. Patch them here so the
+    reducer's schema check passes without altering semantics.
+    """
+    if event_type == "tn.recipient.added":
+        merged.setdefault("cipher", "btn")
+    elif event_type == "tn.recipient.revoked":
+        merged.setdefault("recipient_did", None)
 
-            kind = delta.get("kind")
 
-            if kind == "recipient_added" and delta.get("group") == group:
-                leaf = delta.get("leaf_index")
-                if leaf is None:
-                    continue
-                active[leaf] = {
-                    "leaf_index": leaf,
-                    "recipient_did": delta.get("recipient_did"),
-                    "minted_at": ts,
-                    "kit_sha256": delta.get("kit_sha256"),
-                    "revoked": False,
-                    "revoked_at": None,
-                }
-            elif kind == "recipient_revoked" and delta.get("group") == group:
-                leaf = delta.get("leaf_index")
-                if leaf is None:
-                    continue
-                rec = active.pop(leaf, None)
-                if rec is None:
-                    rec = {
-                        "leaf_index": leaf,
-                        "recipient_did": None,
-                        "minted_at": None,
-                        "kit_sha256": None,
-                    }
-                rec["revoked"] = True
-                rec["revoked_at"] = ts
-                revoked_map[leaf] = rec
+class _AdminStateBuilder:
+    """Accumulates per-event reducer deltas into the
+    ``tn.admin.state(...)`` return shape.
+
+    One handler per reducer ``kind``. Each handler mutates the
+    builder's state in place. The dispatch table avoids the long
+    if/elif chain that drove the original ``state()`` complexity.
+    """
+
+    def __init__(self) -> None:
+        self.state: dict[str, Any] = {
+            "ceremony": None,
+            "groups": [],
+            "recipients": [],
+            "rotations": [],
+            "coupons": [],
+            "enrolments": [],
+            "vault_links": [],
+        }
+        self.by_leaf: dict[tuple[str, int], dict] = {}
+        self.enrolments_by_peer: dict[tuple[str, str], dict] = {}
+        self.vault_links_by_did: dict[str, dict] = {}
+
+    def apply(self, delta: dict[str, Any], ts: Any) -> None:
+        handler = self._HANDLERS.get(delta.get("kind"))
+        if handler is not None:
+            handler(self, delta, ts)
+
+    def finalize(self) -> dict[str, Any]:
+        self.state["recipients"] = list(self.by_leaf.values())
+        self.state["enrolments"] = list(self.enrolments_by_peer.values())
+        self.state["vault_links"] = list(self.vault_links_by_did.values())
+        return self.state
+
+    # ── per-kind handlers ───────────────────────────────────────
+
+    def _on_ceremony_init(self, d: dict, ts: Any) -> None:
+        self.state["ceremony"] = {
+            "ceremony_id": d["ceremony_id"],
+            "cipher": d["cipher"],
+            "device_did": d["device_did"],
+            "created_at": d["created_at"],
+        }
+
+    def _on_group_added(self, d: dict, ts: Any) -> None:
+        self.state["groups"].append({
+            "group": d["group"],
+            "cipher": d["cipher"],
+            "publisher_did": d["publisher_did"],
+            "added_at": d["added_at"],
+        })
+
+    def _on_recipient_added(self, d: dict, ts: Any) -> None:
+        leaf = d.get("leaf_index")
+        if leaf is None:
+            return
+        self.by_leaf[(d["group"], leaf)] = {
+            "group": d["group"],
+            "leaf_index": leaf,
+            "recipient_did": d.get("recipient_did"),
+            "kit_sha256": d["kit_sha256"],
+            "minted_at": ts,
+            "active_status": "active",
+            "revoked_at": None,
+            "retired_at": None,
+        }
+
+    def _on_recipient_revoked(self, d: dict, ts: Any) -> None:
+        leaf = d.get("leaf_index")
+        if leaf is None:
+            return
+        rec = self.by_leaf.get((d["group"], leaf))
+        if rec is not None:
+            rec["active_status"] = "revoked"
+            rec["revoked_at"] = ts
+
+    def _on_rotation_completed(self, d: dict, ts: Any) -> None:
+        self.state["rotations"].append({
+            "group": d["group"],
+            "cipher": d["cipher"],
+            "generation": d["generation"],
+            "previous_kit_sha256": d["previous_kit_sha256"],
+            "rotated_at": d["rotated_at"],
+        })
+        # Retire any currently-active recipients in this group.
+        for leaf_key, rec in self.by_leaf.items():
+            if leaf_key[0] == d["group"] and rec["active_status"] == "active":
+                rec["active_status"] = "retired"
+                rec["retired_at"] = ts
+
+    def _on_coupon_issued(self, d: dict, ts: Any) -> None:
+        self.state["coupons"].append({
+            "group": d["group"],
+            "slot": d["slot"],
+            "to_did": d["to_did"],
+            "issued_to": d["issued_to"],
+            "issued_at": ts,
+        })
+
+    def _on_enrolment_compiled(self, d: dict, ts: Any) -> None:
+        self.enrolments_by_peer[(d["group"], d["peer_did"])] = {
+            "group": d["group"],
+            "peer_did": d["peer_did"],
+            "package_sha256": d["package_sha256"],
+            "status": "offered",
+            "compiled_at": d["compiled_at"],
+            "absorbed_at": None,
+        }
+
+    def _on_enrolment_absorbed(self, d: dict, ts: Any) -> None:
+        peer_key = (d["group"], d["from_did"])
+        existing = self.enrolments_by_peer.get(peer_key)
+        if existing is not None:
+            existing["status"] = "absorbed"
+            existing["absorbed_at"] = d["absorbed_at"]
         else:
-            # Fallback: inline switch when tn_core is not available.
-            if event_type == "tn.recipient.added" and merged.get("group") == group:
-                leaf_raw = merged.get("leaf_index")
-                if leaf_raw is None:
-                    continue
-                leaf = int(leaf_raw)
-                active[leaf] = {
-                    "leaf_index": leaf,
-                    "recipient_did": merged.get("recipient_did"),
-                    "minted_at": ts,
-                    "kit_sha256": merged.get("kit_sha256"),
-                    "revoked": False,
-                    "revoked_at": None,
-                }
-            elif event_type == "tn.recipient.revoked" and merged.get("group") == group:
-                leaf_raw = merged.get("leaf_index")
-                if leaf_raw is None:
-                    continue
-                leaf = int(leaf_raw)
-                rec = active.pop(leaf, None)
-                if rec is None:
-                    rec = {
-                        "leaf_index": leaf,
-                        "recipient_did": None,
-                        "minted_at": None,
-                        "kit_sha256": None,
-                    }
-                rec["revoked"] = True
-                rec["revoked_at"] = ts
-                revoked_map[leaf] = rec
+            self.enrolments_by_peer[peer_key] = {
+                "group": d["group"],
+                "peer_did": d["from_did"],
+                "package_sha256": d["package_sha256"],
+                "status": "absorbed",
+                "compiled_at": None,
+                "absorbed_at": d["absorbed_at"],
+            }
 
-    out = sorted(active.values(), key=lambda r: r["leaf_index"])
-    if include_revoked:
-        out.extend(sorted(revoked_map.values(), key=lambda r: r["leaf_index"]))
-    return out
+    def _on_vault_linked(self, d: dict, ts: Any) -> None:
+        self.vault_links_by_did[d["vault_did"]] = {
+            "vault_did": d["vault_did"],
+            "project_id": d["project_id"],
+            "linked_at": d["linked_at"],
+            "unlinked_at": None,
+        }
+
+    def _on_vault_unlinked(self, d: dict, ts: Any) -> None:
+        link = self.vault_links_by_did.get(d["vault_did"])
+        if link is not None:
+            link["unlinked_at"] = d["unlinked_at"]
+
+    _HANDLERS = {
+        "ceremony_init":      _on_ceremony_init,
+        "group_added":        _on_group_added,
+        "recipient_added":    _on_recipient_added,
+        "recipient_revoked":  _on_recipient_revoked,
+        "rotation_completed": _on_rotation_completed,
+        "coupon_issued":      _on_coupon_issued,
+        "enrolment_compiled": _on_enrolment_compiled,
+        "enrolment_absorbed": _on_enrolment_absorbed,
+        "vault_linked":       _on_vault_linked,
+        "vault_unlinked":     _on_vault_unlinked,
+    }
 
 
 def state(group: str | None = None) -> dict:
@@ -1151,173 +1228,34 @@ def state(group: str | None = None) -> dict:
     import warnings
 
     try:
-        import tn_core
-
-        _have_rust_reducer = True
+        import tn_core  # noqa: F401 — schema defaults still apply; full Python fallback isn't supported here
+        have_rust_reducer = True
     except ImportError:
-        _have_rust_reducer = False
+        have_rust_reducer = False
 
-    state_dict: dict = {
-        "ceremony": None,
-        "groups": [],
-        "recipients": [],
-        "rotations": [],
-        "coupons": [],
-        "enrolments": [],
-        "vault_links": [],
-    }
+    builder = _AdminStateBuilder()
 
-    # Active recipients keyed by (group, leaf_index).
-    by_leaf: dict[tuple[str, int], dict] = {}
-    enrolments_by_peer: dict[tuple[str, str], dict] = {}
-    vault_links_by_did: dict[str, dict] = {}
-
-    for raw in _read_raw_admin_aware():
-        env = raw["envelope"]
-        raw.get("valid", {})
-        plaintext = raw.get("plaintext") or {}
-
-        event_type = env.get("event_type", "")
-
-        # Only process admin events.
-        if not (
-            event_type.startswith("tn.ceremony.")
-            or event_type.startswith("tn.group.")
-            or event_type.startswith("tn.recipient.")
-            or event_type.startswith("tn.rotation.")
-            or event_type.startswith("tn.coupon.")
-            or event_type.startswith("tn.enrolment.")
-            or event_type.startswith("tn.vault.")
-        ):
-            continue
-
-        # Build a flattened envelope suitable for the reducer.
-        merged: dict[str, Any] = dict(env)
-        for group_fields in plaintext.values():
-            if isinstance(group_fields, dict):
-                merged.update(group_fields)
-
-        ts = merged.get("timestamp")
-
-        if _have_rust_reducer:
-            # Supply schema defaults the Rust emitter omits (matches recipients() fix).
-            if event_type == "tn.recipient.added" and "cipher" not in merged:
-                merged.setdefault("cipher", "btn")
-            if event_type == "tn.recipient.revoked" and "recipient_did" not in merged:
-                merged.setdefault("recipient_did", None)
-
+    if have_rust_reducer:
+        import tn_core
+        for raw in _read_raw_admin_aware():
+            env = raw["envelope"]
+            event_type = env.get("event_type", "")
+            if not _is_admin_event(event_type):
+                continue
+            merged = _merge_envelope_for_reducer(env, raw.get("plaintext"))
+            _fill_reducer_schema_defaults(event_type, merged)
+            ts = merged.get("timestamp")
             try:
-                d = tn_core.admin.reduce(merged)
+                delta = tn_core.admin.reduce(merged)
             except ValueError as exc:
                 warnings.warn(
                     f"tn.admin_state: admin event failed reduce: {event_type!r}: {exc}",
                     stacklevel=2,
                 )
                 continue
+            builder.apply(delta, ts)
 
-            kind = d.get("kind")
-
-            if kind == "ceremony_init":
-                state_dict["ceremony"] = {
-                    "ceremony_id": d["ceremony_id"],
-                    "cipher": d["cipher"],
-                    "device_did": d["device_did"],
-                    "created_at": d["created_at"],
-                }
-            elif kind == "group_added":
-                state_dict["groups"].append(
-                    {
-                        "group": d["group"],
-                        "cipher": d["cipher"],
-                        "publisher_did": d["publisher_did"],
-                        "added_at": d["added_at"],
-                    }
-                )
-            elif kind == "recipient_added":
-                leaf = d.get("leaf_index")
-                if leaf is None:
-                    continue
-                key = (d["group"], leaf)
-                by_leaf[key] = {
-                    "group": d["group"],
-                    "leaf_index": leaf,
-                    "recipient_did": d.get("recipient_did"),
-                    "kit_sha256": d["kit_sha256"],
-                    "minted_at": ts,
-                    "active_status": "active",
-                    "revoked_at": None,
-                    "retired_at": None,
-                }
-            elif kind == "recipient_revoked":
-                leaf = d.get("leaf_index")
-                if leaf is None:
-                    continue
-                key = (d["group"], leaf)
-                if key in by_leaf:
-                    by_leaf[key]["active_status"] = "revoked"
-                    by_leaf[key]["revoked_at"] = ts
-            elif kind == "rotation_completed":
-                state_dict["rotations"].append(
-                    {
-                        "group": d["group"],
-                        "cipher": d["cipher"],
-                        "generation": d["generation"],
-                        "previous_kit_sha256": d["previous_kit_sha256"],
-                        "rotated_at": d["rotated_at"],
-                    }
-                )
-                # Retire any currently-active recipients in this group.
-                for leaf_key, rec in by_leaf.items():
-                    if leaf_key[0] == d["group"] and rec["active_status"] == "active":
-                        rec["active_status"] = "retired"
-                        rec["retired_at"] = ts
-            elif kind == "coupon_issued":
-                state_dict["coupons"].append(
-                    {
-                        "group": d["group"],
-                        "slot": d["slot"],
-                        "to_did": d["to_did"],
-                        "issued_to": d["issued_to"],
-                        "issued_at": ts,
-                    }
-                )
-            elif kind == "enrolment_compiled":
-                enrolments_by_peer[(d["group"], d["peer_did"])] = {
-                    "group": d["group"],
-                    "peer_did": d["peer_did"],
-                    "package_sha256": d["package_sha256"],
-                    "status": "offered",
-                    "compiled_at": d["compiled_at"],
-                    "absorbed_at": None,
-                }
-            elif kind == "enrolment_absorbed":
-                peer_key: tuple[str, str] = (d["group"], d["from_did"])
-                if peer_key in enrolments_by_peer:
-                    enrolments_by_peer[peer_key]["status"] = "absorbed"
-                    enrolments_by_peer[peer_key]["absorbed_at"] = d["absorbed_at"]
-                else:
-                    enrolments_by_peer[peer_key] = {
-                        "group": d["group"],
-                        "peer_did": d["from_did"],
-                        "package_sha256": d["package_sha256"],
-                        "status": "absorbed",
-                        "compiled_at": None,
-                        "absorbed_at": d["absorbed_at"],
-                    }
-            elif kind == "vault_linked":
-                vault_links_by_did[d["vault_did"]] = {
-                    "vault_did": d["vault_did"],
-                    "project_id": d["project_id"],
-                    "linked_at": d["linked_at"],
-                    "unlinked_at": None,
-                }
-            elif kind == "vault_unlinked":
-                if d["vault_did"] in vault_links_by_did:
-                    vault_links_by_did[d["vault_did"]]["unlinked_at"] = d["unlinked_at"]
-
-    state_dict["recipients"] = list(by_leaf.values())
-    state_dict["enrolments"] = list(enrolments_by_peer.values())
-    state_dict["vault_links"] = list(vault_links_by_did.values())
+    state_dict = builder.finalize()
 
     # If no ceremony_init event was found in the log (common for btn ceremonies
     # where the Rust runtime writes ceremony info to the yaml, not the main log),
