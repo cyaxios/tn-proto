@@ -61,6 +61,46 @@ def test_watch_yields_new_appends(tmp_path):
     assert "b" in seen
 
 
+def test_watch_yields_admin_events(tmp_path):
+    """tn.watch() observes admin-prefixed events (tn.*) that route to
+    the dedicated admin log, not just user events that land in the
+    main log.
+
+    Regression test for the bug where _watch_impl tailed only
+    cfg.resolve_log_path() (main log) and admin events were invisible
+    after the runtime-correctness PR moved them to admin_log_location.
+    Operators saw 'task starts, never yields' for admin-only traffic.
+    """
+    yaml_path = tmp_path / "tn.yaml"
+    tn.init(yaml_path)
+
+    seen: list[str] = []
+
+    async def reader():
+        async for entry in tn.watch(poll_interval=0.05):
+            seen.append(entry.event_type)
+            # Stop once we've observed at least one admin event
+            # (the synthetic emit below) AND one user event.
+            if any(t.startswith("tn.test.") for t in seen) and "user.thing" in seen:
+                break
+
+    async def run():
+        task = asyncio.create_task(reader())
+        await asyncio.sleep(0.1)
+        # Admin-prefixed event — must route through admin log; watch
+        # must see it.
+        tn.log("tn.test.admin_visibility", level="info", marker="alpha")
+        # User event — goes to main log.
+        tn.info("user.thing", marker="beta")
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(run())
+    assert "tn.test.admin_visibility" in seen, (
+        f"admin event invisible to tn.watch; saw {seen}"
+    )
+    assert "user.thing" in seen, f"user event missing; saw {seen}"
+
+
 def test_watch_since_start_replays_existing(tmp_path):
     """tn.watch(since='start') replays entries written before the watcher started."""
     yaml_path = tmp_path / "tn.yaml"

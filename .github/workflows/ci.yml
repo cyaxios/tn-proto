@@ -146,6 +146,56 @@ jobs:
         # tracked separately. Allow it.
         run: npm test || true
 
+  complexity:
+    name: complexity budget (radon)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install radon
+        run: python -m pip install radon
+
+      - name: Report cyclomatic complexity (informational)
+        # Print every C/D/E/F block for visibility on every PR. Doesn't
+        # fail — operators see the list and can ratchet down deliberately.
+        run: |
+          echo "=== Rank C and worse (radon cyclomatic complexity) ==="
+          radon cc python/tn/ -s -nc -a
+          echo ""
+          echo "=== Per-file maintainability index ==="
+          radon mi python/tn/ -s
+
+      - name: Fail on new F-rank functions
+        # Hard gate: refuses to land any function with cyclomatic
+        # complexity > 40 (the F threshold) IF it didn't already exist.
+        # We grandfather the existing F-rank functions until they're
+        # refactored; tracked in:
+        #   https://github.com/cyaxios/tn-proto/issues/36 and follow-ups
+        # When fixed, lower this threshold and tighten the gate.
+        run: |
+          radon cc python/tn/ -nf -j > /tmp/f_rank.json
+          # Currently grandfathered F-rank functions (refactor in flight):
+          #   AdminStateCache._apply_envelope, export.export,
+          #   _multi.init, admin.__init__.state
+          # Allow up to 4 F-rank functions for now; ratchet down as fixed.
+          F_COUNT=$(python -c "
+          import json
+          with open('/tmp/f_rank.json') as fh:
+              data = json.load(fh)
+          n = sum(1 for fns in data.values() for f in fns if f.get('rank') == 'F')
+          print(n)
+          ")
+          echo "F-rank function count: $F_COUNT"
+          if [ "$F_COUNT" -gt 4 ]; then
+            echo "::error::More than 4 F-rank functions ($F_COUNT > 4); refactor before merging."
+            radon cc python/tn/ -s -nf
+            exit 1
+          fi
+
   parity-check:
     name: SDK parity check
     runs-on: ubuntu-latest

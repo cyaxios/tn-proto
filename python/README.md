@@ -7,19 +7,30 @@ TestigoNodo (TN) Python SDK — attested logging with broadcast encryption
 pip install tn-protocol
 ```
 
-## Library
+## Library — Hello, TN
+
+The smallest useful program (no yaml file required — first run auto-creates `./.tn/default/tn.yaml`):
 
 ```python
 import tn
 
-tn.init("./tn.yaml")            # discovery: $TN_YAML, ./tn.yaml, .tn/default/, ~/.tn/
+tn.init()                                                    # auto-creates a ceremony on first run
 tn.info("order.created", order_id="A100", amount=4999)
+tn.info("order.shipped", order_id="A100", carrier="ups")
 
-for entry in tn.read():         # yields typed Entry instances
+for entry in tn.read():                                      # yields typed Entry instances
     print(entry.event_type, entry.fields.get("order_id"))
-
-tn.flush_and_close()
 ```
+
+You can also pass an explicit yaml path or pick a different ceremony:
+
+```python
+tn.init("./tn.yaml")            # use this specific file (legacy path form)
+tn.init(name="payments")        # named ceremony at ./.tn/payments/
+tn.init(stream="pod-1")         # mint+open a stream of the default ceremony
+```
+
+Discovery chain when no args are passed: `$TN_YAML` → `./tn.yaml` → `./.tn/default/tn.yaml` → `$TN_HOME/tn.yaml`, then mints if nothing's there.
 
 Dirt-easy bootstrap from a dashboard-minted bundle:
 
