@@ -5,15 +5,19 @@ Public entry point: ``maybe_autoinit()``. Called from every public verb in
 already bound (someone called ``tn.init()`` explicitly, or we're inside a
 ``tn.session()`` context), this is a cheap no-op.
 
-Discovery order (mirrors the plan doc's "Design"):
+Discovery order (cwd-scoped; no implicit user-home attach):
 
     1. ``$TN_YAML``                       (env var, absolute or relative)
-    2. ``./tn.yaml``                      (cwd, legacy single-ceremony layout)
+    2. ``./tn.yaml``                      (cwd, single-ceremony layout)
     3. ``./.tn/default/tn.yaml``          (cwd, multi-ceremony layout)
-    4. ``$TN_HOME/tn.yaml``               (default ``~/.tn/tn.yaml``)
-    5. CREATE FRESH at ``./.tn/default/tn.yaml`` and emit a loud notice.
+    4. CREATE FRESH at ``./.tn/default/tn.yaml`` and emit a loud notice.
 
-Strict mode disables steps 2-4: ``TN_STRICT=1`` (env) or
+``$TN_HOME/tn.yaml`` is intentionally NOT in the chain: a project's tn
+calls must scope to that project. To opt in to a user-home ceremony
+explicitly, set ``TN_YAML=$TN_HOME/tn.yaml`` or call ``tn.init(<that
+path>)`` directly.
+
+Strict mode disables steps 2-3: ``TN_STRICT=1`` (env) or
 ``tn.set_strict(True)`` (Python). When strict is on and no explicit init
 has happened, ``tn.log()`` raises ``RuntimeError`` exactly like today.
 
@@ -193,9 +197,12 @@ def _resolve_existing_yaml() -> Path | None:
     multi_yaml = (Path.cwd() / ".tn" / "default" / "tn.yaml").resolve()
     if multi_yaml.exists():
         return multi_yaml
-    home_yaml = _tn_home() / "tn.yaml"
-    if home_yaml.exists():
-        return home_yaml
+    # NOTE: $TN_HOME/tn.yaml is intentionally NOT in the auto-discovery
+    # chain. A project's tn calls must scope to that project; the old
+    # behavior (silently attaching to ~/.tn/tn.yaml from prior work)
+    # corrupted the attestation guarantee for new users. To opt in to
+    # a user-home ceremony explicitly, set TN_YAML=$TN_HOME/tn.yaml or
+    # call tn.init(<that path>) directly.
     return None
 
 
@@ -238,13 +245,15 @@ def _resolve_discovery_yaml() -> tuple[Path, bool] | None:
     if multi_yaml.exists():
         return (multi_yaml, False)
 
-    # Step 5: $TN_HOME/tn.yaml
-    home_dir = _tn_home()
-    home_yaml = home_dir / "tn.yaml"
-    if home_yaml.exists():
-        return (home_yaml, False)
+    # NOTE: $TN_HOME/tn.yaml is intentionally NOT in this chain. A
+    # fresh `python script.py` in a project directory must scope to
+    # that project — the prior behavior (silent attach to
+    # ~/.tn/tn.yaml left over from earlier work) corrupted the
+    # attestation guarantee for new users. To opt in to a user-home
+    # ceremony explicitly, set TN_YAML=$TN_HOME/tn.yaml or call
+    # tn.init(<that path>) directly.
 
-    # Step 6: create fresh at ./.tn/default/tn.yaml — the multi-ceremony
+    # Step 5: create fresh at ./.tn/default/tn.yaml — the multi-ceremony
     # layout is the new default for fresh projects.
     multi_yaml.parent.mkdir(parents=True, exist_ok=True)
     return (multi_yaml, True)

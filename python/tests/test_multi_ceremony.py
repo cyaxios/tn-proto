@@ -346,21 +346,27 @@ class TestInitUseList:
         assert h1 is h2
 
     def test_use_attaches_to_disk_only_ceremony(self, tmp_path):
-        # Pre-create on disk, no registry entry.
+        # Pre-create a real ceremony on disk (init does the minting),
+        # then drop the in-process registry entry to simulate
+        # "ceremony exists on disk from a prior run; this process
+        # hasn't seen it yet." tn.use should re-attach to it.
+        from tn._registry import clear_registry_for_tests
+        marker_did = "did:key:zMarkerForDiskAttachTest"
+        tn.init("audit", project_dir=tmp_path)
         d = tmp_path / ".tn" / "audit"
-        d.mkdir(parents=True)
+        # Stamp a marker into the yaml so the post-attach check can
+        # verify the on-disk file wasn't clobbered by tn.use.
+        yaml_text = (d / "tn.yaml").read_text(encoding="utf-8")
         (d / "tn.yaml").write_text(
-            "ceremony:\n  profile: transaction\n  cipher: btn\n"
-            "default_policy: private\n"
-            "groups:\n  default:\n    policy: private\n    "
-            "recipients:\n      - did: did:key:zXYZ\n",
-            encoding="utf-8",
+            yaml_text + f"\n# marker: {marker_did}\n", encoding="utf-8"
         )
+        clear_registry_for_tests()
+
         handle = tn.use("audit", project_dir=tmp_path)
         assert handle.name == "audit"
         assert "audit" in tn.list_ceremonies()
         # Must not have overwritten the existing yaml.
-        assert "did:key:zXYZ" in (d / "tn.yaml").read_text(encoding="utf-8")
+        assert marker_did in (d / "tn.yaml").read_text(encoding="utf-8")
 
     def test_use_invalid_name_raises(self, tmp_path):
         with pytest.raises(TNInvalidName):
@@ -405,6 +411,24 @@ class TestInitUseList:
 # ---------------------------------------------------------------------------
 
 
+def _mint_then_set_profile(tmp_path, name: str, profile: str) -> None:
+    """Mint a real ceremony at .tn/<name>/, then rewrite its yaml's
+    ceremony.profile field to ``profile``. Used by the conflict-policy
+    tests below — they need an on-disk yaml that's both complete (so
+    the post-#a7 binding init load() succeeds) AND has a specific
+    profile to compare against.
+    """
+    import yaml as _yaml
+    from tn._registry import clear_registry_for_tests
+
+    tn.init(name, project_dir=tmp_path)
+    clear_registry_for_tests()
+    yaml_path = tmp_path / ".tn" / name / "tn.yaml"
+    doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    doc.setdefault("ceremony", {})["profile"] = profile
+    yaml_path.write_text(_yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
 class TestConflictPolicy:
     def test_conflict_when_init_disagrees_with_on_disk_logs_warning(
         self, tmp_path, caplog
@@ -413,11 +437,7 @@ class TestConflictPolicy:
         # The conflict is surfaced via a warning so a developer
         # running locally sees that their intent was overridden.
         import logging
-        d = tmp_path / ".tn" / "payments"
-        d.mkdir(parents=True)
-        (d / "tn.yaml").write_text(
-            "ceremony:\n  profile: audit\n", encoding="utf-8"
-        )
+        _mint_then_set_profile(tmp_path, "payments", "audit")
         with caplog.at_level(logging.WARNING, logger="tn"):
             handle = tn.init(
                 "payments", profile="transaction", project_dir=tmp_path
@@ -441,21 +461,13 @@ class TestConflictPolicy:
             )
 
     def test_no_conflict_when_kwarg_matches(self, tmp_path):
-        d = tmp_path / ".tn" / "payments"
-        d.mkdir(parents=True)
-        (d / "tn.yaml").write_text(
-            "ceremony:\n  profile: audit\n", encoding="utf-8"
-        )
+        _mint_then_set_profile(tmp_path, "payments", "audit")
         # Same value -> fine.
         h = tn.init("payments", profile="audit", project_dir=tmp_path)
         assert h.name == "payments"
 
     def test_no_conflict_when_kwarg_omitted(self, tmp_path):
-        d = tmp_path / ".tn" / "payments"
-        d.mkdir(parents=True)
-        (d / "tn.yaml").write_text(
-            "ceremony:\n  profile: audit\n", encoding="utf-8"
-        )
+        _mint_then_set_profile(tmp_path, "payments", "audit")
         h = tn.init("payments", project_dir=tmp_path)  # no profile kwarg
         assert h.name == "payments"
 
