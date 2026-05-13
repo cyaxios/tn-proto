@@ -10,7 +10,14 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.75"
+# MSRV is a FLOOR, not a pin. CI runs on `dtolnay/rust-toolchain@stable`
+# so we always build against current stable; this line declares the
+# oldest Rust we're willing to support. Bumped from 1.75 -> 1.85 to
+# pick up `std::sync::LazyLock`/`LazyCell` (1.80), stabilized async
+# closures and the Rust 2024 edition (1.85). Current stable at the
+# time of writing is 1.94 — keeps a ~9-month safety margin so this
+# floor is something a downstream consumer can realistically hit.
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
