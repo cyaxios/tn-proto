@@ -100,10 +100,41 @@ pub enum Error {
         /// The offending group name.
         name: String,
     },
+
+    /// Publisher state file on disk has diverged from the caller's
+    /// `prior` snapshot. Another writer (process or thread) committed
+    /// a state mutation between the caller's read and the caller's
+    /// CAS write attempt. The caller's in-memory state is stale; a
+    /// re-read + re-apply + retry is required.
+    ///
+    /// Raised by `keystore_backend::LocalKeystore::write_state` and
+    /// surfaced on the runtime admin verbs so the operator sees a
+    /// recoverable, named failure rather than silent data loss.
+    #[error("keystore state for group {group:?} has diverged on disk; re-read and retry the admin verb")]
+    KeystoreConflict {
+        /// Group whose state file diverged.
+        group: String,
+    },
 }
 
 impl From<serde_yml::Error> for Error {
     fn from(e: serde_yml::Error) -> Self {
         Error::Yaml(e.to_string())
+    }
+}
+
+#[cfg(feature = "fs")]
+impl From<crate::keystore_backend::KeystoreError> for Error {
+    /// Bridge the keystore module's local error type onto the public
+    /// `Error` enum so admin verbs can use `?` against
+    /// `LocalKeystore::write_state(...)` without losing the
+    /// conflict-vs-io distinction.
+    fn from(e: crate::keystore_backend::KeystoreError) -> Self {
+        match e {
+            crate::keystore_backend::KeystoreError::Conflict { group } => {
+                Error::KeystoreConflict { group }
+            }
+            crate::keystore_backend::KeystoreError::Io(io) => Error::Io(io),
+        }
     }
 }

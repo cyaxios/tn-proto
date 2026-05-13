@@ -1921,23 +1921,44 @@ impl Runtime {
         })?;
         let mut pub_cipher = pub_cipher_arc.lock().expect("btn_admin Mutex poisoned");
 
-        // Mint the new reader kit.
+        // Snapshot the pre-mutation state bytes as the CAS prior.
+        // We READ THE FILE rather than re-serialising the in-memory
+        // cipher because PublisherState::from_bytes(x).to_bytes() is
+        // not guaranteed byte-stable: a load + re-serialise can
+        // produce different bytes than the originals (set ordering,
+        // internal layout). Comparing in-memory bytes against disk
+        // would false-positive on every admin verb in single-process
+        // mode. The Python BtnGroupCipher caches _last_persisted_bytes
+        // for the same reason.
+        let keystore_backend = crate::keystore_backend::LocalKeystore::new(self.keystore.clone());
+        let prior_state_bytes = keystore_backend.read_state(group).map_err(Error::Io)?;
+
+        // Mint the new reader kit. After this point the in-memory
+        // cipher is ahead of disk; if the CAS write below fails the
+        // caller MUST treat the in-memory state as stale and re-load
+        // from disk before any further admin op (the runtime's
+        // KeystoreConflict error is the signal).
         let kit = pub_cipher.state_mut().mint()?;
         let leaf_index = kit.leaf().0;
         let kit_bytes = kit.to_bytes();
         let state_bytes = pub_cipher.state_to_bytes();
 
-        // Persist state first (fail before writing kit if state write fails).
-        let state_path = self.keystore.join(format!("{group}.btn.state"));
-        std::fs::write(&state_path, &state_bytes).map_err(Error::Io)?;
+        // Persist state first (fail before writing kit if state write
+        // fails). Atomic + flock + CAS via LocalKeystore: torn-write
+        // proof, multi-process serialised, lost-update detected.
+        keystore_backend.write_state(group, prior_state_bytes.as_deref(), &state_bytes)?;
 
-        // Write the kit to the caller-specified path.
+        // Kit file is per-recipient — no concurrent writer to race
+        // against, but still use atomic_write_bytes to keep crash-
+        // safety: a torn .mykit file is unusable and would silently
+        // burn a leaf index on retry.
         if let Some(parent) = out_kit_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(Error::Io)?;
             }
         }
-        std::fs::write(out_kit_path, &kit_bytes).map_err(Error::Io)?;
+        crate::keystore_backend::atomic_write_bytes(out_kit_path, &kit_bytes)
+            .map_err(Error::Io)?;
 
         // Rebuild cipher from updated state and swap into the groups table.
         let mykit_bytes = self.btn_mykit.get(group).and_then(Option::as_deref);
@@ -2003,13 +2024,21 @@ impl Runtime {
         })?;
         let mut pub_cipher = pub_cipher_arc.lock().expect("btn_admin Mutex poisoned");
 
+        // Pre-mutation snapshot for CAS — read the file rather than
+        // re-serialise the in-memory cipher (see comment in
+        // admin_add_recipient: PublisherState round-trip is not
+        // byte-stable). On KeystoreConflict the in-memory state is
+        // ahead of disk and must be discarded by the caller.
+        let keystore_backend = crate::keystore_backend::LocalKeystore::new(self.keystore.clone());
+        let prior_state_bytes = keystore_backend.read_state(group).map_err(Error::Io)?;
+
         pub_cipher
             .state_mut()
             .revoke_by_leaf(tn_btn::LeafIndex(leaf_index))?;
         let state_bytes = pub_cipher.state_to_bytes();
 
-        let state_path = self.keystore.join(format!("{group}.btn.state"));
-        std::fs::write(&state_path, &state_bytes).map_err(Error::Io)?;
+        // Atomic + flock + CAS write.
+        keystore_backend.write_state(group, prior_state_bytes.as_deref(), &state_bytes)?;
 
         // Rebuild cipher with revocation applied.
         let mykit_bytes = self.btn_mykit.get(group).and_then(Option::as_deref);
@@ -3446,19 +3475,27 @@ fn resolve_pel_static(tmpl: &str, yaml_dir: &Path, ceremony_id: &str, did: &str)
 /// read-ergonomics spec §2.3. Pure-logging users pay nothing — the
 /// group's plaintext stays empty when no policy file exists.
 fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
+    use crate::keystore_backend::atomic_write_bytes;
     use rand_core::{OsRng, RngCore};
 
     let keystore = root.join(".tn").join("keys");
     std::fs::create_dir_all(&keystore)?;
 
+    // Every write below uses atomic_write_bytes (tmp + fsync +
+    // rename) so a crash mid-mint never leaves a half-formed
+    // keystore on disk — partial state files would fail to parse on
+    // next load and burn the ceremony silently. No CAS here because
+    // this is fresh-ceremony init: by construction nobody else is
+    // writing to this keystore yet.
+
     // Device key — 32-byte Ed25519 seed.
     let dk = crate::DeviceKey::generate();
-    std::fs::write(keystore.join("local.private"), dk.private_bytes())?;
+    atomic_write_bytes(&keystore.join("local.private"), &dk.private_bytes())?;
 
     // Master index key — 32 random bytes from the OS.
     let mut master = [0u8; 32];
     OsRng.fill_bytes(&mut master);
-    std::fs::write(keystore.join("index_master.key"), master)?;
+    atomic_write_bytes(&keystore.join("index_master.key"), &master)?;
 
     // default group: btn publisher state + self-reader kit.
     let mut seed = [0u8; 32];
@@ -3470,8 +3507,8 @@ fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
     let kit = pub_state.mint().map_err(|e| {
         std::io::Error::other(format!("btn mint failed: {e:?}"))
     })?;
-    std::fs::write(keystore.join("default.btn.state"), pub_state.to_bytes())?;
-    std::fs::write(keystore.join("default.btn.mykit"), kit.to_bytes())?;
+    atomic_write_bytes(&keystore.join("default.btn.state"), &pub_state.to_bytes())?;
+    atomic_write_bytes(&keystore.join("default.btn.mykit"), &kit.to_bytes())?;
 
     // tn.agents reserved group: btn publisher state + self-reader kit.
     let mut agents_seed = [0u8; 32];
@@ -3483,11 +3520,14 @@ fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
     let agents_kit = agents_state
         .mint()
         .map_err(|e| std::io::Error::other(format!("btn mint (tn.agents) failed: {e:?}")))?;
-    std::fs::write(
-        keystore.join("tn.agents.btn.state"),
-        agents_state.to_bytes(),
+    atomic_write_bytes(
+        &keystore.join("tn.agents.btn.state"),
+        &agents_state.to_bytes(),
     )?;
-    std::fs::write(keystore.join("tn.agents.btn.mykit"), agents_kit.to_bytes())?;
+    atomic_write_bytes(
+        &keystore.join("tn.agents.btn.mykit"),
+        &agents_kit.to_bytes(),
+    )?;
 
     let did = dk.did().to_string();
     let id = format!("cer_eph_{}", &Uuid::new_v4().simple().to_string()[..12]);
@@ -3514,6 +3554,6 @@ fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
          fields: {{}}\n\
          llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
     );
-    std::fs::write(root.join("tn.yaml"), yaml)?;
+    crate::keystore_backend::atomic_write_bytes(&root.join("tn.yaml"), yaml.as_bytes())?;
     Ok(())
 }

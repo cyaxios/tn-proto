@@ -70,3 +70,44 @@ def test_local_backend_independent_keys(tmp_path: Path) -> None:
     b.write_state("audits", prior=None, new=b"av1")
     assert b.read_state("payments") == b"pv1"
     assert b.read_state("audits") == b"av1"
+
+
+def test_concurrent_writers_serialise_via_lock(tmp_path: Path) -> None:
+    """N threads racing read+CAS-write+retry on the same group all
+    land their mutation.
+
+    Mirrors the Rust ``concurrent_writers_serialise_via_lock`` test —
+    proves the OS-level lock + CAS combo prevents lost updates.
+    Without the lock, the read-then-write window would be a TOCTOU
+    race and the final state length would be < expected.
+    """
+    import threading
+
+    b = LocalFileKeystoreBackend(tmp_path)
+    b.write_state("payments", prior=None, new=b"v0")
+
+    n = 20
+
+    def worker(i: int) -> None:
+        while True:
+            current = b.read_state("payments")
+            new = (current or b"") + bytes([ord("a") + (i % 26)])
+            try:
+                b.write_state("payments", prior=current, new=new)
+                return
+            except KeystoreConflictError:
+                continue
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    final = b.read_state("payments")
+    assert final is not None
+    # Initial "v0" (2 bytes) + n single-byte appends. Every mutation
+    # must have landed; the CAS+lock combo serialised them.
+    assert len(final) == 2 + n, (
+        f"expected every concurrent write to land; got len={len(final)}"
+    )

@@ -51,6 +51,8 @@ pub mod handlers;
 #[cfg(feature = "fs")]
 pub mod identity;
 #[cfg(feature = "fs")]
+pub mod keystore_backend;
+#[cfg(feature = "fs")]
 pub mod log_file;
 #[cfg(feature = "fs")]
 pub mod read_as_recipient;
