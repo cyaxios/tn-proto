@@ -420,14 +420,46 @@ class AdminStateCache:
         flagged as a ``LeafReuseAttempt`` and not added to
         ``state.recipients``. Same-coordinate forks and rotation
         conflicts are also detected.
+
+        Structure:
+          1. Pre-dispatch invariants (fork detection, dedupe, clock,
+             head pointer)  ← _observe_envelope()
+          2. Per-event-type merge into self._state                    ← _EVENT_HANDLERS dispatch
         """
         rh = env.get("row_hash")
         if not isinstance(rh, str):
             return
 
-        # Same-coordinate fork detection: do this BEFORE the dedupe so
-        # we surface the conflict even when the second envelope is also
-        # one we'd otherwise skip.
+        if not self._observe_envelope(env, rh):
+            return  # dedupe; observation invariants already applied
+
+        ts = env.get("timestamp")
+        et = env.get("event_type")
+        handler = self._EVENT_HANDLERS.get(et)
+        if handler is not None:
+            # The admin envelope shape stores all admin fields at
+            # envelope root (DEFAULT_PUBLIC_FIELDS); ``env`` IS the
+            # merged dict, no further flattening needed.
+            handler(self, env, ts, rh)
+        # Unknown admin event_type — already folded into clock by
+        # _observe_envelope; no state mutation. Forward-compatible.
+
+    # ------------------------------------------------------------------
+    # Pre-dispatch invariants
+    # ------------------------------------------------------------------
+
+    def _observe_envelope(self, env: dict[str, Any], rh: str) -> bool:
+        """Apply the three pre-dispatch invariants:
+
+        1. Same-coordinate fork detection (runs even on dedupe).
+        2. Row-hash dedupe.
+        3. Vector clock + head_row_hash bookkeeping (only on first
+           sight of an rh).
+
+        Returns ``True`` if the caller should proceed to per-event
+        merge; ``False`` if this envelope is a duplicate and should be
+        skipped.
+        """
         did = env.get("did")
         et = env.get("event_type")
         seq = env.get("sequence")
@@ -436,263 +468,275 @@ class AdminStateCache:
             and isinstance(et, str)
             and isinstance(seq, int)
         ):
-            coord = (did, et, seq)
-            existing_rh = self._coord_to_row_hash.get(coord)
-            if existing_rh is None:
-                self._coord_to_row_hash[coord] = rh
-            elif existing_rh != rh:
-                # Two row_hashes for the same coordinate. Record once.
-                already_recorded = any(
-                    isinstance(c, SameCoordinateFork)
-                    and c.did == did
-                    and c.event_type == et
-                    and c.sequence == seq
-                    for c in self._head_conflicts
-                )
-                if not already_recorded:
-                    self._head_conflicts.append(
-                        SameCoordinateFork(
-                            did=did,
-                            event_type=et,
-                            sequence=seq,
-                            row_hash_a=existing_rh,
-                            row_hash_b=rh,
-                        )
-                    )
+            self._record_coord_fork_if_any(did, et, seq, rh)
 
         if rh in self._row_hashes:
-            return  # already folded into state
+            return False
         self._row_hashes.add(rh)
 
-        # Update vector clock.
         if (
             isinstance(did, str)
             and isinstance(et, str)
             and isinstance(seq, int)
         ):
             key = (did, et)
-            cur = self._clock.get(key, 0)
-            if seq > cur:
+            if seq > self._clock.get(key, 0):
                 self._clock[key] = seq
 
-        # Track head_row_hash as the most recently applied.
         self._head_row_hash = rh
+        return True
 
-        ts = env.get("timestamp")
-
-        # The admin envelope shape stores all admin fields at envelope
-        # root (config.py DEFAULT_PUBLIC_FIELDS). We can read directly.
-        merged = env
-
-        if et == "tn.ceremony.init":
-            self._state["ceremony"] = {
-                "ceremony_id": merged.get("ceremony_id"),
-                "cipher": merged.get("cipher"),
-                "device_did": merged.get("device_did") or merged.get("did"),
-                "created_at": merged.get("created_at") or ts,
-            }
+    def _record_coord_fork_if_any(
+        self, did: str, et: str, seq: int, rh: str
+    ) -> None:
+        """If this ``(did, event_type, sequence)`` was previously seen
+        with a different row_hash, append one ``SameCoordinateFork``
+        conflict. Subsequent re-observations are deduped.
+        """
+        coord = (did, et, seq)
+        existing_rh = self._coord_to_row_hash.get(coord)
+        if existing_rh is None:
+            self._coord_to_row_hash[coord] = rh
             return
+        if existing_rh == rh:
+            return
+        already_recorded = any(
+            isinstance(c, SameCoordinateFork)
+            and c.did == did
+            and c.event_type == et
+            and c.sequence == seq
+            for c in self._head_conflicts
+        )
+        if not already_recorded:
+            self._head_conflicts.append(
+                SameCoordinateFork(
+                    did=did,
+                    event_type=et,
+                    sequence=seq,
+                    row_hash_a=existing_rh,
+                    row_hash_b=rh,
+                )
+            )
 
-        if et == "tn.group.added":
-            self._state["groups"].append(
-                {
-                    "group": merged.get("group"),
-                    "cipher": merged.get("cipher"),
-                    "publisher_did": merged.get("publisher_did"),
-                    "added_at": merged.get("added_at") or ts,
-                }
+    # ------------------------------------------------------------------
+    # Per-event-type handlers — one per admin event_type
+    # ------------------------------------------------------------------
+
+    def _on_ceremony_init(
+        self, env: dict[str, Any], ts: Any, rh: str
+    ) -> None:
+        self._state["ceremony"] = {
+            "ceremony_id": env.get("ceremony_id"),
+            "cipher": env.get("cipher"),
+            "device_did": env.get("device_did") or env.get("did"),
+            "created_at": env.get("created_at") or ts,
+        }
+
+    def _on_group_added(
+        self, env: dict[str, Any], ts: Any, rh: str
+    ) -> None:
+        self._state["groups"].append({
+            "group": env.get("group"),
+            "cipher": env.get("cipher"),
+            "publisher_did": env.get("publisher_did"),
+            "added_at": env.get("added_at") or ts,
+        })
+
+    def _on_recipient_added(
+        self, env: dict[str, Any], ts: Any, rh: str
+    ) -> None:
+        group = env.get("group")
+        leaf = env.get("leaf_index")
+        if not isinstance(group, str) or not isinstance(leaf, int):
+            return
+        # Revocation is terminal: replay onto a revoked/retired leaf
+        # is a reuse attempt, not a state add.
+        if (group, leaf) in self._revoked_leaves:
+            self._head_conflicts.append(
+                LeafReuseAttempt(
+                    group=group,
+                    leaf_index=leaf,
+                    attempted_row_hash=rh,
+                    originally_revoked_at_row_hash=self._revoked_leaves[(group, leaf)],
+                )
             )
             return
-
-        if et == "tn.recipient.added":
-            group = merged.get("group")
-            leaf = merged.get("leaf_index")
-            if not isinstance(group, str) or not isinstance(leaf, int):
-                return
-            key = (group, leaf)
-            # Revocation is terminal: if this leaf is already revoked or
-            # retired, flag a leaf-reuse attempt and skip the state add.
-            if key in self._revoked_leaves:
+        # Double-add onto an active leaf: first add wins, second is reuse.
+        for rec in self._state["recipients"]:
+            if rec.get("group") == group and rec.get("leaf_index") == leaf:
                 self._head_conflicts.append(
                     LeafReuseAttempt(
                         group=group,
                         leaf_index=leaf,
                         attempted_row_hash=rh,
-                        originally_revoked_at_row_hash=self._revoked_leaves[key],
+                        originally_revoked_at_row_hash=None,
                     )
                 )
                 return
-            # Also catch "already-active": replacing an active row would
-            # be a same-(group,leaf) double-add. Treat as leaf reuse —
-            # same convergence logic, the first add wins.
-            for rec in self._state["recipients"]:
-                if (
-                    rec.get("group") == group
-                    and rec.get("leaf_index") == leaf
-                ):
-                    # Already an active row for this leaf — treat the
-                    # second add as a leaf-reuse attempt.
-                    self._head_conflicts.append(
-                        LeafReuseAttempt(
-                            group=group,
-                            leaf_index=leaf,
-                            attempted_row_hash=rh,
-                            originally_revoked_at_row_hash=None,
-                        )
+        self._state["recipients"].append({
+            "group": group,
+            "leaf_index": leaf,
+            "recipient_did": env.get("recipient_did"),
+            "kit_sha256": env.get("kit_sha256"),
+            "minted_at": ts,
+            "active_status": "active",
+            "revoked_at": None,
+            "retired_at": None,
+        })
+
+    def _on_recipient_revoked(
+        self, env: dict[str, Any], ts: Any, rh: str
+    ) -> None:
+        group = env.get("group")
+        leaf = env.get("leaf_index")
+        if not isinstance(group, str) or not isinstance(leaf, int):
+            return
+        self._revoked_leaves[(group, leaf)] = rh
+        for rec in self._state["recipients"]:
+            if (
+                rec.get("group") == group
+                and rec.get("leaf_index") == leaf
+                and rec.get("active_status") == "active"
+            ):
+                rec["active_status"] = "revoked"
+                rec["revoked_at"] = ts
+
+    def _on_rotation_completed(
+        self, env: dict[str, Any], ts: Any, rh: str
+    ) -> None:
+        group = env.get("group")
+        generation_raw = env.get("generation")
+        try:
+            generation = int(generation_raw) if generation_raw is not None else None
+        except (TypeError, ValueError):
+            generation = None
+        prev_kit = env.get("previous_kit_sha256")
+
+        if isinstance(group, str) and generation is not None:
+            self._record_rotation_conflict_if_any(group, generation, prev_kit)
+
+        self._state["rotations"].append({
+            "group": group,
+            "cipher": env.get("cipher"),
+            "generation": generation,
+            "previous_kit_sha256": prev_kit,
+            "rotated_at": env.get("rotated_at") or ts,
+        })
+        # Retire any currently-active recipients in this group.
+        for rec in self._state["recipients"]:
+            if (
+                rec.get("group") == group
+                and rec.get("active_status") == "active"
+            ):
+                rec["active_status"] = "retired"
+                rec["retired_at"] = ts
+
+    def _record_rotation_conflict_if_any(
+        self, group: str, generation: int, prev_kit: Any
+    ) -> None:
+        rot_key = (group, generation)
+        if rot_key in self._rotations_seen:
+            if (
+                isinstance(prev_kit, str)
+                and self._rotations_seen[rot_key] != prev_kit
+            ):
+                self._head_conflicts.append(
+                    RotationConflict(
+                        group=group,
+                        generation=generation,
+                        previous_kit_sha256_a=self._rotations_seen[rot_key],
+                        previous_kit_sha256_b=prev_kit,
                     )
-                    return
-            self._state["recipients"].append(
-                {
-                    "group": group,
-                    "leaf_index": leaf,
-                    "recipient_did": merged.get("recipient_did"),
-                    "kit_sha256": merged.get("kit_sha256"),
-                    "minted_at": ts,
-                    "active_status": "active",
-                    "revoked_at": None,
-                    "retired_at": None,
-                }
-            )
-            return
-
-        if et == "tn.recipient.revoked":
-            group = merged.get("group")
-            leaf = merged.get("leaf_index")
-            if not isinstance(group, str) or not isinstance(leaf, int):
-                return
-            key = (group, leaf)
-            self._revoked_leaves[key] = rh
-            for rec in self._state["recipients"]:
-                if rec.get("group") == group and rec.get("leaf_index") == leaf:
-                    if rec.get("active_status") == "active":
-                        rec["active_status"] = "revoked"
-                        rec["revoked_at"] = ts
-            return
-
-        if et == "tn.rotation.completed":
-            group = merged.get("group")
-            generation_raw = merged.get("generation")
-            try:
-                generation = int(generation_raw) if generation_raw is not None else None
-            except (TypeError, ValueError):
-                generation = None
-            prev_kit = merged.get("previous_kit_sha256")
-            if isinstance(group, str) and generation is not None:
-                rot_key = (group, generation)
-                if rot_key in self._rotations_seen:
-                    if (
-                        isinstance(prev_kit, str)
-                        and self._rotations_seen[rot_key] != prev_kit
-                    ):
-                        self._head_conflicts.append(
-                            RotationConflict(
-                                group=group,
-                                generation=generation,
-                                previous_kit_sha256_a=self._rotations_seen[rot_key],
-                                previous_kit_sha256_b=prev_kit,
-                            )
-                        )
-                else:
-                    if isinstance(prev_kit, str):
-                        self._rotations_seen[rot_key] = prev_kit
-            self._state["rotations"].append(
-                {
-                    "group": group,
-                    "cipher": merged.get("cipher"),
-                    "generation": generation,
-                    "previous_kit_sha256": prev_kit,
-                    "rotated_at": merged.get("rotated_at") or ts,
-                }
-            )
-            # Retire any currently-active recipients in this group.
-            for rec in self._state["recipients"]:
-                if (
-                    rec.get("group") == group
-                    and rec.get("active_status") == "active"
-                ):
-                    rec["active_status"] = "retired"
-                    rec["retired_at"] = ts
-            return
-
-        if et == "tn.coupon.issued":
-            self._state["coupons"].append(
-                {
-                    "group": merged.get("group"),
-                    "slot": merged.get("slot"),
-                    "to_did": merged.get("to_did"),
-                    "issued_to": merged.get("issued_to"),
-                    "issued_at": ts,
-                }
-            )
-            return
-
-        if et == "tn.enrolment.compiled":
-            self._state["enrolments"].append(
-                {
-                    "group": merged.get("group"),
-                    "peer_did": merged.get("peer_did"),
-                    "package_sha256": merged.get("package_sha256"),
-                    "status": "offered",
-                    "compiled_at": merged.get("compiled_at") or ts,
-                    "absorbed_at": None,
-                }
-            )
-            return
-
-        if et == "tn.enrolment.absorbed":
-            from_did = merged.get("from_did")
-            group = merged.get("group")
-            for enr in self._state["enrolments"]:
-                if (
-                    enr.get("group") == group
-                    and enr.get("peer_did") == from_did
-                ):
-                    enr["status"] = "absorbed"
-                    enr["absorbed_at"] = merged.get("absorbed_at") or ts
-                    return
-            # Stand-alone absorbed without a prior compile.
-            self._state["enrolments"].append(
-                {
-                    "group": group,
-                    "peer_did": from_did,
-                    "package_sha256": merged.get("package_sha256"),
-                    "status": "absorbed",
-                    "compiled_at": None,
-                    "absorbed_at": merged.get("absorbed_at") or ts,
-                }
-            )
-            return
-
-        if et == "tn.vault.linked":
-            vd = merged.get("vault_did")
-            if isinstance(vd, str):
-                # last-writer-wins on (vault_did): replace any existing
-                # entry for this DID.
-                self._state["vault_links"] = [
-                    link
-                    for link in self._state["vault_links"]
-                    if link.get("vault_did") != vd
-                ]
-                self._state["vault_links"].append(
-                    {
-                        "vault_did": vd,
-                        "project_id": merged.get("project_id"),
-                        "linked_at": merged.get("linked_at") or ts,
-                        "unlinked_at": None,
-                    }
                 )
-            return
+        elif isinstance(prev_kit, str):
+            self._rotations_seen[rot_key] = prev_kit
 
-        if et == "tn.vault.unlinked":
-            vd = merged.get("vault_did")
-            if isinstance(vd, str):
-                for link in self._state["vault_links"]:
-                    if link.get("vault_did") == vd:
-                        link["unlinked_at"] = merged.get("unlinked_at") or ts
-            return
+    def _on_coupon_issued(
+        self, env: dict[str, Any], ts: Any, rh: str
+    ) -> None:
+        self._state["coupons"].append({
+            "group": env.get("group"),
+            "slot": env.get("slot"),
+            "to_did": env.get("to_did"),
+            "issued_to": env.get("issued_to"),
+            "issued_at": ts,
+        })
 
-        # Unknown admin event_type — record it in clock but no state
-        # mutation. Forward-compatible.
+    def _on_enrolment_compiled(
+        self, env: dict[str, Any], ts: Any, rh: str
+    ) -> None:
+        self._state["enrolments"].append({
+            "group": env.get("group"),
+            "peer_did": env.get("peer_did"),
+            "package_sha256": env.get("package_sha256"),
+            "status": "offered",
+            "compiled_at": env.get("compiled_at") or ts,
+            "absorbed_at": None,
+        })
+
+    def _on_enrolment_absorbed(
+        self, env: dict[str, Any], ts: Any, rh: str
+    ) -> None:
+        from_did = env.get("from_did")
+        group = env.get("group")
+        for enr in self._state["enrolments"]:
+            if (
+                enr.get("group") == group
+                and enr.get("peer_did") == from_did
+            ):
+                enr["status"] = "absorbed"
+                enr["absorbed_at"] = env.get("absorbed_at") or ts
+                return
+        # Stand-alone absorbed without a prior compile.
+        self._state["enrolments"].append({
+            "group": group,
+            "peer_did": from_did,
+            "package_sha256": env.get("package_sha256"),
+            "status": "absorbed",
+            "compiled_at": None,
+            "absorbed_at": env.get("absorbed_at") or ts,
+        })
+
+    def _on_vault_linked(
+        self, env: dict[str, Any], ts: Any, rh: str
+    ) -> None:
+        vd = env.get("vault_did")
+        if not isinstance(vd, str):
+            return
+        # last-writer-wins on (vault_did): replace any existing entry.
+        self._state["vault_links"] = [
+            link for link in self._state["vault_links"]
+            if link.get("vault_did") != vd
+        ]
+        self._state["vault_links"].append({
+            "vault_did": vd,
+            "project_id": env.get("project_id"),
+            "linked_at": env.get("linked_at") or ts,
+            "unlinked_at": None,
+        })
+
+    def _on_vault_unlinked(
+        self, env: dict[str, Any], ts: Any, rh: str
+    ) -> None:
+        vd = env.get("vault_did")
+        if not isinstance(vd, str):
+            return
+        for link in self._state["vault_links"]:
+            if link.get("vault_did") == vd:
+                link["unlinked_at"] = env.get("unlinked_at") or ts
+
+    _EVENT_HANDLERS = {
+        "tn.ceremony.init":     _on_ceremony_init,
+        "tn.group.added":       _on_group_added,
+        "tn.recipient.added":   _on_recipient_added,
+        "tn.recipient.revoked": _on_recipient_revoked,
+        "tn.rotation.completed": _on_rotation_completed,
+        "tn.coupon.issued":     _on_coupon_issued,
+        "tn.enrolment.compiled": _on_enrolment_compiled,
+        "tn.enrolment.absorbed": _on_enrolment_absorbed,
+        "tn.vault.linked":      _on_vault_linked,
+        "tn.vault.unlinked":    _on_vault_unlinked,
+    }
 
     # ------------------------------------------------------------------
     # Persistence
