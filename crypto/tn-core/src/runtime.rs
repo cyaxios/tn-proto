@@ -1921,10 +1921,17 @@ impl Runtime {
         })?;
         let mut pub_cipher = pub_cipher_arc.lock().expect("btn_admin Mutex poisoned");
 
-        // Snapshot the pre-mutation state bytes so CAS can detect a
-        // concurrent writer (another process mutating the same group's
-        // .btn.state between when we last read it and now).
-        let prior_state_bytes = pub_cipher.state_to_bytes();
+        // Snapshot the pre-mutation state bytes as the CAS prior.
+        // We READ THE FILE rather than re-serialising the in-memory
+        // cipher because PublisherState::from_bytes(x).to_bytes() is
+        // not guaranteed byte-stable: a load + re-serialise can
+        // produce different bytes than the originals (set ordering,
+        // internal layout). Comparing in-memory bytes against disk
+        // would false-positive on every admin verb in single-process
+        // mode. The Python BtnGroupCipher caches _last_persisted_bytes
+        // for the same reason.
+        let keystore_backend = crate::keystore_backend::LocalKeystore::new(self.keystore.clone());
+        let prior_state_bytes = keystore_backend.read_state(group).map_err(Error::Io)?;
 
         // Mint the new reader kit. After this point the in-memory
         // cipher is ahead of disk; if the CAS write below fails the
@@ -1939,8 +1946,7 @@ impl Runtime {
         // Persist state first (fail before writing kit if state write
         // fails). Atomic + flock + CAS via LocalKeystore: torn-write
         // proof, multi-process serialised, lost-update detected.
-        let keystore = crate::keystore_backend::LocalKeystore::new(self.keystore.clone());
-        keystore.write_state(group, Some(&prior_state_bytes), &state_bytes)?;
+        keystore_backend.write_state(group, prior_state_bytes.as_deref(), &state_bytes)?;
 
         // Kit file is per-recipient — no concurrent writer to race
         // against, but still use atomic_write_bytes to keep crash-
@@ -2018,10 +2024,13 @@ impl Runtime {
         })?;
         let mut pub_cipher = pub_cipher_arc.lock().expect("btn_admin Mutex poisoned");
 
-        // Pre-mutation snapshot for CAS — same pattern as
-        // admin_add_recipient. On KeystoreConflict the in-memory
-        // state is ahead of disk and must be discarded.
-        let prior_state_bytes = pub_cipher.state_to_bytes();
+        // Pre-mutation snapshot for CAS — read the file rather than
+        // re-serialise the in-memory cipher (see comment in
+        // admin_add_recipient: PublisherState round-trip is not
+        // byte-stable). On KeystoreConflict the in-memory state is
+        // ahead of disk and must be discarded by the caller.
+        let keystore_backend = crate::keystore_backend::LocalKeystore::new(self.keystore.clone());
+        let prior_state_bytes = keystore_backend.read_state(group).map_err(Error::Io)?;
 
         pub_cipher
             .state_mut()
@@ -2029,8 +2038,7 @@ impl Runtime {
         let state_bytes = pub_cipher.state_to_bytes();
 
         // Atomic + flock + CAS write.
-        let keystore = crate::keystore_backend::LocalKeystore::new(self.keystore.clone());
-        keystore.write_state(group, Some(&prior_state_bytes), &state_bytes)?;
+        keystore_backend.write_state(group, prior_state_bytes.as_deref(), &state_bytes)?;
 
         // Rebuild cipher with revocation applied.
         let mykit_bytes = self.btn_mykit.get(group).and_then(Option::as_deref);
