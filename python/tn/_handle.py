@@ -204,7 +204,7 @@ class TN:
         if self.is_default:
             # Default's runtime IS the module-level singleton.
             from . import _dispatch_rt as _global_rt
-            from .lifecycle import init as _legacy_init
+            from . import _init_impl as _legacy_init
 
             if _global_rt is None:
                 _legacy_init(str(self._yaml_path))
@@ -234,7 +234,7 @@ class TN:
         per-instance dispatch (Bug 1 fix).
         """
         from . import current_config as _current_config
-        from .lifecycle import init as _legacy_init
+        from . import _init_impl as _legacy_init
 
         try:
             cfg = _current_config()

@@ -99,6 +99,9 @@ def _ensure_ceremony_on_disk(
     device_did: str,
     cipher: str = "btn",
     profile: str | None = None,
+    device_private_bytes: bytes | None = None,
+    keystore_dir: Path | None = None,
+    admin_log_path: Path | None = None,
 ) -> Path:
     """Create ``.tn/<name>/`` with a real, loadable ``tn.yaml`` if the
     directory does not already exist. Returns the yaml path.
@@ -143,6 +146,9 @@ def _ensure_ceremony_on_disk(
             project_dir=project_dir,
             cipher=cipher,
             profile=chosen_profile,
+            device_private_bytes=device_private_bytes,
+            keystore_dir_override=keystore_dir,
+            admin_log_path_override=admin_log_path,
         )
     return _create_stream_yaml(
         name=name,
@@ -159,9 +165,21 @@ def _create_default_ceremony(
     project_dir: Path | None,
     cipher: str,
     profile: str,
+    device_private_bytes: bytes | None = None,
+    keystore_dir_override: Path | None = None,
+    admin_log_path_override: Path | None = None,
 ) -> Path:
     """Mint the project's default ceremony: identity, keystore,
     full yaml. The only place a TN device DID gets created.
+
+    ``device_private_bytes`` seeds the device key from a known
+    32-byte Ed25519 seed instead of generating a random one. Used by
+    env-injected deploys (Lambda, k8s sealed-secrets).
+
+    ``keystore_dir_override`` and ``admin_log_path_override`` let
+    callers redirect those paths away from the default
+    ``.tn/<name>/keys`` and ``.tn/<name>/admin/admin.ndjson``
+    locations. Useful for shared volumes or encrypted filesystems.
     """
     ydir = ceremony_dir(name, project_dir=project_dir)
     try:
@@ -174,15 +192,27 @@ def _create_default_ceremony(
     for sub in ("keys", "logs", "admin", "vault"):
         (ydir / sub).mkdir(parents=True, exist_ok=True)
 
+    keystore_dir_resolved = (
+        keystore_dir_override
+        if keystore_dir_override is not None
+        else ydir / "keys"
+    )
+    admin_log_resolved = (
+        admin_log_path_override
+        if admin_log_path_override is not None
+        else ydir / "admin" / "admin.ndjson"
+    )
+
     try:
         from . import config as _config
 
         _config.create_fresh(
             yaml_path,
             cipher=cipher,
-            keystore_dir=ydir / "keys",
+            device_private_bytes=device_private_bytes,
+            keystore_dir=keystore_dir_resolved,
             log_path=ydir / "logs" / "tn.ndjson",
-            admin_log_path=ydir / "admin" / "admin.ndjson",
+            admin_log_path=admin_log_resolved,
         )
     except Exception as exc:  # noqa: BLE001
         raise TNCreateFailed(
@@ -490,25 +520,227 @@ def _format_not_found(name: str, project_dir: Path | None) -> str:
 def init(
     name: str | Path | None = None,
     *,
+    # ── existing public params (kept) ────────────────────────────
     yaml_path: str | Path | None = None,
     profile: str | None = None,
     project_dir: str | Path | None = None,
-    **legacy_kwargs: Any,
+    # ── lifted out of **legacy_kwargs (now first-class) ──────────
+    log_path: str | Path | None = None,
+    pool_size: int = 4,
+    cipher: str = "btn",
+    identity: Any = None,
+    extra_handlers: Any = None,
+    stdout: bool | None = None,
+    link: bool | None = None,
+    # ── newly reachable from config.create_fresh ─────────────────
+    device_private_bytes: bytes | None = None,
+    keystore_dir: str | Path | None = None,
+    admin_log_path: str | Path | None = None,
+    # ── new name slots reserved for future behavior ──────────────
+    project: str | None = None,
+    stream: str | None = None,
+    ceremony: str | None = None,
+    load: str | Path | None = None,
+    device_seed: bytes | None = None,
 ) -> TN:
-    """Set up or attach to a named ceremony.
+    """Set up or attach to a TN ceremony and return its handle.
 
-    With no positional arg, sets up the ``"default"`` ceremony.
+    The single public entry for building a TN runtime in this process.
 
-    With a registry-name positional arg (``"payments"``, etc.), sets
-    up the named ceremony at ``.tn/<name>/``. Auto-creates the
-    directory and a safe-defaults yaml if absent. Conflicting kwargs
-    against an existing yaml raise ``TNConfigConflict``.
+    Common shapes
+    -------------
+    ``tn.init()``
+        Walk the discovery chain (``$TN_YAML`` → ``./tn.yaml`` →
+        ``./.tn/default/tn.yaml`` → ``$TN_HOME/tn.yaml``) and attach
+        to whatever's found. If nothing is found, mint a fresh
+        ``.tn/default/`` ceremony at the appropriate root.
 
-    Backwards compatible: if the positional arg is a Path object or
-    looks like a yaml path (ends in ``.yaml`` / ``.yml``), it is
-    routed to the legacy ``tn.init(yaml_path)`` form for the default
-    ceremony.
+    ``tn.init("payments")``
+        Attach to the named ceremony at ``.tn/payments/``, minting
+        if absent.
+
+    ``tn.init("./tn.yaml")`` / ``tn.init(load="./tn.yaml")``
+        Attach to the explicit yaml file (or mint it there).
+
+    ``tn.init(name="my-app", stream="pod-1")``
+        Attach to the default ceremony AND open a named stream in
+        one call. Returns the stream's handle, not the default's.
+
+    Parameters
+    ----------
+    name :
+        Ceremony name (e.g. ``"payments"``) OR a yaml path (``Path``
+        object, or a string ending in ``.yaml`` / ``.yml``). The
+        only positional argument; everything else is keyword-only.
+        See also ``ceremony=`` and ``load=`` for explicit keyword
+        forms.
+
+    yaml_path :
+        Explicit yaml file location. Honored even when ``name`` is
+        also passed. See also ``load=`` (alias).
+
+    profile :
+        Profile-defaults bundle stamped onto a fresh ceremony's yaml
+        (``"transaction"`` / ``"audit"`` / ``"secure_log"`` /
+        ``"telemetry"`` / ``"stdout"``). Ignored when loading an
+        existing yaml.
+
+    project_dir :
+        Explicit project root for the multi-ceremony layout. Pass to
+        force ``.tn/<name>/`` placement under a non-cwd directory.
+
+    log_path :
+        Override the main log file location for a fresh ceremony,
+        AND synthesize a single ``file.rotating`` handler at that
+        path when the yaml has no ``handlers:`` block.
+
+    pool_size :
+        BTN broadcast tree pool size at fresh-mint time. Defaults to
+        4. Btn-only; ignored for JWE ceremonies.
+
+    cipher :
+        Group-sealing cipher for a fresh ceremony: ``"btn"``
+        (default) or ``"jwe"``. Ignored when loading an existing
+        yaml (cipher comes from the yaml).
+
+    identity :
+        A ``tn.identity.Identity`` to seed the device key from. When
+        minting fresh, the new ceremony binds to the identity's
+        keypair; the DID written into ``tn.yaml`` matches. Ignored
+        when loading. Mutually exclusive with ``device_seed=``.
+
+    extra_handlers :
+        Additional ``TNHandler`` instances to register on top of
+        whatever the yaml declares. Used by tests and programmatic
+        integrations.
+
+    stdout :
+        Force the stdout handler on/off. ``None`` (default) defers
+        to ``TN_NO_STDOUT`` env (off when set).
+
+    link :
+        Post-init vault upload + claim URL surfacing.
+        ``None`` (default) runs only inside an IPython/Jupyter/
+        Databricks kernel. ``True`` forces; ``False`` blocks.
+        Env opt-out: ``TN_NO_LINK=1``.
+
+    device_private_bytes :
+        Raw 32-byte Ed25519 seed for the device key at fresh-mint
+        time. Useful for environments that inject the seed via secret
+        manager (Lambda, k8s sealed-secrets, GitHub Actions) — read
+        from env at startup and pass it here. Ignored when loading
+        an existing yaml. Mutually exclusive with ``identity=`` and
+        ``device_seed=``. See also ``device_seed=`` (alias).
+
+    keystore_dir :
+        Explicit keystore directory at fresh-mint time. Defaults to
+        ``<yaml_dir>/.tn/<stem>/keys``. Override when the keystore
+        needs to live outside the default ceremony layout (mounted
+        volume, shared cache, encrypted filesystem). Ignored when
+        loading.
+
+    admin_log_path :
+        Explicit admin log file location at fresh-mint time.
+        Defaults to ``<yaml_dir>/.tn/<stem>/admin/admin.ndjson``.
+        Override when admin events need to ship to a custom location
+        (e.g., a shared audit volume). Ignored when loading.
+
+    project :
+        Vault project tag. Currently stored as informational metadata
+        on the runtime; future releases will wire it to vault
+        auto-attach + pending-claim flows. Pass to tag this runtime
+        with a project name now so the future behavior picks it up
+        without a code change.
+
+    stream :
+        Optional named stream. If set, after the ceremony runtime is
+        up, run ``tn.use(stream)`` and return that handle instead of
+        the default ceremony's. Equivalent to writing
+        ``tn.init(...); return tn.use(stream)``.
+
+    ceremony :
+        Alias for ``name=``. If both are set, raises ``TypeError``.
+
+    load :
+        Alias for ``yaml_path=``. If both are set, raises
+        ``TypeError``.
+
+    device_seed :
+        Alias for ``device_private_bytes=``. If both are set, raises
+        ``TypeError``.
+
+    Returns
+    -------
+    TN
+        A handle to the ceremony (or stream, if ``stream=`` was
+        passed). Subsequent calls in the same process are idempotent.
+
+    Raises
+    ------
+    TypeError
+        Unknown kwarg, or a duplicate-alias conflict.
+    TNInvalidName
+        ``name`` (or ``ceremony=``) is not a valid ceremony name.
     """
+    # Alias resolution — both names of a pair → TypeError.
+    if ceremony is not None and name is not None:
+        raise TypeError(
+            "tn.init() got both 'name' and 'ceremony' — they're aliases; pass exactly one"
+        )
+    if ceremony is not None:
+        name = ceremony
+
+    if load is not None and yaml_path is not None:
+        raise TypeError(
+            "tn.init() got both 'yaml_path' and 'load' — they're aliases; pass exactly one"
+        )
+    if load is not None:
+        yaml_path = load
+
+    if device_seed is not None and device_private_bytes is not None:
+        raise TypeError(
+            "tn.init() got both 'device_private_bytes' and 'device_seed' — they're aliases; pass exactly one"
+        )
+    if device_seed is not None:
+        device_private_bytes = device_seed
+
+    # identity vs device_private_bytes — also mutually exclusive (both seed the device key).
+    if identity is not None and device_private_bytes is not None:
+        raise TypeError(
+            "tn.init() got both 'identity' and 'device_private_bytes' — pass exactly one (or neither)"
+        )
+
+    # Stash project tag as informational metadata. Future PR wires
+    # this to vault auto-attach + pending-claim.
+    if project is not None:
+        import tn as _tn_pkg
+        _tn_pkg._current_project = project
+
+    # Collect the kwargs the legacy chain (_init_impl, build_runtime,
+    # create_fresh) needs to see. These flow through `_legacy_init`
+    # and `_bind_default_singleton` calls below.
+    legacy_kwargs: dict[str, Any] = {}
+    if log_path is not None:
+        legacy_kwargs["log_path"] = log_path
+    if pool_size != 4:
+        legacy_kwargs["pool_size"] = pool_size
+    if cipher != "btn":
+        legacy_kwargs["cipher"] = cipher
+    if identity is not None:
+        legacy_kwargs["identity"] = identity
+    if extra_handlers is not None:
+        legacy_kwargs["extra_handlers"] = extra_handlers
+    if stdout is not None:
+        legacy_kwargs["stdout"] = stdout
+    if link is not None:
+        legacy_kwargs["link"] = link
+    if device_private_bytes is not None:
+        legacy_kwargs["device_private_bytes"] = device_private_bytes
+    if keystore_dir is not None:
+        legacy_kwargs["keystore_dir"] = keystore_dir
+    if admin_log_path is not None:
+        legacy_kwargs["admin_log_path"] = admin_log_path
+
     project_path = Path(project_dir) if project_dir is not None else None
 
     # Backwards-compat shim: legacy ``tn.init(yaml_path)`` style.
@@ -518,15 +750,16 @@ def init(
     if isinstance(name, Path) or (
         isinstance(name, str) and _looks_like_yaml_path(name)
     ):
-        from .lifecycle import init as _legacy_init
+        from . import _init_impl as _legacy_init
 
         legacy_yaml_str = str(name)
         _legacy_init(legacy_yaml_str, **legacy_kwargs)
         # The legacy init binds the singleton to the default ceremony.
         # Register a default handle pointing at the resolved yaml.
-        return _ensure_default_handle_for_legacy_init(
+        handle = _ensure_default_handle_for_legacy_init(
             yaml_path_arg=legacy_yaml_str
         )
+        return use(stream) if stream is not None else handle
 
     if name is None:
         # Discovery chain — see ``tn._autoinit._resolve_existing_yaml``
@@ -545,12 +778,13 @@ def init(
 
             existing = _resolve_existing_yaml()
             if existing is not None:
-                from .lifecycle import init as _legacy_init
+                from . import _init_impl as _legacy_init
 
                 _legacy_init(str(existing), **legacy_kwargs)
-                return _ensure_default_handle_for_legacy_init(
+                handle = _ensure_default_handle_for_legacy_init(
                     yaml_path_arg=str(existing)
                 )
+                return use(stream) if stream is not None else handle
         # Nothing on disk yet (or project_dir is set) — fall through to
         # the default-named flow, which mints ``.tn/default/`` as the
         # safe-defaults home under the right project root.
@@ -586,7 +820,7 @@ def init(
         # against an on-disk yaml still apply.
         _check_no_conflict(explicit_yaml, profile=profile)
         if existing is not None:
-            return existing
+            return use(stream) if stream is not None else existing
         handle = TN(
             name=name,
             yaml_path=explicit_yaml,
@@ -595,7 +829,7 @@ def init(
         _registry_register(name, handle)
         if name == DEFAULT_CEREMONY_NAME:
             _bind_default_singleton(explicit_yaml, **legacy_kwargs)
-        return handle
+        return use(stream) if stream is not None else handle
 
     yaml_p = ceremony_yaml_path(name, project_dir=project_path)
     _check_no_conflict(yaml_p, profile=profile)
@@ -603,7 +837,7 @@ def init(
     if existing is not None:
         # Already registered — return the same instance so the registry
         # stays the single source of truth for handle identity.
-        return existing
+        return use(stream) if stream is not None else existing
 
     is_default = name == DEFAULT_CEREMONY_NAME
 
@@ -617,7 +851,11 @@ def init(
             name,
             project_dir=project_path,
             device_did=_device_did_for_create(),
+            cipher=cipher,
             profile=profile,
+            device_private_bytes=device_private_bytes,
+            keystore_dir=Path(keystore_dir) if keystore_dir is not None else None,
+            admin_log_path=Path(admin_log_path) if admin_log_path is not None else None,
         )
 
     handle = _new_handle(name, project_dir=project_path)
@@ -626,7 +864,7 @@ def init(
     if is_default:
         _bind_default_singleton(yaml_p, **legacy_kwargs)
 
-    return handle
+    return use(stream) if stream is not None else handle
 
 
 def use(
@@ -688,8 +926,8 @@ def list_ceremonies() -> list[str]:
 # Default-ceremony singleton bridge
 #
 # During this sprint, the default ceremony's emit/read still goes
-# through the existing module-level singleton runtime (see
-# ``tn.lifecycle.init``). The bridge below ensures that calling
+# through the existing module-level singleton runtime (built by
+# ``tn._init_impl``). The bridge below ensures that calling
 # ``tn.init()`` (no args) or ``tn.init("default")`` also binds the
 # singleton, so ``tn.info(...)`` keeps working without anyone having
 # to know about both APIs.
@@ -701,8 +939,8 @@ def _bind_default_singleton(yaml_p: Path, **legacy_kwargs: Any) -> None:
     the singleton is already pointing at this yaml; otherwise this is
     a re-init (which the legacy code path supports).
     """
+    from . import _init_impl as _legacy_init
     from . import current_config as _current_config
-    from .lifecycle import init as _legacy_init
 
     try:
         cfg = _current_config()
@@ -723,7 +961,7 @@ def _ensure_default_handle_for_legacy_init(*, yaml_path_arg: str) -> TN:
     intend to replace prior state. If a prior default handle exists
     pointing at a different yaml, swap it out: unregister the old
     handle and register a new one that reflects the new yaml. The
-    singleton itself was already swapped by ``lifecycle.init``; the
+    singleton itself was already swapped by ``_init_impl``; the
     registry just has to follow.
 
     Idempotent if the yaml hasn't changed: returns the existing
