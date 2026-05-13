@@ -22,6 +22,16 @@ for entry in tn.read():                                      # yields typed Entr
     print(entry.event_type, entry.fields.get("order_id"))
 ```
 
+No explicit flush needed — `tn.init()` registers an `atexit` hook that
+drains handlers on normal interpreter shutdown. For deterministic
+scoping (e.g., inside a request handler) use the context manager:
+
+```python
+with tn.session() as s:
+    s.log("order.created", order_id="A100")
+# handlers flushed and closed on block exit
+```
+
 You can also pass an explicit yaml path or pick a different ceremony:
 
 ```python
