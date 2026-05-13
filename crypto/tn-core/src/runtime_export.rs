@@ -281,7 +281,14 @@ impl Runtime {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Absorb an ``admin_log_snapshot`` .tnpkg into the receiver's
+    /// admin log.
+    ///
+    /// Thin orchestrator: build receiver's local state, short-circuit
+    /// when the manifest is already dominated, parse the body, accept
+    /// each envelope through the per-line helper, append the
+    /// accepted set. Mirrors the Python ``_absorb_admin_log_snapshot``
+    /// decomposition (PR #40).
     fn absorb_admin_log_snapshot(
         &self,
         manifest: &Manifest,
@@ -290,144 +297,44 @@ impl Runtime {
         let yaml_dir = self.yaml_dir();
         let admin_log = resolve_admin_log_path(&yaml_dir, &self.cfg);
 
-        // Build receiver's local clock + row-hash set + revoked leaves from
-        // the existing admin log.
-        let mut local_clock: VectorClock = BTreeMap::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut revoked_leaves: BTreeMap<(String, u64), Option<String>> = BTreeMap::new();
-
-        if admin_log.exists() {
-            let text = std::fs::read_to_string(&admin_log)?;
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let Ok(env) = serde_json::from_str::<Value>(line) else {
-                    continue;
-                };
-                let did = env.get("did").and_then(Value::as_str);
-                let et = env.get("event_type").and_then(Value::as_str);
-                let seq = env.get("sequence").and_then(Value::as_u64);
-                let rh = env.get("row_hash").and_then(Value::as_str);
-                if let Some(rh) = rh {
-                    seen.insert(rh.to_string());
-                }
-                if let (Some(d), Some(e), Some(s)) = (did, et, seq) {
-                    let slot = local_clock.entry(d.to_string()).or_default();
-                    let cur = slot.get(e).copied().unwrap_or(0);
-                    if s > cur {
-                        slot.insert(e.to_string(), s);
-                    }
-                }
-                if et == Some("tn.recipient.revoked") {
-                    let g = env.get("group").and_then(Value::as_str);
-                    let li = env.get("leaf_index").and_then(Value::as_u64);
-                    if let (Some(g), Some(li)) = (g, li) {
-                        revoked_leaves
-                            .insert((g.to_string(), li), rh.map(str::to_string));
-                    }
-                }
-            }
-        }
+        let (local_clock, mut seen, mut revoked_leaves) =
+            build_local_admin_clock(&admin_log)?;
 
         if clock_dominates(&local_clock, &manifest.clock) {
-            // Receiver already has everything the manifest claims.
-            return Ok(AbsorbReceipt {
-                kind: manifest.kind.as_str().into(),
-                accepted_count: 0,
-                deduped_count: 0,
-                noop: true,
-                derived_state: None,
-                conflicts: Vec::new(),
-                legacy_status: String::new(),
-                legacy_reason: String::new(),
-            replaced_kit_paths: Vec::new(),
-            });
+            return Ok(noop_receipt(manifest));
         }
 
         let Some(raw) = body.get("body/admin.ndjson") else {
-            return Ok(AbsorbReceipt {
-                kind: manifest.kind.as_str().into(),
-                accepted_count: 0,
-                deduped_count: 0,
-                noop: false,
-                derived_state: None,
-                conflicts: Vec::new(),
-                legacy_status: "rejected".into(),
-                legacy_reason: "admin_log_snapshot body missing `body/admin.ndjson`".into(),
-            replaced_kit_paths: Vec::new(),
-            });
+            return Ok(rejected_receipt(
+                manifest,
+                "admin_log_snapshot body missing `body/admin.ndjson`",
+            ));
         };
-
-        let mut accepted: Vec<Value> = Vec::new();
-        let mut deduped = 0usize;
-        let mut conflicts: Vec<ChainConflict> = Vec::new();
-
         let text = std::str::from_utf8(raw).map_err(|e| Error::Malformed {
             kind: "admin.ndjson body",
             reason: e.to_string(),
         })?;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let Ok(env) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if !envelope_well_formed(&env) {
-                continue;
-            }
-            if !verify_envelope_signature(&env) {
-                continue;
-            }
-            let rh = env
-                .get("row_hash")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            if rh.is_empty() {
-                continue;
-            }
-            if seen.contains(&rh) {
-                deduped += 1;
-                continue;
-            }
 
-            let event_type = env.get("event_type").and_then(Value::as_str);
-            if event_type == Some("tn.recipient.added") {
-                let g = env.get("group").and_then(Value::as_str);
-                let li = env.get("leaf_index").and_then(Value::as_u64);
-                if let (Some(g), Some(li)) = (g, li) {
-                    let key = (g.to_string(), li);
-                    if let Some(rev_rh) = revoked_leaves.get(&key).cloned() {
-                        conflicts.push(ChainConflict::LeafReuseAttempt {
-                            group: g.to_string(),
-                            leaf_index: li,
-                            attempted_row_hash: rh.clone(),
-                            originally_revoked_at_row_hash: rev_rh,
-                        });
-                    }
-                }
-            }
-            if event_type == Some("tn.recipient.revoked") {
-                let g = env.get("group").and_then(Value::as_str);
-                let li = env.get("leaf_index").and_then(Value::as_u64);
-                if let (Some(g), Some(li)) = (g, li) {
-                    revoked_leaves.insert((g.to_string(), li), Some(rh.clone()));
-                }
-            }
-            accepted.push(env);
-            seen.insert(rh);
+        let mut accepted: Vec<Value> = Vec::new();
+        let mut deduped: usize = 0;
+        let mut conflicts: Vec<ChainConflict> = Vec::new();
+        for line in text.lines() {
+            try_accept_admin_envelope(
+                line,
+                &mut seen,
+                &mut revoked_leaves,
+                &mut accepted,
+                &mut conflicts,
+                &mut deduped,
+            );
         }
 
         if !accepted.is_empty() {
             append_admin_envelopes(&admin_log, &accepted)?;
         }
 
-        // Derive state from manifest; if absorb caller wants a fresh local
-        // replay they call admin_state() themselves.
+        // Derive state from manifest; if absorb caller wants a fresh
+        // local replay they call admin_state() themselves.
         let derived_state: Option<AdminState> = manifest
             .state
             .clone()
@@ -760,4 +667,201 @@ fn sha2_256(data: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(data);
     h.finalize().into()
+}
+
+// ----------------------------------------------------------------------
+// absorb_admin_log_snapshot helpers
+// ----------------------------------------------------------------------
+
+/// Receiver-side admin state recovered from disk for the snapshot
+/// absorb path: ``(local_clock, seen_row_hashes, revoked_leaves)``.
+///
+/// Aliased so the function signature and the orchestrator's
+/// destructuring read at a glance — and so clippy doesn't trip
+/// `type_complexity` on the nested generics.
+type LocalAdminClockState = (
+    VectorClock,
+    HashSet<String>,
+    BTreeMap<(String, u64), Option<String>>,
+);
+
+/// Replay the receiver's existing admin log to recover the trio
+/// ``(local_clock, seen_row_hashes, revoked_leaves)``.
+///
+/// The vector clock and the seen-set are the dedupe signals; the
+/// revoked-leaves map is what the per-envelope accept loop checks
+/// to surface ``LeafReuseAttempt`` conflicts on incoming
+/// ``tn.recipient.added`` envelopes whose leaf was previously
+/// revoked locally.
+///
+/// Missing log file is fine: returns three empty containers, as
+/// though the receiver had never seen any admin envelope. Malformed
+/// lines (non-JSON, non-string row_hash) are silently skipped — they
+/// can't be matched against anyway.
+fn build_local_admin_clock(admin_log: &Path) -> Result<LocalAdminClockState> {
+    let mut local_clock: VectorClock = BTreeMap::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut revoked_leaves: BTreeMap<(String, u64), Option<String>> = BTreeMap::new();
+
+    if !admin_log.exists() {
+        return Ok((local_clock, seen, revoked_leaves));
+    }
+    let text = std::fs::read_to_string(admin_log)?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(env) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let rh = env.get("row_hash").and_then(Value::as_str);
+        if let Some(rh) = rh {
+            seen.insert(rh.to_string());
+        }
+        if let (Some(d), Some(e), Some(s)) = (
+            env.get("did").and_then(Value::as_str),
+            env.get("event_type").and_then(Value::as_str),
+            env.get("sequence").and_then(Value::as_u64),
+        ) {
+            let slot = local_clock.entry(d.to_string()).or_default();
+            let cur = slot.get(e).copied().unwrap_or(0);
+            if s > cur {
+                slot.insert(e.to_string(), s);
+            }
+        }
+        if env.get("event_type").and_then(Value::as_str) == Some("tn.recipient.revoked") {
+            if let (Some(g), Some(li)) = (
+                env.get("group").and_then(Value::as_str),
+                env.get("leaf_index").and_then(Value::as_u64),
+            ) {
+                revoked_leaves.insert((g.to_string(), li), rh.map(str::to_string));
+            }
+        }
+    }
+    Ok((local_clock, seen, revoked_leaves))
+}
+
+/// Decide whether one admin log line should be accepted into the
+/// receiver's log.
+///
+/// In-place mutations on success: appends to ``accepted``, marks the
+/// row_hash in ``seen``, may push a ``LeafReuseAttempt`` to
+/// ``conflicts``, may update ``revoked_leaves`` if the envelope is
+/// itself a ``tn.recipient.revoked``. Increments ``deduped`` when
+/// the envelope's row_hash is already in ``seen``.
+///
+/// All malformed / unsigned / dedupe-skip cases are silent no-ops —
+/// the caller's totals are accurate against the well-formed input
+/// only.
+fn try_accept_admin_envelope(
+    line: &str,
+    seen: &mut HashSet<String>,
+    revoked_leaves: &mut BTreeMap<(String, u64), Option<String>>,
+    accepted: &mut Vec<Value>,
+    conflicts: &mut Vec<ChainConflict>,
+    deduped: &mut usize,
+) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let Ok(env) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    if !envelope_well_formed(&env) || !verify_envelope_signature(&env) {
+        return;
+    }
+    let rh = env
+        .get("row_hash")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if rh.is_empty() {
+        return;
+    }
+    if seen.contains(&rh) {
+        *deduped += 1;
+        return;
+    }
+
+    let event_type = env.get("event_type").and_then(Value::as_str);
+    match event_type {
+        Some("tn.recipient.added") => {
+            record_leaf_reuse_if_revoked(&env, &rh, revoked_leaves, conflicts);
+        }
+        Some("tn.recipient.revoked") => {
+            track_revoked_leaf(&env, &rh, revoked_leaves);
+        }
+        _ => {}
+    }
+    accepted.push(env);
+    seen.insert(rh);
+}
+
+fn record_leaf_reuse_if_revoked(
+    env: &Value,
+    rh: &str,
+    revoked_leaves: &BTreeMap<(String, u64), Option<String>>,
+    conflicts: &mut Vec<ChainConflict>,
+) {
+    let (Some(g), Some(li)) = (
+        env.get("group").and_then(Value::as_str),
+        env.get("leaf_index").and_then(Value::as_u64),
+    ) else {
+        return;
+    };
+    let key = (g.to_string(), li);
+    if let Some(rev_rh) = revoked_leaves.get(&key).cloned() {
+        conflicts.push(ChainConflict::LeafReuseAttempt {
+            group: g.to_string(),
+            leaf_index: li,
+            attempted_row_hash: rh.to_string(),
+            originally_revoked_at_row_hash: rev_rh,
+        });
+    }
+}
+
+fn track_revoked_leaf(
+    env: &Value,
+    rh: &str,
+    revoked_leaves: &mut BTreeMap<(String, u64), Option<String>>,
+) {
+    let (Some(g), Some(li)) = (
+        env.get("group").and_then(Value::as_str),
+        env.get("leaf_index").and_then(Value::as_u64),
+    ) else {
+        return;
+    };
+    revoked_leaves.insert((g.to_string(), li), Some(rh.to_string()));
+}
+
+/// Receipt for the "manifest is already dominated" short-circuit.
+fn noop_receipt(manifest: &Manifest) -> AbsorbReceipt {
+    AbsorbReceipt {
+        kind: manifest.kind.as_str().into(),
+        accepted_count: 0,
+        deduped_count: 0,
+        noop: true,
+        derived_state: None,
+        conflicts: Vec::new(),
+        legacy_status: String::new(),
+        legacy_reason: String::new(),
+        replaced_kit_paths: Vec::new(),
+    }
+}
+
+/// Receipt for the "body missing/malformed" rejection paths.
+fn rejected_receipt(manifest: &Manifest, reason: &str) -> AbsorbReceipt {
+    AbsorbReceipt {
+        kind: manifest.kind.as_str().into(),
+        accepted_count: 0,
+        deduped_count: 0,
+        noop: false,
+        derived_state: None,
+        conflicts: Vec::new(),
+        legacy_status: "rejected".into(),
+        legacy_reason: reason.into(),
+        replaced_kit_paths: Vec::new(),
+    }
 }
