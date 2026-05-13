@@ -18,12 +18,17 @@ right for them.
 from __future__ import annotations
 
 from .base import AsyncHandler, SyncHandler, TNHandler
-from .file import FileRotatingHandler, FileTimedRotatingHandler
+from .file import (
+    FileRotatingHandler,
+    FileTemplatedRotatingHandler,
+    FileTimedRotatingHandler,
+)
 from .registry import build_handlers, default_file_handler
 
 __all__ = [
     "AsyncHandler",
     "FileRotatingHandler",
+    "FileTemplatedRotatingHandler",
     "FileTimedRotatingHandler",
     "SyncHandler",
     "TNHandler",

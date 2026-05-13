@@ -185,6 +185,7 @@ class TNRuntime:
             cfg.handler_specs,
             yaml_dir=cfg.yaml_path.parent,
             default_log_dir=default_log_dir,
+            cfg=cfg,
         )
         if extra_handlers:
             self.handlers.extend(extra_handlers)
