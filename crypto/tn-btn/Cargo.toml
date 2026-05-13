@@ -1,10 +1,10 @@
 [package]
 name = "tn-btn"
 version = "0.0.1"
-edition = "2021"
-rust-version = "1.75"
+edition.workspace = true
+rust-version.workspace = true
 description = "Broadcast-Transaction encryption: NNL subset-difference with selective revocation."
-license = "MIT OR Apache-2.0"
+license.workspace = true
 readme = "README.md"
 keywords = ["cryptography", "broadcast", "encryption", "revocation", "nnl"]
 categories = ["cryptography"]
