@@ -586,7 +586,7 @@ class TestLegacyInitShim:
         assert isinstance(handle, TN)
         assert handle.name == "default"
         assert handle.yaml_path.resolve() == yaml_path.resolve()
-        # Singleton was bound (legacy lifecycle.init path).
+        # Singleton was bound (legacy yaml-path init route).
         assert tn._dispatch_rt is not None
 
 

@@ -392,7 +392,7 @@ class TNRuntime:
 # --------------------------------------------------------------------
 
 
-def init(
+def build_runtime(
     yaml_path: str | os.PathLike[str],
     *,
     log_path: str | os.PathLike[str] | None = None,  # back-compat: forces
@@ -403,8 +403,15 @@ def init(
     identity=None,  # tn.identity.Identity or None
     extra_handlers: list[TNHandler] | None = None,  # for tests / programmatic
     stdout: bool | None = None,  # None = default-on unless TN_NO_STDOUT=1
+    device_private_bytes: bytes | None = None,
+    keystore_dir: str | os.PathLike[str] | None = None,
+    admin_log_path: str | os.PathLike[str] | None = None,
 ) -> None:
-    """Load or create the ceremony at `yaml_path`.
+    """Load or create the ceremony at ``yaml_path`` and build the
+    in-process ``TNRuntime`` that backs every emit / read call.
+
+    Called by ``tn.init`` after argument resolution. Not part of the
+    public API — operators should call ``tn.init`` instead.
 
     Handler resolution:
       1. If tn.yaml has a `handlers:` section, use that.
@@ -462,6 +469,21 @@ def init(
         create_kwargs: dict = {"pool_size": pool_size, "cipher": cipher}
         if identity is not None:
             create_kwargs["device_private_bytes"] = identity.device_private_key_bytes()
+        elif device_private_bytes is not None:
+            # Raw seed path — same effect as identity= but skips the
+            # tn.identity.Identity wrapper. Used by env-injected
+            # deploys where the seed comes directly from a secret
+            # manager.
+            create_kwargs["device_private_bytes"] = device_private_bytes
+        if keystore_dir is not None:
+            create_kwargs["keystore_dir"] = keystore_dir
+        if admin_log_path is not None:
+            create_kwargs["admin_log_path"] = admin_log_path
+        # log_path is already handled by build_runtime's default
+        # rotating-file handler synthesis below; create_fresh also
+        # accepts it so the yaml gets the right path written.
+        if log_path is not None:
+            create_kwargs["log_path"] = log_path
         cfg = load_or_create(yaml_path, **create_kwargs)
 
         # --- auto-absorb inbox + _reconcile (unified-read Plan 1) ---

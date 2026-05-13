@@ -175,6 +175,9 @@ def _init_impl(
     extra_handlers=None,
     stdout: bool | None = None,
     link: bool | None = None,
+    device_private_bytes: bytes | None = None,
+    keystore_dir: "str | Path | None" = None,
+    admin_log_path: "str | Path | None" = None,
 ) -> None:
     """Initialize TN for this process.
 
@@ -198,8 +201,8 @@ def _init_impl(
     (current_config, admin verbs, read_as_recipient, etc.) remain on the
     Python path.
 
-    All kwargs are forwarded to the underlying logger.init() so existing
-    call sites continue to work without changes.
+    All kwargs are forwarded to the underlying logger.build_runtime()
+    so existing call sites continue to work without changes.
     """
     global _dispatch_rt, _run_id
 
@@ -243,16 +246,16 @@ def _init_impl(
     # Serialize init() across threads so two callers on a fresh process
     # don't both build their own runtime (and then leak one). The second
     # caller waits, sees the now-bound _dispatch_rt, and short-circuits
-    # via logger.init's own _runtime swap (which also re-uses the same
-    # _runtime_lock). See Workstream D7.
+    # via logger.build_runtime's own _runtime swap (which also re-uses
+    # the same _runtime_lock). See Workstream D7.
     with _init_lock:
-        # Always call logger.init() first — it handles:
+        # Always call logger.build_runtime() first — it handles:
         #   - fresh ceremony creation (keystore, yaml)
         #   - absorb + _reconcile of inbox packages
         #   - building the Python TNRuntime (cfg, handlers, chain)
-        from .logger import init as _logger_init
+        from .logger import build_runtime as _logger_build_runtime
 
-        _logger_init(
+        _logger_build_runtime(
             yaml_path,
             log_path=log_path,
             pool_size=pool_size,
@@ -260,9 +263,12 @@ def _init_impl(
             identity=identity,
             extra_handlers=extra_handlers,
             stdout=stdout,
+            device_private_bytes=device_private_bytes,
+            keystore_dir=keystore_dir,
+            admin_log_path=admin_log_path,
         )
 
-        # After logger.init() completes, read back the singleton it created.
+        # After logger.build_runtime() completes, read back the singleton it created.
         from . import logger as _lg
 
         py_rt = _lg._runtime  # TNRuntime instance
@@ -903,7 +909,7 @@ from ._handle import (  # noqa: E402
 # --------------------------------------------------------------------------
 # Multi-ceremony module verbs — see tn._multi and docs/directory-layout.md.
 # tn.init is sourced from _multi (which delegates legacy yaml-path calls
-# through to lifecycle.init for backwards compat). tn.use and tn.list
+# through to tn._init_impl for backwards compat). tn.use and tn.list
 # are new with the multi-ceremony work.
 # --------------------------------------------------------------------------
 from ._multi import (  # noqa: E402

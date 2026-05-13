@@ -1,49 +1,19 @@
-"""Lifecycle verbs: init, flush_and_close, session, current_config, using_rust.
+"""Lifecycle verbs: flush_and_close, session, current_config, using_rust.
 
 The high-frequency control-plane verbs that bracket every TN session.
 The module-level dispatch runtime (`_dispatch_rt`) and `_run_id` still
 live in `tn/__init__.py` — lifecycle.py imports them back where needed.
+
+Note: ``init`` previously lived here as a thin wrapper around
+``tn._init_impl``. That wrapper was removed when the init chain was
+flattened (see [tn-proto#36](https://github.com/cyaxios/tn-proto/issues/36));
+callers now use ``tn.init`` (the public entry) or ``tn._init_impl``
+(internal). ``flush_and_close`` is itself tracked for removal in
+[tn-proto#35](https://github.com/cyaxios/tn-proto/issues/35).
 """
 from __future__ import annotations
 
 from typing import Any  # noqa: F401 — used in `session(...)` annotation below
-
-
-def init(
-    yaml_path=None,
-    *,
-    log_path=None,
-    pool_size: int = 4,
-    cipher: str = "btn",
-    identity=None,
-    extra_handlers=None,
-    stdout: bool | None = None,
-    link: bool | None = None,
-) -> None:
-    """Initialize TN for this process. See tn/__init__.py:_init_impl for the
-    full discovery chain behavior; this is the same function, relocated.
-
-    ``link`` controls the post-init vault upload + claim URL surfacing
-    (parity with the ``tn init`` CLI verb).
-
-      * ``None`` (default) — run iff inside an IPython/Jupyter/Databricks
-        kernel; plain Python callers (scripts, tests, library use) get
-        a clean ceremony with no vault contact.
-      * ``True`` — force run regardless of context.
-      * ``False`` — never run (CLI uses this to keep its own block).
-
-    Env opt-out: ``TN_NO_LINK=1`` skips the upload even when ``link=True``."""
-    from . import _init_impl
-    return _init_impl(
-        yaml_path,
-        log_path=log_path,
-        pool_size=pool_size,
-        cipher=cipher,
-        identity=identity,
-        extra_handlers=extra_handlers,
-        stdout=stdout,
-        link=link,
-    )
 
 
 def flush_and_close(*, timeout: float = 30.0) -> None:

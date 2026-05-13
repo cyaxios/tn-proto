@@ -1,4 +1,4 @@
-// Ceremony yaml loader. Mirrors the minimum shape that tn.logger.init
+// Ceremony yaml loader. Mirrors the minimum shape that tn.logger.build_runtime
 // consumes in Python. Only btn ceremonies are supported; jwe/bgw fall
 // outside the Rust-backed path (those stay Python-owned for now).
 
