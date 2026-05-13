@@ -42,6 +42,20 @@ tn.init(stream="pod-1")         # mint+open a stream of the default ceremony
 
 Discovery chain when no args are passed: `$TN_YAML` → `./tn.yaml` → `./.tn/default/tn.yaml` → `$TN_HOME/tn.yaml`, then mints if nothing's there.
 
+`tn.read` and `tn.watch` both tail the main user log by default.
+Admin envelopes (`tn.*`) live in a separate log; address them
+explicitly when you want them:
+
+```python
+for entry in tn.read(log="admin"):                # alias sugar
+    ...
+for entry in tn.read(log=tn.current_config().admin_log_location):
+    ...                                            # explicit path
+```
+
+`log=` also accepts a template path with `{event_type}` / `{date}` /
+etc. tokens; every matching file is read or tailed in order.
+
 Dirt-easy bootstrap from a dashboard-minted bundle:
 
 ```python
