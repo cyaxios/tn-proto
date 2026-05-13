@@ -976,6 +976,117 @@ def _absorb_contact_update(
     )
 
 
+def _build_local_admin_clock(
+    admin_log: Path,
+) -> dict[str, dict[str, int]]:
+    """Compute the receiver's per-DID per-event_type vector clock by
+    scanning the local admin log.
+
+    Returns a mapping ``{did: {event_type: max_sequence}}``. Used to
+    detect whether an incoming snapshot is already fully covered by
+    the receiver's local state (the ``_clock_dominates`` check).
+    """
+    clock: dict[str, dict[str, int]] = {}
+    if not admin_log.exists():
+        return clock
+    with admin_log.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                env = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            did = env.get("did")
+            et = env.get("event_type")
+            seq = env.get("sequence")
+            if isinstance(did, str) and isinstance(et, str) and isinstance(seq, int):
+                slot = clock.setdefault(did, {})
+                if seq > slot.get(et, 0):
+                    slot[et] = seq
+    return clock
+
+
+def _build_revoked_leaves(
+    admin_log: Path,
+) -> dict[tuple[str, int], str | None]:
+    """Scan the local admin log for ``tn.recipient.revoked`` events
+    and return a ``{(group, leaf_index): row_hash}`` map.
+
+    Used as the equivocation-detection set when absorbing an admin
+    log snapshot: any inbound ``tn.recipient.added`` whose
+    ``(group, leaf_index)`` collides with a previously-revoked leaf is
+    surfaced as a ``LeafReuseAttempt`` conflict.
+    """
+    revoked: dict[tuple[str, int], str | None] = {}
+    if not admin_log.exists():
+        return revoked
+    with admin_log.open("r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                env = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if env.get("event_type") != "tn.recipient.revoked":
+                continue
+            g = env.get("group")
+            li = env.get("leaf_index")
+            if isinstance(g, str) and isinstance(li, int):
+                revoked[(g, li)] = env.get("row_hash")
+    return revoked
+
+
+def _accept_admin_envelope(
+    env: dict[str, Any],
+    seen_row_hashes: set[str],
+    revoked_leaves: dict[tuple[str, int], str | None],
+) -> tuple[str, LeafReuseAttempt | None]:
+    """Decide what to do with one inbound admin envelope.
+
+    Returns ``(decision, conflict_or_none)`` where ``decision`` is one
+    of ``"drop"`` (malformed / bad sig / no row_hash), ``"dedupe"``
+    (already seen), or ``"accept"`` (append + update tracking).
+
+    Mutates ``revoked_leaves`` in place when this envelope is itself
+    a revocation so a same-batch add-after-revoke is flagged.
+    """
+    if not _envelope_well_formed(env):
+        return "drop", None
+    if not _verify_envelope_signature(env):
+        # Tampered/unsigned: drop. Append-only invariant only applies
+        # to envelopes whose signature already passed.
+        return "drop", None
+
+    rh = env.get("row_hash")
+    if not isinstance(rh, str):
+        return "drop", None
+
+    if rh in seen_row_hashes:
+        return "dedupe", None
+
+    conflict: LeafReuseAttempt | None = None
+    et = env.get("event_type")
+    g = env.get("group")
+    li = env.get("leaf_index")
+
+    if isinstance(g, str) and isinstance(li, int):
+        key = (g, li)
+        if et == "tn.recipient.added" and key in revoked_leaves:
+            conflict = LeafReuseAttempt(
+                group=g,
+                leaf_index=li,
+                attempted_row_hash=rh,
+                revoked_row_hash=revoked_leaves[key],
+            )
+        elif et == "tn.recipient.revoked":
+            # Track newly-arrived revocations so a later add in the
+            # same batch is correctly flagged.
+            revoked_leaves[key] = rh
+
+    return "accept", conflict
+
+
 def _absorb_admin_log_snapshot(
     cfg: LoadedConfig, manifest: TnpkgManifest, body: dict[str, bytes]
 ) -> AbsorbReceipt:
@@ -984,32 +1095,11 @@ def _absorb_admin_log_snapshot(
     leaf-reuse attempts as ``conflicts``.
     """
     admin_log = resolve_admin_log_path(cfg)
-
-    # Build receiver's local clock from existing admin log.
-    local_clock: dict[str, dict[str, int]] = {}
     seen_row_hashes = existing_row_hashes(admin_log)
-    if admin_log.exists():
-        with admin_log.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    env = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                did = env.get("did")
-                et = env.get("event_type")
-                seq = env.get("sequence")
-                if isinstance(did, str) and isinstance(et, str) and isinstance(seq, int):
-                    slot = local_clock.setdefault(did, {})
-                    cur = slot.get(et, 0)
-                    if seq > cur:
-                        slot[et] = seq
+    local_clock = _build_local_admin_clock(admin_log)
 
     if _clock_dominates(local_clock, manifest.clock):
-        # Receiver already has everything the manifest claims. Skip
-        # work; receipt reflects a true noop.
+        # Receiver already has everything the manifest claims.
         return AbsorbReceipt(
             kind=manifest.kind,
             noop=True,
@@ -1024,21 +1114,7 @@ def _absorb_admin_log_snapshot(
             legacy_reason="admin_log_snapshot body missing `body/admin.ndjson`",
         )
 
-    # Build the local revoked-leaf set for equivocation detection.
-    revoked_leaves: dict[tuple[str, int], str | None] = {}
-    if admin_log.exists():
-        with admin_log.open("r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    env = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if env.get("event_type") == "tn.recipient.revoked":
-                    g = env.get("group")
-                    li = env.get("leaf_index")
-                    if isinstance(g, str) and isinstance(li, int):
-                        revoked_leaves[(g, li)] = env.get("row_hash")
-
+    revoked_leaves = _build_revoked_leaves(admin_log)
     accepted_envs: list[dict[str, Any]] = []
     conflicts: list[LeafReuseAttempt] = []
     deduped = 0
@@ -1052,51 +1128,19 @@ def _absorb_admin_log_snapshot(
         except json.JSONDecodeError:
             continue
 
-        if not _envelope_well_formed(env):
+        decision, conflict = _accept_admin_envelope(
+            env, seen_row_hashes, revoked_leaves,
+        )
+        if decision == "drop":
             continue
-
-        if not _verify_envelope_signature(env):
-            # Drop tampered / unsigned envelopes. The append-only invariant
-            # is for envelopes whose signature already passed; an envelope
-            # whose sig fails is data, not log.
-            continue
-
-        rh = env.get("row_hash")
-        if not isinstance(rh, str):
-            continue
-
-        if rh in seen_row_hashes:
+        if decision == "dedupe":
             deduped += 1
             continue
-
-        # Equivocation: leaf-reuse attempts on a previously-revoked
-        # (group, leaf_index). We still append (signed envelopes are
-        # facts) but flag the conflict so callers can reason about it.
-        if env.get("event_type") == "tn.recipient.added":
-            g = env.get("group")
-            li = env.get("leaf_index")
-            if isinstance(g, str) and isinstance(li, int):
-                key = (g, li)
-                if key in revoked_leaves:
-                    conflicts.append(
-                        LeafReuseAttempt(
-                            group=g,
-                            leaf_index=li,
-                            attempted_row_hash=rh,
-                            revoked_row_hash=revoked_leaves[key],
-                        )
-                    )
-
-        # Track newly-arrived revocations so a later add+revoke+add in
-        # the same batch is correctly flagged.
-        if env.get("event_type") == "tn.recipient.revoked":
-            g = env.get("group")
-            li = env.get("leaf_index")
-            if isinstance(g, str) and isinstance(li, int):
-                revoked_leaves[(g, li)] = rh
-
+        # decision == "accept"
+        if conflict is not None:
+            conflicts.append(conflict)
         accepted_envs.append(env)
-        seen_row_hashes.add(rh)
+        seen_row_hashes.add(env["row_hash"])
 
     if accepted_envs:
         append_admin_envelopes(admin_log, accepted_envs)
