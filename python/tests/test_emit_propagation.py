@@ -157,36 +157,38 @@ def _registry_clear_again(tn):
 
 @requires_btn
 class TestPerInstanceDispatch:
-    """Per-instance dispatch — Bug 1 fix.
+    """Per-instance dispatch + last-init-wins singleton binding.
 
-    Named ceremonies' emit verbs route through their own
-    ``DispatchRuntime`` and do NOT rebind the module-level
-    singleton. Two TNs in the same process emit independently;
-    calling ``a.info(...)`` after ``b.info(...)`` does not affect
-    where the singleton points.
+    Each ``tn.init(name=...)`` call binds the module-level singleton
+    to the just-initialised ceremony — mirroring stdlib ``logging``
+    where the last config wins. Returned handles continue to route
+    through their own ``DispatchRuntime`` so a held handle stays
+    pointed at its original ceremony even after another init swaps
+    the singleton; that independence is exercised by
+    :meth:`test_named_streams_have_independent_runtimes` below.
     """
 
-    def test_emit_does_not_rebind_singleton(self, tmp_path):
+    def test_init_rebinds_singleton_to_latest_ceremony(self, tmp_path):
         import tn
+        from pathlib import Path as _P
 
         assert tn._dispatch_rt is None
 
-        # The default ceremony's runtime IS the module-level
-        # singleton. Emitting on default populates the singleton.
         d = tn.init("default", project_dir=tmp_path)
         d.info("evt.default", k=1)
-        from pathlib import Path as _P
         default_yaml = _P(tn.current_config().yaml_path).resolve()
         assert default_yaml == d.yaml_path.resolve()
 
-        # A named stream's emit must NOT rebind the singleton — its
-        # runtime is independent.
+        # tn.init(name=...) rebinds the singleton onto the named
+        # ceremony so subsequent module-level tn.info / tn.read /
+        # tn.current_config calls operate against it.
         b = tn.init("b", profile="audit", project_dir=tmp_path)
         b.info("evt.b", k=1)
 
         assert (
-            _P(tn.current_config().yaml_path).resolve() == default_yaml
-        )
+            _P(tn.current_config().yaml_path).resolve()
+            == b.yaml_path.resolve()
+        ), "tn.init(name=...) must rebind the module-level singleton"
         tn.flush_and_close()
 
     def test_named_streams_have_independent_runtimes(self, tmp_path):
