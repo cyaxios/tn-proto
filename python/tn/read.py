@@ -19,8 +19,13 @@ Kwargs (both verbs):
                        structurally broken, and the read path treats them
                        as bugs to surface, not events to skip.
   - ``raw``          — yield the on-disk envelope dict instead of an Entry.
-  - ``log``          — alternate log path. Defaults to the current
-                       ceremony's log.
+  - ``log``          — alternate log address. Defaults to the current
+                       ceremony's main log. Accepts a literal path, a
+                       template with ``{event_type}`` / ``{date}`` /
+                       etc. tokens (glob expanded), or the ``"admin"``
+                       alias (resolves to ``cfg.admin_log_location``).
+                       The default surface NEVER merges the admin log
+                       in — address it explicitly.
   - ``as_recipient`` — keystore directory to decrypt with. Defaults to
                        the current ceremony's keystore.
   - ``group``        — group whose plaintext to surface (only meaningful
@@ -159,28 +164,77 @@ def read(
 
     Default mode yields :class:`Entry` instances. Pass ``raw=True`` to
     yield on-disk envelope dicts unchanged (forensics / chain auditors).
+
+    The default surface is the main user log only. Admin envelopes
+    (``tn.*``) live in a separate log; address them explicitly:
+
+        tn.read(log="admin")                       # alias sugar
+        tn.read(log=cfg.admin_log_location)        # explicit path
+        tn.read(log="./.tn/admin/admin.ndjson")    # literal
+
+    ``log=`` also accepts a template with ``{event_type}`` /
+    ``{event_class}`` / ``{date}`` / ``{yaml_dir}`` / ``{ceremony_id}``
+    / ``{did}`` tokens, in which case every matching file is read
+    back in turn. This mirrors :func:`tn.watch` — both verbs share
+    the same resolver so any addressing form works uniformly.
     """
     _check_verify_kwarg(verify)
 
     import tn
     tn._maybe_autoinit_load_only()
 
+    # Resolve ``log`` to a concrete list of files. ``None`` keeps the
+    # default (main log resolved by downstream readers). Anything else
+    # — literal path, template, or ``"admin"`` sugar — goes through the
+    # shared resolver so ``tn.read(log=cfg.admin_log_location)`` and
+    # ``tn.read(log="admin")`` and ``tn.read(log=Path(...))`` all reach
+    # the same code path. The default ``tn.read()`` deliberately does
+    # NOT merge the admin log; admin events are addressed explicitly.
+    log_targets: list[Path] = []
+    if log is not None:
+        from . import current_config
+        from ._log_targets import resolve_log_target
+        try:
+            _cfg_for_targets = current_config()
+        except RuntimeError:
+            _cfg_for_targets = None
+        log_targets = resolve_log_target(log, _cfg_for_targets)
+
     # Source of {envelope, plaintext, valid} triples.
     if as_recipient is not None:
         from .reader import read_as_recipient as _raw_read_as_recipient
         if log is None:
             from . import current_config
-            log = current_config().resolve_log_path()
+            log_targets = [current_config().resolve_log_path()]
         verify_sigs = verify is not False
-        triples = _raw_read_as_recipient(
-            log, Path(as_recipient), group=group, verify_signatures=verify_sigs,
-        )
+        # as_recipient mode tails ONE log at a time (the cipher needs
+        # a stable per-file state). Multi-file template targets fan
+        # out one read pass per file.
+        def _triples_recipient() -> "Iterator[dict[str, Any]]":
+            for one_log in log_targets:
+                yield from _raw_read_as_recipient(
+                    one_log,
+                    Path(as_recipient),
+                    group=group,
+                    verify_signatures=verify_sigs,
+                )
+        triples = _triples_recipient()
     else:
         from ._read_impl import _entry_in_current_run_raw, _read_raw_inner
-        triples = (
-            r for r in _read_raw_inner(log, None, all_runs=all_runs)
-            if all_runs or _entry_in_current_run_raw(r)
-        )
+        if log is None:
+            triples = (
+                r for r in _read_raw_inner(None, None, all_runs=all_runs)
+                if all_runs or _entry_in_current_run_raw(r)
+            )
+        else:
+            # Explicit target(s): iterate each resolved file in turn.
+            # No run_id filter — when the caller named a specific log
+            # they're asking for everything in it, not just this
+            # process's emits.
+            def _triples_explicit() -> "Iterator[dict[str, Any]]":
+                for one_log in log_targets:
+                    yield from _read_raw_inner(one_log, None, all_runs=True)
+            triples = _triples_explicit()
 
     for r in _wrap_parse_errors(iter(triples), verify):
         valid = r.get("valid") or {}
@@ -228,6 +282,19 @@ async def watch(
     """Tail the log live, yielding entries as they arrive.
 
     Async generator. Use ``async for entry in tn.watch(...)``.
+
+    The default surface tails the main user log only. Admin envelopes
+    (``tn.*``) live in a separate log and must be addressed
+    explicitly:
+
+        tn.watch(log="admin")                       # alias sugar
+        tn.watch(log=cfg.admin_log_location)        # explicit path
+        tn.watch(log="./.tn/admin/admin.ndjson")    # literal
+
+    ``log=`` also accepts a template with ``{event_type}`` /
+    ``{event_class}`` / ``{date}`` / ``{yaml_dir}`` / ``{ceremony_id}``
+    / ``{did}`` tokens; every matching file is tailed in parallel.
+    Symmetric with :func:`tn.read`.
     """
     _check_verify_kwarg(verify)
 
