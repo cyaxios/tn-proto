@@ -979,15 +979,30 @@ def _resolve_extends(yaml_path: Path, doc: dict[str, Any], _seen: set[Path] | No
     return merged
 
 
-def load(yaml_path: Path) -> LoadedConfig:
-    yaml_path = yaml_path.resolve()
-    doc = _read_yaml_doc(yaml_path)
+@dataclass(frozen=True)
+class _CeremonySettings:
+    """Validated ceremony-block scalars resolved from yaml.
 
-    # Resolve extends: chain *before* validation. After this point the
-    # merged doc carries identity, groups, recipients from the root
-    # of the chain; the per-stream child supplied only its overrides.
-    doc = _resolve_extends(yaml_path, doc)
+    Bundled into one return value so ``load()`` doesn't have to juggle a
+    6-tuple of unrelated strings.
+    """
 
+    ceremony_id: str
+    cipher_name: str  # "btn" | "jwe"
+    mode: str  # "local" | "linked"
+    linked_vault: str | None
+    linked_project_id: str | None
+    sync_logs: bool
+
+
+def _validate_load_doc_structure(yaml_path: Path, doc: Any) -> None:
+    """Top-level structural validation: dict shape, required keys,
+    reserved-namespace check on group names.
+
+    Raises ``ValueError`` with the yaml path prefixed so the operator
+    can locate the offending file at ``tn.init()`` time rather than at
+    first emit.
+    """
     if not isinstance(doc, dict):
         raise ValueError(f"{yaml_path}: expected top-level mapping")
     for required in ("me", "groups"):
@@ -995,27 +1010,32 @@ def load(yaml_path: Path) -> LoadedConfig:
             raise ValueError(f"{yaml_path}: missing required key {required!r}")
 
     # Reserved namespace check: ``tn.*`` group names are reserved for
-    # protocol-level conventions (per the 2026-04-25 read-ergonomics spec
-    # §2.2). The only allowed name in the reserved namespace is the
-    # auto-injected ``tn.agents`` group. Anything else is rejected at
-    # load time so the failure surfaces at ``tn.init()`` not at first
-    # emit.
+    # protocol-level conventions (per the 2026-04-25 read-ergonomics
+    # spec §2.2). The only allowed name in the reserved namespace is
+    # the auto-injected ``tn.agents`` group.
     user_groups = doc.get("groups") or {}
-    if isinstance(user_groups, dict):
-        for gname in user_groups:
-            if not isinstance(gname, str):
-                continue
-            if gname.startswith("tn.") and gname != "tn.agents":
-                raise ValueError(
-                    f"{yaml_path}: group name {gname!r} is reserved "
-                    f"(the ``tn.*`` namespace is for protocol-level conventions; "
-                    f"only ``tn.agents`` is allowed). Rename your group."
-                )
+    if not isinstance(user_groups, dict):
+        return
+    for gname in user_groups:
+        if not isinstance(gname, str):
+            continue
+        if gname.startswith("tn.") and gname != "tn.agents":
+            raise ValueError(
+                f"{yaml_path}: group name {gname!r} is reserved "
+                f"(the ``tn.*`` namespace is for protocol-level conventions; "
+                f"only ``tn.agents`` is allowed). Rename your group."
+            )
 
-    # `ceremony` block may be absent in very old YAMLs. Default the cipher
-    # to "jwe" when unset — the pre-cipher-field era predated BGW removal
-    # and JWE is the closest portable equivalent (pure-Python, no extras).
-    ceremony_block = doc.get("ceremony") or {}
+
+def _resolve_ceremony_settings(
+    yaml_path: Path, ceremony_block: dict[str, Any]
+) -> _CeremonySettings:
+    """Validate and pack the ``ceremony:`` block scalars.
+
+    ``ceremony`` may be absent in very old yamls — callers pass ``{}``
+    in that case and we default cipher to ``"btn"``. ``mode`` defaults
+    to ``"local"``; ``mode=linked`` requires ``linked_vault``.
+    """
     ceremony_id = str(ceremony_block.get("id") or "")
     if not ceremony_id:
         raise ValueError(f"{yaml_path}: ceremony.id must be set")
@@ -1025,27 +1045,44 @@ def load(yaml_path: Path) -> LoadedConfig:
             f"{yaml_path}: unknown ceremony.cipher {cipher_name!r}; "
             f"expected 'jwe' or 'btn' (legacy 'bgw' was removed in Workstream G)"
         )
-
-    # Wallet-link fields (optional, default to unlinked)
     mode = str(ceremony_block.get("mode") or "local")
     if mode not in ("local", "linked"):
         raise ValueError(f"{yaml_path}: unknown ceremony.mode {mode!r}")
     linked_vault = ceremony_block.get("linked_vault") or None
     linked_project_id = ceremony_block.get("linked_project_id") or None
-    sync_logs = bool(ceremony_block.get("sync_logs", False))
     if mode == "linked" and not linked_vault:
         raise ValueError(
             f"{yaml_path}: ceremony.mode=linked requires ceremony.linked_vault",
         )
+    return _CeremonySettings(
+        ceremony_id=ceremony_id,
+        cipher_name=cipher_name,
+        mode=mode,
+        linked_vault=linked_vault,
+        linked_project_id=linked_project_id,
+        sync_logs=bool(ceremony_block.get("sync_logs", False)),
+    )
 
-    # The yaml key is renamed from `protocol_events_location` to
-    # `admin_log_location` for clarity (per docs/.../2026-04-24-tn-admin-log
-    # -architecture.md §1.2). Accept both for now; emit a DeprecationWarning
-    # when the legacy name is the only one supplied. Drop the alias next
-    # release.
+
+def _resolve_admin_log_location(yaml_path: Path, ceremony_block: dict[str, Any]) -> str:
+    """Resolve where ``tn.*`` admin envelopes get written.
+
+    Precedence (per 2026-04-24-tn-admin-log-architecture.md §1.2):
+
+    1. ``ceremony.admin_log_location`` — canonical key.
+    2. ``ceremony.protocol_events_location`` — legacy alias; emits a
+       ``DeprecationWarning`` and will be dropped next release.
+    3. Default: ``./.tn/admin/admin.ndjson`` under the yaml dir.
+
+    The literal ``"main_log"`` is preserved as an escape hatch that
+    folds admin events back into the main log. Anything else is
+    validated as a path template via :func:`_validate_pel_template`.
+    """
     raw_admin_log = ceremony_block.get("admin_log_location")
     raw_pel_legacy = ceremony_block.get("protocol_events_location")
-    if raw_admin_log is None and raw_pel_legacy is not None:
+    if raw_admin_log is not None:
+        pel = str(raw_admin_log)
+    elif raw_pel_legacy is not None:
         import warnings as _warnings
 
         _warnings.warn(
@@ -1055,76 +1092,141 @@ def load(yaml_path: Path) -> LoadedConfig:
             stacklevel=2,
         )
         pel = str(raw_pel_legacy or "main_log")
-    elif raw_admin_log is not None:
-        pel = str(raw_admin_log)
     else:
-        # Default: dedicated admin log under yaml_dir (per
-        # docs/.../2026-04-24-tn-admin-log-architecture.md §1).
         pel = "./.tn/admin/admin.ndjson"
     if pel != "main_log":
         _validate_pel_template(pel, yaml_path.parent)
+    return pel
+
+
+def _load_keystore_and_keys(
+    yaml_path: Path, doc: dict[str, Any]
+) -> tuple[Path, DeviceKey, bytes]:
+    """Resolve ``keystore`` dir, load the device private key, and read
+    the optional ``index_master.key``.
+
+    Recipients (kits that absorb someone else's ceremony) only have the
+    cipher key material and the device key — no master index secret —
+    so the master key is best-effort: an empty bytes sentinel disables
+    index-token emission downstream.
+    """
+    keystore = (yaml_path.parent / doc.get("keystore", {}).get("path", "./.tn/keys")).resolve()
+    device = DeviceKey.from_private_bytes(_read_bytes(keystore / "local.private"))
+    master_path = keystore / "index_master.key"
+    master_index_key = _read_bytes(master_path) if master_path.exists() else b""
+    return keystore, device, master_index_key
+
+
+def _instantiate_group_cipher(
+    name: str, group_cipher: str, keystore: Path
+) -> _cipher.GroupCipher:
+    """Build the ``GroupCipher`` instance for a single group.
+
+    For JWE, detect "recipient view" (we have a sender_pub sidecar + my
+    private key but not the sender key itself) and route through
+    ``as_recipient`` so decrypt works in absorbed kits.
+    """
+    if group_cipher == "btn":
+        return _cipher.BtnGroupCipher.load(keystore, name)
+    # jwe
+    sender_pub_sidecar = keystore / f"{name}.jwe.sender_pub"
+    mykey_path = keystore / f"{name}.jwe.mykey"
+    sender_path = keystore / f"{name}.jwe.sender"
+    if sender_pub_sidecar.exists() and mykey_path.exists() and not sender_path.exists():
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+        my_sk = X25519PrivateKey.from_private_bytes(mykey_path.read_bytes())
+        return _cipher.JWEGroupCipher.as_recipient(
+            sender_pub_sidecar.read_bytes(),
+            my_sk,
+        )
+    return _cipher.JWEGroupCipher.load(keystore, name)
+
+
+def _load_group(
+    name: str,
+    spec: dict[str, Any],
+    *,
+    ceremony_cipher: str,
+    ceremony_id: str,
+    keystore: Path,
+    master_index_key: bytes,
+    yaml_path: Path,
+) -> GroupConfig:
+    """Materialise a single ``GroupConfig`` from its yaml spec.
+
+    Validates the per-group cipher (falling back to ceremony cipher),
+    derives the equality-index key (only when this kit holds the master
+    secret), and returns the assembled record.
+    """
+    pool = int(spec.get("pool_size", DEFAULT_POOL_SIZE))
+    epoch = int(spec.get("index_epoch", 0))
+    raw_cipher = spec.get("cipher") or ceremony_cipher
+    if raw_cipher not in ("jwe", "btn"):
+        raise ValueError(
+            f"{yaml_path}: groups.{name}.cipher is {raw_cipher!r}; "
+            f"expected 'jwe' or 'btn' (legacy 'bgw'/'bearer' removed)"
+        )
+    inst = _instantiate_group_cipher(name, raw_cipher, keystore)
+    derived_index_key = (
+        _indexing._derive_group_index_key(master_index_key, ceremony_id, name, epoch)
+        if master_index_key
+        else b""
+    )
+    return GroupConfig(
+        name=name,
+        cipher=inst,
+        pool_size=pool,
+        unissued_slots=[],
+        index_key=derived_index_key,
+        index_epoch=epoch,
+    )
+
+
+def load(yaml_path: Path) -> LoadedConfig:
+    """Read, validate, and assemble a :class:`LoadedConfig` from yaml.
+
+    High-level shape (each step is its own helper above):
+
+    1. Read raw yaml and resolve the ``extends:`` chain.
+    2. Validate top-level structure + reserved group namespace.
+    3. Pack the ceremony scalars (id, cipher, mode, linked_*).
+    4. Resolve the admin-log location with legacy-key migration.
+    5. Resolve keystore dir + device key + optional master index key.
+    6. Instantiate every group's cipher and derive its index key.
+    7. Build the field→groups routing table and configure the LLM
+       classifier stub.
+    """
+    yaml_path = yaml_path.resolve()
+    doc = _read_yaml_doc(yaml_path)
+
+    # Resolve extends: chain *before* validation. After this point the
+    # merged doc carries identity, groups, recipients from the root
+    # of the chain; the per-stream child supplied only its overrides.
+    doc = _resolve_extends(yaml_path, doc)
+
+    _validate_load_doc_structure(yaml_path, doc)
+    ceremony_block = doc.get("ceremony") or {}
+    settings = _resolve_ceremony_settings(yaml_path, ceremony_block)
+    pel = _resolve_admin_log_location(yaml_path, ceremony_block)
 
     logs_block = doc.get("logs") or {}
     log_path = str(logs_block.get("path") or "./.tn/logs/tn.ndjson")
 
-    keystore = (yaml_path.parent / doc.get("keystore", {}).get("path", "./.tn/keys")).resolve()
-    device = DeviceKey.from_private_bytes(_read_bytes(keystore / "local.private"))
-    # Only the publisher (ceremony creator) holds the master index
-    # secret. Recipients load without it; they can decrypt via their
-    # cipher keys but cannot write index tokens or search by default.
-    master_path = keystore / "index_master.key"
-    master_index_key = _read_bytes(master_path) if master_path.exists() else b""
+    keystore, device, master_index_key = _load_keystore_and_keys(yaml_path, doc)
 
-    groups: dict[str, GroupConfig] = {}
-    for name, spec in doc["groups"].items():
-        pool = int(spec.get("pool_size", DEFAULT_POOL_SIZE))
-        epoch = int(spec.get("index_epoch", 0))
-
-        # Per-group cipher with ceremony-level fallback for backcompat.
-        raw_cipher = spec.get("cipher") or cipher_name
-        group_cipher = raw_cipher
-        if group_cipher not in ("jwe", "btn"):
-            raise ValueError(
-                f"{yaml_path}: groups.{name}.cipher is {raw_cipher!r}; "
-                f"expected 'jwe' or 'btn' (legacy 'bgw'/'bearer' removed)"
-            )
-
-        inst: _cipher.GroupCipher
-        unissued: list[int] = []
-        if group_cipher == "btn":
-            inst = _cipher.BtnGroupCipher.load(keystore, name)
-        else:  # jwe
-            # Recipient view: if we have a sender_pub sidecar + mykey but no
-            # sender key, we're a recipient (not publisher). Construct the
-            # cipher via as_recipient so decrypt works.
-            sender_pub_sidecar = keystore / f"{name}.jwe.sender_pub"
-            mykey_path = keystore / f"{name}.jwe.mykey"
-            sender_path = keystore / f"{name}.jwe.sender"
-            if sender_pub_sidecar.exists() and mykey_path.exists() and not sender_path.exists():
-                from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-
-                my_sk = X25519PrivateKey.from_private_bytes(mykey_path.read_bytes())
-                inst = _cipher.JWEGroupCipher.as_recipient(
-                    sender_pub_sidecar.read_bytes(),
-                    my_sk,
-                )
-            else:
-                inst = _cipher.JWEGroupCipher.load(keystore, name)
-            unissued = []
-
-        derived_index_key = (
-            _indexing._derive_group_index_key(master_index_key, ceremony_id, name, epoch)
-            if master_index_key
-            else b""
+    groups: dict[str, GroupConfig] = {
+        name: _load_group(
+            name,
+            spec,
+            ceremony_cipher=settings.cipher_name,
+            ceremony_id=settings.ceremony_id,
+            keystore=keystore,
+            master_index_key=master_index_key,
+            yaml_path=yaml_path,
         )
-        groups[name] = GroupConfig(
-            name=name,
-            cipher=inst,
-            pool_size=pool,
-            unissued_slots=unissued,
-            index_key=derived_index_key,
-            index_epoch=epoch,
-        )
+        for name, spec in doc["groups"].items()
+    }
 
     field_to_groups = _build_field_to_groups(doc, yaml_path)
 
@@ -1136,9 +1238,9 @@ def load(yaml_path: Path) -> LoadedConfig:
         yaml_path=yaml_path,
         keystore=keystore,
         device=device,
-        ceremony_id=ceremony_id,
+        ceremony_id=settings.ceremony_id,
         master_index_key=master_index_key,
-        cipher_name=cipher_name,
+        cipher_name=settings.cipher_name,
         # ADDITIVE merge: defaults always present, yaml extras appended.
         # Order is preserved (defaults first, then yaml extras in order),
         # de-duped via dict.fromkeys to keep deterministic envelope shape.
@@ -1151,10 +1253,10 @@ def load(yaml_path: Path) -> LoadedConfig:
         groups=groups,
         field_to_groups=field_to_groups,
         handler_specs=doc.get("handlers"),  # None if absent; [] if empty-list
-        mode=mode,
-        linked_vault=linked_vault,
-        linked_project_id=linked_project_id,
-        sync_logs=sync_logs,
+        mode=settings.mode,
+        linked_vault=settings.linked_vault,
+        linked_project_id=settings.linked_project_id,
+        sync_logs=settings.sync_logs,
         admin_log_location=pel,
         log_path=log_path,
     )
