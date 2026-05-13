@@ -901,6 +901,24 @@ def __getattr__(name: str):
     raise AttributeError(f"module 'tn' has no attribute {name!r}")
 
 
+def __dir__() -> list[str]:
+    """Focused introspection surface for ``help(tn)`` and tab-completion.
+
+    Returns the curated ``__all__`` list. Without this hook, Python's
+    default ``dir(tn)`` enumerates every stdlib name we happened to
+    import at module scope (``Path``, ``Any``, ``logging``,
+    ``threading``, ``annotations``, ...) plus every submodule that got
+    auto-imported (``canonical``, ``chain``, ``cipher``, ...). Those
+    are all still reachable via attribute access — we just don't
+    advertise them as part of the public API.
+
+    The clean dir() also gives the TS SDK rebuild an unambiguous
+    signal of which symbols are part of the wire contract and which
+    are implementation detail.
+    """
+    return sorted(__all__)
+
+
 # --------------------------------------------------------------------------
 # Emit verbs — implemented in tn/emit.py. Re-exported here so callers keep
 # writing `tn.info(...)`. The dispatch state (run_id, _dispatch_rt) and
