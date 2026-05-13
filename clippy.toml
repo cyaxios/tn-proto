@@ -1,0 +1,12 @@
+# Complexity budget for the Rust workspace.
+#
+# Mirrors the Python radon gate at the C-rank cutoff. A function over
+# this threshold is a code smell to look at before merging, not
+# necessarily a bug — three functions in `tn-core` carry an explicit
+# `#[allow(clippy::cognitive_complexity)]` with a comment explaining
+# why their cohesion is intentional. New functions over the threshold
+# must either land below it or earn the same allow + justification.
+#
+# The CI step (`cargo clippy --workspace -- -D clippy::cognitive_complexity`)
+# treats every fresh hit as a hard failure.
+cognitive-complexity-threshold = 15
