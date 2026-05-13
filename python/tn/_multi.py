@@ -518,7 +518,7 @@ def init(
     if isinstance(name, Path) or (
         isinstance(name, str) and _looks_like_yaml_path(name)
     ):
-        from .lifecycle import init as _legacy_init
+        from . import _init_impl as _legacy_init
 
         legacy_yaml_str = str(name)
         _legacy_init(legacy_yaml_str, **legacy_kwargs)
@@ -545,7 +545,7 @@ def init(
 
             existing = _resolve_existing_yaml()
             if existing is not None:
-                from .lifecycle import init as _legacy_init
+                from . import _init_impl as _legacy_init
 
                 _legacy_init(str(existing), **legacy_kwargs)
                 return _ensure_default_handle_for_legacy_init(
@@ -688,8 +688,8 @@ def list_ceremonies() -> list[str]:
 # Default-ceremony singleton bridge
 #
 # During this sprint, the default ceremony's emit/read still goes
-# through the existing module-level singleton runtime (see
-# ``tn.lifecycle.init``). The bridge below ensures that calling
+# through the existing module-level singleton runtime (built by
+# ``tn._init_impl``). The bridge below ensures that calling
 # ``tn.init()`` (no args) or ``tn.init("default")`` also binds the
 # singleton, so ``tn.info(...)`` keeps working without anyone having
 # to know about both APIs.
@@ -701,8 +701,8 @@ def _bind_default_singleton(yaml_p: Path, **legacy_kwargs: Any) -> None:
     the singleton is already pointing at this yaml; otherwise this is
     a re-init (which the legacy code path supports).
     """
+    from . import _init_impl as _legacy_init
     from . import current_config as _current_config
-    from .lifecycle import init as _legacy_init
 
     try:
         cfg = _current_config()
@@ -723,7 +723,7 @@ def _ensure_default_handle_for_legacy_init(*, yaml_path_arg: str) -> TN:
     intend to replace prior state. If a prior default handle exists
     pointing at a different yaml, swap it out: unregister the old
     handle and register a new one that reflects the new yaml. The
-    singleton itself was already swapped by ``lifecycle.init``; the
+    singleton itself was already swapped by ``_init_impl``; the
     registry just has to follow.
 
     Idempotent if the yaml hasn't changed: returns the existing

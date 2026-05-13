@@ -903,7 +903,7 @@ from ._handle import (  # noqa: E402
 # --------------------------------------------------------------------------
 # Multi-ceremony module verbs — see tn._multi and docs/directory-layout.md.
 # tn.init is sourced from _multi (which delegates legacy yaml-path calls
-# through to lifecycle.init for backwards compat). tn.use and tn.list
+# through to tn._init_impl for backwards compat). tn.use and tn.list
 # are new with the multi-ceremony work.
 # --------------------------------------------------------------------------
 from ._multi import (  # noqa: E402
