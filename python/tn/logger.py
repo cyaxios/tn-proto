@@ -392,7 +392,7 @@ class TNRuntime:
 # --------------------------------------------------------------------
 
 
-def init(
+def build_runtime(
     yaml_path: str | os.PathLike[str],
     *,
     log_path: str | os.PathLike[str] | None = None,  # back-compat: forces
@@ -404,7 +404,11 @@ def init(
     extra_handlers: list[TNHandler] | None = None,  # for tests / programmatic
     stdout: bool | None = None,  # None = default-on unless TN_NO_STDOUT=1
 ) -> None:
-    """Load or create the ceremony at `yaml_path`.
+    """Load or create the ceremony at ``yaml_path`` and build the
+    in-process ``TNRuntime`` that backs every emit / read call.
+
+    Called by ``tn.init`` after argument resolution. Not part of the
+    public API — operators should call ``tn.init`` instead.
 
     Handler resolution:
       1. If tn.yaml has a `handlers:` section, use that.

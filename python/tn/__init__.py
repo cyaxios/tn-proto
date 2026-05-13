@@ -198,8 +198,8 @@ def _init_impl(
     (current_config, admin verbs, read_as_recipient, etc.) remain on the
     Python path.
 
-    All kwargs are forwarded to the underlying logger.init() so existing
-    call sites continue to work without changes.
+    All kwargs are forwarded to the underlying logger.build_runtime()
+    so existing call sites continue to work without changes.
     """
     global _dispatch_rt, _run_id
 
@@ -243,16 +243,16 @@ def _init_impl(
     # Serialize init() across threads so two callers on a fresh process
     # don't both build their own runtime (and then leak one). The second
     # caller waits, sees the now-bound _dispatch_rt, and short-circuits
-    # via logger.init's own _runtime swap (which also re-uses the same
-    # _runtime_lock). See Workstream D7.
+    # via logger.build_runtime's own _runtime swap (which also re-uses
+    # the same _runtime_lock). See Workstream D7.
     with _init_lock:
-        # Always call logger.init() first — it handles:
+        # Always call logger.build_runtime() first — it handles:
         #   - fresh ceremony creation (keystore, yaml)
         #   - absorb + _reconcile of inbox packages
         #   - building the Python TNRuntime (cfg, handlers, chain)
-        from .logger import init as _logger_init
+        from .logger import build_runtime as _logger_build_runtime
 
-        _logger_init(
+        _logger_build_runtime(
             yaml_path,
             log_path=log_path,
             pool_size=pool_size,
@@ -262,7 +262,7 @@ def _init_impl(
             stdout=stdout,
         )
 
-        # After logger.init() completes, read back the singleton it created.
+        # After logger.build_runtime() completes, read back the singleton it created.
         from . import logger as _lg
 
         py_rt = _lg._runtime  # TNRuntime instance
