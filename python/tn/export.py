@@ -397,6 +397,237 @@ def export_identity_seed(
 # --------------------------------------------------------------------------
 
 
+def _validate_export_args(
+    *,
+    kind: ExportKind,
+    cfg: LoadedConfig | None,
+    confirm_includes_secrets: bool,
+    device: Any | None,
+) -> None:
+    """Pre-flight validation for :func:`export`.
+
+    All checks raise ``ValueError`` so the operator gets a single,
+    deterministic failure point before any zip is touched. The
+    ``full_keystore`` gate is intentionally explicit — that kind
+    bundles the publisher's raw private keys (``local.private`` +
+    ``index_master.key``) and is for self-backup only.
+    """
+    if kind not in KNOWN_KINDS:
+        raise ValueError(f"export: unknown kind {kind!r}; expected one of {sorted(KNOWN_KINDS)}")
+    if kind == "full_keystore" and not confirm_includes_secrets:
+        raise ValueError(
+            "export(kind='full_keystore') writes the publisher's raw private keys "
+            "(local.private + index_master.key) into the zip. This is intended for "
+            "publisher-to-self backup only. Pass confirm_includes_secrets=True to "
+            "acknowledge."
+        )
+    if cfg is None and kind in {"admin_log_snapshot", "offer", "enrolment"}:
+        raise ValueError(f"export(kind={kind!r}) requires cfg=...")
+    if kind == "identity_seed" and device is None:
+        raise ValueError(
+            "export(kind='identity_seed') requires device=<DeviceKey>; the bundle "
+            "is self-issued by the carried Ed25519 key (from_did == to_did)."
+        )
+
+
+def _build_export_body(
+    *,
+    kind: ExportKind,
+    cfg: LoadedConfig | None,
+    package: Package | None,
+    keystore: Path | str | None,
+    groups: list[str] | None,
+    device: Any | None,
+    nickname: str | None,
+    confirm_includes_secrets: bool,
+) -> tuple[dict[str, bytes], dict[str, Any]]:
+    """Per-kind body construction. Returns ``(body, extras)``.
+
+    Dispatches to the right ``_build_*_body`` helper based on ``kind``.
+    Kinds without a body (``recipient_invite``) raise
+    :class:`NotImplementedError` so callers can't silently produce an
+    empty zip.
+    """
+    if kind == "admin_log_snapshot":
+        assert cfg is not None  # guarded by _validate_export_args
+        return _build_admin_log_snapshot_body(cfg)
+    if kind == "offer":
+        if package is None or package.package_kind != "offer":
+            raise ValueError("export(kind='offer') requires package=<signed offer Package>")
+        return _build_offer_body(package), {}
+    if kind == "enrolment":
+        if package is None or package.package_kind != "enrolment":
+            raise ValueError(
+                "export(kind='enrolment') requires package=<signed enrolment Package>"
+            )
+        return _build_enrolment_body(package), {}
+    if kind in ("kit_bundle", "full_keystore"):
+        ks = (
+            Path(keystore).resolve()
+            if keystore is not None
+            else (Path(cfg.keystore).resolve() if cfg is not None else None)
+        )
+        if ks is None:
+            raise ValueError(
+                f"export(kind={kind!r}) requires keystore=... or cfg=... so the keystore is known"
+            )
+        return _build_kit_bundle_body(
+            cfg,
+            ks,
+            full=(kind == "full_keystore"),
+            groups_filter=groups,
+            confirm_includes_secrets=confirm_includes_secrets,
+        )
+    if kind == "identity_seed":
+        assert device is not None  # guarded by _validate_export_args
+        return _build_identity_seed_body(device, nickname=nickname)
+    if kind == "recipient_invite":
+        raise NotImplementedError(
+            f"export(kind={kind!r}) is reserved in the manifest schema but not "
+            f"implemented in this Python session — see the plan doc for next steps."
+        )
+    # Unreachable: _validate_export_args already screened kind.
+    raise ValueError(f"export: unhandled kind {kind!r}")
+
+
+def _resolve_export_signer(
+    *,
+    kind: ExportKind,
+    cfg: LoadedConfig | None,
+    device: Any | None,
+    ceremony_id_stub: str | None,
+) -> tuple[Any, str, str]:
+    """Return ``(signing_key_priv, signer_did, signer_ceremony)``.
+
+    For most kinds the producer (``cfg.device``) signs the manifest.
+    ``identity_seed`` is the one exception: it's self-issued — the
+    Ed25519 key being bundled IS the manifest signer (from_did ==
+    to_did), and there's no enclosing ceremony, so we substitute the
+    placeholder ``ceremony_id``.
+    """
+    if kind == "identity_seed":
+        if device is None:
+            raise ValueError("export(kind='identity_seed') requires device=...")
+        return (
+            device.signing_key(),
+            device.did,
+            ceremony_id_stub or IDENTITY_SEED_CEREMONY_PLACEHOLDER,
+        )
+    if cfg is None:
+        raise ValueError(f"export(kind={kind!r}) requires cfg=... for manifest signing")
+    return cfg.device.signing_key(), cfg.device.did, cfg.ceremony_id
+
+
+def _merge_recipient_dids(
+    to_did: str | None, to_dids: list[str] | None
+) -> list[str]:
+    """Combine and validate ``to_did`` + ``to_dids`` into a deduped list.
+
+    Used by the seal-for-recipient path, which can mint multiple wraps
+    against one body. The singular ``to_did`` is listed first so it
+    becomes the canonical display addressee on the final manifest.
+    """
+    merged: list[str] = []
+    if to_did is not None:
+        if not str(to_did).startswith("did:key:z"):
+            raise ValueError(
+                f"export(seal_for_recipient=True): to_did={to_did!r} is not a "
+                f"did:key string."
+            )
+        merged.append(str(to_did))
+    if to_dids:
+        for d in to_dids:
+            if not isinstance(d, str) or not d.startswith("did:key:z"):
+                raise ValueError(
+                    f"export(seal_for_recipient=True): to_dids contains "
+                    f"non-did:key entry {d!r}."
+                )
+            if d not in merged:
+                merged.append(d)
+    if not merged:
+        raise ValueError(
+            "export(seal_for_recipient=True) requires at least one recipient "
+            "in to_did=... or to_dids=[...]."
+        )
+    return merged
+
+
+def _apply_seal_for_recipient(
+    *,
+    kind: ExportKind,
+    cfg: LoadedConfig | None,
+    body: dict[str, bytes],
+    extras: dict[str, Any],
+    scope: str | None,
+    to_did: str | None,
+    to_dids: list[str] | None,
+) -> tuple[dict[str, bytes], dict[str, Any], str, str]:
+    """Mint a fresh per-export BEK, encrypt the body, wrap the BEK for
+    each recipient DID.
+
+    Returns ``(body, extras, to_did, sealed_as_of)``. The ``to_did``
+    return is the canonical display addressee (first entry in the
+    merged recipient list) — the caller overrides its own ``to_did``
+    with this. The ``sealed_as_of`` return must be reused on the final
+    manifest so its canonical bytes match the AAD we computed against
+    the preview.
+
+    Per the second-release encrypted-kit-bundle spec: only callers who
+    hold a recipient's device key can recover the BEK and decrypt the
+    body. We always emit the plural ``recipient_wraps`` array (canonical
+    forward shape) and additionally emit the singular ``recipient_wrap``
+    shadow when there's exactly one entry — back-compat for older
+    absorbers that only know the singular shape.
+    """
+    if kind not in ("kit_bundle", "full_keystore"):
+        raise ValueError(
+            f"export(seal_for_recipient=True) is currently scoped to "
+            f"kit_bundle / full_keystore; got kind={kind!r}."
+        )
+    import secrets as _secrets
+
+    from .recipient_seal import (
+        manifest_aad_for_wrap as _aad_for_wrap,
+        seal_bek_for_recipient as _seal_bek,
+    )
+
+    merged_dids = _merge_recipient_dids(to_did, to_dids)
+    bek = _secrets.token_bytes(32)
+    body, extras = _encrypt_body_in_place(body, extras, bek)
+
+    # AAD = canonical(manifest_dict_without_signature_or_wrap-set).
+    # Build a preview manifest so the canonical bytes match what the
+    # consumer will compute against the final signed manifest. The AAD
+    # function strips both ``recipient_wrap`` and ``recipient_wraps``
+    # from the canonical bytes, so each entry binds against the same
+    # AAD.
+    preview = TnpkgManifest(
+        kind=str(kind),
+        from_did=cfg.device.did if cfg is not None else "",
+        ceremony_id=cfg.ceremony_id if cfg is not None else "",
+        as_of=_now_iso(),
+        scope=str(scope or extras.get("scope") or _default_scope(kind)),
+        to_did=merged_dids[0],
+        clock=dict(extras.get("clock", {})),
+        event_count=int(extras.get("event_count", 0)),
+        head_row_hash=extras.get("head_row_hash"),
+        state=extras.get("state"),
+    )
+    aad = _aad_for_wrap(preview.to_dict())
+    wraps_array = [_seal_bek(bek, did, aad) for did in merged_dids]
+
+    state = dict(extras.get("state") or {})
+    body_enc = dict(state.get("body_encryption") or {})
+    body_enc["recipient_wraps"] = wraps_array
+    if len(wraps_array) == 1:
+        # Singular shadow for older absorbers; the plural array is the
+        # canonical forward shape.
+        body_enc["recipient_wrap"] = wraps_array[0]
+    state["body_encryption"] = body_enc
+    extras["state"] = state
+    return body, extras, merged_dids[0], preview.as_of
+
+
 def export(
     out_path: Path | str,
     *,
@@ -485,99 +716,44 @@ def export(
         bring their own BEK (init-upload self-backup pattern) or ask the
         export to mint+wrap one (recipient-direction pattern), not both.
     """
-    if kind not in KNOWN_KINDS:
-        raise ValueError(f"export: unknown kind {kind!r}; expected one of {sorted(KNOWN_KINDS)}")
+    # 1. Pre-flight validation (single deterministic failure point
+    #    before we touch a zip).
+    _validate_export_args(
+        kind=kind,
+        cfg=cfg,
+        confirm_includes_secrets=confirm_includes_secrets,
+        device=device,
+    )
 
-    if kind == "full_keystore" and not confirm_includes_secrets:
-        raise ValueError(
-            "export(kind='full_keystore') writes the publisher's raw private keys "
-            "(local.private + index_master.key) into the zip. This is intended for "
-            "publisher-to-self backup only. Pass confirm_includes_secrets=True to "
-            "acknowledge."
-        )
+    # 2. Build the per-kind body.
+    body, extras = _build_export_body(
+        kind=kind,
+        cfg=cfg,
+        package=package,
+        keystore=keystore,
+        groups=groups,
+        device=device,
+        nickname=nickname,
+        confirm_includes_secrets=confirm_includes_secrets,
+    )
 
-    if cfg is None and kind in {"admin_log_snapshot", "offer", "enrolment"}:
-        raise ValueError(f"export(kind={kind!r}) requires cfg=...")
+    # 3. Resolve the manifest signer (cfg.device for most kinds; the
+    #    bundled device key for identity_seed).
+    signing_key_priv, signer_did, signer_ceremony = _resolve_export_signer(
+        kind=kind, cfg=cfg, device=device, ceremony_id_stub=ceremony_id_stub
+    )
 
-    if kind == "identity_seed" and device is None:
-        raise ValueError(
-            "export(kind='identity_seed') requires device=<DeviceKey>; the bundle "
-            "is self-issued by the carried Ed25519 key (from_did == to_did)."
-        )
-
-    body: dict[str, bytes] = {}
-    extras: dict[str, Any] = {}
-
-    if kind == "admin_log_snapshot":
-        if cfg is None:  # guarded above; defensive
-            raise ValueError("export(kind='admin_log_snapshot') requires cfg=...")
-        body, extras = _build_admin_log_snapshot_body(cfg)
-    elif kind == "offer":
-        if package is None or package.package_kind != "offer":
-            raise ValueError("export(kind='offer') requires package=<signed offer Package>")
-        body = _build_offer_body(package)
-    elif kind == "enrolment":
-        if package is None or package.package_kind != "enrolment":
-            raise ValueError(
-                "export(kind='enrolment') requires package=<signed enrolment Package>"
-            )
-        body = _build_enrolment_body(package)
-    elif kind in ("kit_bundle", "full_keystore"):
-        ks = (
-            Path(keystore).resolve()
-            if keystore is not None
-            else (Path(cfg.keystore).resolve() if cfg is not None else None)
-        )
-        if ks is None:
-            raise ValueError(
-                f"export(kind={kind!r}) requires keystore=... or cfg=... so the keystore is known"
-            )
-        body, extras = _build_kit_bundle_body(
-            cfg,
-            ks,
-            full=(kind == "full_keystore"),
-            groups_filter=groups,
-            confirm_includes_secrets=confirm_includes_secrets,
-        )
-    elif kind == "recipient_invite":
-        raise NotImplementedError(
-            f"export(kind={kind!r}) is reserved in the manifest schema but not "
-            f"implemented in this Python session — see the plan doc for next steps."
-        )
-    elif kind == "identity_seed":
-        # device guaranteed non-None by the early check above.
-        body, extras = _build_identity_seed_body(device, nickname=nickname)
-
-    # Build manifest. The producer's DID is the signing authority; we
-    # always sign with cfg.device. For kits-without-cfg (rare) the caller
-    # passes a keystore-only path; we still need an Ed25519 signer, so
-    # require cfg in those cases too. identity_seed is the one exception:
-    # it carries its own Ed25519 device key (the one being bundled), and
-    # signs the manifest with that key — there is no enclosing ceremony.
-    if kind == "identity_seed":
-        if device is None:
-            raise ValueError("export(kind='identity_seed') requires device=...")
-        signing_key_priv = device.signing_key()
-        signer_did = device.did
-        signer_ceremony = ceremony_id_stub or IDENTITY_SEED_CEREMONY_PLACEHOLDER
-    else:
-        if cfg is None:
-            raise ValueError(f"export(kind={kind!r}) requires cfg=... for manifest signing")
-        signing_key_priv = cfg.device.signing_key()
-        signer_did = cfg.device.did
-        signer_ceremony = cfg.ceremony_id
-
-    # Body-level encryption (per D-19 / D-5 / plan §"Body wrapping").
-    # We do this BEFORE the manifest is built so the manifest can record
-    # the encrypted-blob hash + cipher suite. AAD is empty here (the
-    # manifest is what's signed; the manifest itself records the
-    # ciphertext hash, which acts as the integrity binding).
+    # 4. Body encryption — the two paths are mutually exclusive (caller
+    #    either brings their own BEK for init-upload self-backup, or
+    #    asks the export to mint+wrap one for the recipient).
     if encrypt_body_with is not None and seal_for_recipient:
         raise ValueError(
             "export: encrypt_body_with= and seal_for_recipient= are mutually "
             "exclusive. Either bring your own BEK (init-upload pattern) or ask "
             "the export to mint+wrap one (recipient-direction pattern)."
         )
+
+    # 4a. BYOK (init-upload pattern, D-19 / D-5).
     if encrypt_body_with is not None:
         if not isinstance(encrypt_body_with, (bytes, bytearray)) or len(encrypt_body_with) != 32:
             raise ValueError(
@@ -585,109 +761,31 @@ def export(
             )
         body, extras = _encrypt_body_in_place(body, extras, bytes(encrypt_body_with))
 
-    # Recipient-direction sealed-box body wrap (per the second-release
-    # encrypted-kit-bundle spec). Mints a fresh BEK, encrypts the body
-    # with it, then wraps the BEK to ``to_did``'s identity using the
-    # X25519-derived-from-Ed25519 sealed-box construction in
-    # ``tn.recipient_seal``. Only callers who hold the recipient's
-    # device key can recover the BEK and decrypt the body.
+    # 4b. Recipient-direction sealed-box wrap (second-release spec).
+    #     Mint+encrypt+wrap, then reuse the preview ``as_of`` on the
+    #     final manifest so its canonical bytes match the AAD.
+    sealed_as_of: str | None = None
     if seal_for_recipient:
-        # Resolve the recipient set from to_did (singular) and to_dids
-        # (plural) per the federation spec. Either or both may be
-        # provided; we dedupe and require at least one valid did:key.
-        merged_dids: list[str] = []
-        if to_did is not None:
-            if not str(to_did).startswith("did:key:z"):
-                raise ValueError(
-                    f"export(seal_for_recipient=True): to_did={to_did!r} is not a "
-                    f"did:key string."
-                )
-            merged_dids.append(str(to_did))
-        if to_dids:
-            for d in to_dids:
-                if not isinstance(d, str) or not d.startswith("did:key:z"):
-                    raise ValueError(
-                        f"export(seal_for_recipient=True): to_dids contains "
-                        f"non-did:key entry {d!r}."
-                    )
-                if d not in merged_dids:
-                    merged_dids.append(d)
-        if not merged_dids:
-            raise ValueError(
-                "export(seal_for_recipient=True) requires at least one recipient "
-                "in to_did=... or to_dids=[...]."
-            )
-        if kind not in ("kit_bundle", "full_keystore"):
-            raise ValueError(
-                f"export(seal_for_recipient=True) is currently scoped to "
-                f"kit_bundle / full_keystore; got kind={kind!r}."
-            )
-        import secrets as _secrets
-
-        from .recipient_seal import (
-            manifest_aad_for_wrap as _aad_for_wrap,
-            seal_bek_for_recipient as _seal_bek,
+        body, extras, to_did, sealed_as_of = _apply_seal_for_recipient(
+            kind=kind,
+            cfg=cfg,
+            body=body,
+            extras=extras,
+            scope=scope,
+            to_did=to_did,
+            to_dids=to_dids,
         )
 
-        bek = _secrets.token_bytes(32)
-        body, extras = _encrypt_body_in_place(body, extras, bek)
-        # AAD = canonical(manifest_dict_without_signature_or_wrap-set).
-        # Build a preview manifest so the canonical bytes match what the
-        # consumer will compute against the final signed manifest. The
-        # AAD function strips both ``recipient_wrap`` and
-        # ``recipient_wraps`` from the canonical bytes, so each entry
-        # in the array binds against the same AAD.
-        preview = TnpkgManifest(
-            kind=str(kind),
-            from_did=cfg.device.did if cfg is not None else "",
-            ceremony_id=cfg.ceremony_id if cfg is not None else "",
-            as_of=_now_iso(),
-            scope=str(scope or extras.get("scope") or _default_scope(kind)),
-            to_did=merged_dids[0],  # display addressee = first entry
-            clock=dict(extras.get("clock", {})),
-            event_count=int(extras.get("event_count", 0)),
-            head_row_hash=extras.get("head_row_hash"),
-            state=extras.get("state"),
-        )
-        _preview_as_of = preview.as_of
-        aad = _aad_for_wrap(preview.to_dict())
-        # One wrap per recipient DID. All bind against the same AAD.
-        wraps_array = [_seal_bek(bek, did, aad) for did in merged_dids]
-        # Inject the wrap set into extras.state.body_encryption. We
-        # always emit the plural ``recipient_wraps`` array (even for a
-        # single recipient — that's the canonical shape going forward).
-        # We ALSO emit a singular ``recipient_wrap`` shadow when there's
-        # exactly one entry, so consumers running against an older
-        # absorber that only knows the singular shape keep working.
-        state = dict(extras.get("state") or {})
-        body_enc = dict(state.get("body_encryption") or {})
-        body_enc["recipient_wraps"] = wraps_array
-        if len(wraps_array) == 1:
-            body_enc["recipient_wrap"] = wraps_array[0]
-        state["body_encryption"] = body_enc
-        extras["state"] = state
-        extras["_seal_for_recipient_as_of"] = _preview_as_of
-        # Final manifest's to_did is the first recipient in the set —
-        # arbitrary but deterministic, matches the preview we used to
-        # compute the AAD.
-        to_did = merged_dids[0]
-
-    # identity_seed self-addresses: from_did == to_did. For other kinds,
-    # to_did is whatever the caller passed (or None).
-    final_to_did = signer_did if kind == "identity_seed" else to_did
-
-    # If the seal-for-recipient path stashed a preview as_of, reuse it so
-    # the final manifest is byte-equal to the one we computed AAD over.
-    sealed_as_of = extras.pop("_seal_for_recipient_as_of", None)
-    final_as_of = sealed_as_of or _now_iso()
-
+    # 5. Build, sign, write. identity_seed self-addresses
+    #    (from_did == to_did); other kinds use whatever the caller
+    #    passed for to_did.
     manifest = TnpkgManifest(
         kind=str(kind),
         from_did=signer_did,
         ceremony_id=signer_ceremony,
-        as_of=final_as_of,
+        as_of=sealed_as_of or _now_iso(),
         scope=str(scope or extras.get("scope") or _default_scope(kind)),
-        to_did=final_to_did,
+        to_did=signer_did if kind == "identity_seed" else to_did,
         clock=dict(extras.get("clock", {})),
         event_count=int(extras.get("event_count", 0)),
         head_row_hash=extras.get("head_row_hash"),
