@@ -52,10 +52,49 @@ def _ceremony_is_btn_only(yaml_path: Path) -> bool:
     return True
 
 
+def _logs_path_is_templated(yaml_path: Path) -> bool:
+    """True iff the ceremony's ``logs.path`` contains template tokens.
+
+    The Rust runtime opens a single log file at init; per-event-type
+    fan-out via templated paths is currently Python-only. When a
+    ceremony asks for templated routing, we route emit/read through
+    the Python path so the feature works without breaking the Rust
+    acceleration for non-templated ceremonies.
+
+    A follow-up issue tracks adding a writer pool to the Rust runtime
+    so this check can be dropped.
+    """
+    from . import config as _config
+
+    try:
+        doc = _config._read_yaml_doc(yaml_path)
+    except (OSError, ValueError):
+        return False
+    try:
+        doc = _config._resolve_extends(yaml_path, doc)
+    except ValueError:
+        return False
+    if not isinstance(doc, dict):
+        return False
+    logs = doc.get("logs") or {}
+    path = logs.get("path") if isinstance(logs, dict) else None
+    return isinstance(path, str) and "{" in path
+
+
 def should_use_rust(yaml_path: Path) -> bool:
     if os.environ.get("TN_FORCE_PYTHON"):
         return False
-    return _RUST_OK and _ceremony_is_btn_only(yaml_path)
+    if not _RUST_OK:
+        return False
+    if not _ceremony_is_btn_only(yaml_path):
+        return False
+    # Templated main-log paths route per-envelope to N files. The Rust
+    # runtime doesn't support that yet (it opens one log file at init),
+    # so a templated ceremony runs through the Python emit path. See
+    # _logs_path_is_templated for the rationale.
+    if _logs_path_is_templated(yaml_path):
+        return False
+    return True
 
 
 def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:

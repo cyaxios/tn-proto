@@ -155,3 +155,114 @@ class FileTimedRotatingHandler(SyncHandler):
 
     def resolved_address(self) -> str:
         return str(self.path.resolve())
+
+
+class FileTemplatedRotatingHandler(SyncHandler):
+    """Main-log handler that renders a path template per envelope.
+
+    Used when ``logs.path`` in the ceremony yaml contains any of the
+    six TN path tokens (``{event_type}``, ``{event_class}``, ``{date}``,
+    ``{yaml_dir}``, ``{ceremony_id}``, ``{did}``). On every
+    :meth:`emit` the template is rendered against the envelope's
+    ``event_type`` plus the cermony's static identity, producing a
+    concrete absolute path. The handler caches one inner
+    :class:`_BytesRotatingFileHandler` per rendered path so file
+    descriptors aren't reopened on every write.
+
+    Mirrors the admin log's per-event-type fan-out (see
+    :meth:`LoadedConfig.resolve_protocol_events_path`) so a single
+    ceremony can split its main log by event class, date, etc.
+
+    Read-side glob expansion is handled by
+    ``tn._log_targets.resolve_log_target`` — passing the same
+    template to ``tn.read(log=template)`` returns the merged stream.
+
+    Falls back gracefully for envelopes with no ``event_type`` field
+    (writes go to a single ``<template>.unrouted`` sibling) so a
+    malformed emit doesn't crash the handler.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        template: str,
+        cfg: Any,
+        *,
+        max_bytes: int = 5 * 1024 * 1024,
+        backup_count: int = 5,
+        rotate_on_init: bool = False,
+        filter_spec: dict[str, Any] | None = None,
+    ):
+        super().__init__(name, filter_spec)
+        # ``template`` is the raw path string (possibly with tokens);
+        # ``cfg`` is the LoadedConfig so we can call
+        # ``cfg.resolve_log_path_for(event_type)`` per envelope.
+        self._template = template
+        self._cfg = cfg
+        self._max_bytes = max_bytes
+        self._backup_count = backup_count
+        self._rotate_on_init = rotate_on_init
+        self._lock = threading.Lock()
+        # path-string -> handler. Bounded by the cardinality of the
+        # template's expansion (event_type * date * ...). Per-day per-
+        # event-type traffic should never blow this up; if it ever
+        # does, an LRU eviction layer is a one-screen addition.
+        self._handlers: dict[str, _BytesRotatingFileHandler] = {}
+
+    def _handler_for(self, event_type: str) -> _BytesRotatingFileHandler:
+        """Return (or open) the inner rotating handler for a given
+        event_type's rendered path. Thread-safety: caller holds
+        ``self._lock``.
+        """
+        path = self._cfg.resolve_log_path_for(event_type or "tn.unrouted")
+        key = str(path)
+        h = self._handlers.get(key)
+        if h is None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            h = _BytesRotatingFileHandler(
+                filename=str(path),
+                maxBytes=self._max_bytes,
+                backupCount=self._backup_count,
+                encoding="utf-8",
+                delay=True,
+            )
+            if self._rotate_on_init:
+                try:
+                    if path.exists() and path.stat().st_size > 0:
+                        if h.stream is None:
+                            h.stream = h._open()
+                        h.doRollover()
+                except OSError:
+                    pass
+            self._handlers[key] = h
+        return h
+
+    def emit(self, envelope: dict[str, Any], raw_line: bytes) -> None:
+        event_type = (
+            envelope.get("event_type") if isinstance(envelope, dict) else None
+        )
+        if not isinstance(event_type, str):
+            event_type = "tn.unrouted"
+        with self._lock:
+            self._handler_for(event_type).emit_bytes(raw_line)
+
+    def close(self, *, timeout: float = 30.0) -> None:
+        with self._lock:
+            for h in self._handlers.values():
+                try:
+                    h.close()
+                except OSError:
+                    pass
+            self._handlers.clear()
+
+    def resolved_address(self) -> str:
+        """Template itself is the dedup key — two handlers with the
+        same template render the same set of files, so they're
+        equivalent for handler-list dedupe purposes. Resolves the
+        ``{yaml_dir}`` token so the address is stable across
+        cwd changes; other tokens stay literal.
+        """
+        addr = self._template.replace(
+            "{yaml_dir}", str(self._cfg.yaml_path.parent.resolve())
+        )
+        return f"templated:{addr}"

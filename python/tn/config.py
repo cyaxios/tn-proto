@@ -129,10 +129,23 @@ def _substitute_env_vars(text: str, source_path: Path) -> str:
     return substituted.replace("$$", "$")
 
 
-def _validate_pel_template(template: str, yaml_dir: Path) -> None:
+def _validate_path_template(
+    template: str, yaml_dir: Path, *, key_name: str
+) -> None:
+    """Validate a path template against the six TN tokens.
+
+    Used for both ``ceremony.admin_log_location`` and ``logs.path`` so
+    the substitution rules and the safety check (must resolve under
+    the ceremony directory) stay identical for any templated path the
+    runtime renders per-envelope.
+
+    ``key_name`` is the human-readable yaml key for the error message
+    so an operator sees ``unknown substitution {foo} in logs.path``
+    rather than the generic ``protocol_events_location`` text.
+    """
     for m in re.findall(r"\{(\w+)\}", template):
         if m not in _KNOWN_PEL_TOKENS:
-            raise ValueError(f"unknown substitution {{{m}}} in protocol_events_location")
+            raise ValueError(f"unknown substitution {{{m}}} in {key_name}")
     dummy = template
     dummy = dummy.replace("{event_type}", "tn.test")
     dummy = dummy.replace("{event_class}", "tn")
@@ -144,7 +157,15 @@ def _validate_pel_template(template: str, yaml_dir: Path) -> None:
     try:
         resolved.relative_to(yaml_dir.resolve())
     except ValueError as err:
-        raise ValueError("protocol_events_location resolves outside ceremony directory") from err
+        raise ValueError(f"{key_name} resolves outside ceremony directory") from err
+
+
+def _validate_pel_template(template: str, yaml_dir: Path) -> None:
+    """Back-compat wrapper. New code should call
+    :func:`_validate_path_template` directly with an explicit
+    ``key_name``.
+    """
+    _validate_path_template(template, yaml_dir, key_name="protocol_events_location")
 
 
 DEFAULT_POOL_SIZE = 4
@@ -324,9 +345,42 @@ class LoadedConfig:
         return seen
 
     def resolve_protocol_events_path(self, event_type: str) -> Path:
+        """Render the admin-log path template for a single event_type."""
+        return self._render_path_template(
+            self.protocol_events_location, event_type=event_type,
+        )
+
+    def resolve_log_path_for(self, event_type: str) -> Path:
+        """Render the main-log path template for a single event_type.
+
+        Mirrors :meth:`resolve_protocol_events_path` but for ``logs.path``.
+        Lets a ceremony declare e.g.
+        ``logs: {path: ./.tn/logs/{event_class}/{date}.ndjson}`` and have
+        ``tn.info(...)`` route per-envelope to the rendered file. When
+        ``log_path`` has no template tokens, the result is equivalent to
+        :meth:`resolve_log_path` (the literal path).
+
+        Read side: ``tn.read(log=cfg.log_path)`` already glob-expands
+        the same six tokens via ``_log_targets.resolve_log_target``, so
+        the round-trip is symmetric without further changes.
+        """
+        return self._render_path_template(self.log_path, event_type=event_type)
+
+    def _render_path_template(self, template: str, *, event_type: str) -> Path:
+        """Substitute the six TN path tokens against ``event_type`` /
+        the cermony's static identity, then resolve relative paths
+        against the yaml directory.
+
+        Tokens recognised (matches ``_KNOWN_PEL_TOKENS`` in this file):
+        ``{event_type}``, ``{event_class}``, ``{date}``, ``{yaml_dir}``,
+        ``{ceremony_id}``, ``{did}``.
+
+        Single source of truth for both ``resolve_protocol_events_path``
+        and ``resolve_log_path_for`` so the substitution rules stay
+        identical across the admin log and the main log.
+        """
         from datetime import datetime, timezone
 
-        template = self.protocol_events_location
         yaml_dir = self.yaml_path.parent
         result = template
         result = result.replace("{event_type}", event_type)
@@ -1212,6 +1266,11 @@ def load(yaml_path: Path) -> LoadedConfig:
 
     logs_block = doc.get("logs") or {}
     log_path = str(logs_block.get("path") or "./.tn/logs/tn.ndjson")
+    # Validate the main-log path template (if any). Same six tokens
+    # the admin log accepts; the runtime writer renders per-envelope.
+    # See LoadedConfig.resolve_log_path_for / FileTemplatedRotatingHandler.
+    if "{" in log_path:
+        _validate_path_template(log_path, yaml_path.parent, key_name="logs.path")
 
     keystore, device, master_index_key = _load_keystore_and_keys(yaml_path, doc)
 
