@@ -31,6 +31,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # tempfile is used by Runtime::ephemeral(); gated to the `fs` feature so a
 # `no_std`/wasm consumer that disables `fs` doesn't pull it in.
 tempfile = { version = "3", optional = true }
+# fs4 provides cross-platform advisory file locks (flock on Unix,
+# LockFileEx on Windows). Gated to the `fs` feature alongside
+# tempfile — the WASM/no-fs target has no filesystem to lock.
+fs4 = { version = "0.13", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -38,7 +42,7 @@ tempfile = "3"
 
 [features]
 default = ["fs"]
-fs = ["dep:uuid", "dep:clap", "dep:tempfile"] # enables filesystem-backed modules (log_file, identity, FsStorage, Runtime, CLI bin)
+fs = ["dep:uuid", "dep:clap", "dep:tempfile", "dep:fs4"] # enables filesystem-backed modules (log_file, identity, FsStorage, Runtime, CLI bin)
 bgw = []
 
 [[bench]]
