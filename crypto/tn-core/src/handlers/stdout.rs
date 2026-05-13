@@ -47,9 +47,12 @@ impl StdoutFormat {
     /// readable terminal even on typos.
     #[must_use]
     pub fn parse(raw: &str) -> Self {
+        // "pretty" and "" are explicit; every other value (including
+        // unknown formats) falls through to the same default — so
+        // the wildcard arm subsumes the `"pretty" | ""` case. Kept
+        // as one arm to silence clippy::match_same_arms.
         match raw.trim().to_ascii_lowercase().as_str() {
             "json" => Self::Json,
-            "pretty" | "" => Self::Pretty,
             _ => Self::Pretty,
         }
     }

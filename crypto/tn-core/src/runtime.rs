@@ -447,6 +447,12 @@ impl Runtime {
     /// `tn.ceremony.init` first-emit on fresh creation. Splitting it
     /// further would fragment those invariants across helpers.
     #[allow(clippy::too_many_lines)]
+    // cognitive_complexity: this fn intentionally holds the
+    // ceremony-mint vs ceremony-load invariant in one place — see the
+    // comment above. Splitting helpers would scatter the "what state
+    // must be coherent before we hand back a Runtime" check across
+    // call sites where it's easy to miss in review.
+    #[allow(clippy::cognitive_complexity)]
     pub fn init(yaml_path: &Path) -> Result<Self> {
         let cfg = load_config(yaml_path)?;
         let yaml_dir = yaml_path.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -1566,6 +1572,12 @@ impl Runtime {
     ///
     /// Panics if an internal `RwLock` is poisoned.
     #[allow(clippy::too_many_lines)]
+    // cognitive_complexity: the read+verify loop walks one envelope at
+    // a time and decides per-envelope whether each integrity check
+    // (signature, row_hash, chain) passes. Splitting "per-check"
+    // helpers would force ValidFlags re-aggregation per row, which
+    // breaks the audit-grade trace the reader produces in one pass.
+    #[allow(clippy::cognitive_complexity)]
     pub fn read_from_with_validity(
         &self,
         log_path: &Path,
@@ -2758,6 +2770,13 @@ fn attach_instructions(
 /// `_include_valid` is wired through from the spec but the actual
 /// `_valid` block is added by the caller (`read_with_verify`) since
 /// validity flags don't live on `ReadEntry` itself.
+//
+// cognitive_complexity: this is a deliberate flat dispatch over the
+// six envelope shapes (public fields / groups / decrypt errors /
+// reserved fields / …). Each branch is a few-line projection. The
+// alternative — a per-shape helper — buys no clarity and forces an
+// allocation per shape that's currently elided inline.
+#[allow(clippy::cognitive_complexity)]
 pub fn flatten_raw_entry(entry: &ReadEntry, _include_valid: bool) -> FlatEntry {
     const FLAT_ENVELOPE_KEYS: [&str; 6] = [
         "timestamp",
