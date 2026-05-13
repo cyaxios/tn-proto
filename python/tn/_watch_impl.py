@@ -6,11 +6,18 @@ the new file. On unexpected truncation (file shorter than tracked
 offset, no inode change), we resume from the new end and emit a
 tamper-class admin event (``tn.watch.truncation_observed``).
 
-By default ``tn.watch`` tails **both** the main user log AND the
-dedicated admin log (when the ceremony routes ``tn.*`` events away
-from the main log, which is the default since the runtime-correctness
-PR). A caller passing an explicit ``log_path=`` tails only that file —
-useful for foreign-log debugging.
+By default ``tn.watch`` tails **only the main user log**. Admin events
+(``tn.*``) live in a separate log and must be addressed explicitly:
+
+    tn.watch(log="admin")                       # sugar
+    tn.watch(log=cfg.admin_log_location)        # explicit
+    tn.watch(log="./.tn/admin/admin.ndjson")    # literal path
+
+This is intentionally symmetric with ``tn.read`` — the two verbs share
+the resolver in ``tn._log_targets`` so any addressing form works
+uniformly. The previous always-include-admin default was a regression
+fix; the new default rule is "admin events are addressed, never
+merged implicitly."
 
 Cross-language counterpart: ts-sdk/src/watch.ts. Both implementations
 must yield the same entries in the same order for the same log file.
@@ -38,34 +45,31 @@ class _SourceState:
 
 
 def _resolve_watch_sources(
-    cfg, log_path: str | os.PathLike | None
+    cfg, log_path: Any
 ) -> list[Path]:
     """Decide which files ``tn.watch`` should tail.
 
-    With an explicit ``log_path``, tail only that file (foreign-log
-    or audit-replay use case).
+    Symmetric with ``tn.read``: routes the public ``log=`` argument
+    through :func:`tn._log_targets.resolve_log_target` so any form a
+    caller might pass — literal path, template with ``{event_type}``
+    style tokens, or the ``"admin"`` alias — yields the same file set
+    here and in ``tn.read``.
 
-    With no explicit path, tail both the main log and the admin log
-    so admin-prefixed events (``tn.*``) are visible alongside user
-    emits. The admin log is included only when it resolves to a
-    different file than the main log (legacy ceremonies with
-    ``protocol_events_location: main_log`` fold them together and
-    don't need two sources).
+    With ``log_path is None`` we tail **only the main log**. Admin
+    envelopes (``tn.*``) live in their own log since the
+    runtime-correctness work split them off; merging them into the
+    default watch surface was a regression-period workaround. Callers
+    that actually want to see admin events in their tail say so:
+
+        tn.watch(log="admin")                       # sugar
+        tn.watch(log=cfg.admin_log_location)        # explicit
+        tn.watch(log="./.tn/admin/admin.ndjson")    # literal path
     """
-    if log_path is not None:
-        return [Path(log_path)]
-    from .admin.log import resolve_admin_log_path
+    if log_path is None:
+        return [cfg.resolve_log_path()]
+    from ._log_targets import resolve_log_target
 
-    main = cfg.resolve_log_path()
-    sources = [main]
-    try:
-        admin = resolve_admin_log_path(cfg)
-    except Exception:
-        # Some legacy paths return a template string here; treat as absent.
-        return sources
-    if admin and admin != main:
-        sources.append(admin)
-    return sources
+    return resolve_log_target(log_path, cfg)
 
 
 def _initial_offset_for(

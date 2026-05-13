@@ -61,15 +61,15 @@ def test_watch_yields_new_appends(tmp_path):
     assert "b" in seen
 
 
-def test_watch_yields_admin_events(tmp_path):
-    """tn.watch() observes admin-prefixed events (tn.*) that route to
-    the dedicated admin log, not just user events that land in the
-    main log.
+def test_watch_default_main_log_only(tmp_path):
+    """Default ``tn.watch()`` tails the main log only.
 
-    Regression test for the bug where _watch_impl tailed only
-    cfg.resolve_log_path() (main log) and admin events were invisible
-    after the runtime-correctness PR moved them to admin_log_location.
-    Operators saw 'task starts, never yields' for admin-only traffic.
+    Admin events (``tn.*``) live in a separate log since the
+    runtime-correctness work split them off. They must be addressed
+    explicitly via ``log="admin"`` (or an equivalent path) — the
+    default surface does NOT merge them in. This regression-guards
+    against re-introducing the previous "admin visible by default"
+    behavior.
     """
     yaml_path = tmp_path / "tn.yaml"
     tn.init(yaml_path)
@@ -79,26 +79,58 @@ def test_watch_yields_admin_events(tmp_path):
     async def reader():
         async for entry in tn.watch(poll_interval=0.05):
             seen.append(entry.event_type)
-            # Stop once we've observed at least one admin event
-            # (the synthetic emit below) AND one user event.
-            if any(t.startswith("tn.test.") for t in seen) and "user.thing" in seen:
-                break
+            if "user.thing" in seen:
+                # Give one more tick to confirm the admin event does
+                # NOT arrive on the default surface, then stop.
+                await asyncio.sleep(0.3)
+                return
 
     async def run():
         task = asyncio.create_task(reader())
         await asyncio.sleep(0.1)
-        # Admin-prefixed event — must route through admin log; watch
-        # must see it.
-        tn.log("tn.test.admin_visibility", level="info", marker="alpha")
-        # User event — goes to main log.
+        tn.log("tn.test.admin_default", level="info", marker="alpha")
         tn.info("user.thing", marker="beta")
         await asyncio.wait_for(task, timeout=5.0)
 
     asyncio.run(run())
-    assert "tn.test.admin_visibility" in seen, (
-        f"admin event invisible to tn.watch; saw {seen}"
-    )
     assert "user.thing" in seen, f"user event missing; saw {seen}"
+    assert "tn.test.admin_default" not in seen, (
+        f"admin event leaked into default tn.watch(); saw {seen}"
+    )
+
+
+def test_watch_admin_alias_addresses_admin_log(tmp_path):
+    """``tn.watch(log='admin')`` tails the admin log explicitly.
+
+    Confirms the symmetric-by-explicit-address design: admin events
+    are reachable via the ``"admin"`` alias on either verb, and
+    main-log user events are NOT merged into that admin surface.
+    """
+    yaml_path = tmp_path / "tn.yaml"
+    tn.init(yaml_path)
+
+    seen: list[str] = []
+
+    async def reader():
+        async for entry in tn.watch(log="admin", poll_interval=0.05):
+            seen.append(entry.event_type)
+            if any(t.startswith("tn.test.") for t in seen):
+                return
+
+    async def run():
+        task = asyncio.create_task(reader())
+        await asyncio.sleep(0.1)
+        tn.info("user.thing", marker="ignored")
+        tn.log("tn.test.admin_alias", level="info", marker="seen")
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(run())
+    assert "tn.test.admin_alias" in seen, (
+        f"admin event missing via log='admin'; saw {seen}"
+    )
+    assert "user.thing" not in seen, (
+        f"main-log event leaked into log='admin' tail; saw {seen}"
+    )
 
 
 def test_watch_since_start_replays_existing(tmp_path):
