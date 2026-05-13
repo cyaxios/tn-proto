@@ -175,6 +175,9 @@ def _init_impl(
     extra_handlers=None,
     stdout: bool | None = None,
     link: bool | None = None,
+    device_private_bytes: bytes | None = None,
+    keystore_dir: "str | Path | None" = None,
+    admin_log_path: "str | Path | None" = None,
 ) -> None:
     """Initialize TN for this process.
 
@@ -260,6 +263,9 @@ def _init_impl(
             identity=identity,
             extra_handlers=extra_handlers,
             stdout=stdout,
+            device_private_bytes=device_private_bytes,
+            keystore_dir=keystore_dir,
+            admin_log_path=admin_log_path,
         )
 
         # After logger.build_runtime() completes, read back the singleton it created.
