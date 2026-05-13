@@ -442,24 +442,45 @@ class BtnGroupCipher:
     _self_kit: bytes = b""
     _keystore: Path | None = field(default=None, repr=False)
     _group_name: str = ""
+    # Snapshot of the last bytes we successfully persisted to disk.
+    # Used as the CAS `prior` on the next ``_persist_state`` call so a
+    # concurrent writer can't silently overwrite our mutation. Updated
+    # in ``create`` / ``load`` / ``_persist_state`` and is the cipher's
+    # private "view of the world." See _keystore_backend.py.
+    _last_persisted_bytes: bytes | None = field(default=None, repr=False)
 
     @classmethod
     def create(cls, keystore: Path, group_name: str) -> BtnGroupCipher:
-        """Mint a fresh btn ceremony and write its key files."""
+        """Mint a fresh btn ceremony and write its key files.
+
+        No CAS against a prior snapshot here — by construction the
+        keystore is fresh, the state file does not exist yet, and no
+        other writer should be contending. We still go through the
+        keystore backend so the write picks up its OS-level lock and
+        atomic-rename guarantees.
+        """
         import tn_btn as _btn
 
-        from ._keystore_backend import atomic_write_bytes
+        from ._keystore_backend import LocalFileKeystoreBackend, atomic_write_bytes
 
         state = _btn.PublisherState()
         self_kit = state.mint()
         keystore.mkdir(parents=True, exist_ok=True)
-        atomic_write_bytes(keystore / f"{group_name}.btn.state", state.to_bytes())
+        state_bytes = state.to_bytes()
+        # prior=None means "the file must not exist." If it does
+        # exist, somebody minted into the same group before us and
+        # our caller (admin add_group, fresh ceremony bootstrap) made
+        # an invariant mistake; surfacing the conflict is correct.
+        LocalFileKeystoreBackend(keystore).write_state(
+            group_name, prior=None, new=state_bytes
+        )
         atomic_write_bytes(keystore / f"{group_name}.btn.mykit", self_kit)
         return cls(
             _state=state,
             _self_kit=self_kit,
             _keystore=keystore,
             _group_name=group_name,
+            _last_persisted_bytes=state_bytes,
         )
 
     @classmethod
@@ -470,14 +491,18 @@ class BtnGroupCipher:
         state_path = keystore / f"{group_name}.btn.state"
         kit_path = keystore / f"{group_name}.btn.mykit"
         state = None
+        last_persisted: bytes | None = None
         if state_path.exists():
-            state = _btn.PublisherState.from_bytes(state_path.read_bytes())
+            state_bytes = state_path.read_bytes()
+            state = _btn.PublisherState.from_bytes(state_bytes)
+            last_persisted = state_bytes
         self_kit = kit_path.read_bytes() if kit_path.exists() else b""
         return cls(
             _state=state,
             _self_kit=self_kit,
             _keystore=keystore,
             _group_name=group_name,
+            _last_persisted_bytes=last_persisted,
         )
 
     def encrypt(self, plaintext: bytes) -> bytes:
@@ -496,9 +521,32 @@ class BtnGroupCipher:
             raise NotARecipientError(f"btn: kit not entitled: {e}") from e
 
     def _persist_state(self) -> None:
-        """Called by admin verbs after mutating state (add/revoke/mint)."""
-        if self._state is not None and self._keystore is not None:
-            from ._keystore_backend import atomic_write_bytes
+        """Persist the cipher's mutated state to disk under CAS.
 
-            p = self._keystore / f"{self._group_name}.btn.state"
-            atomic_write_bytes(p, self._state.to_bytes())
+        Called by admin verbs after mutating state (add / revoke /
+        mint). The cipher's ``_last_persisted_bytes`` is the CAS
+        ``prior`` — under the keystore's exclusive lock,
+        :class:`LocalFileKeystoreBackend.write_state` re-reads the
+        on-disk bytes and verifies they still match. A mismatch means
+        a concurrent process committed a write between our last
+        ``_persist_state`` (or ``load``) and now; the
+        :class:`KeystoreConflictError` propagates so the caller can
+        re-load and re-apply.
+
+        Mirrors the Rust runtime's ``admin_add_recipient`` /
+        ``admin_revoke_recipient`` pattern so Python and Rust writers
+        contending on the same keystore directory are mutually safe.
+        """
+        if self._state is None or self._keystore is None:
+            return
+        from ._keystore_backend import LocalFileKeystoreBackend
+
+        new_bytes = self._state.to_bytes()
+        LocalFileKeystoreBackend(self._keystore).write_state(
+            self._group_name,
+            prior=self._last_persisted_bytes,
+            new=new_bytes,
+        )
+        # CAS write succeeded — refresh our private snapshot so the
+        # next _persist_state has a fresh prior to compare against.
+        self._last_persisted_bytes = new_bytes

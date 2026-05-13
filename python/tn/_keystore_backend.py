@@ -10,6 +10,7 @@ See ``docs/superpowers/specs/2026-05-12-runtime-correctness-design.md``.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Protocol
 
@@ -75,20 +76,143 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
         raise
 
 
+# Per-path in-process locks. Stops two threads in THIS process from
+# both passing the OS-level acquire and racing through the CAS body
+# — which can happen on platforms where the OS file lock is
+# per-file-handle (e.g. Windows' msvcrt.locking) rather than
+# per-file. On POSIX flock is already file-level so this lock is
+# strictly defensive there.
+_PROCESS_LOCKS: dict[str, "threading.Lock"] = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
+
+
+def _process_lock_for(path: Path) -> "threading.Lock":
+    """Return the singleton process-level lock for ``path``.
+
+    Keyed on the resolved path string so two LocalFileKeystoreBackend
+    instances pointing at the same lock file share one Lock.
+    """
+    key = str(Path(path).resolve())
+    with _PROCESS_LOCKS_GUARD:
+        lock = _PROCESS_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PROCESS_LOCKS[key] = lock
+        return lock
+
+
+class _AdvisoryFileLock:
+    """Cross-platform exclusive advisory file lock.
+
+    Two-tier:
+
+    * In-process: a ``threading.Lock`` keyed on the lock-file path
+      serialises threads in the same interpreter. Necessary because
+      ``msvcrt.locking`` on Windows operates on the *file handle*,
+      not the *file*, so two threads in the same process each
+      acquire their own handle and can both pass the OS-level lock
+      simultaneously.
+    * Cross-process: ``fcntl.flock`` on POSIX (whole-file BSD-style),
+      ``msvcrt.locking`` on Windows (over the first byte). Blocks
+      writers in *other* processes from entering the CAS body.
+
+    Together: writers serialise correctly within the process AND
+    across processes. Mirrors the Rust ``LocalKeystore``'s use of the
+    ``fs4`` crate (whose ``LockFileEx`` on Windows is genuinely
+    file-level — Python has no stdlib equivalent without ``ctypes``).
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = Path(path)
+        self._fd: int | None = None
+        self._proc_lock = _process_lock_for(self._path)
+        self._proc_lock_held = False
+
+    def __enter__(self) -> "_AdvisoryFileLock":
+        import os as _os
+
+        # In-process serialisation first. Released last on exit.
+        self._proc_lock.acquire()
+        self._proc_lock_held = True
+
+        flags = _os.O_CREAT | _os.O_RDWR
+        if hasattr(_os, "O_CLOEXEC"):
+            flags |= _os.O_CLOEXEC  # type: ignore[attr-defined]
+        self._fd = _os.open(self._path, flags, 0o600)
+        # Windows byte-range lock needs at least one byte to lock.
+        # POSIX flock is whole-file and doesn't care; the write is
+        # harmless either way.
+        try:
+            _os.write(self._fd, b"\0")
+            _os.lseek(self._fd, 0, 0)
+        except OSError:
+            pass
+
+        try:
+            import fcntl as _fcntl
+
+            _fcntl.flock(self._fd, _fcntl.LOCK_EX)  # type: ignore[attr-defined]
+        except ImportError:
+            # Windows: msvcrt.locking with LK_LOCK retries ~10 times
+            # at ~1s intervals before raising. Combined with the
+            # in-process threading.Lock above, contention is bounded
+            # by inter-process traffic only (microsecond-scale per
+            # writer) so the retry budget is plenty.
+            import msvcrt as _msvcrt
+
+            _msvcrt.locking(self._fd, _msvcrt.LK_LOCK, 1)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        import os as _os
+
+        try:
+            if self._fd is not None:
+                try:
+                    try:
+                        import fcntl as _fcntl
+
+                        _fcntl.flock(self._fd, _fcntl.LOCK_UN)  # type: ignore[attr-defined]
+                    except ImportError:
+                        import msvcrt as _msvcrt
+
+                        try:
+                            _os.lseek(self._fd, 0, 0)
+                            _msvcrt.locking(self._fd, _msvcrt.LK_UNLCK, 1)
+                        except OSError:
+                            pass
+                finally:
+                    try:
+                        _os.close(self._fd)
+                    finally:
+                        self._fd = None
+        finally:
+            if self._proc_lock_held:
+                self._proc_lock.release()
+                self._proc_lock_held = False
+
+
 class LocalFileKeystoreBackend:
     """Filesystem-backed :class:`KeystoreBackend`.
 
     State for each ``group_name`` lives at
-    ``<keystore_dir>/<group_name>.btn.state``. Writes use
-    :func:`atomic_write_bytes` so a torn write never leaves a partial
-    file on disk. CAS is enforced by reading the current file and
-    comparing to ``prior`` before the write.
+    ``<keystore_dir>/<group_name>.btn.state``. Writes use:
 
-    The CAS window today is "best-effort under cooperating writers in
-    one process or across processes that aren't actively contending."
-    If real multi-writer contention shows up, add an OS-level lock
-    (``fcntl.flock`` on POSIX, ``msvcrt.locking`` on Windows) inside
-    :meth:`write_state` without changing the protocol shape.
+    1. :func:`atomic_write_bytes` so a torn write never leaves a
+       partial file on disk.
+    2. An OS-level advisory lock on a sibling
+       ``<group>.btn.state.lock`` file (``fcntl.flock`` on POSIX,
+       ``msvcrt.locking`` on Windows). Serialises concurrent writers
+       across both threads and processes — last writer no longer
+       silently wins.
+    3. Compare-and-swap re-read under the lock: ``prior`` is compared
+       byte-for-byte against the current on-disk state. Mismatch
+       raises :class:`KeystoreConflictError` so the caller re-reads,
+       re-applies their mutation, and retries.
+
+    Matches the Rust ``keystore_backend::LocalKeystore`` semantics so
+    Python and Rust writers contending on the same keystore directory
+    are mutually safe.
     """
 
     def __init__(self, keystore_dir: Path) -> None:
@@ -97,6 +221,9 @@ class LocalFileKeystoreBackend:
 
     def _path(self, group_name: str) -> Path:
         return self._dir / f"{group_name}.btn.state"
+
+    def _lock_path(self, group_name: str) -> Path:
+        return self._dir / f"{group_name}.btn.state.lock"
 
     def read_state(self, group_name: str) -> bytes | None:
         p = self._path(group_name)
@@ -107,11 +234,15 @@ class LocalFileKeystoreBackend:
     def write_state(
         self, group_name: str, prior: bytes | None, new: bytes
     ) -> None:
-        p = self._path(group_name)
-        current = self.read_state(group_name)
-        if current != prior:
-            raise KeystoreConflictError(
-                f"state for {group_name!r} has diverged on disk; "
-                f"re-read and retry"
-            )
-        atomic_write_bytes(p, new)
+        with _AdvisoryFileLock(self._lock_path(group_name)):
+            # Under the lock: re-read on-disk state and CAS against
+            # the caller's prior snapshot. Without the lock this read
+            # would be a TOCTOU race vs. another process about to
+            # commit a write.
+            current = self.read_state(group_name)
+            if current != prior:
+                raise KeystoreConflictError(
+                    f"state for {group_name!r} has diverged on disk; "
+                    f"re-read and retry"
+                )
+            atomic_write_bytes(self._path(group_name), new)
