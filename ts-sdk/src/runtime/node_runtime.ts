@@ -7,7 +7,6 @@
 // bgw will throw on emit/read, pointing the caller at the Python path.
 
 import {
-  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -21,7 +20,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { DeviceKey } from "../core/signing.js";
 
@@ -51,20 +50,17 @@ function readKitLeaf(kitBytes: Uint8Array): bigint {
   return btnKitLeaf(kitBytes);
 }
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { canonicalize } from "../core/canonical.js";
 import { ZERO_HASH, rowHash } from "../core/chain.js";
-import { buildEnvelopeLine } from "../core/envelope.js";
-import { deriveGroupKey, indexTokenFor } from "../core/indexing.js";
-import { signatureB64, signatureFromB64, verify } from "../core/signing.js";
+import { signatureFromB64, verify } from "../core/signing.js";
 import { asDid, asRowHash, asSignatureB64, type RowHash } from "../core/types.js";
 import { loadConfig, type CeremonyConfig, type GroupConfig } from "./config.js";
 import { loadKeystore, type LoadedKeystore } from "./keystore.js";
 import { scanAttestedEventRecords, yamlRecipientDids } from "./reconcile.js";
-
-interface ChainSlot {
-  seq: number;
-  prevHash: RowHash;
-}
+import { WasmRuntime } from "tn-wasm";
+import { nodeStorageAdapter } from "./storage_node.js";
+import { lastEmitReceipt } from "./wasm_shim.js";
+// Re-export for callers that still consume it through this module.
+export { lastEmitReceipt };
 
 /**
  * One decoded log entry — mirrors Python tn.reader._read() output exactly.
@@ -131,15 +127,35 @@ export function getSessionSignOverride(): boolean | null {
 export class NodeRuntime {
   readonly config: CeremonyConfig;
   readonly keystore: LoadedKeystore;
-  private chain = new Map<string, ChainSlot>();
+  /** TS-side `BtnPublisher` instances per group. Owned here (not by
+   *  wasm) because admin verbs that mint or rotate kits still execute
+   *  in TS for now — `addRecipient`, `rotateGroup`, the agent-runtime
+   *  bundle path. Once those migrate to wasm this can go. */
   private publishers = new Map<string, BtnPublisher>();
   private handlers: TNHandler[] = [];
+  /**
+   * Lazily-attached `WasmRuntime` companion. `null` until the first
+   * `emit*` (or other wasm-routed verb) is invoked; subsequent calls
+   * reuse the cached handle. The four public emit verbs always route
+   * through this handle via `_emitViaWasm`; the TS-side envelope
+   * pipeline (sign / chain / encrypt / handler fan-out / file append)
+   * is fully owned by the wasm runtime.
+   *
+   * `attachWasm()` initialises wasm with `skipCeremonyInitEmit: true`
+   * + `skipPolicyPublishedEmit: true` so the mid-session lazy attach
+   * doesn't duplicate events the TS path has already taken
+   * responsibility for.
+   */
+  private wasm: WasmRuntime | null = null;
   /** Cached `tn.agents` policy doc for this ceremony. `null` means "no
    * `.tn/config/agents.md` present" — splice path no-ops. */
   agentPolicy: PolicyDocument | null = null;
 
   addHandler(h: TNHandler): void {
     this.handlers.push(h);
+    // If wasm is already attached, mirror immediately so this handler
+    // catches subsequent emits (which fan out through wasm).
+    if (this.wasm !== null) this._mirrorHandlerToWasm(h);
   }
 
   private constructor(config: CeremonyConfig, keystore: LoadedKeystore) {
@@ -150,7 +166,6 @@ export class NodeRuntime {
       if (gcfg && gcfg.cipher !== "btn") continue;
       this.publishers.set(name, BtnPublisher.fromBytes(g.stateBytes));
     }
-    this.seedChainFromLog();
     // Load `.tn/config/agents.md` (if present). Errors propagate so a
     // malformed policy fails init — caller fixes or removes the file.
     this.agentPolicy = loadPolicyFile(this.config.yamlDir);
@@ -195,6 +210,19 @@ export class NodeRuntime {
     // opt out (e.g. for tests that need cross-init continuation).
     rotateLogOnSessionStart(config.logPath, config.handlers);
     const rt = new NodeRuntime(config, keystore);
+    // The wasm-side `WasmRuntime` companion (`rt.wasm`) is lazily
+    // instantiated on first use via `rt.attachWasm()`. Eager attachment
+    // is incompatible with the current TS implementation: `WasmRuntime.init`
+    // walks the yaml's admin log path and emits its own `tn.ceremony.init`
+    // bookkeeping, which would race the TS-side chain state and break
+    // tests that rely on a single deterministic event sequence
+    // (`admin.state rolls up ...`, `AdminStateCache flags fork ...`).
+    // The slim-down plan in
+    // `docs/superpowers/plans/2026-05-13-wasm-widen-and-fallback-deprecate.md`
+    // §2.5 routes emit/read through wasm once the TS implementation is
+    // deleted in the same change — keeping both eager today would
+    // double-write. For now the field stays `null` and the TS impl is
+    // authoritative.
     // Reconcile yaml-declared recipients with attested events. Any
     // DID listed in the yaml but with no matching
     // tn.recipient.added / tn.recipient.revoked event gets a freshly
@@ -214,9 +242,12 @@ export class NodeRuntime {
     return this.keystore.device.did;
   }
 
-  /** Append one log entry. Matches Python's tn.logger.emit flow. */
+  /** Append one log entry. Routes through `WasmRuntime.emit` so the
+   *  full envelope build / sign / chain / write happens inside the
+   *  Rust core. The TS-side `emitInternal` is dead (kept only until
+   *  the slim-down deletion pass lands). See `_emitViaWasm` below. */
   emit(level: string, eventType: string, fields: Record<string, unknown>): EmitReceipt {
-    return this.emitInternal(level, eventType, fields, undefined, undefined, undefined);
+    return this._emitViaWasm(level, eventType, fields, undefined, undefined, undefined);
   }
 
   /**
@@ -230,7 +261,7 @@ export class NodeRuntime {
     fields: Record<string, unknown>,
     opts: { timestamp?: string; eventId?: string } = {},
   ): EmitReceipt {
-    return this.emitInternal(level, eventType, fields, opts.timestamp, opts.eventId, undefined);
+    return this._emitViaWasm(level, eventType, fields, opts.timestamp, opts.eventId, undefined);
   }
 
   /**
@@ -244,7 +275,7 @@ export class NodeRuntime {
     fields: Record<string, unknown>,
     sign: boolean | null,
   ): EmitReceipt {
-    return this.emitInternal(level, eventType, fields, undefined, undefined, sign);
+    return this._emitViaWasm(level, eventType, fields, undefined, undefined, sign);
   }
 
   /** Full-control emit: timestamp + event_id + sign override. */
@@ -254,7 +285,7 @@ export class NodeRuntime {
     fields: Record<string, unknown>,
     opts: { timestamp?: string; eventId?: string; sign?: boolean | null } = {},
   ): EmitReceipt {
-    return this.emitInternal(
+    return this._emitViaWasm(
       level,
       eventType,
       fields,
@@ -264,7 +295,17 @@ export class NodeRuntime {
     );
   }
 
-  private emitInternal(
+  /** Single dispatch point that delegates to `WasmRuntime.emit*` and
+   *  synthesizes an `EmitReceipt` from the resulting on-disk envelope.
+   *
+   *  This is the ONLY emit path the four public verbs route through.
+   *  The wasm runtime owns the envelope build, sign, chain advance,
+   *  multi-group encrypt, row_hash, handler fan-out, and file append.
+   *  TS-side concerns kept here: agents-policy splice (so PoliCy
+   *  templates work even when the wasm runtime doesn't have its own
+   *  copy of the policy doc), session-level sign override resolution,
+   *  and PEL path resolution for the `lastEmitReceipt` shim. */
+  private _emitViaWasm(
     level: string,
     eventType: string,
     fields: Record<string, unknown>,
@@ -273,189 +314,61 @@ export class NodeRuntime {
     signOverride: boolean | null | undefined,
   ): EmitReceipt {
     validateEventType(eventType);
-
-    // 0. tn.agents policy splice (per spec §2.6).
-    //    Looks up `eventType` in the cached policy doc; if a template exists,
-    //    fills the six tn.agents fields via "set if absent" so per-emit
-    //    overrides still win. The yaml-declared `tn.agents` group routes
-    //    those six field names automatically.
-    fields = this._spliceAgentPolicy(eventType, fields);
-
-    // 1. split public vs per-group.
-    //
-    // Multi-group routing: a field declared under N groups in yaml
-    // (`groups[<g>].fields: [...]`) is encrypted into all N groups'
-    // payloads. `fieldToGroups` is built and sorted alphabetically at
-    // load time so envelope encoding stays canonical.
-    const publicOut: Record<string, unknown> = {};
-    const perGroup = new Map<string, Record<string, unknown>>();
-    for (const [k, v] of Object.entries(fields)) {
-      if (this.config.publicFields.has(k)) {
-        publicOut[k] = v;
-        continue;
-      }
-      let gnames = this.config.fieldToGroups.get(k);
-      if (!gnames || gnames.length === 0) {
-        // Field has no declared route. Fall back to the default group
-        // when one exists; otherwise raise — silent fall-through is
-        // exactly what multi-group routing was meant to fix.
-        if (this.config.groups.has("default")) {
-          gnames = ["default"];
-        } else {
-          throw new Error(
-            `field ${JSON.stringify(k)} has no group route and is not in ` +
-              "public_fields. Add it to `groups[<g>].fields` in tn.yaml, " +
-              "list it under public_fields, or define a `default` group " +
-              "to absorb unknowns.",
-          );
-        }
-      }
-      for (const gname of gnames) {
-        if (!this.config.groups.has(gname)) {
-          throw new Error(
-            `field ${JSON.stringify(k)} routed to unknown group ` +
-              `${JSON.stringify(gname)} ` +
-              `(known groups: ${JSON.stringify([...this.config.groups.keys()].sort())})`,
-          );
-        }
-        if (!perGroup.has(gname)) perGroup.set(gname, {});
-        perGroup.get(gname)![k] = v;
-      }
-    }
-
-    // 2. per-group index tokens + encrypt.
-    // On-disk shape uses snake_case (`field_hashes`) so envelope JSON is
-    // byte-identical with Python and Rust. In-memory variable name stays
-    // `fieldHashes` (TS convention).
-    const groupPayloadsForEnvelope: Record<
-      string,
-      { ciphertext: string; field_hashes: Record<string, string> }
-    > = {};
-    const groupHashInputs: Record<
-      string,
-      { ciphertext: Uint8Array; fieldHashes: Record<string, string> }
-    > = {};
-    for (const [gname, plainFields] of perGroup) {
-      const publisher = this.publishers.get(gname);
-      if (!publisher) continue; // not a publisher for this group: skip silently
-      const gk = deriveGroupKey(this.keystore.indexMaster, this.config.ceremonyId, gname, 0);
-      const fieldHashes: Record<string, string> = {};
-      for (const [fname, fval] of Object.entries(plainFields)) {
-        fieldHashes[fname] = indexTokenFor(gk, fname, fval);
-      }
-      const ptBytes = canonicalize(plainFields);
-      const ctBytes = publisher.encrypt(ptBytes);
-      groupPayloadsForEnvelope[gname] = {
-        ciphertext: Buffer.from(ctBytes).toString("base64"),
-        field_hashes: fieldHashes,
-      };
-      groupHashInputs[gname] = { ciphertext: ctBytes, fieldHashes };
-    }
-
-    // 3. chain advance.
-    const slot = this.chain.get(eventType) ?? { seq: 0, prevHash: ZERO_HASH() };
-    slot.seq += 1;
-    const seq = slot.seq;
-    const prevHash = slot.prevHash;
-    this.chain.set(eventType, slot);
-
-    const timestamp = timestampOverride ?? isoNowMicro();
-    const eventId = eventIdOverride ?? randomUUID();
-    const levelNorm = level.toLowerCase();
-
-    // 4. row_hash.
-    const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
-    for (const [gname, g] of Object.entries(groupHashInputs)) {
-      groupsForHash[gname] = {
-        ciphertext: g.ciphertext,
-        fieldHashes: g.fieldHashes,
-      };
-    }
-    const rh = rowHash({
-      did: asDid(this.did),
-      timestamp,
-      eventId,
-      eventType,
-      level: levelNorm,
-      prevHash,
-      publicFields: publicOut,
-      groups: groupsForHash,
-    });
-
-    // 5. sign. Resolve precedence: per-call override > session override > yaml.
-    //    Match Python's _resolve_sign() semantics in tn/__init__.py:411.
+    // Apply the agents-policy splice on the TS side so the spec §2.6
+    // template fields land in `fields` exactly as the prior TS emit
+    // did. The wasm runtime independently performs its own splice on
+    // top of this, which is a no-op when the same template values are
+    // already present.
+    const fieldsOut = this._spliceAgentPolicy(eventType, fields);
+    // Honour the session-level signing override at the TS surface.
+    // Per-call `signOverride` still wins.
     const resolvedSign =
-      signOverride !== null && signOverride !== undefined
+      signOverride !== undefined && signOverride !== null
         ? signOverride
-        : (_sessionSignOverride ?? this.config.sign);
-    const sigB64 = resolvedSign
-      ? signatureB64(this.keystore.device.sign(new Uint8Array(Buffer.from(rh, "utf8"))))
-      : ("" as import("../core/types.js").SignatureB64);
-
-    // 6. build + append to primary log file.
-    const line = buildEnvelopeLine({
-      did: asDid(this.did),
-      timestamp,
-      eventId,
-      eventType,
-      level: levelNorm,
-      sequence: seq,
-      prevHash,
-      rowHash: rh,
-      signatureB64: sigB64,
-      publicFields: publicOut,
-      groupPayloads: groupPayloadsForEnvelope,
-    });
-    appendFileSync(this.config.logPath, line);
-
-    // 7. fan out to registered handlers.
-    if (this.handlers.length > 0) {
-      // Reconstruct a plain envelope dict for handlers (mirrors Python shape).
-      const envelope: Record<string, unknown> = {
-        did: this.did,
-        timestamp,
-        event_id: eventId,
-        event_type: eventType,
-        level: levelNorm,
-        sequence: seq,
-        prev_hash: prevHash,
-        row_hash: rh,
-        signature: sigB64,
-        ...publicOut,
-        ...groupPayloadsForEnvelope,
-      };
-      // Per-emit address dedup. Mirrors Python TNRuntime.emit
-      // (logger.py:_emit_locked). When two handlers in the effective
-      // set resolve to the same sink address (file path, stdout
-      // sentinel, network endpoint), only the first writes for this
-      // emit. Handlers that opt out (resolved_address returns null
-      // or the method is absent) are always fired.
-      const seenAddresses = new Set<string>();
-      for (const h of this.handlers) {
-        if (!h.accepts(envelope)) continue;
-        let addr: string | null;
-        try {
-          addr = h.resolved_address?.() ?? null;
-        } catch {
-          addr = null;
-        }
-        if (addr !== null) {
-          if (seenAddresses.has(addr)) continue;
-          seenAddresses.add(addr);
-        }
-        try {
-          h.emit(envelope, line);
-        } catch {
-          // A failing handler must not take down the caller.
-        }
-      }
+        : _sessionSignOverride;
+    const w = this.attachWasm();
+    if (
+      timestampOverride !== undefined ||
+      eventIdOverride !== undefined ||
+      resolvedSign !== null
+    ) {
+      w.emitWithOverrideSign(
+        level,
+        eventType,
+        fieldsOut,
+        timestampOverride ?? null,
+        eventIdOverride ?? null,
+        resolvedSign,
+      );
+    } else {
+      w.emit(level, eventType, fieldsOut);
     }
+    const path = eventType.startsWith("tn.")
+      ? this._resolvePelPath(eventType)
+      : undefined;
+    return lastEmitReceipt(w, path);
+  }
 
-    // 8. commit chain slot.
-    slot.prevHash = rh;
-    this.chain.set(eventType, slot);
-
-    return { eventId, rowHash: rh, sequence: seq };
+  /** Resolve the admin / protocol-events file path that wasm WILL write
+   *  this `eventType` to, mirroring `Runtime::resolve_pel` in
+   *  `tn-core/src/runtime.rs`. Supports the documented template
+   *  placeholders. Falls back to `resolveAdminLogPath` for the
+   *  template-less case so the static default stays consistent. */
+  private _resolvePelPath(eventType: string): string {
+    const tmpl = this.config.protocolEventsLocation;
+    if (!tmpl || tmpl === "main_log" || !tmpl.includes("{")) {
+      return resolveAdminLogPath(this.config);
+    }
+    const eventClass = eventType.split(".")[1] ?? "unknown";
+    const date = new Date().toISOString().slice(0, 10);
+    const filled = tmpl
+      .replace(/\{event_type\}/g, eventType)
+      .replace(/\{event_class\}/g, eventClass)
+      .replace(/\{date\}/g, date)
+      .replace(/\{yaml_dir\}/g, this.config.yamlDir)
+      .replace(/\{ceremony_id\}/g, this.config.ceremonyId)
+      .replace(/\{did\}/g, this.did);
+    return pathResolve(this.config.yamlDir, filled);
   }
 
   /** Emit-side splice (spec §2.6).
@@ -729,6 +642,90 @@ export class NodeRuntime {
         /* best-effort */
       }
     }
+    if (this.wasm !== null) {
+      try {
+        this.wasm.close();
+      } catch {
+        /* best-effort; the Drop impl will still flush */
+      }
+      this.wasm = null;
+    }
+  }
+
+  /**
+   * Lazily attach a `WasmRuntime` companion. Returns the cached handle
+   * if one already exists; otherwise builds a fresh `WasmRuntime`
+   * against this ceremony's yaml + the node `fs` storage adapter and
+   * caches it on `this.wasm`. Idempotent.
+   *
+   * Constructs the wasm runtime with `skipCeremonyInitEmit: true` so
+   * the lazy attach doesn't stray-emit `tn.ceremony.init` into the
+   * admin log. The TS `NodeRuntime` has already initialized the
+   * ceremony out-of-band; the wasm side only needs to inherit the
+   * same chain state, not double-attest it.
+   *
+   * Throws if wasm initialization fails — callers that route through
+   * wasm have no fallback path today.
+   */
+  attachWasm(): WasmRuntime {
+    if (this.wasm !== null) return this.wasm;
+    try {
+      this.wasm = WasmRuntime.initWith(
+        this.config.yamlPath,
+        nodeStorageAdapter(),
+        { skipCeremonyInitEmit: true, skipPolicyPublishedEmit: true },
+      );
+    } catch (err) {
+      throw new Error(
+        `attachWasm: failed to initialize WasmRuntime for ${this.config.yamlPath}: ${
+          (err as Error).message ?? String(err)
+        }`,
+        { cause: err },
+      );
+    }
+    // Mirror every TS-registered handler into wasm so emit fan-out
+    // (which now runs inside `WasmRuntime.emit`) catches them. Handlers
+    // added BEFORE `attachWasm` register here in bulk; later
+    // `addHandler` calls also mirror eagerly (see `addHandler`).
+    for (const h of this.handlers) {
+      this._mirrorHandlerToWasm(h);
+    }
+    return this.wasm;
+  }
+
+  /** Bridge a TS-side `TNHandler` to the wasm runtime's handler list.
+   *  The wasm emit fan-out calls these with a `Uint8Array` rawLine;
+   *  the TS `TNHandler.emit` contract expects a `string`, so we decode
+   *  per call. No-op when `attachWasm()` hasn't been called yet. */
+  private _mirrorHandlerToWasm(h: TNHandler): void {
+    if (this.wasm === null) return;
+    const decoder = new TextDecoder("utf-8");
+    this.wasm.addHandler({
+      name: h.name,
+      accepts: (env: unknown) => {
+        try {
+          return h.accepts(env as Record<string, unknown>);
+        } catch {
+          return false;
+        }
+      },
+      emit: (env: unknown, rawLine: unknown) => {
+        try {
+          const line =
+            rawLine instanceof Uint8Array ? decoder.decode(rawLine) : String(rawLine ?? "");
+          h.emit(env as Record<string, unknown>, line);
+        } catch {
+          // A failing handler must not abort the wasm emit pipeline.
+        }
+      },
+      close: () => {
+        try {
+          h.close();
+        } catch {
+          /* best-effort */
+        }
+      },
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -786,24 +783,24 @@ export class NodeRuntime {
   // Vault namespace helpers — used by VaultNamespace (tn.vault.*).
   // ---------------------------------------------------------------------------
 
-  /** Emit a signed `tn.vault.linked` event. */
+  /** Emit a signed `tn.vault.linked` event by delegating to `WasmRuntime.vaultLink`.
+   *
+   *  The wasm runtime owns the envelope build, sign, chain advance,
+   *  and write through its storage adapter. The receipt is synthesized
+   *  by reading back the last entry from the admin log (see
+   *  `lastEmitReceipt`); `tn.vault.*` events are admin-class so the
+   *  receipt lives there per `protocol_events_location`. */
   vaultLink(vaultDid: string, projectId: string): EmitReceipt {
-    return this.emit("info", "tn.vault.linked", {
-      vault_did: vaultDid,
-      project_id: projectId,
-      linked_at: new Date().toISOString(),
-    });
+    const w = this.attachWasm();
+    w.vaultLink(vaultDid, projectId);
+    return lastEmitReceipt(w, resolveAdminLogPath(this.config));
   }
 
-  /** Emit a signed `tn.vault.unlinked` event. */
+  /** Emit a signed `tn.vault.unlinked` event by delegating to `WasmRuntime.vaultUnlink`. */
   vaultUnlink(vaultDid: string, projectId: string, reason?: string): EmitReceipt {
-    const fields: Record<string, unknown> = {
-      vault_did: vaultDid,
-      project_id: projectId,
-      unlinked_at: new Date().toISOString(),
-    };
-    if (reason !== undefined) fields["reason"] = reason;
-    return this.emit("info", "tn.vault.unlinked", fields);
+    const w = this.attachWasm();
+    w.vaultUnlink(vaultDid, projectId, reason ?? null);
+    return lastEmitReceipt(w, resolveAdminLogPath(this.config));
   }
 
   // ---------------------------------------------------------------------------
@@ -1991,17 +1988,62 @@ export class NodeRuntime {
    *   - Recomputes row_hash and checks it matches the envelope
    *   - Checks prev_hash chain continuity per event_type
    *   - Decrypts each group we hold a kit for (per-group in plaintext)
+   *
+   * When the caller does not pass an explicit `logPath`, the runtime
+   * merges the main log + the admin log (when distinct) and yields
+   * entries in timestamp order. This matches Python's `tn.read` /
+   * Rust's "read both logs" surface so `tn.*` events (which the Rust
+   * core routes to the admin log) are visible to TS readers.
+   *
+   * When `logPath` is supplied explicitly, only that file is walked
+   * (preserves the existing `read(path)` contract for cross-publisher
+   * reads where the caller chose the file).
    */
   *read(logPath?: string): Generator<ReadEntry, void, void> {
-    const path = logPath ?? this.config.logPath;
-    if (!existsSync(path)) return;
-    const text = readFileSync(path, "utf8");
+    // Source lines (with origin path for error messages). Single-path
+    // when the caller specified one, otherwise main+admin merged.
+    type SourceLine = { path: string; lineno: number; line: string; ts: string };
+    const sources: SourceLine[] = [];
+    const collect = (path: string): void => {
+      if (!existsSync(path)) return;
+      const text = readFileSync(path, "utf8");
+      let lineno = 0;
+      for (const rawLine of text.split(/\r?\n/)) {
+        lineno += 1;
+        if (!rawLine) continue;
+        // Extract timestamp for stable cross-file ordering without
+        // re-parsing twice — JSON.parse below will re-validate.
+        let ts = "";
+        try {
+          const env = JSON.parse(rawLine) as Record<string, unknown>;
+          const t = env["timestamp"];
+          if (typeof t === "string") ts = t;
+        } catch {
+          // Leave ts = "" so the line sorts to the front and the main
+          // loop below surfaces the JSON parse error with the correct
+          // path:lineno (matches the prior single-file behavior).
+        }
+        sources.push({ path, lineno, line: rawLine, ts });
+      }
+    };
+
+    if (logPath !== undefined) {
+      collect(logPath);
+    } else {
+      collect(this.config.logPath);
+      const adminPath = resolveAdminLogPath(this.config);
+      if (adminPath !== this.config.logPath) collect(adminPath);
+    }
+
+    // Stable sort by timestamp. Lines from the same file retain their
+    // original order (so chain-continuity per event_type still walks
+    // forward).
+    sources.sort((a, b) => a.ts.localeCompare(b.ts));
+
     const prevHashByType = new Map<string, RowHash>();
 
-    let lineno = 0;
-    for (const rawLine of text.split(/\r?\n/)) {
-      lineno += 1;
-      if (!rawLine) continue;
+    for (const src of sources) {
+      const { path, lineno, line: rawLine } = src;
       let env: Record<string, unknown>;
       try {
         env = JSON.parse(rawLine) as Record<string, unknown>;
@@ -2205,28 +2247,6 @@ export class NodeRuntime {
     };
   }
 
-  /** Seed chain slots by scanning the log for the last row_hash per event_type. */
-  private seedChainFromLog(): void {
-    const path = this.config.logPath;
-    if (!existsSync(path)) return;
-    const text = readFileSync(path, "utf8");
-    for (const rawLine of text.split(/\r?\n/)) {
-      if (!rawLine) continue;
-      try {
-        const env = JSON.parse(rawLine) as Record<string, unknown>;
-        const et = env.event_type as string | undefined;
-        const seq = env.sequence as number | undefined;
-        const rh = env.row_hash as string | undefined;
-        if (!et || typeof seq !== "number" || typeof rh !== "string") continue;
-        const prev = this.chain.get(et);
-        if (!prev || seq > prev.seq) {
-          this.chain.set(et, { seq, prevHash: asRowHash(rh) });
-        }
-      } catch {
-        // skip malformed lines
-      }
-    }
-  }
 }
 
 function isGroupPayload(
@@ -2247,16 +2267,6 @@ function validateEventType(et: string): void {
   }
 }
 
-function isoNowMicro(): string {
-  const now = new Date();
-  // Python emits "...Z" with microsecond precision via
-  // isoformat(timespec='microseconds'). Node's Date only has ms, so we
-  // pad. Timestamps are covered by the row_hash regardless of whether
-  // the other side sees identical microseconds; what matters is that
-  // the timestamp string parses and is UTC.
-  const ms = now.toISOString(); // e.g. 2026-04-23T12:34:56.789Z
-  return ms.replace(/\.(\d{3})Z$/, ".$1000Z");
-}
 
 export function groupForField(_cfg: CeremonyConfig, _fieldName: string): GroupConfig | undefined {
   return undefined; // reserved for future classifier integration

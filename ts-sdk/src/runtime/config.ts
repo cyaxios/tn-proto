@@ -471,7 +471,9 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
     defaultPolicy: String(doc.default_policy ?? "private"),
     sign: (ceremony.sign as boolean | undefined) ?? true,
     protocolEventsLocation: String(
-      ceremony.admin_log_location ?? ceremony.protocol_events_location ?? "main_log",
+      ceremony.admin_log_location ??
+        ceremony.protocol_events_location ??
+        "./.tn/admin/admin.ndjson",
     ),
     // Pass the raw handlers list through so the client can honor
     // operator intent (FINDINGS S0.4): when the yaml declares a

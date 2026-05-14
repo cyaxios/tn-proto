@@ -36,7 +36,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { DeviceKey, NodeRuntime, scanAttestedGroups } from "../src/index.js";
+import { DeviceKey, NodeRuntime, scanAttestedGroups, iterLogFiles, loadConfig } from "../src/index.js";
 import { BtnPublisher } from "../src/raw.js";
 
 interface Ceremony {
@@ -120,6 +120,13 @@ fields: {}
   };
 }
 
+// Walk every log file the ceremony writes to (main log + PEL tree)
+// so tests work regardless of whether tn.* events land in the main
+// log or a templated protocol_events_location.
+function logFilesFor(yamlPath: string): string[] {
+  return iterLogFiles(loadConfig(yamlPath));
+}
+
 function countEvents(paths: string[], eventType: string): number {
   let n = 0;
   for (const p of paths) {
@@ -159,8 +166,13 @@ function scanRecords(paths: string[], eventType: string): Array<Record<string, u
 test("slice1.scan_covers_main_and_pel", () => {
   const c = makeCeremony(false);
   try {
-    // Seed the main log by writing an envelope directly. Then simulate
-    // a Python-side PEL by writing one more envelope to ./.tn/logs/admin/.
+    // Emit one tn.group.added — wasm routes this to the templated
+    // PEL location. Then APPEND a synthetic second envelope for
+    // group "extra" to the same PEL file to simulate a cross-process
+    // append (e.g. a prior Python session). The scan must enumerate
+    // every line across the PEL tree (which now includes the main
+    // log's events too, by virtue of wasm honoring
+    // protocol_events_location).
     const rt = NodeRuntime.init(c.yamlPath);
     rt.emit("info", "tn.group.added", {
       group: "default",
@@ -169,9 +181,6 @@ test("slice1.scan_covers_main_and_pel", () => {
       added_at: new Date().toISOString(),
     });
 
-    // Write a synthetic second tn.group.added for group "extra" into
-    // a PEL location. Simulates Python having routed admin events
-    // there. The file contents only matter for regex/JSON parsing.
     const pelDir = join(c.yamlDir, ".tn/logs", "admin");
     mkdirSync(pelDir, { recursive: true });
     const pelFile = join(pelDir, "tn.group.added.ndjson");
@@ -190,14 +199,16 @@ test("slice1.scan_covers_main_and_pel", () => {
       publisher_did: c.dk.did,
       added_at: "2026-04-23T20:00:00.000000Z",
     };
-    writeFileSync(pelFile, JSON.stringify(fakeEnv) + "\n");
+    const prior = existsSync(pelFile) ? readFileSync(pelFile, "utf8") : "";
+    writeFileSync(pelFile, prior + JSON.stringify(fakeEnv) + "\n");
 
-    // The scan helper must walk BOTH the main log and the PEL tree.
+    // The scan helper must walk the full PEL tree and surface both
+    // the wasm-emitted "default" attestation and the synthetic "extra".
     const seen = scanAttestedGroups(c.yamlPath);
-    assert.ok(seen.has("default"), "scan did not find main-log attestation");
+    assert.ok(seen.has("default"), "scan did not find emitted attestation");
     assert.ok(
       seen.has("extra"),
-      "scan did not find PEL attestation; found " + JSON.stringify([...seen]),
+      "scan did not find synthetic PEL attestation; found " + JSON.stringify([...seen]),
     );
   } finally {
     c.cleanup();
@@ -207,19 +218,19 @@ test("slice1.scan_covers_main_and_pel", () => {
 test("slice2.init_provisions_missing_recipient", () => {
   const c = makeCeremony(true);
   try {
-    const before = countEvents([c.logPath], "tn.recipient.added");
+    const before = countEvents(logFilesFor(c.yamlPath), "tn.recipient.added");
 
     // Init should pick up Bob and mint for him.
     NodeRuntime.init(c.yamlPath);
 
-    const after = countEvents([c.logPath], "tn.recipient.added");
+    const after = countEvents(logFilesFor(c.yamlPath), "tn.recipient.added");
     assert.equal(
       after,
       before + 1,
       `expected +1 tn.recipient.added after init (before=${before}, after=${after})`,
     );
 
-    const bobEvents = scanRecords([c.logPath], "tn.recipient.added").filter(
+    const bobEvents = scanRecords(logFilesFor(c.yamlPath), "tn.recipient.added").filter(
       (env) => env.recipient_did === c.bobDid,
     );
     assert.ok(bobEvents.length === 1, `no tn.recipient.added for ${c.bobDid}`);
@@ -239,7 +250,7 @@ test("slice2.init_provisions_missing_recipient", () => {
 
     // Third init is a no-op. Idempotence.
     NodeRuntime.init(c.yamlPath);
-    const after2 = countEvents([c.logPath], "tn.recipient.added");
+    const after2 = countEvents(logFilesFor(c.yamlPath), "tn.recipient.added");
     assert.equal(after2, after, "second init re-emitted recipient.added");
   } finally {
     c.cleanup();

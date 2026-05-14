@@ -32,17 +32,48 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # `no_std`/wasm consumer that disables `fs` doesn't pull it in.
 tempfile = { version = "3", optional = true }
 # fs4 provides cross-platform advisory file locks (flock on Unix,
-# LockFileEx on Windows). Gated to the `fs` feature alongside
-# tempfile — the WASM/no-fs target has no filesystem to lock.
+# LockFileEx on Windows). Split out behind a separate `fs-locking`
+# feature because fs4 → rustix → errno hard-`compile_error!`s on
+# `wasm32-unknown-unknown`. Native builds enable it via the `fs`
+# default feature; wasm builds opt out and use a no-op lock (safe —
+# single-process, single-threaded wasm has no other writer to race).
 fs4 = { version = "0.13", optional = true }
+
+# On wasm32, uuid's v4 generator needs the `js` feature so its
+# `getrandom`-backed RNG can pull entropy from `crypto.getRandomValues`.
+# Native targets get entropy via libc/std and don't need this. The
+# `getrandom = "js"` line in `tn-wasm/Cargo.toml` is the actual source
+# of entropy; this target-specific feature gate just lets the uuid
+# crate's wasm32 cfg branch find a getrandom impl at compile time.
+#
+# The `time` crate's `wasm-bindgen` feature swaps its
+# `OffsetDateTime::now_utc()` impl from one backed by `SystemTime::now()`
+# (which is `unreachable!()` on `wasm32-unknown-unknown` and traps at
+# runtime) to one backed by `js_sys::Date::now()`. Native builds keep
+# the std-backed path. Without this, every `Runtime::emit` from
+# `WasmRuntime` traps the moment it tries to stamp a timestamp.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { version = "1", features = ["v4", "js"], optional = true }
+time = { version = "0.3", features = ["formatting", "parsing", "macros", "wasm-bindgen"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 
 [features]
-default = ["fs"]
-fs = ["dep:uuid", "dep:clap", "dep:tempfile", "dep:fs4"] # enables filesystem-backed modules (log_file, identity, FsStorage, Runtime, CLI bin)
+default = ["fs", "fs-locking"]
+# `fs` enables filesystem-backed modules (log_file, identity,
+# FsStorage, Runtime, CLI bin). On its own it does NOT pull in
+# `fs4`, so wasm consumers can opt in to `fs` without the
+# advisory-lock dep that won't compile for wasm32-unknown-unknown.
+fs = ["dep:uuid", "dep:clap", "dep:tempfile"]
+# `fs-locking` adds cross-process advisory file locks (flock /
+# LockFileEx) to `FsStorage`'s `with_advisory_lock` + the
+# `keystore_backend::LocalKeystore` write path. Required on native
+# multi-process targets to serialise keystore mutations; safely
+# omitted on single-process wasm where there's no other writer.
+# Requires `fs`.
+fs-locking = ["fs", "dep:fs4"]
 bgw = []
 
 [[bench]]

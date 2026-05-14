@@ -22,6 +22,7 @@ import { join, resolve as pathResolve, isAbsolute as pathIsAbsolute } from "node
 import { randomUUID } from "node:crypto";
 
 import { NodeRuntime, setSigning as _runtimeSetSigning } from "./runtime/node_runtime.js";
+import { iterLogFiles } from "./runtime/reconcile.js";
 import type { EmitReceipt } from "./core/results.js";
 import { watch as _watchFlat, type WatchOptions as _WatchFlatOptions } from "./watch.js";
 import { asRowHash, type LogLevel } from "./core/types.js";
@@ -1143,18 +1144,17 @@ export class Tn {
 
   /**
    * Look up the most-recent `tn.agents.policy_published` content_hash in
-   * the local logs. Walks the main log + the admin log (if separate).
+   * the local logs. Walks every log file the ceremony might write to
+   * (main log + the entire protocol_events_location tree), mirroring
+   * Python's read_all() semantics. Walking only the main log + a
+   * `*.admin.ndjson` sibling missed events routed to a templated PEL
+   * (e.g. `./.tn/admin/{event_type}.ndjson`), causing the de-dupe to
+   * mis-fire under wasm-routed emit.
    */
   private _lastPolicyPublishedHash(): string | null {
-    const sources = [this._rt.config.logPath];
-    // Resolve the admin log path: if there's a sibling *.admin.ndjson use it.
-    const adminCandidate = this._rt.config.logPath.replace(/\.ndjson$/, ".admin.ndjson");
-    if (adminCandidate !== this._rt.config.logPath && existsSync(adminCandidate)) {
-      sources.push(adminCandidate);
-    }
     let lastTs = "";
     let lastHash: string | null = null;
-    for (const path of sources) {
+    for (const path of iterLogFiles(this._rt.config)) {
       if (!existsSync(path)) continue;
       let text: string;
       try {

@@ -10,7 +10,13 @@ description = "WebAssembly bindings for tn-core. Node and browser."
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Pure-compute modules only. No fs feature, no filesystem I/O.
+# `default-features = false` strips the native default set (`fs` +
+# `fs-locking`). Phase 7 split `fs-locking` out from `fs`: enabling
+# `fs` alone gives `WasmRuntime` access to the storage-backed runtime
+# code path (which uses `std::fs` stubs on `wasm32-unknown-unknown`
+# only as a fallback — every `Runtime::init` path goes through
+# `Storage` injection instead) without pulling in `fs4 → rustix →
+# errno`. The `runtime` feature below turns on `fs`.
 tn-core = { path = "../tn-core", default-features = false }
 tn-btn = { path = "../tn-btn" }
 wasm-bindgen = "0.2"
@@ -25,7 +31,21 @@ base64 = { workspace = true }
 bs58 = "0.5"
 
 [features]
-default = []
+# `WasmRuntime` (the Phase 7 widening) is now part of the default set
+# because the ts-sdk consumer requires it — without it the pkg's
+# `tn_wasm.d.ts` lacks the `WasmRuntime` export and `ts-sdk` typecheck
+# fails. To build the minimal crypto-only surface, opt out explicitly:
+# `wasm-pack build --no-default-features`.
+default = ["runtime"]
+
+# Phase 7: enables `WasmRuntime`. Pulls in tn-core's `fs` feature
+# (which today is just the filesystem-backed modules — log_file,
+# identity, FsStorage, Runtime — minus `fs-locking` so we don't drag
+# in `fs4 → rustix → errno`, which refuses to compile on wasm32).
+# The wasm `Runtime` works against a `JsStorageAdapter` rather than
+# `std::fs` directly, so the absence of cross-process advisory locks
+# is a non-issue: single-process, single-threaded.
+runtime = ["tn-core/fs"]
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

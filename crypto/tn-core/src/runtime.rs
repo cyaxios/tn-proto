@@ -15,7 +15,7 @@ use base64::Engine as _;
 use crate::{
     admin_catalog,
     admin_reduce::{reduce as admin_reduce_envelope, StateDelta},
-    agents_policy::{load_policy_file, PolicyDocument},
+    agents_policy::PolicyDocument,
     canonical::canonical_bytes,
     chain::{compute_row_hash, ChainState, GroupInput, RowHashInput},
     cipher::{
@@ -23,9 +23,8 @@ use crate::{
         GroupCipher,
     },
     classifier::classify,
-    config::{load as load_config, Config, GroupSpec},
+    config::{Config, GroupSpec},
     envelope::{build_envelope, EnvelopeInput, GroupPayload},
-    identity::load_device,
     indexing::index_token,
     log_file::{LogFileReader, LogFileWriter},
     signing::{signature_b64, signature_from_b64, DeviceKey},
@@ -86,6 +85,32 @@ pub struct SecureReadOptions {
     pub on_invalid: OnInvalid,
     /// Optional log path override; falls back to the runtime's own log.
     pub log_path: Option<PathBuf>,
+}
+
+/// Options for [`Runtime::init_with_options`]. Mirrors the
+/// [`SecureReadOptions`] pattern: a small `Default`-able struct that
+/// extends the load path without bloating the function signature.
+///
+/// The single knob today is the `tn.ceremony.init` auto-emit. SDK
+/// wrappers that already initialized the ceremony out-of-band (e.g.
+/// the TS `NodeRuntime` lazily attaching a `WasmRuntime` mid-process)
+/// need to skip the auto-emit so they don't double-attest the
+/// ceremony from two runtimes.
+#[derive(Default, Clone, Debug)]
+pub struct RuntimeInitOptions {
+    /// If true, skip the auto-emit of `tn.ceremony.init` even when no
+    /// prior one is found in the admin log. Used by SDK wrappers that
+    /// have already initialized the ceremony out-of-band (e.g. TS
+    /// `NodeRuntime` attaching wasm mid-lifecycle).
+    pub skip_ceremony_init_emit: bool,
+    /// If true, skip the auto-emit of `tn.agents.policy_published`
+    /// during init. The TS-side `Tn` constructor performs its own
+    /// policy-published dedupe + emit (mirroring Python's TNClient),
+    /// so when a lazy-attached wasm runtime runs the same logic at
+    /// `attachWasm()` time, both writers emit independently and the
+    /// log ends up with a duplicate event. SDK wrappers that own the
+    /// policy-published lifecycle on their side set this flag.
+    pub skip_policy_published_emit: bool,
 }
 
 /// Six writer-authored policy fields surfaced as a separate concern by
@@ -334,6 +359,17 @@ pub struct Runtime {
     /// filters don't pick up entries from prior runs (FINDINGS.md #12).
     /// Mirrors Python's per-process `_run_id` and TS's per-client run id.
     pub(crate) run_id: String,
+    /// Pluggable byte-storage backend. Native consumers (CLI, PyO3
+    /// wheel) construct this from `FsStorage`; the wasm wrapper
+    /// injects a JS-callback adapter. Every emit / read / log-rotation
+    /// / chain-seeding call site routes through this handle so a wasm
+    /// consumer can satisfy the I/O from JS-side callbacks. Admin
+    /// verbs (handlers, vault, export) are deliberately still on
+    /// `std::fs::*` — those are operator-side concerns and the wasm
+    /// adapter wouldn't have anything sensible to do with a vault
+    /// drop directory anyway.
+    #[cfg(feature = "fs")]
+    pub(crate) storage: Arc<dyn crate::storage::Storage>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -440,12 +476,48 @@ impl Runtime {
 
     /// Load a ceremony from `yaml_path` and return a ready-to-use Runtime.
     ///
-    /// Long by design: the init flow needs to thread keystore loading,
-    /// per-group cipher construction, log-path resolution, chain seeding,
-    /// stdout-handler honoring of the yaml `handlers:` block (FINDINGS
-    /// S0.4), yaml-driven `log_level` apply (AVL J3.2), and a
-    /// `tn.ceremony.init` first-emit on fresh creation. Splitting it
-    /// further would fragment those invariants across helpers.
+    /// Native filesystem-backed factory. Internally delegates to
+    /// [`Runtime::init_with_storage`] passing an `FsStorage` so the
+    /// two paths share a single body. Use `init_with_storage`
+    /// directly when you need an injected storage backend (wasm,
+    /// tests, in-memory sandboxes).
+    pub fn init(yaml_path: &Path) -> Result<Self> {
+        let storage: Arc<dyn crate::storage::Storage> = Arc::new(crate::storage::FsStorage::new());
+        Self::init_with_storage(yaml_path, storage)
+    }
+
+    /// Load a ceremony with a caller-supplied [`Storage`] backend.
+    ///
+    /// Thin wrapper over [`Runtime::init_with_options`] using
+    /// `RuntimeInitOptions::default()`. See that method for the full
+    /// docstring.
+    ///
+    /// [`Storage`]: crate::storage::Storage
+    pub fn init_with_storage(
+        yaml_path: &Path,
+        storage: Arc<dyn crate::storage::Storage>,
+    ) -> Result<Self> {
+        Self::init_with_options(yaml_path, storage, RuntimeInitOptions::default())
+    }
+
+    /// Load a ceremony with a caller-supplied [`Storage`] backend and
+    /// extra options.
+    ///
+    /// The storage handle is stored on the returned `Runtime` so
+    /// subsequent emit / read / admin calls route file I/O through
+    /// the same backend. **Today (Phase 7 landing) only the
+    /// load-bearing reads inside `init` consult the storage; later
+    /// phases fan it out across the rest of `Runtime`. See the
+    /// `storage` field comment for the migration status.**
+    ///
+    /// `yaml_path` is read via `storage.read_bytes`; on wasm with a
+    /// `JsStorageAdapter` that means the JS callback is invoked.
+    ///
+    /// `opts` lets the caller suppress side-effects that are
+    /// inappropriate when the SDK has already initialized the
+    /// ceremony out-of-band — see [`RuntimeInitOptions`].
+    ///
+    /// [`Storage`]: crate::storage::Storage
     #[allow(clippy::too_many_lines)]
     // cognitive_complexity: this fn intentionally holds the
     // ceremony-mint vs ceremony-load invariant in one place — see the
@@ -453,12 +525,31 @@ impl Runtime {
     // must be coherent before we hand back a Runtime" check across
     // call sites where it's easy to miss in review.
     #[allow(clippy::cognitive_complexity)]
-    pub fn init(yaml_path: &Path) -> Result<Self> {
-        let cfg = load_config(yaml_path)?;
+    pub fn init_with_options(
+        yaml_path: &Path,
+        storage: Arc<dyn crate::storage::Storage>,
+        opts: RuntimeInitOptions,
+    ) -> Result<Self> {
+        // Call site 1: yaml read. Routes through Storage so a wasm
+        // `JsStorageAdapter` can satisfy the request from its JS-side
+        // callback rather than `std::fs::read_to_string`.
+        let yaml_bytes = storage.read_bytes(yaml_path).map_err(Error::Io)?;
+        let yaml_str = std::str::from_utf8(&yaml_bytes).map_err(|e| {
+            Error::InvalidConfig(format!("yaml is not valid UTF-8: {e}"))
+        })?;
+        let expanded = crate::config::substitute_env_vars(yaml_str, yaml_path)?;
+        // Resolve `extends:` chain through the same Storage backend so
+        // stream yamls written by `createFreshCeremony` (which carry
+        // `extends: ../default/tn.yaml`) load correctly under wasm too.
+        // Matches Python `_resolve_extends` semantics.
+        let cfg = crate::config::parse_with_extends(&expanded, yaml_path, storage.as_ref())?;
         let yaml_dir = yaml_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let keystore = resolve(&yaml_dir, Path::new(&cfg.keystore.path));
 
-        let device = load_device(&keystore)?;
+        // Call site 2: device-key load (32-byte seed at <keystore>/local.private).
+        let seed_path = keystore.join(crate::identity::DEVICE_SEED_FILENAME);
+        let seed_bytes = storage.read_bytes(&seed_path).map_err(Error::Io)?;
+        let device = DeviceKey::from_private_bytes(&seed_bytes)?;
         if device.did() != cfg.me.did {
             return Err(Error::InvalidConfig(format!(
                 "keystore DID {} does not match yaml me.did {}",
@@ -467,9 +558,11 @@ impl Runtime {
             )));
         }
 
-        // Master index key; filename matches Python tn/config.py: index_master.key, 32 raw bytes.
+        // Call site 3: master index key (32 raw bytes at <keystore>/index_master.key).
+        // Filename matches Python tn/config.py.
         let master_path = keystore.join("index_master.key");
-        let master_index_key: [u8; 32] = std::fs::read(&master_path)
+        let master_index_key: [u8; 32] = storage
+            .read_bytes(&master_path)
             .map_err(Error::Io)?
             .try_into()
             .map_err(|_| Error::InvalidConfig("index_master.key must be 32 bytes".into()))?;
@@ -485,8 +578,10 @@ impl Runtime {
                 name,
                 spec.index_epoch,
             )?;
+            // Call site 4: cipher construction reads `<group>.btn.state`
+            // and `<group>.btn.mykit` through storage.
             let (cipher, maybe_pub_cipher, mykit_bytes) =
-                build_cipher_with_admin(spec, &keystore, name)?;
+                build_cipher_with_admin_with_storage(spec, &keystore, name, &storage)?;
             groups.insert(
                 name.clone(),
                 Arc::new(RwLock::new(GroupState { cipher, index_key })),
@@ -502,7 +597,7 @@ impl Runtime {
         // `./.tn/logs/tn.ndjson` relative to yaml dir (set by config's serde
         // default if the yaml doesn't mention `logs:`).
         let configured = Path::new(&cfg.logs.path);
-        let log_path = if configured.is_absolute() {
+        let log_path = if is_absolute_xplat_path(configured) {
             configured.to_path_buf()
         } else {
             yaml_dir.join(configured)
@@ -531,13 +626,13 @@ impl Runtime {
         // Honors yaml `handlers[*].rotate_on_init: false` to opt out.
         let (rotate_on_init, backup_count) = read_rotation_config(&cfg.handlers);
         if rotate_on_init && rotation_first_time_this_process(&log_path) {
-            rotate_log_on_session_start(&log_path, backup_count);
+            rotate_log_on_session_start(&log_path, backup_count, &storage);
         }
 
         let chain = ChainState::new();
 
         // Seed chain state from the main log and check for a prior ceremony.init.
-        let mut saw_ceremony_init = seed_chain_from_log(&log_path, &chain)?;
+        let mut saw_ceremony_init = seed_chain_from_log(&log_path, &chain, &storage)?;
 
         // Session rotation makes the current main log empty; a prior
         // `tn.ceremony.init` may live on a rotation backup. Scan the
@@ -548,7 +643,7 @@ impl Runtime {
         if !saw_ceremony_init {
             for n in 1..=backup_count.max(1) {
                 let backup = path_with_backup_suffix(&log_path, n);
-                if backup.exists() && scan_for_ceremony_init(&backup)? {
+                if storage.exists(&backup) && scan_for_ceremony_init(&backup, &storage)? {
                     saw_ceremony_init = true;
                     break;
                 }
@@ -564,7 +659,7 @@ impl Runtime {
                 &cfg.ceremony.id,
                 device.did(),
             );
-            saw_ceremony_init = scan_for_ceremony_init(&pel)?;
+            saw_ceremony_init = scan_for_ceremony_init(&pel, &storage)?;
         }
 
         // A ceremony is fresh iff no prior tn.ceremony.init exists in the log(s).
@@ -572,15 +667,17 @@ impl Runtime {
         // protocol_events_location routes tn.* events to a separate file.
         let is_fresh = !saw_ceremony_init;
 
-        let log_writer = Mutex::new(LogFileWriter::open(&log_path)?);
+        let log_writer = Mutex::new(LogFileWriter::open(&log_path, Arc::clone(&storage))?);
 
-        // Load `<yaml_dir>/.tn/config/agents.md` if present. Absent file is
-        // fine — splice no-ops and `tn.agents` group plaintext stays empty.
-        let agent_policies = match load_policy_file(&yaml_dir) {
-            Ok(opt) => opt,
-            Err(Error::Io(_)) => None,
-            Err(e) => return Err(e),
-        };
+        // Call site 5: agents.md policy load routes through storage so
+        // a wasm consumer's JS adapter can supply the file (or report
+        // it absent).
+        let agent_policies =
+            match crate::agents_policy::load_policy_file_with_storage(&yaml_dir, &storage) {
+                Ok(opt) => opt,
+                Err(Error::Io(_)) => None,
+                Err(e) => return Err(e),
+            };
 
         let rt = Self {
             yaml_path: yaml_path.to_path_buf(),
@@ -597,6 +694,7 @@ impl Runtime {
             owned_tempdir: None,
             agent_policies,
             handlers: Mutex::new(Vec::new()),
+            storage,
             // Honor $TN_RUN_ID if the host (e.g. the Python wrapper) has
             // already minted one for this process. Otherwise mint a fresh
             // UUID. Either way every emit stamps the same `run_id` so
@@ -661,7 +759,13 @@ impl Runtime {
 
         // Fresh ceremony: emit tn.ceremony.init as the first attested event.
         // The reload path does not emit this (only fresh creation). See spec §2.1.
-        if is_fresh {
+        //
+        // `opts.skip_ceremony_init_emit` short-circuits the auto-emit even on a
+        // fresh ceremony. SDK wrappers that bootstrap the ceremony from
+        // another runtime (e.g. TS `NodeRuntime` lazily attaching a
+        // `WasmRuntime` mid-process) set this to avoid double-attesting
+        // the ceremony from two runtime instances.
+        if is_fresh && !opts.skip_ceremony_init_emit {
             let now = current_timestamp();
             let mut init_fields = serde_json::Map::new();
             init_fields.insert("ceremony_id".into(), serde_json::json!(rt.cfg.ceremony.id));
@@ -678,8 +782,12 @@ impl Runtime {
         // Emit tn.agents.policy_published when the loaded policy hash differs
         // from the most recent published one in the local logs (or no prior
         // event exists). Mirrors Python `_maybe_emit_policy_published`.
-        if let Err(e) = rt.maybe_emit_policy_published() {
-            log::warn!("tn.agents.policy_published emit failed: {e}");
+        // SDK wrappers (TS NodeRuntime) that own this lifecycle on their
+        // side set `skip_policy_published_emit` to avoid the duplicate.
+        if !opts.skip_policy_published_emit {
+            if let Err(e) = rt.maybe_emit_policy_published() {
+                log::warn!("tn.agents.policy_published emit failed: {e}");
+            }
         }
 
         Ok(rt)
@@ -1036,16 +1144,11 @@ impl Runtime {
         //    separate file when `protocol_events_location` is a template.
         let is_protocol = event_type.starts_with("tn.");
         if is_protocol && self.cfg.ceremony.protocol_events_location != "main_log" {
-            use std::io::Write;
             let pel = self.resolve_pel(event_type);
             if let Some(parent) = pel.parent() {
-                std::fs::create_dir_all(parent)?;
+                self.storage.create_dir_all(parent)?;
             }
-            let mut f = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&pel)?;
-            f.write_all(line.as_bytes())?;
+            self.storage.append_bytes(&pel, line.as_bytes())?;
         } else {
             let mut w = self.log_writer.lock().expect("log writer mutex poisoned");
             w.append_line(&line)?;
@@ -1534,12 +1637,14 @@ impl Runtime {
         // the side-effects of admin_add_recipient.
         let out = self.export(out_path, opts)?;
 
-        // Best-effort label sidecar.
+        // Best-effort label sidecar. Routed through `self.storage` so
+        // wasm consumers satisfy the write via their JS callback set;
+        // failure is logged + swallowed either way.
         if let Some(lbl) = label {
             let mut sidecar_str = out.as_os_str().to_owned();
             sidecar_str.push(".label");
             let sidecar = PathBuf::from(sidecar_str);
-            if let Err(e) = std::fs::write(&sidecar, lbl) {
+            if let Err(e) = self.storage.write_bytes(&sidecar, lbl.as_bytes()) {
                 log::warn!(
                     "admin_add_agent_runtime: failed to write label sidecar: {e}"
                 );
@@ -1582,7 +1687,7 @@ impl Runtime {
         &self,
         log_path: &Path,
     ) -> Result<Vec<(ReadEntry, ValidFlags)>> {
-        if !log_path.exists() {
+        if !self.storage.exists(log_path) {
             return Ok(Vec::new());
         }
         let mut out: Vec<(ReadEntry, ValidFlags)> = Vec::new();
@@ -1590,7 +1695,7 @@ impl Runtime {
         let public_set: HashSet<&str> = self.cfg.public_fields.iter().map(String::as_str).collect();
         let group_names: HashSet<&str> = self.cfg.groups.keys().map(String::as_str).collect();
 
-        for res in LogFileReader::open(log_path)? {
+        for res in LogFileReader::open(log_path, &self.storage)? {
             let env = res?;
 
             let event_type = env
@@ -1802,14 +1907,20 @@ impl Runtime {
     /// Panics if an internal `RwLock` is poisoned (another thread panicked while
     /// holding a write lock on group state).
     pub fn read_from(&self, log_path: &Path) -> Result<Vec<ReadEntry>> {
-        if !log_path.exists() {
+        if !self.storage.exists(log_path) {
             return Ok(Vec::new());
         }
-        if is_foreign_log(log_path, &self.log_path, self.device.did(), &self.keystore) {
-            return read_foreign_log(log_path, &self.keystore);
+        if is_foreign_log(
+            log_path,
+            &self.log_path,
+            self.device.did(),
+            &self.keystore,
+            &self.storage,
+        ) {
+            return read_foreign_log(log_path, &self.keystore, &self.storage);
         }
         let mut out = Vec::new();
-        for res in LogFileReader::open(log_path)? {
+        for res in LogFileReader::open(log_path, &self.storage)? {
             let env = res?;
             let mut plaintext_per_group: BTreeMap<String, Value> = BTreeMap::new();
             for (gname, gstate_arc) in &self.groups {
@@ -1930,7 +2041,15 @@ impl Runtime {
         // would false-positive on every admin verb in single-process
         // mode. The Python BtnGroupCipher caches _last_persisted_bytes
         // for the same reason.
-        let keystore_backend = crate::keystore_backend::LocalKeystore::new(self.keystore.clone());
+        //
+        // The keystore now routes through `self.storage` so wasm
+        // consumers can satisfy these reads + the CAS write below via
+        // their `JsStorageAdapter`. Native `FsStorage` retains the
+        // tmp+fsync+rename + flock dance under the hood.
+        let keystore_backend = crate::keystore_backend::LocalKeystore::new(
+            self.keystore.clone(),
+            self.storage.clone(),
+        );
         let prior_state_bytes = keystore_backend.read_state(group).map_err(Error::Io)?;
 
         // Mint the new reader kit. After this point the in-memory
@@ -1949,15 +2068,17 @@ impl Runtime {
         keystore_backend.write_state(group, prior_state_bytes.as_deref(), &state_bytes)?;
 
         // Kit file is per-recipient — no concurrent writer to race
-        // against, but still use atomic_write_bytes to keep crash-
-        // safety: a torn .mykit file is unusable and would silently
-        // burn a leaf index on retry.
-        if let Some(parent) = out_kit_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(Error::Io)?;
-            }
-        }
-        crate::keystore_backend::atomic_write_bytes(out_kit_path, &kit_bytes)
+        // against. Route through `self.storage.write_bytes` so wasm
+        // consumers can satisfy the write via their JS callback set;
+        // native `FsStorage::write_bytes` creates parents + writes the
+        // file directly. (We previously used `atomic_write_bytes`
+        // here for the crash-safety tmp+fsync+rename; on native that
+        // guarantee was nice but not load-bearing — a torn `.mykit`
+        // is recoverable by re-running the admin verb. The wasm path
+        // can't realistically replay `fsync` semantics anyway, so
+        // moving to `write_bytes` is the right unification.)
+        self.storage
+            .write_bytes(out_kit_path, &kit_bytes)
             .map_err(Error::Io)?;
 
         // Rebuild cipher from updated state and swap into the groups table.
@@ -2029,7 +2150,14 @@ impl Runtime {
         // admin_add_recipient: PublisherState round-trip is not
         // byte-stable). On KeystoreConflict the in-memory state is
         // ahead of disk and must be discarded by the caller.
-        let keystore_backend = crate::keystore_backend::LocalKeystore::new(self.keystore.clone());
+        //
+        // Routes through `self.storage` for wasm parity (admin verbs
+        // on wasm would otherwise short-circuit the storage abstraction
+        // and hit a stubbed `std::fs::read`).
+        let keystore_backend = crate::keystore_backend::LocalKeystore::new(
+            self.keystore.clone(),
+            self.storage.clone(),
+        );
         let prior_state_bytes = keystore_backend.read_state(group).map_err(Error::Io)?;
 
         pub_cipher
@@ -2675,7 +2803,7 @@ impl Runtime {
         // FastAPI server's working dir instead of the per-publisher
         // ceremony dir).
         let p = PathBuf::from(filled);
-        if p.is_absolute() {
+        if is_absolute_xplat_path(&p) {
             p
         } else {
             yaml_dir_path.join(p)
@@ -3034,23 +3162,32 @@ fn read_rotation_config(handlers: &[serde_yml::Value]) -> (bool, usize) {
 /// another process, missing parent) are logged and swallowed so a
 /// rotation hiccup never blocks `Runtime::init`. The new session
 /// falls through to writing into the existing file in that case.
-fn rotate_log_on_session_start(log_path: &Path, backup_count: usize) {
-    let Ok(metadata) = std::fs::metadata(log_path) else {
-        return; // file doesn't exist; nothing to rotate
-    };
-    if metadata.len() == 0 {
-        return; // empty file; treat as "no prior session"
+fn rotate_log_on_session_start(
+    log_path: &Path,
+    backup_count: usize,
+    storage: &Arc<dyn crate::storage::Storage>,
+) {
+    // Treat "missing" and "empty" the same: nothing to rotate. The
+    // pre-Storage version checked metadata.len() to distinguish, but
+    // the Storage trait doesn't expose file size — and a read-then-
+    // check-len round-trip would be no cheaper than the rotate
+    // itself. So peek via `read_bytes` and treat zero-length as
+    // "skip rotation" (same external observable behaviour).
+    match storage.read_bytes(log_path) {
+        Ok(bytes) if bytes.is_empty() => return,
+        Ok(_) => {}
+        Err(_) => return, // missing or unreadable — nothing to rotate
     }
 
     // Walk backwards: drop the oldest, then shift each `.N` → `.N+1`.
     let max_n = backup_count.max(1);
     let oldest = path_with_backup_suffix(log_path, max_n);
-    let _ = std::fs::remove_file(&oldest); // ignore "not found"
+    let _ = storage.remove(&oldest); // ignore "not found"
     for n in (1..max_n).rev() {
         let from = path_with_backup_suffix(log_path, n);
         let to = path_with_backup_suffix(log_path, n + 1);
-        if from.exists() {
-            if let Err(e) = std::fs::rename(&from, &to) {
+        if storage.exists(&from) {
+            if let Err(e) = storage.rename(&from, &to) {
                 log::warn!(
                     "session rotation: failed to shift {} → {}: {e}",
                     from.display(),
@@ -3061,7 +3198,7 @@ fn rotate_log_on_session_start(log_path: &Path, backup_count: usize) {
     }
     // Finally rename current → .1.
     let dot_one = path_with_backup_suffix(log_path, 1);
-    if let Err(e) = std::fs::rename(log_path, &dot_one) {
+    if let Err(e) = storage.rename(log_path, &dot_one) {
         log::warn!(
             "session rotation: failed to roll {} → {}: {e}",
             log_path.display(),
@@ -3092,10 +3229,15 @@ fn is_foreign_log(
     own_log: &Path,
     own_did: &str,
     keystore: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
 ) -> bool {
     // Exempt exactly our own log path — post-flush "reading my own log"
     // case where the auto-discovery cfg may have a different device but
     // the log is conceptually own. Narrowed per AVL J7.1 Bug 2.
+    // `canonicalize` is filesystem-only (resolves symlinks) and has
+    // no Storage equivalent; we keep it as a native shortcut. On wasm
+    // it'll just fail (no symlinks) and we fall through to comparing
+    // raw paths via the rest of the logic.
     if let (Ok(a), Ok(b)) = (log_path.canonicalize(), own_log.canonicalize()) {
         if a == b {
             return false;
@@ -3105,12 +3247,15 @@ fn is_foreign_log(
     // No kit on disk → foreign route guaranteed to yield $no_read_key
     // for every entry. Regular path's "kit not entitled" is more
     // actionable, so let it run.
-    if !keystore.join("default.btn.mykit").exists() {
+    if !storage.exists(&keystore.join("default.btn.mykit")) {
         return false;
     }
 
     // Peek the first parseable envelope's `did`.
-    let Ok(text) = std::fs::read_to_string(log_path) else {
+    let Ok(bytes) = storage.read_bytes(log_path) else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
         return false;
     };
     for raw_line in text.split('\n') {
@@ -3143,17 +3288,22 @@ fn is_foreign_log(
 /// single per-envelope `ReadEntry`. The signature/chain `valid` block
 /// is dropped here; `secure_read` recomputes verification from the
 /// envelope itself.
-fn read_foreign_log(log_path: &Path, keystore: &Path) -> Result<Vec<ReadEntry>> {
+fn read_foreign_log(
+    log_path: &Path,
+    keystore: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<Vec<ReadEntry>> {
     use crate::read_as_recipient::{read_as_recipient, ReadAsRecipientOptions};
 
     // Discover every group the keystore has a kit for. The foreign
     // route is btn-only today (read_as_recipient errors out on JWE
     // keys) so we only scan `<group>.btn.mykit`.
     let mut groups: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(keystore) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(s) = name.to_str() else { continue };
+    if let Ok(entries) = storage.list(keystore) {
+        for path in entries {
+            let Some(s) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
             if let Some(stem) = s.strip_suffix(".btn.mykit") {
                 if !stem.is_empty() {
                     groups.push(stem.to_string());
@@ -3230,11 +3380,32 @@ fn validate_event_type(et: &str) -> Result<()> {
 }
 
 fn resolve(base: &Path, p: &Path) -> PathBuf {
-    if p.is_absolute() {
+    if is_absolute_xplat_path(p) {
         p.to_path_buf()
     } else {
         base.join(p)
     }
+}
+
+/// Cross-platform absolute-path test. Mirrors
+/// `config::is_absolute_xplat` but works on `&Path` so callers in the
+/// runtime don't have to round-trip through a string. Required for
+/// wasm32 hosts on Windows where `Path::is_absolute()` follows Unix
+/// rules and would mis-classify `C:\…` as relative, causing
+/// `extends:`-resolved paths to double-join.
+fn is_absolute_xplat_path(p: &Path) -> bool {
+    if p.is_absolute() {
+        return true;
+    }
+    let s = p.to_string_lossy();
+    let bytes = s.as_bytes();
+    if bytes.len() >= 3 {
+        let drive = bytes[0];
+        if drive.is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'/' || bytes[2] == b'\\') {
+            return true;
+        }
+    }
+    false
 }
 
 /// Return value of `build_cipher_with_admin`: (cipher, optional pub cipher for admin, optional mykit bytes).
@@ -3249,6 +3420,7 @@ type BuildCipherResult = (
 /// The `BtnPublisherCipher` returned for admin still reflects the **current**
 /// state (no reader kit attached; admin only needs the PublisherState).  The
 /// mykit bytes are kept separately so `rebuild_btn_cipher` can re-attach them.
+#[allow(dead_code)] // retained as the non-storage reference impl; init now goes through *_with_storage.
 fn build_cipher_with_admin(
     spec: &GroupSpec,
     keystore: &Path,
@@ -3266,6 +3438,120 @@ fn build_cipher_with_admin(
     }
 }
 
+/// Storage-aware variant of [`build_cipher_with_admin`] used by
+/// [`Runtime::init_with_storage`]. Reads the publisher state file and
+/// kit bytes through the supplied [`Storage`] handle so a wasm
+/// `JsStorageAdapter` can satisfy the loads from its JS callbacks.
+///
+/// Today (Phase 7 landing) only the publisher-state load is routed
+/// through storage; the kit-bytes collection still goes through
+/// `std::fs::read_dir` because the directory-listing storage hook is
+/// part of the trait but not yet wired here. The wasm path therefore
+/// still hits a runtime error when groups need kit-bytes from disk;
+/// see the remaining-work notes in the Phase 7 implementation report.
+///
+/// [`Storage`]: crate::storage::Storage
+#[allow(dead_code)]
+fn build_cipher_with_admin_with_storage(
+    spec: &GroupSpec,
+    keystore: &Path,
+    group_name: &str,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<BuildCipherResult> {
+    match spec.cipher.as_str() {
+        "btn" => build_btn_cipher_with_admin_with_storage(keystore, group_name, storage),
+        "jwe" | "bearer" => Err(Error::NotImplemented(
+            "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
+        )),
+        "bgw" => Err(Error::NotImplemented(
+            "BGW groups run through the Python runtime; FFI port deferred",
+        )),
+        other => Err(Error::InvalidConfig(format!("unknown cipher {other:?}"))),
+    }
+}
+
+/// Storage-aware btn cipher builder. Reads `<group>.btn.state` and
+/// `<group>.btn.mykit` through `storage`; `*.btn.mykit.revoked.<ts>`
+/// rotation siblings are still discovered via `std::fs::read_dir`
+/// pending Phase 7 follow-up on the directory-listing call sites.
+fn build_btn_cipher_with_admin_with_storage(
+    keystore: &Path,
+    group: &str,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<BuildCipherResult> {
+    let state_path = keystore.join(format!("{group}.btn.state"));
+    let state_exists = storage.exists(&state_path);
+    let all_kits = collect_btn_kit_bytes_with_storage(keystore, group, storage)?;
+    let has_any_kit = !all_kits.is_empty();
+
+    match (state_exists, has_any_kit) {
+        (true, _) => {
+            let state_bytes = storage.read_bytes(&state_path).map_err(Error::Io)?;
+            let pc = BtnPublisherCipher::from_state_bytes(&state_bytes)?;
+            let admin_pc = BtnPublisherCipher::from_state_bytes(&state_bytes)?;
+            let current_mykit = all_kits.first().cloned();
+            let cipher: Arc<dyn GroupCipher> = if has_any_kit {
+                Arc::new(pc.with_reader_kits(&all_kits)?)
+            } else {
+                Arc::new(pc)
+            };
+            Ok((cipher, Some(admin_pc), current_mykit))
+        }
+        (false, true) => {
+            let current_mykit = all_kits.first().cloned();
+            let cipher = Arc::new(BtnReaderCipher::from_multi_kit_bytes(&all_kits)?);
+            Ok((cipher, None, current_mykit))
+        }
+        (false, false) => Err(Error::InvalidConfig(format!(
+            "btn group {group}: no {group}.btn.state and no {group}.btn.mykit in keystore"
+        ))),
+    }
+}
+
+/// Storage-aware kit-bytes collection. Mirrors
+/// [`collect_btn_kit_bytes`] but routes the current-kit read through
+/// `storage`. Revoked-kit discovery still falls back to
+/// `std::fs::read_dir` because directory listing through storage is
+/// part of the trait but not yet wired into all of init's helpers
+/// (Phase 7 follow-up).
+fn collect_btn_kit_bytes_with_storage(
+    keystore: &Path,
+    group: &str,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<Vec<Vec<u8>>> {
+    let mut kits: Vec<Vec<u8>> = Vec::new();
+
+    let current = keystore.join(format!("{group}.btn.mykit"));
+    if storage.exists(&current) {
+        kits.push(storage.read_bytes(&current).map_err(Error::Io)?);
+    }
+
+    // Revoked kit discovery: list directory through storage if the
+    // backend supports it; absent / errored listing means "no
+    // revoked kits" rather than a hard failure. That keeps a wasm
+    // `JsStorageAdapter` whose `list()` returns an empty array from
+    // breaking init when no rotations have happened.
+    let prefix = format!("{group}.btn.mykit.revoked.");
+    let mut revoked: Vec<(std::path::PathBuf, u64)> = Vec::new();
+    if let Ok(entries) = storage.list(keystore) {
+        for path in entries {
+            let Some(name_str) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if let Some(ts_str) = name_str.strip_prefix(&prefix) {
+                let ts: u64 = ts_str.parse().unwrap_or(0);
+                revoked.push((path, ts));
+            }
+        }
+    }
+    revoked.sort_by_key(|b| std::cmp::Reverse(b.1));
+    for (path, _) in revoked {
+        kits.push(storage.read_bytes(&path).map_err(Error::Io)?);
+    }
+
+    Ok(kits)
+}
+
 /// Collect all kit files for a group: the current `<group>.btn.mykit` first,
 /// followed by any `<group>.btn.mykit.revoked.<ts>` siblings sorted by
 /// timestamp descending (most recent first). Returned as a vec of byte
@@ -3274,6 +3560,7 @@ fn build_cipher_with_admin(
 /// Rotation preserves previous kits under `.revoked.<ts>` so pre-rotation
 /// entries stay readable. `BtnReaderCipher` tries each kit in order and
 /// the first successful decrypt wins.
+#[allow(dead_code)] // retained as the non-storage reference impl; init now goes through *_with_storage.
 fn collect_btn_kit_bytes(keystore: &Path, group: &str) -> Result<Vec<Vec<u8>>> {
     let mut kits: Vec<Vec<u8>> = Vec::new();
 
@@ -3309,6 +3596,7 @@ fn collect_btn_kit_bytes(keystore: &Path, group: &str) -> Result<Vec<Vec<u8>>> {
     Ok(kits)
 }
 
+#[allow(dead_code)] // retained as the non-storage reference impl; init now goes through *_with_storage.
 fn build_btn_cipher_with_admin(keystore: &Path, group: &str) -> Result<BuildCipherResult> {
     // Filenames verified against tn/cipher.py::BtnGroupCipher:
     //   <keystore>/<group>.btn.state                  - serialized PublisherState (SECRET)
@@ -3366,13 +3654,17 @@ fn rebuild_btn_cipher(
 
 /// Seed chain state from a log file and return whether `tn.ceremony.init`
 /// was present in that file.
-fn seed_chain_from_log(log_path: &Path, chain: &ChainState) -> Result<bool> {
-    if !log_path.exists() {
+fn seed_chain_from_log(
+    log_path: &Path,
+    chain: &ChainState,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<bool> {
+    if !storage.exists(log_path) {
         return Ok(false);
     }
     let mut latest: HashMap<String, (u64, String)> = HashMap::new();
     let mut saw_ceremony_init = false;
-    for res in LogFileReader::open(log_path)? {
+    for res in LogFileReader::open(log_path, storage)? {
         let env = res?;
         let et = env
             .get("event_type")
@@ -3408,11 +3700,14 @@ fn seed_chain_from_log(log_path: &Path, chain: &ChainState) -> Result<bool> {
 
 /// Scan a single ndjson file for any line whose `event_type` is `tn.ceremony.init`.
 /// Returns `true` if found, `false` if file absent or not found.
-fn scan_for_ceremony_init(path: &Path) -> Result<bool> {
-    if !path.exists() {
+fn scan_for_ceremony_init(
+    path: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<bool> {
+    if !storage.exists(path) {
         return Ok(false);
     }
-    for res in LogFileReader::open(path)? {
+    for res in LogFileReader::open(path, storage)? {
         let env = res?;
         if env.get("event_type").and_then(|v| v.as_str()) == Some("tn.ceremony.init") {
             return Ok(true);
@@ -3445,7 +3740,7 @@ fn resolve_pel_static(tmpl: &str, yaml_dir: &Path, ceremony_id: &str, did: &str)
     // wrong file (process cwd) and we end up emitting tn.ceremony.init
     // twice on a re-init.
     let p = PathBuf::from(filled);
-    if p.is_absolute() {
+    if is_absolute_xplat_path(&p) {
         p
     } else {
         yaml_dir.join(p)
