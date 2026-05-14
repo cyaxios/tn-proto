@@ -5,10 +5,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 import tn
+from tn import _dispatch
 
 
 def test_btn_ceremony_uses_rust(tmp_path):
@@ -34,6 +37,19 @@ def test_tn_force_python_env_var_overrides(tmp_path, monkeypatch):
     tn.info("x.test", k=1)
     assert tn.using_rust() is False
     tn.flush_and_close()
+
+
+def test_python_fallback_emits_deprecation_warning(tmp_path, monkeypatch):
+    """When tn_core is unavailable, should_use_rust() must emit a
+    DeprecationWarning to nudge users off the soon-to-be-removed
+    pure-Python fallback. Mirrors patch A2 of the Track A plan
+    (2026-05-13-wasm-widen-and-fallback-deprecate.md §1.5).
+    """
+    monkeypatch.setattr(_dispatch, "_RUST_OK", False)
+    yaml = tmp_path / "tn.yaml"
+    yaml.write_text("groups: {default: {cipher: btn}}\n", encoding="utf-8")
+    with pytest.warns(DeprecationWarning, match="pure-Python runtime"):
+        assert _dispatch.should_use_rust(yaml) is False
 
 
 def test_btn_ceremony_with_explicit_log_path_keeps_rust(tmp_path):

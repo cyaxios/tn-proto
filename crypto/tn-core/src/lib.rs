@@ -70,7 +70,8 @@ pub use admin_cache::{AdminStateCache, ChainConflict, LKV_VERSION};
 pub use runtime::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
     AdminRotation, AdminState, AdminVaultLink, FlatEntry, Instructions, OnInvalid,
-    ReadEntry, RecipientEntry, Runtime, SecureEntry, SecureReadOptions, ValidFlags,
+    ReadEntry, RecipientEntry, Runtime, RuntimeInitOptions, SecureEntry, SecureReadOptions,
+    ValidFlags,
 };
 #[cfg(feature = "fs")]
 pub use runtime_export::{AbsorbReceipt, AbsorbSource, ExportOptions};
