@@ -289,6 +289,56 @@ calling patterns AND the pre-init / post-close error gates.
 
 ---
 
+### 2026-05-14 — log_query.ts parity correctness (foundation/self-critique)
+
+**Critic invocation:** user pushback on a shortcut I took: when the
+`yaml` npm package didn't resolve from outside ts-sdk's node_modules,
+I replaced `parseYaml` in `regression/_shared/log_query.ts` with a
+hand-rolled line-scanner. Tests still passed, so I moved on.
+
+**Finding `[blocking, fixed]`:** the regression suite's whole purpose is
+**parity between Python and TS** — same inputs, same assertions, same
+files inspected. Replacing a real yaml parser (Python uses
+`yaml.safe_load`) with a hand-rolled line-scanner introduces silent
+behavior drift the moment a ceremony yaml uses:
+
+- `&anchor` / `*alias` (yaml references)
+- `>` / `|` block scalars (multi-line strings)
+- `---` multi-doc files
+- Quoted keys (`"logs":` vs `logs:`)
+- `#` inside quoted string values (my regex strips it as comment)
+- Tab indentation (my scanner only matched `\s+`)
+
+In any of those cases TS would find different log paths than Python,
+and tests asserting the same predicate name would inspect different
+bytes. Tests pass for the wrong reason — exactly the failure mode the
+critic process is supposed to surface.
+
+**Fix:** added `regression/package.json` with `yaml` as a dep, ran
+`npm install`. `regression/node_modules/yaml/` is what Node's resolver
+hits when log_query.ts imports `yaml`, regardless of where the test
+runner was launched from. Restored the real `parseYaml(...)` and
+matched Python's `_resolve_ceremony_logs` structural-check sequence
+exactly:
+
+1. Non-dict / parse-error → `[]`
+2. `logs` must be a non-array dict; if so + `logs.path` is a string,
+   append (resolved against yaml's parent)
+3. `ceremony` same; if so + `admin_log_location` is a string AND not
+   `"main_log"` AND not empty AND no `{` template tokens, append
+
+**Action taken in this PR:** `log_query.ts` uses the real yaml parser
+with byte-for-byte parity to Python's `log_query.py`. The
+`regression/package.json` declares the dep so `npm install` from
+`regression/` provides it.
+
+**Follow-up:** add a cross-language `_resolve_ceremony_logs` parity
+test — feed the same yaml (with non-trivial features: anchors, block
+scalars, comments) to both Python and TS implementations and assert
+identical output. Tracked as a walk-tier item.
+
+---
+
 ## Open cross-silo follow-up items
 
 Tracked here so future PRs pick them up:
@@ -301,6 +351,10 @@ Tracked here so future PRs pick them up:
 - **C3 #2**: TS `tn.init()` error wrapping
 - **C3 #3**: `flush_and_close` snake_case inconsistency
 - **C3 #4**: Multi-ceremony `tn.use(name)` on TS module-level
+- **Foundation #1**: Add a cross-language parity test for
+  `_resolve_ceremony_logs` — feed the same yaml with non-trivial
+  features (anchors, block scalars, comments, quoted keys) to both
+  Python and TS impls, assert identical output. Goes in walk tier.
 
 ---
 
