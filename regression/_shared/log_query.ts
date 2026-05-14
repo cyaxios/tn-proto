@@ -10,7 +10,6 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
-import { parse as parseYaml } from "yaml";
 
 import {
   AssertionRecord,
@@ -227,36 +226,66 @@ function pp(v: unknown): string {
   }
 }
 
+/**
+ * Minimal yaml extractor for the two fields we actually need:
+ *   - `logs.path`
+ *   - `ceremony.admin_log_location`
+ *
+ * Hand-rolled line-scan instead of a full yaml parser so the regression
+ * suite has zero npm deps beyond what node_modules-of-the-test-runner
+ * provides. Format is well-known (we own the writer); this isn't a
+ * general yaml reader.
+ */
 function resolveCeremonyLogs(yamlPath: string): string[] {
   if (!existsSync(yamlPath)) return [];
-  let doc: unknown;
-  try {
-    doc = parseYaml(readFileSync(yamlPath, "utf-8"));
-  } catch {
-    return [];
-  }
-  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return [];
-  const d = doc as Record<string, unknown>;
+  const text = readFileSync(yamlPath, "utf-8");
   const base = dirname(yamlPath);
   const out: string[] = [];
 
-  const logs = d["logs"];
-  if (logs && typeof logs === "object" && !Array.isArray(logs)) {
-    const main = (logs as Record<string, unknown>)["path"];
-    if (typeof main === "string") out.push(resolvePath(base, main));
-  }
+  // Track which top-level block we're under.
+  let inLogs = false;
+  let inCeremony = false;
 
-  const cer = d["ceremony"];
-  if (cer && typeof cer === "object" && !Array.isArray(cer)) {
-    const admin = (cer as Record<string, unknown>)["admin_log_location"];
-    if (typeof admin === "string" && admin !== "main_log" && admin !== "" && !admin.includes("{")) {
-      out.push(resolvePath(base, admin));
+  for (const rawLine of text.split(/\r?\n/)) {
+    // Strip trailing inline comments and trailing whitespace.
+    const line = rawLine.replace(/\s+#.*$/, "").replace(/\s+$/, "");
+
+    // Top-level key (no indent): resets the block we're inside.
+    if (/^[a-zA-Z_]/.test(line)) {
+      inLogs = line.startsWith("logs:");
+      inCeremony = line.startsWith("ceremony:");
+      continue;
+    }
+
+    // Indented child of the current block.
+    if (inLogs) {
+      const m = /^\s+path:\s*(.+?)\s*$/.exec(line);
+      if (m) {
+        const v = stripYamlQuotes(m[1]!);
+        if (v) out.push(resolvePath(base, v));
+      }
+    }
+    if (inCeremony) {
+      const m = /^\s+admin_log_location:\s*(.+?)\s*$/.exec(line);
+      if (m) {
+        const v = stripYamlQuotes(m[1]!);
+        if (v && v !== "main_log" && !v.includes("{")) {
+          out.push(resolvePath(base, v));
+        }
+      }
     }
   }
 
-  // Keep the same `Path` and `AssertionRecord` types-named-for-symmetry
-  // tag — used so the importer treats the symbol as referenced.
+  // Keep AssertionRecord type-name as a referenced symbol so the
+  // top-of-file import isn't flagged as unused.
   void ({} as AssertionRecord);
 
   return out;
+}
+
+function stripYamlQuotes(s: string): string {
+  if (s.length >= 2 && (s.startsWith('"') || s.startsWith("'"))) {
+    if (s.endsWith(s[0])) return s.slice(1, -1);
+  }
+  return s;
 }
