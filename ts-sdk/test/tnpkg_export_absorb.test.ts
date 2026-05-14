@@ -14,6 +14,7 @@ import { test } from "node:test";
 import {
   DeviceKey,
   isManifestSignatureValid,
+  iterLogFiles,
   newManifest,
   readTnpkg,
   signManifest,
@@ -202,18 +203,23 @@ test("absorb surfaces leaf reuse when add(L) → revoke(L) → add(L)", async ()
       // device key so the envelope passes signature verification — the
       // reducer is what flags the reuse.
       const cfg = producer.config() as CeremonyConfig;
-      const mainLog = cfg.logPath;
-      const lines = readFileSync(mainLog, "utf8").split(/\r?\n/);
+      // Walk the full PEL tree, not just the main log — wasm-routed
+      // tn.* events land in the protocol_events_location, not in
+      // logs.path. Python's read_all() does the same merge.
       let lastAddRow: string | null = null;
-      for (const ln of lines) {
-        if (!ln) continue;
-        try {
-          const env = JSON.parse(ln) as Record<string, unknown>;
-          if (env["event_type"] === "tn.recipient.added") {
-            lastAddRow = String(env["row_hash"]);
+      for (const path of iterLogFiles(cfg)) {
+        if (!existsSync(path)) continue;
+        const lines = readFileSync(path, "utf8").split(/\r?\n/);
+        for (const ln of lines) {
+          if (!ln) continue;
+          try {
+            const env = JSON.parse(ln) as Record<string, unknown>;
+            if (env["event_type"] === "tn.recipient.added") {
+              lastAddRow = String(env["row_hash"]);
+            }
+          } catch {
+            /* skip */
           }
-        } catch {
-          /* skip */
         }
       }
       assert.ok(lastAddRow, "producer log must have an existing add to chain off");

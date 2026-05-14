@@ -370,6 +370,34 @@ pub fn load_policy_file(yaml_dir: &Path) -> Result<Option<PolicyDocument>> {
     Ok(Some(parse_policy_text(&text, POLICY_RELATIVE_PATH)?))
 }
 
+/// Storage-aware variant of [`load_policy_file`]. Used by
+/// [`crate::Runtime::init_with_storage`] so the wasm path can satisfy
+/// the read through its JS-callback adapter rather than `std::fs`.
+///
+/// Returns `Ok(None)` when the file is absent (mirroring the disk
+/// loader's missing-file semantics).
+///
+/// # Errors
+///
+/// Returns `Error::Io` for backend failures, `Error::Malformed` for
+/// missing required subsections.
+#[cfg(feature = "fs")]
+pub fn load_policy_file_with_storage(
+    yaml_dir: &Path,
+    storage: &std::sync::Arc<dyn crate::storage::Storage>,
+) -> Result<Option<PolicyDocument>> {
+    let p = policy_path_for(yaml_dir);
+    if !storage.exists(&p) {
+        return Ok(None);
+    }
+    let bytes = storage.read_bytes(&p).map_err(Error::Io)?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| Error::Malformed {
+        kind: "agents policy",
+        reason: format!("agents.md is not valid UTF-8: {e}"),
+    })?;
+    Ok(Some(parse_policy_text(text, POLICY_RELATIVE_PATH)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

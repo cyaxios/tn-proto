@@ -32,6 +32,26 @@ use tn_btn::{
     PublisherState as BtnPublisherState, ReaderKit as BtnReaderKit,
 };
 
+// Phase B1: `WasmRuntime` exposes the tn-core `Runtime` to JS. Lives
+// in its own module to keep the lib.rs surface readable; the helpers
+// `js_to_json` / `json_to_js` below are shared with it.
+//
+// BLOCKER: gated behind a `runtime` cargo feature that is NOT in the
+// default set. Turning the feature on requires tn-core's `fs` feature,
+// which currently pulls `fs4 → rustix → errno`; `errno` refuses to
+// compile for `wasm32-unknown-unknown`. See the Phase B1 implementation
+// report for the resolution paths. Code is in tree (and compiles for
+// native targets via `cargo check --features runtime`) so subsequent
+// phases can iterate on it without an upstream blocker.
+#[cfg(feature = "runtime")]
+mod handlers;
+#[cfg(feature = "runtime")]
+mod runtime;
+#[cfg(feature = "runtime")]
+mod storage;
+#[cfg(feature = "runtime")]
+pub use runtime::WasmRuntime;
+
 // ---------------------------------------------------------------------------
 // JSON <-> JS bridge helpers
 // ---------------------------------------------------------------------------
@@ -42,7 +62,7 @@ use tn_btn::{
 /// `serde-wasm-bindgen` default of mapping `Option::None` to
 /// `undefined`, which would drop keys like `recipient_did: null` on the
 /// way out.
-fn js_to_json(v: JsValue) -> Result<Value, JsError> {
+pub(crate) fn js_to_json(v: JsValue) -> Result<Value, JsError> {
     let s = js_sys::JSON::stringify(&v)
         .map_err(|e| JsError::new(&format!("JSON.stringify failed: {e:?}")))?
         .as_string()
@@ -52,7 +72,7 @@ fn js_to_json(v: JsValue) -> Result<Value, JsError> {
 
 /// Inverse of `js_to_json`: render through `serde_json::to_string` and
 /// `JSON.parse`. Keeps null keys intact.
-fn json_to_js(v: &Value) -> Result<JsValue, JsError> {
+pub(crate) fn json_to_js(v: &Value) -> Result<JsValue, JsError> {
     let s = serde_json::to_string(v)
         .map_err(|e| JsError::new(&format!("serde_json::to_string: {e}")))?;
     js_sys::JSON::parse(&s).map_err(|e| JsError::new(&format!("JSON.parse failed: {e:?}")))

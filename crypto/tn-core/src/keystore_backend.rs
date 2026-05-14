@@ -23,6 +23,20 @@
 //! under cooperating writers" gap. This Rust implementation closes
 //! that gap.
 //!
+//! ## Phase 4 (2026-05-13) — storage routing
+//!
+//! `LocalKeystore` now holds an `Arc<dyn Storage>` alongside the
+//! directory root. `read_state` / `write_state` route through the
+//! injected backend rather than calling `std::fs::*` directly. Native
+//! consumers (CLI bin, PyO3 wheel) supply an `FsStorage` and get
+//! byte-for-byte the same behaviour as before — the CAS+lock+atomic-
+//! write dance lives inside `FsStorage::cas_write`. Wasm consumers
+//! supply a `JsStorageAdapter` and the JS side implements `casWrite`
+//! against whatever primitive their host provides (Node `fs` + manual
+//! tmp+rename, an IndexedDB transaction, etc.). Without this routing
+//! the keystore short-circuits the storage abstraction and breaks
+//! every admin verb on wasm.
+//!
 //! ## Layout
 //!
 //! For a keystore directory `<dir>` and group name `<g>`:
@@ -39,16 +53,21 @@
 //! Use [`LocalKeystore::write_state`] for the publisher state file.
 //! Use [`atomic_write_bytes`] directly for files that don't need CAS
 //! (initial identity setup, kit files, etc.) — those still benefit
-//! from torn-write protection.
+//! from torn-write protection. The free helper bypasses `Storage` on
+//! purpose: it's used by the ceremony-bootstrap test fixtures that
+//! run on native targets only, and forcing them through a storage
+//! handle would add ceremony for no gain.
 
 #![cfg(feature = "fs")]
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use fs4::fs_std::FileExt;
 use thiserror::Error;
+
+use crate::storage::Storage;
 
 /// Error raised when a [`LocalKeystore::write_state`] CAS check fails.
 ///
@@ -77,32 +96,40 @@ pub enum KeystoreError {
 
 /// Filesystem-backed publisher state keystore.
 ///
-/// Owns a directory. Each group's state lives in
-/// `<dir>/<group>.btn.state`; the sibling `.lock` file is the
-/// exclusive-write token. Stateless — safe to instantiate per call,
-/// drop, recreate; the lock is held only for the duration of a
-/// single `write_state` invocation.
+/// Owns a directory + an injected [`Storage`] backend. Each group's
+/// state lives in `<dir>/<group>.btn.state`; the sibling `.lock` file
+/// is the exclusive-write token managed by the storage backend.
+/// Stateless — safe to instantiate per call, drop, recreate; the
+/// lock is held only for the duration of a single `write_state`
+/// invocation by the underlying `Storage::cas_write`.
 pub struct LocalKeystore {
     dir: PathBuf,
+    storage: Arc<dyn Storage>,
 }
 
 impl LocalKeystore {
-    /// Construct rooted at `dir`. Does NOT create the directory; the
-    /// caller is expected to have set up the keystore layout (yaml,
-    /// device key, etc.) before mutating state. If the dir is missing
-    /// at write time, the atomic-write helper will fail with a clear
-    /// I/O error.
+    /// Construct rooted at `dir`, routing reads + writes through
+    /// `storage`. Does NOT create the directory; the caller is
+    /// expected to have set up the keystore layout (yaml, device key,
+    /// etc.) before mutating state. If the dir is missing at write
+    /// time, the storage backend's `cas_write` will create it (native
+    /// `FsStorage` does so via `create_dir_all`, the JS adapter
+    /// surfaces whatever the host does).
+    ///
+    /// `storage` is typically obtained from the owning `Runtime`'s
+    /// `self.storage.clone()` so the keystore inherits the same I/O
+    /// backend the runtime initialised with. Native callers pass an
+    /// `Arc<FsStorage>`; wasm callers pass an `Arc<JsStorageAdapter>`.
     #[must_use]
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+    pub fn new(dir: impl Into<PathBuf>, storage: Arc<dyn Storage>) -> Self {
+        Self {
+            dir: dir.into(),
+            storage,
+        }
     }
 
     fn state_path(&self, group: &str) -> PathBuf {
         self.dir.join(format!("{group}.btn.state"))
-    }
-
-    fn lock_path(&self, group: &str) -> PathBuf {
-        self.dir.join(format!("{group}.btn.state.lock"))
     }
 
     /// Read the current on-disk state for `group`, or `None` if no
@@ -113,36 +140,34 @@ impl LocalKeystore {
     /// "the truth at this instant."
     pub fn read_state(&self, group: &str) -> io::Result<Option<Vec<u8>>> {
         let p = self.state_path(group);
-        if !p.exists() {
+        if !self.storage.exists(&p) {
             return Ok(None);
         }
-        Ok(Some(std::fs::read(p)?))
+        Ok(Some(self.storage.read_bytes(&p)?))
     }
 
     /// Compare-and-swap write of the publisher state for `group`.
     ///
+    /// Delegates to [`Storage::cas_write`], which encapsulates the
+    /// full dance (acquire exclusive lock, re-read, compare to
+    /// `prior`, atomically replace on match). Native `FsStorage`
+    /// implements this via `fs4`'s `flock`/`LockFileEx` plus a
+    /// tmp+fsync+rename; wasm `JsStorageAdapter` forwards to the JS
+    /// host's `casWrite` callback.
+    ///
     /// Semantics:
     ///
-    /// 1. Acquire the exclusive sibling lock (`<g>.btn.state.lock`).
-    ///    This blocks other processes / threads attempting to mutate
-    ///    the same group's state until our write completes.
-    /// 2. Under the lock, re-read the on-disk state.
-    /// 3. Compare to `prior`. `prior == None` means "the file must not
-    ///    exist"; `prior == Some(bytes)` means "the file must contain
-    ///    exactly these bytes." Any divergence returns
-    ///    [`KeystoreError::Conflict`].
-    /// 4. Atomic-write `new` (tmp + fsync + rename).
-    /// 5. Release the lock on scope exit.
-    ///
-    /// The lock file itself is created on first call and left in
-    /// place after; subsequent writes re-open and re-lock the same
-    /// file. Removing it manually between two write_state calls is
-    /// safe but pointless.
+    /// * `prior == None` means "the file must not exist."
+    /// * `prior == Some(bytes)` means "the file must contain exactly
+    ///   these bytes."
+    /// * Any divergence returns [`KeystoreError::Conflict`].
     ///
     /// # Errors
     ///
     /// * [`KeystoreError::Conflict`] — CAS check failed; another
-    ///   writer beat us to the lock and mutated state.
+    ///   writer beat us to the lock and mutated state. Surfaced
+    ///   from `Storage::cas_write` via `io::ErrorKind::AlreadyExists`,
+    ///   which is the storage trait's contract for CAS mismatch.
     /// * [`KeystoreError::Io`] — lock acquisition, read, write, or
     ///   rename failed.
     pub fn write_state(
@@ -151,39 +176,22 @@ impl LocalKeystore {
         prior: Option<&[u8]>,
         new: &[u8],
     ) -> Result<(), KeystoreError> {
-        // Ensure parent exists before we try to create the lock file.
-        // A missing keystore dir at this stage is an operator error
-        // (ceremony was never initialised); we surface as I/O.
-        std::fs::create_dir_all(&self.dir)?;
-
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.lock_path(group))?;
-        // Blocks until we hold the exclusive lock. fs4's lock_exclusive
-        // is cross-platform: flock on Unix, LockFileEx on Windows.
-        lock_file.lock_exclusive()?;
-
-        // Under lock: re-read disk state and CAS-check it against the
-        // caller's prior snapshot. A divergence here means another
-        // process committed a write between the caller's read and
-        // now.
+        // Storage backends create the parent dir as part of `cas_write`
+        // (FsStorage explicitly, JS adapters do whatever the host
+        // requires). No `create_dir_all` shim here.
         let path = self.state_path(group);
-        let current = if path.exists() {
-            Some(std::fs::read(&path)?)
-        } else {
-            None
-        };
-        if current.as_deref() != prior {
-            return Err(KeystoreError::Conflict {
-                group: group.to_string(),
-            });
+        match self.storage.cas_write(&path, prior, new) {
+            Ok(()) => Ok(()),
+            // Storage trait contract: CAS pre-image mismatch surfaces
+            // as `AlreadyExists`. Map to the typed Conflict variant so
+            // callers can match on it without inspecting io::Error.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                Err(KeystoreError::Conflict {
+                    group: group.to_string(),
+                })
+            }
+            Err(e) => Err(KeystoreError::Io(e)),
         }
-
-        atomic_write_bytes(&path, new)?;
-        // Lock is released when `lock_file` is dropped at scope exit.
-        Ok(())
     }
 }
 
@@ -203,6 +211,12 @@ impl LocalKeystore {
 /// `rename` is atomic on POSIX and Windows when source and
 /// destination share a filesystem; we always create the tmp file in
 /// the destination's parent dir so this invariant holds.
+///
+/// Used by the ceremony-bootstrap test fixtures that don't have a
+/// `Storage` handle yet (no `Runtime` exists at that point).
+/// Production-side writes go through `Storage::write_bytes` /
+/// `Storage::cas_write` instead so wasm consumers can satisfy them
+/// via JS callbacks.
 ///
 /// # Errors
 ///
@@ -252,9 +266,14 @@ fn write_and_fsync(tmp: &Path, data: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::FsStorage;
     use std::sync::Arc;
     use std::thread;
     use tempfile::tempdir;
+
+    fn fs_storage() -> Arc<dyn Storage> {
+        Arc::new(FsStorage::new())
+    }
 
     #[test]
     fn atomic_write_round_trip() {
@@ -294,7 +313,7 @@ mod tests {
     #[test]
     fn cas_first_write_against_none_succeeds() {
         let td = tempdir().unwrap();
-        let ks = LocalKeystore::new(td.path());
+        let ks = LocalKeystore::new(td.path(), fs_storage());
         assert_eq!(ks.read_state("default").unwrap(), None);
 
         ks.write_state("default", None, b"v1").unwrap();
@@ -304,7 +323,7 @@ mod tests {
     #[test]
     fn cas_second_write_with_stale_prior_is_rejected() {
         let td = tempdir().unwrap();
-        let ks = LocalKeystore::new(td.path());
+        let ks = LocalKeystore::new(td.path(), fs_storage());
         ks.write_state("default", None, b"v1").unwrap();
 
         // Caller's `prior` is stale (still believes "v0" was on disk).
@@ -319,7 +338,7 @@ mod tests {
     #[test]
     fn cas_second_write_with_fresh_prior_succeeds() {
         let td = tempdir().unwrap();
-        let ks = LocalKeystore::new(td.path());
+        let ks = LocalKeystore::new(td.path(), fs_storage());
         ks.write_state("default", None, b"v1").unwrap();
         ks.write_state("default", Some(b"v1"), b"v2").unwrap();
         assert_eq!(ks.read_state("default").unwrap(), Some(b"v2".to_vec()));
@@ -331,7 +350,7 @@ mod tests {
         // exist" — but it does exist. This is the symmetric error to
         // the stale-bytes case.
         let td = tempdir().unwrap();
-        let ks = LocalKeystore::new(td.path());
+        let ks = LocalKeystore::new(td.path(), fs_storage());
         ks.write_state("default", None, b"v1").unwrap();
 
         let err = ks
@@ -340,6 +359,7 @@ mod tests {
         assert!(matches!(err, KeystoreError::Conflict { .. }));
     }
 
+    #[cfg(feature = "fs-locking")]
     #[test]
     fn concurrent_writers_serialise_via_lock() {
         // Two threads racing to write the same group. Both succeed
@@ -349,7 +369,7 @@ mod tests {
         // retry. Without the lock, the inner read-then-write would
         // be a TOCTOU race.
         let td = tempdir().unwrap();
-        let ks = Arc::new(LocalKeystore::new(td.path()));
+        let ks = Arc::new(LocalKeystore::new(td.path(), fs_storage()));
 
         // Seed initial state.
         ks.write_state("default", None, b"v0").unwrap();

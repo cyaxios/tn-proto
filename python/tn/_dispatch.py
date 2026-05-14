@@ -20,6 +20,16 @@ try:
 except ImportError:
     _RustRuntime = None
     _RUST_OK = False
+    import warnings
+
+    warnings.warn(
+        "tn_core extension not found. The pure-Python runtime fallback is "
+        "deprecated and will be removed in tn-protocol 0.5.0. "
+        "Install tn-core: pip install tn-core (or `pip install tn-protocol` "
+        "which now requires it).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 _log = logging.getLogger("tn._dispatch")
 
@@ -85,6 +95,16 @@ def should_use_rust(yaml_path: Path) -> bool:
     if os.environ.get("TN_FORCE_PYTHON"):
         return False
     if not _RUST_OK:
+        import warnings
+
+        warnings.warn(
+            f"Ceremony {yaml_path}: falling back to pure-Python runtime "
+            "because tn_core is not installed. This fallback is deprecated; "
+            "install tn_core to remove this warning. See tn-protocol 0.5.0 "
+            "release notes for details.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
         return False
     if not _ceremony_is_btn_only(yaml_path):
         return False

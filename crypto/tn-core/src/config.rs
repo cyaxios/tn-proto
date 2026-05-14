@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
 
@@ -413,6 +413,11 @@ impl Config {
 /// spec §2.2): user-declared group names starting with `tn.` are rejected
 /// with [`Error::ReservedGroupName`] except for the protocol-injected
 /// `tn.agents` group.
+///
+/// **Does not resolve `extends:`.** Use [`parse_with_extends`] (or [`load`])
+/// when the yaml may carry `extends: <relpath>` and you need the merged
+/// view; this entry point is for self-contained yamls only (round-trip
+/// tests, fixtures, callers that already inlined the parent).
 pub fn parse(yaml: &str) -> Result<Config> {
     let cfg: Config = serde_yml::from_str(yaml).map_err(|e| Error::Yaml(e.to_string()))?;
     for gname in cfg.groups.keys() {
@@ -425,17 +430,373 @@ pub fn parse(yaml: &str) -> Result<Config> {
     Ok(cfg)
 }
 
-/// Load + parse a tn.yaml from disk.
+// ---------------------------------------------------------------------------
+// extends: resolution
+//
+// Mirrors `python/tn/config.py::_resolve_extends` and
+// `ts-sdk/src/runtime/config.ts::resolveExtends`. A child yaml that
+// declares `extends: <relpath>` inherits identity, keystore, groups,
+// recipients, and other parent-owned blocks from the referenced parent.
+// Stream yamls written by the Python/TS multi-ceremony layer
+// (`createFreshCeremony` for non-default streams) are minimal — they
+// carry only `extends:` plus per-stream overrides (ceremony.profile,
+// logs.path, handlers) and rely on this resolver to fill in the rest.
+//
+// Merge rules (must stay in lockstep with the Python + TS implementations):
+//   - parent-owned keys (me, keystore, groups, fields, public_fields,
+//     default_policy, llm_classifier): parent wins; child override is
+//     dropped silently in Rust (Python logs a warning — Rust doesn't
+//     have an equivalent ergonomic logger plumbed through here, so we
+//     stay silent and match the on-disk merged shape).
+//   - `ceremony`: shallow-merged per subfield, child wins.
+//   - `handlers`: additive, deduped by handler name/kind. Child first wins.
+//   - all other top-level keys: child wins if set, else parent's.
+//
+// Path absolutization: parent's relative paths in `keystore.path`,
+// `logs.path`, `handlers[*].path`, and `ceremony.admin_log_location` are
+// converted to absolute paths rooted at the parent's directory before
+// merge, so they survive the merge into the child's coordinate system
+// (the child yaml typically lives in a sibling directory and would
+// otherwise resolve those paths against its own dir).
+// ---------------------------------------------------------------------------
+
+/// Parent-owned top-level keys: child can never override.
+const PARENT_OWNED_KEYS: &[&str] = &[
+    "me",
+    "keystore",
+    "groups",
+    "fields",
+    "public_fields",
+    "default_policy",
+    "llm_classifier",
+];
+
+/// Maximum depth of an `extends:` chain. Belt-and-suspenders alongside
+/// the path-based cycle check: in practice chains are 0–1 deep (a
+/// stream extends the default ceremony, period). 8 is a generous
+/// cap that still surfaces accidental recursion as a clean error.
+const MAX_EXTENDS_DEPTH: usize = 8;
+
+/// Cross-platform "is this absolute": recognises both POSIX absolute
+/// paths (leading `/`) and Windows drive-letter paths (`C:\…` / `C:/…`)
+/// regardless of the target `std::path` semantics. wasm32 builds use
+/// Unix path rules which would otherwise mis-classify Windows paths
+/// passed through from a Node host as relative, double-joining them
+/// onto the yaml directory and breaking `extends:` chains under
+/// Windows.
+fn is_absolute_xplat(p: &str) -> bool {
+    if Path::new(p).is_absolute() {
+        return true;
+    }
+    let bytes = p.as_bytes();
+    if bytes.len() >= 3 {
+        let drive = bytes[0];
+        if (drive.is_ascii_alphabetic()) && bytes[1] == b':' && (bytes[2] == b'/' || bytes[2] == b'\\') {
+            return true;
+        }
+    }
+    false
+}
+
+fn absolutize_path_str(p: &str, base: &Path) -> String {
+    let pp = Path::new(p);
+    let joined = if is_absolute_xplat(p) { pp.to_path_buf() } else { base.join(pp) };
+    normalize_path(&joined).to_string_lossy().into_owned()
+}
+
+/// Lexical-only path normalization: collapse `.` / `..` / repeated
+/// separators without touching the filesystem. Equivalent to
+/// `os.path.normpath` (Python) or `path.resolve` (Node) on absolute
+/// inputs. We avoid `std::fs::canonicalize` here because (a) the merger
+/// must work for paths whose parents may not yet exist on disk, and
+/// (b) wasm targets can't canonicalize. Behavior matches what Python's
+/// `Path.resolve(strict=False)` does for the path portion (without the
+/// Windows-symlink prefixing).
+fn normalize_path(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component<'_>> = Vec::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Pop the last *normal* component if any, else keep `..`
+                // (covers paths that ascend above the prefix — rare in
+                // our merger but harmless).
+                match out.last() {
+                    Some(Component::Normal(_)) => {
+                        out.pop();
+                    }
+                    _ => out.push(c),
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    let mut buf = PathBuf::new();
+    for c in out {
+        buf.push(c.as_os_str());
+    }
+    buf
+}
+
+/// Walk `parent_doc` (the merged-but-pre-merge-into-child view) and
+/// rewrite relative paths to be absolute under `parent_dir`. Mirrors
+/// `python/tn/config.py::_absolutize_parent_doc`.
+fn absolutize_parent_doc(parent_doc: &mut serde_yml::Mapping, parent_dir: &Path) {
+    if let Some(serde_yml::Value::Mapping(ks)) = parent_doc.get_mut("keystore") {
+        if let Some(serde_yml::Value::String(p)) = ks.get_mut("path") {
+            *p = absolutize_path_str(p, parent_dir);
+        }
+    }
+    if let Some(serde_yml::Value::Mapping(lg)) = parent_doc.get_mut("logs") {
+        if let Some(serde_yml::Value::String(p)) = lg.get_mut("path") {
+            *p = absolutize_path_str(p, parent_dir);
+        }
+    }
+    if let Some(serde_yml::Value::Mapping(cer)) = parent_doc.get_mut("ceremony") {
+        if let Some(serde_yml::Value::String(loc)) = cer.get_mut("admin_log_location") {
+            if loc != "main_log" {
+                *loc = absolutize_path_str(loc, parent_dir);
+            }
+        }
+    }
+    if let Some(serde_yml::Value::Sequence(hs)) = parent_doc.get_mut("handlers") {
+        for h in hs.iter_mut() {
+            if let serde_yml::Value::Mapping(hm) = h {
+                if let Some(serde_yml::Value::String(p)) = hm.get_mut("path") {
+                    *p = absolutize_path_str(p, parent_dir);
+                }
+            }
+        }
+    }
+}
+
+/// Apply Python's merge rules (`_resolve_extends` body) to combine a
+/// fully-resolved + absolutized `parent` mapping with the child's `doc`.
+/// `doc` may still contain its own `extends:` key on entry — that's
+/// dropped from the merged result.
+fn merge_parent_into_child(
+    parent: serde_yml::Mapping,
+    child: &serde_yml::Mapping,
+) -> serde_yml::Mapping {
+    let mut merged = parent;
+    for (key, child_val) in child {
+        let Some(key_s) = key.as_str() else { continue };
+        if key_s == "extends" {
+            continue;
+        }
+        if PARENT_OWNED_KEYS.contains(&key_s) {
+            // Parent owns it: if parent set the key, child is dropped.
+            // If parent omitted it, child fills in.
+            if merged.contains_key(key) {
+                continue;
+            }
+            merged.insert(key.clone(), child_val.clone());
+            continue;
+        }
+        if key_s == "ceremony" {
+            let mut base: serde_yml::Mapping = match merged.remove("ceremony") {
+                Some(serde_yml::Value::Mapping(m)) => m,
+                _ => serde_yml::Mapping::new(),
+            };
+            if let serde_yml::Value::Mapping(child_cer) = child_val {
+                for (ck, cv) in child_cer {
+                    base.insert(ck.clone(), cv.clone());
+                }
+            }
+            merged.insert(
+                serde_yml::Value::String("ceremony".into()),
+                serde_yml::Value::Mapping(base),
+            );
+            continue;
+        }
+        if key_s == "handlers" {
+            let parent_h: Vec<serde_yml::Value> = match merged.remove("handlers") {
+                Some(serde_yml::Value::Sequence(s)) => s,
+                _ => Vec::new(),
+            };
+            let child_h: Vec<serde_yml::Value> = match child_val {
+                serde_yml::Value::Sequence(s) => s.clone(),
+                _ => Vec::new(),
+            };
+            let mut seen_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            let mut out: Vec<serde_yml::Value> = Vec::new();
+            // Child handlers first (per Python: child wins on dedupe by name).
+            for h in child_h.into_iter().chain(parent_h.into_iter()) {
+                let serde_yml::Value::Mapping(ref hm) = h else { continue };
+                let name = hm
+                    .get("name")
+                    .and_then(serde_yml::Value::as_str)
+                    .or_else(|| hm.get("kind").and_then(serde_yml::Value::as_str))
+                    .unwrap_or("")
+                    .to_string();
+                if name.is_empty() || seen_names.contains(&name) {
+                    continue;
+                }
+                seen_names.insert(name);
+                out.push(h);
+            }
+            merged.insert(
+                serde_yml::Value::String("handlers".into()),
+                serde_yml::Value::Sequence(out),
+            );
+            continue;
+        }
+        // Default: child wins outright.
+        merged.insert(key.clone(), child_val.clone());
+    }
+    merged.remove("extends");
+    merged
+}
+
+/// Recursive extends walker. `yaml_path` is the current yaml being
+/// processed; `doc` is its already-parsed mapping (env-var-expanded);
+/// `storage` is the I/O backend for reading parent yamls. Returns the
+/// fully merged mapping with `extends:` removed.
+fn resolve_extends_value(
+    yaml_path: &Path,
+    doc: serde_yml::Mapping,
+    seen: &mut Vec<PathBuf>,
+    depth: usize,
+    storage: &dyn crate::storage::Storage,
+) -> Result<serde_yml::Mapping> {
+    let extends_v = match doc.get("extends") {
+        Some(v) => v.clone(),
+        None => return Ok(doc),
+    };
+    if depth >= MAX_EXTENDS_DEPTH {
+        return Err(Error::InvalidConfig(format!(
+            "{}: extends chain exceeds maximum depth {} (likely a cycle)",
+            yaml_path.display(),
+            MAX_EXTENDS_DEPTH,
+        )));
+    }
+    let extends_str = match extends_v {
+        serde_yml::Value::String(s) => s,
+        other => {
+            return Err(Error::InvalidConfig(format!(
+                "{}: extends must be a string path (got {:?})",
+                yaml_path.display(),
+                other,
+            )));
+        }
+    };
+    let parent_dir = yaml_path.parent().unwrap_or(Path::new("."));
+    let parent_path = parent_dir.join(&extends_str);
+
+    // Cycle detection on the visited-path list. We compare against both
+    // the raw parent_path and the current yaml_path so a back-edge is
+    // caught regardless of where in the chain it loops to.
+    if seen.iter().any(|p| paths_equal(p, &parent_path)) {
+        return Err(Error::InvalidConfig(format!(
+            "{}: extends cycle detected (parent {} already in chain). \
+             extends: chains cannot loop back on themselves.",
+            yaml_path.display(),
+            parent_path.display(),
+        )));
+    }
+    if !storage.exists(&parent_path) {
+        return Err(Error::InvalidConfig(format!(
+            "{}: extends target {} does not exist",
+            yaml_path.display(),
+            parent_path.display(),
+        )));
+    }
+    let parent_bytes = storage.read_bytes(&parent_path).map_err(Error::Io)?;
+    let parent_text = std::str::from_utf8(&parent_bytes).map_err(|e| {
+        Error::InvalidConfig(format!(
+            "{}: extends target {} is not valid UTF-8: {}",
+            yaml_path.display(),
+            parent_path.display(),
+            e,
+        ))
+    })?;
+    let parent_expanded = substitute_env_vars(parent_text, &parent_path)?;
+    let parent_value: serde_yml::Value = serde_yml::from_str(&parent_expanded)
+        .map_err(|e| Error::Yaml(format!("{}: {e}", parent_path.display())))?;
+    let serde_yml::Value::Mapping(parent_doc) = parent_value else {
+        return Err(Error::InvalidConfig(format!(
+            "{}: expected top-level mapping",
+            parent_path.display(),
+        )));
+    };
+
+    seen.push(yaml_path.to_path_buf());
+    let mut parent_resolved =
+        resolve_extends_value(&parent_path, parent_doc, seen, depth + 1, storage)?;
+    seen.pop();
+
+    // Absolutize parent's relative paths against parent's directory
+    // before merging into the child's coordinate system.
+    let parent_dir_abs = parent_path.parent().unwrap_or(Path::new("."));
+    absolutize_parent_doc(&mut parent_resolved, parent_dir_abs);
+
+    Ok(merge_parent_into_child(parent_resolved, &doc))
+}
+
+/// Loose path equality good enough for cycle detection. We compare the
+/// `Path::components()` view so trivial differences like trailing
+/// separators don't fool the check. We do *not* canonicalize (no
+/// filesystem dependency, no symlink resolution) — that's intentional:
+/// the depth limit catches symlink loops we'd miss here.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    let acomp: Vec<_> = a.components().collect();
+    let bcomp: Vec<_> = b.components().collect();
+    acomp == bcomp
+}
+
+/// Parse a tn.yaml that may carry `extends: <relpath>`, resolving the
+/// extends chain through `storage` (so wasm consumers route reads
+/// through their JS-side callback).
+///
+/// `yaml_str` is the env-var-expanded text of the yaml at `yaml_path`.
+/// `yaml_path` is used both as the base directory for resolving the
+/// child's `extends:` and for error messages.
+///
+/// Merge semantics mirror `python/tn/config.py::_resolve_extends` and
+/// `ts-sdk/src/runtime/config.ts::resolveExtends`. See the module-level
+/// comment for the merge rules.
+pub fn parse_with_extends(
+    yaml_str: &str,
+    yaml_path: &Path,
+    storage: &dyn crate::storage::Storage,
+) -> Result<Config> {
+    let value: serde_yml::Value =
+        serde_yml::from_str(yaml_str).map_err(|e| Error::Yaml(e.to_string()))?;
+    let serde_yml::Value::Mapping(doc) = value else {
+        return Err(Error::InvalidConfig(format!(
+            "{}: expected top-level mapping",
+            yaml_path.display(),
+        )));
+    };
+    let merged = if doc.contains_key("extends") {
+        let mut seen: Vec<PathBuf> = Vec::new();
+        resolve_extends_value(yaml_path, doc, &mut seen, 0, storage)?
+    } else {
+        doc
+    };
+    let merged_str = serde_yml::to_string(&serde_yml::Value::Mapping(merged))
+        .map_err(|e| Error::Yaml(e.to_string()))?;
+    parse(&merged_str)
+}
+
+/// Load + parse a tn.yaml from disk, resolving `extends:` chains.
 ///
 /// Env-var substitution (`${VAR}`, `${VAR:-default}`, `$${literal}`) runs
 /// over the file contents before yaml parsing — see [`substitute_env_vars`].
+/// `extends:` is resolved against the file's own directory via the
+/// default `FsStorage` backend; use [`parse_with_extends`] directly to
+/// inject a custom storage backend (wasm / in-memory tests).
+#[cfg(feature = "fs")]
 pub fn load(path: &Path) -> Result<Config> {
     let s = std::fs::read_to_string(path)?;
     let expanded = substitute_env_vars(&s, path)?;
-    parse(&expanded)
+    let storage = crate::storage::FsStorage::new();
+    parse_with_extends(&expanded, path, &storage)
 }
 
 /// Serialize a Config back to YAML at `path`.
+#[cfg(feature = "fs")]
 pub fn save(cfg: &Config, path: &Path) -> Result<()> {
     let s = serde_yml::to_string(cfg).map_err(|e| Error::Yaml(e.to_string()))?;
     std::fs::write(path, s)?;
