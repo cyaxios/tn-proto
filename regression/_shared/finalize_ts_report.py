@@ -68,7 +68,8 @@ def main() -> int:
     report_path = report_root / silo / "last.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(f"wrote silo report → {report_path}")
+    # ASCII-only so Windows cp1252 consoles don't UnicodeEncodeError.
+    print(f"wrote silo report -> {report_path}")
 
     return 0 if all_passed else 1
 
@@ -88,9 +89,11 @@ def _read_jsonl(path: Path) -> list[dict]:
     return records
 
 
-_NODE_TEST_TESTS = re.compile(r"^ℹ\s+tests\s+(\d+)\s*$", re.MULTILINE)
-_NODE_TEST_PASS = re.compile(r"^ℹ\s+pass\s+(\d+)\s*$", re.MULTILINE)
-_NODE_TEST_FAIL = re.compile(r"^ℹ\s+fail\s+(\d+)\s*$", re.MULTILINE)
+# node --test summary prefix varies by version: newer prints "ℹ tests N",
+# older (and CI Linux) prints "# tests N". Accept either.
+_NODE_TEST_TESTS = re.compile(r"^[#ℹ]\s+tests\s+(\d+)\s*$", re.MULTILINE)
+_NODE_TEST_PASS = re.compile(r"^[#ℹ]\s+pass\s+(\d+)\s*$", re.MULTILINE)
+_NODE_TEST_FAIL = re.compile(r"^[#ℹ]\s+fail\s+(\d+)\s*$", re.MULTILINE)
 
 
 def _parse_run_log(path: Path) -> tuple[int, dict]:

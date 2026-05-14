@@ -138,13 +138,17 @@ NODE_RUNNER := cd $(REPO_ROOT)/ts-sdk && node --import tsx --test
 
 .PHONY: c3
 c3: $(REPORTS)/c3/.keep
-	$(NODE_RUNNER) $(ROOT)/crawl/c3_ts_module_log/*.test.ts \
+	@rm -f $(REPORTS)/c3/assertions.jsonl
+	REGRESSION_TS_REPORT=$(REPORTS)/c3/assertions.jsonl \
+		$(NODE_RUNNER) $(ROOT)/crawl/c3_ts_module_log/*.test.ts \
 		2>&1 | tee $(REPORTS)/c3/run.log; \
 	$(PYTHON) $(ROOT)/_shared/finalize_ts_report.py c3 $(REPORTS)/c3/run.log
 
 .PHONY: c4
 c4: $(REPORTS)/c4/.keep
-	$(NODE_RUNNER) $(ROOT)/crawl/c4_ts_object_log/*.test.ts \
+	@rm -f $(REPORTS)/c4/assertions.jsonl
+	REGRESSION_TS_REPORT=$(REPORTS)/c4/assertions.jsonl \
+		$(NODE_RUNNER) $(ROOT)/crawl/c4_ts_object_log/*.test.ts \
 		2>&1 | tee $(REPORTS)/c4/run.log; \
 	$(PYTHON) $(ROOT)/_shared/finalize_ts_report.py c4 $(REPORTS)/c4/run.log
 

@@ -47,8 +47,11 @@ jobs:
       - name: Install tn-protocol + deps
         run: |
           python -m pip install --upgrade pip
-          pip install --pre --no-deps \
+          # TestPyPI is index, real PyPI is extra-index so runtime
+          # transitive deps (cryptography, pynacl, etc.) resolve.
+          pip install --pre \
             --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
             "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
           pip install pytest pyyaml
       - name: Run silo
@@ -70,8 +73,9 @@ jobs:
       - name: Install tn-protocol + deps
         run: |
           python -m pip install --upgrade pip
-          pip install --pre --no-deps \
+          pip install --pre \
             --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
             "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
           pip install pytest pyyaml
       - name: Run silo (no-op until C2 lands)
@@ -93,8 +97,9 @@ jobs:
       - name: Install tn-protocol + deps
         run: |
           python -m pip install --upgrade pip
-          pip install --pre --no-deps \
+          pip install --pre \
             --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
             "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
           pip install pytest pyyaml
       - name: Run silo (no-op until C5 lands)
@@ -116,8 +121,9 @@ jobs:
       - name: Install tn-protocol + deps
         run: |
           python -m pip install --upgrade pip
-          pip install --pre --no-deps \
+          pip install --pre \
             --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
             "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
           pip install pytest pyyaml
       - name: Run silo (no-op until C6 lands)
@@ -143,8 +149,9 @@ jobs:
       - name: Install tn-protocol + deps
         run: |
           python -m pip install --upgrade pip
-          pip install --pre --no-deps \
+          pip install --pre \
             --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
             "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
           pip install pytest pyyaml httpx
       - name: Run silo (no-op until C7 lands)
@@ -170,8 +177,9 @@ jobs:
       - name: Install tn-protocol + deps
         run: |
           python -m pip install --upgrade pip
-          pip install --pre --no-deps \
+          pip install --pre \
             --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
             "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
           pip install pytest pyyaml httpx
       - name: Run silo (no-op until C8 lands)

@@ -5,21 +5,22 @@ TEST: every public severity verb (info/warning/error/debug/log) writes an
 SEE: regression/crawl/c1_python_module_log/README.md
 
 Flow:
-  1. Fresh ceremony.
-  2. Call tn.info / tn.warning / tn.error / tn.debug / tn.log with
+  1. Hermetic machine — TN user-home redirected to a tmpdir.
+  2. tn.init() with no args (rung 1 — simplest path).
+  3. Call tn.info / tn.warning / tn.error / tn.debug / tn.log with
      distinct event_types so each is independently locatable.
-  3. Assert each shows up in the log with the matching level (info/
+  4. Assert each shows up in the log with the matching level (info/
      warning/error/debug/"" for the severity-less log verb).
 
 Asserts (named):
-  - one per severity: "level-<verb>-stamped"
+  - "level-<verb>-stamped": envelope present on disk for each verb
+  - "level-<verb>-is-<level>": envelope's level field matches the verb
 
 Failure modes the test catches:
   - One of the verbs is missing from the module surface.
-  - A verb writes but stamps the wrong level (the slim-down in PR #63
-     could have crossed wires).
+  - A verb writes but stamps the wrong level.
   - The "log" verb (severity-less) puts something into the level
-     field instead of empty.
+    field instead of empty string.
 """
 from __future__ import annotations
 
@@ -28,12 +29,12 @@ from pathlib import Path
 import tn
 
 from regression._shared.assertions import assert_named
+from regression._shared.fixtures import assert_user_home_untouched
 from regression._shared.log_query import LogQuery
 
 
-def test_each_severity_verb_stamps_correct_level(fresh_ceremony: Path) -> None:
-    yaml_path = fresh_ceremony
-    tn.init(yaml_path)
+def test_each_severity_verb_stamps_correct_level(hermetic_machine: Path) -> None:
+    tn.init()
 
     # Set log level to debug so the debug call isn't filtered out.
     tn.set_level("debug")
@@ -44,7 +45,8 @@ def test_each_severity_verb_stamps_correct_level(fresh_ceremony: Path) -> None:
     tn.debug("c1.sev.debug", marker="debug-marker")
     tn.log("c1.sev.log", marker="log-marker")
 
-    log = LogQuery(ceremony_path=yaml_path)
+    cfg = tn.current_config()
+    log = LogQuery(ceremony_path=cfg.yaml_path)
 
     # info
     env = log.assert_contains(
@@ -110,3 +112,5 @@ def test_each_severity_verb_stamps_correct_level(fresh_ceremony: Path) -> None:
         observed=env.get("level"),
         on_miss="tn.log is severity-less — its envelope's level field must be the empty string. Check python/tn/emit.py:log.",
     )
+
+    assert_user_home_untouched()

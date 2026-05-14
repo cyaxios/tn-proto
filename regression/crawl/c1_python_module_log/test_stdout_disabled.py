@@ -4,10 +4,11 @@ TEST: tn.init(stdout=False) suppresses stdout but keeps the file handler
 SEE: regression/crawl/c1_python_module_log/README.md
 
 Flow:
-  1. Fresh ceremony with stdout=False explicitly.
-  2. tn.info() one envelope.
-  3. Assert stdout captured nothing.
-  4. Assert the file handler still produced the envelope on disk.
+  1. Hermetic machine — TN user-home redirected to a tmpdir.
+  2. tn.init(stdout=False) — opt-in to the no-console path.
+  3. tn.info() one envelope.
+  4. Assert stdout captured nothing.
+  5. Assert the file handler still produced the envelope on disk.
 
 Why we care:
   - Servers and cron jobs don't want console noise. stdout=False is
@@ -27,16 +28,15 @@ import pytest
 import tn
 
 from regression._shared.assertions import assert_named
+from regression._shared.fixtures import assert_user_home_untouched
 from regression._shared.log_query import LogQuery
 
 
 def test_stdout_false_suppresses_console(
-    fresh_ceremony: Path,
+    hermetic_machine: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    yaml_path = fresh_ceremony
-
-    tn.init(yaml_path, stdout=False)
+    tn.init(stdout=False)
     # Drain any banner output that might have come during init so the
     # post-emit capture is only what tn.info produced.
     capsys.readouterr()
@@ -56,7 +56,8 @@ def test_stdout_false_suppresses_console(
     )
 
     # File side: the envelope should still be on disk.
-    log = LogQuery(ceremony_path=yaml_path)
+    cfg = tn.current_config()
+    log = LogQuery(ceremony_path=cfg.yaml_path)
     log.assert_contains(
         name="file-still-has-event",
         where={"event_type": "c1.stdout.disabled"},
@@ -66,3 +67,5 @@ def test_stdout_false_suppresses_console(
             "Check python/tn/logger.py:build_runtime handler list."
         ),
     )
+
+    assert_user_home_untouched()
