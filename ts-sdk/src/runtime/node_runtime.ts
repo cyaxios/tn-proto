@@ -2267,16 +2267,6 @@ function validateEventType(et: string): void {
   }
 }
 
-function isoNowMicro(): string {
-  const now = new Date();
-  // Python emits "...Z" with microsecond precision via
-  // isoformat(timespec='microseconds'). Node's Date only has ms, so we
-  // pad. Timestamps are covered by the row_hash regardless of whether
-  // the other side sees identical microseconds; what matters is that
-  // the timestamp string parses and is UTC.
-  const ms = now.toISOString(); // e.g. 2026-04-23T12:34:56.789Z
-  return ms.replace(/\.(\d{3})Z$/, ".$1000Z");
-}
 
 export function groupForField(_cfg: CeremonyConfig, _fieldName: string): GroupConfig | undefined {
   return undefined; // reserved for future classifier integration
