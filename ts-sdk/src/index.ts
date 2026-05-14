@@ -141,3 +141,159 @@ export {
   updateSyncState,
   type SyncState,
 } from "./sync_state.js";
+
+// ---------------------------------------------------------------------------
+// Module-level singleton surface — mirrors Python's `tn.info(...)`,
+// `tn.init(...)`, etc. so the simplest TS usage is the same shape as
+// Python:
+//
+//     import * as tn from "@tnproto/sdk";
+//     await tn.init(yamlPath);
+//     tn.info("event.type", { a: 1 });
+//     for (const entry of tn.read()) { ... }
+//     await tn.close();
+//
+// Under the hood, this is a lazy-initialized default `Tn` instance.
+// Power users who want to manage instances explicitly still use the
+// `Tn` class directly — that surface is unchanged.
+//
+// Why this exists (api-critique log 2026-05-14): before this, TS had
+// NO bare module-level logging verbs. Every consumer had to instantiate
+// `Tn` and thread the instance through their code. That broke
+// cross-SDK parity with Python and added friction for the simplest
+// usage pattern. ~50 LOC of wrappers fixes the asymmetry without
+// changing the `Tn` class.
+// ---------------------------------------------------------------------------
+
+import type { EmitReceipt, Entry as _Entry, ReadOptions, TnInitOptions } from "./tn.js";
+
+let _defaultTn: _Tn | null = null;
+
+/** Internal — for the regression suite and any future test that needs
+ *  to detect "did `tn.init()` succeed yet" without touching the class. */
+function _requireDefault(verb: string): _Tn {
+  if (_defaultTn === null) {
+    throw new Error(
+      `tn.${verb}() called before tn.init(). Call \`await tn.init(yamlPath)\` first, ` +
+        `or use the \`Tn\` class directly if you want to manage multiple ceremonies.`,
+    );
+  }
+  return _defaultTn;
+}
+
+/**
+ * Initialize a default ceremony. Mirrors Python `tn.init(yaml_path)`.
+ * Calling `init()` again closes the previous default first.
+ *
+ * @returns the underlying `Tn` instance so callers who want it can keep
+ *          it; not required for the bare-export usage.
+ */
+export async function init(yamlPath?: string, opts?: TnInitOptions): Promise<_Tn> {
+  if (_defaultTn !== null) {
+    try {
+      await _defaultTn.close();
+    } catch {
+      // Best-effort close; never let a stale singleton block re-init.
+    }
+    _defaultTn = null;
+  }
+  _defaultTn = await _Tn.init(yamlPath, opts);
+  return _defaultTn;
+}
+
+/** Severity-less attested event. Mirrors Python `tn.log(...)`. */
+export function log(
+  eventType: string,
+  msgOrFields?: string | Record<string, unknown>,
+  fieldsIfMessage?: Record<string, unknown>,
+): EmitReceipt {
+  return _requireDefault("log").log(eventType, msgOrFields, fieldsIfMessage);
+}
+
+export function debug(
+  eventType: string,
+  msgOrFields?: string | Record<string, unknown>,
+  fieldsIfMessage?: Record<string, unknown>,
+): EmitReceipt {
+  return _requireDefault("debug").debug(eventType, msgOrFields, fieldsIfMessage);
+}
+
+export function info(
+  eventType: string,
+  msgOrFields?: string | Record<string, unknown>,
+  fieldsIfMessage?: Record<string, unknown>,
+): EmitReceipt {
+  return _requireDefault("info").info(eventType, msgOrFields, fieldsIfMessage);
+}
+
+export function warning(
+  eventType: string,
+  msgOrFields?: string | Record<string, unknown>,
+  fieldsIfMessage?: Record<string, unknown>,
+): EmitReceipt {
+  return _requireDefault("warning").warning(eventType, msgOrFields, fieldsIfMessage);
+}
+
+export function error(
+  eventType: string,
+  msgOrFields?: string | Record<string, unknown>,
+  fieldsIfMessage?: Record<string, unknown>,
+): EmitReceipt {
+  return _requireDefault("error").error(eventType, msgOrFields, fieldsIfMessage);
+}
+
+/** Read attested entries from the default ceremony's log. Mirrors
+ *  Python `tn.read()`. Returns an iterator like the class method;
+ *  yields `Entry` by default, `Record<string, unknown>` when
+ *  `opts.raw === true`. */
+export function read(opts?: ReadOptions): IterableIterator<_Entry | Record<string, unknown>> {
+  return _requireDefault("read").read(opts);
+}
+
+/** Flush handlers and release the default ceremony. Mirrors Python
+ *  `tn.flush_and_close()`. Safe to call multiple times. */
+export async function close(): Promise<void> {
+  if (_defaultTn === null) return;
+  const t = _defaultTn;
+  _defaultTn = null;
+  await t.close();
+}
+
+/** Flush handlers and release the default ceremony. Snake_case alias
+ *  for Python parity (`tn.flush_and_close()`). */
+export const flush_and_close = close;
+
+/** True iff the default ceremony's runtime is using the Rust path
+ *  (always true on TS — wasm is the only backend). Provided for
+ *  Python parity. */
+export function usingRust(): boolean {
+  return _requireDefault("usingRust").usingRust();
+}
+
+/** Return the default ceremony's resolved config. Mirrors Python
+ *  `tn.current_config()`. */
+export function config(): ReturnType<_Tn["config"]> {
+  return _requireDefault("config").config();
+}
+
+/** Default-ceremony context functions — mirror Python `tn.set_context`,
+ *  etc. All no-op if init hasn't been called yet (rather than throwing)
+ *  so they're safe to use in early boot before the runtime is up. */
+export function setContext(fields: Record<string, unknown>): void {
+  if (_defaultTn === null) return;
+  _defaultTn.setContext(fields);
+}
+
+export function updateContext(fields: Record<string, unknown>): void {
+  if (_defaultTn === null) return;
+  _defaultTn.updateContext(fields);
+}
+
+export function clearContext(): void {
+  if (_defaultTn === null) return;
+  _defaultTn.clearContext();
+}
+
+export function getContext(): Record<string, unknown> {
+  return _defaultTn === null ? {} : _defaultTn.getContext();
+}

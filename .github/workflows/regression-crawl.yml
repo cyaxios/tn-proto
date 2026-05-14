@@ -51,8 +51,8 @@ jobs:
             --index-url https://test.pypi.org/simple/ \
             "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
           pip install pytest pyyaml
-      - name: Run silo (no-op until C1 lands)
-        run: make -C regression c1 || echo "c1 not yet implemented — placeholder pass"
+      - name: Run silo
+        run: make -C regression c1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -206,8 +206,8 @@ jobs:
       - name: Install ts-sdk deps
         working-directory: ts-sdk
         run: npm ci || npm install
-      - name: Run silo (no-op until C3 lands)
-        run: make -C regression c3 || echo "c3 not yet implemented — placeholder pass"
+      - name: Run silo
+        run: make -C regression c3
       - uses: actions/upload-artifact@v4
         if: always()
         with:
