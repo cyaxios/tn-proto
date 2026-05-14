@@ -1,0 +1,15 @@
+# Alice — the canonical publisher persona.
+#
+# Alice owns ceremonies, mints projects, invites recipients, rotates
+# groups. She is "the user" in any silo that needs someone running TN.
+#
+# Used in: C1, C2, C5, C6, C7, C8, C9 (every crawl silo) — and most
+# walk-tier flows.
+
+role: publisher
+device_seed_hex: a11ce000000000000000000000000000000000000000000000000000a11ce000
+passphrase: alice-regression-passphrase
+notes: |
+  Canonical publisher. Owns the ceremony in every silo that needs a
+  log-producing role. Her DID is stable across all runs so cross-silo
+  references work.
