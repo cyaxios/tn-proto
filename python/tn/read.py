@@ -40,6 +40,7 @@ Watch-only kwargs:
 """
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal, overload
@@ -201,16 +202,32 @@ def read(
         log_targets = resolve_log_target(log, _cfg_for_targets)
 
     # Source of {envelope, plaintext, valid} triples.
+    #
+    # Decryption strategy:
+    #
+    # * ``log=None`` (caller wants their own ceremony's main log):
+    #   route through the runtime's read path — it uses the
+    #   PublisherState which is the authoritative decryptor for
+    #   events this ceremony emitted.
+    #
+    # * ``log=...`` + ``as_recipient=None``: key-bag read against
+    #   the active ceremony's keystore. After ``tn.absorb(bundle)``
+    #   the bundle's kits live in ``cfg.keystore``, so every
+    #   ``*.btn.mykit`` / ``*.jwe.mykey`` is tried per envelope and
+    #   anything that decrypts is yielded. Closes #57.
+    #
+    # * ``log=...`` + ``as_recipient=<path>``: explicit single-kit
+    #   override (bring-your-own-kit; no merge into the keystore).
+    #   ``group=`` selects which group's kit in that directory to
+    #   load.
     if as_recipient is not None:
         from .reader import read_as_recipient as _raw_read_as_recipient
         if log is None:
             from . import current_config
             log_targets = [current_config().resolve_log_path()]
         verify_sigs = verify is not False
-        # as_recipient mode tails ONE log at a time (the cipher needs
-        # a stable per-file state). Multi-file template targets fan
-        # out one read pass per file.
-        def _triples_recipient() -> "Iterator[dict[str, Any]]":
+        # Single-kit mode: one cipher per call, one group decrypted.
+        def _triples_single_kit() -> "Iterator[dict[str, Any]]":
             for one_log in log_targets:
                 yield from _raw_read_as_recipient(
                     one_log,
@@ -218,7 +235,48 @@ def read(
                     group=group,
                     verify_signatures=verify_sigs,
                 )
-        triples = _triples_recipient()
+        triples = _triples_single_kit()
+    elif log is not None:
+        from . import current_config
+        from .reader import read_with_keybag as _raw_read_with_keybag
+        try:
+            _bag_keystore = current_config().keystore
+        except RuntimeError:
+            # No active ceremony; can't key-bag. Treat as the
+            # foreign-without-keystore case: read raw envelopes only.
+            _bag_keystore = None
+        verify_sigs = verify is not False
+        def _triples_keybag() -> "Iterator[dict[str, Any]]":
+            if _bag_keystore is None:
+                # No keystore available — yield raw envelopes with
+                # empty plaintext so the caller at least sees the
+                # event_types / metadata. Better than silent empty.
+                for one_log in log_targets:
+                    try:
+                        with open(one_log, encoding="utf-8") as fh:
+                            for line in fh:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    env = json.loads(line)
+                                except json.JSONDecodeError:
+                                    continue
+                                yield {
+                                    "envelope": env,
+                                    "plaintext": {},
+                                    "valid": {"signature": True, "chain": True},
+                                }
+                    except FileNotFoundError:
+                        continue
+                return
+            for one_log in log_targets:
+                yield from _raw_read_with_keybag(
+                    one_log,
+                    Path(_bag_keystore),
+                    verify_signatures=verify_sigs,
+                )
+        triples = _triples_keybag()
     else:
         from ._read_impl import _entry_in_current_run_raw, _read_raw_inner
         if log is None:
