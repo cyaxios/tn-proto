@@ -1,0 +1,13 @@
+# Bob — the second-recipient persona, used when a test needs more
+# than one recipient at once (multi-recipient invite, group rotation
+# semantics, etc.).
+#
+# Used in: C5 variants, walk-tier multi-recipient flows.
+
+role: recipient
+device_seed_hex: b0b1234500000000000000000000000000000000000000000000000b0b12345
+passphrase: bob-regression-passphrase
+notes: |
+  Second recipient. Whenever a silo needs to demonstrate that a
+  second-and-distinct DID also has access, Bob is the persona.
+  Distinct seed → distinct DID from Frank.
