@@ -109,13 +109,29 @@ def resolve_log_target(target: Any, cfg: Any) -> list[Path]:
     if isinstance(target, str) and _has_template_tokens(target):
         return _expand_template_to_existing_files(target, yaml_dir)
 
-    # 3. Plain path (str or Path). Anchor relative paths against
-    #    yaml_dir, same as the template branch, so the answer doesn't
-    #    depend on CWD.
+    # 3. Plain path (str or Path). Closes #59:
+    #
+    #    * Absolute path: used as-is.
+    #    * Relative path that EXISTS under CWD: use it (matches every
+    #      other Python file-API).
+    #    * Relative path that doesn't exist under CWD but DOES under
+    #      yaml_dir: use the yaml_dir form (so config-supplied paths
+    #      like ``cfg.admin_log_location == "./admin/admin.ndjson"``
+    #      keep working when fed back to ``tn.read(log=...)``).
+    #    * Neither exists: return the CWD form so the downstream
+    #      ``FileNotFoundError`` points the operator at the path
+    #      they actually typed.
     p = Path(target)
-    if not p.is_absolute() and cfg is not None:
-        p = (yaml_dir / p).resolve()
-    return [p]
+    if p.is_absolute():
+        return [p]
+    cwd_anchored = (Path.cwd() / p).resolve()
+    if cwd_anchored.exists():
+        return [cwd_anchored]
+    if cfg is not None:
+        yaml_anchored = (yaml_dir / p).resolve()
+        if yaml_anchored.exists():
+            return [yaml_anchored]
+    return [cwd_anchored]
 
 
 def _admin_to_paths(admin_location: str, yaml_dir: Path) -> list[Path]:

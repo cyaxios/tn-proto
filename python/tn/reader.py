@@ -251,6 +251,124 @@ def read_all(
     yield from all_entries
 
 
+def _discover_keybag_ciphers(
+    keystore_path: Path,
+) -> dict[str, "_cipher.GroupCipher"]:
+    """Load every kit in ``keystore_path`` as ``{group_name: cipher}``.
+
+    Used by :func:`read_with_keybag` so a reader holding kits from one
+    or more groups (e.g. ``default.btn.mykit`` + ``tn.agents.btn.mykit``
+    + an absorbed ``payments.btn.mykit``) gets ALL those groups
+    decrypted on a single ``tn.read`` call. Missing kits are silently
+    omitted — the read pass just yields ``$no_read_key`` for any group
+    we don't have a kit for, matching the single-group behaviour.
+    """
+    bag: dict[str, _cipher.GroupCipher] = {}
+    if not keystore_path.is_dir():
+        return bag
+    for entry in keystore_path.iterdir():
+        name = entry.name
+        if name.endswith(".btn.mykit"):
+            group = name[: -len(".btn.mykit")]
+            try:
+                bag[group] = _cipher.BtnGroupCipher.load(keystore_path, group)
+            except Exception:  # noqa: BLE001 — best-effort load; bad kit just doesn't join the bag
+                continue
+        elif name.endswith(".jwe.mykey"):
+            group = name[: -len(".jwe.mykey")]
+            # JWE: ``mykey`` is the recipient's private key; the sender's
+            # pub-key sidecar must also be present for ``as_recipient``
+            # construction. Fall back silently if not.
+            try:
+                bag[group] = _cipher.JWEGroupCipher.load(keystore_path, group)
+            except Exception:  # noqa: BLE001
+                continue
+    return bag
+
+
+def read_with_keybag(
+    log_path: str | Path,
+    keystore_dir: str | Path,
+    *,
+    verify_signatures: bool = True,
+) -> Iterator[dict[str, Any]]:
+    """Read a log decrypting every group whose kit lives in
+    ``keystore_dir``.
+
+    "Key bag" semantics: the SDK walks every ``*.btn.mykit`` and
+    ``*.jwe.mykey`` in ``keystore_dir``, builds one cipher per group,
+    and on each envelope tries every group block against its matching
+    kit. The reader gets back the union of what any kit can decrypt.
+
+    This is the default path for ``tn.read(log=...)`` after PR (#57):
+    after ``tn.absorb(bundle)`` the bundle's kits land in
+    ``cfg.keystore``, so a subsequent ``tn.read(log=publisher_log)``
+    decrypts via those kits without the caller having to name any.
+
+    Single-group :func:`read_as_recipient` remains the explicit
+    "use only this kit" override (the ``as_recipient=`` kwarg on
+    ``tn.read``).
+    """
+    keystore_path = Path(keystore_dir)
+    bag = _discover_keybag_ciphers(keystore_path)
+    prev_hash_by_event: dict[str, str] = {}
+
+    with open(log_path, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                env = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{log_path}:{lineno}: invalid JSON: {e}") from e
+
+            event_type = env["event_type"]
+            last = prev_hash_by_event.get(event_type)
+            chain_ok = (last is None) or (env["prev_hash"] == last)
+            prev_hash_by_event[event_type] = env["row_hash"]
+
+            # Walk every group block in the envelope; try the matching
+            # cipher from the bag. Groups we don't have a kit for stay
+            # silent (no $no_read_key entry — matches what an outside
+            # observer would see).
+            plaintext: dict[str, dict[str, Any]] = {}
+            for key, block in env.items():
+                if not isinstance(block, dict) or "ciphertext" not in block:
+                    continue
+                cipher = bag.get(key)
+                if cipher is None:
+                    continue
+                try:
+                    ct_bytes = base64.b64decode(block["ciphertext"])
+                    pt = cipher.decrypt(ct_bytes)
+                    plaintext[key] = json.loads(pt.decode("utf-8"))
+                except _cipher.NotARecipientError:
+                    plaintext[key] = {"$no_read_key": True}
+                except Exception:  # noqa: BLE001 — bad ciphertext doesn't abort the stream
+                    plaintext[key] = {"$decrypt_error": True}
+
+            sig_ok = True
+            if verify_signatures:
+                try:
+                    sig_ok = DeviceKey.verify(
+                        env["did"],
+                        env["row_hash"].encode("ascii"),
+                        _signature_from_b64(env["signature"]),
+                    )
+                except Exception:  # noqa: BLE001
+                    sig_ok = False
+
+            yield {
+                "envelope": env,
+                "plaintext": plaintext,
+                "valid": {
+                    "signature": sig_ok,
+                    "chain": chain_ok,
+                },
+            }
+
+
 def read_as_recipient(
     log_path: str | Path,
     keystore_dir: str | Path,
