@@ -10,6 +10,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
+import { parse as parseYaml } from "yaml";
 
 import {
   AssertionRecord,
@@ -227,65 +228,70 @@ function pp(v: unknown): string {
 }
 
 /**
- * Minimal yaml extractor for the two fields we actually need:
- *   - `logs.path`
- *   - `ceremony.admin_log_location`
+ * Resolve a ceremony yaml to its log file list (main + admin if
+ * separate). **Behavior contract: must match Python's
+ * `_resolve_ceremony_logs` in `regression/_shared/log_query.py`
+ * byte-for-byte for the same input.** Both sides use a real yaml
+ * parser (PyYAML on Python, the `yaml` npm package on TS) so the
+ * regression suite asserts the same files on both runtimes regardless
+ * of anchors, block scalars, multi-doc files, or quoted keys.
  *
- * Hand-rolled line-scan instead of a full yaml parser so the regression
- * suite has zero npm deps beyond what node_modules-of-the-test-runner
- * provides. Format is well-known (we own the writer); this isn't a
- * general yaml reader.
+ * Algorithm (mirrors Python):
+ *   1. Parse the yaml. Non-dict / parse-error → return [].
+ *   2. `doc.logs.path` (if `logs` is a dict + `path` is a string)
+ *      → append, resolved against yaml's parent dir.
+ *   3. `doc.ceremony.admin_log_location` (if `ceremony` is a dict
+ *      + value is a string AND not `"main_log"` AND not empty AND
+ *      contains no `{` template tokens) → append, resolved against
+ *      yaml's parent.
+ *   4. Return.
+ *
+ * The regression suite intentionally does NOT depend on the SDK's
+ * `loadConfig` — when the SDK config loader is broken, the regression
+ * suite needs to still work to surface the bug.
  */
 function resolveCeremonyLogs(yamlPath: string): string[] {
   if (!existsSync(yamlPath)) return [];
-  const text = readFileSync(yamlPath, "utf-8");
+
+  let doc: unknown;
+  try {
+    doc = parseYaml(readFileSync(yamlPath, "utf-8"));
+  } catch {
+    return [];
+  }
+  if (doc === null || doc === undefined) return [];
+  if (typeof doc !== "object" || Array.isArray(doc)) return [];
+
+  const d = doc as Record<string, unknown>;
   const base = dirname(yamlPath);
   const out: string[] = [];
 
-  // Track which top-level block we're under.
-  let inLogs = false;
-  let inCeremony = false;
-
-  for (const rawLine of text.split(/\r?\n/)) {
-    // Strip trailing inline comments and trailing whitespace.
-    const line = rawLine.replace(/\s+#.*$/, "").replace(/\s+$/, "");
-
-    // Top-level key (no indent): resets the block we're inside.
-    if (/^[a-zA-Z_]/.test(line)) {
-      inLogs = line.startsWith("logs:");
-      inCeremony = line.startsWith("ceremony:");
-      continue;
-    }
-
-    // Indented child of the current block.
-    if (inLogs) {
-      const m = /^\s+path:\s*(.+?)\s*$/.exec(line);
-      if (m) {
-        const v = stripYamlQuotes(m[1]!);
-        if (v) out.push(resolvePath(base, v));
-      }
-    }
-    if (inCeremony) {
-      const m = /^\s+admin_log_location:\s*(.+?)\s*$/.exec(line);
-      if (m) {
-        const v = stripYamlQuotes(m[1]!);
-        if (v && v !== "main_log" && !v.includes("{")) {
-          out.push(resolvePath(base, v));
-        }
-      }
+  // 1. logs.path
+  const logsBlock = d["logs"];
+  if (logsBlock !== null && typeof logsBlock === "object" && !Array.isArray(logsBlock)) {
+    const main = (logsBlock as Record<string, unknown>)["path"];
+    if (typeof main === "string") {
+      out.push(resolvePath(base, main));
     }
   }
 
-  // Keep AssertionRecord type-name as a referenced symbol so the
-  // top-of-file import isn't flagged as unused.
+  // 2. ceremony.admin_log_location
+  const cerBlock = d["ceremony"];
+  if (cerBlock !== null && typeof cerBlock === "object" && !Array.isArray(cerBlock)) {
+    const admin = (cerBlock as Record<string, unknown>)["admin_log_location"];
+    if (
+      typeof admin === "string" &&
+      admin !== "main_log" &&
+      admin !== "" &&
+      !admin.includes("{")
+    ) {
+      out.push(resolvePath(base, admin));
+    }
+  }
+
+  // Keep AssertionRecord referenced — the import above is for type
+  // consumers but we don't currently use it inside this function.
   void ({} as AssertionRecord);
 
   return out;
-}
-
-function stripYamlQuotes(s: string): string {
-  if (s.length >= 2 && (s.startsWith('"') || s.startsWith("'"))) {
-    if (s.endsWith(s[0])) return s.slice(1, -1);
-  }
-  return s;
 }
