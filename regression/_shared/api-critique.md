@@ -339,6 +339,64 @@ identical output. Tracked as a walk-tier item.
 
 ---
 
+### 2026-05-14 — Vault auth surface: the crawl rule (CORRECTED)
+
+**Context:** rung 5 of the init-param ladder exercised vault restore.
+User correction on auth-path scope (revised from a prior wrong entry
+in this log):
+
+- **Passphrase → PBKDF2 → credential key**: REALLY IMPORTANT, not a
+  deprecation candidate. Headless servers, devs without passkey
+  hardware, etc. — this is a load-bearing auth path.
+- **Mnemonic-alone**: FUNCTIONAL — decrypts after you've signed in via
+  OAuth/WebAuthn. It's the "backup of backups." Users can hold the
+  mnemonic offline as last-resort recovery; on a new machine they OAuth
+  in AND type the mnemonic, the mnemonic unwraps the BEK.
+- **Legacy DID-challenge JWT**: old, but will probably come back.
+  Don't pin against it but don't actively kill it either.
+- **Google/OAuth**, **WebAuthn-PRF loopback**: production-funnel paths.
+- **Dev-auth `/api/v1/dev/login`**: test infra only.
+
+**The crawl rule (this is the important one):**
+
+For the AUTOMATED regression suite we pick **ONE auth path that
+actually exercises the encryption** and run it programmatically. That
+gives us continuous proof that the crypto pipeline works end-to-end.
+The other auth paths get tested via **Playwright** (for paths that
+involve a browser dance — OAuth, WebAuthn loopback) or **manually**
+(for paths that are inherently human-driven).
+
+Choosing the automated path: it must (a) be representative — exercise
+encrypt+decrypt round-trip — and (b) be drivable without a real
+browser. The two candidates are:
+- Dev-auth `/api/v1/dev/login` + fetch encrypted blob + decrypt with
+  BEK from URL fragment (what rung 5 did).
+- Passphrase: programmatically supply a passphrase, derive credential
+  key via PBKDF2, unwrap the BEK.
+
+**Decision (this PR):** dev-auth path for the automated crawl. It
+proves encryption end-to-end (encrypted blob is fetched, BEK from URL
+fragment decrypts it, real keystore comes back) WITHOUT pinning any
+user-facing auth flow. Playwright covers OAuth + WebAuthn; manual
+coverage handles passphrase-PBKDF2 and mnemonic-recovery scenarios.
+
+**Action for upcoming silos:**
+
+- C7 (key custody default) — automated: dev-auth helper exercises the
+  init-upload + claim-URL pipeline. Encryption round-trip verified.
+- C8 (restore on new machine) — automated: same dev-auth helper to
+  fetch the encrypted blob, decrypt with BEK, restore keys, prove
+  chain continues. The OAuth+WebAuthn "real user flow" gets its own
+  Playwright silo later (probably a walk-tier item).
+- Passphrase + mnemonic restore — manual / Playwright, NOT in
+  automated crawl. They are SUPPORTED PATHS; we just don't drive them
+  every CI run.
+
+**Reverts:** the earlier "deprecation candidate" tagging on passphrase
+and mnemonic was wrong. Strike from the open follow-ups list.
+
+---
+
 ## Open cross-silo follow-up items
 
 Tracked here so future PRs pick them up:
@@ -355,6 +413,13 @@ Tracked here so future PRs pick them up:
   `_resolve_ceremony_logs` — feed the same yaml with non-trivial
   features (anchors, block scalars, comments, quoted keys) to both
   Python and TS impls, assert identical output. Goes in walk tier.
+- **Walk #1**: Playwright silo for the OAuth + WebAuthn loopback
+  restore flow (the "real user multi-device" scenario). Lives
+  alongside the automated dev-auth-driven C8 in walk tier.
+- **Manual #1**: Passphrase-PBKDF2 restore path. Document the
+  manual test script in walk-tier README; not automated in CI.
+- **Manual #2**: Mnemonic-as-backup-of-backups recovery (OAuth +
+  type-the-mnemonic) — document, not automated.
 
 ---
 
