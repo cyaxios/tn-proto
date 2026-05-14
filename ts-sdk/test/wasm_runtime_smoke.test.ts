@@ -842,3 +842,147 @@ test("WasmRuntime.isEnabledFor + getLevel agree with setLevel", () => {
     WasmRuntime.setLevel("info");
   }
 });
+
+// ---------------------------------------------------------------------------
+// Browser-shape smoke: drive `WasmRuntime` through `memoryStorageAdapter`.
+// No `node:fs` reaches the wasm runtime — this is the path an in-browser
+// (or CF Worker / Deno / Bun) minting flow would use. The ceremony is
+// minted once on real disk via `NodeRuntime` (cheapest source of a valid
+// yaml + keystore tuple), then slurped into a memory map under a virtual
+// root before `WasmRuntime.initWith` is called.
+// ---------------------------------------------------------------------------
+
+import { memoryStorageAdapter } from "../src/runtime/storage_memory.js";
+import { readdirSync, statSync } from "node:fs";
+
+function _slurpDirToMap(
+  realDir: string,
+  virtDir: string,
+  map: Map<string, Uint8Array>,
+): void {
+  for (const name of readdirSync(realDir)) {
+    const realChild = join(realDir, name);
+    const virtChild = `${virtDir}/${name}`;
+    const st = statSync(realChild);
+    if (st.isDirectory()) {
+      _slurpDirToMap(realChild, virtChild, map);
+    } else if (st.isFile()) {
+      map.set(virtChild, new Uint8Array(readFileSync(realChild)));
+    }
+  }
+}
+
+test("WasmRuntime: init + emit + read + mint, all through memoryStorageAdapter (browser flow)", () => {
+  // 1. Mint a real ceremony on disk so we have valid bytes to preload.
+  //    In a real browser flow these come from fetch / IndexedDB / drag-drop.
+  const td = mkdtempSync(join(tmpdir(), "tn-mem-smoke-"));
+  const yamlPath = join(td, "tn.yaml");
+  const noderuntime = NodeRuntime.init(yamlPath);
+  noderuntime.close();
+
+  // 2. Slurp everything under the ceremony root into a `path → bytes` map,
+  //    rewriting each disk path to a virtual `/v/...` path. The slash
+  //    convention matters: wasm32 std::path is Unix-only.
+  const fileMap = new Map<string, Uint8Array>();
+  _slurpDirToMap(td, "/v", fileMap);
+  const virtYaml = "/v/tn.yaml";
+  assert.ok(fileMap.has(virtYaml), `slurp must include the yaml; got keys ${[...fileMap.keys()].join(",")}`);
+
+  // 3. Build the adapter from the preload map and hand to `WasmRuntime`.
+  //    Note: zero `node:fs` calls from this point on for the runtime path.
+  const preload: Record<string, Uint8Array> = {};
+  for (const [k, v] of fileMap) preload[k] = v;
+  const storage = memoryStorageAdapter(preload);
+  const initialSize = storage.size();
+  assert.ok(initialSize >= 5, `preload should carry yaml + keystore + ...; got ${initialSize}`);
+
+  // initWith + skipCeremonyInitEmit + skipPolicyPublishedEmit avoids the
+  // stray bookkeeping emits that NodeRuntime already wrote on disk.
+  const rt = WasmRuntime.initWith(virtYaml, storage, {
+    skipCeremonyInitEmit: true,
+    skipPolicyPublishedEmit: true,
+  });
+
+  try {
+    // Same round-trip the nodeStorageAdapter test does, just in memory.
+    const did = rt.did();
+    assert.ok(did.startsWith("did:key:"), `did from wasm should be did:key:..., got ${did}`);
+
+    rt.emit("info", "test.mem.smoke", { ok: true, where: "memory" });
+
+    const entries = rt.read() as Array<Record<string, unknown>>;
+    const ours = entries.find((e) => e["event_type"] === "test.mem.smoke");
+    assert.ok(ours, `read() must find test.mem.smoke after emit, got event_types=${entries.map(e => e["event_type"]).join(",")}`);
+    assert.equal(ours["level"], "info");
+    assert.equal(ours["ok"], true);
+    assert.equal(ours["where"], "memory");
+
+    // Mint a new reader kit via the admin verb. This exercises the
+    // CAS-write path through `memoryStorageAdapter.casWrite` AND the
+    // kit file `write` path. The mint must succeed and the new kit
+    // file must appear in the memory map.
+    const kitVirtPath = "/v/.tn/keys/bob.btn.mykit";
+    // Generate a valid did:key (the runtime uses verifyDid on the
+    // recipient DID); use the wasm primitive so we don't smuggle in
+    // node-side crypto.
+    // Actually `admin_add_recipient(group, out_path, recipient_did?)` accepts
+    // a None for recipient_did per the Phase 4 binding — pass undefined to
+    // mint a kit without recording a recipient identity. Simpler path.
+    const leafIndex = rt.adminAddRecipient("default", kitVirtPath, undefined);
+    assert.equal(typeof leafIndex, "number", `adminAddRecipient must return a leaf index, got ${typeof leafIndex}`);
+    assert.ok(leafIndex >= 0, `leaf index should be non-negative, got ${leafIndex}`);
+
+    // The mint should have:
+    //  (a) written the kit file to memory storage
+    //  (b) updated the btn state file via casWrite
+    //  (c) appended to the admin log
+    assert.ok(storage.exists(kitVirtPath), `kit file must exist after mint at ${kitVirtPath}`);
+    const kitBytes = storage.read(kitVirtPath);
+    assert.ok(kitBytes.length > 0, `kit must have non-empty bytes, got ${kitBytes.length}`);
+
+    // Snapshot for persistence handoff — proves the round-trip shape.
+    const snap = storage.snapshot();
+    assert.ok(snap[kitVirtPath], `snapshot must include the new kit`);
+    assert.ok(storage.size() > initialSize, `storage should grow after mint (was ${initialSize}, now ${storage.size()})`);
+  } finally {
+    try { rt.close(); } catch { /* close errors aren't load-bearing for this smoke */ }
+  }
+});
+
+test("memoryStorageAdapter: casWrite enforces the prior-bytes contract", () => {
+  const s = memoryStorageAdapter();
+  const path = "/foo/state.bin";
+  const a = new Uint8Array([1, 2, 3]);
+  const b = new Uint8Array([4, 5, 6]);
+
+  // prior=null on a fresh path succeeds.
+  s.casWrite(path, null, a);
+  assert.deepEqual(Array.from(s.read(path)), [1, 2, 3]);
+
+  // prior=null on an existing non-empty file must fail.
+  assert.throws(() => s.casWrite(path, null, b), /cas-mismatch/);
+
+  // prior=current succeeds and updates.
+  s.casWrite(path, a, b);
+  assert.deepEqual(Array.from(s.read(path)), [4, 5, 6]);
+
+  // prior=stale (the original 'a') must fail.
+  assert.throws(() => s.casWrite(path, a, new Uint8Array([7])), /cas-mismatch/);
+
+  // Bytes are still 'b' — failed CAS didn't mutate.
+  assert.deepEqual(Array.from(s.read(path)), [4, 5, 6]);
+});
+
+test("memoryStorageAdapter: list returns only direct children of a dir", () => {
+  const s = memoryStorageAdapter({
+    "/v/a.txt":          new Uint8Array([1]),
+    "/v/sub/b.txt":      new Uint8Array([2]),
+    "/v/sub/deeper/c":   new Uint8Array([3]),
+    "/v/sub/d.txt":      new Uint8Array([4]),
+    "/other/x":          new Uint8Array([5]),
+  });
+  assert.deepEqual(s.list("/v").sort(), ["/v/a.txt"]);
+  assert.deepEqual(s.list("/v/sub").sort(), ["/v/sub/b.txt", "/v/sub/d.txt"]);
+  assert.deepEqual(s.list("/v/sub/deeper").sort(), ["/v/sub/deeper/c"]);
+  assert.deepEqual(s.list("/nope"), []);
+});
