@@ -1,0 +1,15 @@
+# Frank — the canonical recipient persona.
+#
+# Frank receives invites from Alice, absorbs .tnpkg bundles, and reads
+# Alice's logs (logs are delivered out-of-band; TN provides the crypto).
+#
+# Used in: C5 (in-process recipient), walk-tier invite/absorb flows.
+
+role: recipient
+device_seed_hex: f4a4ba6000000000000000000000000000000000000000000000000f4a4ba60
+passphrase: frank-regression-passphrase
+notes: |
+  Canonical recipient. Holds a kit minted by Alice. Used in any silo
+  that needs a "second party who can decrypt." His DID is stable so
+  Alice's `tn.recipient.added` envelopes always reference the same
+  did:key:z....
