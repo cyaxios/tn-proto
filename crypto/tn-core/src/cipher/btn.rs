@@ -202,14 +202,31 @@ impl super::GroupCipher for BtnReaderCipher {
         // Try each kit; first one that decrypts wins. Kits that aren't
         // entitled for this ciphertext return tn_btn::Error::NotEntitled
         // (or similar) — skip to the next.
-        let mut last_err: Option<Error> = None;
+        //
+        // Error normalization: if EVERY kit failed with the entitlement
+        // signal, surface the upper-layer `Error::NotEntitled` variant
+        // (not `Error::Btn(tn_btn::Error::NotEntitled)`). The read path
+        // in `runtime::read_from` / `read_with_verify` only treats
+        // `Error::NotEntitled { .. }` and `Error::NotAPublisher { .. }`
+        // as "skip silently" — without this normalization, a reader
+        // whose multi-kit chain doesn't cover a particular row (e.g.
+        // post-rotation entry seen from a pre-rotation kit, or
+        // pre-rotation entry seen by the publisher's freshly-rotated
+        // self-kit before the rotation-preserved siblings are loaded)
+        // would crash the whole read rather than mark the group hidden.
+        let mut malformed_err: Option<Error> = None;
         for kit in &self.kits {
             match kit.decrypt(&ct) {
                 Ok(pt) => return Ok(pt),
-                Err(e) => last_err = Some(Error::from(e)),
+                Err(tn_btn::Error::NotEntitled) => continue,
+                Err(e) => malformed_err = Some(Error::from(e)),
             }
         }
-        Err(last_err.unwrap_or(Error::NotEntitled {
+        // No kit decrypted. If at least one failed with a non-entitlement
+        // error (malformed wire, internal invariant), surface that — it
+        // signals data corruption, not "wrong audience." Otherwise this
+        // is a clean "none of my kits cover this ciphertext."
+        Err(malformed_err.unwrap_or(Error::NotEntitled {
             group: "btn".into(),
         }))
     }
