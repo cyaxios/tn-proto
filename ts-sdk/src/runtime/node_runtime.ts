@@ -589,6 +589,21 @@ export class NodeRuntime {
       // don't unwind the rotation.
     }
 
+    // Tear down the cached wasm runtime so the in-memory btn cipher
+    // it holds — loaded once at attach time off the PRE-rotation
+    // keystore — is dropped. The `this.emit(...)` call below will
+    // lazily re-attach via `attachWasm`, which reads the freshly-
+    // rotated `<group>.btn.state` + `<group>.btn.mykit` from disk.
+    // The attestation event therefore lands under the new epoch's
+    // cipher, and so does every subsequent emit on this NodeRuntime
+    // instance — matching Python's `admin.rotate`, which replaces
+    // `cfg.groups[group].cipher` in the active logger so the next
+    // emit uses the rotated cipher without a re-init. Without this
+    // reset, wasm would keep encrypting under the pre-rotation
+    // publisher seed and a revoked recipient's old kit could still
+    // unwrap post-rotation entries (C5 TS revoke regression).
+    this._resetWasmAfterAdminWrite();
+
     // Attest the rotation. Catalog-validated fields only — anything
     // not listed in public_fields would be sealed away from auditors
     // who only have the public log.
@@ -610,6 +625,25 @@ export class NodeRuntime {
       newKitSha256,
       rotatedAt,
     };
+  }
+
+  /** Drop the cached `WasmRuntime` so the next emit / read re-attaches
+   *  off the current on-disk keystore. Used by admin verbs that mutate
+   *  publisher state (mint/revoke/rotate) — the wasm runtime caches its
+   *  own copy of the btn cipher at attach time and has no reload API,
+   *  so we force a fresh attach to pick up the disk write.
+   *
+   *  Idempotent: a no-op when wasm hasn't been attached yet. Close
+   *  errors are swallowed (best-effort flush; the Drop impl will still
+   *  release file handles). */
+  private _resetWasmAfterAdminWrite(): void {
+    if (this.wasm === null) return;
+    try {
+      this.wasm.close();
+    } catch {
+      // Best-effort: the Drop impl will still flush + release handles.
+    }
+    this.wasm = null;
   }
 
   /**
