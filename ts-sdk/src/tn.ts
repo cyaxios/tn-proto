@@ -687,7 +687,10 @@ export class Tn {
     // Match Windows + POSIX separators. `.tn/<name>/tn.yaml` is the
     // canonical multi-ceremony layout (see docs/directory-layout.md).
     const m = yp.match(/[/\\]\.tn[/\\]([^/\\]+)[/\\]tn\.yaml$/);
-    return m ? m[1] : "default";
+    // Under tsc's noUncheckedIndexedAccess (or strict regex-result
+    // typing), m[1] is `string | undefined` even when the match
+    // succeeded. Fall back to "default" for safety.
+    return m?.[1] ?? "default";
   }
 
   /** True iff this is the default ceremony. */
