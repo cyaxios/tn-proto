@@ -227,35 +227,70 @@ function pp(v: unknown): string {
   }
 }
 
+/**
+ * Resolve a ceremony yaml to its log file list (main + admin if
+ * separate). **Behavior contract: must match Python's
+ * `_resolve_ceremony_logs` in `regression/_shared/log_query.py`
+ * byte-for-byte for the same input.** Both sides use a real yaml
+ * parser (PyYAML on Python, the `yaml` npm package on TS) so the
+ * regression suite asserts the same files on both runtimes regardless
+ * of anchors, block scalars, multi-doc files, or quoted keys.
+ *
+ * Algorithm (mirrors Python):
+ *   1. Parse the yaml. Non-dict / parse-error → return [].
+ *   2. `doc.logs.path` (if `logs` is a dict + `path` is a string)
+ *      → append, resolved against yaml's parent dir.
+ *   3. `doc.ceremony.admin_log_location` (if `ceremony` is a dict
+ *      + value is a string AND not `"main_log"` AND not empty AND
+ *      contains no `{` template tokens) → append, resolved against
+ *      yaml's parent.
+ *   4. Return.
+ *
+ * The regression suite intentionally does NOT depend on the SDK's
+ * `loadConfig` — when the SDK config loader is broken, the regression
+ * suite needs to still work to surface the bug.
+ */
 function resolveCeremonyLogs(yamlPath: string): string[] {
   if (!existsSync(yamlPath)) return [];
+
   let doc: unknown;
   try {
     doc = parseYaml(readFileSync(yamlPath, "utf-8"));
   } catch {
     return [];
   }
-  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return [];
+  if (doc === null || doc === undefined) return [];
+  if (typeof doc !== "object" || Array.isArray(doc)) return [];
+
   const d = doc as Record<string, unknown>;
   const base = dirname(yamlPath);
   const out: string[] = [];
 
-  const logs = d["logs"];
-  if (logs && typeof logs === "object" && !Array.isArray(logs)) {
-    const main = (logs as Record<string, unknown>)["path"];
-    if (typeof main === "string") out.push(resolvePath(base, main));
+  // 1. logs.path
+  const logsBlock = d["logs"];
+  if (logsBlock !== null && typeof logsBlock === "object" && !Array.isArray(logsBlock)) {
+    const main = (logsBlock as Record<string, unknown>)["path"];
+    if (typeof main === "string") {
+      out.push(resolvePath(base, main));
+    }
   }
 
-  const cer = d["ceremony"];
-  if (cer && typeof cer === "object" && !Array.isArray(cer)) {
-    const admin = (cer as Record<string, unknown>)["admin_log_location"];
-    if (typeof admin === "string" && admin !== "main_log" && admin !== "" && !admin.includes("{")) {
+  // 2. ceremony.admin_log_location
+  const cerBlock = d["ceremony"];
+  if (cerBlock !== null && typeof cerBlock === "object" && !Array.isArray(cerBlock)) {
+    const admin = (cerBlock as Record<string, unknown>)["admin_log_location"];
+    if (
+      typeof admin === "string" &&
+      admin !== "main_log" &&
+      admin !== "" &&
+      !admin.includes("{")
+    ) {
       out.push(resolvePath(base, admin));
     }
   }
 
-  // Keep the same `Path` and `AssertionRecord` types-named-for-symmetry
-  // tag — used so the importer treats the symbol as referenced.
+  // Keep AssertionRecord referenced — the import above is for type
+  // consumers but we don't currently use it inside this function.
   void ({} as AssertionRecord);
 
   return out;

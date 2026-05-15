@@ -118,9 +118,13 @@ KNOWN_OMISSIONS = {
 
     # ------------------------------------------------------------------
     # Python utility verbs that the doc summarizes via "context" /
-    # "process-global" sections rather than per-verb rows.
+    # "process-global" sections rather than per-verb rows. The TS-side
+    # camelCase forms (config, usingRust) are bare-export mirrors of
+    # the same verbs — the parity table covers them under the class
+    # methods Tn.config()/Tn.usingRust() implicitly.
     # ------------------------------------------------------------------
     "current_config", "session", "using_rust",
+    "usingRust", "config",
 
     # ------------------------------------------------------------------
     # Low-level bootstrap-absorb plumbing exported from the TS SDK for
