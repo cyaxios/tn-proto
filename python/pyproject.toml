@@ -55,18 +55,20 @@ dependencies = [
 
 [project.optional-dependencies]
 # Installed on demand; keep the base wheel lean.
-kafka   = ["confluent-kafka>=2.3"]
-delta   = ["databricks-sql-connector>=3.0", "databricks-sdk>=0.20"]
-s3      = ["boto3>=1.34"]
+kafka    = ["confluent-kafka>=2.3"]
+delta    = ["databricks-sql-connector>=3.0", "databricks-sdk>=0.20"]
+s3       = ["boto3>=1.34"]
+firehose = ["websocket-client>=1.7"]
 # Test runner + coverage. Required to run `pytest tn/lint/tests/` and the
 # `--cov=tn` invocation declared in [tool.coverage.run] below.
-test    = ["pytest>=7", "pytest-cov>=4"]
+test     = ["pytest>=7", "pytest-cov>=4"]
 # Everything at once (for dev / CI).
-all     = [
+all      = [
     "confluent-kafka>=2.3",
     "databricks-sql-connector>=3.0",
     "databricks-sdk>=0.20",
     "boto3>=1.34",
+    "websocket-client>=1.7",
     "pytest>=7",
     "pytest-cov>=4",
 ]

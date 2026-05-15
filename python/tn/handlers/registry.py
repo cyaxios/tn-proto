@@ -267,6 +267,23 @@ def build_handlers(
                     filter_spec=filter_spec,
                 )
             )
+        elif kind == "tn.firehose":
+            # Streaming firehose handler. Sends encrypted log frames over
+            # a long-lived WebSocket to the TN vault, which forwards to
+            # the CF firehose Worker for archival in R2.
+            # Spec: docs/superpowers/specs/2026-05-15-firehose-design.md
+            from .firehose import TnFirehoseHandler
+
+            out.append(
+                TnFirehoseHandler(
+                    name=name,
+                    outbox_path=_outbox_path(yaml_dir, name),
+                    endpoint=raw["endpoint"],
+                    project_id=raw["project_id"],
+                    key_id=raw.get("key_id"),
+                    filter_spec=filter_spec,
+                )
+            )
         elif kind == "fs.drop":
             from .fs_drop import DEFAULT_FILENAME_TEMPLATE, FsDropHandler
 
