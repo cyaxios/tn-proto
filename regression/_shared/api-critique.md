@@ -946,3 +946,191 @@ existing NodeRuntime + admin layer.
 - Verb-name parity snapshot pins the current state for future renames.
 
 Vault untouched (no auto-link involvement).
+
+---
+
+## 2026-05-15 — Backlog audit: items not previously logged
+
+This entry catches findings that surfaced during the overnight buildout
+but slipped past the per-silo critic passes. Cataloging them now so
+nothing silently sweeps under the rug.
+
+### [track] Backlog #1 — `addRecipient` and `revokeRecipient` also don't refresh wasm state
+
+The sub-agent's fix for [blocking] C5 TS #1 only wired
+`_resetWasmAfterAdminWrite()` into `rotateGroup`. The helper is
+idempotent and the same pattern applies to `addRecipient` and
+`revokeRecipient` — both also mutate publisher state on disk and both
+leave the cached `WasmRuntime` holding pre-mutation cipher state.
+
+Today's invisibility: BTN subset-difference cover excludes only the
+explicitly-revoked set, so a newly-minted leaf the publisher doesn't
+yet know about is still implicitly covered. A leaf revoked only on
+the TS-side BtnPublisher (without _reset) means wasm keeps encrypting
+under a cover that still covers the revoked leaf — forward-only
+revoke without rotate is intentionally weak, so this is academic.
+
+But a purist would want wasm to mirror disk-truth after every admin
+write. Wiring this is two lines per call site in
+`ts-sdk/src/runtime/node_runtime.ts`. Both methods already exist and
+the helper is already there.
+
+### [track] Backlog #2 — tn-core `runtime::emit_inner` asymmetric NotAPublisher handling
+
+`crypto/tn-core/src/runtime.rs` line 1083 (encrypt loop) swallows
+`Error::NotAPublisher` cleanly but would NOT swallow
+`Error::Btn(tn_btn::Error::NotAPublisher)` if such a wrapped variant
+ever surfaced. The BTN cipher doesn't currently wrap NotAPublisher,
+so this is latent — not a live bug. Same normalization pattern as
+the NotEntitled fix in [blocking] C5 TS #1 (RESOLVED) would apply:
+normalize the wrap-or-not to the upper-layer variant.
+
+Lift when: a future cipher wraps NotAPublisher, OR a hygiene pass
+on tn-core removes all these wrap-asymmetries proactively.
+
+### [track] Backlog #3 — My own C5 TS revoke test gates the right outcome via the wrong specific reason
+
+The bundleForRecipient double-mint ([track] C5 TS #2) means the
+canonical "mint kit, bundle it" pattern in
+`ts_revoke_locks_out_recipient.test.ts` mints leaf 1 via
+`addRecipient` and then mints leaf 2 inside `bundleForRecipient`.
+Carol's actual on-disk kit is leaf 2 — but the test's
+`revokeRecipient({ leafIndex: carolAdd.leafIndex })` revokes leaf 1
+(the discarded mint), not leaf 2.
+
+The test still passes because `rotate("default")` invalidates the
+entire epoch, so every old kit is locked out. The
+"Carol-specifically can't decrypt" outcome is correct, but the
+per-leaf revoke target is wrong.
+
+Two fixes:
+- Wait for [track] C5 TS #2 (bundleForRecipient stops double-minting).
+  Then the test naturally targets the right leaf.
+- Strengthen the test now: track both leaf indices, revoke the
+  bundled one, OR add a "revoke alone, no rotate" variant that
+  proves per-leaf revoke targeting.
+
+Lift when the bundleForRecipient fix lands. Test is correct in
+outcome; per-leaf accuracy is masked.
+
+### [track] Backlog #4 — Extension vendored wasm has drifted from SDK wasm provenance
+
+`crypto/tn-core/src/cipher/btn.rs` got the NotEntitled normalization
+in this merge train. SDK wasm rebuilds via wasm-pack on tag push.
+The extension's checked-in `extensions/tn-decrypt/wasm/{tn_wasm.js,
+tn_wasm_bg.wasm}` does NOT auto-rebuild — it is vendored bytes.
+
+Safe today because the extension uses `btnDecrypt` (per-kit decrypt
+via `BtnReaderKit::decrypt`) which doesn't traverse the changed
+`BtnReaderCipher::decrypt` runtime-level reader. But the extension
+wasm and the SDK wasm now compile from slightly different tn-core
+source. Cross-tier provenance drift.
+
+C9 silo's `test_ext_wasm_decrypts_python.test.ts` validates the
+extension wasm against Python tn_btn — catches user-visible
+breakage. Won't catch "extension wasm and SDK wasm both work but
+produce subtly different envelopes" because both decrypt the same
+Python input identically.
+
+Lift: re-vendor `extensions/tn-decrypt/wasm/*` from
+`crypto/tn-wasm/pkg-web/` post the cipher fix landing on TestPyPI.
+Single-commit follow-up PR.
+
+### [track] Backlog #5 — `_read_manifest` only accepts file paths, not BytesIO
+
+Found while building C8 cross-language restore.
+`tn.tnpkg._read_manifest` calls `Path(source)` internally — passing
+`io.BytesIO(bytes)` raises `TypeError`. Worked around in
+`regression/_shared/vault_test_helpers.py:restore_keystore_to` by
+reading the zip directly via `zipfile.ZipFile`.
+
+Real ergonomics gap: any caller with the tnpkg bytes in memory
+(HTTP response, in-process pipe, network buffer) has to write to a
+temp file first. Lift: accept `BinaryIO | bytes | Path` and dispatch
+on type. Not blocking — the workaround is one line — but the API
+surface lies about being byte-friendly.
+
+### [track] Backlog #6 — TS bare `tn.init()` and `Tn.use("default")` produce different in-memory contexts
+
+Python's `tn.use("default")` returns a handle whose runtime IS the
+module-level singleton — `tn.info(...)` and `tn.use("default").info(...)`
+share `setContext` state.
+
+TS's bare `tn.init(yamlPath)` calls `_Tn.init(...)` directly via the
+factory; `Tn.use("default")` goes through the `_registry` interning.
+They produce DIFFERENT Tn instances pointing at the same yaml. The
+files on disk see all writes from both; in-memory setContext /
+updateContext state is NOT shared.
+
+C2 silo's `test_default_handle_shares_module_state.py` gates this
+contract in Python. There is no TS equivalent — the contract
+doesn't currently hold in TS at the in-memory level (only at the
+file level).
+
+Lift options:
+- Document the asymmetry (surprising but defensible — both languages
+  converge to "writes go to the same files").
+- Make TS bare `init()` go through `_Tn.use("default")` so the
+  registry-interned instance IS the default singleton, matching Python.
+
+### [track] Backlog #7 — Walk tier not built
+
+The plan explicitly carves walk tier (recipient end-to-end via
+vault out-of-band, multi-machine sync, Jupyter onboarding, handler
+variants, manual auth-path scripts for passphrase /
+mnemonic-as-backup-of-backups / OAuth / WebAuthn-PRF) as a separate
+sprint.
+
+Crawl is now feature-complete (C1-C9 all green). Walk-tier silos
+pick up next. Each item should be its own silo or its own
+documented manual script in `regression/walk/<name>/`. Directory is
+scaffolded but empty.
+
+### [track] Backlog #8 — Cross-language `_resolve_ceremony_logs` parity test
+
+Original [Foundation #1] item from the C1+C3 PR's critic pass: feed
+the same yaml with non-trivial features (anchors, block scalars,
+comments inside quoted strings, multi-doc files) to both Python's
+`tn._yaml.resolve_ceremony_logs` and TS's
+`regression/_shared/log_query.ts:resolveCeremonyLogs` — assert
+identical output.
+
+Why: silent yaml-parser drift between Python and TS would mean
+production logs parse differently in audit vs in tooling. The
+hand-rolled regex parser I had to walk back from earlier would
+have made this gap invisible.
+
+Goes in walk tier. Not started.
+
+### [track] Backlog #9 — CI workflow placeholder-suffix on built silos
+
+`.github/workflows/regression-crawl.yml` has `make c<N> || echo
+"c<N> not yet implemented — placeholder pass"` on c2, c4, c5, c6,
+c7, c8, c9. All of those now have real tests; the `|| echo` suffix
+means a silo regression would silently pass with "placeholder"
+output instead of failing CI.
+
+Lift: remove the `|| echo` suffix on all silos with real tests.
+One-line change per job. Risk: flake. Mitigation: follow-up PR
+after a few days of stable CI runs.
+
+### [track] Backlog #10 — Stale `regression/c1-c3` remote branch
+
+The old `regression/c1-c3` branch on origin has pre-rebase SHAs
+from the closed PR #65. Orphaned but won't garbage-collect on its
+own. Delete after #67 merges.
+
+### Status summary (2026-05-15)
+
+Counting all entries in this log:
+
+- **Resolved**: 2 ([blocking] C5 TS #1, [blocking-fixed] C4 #1)
+- **[blocking-track]**: 3 (C7 TS #1, C6 #1, C6 TS #1)
+- **[track]**: 21 (11 prior + 10 from this backlog audit)
+- **[by-design]**: 4 (C2 #1, C7 #2, C8 TS #1, C6 #3 — clarifications,
+  not defects)
+
+Signal-to-noise: most items are track-level ergonomics, not blocking
+gaps. The protocol's load-bearing properties — BTN crypto round-trip,
+revoke+rotate forward-only semantics, vault auto-backup, cross-
+machine restore — are all gated by green crawl-tier tests.
