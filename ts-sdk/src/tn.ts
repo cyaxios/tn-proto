@@ -670,6 +670,31 @@ export class Tn {
     return this._rt.config.logPath;
   }
 
+  /** Absolute path to this ceremony's `tn.yaml`. Mirrors Python's
+   *  `TN.yaml_path`. */
+  get yamlPath(): string {
+    return (this._rt.config as { yamlPath?: string }).yamlPath ?? "";
+  }
+
+  /** Registry name of this ceremony (e.g. `"payments"`, `"default"`).
+   *
+   *  Mirrors Python's `TN.name`. Derived from `yamlPath`:
+   *    `<...>/.tn/<NAME>/tn.yaml` → `NAME`
+   *    anything else → `"default"` (the legacy single-yaml layout).
+   */
+  get name(): string {
+    const yp = this.yamlPath;
+    // Match Windows + POSIX separators. `.tn/<name>/tn.yaml` is the
+    // canonical multi-ceremony layout (see docs/directory-layout.md).
+    const m = yp.match(/[/\\]\.tn[/\\]([^/\\]+)[/\\]tn\.yaml$/);
+    return m ? m[1] : "default";
+  }
+
+  /** True iff this is the default ceremony. */
+  get isDefault(): boolean {
+    return this.name === "default";
+  }
+
   /** Returns the underlying NodeRuntime config. */
   config(): unknown {
     return this._rt.config;
