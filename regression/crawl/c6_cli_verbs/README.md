@@ -1,55 +1,71 @@
 # C6 — `tn` CLI verbs
 
-**Status: scaffolded, no tests yet. Implemented in the C6 PR.**
-
 ## What this silo proves
 
-The CLI surface that operators (not library callers) reach for:
+The `tn` CLI surface (the operator-facing path, not the library-tier
+verbs):
 
 ```bash
-$ tn init payments
-$ tn add_recipient default --recipient-did did:key:z6Mk...
-$ tn rotate default
-$ tn read
+$ python -m tn.cli init <projectdir>
+$ python -m tn.cli add_recipient default did:key:zAlice --yaml ...
+$ python -m tn.cli rotate default --yaml ...
+$ python -m tn.cli read --yaml ...
 ```
 
 Each verb produces the right side effects on disk (yaml + keystore +
-log) AND the CLI exit code accurately reflects success/failure.
+log + .tnpkg artifacts) AND the CLI exit code accurately reflects
+success/failure.
 
 ## Why it's load-bearing
 
 Operators use the CLI from cron jobs, shell scripts, CI pipelines.
-Library-tier tests don't catch CLI argument-parsing regressions,
-exit-code regressions, or subprocess-context bugs (env var
-propagation, signal handling, etc.).
+Library-tier tests don't catch:
+
+* argparse regressions (a renamed flag silently no-ops via the default)
+* exit-code regressions (cron expects `tn rotate` to exit non-zero on
+  failure; if it always exits 0 the operator never knows)
+* subprocess-context bugs (env var propagation, TN_NO_STDOUT default,
+  the cwd-vs-discovery interaction)
+* stdout/stderr separation (stderr scraping is how CI tooling parses
+  TN output)
 
 ## Code paths exercised
 
 - `python/tn/cli.py` — every verb's entry point + flag parsing
-- Subprocess-level: invoked via `subprocess.run([sys.executable, "-m", "tn.cli", ...])`
-- `python/tn/__main__.py` — module entry shim
+- Subprocess wire: `_shared/fixtures.py` re-exports + a `cli_run`
+  helper in this silo's conftest that invokes `python -m tn.cli ...`
+  against the hermetic machine
 
-## Tests to add (in the C6 PR)
+## Tests in this silo
 
-- `test_tn_init_creates_ceremony.py` — `tn init <name>` produces valid yaml + keystore
-- `test_tn_add_recipient_updates_yaml.py` — after `tn add_recipient`, ceremony yaml lists the recipient
-- `test_tn_rotate_advances_keystore.py` — `tn rotate` produces a new epoch + new state
-- `test_tn_read_lists_entries.py` — `tn read` exit 0 + writes envelopes to stdout in NDJSON
-- `test_tn_exit_codes.py` — invalid args exit non-zero with a useful error message
+- `test_tn_init_creates_ceremony.py` — `tn init <dir>` produces yaml +
+  keystore + .tn/ subdir; exit 0; stdout mentions DID.
+- `test_tn_add_recipient_writes_pkg.py` — after init,
+  `tn add_recipient default <did>` writes a .tnpkg artifact + the
+  ceremony's admin log records `tn.recipient.added`.
+- `test_tn_rotate_bumps_epoch.py` — after a `tn add_recipient`, a
+  `tn rotate default` bumps the group's `index_epoch` and writes
+  rotated kit packages.
+- `test_tn_exit_codes.py` — invalid verb → non-zero exit + readable
+  error message; missing required positional → non-zero with help-
+  pointer.
 
 ## How to run only this silo
 
-```bash
-make -C regression c6
+```
+make c6
 # or
 pytest regression/crawl/c6_cli_verbs -v
 ```
 
-## Failure investigation guide (skeleton)
+No vault contact — TN_NO_LINK is set by hermetic_machine.
+
+## Failure investigation guide
 
 | symptom | first place to look |
 |---|---|
-| CLI exits 0 but no files appear | `cli.py:cmd_init` — verify side effects are actually performed |
-| CLI exits non-zero on valid args | `cli.py:_argparse` setup; check that subcommand names match |
-| Output goes to stderr not stdout | `cli.py` — print routing; spec is "envelopes to stdout, status to stderr" |
-| Yaml gets mangled after `add_recipient` | `admin/__init__.py:add_recipient` write step + `config.py:_dump_yaml` |
+| `tn init` exits 0 but writes nothing | `python/tn/cli.py:cmd_init` — likely an exception swallowed before writing |
+| `tn add_recipient` writes wrong DID | `cli.py:cmd_add_recipient` recipient-label normalization (`did:key:zLabel-...` prefix) |
+| `tn rotate` exits 0 but doesn't bump epoch | `cli.py:cmd_rotate` group resolution + `python/tn/admin/__init__.py:rotate` actual mutation |
+| Exit code 0 on bad args | argparse must have `required=True` on positionals; missing positional should fall through `_die` with code=2 |
+| stderr empty on failure | `_die` should write to stderr not stdout |

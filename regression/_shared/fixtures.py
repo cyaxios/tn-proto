@@ -85,14 +85,31 @@ def hermetic_machine(
     cwd_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(cwd_dir)
 
+    # 5. Reset process-wide one-shot guards in the tn module so each
+    # test starts clean. The auto-link path uses
+    # `_link_done_this_process = True` after its first successful
+    # upload so a single Python process doesn't print the claim banner
+    # twice. In a pytest session each test should see a fresh world —
+    # otherwise tests 2+ would silently skip auto-link entirely.
+    try:
+        import tn as _tn_mod
+
+        if hasattr(_tn_mod, "_link_done_this_process"):
+            _tn_mod._link_done_this_process = False  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         yield cwd_dir
     finally:
-        # 5. Drop the module singleton so the next test starts clean.
+        # 6. Drop the module singleton + reset the one-shot guard so
+        # the next test starts clean.
         try:
             import tn
 
             tn.flush_and_close()
+            if hasattr(tn, "_link_done_this_process"):
+                tn._link_done_this_process = False  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             # Teardown is best-effort; don't mask the real test failure.
             pass
@@ -113,6 +130,58 @@ def hermetic_machine_with_vault(
     monkeypatch.setenv("TN_VAULT_URL", "http://127.0.0.1:8790")
     monkeypatch.delenv("TN_NO_LINK", raising=False)
     yield hermetic_machine
+
+
+@pytest.fixture
+def vault_cleanup() -> Iterator[list[str]]:
+    """Per-test registry of vault_ids the test created.
+
+    Usage in a test:
+
+        def test_x(vault_server, vault_cleanup):
+            tn.init(link=True)
+            pc = get_pending_claim(...)
+            vault_cleanup.append(pc["vault_id"])
+            ...
+
+    In the default (live-vault) mode the fixture's finalizer DELETEs
+    every registered vault_id from the live vault so test-created
+    pending_claims don't accumulate. In ephemeral mode
+    (TN_REGRESSION_USE_EPHEMERAL_VAULT=1) the registry is recorded but
+    no DELETEs fire — the ephemeral DB drops at session end anyway.
+
+    The cleanup is best-effort: a 404 (already gone) or a 409
+    (already bound) is silently OK; nothing raises here, so the
+    underlying test failure (if any) surfaces cleanly.
+    """
+    registered: list[str] = []
+    yield registered
+
+    # Cleanup runs in live mode (the default). In ephemeral mode the
+    # DB drop at session teardown handles it for us.
+    if os.environ.get("TN_REGRESSION_USE_EPHEMERAL_VAULT") == "1":
+        return
+    if not registered:
+        return
+
+    # Need a live bearer JWT to DELETE. Use the same dev-auth path
+    # the test fixture uses.
+    try:
+        from regression._shared.vault_test_helpers import (
+            delete_pending_claim,
+            dev_auth_login,
+        )
+
+        live_url = os.environ.get("TN_VAULT_URL", "http://127.0.0.1:8790")
+        login = dev_auth_login(live_url, handle="alice")
+        token = login.get("token")
+        if not token:
+            return
+        for vid in registered:
+            delete_pending_claim(live_url, vid, token)
+    except Exception:  # noqa: BLE001
+        # Best-effort cleanup — never mask the real test failure.
+        pass
 
 
 def assert_user_home_untouched() -> None:
