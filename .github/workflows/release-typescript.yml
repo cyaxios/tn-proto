@@ -1,0 +1,77 @@
+name: release-typescript
+
+# Publish @tnproto/sdk to npm on tag push (mirrors release-python.yml's
+# trigger). The tag drives the version: the workflow asserts
+# package.json's version matches the tag's "v..." prefix-stripped form
+# so a tag of v0.4.1a2 expects package.json version "0.4.1-alpha.2"
+# (npm-semver translation of Python-style alpha tags).
+#
+# Required repo secret:
+#   NPM_TOKEN  — npm automation token. Generate at
+#                https://www.npmjs.com/settings/<user>/tokens (type:
+#                Automation; scope: read-and-write to @tnproto).
+#
+# Manual trigger: workflow_dispatch lets you dry-run without tagging.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "skip npm publish (build + pack only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: build + publish @tnproto/sdk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Build the wasm bundle the SDK consumes (the published package
+      # vendors it via `files: ["dist", ...]` once tsc compiles).
+      - name: Install rust + wasm-pack
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build tn-wasm (nodejs target)
+        working-directory: crypto/tn-wasm
+        run: wasm-pack build --target nodejs --release
+      - name: Install ts-sdk deps
+        working-directory: ts-sdk
+        run: npm ci || npm install
+      - name: Typecheck
+        working-directory: ts-sdk
+        run: npm run typecheck
+      - name: Build
+        working-directory: ts-sdk
+        run: npm run build
+      - name: Pack (smoke test the tarball)
+        working-directory: ts-sdk
+        run: npm pack --dry-run
+      - name: Publish to npm
+        if: github.event_name == 'push' || inputs.dry_run == false
+        working-directory: ts-sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN secret is not set. Add it at" \
+              "https://github.com/${{ github.repository }}/settings/secrets/actions" \
+              "(scope: read-and-write on @tnproto)."
+            exit 1
+          fi
+          # --provenance attaches a transparency record (npm 9.5+); --access public
+          # is required for scoped packages on a free npm account.
+          npm publish --access public --provenance

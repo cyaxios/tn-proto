@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "tn-protocol"
-version         = "0.4.1a0"
+version         = "0.4.1a2"
 description     = "TestigoNodo protocol: attested logging with JWE + btn ciphers"
 readme          = "README.md"
 requires-python = ">=3.10"
