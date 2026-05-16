@@ -21,7 +21,7 @@
  * what we expect today, and would fail if either side renamed/dropped
  * a verb. The named-assertions make the differences visible in the
  * report so a CLI rename PR has to update the test (and that forces
- * the api-critique log to stay current).
+ * the critic log log to stay current).
  *
  * Asserts (named):
  *   - "python-cli-help-mentions-add_recipient"

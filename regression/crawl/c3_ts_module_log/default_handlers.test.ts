@@ -5,7 +5,7 @@
  *
  * This test mirrors C1 (Python) on the TS side. The bare-export surface
  * was added in the same PR — before that, TS had only the `Tn` class.
- * The api-critique log entry (regression/_shared/api-critique.md
+ * The critic log log entry (.tn-internal/critic log
  * 2026-05-14 — C3) records the gap that was fixed.
  *
  * Flow:

@@ -62,4 +62,8 @@ vault_blobs/
 identity.json
 
 #superpowers
-docs/superpowers/*
+docs/superpowers/*/
+
+# Internal-only notes (critic logs, parity audits, design drafts) —
+# kept on disk for cross-agent collaboration but never published.
+.tn-internal/
