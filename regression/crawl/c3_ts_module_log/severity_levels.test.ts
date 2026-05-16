@@ -4,7 +4,7 @@
  * SEE: regression/crawl/c3_ts_module_log/README.md
  *
  * Mirrors C1's severity-level test on the TS side. After the
- * module-level surface was added (api-critique 2026-05-14 — C3), this
+ * module-level surface was added (critic log 2026-05-14 — C3), this
  * test exercises `tn.info`, `tn.warning`, `tn.error`, `tn.debug`,
  * `tn.log` and asserts the level field on each emitted envelope.
  *
