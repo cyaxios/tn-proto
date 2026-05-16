@@ -19,7 +19,7 @@ Two ciphers ship in this release:
 | Python        | `pip install -i https://test.pypi.org/simple/ tn-protocol`       | **0.4.1a2** alpha (TestPyPI)            |
 | TypeScript    | `npm install @tnproto/sdk`                                       | **0.4.1-alpha.2** (in tree; npm pending)|
 | Rust          | `cargo add tn-core`                                              | in tree, not yet published              |
-| Chrome ext    | [`tn-decrypt-0.3.0.zip`](https://github.com/cyaxios/tn-proto/releases/tag/ext-v0.3.0) | 0.3.0 (manual install, see below) |
+| Chrome ext    | [`tn-decrypt-0.4.0.zip`](https://github.com/cyaxios/tn-proto/releases/tag/ext-v0.4.0) | **0.4.0** (manual install, see below)   |
 
 Both SDKs share the same wire format (the byte-identical wasm-compiled
 Rust core); a Python publisher's log decrypts cleanly under a TS reader
@@ -89,8 +89,8 @@ self-contained — no sibling repo needed).
 
 ### Install (manual, until the Chrome Web Store listing is live)
 
-1. **Download** `tn-decrypt-0.3.0.zip` from the
-   [latest release](https://github.com/cyaxios/tn-proto/releases/tag/ext-v0.3.0).
+1. **Download** `tn-decrypt-0.4.0.zip` from the
+   [latest release](https://github.com/cyaxios/tn-proto/releases/tag/ext-v0.4.0).
 2. **Unzip** into a directory you'll keep around (Chrome reads the
    directory live, so don't delete it after install).
 3. Open **`chrome://extensions`**, toggle **Developer mode** in the
@@ -150,7 +150,7 @@ log opens under Python (the "service audits browser actions" shape).
 ```
 python/                  # Python SDK (PyPI: tn-protocol)
 crypto/
-  tn-core/               # Rust core (crates.io: tn-core, planned)
+  tn-core/               # Rust core (compiled into the PyPI tn-core wheel + the wasm bundle)
   tn-btn/                # btn cipher Rust crate
   tn-wasm/               # WASM build for browser / Node
   tn-core-py/            # pyo3 bindings (PyPI: tn-core)
