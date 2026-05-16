@@ -27,7 +27,7 @@ value prop is: keys are safe AND recoverable.
 
 ## Restore path scope
 
-Per the corrected crawl rule (critic log, 2026-05-14):
+Per the crawl-tier auth-path rule:
 
 * **ONE automated encryption-exercising path** — dev-auth bearer JWT,
   which is the same shape rung-5 of the manual ladder used. Exercises
