@@ -5,7 +5,7 @@
  * SEE: regression/crawl/c8_restore_new_machine/README.md
  *
  * Why cross-language is the right shape here: the TS SDK has no
- * vault auto-backup today (see api-critique.md, C7 TS section), so a
+ * vault auto-backup today (see critic log, C7 TS section), so a
  * TS-only round-trip isn't possible. But the *restore* half is
  * symmetric — it's just decrypt + lay-out + `Tn.init`. Driving Python
  * A → TS B proves the wire format and zip layout are language-agnostic,

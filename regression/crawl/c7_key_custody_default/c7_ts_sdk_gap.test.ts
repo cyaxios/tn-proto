@@ -1,7 +1,7 @@
 /**
  * SILO: C7 — Default key custody
  * STATUS: SKIPPED — TS SDK has no vault auto-backup today.
- * SEE: regression/_shared/api-critique.md (C7 TS section)
+ * SEE: .tn-internal/critic log (C7 TS section)
  *
  * What this test WOULD do, mirroring the Python side:
  *   1. Hermetic machine + TN_VAULT_URL pointed at the live vault.
@@ -23,7 +23,7 @@
  * the init-upload half. That's currently sufficient — but a TS-only
  * consumer can't drive the funnel-critical onboarding flow.
  *
- * Track this in api-critique.md as a [blocking-track]: implement
+ * Track this in critic log as a [blocking-track]: implement
  * TS-side init-upload + claim_url surface, then this skipped test
  * becomes a real one.
  *
@@ -47,6 +47,6 @@ test("C7 (TS): vault auto-backup — SKIPPED (TS SDK gap)", { skip: true }, () =
     onMiss:
       "When this fires for real, TnInitOptions has gained a `link` field " +
       "and Tn.init({ link: true }) triggers the vault init-upload + " +
-      "writes claim_url.txt. See api-critique.md C7 TS section.",
+      "writes claim_url.txt. See critic log C7 TS section.",
   });
 });

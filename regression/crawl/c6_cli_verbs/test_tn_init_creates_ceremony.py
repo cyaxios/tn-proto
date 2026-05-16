@@ -45,7 +45,7 @@ def test_tn_init_creates_ceremony(
     # auto-link block that does NOT honor `TN_NO_LINK=1` from env.
     # Without --no-link, `tn init` would POST a real pending-claim to
     # https://vault.tn-proto.org (the production vault). See
-    # api-critique.md C6 #1.
+    # critic log C6 #1.
     result = cli_run(  # type: ignore[arg-type]
         "init",
         str(project),

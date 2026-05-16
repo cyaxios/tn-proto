@@ -3,7 +3,7 @@
  *
  * Used by C8-TS for the restore-on-new-machine flow. C7-TS does NOT
  * use these — the TS SDK has no vault auto-backup today (see
- * api-critique.md, C7 TS section). Only the restore half is testable.
+ * critic log, C7 TS section). Only the restore half is testable.
  *
  * Three operations, same shape as the Python helpers:
  *
