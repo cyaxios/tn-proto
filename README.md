@@ -1,6 +1,6 @@
 # tn-proto
 
-TestigoNodo (TN) — attested logging protocol with broadcast encryption.
+ (TN) — attested logging protocol with broadcast encryption.
 
 A small protocol for emitting log entries that are signed, encrypted to a
 named group of recipients, and chain-linked. Two ciphers ship in this
