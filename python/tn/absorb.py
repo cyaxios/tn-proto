@@ -186,18 +186,29 @@ def absorb(
         try:
             cfg = _current_config()
         except RuntimeError as exc:
-            # Bug 3 dirt-easy fix: if there's no active runtime, peek at the
-            # bundle and see if it's a self-contained bootstrap kind
-            # (identity_seed / project_seed). If so, derive a synthetic cfg
-            # from the cwd + bundle's body/tn.yaml so absorb can install
-            # everything end-to-end without a prior tn.init(). The user's
-            # subsequent tn.init() then picks up the freshly-absorbed yaml.
+            # If the bundle is a self-contained bootstrap kind
+            # (identity_seed / project_seed), derive a synthetic cfg
+            # from the cwd + bundle's body/tn.yaml so absorb installs
+            # everything end-to-end without a prior tn.init(). The
+            # caller's subsequent tn.init() then picks up the
+            # freshly-absorbed yaml.
             cfg = _try_bootstrap_cfg(source)
             if cfg is None:
-                raise RuntimeError(
-                    "absorb: no LoadedConfig available — call tn.init(yaml_path) "
-                    "first, or pass cfg explicitly via the legacy two-arg form."
-                ) from exc
+                # No bootstrap shortcut available. Auto-create a fresh
+                # ceremony in the cwd (same path tn.info(...) takes when
+                # called with no prior init). This prints the standard
+                # autoinit banner so the caller knows a new identity was
+                # minted. Then retry the config lookup.
+                from ._autoinit import maybe_autoinit as _maybe_autoinit
+                _maybe_autoinit()
+                try:
+                    cfg = _current_config()
+                except RuntimeError:
+                    raise RuntimeError(
+                        "absorb: no LoadedConfig available. Call "
+                        "tn.init(yaml_path) first, or pass cfg explicitly "
+                        "via the legacy two-arg form."
+                    ) from exc
 
     receipt = _absorb_dispatch(cfg, source)
 

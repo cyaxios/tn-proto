@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1a3] - 2026-05-17
+
+Two papercuts removed from the day-one user journey.
+
+Released in Python as `tn-protocol 0.4.1a3` and in TS as
+`@tnproto/sdk 0.4.1-alpha.3`.
+
+### Changed (Python and TS)
+
+- **`tn.read()` now defaults to "all runs on disk".** A fresh process
+  calling `tn.read()` returns every entry on disk, which is what most
+  callers want on first contact. The old behavior is still reachable
+  by passing `all_runs=False` (Python) / `{allRuns: false}` (TS).
+  Same flip applied to the MCP `ReadInput` schema.
+
+### Changed (Python)
+
+- **`tn.absorb()` auto-creates a ceremony when none exists.** Calling
+  `tn.absorb(<bundle>)` as the very first verb no longer raises
+  `RuntimeError` for kit_bundle and similar non-bootstrap kinds. The
+  standard autoinit banner fires (the same one `tn.info(...)` triggers
+  today) so the caller sees that a fresh identity was minted in the
+  cwd. Set `TN_AUTOINIT_QUIET=1` to silence.
+
+### Notes on TS parity
+
+- The TS SDK keeps its existing absorb split: `Tn.absorb(source)` (the
+  static method) auto-bootstraps for `project_seed` / `identity_seed`
+  kinds, while non-bootstrap kinds (kit_bundle, admin_log_snapshot)
+  flow through `await Tn.init(yamlPath)` then `tn.pkg.absorb(source)`.
+  Aligning TS absorb with the Python "any kind autoinits" model is a
+  follow-up.
+
+- Both Python and TS changes are alpha-cycle adjustments to defaults.
+  Behavior is flipped at the public surface; private internal helpers
+  keep their existing defaults.
+
 ## [0.4.0a4] - 2026-05-09
 
 Python-only packaging patch.

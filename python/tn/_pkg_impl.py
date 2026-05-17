@@ -96,7 +96,16 @@ def _absorb_impl(*args: Any, **kwargs: Any) -> AbsorbReceipt | AbsorbResult:
     # bundle is a self-contained bootstrap kind: the underlying
     # absorb() synthesizes a cfg from cwd + body/tn.yaml.
     if not is_pre_init_bootstrap:
-        tn._maybe_autoinit_load_only()
+        # Try load-only first (preferred: bind an existing ceremony).
+        # If none exists, fall back to the emit-style autoinit so the
+        # caller can absorb a kit_bundle as their very first verb. The
+        # standard autoinit banner fires when a fresh ceremony gets
+        # minted, so the caller knows a new identity was created.
+        try:
+            tn._maybe_autoinit_load_only()
+        except RuntimeError:
+            from ._autoinit import maybe_autoinit as _maybe_autoinit
+            _maybe_autoinit()
     receipt = _raw_absorb(*args, **kwargs)
     tn._refresh_admin_cache_if_present()
 

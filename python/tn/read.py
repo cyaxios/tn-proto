@@ -32,7 +32,9 @@ Kwargs (both verbs):
                        with ``as_recipient``).
 
 Read-only kwargs:
-  - ``all_runs``     — scan across all runs in the file.
+  - ``all_runs``     — default ``True``: scan every entry on disk.
+                       Pass ``False`` to restrict to this process's
+                       current run.
 
 Watch-only kwargs:
   - ``since``        — ``"now"`` | ``"start"`` | int | iso-string.
@@ -159,12 +161,16 @@ def read(
     log: str | Path | None = None,
     as_recipient: str | Path | None = None,
     group: str = "default",
-    all_runs: bool = False,
+    all_runs: bool = True,
 ) -> Iterator[Entry] | Iterator[dict[str, Any]]:
     """Iterate log entries.
 
     Default mode yields :class:`Entry` instances. Pass ``raw=True`` to
     yield on-disk envelope dicts unchanged (forensics / chain auditors).
+
+    ``all_runs`` defaults to ``True``: a fresh process returns every
+    entry on disk. Pass ``all_runs=False`` to restrict the result to
+    entries this process emitted in the current run.
 
     The default surface is the main user log only. Admin envelopes
     (``tn.*``) live in a separate log; address them explicitly:

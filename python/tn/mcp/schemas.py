@@ -88,8 +88,8 @@ class ReadInput(BaseModel):
         ),
     )
     all_runs: bool = Field(
-        default=False,
-        description="If True, include entries from prior process runs (default: current run only).",
+        default=True,
+        description="If True (default), return every entry on disk. Set False to restrict to the current process run.",
     )
     verify: bool = Field(
         default=False,

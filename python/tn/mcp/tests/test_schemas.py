@@ -56,9 +56,9 @@ def test_status_output_with_groups():
 
 
 def test_read_input_defaults():
-    """ReadInput has sensible defaults: no filter, current run only."""
+    """ReadInput has sensible defaults: no filter, all runs on disk."""
     inp = ReadInput.model_validate({})
-    assert inp.all_runs is False
+    assert inp.all_runs is True
     assert inp.where is None
     assert inp.verify is False
 

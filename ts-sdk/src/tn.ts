@@ -938,12 +938,13 @@ export class Tn {
    * - `log`          — alternate log path.
    * - `asRecipient`  — keystore directory to decrypt with (foreign-log mode).
    * - `group`        — group plaintext to surface (with `asRecipient`).
-   * - `allRuns`      — scan across all runs.
+   * - `allRuns`      — default `true`: scan every entry on disk. Pass
+   *                    `false` to restrict to this process's current run.
    */
   *read(opts: ReadOptions = {}): IterableIterator<Entry | Record<string, unknown>> {
-    // Bug 3 fix: streams whose profile has no replay surface (e.g.
-    // ``telemetry`` writes only to stdout) yield an empty iterator
-    // rather than going to the reader.
+    // Streams whose profile has no replay surface (e.g. ``telemetry``
+    // writes only to stdout) yield an empty iterator rather than going
+    // to the reader.
     if (!this._hasReplaySurface()) return;
 
     const verify = opts.verify ?? false;
@@ -952,7 +953,7 @@ export class Tn {
     const logPath = opts.log;
     const asRecipient = opts.asRecipient;
     const group = opts.group ?? "default";
-    const allRuns = opts.allRuns ?? false;
+    const allRuns = opts.allRuns ?? true;
     const where = opts.where;
     const rt = this._rt;
     const runId = this._runId;
