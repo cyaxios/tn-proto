@@ -83,6 +83,18 @@ KNOWN_OMISSIONS = {
     "KNOWN_KINDS",
 
     # ------------------------------------------------------------------
+    # TS-only branded helpers + types for the polymorphic `recipient=`
+    # kwarg on tn.admin.addRecipient / revokeRecipient (DX review 0.4.2a2).
+    # Python's dynamic typing handles the polymorphism natively via the
+    # private _resolve_recipient — no public Python counterpart exists.
+    # The parity row for `tn.admin.add_recipient` already covers the
+    # verb's behaviour; these are TS-internal compile-time aids.
+    # ------------------------------------------------------------------
+    "Did", "LeafIndex", "PublicKeyBytes",
+    "RecipientInput", "RecipientLike", "ResolvedRecipient",
+    "did", "leafIndex", "publicKeyBytes", "resolveRecipient",
+
+    # ------------------------------------------------------------------
     # Manifest / tnpkg low-level types and helpers (Layer 1 primitives;
     # the user-facing surface is tn.pkg.*).
     # ------------------------------------------------------------------
