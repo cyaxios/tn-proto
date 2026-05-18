@@ -909,7 +909,12 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     tn_init(yaml_path)
     try:
         groups = args.groups.split(",") if args.groups else None
-        out = bundle_for_recipient(args.recipient_did, args.out, groups=groups)
+        out = bundle_for_recipient(
+            args.recipient_did,
+            args.out,
+            groups=groups,
+            seal_for_recipient=getattr(args, "seal_for_recipient", False),
+        )
         cfg = current_config()
         # The bundle was just minted — every requested group has a fresh
         # tn.recipient.added event in the log. Print a one-line summary
@@ -955,12 +960,36 @@ def cmd_add_recipient(args: argparse.Namespace) -> int:
         recipient_did = f"did:key:zLabel-{label}"
         out_default_stem = _re.sub(r"[^A-Za-z0-9._-]", "_", label) or "recipient"
 
+    # --seal-for-recipient needs a real key-DID to wrap the body under
+    # the recipient's actual public key. A friendly label like
+    # `did:key:zLabel-foo` has no embedded base58 public key, so the
+    # seal path would fail deep inside `_did_key_to_ed25519_pub`. Reject
+    # the combination here with a clear message.
+    if getattr(args, "seal_for_recipient", False) and (
+        not label.startswith("did:") or recipient_did.startswith("did:key:zLabel-")
+    ):
+        print(
+            "[tn add_recipient] error: --seal-for-recipient requires a real "
+            "key-DID for the recipient (one with an embedded base58 public "
+            "key). Friendly labels synthesize a placeholder DID that has no "
+            f"public key, so the seal step has nothing to wrap under. Got "
+            f"{label!r}. Pass the recipient's real did:key:z... instead, or "
+            "drop --seal-for-recipient to ship an unsealed kit bundle.",
+            file=sys.stderr,
+        )
+        return 2
+
     out_path = Path(args.out).resolve() if args.out else Path.cwd() / f"{out_default_stem}.tnpkg"
 
     tn_init(yaml_path)
     try:
         groups = [args.group]
-        out = bundle_for_recipient(recipient_did, out_path, groups=groups)
+        out = bundle_for_recipient(
+            recipient_did,
+            out_path,
+            groups=groups,
+            seal_for_recipient=getattr(args, "seal_for_recipient", False),
+        )
         print(f"[tn add_recipient] wrote {out}")
         print(f"[tn add_recipient]   group:     {args.group}")
         print(f"[tn add_recipient]   recipient: {recipient_did}")
@@ -2100,6 +2129,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Comma-separated group names. Default: every non-tn.agents group in the ceremony.",
     )
+    p_bundle.add_argument(
+        "--seal-for-recipient",
+        action="store_true",
+        default=False,
+        help="Wrap the bundle body under a per-export key only the named "
+             "recipient DID can unwrap. Lets a CDN or vault host the file "
+             "without being able to read its contents.",
+    )
     p_bundle.set_defaults(func=cmd_bundle)
 
     # --- tn add_recipient <group> <did-or-label> -------------
@@ -2123,6 +2160,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument(
         "--yaml", default=None,
         help="Path to your tn.yaml. Default: discover via $TN_YAML / ./tn.yaml / ~/.tn/tn.yaml.",
+    )
+    p_add.add_argument(
+        "--seal-for-recipient",
+        action="store_true",
+        default=False,
+        help="Wrap the bundle body under a per-export key only the named "
+             "recipient DID can unwrap. Lets a CDN or vault host the file "
+             "without being able to read its contents.",
     )
     p_add.set_defaults(func=cmd_add_recipient)
 
@@ -2195,10 +2240,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--yaml", default=None,
         help="Path to your tn.yaml. Default: discover via the standard chain.",
     )
+    # Read defaults to "everything on disk". A boolean-optional flag lets
+    # callers narrow back to the current process run via `--no-all-runs`.
     p_read.add_argument(
         "--all-runs",
-        action="store_true",
-        help="Include entries from previous runs (default: this run only).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include entries from previous runs (default: True). "
+             "Pass `--no-all-runs` to restrict to this process run.",
     )
     p_read.set_defaults(func=cmd_read)
 

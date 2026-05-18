@@ -135,6 +135,8 @@ No compat shims — the deletions are hard. The branch is the alpha-track.
 | `tn.admin.cache.SameCoordinateFork` (dataclass) | `SameCoordinateForkError` + `SameCoordinateFork` | ⚠ | Same pattern. |
 | `tn.admin.cache.RotationConflict` (dataclass) | `RotationConflictError` + `RotationConflict` | ⚠ | Same pattern. |
 | (n/a) | `ChainConflictError` (Error class) | ⊝ | Type-union of the three above on both sides; only TS has the wrapper Error class. |
+| `tn.KeystoreConflictError` | (n/a) | ⊝ | NEW in 0.4.2a1. Re-export of the Rust-bound `tn_core._core.TnRuntimeError` so deploy scripts can write `except tn.KeystoreConflictError:` without dipping into the private module. TS gap; future work. |
+| `tn.is_keystore_diverged(exc)` | (n/a) | ⊝ | NEW in 0.4.2a1. Predicate that returns True when the exception carries the keystore-divergence marker (the retry-friendly subset of `KeystoreConflictError`). TS gap; future work. |
 
 ## Modules / namespaces
 

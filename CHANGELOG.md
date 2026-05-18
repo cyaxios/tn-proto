@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2a1] - 2026-05-17
+
+Four follow-up fixes surfaced by the white-glove suite run against
+0.4.1a3. Picks up where the read / absorb default flips left off.
+
+Released in Python as `tn-protocol 0.4.2a1` and in TS as
+`@tnproto/sdk 0.4.2-alpha.1`.
+
+### Changed
+
+- **CLI `tn read` defaults to `--all-runs`.** Matches the Python API
+  change from 0.4.1a3. A fresh `tn read` invocation now returns every
+  entry on disk. Restrict to the current process run with
+  `tn read --no-all-runs`.
+
+- **`tn.init(stream='<name>')` rebinds the module singleton.** Before
+  0.4.2a1, passing `stream=` returned a per-stream handle but left
+  module-level `tn.info(...)` calls bound to the default ceremony, so
+  emits silently landed in `default` instead of the named stream. The
+  rebind now matches the docstring ("focus on `<name>` for subsequent
+  module-level calls"). The handle return value is unchanged.
+
+### Added
+
+- **`tn.KeystoreConflictError`** at the package top level. Re-export
+  of the Rust-bound runtime exception so callers can write a stable
+  `except tn.KeystoreConflictError:` instead of importing from the
+  private `tn_core._core` module.
+
+- **`tn.is_keystore_diverged(exc)`** predicate. The runtime
+  exception class is shared across many failure modes; this helper
+  returns `True` only when the exception message carries the
+  divergence marker, so deploy scripts can safely retry the admin
+  verb after a concurrent writer race::
+
+      try:
+          tn.admin.add_recipient(group="default", recipient_did=did)
+      except tn.KeystoreConflictError as exc:
+          if tn.is_keystore_diverged(exc):
+              # safe to re-read state + retry
+              ...
+          else:
+              raise
+
+- **`--seal-for-recipient` flag on `tn bundle` and `tn add_recipient`.**
+  Wraps the bundle body under a per-export key only the named recipient
+  DID can unwrap. Previously the seal-for-recipient feature lived only
+  in the Python `tn.export(...)` call; operators following `tn --help`
+  could not discover it.
+
+### Notes
+
+- TS parity: TS gets the read default flip in tandem (already shipped
+  in 0.4.1-alpha.3). The stream-singleton fix, exception export, and
+  CLI seal flag are Python-only this round; TS callers already use
+  `Tn.init({stream: ...})` returning a focused handle by convention,
+  so the per-stream emit issue does not surface in TS.
+
+- `TN_NO_STDOUT=1` env-var suppression was re-verified across fresh
+  ceremonies, existing ceremonies, and admin-event emit paths. Works
+  as documented in 0.4.2a1; the D1 white-glove finding was not
+  reproducible in this build.
+
+- JWE CLI surface (offer / enrolment handshake) is intentionally
+  deferred to a later release. Today's JWE recipient onboarding still
+  flows through the Python `tn.offer(...)` + `tn.admin.add_recipient(
+  ..., public_key=...)` path.
+
 ## [0.4.1a3] - 2026-05-17
 
 Two papercuts removed from the day-one user journey.

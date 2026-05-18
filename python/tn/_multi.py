@@ -619,13 +619,32 @@ def _build_legacy_kwargs(
 
 
 def _apply_stream(handle: TN, stream: str | None) -> TN:
-    """If ``stream`` is set, open the named stream and return its
-    handle; otherwise return ``handle`` unchanged.
+    """If ``stream`` is set, open the named stream, rebind the module
+    singleton to it, and return its handle; otherwise return ``handle``
+    unchanged.
 
     Pattern used everywhere ``init`` returns: callers do
     ``return _apply_stream(handle, stream)``.
+
+    The singleton rebind matters because ``tn.init(stream='foo')`` is
+    documented as equivalent to "focus on foo for subsequent
+    module-level calls." Without the rebind, ``tn.info(...)`` after
+    init would still land in the default ceremony, contradicting the
+    docstring and silently swallowing per-stream emits.
     """
-    return use(stream) if stream is not None else handle
+    if stream is None:
+        return handle
+    # Route through the bind=True path so the module singleton
+    # (_dispatch_rt) points at the stream's yaml. Subsequent
+    # tn.info / tn.read at module level then address the stream.
+    return _init_named_ceremony(
+        name=stream,
+        project_path=None,
+        yaml_path=None,
+        profile=None,
+        legacy_kwargs={},
+        bind=True,
+    )
 
 
 def _init_via_yaml_path(

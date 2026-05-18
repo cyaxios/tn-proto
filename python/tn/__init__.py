@@ -56,6 +56,38 @@ from ._dispatch import (  # should_use_rust re-exported for diagnostics
 from ._entry import Entry, VerifyError
 from .absorb import AbsorbReceipt, AbsorbResult, LeafReuseAttempt
 from .absorb import absorb as _raw_absorb
+
+# Re-export the Rust-bound runtime exception so callers can write a
+# stable `except tn.KeystoreConflictError` instead of dipping into the
+# private `tn_core._core` module. The class is shared across runtime
+# failures, so check the message string when distinguishing
+# divergence-retry from other faults: see `is_keystore_diverged()`.
+from tn_core._core import TnRuntimeError as KeystoreConflictError
+
+
+def is_keystore_diverged(exc: BaseException) -> bool:
+    """Return True if ``exc`` is a keystore-state-divergence error from
+    the Rust runtime (the retry-friendly case for concurrent admin
+    writers), False otherwise.
+
+    The Rust runtime raises ``KeystoreConflictError`` for many distinct
+    failure modes that share the same exception class. This predicate
+    looks for the specific divergence marker so deploy scripts can
+    write::
+
+        try:
+            tn.admin.add_recipient(group="default", recipient_did=did)
+        except tn.KeystoreConflictError as exc:
+            if tn.is_keystore_diverged(exc):
+                # safe to re-read + retry the admin verb
+                ...
+            else:
+                raise
+    """
+    if not isinstance(exc, KeystoreConflictError):
+        return False
+    msg = str(exc)
+    return "diverged" in msg
 from .admin import (
     ensure_group,
     set_link_state,
@@ -1151,6 +1183,8 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "AdminStateCache",
     "ChainConflict",
     "Entry",
+    "KeystoreConflictError",
+    "is_keystore_diverged",
     "LeafReuseAttempt",
     "MultiCeremonyEmitNotImplemented",
     "PolicyDocument",

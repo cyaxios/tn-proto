@@ -239,6 +239,7 @@ def _bundle_for_recipient_impl(
     out_path: str | Path,
     *,
     groups: list[str] | None = None,
+    seal_for_recipient: bool = False,
 ) -> Path:
     """Mint a fresh kit for ``recipient_did`` across one or more groups and
     bundle them into a single ``.tnpkg`` at ``out_path``.
@@ -320,5 +321,6 @@ def _bundle_for_recipient_impl(
             to_did=recipient_did,
             keystore=td_path,
             groups=requested,
+            seal_for_recipient=seal_for_recipient,
         )
     return Path(out)
