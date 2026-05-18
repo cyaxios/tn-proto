@@ -76,31 +76,35 @@ def test_message_is_none_when_no_positional(tmp_path):
     assert e.message is None
 
 
-def test_positional_message_hoists_to_typed_slot(tmp_path):
-    """Positional messages on tn.info / tn.log / etc. must surface on
-    `entry.message` (the typed envelope slot), not in `entry.fields`.
+def test_message_kwarg_hoists_to_typed_slot(tmp_path):
+    """``message=`` kwarg on tn.info / tn.log / etc. must surface on
+    ``entry.message`` (the typed envelope slot), not in ``entry.fields``.
 
-    The writer encrypts the joined positional into the plaintext payload
-    under a `"message"` key for confidentiality; the reader hoists it
-    out so callers read `e.message` instead of `e.fields["message"]`.
+    The writer encrypts the value into the plaintext payload under a
+    ``"message"`` key for confidentiality; the reader hoists it out so
+    callers read ``e.message`` instead of ``e.fields["message"]``.
+
+    Note (DX review #3 — 0.4.2a2): positional messages were dropped
+    in favour of the explicit ``message=`` kwarg. ``tn.info("evt",
+    "free text")`` now raises ``TypeError`` instead of silently
+    folding the positional into ``message``.
     """
     _setup(tmp_path)
-    tn.info("auth.login", "alice signed in from web", user_id="u123")
+    tn.info("auth.login", message="alice signed in from web", user_id="u123")
     e = next(e for e in tn.read() if e.event_type == "auth.login")
     assert e.message == "alice signed in from web"
     assert "message" not in e.fields
     assert e.fields == {"user_id": "u123"}
 
 
-def test_multiple_positionals_join_into_message(tmp_path):
-    """Multiple positionals after the event_type are joined with a space
-    and surface as one `entry.message`. Mirrors stdlib `logging.info`."""
+def test_extra_positionals_raise_typeerror(tmp_path):
+    """DX review #3 — extra positionals after the event_type are
+    rejected with a TypeError that tells the caller how to migrate
+    (use kwargs for structured data, or ``message=`` for free text)."""
+    import pytest
     _setup(tmp_path)
-    tn.info("debug.note", "short note", "second positional", tag="x")
-    e = next(e for e in tn.read() if e.event_type == "debug.note")
-    assert e.message == "short note second positional"
-    assert "message" not in e.fields
-    assert e.fields == {"tag": "x"}
+    with pytest.raises(TypeError, match=r"extra positional argument"):
+        tn.info("debug.note", "short note", "second positional", tag="x")
 
 
 # ---------------------------------------------------------------------

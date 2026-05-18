@@ -13,14 +13,30 @@ import type {
 } from "../core/results.js";
 import type { AdminState, RecipientEntry } from "../core/types.js";
 import type { AdminStateCache } from "./cache.js";
+import { resolveRecipient, type RecipientInput } from "./recipient.js";
 
 export interface AddRecipientOptions {
+  /**
+   * Polymorphic recipient. Accepts a DID string, a 32-byte X25519 public key
+   * (jwe), a contacts.yaml row dict, or an AddRecipientResult-like object.
+   * Explicit `recipientDid` / `publicKey` fields on this options object
+   * override the resolved values.
+   */
+  recipient?: RecipientInput;
   recipientDid?: string;
+  publicKey?: Uint8Array;
   outKitPath?: string;
   cipher?: "btn" | "jwe";
 }
 
 export interface RevokeRecipientOptions {
+  /**
+   * Polymorphic recipient. Accepts a DID string, an int leafIndex, an
+   * AddRecipientResult from the matching addRecipient call, or a
+   * contacts.yaml row dict. Explicit `leafIndex` / `recipientDid` fields
+   * override the resolved values.
+   */
+  recipient?: RecipientInput;
   leafIndex?: number;
   recipientDid?: string;
 }
@@ -29,6 +45,17 @@ export class AdminNamespace {
   constructor(private readonly _rt: NodeRuntime) {}
 
   async addRecipient(group: string, opts: AddRecipientOptions): Promise<AddRecipientResult> {
+    // Polymorphic recipient — explicit kwargs win over resolved fields.
+    let recipientDid = opts.recipientDid;
+    // publicKey is captured for future jwe support (TS jwe-add lands later);
+    // for btn the leaf mint doesn't consume it.
+    if (opts.recipient !== undefined) {
+      const resolved = resolveRecipient(opts.recipient);
+      if (recipientDid === undefined && resolved.recipientDid !== null) {
+        recipientDid = resolved.recipientDid;
+      }
+    }
+
     // Default outKitPath: keystore subdir, named <group>.btn.mykit (matches Python).
     const outKitPath =
       opts.outKitPath ?? join(this._rt.config.keystorePath, `${group}.btn.mykit`);
@@ -44,7 +71,7 @@ export class AdminNamespace {
     }
 
     // Delegate to NodeRuntime: mint kit, write to disk, emit tn.recipient.added.
-    const leafIndex = this._rt.addRecipient(group, outKitPath, opts.recipientDid);
+    const leafIndex = this._rt.addRecipient(group, outKitPath, recipientDid);
 
     // Hash the kit file to compute kitSha256 for the result.
     const kitBytes = readFileSync(outKitPath);
@@ -55,7 +82,7 @@ export class AdminNamespace {
       group,
       cipher,
       leafIndex,
-      recipientDid: opts.recipientDid ?? null,
+      recipientDid: recipientDid ?? null,
       kitPath: outKitPath,
       kitSha256,
       mintedAt,
@@ -66,22 +93,35 @@ export class AdminNamespace {
     group: string,
     opts: RevokeRecipientOptions,
   ): Promise<RevokeRecipientResult> {
-    if (opts.leafIndex === undefined && !opts.recipientDid) {
+    // Polymorphic recipient — explicit kwargs win over resolved fields.
+    let leafIndex = opts.leafIndex;
+    let recipientDid = opts.recipientDid;
+    if (opts.recipient !== undefined) {
+      const resolved = resolveRecipient(opts.recipient);
+      if (leafIndex === undefined && resolved.leafIndex !== null) {
+        leafIndex = resolved.leafIndex;
+      }
+      if (recipientDid === undefined && resolved.recipientDid !== null) {
+        recipientDid = resolved.recipientDid;
+      }
+    }
+
+    if (leafIndex === undefined && !recipientDid) {
       throw new Error(
-        "tn.admin.revokeRecipient: must specify either leafIndex or recipientDid",
+        "tn.admin.revokeRecipient: must specify either leafIndex, recipientDid, or recipient",
       );
     }
     const cipher = (this._rt.config.groups.get(group)?.cipher ?? "btn") as "btn" | "jwe";
-    const leafIndex =
-      opts.leafIndex !== undefined
-        ? opts.leafIndex
-        : this._resolveLeafForDid(group, opts.recipientDid!);
-    this._rt.revokeRecipient(group, leafIndex, opts.recipientDid);
+    const finalLeafIndex =
+      leafIndex !== undefined
+        ? leafIndex
+        : this._resolveLeafForDid(group, recipientDid!);
+    this._rt.revokeRecipient(group, finalLeafIndex, recipientDid);
     return {
       group,
       cipher,
-      leafIndex,
-      recipientDid: opts.recipientDid ?? null,
+      leafIndex: finalLeafIndex,
+      recipientDid: recipientDid ?? null,
       revokedAt: new Date().toISOString(),
       newKitPath: null, // btn: no rotation
       newKitSha256: null,

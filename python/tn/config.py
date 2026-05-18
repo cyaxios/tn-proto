@@ -273,6 +273,11 @@ class LoadedConfig:
     linked_vault: str | None = None  # e.g. "https://vault.tn-proto.org"
     linked_project_id: str | None = None  # vault-side project id
     sync_logs: bool = False  # §9.4 option B: also sync ndjson logs
+    # DX review #6: ``ceremony.sign`` mirrored on the loaded config so
+    # readers can decide whether to verify signatures. False means the
+    # writer chose to skip Ed25519 signing (profile=telemetry/stdout);
+    # signature-check on read is then meaningless and would always fail.
+    sign: bool = True
     # Where ``tn.*`` admin envelopes are written. The canonical attribute is
     # ``admin_log_location``; ``protocol_events_location`` is kept as a
     # read-only property (below) for callers that haven't migrated yet.
@@ -457,6 +462,7 @@ def create_fresh(
     keystore_dir: Path | None = None,
     log_path: Path | None = None,
     admin_log_path: Path | None = None,
+    link: bool | None = None,
 ) -> LoadedConfig:
     """Generate a fresh ceremony: device key + default group.
 
@@ -613,6 +619,15 @@ def create_fresh(
 
     from .vault_client import DEFAULT_VAULT_URL
 
+    # DX review #5: ``link=False`` produces an unlinked (offline)
+    # ceremony — no ``linked_vault`` URL, ``mode: local``. ``link=True``
+    # or ``link=None`` (the legacy default) preserves the linked
+    # behaviour. Callers that want an air-gap deploy now have a
+    # documented init-time knob; the kwarg used to silently no-op.
+    _is_unlinked = link is False
+    _yaml_mode = "local" if _is_unlinked else "linked"
+    _yaml_vault_url = "" if _is_unlinked else DEFAULT_VAULT_URL
+
     doc = {
         # All ceremony defaults are written explicitly so the yaml is a
         # complete, auditable contract — every behavior the runtime
@@ -627,8 +642,8 @@ def create_fresh(
             # vault verb runs — ``mode: linked`` only gates which
             # operations are permitted, not whether they fire. Set
             # ``mode: local`` to opt out and operate fully offline.
-            "mode": "linked",
-            "linked_vault": DEFAULT_VAULT_URL,
+            "mode": _yaml_mode,
+            "linked_vault": _yaml_vault_url,
             "linked_project_id": "",
             "sync_logs": False,
             "cipher": cipher,
@@ -1038,7 +1053,7 @@ class _CeremonySettings:
     """Validated ceremony-block scalars resolved from yaml.
 
     Bundled into one return value so ``load()`` doesn't have to juggle a
-    6-tuple of unrelated strings.
+    7-tuple of unrelated strings.
     """
 
     ceremony_id: str
@@ -1047,6 +1062,11 @@ class _CeremonySettings:
     linked_vault: str | None
     linked_project_id: str | None
     sync_logs: bool
+    # DX review #6: surface ``ceremony.sign`` on the loaded config so
+    # ``tn.read(verify=True)`` can consult it. Yamls written with
+    # ``sign: false`` ship empty signatures; the reader skips the
+    # signature check rather than raising a guaranteed VerifyError.
+    sign: bool
 
 
 def _validate_load_doc_structure(yaml_path: Path, doc: Any) -> None:
@@ -1115,6 +1135,9 @@ def _resolve_ceremony_settings(
         linked_vault=linked_vault,
         linked_project_id=linked_project_id,
         sync_logs=bool(ceremony_block.get("sync_logs", False)),
+        # Default ``sign: True`` keeps pre-DX-fix yamls (which never
+        # carried this key) verifying as before.
+        sign=bool(ceremony_block.get("sign", True)),
     )
 
 
@@ -1316,6 +1339,7 @@ def load(yaml_path: Path) -> LoadedConfig:
         linked_vault=settings.linked_vault,
         linked_project_id=settings.linked_project_id,
         sync_logs=settings.sync_logs,
+        sign=settings.sign,
         admin_log_location=pel,
         log_path=log_path,
     )

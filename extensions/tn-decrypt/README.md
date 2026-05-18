@@ -1,75 +1,110 @@
 # TN Decrypt (Chrome extension)
 
 Decrypts TN envelopes in the page you're looking at. Your dashboard vendor
-(Datadog, Splunk, Kibana, webmail, any random HTML rendering of an ndjson
-log) stores the ciphertext as opaque text. This extension scans the DOM,
-finds the envelopes, asks its service worker to decrypt each group payload
-using a kit you've imported, and rewrites the page in place. Keys stay on
-this machine; only the active browser session holds them in memory.
+(Datadog, Splunk, Kibana, webmail, any random HTML rendering of an
+ndjson log) stores the ciphertext as opaque text. This extension scans
+the DOM, finds the envelopes, asks its service worker to decrypt each
+group payload using a kit you've imported, and rewrites the page in
+place. Keys stay on this machine; only the active browser session
+holds them in memory.
+
+> **Alpha.** This extension is shipped unsigned during the TN alpha.
+> It must be loaded into Chrome via developer mode (`Load unpacked`).
+> A Chrome Web Store listing comes once the protocol leaves alpha.
 
 ## Why this exists
 
-Vendor tools do not have per-field decryption. They ingest bytes and index
-what they see. Running a TN reader kit inside the browser makes the same
-page legible only for people who hold the kit, and stays opaque for
-everyone else looking over the same shoulder.
+Vendor tools do not have per-field decryption. They ingest bytes and
+index what they see. Running a TN reader kit inside the browser makes
+the same page legible only for people who hold the kit, and stays
+opaque for everyone else looking over the same shoulder.
 
 ## How it maps to the Rust core
 
-Uses the exact same `tn-wasm` build (web target) that the Python SDK and
-Node CLI wrap. Decryption goes through the shared `btn::ReaderKit`
+Uses the exact same `tn-wasm` build (web target) that the Python SDK
+and Node CLI wrap. Decryption goes through the shared `btn::ReaderKit`
 implementation. There is no JS reimplementation of any crypto primitive.
 
-## Install for development
+---
 
-1. Build the SDK and vendor it into the extension. From the repo root:
+## Install (users)
 
-   ```
-   bash tools/build-extension.sh
-   ```
+This is the path for anyone who just wants to try the extension. No
+build tooling required.
 
-   That compiles `ts-sdk/` and copies `dist/core/encoding.js` +
-   `dist/core/emk.js` into `extensions/tn-decrypt/vendor/sdk-core/`. After
-   it runs, this directory has no out-of-tree imports — it's complete on
-   its own.
-
-2. (Only if `wasm/tn_wasm.js` and `wasm/tn_wasm_bg.wasm` are missing or
-   stale.) Build `tn-wasm` for the web target:
+1. Clone or download this repository:
 
    ```
-   cd crypto/tn-wasm
-   wasm-pack build --target web --release --out-dir pkg-web
-   cp pkg-web/tn_wasm.js     ../../extensions/tn-decrypt/wasm/
-   cp pkg-web/tn_wasm_bg.wasm ../../extensions/tn-decrypt/wasm/
+   git clone https://github.com/cyaxios/tn-proto
    ```
 
-3. In Chrome: `chrome://extensions`, turn on **Developer mode**, click
-   **Load unpacked**, pick this directory.
+   (Or download a release archive from the GitHub releases page if you
+   prefer not to clone.)
 
-4. Click the extension icon, go to **Manage keystore**, import a plaintext
-   keystore bundle (from tnproto-org's "Coming from another device?" step
-   or any `*.keystore.json` file you produced with `tn-js` or the Python
-   SDK). Pick a passphrase for this extension's stored copy.
+2. In Chrome, open `chrome://extensions`, turn on **Developer mode**
+   (top-right toggle), click **Load unpacked**, and select the
+   `extensions/tn-decrypt/` directory from your clone.
 
-5. Click the extension icon again and **Unlock** with that passphrase.
+3. Click the extension icon → **Manage keystore** → import a plaintext
+   keystore bundle (from tnproto-org's "Coming from another device?"
+   step, or any `*.keystore.json` file you produced with `tn-js` or
+   the Python SDK). Pick a passphrase for this extension's stored copy.
 
-6. Open any page that displays a TN envelope. Entries with ciphertexts
-   the imported kit can open are highlighted with a green `TN` badge and
-   the decrypted fields are shown inline. Entries from other publishers
-   you don't hold kits for are left alone.
+4. Click the extension icon again → **Unlock** with that passphrase.
+
+5. Open any page that displays a TN envelope. Entries with ciphertexts
+   the imported kit can open are highlighted with a green `TN` badge
+   and the decrypted fields are shown inline. Entries from other
+   publishers you don't hold kits for are left alone.
+
+The repo ships the prebuilt `vendor/sdk-core/` JS and the prebuilt
+`wasm/tn_wasm*` artifacts directly so step 1 is all you need. If you
+ever see a console error about a missing vendor file, run the build
+step from the next section.
+
+---
+
+## Build (contributors)
+
+You only need this section if you're modifying the SDK / wasm / extension
+code itself. Users following the install section above can skip it.
+
+The build script does both pieces in one shot:
+
+```
+bash tools/build-extension.sh
+```
+
+This compiles `ts-sdk/`, copies `dist/core/encoding.js` +
+`dist/core/emk.js` into `extensions/tn-decrypt/vendor/sdk-core/`,
+builds `crypto/tn-wasm` for the web target with `wasm-pack`, and
+copies `tn_wasm.js` + `tn_wasm_bg.wasm` into
+`extensions/tn-decrypt/wasm/`. After it runs, this directory has no
+out-of-tree imports — it's complete on its own and ready to load
+unpacked.
+
+Requirements for the build script:
+
+- Node 20+ and `npm` for the TS compile step
+- Rust toolchain + `wasm-pack` (`cargo install wasm-pack`) for the
+  WASM step
+
+Reload the extension on `chrome://extensions` after rebuilding to pick
+up changes.
+
+---
 
 ## Test page
 
-A minimal fixture lives at `test-page.html` in this directory. Serve it
-locally (`python -m http.server 8080`) or open it as `file://`; it embeds
-one decrypted envelope in a `<pre>` block the way Datadog would show a
-log line. With the extension unlocked, the group payload will flip from
-a base64 blob to the decrypted fields.
+A minimal fixture lives at `test-page.html` in this directory. Serve
+it locally (`python -m http.server 8080`) or open it as `file://`; it
+embeds one envelope the way Datadog would show a log line. With the
+extension unlocked, the group payload will flip from a base64 blob to
+the decrypted fields.
 
 ## Scope
 
-- Reads btn ciphertexts. JWE groups would need Rust JWE first (see the
-  TN TS-client handoff doc).
+- Reads btn ciphertexts. JWE groups would need Rust JWE first.
 - Does not send anything over the network. No telemetry.
 - Does not write to the page's forms or inputs; purely visual.
 - Treats `ciphertext` in JSON contexts as the extraction point. More

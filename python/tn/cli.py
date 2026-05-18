@@ -1885,6 +1885,43 @@ def cmd_streams(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validate_resolve_keystore_pub(
+    *,
+    yaml_path: Path,
+    yaml_doc: dict,
+    project_dir: Path,  # noqa: ARG001 — kept for symmetry / future absolute paths
+) -> Path | None:
+    """Resolve the path to ``local.public`` for the ceremony at
+    ``yaml_path``. Used by ``cmd_validate`` to compare yaml.me.did
+    against the keystore's recorded did:key.
+
+    Resolution order:
+
+    1. ``yaml_doc['keystore']['path']`` if present (relative to the
+       yaml's directory) — named streams point at default's keystore
+       via this field.
+    2. ``<yaml_dir>/keys/local.public`` fallback (the default
+       ceremony layout).
+
+    Returns ``None`` if neither resolves to a path that could
+    plausibly hold a keystore (caller can ignore this ceremony's
+    DID-consistency check).
+    """
+    yaml_dir = yaml_path.parent
+    keystore_section = yaml_doc.get("keystore") or {}
+    raw_path = keystore_section.get("path") if isinstance(
+        keystore_section, dict
+    ) else None
+    if isinstance(raw_path, str) and raw_path:
+        # Stream yaml relative paths are interpreted relative to the
+        # stream's own yaml directory (matches what the runtime does).
+        keystore_dir = (yaml_dir / raw_path).resolve()
+    else:
+        keystore_dir = yaml_dir / "keys"
+    pub = keystore_dir / "local.public"
+    return pub
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     """Validate the project's ``.tn/`` configuration tree.
 
@@ -1893,6 +1930,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
       - every stamped ceremony.profile is in the SDK catalog
       - the default ceremony exists if any others do (identity must
         live at the project root)
+      - the on-disk ``me.did`` in each ``tn.yaml`` matches the
+        ``keys/local.public`` did:key for that ceremony (the basic
+        keystore-yaml consistency invariant — DX review #2)
 
     Returns 0 if everything is well-formed; 1 with errors printed
     to stderr otherwise. Suitable for use in a pre-commit hook or
@@ -1950,6 +1990,37 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 f"{yaml_path}: unknown profile {profile!r}; "
                 f"catalog: {list(_profiles.all_profile_names())}"
             )
+
+        # DX review #2: catch the keystore/yaml DID divergence that
+        # `tn.init` previously surfaced as `ValueError: keystore DID
+        # ... does not match yaml me.did`. The validator owes its
+        # callers this check; it is the basic consistency invariant.
+        keystore_pub = _validate_resolve_keystore_pub(
+            yaml_path=yaml_path,
+            yaml_doc=doc,
+            project_dir=project_dir,
+        )
+        if keystore_pub is not None and keystore_pub.is_file():
+            try:
+                derived_did = keystore_pub.read_text(
+                    encoding="ascii"
+                ).strip()
+            except OSError as exc:
+                errors.append(
+                    f"{yaml_path}: could not read keystore "
+                    f"{keystore_pub}: {exc}"
+                )
+                continue
+            yaml_did = (doc.get("me") or {}).get("did")
+            if yaml_did and derived_did and yaml_did != derived_did:
+                errors.append(
+                    f"{yaml_path}: yaml me.did does not match keystore. "
+                    f"yaml me.did = {yaml_did}; "
+                    f"keys/local.public = {derived_did}. "
+                    "Reseat one to match the other before any further "
+                    "writes — the runtime will refuse to load this "
+                    "ceremony otherwise."
+                )
 
     if warnings:
         for w in warnings:

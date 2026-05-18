@@ -245,6 +245,26 @@ class DispatchRuntime:
         else:
             self._rt = None
 
+    def reload(self) -> None:
+        """Re-init the Rust runtime against the current yaml on disk.
+
+        DX review #8: ``tn.admin.ensure_group`` mutates the yaml at
+        runtime to add a new group. The Rust runtime caches its view
+        of groups + routing at init time, so without an explicit
+        reload, post-ensure_group emits would route only through the
+        groups the runtime saw originally. This method re-reads the
+        yaml (resolving ``extends`` if present) and rebinds
+        ``self._rt`` so subsequent emits see the new group.
+
+        Cheap to call: the Rust runtime's init path loads existing
+        keystore material (does NOT mint fresh keys when the yaml's
+        ceremony already exists on disk). Pre-existing chain state
+        is preserved.
+        """
+        if not self._use_rust:
+            return
+        self._rt = _RustRuntime.init(str(self._yaml_for_rust()))
+
     def _yaml_for_rust(self) -> Path:
         """Return a yaml path the Rust runtime can load.
 

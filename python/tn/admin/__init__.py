@@ -67,8 +67,12 @@ def ensure_group(
     return unchanged. Otherwise generate a fresh cipher instance + pool,
     write key files, and add `groups:` + `fields:` entries to tn.yaml.
 
-    After calling this, the caller should `tn.flush_and_close()` + reopen
-    with `tn.init()` so the logger picks up the new group.
+    Hot-reload behaviour (DX review #8): when the in-process logger
+    runtime is bound, ``ensure_group`` reloads its view of the yaml
+    after the write so subsequent ``tn.info(...)`` calls in the same
+    process see the new group's routing. Prior to 0.4.2a2 callers
+    had to ``tn.flush_and_close()`` + ``tn.init()`` to pick up the
+    change.
     """
     internal_cipher = cipher if cipher is not None else cfg.cipher_name
     if internal_cipher not in ("jwe", "btn"):
@@ -148,6 +152,27 @@ def ensure_group(
             )
 
     _maybe_autosync(cfg)
+
+    # DX review #8: rebind the live runtime's view of the yaml so the
+    # next emit routes through the new group without forcing a full
+    # flush_and_close + tn.init round-trip. Best-effort; a failure
+    # here doesn't undo the yaml + keystore writes above, and the
+    # next process will load the new state fine.
+    try:
+        from .. import logger as _lg_reload
+
+        _lg_reload.reload_from_yaml()
+    except Exception:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("tn.admin").warning(
+            "ensure_group: live-runtime reload failed; group=%s is on "
+            "disk but in-process routing may be stale. Run "
+            "`tn.flush_and_close(); tn.init()` to refresh.",
+            group,
+            exc_info=True,
+        )
+
     return cfg
 
 
@@ -710,6 +735,114 @@ def _yaml_rotate_group(
 
 
 @dataclass
+class _ResolvedRecipient:
+    """Canonical fields extracted from a polymorphic `recipient=` value."""
+
+    recipient_did: str | None = None
+    leaf_index: int | None = None
+    public_key: bytes | None = None
+
+
+def _resolve_recipient(value: Any) -> _ResolvedRecipient:
+    """Normalize a polymorphic recipient value into canonical fields.
+
+    Accepts:
+      - ``str`` starting with ``did:`` -> ``recipient_did``
+      - ``int`` (non-negative) -> ``leaf_index`` (btn only)
+      - 32-byte ``bytes`` -> ``public_key`` (jwe X25519)
+      - object with ``.recipient_did`` / ``.leaf_index`` / ``.public_key``
+        attributes (e.g. ``AddRecipientResult``, a contacts.yaml row,
+        any Contact-like)
+      - ``dict`` with keys ``recipient_did``/``did``, ``leaf_index``,
+        ``public_key``/``x25519_pub_b64`` (b64 decoded)
+
+    Explicit keyword arguments to ``add_recipient`` / ``revoke_recipient``
+    take precedence over fields resolved here.
+    """
+    out = _ResolvedRecipient()
+    if isinstance(value, bool):
+        raise TypeError(
+            "tn.admin: recipient cannot be a bool (use an int leaf_index)"
+        )
+    if isinstance(value, str):
+        if not value.startswith("did:"):
+            raise ValueError(
+                f"tn.admin: recipient string must be a DID (got {value!r})"
+            )
+        out.recipient_did = value
+        return out
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(
+                f"tn.admin: leaf_index must be non-negative (got {value})"
+            )
+        out.leaf_index = value
+        return out
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        b = bytes(value)
+        if len(b) != 32:
+            raise ValueError(
+                "tn.admin: raw recipient bytes must be a 32-byte X25519 "
+                f"public key (got len={len(b)})"
+            )
+        out.public_key = b
+        return out
+    if isinstance(value, dict):
+        did = value.get("recipient_did") or value.get("did")
+        leaf = value.get("leaf_index")
+        pk = value.get("public_key")
+        if pk is None and value.get("x25519_pub_b64") is not None:
+            import base64 as _b64
+
+            pk = _b64.b64decode(value["x25519_pub_b64"])
+        if did is None and leaf is None and pk is None:
+            raise ValueError(
+                "tn.admin: recipient dict must contain at least one of "
+                "recipient_did/did, leaf_index, public_key/x25519_pub_b64"
+            )
+        out.recipient_did = did
+        out.leaf_index = leaf
+        out.public_key = pk
+        return out
+    did = getattr(value, "recipient_did", None)
+    leaf = getattr(value, "leaf_index", None)
+    pk = getattr(value, "public_key", None)
+    if did is None and leaf is None and pk is None:
+        raise TypeError(
+            f"tn.admin: unsupported recipient type {type(value).__name__}; "
+            "expected DID str, int leaf_index, 32-byte public_key bytes, "
+            "AddRecipientResult-like, or dict"
+        )
+    out.recipient_did = did
+    out.leaf_index = leaf
+    out.public_key = pk
+    return out
+
+
+def _resolve_btn_did_to_leaf(group: str, recipient_did: str) -> int:
+    """Look up the active leaf_index for ``recipient_did`` in a btn ``group``.
+
+    Errors on zero matches; errors on ambiguity if a DID was somehow
+    minted onto multiple active leaves (shouldn't happen, but guard it).
+    """
+    rows = recipients(group, include_revoked=False)
+    matches = [r for r in rows if r.get("recipient_did") == recipient_did]
+    if not matches:
+        raise ValueError(
+            f"tn.admin.revoke_recipient: no active recipient with "
+            f"recipient_did={recipient_did!r} in group {group!r}"
+        )
+    if len(matches) > 1:
+        leaves = [m["leaf_index"] for m in matches]
+        raise ValueError(
+            f"tn.admin.revoke_recipient: recipient_did={recipient_did!r} "
+            f"resolves to multiple leaves {leaves} in group {group!r}; "
+            "pass leaf_index= explicitly"
+        )
+    return int(matches[0]["leaf_index"])
+
+
+@dataclass
 class AddRecipientResult:
     """Structured return from `tn.admin.add_recipient`.
 
@@ -726,6 +859,7 @@ class AddRecipientResult:
 def add_recipient(
     group: str,
     *,
+    recipient: Any | None = None,
     recipient_did: str | None = None,
     out_path: Path | str | None = None,
     public_key: bytes | None = None,
@@ -744,7 +878,21 @@ def add_recipient(
     `tn.recipient.added` admin event's metadata).
 
     `cfg` defaults to the runtime singleton's cfg.
+
+    The polymorphic ``recipient=`` keyword accepts a DID string, a
+    32-byte X25519 public key (jwe), an ``AddRecipientResult``, a
+    contacts.yaml-style dict, or any object exposing
+    ``recipient_did`` / ``public_key`` attributes. Explicit
+    ``recipient_did=`` / ``public_key=`` kwargs override the resolved
+    fields.
     """
+    if recipient is not None:
+        resolved = _resolve_recipient(recipient)
+        if recipient_did is None:
+            recipient_did = resolved.recipient_did
+        if public_key is None:
+            public_key = resolved.public_key
+
     if cfg is None:
         from .. import current_config
 
@@ -831,11 +979,30 @@ class RevokeRecipientResult:
 def revoke_recipient(
     group: str,
     *,
+    recipient: Any | None = None,
     leaf_index: int | None = None,
     recipient_did: str | None = None,
     cfg: Any | None = None,
 ) -> RevokeRecipientResult:
-    """Revoke a recipient. btn: leaf_index; JWE: recipient_did."""
+    """Revoke a recipient.
+
+    btn: pass ``leaf_index`` *or* ``recipient_did`` (the did is resolved
+    to its active leaf via the admin log).
+    JWE: pass ``recipient_did``.
+
+    ``recipient=`` is the polymorphic shortcut — accepts a DID str, an
+    int leaf, an ``AddRecipientResult`` from the matching add call, a
+    contacts.yaml row dict, or any object with
+    ``recipient_did`` / ``leaf_index`` attrs. Explicit ``leaf_index=`` /
+    ``recipient_did=`` kwargs override the resolved fields.
+    """
+    if recipient is not None:
+        resolved = _resolve_recipient(recipient)
+        if leaf_index is None:
+            leaf_index = resolved.leaf_index
+        if recipient_did is None:
+            recipient_did = resolved.recipient_did
+
     if cfg is None:
         from .. import current_config
 
@@ -847,15 +1014,15 @@ def revoke_recipient(
     cipher = group_spec.cipher.name
 
     if cipher == "btn":
+        if leaf_index is None and recipient_did is None:
+            raise ValueError(
+                "tn.admin.revoke_recipient: btn group requires leaf_index "
+                "or recipient_did."
+            )
         if leaf_index is None:
-            raise ValueError(
-                "tn.admin.revoke_recipient: leaf_index required for btn group."
-            )
-        if recipient_did is not None:
-            raise ValueError(
-                "tn.admin.revoke_recipient: recipient_did is JWE-only; "
-                "for btn use leaf_index."
-            )
+            # recipient_did is not None here by the check above.
+            assert recipient_did is not None
+            leaf_index = _resolve_btn_did_to_leaf(group, recipient_did)
         # Inline the btn-runtime revoke flow (was tn.admin_revoke_recipient
         # in pre-Stage-C; that flat alias is gone in 0.2.0).
         from .. import _maybe_autoinit_load_only, _refresh_admin_cache_if_present, _require_dispatch

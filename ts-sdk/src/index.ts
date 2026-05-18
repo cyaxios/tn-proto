@@ -30,6 +30,18 @@ export {
   SameCoordinateForkError,
 } from "./core/errors.js";
 
+// Polymorphic recipient helpers for tn.admin.{addRecipient,revokeRecipient}.
+// Matches the Python `recipient=` resolver in tn.admin.
+export { did, leafIndex, publicKeyBytes, resolveRecipient } from "./admin/recipient.js";
+export type {
+  Did,
+  LeafIndex,
+  PublicKeyBytes,
+  RecipientInput,
+  RecipientLike,
+  ResolvedRecipient,
+} from "./admin/recipient.js";
+
 // 0.3.0 surface — Tn is the public class. Bare-function exports of the
 // process-global toggles let callers do `import { setLevel } from
 // "@tnproto/sdk"` without needing the class.

@@ -279,24 +279,43 @@ class TN:
         # event's level is *below* the threshold. ``tn.log`` (level
         # ``""``) always emits regardless.
         thresholds = {"debug": 10, "info": 20, "warning": 30, "error": 40}
+        # DX review #3: reject extra positionals loudly. Previously the
+        # handle silently folded them into a joined ``message`` string,
+        # destroying the caller's structured intent. The fail-loud
+        # message tells callers exactly how to migrate.
+        if args:
+            verb = level if level else "log"
+            raise TypeError(
+                f"TN.{verb}(event_type, **fields) — got {len(args)} extra "
+                f"positional argument(s) after event_type: {args!r}. "
+                f"For structured data use kwargs: "
+                f"tn.{verb}('evt', user='alice', amount=4999). "
+                f"For a free-text message use the 'message' kwarg: "
+                f"tn.{verb}('evt', message='hello world')."
+            )
         if level in thresholds:
             if thresholds[level] < _session._log_level_threshold:
                 return
-        # Stdlib-style "absorb positional message" — same as
-        # ``tn.emit._absorb_positional_message``.
-        if args:
-            if "message" in fields:
-                fields["message"] = (
-                    str(fields["message"]) + " " + " ".join(str(a) for a in args)
-                )
-            else:
-                fields["message"] = " ".join(str(a) for a in args)
         _emit_via(self._get_runtime(), level, event_type, fields, _resolve_sign(None))
 
-    def log(self, event_type: str, *args: Any, **fields: Any) -> None:
-        """Severity-less event on this stream. Routes through this
-        TN's per-instance runtime — no global-singleton rebinding."""
-        self._emit("", event_type, args, fields)
+    def log(
+        self,
+        event_type: str,
+        *args: Any,
+        level: str = "",
+        **fields: Any,
+    ) -> None:
+        """Emit an entry on this stream with a caller-chosen level.
+
+        Default level is ``""`` (severity-less). DX review #13: the
+        ``level=`` kwarg lets callers stamp non-standard levels
+        (``"trace"``, ``"audit"``, foreign-logger spellings) on the
+        per-instance handle without giving up the explicit verb
+        shape. For the common four levels, use ``.info`` / ``.warning``
+        / ``.error`` / ``.debug`` — those short-circuit below the
+        active threshold; ``.log`` always emits.
+        """
+        self._emit(level, event_type, args, fields)
 
     def debug(self, event_type: str, *args: Any, **fields: Any) -> None:
         self._emit("debug", event_type, args, fields)

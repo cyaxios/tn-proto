@@ -44,10 +44,69 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, overload
 
 from ._entry import Entry, VerifyError
+
+
+# ---------------------------------------------------------------------
+# Public read-side observability primitives (DX review #11)
+# ---------------------------------------------------------------------
+
+
+@dataclass
+class ReadStats:
+    """Per-call accounting of what ``tn.read`` yielded vs dropped.
+
+    Attached as ``.stats`` to the iterator that ``tn.read`` returns so
+    callers can introspect post-iteration:
+
+        result = tn.read(verify="skip")
+        for e in result:
+            ...
+        if result.stats.skipped_verify > 0:
+            log.warning("%d entries failed integrity", result.stats.skipped_verify)
+
+    Counters tick incrementally during iteration, so partial consumption
+    (break out of the loop early) shows partial counts. The default
+    ``verify=False`` mode never populates ``skipped_*`` — parse errors
+    raise as today.
+    """
+
+    yielded: int = 0
+    skipped_parse: int = 0
+    skipped_verify: int = 0
+    skipped_reasons: list[str] = field(default_factory=list)
+
+
+class _ReadIterator:
+    """Iterator wrapper that exposes ``.stats`` alongside the
+    generator protocol. Returned by ``tn.read``; transparent to
+    ``for e in tn.read(): ...``.
+    """
+
+    def __init__(
+        self,
+        gen: Iterator[Any],
+        stats: ReadStats,
+    ) -> None:
+        self._gen = gen
+        self.stats = stats
+
+    def __iter__(self) -> _ReadIterator:
+        return self
+
+    def __next__(self) -> Any:
+        return next(self._gen)
+
+    # Generator-style close so callers using ``yield from`` or
+    # itertools-style cleanup paths continue to work.
+    def close(self) -> None:
+        close = getattr(self._gen, "close", None)
+        if close is not None:
+            close()
 
 # ---------------------------------------------------------------------
 # Internal helpers
@@ -86,7 +145,21 @@ def _emit_tampered_row(envelope: dict[str, Any], reasons: list[str]) -> None:
         pass
 
 
-def _check_verify_kwarg(verify: bool | str) -> None:
+def _check_verify_kwarg(verify: bool | Literal["skip", "raise"]) -> None:
+    """Validate the ``verify`` kwarg.
+
+    Legal values:
+      * ``False`` (default) — don't verify; parse errors raise.
+      * ``True`` / ``'raise'`` — verify; raise on first failure
+        (synonyms — ``True`` is the idiomatic Python form,
+        ``'raise'`` is the explicit string form).
+      * ``'skip'`` — verify; drop failures; populate ``.stats`` /
+        fire ``on_skip``.
+
+    DX review #17: the type is ``bool | Literal["skip", "raise"]``
+    so IDE autocomplete suggests the legal string values. The
+    runtime check still accepts the same four values as before.
+    """
     if verify in (False, True, "skip", "raise"):
         return
     raise ValueError(
@@ -94,7 +167,13 @@ def _check_verify_kwarg(verify: bool | str) -> None:
     )
 
 
-def _wrap_parse_errors(triple_iter, verify):
+def _wrap_parse_errors(
+    triple_iter,
+    verify,
+    *,
+    on_skip: Callable[[dict[str, Any], str], None] | None = None,
+    stats: ReadStats | None = None,
+):
     """Wrap a triple iterator so parser-level errors (malformed ciphertext,
     unparseable JSON, etc.) follow the same verify policy as
     integrity-check failures.
@@ -108,17 +187,30 @@ def _wrap_parse_errors(triple_iter, verify):
         except StopIteration:
             return
         except Exception as exc:
+            reason = f"parse: {type(exc).__name__}: {exc}"
+            tampered_env = {"event_type": "<parse-error>"}
+            # DX review #11: notify observer (logging hook / metric)
+            # before any irreversible action (skip / raise).
+            if on_skip is not None:
+                try:
+                    on_skip(tampered_env, reason)
+                except Exception:  # noqa: BLE001 — observer must not break the read
+                    import logging as _logging
+                    _logging.getLogger("tn.read").warning(
+                        "on_skip callback raised; continuing.",
+                        exc_info=True,
+                    )
+            if stats is not None:
+                stats.skipped_parse += 1
+                stats.skipped_reasons.append(reason)
             if verify == "skip":
-                _emit_tampered_row(
-                    {"event_type": "<parse-error>"},
-                    [f"parse: {type(exc).__name__}: {exc}"],
-                )
+                _emit_tampered_row(tampered_env, [reason])
                 continue
             if verify in (True, "raise"):
                 raise VerifyError(
                     sequence=0,
                     event_type="<parse-error>",
-                    failed_checks=[f"parse: {type(exc).__name__}: {exc}"],
+                    failed_checks=[reason],
                 ) from exc
             # verify=False: malformed bytes are still bytes; let the
             # caller see the original exception so they can debug.
@@ -135,34 +227,37 @@ def _wrap_parse_errors(triple_iter, verify):
 def read(
     *,
     where: Callable[[Any], bool] | None = ...,
-    verify: bool | str = ...,
+    verify: bool | Literal["skip", "raise"] = ...,
     raw: Literal[False] = ...,
     log: str | Path | None = ...,
     as_recipient: str | Path | None = ...,
     group: str = ...,
     all_runs: bool = ...,
-) -> Iterator[Entry]: ...
+    on_skip: Callable[[dict[str, Any], str], None] | None = ...,
+) -> _ReadIterator: ...
 @overload
 def read(
     *,
     where: Callable[[Any], bool] | None = ...,
-    verify: bool | str = ...,
+    verify: bool | Literal["skip", "raise"] = ...,
     raw: Literal[True],
     log: str | Path | None = ...,
     as_recipient: str | Path | None = ...,
     group: str = ...,
     all_runs: bool = ...,
-) -> Iterator[dict[str, Any]]: ...
+    on_skip: Callable[[dict[str, Any], str], None] | None = ...,
+) -> _ReadIterator: ...
 def read(
     *,
     where: Callable[[Any], bool] | None = None,
-    verify: bool | str = False,
+    verify: bool | Literal["skip", "raise"] = False,
     raw: bool = False,
     log: str | Path | None = None,
     as_recipient: str | Path | None = None,
     group: str = "default",
     all_runs: bool = True,
-) -> Iterator[Entry] | Iterator[dict[str, Any]]:
+    on_skip: Callable[[dict[str, Any], str], None] | None = None,
+) -> _ReadIterator:
     """Iterate log entries.
 
     Default mode yields :class:`Entry` instances. Pass ``raw=True`` to
@@ -300,42 +395,94 @@ def read(
                     yield from _read_raw_inner(one_log, None, all_runs=True)
             triples = _triples_explicit()
 
-    for r in _wrap_parse_errors(iter(triples), verify):
-        valid = r.get("valid") or {}
-        if not _all_valid(valid):
-            reasons = [k for k, v in valid.items() if not v]
-            if verify in (True, "raise"):
-                env = r.get("envelope") or {}
-                raise VerifyError(
-                    sequence=int(env.get("sequence", 0)),
-                    event_type=str(env.get("event_type", "")),
-                    failed_checks=reasons,
-                )
-            if verify == "skip":
-                _emit_tampered_row(r.get("envelope") or {}, reasons)
-                continue
-            # verify=False: yield the entry anyway
+    # DX review #6: when the writer ceremony chose ``sign: false`` the
+    # on-disk entries carry empty ``signature`` values by design — the
+    # signature validator can't be expected to succeed there, and
+    # raising ``VerifyError: signature`` on every entry makes the
+    # combination "unverifiable by design." Drop signature from the
+    # reasons list (under all verify modes) when the active ceremony
+    # is configured for unsigned emit. Other checks (chain, row_hash,
+    # decrypt) still run and still fail loudly.
+    try:
+        from . import current_config
+        _verify_skip_signature = current_config().sign is False
+    except Exception:
+        _verify_skip_signature = False
 
-        if raw:
-            envelope = r.get("envelope") or {}
-            if where is not None and not where(envelope):
-                continue
-            yield envelope
-            continue
+    # DX review #11: build the public ReadStats accumulator (always
+    # present on the returned iterator; cheap to maintain even when
+    # unused). The inner generator updates ``stats.yielded`` /
+    # ``skipped_*`` as it walks; callers introspect after iteration.
+    stats = ReadStats()
 
-        try:
-            entry = Entry.from_raw(r)
-        except Exception:  # noqa: BLE001 — malformed entry, skip rather than abort
-            continue
-        if where is not None and not where(entry):
-            continue
-        yield entry
+    def _gen() -> Iterator[Any]:
+        for r in _wrap_parse_errors(
+            iter(triples), verify, on_skip=on_skip, stats=stats,
+        ):
+            valid = r.get("valid") or {}
+            if not _all_valid(valid):
+                reasons = [k for k, v in valid.items() if not v]
+                if _verify_skip_signature and "signature" in reasons:
+                    reasons = [r for r in reasons if r != "signature"]
+                if not reasons:
+                    # Only the signature check failed and we're configured
+                    # to skip it — entry is valid for this ceremony.
+                    pass
+                else:
+                    env = r.get("envelope") or {}
+                    reason_str = ",".join(reasons)
+                    # DX review #11: notify observer before any
+                    # irreversible action (raise or skip). Catch
+                    # exceptions in the callback so a buggy observer
+                    # can't tank the read loop.
+                    if on_skip is not None:
+                        try:
+                            on_skip(env, reason_str)
+                        except Exception:  # noqa: BLE001
+                            import logging as _logging
+                            _logging.getLogger("tn.read").warning(
+                                "on_skip callback raised; continuing.",
+                                exc_info=True,
+                            )
+                    if verify in (True, "raise"):
+                        stats.skipped_verify += 1
+                        stats.skipped_reasons.append(reason_str)
+                        raise VerifyError(
+                            sequence=int(env.get("sequence", 0)),
+                            event_type=str(env.get("event_type", "")),
+                            failed_checks=reasons,
+                        )
+                    elif verify == "skip":
+                        stats.skipped_verify += 1
+                        stats.skipped_reasons.append(reason_str)
+                        _emit_tampered_row(env, reasons)
+                        continue
+                    # verify=False: yield the entry anyway
+
+            if raw:
+                envelope = r.get("envelope") or {}
+                if where is not None and not where(envelope):
+                    continue
+                stats.yielded += 1
+                yield envelope
+                continue
+
+            try:
+                entry = Entry.from_raw(r)
+            except Exception:  # noqa: BLE001 — malformed entry, skip rather than abort
+                continue
+            if where is not None and not where(entry):
+                continue
+            stats.yielded += 1
+            yield entry
+
+    return _ReadIterator(_gen(), stats)
 
 
 async def watch(
     *,
     where: Callable[[Any], bool] | None = None,
-    verify: bool | str = False,
+    verify: bool | Literal["skip", "raise"] = False,
     raw: bool = False,
     log: str | Path | None = None,
     as_recipient: str | Path | None = None,

@@ -646,6 +646,48 @@ def current_config() -> LoadedConfig:
     return _require_init().cfg
 
 
+def reload_from_yaml() -> None:
+    """Re-read the active ceremony's yaml and rebind the runtime.
+
+    DX review #8: ``tn.admin.ensure_group`` (and any future runtime
+    yaml mutation) needs the live runtime to pick up the change
+    without forcing the caller through a full ``flush_and_close()
+    + tn.init()`` round-trip. This helper rebuilds the TNRuntime's
+    in-memory ``LoadedConfig`` from the current on-disk yaml and
+    reloads the Rust dispatch runtime so subsequent emits see the
+    new groups / routing.
+
+    Quiet by design: does NOT re-emit ``tn.ceremony.init`` or any
+    other init-time admin events — those fired on the original
+    ``tn.init`` and would be misleading if duplicated.
+    """
+    global _runtime
+    with _runtime_lock:
+        if _runtime is None:
+            return
+        # Reload the cfg from disk against the same yaml path.
+        from . import config as _config
+
+        new_cfg = _config.load(_runtime.cfg.yaml_path)
+        _runtime.cfg = new_cfg
+    # Reload the Rust-side dispatch runtime against the updated yaml.
+    from . import _dispatch_rt as _current_dispatch_rt  # noqa: PLC0415
+
+    if _current_dispatch_rt is not None:
+        try:
+            _current_dispatch_rt.reload()
+        except Exception:  # noqa: BLE001
+            # A Rust reload failure shouldn't tank the caller — the
+            # next full tn.init() will recover. Log and continue.
+            import logging as _logging
+
+            _logging.getLogger("tn").warning(
+                "tn.logger.reload_from_yaml: Rust runtime reload failed; "
+                "the next full tn.init() will recover.",
+                exc_info=True,
+            )
+
+
 def flush_and_close(*, timeout: float = 30.0) -> None:
     """Close all handlers (drains async outboxes best-effort)."""
     global _runtime

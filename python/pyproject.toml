@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "tn-protocol"
-version         = "0.4.2a1"
+version         = "0.4.2a2"
 description     = "TestigoNodo protocol: attested logging with JWE + btn ciphers"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -45,6 +45,10 @@ dependencies = [
     # kit_bundles). The cryptography library doesn't expose curve point
     # arithmetic; pynacl is the right primitive here.
     "pynacl>=1.5",
+    # tn._entry.Entry is a pydantic BaseModel. Historically this came in
+    # transitively via mcp; declare explicitly so the install works in
+    # any environment, including when mcp moves to an extra in tn-proto.
+    "pydantic>=2",
     # Rust-backed ciphers. Built with maturin from ../crypto/tn-btn-py/
     # and ../crypto/tn-core-py/; published as separate wheels. The
     # range allows alpha sub-package patches to flow without forcing a

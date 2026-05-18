@@ -5,6 +5,130 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2a2] - 2026-05-18
+
+DX review batch — 10 numbered findings closed (criticals through nits)
+plus the profile-catalog audit and matrix tests. The papercut cycle
+that started in 0.4.2a1 continues; the install / verify / read /
+ceremony create paths are noticeably less surprising. See `DX_FIXES.md`
+in the repo for per-finding root cause + verify command + risks.
+
+Released in Python as `tn-protocol 0.4.2a2` and in TS as
+`@tnproto/sdk 0.4.2-alpha.2`.
+
+### Added
+
+- **Polymorphic `recipient=` kwarg on `tn.admin.add_recipient` and
+  `tn.admin.revoke_recipient`** (Python + TS). Single named argument
+  accepts a DID string, an int leaf_index, a 32-byte X25519 public
+  key, an `AddRecipientResult` from the matching `add_recipient`
+  call, a contacts.yaml row dict, or any object with
+  `recipient_did` / `leaf_index` / `public_key` attributes. Existing
+  `recipient_did=` / `leaf_index=` / `public_key=` kwargs keep
+  working and override the resolved fields. TS exposes branded
+  helpers (`did()`, `leafIndex()`, `publicKeyBytes()`) for
+  compile-time narrowing alongside the runtime resolver.
+
+- **btn `tn.admin.revoke_recipient` accepts `recipient_did=`**
+  (resolves automatically via `tn.admin.recipients(group)`). Closes
+  the long-standing asymmetry where btn revoke required a
+  `leaf_index` while jwe revoke used the did.
+
+- **`tn.log` gains an optional `level=` kwarg** (DX review #13). Use
+  it to stamp non-standard levels (`"trace"`, `"audit"`, foreign
+  logger spellings) or bridge from another logging system.
+  Default level is `""` (severity-less, unchanged). `tn.log` always
+  emits regardless of threshold — distinct from the named-level
+  verbs.
+
+- **`tn.read` returns a stats-bearing iterator + `on_skip` callback**
+  (DX review #10 / #11). The returned object has a `.stats`
+  attribute (`ReadStats` — `yielded`, `skipped_parse`,
+  `skipped_verify`, `skipped_reasons`) that ticks incrementally
+  during iteration. Pass `on_skip=lambda env, reason: ...` to be
+  notified per skipped row under `verify="skip"`, or once before
+  the `VerifyError` propagates under `verify=True`. Iteration
+  protocol is preserved — `for e in tn.read(): ...` works
+  unchanged.
+
+- **`tn validate` catches yaml.me.did vs keystore.local.public
+  mismatch** (DX review #2). Non-zero exit + diagnostic naming both
+  DIDs. The very condition the runtime refuses to load is now
+  surfaced by the validator that should be guarding it.
+
+- **`tn.init(link=False)` produces a `mode: local` ceremony**
+  (DX review #5). Previously a silent no-op; now writes
+  `ceremony.mode: local` + empty `linked_vault` for air-gapped
+  deployments. `link=True` / `link=None` preserve the linked
+  default.
+
+- **DX_FIXES.md at repo root** — patch notes for testers with root
+  cause, copy-pasteable verify commands, and risks/regressions per
+  finding.
+
+### Changed
+
+- **Profiles drive `ceremony.sign` + handler list** (DX review #4
+  + profile audit). `tn.init(profile="telemetry")` now writes
+  `sign: false` to yaml AND drops the file.rotating handler — both
+  for the default ceremony and per-stream yamls. The Rust runtime
+  already honoured `sign: false`; signature-verify on read now
+  respects it too (DX review #6 — see below). The `chains` and
+  `flush` profile axes remain Rust-runtime gaps; documented in
+  `python/tests/test_profile_full_matrix.py` as xfailed tests.
+
+- **`tn.read(verify=True)` no longer always raises on `sign:false`
+  ceremonies** (DX review #6). When the ceremony was minted with
+  `sign: false` (e.g. profile=telemetry), the signature axis is
+  dropped from the integrity check so entries don't fail
+  verify-by-design. Other checks (`chain`, `row_hash`, decrypt)
+  still fire.
+
+- **`tn.info` / `.warning` / `.error` / `.debug` / `.log` reject
+  extra positionals with `TypeError`** (DX review #3). Previously
+  the positional tail was silently folded into a joined `message`
+  field, destroying the caller's structured intent. The new error
+  message names the dropped args and points at the kwargs +
+  `message=` migrations.
+
+- **`tn.admin.ensure_group` hot-reloads the live runtime**
+  (DX review #8). After writing the new group to yaml, the
+  in-process runtime now picks up the new routing without needing
+  a `flush_and_close() + tn.init()` round-trip.
+
+- **`tn.read(verify=...)` type narrowed** to
+  `bool | Literal["skip", "raise"]` (DX review #17). IDEs
+  autocomplete the legal string values. Runtime accepts the same
+  four values (`False`, `True`, `"skip"`, `"raise"`).
+
+- **README "Reading: all runs, this run, admin"** updated to match
+  the actual default (`all_runs=True` since 0.4.1a3). New
+  contract test pins the default so any future flip ships with a
+  coordinated doc update (DX review #7).
+
+- **README "Profiles" section** added — catalog table + one
+  example per profile + wired-vs-gap matrix.
+
+- **README "Project identity and named streams"** section added
+  (DX review #14) — explains why `tn.init('billing')` also mints
+  `.tn/default/` (named ceremonies share the project identity via
+  `extends:`), and points at the `yaml_path=` form for callers who
+  want a truly self-contained ceremony.
+
+- **`tn-protocol` base deps now declare `pydantic>=2` explicitly.**
+  `tn._entry.Entry` is a pydantic `BaseModel`; today this dep
+  arrived transitively via `mcp`. Declared directly to keep the
+  install working regardless of what pulls in pydantic.
+
+### Fixed
+
+- **Concurrent `tn.init()` across processes no longer corrupts the
+  ceremony** (DX review #1). A per-name cross-process lock
+  (`O_CREAT | O_EXCL` sentinel under `.tn/.init.<name>.lock`,
+  60 s stale-reap) serialises the create branch. The
+  gunicorn/uvicorn-workers/celery race that previously left an
+  on-disk yaml whose `me.did` didn't match the keystore is closed.
+
 ## [0.4.2a1] - 2026-05-17
 
 Four follow-up fixes surfaced by the white-glove suite run against

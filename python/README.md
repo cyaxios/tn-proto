@@ -60,40 +60,59 @@ No explicit flush. The SDK drains on interpreter exit.
 | verb | what it does |
 |---|---|
 | `tn.init(...)` | resolve or create a ceremony, bind the runtime |
-| `tn.info / .warning / .error / .debug / .log` | one signed, encrypted envelope per call |
+| `tn.info / .warning / .error / .debug` | one signed, encrypted envelope per call at that level; short-circuits below the active threshold |
+| `tn.log(event_type, *, level="", **fields)` | severity-less emit (default `level=""`). Pass `level=` to stamp a custom level (`"trace"`, `"audit"`, foreign-logger spellings). Always emits regardless of threshold. Distinct from the four named verbs — not an alias. |
 | `tn.read(...)` | iterate decoded entries |
 | `tn.watch(...)` | tail the log live (async iterator) |
 | `tn.absorb / tn.export` | install or produce a `.tnpkg` bundle |
 
-## Reading: this run, all runs, admin
+### `tn.log` vs the level verbs
 
-`tn.read()` defaults to entries written by *this* process's runtime.
-That keeps a fresh `python hello.py` clean (no entries from yesterday
-appearing as if from this run). To see across runs, pass
-`all_runs=True`:
+```python
+tn.info("user.signed_in", user="alice")   # level="info", threshold-aware
+tn.log("user.signed_in", user="alice")    # level="",     always emits
+tn.log("scan.tick", level="trace",
+       phase="discovery")                  # level="trace" (custom), always emits
+```
+
+Reach for `tn.log` when you need a level outside `debug` / `info` /
+`warning` / `error`, or when you want an event that survives the
+level-threshold filter regardless of what `tn.set_level` is set to.
+
+## Reading: all runs, this run, admin
+
+`tn.read()` defaults to **every entry on disk** (`all_runs=True`).
+A fresh `python hello.py` reading an existing `.tn/` log will surface
+yesterday's events. To restrict to entries written by *this* process's
+runtime, pass `all_runs=False`:
 
 ```python
 import tn
 tn.init()
 
-# This run, main log only.
+# All entries on the main log (default).
 for e in tn.read():
-    print(e.level, e.event_type, e.fields)
-# (empty in a fresh process; nothing was emitted yet this run)
-
-# All runs, main log.
-for e in tn.read(all_runs=True):
     print(e.level, e.event_type, e.fields)
 # info order.created {'amount': 4999, 'order_id': 'A100'}
 # warning order.flagged {'order_id': 'A100', 'reason': 'hold'}
 
+# Restrict to entries emitted by this process run.
+for e in tn.read(all_runs=False):
+    print(e.level, e.event_type, e.fields)
+# (empty in a fresh process; nothing was emitted yet this run)
+
 # Admin log (ceremony lifecycle), addressed explicitly by name.
-for e in tn.read(log="admin", all_runs=True):
+for e in tn.read(log="admin"):
     print(e.level, e.event_type)
 # info tn.ceremony.init
 # info tn.group.added
 # info tn.group.added
 ```
+
+The `all_runs=True` default was chosen in 0.4.1a3 so that
+`tn read` (CLI) and `tn.read()` (Python) match the operator
+expectation of "show me what's in this log file." Set
+`all_runs=False` explicitly to scope a read to the current run.
 
 The default surface (`tn.read()` / `tn.watch()` with no `log=`) is
 the main user log only. Admin envelopes (`tn.*`) live in a separate
@@ -131,6 +150,110 @@ ceremony:
 **Nothing reaches the network until an explicit vault verb fires.** A
 linked-by-default ceremony is safe even on a machine that never sees
 the vault.
+
+## Project identity and named streams
+
+When you call `tn.init('billing')` against an empty project, you'll
+see TWO directories appear on disk:
+
+```
+.tn/
+├── default/          ← project identity anchor (auto-created)
+│   ├── keys/
+│   ├── tn.yaml
+│   └── ...
+└── billing/          ← the stream you asked for
+    ├── logs/billing.ndjson
+    ├── tn.yaml       ← carries `extends: ../default/tn.yaml`
+    └── ...
+```
+
+This is by design (DX review #14). Named ceremonies are **streams**
+layered on a shared project identity:
+
+- The project's device DID + signing key live exactly once, at
+  `.tn/default/keys/`. All entries from any stream attest under
+  that same publisher.
+- Each named stream's `tn.yaml` carries `extends:
+  ../default/tn.yaml`. The loader pulls identity, keystore, groups,
+  and recipients from default at config-load time. Streams own
+  their **logs**, **admin log**, **chain state**, and
+  **per-stream handlers** — not identity.
+- Editing default's groups affects all streams in that project. No
+  drift, no manual sync.
+
+If you want a **truly standalone ceremony** at an arbitrary path
+(no `.tn/default/`, no shared identity), use the explicit
+`yaml_path=` form:
+
+```python
+tn.init(yaml_path="./my-custom-yaml.yaml", cipher="btn")
+```
+
+That mints a fresh self-contained ceremony at the given path with
+its own DID + keystore + no `extends` reference.
+
+## Profiles — pick the trade-off, not the knobs
+
+`tn.init(profile=...)` selects a curated bundle of evidence and
+performance trade-offs. Profiles are SDK-fixed (not user-composable);
+pick the closest match and the runtime applies the bundle. The
+catalog has five entries today:
+
+| Profile | encrypts | signs | chains | flush | default_sink | use for |
+|--|--|--|--|--|--|--|
+| `transaction` | yes | yes | yes | fsync | file_rotating | grants, revokes, payments, agent actions, security events |
+| `audit` | yes | yes | yes | buffered | file_rotating | normal business events; same evidence as transaction, weaker durability |
+| `secure_log` | yes | yes | no | buffered | file_rotating | sensitive app logs where signing matters more than sequence |
+| `telemetry` | yes | no | no | async | stdout | high-volume traces / metrics; near-zero overhead vs `logging.Logger` |
+| `stdout` | yes | no | no | async | stdout | dev / notebook scratchpad — `print()` shape with encryption still on |
+
+Encryption is **always on** — that's the protocol floor. The other
+four axes (signs, chains, flush, default_sink) vary by profile.
+
+### Examples — one per profile
+
+```python
+import tn
+
+# transaction — the default. Grants, payments, anything you'd want
+# to audit later.
+tn.init(profile="transaction")        # same as tn.init()
+tn.info("payment.completed", user="alice", amount=4999, currency="USD")
+
+# audit — buffered writes for higher throughput on normal events.
+tn.init(profile="audit")
+tn.info("order.viewed", order_id="A100", viewer="bob")
+
+# secure_log — signed but no chain. Use when chain coordination
+# costs more than per-row sequence is worth.
+tn.init(profile="secure_log")
+tn.info("session.opened", session_id="s12", actor="alice")
+
+# telemetry — unsigned, async, stdout-only. Near-zero overhead.
+# No on-disk log file: `tn.read()` for this ceremony returns empty.
+tn.init(profile="telemetry")
+tn.info("page.viewed", path="/dashboard", latency_ms=87)
+
+# stdout — dev-friendly default. Same evidence shape as telemetry
+# but framed as "the logger you reach for in a notebook."
+tn.init(profile="stdout")
+tn.info("debug.note", message="trying something out", attempt=1)
+```
+
+### What's wired in `0.4.2a2`
+
+| Axis | Wired? | Where |
+|--|--|--|
+| `signs` | yes | `ceremony.sign` in yaml; Rust runtime emits empty signature when False |
+| `default_sink` | yes | Default-ceremony and per-stream yamls drop `file.rotating` for stdout-sink profiles |
+| `chains` | **no — runtime gap** | Rust runtime always chains. `secure_log` / `telemetry` / `stdout` still emit `prev_hash` + `sequence`. Tracked in DX_FIXES.md profile-audit section. |
+| `flush` | **no — runtime gap** | Handler dicts don't carry flush policy. The catalog's per-profile flush bit (`fsync` / `buffered` / `async`) is documentation-only today. |
+
+The two gaps need Rust runtime work in `crypto/tn-core/`; both are
+captured as xfailed tests in `tests/test_profile_full_matrix.py` so
+they flip green automatically once the runtime grows the matching
+switches.
 
 To engage the vault:
 
@@ -383,7 +506,7 @@ prompts where they are useful.
 |---|---|
 | `KeystoreConflict: state for group X has diverged on disk` | Another process mutated the same ceremony's state. Re-run the admin verb; it picks up the fresh state and re-applies. |
 | `tn.watch` shows no `tn.*` events | By design. Pass `log="admin"`. |
-| `tn.read()` returns nothing in a fresh process | Default filters to this process's run_id. Pass `all_runs=True`. |
+| `tn.read()` shows entries from previous runs | The default is `all_runs=True` (every entry on disk). Pass `all_runs=False` to restrict to this process's run. |
 | `tn: no ceremony found` when running `tn.absorb` | `tn.absorb` merges INTO an existing ceremony. Run `tn.init()` first. |
 | Wheel install fails on an exotic platform | Source build needs Rust >= 1.85 (`rustup install stable`). |
 

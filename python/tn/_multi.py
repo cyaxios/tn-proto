@@ -21,7 +21,10 @@ defaults in ``tn._defaults``.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +82,91 @@ class TNCreateFailed(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _ceremony_create_lock(project_dir: Path | None, name: str):
+    """Cross-process lock around ceremony creation.
+
+    Mints a sentinel lock file at ``<project>/.tn/.init.<name>.lock``
+    using ``O_CREAT | O_EXCL`` (atomic on POSIX and Windows). The first
+    arrival wins and proceeds with creation; subsequent arrivals spin
+    on a short sleep until either the yaml has appeared on disk
+    (meaning the holder finished) or a 30s timeout fires.
+
+    Stale-lock recovery: a lock file older than 60s is assumed to be
+    abandoned (process crashed mid-init) and is reaped by the next
+    arrival.
+
+    Per-name scoping means concurrent inits of different ceremonies
+    (e.g. ``default`` and ``billing`` from different workers) don't
+    serialize on each other; only same-name races queue.
+
+    DX review #1: closes the gunicorn/uvicorn-workers/celery race that
+    silently corrupted ceremonies when multiple processes called
+    ``tn.init()`` against an empty ``.tn/`` simultaneously. See
+    DX_FIXES.md and tests/test_concurrent_init.py.
+    """
+    pdir = project_dir if project_dir is not None else Path.cwd()
+    lock_dir = pdir / ".tn"
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # pragma: no cover — surfaced by caller
+        raise TNCreateFailed(
+            f"could not create .tn/ for lock at {lock_dir}: {exc}"
+        ) from exc
+    lock_path = lock_dir / f".init.{name}.lock"
+    yaml_path = ceremony_yaml_path(name, project_dir=project_dir)
+    deadline = time.monotonic() + 30.0
+    holding = False
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, f"pid={os.getpid()}\n".encode())
+            finally:
+                os.close(fd)
+            holding = True
+            break
+        except FileExistsError:
+            # Another process holds the lock. Three outcomes possible:
+            #   1. They finished while we were spinning -> yaml present.
+            #   2. They crashed -> stale lock; reap if older than 60s.
+            #   3. They're still working -> sleep + retry.
+            if yaml_path.is_file():
+                # Race lost; the other process completed. Yield to
+                # caller without holding the lock so they load.
+                yield
+                return
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                # Lock vanished between FileExistsError and stat (the
+                # other process just released). Retry immediately.
+                continue
+            if age > 60.0:
+                # Stale; the holder probably crashed. Best-effort reap.
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            if time.monotonic() > deadline:
+                raise TNCreateFailed(
+                    f"timed out (30s) acquiring ceremony create lock at "
+                    f"{lock_path}; another process appears stuck. If you "
+                    f"are certain no other process is initialising this "
+                    f"ceremony, delete {lock_path} and retry."
+                )
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        if holding:
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _looks_like_yaml_path(arg: str) -> bool:
     """True iff ``arg`` looks like a legacy ``init(yaml_path)`` argument
     rather than a new-style registry name. Conservative: must end in
@@ -102,6 +190,7 @@ def _ensure_ceremony_on_disk(
     device_private_bytes: bytes | None = None,
     keystore_dir: Path | None = None,
     admin_log_path: Path | None = None,
+    link: bool | None = None,
 ) -> Path:
     """Create ``.tn/<name>/`` with a real, loadable ``tn.yaml`` if the
     directory does not already exist. Returns the yaml path.
@@ -139,23 +228,33 @@ def _ensure_ceremony_on_disk(
             f"{list(_profiles.all_profile_names())}"
         )
 
-    if name == DEFAULT_CEREMONY_NAME:
-        return _create_default_ceremony(
+    # DX review #1: serialise concurrent creators of the same ceremony
+    # across processes. Acquiring the lock and re-checking ``is_file``
+    # closes the gunicorn/uvicorn-workers race that previously let
+    # multiple workers each mint a fresh device DID, ending with an
+    # on-disk yaml whose ``me.did`` did not match the keystore.
+    with _ceremony_create_lock(project_dir, name):
+        if yaml_path.is_file():
+            # Another process finished while we waited; load that.
+            return yaml_path
+        if name == DEFAULT_CEREMONY_NAME:
+            return _create_default_ceremony(
+                name=name,
+                yaml_path=yaml_path,
+                project_dir=project_dir,
+                cipher=cipher,
+                profile=chosen_profile,
+                device_private_bytes=device_private_bytes,
+                keystore_dir_override=keystore_dir,
+                admin_log_path_override=admin_log_path,
+                link=link,
+            )
+        return _create_stream_yaml(
             name=name,
             yaml_path=yaml_path,
             project_dir=project_dir,
-            cipher=cipher,
             profile=chosen_profile,
-            device_private_bytes=device_private_bytes,
-            keystore_dir_override=keystore_dir,
-            admin_log_path_override=admin_log_path,
         )
-    return _create_stream_yaml(
-        name=name,
-        yaml_path=yaml_path,
-        project_dir=project_dir,
-        profile=chosen_profile,
-    )
 
 
 def _create_default_ceremony(
@@ -168,6 +267,7 @@ def _create_default_ceremony(
     device_private_bytes: bytes | None = None,
     keystore_dir_override: Path | None = None,
     admin_log_path_override: Path | None = None,
+    link: bool | None = None,
 ) -> Path:
     """Mint the project's default ceremony: identity, keystore,
     full yaml. The only place a TN device DID gets created.
@@ -213,6 +313,7 @@ def _create_default_ceremony(
             keystore_dir=keystore_dir_resolved,
             log_path=ydir / "logs" / "tn.ndjson",
             admin_log_path=admin_log_resolved,
+            link=link,
         )
     except Exception as exc:  # noqa: BLE001
         raise TNCreateFailed(
@@ -221,7 +322,32 @@ def _create_default_ceremony(
 
     try:
         doc = _load_yaml_dict(yaml_path)
-        doc.setdefault("ceremony", {})["profile"] = profile
+        ceremony_block = doc.setdefault("ceremony", {})
+        ceremony_block["profile"] = profile
+        # DX review #4 (signs) + profile audit (default_sink):
+        # the profile catalog drives runtime behaviour, not just yaml
+        # metadata. Today we wire two axes here:
+        #   * ``signs`` -> ``ceremony.sign`` (Rust runtime honours).
+        #   * ``default_sink`` -> handler list filter (stdout-sink
+        #     profiles drop the file.rotating handler, matching what
+        #     ``_create_stream_yaml`` already does for streams).
+        # The remaining two axes (``chains``, ``flush``) need Rust
+        # runtime support — see DX_FIXES.md for the gap matrix.
+        try:
+            prof = _profiles.get(profile)
+        except KeyError:
+            prof = None
+        if prof is not None:
+            ceremony_block["sign"] = prof.signs
+            if prof.default_sink == "stdout":
+                # Drop the auto-declared file.rotating handler so this
+                # ceremony is true stdout-only — matches the catalog
+                # promise of "near-zero overhead vs Python's logging."
+                doc["handlers"] = [
+                    h for h in (doc.get("handlers") or [])
+                    if not (isinstance(h, dict)
+                            and h.get("kind") in ("file.rotating", "file"))
+                ]
         with yaml_path.open("w", encoding="utf-8") as fh:
             _yaml.safe_dump(doc, fh, sort_keys=False)
     except OSError as exc:
@@ -851,6 +977,12 @@ def _init_named_default_layout(
                 Path(legacy_kwargs["admin_log_path"])
                 if "admin_log_path" in legacy_kwargs else None
             ),
+            # DX review #5: ``link=False`` propagates all the way to
+            # ``config.create_fresh`` which writes ``mode: local`` +
+            # empty ``linked_vault`` into the yaml. The kwarg used to
+            # be accepted silently and only suppress the post-init
+            # auto-link prompt.
+            link=legacy_kwargs.get("link"),
         )
 
     handle = _new_handle(name, project_dir=project_path)
@@ -905,7 +1037,15 @@ def init(
 
     ``tn.init("payments")``
         Attach to the named ceremony at ``.tn/payments/``, minting
-        if absent.
+        if absent. **Side effect (DX review #14):** if no project
+        default exists yet, this call ALSO mints
+        ``.tn/default/`` to anchor the project identity. Named
+        ceremonies are *streams* that share the project DID via
+        ``extends: ../default/tn.yaml`` — they cannot exist
+        without a default. See the "Project identity and named
+        streams" section of the README for the architecture, and
+        ``tn.init(yaml_path=...)`` if you want a truly
+        self-contained ceremony at a custom location.
 
     ``tn.init("./tn.yaml")`` / ``tn.init(load="./tn.yaml")``
         Attach to the explicit yaml file (or mint it there).
@@ -1080,6 +1220,23 @@ def init(
         )
 
     # Named ceremony — ``tn.init("payments")`` or ``tn.init(name="x")``.
+    #
+    # DX review #14: the named-ceremony path ALSO mints ``.tn/default/``
+    # if it doesn't exist yet. This is by design — named ceremonies
+    # are *streams* that share the project's identity. The stream's
+    # yaml carries ``extends: ../default/tn.yaml`` and the loader
+    # pulls the device DID + signing key + groups + recipients from
+    # default at config-load time. Removing the auto-create would
+    # leave the stream unable to encrypt anything.
+    #
+    # If you want a truly self-contained ceremony with its own DID
+    # (no shared identity, no .tn/default/), use the explicit
+    # yaml_path= form instead:
+    #
+    #     tn.init(yaml_path="./standalone.yaml", cipher="btn")
+    #
+    # See the "Project identity and named streams" section of the
+    # README for the architecture.
     return _apply_stream(
         _init_named_ceremony(
             name=name,
