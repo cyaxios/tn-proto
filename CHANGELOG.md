@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2a6] - 2026-05-19
+
+One bug filed against `0.4.2a5`. Python-only — no Rust changes;
+`tn-core` stays at `0.2.0a5`. TS package version bumps for tag
+parity only.
+
+### Fixed
+
+- **Auto-init via `tn.info()` (no explicit `tn.init()` first) now
+  produces the same flat `.tn/default/{admin,keys,logs,vault}/`
+  layout as explicit `tn.init()`.** Previously auto-init dispatched
+  through `tn.init(<canonical_yaml_path>)`, which routed
+  `config.create_fresh` without a `keystore_dir` override and fell
+  back to the legacy `<yaml_dir>/.tn/<yaml_stem>/...` rule —
+  producing the nested `.tn/default/.tn/tn/{admin,keys,logs}/`
+  layout (and silently dropping the `vault/` subdir that the
+  multi-ceremony path creates). The ceremony worked, but the layout
+  diverged from explicit init.
+
+  Fix: when auto-init creates a fresh ceremony at the canonical
+  `<cwd>/.tn/default/tn.yaml` location, dispatch through the no-arg
+  `tn.init()` so both paths converge on `_create_default_ceremony`
+  → flat layout. Existing yamls (`was_created=False`) and explicit
+  `TN_YAML=...` overrides keep their literal paths and behaviour.
+
+### Tests
+
+- `python/tests/test_autoinit_layout.py` (2 cases): pin the
+  layout equivalence between auto-init and explicit init, and an
+  anti-regression check that the nested `.tn/default/.tn/tn/`
+  shape never reappears.
+
+Full Python suite: 851 passed, 0 regressions, 8 documented xfails.
+
 ## [0.4.2a5] - 2026-05-19
 
 Two follow-up bugs filed against `0.4.2a4`. Python-only — no Rust

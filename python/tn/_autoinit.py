@@ -315,7 +315,33 @@ def maybe_autoinit() -> None:
 
     # Hand off to the regular init() so all the absorb/_reconcile/handler
     # plumbing fires exactly as it does for explicit init.
-    _tn.init(yaml_path)
+    #
+    # Bug fix (0.4.2a6): when we're auto-creating a fresh ceremony at
+    # the canonical multi-ceremony location ``<cwd>/.tn/default/tn.yaml``,
+    # dispatch through ``tn.init()`` (no positional yaml path) rather
+    # than ``tn.init(<path>)``. The no-arg form routes via
+    # ``_init_named_default_layout`` → ``_create_default_ceremony``,
+    # which passes ``keystore_dir=<.tn/default>/keys`` explicitly and
+    # produces the flat ``.tn/default/{admin,keys,logs,vault}/`` layout
+    # that matches explicit-init. The yaml-path form falls through to
+    # ``config.create_fresh`` with no override, which uses the legacy
+    # ``<yaml_dir>/.tn/<yaml_stem>/keys/`` rule — for our canonical
+    # yaml at ``.tn/default/tn.yaml`` (stem "tn") that's
+    # ``.tn/default/.tn/tn/keys`` — nested, surprising, and a mismatch
+    # with explicit-init.
+    #
+    # We only flip when:
+    #   (a) the path was created in this call (was_created=True), AND
+    #   (b) the path is the canonical multi-ceremony location.
+    # Existing yamls (was_created=False) are honoured at whatever
+    # location they live; explicit ``TN_YAML`` overrides similarly
+    # keep their literal path. Only the auto-create-fresh case is
+    # affected.
+    cwd_canonical = (Path.cwd() / ".tn" / "default" / "tn.yaml").resolve()
+    if was_created and yaml_path == cwd_canonical:
+        _tn.init()
+    else:
+        _tn.init(yaml_path)
 
     # Now read back the device DID and emit the notice. ``current_config``
     # raises if init failed; in that case we don't print the banner —
