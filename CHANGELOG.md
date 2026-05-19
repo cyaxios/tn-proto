@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2a5] - 2026-05-19
+
+Two follow-up bugs filed against `0.4.2a4`. Python-only — no Rust
+changes; `tn-core` stays at `0.2.0a5`.
+
+Released in Python as `tn-protocol 0.4.2a5` and in TS as
+`@tnproto/sdk 0.4.2-alpha.5` (tag parity, no TS code changes).
+
+### Fixed
+
+- **W6 (real bug): `tn.watch(log='admin', since=<historical>)` was
+  silently dropping admin entries that lack `run_id`.** The Rust
+  read pipeline correctly produced all 6 of 6 entries from the admin
+  log, and `tn.read(log='admin')` (using `Entry.from_raw`) yielded
+  all of them. But `tn.watch` (using `Entry.from_flat`) hard-rejected
+  any envelope without a `run_id` field — and admin events emitted
+  by runtime verbs (`ensure_group`, `rotate`, etc.) legitimately
+  lack one (the row was minted outside a run context).
+  `Entry.from_raw` already defaulted `run_id` to `""` in that case
+  (and the comment on that path explicitly mentions admin events);
+  `Entry.from_flat` was the strict outlier. Fix removes `run_id`
+  from `from_flat`'s required-fields tuple so both constructors
+  share the same leniency.
+
+- **W5: `tn.watch()` from a no-ceremony directory now raises the
+  same friendly "no ceremony found" error as `tn.read()`.**
+  Previously watch called `current_config()` directly, which
+  raised the less-helpful "no active runtime" message (and in
+  states where a stale runtime was loaded from a prior init in a
+  different directory, watch silently tailed that runtime's log
+  instead of erroring). `_watch_impl` now calls
+  `tn._maybe_autoinit_load_only()` first — same as `tn.read` —
+  so both verbs share the discovery-chain error path.
+
+### Tests
+
+- `python/tests/test_watch_bugs_w5_w6.py` (5 cases): pins the W5
+  symmetric-error behavior, the W6 admin-watch yields-all-six
+  behavior, the `Entry.from_flat` leniency for missing `run_id`,
+  and a boundary test confirming other required envelope fields
+  still raise on absence.
+
+Full Python suite: 849 passed, 0 regressions, 8 documented xfails.
+
 ## [0.4.2a4] - 2026-05-19
 
 Four follow-up items filed against `0.4.2a3`. `#10` is the actual

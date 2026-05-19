@@ -182,8 +182,17 @@ class Entry(BaseModel):
             else:
                 user_fields[k] = v
 
+        # ``run_id`` is intentionally NOT required — admin events
+        # emitted by runtime verbs (ensure_group, rotate, etc.)
+        # legitimately lack it (the row was minted outside a run
+        # context). Matches the same leniency in ``from_raw`` (which
+        # defaults run_id to ``""`` when absent). Bug W6 (0.4.2a4
+        # follow-up): the asymmetric strictness here was causing
+        # ``tn.watch(log='admin', since=<historical>)`` to silently
+        # drop every admin row without run_id, while
+        # ``tn.read(log='admin')`` (using from_raw) yielded them all.
         for required in ("event_type", "did", "event_id", "sequence",
-                         "run_id", "prev_hash", "row_hash", "signature"):
+                         "prev_hash", "row_hash", "signature"):
             if required not in kwargs:
                 raise ValueError(
                     f"Entry.from_flat: required envelope field {required!r} "

@@ -92,6 +92,15 @@ async def _watch_impl(
     poll_interval: float = 0.3,
     log_path: str | os.PathLike | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
+    # Bug W5 (0.4.2a4 follow-up): match ``tn.read``'s autoinit path so
+    # a fresh process without a bound runtime gets the same friendly
+    # "no ceremony found" error (with discovery-chain hint) instead
+    # of the bare ``no active runtime`` raise that ``current_config``
+    # would otherwise produce. read.py:191 does this for the same
+    # reason; the asymmetry made watch's empty-result mode confusing.
+    import tn as _tn
+    _tn._maybe_autoinit_load_only()
+
     from . import current_config
     from .reader import flatten_raw_entry, parse_envelope_line
 
