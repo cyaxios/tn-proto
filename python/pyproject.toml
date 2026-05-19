@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "tn-protocol"
-version         = "0.4.2a3"
+version         = "0.4.2a4"
 description     = "TestigoNodo protocol: attested logging with JWE + btn ciphers"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -54,12 +54,11 @@ dependencies = [
     # range allows alpha sub-package patches to flow without forcing a
     # tn-protocol republish — tighten to == on stable.
     "tn-btn>=0.2.0a1,<0.3",
-    # 0.2.0a4 carries the cross-process emit lock that fixes the
-    # chain-integrity bug surfaced by the 4-worker stress test.
-    # Older wheels of tn-core lack the fix; tighten the floor so
-    # ``pip install tn-protocol==0.4.2a3`` always pulls in a
-    # runtime that serialises emit across processes.
-    "tn-core>=0.2.0a4,<0.3",
+    # 0.2.0a5 carries the cross-process emit lock (0.4.2a3) AND the
+    # per-row parse resilience + Rust stdout admin filter (0.4.2a4).
+    # Tighten the floor so ``pip install tn-protocol==0.4.2a4`` always
+    # pulls in a runtime that has both fixes.
+    "tn-core>=0.2.0a5,<0.3",
 ]
 
 [project.optional-dependencies]

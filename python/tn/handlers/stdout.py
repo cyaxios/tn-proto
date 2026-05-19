@@ -24,6 +24,20 @@ Format selection (precedence high -> low):
 For declarative use the same handler is registered as ``kind: "stdout"``
 in :mod:`tn.handlers.registry`, so a yaml ``handlers: [{kind: stdout}]``
 list also works.
+
+Admin-event filtering (DX review #23):
+
+By default the stdout handler suppresses ``tn.*`` protocol admin
+events (``tn.ceremony.init``, ``tn.group.added``, etc.) so a fresh
+``tn.init()`` + ``tn.info(...)`` prints exactly what the user wrote
+— one line per emit, no bookkeeping noise. This matches what
+``tn.read()`` already does (admin events live in a separate log
+addressed via ``tn.read(log='admin')``).
+
+Opt back in via either:
+
+  * ``TN_STDOUT_INCLUDE_ADMIN=1`` env var (process-wide), or
+  * ``include_admin=True`` constructor kwarg.
 """
 
 from __future__ import annotations
@@ -165,6 +179,7 @@ class StdoutHandler(SyncHandler):
         stream: IO[bytes] | None = None,
         filter_spec: dict[str, Any] | None = None,
         format: str | None = None,
+        include_admin: bool | None = None,
     ):
         super().__init__(name, filter_spec)
         # Resolve at emit-time, not import-time, so test capsys redirection
@@ -172,6 +187,12 @@ class StdoutHandler(SyncHandler):
         # constructed before capsys took effect.
         self._stream_override = stream
         self._format_kwarg = format
+        # DX review #23: by default ``tn.*`` admin events are filtered
+        # out of stdout so the user sees only what they emitted. ``None``
+        # means "consult ``TN_STDOUT_INCLUDE_ADMIN``"; ``True`` / ``False``
+        # force the behaviour and bypass the env var. Useful when a
+        # specific stream + filter combo is wanted programmatically.
+        self._include_admin = include_admin
 
     def resolved_address(self) -> str:
         """Stdout handlers dedup by a single sentinel — every
@@ -183,6 +204,20 @@ class StdoutHandler(SyncHandler):
         return "<stdout>"
 
     def emit(self, envelope: dict[str, Any], raw_line: bytes) -> None:
+        # DX review #23: filter ``tn.*`` admin events by default so a
+        # fresh ``tn.init()`` + ``tn.info('hello')`` prints one line,
+        # not four. ``TN_STDOUT_INCLUDE_ADMIN=1`` (or
+        # ``include_admin=True``) restores the previous behaviour for
+        # operators who want the protocol bookkeeping on stdout.
+        event_type = str(envelope.get("event_type", ""))
+        if event_type.startswith("tn."):
+            if self._include_admin is True:
+                # Explicit per-handler opt-in wins over env.
+                pass
+            elif self._include_admin is False:
+                return
+            elif os.environ.get("TN_STDOUT_INCLUDE_ADMIN", "").strip() != "1":
+                return
         if self._stream_override is not None:
             stream = self._stream_override
             text_mode = False

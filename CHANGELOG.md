@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2a4] - 2026-05-19
+
+Four follow-up items filed against `0.4.2a3`. `#10` is the actual
+fix; `#21` / `#22` / `#23` are CLI/stdout polish.
+
+Released in Python as `tn-protocol 0.4.2a4` (+ `tn-core 0.2.0a5`) and
+in TS as `@tnproto/sdk 0.4.2-alpha.4`. No TS code changes; tag parity
+only.
+
+### Changed
+
+- **`tn.read()` (default `verify=False`) is now resilient to
+  per-row corruption.** Previously a single malformed entry (corrupt
+  base64 ciphertext from a partial write, disk corruption) raised
+  `ValueError` and killed the iterator mid-stream — clean entries
+  before and after the bad one never reached the caller. Now the
+  default skips the bad row and continues; `result.stats.skipped_parse`
+  ticks (callers who want a count can read it post-iteration), and
+  the optional `on_skip` callback still fires with a `parse:`-prefixed
+  reason. `verify=True` still raises (the explicit fail-loud
+  contract); `verify='skip'` still emits the admin event and fires
+  the callback.
+
+- **`tn show` with no subverb dispatches to `tn show env`** instead
+  of an argparse usage error (DX review #21). Friendly first
+  impression; explicit `tn show env` / `tn show profiles` are
+  unchanged.
+
+- **Stdout handler filters `tn.*` admin events by default** (DX
+  review #23). A fresh `tn.init()` + `tn.info('hello', x=1)` now
+  prints exactly one stdout line, not four. Both the Rust-native
+  stdout handler (the auto-registered one) and the Python
+  `StdoutHandler` apply the filter. Opt back in via
+  `TN_STDOUT_INCLUDE_ADMIN=1` (process-wide) or `include_admin=True`
+  on a per-handler basis (`StdoutHandler(stream=..., include_admin=True)`
+  and the yaml `handlers: [{kind: stdout, include_admin: true}]` form).
+
+### Added
+
+- **`tn show profiles` CLI** (DX review #22). Prints the 5-profile
+  catalog with `encrypts` / `signs` / `chains` / `flush` /
+  `default_sink` columns + `intended_use` blurbs. `--format json`
+  for tooling. The catalog metadata already lived in
+  `tn._profiles._CATALOG`; this verb gives it a public CLI surface.
+
+### Tests
+
+- `python/tests/test_read_skip_observability.py::test_verify_false_yields_around_parse_error`
+  — pins the new `verify=False` resilience behaviour with a corrupt
+  middle row.
+- `python/tests/test_show_and_stdout_polish.py` (6 cases): `tn show`
+  no-args, `tn show profiles` (human + json), stdout admin filter
+  (default-off, env opt-in, per-handler kwarg).
+
 ## [0.4.2a3] - 2026-05-18
 
 Follow-up fix to the DX review batch in 0.4.2a2. The cross-process init

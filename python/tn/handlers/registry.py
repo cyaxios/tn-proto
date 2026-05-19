@@ -325,10 +325,18 @@ def build_handlers(
         elif kind == "stdout":
             from .stdout import StdoutHandler
 
+            # DX review #23: ``include_admin`` is opt-in at the
+            # yaml layer. None = consult ``TN_STDOUT_INCLUDE_ADMIN``;
+            # True/False forces the behaviour for this handler entry.
+            raw_include_admin = raw.get("include_admin")
+            include_admin: bool | None = (
+                None if raw_include_admin is None else bool(raw_include_admin)
+            )
             handler = StdoutHandler(
                 name=name,
                 filter_spec=filter_spec,
                 format=raw.get("format"),
+                include_admin=include_admin,
             )
             # Marker preserved for back-compat with any caller still
             # introspecting it. The dispatch fan-out no longer reads it

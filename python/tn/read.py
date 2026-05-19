@@ -454,11 +454,19 @@ def read(
                     stats.skipped_reasons.append(reason)
                     _emit_tampered_row(env_for_parse_check, [reason])
                     continue
-                # verify=False: the user explicitly asked for fail-loud
-                # on parse errors (the documented contract). Raise the
-                # original-style ValueError so behaviour matches the
-                # pre-0.4.2a3 default.
-                raise ValueError(reason)
+                # verify=False (0.4.2a4): silently skip the bad row and
+                # keep iterating so clean entries before and after a
+                # corrupt one both surface. Stats still tick so callers
+                # who care can read ``result.stats.skipped_parse`` after
+                # iteration; an ``on_skip`` callback (if supplied) still
+                # fires above. Previously this branch raised
+                # ``ValueError(reason)``, which killed the generator
+                # mid-stream and discarded every clean entry after the
+                # first bad one. ``verify=True`` still raises (after the
+                # observer call); ``verify='skip'`` is unchanged.
+                stats.skipped_parse += 1
+                stats.skipped_reasons.append(reason)
+                continue
 
             valid = r.get("valid") or {}
             if not _all_valid(valid):

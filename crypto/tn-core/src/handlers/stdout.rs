@@ -178,6 +178,22 @@ impl TnHandler for StdoutHandler {
     }
 
     fn accepts(&self, envelope: &Value) -> bool {
+        // DX review #23: hide ``tn.*`` admin events from stdout by
+        // default. The same default already lives in Python's
+        // ``StdoutHandler`` (see python/tn/handlers/stdout.py) and in
+        // ``tn.read()`` (admin events live in a separate log addressed
+        // explicitly). Restore the previous noisy behaviour by setting
+        // ``TN_STDOUT_INCLUDE_ADMIN=1`` in the environment.
+        if let Some(et) = envelope.get("event_type").and_then(Value::as_str) {
+            if et.starts_with("tn.") {
+                let include = std::env::var("TN_STDOUT_INCLUDE_ADMIN")
+                    .map(|v| v.trim() == "1")
+                    .unwrap_or(false);
+                if !include {
+                    return false;
+                }
+            }
+        }
         self.filter.matches(envelope)
     }
 

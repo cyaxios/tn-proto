@@ -137,12 +137,17 @@ def test_default_verify_false_unchanged(ceremony):
     assert result.stats.skipped_parse == 0
 
 
-def test_verify_false_still_raises_on_parse_error(ceremony):
-    """#10 status pin: verify=False's raise-on-parse-error contract is
-    preserved. The new resilient path lives in verify='skip'."""
+def test_verify_false_yields_around_parse_error(ceremony):
+    """#10 (0.4.2a4): under default ``verify=False``, a single corrupt
+    row no longer kills iteration. Clean entries before and after the
+    bad one both surface; ``stats.skipped_parse`` ticks so callers
+    that want a count can read it. ``verify=True`` still raises
+    (covered separately in ``test_verify_true_fires_callback_before_raise``)
+    and ``verify='skip'`` still emits the admin event +
+    fires the callback.
+    """
     tn, tmp_path = ceremony
     log = tmp_path / ".tn" / "default" / "logs" / "tn.ndjson"
-    # Make line 1 unparseable in the ciphertext layer.
     import base64
     lines = log.read_text().splitlines()
     doc = json.loads(lines[1])
@@ -154,8 +159,18 @@ def test_verify_false_still_raises_on_parse_error(ceremony):
     lines[1] = json.dumps(doc)
     log.write_text("\n".join(lines) + "\n")
 
-    with pytest.raises(Exception):
-        list(tn.read())  # default verify=False — raises as today
+    # The runtime was bound BEFORE the on-disk tampering; rebind so
+    # tn.read() picks up the mutated file.
+    tn.flush_and_close()
+    tn.init()
+    result = tn.read()  # default verify=False
+    events = [e.event_type for e in result]
+    assert "alpha" in events and "gamma" in events, (
+        f"clean entries on either side of the corrupt one must both "
+        f"yield; got {events!r}"
+    )
+    assert result.stats.skipped_parse == 1
+    assert result.stats.yielded >= 2
 
 
 def test_on_skip_callback_exceptions_dont_break_iteration(ceremony):

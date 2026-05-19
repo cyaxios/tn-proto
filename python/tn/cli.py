@@ -1813,6 +1813,82 @@ def cmd_show_env(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_show_profiles(args: argparse.Namespace) -> int:
+    """Print the profile catalog.
+
+    DX review #22: the curated profile bundle (encrypts / signs /
+    chains / flush / default_sink / intended_use) is the right
+    metadata to expose for "what should I init with?" decisions.
+    The data has lived in ``tn._profiles._CATALOG`` since 0.3.0 but
+    had no CLI surface — users were reaching into the private module
+    to discover the bundles. This verb is the proper public reflection.
+    """
+    import json as _json
+
+    from . import _profiles
+
+    fmt = getattr(args, "format", "human") or "human"
+    names = list(_profiles.all_profile_names())
+    profiles = [_profiles.get(n) for n in names]
+
+    if fmt == "json":
+        payload = [
+            {
+                "name": p.name,
+                "encrypts": p.encrypts,
+                "signs": p.signs,
+                "chains": p.chains,
+                "flush": p.flush,
+                "default_sink": p.default_sink,
+                "intended_use": p.intended_use,
+                "default": p.name == _profiles.DEFAULT_PROFILE,
+            }
+            for p in profiles
+        ]
+        sys.stdout.write(_json.dumps({"profiles": payload}, indent=2) + "\n")
+        return 0
+
+    # human table
+    cols = [
+        ("NAME", 12),
+        ("ENCRYPTS", 8),
+        ("SIGNS", 5),
+        ("CHAINS", 6),
+        ("FLUSH", 8),
+        ("SINK", 14),
+    ]
+    header = "  ".join(f"{name:<{w}}" for name, w in cols)
+    sys.stdout.write(header + "\n")
+    sys.stdout.write(
+        "  ".join("-" * w for _name, w in cols) + "\n"
+    )
+    for p in profiles:
+        marker = "*" if p.name == _profiles.DEFAULT_PROFILE else " "
+        sys.stdout.write(
+            f"{p.name + marker:<12}  "
+            f"{'yes' if p.encrypts else 'no':<8}  "
+            f"{'yes' if p.signs else 'no':<5}  "
+            f"{'yes' if p.chains else 'no':<6}  "
+            f"{p.flush:<8}  "
+            f"{p.default_sink:<14}\n"
+        )
+    sys.stdout.write("\n* = catalog default (used when tn.init() is called with no profile=).\n\n")
+    # Intended-use details below the table.
+    for p in profiles:
+        sys.stdout.write(f"{p.name}: {p.intended_use}\n\n")
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    """DX review #21: ``tn show`` with no subverb dispatches to the
+    most-useful default rather than spitting an argparse usage error.
+    Today that default is ``env``; if a future ``show`` verb becomes
+    the obvious entrypoint, repoint here. Explicit subverbs
+    (``tn show env``, ``tn show profiles``) take precedence.
+    """
+    return cmd_show_env(args)
+
+
 # ---------------------------------------------------------------------
 # Shared helper
 # ---------------------------------------------------------------------
@@ -2368,7 +2444,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate.set_defaults(func=cmd_validate)
 
     p_show = sub.add_parser("show", help="Reflective inspection commands.")
-    show_sub = p_show.add_subparsers(dest="show_verb", required=True)
+    # DX review #21: ``required=False`` so ``tn show`` with no subverb
+    # dispatches to a useful default (env) rather than spitting an
+    # argparse usage error.
+    show_sub = p_show.add_subparsers(dest="show_verb", required=False)
+    p_show.set_defaults(func=cmd_show, format="human")
     p_show_env = show_sub.add_parser(
         "env",
         help="Print the canonical TN_* env-var surface (human / env / json).",
@@ -2381,6 +2461,19 @@ def build_parser() -> argparse.ArgumentParser:
              "TN_FOO=value block (secrets present); json for programmatic use.",
     )
     p_show_env.set_defaults(func=cmd_show_env)
+
+    # DX review #22: profile-catalog reflection.
+    p_show_profiles = show_sub.add_parser(
+        "profiles",
+        help="Print the profile catalog (transaction / audit / secure_log / telemetry / stdout) with their encrypts/signs/chains/flush/sink matrices and intended-use blurbs.",
+    )
+    p_show_profiles.add_argument(
+        "--format",
+        default="human",
+        choices=["human", "json"],
+        help="human (default) for the pretty table + descriptions; json for programmatic use.",
+    )
+    p_show_profiles.set_defaults(func=cmd_show_profiles)
 
     return p
 
