@@ -17,7 +17,7 @@ use crate::{
     admin_reduce::{reduce as admin_reduce_envelope, StateDelta},
     agents_policy::PolicyDocument,
     canonical::canonical_bytes,
-    chain::{compute_row_hash, ChainState, GroupInput, RowHashInput},
+    chain::{chain_tips_from_ndjson, compute_row_hash, ChainState, GroupInput, RowHashInput},
     cipher::{
         btn::{BtnPublisherCipher, BtnReaderCipher},
         GroupCipher,
@@ -1097,66 +1097,154 @@ impl Runtime {
             group_payloads.insert(gname, serde_json::to_value(payload)?);
         }
 
-        // 4. Chain advance.
-        let (seq, prev_hash) = self.chain.advance(event_type);
-
-        // 5. Row hash.
-        let public_bmap: BTreeMap<String, Value> = public_out.clone().into_iter().collect();
-        let row_hash = compute_row_hash(&RowHashInput {
-            did: self.device.did(),
-            timestamp: &ts,
-            event_id: &eid,
-            event_type,
-            level: &level_norm,
-            prev_hash: &prev_hash,
-            public_fields: &public_bmap,
-            groups: &group_inputs_for_hash,
-        });
-
-        // 6. Sign: respects per-call override, then ceremony default.
-        let should_sign = sign.unwrap_or(self.cfg.ceremony.sign);
-        let sig_b64 = if should_sign {
-            let sig = self.device.sign(row_hash.as_bytes());
-            signature_b64(&sig)
-        } else {
-            // Unsigned mode: envelope's signature field is the empty string.
-            // Chain and row_hash are still computed, so accidental corruption
-            // is still detectable. See RFC 2026-04-22-tn-transaction-protocol.
-            String::new()
-        };
-
-        // 7. Envelope serialize.
-        let line = build_envelope(EnvelopeInput {
-            did: self.device.did(),
-            timestamp: &ts,
-            event_id: &eid,
-            event_type,
-            level: &level_norm,
-            sequence: seq,
-            prev_hash: &prev_hash,
-            row_hash: &row_hash,
-            signature_b64: &sig_b64,
-            public_fields: public_out,
-            group_payloads,
-        })?;
-
-        // 8. Append to log file; protocol events (`tn.*`) may route to a
-        //    separate file when `protocol_events_location` is a template.
+        // DX review 0.4.2a3: cross-process emit serialization.
+        //
+        // Steps 4–9 (chain advance through chain commit) MUST execute
+        // atomically across processes. Otherwise, two workers writing
+        // to the same log race on per-process ChainState: both compute
+        // (seq, prev_hash) from a stale local view, both write rows
+        // referencing the same parent, and the chain branches —
+        // ``tn.read(verify=True)`` then rejects every branch except
+        // the first.
+        //
+        // The fix bookends 4–9 with an advisory file lock on a
+        // sentinel adjacent to the write target (main log OR pel for
+        // protocol events). Under the lock we refresh ChainState from
+        // disk truth for this event_type before advance, then proceed.
+        // The lock is released as soon as the row is on disk + chain
+        // committed; handler fan-out runs unlocked because the row is
+        // already durable.
+        //
+        // The wasm code path inherits the trait's no-op lock impl
+        // (single-threaded, single-process — no race to coordinate).
         let is_protocol = event_type.starts_with("tn.");
-        if is_protocol && self.cfg.ceremony.protocol_events_location != "main_log" {
-            let pel = self.resolve_pel(event_type);
-            if let Some(parent) = pel.parent() {
-                self.storage.create_dir_all(parent)?;
-            }
-            self.storage.append_bytes(&pel, line.as_bytes())?;
-        } else {
-            let mut w = self.log_writer.lock().expect("log writer mutex poisoned");
-            w.append_line(&line)?;
-            w.flush()?;
+        let target_path: PathBuf =
+            if is_protocol && self.cfg.ceremony.protocol_events_location != "main_log" {
+                self.resolve_pel(event_type)
+            } else {
+                self.log_path.clone()
+            };
+        let lock_path = {
+            let mut s = target_path.as_os_str().to_os_string();
+            s.push(".emit.lock");
+            PathBuf::from(s)
+        };
+        if let Some(parent) = target_path.parent() {
+            self.storage.create_dir_all(parent)?;
         }
 
-        // 9. Commit row_hash into the chain.
-        self.chain.commit(event_type, &row_hash);
+        // Capture the row's outputs from inside the closure so the
+        // outer scope can return them. The lock helper returns
+        // io::Result<()>; non-io errors get parked here and re-raised
+        // after the lock releases.
+        let mut row_hash_out: Option<String> = None;
+        let mut line_out: Option<String> = None;
+        let mut deferred_err: Option<Error> = None;
+
+        // Pre-clone the inputs the closure consumes by reference so
+        // the borrow checker is happy with the FnMut signature.
+        let public_out_for_lock = public_out;
+        let group_inputs_for_lock = group_inputs_for_hash;
+        let group_payloads_for_lock = group_payloads;
+
+        let storage_for_lock = Arc::clone(&self.storage);
+        storage_for_lock.with_advisory_lock(&lock_path, &mut || {
+            // Under the lock: refresh in-memory chain tip from disk
+            // truth. If another process appended rows since our last
+            // emit, this is where we discover the latest (seq,
+            // prev_hash) for our event_type — overwriting the local
+            // ChainState entry.
+            if self.storage.exists(&target_path) {
+                let bytes = self.storage.read_bytes(&target_path)?;
+                let tips = chain_tips_from_ndjson(&bytes);
+                if let Some((tip_seq, tip_hash)) = tips.get(event_type).cloned() {
+                    let mut single: HashMap<String, (u64, String)> = HashMap::new();
+                    single.insert(event_type.to_string(), (tip_seq, tip_hash));
+                    self.chain.seed(single);
+                }
+            }
+
+            // 4. Chain advance (now reflects disk truth).
+            let (seq, prev_hash) = self.chain.advance(event_type);
+
+            // 5. Row hash.
+            let public_bmap: BTreeMap<String, Value> =
+                public_out_for_lock.clone().into_iter().collect();
+            let row_hash = compute_row_hash(&RowHashInput {
+                did: self.device.did(),
+                timestamp: &ts,
+                event_id: &eid,
+                event_type,
+                level: &level_norm,
+                prev_hash: &prev_hash,
+                public_fields: &public_bmap,
+                groups: &group_inputs_for_lock,
+            });
+
+            // 6. Sign: respects per-call override, then ceremony default.
+            let should_sign = sign.unwrap_or(self.cfg.ceremony.sign);
+            let sig_b64 = if should_sign {
+                let sig = self.device.sign(row_hash.as_bytes());
+                signature_b64(&sig)
+            } else {
+                // Unsigned mode: envelope's signature field is the empty
+                // string. Chain and row_hash are still computed, so
+                // accidental corruption is still detectable. See RFC
+                // 2026-04-22-tn-transaction-protocol.
+                String::new()
+            };
+
+            // 7. Envelope serialize.
+            let line = match build_envelope(EnvelopeInput {
+                did: self.device.did(),
+                timestamp: &ts,
+                event_id: &eid,
+                event_type,
+                level: &level_norm,
+                sequence: seq,
+                prev_hash: &prev_hash,
+                row_hash: &row_hash,
+                signature_b64: &sig_b64,
+                public_fields: public_out_for_lock.clone(),
+                group_payloads: group_payloads_for_lock.clone(),
+            }) {
+                Ok(line) => line,
+                Err(e) => {
+                    deferred_err = Some(e);
+                    return Err(std::io::Error::other("build_envelope failed (deferred)"));
+                }
+            };
+
+            // 8. Append to log file (or the resolved pel for tn.* events).
+            if is_protocol && self.cfg.ceremony.protocol_events_location != "main_log" {
+                self.storage.append_bytes(&target_path, line.as_bytes())?;
+            } else {
+                let mut w = self.log_writer.lock().expect("log writer mutex poisoned");
+                if let Err(e) = w.append_line(&line) {
+                    deferred_err = Some(e);
+                    return Err(std::io::Error::other("append_line failed (deferred)"));
+                }
+                if let Err(e) = w.flush() {
+                    deferred_err = Some(e);
+                    return Err(std::io::Error::other("flush failed (deferred)"));
+                }
+            }
+
+            // 9. Commit row_hash into the chain.
+            self.chain.commit(event_type, &row_hash);
+
+            row_hash_out = Some(row_hash);
+            line_out = Some(line);
+            Ok(())
+        })?;
+
+        if let Some(e) = deferred_err {
+            return Err(e);
+        }
+        let row_hash =
+            row_hash_out.expect("with_advisory_lock returned Ok but row_hash unset");
+        let line =
+            line_out.expect("with_advisory_lock returned Ok but line unset");
 
         // 10. Fan out to handlers. Mirrors Python `tn/logger.py:343` and
         //     TS `node_runtime.ts:376`. A handler whose filter rejects
@@ -1171,7 +1259,12 @@ impl Runtime {
         // The on-disk envelope carries them. The `_returning_line` variant
         // hands the canonical NDJSON back so a host runtime (PyO3) can fan
         // out to its own handlers without re-deriving it.
-        let _ = (eid, row_hash, seq);
+        //
+        // ``seq`` lives inside the cross-process lock closure after the
+        // 0.4.2a3 emit-locking refactor; the envelope itself still
+        // carries it on disk, so this sink only needs the two values
+        // we have in this scope.
+        let _ = (eid, row_hash);
         Ok(Some(line))
     }
 
@@ -1696,7 +1789,32 @@ impl Runtime {
         let group_names: HashSet<&str> = self.cfg.groups.keys().map(String::as_str).collect();
 
         for res in LogFileReader::open(log_path, &self.storage)? {
-            let env = res?;
+            // DX review 0.4.2a3 follow-up: a single malformed row (bad
+            // base64 ciphertext, JSON parse failure, etc.) must not
+            // halt iteration. Skip the row and emit a sentinel triple
+            // with the special event_type "<parse-error>" + all-false
+            // validity flags; the reader's verify='skip' path
+            // recognises this and counts it as ``skipped_parse``.
+            let env = match res {
+                Ok(e) => e,
+                Err(e) => {
+                    out.push((
+                        ReadEntry {
+                            envelope: serde_json::json!({
+                                "event_type": "<parse-error>",
+                                "_parse_error": e.to_string(),
+                            }),
+                            plaintext_per_group: BTreeMap::new(),
+                        },
+                        ValidFlags {
+                            signature: false,
+                            row_hash: false,
+                            chain: false,
+                        },
+                    ));
+                    continue;
+                }
+            };
 
             let event_type = env
                 .get("event_type")
@@ -1734,14 +1852,24 @@ impl Runtime {
             // Decrypt every group we hold a kit for.
             let mut plaintext_per_group: BTreeMap<String, Value> = BTreeMap::new();
             let mut groups_for_hash: BTreeMap<String, GroupInput> = BTreeMap::new();
+            // DX review 0.4.2a3 follow-up: per-row resilience for the
+            // base64-decode + post-decrypt JSON-parse paths. A row
+            // whose ciphertext is corrupt or whose plaintext doesn't
+            // parse becomes a sentinel rather than killing iteration.
+            let mut row_parse_error: Option<String> = None;
             if let Value::Object(env_map) = &env {
-                for (k, v) in env_map {
+                'group_loop: for (k, v) in env_map {
                     if let Some(g_obj) = v.as_object() {
                         if let Some(ct_str) = g_obj.get("ciphertext").and_then(Value::as_str) {
-                            let ct = STANDARD.decode(ct_str).map_err(|e| Error::Malformed {
-                                kind: "ciphertext base64",
-                                reason: e.to_string(),
-                            })?;
+                            let ct = match STANDARD.decode(ct_str) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    row_parse_error = Some(format!(
+                                        "ciphertext base64 in group {k:?}: {e}"
+                                    ));
+                                    break 'group_loop;
+                                }
+                            };
                             let mut field_hashes: BTreeMap<String, String> = BTreeMap::new();
                             if let Some(fh_obj) =
                                 g_obj.get("field_hashes").and_then(Value::as_object)
@@ -1767,8 +1895,20 @@ impl Runtime {
                                     .expect("group state RwLock poisoned");
                                 match gstate.cipher.decrypt(&ct) {
                                     Ok(pt) => {
-                                        let pv: Value = serde_json::from_slice(&pt)?;
-                                        plaintext_per_group.insert(k.clone(), pv);
+                                        match serde_json::from_slice::<Value>(&pt) {
+                                            Ok(pv) => {
+                                                plaintext_per_group.insert(k.clone(), pv);
+                                            }
+                                            Err(e) => {
+                                                // Bad plaintext bytes after decrypt;
+                                                // treat as a per-row parse error rather
+                                                // than aborting the iterator.
+                                                row_parse_error = Some(format!(
+                                                    "plaintext json in group {k:?}: {e}"
+                                                ));
+                                                break 'group_loop;
+                                            }
+                                        }
                                     }
                                     Err(
                                         Error::NotEntitled { .. } | Error::NotAPublisher { .. },
@@ -1794,6 +1934,31 @@ impl Runtime {
                         }
                     }
                 }
+            }
+
+            // DX review 0.4.2a3 follow-up: if any per-row error fired
+            // during the group/ciphertext loop above, surface a
+            // sentinel triple and move on. Don't update
+            // ``prev_hash_by_event`` — subsequent rows that chain
+            // through this one will fail chain verify, which is the
+            // correct semantics (the chain branched at this row, and
+            // we can't tell which fork is real).
+            if let Some(err) = row_parse_error {
+                out.push((
+                    ReadEntry {
+                        envelope: serde_json::json!({
+                            "event_type": "<parse-error>",
+                            "_parse_error": err,
+                        }),
+                        plaintext_per_group: BTreeMap::new(),
+                    },
+                    ValidFlags {
+                        signature: false,
+                        row_hash: false,
+                        chain: false,
+                    },
+                ));
+                continue;
             }
 
             // Recompute row_hash from envelope + decrypted/raw groups.
@@ -1921,30 +2086,72 @@ impl Runtime {
         }
         let mut out = Vec::new();
         for res in LogFileReader::open(log_path, &self.storage)? {
-            let env = res?;
+            // DX review 0.4.2a3 follow-up: per-row resilience. A bad
+            // row (malformed JSON, corrupt base64 ciphertext, bad
+            // post-decrypt plaintext) yields a sentinel envelope so
+            // the caller's verify='skip' path can count it as
+            // ``skipped_parse`` and continue. Without this, a single
+            // disk-corrupt row killed the iterator and clean rows
+            // after it never reached the caller.
+            let env = match res {
+                Ok(e) => e,
+                Err(e) => {
+                    out.push(ReadEntry {
+                        envelope: serde_json::json!({
+                            "event_type": "<parse-error>",
+                            "_parse_error": e.to_string(),
+                        }),
+                        plaintext_per_group: BTreeMap::new(),
+                    });
+                    continue;
+                }
+            };
             let mut plaintext_per_group: BTreeMap<String, Value> = BTreeMap::new();
-            for (gname, gstate_arc) in &self.groups {
+            let mut row_parse_error: Option<String> = None;
+            'group_loop: for (gname, gstate_arc) in &self.groups {
                 let Some(group_v) = env.get(gname) else {
                     continue;
                 };
                 let Some(ct_b64) = group_v.get("ciphertext").and_then(|v| v.as_str()) else {
                     continue;
                 };
-                let ct = STANDARD.decode(ct_b64).map_err(|e| Error::Malformed {
-                    kind: "ciphertext base64",
-                    reason: e.to_string(),
-                })?;
+                let ct = match STANDARD.decode(ct_b64) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        row_parse_error = Some(format!(
+                            "ciphertext base64 in group {gname:?}: {e}"
+                        ));
+                        break 'group_loop;
+                    }
+                };
                 let gstate = gstate_arc.read().expect("group state RwLock poisoned");
                 match gstate.cipher.decrypt(&ct) {
-                    Ok(pt) => {
-                        let v: Value = serde_json::from_slice(&pt)?;
-                        plaintext_per_group.insert(gname.clone(), v);
-                    }
+                    Ok(pt) => match serde_json::from_slice::<Value>(&pt) {
+                        Ok(v) => {
+                            plaintext_per_group.insert(gname.clone(), v);
+                        }
+                        Err(e) => {
+                            row_parse_error = Some(format!(
+                                "plaintext json in group {gname:?}: {e}"
+                            ));
+                            break 'group_loop;
+                        }
+                    },
                     Err(Error::NotEntitled { .. } | Error::NotAPublisher { .. }) => {
                         // Skip groups we can't read.
                     }
                     Err(e) => return Err(e),
                 }
+            }
+            if let Some(err) = row_parse_error {
+                out.push(ReadEntry {
+                    envelope: serde_json::json!({
+                        "event_type": "<parse-error>",
+                        "_parse_error": err,
+                    }),
+                    plaintext_per_group: BTreeMap::new(),
+                });
+                continue;
             }
             out.push(ReadEntry {
                 envelope: env,

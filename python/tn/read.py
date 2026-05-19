@@ -419,6 +419,47 @@ def read(
         for r in _wrap_parse_errors(
             iter(triples), verify, on_skip=on_skip, stats=stats,
         ):
+            # DX review 0.4.2a3 follow-up: the Rust read iterator now
+            # yields a sentinel triple ({"event_type": "<parse-error>",
+            # "_parse_error": "..."}) for rows that fail per-row
+            # parse/decrypt instead of raising. Route those through the
+            # ``skipped_parse`` counter (not ``skipped_verify``) so the
+            # caller can distinguish "the bytes are malformed" from
+            # "the bytes parse but verify failed."
+            env_for_parse_check = r.get("envelope") or {}
+            if env_for_parse_check.get("event_type") == "<parse-error>":
+                reason = (
+                    "parse: " +
+                    str(env_for_parse_check.get("_parse_error", "unknown"))
+                )
+                if on_skip is not None:
+                    try:
+                        on_skip(env_for_parse_check, reason)
+                    except Exception:  # noqa: BLE001
+                        import logging as _logging
+                        _logging.getLogger("tn.read").warning(
+                            "on_skip callback raised; continuing.",
+                            exc_info=True,
+                        )
+                if verify in (True, "raise"):
+                    stats.skipped_parse += 1
+                    stats.skipped_reasons.append(reason)
+                    raise VerifyError(
+                        sequence=0,
+                        event_type="<parse-error>",
+                        failed_checks=[reason],
+                    )
+                if verify == "skip":
+                    stats.skipped_parse += 1
+                    stats.skipped_reasons.append(reason)
+                    _emit_tampered_row(env_for_parse_check, [reason])
+                    continue
+                # verify=False: the user explicitly asked for fail-loud
+                # on parse errors (the documented contract). Raise the
+                # original-style ValueError so behaviour matches the
+                # pre-0.4.2a3 default.
+                raise ValueError(reason)
+
             valid = r.get("valid") or {}
             if not _all_valid(valid):
                 reasons = [k for k, v in valid.items() if not v]

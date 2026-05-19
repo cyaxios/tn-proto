@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2a3] - 2026-05-18
+
+Follow-up fix to the DX review batch in 0.4.2a2. The cross-process init
+lock landed in `0.4.2a2` made `tn.yaml` / keystore consistent under
+concurrent workers, but exposed a second-order chain-integrity bug:
+each worker's runtime kept a process-local view of the chain tip, so
+parallel emits raced on `prev_hash` and the on-disk chain branched.
+A 4-worker × 50-emit stress test was rejecting ~65% of entries on
+`tn.read(verify=True)` after `0.4.2a2`; this release closes that gap.
+
+Released in Python as `tn-protocol 0.4.2a3` (+ `tn-core 0.2.0a4`) and
+in TS as `@tnproto/sdk 0.4.2-alpha.3`. The TS SDK has no Rust runtime
+changes — same source as `0.4.2-alpha.2`, version bump only for tag
+parity.
+
+### Fixed
+
+- **Cross-process emit chain integrity.** Every emit now bookends
+  steps 4–9 of the runtime pipeline (chain advance, row-hash,
+  signing, envelope serialize, log append, chain commit) with an
+  advisory file lock on a sentinel adjacent to the target log
+  (`<log>.emit.lock`). Under the lock, the runtime re-reads the log
+  tail to derive the disk-truth `(seq, prev_hash)` for this
+  `event_type` and seeds `ChainState` before `advance` runs. The
+  in-memory chain becomes a cache; the file is the authority.
+
+  The fix preserves the gunicorn/uvicorn/celery multi-worker use
+  cases that the `0.4.2a2` init-lock work was scoped for. Lock cost
+  is ~1 ms per emit on local FS — negligible for non-hot paths;
+  hot-path batching is out of scope for this release.
+
+  Wasm consumers inherit the trait's no-op lock impl (single-process,
+  single-threaded — no race to coordinate).
+
+- **`tn.read(verify='skip')` survives parse errors mid-stream.**
+  Previously, a malformed entry (corrupt base64 ciphertext from a
+  partial write, disk corruption, schema mismatch) raised out of
+  the read iterator and clean entries before/after the bad one
+  were never yielded. Now the Rust read pipeline (`read_from`,
+  `read_from_with_validity`) catches per-row failures and yields a
+  sentinel envelope (`event_type == "<parse-error>"`); the Python
+  verify loop routes those into `stats.skipped_parse` (distinct
+  from `skipped_verify`) and fires the `on_skip` callback so
+  observability stays intact. Verification semantics elsewhere are
+  unchanged: `verify=True` still raises after the callback,
+  `verify=False` still raises on parse errors (the documented
+  fail-loud contract).
+
+### Changed
+
+- **`tn-core` dependency floor in `tn-protocol`** raised to
+  `>=0.2.0a4` (was `>=0.2.0a1`). Earlier `tn-core` wheels lack the
+  emit lock; tightening the floor guarantees that
+  `pip install tn-protocol==0.4.2a3` always pulls in a runtime that
+  serialises emit across processes.
+
+### Tests
+
+- `python/tests/test_concurrent_emit_chain.py` (3 cases): 4 workers
+  × 50 emits, 8 workers × 25 emits, and 5-iteration stress all yield
+  every entry with `tn.read(verify=True)` succeeding. 2000/2000
+  rows across 10 iterations on the development box.
+- `python/tests/test_read_parse_resilience.py` (3 cases): pin the
+  spec the tester filed — clean entries before and after a
+  parse-failing row both surface; `stats.skipped_parse=1`;
+  `on_skip` fires once with a `parse:`-prefixed reason.
+- `crypto/tn-core/src/chain.rs` `chain_tip_tests` (3 cases): unit
+  tests for the new `chain_tips_from_ndjson` helper that powers the
+  under-lock disk refresh.
+
 ## [0.4.2a2] - 2026-05-18
 
 DX review batch — 10 numbered findings closed (criticals through nits)

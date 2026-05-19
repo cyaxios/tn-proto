@@ -185,3 +185,81 @@ impl Default for ChainState {
         Self::new()
     }
 }
+
+/// Walk an ndjson log line-by-line and return the latest `(seq, row_hash)`
+/// observed for each `event_type`. Used by the cross-process emit lock
+/// (DX review 0.4.2a3) to refresh chain state from disk truth before
+/// advancing — the in-memory `ChainState` is per-process, so two
+/// workers racing on `tn.info("evt", …)` previously both started from
+/// the same stale view and emitted rows with conflicting `prev_hash`
+/// values. This helper produces the authoritative tip; `ChainState`
+/// is then re-seeded under the file lock before `advance` runs.
+///
+/// Lines that don't parse, or that lack `event_type`/`sequence`/
+/// `row_hash`, are silently skipped. The intent is to find the
+/// chain tip, not to validate the log — verification stays the
+/// reader's job.
+///
+/// Returns an empty map for a missing or unreadable log (treated as
+/// "no prior rows"; the runtime's existing init code-path already
+/// seeds from disk on `Runtime::init`, so this is only the
+/// per-emit refresh layer).
+pub fn chain_tips_from_ndjson(bytes: &[u8]) -> HashMap<String, (u64, String)> {
+    let mut out: HashMap<String, (u64, String)> = HashMap::new();
+    for line in bytes.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(env) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let Some(event_type) = env.get("event_type").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(seq) = env.get("sequence").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(row_hash) = env.get("row_hash").and_then(Value::as_str) else {
+            continue;
+        };
+        // Last-write-wins per event_type: later iterations of the
+        // loop overwrite the earlier entry, which matches "the
+        // most recent row in the file for this event_type."
+        out.insert(event_type.to_string(), (seq, row_hash.to_string()));
+    }
+    out
+}
+
+#[cfg(test)]
+mod chain_tip_tests {
+    use super::*;
+
+    #[test]
+    fn empty_log_returns_empty_map() {
+        let tips = chain_tips_from_ndjson(b"");
+        assert!(tips.is_empty());
+    }
+
+    #[test]
+    fn latest_row_per_event_type_wins() {
+        let bytes = b"{\"event_type\":\"a\",\"sequence\":1,\"row_hash\":\"sha256:11\"}\n\
+                     {\"event_type\":\"a\",\"sequence\":2,\"row_hash\":\"sha256:22\"}\n\
+                     {\"event_type\":\"b\",\"sequence\":1,\"row_hash\":\"sha256:bb\"}\n";
+        let tips = chain_tips_from_ndjson(bytes);
+        assert_eq!(tips.len(), 2);
+        assert_eq!(tips["a"], (2, "sha256:22".to_string()));
+        assert_eq!(tips["b"], (1, "sha256:bb".to_string()));
+    }
+
+    #[test]
+    fn malformed_lines_skipped() {
+        let bytes = b"not json\n\
+                     {\"event_type\":\"a\",\"sequence\":1,\"row_hash\":\"sha256:11\"}\n\
+                     {\"missing_fields\":true}\n\
+                     {\"event_type\":\"a\",\"sequence\":2,\"row_hash\":\"sha256:22\"}\n\
+                     \n";
+        let tips = chain_tips_from_ndjson(bytes);
+        assert_eq!(tips.len(), 1);
+        assert_eq!(tips["a"], (2, "sha256:22".to_string()));
+    }
+}

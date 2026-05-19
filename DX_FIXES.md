@@ -101,11 +101,14 @@ Expected: prints `OK`. yaml's `me.did` matches `keys/local.public`.
 
 - **Chain coherence under concurrent user writes is a separate
   problem.** Fix #1 makes init safe; it does not serialise
-  per-emit chain writes. The previously-published reproduction
+  per-emit chain writes. ~~The previously-published reproduction
   script (workers each call `tn.info` in a loop) will still raise
   `VerifyError: chain` on a `tn.read(verify=True)` because the
-  workers concurrently advance the same chain. That is filed as a
-  separate concern and is not in scope for this fix.
+  workers concurrently advance the same chain.~~ **Fixed in
+  0.4.2a3** — the emit pipeline now bookends chain advance through
+  commit with an advisory file lock, refreshing chain state from
+  disk truth under the lock. 2000/2000 rows across 10 stress
+  iterations pass `verify=True`. See the 0.4.2a3 CHANGELOG entry.
 - **Lock release on `SIGKILL`**: the OS doesn't auto-unlink the
   sentinel. The 60 s stale reaper handles this. Soak-test sites
   should monitor for `.init.*.lock` files older than 5 minutes as
@@ -844,13 +847,16 @@ except Exception:
 
 ### Risks / regressions to watch
 
-- **#10 parse-error resilience is partial.** Once the underlying
-  triple-iterator (Rust runtime read path) raises mid-stream, the
-  generator is dead — Python generators can't continue past an
-  exception. So `verify='skip'` will catch and emit an admin event
-  for the *first* parse error, then iteration stops naturally.
-  Multi-bad-row resilience requires the Rust runtime to recover
-  per-line internally. That's tracked as Rust-side work.
+- ~~**#10 parse-error resilience is partial.**~~ **Closed in
+  0.4.2a3.** The Rust read pipeline (`read_from`,
+  `read_from_with_validity`) now wraps each row's body so per-row
+  failures (JSON parse, base64 decode, post-decrypt plaintext
+  json) yield a sentinel envelope (`event_type == "<parse-error>"`)
+  and iteration continues. The Python verify loop routes the
+  sentinel into `stats.skipped_parse` (distinct from
+  `skipped_verify`) and fires `on_skip` with a `parse:`-prefixed
+  reason. Clean rows on either side of a bad one now both yield.
+  See `python/tests/test_read_parse_resilience.py`.
 - **Return type change** — `tn.read` previously returned `Iterator[Entry]`;
   it now returns `_ReadIterator`. The iteration protocol is preserved
   so consumers using `for e in tn.read(): ...` are unaffected. Callers
