@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "tn-protocol"
-version         = "0.4.2a6"
+version         = "0.4.2a8"
 description     = "TestigoNodo protocol: attested logging with JWE + btn ciphers"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -50,15 +50,17 @@ dependencies = [
     # any environment, including when mcp moves to an extra in tn-proto.
     "pydantic>=2",
     # Rust-backed ciphers. Built with maturin from ../crypto/tn-btn-py/
-    # and ../crypto/tn-core-py/; published as separate wheels. The
-    # range allows alpha sub-package patches to flow without forcing a
-    # tn-protocol republish — tighten to == on stable.
-    "tn-btn>=0.2.0a1,<0.3",
-    # 0.2.0a5 carries the cross-process emit lock (0.4.2a3) AND the
-    # per-row parse resilience + Rust stdout admin filter (0.4.2a4).
-    # Tighten the floor so ``pip install tn-protocol==0.4.2a4`` always
-    # pulls in a runtime that has both fixes.
-    "tn-core>=0.2.0a5,<0.3",
+    # and ../crypto/tn-core-py/; published as separate wheels. As of
+    # 0.4.2a8 all three packages move on the same version axis to
+    # avoid skew across the Rust/Python boundary on every release.
+    # The lower bound carries:
+    #   - cross-process emit lock (0.4.2a3)
+    #   - per-row parse resilience + Rust stdout admin filter (0.4.2a4)
+    #   - pinned-writer pool + PEL admin path + templated chain seed
+    #     (0.4.2a8) — required because tn-protocol uses the new
+    #     LogWriters dispatcher via PyO3
+    "tn-btn>=0.4.2a8,<0.5",
+    "tn-core>=0.4.2a8,<0.5",
 ]
 
 [project.optional-dependencies]
