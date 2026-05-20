@@ -147,6 +147,24 @@ def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str
         "signature",
     }
 
+    # Ceremony-level shape (chain / sign flags) drives which checks
+    # are load-bearing. Chain-disabled ceremonies (telemetry,
+    # secure_log, stdout) emit `prev_hash=""` / `sequence=1` sentinels
+    # on every row, so a byte-for-byte chain comparison would always
+    # fail from row 2 onward — the writer never made the chain claim.
+    # Likewise, sign=False + chain=False emits `row_hash=""` sentinel,
+    # and recomputing the hash would mismatch.
+    #
+    # Resolve once outside the loop; the ceremony shape is invariant
+    # for the duration of one read pass.
+    try:
+        from . import current_config
+        _ceremony_chain = bool(getattr(current_config(), "chain", True))
+        _ceremony_sign = bool(getattr(current_config(), "sign", True))
+    except Exception:  # noqa: BLE001
+        _ceremony_chain = True
+        _ceremony_sign = True
+
     prev_hash_by_event: dict[str, str] = {}
     for entry in entries:
         env = entry["envelope"]
@@ -157,9 +175,16 @@ def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str
         sig_b64 = env.get("signature", "")
 
         # Chain linkage ------------------------------------------------
-        last = prev_hash_by_event.get(event_type)
-        chain_ok = (last is None) or (prev_hash == last)
-        prev_hash_by_event[event_type] = row_hash
+        if not _ceremony_chain:
+            # The ceremony opted out of chain claims. Don't try to
+            # verify a chain we never wrote. Don't carry row_hash
+            # forward either — if a later read sees a chained
+            # ceremony's rows mixed in, that pass should start fresh.
+            chain_ok = True
+        else:
+            last = prev_hash_by_event.get(event_type)
+            chain_ok = (last is None) or (prev_hash == last)
+            prev_hash_by_event[event_type] = row_hash
 
         # Row hash recompute ------------------------------------------
         public_fields: dict[str, Any] = {}
@@ -174,20 +199,31 @@ def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str
                 }
             else:
                 public_fields[k] = v
-        try:
-            recomputed = _compute_row_hash(
-                did=did,
-                timestamp=env.get("timestamp", ""),
-                event_id=env.get("event_id", ""),
-                event_type=event_type,
-                level=env.get("level", ""),
-                prev_hash=prev_hash,
-                public_fields=public_fields,
-                groups=groups,
-            )
-            row_hash_ok = recomputed == row_hash
-        except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
-            row_hash_ok = False
+        # Row-hash sentinel: when the writer's ceremony has both
+        # `chain: false` AND `sign: false` (telemetry, stdout),
+        # `need_row_hash` was false at emit time and the envelope's
+        # `row_hash` field is the documented empty sentinel.
+        # Recomputing would produce a non-empty hash and the byte
+        # compare would always fail. Accept the sentinel as
+        # "row_hash is not a load-bearing field for this ceremony
+        # shape" — matches the writer's contract.
+        if not _ceremony_chain and not _ceremony_sign and not row_hash:
+            row_hash_ok = True
+        else:
+            try:
+                recomputed = _compute_row_hash(
+                    did=did,
+                    timestamp=env.get("timestamp", ""),
+                    event_id=env.get("event_id", ""),
+                    event_type=event_type,
+                    level=env.get("level", ""),
+                    prev_hash=prev_hash,
+                    public_fields=public_fields,
+                    groups=groups,
+                )
+                row_hash_ok = recomputed == row_hash
+            except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
+                row_hash_ok = False
 
         # Signature verify --------------------------------------------
         try:

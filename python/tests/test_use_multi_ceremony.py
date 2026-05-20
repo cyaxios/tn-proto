@@ -289,17 +289,19 @@ def test_use_with_audit_profile_round_trips_entries():
 
 
 @requires_btn
-def test_use_with_telemetry_profile_has_no_replay_surface():
-    """Telemetry's default sink is stdout — there is no on-disk log
-    file for ``read()`` to iterate. The verb returns an empty list,
-    matching the profile's "fast-as-stdlib-logger" contract."""
+def test_use_with_telemetry_profile_has_replay_surface():
+    """0.4.2a9: telemetry HAS a file sink (in addition to stdout).
+    The profile's "fast-as-stdlib-logger" contract is about CPU cost
+    (unsigned, unchained), not about dropping the file — operators
+    who want a truly forward-only profile use ``stdout`` instead."""
     import tn
 
     traces = tn.use("traces", profile="telemetry")
     traces.info("trace.span_ended", duration_ms=12)
     traces.info("trace.span_ended", duration_ms=7)
 
-    assert list(traces.read()) == []
+    rows = list(traces.read())
+    assert len(rows) == 2, f"expected 2 user rows, got {len(rows)}"
 
 
 @requires_btn
@@ -359,7 +361,8 @@ def test_use_keeps_each_profile_independent_in_the_same_process():
     assert p_yaml["ceremony"]["sign"] is True
     assert [e.event_type for e in _user_entries(payments)] == ["charge.captured"]
 
-    # Telemetry doesn't sign and doesn't replay.
+    # Telemetry doesn't sign but DOES write a file you can read back
+    # (0.4.2a9: file_rotating default sink restored).
     t_yaml = _ceremony_yaml(traces)
     assert t_yaml["ceremony"]["sign"] is False
-    assert list(traces.read()) == []
+    assert [e.event_type for e in _user_entries(traces)] == ["trace.span_ended"]

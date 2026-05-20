@@ -246,17 +246,41 @@ class StdoutHandler(SyncHandler):
             payload = raw_line if raw_line.endswith(b"\n") else raw_line + b"\n"
         else:
             payload = _format_pretty(envelope)
+        # 0.4.2a9: handle Windows-console encoding gracefully. On
+        # Windows the default cp1252 codec cannot encode many common
+        # characters (em-dash, arrows, emoji, CJK, …). A bare
+        # `stream.write(text)` raises UnicodeEncodeError on those
+        # bytes and would kill the emit. We already decode with
+        # `errors="replace"` going from bytes → str; mirror that on
+        # the str → console encode step by replacing un-encodable
+        # codepoints with `?` rather than raising.
+        text_payload = payload.decode("utf-8", errors="replace")
         if text_mode:
             try:
-                stream.write(payload.decode("utf-8", errors="replace"))  # type: ignore[arg-type]
+                stream.write(text_payload)  # type: ignore[arg-type]
             except TypeError:
                 stream.write(payload)  # type: ignore[arg-type]
+            except UnicodeEncodeError:
+                # Resort to the stream's own encoding, replacing
+                # anything it can't render with a "?". Keeps the log
+                # line visible (with lossy chars) instead of taking
+                # the whole emit down.
+                enc = getattr(stream, "encoding", None) or "ascii"
+                stream.write(
+                    text_payload.encode(enc, errors="replace").decode(enc)
+                )  # type: ignore[arg-type]
         else:
             try:
                 stream.write(payload)
             except TypeError:
                 # capsys's captured stdout may be text-mode, not bytes-mode
-                stream.write(payload.decode("utf-8", errors="replace"))  # type: ignore[arg-type]
+                try:
+                    stream.write(text_payload)  # type: ignore[arg-type]
+                except UnicodeEncodeError:
+                    enc = getattr(stream, "encoding", None) or "ascii"
+                    stream.write(
+                        text_payload.encode(enc, errors="replace").decode(enc)
+                    )  # type: ignore[arg-type]
         try:
             stream.flush()
         except Exception:  # noqa: BLE001 — flush is best-effort; underlying stream may be unflushable in test capture

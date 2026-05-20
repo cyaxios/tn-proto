@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tn-core"
-version = "0.4.2a8"
+version = "0.4.2a9"
 description = "Rust-backed TN runtime (PyO3)."
 readme = "README.md"
 requires-python = ">=3.9"

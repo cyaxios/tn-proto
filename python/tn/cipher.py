@@ -496,7 +496,32 @@ class BtnGroupCipher:
             state_bytes = state_path.read_bytes()
             state = _btn.PublisherState.from_bytes(state_bytes)
             last_persisted = state_bytes
-        self_kit = kit_path.read_bytes() if kit_path.exists() else b""
+        kit_exists = kit_path.exists()
+        self_kit = kit_path.read_bytes() if kit_exists else b""
+
+        # 0.4.2a9: integrity check at load time, not per-emit. If the
+        # publisher state exists but the self-kit is missing or
+        # empty, the publisher would encrypt-and-write but be unable
+        # to decrypt-and-read its own emits — "silent data loss" on
+        # any subsequent `tn.read()`. We can't cheaply regenerate the
+        # kit from state (`state.mint()` advances state, producing a
+        # NEW kit, not the original), so fail loudly at init. The
+        # operator can recover by absorbing a fresh kit bundle, or by
+        # re-initing the ceremony (which wipes state too).
+        #
+        # We check at load — once per process — instead of per-emit
+        # so the hot path stays free.
+        if state is not None and (not kit_exists or len(self_kit) == 0):
+            kind = "missing" if not kit_exists else "empty"
+            raise CipherError(
+                f"btn group {group_name!r} kit is {kind}: {kit_path}. "
+                f"The publisher state at {state_path} expects a "
+                f"matching self-kit; without it, emits would be "
+                f"unreadable by this publisher. Recover by absorbing "
+                f"a fresh kit bundle for this group, or by "
+                f"re-initing the ceremony from scratch (which wipes "
+                f"the existing publisher state)."
+            )
         return cls(
             _state=state,
             _self_kit=self_kit,

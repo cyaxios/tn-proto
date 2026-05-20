@@ -106,6 +106,32 @@ def _print_mnemonic_banner(mnemonic: str) -> None:
 # ---------------------------------------------------------------------
 
 
+def _stamp_project_labels(
+    yaml_path: Path,
+    project_name: str | None,
+    version_name: str | None,
+) -> None:
+    """Stamp ``ceremony.project_name`` / ``ceremony.version_name`` into
+    an existing yaml. No-op when both are None. Used by ``tn init``
+    to record the operator-chosen vault label at mint time.
+
+    Read-modify-write via PyYAML to preserve every other key as the
+    init machinery left it.
+    """
+    if project_name is None and version_name is None:
+        return
+    import yaml as _yaml
+    with yaml_path.open("r", encoding="utf-8") as fh:
+        doc = _yaml.safe_load(fh) or {}
+    ceremony = doc.setdefault("ceremony", {})
+    if project_name is not None:
+        ceremony["project_name"] = project_name
+    if version_name is not None:
+        ceremony["version_name"] = version_name
+    with yaml_path.open("w", encoding="utf-8") as fh:
+        _yaml.safe_dump(doc, fh, sort_keys=False)
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """Scaffold identity (if absent) + ceremony at <project>/tn.yaml."""
     # Quiet the stdout handler by default: it echoes every log envelope
@@ -144,13 +170,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
 
     project_dir = Path(args.project).resolve()
-    if project_dir.exists() and any(project_dir.iterdir()):
-        if not args.force:
-            _die(
-                f"project directory {project_dir} already exists and is non-empty. "
-                f"Use --force to overwrite or pick a different path.",
-                code=2,
-            )
     project_dir.mkdir(parents=True, exist_ok=True)
 
     identity_path = _default_identity_path()
@@ -186,30 +205,68 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"[tn init] New identity written to {identity_path}")
         print(f"[tn init]   DID: {identity.did}")
 
-    # -- Create ceremony -------------------------------------------
+    # -- Create or attach to ceremony -------------------------------
+    # 0.4.2a9: CLI now uses the SAME layout Python's `tn.init()` produces
+    # — `<project>/.tn/default/tn.yaml` — so the two entry points are
+    # interchangeable. Re-running `tn init <same project>` is idempotent:
+    # it re-attaches to the existing default ceremony instead of erroring
+    # out. `--force` still nukes and re-mints (with a backup of the prior
+    # identity-bound material into `.tn/_overwritten_<UTC>/`).
     from . import current_config, flush_and_close
     from . import init as tn_init
+    from ._multi import DEFAULT_CEREMONY_NAME, _ensure_ceremony_on_disk
 
-    yaml_path = project_dir / "tn.yaml"
-    # Don't pass log_path: let create_fresh + the generated yaml drive
-    # the path so the per-yaml-stem namespace (FINDINGS #2) is honored.
-    # Hardcoding `.tn/logs/...` here would override the yaml and create
-    # a layout collision when a second ceremony is added to the same dir.
+    default_dir = project_dir / ".tn" / DEFAULT_CEREMONY_NAME
+    yaml_path = default_dir / "tn.yaml"
 
-    if yaml_path.exists() and not args.force:
-        _die(
-            f"{yaml_path} already exists. Use --force to overwrite.",
-            code=2,
-        )
+    if yaml_path.exists() and args.force:
+        # Move the existing ceremony aside so --force never deletes data
+        # silently. The operator can recover by hand from the backup dir.
+        import shutil
+        from datetime import datetime, timezone
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup = project_dir / ".tn" / f"_overwritten_{stamp}"
+        shutil.move(str(default_dir), str(backup))
+        print(f"[tn init] --force: prior ceremony moved to {backup}")
 
-    tn_init(
-        yaml_path,
+    if yaml_path.exists():
+        # Idempotent re-attach. Matches Python `tn.init()`'s behaviour:
+        # if a default ceremony is already there, attach to it; don't
+        # mint a second one and don't error.
+        tn_init(yaml_path, identity=identity, link=False)
+        cfg = current_config()
+        print(f"[tn init] Reusing ceremony {cfg.ceremony_id} at {yaml_path}")
+        print(f"[tn init]   cipher: {cfg.cipher_name}")
+        print(f"[tn init]   keystore: {cfg.keystore}")
+        flush_and_close()
+        return 0
+
+    # Use the same canonical-layout primitive the Python init uses.
+    # That builds `.tn/<name>/{keys,logs,admin}/` cleanly under
+    # project_dir, avoiding the per-yaml-stem nesting that
+    # create_fresh's bare defaults would produce.
+    _ensure_ceremony_on_disk(
+        DEFAULT_CEREMONY_NAME,
+        project_dir=project_dir,
+        device_did=identity.did,
+        profile=None,
         cipher=args.cipher,
-        identity=identity,
-        link=False,  # CLI runs its own link/print block below; suppress SDK auto-link
+        link=False,
     )
+    # 0.4.2a9: stamp the operator-chosen project/version labels into
+    # the freshly-minted yaml so the vault link (next step) uses
+    # human names instead of the random ceremony_id. Default to the
+    # basename of the project dir when --project-name is omitted, so
+    # `tn init mycompany_payments` Just Works for the common case.
+    project_name = args.project_name or project_dir.name
+    version_name = args.version_name  # None → wallet falls through to project_name
+    _stamp_project_labels(yaml_path, project_name, version_name)
+    tn_init(yaml_path, identity=identity, link=False)
     cfg = current_config()
     print(f"[tn init] Ceremony {cfg.ceremony_id} created at {yaml_path}")
+    if cfg.project_name:
+        print(f"[tn init]   project: {cfg.project_name}"
+              + (f" (version: {cfg.version_name})" if cfg.version_name else ""))
     print(f"[tn init]   cipher: {cfg.cipher_name}")
     print(f"[tn init]   keystore: {cfg.keystore}")
     flush_and_close()
@@ -339,13 +396,17 @@ def cmd_wallet_link(args: argparse.Namespace) -> int:
     from . import current_config, flush_and_close
     from . import init as tn_init
 
-    yaml_path = Path(args.yaml).resolve()
+    yaml_path = _resolve_yaml_or_discover(args.yaml)
     tn_init(yaml_path, identity=identity)
     cfg = current_config()
 
     client = VaultClient.for_identity(identity, vault_url)
     try:
-        _wallet.link_ceremony(cfg, client, project_name=cfg.ceremony_id)
+        # 0.4.2a9: omit explicit project_name so wallet.link_ceremony
+        # uses cfg.project_name when present, falls back to ceremony_id
+        # otherwise. Legacy ceremonies with no project_name field keep
+        # linking under their random ceremony_id label.
+        _wallet.link_ceremony(cfg, client)
         result = _wallet.sync_ceremony(cfg, client)
         print(f"Linked {cfg.ceremony_id} -> {vault_url}/projects/{cfg.linked_project_id}")
         print(f"  uploaded {len(result.uploaded)} files")
@@ -374,7 +435,7 @@ def cmd_wallet_unlink(args: argparse.Namespace) -> int:
     from . import current_config, flush_and_close
     from . import init as tn_init
 
-    yaml_path = Path(args.yaml).resolve()
+    yaml_path = _resolve_yaml_or_discover(args.yaml)
     tn_init(yaml_path, identity=identity)
     cfg = current_config()
     prior_vault = cfg.linked_vault
@@ -396,7 +457,7 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
     from . import current_config, flush_and_close
     from . import init as tn_init
 
-    yaml_path = Path(args.yaml).resolve()
+    yaml_path = _resolve_yaml_or_discover(args.yaml)
     tn_init(yaml_path, identity=identity)
     cfg = current_config()
 
@@ -999,7 +1060,7 @@ def cmd_add_recipient(args: argparse.Namespace) -> int:
 
 
 def cmd_absorb(args: argparse.Namespace) -> int:
-    from . import flush_and_close
+    from . import current_config, flush_and_close
     from . import init as tn_init
     from .pkg import absorb
 
@@ -1009,6 +1070,38 @@ def cmd_absorb(args: argparse.Namespace) -> int:
         _die(f"package not found: {package}")
 
     tn_init(yaml_path)
+    # 0.4.2a9: reject self-absorb. A .tnpkg whose `from_did` matches the
+    # active ceremony's DID means the publisher is trying to absorb a
+    # bundle they just minted — that overwrites their OWN publisher
+    # keystore with a reader-kit copy. The absorb path warns on the
+    # collision but proceeds; that's a foot-cannon in a CLI. Block it
+    # at the verb so the user has to use `--allow-self-absorb` (escape
+    # hatch for tests).
+    import json
+    import zipfile
+    try:
+        with zipfile.ZipFile(package) as zf:
+            if "manifest.json" in zf.namelist():
+                m = json.loads(zf.read("manifest.json").decode("utf-8"))
+                from_did = m.get("from_did")
+                local_did = current_config().device.did
+                if from_did and from_did == local_did and not getattr(
+                    args, "allow_self_absorb", False
+                ):
+                    flush_and_close()
+                    _die(
+                        f"refusing to absorb a package this ceremony minted "
+                        f"(from_did={from_did}). Absorbing it would overwrite "
+                        f"the publisher's own keystore with a reader-kit "
+                        f"copy. Pass --allow-self-absorb if you actually "
+                        f"intend to do this (tests, recovery flows).",
+                        code=2,
+                    )
+    except (zipfile.BadZipFile, KeyError, json.JSONDecodeError):
+        # Not a zip / no manifest / bad JSON — let the real absorb path
+        # produce its own error message about the corrupt package.
+        pass
+
     try:
         receipt = absorb(package)
     finally:
@@ -1036,10 +1129,19 @@ def cmd_rotate(args: argparse.Namespace) -> int:
 
     The rotation primitive is the deploy event for a TN ceremony: it
     bumps the per-group ``index_epoch``, regenerates the publisher's
-    self-kit, renames the prior key material to ``.revoked.<ts>``, and
-    appends a ``tn.rotation.completed`` attestation to the admin log.
-    Existing kits keep working for *pre-rotation* entries; *post-rotation*
-    reads require a freshly-minted kit, which this verb produces.
+    self-kit, renames the prior key material to ``.revoked.<ts>`` (the
+    publisher keeps the file on disk for keywalk exercises across
+    rotation boundaries), and appends a ``tn.rotation.completed``
+    attestation to the admin log. Recipients receive the new kit but
+    keep their old ones too — also kept on disk for keywalk.
+
+    Rotation is *not* eviction. The same recipient set carries
+    forward; both pre- and post-rotation kits successfully decrypt
+    both pre- and post-rotation entries. The new kit exists so the
+    publisher can hand it to new recipients added after this point,
+    and so the keystore generation count moves forward for
+    audit/key-hygiene purposes. To actually remove a recipient,
+    revoke them via ``admin_revoke_recipient`` before rotating.
 
     Vault-linked ceremonies push the new state on autosync as a side
     effect of the underlying ``tn.admin.rotate`` call (see
@@ -1192,11 +1294,33 @@ def cmd_read(args: argparse.Namespace) -> int:
     from . import flush_and_close
     from . import init as tn_init
     from . import read as tn_read
+    from ._multi import ceremony_yaml_path
 
     yaml_path = _resolve_yaml_or_discover(args.yaml)
     tn_init(yaml_path)
+    # 0.4.2a9: `tn read <name>` resolves a stream/ceremony name from the
+    # local project's `.tn/<name>/tn.yaml` registry before falling back
+    # to treating the positional as a literal log path. Matches what
+    # `tn streams` lists. The lookup is anchored at the discovered
+    # yaml's parent (the project root) so it works regardless of cwd.
+    log_path = None
+    if args.log:
+        as_name = args.log
+        # First, see if it's a registered stream name.
+        project_dir = yaml_path.parent.parent.parent  # .tn/default/tn.yaml -> project root
+        try:
+            candidate_yaml = ceremony_yaml_path(as_name, project_dir=project_dir)
+        except Exception:  # noqa: BLE001 — invalid name, fall through to path mode
+            candidate_yaml = None
+        if candidate_yaml is not None and candidate_yaml.is_file():
+            # It IS a stream name. Re-init against that stream's yaml so
+            # tn.read decrypts with the right per-stream config, then
+            # read its main log file directly.
+            tn_init(candidate_yaml)
+            log_path = None  # use the stream's own resolved log path
+        else:
+            log_path = Path(args.log).resolve()
     try:
-        log_path = Path(args.log).resolve() if args.log else None
         for entry in tn_read(log=log_path, all_runs=args.all_runs):
             ts = entry.timestamp.isoformat() if entry.timestamp else "?"
             level = entry.level or ""
@@ -2060,12 +2184,82 @@ def cmd_validate(args: argparse.Namespace) -> int:
             errors.append(f"{yaml_path}: top-level must be a mapping")
             continue
 
+        # 0.4.2a9: structural validation. A yaml that parses but has a
+        # typo in a key name (e.g. `keystore_typo:` instead of
+        # `keystore:`) used to pass validate and then fail
+        # confusingly at runtime with a FileNotFoundError on a path
+        # the user never set. Validate now means "fully valid" —
+        # required top-level sections must be present.
+        #
+        # Stream yamls (those with `extends:`) inherit identity /
+        # groups / keystore from the parent, so their requirement
+        # set is narrower. Check `extends:` first.
+        is_stream = "extends" in doc
+        required_top: list[str] = ["ceremony"]
+        if not is_stream:
+            required_top += ["logs", "keystore", "me", "groups"]
+        for key in required_top:
+            if key not in doc:
+                errors.append(
+                    f"{yaml_path}: missing required top-level key "
+                    f"{key!r}. A yaml that parses but lacks "
+                    f"required sections will fail at init time with "
+                    f"a confusing error; declare {key!r} or add an "
+                    f"`extends:` pointing at a yaml that does."
+                )
+
+        # Sub-keys we depend on at runtime.
+        if isinstance(doc.get("ceremony"), dict):
+            if "id" not in doc["ceremony"]:
+                errors.append(f"{yaml_path}: ceremony.id is required")
+        if not is_stream:
+            if isinstance(doc.get("logs"), dict) and "path" not in doc["logs"]:
+                errors.append(f"{yaml_path}: logs.path is required")
+            if isinstance(doc.get("keystore"), dict) and "path" not in doc["keystore"]:
+                errors.append(f"{yaml_path}: keystore.path is required")
+            if isinstance(doc.get("me"), dict) and "did" not in doc["me"]:
+                errors.append(f"{yaml_path}: me.did is required")
+
         profile = (doc.get("ceremony") or {}).get("profile")
         if profile is not None and not _profiles.is_known(profile):
             errors.append(
                 f"{yaml_path}: unknown profile {profile!r}; "
                 f"catalog: {list(_profiles.all_profile_names())}"
             )
+
+        # 0.4.2a9: also check that the keystore actually contains the
+        # publisher's self-kit material for every declared group. An
+        # empty/missing `*.btn.mykit` file means the publisher can
+        # encrypt-and-write but can't decrypt-and-read its own log
+        # (the read silently returns `fields: {}` with the group
+        # listed in `hidden_groups`). Catch it at validate time so
+        # the operator sees the problem before silent data loss.
+        groups_dict = doc.get("groups") if isinstance(doc.get("groups"), dict) else None
+        keystore_block = doc.get("keystore") if isinstance(doc.get("keystore"), dict) else None
+        if groups_dict and keystore_block and "path" in keystore_block:
+            ks_path = _Path(keystore_block["path"])
+            if not ks_path.is_absolute():
+                ks_path = (yaml_path.parent / ks_path).resolve()
+            for gname, gspec in groups_dict.items():
+                if not isinstance(gspec, dict):
+                    continue
+                cipher = (gspec.get("cipher") or doc.get("ceremony", {}).get("cipher") or "btn")
+                if cipher == "btn":
+                    kit_file = ks_path / f"{gname}.btn.mykit"
+                    if not kit_file.is_file():
+                        errors.append(
+                            f"{yaml_path}: group {gname!r} kit missing: "
+                            f"{kit_file}. Without the publisher self-kit "
+                            f"the runtime will silently fail to decrypt "
+                            f"its own emits. Re-init the ceremony or "
+                            f"absorb a fresh kit bundle."
+                        )
+                    elif kit_file.stat().st_size == 0:
+                        errors.append(
+                            f"{yaml_path}: group {gname!r} kit is empty: "
+                            f"{kit_file}. Same effect as missing — "
+                            f"emits will be unreadable by the publisher."
+                        )
 
         # DX review #2: catch the keystore/yaml DID divergence that
         # `tn.init` previously surfaced as `ValueError: keystore DID
@@ -2125,6 +2319,30 @@ def build_parser() -> argparse.ArgumentParser:
     # --- tn init -------------------------------------------------
     p_init = sub.add_parser("init", help="Scaffold identity + ceremony.")
     p_init.add_argument("project", help="Path to the new project directory.")
+    # 0.4.2a9: vault-link labels stamped into the yaml at mint.
+    # ``--project-name`` becomes ``account_projects.name`` in the
+    # vault (one row per operator-named project, multiple publishers
+    # under one row). Defaults to ``basename(<project>)``.
+    # ``--version-name`` becomes ``account_projects.publishers[].nickname``;
+    # defaults to ``project_name`` when omitted.
+    p_init.add_argument(
+        "--project-name",
+        default=None,
+        help=(
+            "Operator label for vault-side project grouping. Two TN "
+            "installs that share this name AND belong to the same "
+            "account merge into one vault project. Defaults to the "
+            "basename of <project>."
+        ),
+    )
+    p_init.add_argument(
+        "--version-name",
+        default=None,
+        help=(
+            "Per-instance nickname inside the project (e.g. "
+            "'laptop-dev', 'ci', 'prod'). Defaults to <project-name>."
+        ),
+    )
     # ``btn`` is the shipping default cipher; ``jwe`` is the pure-Python
     # alternative kept for environments that can't ship the Rust extension.
     # ``bgw`` was retired in Workstream G — removed from choices.
@@ -2174,17 +2392,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_status.set_defaults(func=cmd_wallet_status)
 
+    # 0.4.2a9: wallet link / unlink / sync all default to the
+    # discovered yaml the same way `tn read` and `tn status` do —
+    # operator doesn't have to type the full path when one is in
+    # scope. Pass an explicit yaml only when you want to override
+    # discovery.
     p_link = wsub.add_parser("link")
-    p_link.add_argument("yaml")
+    p_link.add_argument(
+        "yaml", nargs="?", default=None,
+        help="Optional ceremony yaml. Default: discover via the standard chain.",
+    )
     p_link.add_argument("--vault", default=None)
     p_link.set_defaults(func=cmd_wallet_link)
 
     p_unlink = wsub.add_parser("unlink")
-    p_unlink.add_argument("yaml")
+    p_unlink.add_argument(
+        "yaml", nargs="?", default=None,
+        help="Optional ceremony yaml. Default: discover via the standard chain.",
+    )
     p_unlink.set_defaults(func=cmd_wallet_unlink)
 
     p_sync = wsub.add_parser("sync")
-    p_sync.add_argument("yaml")
+    p_sync.add_argument(
+        "yaml", nargs="?", default=None,
+        help="Optional ceremony yaml. Default: discover via the standard chain.",
+    )
     p_sync.add_argument(
         "--drain-queue",
         action="store_true",
@@ -2327,6 +2559,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_absorb.add_argument(
         "--yaml", default=None,
         help="Path to the absorber's tn.yaml. Default: discover via the standard chain.",
+    )
+    p_absorb.add_argument(
+        "--allow-self-absorb", action="store_true",
+        help=(
+            "Allow absorbing a .tnpkg this ceremony itself minted. The "
+            "default is to refuse: self-absorb overwrites the publisher's "
+            "own keystore with a reader-kit copy, which is almost never "
+            "what you want outside test/recovery flows."
+        ),
     )
     p_absorb.set_defaults(func=cmd_absorb)
 

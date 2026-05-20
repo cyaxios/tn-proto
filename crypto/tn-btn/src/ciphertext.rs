@@ -42,8 +42,13 @@ pub struct Ciphertext {
     /// their kit's publisher_id before attempting decrypt; a mismatch
     /// surfaces as `NotEntitled` without any cryptographic work.
     pub publisher_id: [u8; 32],
-    /// Epoch counter. Bumped on key rotation; a ciphertext from a
-    /// later epoch requires a fresh reader kit.
+    /// Epoch counter. Bumped on key rotation. Each ciphertext is
+    /// sealed under exactly one epoch; a kit minted at epoch N
+    /// decrypts ciphertexts at epoch N only. Higher-layer readers
+    /// (`tn.read` and friends) keep every absorbed kit generation
+    /// on disk and walk them in turn — that's how a recipient with
+    /// pre- and post-rotation kits transparently reads both pre-
+    /// and post-rotation entries. Don't delete old kits.
     pub epoch: u32,
     /// One entry per subset in the cover.
     pub cover: Vec<CoverEntry>,

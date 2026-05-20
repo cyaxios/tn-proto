@@ -131,15 +131,20 @@ class TestExtendsResolutionMechanics:
         # Child's logs.path wins outright (not absolutized at child level).
         assert merged["logs"]["path"] == "./logs/child.ndjson"
 
-    def test_extends_handlers_additive(self, tmp_path):
+    def test_extends_handlers_replaces(self, tmp_path):
+        """0.4.2a9: declaring ``handlers:`` on the child REPLACES the
+        parent's list (was additive-with-dedupe, which surprised
+        users — see 0.4.2a9 bug-2 fix in `_resolve_extends`)."""
         _, child = self._setup_pair(tmp_path)
         doc = _config._read_yaml_doc(child)
         merged = _config._resolve_extends(child, doc)
         # Child has file.rotating "main"; parent has stdout "stdout".
-        # Both appear in the merged list (additive, deduped by name).
+        # The child declared handlers, so its list replaces the parent's
+        # — only "main" survives.
         names = {h.get("name") or h.get("kind") for h in merged["handlers"]}
-        assert "main" in names
-        assert "stdout" in names
+        assert names == {"main"}, (
+            f"child handlers: should replace parent's; got {names}"
+        )
 
     def test_extends_child_overriding_parent_owned_logs_warning(
         self, tmp_path, caplog

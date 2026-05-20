@@ -42,7 +42,8 @@ def test_tn_rotate_bumps_epoch(
     cli_run: Callable[..., object],
 ) -> None:
     project = hermetic_machine / "myproject"
-    yaml_path = project / "tn.yaml"
+    # 0.4.2a9: CLI `tn init` writes the yaml under `.tn/default/`.
+    yaml_path = project / ".tn" / "default" / "tn.yaml"
 
     init_r = cli_run("init", str(project), "--skip-confirm", "--keep-mnemonic", "--no-link")  # type: ignore[arg-type]
     assert_named(

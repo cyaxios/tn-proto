@@ -64,7 +64,13 @@ def test_tn_init_creates_ceremony(
         ),
     )
 
-    yaml_path = project / "tn.yaml"
+    # 0.4.2a9: CLI `tn init <project>` now creates
+    # `<project>/.tn/default/tn.yaml` (canonical layout, matches
+    # Python's `tn.init()` so the two entry points are
+    # interchangeable). The prior layout was a yaml at the project
+    # root; this assertion was the canary that locked the old shape
+    # in place.
+    yaml_path = project / ".tn" / "default" / "tn.yaml"
     assert_named(
         name="tn-init-writes-yaml",
         expected=True,

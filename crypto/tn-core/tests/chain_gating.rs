@@ -153,16 +153,21 @@ fn chain_false_skips_lock_file_and_writes_unchained_sentinels() {
         .filter(|e| e.get("event_type").and_then(Value::as_str) == Some("trace.span"))
         .collect();
     assert_eq!(envs.len(), 3);
+    // 0.4.2a9: chain=false now increments `sequence` per event_type
+    // (in-memory only, no lock or tail-scan, no cross-restart seed).
+    // `prev_hash` stays empty — the "no linkage claim" sentinel —
+    // since there's no chain to link.
     for (i, env) in envs.iter().enumerate() {
+        let want_seq = (i as u64) + 1;
         assert_eq!(
             env.get("sequence").and_then(Value::as_u64),
-            Some(1),
-            "row {i} of chain=false must carry sequence: 1 (unchained sentinel)"
+            Some(want_seq),
+            "row {i} of chain=false must carry sequence: {want_seq} (counter, not sentinel)"
         );
         assert_eq!(
             env.get("prev_hash").and_then(Value::as_str),
             Some(""),
-            "row {i} of chain=false must carry prev_hash: \"\" (unchained sentinel)"
+            "row {i} of chain=false must carry prev_hash: \"\" (no-linkage sentinel)"
         );
     }
 }
