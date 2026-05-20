@@ -57,6 +57,12 @@ pub struct LogFileWriter {
     /// own Mutex, so the multiple-emitter case interleaves at this
     /// level too.
     reader: std::sync::Mutex<Option<std::fs::File>>,
+    /// True once `OpenOptions::read` returned a non-fs error (wasm,
+    /// in-memory adapters, anything whose std::fs is a no-op shim).
+    /// Switches `read_tail_if_grown` to go through the
+    /// `storage.read_bytes_tail` slow path forever after — the
+    /// pinned-handle perf win is FsStorage-only.
+    pinned_read_unavailable: std::sync::atomic::AtomicBool,
     /// Last file size we know about — initialised to the on-disk
     /// size at `open()` (so the init-time chain seed counts as
     /// "we know about these bytes"), incremented by every
@@ -95,6 +101,7 @@ impl LogFileWriter {
             writer: None,
             pinned_unavailable: false,
             reader: std::sync::Mutex::new(None),
+            pinned_read_unavailable: std::sync::atomic::AtomicBool::new(false),
             our_known_size: std::sync::atomic::AtomicU64::new(initial_size),
         })
     }
@@ -148,13 +155,38 @@ impl LogFileWriter {
     /// tail read as `read_tail` — chain integrity is unaffected.
     pub fn read_tail_if_grown(&self, max_bytes: usize) -> Result<Option<Vec<u8>>> {
         use std::io::{Read, Seek, SeekFrom};
+        // Fallback path for backends whose `std::fs::OpenOptions::read`
+        // is a no-op shim (wasm32-unknown-unknown, in-memory test
+        // adapters). Once we know the OS doesn't support real fs
+        // reads, route every subsequent call through
+        // `storage.read_bytes_tail` so the chain-tip refresh still
+        // works — just without the FsStorage Windows-AV bypass.
+        if self.pinned_read_unavailable
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return self.read_tail_via_storage(max_bytes);
+        }
         let mut guard = self
             .reader
             .lock()
             .expect("log_file reader mutex poisoned");
         if guard.is_none() {
-            let f = std::fs::OpenOptions::new().read(true).open(&self.path)?;
-            *guard = Some(f);
+            match std::fs::OpenOptions::new().read(true).open(&self.path) {
+                Ok(f) => *guard = Some(f),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    // Non-fs backend (wasm shim returns "operation
+                    // not supported on this platform"). Remember so
+                    // subsequent calls skip the std::fs probe, then
+                    // serve this call from storage.
+                    drop(guard);
+                    self.pinned_read_unavailable
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    return self.read_tail_via_storage(max_bytes);
+                }
+            }
         }
         let f = guard.as_mut().expect("just inserted");
         let len = f.metadata()?.len();
@@ -180,6 +212,23 @@ impl LogFileWriter {
         self.our_known_size
             .store(len, std::sync::atomic::Ordering::Relaxed);
         Ok(Some(buf))
+    }
+
+    /// Storage-backed tail read for non-FsStorage backends. The
+    /// `our_known_size` skip still applies — when the backend reports
+    /// the same file size we've written, no refresh needed.
+    fn read_tail_via_storage(&self, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        if !self.storage.exists(&self.path) {
+            return Err(Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound)));
+        }
+        // No cheap metadata() through the trait; just read the
+        // tail every time and let the caller's reverse-scan
+        // dedupe via its in-memory chain state.
+        let bytes = self.storage.read_bytes_tail(&self.path, max_bytes)?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
     }
 
     /// Append `line` (must already include a trailing `\n`).
