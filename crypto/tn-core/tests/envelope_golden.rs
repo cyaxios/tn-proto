@@ -115,16 +115,16 @@ fn envelope_matches_python_golden() {
             idx
         );
 
-        // Build group_payloads Map in insertion order.
-        let mut group_payloads = Map::new();
-        group_payloads.insert(
-            v.inputs.group.clone(),
-            serde_json::to_value(GroupPayload {
-                ciphertext: ct,
-                field_hashes: field_hashes.into_iter().collect(),
-            })
-            .unwrap(),
-        );
+        // Build group_payloads as pre-serialized JSON snippets
+        // (0.4.2a7 shape change — was `Map<String, Value>`).
+        let mut group_payloads: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let payload_json = serde_json::to_string(&GroupPayload {
+            ciphertext: ct,
+            field_hashes: field_hashes.into_iter().collect(),
+        })
+        .unwrap();
+        group_payloads.insert(v.inputs.group.clone(), payload_json);
 
         let line = build_envelope(EnvelopeInput {
             did: dk.did(),

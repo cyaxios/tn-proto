@@ -11,8 +11,8 @@ mod admin;
 
 use pyo3::exceptions::{PyException, PyIOError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
-use pyo3::{create_exception, intern};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
+use pyo3::{create_exception, intern, wrap_pyfunction};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -98,7 +98,27 @@ impl PyRuntime {
         event_id: Option<&str>,
         sign: Option<bool>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        // PyO3-layer perf hooks. Same env-gating as the in-runtime
+        // markers — one AtomicBool::load(Relaxed) per stage on the
+        // disabled path. Together with emit:_TOTAL we get the full
+        // Python→Rust crossing accounted for.
+        let _py_t0 = if tn_core::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let fields_json = pydict_to_json(fields)?;
+        if let Some(t0) = _py_t0 {
+            tn_core::perf::record_ns(
+                "emit:py_dict_marshal",
+                t0.elapsed().as_nanos() as u64,
+            );
+        }
+        let _wrap_t0 = if tn_core::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let line = self
             .inner
             .emit_with_override_sign_returning_line(
@@ -110,7 +130,17 @@ impl PyRuntime {
                 sign,
             )
             .map_err(err_to_py)?;
-        Ok(line.map(|s| PyBytes::new_bound(py, s.as_bytes())))
+        let result = Ok(line.map(|s| PyBytes::new_bound(py, s.as_bytes())));
+        if let Some(t0) = _wrap_t0 {
+            // Includes both Runtime::emit_inner (which has its own
+            // emit:_TOTAL marker) AND the return-wrap into PyBytes.
+            // Subtract emit:_TOTAL to isolate the wrap-back cost.
+            tn_core::perf::record_ns(
+                "emit:py_call_and_wrap",
+                t0.elapsed().as_nanos() as u64,
+            );
+        }
+        result
     }
 
     /// Read all entries as flat dicts (the default 2026-04-25 shape).
@@ -834,6 +864,32 @@ pub(crate) fn json_to_py<'py>(
     })
 }
 
+/// Snapshot the runtime's per-stage perf counters as a list of
+/// `(stage, count, total_ns)` tuples. Empty when `TN_PERF_TRACE` is
+/// unset (no recording happened) — set the env var BEFORE calling
+/// `Runtime.init` to enable.
+#[pyfunction]
+fn perf_snapshot(py: Python<'_>) -> PyResult<PyObject> {
+    let snap = tn_core::perf::snapshot();
+    let list = PyList::empty_bound(py);
+    for (stage, stats) in snap {
+        let tup = PyTuple::new_bound(py, &[
+            stage.to_object(py),
+            stats.count.to_object(py),
+            stats.total_ns.to_object(py),
+        ]);
+        list.append(tup)?;
+    }
+    Ok(list.into())
+}
+
+/// Reset all perf counters to zero. Use to drop warmup costs before
+/// a measurement window.
+#[pyfunction]
+fn perf_reset() {
+    tn_core::perf::reset();
+}
+
 #[pymodule]
 #[pyo3(name = "_core")]
 fn tn_core_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -842,6 +898,8 @@ fn tn_core_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("TnRuntimeError", py.get_type_bound::<TnRuntimeError>())?;
     m.add("NotEntitled", py.get_type_bound::<NotEntitled>())?;
     m.add("NotAPublisher", py.get_type_bound::<NotAPublisher>())?;
+    m.add_function(wrap_pyfunction!(perf_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(perf_reset, m)?)?;
     crate::admin::register(m)?;
     // Make `import tn_core._core.admin` (and thus `from tn_core.admin import …`)
     // work. PyO3 submodules are not automatically registered in sys.modules;

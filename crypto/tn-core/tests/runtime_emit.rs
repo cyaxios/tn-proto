@@ -133,7 +133,10 @@ fn protocol_events_route_to_separate_file() {
     .unwrap();
 
     let main_log = rt.log_path().to_path_buf();
-    let protocol_log = td.path().join(".tn").join("logs").join("protocol").join("key.ndjson");
+    // 0.4.2a8: `{event_class}` is the first dotted segment, matching
+    // `python/tn/config.py::resolve_path_template` (`event_type.split(".")[0]`).
+    // For `tn.key.rotate` that's `tn`.
+    let protocol_log = td.path().join(".tn").join("logs").join("protocol").join("tn.ndjson");
     drop(rt);
 
     let main = std::fs::read_to_string(&main_log).unwrap();
@@ -142,8 +145,15 @@ fn protocol_events_route_to_separate_file() {
     assert_eq!(main.lines().count(), 1, "main log should have 1 line");
     assert!(main.contains("order.created"));
     assert!(!main.contains("tn.key.rotate"));
-    // Protocol log should have only the tn.key.rotate event
-    assert_eq!(proto.lines().count(), 1);
+    // Protocol log should have BOTH `tn.*` events — auto-emitted
+    // `tn.ceremony.init` on fresh init + the `tn.key.rotate` from
+    // this test. Under the corrected `{event_class}` semantic
+    // (first dotted segment), every `tn.*` event_type renders to
+    // the same `protocol/tn.ndjson` file. Under the prior buggy
+    // `nth(1)` semantic these would have landed in `ceremony.ndjson`
+    // and `key.ndjson` respectively.
+    assert_eq!(proto.lines().count(), 2);
+    assert!(proto.contains("tn.ceremony.init"));
     assert!(proto.contains("tn.key.rotate"));
 }
 

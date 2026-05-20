@@ -201,12 +201,16 @@ fn reload_does_not_re_emit_ceremony_init_with_protocol_routing() {
     }
 
     // Count tn.ceremony.init across both known paths.
+    // 0.4.2a8: `{event_class}` is the first dotted segment, matching
+    // `python/tn/config.py::resolve_path_template`. For
+    // `tn.ceremony.init` that's `tn`, so the file is `protocol/tn.ndjson`
+    // (the prior `nth(1)` shorthand would have rendered `ceremony.ndjson`).
     let protocol_log = td
         .path()
         .join(".tn")
         .join("logs")
         .join("protocol")
-        .join("ceremony.ndjson");
+        .join("tn.ndjson");
     let mut count = 0usize;
 
     // Main log: may still not exist (no non-tn events were emitted).

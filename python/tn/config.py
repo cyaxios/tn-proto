@@ -278,6 +278,13 @@ class LoadedConfig:
     # writer chose to skip Ed25519 signing (profile=telemetry/stdout);
     # signature-check on read is then meaningless and would always fail.
     sign: bool = True
+    # 0.4.2a7: ``ceremony.chain`` mirrored alongside ``sign``. False
+    # means the Rust runtime skips the per-emit advisory lock + tail
+    # scan + chain advance/commit; rows carry sequence=1 and
+    # prev_hash="" (unchained sentinels). Used by telemetry /
+    # secure_log profiles where per-row chain integrity isn't part of
+    # the audit story.
+    chain: bool = True
     # Where ``tn.*`` admin envelopes are written. The canonical attribute is
     # ``admin_log_location``; ``protocol_events_location`` is kept as a
     # read-only property (below) for callers that haven't migrated yet.
@@ -1067,6 +1074,11 @@ class _CeremonySettings:
     # ``sign: false`` ship empty signatures; the reader skips the
     # signature check rather than raising a guaranteed VerifyError.
     sign: bool
+    # 0.4.2a7: surface ``ceremony.chain``. False means rows are
+    # unchained (sequence=1, prev_hash=""); mirror it onto
+    # LoadedConfig so a reader can decide whether chain verification
+    # makes sense.
+    chain: bool
 
 
 def _validate_load_doc_structure(yaml_path: Path, doc: Any) -> None:
@@ -1138,6 +1150,10 @@ def _resolve_ceremony_settings(
         # Default ``sign: True`` keeps pre-DX-fix yamls (which never
         # carried this key) verifying as before.
         sign=bool(ceremony_block.get("sign", True)),
+        # Default ``chain: True`` keeps pre-0.4.2a7 yamls (no key)
+        # chaining as before. False is opt-in for telemetry /
+        # secure_log profiles.
+        chain=bool(ceremony_block.get("chain", True)),
     )
 
 
@@ -1340,6 +1356,7 @@ def load(yaml_path: Path) -> LoadedConfig:
         linked_project_id=settings.linked_project_id,
         sync_logs=settings.sync_logs,
         sign=settings.sign,
+        chain=settings.chain,
         admin_log_location=pel,
         log_path=log_path,
     )

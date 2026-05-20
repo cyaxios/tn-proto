@@ -88,7 +88,18 @@ pub fn compute_row_hash(input: &RowHashInput<'_>) -> String {
         }
     }
 
-    format!("sha256:{}", hex::encode(h.finalize()))
+    // Build "sha256:<64 hex chars>" in one allocation rather than
+    // `format!` + `hex::encode` which allocates twice.
+    let digest = h.finalize();
+    let mut out = String::with_capacity(7 + 64);
+    out.push_str("sha256:");
+    let mut hex_buf = [0u8; 64];
+    hex::encode_to_slice(digest.as_slice(), &mut hex_buf)
+        .expect("32-byte digest into 64-char buffer is infallible");
+    out.push_str(
+        std::str::from_utf8(&hex_buf).expect("hex::encode_to_slice emits ASCII"),
+    );
+    out
 }
 
 /// Render a JSON value the way Python's `str()` would.
@@ -230,6 +241,86 @@ pub fn chain_tips_from_ndjson(bytes: &[u8]) -> HashMap<String, (u64, String)> {
     out
 }
 
+/// Reverse-scan helper for the cross-process emit lock's hot path.
+///
+/// Walks `bytes` backward from the end and returns the latest
+/// `(sequence, row_hash)` for `event_type`, stopping as soon as the
+/// most-recent matching row is found. The forward-scan equivalent
+/// (`chain_tips_from_ndjson`) reads the whole file to build a tips map
+/// for every event_type; for a single emit we only care about one
+/// event_type and stop early, which is the perf fix S11 surfaced
+/// (forward scan was O(N) per emit, O(N²) over a session).
+///
+/// Returns `None` when no row in `bytes` carries the target
+/// `event_type` (caller treats this as ZERO_HASH / seq=0, matching
+/// the existing init-time semantics). Malformed lines are silently
+/// skipped, same contract as `chain_tips_from_ndjson`.
+pub fn chain_tip_from_log_tail_reverse(
+    bytes: &[u8],
+    event_type: &str,
+) -> Option<(u64, String)> {
+    // Trim trailing newline(s) so the final line, if it doesn't end
+    // in `\n`, still scans as one line rather than as an empty
+    // segment after a phantom newline.
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1] == b'\n' {
+        end -= 1;
+    }
+    while end > 0 {
+        // Walk back to the previous `\n` (or to byte 0).
+        let mut start = end;
+        while start > 0 && bytes[start - 1] != b'\n' {
+            start -= 1;
+        }
+        let line = &bytes[start..end];
+        if !line.is_empty() {
+            if let Ok(env) = serde_json::from_slice::<Value>(line) {
+                if env.get("event_type").and_then(Value::as_str) == Some(event_type) {
+                    let seq = env.get("sequence").and_then(Value::as_u64);
+                    let rh = env.get("row_hash").and_then(Value::as_str);
+                    if let (Some(s), Some(r)) = (seq, rh) {
+                        return Some((s, r.to_string()));
+                    }
+                    // Row matched event_type but is missing
+                    // sequence/row_hash — treat as malformed and
+                    // keep walking. The next match (if any) wins.
+                }
+            }
+        }
+        if start == 0 {
+            return None;
+        }
+        end = start - 1; // skip the `\n` between this line and the previous one
+    }
+    None
+}
+
+/// Multi-file variant of [`chain_tip_from_log_tail_reverse`]: try the
+/// active log first, then walk into rotated backups (newest first)
+/// until a row for `event_type` is found.
+///
+/// The runtime emits into a single active file; rotation (today,
+/// session-start; in a later release, size-triggered with commit
+/// envelopes) shifts the active file to `<log>.1` and starts a fresh
+/// active. When the very first emit of an event_type after a
+/// rotation needs to chain off the pre-rotation tip, the active file
+/// is empty for that event_type and we have to peek into `.1`.
+///
+/// Caller supplies the byte slices in newest-first order (active,
+/// `.1`, `.2`, …). Returns on the first match; `None` when no file
+/// in the slice carries `event_type`.
+pub fn chain_tip_from_log_files_reverse(
+    files_newest_first: &[&[u8]],
+    event_type: &str,
+) -> Option<(u64, String)> {
+    for bytes in files_newest_first {
+        if let Some(tip) = chain_tip_from_log_tail_reverse(bytes, event_type) {
+            return Some(tip);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod chain_tip_tests {
     use super::*;
@@ -261,5 +352,118 @@ mod chain_tip_tests {
         let tips = chain_tips_from_ndjson(bytes);
         assert_eq!(tips.len(), 1);
         assert_eq!(tips["a"], (2, "sha256:22".to_string()));
+    }
+
+    #[test]
+    fn reverse_scan_empty_returns_none() {
+        assert!(chain_tip_from_log_tail_reverse(b"", "a").is_none());
+    }
+
+    #[test]
+    fn reverse_scan_finds_last_match() {
+        let bytes = b"{\"event_type\":\"a\",\"sequence\":1,\"row_hash\":\"sha256:11\"}\n\
+                     {\"event_type\":\"b\",\"sequence\":1,\"row_hash\":\"sha256:bb\"}\n\
+                     {\"event_type\":\"a\",\"sequence\":2,\"row_hash\":\"sha256:22\"}\n";
+        assert_eq!(
+            chain_tip_from_log_tail_reverse(bytes, "a"),
+            Some((2, "sha256:22".to_string()))
+        );
+        assert_eq!(
+            chain_tip_from_log_tail_reverse(bytes, "b"),
+            Some((1, "sha256:bb".to_string()))
+        );
+    }
+
+    #[test]
+    fn reverse_scan_returns_none_when_event_type_absent() {
+        let bytes = b"{\"event_type\":\"a\",\"sequence\":1,\"row_hash\":\"sha256:11\"}\n";
+        assert!(chain_tip_from_log_tail_reverse(bytes, "x").is_none());
+    }
+
+    #[test]
+    fn reverse_scan_handles_missing_trailing_newline() {
+        let bytes = b"{\"event_type\":\"a\",\"sequence\":1,\"row_hash\":\"sha256:11\"}\n\
+                     {\"event_type\":\"a\",\"sequence\":2,\"row_hash\":\"sha256:22\"}";
+        assert_eq!(
+            chain_tip_from_log_tail_reverse(bytes, "a"),
+            Some((2, "sha256:22".to_string()))
+        );
+    }
+
+    #[test]
+    fn reverse_scan_skips_malformed_and_finds_earlier_clean_row() {
+        let bytes = b"{\"event_type\":\"a\",\"sequence\":1,\"row_hash\":\"sha256:11\"}\n\
+                     not json\n\
+                     {\"event_type\":\"a\",\"missing_seq\":true}\n";
+        assert_eq!(
+            chain_tip_from_log_tail_reverse(bytes, "a"),
+            Some((1, "sha256:11".to_string()))
+        );
+    }
+
+    #[test]
+    fn multi_file_reverse_scan_falls_back_to_backup() {
+        let active: &[u8] = b"{\"event_type\":\"b\",\"sequence\":1,\"row_hash\":\"sha256:bb\"}\n";
+        let backup1: &[u8] =
+            b"{\"event_type\":\"a\",\"sequence\":3,\"row_hash\":\"sha256:a3\"}\n";
+        let backup2: &[u8] =
+            b"{\"event_type\":\"a\",\"sequence\":2,\"row_hash\":\"sha256:a2\"}\n\
+              {\"event_type\":\"x\",\"sequence\":1,\"row_hash\":\"sha256:x1\"}\n";
+        let files: Vec<&[u8]> = vec![active, backup1, backup2];
+        assert_eq!(
+            chain_tip_from_log_files_reverse(&files, "a"),
+            Some((3, "sha256:a3".to_string()))
+        );
+        assert_eq!(
+            chain_tip_from_log_files_reverse(&files, "x"),
+            Some((1, "sha256:x1".to_string()))
+        );
+        assert_eq!(chain_tip_from_log_files_reverse(&files, "missing"), None);
+    }
+
+    #[test]
+    fn multi_file_reverse_scan_active_wins_over_backup() {
+        let active: &[u8] = b"{\"event_type\":\"a\",\"sequence\":5,\"row_hash\":\"sha256:a5\"}\n";
+        let backup1: &[u8] =
+            b"{\"event_type\":\"a\",\"sequence\":3,\"row_hash\":\"sha256:a3\"}\n";
+        let files: Vec<&[u8]> = vec![active, backup1];
+        assert_eq!(
+            chain_tip_from_log_files_reverse(&files, "a"),
+            Some((5, "sha256:a5".to_string()))
+        );
+    }
+
+    #[test]
+    fn reverse_scan_equivalent_to_forward_scan_for_single_event_type() {
+        // 1000 alternating-event_type lines — reverse-scan should
+        // terminate at the last matching row, not walk to byte 0.
+        let mut buf: Vec<u8> = Vec::with_capacity(1024 * 100);
+        for i in 0..500u64 {
+            buf.extend_from_slice(
+                format!(
+                    "{{\"event_type\":\"a\",\"sequence\":{},\"row_hash\":\"sha256:a{}\"}}\n",
+                    i + 1,
+                    i + 1
+                )
+                .as_bytes(),
+            );
+            buf.extend_from_slice(
+                format!(
+                    "{{\"event_type\":\"b\",\"sequence\":{},\"row_hash\":\"sha256:b{}\"}}\n",
+                    i + 1,
+                    i + 1
+                )
+                .as_bytes(),
+            );
+        }
+        let tips = chain_tips_from_ndjson(&buf);
+        assert_eq!(
+            chain_tip_from_log_tail_reverse(&buf, "a"),
+            Some(tips["a"].clone())
+        );
+        assert_eq!(
+            chain_tip_from_log_tail_reverse(&buf, "b"),
+            Some(tips["b"].clone())
+        );
     }
 }

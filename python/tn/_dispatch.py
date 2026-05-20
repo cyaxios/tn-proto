@@ -108,12 +108,12 @@ def should_use_rust(yaml_path: Path) -> bool:
         return False
     if not _ceremony_is_btn_only(yaml_path):
         return False
-    # Templated main-log paths route per-envelope to N files. The Rust
-    # runtime doesn't support that yet (it opens one log file at init),
-    # so a templated ceremony runs through the Python emit path. See
-    # _logs_path_is_templated for the rationale.
-    if _logs_path_is_templated(yaml_path):
-        return False
+    # Templated main-log paths (e.g. `./logs/{event_class}.ndjson`)
+    # were routed through the legacy Python emit path until 0.4.2a7
+    # because the Rust runtime opened a single log file at init.
+    # The Rust runtime now supports templated paths natively via
+    # `LogWriters::Templated` (a lazy pool keyed by rendered path)
+    # so this branch no longer needs to fall back.
     return True
 
 
@@ -245,6 +245,95 @@ class DispatchRuntime:
         else:
             self._rt = None
 
+        # ------------------------------------------------------------------
+        # Per-emit invariant cache (0.4.2a7).
+        #
+        # Everything in this section answers a question that doesn't change
+        # between emits within a single process. Stdlib `logging` lifts the
+        # same kinds of decisions to handler-construction time; TN was
+        # answering them per-emit (Path.resolve, IPython introspection,
+        # handler-skip detection) at a cost of ~750 us per call. Cache here,
+        # invalidate from ``_invalidate_caches`` on add/remove_handler,
+        # session toggles, and ``reload()``.
+        # ------------------------------------------------------------------
+        self._cached_in_ipython: bool = False
+        self._cached_rust_log_path: Path | None = None
+        self._cached_effective_handlers: list = []
+        self._cached_skip_fan_out: bool = True
+        self._init_caches()
+
+    def _init_caches(self) -> None:
+        """Populate the per-emit invariant cache slots from current
+        runtime state. Called from ``__init__`` and ``_invalidate_caches``.
+
+        Decisions cached here:
+        - IPython/Jupyter kernel detection: kernel state is set at process
+          start and cannot materialise mid-process. Avoid the 580 us
+          ``IPython.get_ipython()`` call per emit.
+        - Rust-side log path: resolved once and pinned for the lifetime
+          of the runtime; avoid the 178 us Windows-fs case-normalise
+          ``Path(...).resolve()`` per emit.
+        - Effective handler list: drop handlers whose write target Rust
+          already covers (StdoutHandler when not in a notebook; file
+          handlers whose path equals Rust's log path). When the
+          resulting list is empty, set ``_skip_fan_out`` so emit()
+          short-circuits past the fan-out entirely.
+        """
+        from . import _in_ipython as _detect_ipython  # local — avoid cycle
+        self._cached_in_ipython = _detect_ipython()
+
+        rust_log_path: Path | None = None
+        if self._rt is not None:
+            try:
+                rust_log_path = Path(self._rt.log_path()).resolve()
+            except Exception:  # noqa: BLE001 — older bindings may lack log_path
+                rust_log_path = None
+        self._cached_rust_log_path = rust_log_path
+
+        # Build the effective handler list once. The skip rule:
+        # any handler marked ``_tn_default=True`` is a yaml-declared
+        # destination that Rust now natively owns (file.rotating,
+        # file.templated_rotating, stdout) — Rust already wrote the
+        # canonical envelope to it, so the Python copy is a redundant
+        # double-write. The sentinel is the architectural contract;
+        # the previous shape's path-equality check was a roundabout
+        # version that broke for templated handlers (which expose
+        # `.template` not `.path`).
+        #
+        # Notebook exception: in an IPython kernel the Rust stdout
+        # handler writes to fd 1 which the kernel doesn't capture, so
+        # the Python StdoutHandler still needs to run for cell-output
+        # visibility. We keep StdoutHandler instances in the
+        # effective list when ``_cached_in_ipython`` is true even if
+        # they were ``_tn_default``-marked.
+        effective: list = []
+        handlers_obj = getattr(self._py_rt, "handlers", None) if self._py_rt else None
+        if handlers_obj:
+            from tn.handlers.stdout import StdoutHandler as _StdoutHandler
+            for h in list(handlers_obj):
+                is_default = bool(getattr(h, "_tn_default", False))
+                if is_default and isinstance(h, _StdoutHandler) and self._cached_in_ipython:
+                    # Notebook kernel: keep Python stdout for cell output.
+                    effective.append(h)
+                    continue
+                if is_default:
+                    # Rust owns this destination; skip the Python copy.
+                    continue
+                effective.append(h)
+        self._cached_effective_handlers = effective
+        self._cached_skip_fan_out = not effective
+
+    def _invalidate_caches(self) -> None:
+        """Re-populate the per-emit invariant caches. Call after any
+        config change that could shift the answers: add/remove_handler,
+        ``reload()``, session toggles that affect handler routing.
+
+        Cheap (one IPython probe, one Path.resolve, one handler-list walk).
+        Called explicitly by the public mutators; callers outside the
+        package can trigger via ``tn._notify_config_changed()``.
+        """
+        self._init_caches()
+
     def reload(self) -> None:
         """Re-init the Rust runtime against the current yaml on disk.
 
@@ -264,6 +353,9 @@ class DispatchRuntime:
         if not self._use_rust:
             return
         self._rt = _RustRuntime.init(str(self._yaml_for_rust()))
+        # Yaml-driven config may have shifted (log path moved, handlers
+        # re-rendered). Rebuild the invariant cache.
+        self._invalidate_caches()
 
     def _yaml_for_rust(self) -> Path:
         """Return a yaml path the Rust runtime can load.
@@ -312,7 +404,10 @@ class DispatchRuntime:
             # Returns the canonical NDJSON line as bytes (or None if filtered
             # by Rust's level threshold).
             raw_line = self._rt.emit(level, event_type, fields, None, None, sign)
-            if raw_line is not None:
+            # Fast-path: when the effective handler list is empty (default
+            # for vanilla ``tn.init()`` profiles where Rust already covers
+            # every declared handler), skip the fan-out call entirely.
+            if raw_line is not None and not self._cached_skip_fan_out:
                 self._fan_out_python_handlers(raw_line)
             return None
         if self._py_rt is None:
@@ -350,58 +445,21 @@ class DispatchRuntime:
             expected.
 
         Everything else (kafka, S3, vault.sync, fs.drop, etc.) runs.
-        """
-        if self._py_rt is None or not getattr(self._py_rt, "handlers", None):
-            return
-        # Snapshot handlers so a handler that re-enters emit doesn't
-        # observe a half-mutated list mid-iteration.
-        handlers = list(self._py_rt.handlers)
 
-        # Compute what Rust covers exactly once per emit. The PyO3
-        # ``log_path()`` returns the resolved string path; we re-resolve
-        # to normalise drive-letter case + separators on Windows so the
-        # path-equality check below is robust.
-        rust_log_path: Path | None = None
-        if self._rt is not None:
-            try:
-                rust_log_path = Path(self._rt.log_path()).resolve()
-            except Exception:  # noqa: BLE001 — best-effort; older bindings may lack log_path
-                rust_log_path = None
+        Hot path note (0.4.2a7): the per-handler skip decisions —
+        ``_in_ipython`` probe and ``Path.resolve()`` of Rust's log
+        writer target — are evaluated once at runtime construction
+        and cached on ``_cached_effective_handlers``. This method now
+        iterates the pre-filtered list. ``emit()`` short-circuits
+        past this call entirely when the cached list is empty (see
+        ``_cached_skip_fan_out``).
+        """
+        effective = self._cached_effective_handlers
+        if not effective:
+            return
 
         envelope: dict[str, Any] | None = None
-        # Lazy import to avoid a circular dependency with tn.handlers.*.
-        from tn.handlers.stdout import StdoutHandler as _StdoutHandler  # noqa: PLC0415
-
-        # IPython/Jupyter/Databricks capture sys.stdout at the Python
-        # object level. Rust's native StdoutHandler writes to fd 1
-        # directly, which bypasses that capture — emits never land in
-        # cell output, only get flushed to the kernel's underlying
-        # stdout (visible in the driver log, not the notebook).
-        #
-        # When a kernel is detected we DO NOT skip Python's
-        # StdoutHandler: it writes through sys.stdout (text mode, see
-        # handlers/stdout.py) which the kernel captures and renders in
-        # the originating cell. The Rust handler's fd-1 writes still
-        # happen but are invisible to the user — no perceived double-print.
-        from . import _in_ipython as _detect_ipython  # noqa: PLC0415
-        _stdout_in_notebook = _detect_ipython()
-
-        for h in handlers:
-            # Skip Python's StdoutHandler — Rust's native one already wrote.
-            # Exception: in a notebook kernel, run the Python handler so
-            # emits land in cell output (see comment above).
-            if isinstance(h, _StdoutHandler) and not _stdout_in_notebook:
-                continue
-
-            # Skip file handler whose path matches Rust's log_writer target.
-            h_path = getattr(h, "path", None)
-            if h_path is not None and rust_log_path is not None:
-                try:
-                    if Path(h_path).resolve() == rust_log_path:
-                        continue
-                except (OSError, ValueError):
-                    pass
-
+        for h in effective:
             if envelope is None:
                 # Lazy-parse: only pay the JSON-load cost when at least
                 # one user handler is going to look at the envelope.

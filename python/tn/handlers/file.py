@@ -4,6 +4,28 @@ These subclass logging.handlers.*RotatingFileHandler so we inherit the
 rotation math (file renaming, size/time checks, fsync on rotate). We
 override emit() to take raw bytes directly instead of LogRecords, so
 there's no round-trip through the logging module's formatting machinery.
+
+Deprecation note (0.4.2a7): the canonical write path for TN ceremonies
+is now the Rust runtime — ``DispatchRuntime`` marks the yaml-declared
+``kind: file.rotating`` handler ``_tn_default=True`` and skips it
+because Rust appends to the same file. These classes remain in place
+only because:
+
+  1. ``FileTemplatedRotatingHandler`` renders ``{event_type}`` /
+     ``{date}`` tokens in the main-log path — the Rust runtime
+     doesn't yet support templated main-log paths, only the admin
+     PEL.
+  2. Direct ``FileRotatingHandler(...)``  /  ``FileTimedRotatingHandler(...)``
+     usage from Python tests + scripts (outside any ceremony) needs a
+     working sink, and these are the cheapest option.
+
+The size-based rotation underneath
+(``_BytesRotatingFileHandler.doRollover()``) is dead in the
+Rust-default flow: rotation will live in the Rust runtime once the
+commit-envelope work in
+``docs/superpowers/specs/2026-05-19-commit-envelopes-and-rotation.md``
+lands. Until then, expect these handlers' rotation to fire only in
+pure-Python tests that bypass the Rust runtime.
 """
 
 from __future__ import annotations

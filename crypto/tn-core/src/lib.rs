@@ -40,6 +40,8 @@ pub mod config;
 pub mod envelope;
 pub mod error;
 pub mod indexing;
+pub mod path_template;
+pub mod perf;
 pub mod signing;
 pub mod storage;
 pub mod tnpkg;

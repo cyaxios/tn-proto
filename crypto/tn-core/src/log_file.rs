@@ -12,64 +12,336 @@
 //! load-bearing and the per-emit overhead has not shown up in any
 //! benchmark yet. Revisit if it does.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
+use crate::path_template::PathTemplate;
 use crate::storage::Storage;
 use crate::{Error, Result};
 
 /// Append-only writer for ndjson log files.
 ///
 /// Call `append_line(line)` with a string that already includes the
-/// trailing newline. Each call goes straight to
-/// `storage.append_bytes`; there is no in-memory buffer to flush. The
-/// `flush()` method is retained for source-compat with the previous
-/// `BufWriter<File>`-backed shape — it's a no-op today.
+/// trailing newline. On native (`FsStorage`) backends the writer pins
+/// an OS append-mode handle on first emit and reuses it for every
+/// subsequent call — one `WriteFile` syscall per emit instead of
+/// `CreateFileW + WriteFile + CloseHandle`. On backends that don't
+/// expose a pinnable handle (wasm IndexedDB, in-memory test
+/// adapters) it falls back to `storage.append_bytes` per call.
+///
+/// Lifecycle: lazy-open on first `append_line`, hold the handle for
+/// the rest of the runtime's lifetime, drop on rotation (when
+/// rotation is wired up) or runtime shutdown.
 pub struct LogFileWriter {
     path: PathBuf,
     storage: Arc<dyn Storage>,
+    /// Pinned append-mode writer. `None` until first append (lazy);
+    /// stays `None` for the lifetime of the writer if the storage
+    /// backend returned `None` from `open_append_writer` (signals
+    /// "no pinned handle available — use append_bytes per call").
+    writer: Option<Box<dyn std::io::Write + Send>>,
+    /// True once we've attempted to pin a writer and gotten `None`
+    /// back. Skips the per-emit `open_append_writer` call on
+    /// non-pinnable backends so they don't pay an unnecessary trait
+    /// dispatch on every write.
+    pinned_unavailable: bool,
+    /// Pinned READ handle for tail-byte chain-tip refresh
+    /// (`read_tail`). Cached on first call. On Windows, re-opening
+    /// a file in read mode while another handle of ours has it open
+    /// in append mode takes ~9 ms (share-mode reconciliation or AV
+    /// scan) — caching the read handle skips that path completely.
+    /// `Mutex` because the runtime holds `LogFileWriter` inside its
+    /// own Mutex, so the multiple-emitter case interleaves at this
+    /// level too.
+    reader: std::sync::Mutex<Option<std::fs::File>>,
+    /// Last file size we know about — initialised to the on-disk
+    /// size at `open()` (so the init-time chain seed counts as
+    /// "we know about these bytes"), incremented by every
+    /// `append_line` write. The chain-tip refresh consults this
+    /// via `read_tail_if_grown`: when the file's current size
+    /// matches `our_known_size`, no other process has appended
+    /// since our last write, and tip_refresh skips the seek+read.
+    /// Saves ~25-30 µs/emit on chain=T profiles for the common
+    /// single-writer case.
+    our_known_size: std::sync::atomic::AtomicU64,
 }
 
 impl LogFileWriter {
-    /// Open (creating if missing) `path` in append mode. Parent
-    /// directories are created through `storage.create_dir_all` so
-    /// the very first emit lands cleanly even on a fresh
-    /// `FsStorage`/wasm filesystem.
-    ///
-    /// Unlike the previous `OpenOptions::append` shape, this does not
-    /// hold an OS file handle — every subsequent
-    /// [`Self::append_line`] re-opens via `storage.append_bytes`. On
-    /// native that's `std::fs::OpenOptions::new().append(true)`; on
-    /// wasm it's a single JS callback per append.
+    /// Open the writer for `path`. Parent directories are created
+    /// via `storage.create_dir_all`. The OS file handle is NOT
+    /// opened here — it's lazy-opened on the first `append_line`
+    /// (typically the first emit, which is `tn.ceremony.init` for a
+    /// fresh ceremony).
     pub fn open(path: &Path, storage: Arc<dyn Storage>) -> Result<Self> {
         if let Some(p) = path.parent() {
             storage.create_dir_all(p)?;
         }
+        // Seed `our_known_size` with the current on-disk file size
+        // so the chain-tip skip in `read_tail_if_grown` knows the
+        // init-time `seed_chain_from_log` scan already consumed
+        // these bytes. Anything beyond this point was written by
+        // someone else and warrants a tail re-read.
+        let initial_size = if storage.exists(path) {
+            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
         Ok(Self {
             path: path.to_path_buf(),
             storage,
+            writer: None,
+            pinned_unavailable: false,
+            reader: std::sync::Mutex::new(None),
+            our_known_size: std::sync::atomic::AtomicU64::new(initial_size),
         })
     }
 
+    /// Read up to `max_bytes` from the end of the log via a pinned
+    /// read handle. Lazy-opens the handle on first call and reuses
+    /// thereafter. Used by the chain-tip refresh on every chain=T
+    /// emit; the cached handle skips the ~9 ms NTFS share-mode
+    /// reconciliation cost that a fresh `OpenOptions::open(read)`
+    /// pays when another handle has the file open in append mode.
+    ///
+    /// Returns the bytes; the first line may be partial (we sliced
+    /// into the middle of a row). Caller (the reverse-scan ndjson
+    /// walker) tolerates that.
+    pub fn read_tail(&self, max_bytes: usize) -> Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut guard = self
+            .reader
+            .lock()
+            .expect("log_file reader mutex poisoned");
+        if guard.is_none() {
+            // Lazy open. Errors propagate; if the file doesn't
+            // exist yet, NotFound is the right return.
+            let f = std::fs::OpenOptions::new().read(true).open(&self.path)?;
+            *guard = Some(f);
+        }
+        let f = guard.as_mut().expect("just inserted");
+        let len = f.metadata()?.len();
+        let start = len.saturating_sub(max_bytes as u64);
+        f.seek(SeekFrom::Start(start))?;
+        let cap = (len - start) as usize;
+        let mut buf = Vec::with_capacity(cap);
+        f.read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+
+    /// Like [`read_tail`] but returns `Ok(None)` when the file size
+    /// matches what we've written ourselves — i.e. no other process
+    /// has appended since our last write, and the caller's
+    /// in-memory chain state is already current.
+    ///
+    /// This is the single-writer fast path for the chain-tip
+    /// refresh: in the common case (one Python process owning the
+    /// log) the file's size matches `our_known_size` and we return
+    /// `Ok(None)` after just one cheap `metadata()` call. The
+    /// caller then skips the seek+read+parse work entirely.
+    ///
+    /// Correctness across multi-writer setups is preserved by the
+    /// metadata check: if another process appended N bytes, we see
+    /// `file_size > our_known_size` and fall through to the same
+    /// tail read as `read_tail` — chain integrity is unaffected.
+    pub fn read_tail_if_grown(&self, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut guard = self
+            .reader
+            .lock()
+            .expect("log_file reader mutex poisoned");
+        if guard.is_none() {
+            let f = std::fs::OpenOptions::new().read(true).open(&self.path)?;
+            *guard = Some(f);
+        }
+        let f = guard.as_mut().expect("just inserted");
+        let len = f.metadata()?.len();
+        let our_size = self
+            .our_known_size
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if len <= our_size {
+            // No bytes beyond what we've written ourselves; nothing
+            // to refresh. Caller's in-memory chain state is the
+            // authoritative tip.
+            return Ok(None);
+        }
+        // Another writer appended. Read the tail and let the caller
+        // re-seed from the new bytes.
+        let start = len.saturating_sub(max_bytes as u64);
+        f.seek(SeekFrom::Start(start))?;
+        let cap = (len - start) as usize;
+        let mut buf = Vec::with_capacity(cap);
+        f.read_to_end(&mut buf)?;
+        // Catch our_known_size up so we don't repeat this read
+        // if no further external writes happen — the bytes we
+        // just consumed are now "known" to us.
+        self.our_known_size
+            .store(len, std::sync::atomic::Ordering::Relaxed);
+        Ok(Some(buf))
+    }
+
     /// Append `line` (must already include a trailing `\n`).
+    ///
+    /// Hot path: pinned handle present, one `write_all` syscall.
+    /// Slow path: first call on a `FsStorage`-backed writer triggers
+    /// `open_append_writer` (one open syscall, cached for the rest
+    /// of the lifecycle). Fallback path: `pinned_unavailable` set
+    /// (wasm / in-memory backend), per-call `append_bytes`.
     pub fn append_line(&mut self, line: &str) -> Result<()> {
+        let line_len = line.len() as u64;
+        if let Some(w) = self.writer.as_mut() {
+            w.write_all(line.as_bytes())?;
+            self.our_known_size
+                .fetch_add(line_len, std::sync::atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+        if !self.pinned_unavailable {
+            // First emit on this writer: try to pin a handle.
+            match self.storage.open_append_writer(&self.path)? {
+                Some(mut w) => {
+                    w.write_all(line.as_bytes())?;
+                    self.writer = Some(w);
+                    self.our_known_size
+                        .fetch_add(line_len, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(());
+                }
+                None => {
+                    // Backend has no pinnable handle (wasm, memory
+                    // adapter). Remember so we don't trait-dispatch
+                    // through `open_append_writer` on every emit.
+                    self.pinned_unavailable = true;
+                }
+            }
+        }
         self.storage.append_bytes(&self.path, line.as_bytes())?;
+        self.our_known_size
+            .fetch_add(line_len, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Flush OS buffers to disk. No-op today — each `append_line`
-    /// already round-trips to storage. Kept on the public API so
-    /// callers can still call `.flush()` for symmetry with the
-    /// pre-Storage shape.
+    /// Flush OS buffers to disk. On the pinned-handle path this
+    /// calls through to the underlying `Write::flush` (which for
+    /// `File` is a no-op — Windows page-cache and POSIX page-cache
+    /// handle their own flushing, and we don't fsync here). On the
+    /// fallback path each `append_bytes` call already round-trips
+    /// to storage so there's nothing to flush.
     pub fn flush(&mut self) -> Result<()> {
+        if let Some(w) = self.writer.as_mut() {
+            w.flush()?;
+        }
         Ok(())
     }
 
     /// Path this writer opened.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// Writer dispatcher for emit: literal `logs.path` → one shared
+/// writer; templated `logs.path` → lazy pool keyed by rendered path.
+///
+/// The Runtime swaps `Mutex<LogFileWriter>` for `LogWriters` so a
+/// ceremony with `logs: {path: ./.tn/{event_class}.ndjson}` routes
+/// each emit to its rendered file — same Rust-accelerated path that
+/// non-templated ceremonies use. Before 0.4.2a7 the dispatch layer
+/// fell back to the legacy Python emit for templated ceremonies,
+/// paying an 18× perf tax. With `LogWriters::Templated`, both
+/// shapes run through the same hot path.
+pub enum LogWriters {
+    /// Single literal path — no templating, one shared writer.
+    /// Path is cached separately from the writer so
+    /// `path_for(event_type)` doesn't need to acquire the writer
+    /// mutex on the hot path.
+    Literal {
+        /// Resolved absolute path the writer appends to.
+        path: PathBuf,
+        /// Shared writer handle for that path.
+        writer: Arc<Mutex<LogFileWriter>>,
+    },
+    /// Templated `logs.path`. The first emit of each rendered path
+    /// lazy-opens its `LogFileWriter`; subsequent emits to the same
+    /// rendered path reuse the cached writer (all the
+    /// pinned-handle / offset-skip / lock-cache machinery applies
+    /// per writer).
+    Templated {
+        /// Parsed template — `render(event_type)` produces the
+        /// per-emit path.
+        template: PathTemplate,
+        /// Shared storage handle passed through to each writer.
+        storage: Arc<dyn Storage>,
+        /// Lazy pool. Outer Mutex protects the HashMap; inner
+        /// `Arc<Mutex>` so a caller can clone the writer's Arc out
+        /// and drop the pool mutex before locking the writer.
+        writers: Mutex<HashMap<PathBuf, Arc<Mutex<LogFileWriter>>>>,
+    },
+}
+
+impl LogWriters {
+    /// Resolve the rendered path for an emit with this event_type.
+    /// Cheap on the literal path (clone of cached PathBuf); does
+    /// one template render on the templated path.
+    pub fn path_for(&self, event_type: &str) -> PathBuf {
+        match self {
+            LogWriters::Literal { path, .. } => path.clone(),
+            LogWriters::Templated { template, .. } => template.render(event_type),
+        }
+    }
+
+    /// Return (or lazy-create) the writer for a row whose
+    /// `event_type` would render to a given path. The returned
+    /// `Arc<Mutex<LogFileWriter>>` lives independently of the pool
+    /// — caller drops the pool mutex before locking the writer.
+    pub fn writer_for(&self, event_type: &str) -> Result<Arc<Mutex<LogFileWriter>>> {
+        match self {
+            LogWriters::Literal { writer, .. } => Ok(writer.clone()),
+            LogWriters::Templated {
+                template,
+                storage,
+                writers,
+            } => {
+                let path = template.render(event_type);
+                let mut pool = writers
+                    .lock()
+                    .expect("log writers pool mutex poisoned");
+                if let Some(existing) = pool.get(&path) {
+                    return Ok(existing.clone());
+                }
+                let w = LogFileWriter::open(&path, storage.clone())?;
+                let arc = Arc::new(Mutex::new(w));
+                pool.insert(path, arc.clone());
+                Ok(arc)
+            }
+        }
+    }
+
+    /// True iff this writer set was constructed from a templated
+    /// path (any rendered path may differ per event_type).
+    pub fn is_templated(&self) -> bool {
+        matches!(self, LogWriters::Templated { .. })
+    }
+
+    /// Consume the writer pool, flushing each writer. Called from
+    /// `Runtime::flush_and_close` at shutdown to drain any
+    /// buffered state. Errors during flush are swallowed — we're
+    /// going down anyway and propagating wouldn't help the caller.
+    pub fn flush_all(self) {
+        let arcs: Vec<Arc<Mutex<LogFileWriter>>> = match self {
+            LogWriters::Literal { writer, .. } => vec![writer],
+            LogWriters::Templated { writers, .. } => match writers.into_inner() {
+                Ok(pool) => pool.into_values().collect(),
+                Err(_) => return,
+            },
+        };
+        for arc in arcs {
+            if let Ok(mtx) = Arc::try_unwrap(arc) {
+                if let Ok(mut w) = mtx.into_inner() {
+                    let _ = w.flush();
+                }
+            }
+        }
     }
 }
 

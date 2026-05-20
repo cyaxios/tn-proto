@@ -174,6 +174,20 @@ pub struct Ceremony {
     /// `2026-04-22-tn-transaction-protocol`) is not yet implemented.
     #[serde(default = "default_sign")]
     pub sign: bool,
+    /// Whether to maintain a per-event_type hash chain (sequence +
+    /// prev_hash + cross-process tip refresh) for emitted entries.
+    /// `true` (default) gives full chain integrity at the cost of a
+    /// per-emit advisory file lock and tail-scan. `false` skips the
+    /// lock and the tip refresh entirely — emits write
+    /// `sequence: 1` and `prev_hash: ""`, no `.emit.lock` artifacts.
+    ///
+    /// Used by the `telemetry` and `secure_log` profiles where
+    /// per-row chain integrity isn't part of the audit story and the
+    /// per-emit lock cost would dominate hot paths. Set by the
+    /// profile-stamping step in `python/tn/_multi.py` when minting a
+    /// fresh ceremony.
+    #[serde(default = "default_chain")]
+    pub chain: bool,
     /// Active log-level threshold (AVL J3.2). One of "debug" / "info" /
     /// "warning" / "error", case-insensitive. ``"debug"`` (default)
     /// emits every verb; raising drops lower-priority emits before any
@@ -199,6 +213,9 @@ fn default_private() -> String {
     "private".into()
 }
 fn default_sign() -> bool {
+    true
+}
+fn default_chain() -> bool {
     true
 }
 
