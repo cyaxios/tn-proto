@@ -634,3 +634,111 @@ class TestProjectNameLabels:
             "legacy ceremony with no project_name should link under "
             "its ceremony_id (preserves pre-0.4.2a9 behaviour)"
         )
+
+
+# =====================================================================
+# 0.4.2a10 — admin verb clarity (Findings 1+2+3) + identity naming Phase 1
+# =====================================================================
+
+
+class TestLooseRotationWarning:
+    """0.4.2a10 Finding 2 interim: btn rotate raises a warning that
+    it doesn't actually rotate keys, suppressible via the explicit
+    kwarg. cipher_actually_rotated=False on the result."""
+
+    def test_btn_rotate_raises_warning(self, fresh_cwd):
+        import warnings
+        tn.init()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = tn.admin.rotate(group="default")
+        assert any(
+            isinstance(w.message, tn.LooseRotationWarning) for w in caught
+        ), "expected LooseRotationWarning on btn rotate"
+        assert result.cipher_actually_rotated is False, (
+            "btn rotation today is metadata-only; flag must reflect "
+            "the truth"
+        )
+
+    def test_btn_rotate_silenced_by_acknowledge(self, fresh_cwd):
+        import warnings
+        tn.init()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = tn.admin.rotate(
+                group="default", acknowledge_loose=True,
+            )
+        assert not any(
+            isinstance(w.message, tn.LooseRotationWarning) for w in caught
+        )
+        assert result.cipher_actually_rotated is False
+
+
+class TestDecryptionFailureObservability:
+    """0.4.2a10 Finding 3: distinguish 'I can't read this row' from
+    'this row has no payload'."""
+
+    def test_clean_read_has_no_decrypt_failures(self, fresh_cwd):
+        tn.init()
+        tn.info("clean.event", x=1)
+        result = tn.read()
+        rows = list(result)
+        assert len(rows) == 1
+        assert rows[0].decryption_failed is False
+        assert rows[0].hidden_groups == []
+        assert result.stats.skipped_decrypt == 0
+
+
+class TestAddRecipientErgonomics:
+    """0.4.2a10 Finding 1: add_recipient produces an absorbable .tnpkg
+    by default. raw=True path stays for legacy scripted deployments."""
+
+    def test_add_recipient_default_writes_tnpkg(self, fresh_cwd):
+        tn.init()
+        result = tn.admin.add_recipient(
+            "default", recipient_did="did:key:zLabel-alice",
+        )
+        assert result.kit_path is not None
+        assert result.kit_path.name.endswith(".tnpkg")
+        assert result.kit_path.is_file()
+
+    def test_add_recipient_registers_for_revocation(self, fresh_cwd):
+        tn.init()
+        tn.admin.add_recipient(
+            "default", recipient_did="did:key:zLabel-bob",
+        )
+        # The recipient is in the registry — revocation works
+        # without "no active recipient" error.
+        tn.admin.revoke_recipient(
+            "default", recipient_did="did:key:zLabel-bob",
+        )
+
+    def test_add_recipient_raw_still_works(self, fresh_cwd):
+        from pathlib import Path as _P
+        tn.init()
+        result = tn.admin.add_recipient(
+            "default",
+            recipient_did="did:key:zLabel-carol",
+            out_path=_P("./default.btn.mykit"),
+            raw=True,
+        )
+        assert result.kit_path is not None
+        assert result.kit_path.name.endswith(".btn.mykit")
+        assert result.kit_path.is_file()
+
+
+class TestIdentityNamingPhase1:
+    """0.4.2a10 naming Phase 1: `device_identity` accessor added
+    alongside `did`. Closes the cfg.me.did debug-loop testers hit
+    looking at resolved.yaml."""
+
+    def test_device_identity_alias_exists(self, fresh_cwd):
+        tn.init()
+        cfg = tn.current_config()
+        # New canonical name
+        ident = cfg.device.device_identity
+        assert isinstance(ident, str)
+        # Same value as the legacy accessor
+        assert ident == cfg.device.did
+        # Both keep working in 0.4.2a10
+        assert cfg.device.did is not None

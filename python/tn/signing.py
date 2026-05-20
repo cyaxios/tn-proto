@@ -80,11 +80,32 @@ class DeviceKey:
     `private_bytes` is the 32-byte Ed25519 seed. `public_bytes` is the
     32-byte public key in raw encoding. `did` is the did:key form of the
     public key with the Ed25519 multicodec prefix.
+
+    0.4.2a10 adds `device_identity` as the canonical accessor — same
+    value as `did`, but the field name no longer claims the value
+    MUST be a did:key (today it is; future SDK shapes may decode
+    other identifier formats here). New code should reach for
+    `cfg.device.device_identity`; `cfg.device.did` stays as a
+    back-compat alias and continues to work indefinitely. See
+    `docs/superpowers/specs/2026-05-20-identity-and-key-naming.md`.
     """
 
     private_bytes: bytes  # 32-byte Ed25519 seed
     public_bytes: bytes  # 32-byte public key, raw
-    did: str  # did:key:z...
+    did: str  # did:key:z... (legacy attribute name — see device_identity)
+
+    @property
+    def device_identity(self) -> str:
+        """The canonical identifier string for this device. Today
+        renders as a did:key string (same value as `self.did`); the
+        attribute name is format-agnostic.
+
+        Use this in new code. `self.did` is kept as a back-compat
+        alias — both return the same string. See the existing
+        `signing_key()` method for the crypto-layer accessor; this
+        property is the user-facing LABEL surface.
+        """
+        return self.did
 
     @classmethod
     def generate(cls) -> Self:

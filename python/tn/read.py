@@ -78,6 +78,12 @@ class ReadStats:
     yielded: int = 0
     skipped_parse: int = 0
     skipped_verify: int = 0
+    # 0.4.2a10: decrypt failures get their own bucket so callers can
+    # distinguish "the bytes parsed and verified but I don't hold the
+    # right kit for this row's groups" from parse / verify failures.
+    # Bumped each time a yielded entry has hidden_groups != [] (i.e.
+    # we couldn't decrypt at least one group's payload).
+    skipped_decrypt: int = 0
     skipped_reasons: list[str] = field(default_factory=list)
 
 
@@ -507,6 +513,52 @@ def read(
                         _emit_tampered_row(env, reasons)
                         continue
                     # verify=False: yield the entry anyway
+
+            # 0.4.2a10: surface decrypt failures.
+            # When the dispatch returned a triple whose `plaintext` is
+            # missing keys for at least one group present in the
+            # envelope's ciphertext, the row's `hidden_groups` is
+            # non-empty. This is distinct from a parse / verify
+            # failure — the bytes parsed and the signature checked,
+            # but the reader doesn't hold a kit that can decrypt
+            # the payload. Today this would yield an Entry with
+            # `fields = {}` silently; that's the audit-correctness
+            # hole the 0.4.2a10 admin-verb-clarity spec calls out.
+            #
+            # Now: bump stats.skipped_decrypt, fire on_skip with a
+            # reason starting "decrypt:<groups>", and yield the
+            # entry as before (so chain integrity / sequence
+            # continuity stay visible). The Entry exposes a new
+            # `decryption_failed` property the caller can branch
+            # on; existing call sites that don't check it see
+            # exactly the same shape as before.
+            hidden = list(r.get("envelope_hidden_groups", []) or [])
+            if not hidden:
+                # The Entry-construction path also derives this from
+                # the raw triple; mirror its logic so we agree.
+                env_for_hidden = r.get("envelope") or {}
+                plaintext_for_hidden = r.get("plaintext") or {}
+                hidden = [
+                    g for g in env_for_hidden
+                    if isinstance(env_for_hidden.get(g), dict)
+                    and "ciphertext" in env_for_hidden[g]
+                    and g not in plaintext_for_hidden
+                ]
+            if hidden:
+                env = r.get("envelope") or {}
+                reason = "decrypt:" + ",".join(sorted(hidden))
+                stats.skipped_decrypt += 1
+                stats.skipped_reasons.append(reason)
+                if on_skip is not None:
+                    try:
+                        on_skip(env, reason)
+                    except Exception:  # noqa: BLE001
+                        import logging as _logging
+                        _logging.getLogger("tn.read").warning(
+                            "on_skip callback raised on decrypt-fail; "
+                            "continuing.",
+                            exc_info=True,
+                        )
 
             if raw:
                 envelope = r.get("envelope") or {}

@@ -76,6 +76,23 @@ class Entry(BaseModel):
     # caller's keystore couldn't decrypt them.
     hidden_groups: list[str] = Field(default_factory=list)
 
+    @property
+    def decryption_failed(self) -> bool:
+        """0.4.2a10: True when at least one of this row's encrypted
+        groups could not be decrypted with the keys available to the
+        reader (e.g. the reader was revoked, or never received a kit
+        for the group, or the kit is from a different cipher epoch).
+
+        Use this to distinguish "I'm not authorised to see this row's
+        contents" from "this row was logged with no payload" — both
+        produce `entry.fields == {}` today, but the former sets this
+        flag and `entry.hidden_groups != []`.
+
+        Mirror surface to `tn.read(on_skip=...)`'s decrypt-failure
+        callback and `result.stats.skipped_decrypt`.
+        """
+        return len(self.hidden_groups) > 0
+
     # ---------------------------------------------------------------
     # Constructors
     # ---------------------------------------------------------------

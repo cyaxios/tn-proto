@@ -863,16 +863,36 @@ def add_recipient(
     recipient_did: str | None = None,
     out_path: Path | str | None = None,
     public_key: bytes | None = None,
+    raw: bool = False,
     cfg: Any | None = None,
 ) -> AddRecipientResult:
-    """Add a recipient to a group. Branches on the group's cipher type.
+    """Register a new recipient on `group` and mint their reader kit.
 
-    btn ceremonies: pass `out_path` (where to write the kit). Returns
-    `AddRecipientResult(leaf_index=N, kit_path=Path)`.
+    btn ceremonies:
+        Mints a fresh kit, registers the recipient (emits
+        `tn.recipient.added`), and writes an absorbable `.tnpkg`
+        bundle to disk. `out_path` defaults to
+        `<cwd>/<recipient_label>.tnpkg`. The recipient absorbs via
+        `tn.absorb(<path>)`.
 
-    JWE ceremonies: pass `public_key` (32-byte X25519 public key) and
-    `cfg` (the LoadedConfig to mutate). Returns
-    `AddRecipientResult(updated_cfg=cfg')`.
+        For legacy scripted deployments that hand-copy raw kit
+        bytes into the recipient's keystore, pass `raw=True` along
+        with an `out_path` ending in `.btn.mykit`. The raw kit is
+        the pre-0.4.2a10 default; .tnpkg is the new default.
+
+        Either form registers the recipient and supports a later
+        `revoke_recipient` call. The difference is purely the wire
+        shape of the kit material.
+
+    JWE ceremonies:
+        Pass `public_key` (32-byte X25519 public key) and `cfg` (the
+        LoadedConfig to mutate). Returns
+        `AddRecipientResult(updated_cfg=cfg')`. `raw` is btn-only
+        and ignored on JWE.
+
+    For re-distributing kit material to an already-known recipient
+    WITHOUT a new attestation event, use
+    `tn.pkg.bundle_for_recipient` instead.
 
     `recipient_did` is optional in both cases (provided for the
     `tn.recipient.added` admin event's metadata).
@@ -909,28 +929,63 @@ def add_recipient(
                 "tn.admin.add_recipient: public_key is JWE-only and was "
                 f"passed to a btn group {group!r}. For btn, pass out_path."
             )
+
+        # 0.4.2a10: out_path defaults to <cwd>/<safe-label>.tnpkg
+        # (absorbable bundle). Legacy raw .btn.mykit output stays
+        # available via `raw=True` for scripted deployments.
+        import re as _re
         if out_path is None:
-            raise ValueError(
-                "tn.admin.add_recipient: out_path is required for btn "
-                f"group {group!r}."
+            safe_stem = _re.sub(
+                r"[^A-Za-z0-9._-]", "_",
+                (recipient_did or "recipient").split(":")[-1],
             )
-        # Inline the btn-runtime kit-mint flow (was tn.admin_add_recipient
-        # in pre-Stage-C; that flat alias is gone in 0.2.0).
+            out_path = Path.cwd() / f"{safe_stem}.tnpkg"
+        out_path = Path(out_path)
+        name = out_path.name
+
         from .. import _maybe_autoinit_load_only, _refresh_admin_cache_if_present, _require_dispatch
         _maybe_autoinit_load_only()
-        out_path_p = Path(out_path)
-        name = out_path_p.name
-        if not name.endswith(".btn.mykit") or name == ".btn.mykit":
-            raise ValueError(
-                f"tn.admin.add_recipient: out_path basename must end with "
-                f"'.btn.mykit' (e.g. {group!r}.btn.mykit), got {name!r}. The "
-                f"kit_bundle exporter regex requires the .btn.mykit suffix; "
-                f"non-matching files get silently skipped and the publisher's "
-                f"own self-kit ships in their place."
+
+        # Branch on output shape.
+        if raw or name.endswith(".btn.mykit"):
+            # Legacy raw-kit path. Same as pre-0.4.2a10 behaviour.
+            if not name.endswith(".btn.mykit") or name == ".btn.mykit":
+                raise ValueError(
+                    f"tn.admin.add_recipient: when raw=True or "
+                    f"out_path ends in '.btn.mykit', the basename must "
+                    f"match '<group>.btn.mykit' (e.g. "
+                    f"{group!r}.btn.mykit), got {name!r}."
+                )
+            leaf = _require_dispatch().add_recipient_btn(
+                group, str(out_path), recipient_did=recipient_did,
             )
-        leaf = _require_dispatch().add_recipient_btn(
-            group, str(out_path), recipient_did=recipient_did,
-        )
+            _refresh_admin_cache_if_present()
+            return AddRecipientResult(
+                leaf_index=leaf,
+                kit_path=Path(out_path),
+                updated_cfg=None,
+            )
+
+        # Default: absorbable .tnpkg. Mint into a temp keystore
+        # directory under the canonical filename the kit_bundle
+        # exporter expects, then export to the requested out_path
+        # as a .tnpkg manifest.
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory(prefix="tn-add-recipient-") as td:
+            td_path = Path(td)
+            raw_kit_path = td_path / f"{group}.btn.mykit"
+            leaf = _require_dispatch().add_recipient_btn(
+                group, str(raw_kit_path), recipient_did=recipient_did,
+            )
+            from .._pkg_impl import _export_impl
+            _export_impl(
+                out_path,
+                kind="kit_bundle",
+                cfg=cfg,
+                to_did=recipient_did,
+                keystore=td_path,
+                groups=[group],
+            )
         _refresh_admin_cache_if_present()
         return AddRecipientResult(
             leaf_index=leaf,
@@ -1059,11 +1114,40 @@ class RotateGroupResult:
     expose a generation counter at this level (the runtime tracks it
     internally via the `tn.rotation.completed` admin event), so
     `generation` may be None.
+
+    0.4.2a10: `cipher_actually_rotated` is the honest flag. JWE
+    rotation re-keys the cover set (forward-secret); the field is
+    True. btn rotation today is metadata-only (epoch bump + self-kit
+    refresh; the cipher's master_seed is unchanged); the field is
+    False. The real btn cipher rotation lands in 0.4.3 — see
+    `docs/superpowers/specs/2026-05-20-btn-cipher-rotation.md`.
     """
 
     cipher: str
     generation: int | None = None
     updated_cfg: LoadedConfig | None = None
+    cipher_actually_rotated: bool = False
+
+
+class LooseRotationWarning(UserWarning):
+    """Raised by `tn.admin.rotate` on btn ceremonies to surface that
+    the cipher's encryption keys are NOT being rotated.
+
+    Today's btn `rotate` is metadata-only: it bumps the yaml's
+    `index_epoch` (the HMAC key for searchable-encryption tokens),
+    refreshes the publisher's self-kit, and emits a
+    `tn.rotation.completed` attestation — but the btn cipher's
+    `master_seed` and derived `publisher_id` are unchanged.
+    Pre-rotation recipient kits continue to decrypt post-rotation
+    ciphertexts byte-for-byte. There is no forward secrecy.
+
+    The real cipher-level rotation lands in 0.4.3. See
+    `docs/superpowers/specs/2026-05-20-btn-cipher-rotation.md` for
+    the design.
+
+    Suppressible via `tn.admin.rotate(..., acknowledge_loose=True)`.
+    The warning is sticky on btn rotate calls until that release.
+    """
 
 
 def rotate(
@@ -1071,14 +1155,29 @@ def rotate(
     *,
     revoke_did: str | None = None,
     pool_size: int | None = None,
+    acknowledge_loose: bool = False,
     cfg: Any | None = None,
 ) -> RotateGroupResult:
-    """Rotate group keys. revoke_did + pool_size are JWE-only.
+    """Rotate group keys.
 
-    Both ciphers route through the same `_rotate_impl` body (which
-    branches internally on `cfg.cipher_name`), so this verb's job is
-    parameter validation + result wrapping. btn rotations ignore
-    `revoke_did` / `pool_size` (the runtime doesn't take them).
+    On JWE ceremonies this is a real forward-secret rotation:
+    the cover set is re-wrapped under fresh keys, and old recipient
+    kits no longer decrypt post-rotation entries.
+
+    On btn ceremonies, **this verb is metadata-only as of 0.4.2a10**.
+    The yaml's `index_epoch` ticks, the publisher's self-kit is
+    refreshed, and a `tn.rotation.completed` attestation is emitted,
+    but the cipher's `master_seed` and `publisher_id` are unchanged.
+    A pre-rotation recipient kit decrypts post-rotation ciphertexts.
+    There is no forward secrecy on btn yet. A `LooseRotationWarning`
+    is raised on every btn rotate call (suppressible via
+    `acknowledge_loose=True`) so callers don't silently rely on
+    forward secrecy that isn't there.
+
+    Real btn cipher rotation lands in 0.4.3 — see
+    `docs/superpowers/specs/2026-05-20-btn-cipher-rotation.md`.
+
+    `revoke_did` + `pool_size` are JWE-only.
     """
     if cfg is None:
         from .. import current_config
@@ -1095,19 +1194,48 @@ def rotate(
             raise ValueError(
                 "tn.admin.rotate: revoke_did and pool_size are JWE-only."
             )
+        # 0.4.2a10: surface the metadata-only truth. The architectural
+        # slot for real rotation exists (publisher_id + epoch fields
+        # in every ciphertext) but the operation isn't built. See the
+        # 0.4.3 design doc referenced in LooseRotationWarning.
+        if not acknowledge_loose:
+            import warnings as _warnings
+            _warnings.warn(
+                (
+                    "tn.admin.rotate on btn is metadata-only as of "
+                    "0.4.2a10: the cipher's encryption keys are NOT "
+                    "rotated, and pre-rotation recipient kits will "
+                    "still decrypt post-rotation entries. For forward "
+                    "secrecy on btn, await 0.4.3 (see docs/superpowers/"
+                    "specs/2026-05-20-btn-cipher-rotation.md). To "
+                    "suppress this warning, pass acknowledge_loose=True."
+                ),
+                LooseRotationWarning,
+                stacklevel=2,
+            )
         # _rotate_impl handles btn internally — no separate runtime rotate.
         # btn rotations bump index_epoch and rename old state/mykit but
         # don't expose a "generation" counter at this layer; we report
         # the new index_epoch as the generation for symmetry.
         updated = _rotate_impl(group, cfg=cfg)
         new_epoch = updated.groups[group].index_epoch
-        return RotateGroupResult(cipher="btn", generation=new_epoch, updated_cfg=None)
+        return RotateGroupResult(
+            cipher="btn",
+            generation=new_epoch,
+            updated_cfg=None,
+            cipher_actually_rotated=False,
+        )
 
     elif cipher == "jwe":
         updated_cfg = _rotate_impl(
             group, revoke_did=revoke_did, pool_size=pool_size, cfg=cfg,
         )
-        return RotateGroupResult(cipher="jwe", generation=None, updated_cfg=updated_cfg)
+        return RotateGroupResult(
+            cipher="jwe",
+            generation=None,
+            updated_cfg=updated_cfg,
+            cipher_actually_rotated=True,
+        )
 
     else:
         raise NotImplementedError(
