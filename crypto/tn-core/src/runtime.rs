@@ -1117,8 +1117,10 @@ impl Runtime {
 
     // emit_inner is the single canonical path for building + signing an
     // envelope; splitting it further would fragment the invariants enforced
-    // across the sealing/signing/writing phases.
-    #[allow(clippy::too_many_lines)]
+    // across the sealing/signing/writing phases. The chain-enabled
+    // closure (under `with_advisory_lock`) builds on the same locals,
+    // so it carries the same allow.
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     fn emit_inner(
         &self,
         level: &str,
