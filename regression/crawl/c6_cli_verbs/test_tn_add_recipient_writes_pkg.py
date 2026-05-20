@@ -34,7 +34,10 @@ def test_tn_add_recipient_writes_pkg(
     cli_run: Callable[..., object],
 ) -> None:
     project = hermetic_machine / "myproject"
-    yaml_path = project / "tn.yaml"
+    # 0.4.2a9: CLI `tn init` writes the yaml under `.tn/default/`
+    # (canonical layout). See test_tn_init_creates_ceremony for the
+    # layout assertion that pins this.
+    yaml_path = project / ".tn" / "default" / "tn.yaml"
 
     init_r = cli_run(  # type: ignore[arg-type]
         "init", str(project), "--skip-confirm", "--keep-mnemonic", "--no-link",

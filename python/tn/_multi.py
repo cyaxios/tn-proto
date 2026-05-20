@@ -219,6 +219,33 @@ def _ensure_ceremony_on_disk(
 
     yaml_path = ceremony_yaml_path(name, project_dir=project_dir)
     if yaml_path.is_file():
+        # 0.4.2a9: warn if the caller asked for a different profile
+        # than the one stamped on the existing yaml. Profile is part
+        # of a ceremony's identity — it controls signs / chains /
+        # default_sink — and changing it after mint would invalidate
+        # the on-disk log's verifiability. Silently honour the
+        # original stamp; tell the operator (loudly) that their
+        # second arg was a no-op.
+        if profile is not None:
+            import yaml as _yaml
+            try:
+                with yaml_path.open("r", encoding="utf-8") as fh:
+                    existing = _yaml.safe_load(fh) or {}
+                stamped = (existing.get("ceremony") or {}).get("profile")
+                if stamped and stamped != profile:
+                    import logging as _logging
+                    _logging.getLogger("tn").warning(
+                        "ceremony %r already minted with profile=%r; "
+                        "requested profile=%r is ignored. Profile is "
+                        "immutable per-ceremony; mint a new named "
+                        "stream (`tn.init('<new_name>', profile=%r)`) "
+                        "instead.",
+                        name, stamped, profile, profile,
+                    )
+            except (_yaml.YAMLError, OSError):
+                # Best-effort warning — don't block attach on a
+                # transient read error.
+                pass
         return yaml_path
 
     chosen_profile = profile or _profiles.DEFAULT_PROFILE
@@ -706,6 +733,43 @@ def _store_project_tag(project: str | None) -> None:
     _tn_pkg._current_project = project
 
 
+def _stamp_project_labels(
+    yaml_path: Path, project_name: str | None, version_name: str | None,
+) -> None:
+    """Stamp ``ceremony.project_name`` / ``ceremony.version_name`` into
+    an existing yaml. No-op when both are None. Used by ``tn.init`` to
+    record the operator-chosen vault label at mint time.
+
+    Read-modify-write via PyYAML to preserve every other key as the
+    init machinery left it.
+    """
+    if project_name is None and version_name is None:
+        return
+    import yaml as _yaml
+    try:
+        with yaml_path.open("r", encoding="utf-8") as fh:
+            doc = _yaml.safe_load(fh) or {}
+    except OSError:
+        return
+    if not isinstance(doc, dict):
+        return
+    ceremony = doc.setdefault("ceremony", {})
+    if not isinstance(ceremony, dict):
+        return
+    # Only set when missing — don't overwrite an existing operator
+    # edit. Same shape as how ``_apply_profile_to_yaml`` treats the
+    # profile field at re-init time.
+    if project_name is not None and "project_name" not in ceremony:
+        ceremony["project_name"] = project_name
+    if version_name is not None and "version_name" not in ceremony:
+        ceremony["version_name"] = version_name
+    try:
+        with yaml_path.open("w", encoding="utf-8") as fh:
+            _yaml.safe_dump(doc, fh, sort_keys=False)
+    except OSError:
+        pass
+
+
 def _build_legacy_kwargs(
     *,
     log_path: str | Path | None,
@@ -828,6 +892,12 @@ def _init_via_discovery(
 
         existing = _resolve_existing_yaml()
         if existing is not None:
+            # 0.4.2a9: warn if the caller passed `profile=` but the
+            # on-disk yaml has a different profile stamped. Profile
+            # is immutable per-ceremony (see `tn.init` docstring);
+            # the second-call profile arg is silently honored as a
+            # no-op without this warning.
+            _check_no_conflict(existing, profile=profile)
             return _init_via_yaml_path(str(existing), legacy_kwargs)
 
     # Nothing on disk yet (or project_dir is set) — mint the default
@@ -1022,6 +1092,7 @@ def init(
     admin_log_path: str | Path | None = None,
     # ── new name slots reserved for future behavior ──────────────
     project: str | None = None,
+    version: str | None = None,
     stream: str | None = None,
     ceremony: str | None = None,
     load: str | Path | None = None,
@@ -1074,8 +1145,19 @@ def init(
     profile :
         Profile-defaults bundle stamped onto a fresh ceremony's yaml
         (``"transaction"`` / ``"audit"`` / ``"secure_log"`` /
-        ``"telemetry"`` / ``"stdout"``). Ignored when loading an
-        existing yaml.
+        ``"telemetry"`` / ``"stdout"``).
+
+        **Immutable per-ceremony.** Profile is part of a ceremony's
+        identity: it controls ``sign`` / ``chain`` / ``default_sink``,
+        all of which are stamped into the yaml and into every emit.
+        Changing the profile after mint would invalidate the
+        verifiability of the existing log. So when ``tn.init`` is
+        called with a ``profile=`` arg against a ceremony that
+        already exists, the new value is **ignored** — the original
+        stamp wins. A warning is logged via ``logging.getLogger("tn")``
+        when the requested profile differs from the stamped one.
+        To run a different profile, mint a new named stream:
+        ``tn.init("<new_name>", profile="<other>")``.
 
     project_dir :
         Explicit project root for the multi-ceremony layout. Pass to
@@ -1200,13 +1282,43 @@ def init(
 
     project_path = Path(project_dir) if project_dir is not None else None
 
+    def _stamp_after_dispatch(handle: TN) -> TN:
+        # 0.4.2a9: stamp project_name / version_name into the active
+        # yaml after dispatch returns. Additive (no overwrite of an
+        # existing field), idempotent on re-init. Re-loads the
+        # singleton's cfg via a second init pass so the in-memory
+        # LoadedConfig reflects the new fields immediately — required
+        # for `wallet.link_ceremony` called in the same process to
+        # pick up the operator-chosen label.
+        if project is None and version is None:
+            return handle
+        try:
+            from . import current_config
+            cfg = current_config()
+            yaml_p = Path(cfg.yaml_path)
+        except Exception:  # noqa: BLE001
+            return handle
+        if not yaml_p.is_file():
+            return handle
+        before = (cfg.project_name, cfg.version_name)
+        _stamp_project_labels(yaml_p, project, version)
+        # Re-load only if the stamp actually changed something.
+        # `_stamp_project_labels` is additive (no overwrite), so we
+        # only reload when at least one field was previously None.
+        if (project is not None and before[0] is None) or (
+            version is not None and before[1] is None
+        ):
+            from . import _init_impl as _legacy_init  # noqa: PLC0415
+            _legacy_init(str(yaml_p), **legacy_kwargs)
+        return handle
+
     # Dispatch by call shape. Three shapes, each handled by a small helper.
     if isinstance(name, Path) or (
         isinstance(name, str) and _looks_like_yaml_path(name)
     ):
         # Legacy ``tn.init(yaml_path)`` style — Path or yaml-suffixed string.
         return _apply_stream(
-            _init_via_yaml_path(str(name), legacy_kwargs),
+            _stamp_after_dispatch(_init_via_yaml_path(str(name), legacy_kwargs)),
             stream,
         )
 
@@ -1214,11 +1326,13 @@ def init(
         # No-args / discovery chain — find an existing yaml or mint default.
         # An explicit yaml_path= (or load=) overrides discovery.
         return _apply_stream(
-            _init_via_discovery(
-                project_path=project_path,
-                yaml_path=yaml_path,
-                profile=profile,
-                legacy_kwargs=legacy_kwargs,
+            _stamp_after_dispatch(
+                _init_via_discovery(
+                    project_path=project_path,
+                    yaml_path=yaml_path,
+                    profile=profile,
+                    legacy_kwargs=legacy_kwargs,
+                ),
             ),
             stream,
         )
@@ -1242,12 +1356,14 @@ def init(
     # See the "Project identity and named streams" section of the
     # README for the architecture.
     return _apply_stream(
-        _init_named_ceremony(
-            name=name,
-            project_path=project_path,
-            yaml_path=yaml_path,
-            profile=profile,
-            legacy_kwargs=legacy_kwargs,
+        _stamp_after_dispatch(
+            _init_named_ceremony(
+                name=name,
+                project_path=project_path,
+                yaml_path=yaml_path,
+                profile=profile,
+                legacy_kwargs=legacy_kwargs,
+            ),
         ),
         stream,
     )

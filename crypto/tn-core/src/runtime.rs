@@ -1493,15 +1493,18 @@ impl Runtime {
         let group_payloads_for_lock = group_payloads;
 
         // Chain gating (0.4.2a7): `ceremony.chain: false` skips the
-        // cross-process advisory lock, the per-emit tail-scan, and
-        // the chain advance/commit entirely. Used by the
-        // `telemetry` and `secure_log` profiles where per-row chain
-        // integrity isn't part of the audit story and the per-emit
-        // lock cost would dominate hot paths. When disabled, the
-        // envelope still carries `sequence: 1` and `prev_hash: ""`
-        // so the row format is unchanged (readers that ignore
-        // sequence/prev_hash continue to work; readers that check
-        // them see the documented "unchained" sentinel values).
+        // cross-process advisory lock and the per-emit tail-scan.
+        // Used by the `telemetry` and `secure_log` profiles where
+        // per-row prev_hash linkage isn't part of the audit story
+        // and the per-emit lock cost would dominate hot paths.
+        //
+        // 0.4.2a9: the unchained path still increments a per-
+        // event_type `sequence` counter (no lock, in-memory only —
+        // resets to 1 on restart). `prev_hash` stays empty as the
+        // "no linkage claim" sentinel. Readers that check chain
+        // integrity see `ceremony.chain == false` and skip the
+        // per-row prev_hash compare; sequence remains useful for
+        // ordering inside a single run.
         let chain_enabled = self.cfg.ceremony.chain;
 
         // `need_row_hash` was computed earlier (just before the
@@ -1789,12 +1792,24 @@ impl Runtime {
         } else {
             // Lockless emit for unchained profiles. No advisory
             // lock means no `.emit.lock` artifact on disk, no
-            // tail-scan, no chain.advance/commit. The append-only
+            // tail-scan, no chain prev_hash linkage. The append-only
             // syscall is the only ordering primitive — interleaving
             // across processes is acceptable because there's no
             // chain to break.
+            //
+            // 0.4.2a9: even unchained profiles increment a per-
+            // event_type sequence counter. `prev_hash` stays empty
+            // (sentinel pattern; the verifier knows to skip the
+            // linkage check when `ceremony.chain == false`), but
+            // `sequence` grows monotonically within a single
+            // process. Across restart the counter resets to 1 —
+            // there's no seed scan for unchained profiles, by
+            // design (would defeat the perf-first promise). Users
+            // that need cross-restart sequence continuity should
+            // pick `audit` or `transaction`.
+            let (seq, _prev_unused) = self.chain.advance(event_type);
             let result: std::io::Result<()> = (|| {
-                let (row_hash, line) = build_and_write!(1u64, "");
+                let (row_hash, line) = build_and_write!(seq, "");
                 row_hash_out = Some(row_hash);
                 line_out = Some(line);
                 Ok(())
@@ -2406,6 +2421,10 @@ impl Runtime {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let sequence = env
+                .get("sequence")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let did = env
                 .get("did")
                 .and_then(Value::as_str)
@@ -2417,12 +2436,40 @@ impl Runtime {
                 .unwrap_or("")
                 .to_string();
 
+            // Chain-disabled ceremonies (telemetry / secure_log /
+            // stdout — anything with `ceremony.chain: false`) emit
+            // every row with `prev_hash=""` + `sequence=1` sentinels.
+            // The writer never advances the chain; the on-disk shape
+            // is "N independent attestations" rather than a linked
+            // list. A byte-for-byte `prev_hash == prior.row_hash`
+            // compare always fails from row 2 onward. Skip the
+            // per-row chain check entirely for such ceremonies — the
+            // chain claim isn't being made, so there's nothing to
+            // verify against. We could check the sentinel pattern is
+            // intact (`prev == ""` + `sequence == 1`) and fail
+            // otherwise; for now treat chain=false as "chain is not
+            // a load-bearing field," matching the writer's contract.
+            //
+            // sequence is read for parity with the writer's sentinel
+            // contract and to make this branch self-documenting in
+            // a future tightening.
+            let _ = sequence;
             let last = prev_hash_by_event.get(&event_type).cloned();
-            let chain_ok = match last {
-                None => true,
-                Some(l) => l == prev,
+            let chain_ok = if !self.cfg.ceremony.chain {
+                true
+            } else {
+                match last {
+                    None => true,
+                    Some(l) => l == prev,
+                }
             };
-            prev_hash_by_event.insert(event_type.clone(), row_hash.clone());
+            // Track the row_hash forward only for chained ceremonies.
+            // Chain-disabled rows have nothing to chain, and carrying
+            // their row_hash forward would just confuse a future
+            // tightening of this branch.
+            if self.cfg.ceremony.chain {
+                prev_hash_by_event.insert(event_type.clone(), row_hash.clone());
+            }
 
             // Decrypt every group we hold a kit for.
             let mut plaintext_per_group: BTreeMap<String, Value> = BTreeMap::new();
@@ -2587,17 +2634,33 @@ impl Runtime {
                 .unwrap_or("")
                 .to_string();
 
-            let expected = compute_row_hash(&RowHashInput {
-                did: &did,
-                timestamp: &timestamp,
-                event_id: &event_id,
-                event_type: &event_type,
-                level: &level,
-                prev_hash: &prev,
-                public_fields: &public_out,
-                groups: &groups_for_hash,
-            });
-            let row_hash_ok = expected == row_hash;
+            // Row-hash sentinel: when the writer's ceremony has both
+            // `chain: false` AND `sign: false` (telemetry, stdout),
+            // `need_row_hash` was false at emit time and the
+            // envelope's `row_hash` field is the documented empty
+            // sentinel. Recomputing would produce a non-empty hash
+            // and the byte compare would always fail. Accept the
+            // sentinel as "row_hash is not a load-bearing field for
+            // this ceremony shape" — same shape the writer
+            // documents at emit time.
+            let row_hash_ok = if !self.cfg.ceremony.chain
+                && !self.cfg.ceremony.sign
+                && row_hash.is_empty()
+            {
+                true
+            } else {
+                let expected = compute_row_hash(&RowHashInput {
+                    did: &did,
+                    timestamp: &timestamp,
+                    event_id: &event_id,
+                    event_type: &event_type,
+                    level: &level,
+                    prev_hash: &prev,
+                    public_fields: &public_out,
+                    groups: &groups_for_hash,
+                });
+                expected == row_hash
+            };
 
             // Signature: empty signature counts as `false` (unsigned mode
             // is intentionally fail-closed for verifiers — matches Python).
@@ -4454,34 +4517,34 @@ fn seed_chain_from_log(
     }
     let mut latest: HashMap<String, (u64, String)> = HashMap::new();
     let mut saw_ceremony_init = false;
+    // 0.4.2a9: tolerate malformed lines during the chain-seed scan.
+    // A process killed mid-emit leaves a partial JSON line at the
+    // file tail; the prior version propagated that parse error and
+    // crashed `tn.init` on every subsequent run, leaving the
+    // operator with no graceful recovery. Mirror the per-row
+    // resilience that `seed_chain_from_template` (and the runtime
+    // read path) already have: skip the bad line, keep walking,
+    // seed from whatever survived.
     for res in LogFileReader::open(log_path, storage)? {
-        let env = res?;
-        let et = env
-            .get("event_type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::Malformed {
-                kind: "log entry",
-                reason: "missing event_type".into(),
-            })?
-            .to_string();
+        let env = match res {
+            Ok(v) => v,
+            Err(_) => continue, // skip malformed/truncated row, keep scanning
+        };
+        let et = match env.get("event_type").and_then(Value::as_str) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
         if et == "tn.ceremony.init" {
             saw_ceremony_init = true;
         }
-        let seq = env
-            .get("sequence")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| Error::Malformed {
-                kind: "log entry",
-                reason: "missing sequence".into(),
-            })?;
-        let rh = env
-            .get("row_hash")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::Malformed {
-                kind: "log entry",
-                reason: "missing row_hash".into(),
-            })?
-            .to_string();
+        let seq = match env.get("sequence").and_then(Value::as_u64) {
+            Some(s) => s,
+            None => continue,
+        };
+        let rh = match env.get("row_hash").and_then(Value::as_str) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
         latest.insert(et, (seq, rh));
     }
     chain.seed(latest);

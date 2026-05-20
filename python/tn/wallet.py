@@ -98,7 +98,11 @@ def link_ceremony(
             f"{cfg.linked_vault}; unlink first before re-linking",
         )
 
-    name = project_name or cfg.ceremony_id
+    # 0.4.2a9: prefer the operator-chosen project_name stamped into
+    # the yaml (`ceremony.project_name`). Fall back to ceremony_id
+    # for legacy ceremonies that don't carry the field. Explicit
+    # `project_name=` kwarg still wins (caller knows best).
+    name = project_name or cfg.project_name or cfg.ceremony_id
     project: dict[Any, Any] | None
     try:
         project = client.create_project(name=name, ceremony_id=cfg.ceremony_id)

@@ -237,27 +237,33 @@ class TestProfileEndToEnd:
         text = log_path.read_text(encoding="utf-8")
         assert "evt.persisted" in text
 
-    def test_telemetry_does_not_persist_to_file(self, tmp_path):
+    def test_telemetry_persists_to_file_and_stdout(self, tmp_path):
+        """0.4.2a9: telemetry writes BOTH to a file AND to stdout.
+        The "fast-as-stdlib-logger" framing is about CPU cost
+        (unsigned, unchained), not about dropping the file sink.
+        Operators who want truly forward-only "no file" use the
+        ``stdout`` profile."""
         import tn
 
         h = tn.init("traces", profile="telemetry", project_dir=tmp_path)
         h.info("evt.fast", k=1)
         tn.flush_and_close()
 
-        # Telemetry's default sink is stdout; no per-stream file is
-        # written for it. The directory is created (logs/) but the
-        # file isn't.
+        # Telemetry writes its own file under .tn/<name>/logs/.
         log_path = tmp_path / ".tn" / "traces" / "logs" / "traces.ndjson"
-        # The legacy file handler may still write because default
-        # ceremony's file handler propagates. The IMPORTANT property
-        # is: telemetry didn't write to its OWN file (no
-        # file.rotating handler declared). Check that the stream
-        # yaml has no file.rotating handler.
+        assert log_path.is_file(), (
+            "telemetry must persist to its own log file"
+        )
+        text = log_path.read_text(encoding="utf-8")
+        assert "evt.fast" in text
+
+        # The stream yaml declares BOTH a file.rotating AND a stdout
+        # handler.
         import yaml as _yaml
         with h.yaml_path.open("r", encoding="utf-8") as fh:
             doc = _yaml.safe_load(fh)
-        kinds = [x.get("kind") for x in (doc.get("handlers") or [])]
-        assert "file.rotating" not in kinds
+        kinds = sorted(x.get("kind") for x in (doc.get("handlers") or []))
+        assert "file.rotating" in kinds
         assert "stdout" in kinds
 
 

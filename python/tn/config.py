@@ -285,6 +285,21 @@ class LoadedConfig:
     # secure_log profiles where per-row chain integrity isn't part of
     # the audit story.
     chain: bool = True
+    # 0.4.2a9: operator-chosen project label. Persisted in the yaml as
+    # ``ceremony.project_name``. Passed to the vault on link so the
+    # web UI shows a human name ("mycompany_payments") instead of the
+    # random ceremony_id. Two TN installs that share a project_name
+    # AND belong to the same vault account merge into one
+    # ``account_projects`` row (laptop-dev, ci, prod become three
+    # publishers on one project). When ``None`` (legacy ceremonies),
+    # ``wallet.link_ceremony`` falls back to ``ceremony_id`` so old
+    # data keeps working.
+    project_name: str | None = None
+    # 0.4.2a9: per-instance version label inside ``project_name``.
+    # The vault stores it as ``account_projects.publishers[].nickname``.
+    # Typical values: "laptop-dev", "ci", "prod". Defaults to
+    # ``project_name`` when None (single-version projects).
+    version_name: str | None = None
     # Where ``tn.*`` admin envelopes are written. The canonical attribute is
     # ``admin_log_location``; ``protocol_events_location`` is kept as a
     # read-only property (below) for callers that haven't migrated yet.
@@ -964,8 +979,11 @@ def _resolve_extends(yaml_path: Path, doc: dict[str, Any], _seen: set[Path] | No
         Child values logged + ignored.
       - child-owned keys (logs.path): child wins outright.
       - ``ceremony``: shallow-merged per subfield, child wins.
-      - ``handlers``: additive, deduped by name. Child handlers come
-        first; parent handlers append unless name already present.
+      - ``handlers``: child REPLACES if declared (including empty list).
+        Inherits from parent only when the child omits the key entirely.
+        0.4.2a8 used an additive merge that surprised users whose child
+        yaml declared a stdout-only handler — they ended up dual-writing
+        to the parent's file.rotating sink.
       - all other top-level keys: child wins if set, else parent's.
 
     Path absolutization: parent's relative paths (keystore.path,
@@ -1035,19 +1053,20 @@ def _resolve_extends(yaml_path: Path, doc: dict[str, Any], _seen: set[Path] | No
             merged["ceremony"] = base
             continue
         if key == "handlers":
-            base_h = list(parent_resolved.get("handlers") or [])
-            child_h = list(child_val) if isinstance(child_val, list) else []
-            seen_names: set[str] = set()
-            out: list[Any] = []
-            for h in child_h + base_h:
-                if not isinstance(h, dict):
-                    continue
-                name = h.get("name") or h.get("kind")
-                if name in seen_names:
-                    continue
-                seen_names.add(name)
-                out.append(h)
-            merged["handlers"] = out
+            # Child-declared `handlers:` REPLACES the parent's list
+            # outright. Standard yaml-inheritance semantics, and the
+            # only one that matches user intent: a child stream
+            # declaring `handlers: [stdout]` means "I want stdout
+            # only," not "I want stdout PLUS whatever the parent
+            # had." The prior additive-with-dedupe behaviour caused
+            # silent dual-writes into the parent's file sink.
+            #
+            # Keep declared as-is, including the empty-list case
+            # `handlers: []` which means "no handlers at all" — an
+            # explicit child opt-out of parent inheritance.
+            merged["handlers"] = (
+                list(child_val) if isinstance(child_val, list) else []
+            )
             continue
         # Default: child wins.
         merged[key] = child_val
@@ -1079,6 +1098,13 @@ class _CeremonySettings:
     # LoadedConfig so a reader can decide whether chain verification
     # makes sense.
     chain: bool
+    # 0.4.2a9: operator-chosen project label (vault-side
+    # `account_projects.name`). None for legacy ceremonies.
+    project_name: str | None
+    # 0.4.2a9: per-instance label inside the project (vault-side
+    # `account_projects.publishers[].nickname`). None when omitted —
+    # the link path falls back to `project_name`.
+    version_name: str | None
 
 
 def _validate_load_doc_structure(yaml_path: Path, doc: Any) -> None:
@@ -1154,7 +1180,21 @@ def _resolve_ceremony_settings(
         # chaining as before. False is opt-in for telemetry /
         # secure_log profiles.
         chain=bool(ceremony_block.get("chain", True)),
+        # 0.4.2a9: vault-link labels. Pulled as-typed (yaml-quoted
+        # strings only); operator-managed, not derived.
+        project_name=_str_or_none(ceremony_block.get("project_name")),
+        version_name=_str_or_none(ceremony_block.get("version_name")),
     )
+
+
+def _str_or_none(v: Any) -> str | None:
+    """Return a stripped string if ``v`` is a non-empty string, else None.
+    Centralises the "yaml field optional string" pattern."""
+    if isinstance(v, str):
+        stripped = v.strip()
+        if stripped:
+            return stripped
+    return None
 
 
 def _resolve_admin_log_location(yaml_path: Path, ceremony_block: dict[str, Any]) -> str:
@@ -1357,6 +1397,8 @@ def load(yaml_path: Path) -> LoadedConfig:
         sync_logs=settings.sync_logs,
         sign=settings.sign,
         chain=settings.chain,
+        project_name=settings.project_name,
+        version_name=settings.version_name,
         admin_log_location=pel,
         log_path=log_path,
     )

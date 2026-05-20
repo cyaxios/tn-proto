@@ -160,13 +160,17 @@ class TestReadAcrossProfiles:
         from tn import Entry
         assert all(isinstance(e, Entry) for e in result)
 
-    def test_read_returns_empty_for_telemetry(self, tmp_path):
-        h = tn.init("t", profile="telemetry", project_dir=tmp_path)
+    def test_read_returns_empty_for_stdout(self, tmp_path):
+        """0.4.2a9: ``stdout`` profile is the truly forward-only one.
+        ``telemetry`` HAS a file sink and is readable; ``stdout`` is
+        not."""
+        h = tn.init("t", profile="stdout", project_dir=tmp_path)
         assert list(h.read()) == []
 
-    def test_watch_returns_empty_for_telemetry(self, tmp_path):
-        h = tn.init("t", profile="telemetry", project_dir=tmp_path)
-        # Watch on a no-replay-surface stream yields nothing.
+    def test_watch_returns_empty_for_stdout(self, tmp_path):
+        """Watch on a no-replay-surface stream yields nothing.
+        ``stdout`` profile is the forward-only one in 0.4.2a9+."""
+        h = tn.init("t", profile="stdout", project_dir=tmp_path)
         assert list(h.watch()) == []
 
 

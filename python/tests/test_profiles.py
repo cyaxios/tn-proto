@@ -74,15 +74,19 @@ class TestTelemetryProfile:
     def test_properties(self):
         p = _profiles.get("telemetry")
         # Fast-as-stdlib-logger profile: drop signing for speed.
-        # Encryption stays on (floor).
+        # Encryption stays on (floor). 0.4.2a9: default_sink is
+        # `file_rotating`, matching the runtime which has always
+        # written the file at `logs.path`. The forward-only "no
+        # file" profile is `stdout`.
         assert p.signs is False
         assert p.chains is False
         assert p.flush == "async"
-        assert p.default_sink == "stdout"
+        assert p.default_sink == "file_rotating"
 
-    def test_telemetry_has_no_replay_surface(self):
+    def test_telemetry_has_replay_surface(self):
+        # 0.4.2a9: telemetry HAS a file sink — read works.
         p = _profiles.get("telemetry")
-        assert p.has_replay_surface() is False
+        assert p.has_replay_surface() is True
 
 
 class TestLookup:

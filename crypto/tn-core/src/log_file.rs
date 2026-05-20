@@ -85,13 +85,42 @@ impl LogFileWriter {
         if let Some(p) = path.parent() {
             storage.create_dir_all(p)?;
         }
-        // Seed `our_known_size` with the current on-disk file size
-        // so the chain-tip skip in `read_tail_if_grown` knows the
-        // init-time `seed_chain_from_log` scan already consumed
-        // these bytes. Anything beyond this point was written by
-        // someone else and warrants a tail re-read.
+        // 0.4.2a9: terminate a partial trailing line if present. A
+        // process killed mid-emit leaves the log ending with a
+        // truncated JSON fragment and no `\n`. The next emit
+        // appending to that file would concatenate its envelope
+        // bytes onto the fragment, producing one big malformed
+        // line that breaks all subsequent reads. Detect the
+        // missing newline once at open and append one — turns the
+        // fragment into its own (still-malformed) line, which the
+        // per-row parse-error resilience in the reader and
+        // chain-seed code paths can skip past.
         let initial_size = if storage.exists(path) {
-            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            if size > 0 {
+                // Read just the last byte. Cheap on any platform.
+                let needs_terminator = (|| -> std::io::Result<bool> {
+                    use std::io::{Read, Seek, SeekFrom};
+                    let mut f = std::fs::OpenOptions::new().read(true).open(path)?;
+                    f.seek(SeekFrom::End(-1))?;
+                    let mut last = [0u8; 1];
+                    f.read_exact(&mut last)?;
+                    Ok(last[0] != b'\n')
+                })()
+                .unwrap_or(false);
+                if needs_terminator {
+                    if let Some(mut w) = storage.open_append_writer(path)? {
+                        let _ = w.write_all(b"\n");
+                        let _ = w.flush();
+                    }
+                    // Re-read size after the recovery write.
+                    std::fs::metadata(path).map(|m| m.len()).unwrap_or(size + 1)
+                } else {
+                    size
+                }
+            } else {
+                0
+            }
         } else {
             0
         };

@@ -337,19 +337,32 @@ class TN:
         """Read this stream's log file, decrypting with the project
         keystore.
 
-        For streams whose profile has no replay surface (e.g.
-        ``telemetry`` writes only to stdout), ``read()`` returns an
-        empty iterator rather than raising. The semantics are
-        "this stream has nothing to replay" — different shape, not
-        an error. Callers iterating over read can write code that
-        works uniformly across stream profiles.
+        Replay surface is determined by the stream's profile. A
+        profile has a replay surface iff its ``default_sink`` is
+        ``file_rotating`` — that's the only sink today that lets
+        a reader re-open the backlog after the fact. The catalog:
 
-        For streams with a file sink, this activates the ceremony
-        (binds the singleton to its yaml so the legacy reader
-        machinery has a runtime to read against) and delegates to
-        the standard read function.
+          * ``transaction`` / ``audit`` / ``secure_log`` /
+            ``telemetry`` — file sink, ``read()`` works.
+          * ``stdout`` — forward-only contract, ``read()`` returns
+            an empty iterator rather than raising. Same shape as
+            a stream-with-file that has no entries yet, so callers
+            can iterate uniformly across profiles.
+
+        For streams with a replay surface, this activates the
+        ceremony (binds the singleton to its yaml so the reader
+        has a runtime to read against) and delegates to the
+        module-level ``tn.read``. The caller can always force a
+        read against a specific file by passing ``log=<path>``;
+        that path-based form bypasses the replay-surface gate
+        and reads whatever file you name.
         """
-        if not self._has_replay_surface():
+        # Explicit ``log=<path>`` is the operator's "I know exactly
+        # what file I want, hand me its contents" backdoor. Honour
+        # it even when the profile has no implicit replay surface —
+        # if the caller named the file, they get whatever is in it.
+        explicit_log = kwargs.get("log") is not None
+        if not explicit_log and not self._has_replay_surface():
             return iter(())
         self._activate()
         from .read import read as _read_fn
@@ -357,10 +370,11 @@ class TN:
 
     def watch(self, *args: Any, **kwargs: Any) -> Any:
         """Tail this stream's log file. See ``read`` for replay-surface
-        semantics — streams without a file sink yield an empty
-        iterator (forward-only sinks have nothing to tail in the
-        replay sense)."""
-        if not self._has_replay_surface():
+        semantics — forward-only profiles (``stdout`` today) yield an
+        empty iterator. An explicit ``log=<path>`` overrides the gate
+        for the same reason it does on ``read``."""
+        explicit_log = kwargs.get("log") is not None
+        if not explicit_log and not self._has_replay_surface():
             return iter(())
         self._activate()
         from . import watch as _watch_fn

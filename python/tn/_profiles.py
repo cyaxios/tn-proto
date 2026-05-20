@@ -194,13 +194,25 @@ _CATALOG: dict[str, Profile] = {
         signs=False,
         chains=False,
         flush="async",
-        default_sink="stdout",
+        # `default_sink="file_rotating"` matches what the runtime
+        # actually does: every emit writes to `logs.path` regardless
+        # of profile, so telemetry's bytes hit disk like audit's and
+        # transaction's. The 0.4.2a8 catalog labelled this `stdout`,
+        # which made `has_replay_surface()` return False and silently
+        # broke `h.read()` on the very file the engine just wrote.
+        # If you want truly forward-only "print and forget", reach for
+        # the `stdout` profile.
+        default_sink="file_rotating",
         intended_use=(
             "Fast-as-stdlib-logger profile. Encryption still applies; "
-            "signing is dropped to approach zero overhead. Intended "
-            "for high-volume traces, metrics, debug noise where "
-            "evidence is overkill. Will be regression-tested for "
-            "near-zero perf impact vs Python's logging.Logger."
+            "signing and chain linkage are dropped to approach zero "
+            "overhead. Writes a file (so `read()` works) AND stdout; "
+            "sequence still increments in-process. Use for high-volume "
+            "traces, metrics, debug noise where evidence is overkill. "
+            "Volume bench (0.4.2a8, 256B emit, release): ~57 us/emit "
+            "in-process via PyO3 — comparable to Python's stdlib logger "
+            "on a chained sink, an order of magnitude faster than the "
+            "signed/chained profiles."
         ),
     ),
     "stdout": Profile(
