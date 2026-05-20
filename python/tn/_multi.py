@@ -324,21 +324,24 @@ def _create_default_ceremony(
         doc = _load_yaml_dict(yaml_path)
         ceremony_block = doc.setdefault("ceremony", {})
         ceremony_block["profile"] = profile
-        # DX review #4 (signs) + profile audit (default_sink):
-        # the profile catalog drives runtime behaviour, not just yaml
-        # metadata. Today we wire two axes here:
+        # DX review #4 (signs) + profile audit (default_sink) +
+        # 0.4.2a7 (chains): the profile catalog drives runtime
+        # behaviour, not just yaml metadata. Axes wired here:
         #   * ``signs`` -> ``ceremony.sign`` (Rust runtime honours).
+        #   * ``chains`` -> ``ceremony.chain`` (Rust runtime honours;
+        #     when false skips the per-emit advisory lock + tail-scan
+        #     + chain advance/commit, used by telemetry / secure_log).
         #   * ``default_sink`` -> handler list filter (stdout-sink
         #     profiles drop the file.rotating handler, matching what
         #     ``_create_stream_yaml`` already does for streams).
-        # The remaining two axes (``chains``, ``flush``) need Rust
-        # runtime support — see DX_FIXES.md for the gap matrix.
+        # The last axis (``flush``) still needs Rust runtime support.
         try:
             prof = _profiles.get(profile)
         except KeyError:
             prof = None
         if prof is not None:
             ceremony_block["sign"] = prof.signs
+            ceremony_block["chain"] = prof.chains
             if prof.default_sink == "stdout":
                 # Drop the auto-declared file.rotating handler so this
                 # ceremony is true stdout-only — matches the catalog
@@ -455,6 +458,7 @@ def _create_stream_yaml(
         "ceremony": {
             "id": _mint_stream_ceremony_id(name),
             "sign": p.signs,
+            "chain": p.chains,
             "profile": profile,
             "admin_log_location": admin_path,
             "log_level": "debug",

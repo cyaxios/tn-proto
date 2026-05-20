@@ -17,7 +17,7 @@ use crate::{
     admin_reduce::{reduce as admin_reduce_envelope, StateDelta},
     agents_policy::PolicyDocument,
     canonical::canonical_bytes,
-    chain::{chain_tips_from_ndjson, compute_row_hash, ChainState, GroupInput, RowHashInput},
+    chain::{chain_tip_from_log_tail_reverse, compute_row_hash, ChainState, GroupInput, RowHashInput},
     cipher::{
         btn::{BtnPublisherCipher, BtnReaderCipher},
         GroupCipher,
@@ -25,7 +25,7 @@ use crate::{
     classifier::classify,
     config::{Config, GroupSpec},
     envelope::{build_envelope, EnvelopeInput, GroupPayload},
-    indexing::index_token,
+    indexing::index_token_with_template,
     log_file::{LogFileReader, LogFileWriter},
     signing::{signature_b64, signature_from_b64, DeviceKey},
     Error, Result,
@@ -308,6 +308,12 @@ pub struct AdminState {
 pub(crate) struct GroupState {
     pub(crate) cipher: Arc<dyn GroupCipher>,
     pub(crate) index_key: [u8; 32],
+    /// Pre-initialized HMAC-SHA256 keyed by `index_key`. Each
+    /// per-emit `index_token` call clones this template and feeds
+    /// the field bytes into the clone — skips the `Mac::new_from_slice`
+    /// init cost (~2-3 µs per field) every emit. Built once at
+    /// runtime construction, never mutated.
+    pub(crate) hmac_template: hmac::Hmac<sha2::Sha256>,
 }
 
 /// Stateful TN runtime: one per ceremony.
@@ -326,7 +332,15 @@ pub struct Runtime {
     /// Per-group state wrapped in RwLock so admin verbs can swap the cipher
     /// inside while emit/read hold a read lock.
     pub(crate) groups: BTreeMap<String, Arc<RwLock<GroupState>>>,
-    pub(crate) log_writer: Mutex<LogFileWriter>,
+    pub(crate) log_writer: crate::log_file::LogWriters,
+    /// Writer pool for protocol-event-location (PEL) admin writes.
+    /// When `cfg.ceremony.protocol_events_location != "main_log"`,
+    /// admin events route here so they get the same pinned-handle /
+    /// lock-cache / offset-skip machinery as the main log. When PEL
+    /// is `"main_log"`, `pel_routed` is always false at emit time so
+    /// this field is never consulted; we still construct it as a
+    /// shadow of `log_writer` to keep `flush_all` symmetric.
+    pub(crate) pel_writer: crate::log_file::LogWriters,
     pub(crate) log_path: PathBuf,
     #[allow(dead_code)]
     pub(crate) master_index_key: [u8; 32],
@@ -359,6 +373,28 @@ pub struct Runtime {
     /// filters don't pick up entries from prior runs (FINDINGS.md #12).
     /// Mirrors Python's per-process `_run_id` and TS's per-client run id.
     pub(crate) run_id: String,
+    /// Field-routing table cached at init (0.4.2a7 perf fix).
+    ///
+    /// `field_to_groups()` walks the config and builds a routing map
+    /// from scratch — that's O(groups × fields_per_group) of allocation
+    /// and validation work. It's a static function of the loaded
+    /// `Config`, so the result is the same on every emit. We compute
+    /// once at runtime construction and reference for the lifetime
+    /// of this `Runtime`. Rebuilt only on `Runtime::reload`/re-init
+    /// after admin verbs mutate the yaml (e.g. `ensure_group`).
+    pub(crate) field_to_groups: BTreeMap<String, Vec<String>>,
+    /// `public_fields` rendered as a HashSet for O(1) membership
+    /// tests (0.4.2a7 perf fix). Was previously built every emit
+    /// from the `Vec<String>` in the config; that's wasted
+    /// allocation when the result is invariant per runtime.
+    pub(crate) public_set: std::collections::HashSet<String>,
+    /// Group names whose `policy == "public"` — fields routed to
+    /// these groups skip the cipher and land in the envelope as
+    /// plaintext (same effect as listing them under `public_fields`).
+    /// Cached at init so the field-classify hot path can check
+    /// membership inline; the prior version did a two-pass dance
+    /// (classify normally → walk `per_group` again → promote).
+    pub(crate) public_groups: std::collections::HashSet<String>,
     /// Pluggable byte-storage backend. Native consumers (CLI, PyO3
     /// wheel) construct this from `FsStorage`; the wasm wrapper
     /// injects a JS-callback adapter. Every emit / read / log-rotation
@@ -482,6 +518,7 @@ impl Runtime {
     /// directly when you need an injected storage backend (wasm,
     /// tests, in-memory sandboxes).
     pub fn init(yaml_path: &Path) -> Result<Self> {
+        crate::perf::init_from_env();
         let storage: Arc<dyn crate::storage::Storage> = Arc::new(crate::storage::FsStorage::new());
         Self::init_with_storage(yaml_path, storage)
     }
@@ -582,9 +619,15 @@ impl Runtime {
             // and `<group>.btn.mykit` through storage.
             let (cipher, maybe_pub_cipher, mykit_bytes) =
                 build_cipher_with_admin_with_storage(spec, &keystore, name, &storage)?;
+            let hmac_template =
+                crate::indexing::build_hmac_template(&index_key)?;
             groups.insert(
                 name.clone(),
-                Arc::new(RwLock::new(GroupState { cipher, index_key })),
+                Arc::new(RwLock::new(GroupState {
+                    cipher,
+                    index_key,
+                    hmac_template,
+                })),
             );
             if let Some(pub_cipher) = maybe_pub_cipher {
                 btn_admin.insert(name.clone(), Arc::new(Mutex::new(pub_cipher)));
@@ -629,10 +672,31 @@ impl Runtime {
             rotate_log_on_session_start(&log_path, backup_count, &storage);
         }
 
+        // Parse the main-log template once. The parsed template is
+        // reused both for the chain seed (literal vs templated) and
+        // for the `LogWriters` construction below.
+        let log_path_template = crate::path_template::PathTemplate::parse(
+            &cfg.logs.path,
+            &yaml_dir,
+            &cfg.ceremony.id,
+            device.did(),
+        )?;
+
         let chain = ChainState::new();
 
-        // Seed chain state from the main log and check for a prior ceremony.init.
-        let mut saw_ceremony_init = seed_chain_from_log(&log_path, &chain, &storage)?;
+        // Seed chain state from the main log and check for a prior
+        // ceremony.init. Templated `logs.path` walks every rendered
+        // `.ndjson` under the template's parent directory; literal
+        // paths just walk the one file. Wiring the templated seed
+        // closes a silent regression introduced when templated paths
+        // moved off the Python emit path — without it, chained
+        // templated ceremonies reset every event_type's
+        // (sequence, prev_hash) to (1, ZERO) on each restart.
+        let mut saw_ceremony_init = if log_path_template.is_templated() {
+            seed_chain_from_template(&log_path_template, &chain, &storage)?
+        } else {
+            seed_chain_from_log(&log_path, &chain, &storage)?
+        };
 
         // Session rotation makes the current main log empty; a prior
         // `tn.ceremony.init` may live on a rotation backup. Scan the
@@ -667,7 +731,84 @@ impl Runtime {
         // protocol_events_location routes tn.* events to a separate file.
         let is_fresh = !saw_ceremony_init;
 
-        let log_writer = Mutex::new(LogFileWriter::open(&log_path, Arc::clone(&storage))?);
+        // Construct the writer pool from the template hoisted above.
+        // Init-time tokens (`{yaml_dir}`, `{ceremony_id}`, `{did}`)
+        // were substituted at parse time. The dispatcher routes
+        // per-emit to a literal writer (one shared `LogFileWriter`)
+        // OR a lazy pool keyed by rendered path.
+        let log_writer = if log_path_template.is_templated() {
+            crate::log_file::LogWriters::Templated {
+                template: log_path_template,
+                storage: Arc::clone(&storage),
+                writers: Mutex::new(std::collections::HashMap::new()),
+            }
+        } else {
+            // Literal path — render once (returns the path with
+            // any relative root resolved against yaml_dir) and
+            // open the single writer.
+            let path = log_path_template.render("");
+            let writer = LogFileWriter::open(&path, Arc::clone(&storage))?;
+            crate::log_file::LogWriters::Literal {
+                path,
+                writer: Arc::new(Mutex::new(writer)),
+            }
+        };
+
+        // PEL writer mirrors the main log writer for `tn.*` admin
+        // events when `protocol_events_location != "main_log"`. The
+        // pre-0.4.2a8 emit path opened a fresh file handle per admin
+        // emit via `storage.append_bytes`, paying ~150 us of Windows
+        // syscall floor (CreateFileW + WriteFile + CloseHandle).
+        // Routing PEL emits through a `LogWriters` pool reuses the
+        // pinned-handle, lock-cache, and offset-skip machinery and
+        // closes that asymmetry with the main path.
+        //
+        // PEL=="main_log" shadow: emit-time `pel_routed` is always
+        // false in that mode, so this field is never read. We still
+        // build a placeholder that mirrors the main log so
+        // `flush_all` at shutdown is symmetric and the struct field
+        // always holds a valid `LogWriters`.
+        let pel_writer = {
+            let pel_raw = &cfg.ceremony.protocol_events_location;
+            if pel_raw == "main_log" {
+                match &log_writer {
+                    crate::log_file::LogWriters::Literal { path, writer } => {
+                        crate::log_file::LogWriters::Literal {
+                            path: path.clone(),
+                            writer: writer.clone(),
+                        }
+                    }
+                    crate::log_file::LogWriters::Templated { template, storage: stor, .. } => {
+                        crate::log_file::LogWriters::Templated {
+                            template: template.clone(),
+                            storage: Arc::clone(stor),
+                            writers: Mutex::new(std::collections::HashMap::new()),
+                        }
+                    }
+                }
+            } else {
+                let pel_template = crate::path_template::PathTemplate::parse(
+                    pel_raw,
+                    &yaml_dir,
+                    &cfg.ceremony.id,
+                    device.did(),
+                )?;
+                if pel_template.is_templated() {
+                    crate::log_file::LogWriters::Templated {
+                        template: pel_template,
+                        storage: Arc::clone(&storage),
+                        writers: Mutex::new(std::collections::HashMap::new()),
+                    }
+                } else {
+                    let path = pel_template.render("");
+                    let writer = LogFileWriter::open(&path, Arc::clone(&storage))?;
+                    crate::log_file::LogWriters::Literal {
+                        path,
+                        writer: Arc::new(Mutex::new(writer)),
+                    }
+                }
+            }
+        };
 
         // Call site 5: agents.md policy load routes through storage so
         // a wasm consumer's JS adapter can supply the file (or report
@@ -679,6 +820,22 @@ impl Runtime {
                 Err(e) => return Err(e),
             };
 
+        // 0.4.2a7: pre-compute the field-routing table, public
+        // membership set, and the set of groups whose policy is
+        // public so emit_inner doesn't rebuild them per call. All
+        // three are pure functions of the loaded `Config` —
+        // invalidate only by re-init (which builds a fresh Runtime
+        // anyway).
+        let field_to_groups = cfg.field_to_groups()?;
+        let public_set: std::collections::HashSet<String> =
+            cfg.public_fields.iter().cloned().collect();
+        let public_groups: std::collections::HashSet<String> = cfg
+            .groups
+            .iter()
+            .filter(|(_, gspec)| gspec.policy == "public")
+            .map(|(gname, _)| gname.clone())
+            .collect();
+
         let rt = Self {
             yaml_path: yaml_path.to_path_buf(),
             cfg,
@@ -686,6 +843,7 @@ impl Runtime {
             chain,
             groups,
             log_writer,
+            pel_writer,
             log_path,
             master_index_key,
             btn_admin,
@@ -703,6 +861,9 @@ impl Runtime {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| Uuid::new_v4().simple().to_string()),
+            field_to_groups,
+            public_set,
+            public_groups,
         };
 
         // Default-on stdout handler: emit every envelope as a JSON line on
@@ -956,8 +1117,10 @@ impl Runtime {
 
     // emit_inner is the single canonical path for building + signing an
     // envelope; splitting it further would fragment the invariants enforced
-    // across the sealing/signing/writing phases.
-    #[allow(clippy::too_many_lines)]
+    // across the sealing/signing/writing phases. The chain-enabled
+    // closure (under `with_advisory_lock`) builds on the same locals,
+    // so it carries the same allow.
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     fn emit_inner(
         &self,
         level: &str,
@@ -967,6 +1130,16 @@ impl Runtime {
         event_id: Option<&str>,
         sign: Option<bool>,
     ) -> Result<Option<String>> {
+        // Outer perf wrapper — measures total emit_inner time so we
+        // can confirm the per-stage breakdown sums correctly.
+        // `TN_PERF_TRACE` env var gates the instrumentation; when
+        // off this is one atomic-bool load per emit.
+        let _emit_total_start = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+
         // Log-level filter (AVL J3.2). Drop emits whose level is below
         // the active threshold before any work happens. Severity-less
         // ("") always passes — it's an explicit "this is a fact"
@@ -978,6 +1151,11 @@ impl Runtime {
             }
         }
 
+        let _prelude_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         validate_event_type(event_type)?;
 
         // Auto-inject run_id (FINDINGS.md #12). Caller can override by
@@ -1007,62 +1185,141 @@ impl Runtime {
                 })?;
             }
         }
+        if let Some(t0) = _prelude_t0 {
+            crate::perf::record_ns("emit:prelude", t0.elapsed().as_nanos() as u64);
+        }
 
-        let ts = timestamp.map_or_else(current_timestamp, str::to_string);
-        let eid = event_id.map_or_else(|| Uuid::new_v4().to_string(), str::to_string);
-        let level_norm = level.to_ascii_lowercase();
+        let (ts, eid, level_norm) = crate::perf::time_stage("emit:header", || {
+            (
+                timestamp.map_or_else(current_timestamp, str::to_string),
+                // UUID v7 (0.4.2a7): time-sortable event_id with a
+                // 48-bit ms timestamp in the high bits. Sorting log
+                // entries by event_id now puts them in chronological
+                // order — drop-in friendly for DB indexes and binary
+                // tree scans. Older event_ids passed in via the
+                // ``event_id`` override (replay, deterministic test
+                // fixtures) still take precedence verbatim, so the
+                // change is transparent to callers who supply their
+                // own ids.
+                event_id.map_or_else(|| Uuid::now_v7().to_string(), str::to_string),
+                level.to_ascii_lowercase(),
+            )
+        });
 
         // 1. Classify fields: public vs per-group.
         //
         // Multi-group routing: a field declared under N groups in yaml
         // (`groups[<g>].fields: [...]`) is encrypted into all N groups'
-        // payloads. The `field_to_groups()` map is sorted alphabetically
-        // per field at load time so envelope encoding stays canonical
-        // across SDK implementations.
-        let public_set: HashSet<&str> = self.cfg.public_fields.iter().map(String::as_str).collect();
-        let field_to_groups = self.cfg.field_to_groups()?;
-        let mut public_out: Map<String, Value> = Map::new();
-        let mut per_group: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
-        for (k, v) in fields {
-            if public_set.contains(k.as_str()) {
-                public_out.insert(k, v);
-                continue;
-            }
-            let routed = field_to_groups.get(&k).cloned().unwrap_or_default();
-            let gnames: Vec<String> = if routed.is_empty() {
-                // Field has no declared route. Try the legacy classifier
-                // (returns a single name today, "default" by stub). If
-                // that lands in a known group, use it; otherwise fall
-                // back to the "default" group when present. Last resort
-                // raise — silent fall-through is exactly what multi-group
-                // routing was meant to fix.
-                let guess = classify(&self.cfg, &k).to_string();
-                if self.cfg.groups.contains_key(&guess) {
-                    vec![guess]
-                } else if self.cfg.groups.contains_key("default") {
-                    vec!["default".to_string()]
-                } else {
-                    return Err(Error::InvalidConfig(format!(
-                        "field {k:?} has no group route and is not in \
-                         public_fields. Add it to `groups[<g>].fields` in \
-                         tn.yaml, list it under public_fields, or define a \
-                         `default` group to absorb unknowns."
-                    )));
-                }
+        // payloads. The `field_to_groups` table is precomputed at
+        // `Runtime::init` (0.4.2a7 — was rebuilt every emit) and
+        // sorted alphabetically per field at load time so envelope
+        // encoding stays canonical across SDK implementations.
+        let field_to_groups = &self.field_to_groups;
+        let public_set = &self.public_set;
+        let public_groups = &self.public_groups;
+        let (public_out, per_group) = {
+            let t0 = if crate::perf::enabled() {
+                Some(std::time::Instant::now())
             } else {
-                routed
+                None
             };
-            for gname in gnames {
-                per_group
-                    .entry(gname)
-                    .or_default()
-                    .insert(k.clone(), v.clone());
+            let mut public_out: Map<String, Value> = Map::new();
+            let mut per_group: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
+            // Inline routing logic. A field is destined for `public_out`
+            // when ANY of these are true: (a) explicitly listed in
+            // top-level `public_fields`, or (b) routed to a group whose
+            // policy is `"public"`. Everything else goes through the
+            // per-group encrypt path. Multi-group fan-out clones the
+            // field into each target.
+            for (k, v) in fields {
+                if public_set.contains(&k) {
+                    public_out.insert(k, v);
+                    continue;
+                }
+                if let Some(routed) = field_to_groups.get(&k) {
+                    if routed.len() == 1 {
+                        // Single-group: most common case. Avoid the
+                        // v.clone() that the multi-group path needs
+                        // on the last iteration.
+                        let gname = &routed[0];
+                        if public_groups.contains(gname) {
+                            public_out.insert(k, v);
+                        } else {
+                            per_group
+                                .entry(gname.clone())
+                                .or_default()
+                                .insert(k, v);
+                        }
+                    } else {
+                        for gname in routed {
+                            if public_groups.contains(gname) {
+                                public_out.insert(k.clone(), v.clone());
+                            } else {
+                                per_group
+                                    .entry(gname.clone())
+                                    .or_default()
+                                    .insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                } else {
+                    // Field has no declared route. Try the legacy
+                    // classifier (returns a single name today,
+                    // "default" by stub). If that lands in a known
+                    // group, use it; otherwise fall back to the
+                    // "default" group when present. Last resort:
+                    // raise.
+                    let guess = classify(&self.cfg, &k);
+                    let target = if self.cfg.groups.contains_key(guess) {
+                        guess.to_string()
+                    } else if self.cfg.groups.contains_key("default") {
+                        "default".to_string()
+                    } else {
+                        return Err(Error::InvalidConfig(format!(
+                            "field {k:?} has no group route and is not in \
+                             public_fields. Add it to `groups[<g>].fields` in \
+                             tn.yaml, list it under public_fields, or define a \
+                             `default` group to absorb unknowns."
+                        )));
+                    };
+                    if public_groups.contains(&target) {
+                        public_out.insert(k, v);
+                    } else {
+                        per_group.entry(target).or_default().insert(k, v);
+                    }
+                }
             }
-        }
+            if let Some(t0) = t0 {
+                crate::perf::record_ns("emit:field_classify", t0.elapsed().as_nanos() as u64);
+            }
+            (public_out, per_group)
+        };
+
+        // row_hash gating (0.4.2a7): hoisted up here from below so the
+        // per-group encrypt loop can skip building `group_inputs_for_hash`
+        // when no consumer will read it. The structure only feeds into
+        // `compute_row_hash`; when chain=F sign=F (pure-log mode), the
+        // row_hash compute is skipped and the structure is dead. The
+        // per-call sign override (`sign=true` passed explicitly) also
+        // pulls it back in since the signature is over row_hash bytes.
+        let chain_enabled_for_row_hash = self.cfg.ceremony.chain;
+        let need_row_hash = chain_enabled_for_row_hash
+            || self.cfg.ceremony.sign
+            || sign.unwrap_or(false);
 
         // 2. Index tokens + 3. Encrypt per group.
         let mut group_inputs_for_hash: BTreeMap<String, GroupInput> = BTreeMap::new();
-        let mut group_payloads: Map<String, Value> = Map::new();
+        // group_payloads (0.4.2a7): pre-rendered JSON snippets rather
+        // than serde_json::Value trees. envelope_build splices the
+        // raw snippet in verbatim, skipping a `to_value` tree alloc
+        // here AND a re-walk inside envelope_build.
+        let mut group_payloads: BTreeMap<String, String> = BTreeMap::new();
+
+        let _group_encrypt_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
 
         for (gname, plain) in per_group {
             let Some(gstate_arc) = self.groups.get(&gname) else {
@@ -1071,30 +1328,98 @@ impl Runtime {
                 continue;
             };
             let gstate = gstate_arc.read().expect("group state RwLock poisoned");
-            // Deterministic sort: ciphertext is canonical of sorted fields.
+
+            // Sub-stage timing inside group_encrypt. emit:group_encrypt
+            // (outer) is still the total; these four sum to it.
+            let _sort_t0 = if crate::perf::enabled() {
+                Some(std::time::Instant::now())
+            } else { None };
             let sorted: BTreeMap<String, Value> = plain.into_iter().collect();
+            if let Some(t0) = _sort_t0 {
+                crate::perf::record_ns(
+                    "emit:group_encrypt.sort",
+                    t0.elapsed().as_nanos() as u64,
+                );
+            }
+
+            let _idx_t0 = if crate::perf::enabled() {
+                Some(std::time::Instant::now())
+            } else { None };
             let mut field_hashes: BTreeMap<String, String> = BTreeMap::new();
             for (k, v) in &sorted {
-                field_hashes.insert(k.clone(), index_token(&gstate.index_key, k, v)?);
+                field_hashes.insert(
+                    k.clone(),
+                    index_token_with_template(&gstate.hmac_template, k, v)?,
+                );
             }
-            let plaintext_bytes = canonical_bytes(&Value::Object(sorted.into_iter().collect()))?;
+            if let Some(t0) = _idx_t0 {
+                crate::perf::record_ns(
+                    "emit:group_encrypt.index_token",
+                    t0.elapsed().as_nanos() as u64,
+                );
+            }
+
+            let _canon_t0 = if crate::perf::enabled() {
+                Some(std::time::Instant::now())
+            } else { None };
+            let plaintext_bytes =
+                canonical_bytes(&Value::Object(sorted.into_iter().collect()))?;
+            if let Some(t0) = _canon_t0 {
+                crate::perf::record_ns(
+                    "emit:group_encrypt.canonical_bytes",
+                    t0.elapsed().as_nanos() as u64,
+                );
+            }
+
+            let _enc_t0 = if crate::perf::enabled() {
+                Some(std::time::Instant::now())
+            } else { None };
             let ct = match gstate.cipher.encrypt(&plaintext_bytes) {
                 Ok(ct) => ct,
                 Err(Error::NotAPublisher { .. }) => continue,
                 Err(e) => return Err(e),
             };
-            group_inputs_for_hash.insert(
-                gname.clone(),
-                GroupInput {
-                    ciphertext: ct.clone(),
-                    field_hashes: field_hashes.clone(),
-                },
-            );
+            if let Some(t0) = _enc_t0 {
+                crate::perf::record_ns(
+                    "emit:group_encrypt.cipher",
+                    t0.elapsed().as_nanos() as u64,
+                );
+            }
+
+            let _build_t0 = if crate::perf::enabled() {
+                Some(std::time::Instant::now())
+            } else { None };
+            // group_inputs_for_hash only feeds compute_row_hash; skip
+            // the clones when no row_hash will be computed (chain=F
+            // sign=F pure-log mode).
+            if need_row_hash {
+                group_inputs_for_hash.insert(
+                    gname.clone(),
+                    GroupInput {
+                        ciphertext: ct.clone(),
+                        field_hashes: field_hashes.clone(),
+                    },
+                );
+            }
+            // Render GroupPayload to a JSON snippet directly via
+            // serde_json::to_string. Skips the prior `to_value`
+            // intermediate that envelope_build then had to re-walk.
             let payload = GroupPayload {
                 ciphertext: ct,
                 field_hashes,
             };
-            group_payloads.insert(gname, serde_json::to_value(payload)?);
+            let payload_json = serde_json::to_string(&payload)?;
+            group_payloads.insert(gname, payload_json);
+            if let Some(t0) = _build_t0 {
+                crate::perf::record_ns(
+                    "emit:group_encrypt.payload_build",
+                    t0.elapsed().as_nanos() as u64,
+                );
+            }
+        }
+
+        if let Some(t0) = _group_encrypt_t0 {
+            crate::perf::record_ns("emit:group_encrypt", t0.elapsed().as_nanos() as u64);
         }
 
         // DX review 0.4.2a3: cross-process emit serialization.
@@ -1117,20 +1442,40 @@ impl Runtime {
         //
         // The wasm code path inherits the trait's no-op lock impl
         // (single-threaded, single-process — no race to coordinate).
+        let _path_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let is_protocol = event_type.starts_with("tn.");
-        let target_path: PathBuf =
-            if is_protocol && self.cfg.ceremony.protocol_events_location != "main_log" {
-                self.resolve_pel(event_type)
-            } else {
-                self.log_path.clone()
-            };
+        let pel_routed =
+            is_protocol && self.cfg.ceremony.protocol_events_location != "main_log";
+        // Derive the on-disk path from the writer pool's template so
+        // the advisory-lock file always sits next to the file we're
+        // actually appending to. Going through `pel_writer.path_for`
+        // also keeps the `{event_class}` semantics consistent with
+        // PathTemplate / Python (first dotted segment) — the prior
+        // `self.resolve_pel(event_type)` used `nth(1)` and would
+        // disagree with the writer pool when the PEL template
+        // contains `{event_class}`.
+        let target_path: PathBuf = if pel_routed {
+            self.pel_writer.path_for(event_type)
+        } else {
+            self.log_writer.path_for(event_type)
+        };
         let lock_path = {
             let mut s = target_path.as_os_str().to_os_string();
             s.push(".emit.lock");
             PathBuf::from(s)
         };
-        if let Some(parent) = target_path.parent() {
-            self.storage.create_dir_all(parent)?;
+        // Parent-directory creation moved into `LogFileWriter::open`
+        // (0.4.2a8 PEL pinned-writer fix). Each rendered path opens
+        // its writer lazily on first emit; `LogFileWriter::open`
+        // already calls `storage.create_dir_all(parent)` then.
+        // Subsequent emits to the same rendered path reuse the pinned
+        // handle and skip the parent-create syscall entirely.
+        if let Some(t0) = _path_t0 {
+            crate::perf::record_ns("emit:path_setup", t0.elapsed().as_nanos() as u64);
         }
 
         // Capture the row's outputs from inside the closure so the
@@ -1147,79 +1492,129 @@ impl Runtime {
         let group_inputs_for_lock = group_inputs_for_hash;
         let group_payloads_for_lock = group_payloads;
 
-        let storage_for_lock = Arc::clone(&self.storage);
-        storage_for_lock.with_advisory_lock(&lock_path, &mut || {
-            // Under the lock: refresh in-memory chain tip from disk
-            // truth. If another process appended rows since our last
-            // emit, this is where we discover the latest (seq,
-            // prev_hash) for our event_type — overwriting the local
-            // ChainState entry.
-            if self.storage.exists(&target_path) {
-                let bytes = self.storage.read_bytes(&target_path)?;
-                let tips = chain_tips_from_ndjson(&bytes);
-                if let Some((tip_seq, tip_hash)) = tips.get(event_type).cloned() {
-                    let mut single: HashMap<String, (u64, String)> = HashMap::new();
-                    single.insert(event_type.to_string(), (tip_seq, tip_hash));
-                    self.chain.seed(single);
+        // Chain gating (0.4.2a7): `ceremony.chain: false` skips the
+        // cross-process advisory lock, the per-emit tail-scan, and
+        // the chain advance/commit entirely. Used by the
+        // `telemetry` and `secure_log` profiles where per-row chain
+        // integrity isn't part of the audit story and the per-emit
+        // lock cost would dominate hot paths. When disabled, the
+        // envelope still carries `sequence: 1` and `prev_hash: ""`
+        // so the row format is unchanged (readers that ignore
+        // sequence/prev_hash continue to work; readers that check
+        // them see the documented "unchained" sentinel values).
+        let chain_enabled = self.cfg.ceremony.chain;
+
+        // `need_row_hash` was computed earlier (just before the
+        // group-encrypt loop) so the loop could skip building
+        // `group_inputs_for_hash` when no consumer will read it.
+        // Reuse the same value here for the row_hash skip below.
+
+        // Shared inline body for build + write — used twice below
+        // (under-lock for chain_enabled, direct for !chain_enabled).
+        // Kept as a macro to sidestep nested-FnMut borrow issues
+        // (`with_advisory_lock` takes an `FnMut`, and another
+        // captured closure inside it would double-borrow the
+        // shared `&mut deferred_err` / `&mut row_hash_out` /
+        // `&mut line_out` slots).
+        macro_rules! build_and_write {
+            ($seq:expr, $prev_hash:expr) => {{
+                let seq: u64 = $seq;
+                let prev_hash: &str = $prev_hash;
+
+                // 5. Row hash — skipped when neither chain nor sign
+                //    consumes it (chain=F sign=F pure-log mode).
+                let _rh_t0 = if crate::perf::enabled() {
+                    Some(std::time::Instant::now())
+                } else { None };
+                let row_hash = if need_row_hash {
+                    let public_bmap: BTreeMap<String, Value> =
+                        public_out_for_lock.clone().into_iter().collect();
+                    compute_row_hash(&RowHashInput {
+                        did: self.device.did(),
+                        timestamp: &ts,
+                        event_id: &eid,
+                        event_type,
+                        level: &level_norm,
+                        prev_hash,
+                        public_fields: &public_bmap,
+                        groups: &group_inputs_for_lock,
+                    })
+                } else {
+                    // Pure-log mode (chain=F sign=F): no consumer.
+                    // Envelope ships ``row_hash: ""`` as the
+                    // documented unchained-and-unsigned sentinel,
+                    // matching prev_hash="" and signature="".
+                    String::new()
+                };
+                if let Some(t0) = _rh_t0 {
+                    crate::perf::record_ns("emit:row_hash", t0.elapsed().as_nanos() as u64);
                 }
-            }
 
-            // 4. Chain advance (now reflects disk truth).
-            let (seq, prev_hash) = self.chain.advance(event_type);
-
-            // 5. Row hash.
-            let public_bmap: BTreeMap<String, Value> =
-                public_out_for_lock.clone().into_iter().collect();
-            let row_hash = compute_row_hash(&RowHashInput {
-                did: self.device.did(),
-                timestamp: &ts,
-                event_id: &eid,
-                event_type,
-                level: &level_norm,
-                prev_hash: &prev_hash,
-                public_fields: &public_bmap,
-                groups: &group_inputs_for_lock,
-            });
-
-            // 6. Sign: respects per-call override, then ceremony default.
-            let should_sign = sign.unwrap_or(self.cfg.ceremony.sign);
-            let sig_b64 = if should_sign {
-                let sig = self.device.sign(row_hash.as_bytes());
-                signature_b64(&sig)
-            } else {
-                // Unsigned mode: envelope's signature field is the empty
-                // string. Chain and row_hash are still computed, so
-                // accidental corruption is still detectable. See RFC
-                // 2026-04-22-tn-transaction-protocol.
-                String::new()
-            };
-
-            // 7. Envelope serialize.
-            let line = match build_envelope(EnvelopeInput {
-                did: self.device.did(),
-                timestamp: &ts,
-                event_id: &eid,
-                event_type,
-                level: &level_norm,
-                sequence: seq,
-                prev_hash: &prev_hash,
-                row_hash: &row_hash,
-                signature_b64: &sig_b64,
-                public_fields: public_out_for_lock.clone(),
-                group_payloads: group_payloads_for_lock.clone(),
-            }) {
-                Ok(line) => line,
-                Err(e) => {
-                    deferred_err = Some(e);
-                    return Err(std::io::Error::other("build_envelope failed (deferred)"));
+                // 6. Sign: respects per-call override, then ceremony default.
+                let _sign_t0 = if crate::perf::enabled() {
+                    Some(std::time::Instant::now())
+                } else { None };
+                let should_sign = sign.unwrap_or(self.cfg.ceremony.sign);
+                let sig_b64 = if should_sign {
+                    let sig = self.device.sign(row_hash.as_bytes());
+                    signature_b64(&sig)
+                } else {
+                    String::new()
+                };
+                if let Some(t0) = _sign_t0 {
+                    crate::perf::record_ns("emit:sign", t0.elapsed().as_nanos() as u64);
                 }
-            };
 
-            // 8. Append to log file (or the resolved pel for tn.* events).
-            if is_protocol && self.cfg.ceremony.protocol_events_location != "main_log" {
-                self.storage.append_bytes(&target_path, line.as_bytes())?;
-            } else {
-                let mut w = self.log_writer.lock().expect("log writer mutex poisoned");
+                // 7. Envelope serialize.
+                let _env_t0 = if crate::perf::enabled() {
+                    Some(std::time::Instant::now())
+                } else { None };
+                let line = match build_envelope(EnvelopeInput {
+                    did: self.device.did(),
+                    timestamp: &ts,
+                    event_id: &eid,
+                    event_type,
+                    level: &level_norm,
+                    sequence: seq,
+                    prev_hash,
+                    row_hash: &row_hash,
+                    signature_b64: &sig_b64,
+                    public_fields: public_out_for_lock.clone(),
+                    group_payloads: group_payloads_for_lock.clone(),
+                }) {
+                    Ok(line) => line,
+                    Err(e) => {
+                        deferred_err = Some(e);
+                        return Err(std::io::Error::other("build_envelope failed (deferred)"));
+                    }
+                };
+                if let Some(t0) = _env_t0 {
+                    crate::perf::record_ns("emit:envelope_build", t0.elapsed().as_nanos() as u64);
+                }
+
+                // 8. Append to log file (or the resolved pel for tn.* events).
+                let _wr_t0 = if crate::perf::enabled() {
+                    Some(std::time::Instant::now())
+                } else { None };
+                // Get-or-create the writer for this event_type's
+                // rendered path. PEL admin emits route through
+                // `pel_writer`; everything else through `log_writer`.
+                // Both fields are pinned-writer pools so the syscall
+                // floor matches whether we're writing to the main log
+                // or a split admin log.
+                let writers = if pel_routed {
+                    &self.pel_writer
+                } else {
+                    &self.log_writer
+                };
+                let writer_arc = match writers.writer_for(event_type) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        deferred_err = Some(e);
+                        return Err(std::io::Error::other("writer_for failed (deferred)"));
+                    }
+                };
+                let mut w = writer_arc.lock().expect("log writer mutex poisoned");
                 if let Err(e) = w.append_line(&line) {
                     deferred_err = Some(e);
                     return Err(std::io::Error::other("append_line failed (deferred)"));
@@ -1228,15 +1623,184 @@ impl Runtime {
                     deferred_err = Some(e);
                     return Err(std::io::Error::other("flush failed (deferred)"));
                 }
-            }
+                if let Some(t0) = _wr_t0 {
+                    crate::perf::record_ns("emit:file_write", t0.elapsed().as_nanos() as u64);
+                }
 
-            // 9. Commit row_hash into the chain.
-            self.chain.commit(event_type, &row_hash);
+                (row_hash, line)
+            }};
+        }
 
-            row_hash_out = Some(row_hash);
-            line_out = Some(line);
-            Ok(())
-        })?;
+        if chain_enabled {
+            let storage_for_lock = Arc::clone(&self.storage);
+            let _lock_t0 = if crate::perf::enabled() {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            storage_for_lock.with_advisory_lock(&lock_path, &mut || {
+                if let Some(t0) = _lock_t0 {
+                    crate::perf::record_ns(
+                        "emit:lock_acquire",
+                        t0.elapsed().as_nanos() as u64,
+                    );
+                }
+                // Under the lock: refresh in-memory chain tip from
+                // disk truth. If another process appended rows since
+                // our last emit, this is where we discover the
+                // latest (seq, prev_hash) for our event_type —
+                // overwriting the local ChainState entry.
+                //
+                // Reverse-scan from the file tail (0.4.2a7 perf
+                // fix): we only care about ONE event_type's tip,
+                // not the full tips map; stopping at the first
+                // matching row keeps the hot path O(scan-window)
+                // instead of the prior O(filesize) forward scan.
+                // See chain.rs::chain_tip_from_log_tail_reverse
+                // and the S11 stress regression that surfaced the
+                // issue.
+                let _tip_t0 = if crate::perf::enabled() {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                // Tail-byte windowing (0.4.2a7 perf fix). The chain
+                // tip is always near the end of the log — the row we
+                // just emitted last time is right before whatever
+                // someone else may have appended since. Reading the
+                // whole file every emit (which the prior version
+                // did) cost ~10 ms on a 1 MB log; reading 64 KB of
+                // tail through a PINNED read handle costs ~50 µs.
+                //
+                // The pinned read handle (`log_writer.read_tail`) is
+                // what makes this fast on Windows: opening a fresh
+                // read handle while our own writer holds an append
+                // handle to the same file costs ~9 ms on NTFS
+                // (share-mode reconciliation / AV scan). The pinned
+                // handle skips that cost — `seek + read` on an
+                // already-open file is ~50 µs.
+                //
+                // For chain=T emits targeting a PEL admin path (rare:
+                // only fires when admin events are chained AND the
+                // PEL is not "main_log"), we fall back to
+                // `storage.read_bytes_tail` which opens a fresh
+                // handle. That path pays the ~9 ms once per
+                // admin emit but admin emits are rare so the
+                // amortized cost is negligible.
+                //
+                // Cold path (no match in window): the in-memory
+                // chain state is already seeded from a whole-file
+                // scan at `Runtime::init`, so missing the tip in the
+                // tail just leaves the existing in-memory tip in
+                // place. Documented as a known trade-off in
+                // docs/superpowers/specs/2026-05-19-commit-envelopes-and-rotation.md.
+                const TIP_REFRESH_TAIL_WINDOW: usize = 64 * 1024;
+                // Pinned-read fast path with single-writer skip
+                // (0.4.2a7). `read_tail_if_grown` returns None when
+                // the file's current size matches what we wrote
+                // ourselves — no other process appended,
+                // in-memory chain tip is current, no read needed.
+                // In multi-writer setups this falls through to a
+                // full tail read.
+                //
+                // PEL admin emits use the same pinned-writer pool
+                // (0.4.2a8 PEL pinned-writer fix), so the tip
+                // refresh for `pel_routed=true` consults
+                // `pel_writer` and gets the same machinery.
+                //
+                // The file-not-yet-created case (very first emit
+                // before any append) yields NotFound from the lazy
+                // reader open; treat as "no prior rows, leave
+                // in-memory tip alone".
+                let writers = if pel_routed {
+                    &self.pel_writer
+                } else {
+                    &self.log_writer
+                };
+                let writer_arc = match writers.writer_for(event_type) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        deferred_err = Some(e);
+                        return Err(std::io::Error::other(
+                            "writer_for failed (deferred)",
+                        ));
+                    }
+                };
+                let bytes_opt: Option<Vec<u8>> = {
+                    let w = writer_arc.lock().expect("log writer mutex poisoned");
+                    match w.read_tail_if_grown(TIP_REFRESH_TAIL_WINDOW) {
+                        Ok(opt) => opt,
+                        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => return Err(e).map_err(|err| {
+                            std::io::Error::other(format!("read_tail: {err}"))
+                        }),
+                    }
+                };
+                if let Some(bytes) = bytes_opt {
+                    if let Some((tip_seq, tip_hash)) =
+                        chain_tip_from_log_tail_reverse(&bytes, event_type)
+                    {
+                        let mut single: HashMap<String, (u64, String)> = HashMap::new();
+                        single.insert(event_type.to_string(), (tip_seq, tip_hash));
+                        self.chain.seed(single);
+                    }
+                }
+                if let Some(t0) = _tip_t0 {
+                    crate::perf::record_ns(
+                        "emit:tip_refresh",
+                        t0.elapsed().as_nanos() as u64,
+                    );
+                }
+
+                // 4. Chain advance (now reflects disk truth).
+                let _adv_t0 = if crate::perf::enabled() {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                let (seq, prev_hash) = self.chain.advance(event_type);
+                if let Some(t0) = _adv_t0 {
+                    crate::perf::record_ns(
+                        "emit:chain_advance",
+                        t0.elapsed().as_nanos() as u64,
+                    );
+                }
+
+                let (row_hash, line) = build_and_write!(seq, &prev_hash);
+
+                // 9. Commit row_hash into the chain.
+                let _cm_t0 = if crate::perf::enabled() {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                self.chain.commit(event_type, &row_hash);
+                if let Some(t0) = _cm_t0 {
+                    crate::perf::record_ns(
+                        "emit:chain_commit",
+                        t0.elapsed().as_nanos() as u64,
+                    );
+                }
+
+                row_hash_out = Some(row_hash);
+                line_out = Some(line);
+                Ok(())
+            })?;
+        } else {
+            // Lockless emit for unchained profiles. No advisory
+            // lock means no `.emit.lock` artifact on disk, no
+            // tail-scan, no chain.advance/commit. The append-only
+            // syscall is the only ordering primitive — interleaving
+            // across processes is acceptable because there's no
+            // chain to break.
+            let result: std::io::Result<()> = (|| {
+                let (row_hash, line) = build_and_write!(1u64, "");
+                row_hash_out = Some(row_hash);
+                line_out = Some(line);
+                Ok(())
+            })();
+            result?;
+        }
 
         if let Some(e) = deferred_err {
             return Err(e);
@@ -1251,7 +1815,18 @@ impl Runtime {
         //     the envelope is skipped; a handler whose `emit` panics or
         //     errors is logged + swallowed so the publish call still
         //     succeeds for the caller.
+        let _fan_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         self.fan_out_to_handlers(line.as_bytes(), event_type, &eid);
+        if let Some(t0) = _fan_t0 {
+            crate::perf::record_ns("emit:fan_out", t0.elapsed().as_nanos() as u64);
+        }
+        if let Some(t0) = _emit_total_start {
+            crate::perf::record_ns("emit:_TOTAL", t0.elapsed().as_nanos() as u64);
+        }
 
         // event_id, row_hash, and sequence are not surfaced through the
         // public emit*() facades (which discard the line and return
@@ -2167,9 +2742,14 @@ impl Runtime {
     /// Drop impl flushes OS buffers. Calling `close` gives you a
     /// `Result` you can surface if flushing errored.
     pub fn close(self) -> Result<()> {
-        if let Ok(mut w) = self.log_writer.into_inner() {
-            w.flush()?;
-        }
+        // Hand the LogWriters dispatchers off — for literal paths
+        // this flushes the single writer; for templated pools it
+        // walks every cached per-rendered-path writer. `pel_writer`
+        // is a shadow of `log_writer` when PEL=="main_log"; its
+        // separate `flush_all` is a no-op there (Arc clones, no
+        // distinct writers), and a real flush when PEL is split.
+        self.log_writer.flush_all();
+        self.pel_writer.flush_all();
         Ok(())
     }
 
@@ -2984,7 +3564,10 @@ impl Runtime {
         if tmpl == "main_log" {
             return self.log_path.clone();
         }
-        let event_class = event_type.split('.').nth(1).unwrap_or("unknown");
+        // First dotted segment. Matches `python/tn/config.py::
+        // resolve_path_template` (which uses `event_type.split(".")[0]`)
+        // and `path_template.rs` (`event_type.split('.').next()`).
+        let event_class = event_type.split('.').next().unwrap_or("unknown");
         let date_fmt = time::macros::format_description!("[year]-[month]-[day]");
         let date = OffsetDateTime::now_utc()
             .format(&date_fmt)
@@ -3905,6 +4488,99 @@ fn seed_chain_from_log(
     Ok(saw_ceremony_init)
 }
 
+/// Seed chain state from EVERY `.ndjson` file under the template's
+/// parent directory. The templated counterpart of [`seed_chain_from_log`].
+///
+/// Templated `logs.path` (e.g. `./logs/{event_class}.ndjson`) renders
+/// to N different files at emit time — one per event_class/event_type/
+/// date combination. On restart the in-memory chain state has to be
+/// seeded from ALL of them, otherwise the first emit after restart
+/// resets `sequence=1 prev_hash=ZERO` for every event_type and
+/// corrupts chain verification. Mirrors `python/tn/logger.py::
+/// _seed_chain_from_logs` which scanned the log directory file-by-
+/// file before chain=T templated ceremonies got Rust support
+/// (0.4.2a7).
+///
+/// Resolves the parent directory from the template's static prefix
+/// (everything before the first wildcard) and walks it
+/// non-recursively. Templates that put per-emit tokens in
+/// directory segments (e.g. `./logs/{date}/{event_class}.ndjson`)
+/// still get the most-recent-day's parent directory scanned but
+/// won't pick up older days; for that level of templating you'd
+/// need a recursive walk, which we defer until someone actually
+/// uses that shape.
+///
+/// Tolerant to malformed lines, missing fields, and unreadable
+/// files — matches the Python helper's behaviour of "best-effort
+/// seed, never block init."
+fn seed_chain_from_template(
+    template: &crate::path_template::PathTemplate,
+    chain: &ChainState,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<bool> {
+    // Resolve the parent directory we'll walk. Use `render` with a
+    // placeholder event_type and take its parent — that gives us the
+    // absolute path with yaml_dir already resolved.
+    let sample = template.render("__seed_probe__");
+    let Some(parent_dir) = sample.parent() else {
+        return Ok(false);
+    };
+    if !storage.exists(parent_dir) {
+        return Ok(false);
+    }
+    let entries = match storage.list(parent_dir) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    let mut latest: HashMap<String, (u64, String)> = HashMap::new();
+    let mut saw_ceremony_init = false;
+    for entry in entries {
+        if entry.extension().and_then(|e| e.to_str()) != Some("ndjson") {
+            continue;
+        }
+        // Best-effort per file: a malformed file shouldn't block
+        // seeding from other files. The Python equivalent's
+        // try/except OSError around the file open is mirrored here.
+        let reader = match LogFileReader::open(&entry, storage) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for res in reader {
+            let env = match res {
+                Ok(v) => v,
+                Err(_) => continue, // skip malformed rows
+            };
+            let et = match env.get("event_type").and_then(Value::as_str) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if et == "tn.ceremony.init" {
+                saw_ceremony_init = true;
+            }
+            let seq = match env.get("sequence").and_then(Value::as_u64) {
+                Some(s) => s,
+                None => continue,
+            };
+            let rh = match env.get("row_hash").and_then(Value::as_str) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            // Max-sequence-wins per event_type across all scanned
+            // files. The same event_type can appear in multiple
+            // rendered files only when the template doesn't isolate
+            // by event_type (e.g. `{date}.ndjson` mixes types per
+            // day). Per-event_type chain tip is the highest
+            // sequence we observe anywhere.
+            let prior_seq = latest.get(&et).map(|(s, _)| *s).unwrap_or(0);
+            if seq > prior_seq {
+                latest.insert(et, (seq, rh));
+            }
+        }
+    }
+    chain.seed(latest);
+    Ok(saw_ceremony_init)
+}
+
 /// Scan a single ndjson file for any line whose `event_type` is `tn.ceremony.init`.
 /// Returns `true` if found, `false` if file absent or not found.
 fn scan_for_ceremony_init(
@@ -3935,9 +4611,14 @@ fn resolve_pel_static(tmpl: &str, yaml_dir: &Path, ceremony_id: &str, did: &str)
         .format(&date_fmt)
         .unwrap_or_else(|_| "1970-01-01".to_string());
     let yaml_dir_s = yaml_dir.to_string_lossy().into_owned();
+    // `{event_class}` is the first dotted segment of `tn.ceremony.init`
+    // = `tn` (matches Python/PathTemplate, not the prior `nth(1)`
+    // shorthand which would yield `ceremony`). The init-time fresh-
+    // detection scan and the emit-time write must agree on the
+    // rendered path, otherwise restart re-emits `tn.ceremony.init`.
     let filled = tmpl
         .replace("{event_type}", "tn.ceremony.init")
-        .replace("{event_class}", "ceremony")
+        .replace("{event_class}", "tn")
         .replace("{date}", &date)
         .replace("{yaml_dir}", &yaml_dir_s)
         .replace("{ceremony_id}", ceremony_id)

@@ -101,6 +101,7 @@ from .admin.cache import (
 from .admin.cache import LeafReuseAttempt as CacheLeafReuseAttempt  # noqa: F401
 from .compile import compile_enrolment
 from .context import (
+    _context as _ctx_var,  # noqa: F401 — read by `_emit_via` hot path
     clear_context,
     get_context,
     scope,
@@ -830,6 +831,56 @@ def _coerce_for_wire(value: Any) -> Any:
     return value
 
 
+# Types that pass straight through ``_coerce_for_wire`` unchanged. JSON-native
+# scalars plus None. When every top-level value in a fields dict is one of
+# these, we can skip the recursive walk entirely.
+#
+# Containers (dict, list, tuple) are deliberately NOT in this set — they
+# could contain a nested Decimal that needs coercion. The fast-path here
+# only fires for "flat" emits, which is the overwhelming common case
+# (``tn.info('order.created', user='alice', amount=4999)``).
+_WIRE_SAFE_TYPES: tuple = (str, int, float, bool, bytes, type(None))
+
+
+def _fields_already_wire_safe(fields: dict[str, Any]) -> bool:
+    """Return True iff every value in ``fields`` is a JSON-native scalar.
+
+    Used by ``_emit_via`` to skip the ``_coerce_for_wire`` walk for the
+    common flat-emit case. Order-of-magnitude faster than the walk
+    itself when the answer is True, and the walk is unchanged for
+    fields that aren't.
+    """
+    # ``isinstance(v, _WIRE_SAFE_TYPES)`` is a C-level type-tuple check,
+    # cheaper than the recursive _coerce_for_wire call on the same value.
+    for v in fields.values():
+        if not isinstance(v, _WIRE_SAFE_TYPES):
+            return False
+    return True
+
+
+def _notify_config_changed() -> None:
+    """Tell the dispatch runtime to re-build its per-emit invariant cache.
+
+    Call this when state that the cache depends on has changed outside
+    the package's own setters — for example, after directly mutating
+    ``tn._dispatch_rt._py_rt.handlers`` from advanced/test code. The
+    package's public setters (``set_level``, ``set_signing``,
+    ``reload()``) already trigger this implicitly.
+
+    No-op if no dispatch runtime is bound yet.
+
+    See ``DispatchRuntime._invalidate_caches`` for the list of
+    cache slots that get rebuilt (IPython detection, Rust log path,
+    effective handler list).
+    """
+    rt = globals().get("_dispatch_rt")
+    if rt is None:
+        return
+    invalidator = getattr(rt, "_invalidate_caches", None)
+    if invalidator is not None:
+        invalidator()
+
+
 def _ensure_run_id() -> str:
     """Return the per-process ``_run_id``, minting it lazily on first
     use. Without this the per-instance dispatch path (TN.info on a
@@ -862,11 +913,35 @@ def _emit_via(
     runtime). Splitting the dispatch target out is what makes
     multi-ceremony non-default emits independent of the global
     singleton — the user's no-rebinding contract.
+
+    Hot-path note (0.4.2a7): the common flow is "no scope context,
+    flat fields, no agent policy template for this event_type". The
+    branches below short-circuit each invariant so vanilla emits
+    don't pay for capabilities they aren't using:
+      - When ``_context.get()`` is None (no ``tn.scope(...)`` /
+        ``set_context(...)`` active), the ``fields`` dict (which is
+        the verb wrapper's ``**kwargs`` capture — private to this
+        call) is mutated in place. Saves the ``dict(fields)`` copy.
+      - When every field value is JSON-native, skip the recursive
+        ``_coerce_for_wire`` walk.
+      - When no agent-policy doc is loaded,
+        ``_splice_agent_policy`` returns immediately.
     """
-    merged: dict[str, Any] = {**get_context(), **fields}
+    ctx = _ctx_var.get()
+    if ctx is None:
+        # Common path: no scope active. ``fields`` is the freshly-
+        # built ``**kwargs`` from the verb wrapper — private to this
+        # call — so we can mutate it directly without bleeding into
+        # the caller.
+        merged: dict[str, Any] = fields
+    else:
+        merged = {**ctx, **fields}
     if "run_id" not in merged:
         merged["run_id"] = _ensure_run_id()
-    merged = _coerce_for_wire(merged)
+    # _coerce_for_wire is a recursive walk; for flat emits with
+    # JSON-native scalars it returns the input unchanged. Skip it.
+    if not _fields_already_wire_safe(merged):
+        merged = _coerce_for_wire(merged)
     _splice_agent_policy(event_type, merged)
     return rt.emit(level, event_type, merged, sign=sign)
 
@@ -990,7 +1065,17 @@ from ._read_impl import (  # noqa: F401, E402
     _rotated_backup_paths,
 )
 from ._registry import TNNotFound  # noqa: E402
+from . import emit as _emit_module  # noqa: E402
 from .emit import debug, error, info, log, warning  # noqa: E402
+
+# 0.4.2a7 hot-path lift: bind ``_emit_with_splice`` / ``_resolve_sign``
+# / the ``tn`` module reference onto ``emit.py``'s module namespace
+# once at package load. The verbs (``log`` / ``info`` / etc.) then
+# call the bound names directly instead of paying for a late ``from .
+# import ...`` on every emit. emit.py is imported earlier in this
+# same __init__.py — at that point those names didn't exist yet, so
+# we patch them in here at the tail.
+_emit_module._bind_dependencies()
 
 # --------------------------------------------------------------------------
 # Lifecycle verbs — public API lives in tn.lifecycle, re-exported here.

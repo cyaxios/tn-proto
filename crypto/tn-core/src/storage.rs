@@ -86,6 +86,57 @@ pub trait Storage: Send + Sync {
     /// transaction (the JS side gives us the primitive).
     fn cas_write(&self, path: &Path, prior: Option<&[u8]>, new: &[u8]) -> io::Result<()>;
 
+    /// Read at most the last `max_bytes` of `path`. If the file is
+    /// smaller than the window, returns the whole file. Used by the
+    /// emit-time chain-tip refresh to avoid reading megabytes of log
+    /// on every emit just to find the latest row — the tip is almost
+    /// always within the last few KB of the file.
+    ///
+    /// The default impl is correct-but-slow (calls `read_bytes` then
+    /// slices the tail). `FsStorage` overrides with a
+    /// `seek(SeekFrom::End)` + `read_to_end` for the fast path; on
+    /// NTFS this drops chain-mode emit latency from ~10 ms (whole-
+    /// file read of a 1 MB log) to ~50 µs.
+    ///
+    /// Caller-side note: the first line of the returned buffer may
+    /// be a partial line (we sliced into the middle of a row). The
+    /// reverse-scan ndjson walker handles that — `serde_json::from_slice`
+    /// fails on the partial leading line and the helper silently
+    /// skips it.
+    fn read_bytes_tail(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+        let bytes = self.read_bytes(path)?;
+        if bytes.len() <= max_bytes {
+            return Ok(bytes);
+        }
+        Ok(bytes[bytes.len() - max_bytes..].to_vec())
+    }
+
+    /// Open `path` for append-only writes and return a pinned writer
+    /// suitable for repeated emits. The caller holds the returned
+    /// writer for as long as it needs and calls `write_all` (then
+    /// optionally `flush`) on it per emit — saving the open + close
+    /// syscalls that `append_bytes` pays on every call.
+    ///
+    /// Returning `Ok(None)` instructs the caller to fall back to
+    /// `append_bytes` per write. This is appropriate for storage
+    /// backends that don't have an OS-level append-mode handle to
+    /// pin (in-memory, IndexedDB, wasm). The default implementation
+    /// returns `None` so non-fs backends stay correct without
+    /// overriding.
+    ///
+    /// Fs-backed implementations should override to return
+    /// `Ok(Some(writer))` wrapping a long-lived `File` opened with
+    /// `O_APPEND | O_CREAT` (or the Windows equivalent). On NTFS
+    /// this saves ~200 µs per emit relative to `OpenOptions::open`
+    /// every time. See `LogFileWriter` for the consumer.
+    fn open_append_writer(
+        &self,
+        path: &Path,
+    ) -> io::Result<Option<Box<dyn io::Write + Send>>> {
+        let _ = path;
+        Ok(None)
+    }
+
     /// Acquire an advisory cross-process lock on `path` for the
     /// duration of `f`. On native `FsStorage` with `fs-locking`, this
     /// uses `fs4`'s `flock`/`LockFileEx`. On wasm (single-threaded,
@@ -121,15 +172,40 @@ pub trait Storage: Send + Sync {
 /// is this relative to" was just confusing.
 #[cfg(feature = "fs")]
 #[derive(Debug, Default)]
-pub struct FsStorage;
+pub struct FsStorage {
+    /// Per-path lock-file handle cache (0.4.2a7 perf fix). On NTFS
+    /// the per-emit `OpenOptions::open` + `CloseHandle` round-trip
+    /// on the `.emit.lock` sentinel costs ~150 µs even when no
+    /// other process contends for the lock. Caching the file
+    /// handle reduces the per-emit cost to just `lock_exclusive`
+    /// + `unlock` (~20-40 µs).
+    ///
+    /// Value type is `Arc<Mutex<File>>` — the inner Mutex serializes
+    /// in-process callers BEFORE they hit `lock_exclusive`. Without
+    /// it, Windows `LockFileEx` would happily grant the same handle
+    /// nested locks (and Linux flock would behave the same on a
+    /// shared FD), breaking the cross-thread serialization the
+    /// callers depend on. The outer cache Mutex protects the
+    /// HashMap; callers clone the Arc out, drop the outer mutex,
+    /// then lock the inner Mutex (waits for any peer in the same
+    /// process) before calling `lock_exclusive` (waits for any
+    /// peer in another process).
+    #[cfg(feature = "fs-locking")]
+    lock_files: std::sync::Mutex<
+        std::collections::HashMap<
+            std::path::PathBuf,
+            std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+        >,
+    >,
+}
 
 #[cfg(feature = "fs")]
 impl FsStorage {
-    /// Construct a fresh `FsStorage`. Stateless — every instance is
-    /// equivalent.
+    /// Construct a fresh `FsStorage`. Empty lock-file cache; first
+    /// use of each lock path lazy-opens the handle.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -156,6 +232,65 @@ impl Storage for FsStorage {
             .append(true)
             .open(path)?;
         f.write_all(data)
+    }
+
+    fn read_bytes_tail(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+        // Native fast path: open read-only, seek to end-max_bytes,
+        // read_to_end. Avoids the std::fs::read whole-file allocation
+        // when the file is large and the caller only needs the tail.
+        // For the chain-tip refresh (the only consumer today), this
+        // drops the per-emit read cost from O(log_size) to O(window).
+        use std::io::{Read, Seek, SeekFrom};
+        let _t0_open = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else { None };
+        let mut f = std::fs::OpenOptions::new().read(true).open(path)?;
+        if let Some(t) = _t0_open {
+            crate::perf::record_ns("emit:tip_refresh.open", t.elapsed().as_nanos() as u64);
+        }
+        let _t0_meta = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else { None };
+        let len = f.metadata()?.len();
+        if let Some(t) = _t0_meta {
+            crate::perf::record_ns("emit:tip_refresh.metadata", t.elapsed().as_nanos() as u64);
+        }
+        let start = len.saturating_sub(max_bytes as u64);
+        if start > 0 {
+            f.seek(SeekFrom::Start(start))?;
+        }
+        let cap = (len - start) as usize;
+        let mut buf = Vec::with_capacity(cap);
+        let _t0_read = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else { None };
+        f.read_to_end(&mut buf)?;
+        if let Some(t) = _t0_read {
+            crate::perf::record_ns("emit:tip_refresh.read", t.elapsed().as_nanos() as u64);
+        }
+        Ok(buf)
+    }
+
+    fn open_append_writer(
+        &self,
+        path: &Path,
+    ) -> io::Result<Option<Box<dyn io::Write + Send>>> {
+        // Pin one OS handle for the lifetime of the writer instead of
+        // the open/write/close-per-emit pattern that `append_bytes`
+        // uses. Saves ~200 µs/emit on NTFS (two CreateFileW +
+        // CloseHandle round-trips per write). The runtime's
+        // `LogFileWriter` is the consumer; per-emit `flush()` calls
+        // still go through to the OS, but the `OpenOptions::open`
+        // and `CloseHandle` syscalls happen exactly once each over
+        // the writer's lifetime.
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Some(Box::new(f)))
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -230,20 +365,63 @@ impl Storage for FsStorage {
         f: &mut dyn FnMut() -> io::Result<()>,
     ) -> io::Result<()> {
         use fs4::fs_std::FileExt;
-        // Open (creating if missing) the lock file. We never write to
-        // it; the lock itself lives in OS-kernel state keyed on the
-        // file's inode.
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)?;
+        // Cached lock-file handle (0.4.2a7). Open lazily on first
+        // call per path, then reuse: each subsequent emit just calls
+        // `lock_exclusive` + `unlock` on the held handle, skipping
+        // the ~150 µs `OpenOptions::open` + `CloseHandle` pair that
+        // the prior shape paid every emit.
+        //
+        // Re-locking the same handle across emits is the standard
+        // fs4 / flock pattern: on Linux `flock` accepts the same
+        // descriptor repeatedly; on Windows `LockFileEx` is
+        // by-handle and unlocking releases the kernel state. We
+        // unlock explicitly after `f()` so the lock is released
+        // even when `f()` errors.
+        let cached: std::sync::Arc<std::sync::Mutex<std::fs::File>> = {
+            let mut cache = self
+                .lock_files
+                .lock()
+                .expect("fs storage lock_files mutex poisoned");
+            if let Some(existing) = cache.get(path) {
+                existing.clone()
+            } else {
+                // Ensure parent dir exists. The first emit to a
+                // templated PEL path (e.g. `./.tn/logs/protocol/tn.ndjson`)
+                // races: the LogFileWriter's lazy open creates the
+                // dir, but the advisory lock is acquired BEFORE the
+                // writer runs. Creating the dir here makes the lock
+                // open robust to never-seen rendered paths. Cost:
+                // one create_dir_all per (process, path) — amortized
+                // across all subsequent emits via the cache hit.
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let f = std::sync::Arc::new(std::sync::Mutex::new(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .write(true)
+                        .open(path)?,
+                ));
+                cache.insert(path.to_path_buf(), f.clone());
+                f
+            }
+            // cache mutex dropped at end of this block — emits to
+            // OTHER paths can proceed while we hold the per-path
+            // inner Mutex below.
+        };
+        // Inner Mutex serializes in-process threads. Holding it
+        // across `lock_exclusive` + f() + unlock ensures only one
+        // thread of this process is inside the critical section
+        // for this path at a time — required because LockFileEx
+        // on Windows grants nested locks on the same handle.
+        let lock_file = cached.lock().expect("inner lock_file mutex poisoned");
         lock_file.lock_exclusive()?;
         let res = f();
-        // Lock is released when `lock_file` is dropped at scope exit.
-        // We want to keep `lock_file` alive across `f()` so we hold it
-        // explicitly via the trailing drop:
-        drop(lock_file);
+        // Best-effort unlock. If the unlock call itself fails, the
+        // closure's result still propagates — the OS releases the
+        // lock when the process exits even if unlock here errors.
+        let _ = lock_file.unlock();
         res
     }
 

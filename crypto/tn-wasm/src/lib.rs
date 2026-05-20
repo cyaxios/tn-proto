@@ -444,11 +444,21 @@ pub fn build_envelope_js(input: JsValue) -> Result<String, JsError> {
         .unwrap_or_else(|| Value::Object(Map::new()));
     let public_fields = expect_object(public_fields, "public_fields")?;
 
-    let group_payloads = obj
+    // `EnvelopeInput::group_payloads` is `BTreeMap<String, String>`
+    // (pre-serialized JSON snippets, one per group). The wasm caller
+    // passes a JSON object whose values are arbitrary JSON; serialise
+    // each value once to the snippet form the envelope builder expects.
+    let group_payloads_raw = obj
         .get("group_payloads")
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
-    let group_payloads = expect_object(group_payloads, "group_payloads")?;
+    let group_payloads_map = expect_object(group_payloads_raw, "group_payloads")?;
+    let mut group_payloads: BTreeMap<String, String> = BTreeMap::new();
+    for (name, val) in group_payloads_map {
+        let snippet = serde_json::to_string(&val)
+            .map_err(|e| JsError::new(&format!("group_payloads[{name}]: {e}")))?;
+        group_payloads.insert(name, snippet);
+    }
 
     let ein = envelope::EnvelopeInput {
         did: &did,

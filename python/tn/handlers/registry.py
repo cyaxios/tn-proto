@@ -82,6 +82,15 @@ def build_handlers(
         )
         return []
 
+    # Rust owns at most ONE file destination: the one mirrored by
+    # ``cfg.logs.path``. Other file handlers in the yaml are
+    # secondary destinations the Python fan-out has to deliver to.
+    # We mark only the handler whose path string matches
+    # ``cfg.logs.path`` with ``_tn_default=True`` so DispatchRuntime
+    # skips just that one at fan-out time. The rest stay in the
+    # effective list and write via Python.
+    canonical_logs_path: str | None = getattr(cfg, "log_path", None) if cfg else None
+
     out: list[TNHandler] = []
     for raw in specs:
         kind = raw.get("kind", "").lower()
@@ -125,13 +134,18 @@ def build_handlers(
                     rotate_on_init=bool(raw.get("rotate_on_init", False)),
                     filter_spec=filter_spec,
                 )
-            # The yaml-declared file handler is the canonical default sink
-            # for ceremonies — Rust writes to the same log file itself, so
-            # this handler must be marked as a "default" so the dispatch
-            # layer can keep using the Rust path. The Python emit path
-            # also writes via this handler (same as before); only the Rust
-            # path treats it as "already covered, skip the Python copy".
-            handler._tn_default = True  # type: ignore[attr-defined]
+            # ``_tn_default=True`` marks the handler whose target Rust
+            # already covers — DispatchRuntime skips it at fan-out
+            # so Rust's write isn't duplicated. Set ONLY when the
+            # handler's path string matches ``cfg.logs.path`` (the
+            # canonical log destination Rust owns). Other file
+            # handlers in the yaml are secondary destinations: they
+            # write a *different* file and stay in the effective
+            # fan-out list. Pre-0.4.2a7 every file.rotating got the
+            # sentinel, which made multi-file fan-out (one canonical
+            # + N filtered secondaries) silently drop the secondaries.
+            if isinstance(raw_path, str) and canonical_logs_path == raw_path:
+                handler._tn_default = True  # type: ignore[attr-defined]
             out.append(handler)
         elif kind == "file.timed_rotating":
             path = _resolve_path(raw["path"], yaml_dir)
