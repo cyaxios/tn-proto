@@ -12,7 +12,7 @@ legacy `bgw` cipher was removed in Workstream G.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +240,8 @@ def _rotate_impl(
     pool_size: int | None = None,
     cfg: LoadedConfig | None = None,
     btn_cipher_result: Any | None = None,
+    renewed_recipients: list[str] | None = None,
+    renewal_output_dir: Path | None = None,
 ) -> LoadedConfig:
     """Rotate a group's cipher: regenerate keys + bump index_epoch.
 
@@ -368,7 +370,9 @@ def _rotate_impl(
         # 0.4.3a1 truth-telling fields for btn. JWE rotations don't yet
         # surface their X25519 sender keypair as a publisher_identity
         # (separate naming work). For btn we have explicit prior/new
-        # publisher_id values from BtnGroupCipher.rotate().
+        # publisher_id values from BtnGroupCipher.rotate(), plus the
+        # list of recipients whose kits were re-minted under the new
+        # tree.
         if btn_cipher_result is not None:
             event_fields["cipher_actually_rotated"] = True
             event_fields["prior_epoch"] = btn_cipher_result.prior_epoch
@@ -378,6 +382,10 @@ def _rotate_impl(
             )
             event_fields["new_publisher_id_hex"] = (
                 btn_cipher_result.new_publisher_id.hex()
+            )
+            event_fields["renewed_recipients"] = renewed_recipients or []
+            event_fields["renewal_output_dir"] = (
+                str(renewal_output_dir) if renewal_output_dir is not None else None
             )
         _lg._require_init().emit(
             "info",
@@ -1180,6 +1188,120 @@ class RotateGroupResult:
     new_publisher_id: bytes | None = None
     prior_epoch: int | None = None
     new_epoch: int | None = None
+    # Recipient identities whose kits were re-minted under the new
+    # active state during this rotation. Empty if no enrolled recipients
+    # other than the publisher.
+    renewed_recipients: list[str] = field(default_factory=list)
+    # Filesystem path where per-recipient .tnpkg bundles for the renewed
+    # recipients were written. None if no recipients were renewed.
+    renewal_output_dir: Path | None = None
+
+
+def _renew_btn_recipients(
+    cfg: LoadedConfig,
+    group: str,
+    *,
+    new_epoch: int,
+) -> tuple[list[str], Path | None]:
+    """Mint a fresh kit for every active recipient in this group's
+    yaml under the new (post-rotation) active state, and write a
+    signed `.tnpkg` kit_bundle for each.
+
+    Called immediately after the cipher has rotated. Reads the
+    recipient list from yaml (the cipher class doesn't see it). Skips
+    recipients whose `revoked_at` is set. Skips the publisher's own
+    self-entry (their self-kit is already updated by the cipher's
+    rotate()).
+
+    Returns `(renewed_recipient_identities, output_dir_or_None)`. The
+    output dir is `<keystore_parent>/rotations/<group>/<new_epoch>/`.
+    Bundle filenames encode each recipient identity with `:` replaced
+    by `_` for cross-platform filesystem safety. Operators distribute
+    the bundles out-of-band; recipients absorb via `tn.absorb(<path>)`.
+
+    Does NOT emit `tn.recipient.added` events — these recipients are
+    already enrolled; we're renewing their cryptographic material
+    under a new tree, not registering new readers. The
+    `tn.rotation.completed` event lists them in its `renewed_recipients`
+    field.
+    """
+    from .. import _pkg_impl
+
+    publisher_id = cfg.device.device_identity
+
+    # Read the yaml's recipient list for this group.
+    yaml_doc = _read_yaml_doc(cfg.yaml_path)
+    g = (yaml_doc.get("groups") or {}).get(group) or {}
+    yaml_recipients = g.get("recipients") or []
+
+    targets: list[str] = []
+    for r in yaml_recipients:
+        if not isinstance(r, dict):
+            continue
+        if r.get("revoked_at") is not None:
+            continue
+        rid = r.get("recipient_identity") or r.get("did")
+        if not rid or rid == publisher_id:
+            continue
+        targets.append(rid)
+
+    if not targets:
+        return ([], None)
+
+    # Output dir: <keystore_parent>/rotations/<group>/<new_epoch>/
+    # Epoch-indexed so multiple rotations don't collide and the
+    # operator can tell which generation each bundle belongs to.
+    out_dir = cfg.keystore.parent / "rotations" / group / str(new_epoch)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cipher_obj = cfg.groups[group].cipher  # BtnGroupCipher post-rotation
+    renewed: list[str] = []
+
+    import re as _re
+    import tempfile as _tempfile
+
+    for rid in targets:
+        safe_stem = _re.sub(r"[^A-Za-z0-9._-]", "_", rid.split(":")[-1])
+        bundle_path = out_dir / f"{safe_stem}.tnpkg"
+
+        # Mint a fresh kit on the new active state. cipher_obj._state
+        # was refreshed by BtnGroupCipher.rotate() to point at the new
+        # active PublisherState.
+        new_kit_bytes = cipher_obj._state.mint()
+        cipher_obj._persist_state()
+
+        # Wrap the raw kit bytes as a signed kit_bundle .tnpkg via the
+        # existing export pipeline. The kit_bundle exporter discovers
+        # `<group>.btn.mykit` files in the supplied keystore dir, so
+        # we stage the new kit under that canonical filename in a temp
+        # dir scoped to this recipient.
+        with _tempfile.TemporaryDirectory(prefix="tn-renew-") as td:
+            td_path = Path(td)
+            (td_path / f"{group}.btn.mykit").write_bytes(new_kit_bytes)
+            _pkg_impl._export_impl(
+                bundle_path,
+                kind="kit_bundle",
+                cfg=cfg,
+                to_did=rid,
+                keystore=td_path,
+                groups=[group],
+            )
+        renewed.append(rid)
+
+    return (renewed, out_dir)
+
+
+def _read_yaml_doc(yaml_path: Path) -> dict[str, Any]:
+    """Read + parse yaml at `yaml_path`. Returns empty dict on missing
+    file or non-mapping top-level. Used by recipient renewal which
+    walks the recipients[] list."""
+    import yaml as _yaml
+
+    try:
+        doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    except (OSError, _yaml.YAMLError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
 
 
 def rotate(
@@ -1230,13 +1352,25 @@ def rotate(
                 "recipient_did=...) first, then tn.admin.rotate(group)."
             )
         cipher_result = group_spec.cipher.rotate()
-        # The cipher already drove the disk-side atomic promote dance
-        # and updated its in-memory _state. _rotate_impl now just runs
-        # the yaml-side index_epoch bump + the truth-telling event emit.
-        updated = _rotate_impl(
+
+        # Renew every active recipient: mint a fresh kit on the new
+        # active state and write a signed .tnpkg bundle per recipient.
+        # The cipher's rotate() already updated cfg.groups[group].cipher
+        # in place, so this walks the new state. Skips the publisher's
+        # self-entry (their self-kit is updated by the cipher's rotate).
+        renewed_recipients, renewal_output_dir = _renew_btn_recipients(
+            cfg, group, new_epoch=cipher_result.new_epoch,
+        )
+
+        # _rotate_impl now just runs the yaml-side index_epoch bump +
+        # the truth-telling event emit. btn_cipher_result + the renewal
+        # info flow into the emitted tn.rotation.completed fields.
+        _rotate_impl(
             group,
             cfg=cfg,
             btn_cipher_result=cipher_result,
+            renewed_recipients=renewed_recipients,
+            renewal_output_dir=renewal_output_dir,
         )
         return RotateGroupResult(
             cipher="btn",
@@ -1247,6 +1381,8 @@ def rotate(
             new_publisher_id=cipher_result.new_publisher_id,
             prior_epoch=cipher_result.prior_epoch,
             new_epoch=cipher_result.new_epoch,
+            renewed_recipients=renewed_recipients,
+            renewal_output_dir=renewal_output_dir,
         )
 
     elif cipher == "jwe":
