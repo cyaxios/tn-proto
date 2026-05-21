@@ -212,7 +212,7 @@ def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str
         else:
             try:
                 recomputed = _compute_row_hash(
-                    did=did,
+                    device_identity=did,
                     timestamp=env.get("timestamp", ""),
                     event_id=env.get("event_id", ""),
                     event_type=event_type,

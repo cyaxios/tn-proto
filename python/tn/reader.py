@@ -548,7 +548,7 @@ def parse_envelope_line(
             and k not in cfg.groups
         }
         expected_row_hash = _compute_row_hash(
-            did=env.get("did", ""),
+            device_identity=env.get("did", ""),
             timestamp=env.get("timestamp", ""),
             event_id=env.get("event_id", ""),
             event_type=event_type,
@@ -665,7 +665,7 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
                 if k in cfg.public_fields and k not in _envelope_reserved and k not in cfg.groups
             }
             expected_row_hash = _compute_row_hash(
-                did=env["did"],
+                device_identity=env["did"],
                 timestamp=env["timestamp"],
                 event_id=env["event_id"],
                 event_type=event_type,

@@ -382,7 +382,7 @@ pub fn compute_row_hash_js(input: JsValue) -> Result<String, JsError> {
     }
 
     let input_ref = chain::RowHashInput {
-        did: &did,
+        device_identity: &did,
         timestamp: &timestamp,
         event_id: &event_id,
         event_type: &event_type,
@@ -461,7 +461,7 @@ pub fn build_envelope_js(input: JsValue) -> Result<String, JsError> {
     }
 
     let ein = envelope::EnvelopeInput {
-        did: &did,
+        device_identity: &did,
         timestamp: &timestamp,
         event_id: &event_id,
         event_type: &event_type,

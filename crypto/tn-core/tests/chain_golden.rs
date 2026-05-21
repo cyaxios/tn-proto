@@ -52,7 +52,7 @@ fn row_hash_matches_python_golden() {
             })
             .collect();
         let got = tn_core::chain::compute_row_hash(&tn_core::chain::RowHashInput {
-            did: &v.inputs.did,
+            device_identity: &v.inputs.did,
             timestamp: &v.inputs.timestamp,
             event_id: &v.inputs.event_id,
             event_type: &v.inputs.event_type,

@@ -1533,7 +1533,7 @@ impl Runtime {
                     let public_bmap: BTreeMap<String, Value> =
                         public_out_for_lock.clone().into_iter().collect();
                     compute_row_hash(&RowHashInput {
-                        did: self.device.did(),
+                        device_identity: self.device.did(),
                         timestamp: &ts,
                         event_id: &eid,
                         event_type,
@@ -1573,7 +1573,7 @@ impl Runtime {
                     Some(std::time::Instant::now())
                 } else { None };
                 let line = match build_envelope(EnvelopeInput {
-                    did: self.device.did(),
+                    device_identity: self.device.did(),
                     timestamp: &ts,
                     event_id: &eid,
                     event_type,
@@ -2650,7 +2650,7 @@ impl Runtime {
                 true
             } else {
                 let expected = compute_row_hash(&RowHashInput {
-                    did: &did,
+                    device_identity: &did,
                     timestamp: &timestamp,
                     event_id: &event_id,
                     event_type: &event_type,

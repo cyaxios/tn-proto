@@ -237,7 +237,7 @@ fn tn_core_full_ingest_matrix_h8() {
 
                     // 4. Recompute row_hash and compare.
                     let recomputed = compute_row_hash(&RowHashInput {
-                        did,
+                        device_identity: did,
                         timestamp,
                         event_id,
                         event_type,
