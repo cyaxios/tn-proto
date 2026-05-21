@@ -30,7 +30,7 @@ llm_classifier:
     let cfg = tn_core::config::parse(yaml).unwrap();
     assert_eq!(cfg.ceremony.id, "cer_test");
     assert_eq!(cfg.ceremony.cipher, "btn");
-    assert_eq!(cfg.me.did, "did:key:zABC");
+    assert_eq!(cfg.device.device_identity, "did:key:zABC");
     assert!(cfg.groups.contains_key("default"));
     assert_eq!(cfg.groups["default"].cipher, "btn");
     assert_eq!(cfg.groups["default"].index_epoch, 0);

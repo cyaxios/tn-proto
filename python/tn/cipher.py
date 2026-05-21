@@ -206,7 +206,7 @@ class JWEGroupCipher:
     Keystore layout::
 
         <keystore>/<group>.jwe.sender       32B X25519 private (publisher)
-        <keystore>/<group>.jwe.recipients   JSON list [{did, pub_b64}, ...]
+        <keystore>/<group>.jwe.recipients   JSON list [{recipient_identity, pub_b64}, ...]
         <keystore>/<group>.jwe.mykey        32B X25519 private (recipient)
     """
 
@@ -256,7 +256,11 @@ class JWEGroupCipher:
             pubs[missing[0]] = my_sk_new.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
         recipients_doc = [
-            {"did": d, "pub_b64": base64.b64encode(pubs[d]).decode("ascii")} for d in recipient_dids
+            {
+                "recipient_identity": d,
+                "pub_b64": base64.b64encode(pubs[d]).decode("ascii"),
+            }
+            for d in recipient_dids
         ]
         recipients_path = keystore / f"{group_name}.jwe.recipients"
         _atomic_write_text(recipients_path, json.dumps(recipients_doc, indent=2))
@@ -339,7 +343,7 @@ class JWEGroupCipher:
         for entry in doc:
             pub = base64.b64decode(entry["pub_b64"])
             kek = _derive_kek(pub, self._sender_sk)
-            cache[entry["did"]] = kek
+            cache[entry["recipient_identity"]] = kek
         self._kek_cache = cache
 
     def revoke_recipient(self, did: str) -> None:
@@ -349,7 +353,7 @@ class JWEGroupCipher:
             raise NotAPublisherError("JWE: only the publisher can revoke")
         doc = json.loads(self._recipients_path.read_text(encoding="utf-8"))
         before = len(doc)
-        doc = [e for e in doc if e["did"] != did]
+        doc = [e for e in doc if e["recipient_identity"] != did]
         if len(doc) == before:
             return  # already absent — idempotent
         _atomic_write_text(self._recipients_path, json.dumps(doc, indent=2))
@@ -367,10 +371,10 @@ class JWEGroupCipher:
         if len(pub_bytes) != 32:
             raise ValueError(f"pub_bytes must be 32 raw X25519 bytes, got {len(pub_bytes)}")
         doc = json.loads(self._recipients_path.read_text(encoding="utf-8"))
-        doc = [e for e in doc if e.get("did") != did]
+        doc = [e for e in doc if e.get("recipient_identity") != did]
         doc.append(
             {
-                "did": did,
+                "recipient_identity": did,
                 "pub_b64": base64.b64encode(pub_bytes).decode("ascii"),
             }
         )

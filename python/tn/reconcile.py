@@ -71,7 +71,7 @@ def _reconcile(cfg: LoadedConfig) -> ReconcileResult:
 
         if isinstance(gcfg.cipher, JWEGroupCipher):
             for r in list(recipients):
-                did = r.get("did")
+                did = r.get("recipient_identity")
                 if not did or r.get("pub_b64"):
                     continue
                 safe = _DID_SAFE.sub("_", did)

@@ -1269,10 +1269,14 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
     sk = X25519PrivateKey.from_private_bytes(mykey_path.read_bytes())
     my_pub = sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     recipients = g.setdefault("recipients", [])
-    if not any(r.get("did") == cfg.device.did for r in recipients if isinstance(r, dict)):
+    if not any(
+        r.get("recipient_identity") == cfg.device.device_identity
+        for r in recipients
+        if isinstance(r, dict)
+    ):
         recipients.append(
             {
-                "did": cfg.device.did,
+                "recipient_identity": cfg.device.device_identity,
                 "pub_b64": base64.b64encode(my_pub).decode("ascii"),
             }
         )

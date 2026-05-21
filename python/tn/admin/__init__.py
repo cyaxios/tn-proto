@@ -194,7 +194,7 @@ def _yaml_add_group(
             "policy": "private",
             "pool_size": pool_size,
             "cipher": cipher_name,
-            "recipients": [{"did": me_did}],
+            "recipients": [{"recipient_identity": me_did}],
         }
     if fields:
         _yaml_add_fields(doc, group, fields)
@@ -405,8 +405,12 @@ def _add_recipient_jwe_impl(
         def _mutate_pending(doc):
             g = doc.setdefault("groups", {}).setdefault(group, {})
             recipients = g.setdefault("recipients", [])
-            if not any(r.get("did") == did for r in recipients if isinstance(r, dict)):
-                recipients.append({"did": did})
+            if not any(
+                r.get("recipient_identity") == did
+                for r in recipients
+                if isinstance(r, dict)
+            ):
+                recipients.append({"recipient_identity": did})
 
         _update_yaml(cfg, _mutate_pending)
         if _lg._runtime is not None:
@@ -438,10 +442,10 @@ def _add_recipient_jwe_impl(
 
         g = doc.setdefault("groups", {}).setdefault(group, {})
         recipients = g.setdefault("recipients", [])
-        recipients = [r for r in recipients if r.get("did") != did]
+        recipients = [r for r in recipients if r.get("recipient_identity") != did]
         recipients.append(
             {
-                "did": did,
+                "recipient_identity": did,
                 "pub_b64": base64.b64encode(pub_bytes).decode("ascii"),
             }
         )
@@ -527,7 +531,11 @@ def _revoke_recipient_jwe_impl(cfg: LoadedConfig, group: str, did: str) -> Loade
 
     def _mutate(doc):
         g = doc.setdefault("groups", {}).setdefault(group, {})
-        g["recipients"] = [r for r in (g.get("recipients") or []) if r.get("did") != did]
+        g["recipients"] = [
+            r
+            for r in (g.get("recipients") or [])
+            if r.get("recipient_identity") != did
+        ]
 
     _update_yaml(cfg, _mutate)
 
@@ -714,12 +722,13 @@ def _yaml_rotate_group(
     g["index_epoch"] = new_epoch
 
     # YAML recipient entry shape (bgw cipher was removed in Workstream G).
-    me_entry: dict[str, Any] = {"did": me_did}
+    me_entry: dict[str, Any] = {"recipient_identity": me_did}
     recipients: list[dict[str, Any]] = [me_entry]
     if revoke_did is not None:
         old_recipients = g.get("recipients") or []
         for r in old_recipients:
-            if r.get("did") and r["did"] != revoke_did and r["did"] != me_did:
+            r_id = r.get("recipient_identity")
+            if r_id and r_id != revoke_did and r_id != me_did:
                 recipients.append(r)
     g["recipients"] = recipients
 

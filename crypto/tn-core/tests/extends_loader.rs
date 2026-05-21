@@ -65,7 +65,7 @@ ceremony:
     // Inherited from parent.
     assert_eq!(cfg.ceremony.cipher, "btn");
     assert!(cfg.groups.contains_key("default"));
-    assert_eq!(cfg.me.did, "did:key:zABC");
+    assert_eq!(cfg.device.device_identity, "did:key:zABC");
     // Child override on ceremony.id wins.
     assert_eq!(cfg.ceremony.id, "cer_child");
 }
@@ -123,7 +123,7 @@ ceremony:
     let cfg = config::load(&a_path).unwrap();
     // From C (parent-owned).
     assert!(cfg.groups.contains_key("default"));
-    assert_eq!(cfg.me.did, "did:key:zABC");
+    assert_eq!(cfg.device.device_identity, "did:key:zABC");
     assert_eq!(cfg.ceremony.cipher, "btn");
     // From B (ceremony shallow merge).
     assert_eq!(cfg.ceremony.log_level, "info");
@@ -293,7 +293,7 @@ me:
     );
     let cfg = config::load(&child).unwrap();
     assert_eq!(
-        cfg.me.did, "did:key:zABC",
+        cfg.device.device_identity, "did:key:zABC",
         "parent's me.did must survive child's attempted override",
     );
 }
@@ -347,7 +347,7 @@ fn yaml_without_extends_loads_unchanged() {
     write(&p, &parent_btn("cer_plain"));
     let cfg = config::load(&p).unwrap();
     assert_eq!(cfg.ceremony.id, "cer_plain");
-    assert_eq!(cfg.me.did, "did:key:zABC");
+    assert_eq!(cfg.device.device_identity, "did:key:zABC");
 }
 
 #[test]
@@ -400,7 +400,7 @@ handlers:
 
     let cfg = config::load(&payments).expect("emit_propagation-style stream yaml must load");
     // Identity + groups inherited from default.
-    assert_eq!(cfg.me.did, "did:key:zABC");
+    assert_eq!(cfg.device.device_identity, "did:key:zABC");
     assert!(cfg.groups.contains_key("default"));
     assert_eq!(cfg.ceremony.cipher, "btn");
     // Stream-specific overrides win.

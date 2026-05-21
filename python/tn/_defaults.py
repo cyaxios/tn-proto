@@ -105,7 +105,7 @@ def safe_defaults_yaml(*, device_did: str) -> dict[str, Any]:
                 "policy": DEFAULT_POLICY,
                 "cipher": DEFAULT_CIPHER,
                 "recipients": [
-                    {"did": device_did},
+                    {"recipient_identity": device_did},
                 ],
             },
         },

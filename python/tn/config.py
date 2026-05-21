@@ -605,7 +605,7 @@ def create_fresh(
     group_block: dict[str, Any] = {
         "policy": "private",
         "cipher": cipher,
-        "recipients": [{"did": device.did}],
+        "recipients": [{"recipient_identity": device.device_identity}],
     }
 
     # ``tn.agents`` reserved group — auto-inject for every fresh ceremony
@@ -627,7 +627,7 @@ def create_fresh(
     agents_block: dict[str, Any] = {
         "policy": "private",
         "cipher": "btn",
-        "recipients": [{"did": device.did}],
+        "recipients": [{"recipient_identity": device.device_identity}],
         "fields": [
             "instruction",
             "use_for",
@@ -693,7 +693,7 @@ def create_fresh(
         # block or `protocol_events_location` (see advanced docs).
         "logs": {"path": _log_path_default},
         "keystore": {"path": _keystore_path_str},
-        "me": {"did": device.did},
+        "device": {"device_identity": device.device_identity},
         # Output sinks. Both sinks are declared explicitly so they're
         # auditable + editable from the yaml — no hidden in-code defaults
         # (FINDINGS #1, #10). To silence stdout, remove the second entry
@@ -900,7 +900,7 @@ def _read_yaml_doc(yaml_path: Path) -> dict[str, Any]:
 # these, a warning is logged and the parent's value is used.
 # Identity, groups, recipient relationships are project-scoped.
 _PARENT_OWNED_KEYS = (
-    "me",
+    "device",
     "keystore",
     "groups",
     "fields",
@@ -1117,7 +1117,14 @@ def _validate_load_doc_structure(yaml_path: Path, doc: Any) -> None:
     """
     if not isinstance(doc, dict):
         raise ValueError(f"{yaml_path}: expected top-level mapping")
-    for required in ("me", "groups"):
+    if "me" in doc and "device" not in doc:
+        raise ValueError(
+            f"{yaml_path}: legacy `me:` top-level block is no longer supported "
+            f"(0.4.3a1 renamed it to `device:`). Replace `me: {{did: ...}}` with "
+            f"`device: {{device_identity: ...}}`. See "
+            f"docs/superpowers/specs/2026-05-20-identity-and-key-naming.md."
+        )
+    for required in ("device", "groups"):
         if required not in doc:
             raise ValueError(f"{yaml_path}: missing required key {required!r}")
 

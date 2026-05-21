@@ -587,11 +587,11 @@ impl Runtime {
         let seed_path = keystore.join(crate::identity::DEVICE_SEED_FILENAME);
         let seed_bytes = storage.read_bytes(&seed_path).map_err(Error::Io)?;
         let device = DeviceKey::from_private_bytes(&seed_bytes)?;
-        if device.did() != cfg.me.did {
+        if device.did() != cfg.device.device_identity {
             return Err(Error::InvalidConfig(format!(
-                "keystore DID {} does not match yaml me.did {}",
+                "keystore DID {} does not match yaml device.device_identity {}",
                 device.did(),
-                cfg.me.did
+                cfg.device.device_identity
             )));
         }
 
