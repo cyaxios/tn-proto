@@ -27,15 +27,23 @@ will silently double-insert publisher records.
 
 ```bash
 cd C:/codex/tn/tn_proto_web
-export MONGO_URL=<prod>
-export MONGO_DB_NAME=<prod-db>
-python scripts/migrate_0_4_3a1_identity_naming.py
+# Match the env-var names src/config.py uses (NOT MONGO_URL /
+# MONGO_DB_NAME — those defaults silently fall through to localhost,
+# which produces a no-op rewrite that *looks* successful).
+export VAULT_MONGO_URI=<prod>
+export VAULT_MONGO_DB=<prod-db>
+python scripts/migrate_0_4_3a1_identity_naming.py --require-non-localhost
 ```
 
 The script is idempotent. It walks `account_projects` and rewrites
 each `publishers[*].did` → `publishers[*].device_identity`, then
 recreates the supporting index. Re-running is a no-op on already-
 migrated documents.
+
+`--require-non-localhost` refuses to run against `mongodb://localhost`
+or `mongodb://127.*` — guards against the silent no-op above. First
+line of script output is `migration target: uri=<creds-redacted> db=<name>`
+so the operator can sanity-check the destination before any writes.
 
 Verify:
 
