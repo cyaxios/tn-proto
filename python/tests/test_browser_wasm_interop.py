@@ -19,7 +19,6 @@ is found via PATH; if absent the test skips with a clear message.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import tempfile
@@ -176,7 +175,7 @@ def test_python_can_decrypt_kit_from_browser_built_tnpkg():
 
     from tn.tnpkg import _read_manifest
 
-    _manifest, body = _read_manifest(pkg_path)
+    _, body = _read_manifest(pkg_path)
     kit_from_pkg = body.get("body/default.btn.mykit")
     assert kit_from_pkg is not None, "kit not present in browser-built tnpkg"
 
@@ -202,7 +201,6 @@ def test_browser_extracts_package_key_from_python_built_full_keystore_body(tmp_p
       3. Python verifies actual_priv.bin == expected_priv.bin AND that
          sig.bin verifies under expected_did's public key on msg.bin.
     """
-    import json
     import os
     import shutil
     import subprocess
