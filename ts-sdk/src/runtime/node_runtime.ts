@@ -2400,7 +2400,14 @@ function _defaultScope(kind: ManifestKind | string): string {
 }
 
 function _envelopeWellFormed(env: Record<string, unknown>): boolean {
-  for (const k of ["did", "timestamp", "event_id", "event_type", "row_hash", "signature"]) {
+  for (const k of [
+    "device_identity",
+    "timestamp",
+    "event_id",
+    "event_type",
+    "row_hash",
+    "signature",
+  ]) {
     if (typeof env[k] !== "string") return false;
   }
   return true;

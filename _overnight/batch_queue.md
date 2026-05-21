@@ -44,4 +44,19 @@ When a batch is BLOCKED, mark `- [ ] [BLOCKED: F<n>]` with the finding number.
     - secure_read_interop: Python admin_events byte-compare
     - secure_read_interop: Rust admin_events byte-compare
 
+- [x] B2.1 — tnpkg manifest from_did → publisher_identity + fixture rebuild (resolves F3). Five layers:
+  1. **Producer audit**: all three SDK writers (Rust `crypto/tn-core/src/tnpkg.rs`, Python `python/tn/tnpkg.py`, TS `ts-sdk/src/core/tnpkg.ts`) already emit the new wire field names — no writer source change required. Python keeps `from_did`/`to_did` as the internal dataclass attribute but serialises them as `publisher_identity`/`recipient_identity` on the wire. Confirmed via grep before any edits.
+  2. **TS canonical scenario flip** (`ts-sdk/test/fixtures/secure_read_canonical_scenario.ts`): `tn.coupon.issued.to_did` → `recipient_identity`; `tn.enrolment.absorbed.from_did` → `publisher_identity`. Brought TS into line with Python/Rust scenarios. Regenerated `admin_events_canonical.json` via `build_secure_read_fixtures.ts` — now byte-identical across all three SDKs.
+  3. **TS golden-bytes test flip** (`ts-sdk/test/tnpkg_interop.test.ts:169`): the inline-literal "manifest canonical bytes match golden" comparison still asserted the legacy `from_did`/`to_did` keys. Flipped to `publisher_identity`/`recipient_identity` so the test matches the renamed wire.
+  4. **Fixture regeneration** (4 binary fixtures):
+     - `ts-sdk/test/fixtures/ts_admin_snapshot.tnpkg` (new): minted by `build_admin_snapshot_fixture.ts` against the renamed wire.
+     - `python/tests/fixtures/python_admin_snapshot.tnpkg` (new): minted by `build_admin_snapshot_fixture.py` after a one-line builder fix (`leaf_index=leaf_a` → `leaf_a.leaf_index` — `add_recipient` returns `AddRecipientResult`, not int). Required rebuilding `tn_core-py` wheel via `maturin build --release` first because the editable install in the venv was lagging behind commit `d73b7f1`; restored editable install after the build so the trunk venv is unaffected.
+     - `crypto/tn-core/tests/fixtures/rust_admin_snapshot.tnpkg` (rebuild): regenerated via `cargo test -p tn-core --features fs --test tnpkg_fixture_builder -- --ignored` after a builder fix (kit basenames `alice.kit` / `bob.kit` → `alice.btn.mykit` / `bob.btn.mykit` to satisfy the `kit_bundle` exporter's regex).
+     - `Agentic20.project.tnpkg` (both TS and Python copies): minted from scratch by a new helper `ts-sdk/test/fixtures/build_agentic20_project_seed.ts`. The committed binary on `main` was already corrupted in transit (UTF-8 replacement characters injected into the zip bytes; `parseTnpkg` chokes on it, Python `zipfile` raises `BadZipFile`). The fresh fixture mints a real btn ceremony in a tempdir, harvests `tn.yaml` + keystore, and wraps as a signed project_seed manifest with the post-0.4.3a1 yaml shape.
+  5. **`_envelopeWellFormed` phase-G miss** (`ts-sdk/src/runtime/node_runtime.ts:2402`): the absorb-side admin-snapshot gate was still checking `env["did"]`. Without this, `_absorbAdminLogSnapshot` discarded every snapshot envelope and returned `acceptedCount: 0`. Flipped to `device_identity`. Resolves 2 tests that the F3 finding had attributed to fixture issues but were actually a separate naming-flip gap.
+
+  Test impact: 286→296 passes (+10), 10→0 failures. Zero regressions. Typecheck + lint clean.
+
+  No new findings filed — B2.1 closed F3 and incidentally caught a phase-G gap that wasn't in F2's scope. The Python `_envelope_reserved` gap (F2) and `pretest: npm run build` follow-on (F4) remain open.
+
 (Phase 1 will populate the rest of this; placeholder.)

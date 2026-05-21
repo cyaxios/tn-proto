@@ -352,7 +352,7 @@ const ADMIN_EVENT_SCENARIOS: ReadonlyArray<readonly [string, Record<string, unkn
     {
       group: "default",
       slot: 3,
-      to_did: "did:key:zCouponHolder",
+      recipient_identity: "did:key:zCouponHolder",
       issued_to: "did:key:zCouponHolder",
     },
   ],
@@ -381,7 +381,7 @@ const ADMIN_EVENT_SCENARIOS: ReadonlyArray<readonly [string, Record<string, unkn
     "tn.enrolment.absorbed",
     {
       group: "default",
-      from_did: "did:key:zSenderEnrolment",
+      publisher_identity: "did:key:zSenderEnrolment",
       package_sha256: "sha256:" + "c".repeat(64),
       absorbed_at: "2026-04-25T18:00:04.000000Z",
     },
