@@ -88,7 +88,7 @@ def compile_enrolment(cfg: LoadedConfig, group: str, peer_did: str) -> Package:
                 "tn.enrolment.compiled",
                 {
                     "group": group,
-                    "peer_did": peer_did,
+                    "peer_identity": peer_did,
                     "package_sha256": pkg_sha,
                     "compiled_at": compiled_at,
                 },

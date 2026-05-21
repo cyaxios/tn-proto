@@ -373,8 +373,9 @@ impl PyRuntime {
             let d = PyDict::new_bound(py);
             d.set_item(intern!(py, "leaf_index"), r.leaf_index)?;
             d.set_item(
-                intern!(py, "recipient_did"),
-                r.recipient_did.map_or_else(|| py.None(), |s| s.into_py(py)),
+                intern!(py, "recipient_identity"),
+                r.recipient_identity
+                    .map_or_else(|| py.None(), |s| s.into_py(py)),
             )?;
             d.set_item(
                 intern!(py, "minted_at"),
@@ -413,7 +414,7 @@ impl PyRuntime {
                 let d = PyDict::new_bound(py);
                 d.set_item(intern!(py, "ceremony_id"), c.ceremony_id)?;
                 d.set_item(intern!(py, "cipher"), c.cipher)?;
-                d.set_item(intern!(py, "device_did"), c.device_did)?;
+                d.set_item(intern!(py, "device_identity"), c.device_identity)?;
                 d.set_item(
                     intern!(py, "created_at"),
                     c.created_at.map_or_else(|| py.None(), |s| s.into_py(py)),
@@ -430,7 +431,7 @@ impl PyRuntime {
             let d = PyDict::new_bound(py);
             d.set_item(intern!(py, "group"), g.group)?;
             d.set_item(intern!(py, "cipher"), g.cipher)?;
-            d.set_item(intern!(py, "publisher_did"), g.publisher_did)?;
+            d.set_item(intern!(py, "publisher_identity"), g.publisher_identity)?;
             d.set_item(intern!(py, "added_at"), g.added_at)?;
             groups.append(d)?;
         }
@@ -443,8 +444,9 @@ impl PyRuntime {
             d.set_item(intern!(py, "group"), r.group)?;
             d.set_item(intern!(py, "leaf_index"), r.leaf_index)?;
             d.set_item(
-                intern!(py, "recipient_did"),
-                r.recipient_did.map_or_else(|| py.None(), |s| s.into_py(py)),
+                intern!(py, "recipient_identity"),
+                r.recipient_identity
+                    .map_or_else(|| py.None(), |s| s.into_py(py)),
             )?;
             d.set_item(intern!(py, "kit_sha256"), r.kit_sha256)?;
             d.set_item(
@@ -483,7 +485,7 @@ impl PyRuntime {
             let d = PyDict::new_bound(py);
             d.set_item(intern!(py, "group"), c.group)?;
             d.set_item(intern!(py, "slot"), c.slot)?;
-            d.set_item(intern!(py, "to_did"), c.to_did)?;
+            d.set_item(intern!(py, "recipient_identity"), c.recipient_identity)?;
             d.set_item(intern!(py, "issued_to"), c.issued_to)?;
             d.set_item(
                 intern!(py, "issued_at"),
@@ -498,7 +500,7 @@ impl PyRuntime {
         for e in state.enrolments {
             let d = PyDict::new_bound(py);
             d.set_item(intern!(py, "group"), e.group)?;
-            d.set_item(intern!(py, "peer_did"), e.peer_did)?;
+            d.set_item(intern!(py, "peer_identity"), e.peer_identity)?;
             d.set_item(intern!(py, "package_sha256"), e.package_sha256)?;
             d.set_item(intern!(py, "status"), e.status)?;
             d.set_item(
@@ -517,7 +519,7 @@ impl PyRuntime {
         let vault_links = PyList::empty_bound(py);
         for v in state.vault_links {
             let d = PyDict::new_bound(py);
-            d.set_item(intern!(py, "vault_did"), v.vault_did)?;
+            d.set_item(intern!(py, "vault_identity"), v.vault_identity)?;
             d.set_item(intern!(py, "project_id"), v.project_id)?;
             d.set_item(intern!(py, "linked_at"), v.linked_at)?;
             d.set_item(

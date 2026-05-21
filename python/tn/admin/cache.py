@@ -528,7 +528,7 @@ class AdminStateCache:
         self._state["ceremony"] = {
             "ceremony_id": env.get("ceremony_id"),
             "cipher": env.get("cipher"),
-            "device_did": env.get("device_did") or env.get("did"),
+            "device_identity": env.get("device_identity") or env.get("did"),
             "created_at": env.get("created_at") or ts,
         }
 
@@ -538,7 +538,7 @@ class AdminStateCache:
         self._state["groups"].append({
             "group": env.get("group"),
             "cipher": env.get("cipher"),
-            "publisher_did": env.get("publisher_did"),
+            "publisher_identity": env.get("publisher_identity"),
             "added_at": env.get("added_at") or ts,
         })
 
@@ -576,7 +576,7 @@ class AdminStateCache:
         self._state["recipients"].append({
             "group": group,
             "leaf_index": leaf,
-            "recipient_did": env.get("recipient_did"),
+            "recipient_identity": env.get("recipient_identity"),
             "kit_sha256": env.get("kit_sha256"),
             "minted_at": ts,
             "active_status": "active",
@@ -657,7 +657,7 @@ class AdminStateCache:
         self._state["coupons"].append({
             "group": env.get("group"),
             "slot": env.get("slot"),
-            "to_did": env.get("to_did"),
+            "recipient_identity": env.get("recipient_identity"),
             "issued_to": env.get("issued_to"),
             "issued_at": ts,
         })
@@ -667,7 +667,7 @@ class AdminStateCache:
     ) -> None:
         self._state["enrolments"].append({
             "group": env.get("group"),
-            "peer_did": env.get("peer_did"),
+            "peer_identity": env.get("peer_identity"),
             "package_sha256": env.get("package_sha256"),
             "status": "offered",
             "compiled_at": env.get("compiled_at") or ts,
@@ -677,12 +677,12 @@ class AdminStateCache:
     def _on_enrolment_absorbed(
         self, env: dict[str, Any], ts: Any, rh: str
     ) -> None:
-        from_did = env.get("from_did")
+        publisher_identity = env.get("publisher_identity")
         group = env.get("group")
         for enr in self._state["enrolments"]:
             if (
                 enr.get("group") == group
-                and enr.get("peer_did") == from_did
+                and enr.get("peer_identity") == publisher_identity
             ):
                 enr["status"] = "absorbed"
                 enr["absorbed_at"] = env.get("absorbed_at") or ts
@@ -690,7 +690,7 @@ class AdminStateCache:
         # Stand-alone absorbed without a prior compile.
         self._state["enrolments"].append({
             "group": group,
-            "peer_did": from_did,
+            "peer_identity": publisher_identity,
             "package_sha256": env.get("package_sha256"),
             "status": "absorbed",
             "compiled_at": None,
@@ -700,16 +700,16 @@ class AdminStateCache:
     def _on_vault_linked(
         self, env: dict[str, Any], ts: Any, rh: str
     ) -> None:
-        vd = env.get("vault_did")
+        vd = env.get("vault_identity")
         if not isinstance(vd, str):
             return
-        # last-writer-wins on (vault_did): replace any existing entry.
+        # last-writer-wins on (vault_identity): replace any existing entry.
         self._state["vault_links"] = [
             link for link in self._state["vault_links"]
-            if link.get("vault_did") != vd
+            if link.get("vault_identity") != vd
         ]
         self._state["vault_links"].append({
-            "vault_did": vd,
+            "vault_identity": vd,
             "project_id": env.get("project_id"),
             "linked_at": env.get("linked_at") or ts,
             "unlinked_at": None,
@@ -718,11 +718,11 @@ class AdminStateCache:
     def _on_vault_unlinked(
         self, env: dict[str, Any], ts: Any, rh: str
     ) -> None:
-        vd = env.get("vault_did")
+        vd = env.get("vault_identity")
         if not isinstance(vd, str):
             return
         for link in self._state["vault_links"]:
-            if link.get("vault_did") == vd:
+            if link.get("vault_identity") == vd:
                 link["unlinked_at"] = env.get("unlinked_at") or ts
 
     _EVENT_HANDLERS = {

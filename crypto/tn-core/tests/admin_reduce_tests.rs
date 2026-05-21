@@ -62,18 +62,18 @@ fn reduce_recipient_added_with_did() {
         "tn.recipient.added",
         json!({
             "group": "default", "leaf_index": 2,
-            "recipient_did": "did:key:zFrank",
+            "recipient_identity": "did:key:zFrank",
             "kit_sha256": "sha256:abc", "cipher": "btn",
         }),
     );
     match reduce(&e).unwrap() {
         StateDelta::RecipientAdded {
             leaf_index,
-            recipient_did,
+            recipient_identity,
             ..
         } => {
             assert_eq!(leaf_index, Some(2));
-            assert_eq!(recipient_did.as_deref(), Some("did:key:zFrank"));
+            assert_eq!(recipient_identity.as_deref(), Some("did:key:zFrank"));
         }
         d => panic!("expected RecipientAdded, got {d:?}"),
     }
@@ -85,13 +85,13 @@ fn reduce_recipient_added_without_did() {
         "tn.recipient.added",
         json!({
             "group": "default", "leaf_index": 3,
-            "recipient_did": null,
+            "recipient_identity": null,
             "kit_sha256": "sha256:xyz", "cipher": "btn",
         }),
     );
     match reduce(&e).unwrap() {
-        StateDelta::RecipientAdded { recipient_did, .. } => {
-            assert_eq!(recipient_did, None);
+        StateDelta::RecipientAdded { recipient_identity, .. } => {
+            assert_eq!(recipient_identity, None);
         }
         d => panic!("{d:?}"),
     }
@@ -103,7 +103,7 @@ fn reduce_recipient_revoked() {
         "tn.recipient.revoked",
         json!({
             "group": "default", "leaf_index": 2,
-            "recipient_did": "did:key:zFrank",
+            "recipient_identity": "did:key:zFrank",
         }),
     );
     assert!(matches!(
@@ -238,7 +238,7 @@ fn reduce_schema_violation_on_catalogued_event() {
         "tn.recipient.added",
         json!({
             "group": "default", "leaf_index": 1,
-            "recipient_did": null,
+            "recipient_identity": null,
             "cipher": "btn",
         }),
     );
@@ -254,7 +254,7 @@ fn serde_roundtrip_delta() {
     let d = StateDelta::RecipientAdded {
         group: "default".into(),
         leaf_index: Some(2),
-        recipient_did: Some("did:key:zFrank".into()),
+        recipient_identity: Some("did:key:zFrank".into()),
         kit_sha256: "sha256:abc".into(),
         cipher: "btn".into(),
     };

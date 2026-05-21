@@ -158,7 +158,7 @@ pub struct RecipientEntry {
     pub leaf_index: u64,
     /// Optional `did:key:…` of the recipient — `None` when the mint did not
     /// name one.
-    pub recipient_did: Option<String>,
+    pub recipient_identity: Option<String>,
     /// Envelope timestamp from the `tn.recipient.added` event.
     pub minted_at: Option<String>,
     /// `sha256:` prefixed digest of the kit bytes the publisher minted.
@@ -177,7 +177,7 @@ pub struct AdminCeremony {
     /// Cipher name (`"btn"`, `"jwe"`, …).
     pub cipher: String,
     /// `did:key:…` of the device that initialized the ceremony.
-    pub device_did: String,
+    pub device_identity: String,
     /// Envelope timestamp on the `tn.ceremony.init` event. `None` when the
     /// ceremony record is reconstructed from config (btn fallback).
     pub created_at: Option<String>,
@@ -191,7 +191,7 @@ pub struct AdminGroupRecord {
     /// Cipher backing this group.
     pub cipher: String,
     /// `did:key:…` of the publisher that declared the group.
-    pub publisher_did: String,
+    pub publisher_identity: String,
     /// Envelope timestamp on the `tn.group.added` event.
     pub added_at: String,
 }
@@ -207,7 +207,7 @@ pub struct AdminRecipientRecord {
     /// btn leaf index (or cipher-specific identifier).
     pub leaf_index: u64,
     /// Optional `did:key:…` named at mint time.
-    pub recipient_did: Option<String>,
+    pub recipient_identity: Option<String>,
     /// `sha256:` digest of the minted kit.
     pub kit_sha256: String,
     /// Envelope timestamp on the `tn.recipient.added` event.
@@ -244,7 +244,7 @@ pub struct AdminCoupon {
     /// Coupon slot index.
     pub slot: u64,
     /// Recipient `did:key:…`.
-    pub to_did: String,
+    pub recipient_identity: String,
     /// Free-form recipient label.
     pub issued_to: String,
     /// Envelope timestamp on the `tn.coupon.issued` event.
@@ -258,7 +258,7 @@ pub struct AdminEnrolment {
     /// Group the enrolment was compiled / absorbed for.
     pub group: String,
     /// `did:key:…` of the peer the package was for / from.
-    pub peer_did: String,
+    pub peer_identity: String,
     /// `sha256:` digest of the enrolment package bytes.
     pub package_sha256: String,
     /// `"offered"` or `"absorbed"`.
@@ -273,7 +273,7 @@ pub struct AdminEnrolment {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AdminVaultLink {
     /// `did:key:…` of the vault.
-    pub vault_did: String,
+    pub vault_identity: String,
     /// Vault project identifier.
     pub project_id: String,
     /// Envelope timestamp on the `tn.vault.linked` event.
@@ -931,7 +931,7 @@ impl Runtime {
             let mut init_fields = serde_json::Map::new();
             init_fields.insert("ceremony_id".into(), serde_json::json!(rt.cfg.ceremony.id));
             init_fields.insert("cipher".into(), serde_json::json!(rt.cfg.ceremony.cipher));
-            init_fields.insert("device_did".into(), serde_json::json!(rt.device.did()));
+            init_fields.insert("device_identity".into(), serde_json::json!(rt.device.did()));
             init_fields.insert("created_at".into(), serde_json::json!(now));
             if let Err(e) = rt.emit("info", "tn.ceremony.init", init_fields) {
                 log::warn!(
@@ -2132,7 +2132,7 @@ impl Runtime {
 
         let mut fields = Map::new();
         fields.insert("envelope_event_id".into(), Value::String(event_id));
-        fields.insert("envelope_did".into(), Value::String(did));
+        fields.insert("envelope_device_identity".into(), Value::String(did));
         fields.insert("envelope_event_type".into(), Value::String(event_type));
         fields.insert(
             "envelope_sequence".into(),
@@ -2946,10 +2946,10 @@ impl Runtime {
         let mut fields = Map::new();
         fields.insert("group".into(), Value::String(group.to_string()));
         fields.insert("leaf_index".into(), Value::Number(leaf_index.into()));
-        // recipient_did is OptionalString; include null when not provided so
-        // validate_emit can confirm the field is present.
+        // recipient_identity is OptionalString; include null when not provided
+        // so validate_emit can confirm the field is present.
         fields.insert(
-            "recipient_did".into(),
+            "recipient_identity".into(),
             recipient_did.map_or(Value::Null, |d| Value::String(d.to_string())),
         );
         fields.insert(
@@ -3032,9 +3032,9 @@ impl Runtime {
         let mut fields = Map::new();
         fields.insert("group".into(), Value::String(group.to_string()));
         fields.insert("leaf_index".into(), Value::Number(leaf_index.into()));
-        // recipient_did is OptionalString in the catalog schema; include null
-        // so validate_emit can confirm the field is present.
-        fields.insert("recipient_did".into(), Value::Null);
+        // recipient_identity is OptionalString in the catalog schema; include
+        // null so validate_emit can confirm the field is present.
+        fields.insert("recipient_identity".into(), Value::Null);
         if let Err(e) = self.emit("info", "tn.recipient.revoked", fields) {
             log::warn!(
                 "admin state persisted but attestation emit failed: event_type={} error={}",
@@ -3124,7 +3124,7 @@ impl Runtime {
                 StateDelta::RecipientAdded {
                     group: g,
                     leaf_index: Some(leaf),
-                    recipient_did,
+                    recipient_identity,
                     kit_sha256,
                     ..
                 } if g == group => {
@@ -3132,7 +3132,7 @@ impl Runtime {
                         leaf,
                         RecipientEntry {
                             leaf_index: leaf,
-                            recipient_did,
+                            recipient_identity,
                             minted_at: ts.clone(),
                             kit_sha256: Some(kit_sha256),
                             revoked: false,
@@ -3147,7 +3147,7 @@ impl Runtime {
                 } if g == group => {
                     let mut rec = active.remove(&leaf).unwrap_or(RecipientEntry {
                         leaf_index: leaf,
-                        recipient_did: None,
+                        recipient_identity: None,
                         minted_at: None,
                         kit_sha256: None,
                         revoked: false,
@@ -3232,33 +3232,33 @@ impl Runtime {
                 StateDelta::CeremonyInit {
                     ceremony_id,
                     cipher,
-                    device_did,
+                    device_identity,
                     created_at,
                 } => {
                     state.ceremony = Some(AdminCeremony {
                         ceremony_id,
                         cipher,
-                        device_did,
+                        device_identity,
                         created_at: Some(created_at),
                     });
                 }
                 StateDelta::GroupAdded {
                     group: g,
                     cipher,
-                    publisher_did,
+                    publisher_identity,
                     added_at,
                 } => {
                     state.groups.push(AdminGroupRecord {
                         group: g,
                         cipher,
-                        publisher_did,
+                        publisher_identity,
                         added_at,
                     });
                 }
                 StateDelta::RecipientAdded {
                     group: g,
                     leaf_index: Some(leaf),
-                    recipient_did,
+                    recipient_identity,
                     kit_sha256,
                     ..
                 } => {
@@ -3267,7 +3267,7 @@ impl Runtime {
                         AdminRecipientRecord {
                             group: g,
                             leaf_index: leaf,
-                            recipient_did,
+                            recipient_identity,
                             kit_sha256,
                             minted_at: ts.clone(),
                             active_status: "active".to_string(),
@@ -3312,28 +3312,28 @@ impl Runtime {
                 StateDelta::CouponIssued {
                     group: g,
                     slot,
-                    to_did,
+                    recipient_identity,
                     issued_to,
                 } => {
                     state.coupons.push(AdminCoupon {
                         group: g,
                         slot,
-                        to_did,
+                        recipient_identity,
                         issued_to,
                         issued_at: ts.clone(),
                     });
                 }
                 StateDelta::EnrolmentCompiled {
                     group: g,
-                    peer_did,
+                    peer_identity,
                     package_sha256,
                     compiled_at,
                 } => {
                     enrolments_by_peer.insert(
-                        (g.clone(), peer_did.clone()),
+                        (g.clone(), peer_identity.clone()),
                         AdminEnrolment {
                             group: g,
-                            peer_did,
+                            peer_identity,
                             package_sha256,
                             status: "offered".to_string(),
                             compiled_at: Some(compiled_at),
@@ -3343,11 +3343,11 @@ impl Runtime {
                 }
                 StateDelta::EnrolmentAbsorbed {
                     group: g,
-                    from_did,
+                    publisher_identity,
                     package_sha256,
                     absorbed_at,
                 } => {
-                    let key = (g.clone(), from_did.clone());
+                    let key = (g.clone(), publisher_identity.clone());
                     if let Some(existing) = enrolments_by_peer.get_mut(&key) {
                         existing.status = "absorbed".to_string();
                         existing.absorbed_at = Some(absorbed_at);
@@ -3356,7 +3356,7 @@ impl Runtime {
                             key,
                             AdminEnrolment {
                                 group: g,
-                                peer_did: from_did,
+                                peer_identity: publisher_identity,
                                 package_sha256,
                                 status: "absorbed".to_string(),
                                 compiled_at: None,
@@ -3366,14 +3366,14 @@ impl Runtime {
                     }
                 }
                 StateDelta::VaultLinked {
-                    vault_did,
+                    vault_identity,
                     project_id,
                     linked_at,
                 } => {
                     vault_links_by_did.insert(
-                        vault_did.clone(),
+                        vault_identity.clone(),
                         AdminVaultLink {
-                            vault_did,
+                            vault_identity,
                             project_id,
                             linked_at,
                             unlinked_at: None,
@@ -3381,11 +3381,11 @@ impl Runtime {
                     );
                 }
                 StateDelta::VaultUnlinked {
-                    vault_did,
+                    vault_identity,
                     unlinked_at,
                     ..
                 } => {
-                    if let Some(link) = vault_links_by_did.get_mut(&vault_did) {
+                    if let Some(link) = vault_links_by_did.get_mut(&vault_identity) {
                         link.unlinked_at = Some(unlinked_at);
                     }
                 }
@@ -3408,7 +3408,7 @@ impl Runtime {
             state.ceremony = Some(AdminCeremony {
                 ceremony_id: self.cfg.ceremony.id.clone(),
                 cipher: self.cfg.ceremony.cipher.clone(),
-                device_did: self.device.did().to_string(),
+                device_identity: self.device.did().to_string(),
                 created_at: None,
             });
         }
@@ -3437,7 +3437,7 @@ impl Runtime {
         // emit (Python catches blanket `Exception`); on error we proceed.
         if let Ok(state) = self.admin_state(None) {
             for link in &state.vault_links {
-                if link.vault_did == vault_did
+                if link.vault_identity == vault_did
                     && link.project_id == project_id
                     && link.unlinked_at.is_none()
                 {

@@ -1301,7 +1301,7 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
                 "tn.enrolment.absorbed",
                 {
                     "group": pkg.group,
-                    "from_did": pkg.signer_did,
+                    "publisher_identity": pkg.signer_did,
                     "package_sha256": pkg_sha,
                     "absorbed_at": datetime.now(_tz.utc).isoformat(),
                 },

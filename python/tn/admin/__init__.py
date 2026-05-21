@@ -138,7 +138,7 @@ def ensure_group(
                 {
                     "group": group,
                     "cipher": group_cipher,
-                    "publisher_did": cfg.device.did,
+                    "publisher_identity": cfg.device.device_identity,
                     "added_at": datetime.now(_tz.utc).isoformat(),
                 },
             )
@@ -417,7 +417,7 @@ def _add_recipient_jwe_impl(
             _lg._require_init().emit(
                 "",
                 "tn.recipient.intent_declared",
-                {"group": group, "did": did},
+                {"group": group, "recipient_identity": did},
             )
         return cfg
 
@@ -457,7 +457,7 @@ def _add_recipient_jwe_impl(
         _lg._require_init().emit(
             "",
             "tn.recipient.added",
-            {"group": group, "added_did": did},
+            {"group": group, "recipient_identity": did},
         )
     # Auto-emit enrolment package to outbox so the recipient has
     # something to absorb. Non-fatal: yaml mutation has already
@@ -543,7 +543,7 @@ def _revoke_recipient_jwe_impl(cfg: LoadedConfig, group: str, did: str) -> Loade
         _lg._require_init().emit(
             "",
             "tn.recipient.revoked",
-            {"group": group, "revoked_did": did},
+            {"group": group, "recipient_identity": did},
         )
     _maybe_autosync(cfg)
     return cfg

@@ -30,7 +30,7 @@ fn recipients_add_revoke_roundtrip_with_and_without_include_revoked() {
     let active = rt.recipients("default", false).unwrap();
     assert_eq!(active.len(), 1, "active should drop revoked leaf_a");
     assert_eq!(active[0].leaf_index, leaf_b);
-    assert_eq!(active[0].recipient_did.as_deref(), Some("did:key:zBob"));
+    assert_eq!(active[0].recipient_identity.as_deref(), Some("did:key:zBob"));
     assert!(!active[0].revoked);
     assert!(active[0].kit_sha256.is_some());
     assert!(active[0].minted_at.is_some());
@@ -43,8 +43,8 @@ fn recipients_add_revoke_roundtrip_with_and_without_include_revoked() {
     assert_eq!(all[1].leaf_index, leaf_a, "revoked comes after");
     assert!(all[1].revoked);
     assert!(all[1].revoked_at.is_some());
-    // The revoked entry retains the recipient_did from its add event.
-    assert_eq!(all[1].recipient_did.as_deref(), Some("did:key:zAlice"));
+    // The revoked entry retains the recipient_identity from its add event.
+    assert_eq!(all[1].recipient_identity.as_deref(), Some("did:key:zAlice"));
 }
 
 /// Filtering by group: a recipient in another group must not appear.
@@ -79,7 +79,7 @@ fn admin_state_ceremony_from_log_event() {
     let cer_rec = state.ceremony.as_ref().expect("ceremony must populate");
     assert_eq!(cer_rec.ceremony_id, "cer_test");
     assert_eq!(cer_rec.cipher, "btn");
-    assert_eq!(cer_rec.device_did, cer.did);
+    assert_eq!(cer_rec.device_identity, cer.did);
     assert!(
         cer_rec.created_at.is_some(),
         "log-derived ceremony carries a created_at timestamp"
@@ -110,7 +110,7 @@ fn admin_state_ceremony_fallback_when_init_routed_elsewhere() {
     let cer_rec = state.ceremony.as_ref().expect("ceremony fallback");
     assert_eq!(cer_rec.ceremony_id, "cer_test");
     assert_eq!(cer_rec.cipher, "btn");
-    assert_eq!(cer_rec.device_did, cer.did);
+    assert_eq!(cer_rec.device_identity, cer.did);
     assert!(
         cer_rec.created_at.is_none(),
         "fallback ceremony has no timestamp"
@@ -249,7 +249,7 @@ fn vault_link_and_unlink_round_trip() {
     // admin_state reflects the link as still-open.
     let state = rt.admin_state(None).unwrap();
     assert_eq!(state.vault_links.len(), 1);
-    assert_eq!(state.vault_links[0].vault_did, "did:key:zVault");
+    assert_eq!(state.vault_links[0].vault_identity, "did:key:zVault");
     assert_eq!(state.vault_links[0].project_id, "proj_1");
     assert!(state.vault_links[0].unlinked_at.is_none());
     assert!(!state.vault_links[0].linked_at.is_empty());

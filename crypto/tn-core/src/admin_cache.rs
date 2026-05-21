@@ -599,11 +599,11 @@ impl AdminStateCache {
             env.get("cipher").cloned().unwrap_or(Value::Null),
         );
         let dd = env
-            .get("device_did")
+            .get("device_identity")
             .cloned()
             .or_else(|| env.get("did").cloned())
             .unwrap_or(Value::Null);
-        o.insert("device_did".into(), dd);
+        o.insert("device_identity".into(), dd);
         o.insert(
             "created_at".into(),
             env.get("created_at")
@@ -625,8 +625,8 @@ impl AdminStateCache {
             env.get("cipher").cloned().unwrap_or(Value::Null),
         );
         o.insert(
-            "publisher_did".into(),
-            env.get("publisher_did").cloned().unwrap_or(Value::Null),
+            "publisher_identity".into(),
+            env.get("publisher_identity").cloned().unwrap_or(Value::Null),
         );
         o.insert(
             "added_at".into(),
@@ -680,8 +680,8 @@ impl AdminStateCache {
         o.insert("group".into(), Value::String(group.to_string()));
         o.insert("leaf_index".into(), Value::Number(leaf.into()));
         o.insert(
-            "recipient_did".into(),
-            env.get("recipient_did").cloned().unwrap_or(Value::Null),
+            "recipient_identity".into(),
+            env.get("recipient_identity").cloned().unwrap_or(Value::Null),
         );
         o.insert(
             "kit_sha256".into(),
@@ -822,8 +822,8 @@ impl AdminStateCache {
         );
         o.insert("slot".into(), env.get("slot").cloned().unwrap_or(Value::Null));
         o.insert(
-            "to_did".into(),
-            env.get("to_did").cloned().unwrap_or(Value::Null),
+            "recipient_identity".into(),
+            env.get("recipient_identity").cloned().unwrap_or(Value::Null),
         );
         o.insert(
             "issued_to".into(),
@@ -845,8 +845,8 @@ impl AdminStateCache {
             env.get("group").cloned().unwrap_or(Value::Null),
         );
         o.insert(
-            "peer_did".into(),
-            env.get("peer_did").cloned().unwrap_or(Value::Null),
+            "peer_identity".into(),
+            env.get("peer_identity").cloned().unwrap_or(Value::Null),
         );
         o.insert(
             "package_sha256".into(),
@@ -871,12 +871,15 @@ impl AdminStateCache {
     }
 
     fn on_enrolment_absorbed(&mut self, env: &Value, ts: Option<&str>) {
-        let from_did = env.get("from_did").and_then(Value::as_str).unwrap_or("");
+        let publisher_identity = env
+            .get("publisher_identity")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let group = env.get("group").and_then(Value::as_str).unwrap_or("");
-        if self.update_existing_enrolment(env, ts, group, from_did) {
+        if self.update_existing_enrolment(env, ts, group, publisher_identity) {
             return;
         }
-        self.append_absorbed_enrolment(env, ts, group, from_did);
+        self.append_absorbed_enrolment(env, ts, group, publisher_identity);
     }
 
     /// Returns true iff an existing ``offered`` enrolment was upgraded
@@ -898,7 +901,7 @@ impl AdminStateCache {
         };
         for enr in arr.iter_mut() {
             if enr.get("group").and_then(Value::as_str) == Some(group)
-                && enr.get("peer_did").and_then(Value::as_str) == Some(from_did)
+                && enr.get("peer_identity").and_then(Value::as_str) == Some(from_did)
             {
                 enr["status"] = Value::String("absorbed".into());
                 enr["absorbed_at"] = env
@@ -921,7 +924,7 @@ impl AdminStateCache {
     ) {
         let mut o = Map::new();
         o.insert("group".into(), Value::String(group.to_string()));
-        o.insert("peer_did".into(), Value::String(from_did.to_string()));
+        o.insert("peer_identity".into(), Value::String(from_did.to_string()));
         o.insert(
             "package_sha256".into(),
             env.get("package_sha256").cloned().unwrap_or(Value::Null),
@@ -945,7 +948,7 @@ impl AdminStateCache {
     }
 
     fn on_vault_linked(&mut self, env: &Value, ts: Option<&str>) {
-        let vd = env.get("vault_did").and_then(Value::as_str).unwrap_or("");
+        let vd = env.get("vault_identity").and_then(Value::as_str).unwrap_or("");
         if vd.is_empty() {
             return;
         }
@@ -956,10 +959,10 @@ impl AdminStateCache {
         else {
             return;
         };
-        // Vault link is "last write wins" per-vault_did.
-        arr.retain(|l| l.get("vault_did").and_then(Value::as_str) != Some(vd));
+        // Vault link is "last write wins" per-vault_identity.
+        arr.retain(|l| l.get("vault_identity").and_then(Value::as_str) != Some(vd));
         let mut o = Map::new();
-        o.insert("vault_did".into(), Value::String(vd.to_string()));
+        o.insert("vault_identity".into(), Value::String(vd.to_string()));
         o.insert(
             "project_id".into(),
             env.get("project_id").cloned().unwrap_or(Value::Null),
@@ -976,7 +979,7 @@ impl AdminStateCache {
     }
 
     fn on_vault_unlinked(&mut self, env: &Value, ts: Option<&str>) {
-        let vd = env.get("vault_did").and_then(Value::as_str).unwrap_or("");
+        let vd = env.get("vault_identity").and_then(Value::as_str).unwrap_or("");
         let Some(arr) = self
             .state
             .get_mut("vault_links")
@@ -985,7 +988,7 @@ impl AdminStateCache {
             return;
         };
         for link in arr.iter_mut() {
-            if link.get("vault_did").and_then(Value::as_str) == Some(vd) {
+            if link.get("vault_identity").and_then(Value::as_str) == Some(vd) {
                 link["unlinked_at"] = env
                     .get("unlinked_at")
                     .cloned()
