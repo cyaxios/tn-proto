@@ -579,11 +579,11 @@ def _maybe_unseal_recipient_wrap(
         for entry in wraps_array:
             if not isinstance(entry, dict):
                 continue
-            rdid = entry.get("recipient_did")
+            rdid = entry.get("recipient_identity")
             if rdid == our_did:
                 candidates.append(entry)
     elif isinstance(wrap_singular, dict):
-        rdid = wrap_singular.get("recipient_did")
+        rdid = wrap_singular.get("recipient_identity")
         if rdid == our_did:
             candidates.append(wrap_singular)
 
@@ -594,13 +594,13 @@ def _maybe_unseal_recipient_wrap(
         # a clear reason.
         if isinstance(wraps_array, list):
             recipients = [
-                e.get("recipient_did")
+                e.get("recipient_identity")
                 for e in wraps_array
                 if isinstance(e, dict)
             ]
         else:
             recipients = [
-                wrap_singular.get("recipient_did")
+                wrap_singular.get("recipient_identity")
                 if isinstance(wrap_singular, dict)
                 else None
             ]
@@ -1009,7 +1009,7 @@ def _build_local_admin_clock(
                 env = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            did = env.get("did")
+            did = env.get("device_identity")
             et = env.get("event_type")
             seq = env.get("sequence")
             if isinstance(did, str) and isinstance(et, str) and isinstance(seq, int):
@@ -1177,7 +1177,7 @@ def _envelope_well_formed(env: dict[str, Any]) -> bool:
 def _verify_envelope_signature(env: dict[str, Any]) -> bool:
     try:
         return DeviceKey.verify(
-            env["did"],
+            env["device_identity"],
             env["row_hash"].encode("ascii"),
             _signature_from_b64(env["signature"]),
         )
@@ -1225,7 +1225,7 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
 
     local_cid = (doc.get("ceremony") or {}).get("id")
     already_enrolled = any(
-        isinstance(gspec, dict) and gspec.get("publisher_did")
+        isinstance(gspec, dict) and gspec.get("publisher_identity")
         for gspec in (doc.get("groups") or {}).values()
     )
     if local_cid and local_cid != pkg.ceremony_id and already_enrolled:
@@ -1252,7 +1252,7 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
             ),
         )
     g["group_epoch"] = pkg.group_epoch
-    g["publisher_did"] = pkg.payload["publisher_did"]
+    g["publisher_identity"] = pkg.payload["publisher_identity"]
     g["sender_pub_b64"] = pkg.payload["sender_pub_b64"]
 
     mykey_path = cfg.keystore / f"{pkg.group}.jwe.mykey"

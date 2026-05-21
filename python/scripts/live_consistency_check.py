@@ -297,7 +297,7 @@ def run_checks() -> None:
             cons_yaml.write_text(_yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
             tn.init(cons_yaml, cipher="btn")
             cons_cfg = tn.current_config()
-            consumer_did = cons_cfg.device.did
+            consumer_did = cons_cfg.device.device_identity
             tn.flush_and_close()
 
             # Add consumer as recipient on publisher

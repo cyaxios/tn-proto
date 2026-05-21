@@ -68,13 +68,13 @@ def test_compile_enrolment_emits_event(tmp_path):
 
     tn.init(yaml)
     state = tn.admin.state()
-    matches = [r for r in state["enrolments"] if r.get("peer_did") == peer_did]
+    matches = [r for r in state["enrolments"] if r.get("peer_identity") == peer_did]
     assert len(matches) >= 1, (
         f"expected at least 1 enrolment for {peer_did!r}, got {state['enrolments']}"
     )
     r = matches[0]
     assert r["group"] == "default", f"group mismatch: {r['group']!r}"
-    assert r["peer_did"] == peer_did, f"peer_did mismatch: {r['peer_did']!r}"
+    assert r["peer_identity"] == peer_did, f"peer_did mismatch: {r['peer_did']!r}"
     assert r["package_sha256"].startswith("sha256:"), (
         f"package_sha256 should start with 'sha256:': {r['package_sha256']!r}"
     )
@@ -102,7 +102,7 @@ def test_compile_enrolment_all_catalog_fields_present(tmp_path):
     # the required fields. add_recipient stores them publicly so the
     # vault reducer can read without decrypting.
     flat = dict(env)
-    for field in ("group", "peer_did", "package_sha256", "compiled_at"):
+    for field in ("group", "peer_identity", "package_sha256", "compiled_at"):
         assert field in flat, (
             f"required field {field!r} missing from tn.enrolment.compiled: {sorted(flat)}"
         )
@@ -123,7 +123,7 @@ def test_compile_enrolment_direct_call_emits_event(tmp_path):
 
     tn.init(yaml)
     state = tn.admin.state()
-    matches = [r for r in state["enrolments"] if r.get("peer_did") == peer_did]
+    matches = [r for r in state["enrolments"] if r.get("peer_identity") == peer_did]
     # Reducer dedupes per (group, peer_did) so only one entry, but the on-disk
     # log holds both compile events. Verify both: the reduced state, and the
     # raw envelopes.
@@ -131,7 +131,7 @@ def test_compile_enrolment_direct_call_emits_event(tmp_path):
         f"expected >=1 enrolment for peer_did={peer_did!r}, got {state['enrolments']}"
     )
     raw_envs = [
-        e for e in _enrolments_from_admin_log(yaml) if e.get("peer_did") == peer_did
+        e for e in _enrolments_from_admin_log(yaml) if e.get("peer_identity") == peer_did
     ]
     assert len(raw_envs) >= 1, (
         f"expected >=1 tn.enrolment.compiled envelope for {peer_did!r}, got {raw_envs}"
@@ -164,15 +164,15 @@ def test_absorb_emits_event(tmp_path):
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
     alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
-    alice_did = alice_cfg.device.did
+    alice_did = alice_cfg.device.device_identity
 
     bob_dir = tmp_path / "bob"
     bob_dir.mkdir()
     bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
     bob_pub = _ensure_mykey(bob_cfg, "default")
 
-    admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.did, bob_pub)
-    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.did)
+    admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity, bob_pub)
+    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.device_identity)
     pkg_path = emit_to_outbox(alice_cfg, pkg)
 
     # Bob: init TN against his workspace so _runtime is live, then absorb.
@@ -197,7 +197,7 @@ def test_absorb_emits_event(tmp_path):
 
     # All 4 catalog fields must be present and non-empty.
     assert e["group"] == "default", f"group mismatch: {e['group']!r}"
-    assert e["from_did"] == alice_did, (
+    assert e["publisher_identity"] == alice_did, (
         f"from_did must be the compiler's (Alice's) DID, got {e['from_did']!r}"
     )
     assert e["package_sha256"].startswith("sha256:"), (
@@ -217,8 +217,8 @@ def test_absorb_no_emit_without_runtime(tmp_path):
     bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
     bob_pub = _ensure_mykey(bob_cfg, "default")
 
-    admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.did, bob_pub)
-    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.did)
+    admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity, bob_pub)
+    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.device_identity)
     pkg_path = emit_to_outbox(alice_cfg, pkg)
 
     # tn is NOT init'd for bob — _runtime is None; absorb must succeed silently.

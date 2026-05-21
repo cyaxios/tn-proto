@@ -174,7 +174,7 @@ def _emit_tampered_row_skipped(envelope: dict[str, Any], reasons: list[str]) -> 
         "tn.read.tampered_row_skipped",
         {
             "envelope_event_id": envelope.get("event_id"),
-            "envelope_did": envelope.get("did"),
+            "envelope_device_identity": envelope.get("device_identity"),
             "envelope_event_type": envelope.get("event_type"),
             "envelope_sequence": envelope.get("sequence"),
             "invalid_reasons": sorted(set(reasons)),
@@ -249,7 +249,7 @@ def _is_foreign_log(log_path, cfg=None) -> bool:
                     env = _json.loads(line)
                 except _json.JSONDecodeError:
                     continue
-                env_did = env.get("did")
+                env_did = env.get("device_identity")
                 if isinstance(env_did, str) and env_did:
                     return env_did != own_did
                 # First non-empty line had no did — give up; let the

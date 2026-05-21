@@ -87,14 +87,14 @@ def _assert_canonical_admin_state(state: dict) -> None:
     recipients = state.get("recipients") or []
     vault_links = state.get("vault_links") or []
     assert len(recipients) == 2, f"expected 2 recipients, got {len(recipients)}"
-    dids = {r.get("recipient_did") for r in recipients}
+    dids = {r.get("recipient_identity") for r in recipients}
     assert dids == {"did:key:zAlice", "did:key:zBob"}, f"unexpected recipient DIDs: {dids}"
-    statuses = {r.get("recipient_did"): r.get("active_status") for r in recipients}
+    statuses = {r.get("recipient_identity"): r.get("active_status") for r in recipients}
     assert statuses["did:key:zAlice"] == "revoked", f"alice should be revoked: {statuses}"
     assert statuses["did:key:zBob"] == "active", f"bob should be active: {statuses}"
     assert len(vault_links) == 1, f"expected 1 vault link, got {len(vault_links)}"
     link = vault_links[0]
-    assert link.get("vault_did") == "did:web:vault.example"
+    assert link.get("vault_identity") == "did:web:vault.example"
     assert link.get("project_id") == "demo"
     assert link.get("unlinked_at") is None
 
@@ -148,7 +148,7 @@ def test_ts_produced_admin_snapshot_parses_in_python():
 GOLDEN_INPUT = {
     "kind": "admin_log_snapshot",
     "version": 1,
-    "from_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+    "publisher_identity": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
     "ceremony_id": "test_ceremony_42",
     "as_of": "2026-04-24T12:00:00.000+00:00",
     "scope": "admin",
@@ -161,11 +161,11 @@ GOLDEN_INPUT = {
     },
     "event_count": 4,
     "head_row_hash": "sha256:" + "a" * 64,
-    "to_did": "did:key:zRecipient",
+    "recipient_identity": "did:key:zRecipient",
     "state": {
         "vault_links": [
             {
-                "vault_did": "did:web:vault.example",
+                "vault_identity": "did:web:vault.example",
                 "project_id": "demo",
                 "linked_at": "2026-04-24T12:00:00.000Z",
                 "unlinked_at": None,
@@ -193,11 +193,11 @@ def test_manifest_canonical_bytes_match_golden():
     m = TnpkgManifest(
         kind=GOLDEN_INPUT["kind"],
         version=GOLDEN_INPUT["version"],
-        from_did=GOLDEN_INPUT["from_did"],
+        from_did=GOLDEN_INPUT["publisher_identity"],
         ceremony_id=GOLDEN_INPUT["ceremony_id"],
         as_of=GOLDEN_INPUT["as_of"],
         scope=GOLDEN_INPUT["scope"],
-        to_did=GOLDEN_INPUT["to_did"],
+        to_did=GOLDEN_INPUT["recipient_identity"],
         clock=GOLDEN_INPUT["clock"],
         event_count=GOLDEN_INPUT["event_count"],
         head_row_hash=GOLDEN_INPUT["head_row_hash"],

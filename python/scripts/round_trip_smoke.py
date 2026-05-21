@@ -81,7 +81,7 @@ def main() -> int:
 
         cons_yaml = _build_ceremony(tmp, "consumer")
         cons_cfg = tn.current_config()
-        consumer_did = cons_cfg.device.did
+        consumer_did = cons_cfg.device.device_identity
         print(f"   consumer DID = {consumer_did}")
         tn.flush_and_close()
 
@@ -89,7 +89,7 @@ def main() -> int:
         tn.init(pub_yaml, cipher="btn")
         tn.admin.add_recipient("default", recipient_did=consumer_did, out_path=kit_dir / "default.btn.mykit")
         pub_cfg = tn.current_config()
-        publisher_did = pub_cfg.device.did
+        publisher_did = pub_cfg.device.device_identity
         print(f"   publisher DID = {publisher_did}")
 
         # 2. Export a snapshot

@@ -109,7 +109,7 @@ def pull_inbox(
             f"vault.pull: on_absorb_error must be 'log' or 'raise', got {on_absorb_error!r}"
         )
 
-    my_did = cfg.device.did
+    my_did = cfg.device.device_identity
     try:
         items = client.list_incoming(my_did, since=since_cursor)
     except Exception:

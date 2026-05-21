@@ -59,7 +59,7 @@ def _minimal_tn_yaml(keystore_dir: Path) -> dict:
     namespacing default that other parts of the SDK now use).
     """
     return {
-        "me": {"did": "did:key:z6Mkfrank"},
+        "device": {"device_identity": "did:key:z6Mkfrank"},
         "ceremony": {"id": "test-ceremony", "mode": "local"},
         "groups": {},
         "keystore": {"path": str(keystore_dir).replace("\\", "/")},

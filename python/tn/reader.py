@@ -352,7 +352,7 @@ def read_with_keybag(
             if verify_signatures:
                 try:
                     sig_ok = DeviceKey.verify(
-                        env["did"],
+                        env["device_identity"],
                         env["row_hash"].encode("ascii"),
                         _signature_from_b64(env["signature"]),
                     )
@@ -457,7 +457,7 @@ def read_as_recipient(
             if verify_signatures:
                 try:
                     sig_ok = DeviceKey.verify(
-                        env["did"],
+                        env["device_identity"],
                         env["row_hash"].encode("ascii"),
                         _signature_from_b64(env["signature"]),
                     )
@@ -560,7 +560,7 @@ def parse_envelope_line(
         row_hash_ok: bool = expected_row_hash == env.get("row_hash", "")
         try:
             sig_ok: bool = DeviceKey.verify(
-                env["did"],
+                env["device_identity"],
                 env["row_hash"].encode("ascii"),
                 _signature_from_b64(env["signature"]),
             )
@@ -665,7 +665,7 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
                 if k in cfg.public_fields and k not in _envelope_reserved and k not in cfg.groups
             }
             expected_row_hash = _compute_row_hash(
-                device_identity=env["did"],
+                device_identity=env["device_identity"],
                 timestamp=env["timestamp"],
                 event_id=env["event_id"],
                 event_type=event_type,
@@ -677,7 +677,7 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
             row_hash_ok = expected_row_hash == env["row_hash"]
 
             sig_ok = DeviceKey.verify(
-                env["did"],
+                env["device_identity"],
                 env["row_hash"].encode("ascii"),
                 _signature_from_b64(env["signature"]),
             )

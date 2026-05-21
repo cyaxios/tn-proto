@@ -75,7 +75,7 @@ def test_stage6_cross_publisher_btn(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     # this process — FINDINGS #4 (admin reducer must read all_runs).
     cfg = tn.current_config()
     recs = tn.admin.recipients("default")
-    assert any(r["recipient_did"] == PROFESSOR_DID for r in recs), \
+    assert any(r["recipient_identity"] == PROFESSOR_DID for r in recs), \
         f"expected professor DID in recipients, got {recs!r}"
 
     # Bundle the kit (not the publisher's own keystore — that would ship the
@@ -168,7 +168,7 @@ def test_stage6_recipients_persists_across_processes(tmp_path: Path, monkeypatch
         f"recipients lost across run boundary: in-run={in_run_recs!r} "
         f"cross-run={cross_run_recs!r}"
     )
-    in_run_dids = sorted(r["recipient_did"] for r in in_run_recs)
-    cross_run_dids = sorted(r["recipient_did"] for r in cross_run_recs)
+    in_run_dids = sorted(r["recipient_identity"] for r in in_run_recs)
+    cross_run_dids = sorted(r["recipient_identity"] for r in cross_run_recs)
     assert in_run_dids == cross_run_dids, \
         f"recipient DIDs differ across runs: {in_run_dids!r} vs {cross_run_dids!r}"

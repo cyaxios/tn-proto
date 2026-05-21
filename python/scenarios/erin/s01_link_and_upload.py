@@ -43,7 +43,7 @@ class ErinLinkAndUpload(Scenario):
                 identity=ident,
             )
         cfg = tn.current_config()
-        assert cfg.device.did == ident.did, "DID should match unified identity"
+        assert cfg.device.device_identity == ident.did, "DID should match unified identity"
 
         # 2. Authenticate to vault
         with ctx.timer("vault_auth_ms"):

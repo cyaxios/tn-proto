@@ -37,7 +37,7 @@ def test_ensure_group_emits_tn_group_added(tmp_path):
     assert len(pii_groups) == 1, f"expected exactly one tn.group.added for group=pii, got {pii_groups}"
     g = pii_groups[0]
     assert g["cipher"] in {"btn", "bearer", "jwe"}, f"unexpected cipher: {g['cipher']!r}"
-    assert g["publisher_did"].startswith("did:"), (
+    assert g["publisher_identity"].startswith("did:"), (
         f"publisher_did does not look like a DID: {g['publisher_did']!r}"
     )
     assert g["added_at"], "added_at should be a non-empty ISO 8601 string"

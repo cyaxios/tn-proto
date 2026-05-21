@@ -605,7 +605,7 @@ def _scan_attested_events(cfg, event_type: str, *, key: str = "group") -> set:
     init stays idempotent across split-log setups.
 
     `key` defaults to "group" for the common case (group.added). Pass
-    e.g. `"recipient_did"` or a tuple-producing key.
+    e.g. `"recipient_identity"` or a tuple-producing key.
     """
     import json as _json
 
@@ -656,7 +656,7 @@ def _emit_missing_group_added(py_rt):
                 {
                     "group": group_name,
                     "cipher": cfg.cipher_name,
-                    "publisher_did": cfg.device.did,
+                    "publisher_identity": cfg.device.device_identity,
                     "added_at": _dt.now(_tz.utc).isoformat(),
                 },
             )

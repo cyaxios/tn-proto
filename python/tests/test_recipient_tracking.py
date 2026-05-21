@@ -51,7 +51,7 @@ def test_add_recipient_with_did_emits_attested_event(tmp_path):
     assert len(added) == 1, f"expected one recipient.added event, got {len(added)}"
     assert added[0].fields["group"] == "default"
     assert added[0].fields["leaf_index"] == leaf
-    assert added[0].fields["recipient_did"] == "did:key:zFrank"
+    assert added[0].fields["recipient_identity"] == "did:key:zFrank"
     assert added[0].fields["kit_sha256"].startswith("sha256:")
 
 
@@ -72,7 +72,7 @@ def test_add_recipient_without_did_still_emits_event_without_did_field(tmp_path)
     ]
     assert len(added) == 1
     # DID field is absent (or None) when not provided.
-    assert added[0].fields.get("recipient_did") is None
+    assert added[0].fields.get("recipient_identity") is None
 
 
 def test_recipients_returns_active_only_by_default(tmp_path):
@@ -88,7 +88,7 @@ def test_recipients_returns_active_only_by_default(tmp_path):
     # Only Carol should be active.
     assert len(active) == 1, f"expected 1 active, got {active}"
     assert active[0]["leaf_index"] == leaf_carol
-    assert active[0]["recipient_did"] == "did:key:zCarol"
+    assert active[0]["recipient_identity"] == "did:key:zCarol"
     assert active[0]["revoked"] is False
 
 

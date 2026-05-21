@@ -460,7 +460,7 @@ class AdminStateCache:
         merge; ``False`` if this envelope is a duplicate and should be
         skipped.
         """
-        did = env.get("did")
+        did = env.get("device_identity")
         et = env.get("event_type")
         seq = env.get("sequence")
         if (
@@ -528,7 +528,7 @@ class AdminStateCache:
         self._state["ceremony"] = {
             "ceremony_id": env.get("ceremony_id"),
             "cipher": env.get("cipher"),
-            "device_identity": env.get("device_identity") or env.get("did"),
+            "device_identity": env.get("device_identity") or env.get("device_identity"),
             "created_at": env.get("created_at") or ts,
         }
 

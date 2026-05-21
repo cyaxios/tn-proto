@@ -99,7 +99,7 @@ def _scan_admin_envelopes(sources: list[Path]) -> tuple[bytes, dict[str, Any]]:
             rh = env.get("row_hash")
             if isinstance(rh, str) and rh in seen:
                 continue
-            did = env.get("did")
+            did = env.get("device_identity")
             seq = env.get("sequence")
             if not (isinstance(did, str) and isinstance(seq, int) and isinstance(rh, str)):
                 continue
@@ -515,7 +515,7 @@ def _resolve_export_signer(
         )
     if cfg is None:
         raise ValueError(f"export(kind={kind!r}) requires cfg=... for manifest signing")
-    return cfg.device.signing_key(), cfg.device.did, cfg.ceremony_id
+    return cfg.device.signing_key(), cfg.device.device_identity, cfg.ceremony_id
 
 
 def _merge_recipient_dids(
@@ -603,7 +603,7 @@ def _apply_seal_for_recipient(
     # AAD.
     preview = TnpkgManifest(
         kind=str(kind),
-        from_did=cfg.device.did if cfg is not None else "",
+        from_did=cfg.device.device_identity if cfg is not None else "",
         ceremony_id=cfg.ceremony_id if cfg is not None else "",
         as_of=_now_iso(),
         scope=str(scope or extras.get("scope") or _default_scope(kind)),

@@ -154,7 +154,7 @@ def bench_plaintext_signed(events: int, size_bytes: int, ws: Path) -> dict:
             digest = hashlib.sha256(payload).digest()
             from tn.signing import signature_from_b64 as _sfb
 
-            assert DeviceKey.verify(env["did"], digest, _sfb(env["sig"]))
+            assert DeviceKey.verify(env["device_identity"], digest, _sfb(env["sig"]))
             decrypt_latencies_us.append((time.perf_counter() - t_entry) * 1e6)
     decrypt_total = time.perf_counter() - t_d0
 
@@ -434,7 +434,7 @@ def bench_jwe_envelope(events: int, size_bytes: int, ws: Path) -> dict:
             cek = aes_key_unwrap(kek, wrapped)
             _pt = AESGCM(cek).decrypt(iv_bytes, ct, None)
             assert DeviceKey.verify(
-                env["did"], env["row_hash"].encode("ascii"), _sfb(env["signature"])
+                env["device_identity"], env["row_hash"].encode("ascii"), _sfb(env["signature"])
             )
             decrypt_latencies_us.append((time.perf_counter() - t_entry) * 1e6)
     decrypt_total = time.perf_counter() - t_d0
@@ -581,7 +581,7 @@ def bench_jwe_static_dh(events: int, size_bytes: int, ws: Path) -> dict:
             cek = aes_key_unwrap(recv_kek, wrapped)
             _pt = AESGCM(cek).decrypt(iv_bytes, ct, None)
             assert DeviceKey.verify(
-                env["did"], env["row_hash"].encode("ascii"), _sfb(env["signature"])
+                env["device_identity"], env["row_hash"].encode("ascii"), _sfb(env["signature"])
             )
             decrypt_latencies_us.append((time.perf_counter() - t_entry) * 1e6)
     decrypt_total = time.perf_counter() - t_d0

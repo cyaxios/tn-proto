@@ -486,7 +486,7 @@ def _build_alice(tmp_path: Path, frank_did: str) -> dict[str, Any]:
 
     cfg = tn.current_config()
     keystore = Path(cfg.keystore)
-    alice_did = cfg.device.did
+    alice_did = cfg.device.device_identity
 
     # Mint Frank's kits before Alice closes. These admin actions also
     # produce ``tn.recipient.added`` envelopes in Alice's admin log --
@@ -541,7 +541,7 @@ def _build_frank(tmp_path: Path) -> dict[str, Any]:
         pytest.skip("vault e2e test requires the Rust runtime (btn)")
     cfg = tn.current_config()
     keystore = Path(cfg.keystore)
-    frank_did = cfg.device.did
+    frank_did = cfg.device.device_identity
     frank_priv = _read_local_priv(keystore)
     cfg_obj = tn.current_config()
     return {
@@ -639,9 +639,9 @@ def test_alice_to_frank_round_trip(tmp_path: Path, _shared_loop) -> None:
 
     # Sanity: the vault's mongo metadata records the snapshot. Run the
     # find via the shared loop so we don't open a new motor pool.
-    rec = _run(_db.inbox_snapshots().find_one({"from_did": alice["did"]}))
+    rec = _run(_db.inbox_snapshots().find_one({"publisher_identity": alice["did"]}))
     assert rec is not None, "vault did not store metadata for the pushed snapshot"
-    assert rec["to_did"] == frank["did"]
+    assert rec["recipient_identity"] == frank["did"]
 
     # 5. Install Alice's mint-kits into Frank's keystore so decrypts
     #    succeed over the absorbed admin events. (The vault doesn't ship

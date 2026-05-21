@@ -141,7 +141,7 @@ def _emit_tampered_row(envelope: dict[str, Any], reasons: list[str]) -> None:
             "tn.read.tampered_row_skipped",
             {
                 "envelope_event_id": envelope.get("event_id"),
-                "envelope_did": envelope.get("did"),
+                "envelope_device_identity": envelope.get("device_identity"),
                 "envelope_event_type": envelope.get("event_type"),
                 "envelope_sequence": envelope.get("sequence"),
                 "invalid_reasons": sorted(set(reasons)),

@@ -45,7 +45,7 @@ def test_export_offer_round_trip(tmp_path: Path):
 
     manifest, body = _read_manifest(out)
     assert manifest.kind == "offer"
-    assert manifest.from_did == bob_cfg.device.did
+    assert manifest.from_did == bob_cfg.device.device_identity
     assert manifest.to_did == "did:key:z6MkAlice"
     assert "body/package.json" in body
     assert _verify_manifest_signature(manifest)

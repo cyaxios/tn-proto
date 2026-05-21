@@ -69,7 +69,7 @@ def test_admin_add_agent_runtime_dedupes_tn_agents(tmp_path):
     # And the recipients() reducer should show exactly one new tn.agents
     # recipient with our DID (the publisher's self-kit + the new one = 2).
     rcpts = tn.admin.recipients("tn.agents")
-    matching = [r for r in rcpts if r.get("recipient_did") == "did:key:zRuntime2"]
+    matching = [r for r in rcpts if r.get("recipient_identity") == "did:key:zRuntime2"]
     assert len(matching) == 1
 
 

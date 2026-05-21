@@ -134,7 +134,7 @@ def _format_pretty(envelope: dict[str, Any]) -> bytes:
     eid = envelope.get("event_id")
     if isinstance(eid, str) and eid:
         parts.append(f"id={_short(eid, 8)}")
-    did = envelope.get("did")
+    did = envelope.get("device_identity")
     if isinstance(did, str) and did:
         parts.append(f"did={_short(did, 16)}")
 

@@ -26,7 +26,7 @@ def _vault_link_impl(vault_did: str, project_id: str) -> None:
         state = _admin.state()
         for link in state.get("vault_links", []):
             if (
-                link.get("vault_did") == vault_did
+                link.get("vault_identity") == vault_did
                 and link.get("project_id") == project_id
                 and link.get("unlinked_at") is None
             ):
@@ -43,7 +43,7 @@ def _vault_link_impl(vault_did: str, project_id: str) -> None:
         "info",
         "tn.vault.linked",
         {
-            "vault_did": vault_did,
+            "vault_identity": vault_did,
             "project_id": project_id,
             "linked_at": datetime.now(_tz.utc).isoformat(),
         },
@@ -71,7 +71,7 @@ def _vault_unlink_impl(
         "info",
         "tn.vault.unlinked",
         {
-            "vault_did": vault_did,
+            "vault_identity": vault_did,
             "project_id": project_id,
             "reason": reason,
             "unlinked_at": datetime.now(_tz.utc).isoformat(),

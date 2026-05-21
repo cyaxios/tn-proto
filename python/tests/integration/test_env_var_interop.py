@@ -39,8 +39,8 @@ logs:
   path: ${TN_TEST_LOG_PATH:-./.tn/logs/tn.ndjson}
 keystore:
   path: ./.tn/keys
-me:
-  did: ${TN_TEST_DID}
+device:
+  device_identity: ${TN_TEST_DID}
 groups:
   default:
     policy: private

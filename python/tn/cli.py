@@ -1083,7 +1083,7 @@ def cmd_absorb(args: argparse.Namespace) -> int:
         with zipfile.ZipFile(package) as zf:
             if "manifest.json" in zf.namelist():
                 m = json.loads(zf.read("manifest.json").decode("utf-8"))
-                from_did = m.get("from_did")
+                from_did = m.get("publisher_identity")
                 local_did = current_config().device.did
                 if from_did and from_did == local_did and not getattr(
                     args, "allow_self_absorb", False
@@ -1217,7 +1217,7 @@ def cmd_rotate(args: argparse.Namespace) -> int:
             for rec in _admin.recipients(g):
                 if rec.get("revoked"):
                     continue
-                rdid = rec.get("recipient_did")
+                rdid = rec.get("recipient_identity")
                 if not isinstance(rdid, str):
                     continue
                 recipient_groups.setdefault(rdid, []).append(g)
@@ -2202,7 +2202,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 errors.append(
                     f"{yaml_path}: legacy `me:` top-level block is no longer "
                     f"supported (0.4.3a1 renamed it to `device:`). Replace "
-                    f"`me: {{did: ...}}` with `device: {{device_identity: ...}}`."
+                    f"`device: {{device_identity: ...}}` with `device: {{device_identity: ...}}`."
                 )
         for key in required_top:
             if key not in doc:
@@ -2503,7 +2503,7 @@ def build_parser() -> argparse.ArgumentParser:
         "bundle",
         help="Mint a kit_bundle .tnpkg for one recipient (FINDINGS #5 footgun-free).",
     )
-    p_bundle.add_argument("recipient_did", help="DID of the recipient receiving the kit.")
+    p_bundle.add_argument("recipient_identity", help="DID of the recipient receiving the kit.")
     p_bundle.add_argument("out", help="Destination .tnpkg path.")
     p_bundle.add_argument(
         "--yaml", default=None,

@@ -64,10 +64,10 @@ def test_validate_catches_yaml_did_keystore_mismatch(tmp_path: Path):
     _init_default(tmp_path)
     yaml_path = tmp_path / ".tn" / "default" / "tn.yaml"
     doc = pyyaml.safe_load(yaml_path.read_text())
-    real_did = doc["me"]["did"]
+    real_did = doc["device"]["device_identity"]
     fake_did = "did:key:z6MkfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKE"
     assert real_did != fake_did
-    doc["me"]["did"] = fake_did
+    doc["device"]["device_identity"] = fake_did
     yaml_path.write_text(pyyaml.safe_dump(doc, sort_keys=False))
 
     rc = _run_validate(tmp_path)

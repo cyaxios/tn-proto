@@ -53,7 +53,7 @@ class _FakeCfg:
     """Minimal LoadedConfig stand-in for absorb's sealed-box path.
 
     The unwrap step in ``_maybe_unseal_recipient_wrap`` needs only
-    ``cfg.device.did``, ``cfg.device.private_bytes`` and ``cfg.keystore``.
+    ``cfg.device.device_identity``, ``cfg.device.private_bytes`` and ``cfg.keystore``.
     The kit_bundle absorb path also needs ``cfg.keystore`` and a
     ``yaml_path`` for path-equality checks. This mock keeps the test
     fixture independent of the full LoadedConfig shape (which requires
@@ -96,7 +96,7 @@ def test_sealed_kit_bundle_round_trip(tmp_path: Path):
     alice_cfg = _make_publisher_with_btn_group(tmp_path)
     frank_device = DeviceKey.generate()
     frank_cfg = _install_fresh_recipient(tmp_path, frank_device)
-    assert frank_cfg.device.did == frank_device.did
+    assert frank_cfg.device.device_identity == frank_device.did
 
     out = tmp_path / "frank_kit.tnpkg"
     export(
@@ -125,7 +125,7 @@ def test_sealed_kit_bundle_round_trip(tmp_path: Path):
     wrap = body_encryption.get("recipient_wrap")
     assert wrap is not None
     assert wrap["frame"] == "tn-sealed-box-v1"
-    assert wrap["recipient_did"] == frank_device.did
+    assert wrap["recipient_identity"] == frank_device.did
 
     # Frank absorbs.
     receipt = _absorb_dispatch(frank_cfg, out)
@@ -145,7 +145,7 @@ def test_sealed_kit_bundle_wrong_recipient_rejected(tmp_path: Path):
 
     # Bob has a different identity.
     bob_cfg = _install_fresh_recipient(tmp_path, bob_device, name="bob")
-    assert bob_cfg.device.did == bob_device.did
+    assert bob_cfg.device.device_identity == bob_device.did
 
     out = tmp_path / "for_frank.tnpkg"
     export(
@@ -290,7 +290,7 @@ def test_sealed_wrap_aad_lift_attack_rejected(tmp_path: Path):
 def test_seal_for_recipient_requires_to_did(tmp_path: Path):
     alice_cfg = _make_publisher_with_btn_group(tmp_path)
     out = tmp_path / "x.tnpkg"
-    with pytest.raises(ValueError, match="to_did"):
+    with pytest.raises(ValueError, match="recipient_identity"):
         export(out, kind="kit_bundle", cfg=alice_cfg, seal_for_recipient=True)
 
 
@@ -313,11 +313,11 @@ def test_aad_function_omits_wrap_and_sig():
     manifest_dict = {
         "kind": "kit_bundle",
         "version": 1,
-        "from_did": "did:key:zAlice",
+        "publisher_identity": "did:key:zAlice",
         "ceremony_id": "test_ceremony",
         "as_of": "2026-05-04T12:00:00.000+00:00",
         "scope": "kit_bundle",
-        "to_did": "did:key:zFrank",
+        "recipient_identity": "did:key:zFrank",
         "clock": {},
         "event_count": 0,
         "state": {
@@ -328,7 +328,7 @@ def test_aad_function_omits_wrap_and_sig():
                 "ciphertext_sha256": "sha256:abcd",
                 "recipient_wrap": {
                     "frame": "tn-sealed-box-v1",
-                    "recipient_did": "did:key:zFrank",
+                    "recipient_identity": "did:key:zFrank",
                     "ephemeral_x25519_pub_b64": "AAAA",
                     "wrap_nonce_b64": "BBBB",
                     "wrapped_bek_b64": "CCCC",
@@ -355,7 +355,7 @@ def test_unseal_rejects_unsupported_curve():
     # Ed25519 multicodec should cleanly raise.
     bad_wrap = {
         "frame": "tn-sealed-box-v1",
-        "recipient_did": "did:web:example.com",  # not did:key
+        "recipient_identity": "did:web:example.com",  # not did:key
         "ephemeral_x25519_pub_b64": base64.b64encode(b"\x00" * 32).decode(),
         "wrap_nonce_b64": base64.b64encode(b"\x00" * 12).decode(),
         "wrapped_bek_b64": base64.b64encode(b"\x00" * 48).decode(),

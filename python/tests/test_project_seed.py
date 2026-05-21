@@ -303,7 +303,7 @@ def test_project_seed_rejects_non_self_addressed(tmp_path: Path):
     with zipfile.ZipFile(out, "r") as zf:
         manifest_doc = json.loads(zf.read("manifest.json").decode("utf-8"))
         members = {n: zf.read(n) for n in zf.namelist()}
-    manifest_doc["to_did"] = other.did
+    manifest_doc["recipient_identity"] = other.did
     members["manifest.json"] = json.dumps(manifest_doc, indent=2, sort_keys=True).encode("utf-8")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as zf:
         for n, d in members.items():

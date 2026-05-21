@@ -146,8 +146,8 @@ def test_python_reads_browser_built_tnpkg_and_verifies_signature():
     # Manifest fields match what the JS side emitted.
     assert manifest.kind == "kit_bundle"
     assert manifest.version == 1
-    assert manifest.from_did == meta["from_did"]
-    assert manifest.to_did == meta["to_did"]
+    assert manifest.from_did == meta["publisher_identity"]
+    assert manifest.to_did == meta["recipient_identity"]
     assert manifest.ceremony_id == meta["ceremony_id"]
     assert manifest.manifest_signature_b64, "manifest is signed"
 
@@ -230,7 +230,7 @@ def test_browser_extracts_package_key_from_python_built_full_keystore_body(tmp_p
     # tnpkg's body/* entries.
     keystore_dir = cfg.keystore
     expected_priv = (keystore_dir / "local.private").read_bytes()
-    expected_did = cfg.device.did
+    expected_did = cfg.device.device_identity
     assert len(expected_priv) == 32, "Ed25519 seed is 32 bytes"
 
     # Build the body zip the browser would see (same files, no

@@ -111,7 +111,7 @@ def ensure_group(
             doc,
             group,
             pool_size,
-            cfg.device.did,
+            cfg.device.device_identity,
             fields,
             cipher_name=internal_cipher,
         ),
@@ -322,7 +322,7 @@ def _rotate_impl(
             doc,
             group,
             pool,
-            cfg.device.did,
+            cfg.device.device_identity,
             revoke_did,
             new_epoch=new_group.index_epoch,
         ),
@@ -797,7 +797,7 @@ def _resolve_recipient(value: Any) -> _ResolvedRecipient:
         out.public_key = b
         return out
     if isinstance(value, dict):
-        did = value.get("recipient_did") or value.get("did")
+        did = value.get("recipient_identity") or value.get("did")
         leaf = value.get("leaf_index")
         pk = value.get("public_key")
         if pk is None and value.get("x25519_pub_b64") is not None:
@@ -813,7 +813,7 @@ def _resolve_recipient(value: Any) -> _ResolvedRecipient:
         out.leaf_index = leaf
         out.public_key = pk
         return out
-    did = getattr(value, "recipient_did", None)
+    did = getattr(value, "recipient_identity", None)
     leaf = getattr(value, "leaf_index", None)
     pk = getattr(value, "public_key", None)
     if did is None and leaf is None and pk is None:
@@ -835,7 +835,7 @@ def _resolve_btn_did_to_leaf(group: str, recipient_did: str) -> int:
     minted onto multiple active leaves (shouldn't happen, but guard it).
     """
     rows = recipients(group, include_revoked=False)
-    matches = [r for r in rows if r.get("recipient_did") == recipient_did]
+    matches = [r for r in rows if r.get("recipient_identity") == recipient_did]
     if not matches:
         raise ValueError(
             f"tn.admin.revoke_recipient: no active recipient with "
@@ -1291,7 +1291,7 @@ def recipients(group: str, *, include_revoked: bool = False) -> list[dict[str, A
         is_revoked = r.get("active_status") in ("revoked", "retired")
         row = {
             "leaf_index": r["leaf_index"],
-            "recipient_did": r.get("recipient_did"),
+            "recipient_identity": r.get("recipient_identity"),
             "minted_at": r.get("minted_at"),
             "kit_sha256": r.get("kit_sha256"),
             "revoked": is_revoked,
@@ -1350,7 +1350,7 @@ def _fill_reducer_schema_defaults(
     if event_type == "tn.recipient.added":
         merged.setdefault("cipher", "btn")
     elif event_type == "tn.recipient.revoked":
-        merged.setdefault("recipient_did", None)
+        merged.setdefault("recipient_identity", None)
 
 
 class _AdminStateBuilder:
@@ -1393,7 +1393,7 @@ class _AdminStateBuilder:
         self.state["ceremony"] = {
             "ceremony_id": d["ceremony_id"],
             "cipher": d["cipher"],
-            "device_did": d["device_did"],
+            "device_identity": d["device_identity"],
             "created_at": d["created_at"],
         }
 
@@ -1401,7 +1401,7 @@ class _AdminStateBuilder:
         self.state["groups"].append({
             "group": d["group"],
             "cipher": d["cipher"],
-            "publisher_did": d["publisher_did"],
+            "publisher_identity": d["publisher_identity"],
             "added_at": d["added_at"],
         })
 
@@ -1412,7 +1412,7 @@ class _AdminStateBuilder:
         self.by_leaf[(d["group"], leaf)] = {
             "group": d["group"],
             "leaf_index": leaf,
-            "recipient_did": d.get("recipient_did"),
+            "recipient_identity": d.get("recipient_identity"),
             "kit_sha256": d["kit_sha256"],
             "minted_at": ts,
             "active_status": "active",
@@ -1447,15 +1447,15 @@ class _AdminStateBuilder:
         self.state["coupons"].append({
             "group": d["group"],
             "slot": d["slot"],
-            "to_did": d["to_did"],
+            "recipient_identity": d["recipient_identity"],
             "issued_to": d["issued_to"],
             "issued_at": ts,
         })
 
     def _on_enrolment_compiled(self, d: dict, ts: Any) -> None:
-        self.enrolments_by_peer[(d["group"], d["peer_did"])] = {
+        self.enrolments_by_peer[(d["group"], d["peer_identity"])] = {
             "group": d["group"],
-            "peer_did": d["peer_did"],
+            "peer_identity": d["peer_identity"],
             "package_sha256": d["package_sha256"],
             "status": "offered",
             "compiled_at": d["compiled_at"],
@@ -1463,7 +1463,7 @@ class _AdminStateBuilder:
         }
 
     def _on_enrolment_absorbed(self, d: dict, ts: Any) -> None:
-        peer_key = (d["group"], d["from_did"])
+        peer_key = (d["group"], d["publisher_identity"])
         existing = self.enrolments_by_peer.get(peer_key)
         if existing is not None:
             existing["status"] = "absorbed"
@@ -1471,7 +1471,7 @@ class _AdminStateBuilder:
         else:
             self.enrolments_by_peer[peer_key] = {
                 "group": d["group"],
-                "peer_did": d["from_did"],
+                "peer_identity": d["publisher_identity"],
                 "package_sha256": d["package_sha256"],
                 "status": "absorbed",
                 "compiled_at": None,
@@ -1479,15 +1479,15 @@ class _AdminStateBuilder:
             }
 
     def _on_vault_linked(self, d: dict, ts: Any) -> None:
-        self.vault_links_by_did[d["vault_did"]] = {
-            "vault_did": d["vault_did"],
+        self.vault_links_by_did[d["vault_identity"]] = {
+            "vault_identity": d["vault_identity"],
             "project_id": d["project_id"],
             "linked_at": d["linked_at"],
             "unlinked_at": None,
         }
 
     def _on_vault_unlinked(self, d: dict, ts: Any) -> None:
-        link = self.vault_links_by_did.get(d["vault_did"])
+        link = self.vault_links_by_did.get(d["vault_identity"])
         if link is not None:
             link["unlinked_at"] = d["unlinked_at"]
 
@@ -1570,7 +1570,7 @@ def state(group: str | None = None) -> dict:
             state_dict["ceremony"] = {
                 "ceremony_id": cfg.ceremony_id,
                 "cipher": cfg.cipher_name,
-                "device_did": cfg.device.did,
+                "device_identity": cfg.device.device_identity,
                 "created_at": None,
             }
         except RuntimeError:

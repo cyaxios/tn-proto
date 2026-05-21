@@ -80,7 +80,7 @@ def test_admin_log_snapshot_zip_shape_and_signature(tmp_path: Path):
 
     manifest, body = _read_manifest(out)
     assert manifest.kind == "admin_log_snapshot"
-    assert manifest.from_did == cfg.device.did
+    assert manifest.from_did == cfg.device.device_identity
     assert manifest.scope == "admin"
     assert "body/admin.ndjson" in body
     assert manifest.event_count > 0
@@ -262,14 +262,14 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
         "ceremony_id": cfg.ceremony_id,
         "group": group,
         "leaf_index": leaf_index,
-        "recipient_did": "did:key:zForged",
+        "recipient_identity": "did:key:zForged",
         "kit_sha256": "sha256:" + ("0" * 64),
         "cipher": "btn",
         "added_at": forged_ts,
-        "publisher_did": cfg.device.did,
+        "publisher_identity": cfg.device.device_identity,
     }
     forged_row_hash = _compute_row_hash(
-        did=cfg.device.did,
+        did=cfg.device.device_identity,
         timestamp=forged_ts,
         event_id=forged_event_id,
         event_type="tn.recipient.added",
@@ -280,7 +280,7 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
     )
     sig = cfg.device.sign(forged_row_hash.encode("ascii"))
     forged_env = {
-        "did": cfg.device.did,
+        "did": cfg.device.device_identity,
         "timestamp": forged_ts,
         "event_id": forged_event_id,
         "event_type": "tn.recipient.added",
@@ -299,11 +299,11 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
 
     manifest = TnpkgManifest(
         kind="admin_log_snapshot",
-        from_did=cfg.device.did,
+        from_did=cfg.device.device_identity,
         ceremony_id=cfg.ceremony_id,
         as_of=forged_ts,
         scope="admin",
-        clock={cfg.device.did: {"tn.recipient.added": 999_999}},
+        clock={cfg.device.device_identity: {"tn.recipient.added": 999_999}},
         event_count=len(envelopes) + 1,
         head_row_hash=forged_row_hash,
     )

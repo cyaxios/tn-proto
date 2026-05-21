@@ -127,7 +127,7 @@ def main() -> int:
         print("\n--- verifying one entry with ONLY public material ---")
         sig = _signature_from_b64(first_env["signature"])
         ok = DeviceKey.verify(
-            first_env["did"], first_env["row_hash"].encode("ascii"), sig,
+            first_env["device_identity"], first_env["row_hash"].encode("ascii"), sig,
         )
         print(f"  DID      = {first_env['did']}")
         print(f"  row_hash = {first_env['row_hash']}")

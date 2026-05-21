@@ -29,7 +29,7 @@ def main() -> int:
 
         tn.init(yaml_path, log_path=log_path, pool_size=4, cipher="bgw")
         cfg = tn.current_config()
-        print(f"DID:       {cfg.device.did}")
+        print(f"DID:       {cfg.device.device_identity}")
         print(f"keystore:  {cfg.keystore}")
         print(f"log file:  {log_path}")
 

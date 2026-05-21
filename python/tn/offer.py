@@ -57,7 +57,7 @@ def offer(
         ceremony_id=cfg.ceremony_id,
         group=group,
         group_epoch=0,
-        signer_did=cfg.device.did,
+        signer_did=cfg.device.device_identity,
         signer_verify_pub_b64="",
         peer_did=publisher_did,
         payload={"x25519_pub_b64": base64.b64encode(pub).decode("ascii")},

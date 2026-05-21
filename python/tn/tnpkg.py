@@ -114,7 +114,7 @@ class TnpkgManifest:
         out: dict[str, Any] = {
             "kind": self.kind,
             "version": self.version,
-            "from_did": self.from_did,
+            "publisher_identity": self.from_did,
             "ceremony_id": self.ceremony_id,
             "as_of": self.as_of,
             "scope": self.scope,
@@ -122,7 +122,7 @@ class TnpkgManifest:
             "event_count": self.event_count,
         }
         if self.to_did is not None:
-            out["to_did"] = self.to_did
+            out["recipient_identity"] = self.to_did
         if self.head_row_hash is not None:
             out["head_row_hash"] = self.head_row_hash
         if self.state is not None:
@@ -137,18 +137,18 @@ class TnpkgManifest:
             raise ValueError(f"manifest must be a JSON object; got {type(doc).__name__}")
         # Required keys; reject loudly if missing.
         missing = [
-            k for k in ("kind", "version", "from_did", "ceremony_id", "as_of") if k not in doc
+            k for k in ("kind", "version", "publisher_identity", "ceremony_id", "as_of") if k not in doc
         ]
         if missing:
             raise ValueError(f"manifest missing required keys: {missing}")
         return cls(
             kind=str(doc["kind"]),
             version=int(doc["version"]),
-            from_did=str(doc["from_did"]),
+            from_did=str(doc["publisher_identity"]),
             ceremony_id=str(doc["ceremony_id"]),
             as_of=str(doc["as_of"]),
             scope=str(doc.get("scope", "admin")),
-            to_did=(str(doc["to_did"]) if doc.get("to_did") is not None else None),
+            to_did=(str(doc["recipient_identity"]) if doc.get("recipient_identity") is not None else None),
             clock=dict(doc.get("clock") or {}),
             event_count=int(doc.get("event_count", 0)),
             head_row_hash=(

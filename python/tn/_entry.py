@@ -163,7 +163,7 @@ class Entry(BaseModel):
             level=env.get("level", ""),
             message=message,
             fields=fields,
-            did=env["did"],
+            did=env["device_identity"],
             event_id=env["event_id"],
             sequence=env["sequence"],
             run_id=run_id,

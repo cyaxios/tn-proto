@@ -244,7 +244,7 @@ def test_absorb_writes_contacts_yaml(tmp_path: Path):
     body = _valid_body(account_id="01J9XACCT", label="frank")
     pkg_bytes = _signed_contact_update_zip(
         signer=signer,
-        to_did=cfg.device.did,
+        to_did=cfg.device.device_identity,
         body=body,
     )
     pkg_path = tmp_path / "contact.tnpkg"
@@ -271,7 +271,7 @@ def test_absorb_rejects_invalid_contact_update_body(tmp_path: Path):
     bad_body = {"account_id": "only-this"}
     pkg_bytes = _signed_contact_update_zip(
         signer=signer,
-        to_did=cfg.device.did,
+        to_did=cfg.device.device_identity,
         body=bad_body,
     )
     pkg_path = tmp_path / "bad.tnpkg"
@@ -291,7 +291,7 @@ def test_absorb_rejects_signature_tampering(tmp_path: Path):
     signer = DeviceKey.generate()
     pkg_bytes = _signed_contact_update_zip(
         signer=signer,
-        to_did=cfg.device.did,
+        to_did=cfg.device.device_identity,
         body=_valid_body(),
     )
     # Tamper with the body so the manifest signature no longer verifies.

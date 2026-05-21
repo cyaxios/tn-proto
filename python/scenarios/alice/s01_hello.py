@@ -33,7 +33,7 @@ class AliceHello(Scenario):
 
         cfg = tn.current_config()
         ctx.record("cipher", cfg.cipher_name)
-        ctx.record("did", cfg.device.did)
+        ctx.record("did", cfg.device.device_identity)
         ctx.record("recipient_count", 1)
         ctx.record("group_count", 1)
         ctx.record("handler_count", 1)

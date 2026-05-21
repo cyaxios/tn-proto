@@ -104,7 +104,7 @@ class ZenohPullHandler(TNHandler):
     subscribe_pattern
         Bus key expression to subscribe to. Defaults to
         ``"tn/inbox/{did}/**"`` with ``{did}`` substituted from
-        ``cfg.device.did`` at startup.
+        ``cfg.device.device_identity`` at startup.
     on_absorb_error
         ``"log"`` (default) — failures are logged, the subscription
         keeps running. ``"raise"`` — failures propagate out of the
@@ -212,7 +212,7 @@ class ZenohPullHandler(TNHandler):
                 f"before instantiating this handler."
             )
 
-        my_did = cfg.device.did
+        my_did = cfg.device.device_identity
         sub_key = self._subscribe_pattern.format(did=my_did)
 
         # Mint creds (skip in no-auth mode).

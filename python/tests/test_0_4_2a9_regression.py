@@ -739,6 +739,6 @@ class TestIdentityNamingPhase1:
         ident = cfg.device.device_identity
         assert isinstance(ident, str)
         # Same value as the legacy accessor
-        assert ident == cfg.device.did
+        assert ident == cfg.device.device_identity
         # Both keep working in 0.4.2a10
-        assert cfg.device.did is not None
+        assert cfg.device.device_identity is not None

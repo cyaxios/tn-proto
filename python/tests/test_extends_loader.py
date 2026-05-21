@@ -66,13 +66,13 @@ class TestExtendsResolutionMechanics:
             _yaml.safe_dump(
                 {
                     "ceremony": {"id": "P1", "cipher": "btn", "sign": True},
-                    "me": {"did": "did:key:zParent"},
+                    "device": {"device_identity": "did:key:zParent"},
                     "keystore": {"path": "./keys"},
                     "groups": {
                         "default": {
                             "policy": "private",
                             "cipher": "btn",
-                            "recipients": [{"did": "did:key:zParent"}],
+                            "recipients": [{"recipient_identity": "did:key:zParent"}],
                         }
                     },
                     "default_policy": "private",
@@ -153,7 +153,7 @@ class TestExtendsResolutionMechanics:
         _, child = self._setup_pair(tmp_path)
         # Child illegally tries to set me.did.
         doc = _yaml.safe_load(child.read_text(encoding="utf-8"))
-        doc["me"] = {"did": "did:key:zCHILD_TRYING_TO_OVERRIDE"}
+        doc["device"] = {"did": "did:key:zCHILD_TRYING_TO_OVERRIDE"}
         child.write_text(_yaml.safe_dump(doc), encoding="utf-8")
 
         cdoc = _config._read_yaml_doc(child)
@@ -212,7 +212,7 @@ class TestStreamYamlIsMinimal:
         h = tn.init("payments", profile="transaction", project_dir=tmp_path)
         cfg = _config.load(h.yaml_path)
         # Loader resolved extends — cfg has full identity + groups.
-        assert cfg.device.did.startswith("did:key:z")
+        assert cfg.device.device_identity.startswith("did:key:z")
         assert "default" in cfg.groups
 
     def test_three_streams_share_identity(self, tmp_path):
@@ -221,7 +221,7 @@ class TestStreamYamlIsMinimal:
         b = tn.init("b", profile="audit", project_dir=tmp_path)
         c = tn.init("c", profile="telemetry", project_dir=tmp_path)
         # Same DID across all three.
-        assert a.cfg.device.did == b.cfg.device.did == c.cfg.device.did
+        assert a.cfg.device.device_identity == b.cfg.device.device_identity == c.cfg.device.device_identity
         # Same keystore path.
         assert a.cfg.keystore == b.cfg.keystore == c.cfg.keystore
         # Distinct ceremony_ids.

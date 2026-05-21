@@ -86,7 +86,7 @@ class DeviceKey:
 
     0.4.3a1 flipped the canonical name from `did` to `device_identity`
     (0.4.2a10 introduced the new name as an alias; this release inverts
-    the alias). `cfg.device.did` remains as a back-compat property
+    the alias). `cfg.device.device_identity` remains as a back-compat property
     returning the same string — old call-sites continue to work
     indefinitely. See
     `docs/superpowers/specs/2026-05-20-identity-and-key-naming.md`.
@@ -99,7 +99,7 @@ class DeviceKey:
     @property
     def did(self) -> str:
         """Back-compat alias for `device_identity`. Pre-0.4.3a1 code
-        reached for `cfg.device.did`; the alias keeps that working.
+        reached for `cfg.device.device_identity`; the alias keeps that working.
         New code should use `device_identity` directly."""
         return self.device_identity
 

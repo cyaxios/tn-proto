@@ -93,7 +93,7 @@ def test_cold_path_matches_admin_state(tmp_path):
         for r in expected["recipients"]
     )
     assert cached_recs == expected_recs
-    assert cached["ceremony"]["device_did"] == expected["ceremony"]["device_did"]
+    assert cached["ceremony"]["device_identity"] == expected["ceremony"]["device_identity"]
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ def test_orphan_tmp_file_is_ignored(tmp_path):
     tn.init(yaml_path)
     s = tn.admin.cache.cached_admin_state()
     assert any(
-        r.get("recipient_did") == "did:key:zAlice" for r in s["recipients"]
+        r.get("recipient_identity") == "did:key:zAlice" for r in s["recipients"]
     )
 
 
@@ -237,14 +237,14 @@ def test_revocation_is_terminal_leaf_reuse(tmp_path):
         "ceremony_id": cfg.ceremony_id,
         "group": "default",
         "leaf_index": leaf_index,
-        "recipient_did": "did:key:zForged",
+        "recipient_identity": "did:key:zForged",
         "kit_sha256": "sha256:" + ("0" * 64),
         "cipher": "btn",
         "added_at": forged_ts,
-        "publisher_did": cfg.device.did,
+        "publisher_identity": cfg.device.device_identity,
     }
     forged_row_hash = _compute_row_hash(
-        did=cfg.device.did,
+        did=cfg.device.device_identity,
         timestamp=forged_ts,
         event_id=forged_event_id,
         event_type="tn.recipient.added",
@@ -255,7 +255,7 @@ def test_revocation_is_terminal_leaf_reuse(tmp_path):
     )
     sig = cfg.device.sign(forged_row_hash.encode("ascii"))
     forged_env = {
-        "did": cfg.device.did,
+        "did": cfg.device.device_identity,
         "timestamp": forged_ts,
         "event_id": forged_event_id,
         "event_type": "tn.recipient.added",
@@ -337,14 +337,14 @@ def test_same_coordinate_fork_detection(tmp_path):
         "ceremony_id": cfg.ceremony_id,
         "group": "default",
         "leaf_index": 42,
-        "recipient_did": "did:key:zEvilTwin",
+        "recipient_identity": "did:key:zEvilTwin",
         "kit_sha256": "sha256:" + ("9" * 64),
         "cipher": "btn",
         "added_at": forged_ts,
-        "publisher_did": cfg.device.did,
+        "publisher_identity": cfg.device.device_identity,
     }
     forged_row_hash = _compute_row_hash(
-        did=cfg.device.did,
+        did=cfg.device.device_identity,
         timestamp=forged_ts,
         event_id="forged-coord-fork",
         event_type="tn.recipient.added",
@@ -355,7 +355,7 @@ def test_same_coordinate_fork_detection(tmp_path):
     )
     sig = cfg.device.sign(forged_row_hash.encode("ascii"))
     forged_env = {
-        "did": cfg.device.did,
+        "did": cfg.device.device_identity,
         "timestamp": forged_ts,
         "event_id": "forged-coord-fork",
         "event_type": "tn.recipient.added",
@@ -378,7 +378,7 @@ def test_same_coordinate_fork_detection(tmp_path):
         if isinstance(c, SameCoordinateFork)
     ]
     assert len(forks) == 1
-    assert forks[0].did == cfg.device.did
+    assert forks[0].did == cfg.device.device_identity
     assert forks[0].sequence == seq
 
 
@@ -435,5 +435,5 @@ def test_direct_instantiation_per_cfg(tmp_path):
     cache = AdminStateCache(cfg)
     s = cache.state()
     assert any(
-        r.get("recipient_did") == "did:key:zAlice" for r in s["recipients"]
+        r.get("recipient_identity") == "did:key:zAlice" for r in s["recipients"]
     )

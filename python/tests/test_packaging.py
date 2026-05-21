@@ -11,7 +11,7 @@ def test_canonical_bytes_is_deterministic():
         signer_did="did:key:z6MkAlice",
         signer_verify_pub_b64="AAAA",
         peer_did="did:key:z6MkBob",
-        payload={"publisher_did": "did:key:z6MkAlice", "sender_pub_b64": "BBBB"},
+        payload={"publisher_identity": "did:key:z6MkAlice", "sender_pub_b64": "BBBB"},
         compiled_at="2026-04-21T17:22:00Z",
     )
     assert _canonical_bytes(pkg) == _canonical_bytes(pkg)

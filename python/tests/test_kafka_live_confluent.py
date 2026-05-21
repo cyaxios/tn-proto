@@ -206,7 +206,7 @@ handlers:
     sig_ok = 0
     for env in received:
         if DeviceKey.verify(
-            env["did"], env["row_hash"].encode("ascii"), _signature_from_b64(env["signature"])
+            env["device_identity"], env["row_hash"].encode("ascii"), _signature_from_b64(env["signature"])
         ):
             sig_ok += 1
     print(f"signatures verify after Kafka round-trip: {sig_ok}/{len(received)}")

@@ -61,11 +61,11 @@ def compile_enrolment(cfg: LoadedConfig, group: str, peer_did: str) -> Package:
         ceremony_id=cfg.ceremony_id,
         group=group,
         group_epoch=gcfg.index_epoch,
-        signer_did=cfg.device.did,
+        signer_did=cfg.device.device_identity,
         signer_verify_pub_b64="",
         peer_did=peer_did,
         payload={
-            "publisher_did": cfg.device.did,
+            "publisher_identity": cfg.device.device_identity,
             "sender_pub_b64": base64.b64encode(sender_pub).decode("ascii"),
         },
         compiled_at=_now_iso(),
