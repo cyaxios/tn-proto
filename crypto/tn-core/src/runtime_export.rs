@@ -633,7 +633,7 @@ fn append_admin_envelopes(admin_log: &Path, envelopes: &[Value]) -> Result<()> {
 
 fn envelope_well_formed(env: &Value) -> bool {
     for k in [
-        "did",
+        "device_identity",
         "timestamp",
         "event_id",
         "event_type",

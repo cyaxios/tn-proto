@@ -3913,8 +3913,8 @@ fn apply_schema_defaults(event_type: &str, mut merged: Map<String, Value>) -> Va
     if event_type == "tn.recipient.added" && !merged.contains_key("cipher") {
         merged.insert("cipher".into(), Value::String("btn".into()));
     }
-    if event_type == "tn.recipient.revoked" && !merged.contains_key("recipient_did") {
-        merged.insert("recipient_did".into(), Value::Null);
+    if event_type == "tn.recipient.revoked" && !merged.contains_key("recipient_identity") {
+        merged.insert("recipient_identity".into(), Value::Null);
     }
     Value::Object(merged)
 }
