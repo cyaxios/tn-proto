@@ -2426,7 +2426,7 @@ impl Runtime {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let did = env
-                .get("did")
+                .get("device_identity")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
