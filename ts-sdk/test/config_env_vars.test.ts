@@ -127,8 +127,8 @@ test("loadConfig propagates env-var substitution end-to-end", async () => {
       "  path: ./.tn/logs/tn.ndjson\n" +
       "keystore:\n" +
       "  path: ./.tn/keys\n" +
-      "me:\n" +
-      "  did: did:key:zABC\n" +
+      "device:\n" +
+      "  device_identity: did:key:zABC\n" +
       "groups:\n" +
       "  default:\n" +
       "    policy: private\n" +

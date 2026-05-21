@@ -68,14 +68,14 @@ function makeCeremony(opts: {
 }
 
 function recipientLine(did: string): string {
-  return `    recipients:\n    - did: ${did}\n`;
+  return `    recipients:\n    - recipient_identity: ${did}\n`;
 }
 
 test("loadConfig inverts groups[<g>].fields into fieldToGroups", () => {
   const c = makeCeremony({
     groupNames: ["default", "a", "b"],
     yamlBody: (did) =>
-      `ceremony:\n  id: mg_test\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\nme:\n  did: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}  a:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - email\n  b:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - email\nfields: {}\n`,
+      `ceremony:\n  id: mg_test\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\ndevice:\n  device_identity: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}  a:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - email\n  b:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - email\nfields: {}\n`,
   });
   try {
     const cfg = loadConfig(c.yamlPath);
@@ -89,7 +89,7 @@ test("emit encrypts a field into every group it's declared under", () => {
   const c = makeCeremony({
     groupNames: ["default", "a", "b"],
     yamlBody: (did) =>
-      `ceremony:\n  id: mg_emit\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\nme:\n  did: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}  a:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - email\n  b:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - email\nfields: {}\n`,
+      `ceremony:\n  id: mg_emit\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\ndevice:\n  device_identity: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}  a:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - email\n  b:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - email\nfields: {}\n`,
   });
   try {
     const rt = NodeRuntime.init(c.yamlPath);
@@ -119,7 +119,7 @@ test("fieldToGroups list is sorted alphabetically (insertion-order independent)"
   const c = makeCeremony({
     groupNames: ["default", "zeta", "alpha"],
     yamlBody: (did) =>
-      `ceremony:\n  id: mg_sort\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\nme:\n  did: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}  zeta:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - x\n  alpha:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - x\nfields: {}\n`,
+      `ceremony:\n  id: mg_sort\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\ndevice:\n  device_identity: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}  zeta:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - x\n  alpha:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - x\nfields: {}\n`,
   });
   try {
     const cfg = loadConfig(c.yamlPath);
@@ -135,7 +135,7 @@ test("field routed to an unknown group raises at load", () => {
   const c = makeCeremony({
     groupNames: ["default"],
     yamlBody: (did) =>
-      `ceremony:\n  id: mg_unknown\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\nme:\n  did: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}fields:\n  x:\n    group: ghost_group\n`,
+      `ceremony:\n  id: mg_unknown\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\ndevice:\n  device_identity: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}fields:\n  x:\n    group: ghost_group\n`,
   });
   try {
     assert.throws(() => loadConfig(c.yamlPath), /unknown group/);
@@ -148,7 +148,7 @@ test("field in both public_fields and a group is rejected", () => {
   const c = makeCeremony({
     groupNames: ["default", "a"],
     yamlBody: (did) =>
-      `ceremony:\n  id: mg_amb\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\nme:\n  did: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\n- email\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}  a:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - email\nfields: {}\n`,
+      `ceremony:\n  id: mg_amb\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\ndevice:\n  device_identity: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\n- email\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}  a:\n    policy: private\n    cipher: btn\n${recipientLine(did)}    fields:\n    - email\nfields: {}\n`,
   });
   try {
     assert.throws(() => loadConfig(c.yamlPath), /public_fields and a group/);
@@ -162,7 +162,7 @@ test("legacy flat fields: block still loads with a deprecation warning", () => {
   const c = makeCeremony({
     groupNames: ["default", "secrets"],
     yamlBody: (did) =>
-      `ceremony:\n  id: mg_legacy\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\nme:\n  did: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}  secrets:\n    policy: private\n    cipher: btn\n${recipientLine(did)}fields:\n  password:\n    group: secrets\n`,
+      `ceremony:\n  id: mg_legacy\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\ndevice:\n  device_identity: ${did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n${recipientLine(did)}  secrets:\n    policy: private\n    cipher: btn\n${recipientLine(did)}fields:\n  password:\n    group: secrets\n`,
   });
   try {
     const captured: string[] = [];

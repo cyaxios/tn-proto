@@ -78,8 +78,12 @@ import type { ReadEntry } from "../core/read_shape.js";
 export type { ReadEntry };
 
 // Envelope fields that are NOT public fields and NOT group payloads.
+// 0.4.3a1 phase G: wire key flipped from `did` to `device_identity` so the
+// reserved-keys set must follow. Otherwise the read-side row_hash recompute
+// leaks `device_identity` into `publicFields`, double-hashes it, and every
+// verify check fails. Matches python/tn/reader.py:_envelope_reserved post-flip.
 const _ENVELOPE_RESERVED = new Set([
-  "did",
+  "device_identity",
   "timestamp",
   "event_id",
   "event_type",
@@ -194,9 +198,9 @@ export class NodeRuntime {
       }
     }
     const keystore = loadKeystore(config.keystorePath);
-    if (keystore.device.did !== config.me.did) {
+    if (keystore.device.did !== config.device.device_identity) {
       throw new Error(
-        `keystore did (${keystore.device.did}) does not match yaml me.did (${config.me.did})`,
+        `keystore did (${keystore.device.did}) does not match yaml device.device_identity (${config.device.device_identity})`,
       );
     }
     const logDir = dirname(config.logPath);
@@ -902,7 +906,7 @@ export class NodeRuntime {
 
       const manifest = newManifest({
         kind: "kit_bundle",
-        fromDid: this.config.me.did,
+        fromDid: this.config.device.device_identity,
         ceremonyId: this.config.ceremonyId,
         scope: "kit_bundle",
         toDid: opts.runtimeDid,
@@ -969,7 +973,7 @@ export class NodeRuntime {
             ceremony: {
               ceremonyId: this.config.ceremonyId,
               cipher: this.config.cipher,
-              deviceDid: this.config.me.did,
+              deviceDid: this.config.device.device_identity,
               createdAt: null,
             },
           }
@@ -1134,7 +1138,7 @@ export class NodeRuntime {
       toDid?: string;
     } = {
       kind,
-      fromDid: this.config.me.did,
+      fromDid: this.config.device.device_identity,
       ceremonyId: this.config.ceremonyId,
       scope: opts.scope ?? extras.scope ?? _defaultScope(kind),
     };
@@ -1295,7 +1299,7 @@ export class NodeRuntime {
     }
     const manifest = newManifest({
       kind: "kit_bundle",
-      fromDid: this.config.me.did,
+      fromDid: this.config.device.device_identity,
       ceremonyId: this.config.ceremonyId,
       scope: "kit_bundle",
       toDid: runtimeDid,
@@ -2396,7 +2400,14 @@ function _defaultScope(kind: ManifestKind | string): string {
 }
 
 function _envelopeWellFormed(env: Record<string, unknown>): boolean {
-  for (const k of ["did", "timestamp", "event_id", "event_type", "row_hash", "signature"]) {
+  for (const k of [
+    "device_identity",
+    "timestamp",
+    "event_id",
+    "event_type",
+    "row_hash",
+    "signature",
+  ]) {
     if (typeof env[k] !== "string") return false;
   }
   return true;
@@ -2573,8 +2584,8 @@ handlers:
   # would observe an empty log.
   rotate_on_init: false
 - kind: stdout
-me:
-  did: ${dk.did}
+device:
+  device_identity: ${dk.did}
 public_fields:
 - timestamp
 - event_id
@@ -2628,12 +2639,12 @@ groups:
     policy: private
     cipher: btn
     recipients:
-    - did: ${dk.did}
+    - recipient_identity: ${dk.did}
   tn.agents:
     policy: private
     cipher: btn
     recipients:
-    - did: ${dk.did}
+    - recipient_identity: ${dk.did}
     fields:
     - instruction
     - use_for

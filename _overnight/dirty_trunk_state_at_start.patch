@@ -1,0 +1,561 @@
+_scratch_bench/bench_volume_results.json  | 320 +++++++++++++++---------------
+ python/scripts/round_trip_smoke.py        |   4 +-
+ python/tests/test_absorb.py               |   4 +-
+ python/tests/test_admin_log.py            |   4 +-
+ python/tests/test_browser_wasm_interop.py |   4 +-
+ python/tests/test_btn_keystore.py         |  37 +++-
+ python/tests/test_compile.py              |   2 +-
+ python/tests/test_contact_update_tnpkg.py |   8 +-
+ python/tests/test_enrolment_events.py     |   2 +-
+ python/tests/test_export_absorb.py        |   6 +-
+ python/tests/test_identity_seed.py        |  14 +-
+ python/tests/test_offer.py                |   2 +-
+ python/tests/test_packaging.py            |  12 +-
+ python/tests/test_project_seed.py         |   4 +-
+ python/tests/test_reconcile.py            |   2 +-
+ python/tests/test_tnpkg_interop.py        |   4 +-
+ python/tests/test_vault_push_handler.py   |   2 +-
+ python/tn/_dispatch.py                    |   4 +-
+ python/tn/absorb.py                       |   6 +-
+ python/tn/admin/__init__.py               |  25 ++-
+ python/tn/btn_keystore.py                 |  66 +++---
+ python/tn/compile.py                      |   4 +-
+ python/tn/config.py                       |   2 +-
+ python/tn/export.py                       |   8 +-
+ python/tn/offer.py                        |   2 +-
+ python/tn/reader.py                       |  13 +-
+ python/tn/tnpkg.py                        |  14 +-
+ ts-sdk/src/_log_fields.ts                 |  97 +++++++--
+ ts-sdk/src/index.ts                       |  33 ++-
+ ts-sdk/src/tn.ts                          | 189 ++++++++++++------
+ ts-sdk/test/context_verbs.test.ts         |  72 ++++++-
+ ts-sdk/test/log_fields.test.ts            |  21 ++
+ ts-sdk/test/tn_init.test.ts               |  17 +-
+ 33 files changed, 650 insertions(+), 354 deletions(-)
+
+--- Changes ---
+
+_scratch_bench/bench_volume_results.json
+  @@ -4,279 +4,279 @@
+  -    "wall_total_ms": 301.71540000000005,
+  -    "mean_us": 60.34308,
+  -    "p50_us": 55.9,
+  -    "p95_us": 82.6,
+  -    "p99_us": 114.1,
+  -    "max_us": 247.4,
+  -    "last_us": 54.8,
+  -    "throughput_per_s": 16571
+  +    "wall_total_ms": 305.8948,
+  +    "mean_us": 61.17896,
+  +    "p50_us": 56.4,
+  +    "p95_us": 89.2,
+  +    "p99_us": 132.2,
+  +    "max_us": 357.0,
+  +    "last_us": 64.9,
+  +    "throughput_per_s": 16345
+     },
+     {
+       "profile": "telemetry",
+       "size_label": "256B",
+       "payload_bytes": 193,
+       "n": 5000,
+  -    "wall_total_ms": 286.2208,
+  -    "mean_us": 57.24416,
+  -    "p50_us": 53.7,
+  -    "p95_us": 75.4,
+  -    "p99_us": 113.1,
+  -    "max_us": 230.5,
+  -    "last_us": 58.6,
+  -    "throughput_per_s": 17469
+  +    "wall_total_ms": 295.38120000000004,
+  +    "mean_us": 59.07624,
+  +    "p50_us": 56.0,
+  +    "p95_us": 80.0,
+  +    "p99_us": 104.3,
+  +    "max_us": 386.3,
+  +    "last_us": 58.0,
+  +    "throughput_per_s": 16927
+     },
+     {
+       "profile": "telemetry",
+       "size_label": "1KB",
+       "payload_bytes": 971,
+       "n": 5000,
+  -    "wall_total_ms": 504.3408,
+  -    "mean_us": 100.86816,
+  -    "p50_us": 89.5,
+  -    "p95_us": 158.0,
+  -    "p99_us": 198.2,
+  -    "max_us": 283.7,
+  -    "last_us": 108.0,
+  -    "throughput_per_s": 9913
+  +    "wall_total_ms": 511.2131,
+  +    "mean_us": 102.24262,
+  +    "p50_us": 93.2,
+  +    "p95_us": 142.0,
+  +    "p99_us": 180.2,
+  +    "max_us": 429.6,
+  +    "last_us": 92.2,
+  +    "throughput_per_s": 9780
+     },
+     {
+       "profile": "telemetry",
+       "size_label": "2KB",
+       "payload_bytes": 1951,
+       "n": 5000,
+  -    "wall_total_ms": 665.3219,
+  -    "mean_us": 133.06438,
+  -    "p50_us": 123.9,
+  -    "p95_us": 176.3,
+  -    "p99_us": 242.2,
+  -    "max_us": 398.8,
+  -    "last_us": 211.9,
+  -    "throughput_per_s": 7515
+  +    "wall_total_ms": 699.5984,
+  +    "mean_us": 139.91968,
+  +    "p50_us": 129.5,
+  +    "p95_us": 193.2,
+  +    "p99_us": 258.2,
+  +    "max_us": 577.6,
+  +    "last_us": 124.8,
+  +    "throughput_per_s": 7146
+     },
+     {
+       "profile": "stdout",
+       "size_label": "128B",
+       "payload_bytes": 113,
+       "n": 5000,
+  -    "wall_total_ms": 312.4495,
+  -    "mean_us": 62.4899,
+  -    "p50_us": 51.7,
+  -    "p95_us": 108.6,
+  -    "p99_us": 147.4,
+  -    "max_us": 396.0,
+  -    "last_us": 54.3,
+  -    "throughput_per_s": 16002
+  +    "wall_total_ms": 288.6555,
+  +    "mean_us": 57.7311,
+  +    "p50_us": 54.1,
+  +    "p95_us": 78.7,
+  ... (244 lines truncated)
+  +160 -160
+
+python/scripts/round_trip_smoke.py
+  @@ -97,8 +97,8 @@ def main() -> int:
+  -        print(f"   manifest from_did = {manifest.from_did}")
+  -        print(f"   manifest to_did = {manifest.to_did}")
+  +        print(f"   manifest from_did = {manifest.publisher_identity}")
+  +        print(f"   manifest to_did = {manifest.recipient_identity}")
+           tn.flush_and_close()
+   
+           # 3. POST it to the vault using the publisher's identity.
+  +2 -2
+
+python/tests/test_absorb.py
+  @@ -68,9 +68,9 @@ def test_absorb_rejects_unsupported_kind(tmp_path: Path):
+  -        signer_did="did:key:x",
+  +        device_identity="did:key:x",
+           signer_verify_pub_b64="",
+  -        peer_did="did:key:y",
+  +        recipient_identity="did:key:y",
+           payload={},
+           compiled_at="2026-04-21T00:00:00Z",
+       )
+  +2 -2
+
+python/tests/test_admin_log.py
+  @@ -80,7 +80,7 @@ def test_admin_log_snapshot_zip_shape_and_signature(tmp_path: Path):
+  -    assert manifest.from_did == cfg.device.device_identity
+  +    assert manifest.publisher_identity == cfg.device.device_identity
+       assert manifest.scope == "admin"
+       assert "body/admin.ndjson" in body
+       assert manifest.event_count > 0
+  @@ -299,7 +299,7 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
+  -        from_did=cfg.device.device_identity,
+  +        publisher_identity=cfg.device.device_identity,
+           ceremony_id=cfg.ceremony_id,
+           as_of=forged_ts,
+           scope="admin",
+  +2 -2
+
+python/tests/test_browser_wasm_interop.py
+  @@ -146,8 +146,8 @@ def test_python_reads_browser_built_tnpkg_and_verifies_signature():
+  -    assert manifest.from_did == meta["publisher_identity"]
+  -    assert manifest.to_did == meta["recipient_identity"]
+  +    assert manifest.publisher_identity == meta["publisher_identity"]
+  +    assert manifest.recipient_identity == meta["recipient_identity"]
+       assert manifest.ceremony_id == meta["ceremony_id"]
+       assert manifest.manifest_signature_b64, "manifest is signed"
+   
+  +2 -2
+
+python/tests/test_btn_keystore.py
+  @@ -68,37 +68,54 @@ def test_load_retired_states_skips_non_numeric_suffix(tmp_path: Path):
+  -def test_promote_pending_archives_active_at_epoch(tmp_path: Path):
+  +def test_promote_pending_swaps_pending_into_active(tmp_path: Path):
+  +    """Happy path: write_retired_pair has already archived the prior
+  +    generation as the canonical RetiredPublisherState; promote_pending
+  +    just removes the now-redundant active files and renames pending →
+  +    active."""
+       ks = BtnKeystore(tmp_path)
+       ks.write_active("default", state_bytes=b"E0_STATE", self_kit=b"E0_KIT")
+       ks.write_pending("default", state_bytes=b"E1_STATE", self_kit=b"E1_KIT")
+  +    # Archive the prior generation FIRST (this is what cipher.rotate()
+  +    # does — writes RetiredPublisherState wire bytes, distinct from the
+  +    # raw PublisherState bytes that were in `default.btn.state`).
+  +    ks.write_retired_pair(
+  +        "default", epoch=0,
+  +        state_bytes=b"E0_RETIRED_BYTES", self_kit=b"E0_KIT",
+  +    )
+   
+       ks.promote_pending("default", retiring_epoch=0)
+   
+       assert (tmp_path / "default.btn.state").read_bytes() == b"E1_STATE"
+       assert (tmp_path / "default.btn.mykit").read_bytes() == b"E1_KIT"
+  -    assert (tmp_path / "default.btn.state.retired.0").read_bytes() == b"E0_STATE"
+  +    # Retired archive is intact (NOT overwritten by promote_pending).
+  +    assert (tmp_path / "default.btn.state.retired.0").read_bytes() == b"E0_RETIRED_BYTES"
+       assert (tmp_path / "default.btn.mykit.retired.0").read_bytes() == b"E0_KIT"
+  +    # Pending files cleared by the rename.
+       assert not (tmp_path / "default.btn.state.pending").exists()
+       assert not (tmp_path / "default.btn.mykit.pending").exists()
+   
+   
+  -def test_promote_pending_refuses_retired_collision(tmp_path: Path):
+  +def test_promote_pending_refuses_missing_retired_archive(tmp_path: Path):
+  +    """Forward secrecy guard: if write_retired_pair didn't run, the
+  +    prior master_seed is about to be lost when promote_pending replaces
+  +    the active state. Refuse rather than silently delete."""
+       ks = BtnKeystore(tmp_path)
+  -    ks.write_active("default", state_bytes=b"a", self_kit=b"k")
+  -    # Pre-existing retired pair at the epoch we're about to promote into.
+  -    (tmp_path / "default.btn.state.retired.0").write_bytes(b"stale")
+  -    (tmp_path / "default.btn.mykit.retired.0").write_bytes(b"stale")
+  -    ks.write_pending("default", state_bytes=b"new", self_kit=b"new")
+  +    ks.write_active("default", state_bytes=b"E0", self_kit=b"E0K")
+  +    ks.write_pending("default", state_bytes=b"E1", self_kit=b"E1K")
+  +    # No write_retired_pair() called.
+   
+  -    with pytest.raises(FileExistsError):
+  +    with pytest.raises(FileNotFoundError):
+           ks.promote_pending("default", retiring_epoch=0)
+   
+   
+   def test_promote_pending_refuses_missing_pending(tmp_path: Path):
+       ks = BtnKeystore(tmp_path)
+       ks.write_active("default", state_bytes=b"a", self_kit=b"k")
+  -    # No write_pending() called.
+  +    # write_retired_pair did run, but no write_pending().
+  +    ks.write_retired_pair(
+  +        "default", epoch=0, state_bytes=b"r", self_kit=b"r",
+  +    )
+       with pytest.raises(FileNotFoundError):
+           ks.promote_pending("default", retiring_epoch=0)
+   
+  +27 -10
+
+python/tests/test_compile.py
+  @@ -18,7 +18,7 @@ def test_compile_enrolment_produces_signed_package(tmp_path: Path):
+  -    assert pkg.peer_did == "did:key:z6MkBob"
+  +    assert pkg.recipient_identity == "did:key:z6MkBob"
+       assert pkg.ceremony_id == cfg.ceremony_id
+       assert "sender_pub_b64" in pkg.payload
+       assert len(base64.b64decode(pkg.payload["sender_pub_b64"])) == 32
+  +1 -1
+
+python/tests/test_contact_update_tnpkg.py
+  @@ -69,8 +69,8 @@ def _signed_contact_update_zip(
+  -        from_did=signer.did,
+  -        to_did=to_did,
+  +        publisher_identity=signer.did,
+  +        recipient_identity=to_did,
+           ceremony_id=ceremony_id,
+           as_of=datetime.now(timezone.utc).isoformat(),
+           scope="default",
+  @@ -124,8 +124,8 @@ def test_signed_contact_update_manifest_round_trips(tmp_path: Path):
+  -    assert manifest.from_did == signer.did
+  -    assert manifest.to_did == "did:key:z6MkRecipient"
+  +    assert manifest.publisher_identity == signer.did
+  +    assert manifest.recipient_identity == "did:key:z6MkRecipient"
+       assert _verify_manifest_signature(manifest) is True
+       assert "body/contact_update.json" in body
+   
+  +4 -4
+
+python/tests/test_enrolment_events.py
+  @@ -128,7 +128,7 @@ def test_compile_enrolment_direct_call_emits_event(tmp_path):
+  -        f"expected >=1 enrolment for peer_did={peer_did!r}, got {state['enrolments']}"
+  +        f"expected >=1 enrolment for to_did={peer_did!r}, got {state['enrolments']}"
+       )
+       raw_envs = [
+           e for e in _enrolments_from_admin_log(yaml) if e.get("peer_identity") == peer_did
+  +1 -1
+
+python/tests/test_export_absorb.py
+  @@ -45,8 +45,8 @@ def test_export_offer_round_trip(tmp_path: Path):
+  -    assert manifest.from_did == bob_cfg.device.device_identity
+  -    assert manifest.to_did == "did:key:z6MkAlice"
+  +    assert manifest.publisher_identity == bob_cfg.device.device_identity
+  +    assert manifest.recipient_identity == "did:key:z6MkAlice"
+       assert "body/package.json" in body
+       assert _verify_manifest_signature(manifest)
+   
+  @@ -63,7 +63,7 @@ def test_export_enrolment_round_trip(tmp_path: Path):
+  -    assert manifest.to_did == "did:key:z6MkBob"
+  +    assert manifest.recipient_identity == "did:key:z6MkBob"
+       assert _verify_manifest_signature(manifest)
+       body_pkg = json.loads(body["body/package.json"].decode("utf-8"))
+       assert body_pkg["package_kind"] == "enrolment"
+  +3 -3
+
+python/tests/test_identity_seed.py
+  @@ -13,7 +13,7 @@ Coverage:
+  -* Signing-key-derived check: the manifest.from_did MUST match the DID
+  +* Signing-key-derived check: the manifest.publisher_identity MUST match the DID
+     derived from body/local.private (caught even if the manifest sig
+     itself is consistent — which it can't be, but we test the layer).
+   """
+  @@ -61,8 +61,8 @@ def test_identity_seed_round_trip(tmp_path: Path):
+  -    assert manifest.from_did == device.did
+  -    assert manifest.to_did == device.did
+  +    assert manifest.publisher_identity == device.did
+  +    assert manifest.recipient_identity == device.did
+       assert manifest.ceremony_id == IDENTITY_SEED_CEREMONY_PLACEHOLDER
+       assert manifest.scope == "identity"
+       assert _verify_manifest_signature(manifest), (
+  @@ -182,7 +182,7 @@ def test_identity_seed_rejects_swapped_private(tmp_path: Path):
+  -    manifest.from_did. The integrity check in _absorb_identity_seed
+  +    manifest.publisher_identity. The integrity check in _absorb_identity_seed
+       catches this.
+       """
+       device_a = DeviceKey.generate()
+  @@ -192,7 +192,7 @@ def test_identity_seed_rejects_swapped_private(tmp_path: Path):
+  -    # between (manifest.from_did, body/local.public, derived-from-priv).
+  +    # between (manifest.publisher_identity, body/local.public, derived-from-priv).
+       with zipfile.ZipFile(out, "r") as zf:
+           manifest_bytes = zf.read("manifest.json")
+           public_bytes = zf.read("body/local.public")
+  @@ -267,8 +267,8 @@ def test_export_identity_seed_with_default_device(tmp_path: Path):
+  -    assert manifest.from_did.startswith("did:key:z")
+  -    assert manifest.from_did == manifest.to_did
+  +    assert manifest.publisher_identity.startswith("did:key:z")
+  +    assert manifest.publisher_identity == manifest.recipient_identity
+       assert _verify_manifest_signature(manifest)
+   
+   
+  +7 -7
+
+python/tests/test_offer.py
+  @@ -12,7 +12,7 @@ def test_offer_emits_signed_package(tmp_path: Path):
+  -    assert pkg.peer_did == "did:key:z6MkAlice"
+  +    assert pkg.recipient_identity == "did:key:z6MkAlice"
+       assert "x25519_pub_b64" in pkg.payload
+       assert len(base64.b64decode(pkg.payload["x25519_pub_b64"])) == 32
+       assert verify(pkg) is True
+  +1 -1
+
+python/tests/test_packaging.py
+  @@ -8,9 +8,9 @@ def test_canonical_bytes_is_deterministic():
+  -        signer_did="did:key:z6MkAlice",
+  +        device_identity="did:key:z6MkAlice",
+           signer_verify_pub_b64="AAAA",
+  -        peer_did="did:key:z6MkBob",
+  +        recipient_identity="did:key:z6MkBob",
+           payload={"publisher_identity": "did:key:z6MkAlice", "sender_pub_b64": "BBBB"},
+           compiled_at="2026-04-21T17:22:00Z",
+       )
+  @@ -25,9 +25,9 @@ def test_canonical_bytes_excludes_signature():
+  -        signer_did="did:key:a",
+  +        device_identity="did:key:a",
+           signer_verify_pub_b64="x",
+  -        peer_did="did:key:b",
+  +        recipient_identity="did:key:b",
+           payload={},
+           compiled_at="2026-04-21T00:00:00Z",
+       )
+  @@ -47,9 +47,9 @@ def _mk_pkg():
+  -        signer_did="did:key:alice",
+  +        device_identity="did:key:alice",
+           signer_verify_pub_b64="",
+  -        peer_did="did:key:bob",
+  +        recipient_identity="did:key:bob",
+           payload={"k": "v"},
+           compiled_at="2026-04-21T00:00:00Z",
+       )
+  +6 -6
+
+python/tests/test_project_seed.py
+  @@ -82,7 +82,7 @@ def test_project_seed_real_fixture_round_trip(tmp_path: Path):
+  -    assert manifest.from_did == manifest.to_did
+  +    assert manifest.publisher_identity == manifest.recipient_identity
+   
+       cfg = _bootstrap_cfg_for(tmp_path)
+       receipt = _absorb_dispatch(cfg, FIXTURE)
+  @@ -216,7 +216,7 @@ def _hand_built_project_seed(out_path: Path, device: DeviceKey) -> Path:
+  -        from_did=device.did,
+  +        publisher_identity=device.did,
+           ceremony_id="synthetic_proj",
+           as_of=datetime.now(timezone.utc).isoformat(),
+           scope="project",
+  +2 -2
+
+python/tests/test_reconcile.py
+  @@ -20,7 +20,7 @@ def test_reconcile_promotes_pending_jwe_recipient(tmp_path: Path):
+  -                "signer_did": "did:key:z6MkBob",
+  +                "device_identity": "did:key:z6MkBob",
+                   "group": "default",
+                   "x25519_pub_b64": base64.b64encode(bob_pub).decode("ascii"),
+                   "compiled_at": "2026-04-21T00:00:00Z",
+  +1 -1
+
+python/tests/test_tnpkg_interop.py
+  @@ -193,11 +193,11 @@ def test_manifest_canonical_bytes_match_golden():
+  -        from_did=GOLDEN_INPUT["publisher_identity"],
+  +        publisher_identity=GOLDEN_INPUT["publisher_identity"],
+           ceremony_id=GOLDEN_INPUT["ceremony_id"],
+           as_of=GOLDEN_INPUT["as_of"],
+           scope=GOLDEN_INPUT["scope"],
+  -        to_did=GOLDEN_INPUT["recipient_identity"],
+  +        recipient_identity=GOLDEN_INPUT["recipient_identity"],
+           clock=GOLDEN_INPUT["clock"],
+           event_count=GOLDEN_INPUT["event_count"],
+           head_row_hash=GOLDEN_INPUT["head_row_hash"],
+  +2 -2
+
+python/tests/test_vault_push_handler.py
+  @@ -129,7 +129,7 @@ class TestVaultPushOnSchedule:
+  -        assert manifest.from_did == cfg.device.device_identity
+  +        assert manifest.publisher_identity == cfg.device.device_identity
+           assert _verify_manifest_signature(manifest)
+           # Body has at least one envelope (the admin_add_recipient call).
+           assert b"tn.recipient.added" in body["body/admin.ndjson"]
+  +1 -1
+
+python/tn/_dispatch.py
+  @@ -136,7 +136,7 @@ def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str
+  -        "did",
+  +        "device_identity",
+           "timestamp",
+           "event_id",
+           "event_type",
+  @@ -171,7 +171,7 @@ def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str
+  -        did = env.get("did", "")
+  +        did = env.get("device_identity", "")
+           sig_b64 = env.get("signature", "")
+   
+           # Chain linkage ------------------------------------------------
+  +2 -2
+
+python/tn/absorb.py
+  @@ -222,7 +222,7 @@ def absorb(
+  -                recipient_identity=None,
+  +                to_did=None,
+               )
+           # Default mapping for snapshot kinds the old callers never saw.
+           if receipt.kind == "admin_log_snapshot":
+  @@ -730,7 +730,7 @@ def _absorb_identity_seed(
+  -                f"identity_seed integrity check failed: manifest.publisher_identity="
+  +                f"identity_seed integrity check failed: manifest.from_did="
+                   f"{manifest.publisher_identity!r}, body/local.public={bundle_did!r}, "
+                   f"derived-from-private={derived.did!r}. The bundle's body and "
+                   f"manifest disagree about which identity this is — refuse to "
+  @@ -1458,7 +1458,7 @@ def _absorb_project_seed(
+  -                f"project_seed integrity check failed: manifest.publisher_identity="
+  +                f"project_seed integrity check failed: manifest.from_did="
+                   f"{manifest.publisher_identity!r}, body/keys/local.public={bundle_did!r}, "
+                   f"derived-from-private={derived.did!r}. The bundle's body and "
+                   f"manifest disagree about which identity this is — refuse to "
+  +3 -3
+
+python/tn/admin/__init__.py
+  @@ -1229,20 +1229,31 @@ def _renew_btn_recipients(
+  -    # Read the yaml's recipient list for this group.
+  -    yaml_doc = _read_yaml_doc(cfg.yaml_path)
+  -    g = (yaml_doc.get("groups") or {}).get(group) or {}
+  -    yaml_recipients = g.get("recipients") or []
+  +    # Canonical recipient registry is the admin event log, not yaml.
+  +    # The raw-kit `add_recipient_btn` path mints kits + emits
+  +    # tn.recipient.added events but doesn't always update yaml's
+  +    # recipients[]. Read from the reducer-derived state so both the
+  +    # tnpkg path (which updates yaml) and the raw-kit path (which
+  +    # doesn't) flow through the same renewal loop.
+  +    try:
+  +        live_state = state(group=group)
+  +    except Exception:  # noqa: BLE001
+  +        live_state = {"recipients": []}
+  +    recipients = live_state.get("recipients") or []
+   
+       targets: list[str] = []
+  -    for r in yaml_recipients:
+  +    seen_targets: set[str] = set()
+  +    for r in recipients:
+           if not isinstance(r, dict):
+               continue
+  -        if r.get("revoked_at") is not None:
+  +        if r.get("active_status") in ("revoked", "retired"):
+               continue
+  -        rid = r.get("recipient_identity") or r.get("did")
+  +        rid = r.get("recipient_did") or r.get("recipient_identity")
+           if not rid or rid == publisher_id:
+               continue
+  +        if rid in seen_targets:
+  +            continue
+  +        seen_targets.add(rid)
+           targets.append(rid)
+   
+       if not targets:
+  +18 -7
+
+python/tn/btn_keystore.py
+  @@ -212,25 +212,31 @@ class BtnKeystore:
+  -        """Atomic swap: archive current active as retired.<N>, promote pending.
+  -
+  -        Sequence (each step is an atomic POSIX rename):
+  -          1. Rename ``<g>.btn.state`` → ``<g>.btn.state.retired.<N>``
+  -          2. Rename ``<g>.btn.mykit`` → ``<g>.btn.mykit.retired.<N>``
+  -          3. Rename ``<g>.btn.state.pending`` → ``<g>.btn.state``
+  -          4. Rename ``<g>.btn.mykit.pending`` → ``<g>.btn.mykit``
+  -
+  -        Crash between any two steps leaves the keystore in a
+  -        recoverable state. The next init detects an orphaned pending
+  -        pair via :meth:`cleanup_orphan_pending` (if we crashed before
+  -        step 1) or sees a complete promote with the next call's
+  -        catalog event missing (if between step 4 and the admin emit;
+  -        the catalog re-emit is idempotent).
+  -
+  -        Refuses to overwrite an existing retired pair at the same
+  -        epoch — that situation indicates either a re-run of an already
+  -        completed promote (manual cleanup needed) or a stale leftover
+  -        from a partially-failed prior rotation."""
+  +        """Swap pending → active.
+  +
+  +        Caller contract (the rotation orchestrator in
+  +        :class:`BtnGroupCipher.rotate`):
+  +          1. write_pending  — writes the post-rotation active state +
+  +             self-kit to ``.pending`` paths.
+  +          2. write_retired_pair  — writes the lightweight retired
+  +             snapshot + the old self-kit to
+  +             ``.retired.<retiring_epoch>`` paths. This is the canonical
+  +             archive of the prior generation; the active state files
+  +             on disk are now redundant snapshots of the same data.
+  +          3. promote_pending (this method)  — removes the now-redundant
+  +             active files and renames pending → active. Two atomic
+  +             POSIX renames; the file removals are best-effort idempotent
+  +             (a crash between them is recoverable by the next init's
+  +             cleanup_orphan_pending + re-rotate cycle).
+  +
+  +        Refuses if the retired pair is NOT present on disk at the
+  +        expected epoch — that means write_retired_pair didn't run and
+  +        a forward-secret rotation would otherwise lose the prior
+  +        master_seed irrecoverably.
+  +
+  +        Refuses if the pending pair is absent — write_pending must have
+  +        succeeded.
+  +        """
+           state_active = self._state_path(group)
+           kit_active = self._kit_path(group)
+           state_pending = self._pending_state_path(group)
+
+... (more changes truncated)
+  +25 -19
+[full diff: rtk git diff --no-compact]

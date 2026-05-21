@@ -279,7 +279,7 @@ function readCmd() {
       event_type: entry.envelope.event_type,
       sequence: entry.envelope.sequence,
       timestamp: entry.envelope.timestamp,
-      did: entry.envelope.did,
+      device_identity: entry.envelope.device_identity,
       row_hash: entry.envelope.row_hash,
       plaintext: entry.plaintext,
       valid: entry.valid,

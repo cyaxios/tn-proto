@@ -9,12 +9,18 @@
 import type { ReadEntry } from "./types.js";
 export type { ReadEntry } from "./types.js";
 
-/** Public envelope keys that always surface flat in the new shape (§1.1). */
+/** Public envelope keys that always surface flat in the new shape (§1.1).
+ *
+ * Carries `device_identity` post 0.4.3a1 naming flip (phase G completion,
+ * batch B0.2). The wire-format envelope key was renamed from `did` to
+ * `device_identity` in phase A; the flat-dict surface (this layer) and
+ * Entry's typed attribute followed suit in B0.2.
+ */
 export const FLAT_ENVELOPE_KEYS: readonly string[] = [
   "timestamp",
   "event_type",
   "level",
-  "did",
+  "device_identity",
   "sequence",
   "event_id",
 ];

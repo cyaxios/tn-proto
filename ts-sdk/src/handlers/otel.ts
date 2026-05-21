@@ -42,7 +42,14 @@ const SEVERITY: Record<string, number> = {
 };
 
 // Envelope fields promoted to OTel attributes (flat, indexable).
-const ATTR_FIELDS = new Set(["did", "event_id", "event_type", "level", "sequence", "timestamp"]);
+const ATTR_FIELDS = new Set([
+  "device_identity",
+  "event_id",
+  "event_type",
+  "level",
+  "sequence",
+  "timestamp",
+]);
 
 export interface OpenTelemetryHandlerOptions {
   filter?: FilterSpec;

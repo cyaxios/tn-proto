@@ -60,14 +60,6 @@ def test_required_byte_compare_fixtures_present():
     healthy `main`; if a fixture is renamed, moved, or zero-byte, this test
     surfaces it loudly rather than letting the byte-compare assertions
     silently no-op.
-
-    0.4.3a1 caveat: the TS SDK identity-naming flip is a separate,
-    explicitly-deferred phase — the TS source still emits the legacy
-    ``me.did`` envelope schema, so ``ts_admin_snapshot.tnpkg`` cannot be
-    regenerated against the new wire format from this release. The TS
-    slot below is therefore *xfail-strict* until the TS rename ships:
-    the test surfaces the gap as an EXPECTED failure rather than a
-    silent skip, so it can't be forgotten.
     """
     expected: list[Path] = [
         # Python-produced fixtures (own dir).
@@ -80,33 +72,13 @@ def test_required_byte_compare_fixtures_present():
         RUST_FIXTURE_DIR / "tn_agents_pre_encryption.json",
         # TS-produced fixtures.
         TS_FIXTURE_DIR / "secure_read_canonical.json",
+        TS_FIXTURE_DIR / "ts_admin_snapshot.tnpkg",
         TS_FIXTURE_DIR / "tn_agents_pre_encryption.json",
     ]
     missing = [str(p) for p in expected if not p.exists()]
     empty = [str(p) for p in expected if p.exists() and p.stat().st_size == 0]
     assert not missing, f"missing byte-compare fixtures: {missing}"
     assert not empty, f"empty byte-compare fixtures (zero bytes): {empty}"
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "0.4.3a1: TS SDK identity-naming rename is a separate phase; the "
-        "TS fixture builder cannot emit the new wire format yet. Expect "
-        "this xfail to flip green (and remove the marker) once the TS "
-        "SDK rename ships."
-    ),
-)
-def test_ts_admin_snapshot_fixture_present():
-    """Tracked-deferral sentinel: pinned xfail so the TS fixture gap
-    stays visible in the test report. Will flip to passing as soon as
-    the TS SDK rename phase lands and ``ts_admin_snapshot.tnpkg`` is
-    regenerated under the new schema."""
-    assert (TS_FIXTURE_DIR / "ts_admin_snapshot.tnpkg").exists(), (
-        "ts_admin_snapshot.tnpkg missing — regenerate via "
-        "`node --import tsx ts-sdk/test/fixtures/build_admin_snapshot_fixture.ts` "
-        "AFTER the TS SDK identity-naming rename ships."
-    )
 
 
 def _assert_canonical_admin_state(state: dict) -> None:

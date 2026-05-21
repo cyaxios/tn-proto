@@ -174,6 +174,26 @@ Python doesn't have a Layer 1 / Layer 2 split because it's not a browser concern
 | `tn watch ...`              | `tn-js watch ...`             | ✓      | Identical kwargs (`--since`, `--verify`, `--poll`, `--once`). |
 | `tn wallet ...`             | (n/a)                         | ⊝      | Vault flows are Python-only today. |
 
+## 0.4.3a1 identity-naming flip status
+
+The 0.4.3a1 release renames identity-bearing fields to a canonical role
+vocabulary (`device_identity`, `publisher_identity`, `recipient_identity`).
+The flip lands phase by phase across the SDKs; this table tracks where
+each side is.
+
+| Surface | Python | TS | Notes |
+|---------|--------|------|-------|
+| Wire envelope (`did` → `device_identity`) | ✓ | ✓ | Phase A. |
+| tnpkg manifest (`from_did`/`to_did` → `publisher_identity`/`recipient_identity`) | ✓ | ✓ | Phase G commit `db2631d`. |
+| Ceremony yaml top-level (`me: {did: ...}` → `device: {device_identity: ...}`) | ✓ | ✓ | Phase B. TS landed in batch B0.1. Validator rejects legacy `me:` outright. |
+| Ceremony yaml `groups.<g>.recipients[].did` → `.recipient_identity` | ✓ | ✓ | Folded into TS B0.1; Rust loader strictly requires the new key. |
+| `Entry.fromFlat` / `read_shape.FLAT_ENVELOPE_KEYS` / `Entry.device_identity` (`did` → `device_identity`) | n/a | ✓ | TS landed in batch B0.2: `FLAT_ENVELOPE_KEYS`, `Entry` typed attribute, `Entry.toJSON()`, `Entry.fromFlat`/`fromRaw`, `Entry.[util.inspect.custom]`, stdout `_CRYPTO_KEYS`, otel `ATTR_FIELDS`, `tn-js` CLI read output, and three internal `env["did"]` readers all flipped end-to-end. B0.1's wire-side alias removed. Python keeps `Entry.did` for now — TS is ahead on this row. |
+| Runtime `_ENVELOPE_RESERVED` set (read-side row_hash recompute filter) | ⊝ | ✓ | TS landed in B0.4 (`ts-sdk/src/runtime/node_runtime.ts:81`): `"did"` → `"device_identity"`. Without this, `device_identity` leaks into `publicFields` during row_hash recompute, double-hashes, and every `verify: true` read fails. Python equivalent at `python/tn/reader.py:540, 651` still has `"did"` (see F2 in `_overnight/FINDINGS.md`) — TS is ahead. |
+| Runtime `_envelopeWellFormed` admin-snapshot gate (absorb-side) | n/a | ✓ | TS landed in B2.1 (`ts-sdk/src/runtime/node_runtime.ts:2402`): `"did"` → `"device_identity"`. Without this, `_absorbAdminLogSnapshot` rejects every well-formed envelope it sees because the envelope shape was renamed but the gate wasn't — manifesting as `acceptedCount: 0` on otherwise valid admin snapshots and no `leaf_reuse_attempt` conflicts detected. |
+| tnpkg binary fixtures (`ts_admin_snapshot.tnpkg`, `python_admin_snapshot.tnpkg`, `rust_admin_snapshot.tnpkg`, `Agentic20.project.tnpkg`) | ✓ | ✓ | B2.1: regenerated against the renamed manifest fields. Rust fixture builder at `crypto/tn-core/tests/tnpkg_fixture_builder.rs` had a stale kit basename (`alice.kit` → `alice.btn.mykit`) — fixed in this batch. The `Agentic20.project.tnpkg` was minted from scratch by `ts-sdk/test/fixtures/build_agentic20_project_seed.ts` because the committed binary on `main` had been corrupted in transit (UTF-8 replacement chars in the zip bytes) and parseTnpkg couldn't read it. |
+| TS canonical-bytes golden (`tnpkg_interop.test.ts`'s inline-literal golden) | n/a | ✓ | B2.1: flipped `from_did`/`to_did` → `publisher_identity`/`recipient_identity` to match the renamed wire form (the test was previously asserting the legacy bytes). |
+| TS secure-read canonical scenario (`test/fixtures/secure_read_canonical_scenario.ts`) | ✓ | ✓ | B2.1: `tn.coupon.issued.to_did` → `recipient_identity`; `tn.enrolment.absorbed.from_did` → `publisher_identity`. Cross-language `admin_events_canonical.json` now byte-identical across Python / Rust / TS. |
+
 ## CI parity gate
 
 `tools/check_parity.py` walks the public symbols of `tn` (Python) and `@tnproto/sdk` (TS) and fails if a row is missing from this document. New verbs MUST add a row before the SDK can publish.

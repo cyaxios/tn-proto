@@ -184,9 +184,10 @@ test("manifest canonical bytes match golden across languages", () => {
         },
       },
       event_count: 4,
-      from_did: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
       head_row_hash: "sha256:" + "a".repeat(64),
       kind: "admin_log_snapshot",
+      publisher_identity: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+      recipient_identity: "did:key:zRecipient",
       scope: "admin",
       state: {
         vault_links: [
@@ -198,7 +199,6 @@ test("manifest canonical bytes match golden across languages", () => {
           },
         ],
       },
-      to_did: "did:key:zRecipient",
       version: 1,
     }),
     "utf-8",

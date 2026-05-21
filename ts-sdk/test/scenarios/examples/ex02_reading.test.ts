@@ -24,7 +24,7 @@ import {
 
 // TS envelope uses snake_case keys on the wire.
 const RESERVED_ENVELOPE_KEYS = [
-  "did",
+  "device_identity",
   "timestamp",
   "event_type",
   "event_id",
@@ -62,7 +62,7 @@ test("ex02/envelope-shape — every reserved envelope key is present on first us
     }
 
     // Sanity-check types.
-    assert.strictEqual(typeof firstUser!["did"], "string");
+    assert.strictEqual(typeof firstUser!["device_identity"], "string");
     assert.strictEqual(typeof firstUser!["timestamp"], "string");
     assert.strictEqual(typeof firstUser!["event_type"], "string");
     assert.strictEqual(typeof firstUser!["event_id"], "string");
@@ -125,7 +125,7 @@ test("ex02/chain-coherence — page.view sequences [1,2,3] and auth.login sequen
   }
 });
 
-test("ex02/independent-verify — verify signature with public material only (did + row_hash + signature)", async () => {
+test("ex02/independent-verify — verify signature with public material only (device_identity + row_hash + signature)", async () => {
   const tn = await ScenarioContext.newTn();
   try {
     tn.info("page.view", { path: "/", user: "alice" });
@@ -140,7 +140,7 @@ test("ex02/independent-verify — verify signature with public material only (di
     }
     assert.ok(firstUser !== undefined, "expected a user entry");
 
-    const did = asDid(String(firstUser!["did"]));
+    const did = asDid(String(firstUser!["device_identity"]));
     const rowHashStr = asRowHash(String(firstUser!["row_hash"]));
     const sigStr = String(firstUser!["signature"]);
 

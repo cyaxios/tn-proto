@@ -56,7 +56,7 @@ const ENVELOPE_BASICS = new Set([
   "event_type",
   "timestamp",
   "level",
-  "did",
+  "device_identity",
   "sequence",
   "event_id",
   "run_id",
@@ -71,7 +71,7 @@ const ENVELOPE_KEYS_FROM_FLAT = new Set([
   "timestamp",
   "level",
   "message",
-  "did",
+  "device_identity",
   "event_id",
   "sequence",
   "run_id",
@@ -129,7 +129,7 @@ export class Entry {
   fields: Record<string, unknown>;
 
   // Chain / authorship — typed, always present
-  did: string;
+  device_identity: string;
   event_id: string;
   sequence: number;
   run_id: string;
@@ -148,7 +148,7 @@ export class Entry {
     level: string;
     message?: string | null;
     fields?: Record<string, unknown>;
-    did: string;
+    device_identity: string;
     event_id: string;
     sequence: number;
     run_id: string;
@@ -162,7 +162,7 @@ export class Entry {
     this.level = init.level;
     this.message = init.message ?? null;
     this.fields = init.fields ?? {};
-    this.did = init.did;
+    this.device_identity = init.device_identity;
     this.event_id = init.event_id;
     this.sequence = init.sequence;
     this.run_id = init.run_id;
@@ -262,7 +262,7 @@ export class Entry {
       level: String(env["level"] ?? ""),
       message,
       fields,
-      did: String(env["device_identity"] ?? ""),
+      device_identity: String(env["device_identity"] ?? ""),
       event_id: String(env["event_id"] ?? ""),
       sequence: Number(env["sequence"] ?? 0),
       run_id: runId,
@@ -300,7 +300,7 @@ export class Entry {
     // plumbing (`prev_hash`, `row_hash`, `signature`) is excluded from
     // `flattenRawEntry`'s output, so the watch path never carries it; we
     // default-fill below.
-    for (const required of ["event_type", "did", "event_id", "sequence"]) {
+    for (const required of ["event_type", "device_identity", "event_id", "sequence"]) {
       if (!(required in kwargs)) {
         throw new Error(
           `Entry.fromFlat: required envelope field ${JSON.stringify(required)} ` +
@@ -340,7 +340,7 @@ export class Entry {
       level: String(kwargs["level"] ?? ""),
       message,
       fields: userFields,
-      did: String(kwargs["did"]),
+      device_identity: String(kwargs["device_identity"]),
       event_id: String(kwargs["event_id"]),
       sequence: Number(kwargs["sequence"]),
       run_id: runId,
@@ -376,7 +376,7 @@ export class Entry {
       level: this.level,
       message: this.message,
       fields: { ...this.fields },
-      did: this.did,
+      device_identity: this.device_identity,
       event_id: this.event_id,
       sequence: this.sequence,
       run_id: this.run_id,
@@ -390,7 +390,9 @@ export class Entry {
   /** Developer-facing — used by `console.log` / Node's `util.inspect`. */
   [NODE_INSPECT_CUSTOM](): string {
     const didShort =
-      this.did.length > 30 ? `${this.did.slice(0, 16)}...${this.did.slice(-8)}` : this.did;
+      this.device_identity.length > 30
+        ? `${this.device_identity.slice(0, 16)}...${this.device_identity.slice(-8)}`
+        : this.device_identity;
     const fieldsDump = JSON.stringify(this.fields);
     const fieldsRepr =
       fieldsDump.length <= 60 ? fieldsDump : `{...${Object.keys(this.fields).length} kwargs}`;
@@ -399,7 +401,7 @@ export class Entry {
       `timestamp=${JSON.stringify(this.timestamp.toISOString())}, ` +
       `level=${JSON.stringify(this.level)}, ` +
       `sequence=${this.sequence}, ` +
-      `did=${JSON.stringify(didShort)}, ` +
+      `device_identity=${JSON.stringify(didShort)}, ` +
       `fields=${fieldsRepr})`
     );
   }

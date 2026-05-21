@@ -35,7 +35,7 @@ function makeCeremony(): { yamlPath: string; cleanup: () => void } {
   // from existing log"). Opt out of session-start rotation so the
   // prior session's events stay in the current file rather than
   // rolling to `<log>.1`.
-  const yaml = `ceremony:\n  id: runtime_test\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\nme:\n  did: ${dk.did}\nhandlers:\n- kind: file.rotating\n  path: ./.tn/logs/tn.ndjson\n  rotate_on_init: false\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n    recipients:\n    - did: ${dk.did}\nfields: {}\n`;
+  const yaml = `ceremony:\n  id: runtime_test\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\ndevice:\n  device_identity: ${dk.did}\nhandlers:\n- kind: file.rotating\n  path: ./.tn/logs/tn.ndjson\n  rotate_on_init: false\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n    recipients:\n    - recipient_identity: ${dk.did}\nfields: {}\n`;
   const yamlPath = join(dir, "tn.yaml");
   writeFileSync(yamlPath, yaml, "utf8");
 

@@ -54,20 +54,20 @@ logs:
   path: ./.tn/logs/tn.ndjson
 keystore:
   path: ./.tn/keys
-me:
-  did: ${cfg.me.did}
+device:
+  device_identity: ${cfg.device.device_identity}
 default_policy: private
 groups:
   default:
     policy: private
     cipher: btn
     recipients:
-    - did: ${cfg.me.did}
+    - recipient_identity: ${cfg.device.device_identity}
   tn.bogus:
     policy: private
     cipher: btn
     recipients:
-    - did: ${cfg.me.did}
+    - recipient_identity: ${cfg.device.device_identity}
 fields: {}
 `;
     writeFileSync(yamlPath, bad, "utf8");

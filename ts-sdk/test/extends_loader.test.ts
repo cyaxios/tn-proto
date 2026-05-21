@@ -44,13 +44,13 @@ function writeParentChild(td: string): { parent: string; child: string } {
     parent,
     yamlStringify({
       ceremony: { id: "P1", cipher: "btn", sign: true },
-      me: { did: "did:key:z6MkParent" },
+      device: { device_identity: "did:key:z6MkParent" },
       keystore: { path: "./keys" },
       groups: {
         default: {
           policy: "private",
           cipher: "btn",
-          recipients: [{ did: "did:key:z6MkParent" }],
+          recipients: [{ recipient_identity: "did:key:z6MkParent" }],
         },
       },
       default_policy: "private",
@@ -79,7 +79,7 @@ test("extends: pulls identity from parent", () => {
   try {
     const { child } = writeParentChild(td);
     const cfg = loadConfig(child);
-    assert.equal(cfg.me.did, "did:key:z6MkParent");
+    assert.equal(cfg.device.device_identity, "did:key:z6MkParent");
   } finally {
     rmSync(td, { recursive: true, force: true });
   }
@@ -170,13 +170,13 @@ test("extends: child override of parent-owned key warns + parent wins", () => {
   const td = makeProject();
   try {
     const { child } = writeParentChild(td);
-    // Add child me.did override.
+    // Add child device.device_identity override.
     const childDoc = `extends: parent.yaml
 ceremony:
   id: C1
   profile: audit
-me:
-  did: did:key:z6MkCHILD_OVERRIDE
+device:
+  device_identity: did:key:z6MkCHILD_OVERRIDE
 logs:
   path: ./logs/child.ndjson
 handlers:
@@ -193,7 +193,7 @@ handlers:
     try {
       const cfg = loadConfig(child);
       // Parent wins.
-      assert.equal(cfg.me.did, "did:key:z6MkParent");
+      assert.equal(cfg.device.device_identity, "did:key:z6MkParent");
     } finally {
       console.warn = orig;
     }

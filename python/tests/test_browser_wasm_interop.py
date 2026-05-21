@@ -19,7 +19,6 @@ is found via PATH; if absent the test skips with a clear message.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import tempfile
@@ -124,19 +123,6 @@ def test_python_decrypts_browser_wasm_ciphertext():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "0.4.3a1: the dashboard's vendored TS SDK bundle "
-        "(static/dashboard/vendor/tnproto-sdk-core.mjs) still emits the "
-        "legacy `from_did`/`to_did` manifest wire keys. The TS SDK "
-        "identity-naming rename is an explicitly-deferred phase. This "
-        "xfail flips green automatically once the TS SDK ships under "
-        "the new schema AND the dashboard re-vendors the bundle. "
-        "Tracked alongside test_ts_admin_snapshot_fixture_present in "
-        "test_tnpkg_interop.py."
-    ),
-)
 def test_python_reads_browser_built_tnpkg_and_verifies_signature():
     """The structural assertion: snapshot_builder.js produces a real .tnpkg
     that tn.tnpkg._read_manifest accepts and _verify_manifest_signature
@@ -177,16 +163,6 @@ def test_python_reads_browser_built_tnpkg_and_verifies_signature():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "0.4.3a1: same root cause as "
-        "test_python_reads_browser_built_tnpkg_and_verifies_signature — "
-        "the JS-built tnpkg's manifest carries the legacy `from_did`/"
-        "`to_did` wire keys, so `_read_manifest` raises before we ever "
-        "reach the kit-body. Will flip green once the TS SDK rename ships."
-    ),
-)
 def test_python_can_decrypt_kit_from_browser_built_tnpkg():
     """End-to-end: read the kit OUT of the JS-built tnpkg, then use it
     against the published ciphertext. Closes the loop on
@@ -199,7 +175,7 @@ def test_python_can_decrypt_kit_from_browser_built_tnpkg():
 
     from tn.tnpkg import _read_manifest
 
-    _manifest, body = _read_manifest(pkg_path)
+    _, body = _read_manifest(pkg_path)
     kit_from_pkg = body.get("body/default.btn.mykit")
     assert kit_from_pkg is not None, "kit not present in browser-built tnpkg"
 
@@ -225,7 +201,6 @@ def test_browser_extracts_package_key_from_python_built_full_keystore_body(tmp_p
       3. Python verifies actual_priv.bin == expected_priv.bin AND that
          sig.bin verifies under expected_did's public key on msg.bin.
     """
-    import json
     import os
     import shutil
     import subprocess

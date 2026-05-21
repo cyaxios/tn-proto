@@ -167,7 +167,12 @@ export function yamlRecipientDids(cfg: CeremonyConfig): Map<string, string[]> {
     const rs = Array.isArray(g?.recipients) ? g.recipients : [];
     const dids: string[] = [];
     for (const r of rs as Array<Record<string, unknown>>) {
-      if (r && typeof r === "object" && r.did) dids.push(String(r.did));
+      // Read tolerant: prefer the post-0.4.3a1 canonical
+      // `recipient_identity` key, fall back to legacy `did`.
+      if (r && typeof r === "object") {
+        const id = r.recipient_identity ?? r.did;
+        if (id) dids.push(String(id));
+      }
     }
     out.set(gname, dids);
   }
