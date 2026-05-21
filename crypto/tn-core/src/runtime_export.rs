@@ -162,8 +162,8 @@ impl Runtime {
         let mut manifest = Manifest {
             kind,
             version: crate::tnpkg::MANIFEST_VERSION,
-            from_did: self.did().to_string(),
-            to_did: opts.to_did.clone(),
+            publisher_identity: self.did().to_string(),
+            recipient_identity: opts.to_did.clone(),
             ceremony_id: self.cfg.ceremony.id.clone(),
             as_of: now_iso_millis(),
             scope: opts.scope.clone().unwrap_or_else(|| scope_default.into()),
@@ -218,8 +218,8 @@ impl Runtime {
                 conflicts: Vec::new(),
                 legacy_status: "rejected".into(),
                 legacy_reason: format!(
-                    "manifest signature does not verify against from_did {:?}: {e}",
-                    manifest.from_did
+                    "manifest signature does not verify against publisher_identity {:?}: {e}",
+                    manifest.publisher_identity
                 ),
                 replaced_kit_paths: Vec::new(),
             });

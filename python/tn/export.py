@@ -373,7 +373,7 @@ def export_identity_seed(
 
     If ``device`` is None, generate a fresh ``DeviceKey`` and use it. The
     caller can recover the freshly-generated DID by reading
-    ``manifest.from_did`` from the resulting tnpkg, or by passing in their
+    ``manifest.publisher_identity`` from the resulting tnpkg, or by passing in their
     own DeviceKey if they already have one.
 
     Returns the output path. The caller is responsible for protecting the

@@ -31,9 +31,9 @@ class Package:
     ceremony_id: str
     group: str
     group_epoch: int
-    signer_did: str
+    device_identity: str
     signer_verify_pub_b64: str
-    peer_did: str | None
+    recipient_identity: str | None
     payload: dict[str, Any]
     compiled_at: str
     sig_b64: str | None = None

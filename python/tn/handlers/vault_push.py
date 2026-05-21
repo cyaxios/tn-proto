@@ -181,7 +181,7 @@ def push_snapshot(
     with open(out_path, "rb") as f:
         body = f.read()
     ceremony_id = manifest.ceremony_id
-    my_did = manifest.from_did
+    my_did = manifest.publisher_identity
     url_path = f"/api/v1/inbox/{my_did}/snapshots/{ceremony_id}/{ts}.tnpkg"
     params = {"head_row_hash": head} if head else {}
     client.post_inbox_snapshot(url_path, body, params=params)
@@ -427,7 +427,7 @@ class VaultPushHandler(TNHandler):
     to_did
         Optional recipient DID to stamp into the manifest. The vault's v1
         inbox routing rule (plan 2026-04-25 §4) requires
-        ``manifest.to_did`` to be present so the snapshot lands in that
+        ``manifest.recipient_identity`` to be present so the snapshot lands in that
         DID's per-recipient inbox. Leaving this ``None`` produces an
         unaddressed snapshot that the vault will reject with HTTP 422.
         Future versions may auto-derive this from the active group's

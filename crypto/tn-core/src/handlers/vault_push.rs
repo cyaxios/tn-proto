@@ -260,7 +260,7 @@ impl VaultPushHandler {
 
         let url_path = format!(
             "/api/v1/inbox/{}/snapshots/{}/{}.tnpkg",
-            manifest.from_did, manifest.ceremony_id, ts
+            manifest.publisher_identity, manifest.ceremony_id, ts
         );
         let mut query = BTreeMap::new();
         if let Some(h) = &head {

@@ -40,7 +40,7 @@ fn export_admin_log_snapshot_round_trip() {
     let (manifest, body) = read_tnpkg(TnpkgSource::Path(&out)).unwrap();
     verify_manifest(&manifest).expect("manifest signature must verify");
     assert_eq!(manifest.kind, ManifestKind::AdminLogSnapshot);
-    assert_eq!(manifest.from_did, rt.did());
+    assert_eq!(manifest.publisher_identity, rt.did());
     assert!(body.contains_key("body/admin.ndjson"));
     assert!(manifest.event_count >= 1);
 }

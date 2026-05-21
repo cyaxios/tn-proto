@@ -207,7 +207,7 @@ class FsDropHandler(TNHandler):
             "{date}": ts,
             "{head_row_hash}": head,
             "{head_row_hash:short}": head_short,
-            "{from_did}": manifest.from_did,
+            "{from_did}": manifest.publisher_identity,
         }
         for needle, value in replacements.items():
             out = out.replace(needle, str(value))

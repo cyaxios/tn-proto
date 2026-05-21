@@ -210,7 +210,7 @@ def _verify_manifest_signature(manifest: TnpkgManifest) -> bool:
     if not manifest.manifest_signature_b64:
         return False
     try:
-        pub_bytes = _did_key_pub(manifest.from_did)
+        pub_bytes = _did_key_pub(manifest.publisher_identity)
         sig = base64.b64decode(manifest.manifest_signature_b64)
         Ed25519PublicKey.from_public_bytes(pub_bytes).verify(sig, manifest.signing_bytes())
         return True
