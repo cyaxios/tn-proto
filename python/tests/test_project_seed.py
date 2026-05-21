@@ -220,7 +220,7 @@ def _hand_built_project_seed(out_path: Path, device: DeviceKey) -> Path:
         ceremony_id="synthetic_proj",
         as_of=datetime.now(timezone.utc).isoformat(),
         scope="project",
-        to_did=device.did,
+        recipient_identity=device.did,
         state={
             "project": {
                 "schema": "tn-project-seed-v1",

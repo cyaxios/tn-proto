@@ -101,7 +101,7 @@ class TestExtendsResolutionMechanics:
         _, child = self._setup_pair(tmp_path)
         doc = _config._read_yaml_doc(child)
         merged = _config._resolve_extends(child, doc)
-        assert merged["me"]["did"] == "did:key:zParent"
+        assert merged["device"]["device_identity"] == "did:key:zParent"
         assert "default" in merged["groups"]
 
     def test_extends_resolves_keystore_to_absolute_path(self, tmp_path):
@@ -151,7 +151,7 @@ class TestExtendsResolutionMechanics:
     ):
         import logging
         _, child = self._setup_pair(tmp_path)
-        # Child illegally tries to set me.did.
+        # Child illegally tries to set device.device_identity.
         doc = _yaml.safe_load(child.read_text(encoding="utf-8"))
         doc["device"] = {"did": "did:key:zCHILD_TRYING_TO_OVERRIDE"}
         child.write_text(_yaml.safe_dump(doc), encoding="utf-8")
@@ -160,7 +160,7 @@ class TestExtendsResolutionMechanics:
         with caplog.at_level(logging.WARNING, logger="tn"):
             merged = _config._resolve_extends(child, cdoc)
         # Parent wins.
-        assert merged["me"]["did"] == "did:key:zParent"
+        assert merged["device"]["device_identity"] == "did:key:zParent"
         # Warning was logged.
         assert any("parent-owned" in rec.message for rec in caplog.records)
 
@@ -202,7 +202,7 @@ class TestStreamYamlIsMinimal:
         assert (doc.get("ceremony") or {}).get("profile") == "transaction"
         assert "logs" in doc
         # Does NOT have parent-owned blocks.
-        for forbidden in ("me", "keystore", "groups", "default_policy", "public_fields"):
+        for forbidden in ("device", "keystore", "groups", "default_policy", "public_fields"):
             assert forbidden not in doc, (
                 f"stream yaml should not duplicate parent-owned key {forbidden!r}"
             )
@@ -245,7 +245,7 @@ class TestNoDriftFromDefault:
         with default_yaml.open("r", encoding="utf-8") as fh:
             doc = _yaml.safe_load(fh)
         # default has the actual identity / groups / keystore.
-        assert "me" in doc
+        assert "device" in doc
         assert "groups" in doc
         assert "keystore" in doc
 
@@ -253,5 +253,5 @@ class TestNoDriftFromDefault:
         with stream_yaml.open("r", encoding="utf-8") as fh:
             sdoc = _yaml.safe_load(fh)
         # Stream is minimal.
-        assert "me" not in sdoc
+        assert "device" not in sdoc
         assert "groups" not in sdoc

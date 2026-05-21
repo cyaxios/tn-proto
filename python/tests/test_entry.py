@@ -262,7 +262,7 @@ def test_from_raw_constructor():
             "event_type": "x.y",
             "timestamp": "2026-05-08T03:30:20.184000Z",
             "level": "info",
-            "did": "did:key:zABC123",
+            "device_identity": "did:key:zABC123",
             "event_id": "abc-123",
             "sequence": 1,
             "prev_hash": "sha256:000",

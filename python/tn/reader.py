@@ -57,7 +57,7 @@ _FLAT_ENVELOPE_KEYS: tuple[str, ...] = (
     "timestamp",
     "event_type",
     "level",
-    "did",
+    "device_identity",
     "sequence",
     "event_id",
     "prev_hash",
