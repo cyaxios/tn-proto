@@ -42,7 +42,7 @@ fn cache_state_matches_admin_state_after_add() {
     let recipients = state.get("recipients").unwrap().as_array().unwrap();
     assert!(recipients
         .iter()
-        .any(|r| r.get("recipient_did").and_then(|v| v.as_str())
+        .any(|r| r.get("recipient_identity").and_then(|v| v.as_str())
             == Some("did:key:zRecipientA")));
 }
 

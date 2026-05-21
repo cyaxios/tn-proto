@@ -26,7 +26,7 @@ fn reduce_ceremony_init() {
         json!({
             "ceremony_id": "local_abc",
             "cipher": "btn",
-            "device_did": "did:key:zAlice",
+            "device_identity": "did:key:zAlice",
             "created_at": "2026-04-22T12:00:00Z",
         }),
     );
@@ -49,7 +49,7 @@ fn reduce_group_added() {
         "tn.group.added",
         json!({
             "group": "pii", "cipher": "btn",
-            "publisher_did": "did:key:zAlice",
+            "publisher_identity": "did:key:zAlice",
             "added_at": "2026-04-22T12:00:00Z",
         }),
     );
@@ -118,7 +118,7 @@ fn reduce_coupon_issued() {
         "tn.coupon.issued",
         json!({
             "group": "default", "slot": 1,
-            "to_did": "did:key:zBob", "issued_to": "bob@example.com",
+            "recipient_identity": "did:key:zBob", "issued_to": "bob@example.com",
         }),
     );
     assert!(matches!(
@@ -157,7 +157,7 @@ fn reduce_enrolment_compiled_and_absorbed() {
     let c = env(
         "tn.enrolment.compiled",
         json!({
-            "group": "default", "peer_did": "did:key:zBob",
+            "group": "default", "peer_identity": "did:key:zBob",
             "package_sha256": "sha256:pkg",
             "compiled_at": "2026-04-22T12:00:00Z",
         }),
@@ -170,7 +170,7 @@ fn reduce_enrolment_compiled_and_absorbed() {
     let a = env(
         "tn.enrolment.absorbed",
         json!({
-            "group": "default", "from_did": "did:key:zAlice",
+            "group": "default", "publisher_identity": "did:key:zAlice",
             "package_sha256": "sha256:pkg",
             "absorbed_at": "2026-04-22T12:05:00Z",
         }),
@@ -186,7 +186,7 @@ fn reduce_vault_linked_and_unlinked() {
     let l = env(
         "tn.vault.linked",
         json!({
-            "vault_did": "did:web:tnproto.org",
+            "vault_identity": "did:web:tnproto.org",
             "project_id": "proj_test",
             "linked_at": "2026-04-22T12:00:00Z",
         }),
@@ -199,7 +199,7 @@ fn reduce_vault_linked_and_unlinked() {
     let u = env(
         "tn.vault.unlinked",
         json!({
-            "vault_did": "did:web:tnproto.org",
+            "vault_identity": "did:web:tnproto.org",
             "project_id": "proj_test",
             "reason": "user_request",
             "unlinked_at": "2026-04-22T13:00:00Z",

@@ -2119,7 +2119,7 @@ impl Runtime {
             .unwrap_or("")
             .to_string();
         let did = env
-            .and_then(|o| o.get("did"))
+            .and_then(|o| o.get("device_identity"))
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
@@ -3447,7 +3447,7 @@ impl Runtime {
         }
 
         let mut fields = Map::new();
-        fields.insert("vault_did".into(), Value::String(vault_did.to_string()));
+        fields.insert("vault_identity".into(), Value::String(vault_did.to_string()));
         fields.insert("project_id".into(), Value::String(project_id.to_string()));
         fields.insert(
             "linked_at".into(),
@@ -3470,7 +3470,7 @@ impl Runtime {
         reason: Option<&str>,
     ) -> Result<()> {
         let mut fields = Map::new();
-        fields.insert("vault_did".into(), Value::String(vault_did.to_string()));
+        fields.insert("vault_identity".into(), Value::String(vault_did.to_string()));
         fields.insert("project_id".into(), Value::String(project_id.to_string()));
         fields.insert(
             "unlinked_at".into(),
@@ -4119,7 +4119,7 @@ fn is_foreign_log(
         let Ok(env) = serde_json::from_str::<Value>(s) else {
             continue;
         };
-        if let Some(env_did) = env.get("did").and_then(Value::as_str) {
+        if let Some(env_did) = env.get("device_identity").and_then(Value::as_str) {
             if !env_did.is_empty() {
                 return env_did != own_did;
             }
@@ -4780,7 +4780,7 @@ fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
     let yaml = format!(
         "ceremony: {{id: {id}, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
          keystore: {{path: ./.tn/keys}}\n\
-         me: {{did: \"{did}\"}}\n\
+         device: {{device_identity: \"{did}\"}}\n\
          public_fields: []\n\
          default_policy: private\n\
          groups:\n\
@@ -4788,13 +4788,13 @@ fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
          \x20   policy: private\n\
          \x20   cipher: btn\n\
          \x20   recipients:\n\
-         \x20     - {{did: \"{did}\"}}\n\
+         \x20     - {{recipient_identity: \"{did}\"}}\n\
          \x20   index_epoch: 0\n\
          \x20 \"tn.agents\":\n\
          \x20   policy: private\n\
          \x20   cipher: btn\n\
          \x20   recipients:\n\
-         \x20     - {{did: \"{did}\"}}\n\
+         \x20     - {{recipient_identity: \"{did}\"}}\n\
          \x20   index_epoch: 0\n\
          \x20   fields: [instruction, use_for, do_not_use_for, consequences, on_violation_or_error, policy]\n\
          fields: {{}}\n\

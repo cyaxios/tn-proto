@@ -491,7 +491,7 @@ impl AdminStateCache {
             return;
         };
 
-        let did = env.get("did").and_then(Value::as_str);
+        let did = env.get("device_identity").and_then(Value::as_str);
         let et = env.get("event_type").and_then(Value::as_str);
         let seq = env.get("sequence").and_then(Value::as_u64);
 
@@ -601,7 +601,7 @@ impl AdminStateCache {
         let dd = env
             .get("device_identity")
             .cloned()
-            .or_else(|| env.get("did").cloned())
+            .or_else(|| env.get("device_identity").cloned())
             .unwrap_or(Value::Null);
         o.insert("device_identity".into(), dd);
         o.insert(
@@ -1253,7 +1253,7 @@ impl AdminStateCache {
             return;
         };
         for entry in arr {
-            let d = entry.get("did").and_then(Value::as_str);
+            let d = entry.get("device_identity").and_then(Value::as_str);
             let e = entry.get("event_type").and_then(Value::as_str);
             let s = entry.get("sequence").and_then(Value::as_u64);
             let rh = entry.get("row_hash").and_then(Value::as_str);

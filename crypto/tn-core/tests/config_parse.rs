@@ -10,8 +10,8 @@ ceremony:
   protocol_events_location: main_log
 keystore:
   path: ./keys
-me:
-  did: "did:key:zABC"
+device:
+  device_identity: "did:key:zABC"
 public_fields: [timestamp, event_id, event_type, level]
 default_policy: private
 groups:
@@ -19,7 +19,7 @@ groups:
     policy: private
     cipher: btn
     recipients:
-      - did: "did:key:zABC"
+      - recipient_identity: "did:key:zABC"
     index_epoch: 0
 fields: {}
 llm_classifier:
@@ -46,8 +46,8 @@ ceremony:
   cipher: btn
 keystore:
   path: ./keys
-me:
-  did: "did:key:zXYZ"
+device:
+  device_identity: "did:key:zXYZ"
 groups:
   default:
     cipher: btn

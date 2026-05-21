@@ -201,7 +201,7 @@ fn setup_btn_with_agents(root: &Path) -> common::BtnCeremony {
     let yaml = format!(
         "ceremony: {{id: cer_test, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
          keystore: {{path: ./.tn/keys}}\n\
-         me: {{did: \"{did}\"}}\n\
+         device: {{device_identity: \"{did}\"}}\n\
          public_fields: []\n\
          default_policy: private\n\
          groups:\n\
@@ -209,13 +209,13 @@ fn setup_btn_with_agents(root: &Path) -> common::BtnCeremony {
          \x20   policy: private\n\
          \x20   cipher: btn\n\
          \x20   recipients:\n\
-         \x20     - {{did: \"{did}\"}}\n\
+         \x20     - {{recipient_identity: \"{did}\"}}\n\
          \x20   index_epoch: 0\n\
          \x20 \"tn.agents\":\n\
          \x20   policy: private\n\
          \x20   cipher: btn\n\
          \x20   recipients:\n\
-         \x20     - {{did: \"{did}\"}}\n\
+         \x20     - {{recipient_identity: \"{did}\"}}\n\
          \x20   index_epoch: 0\n\
          \x20   fields: [instruction, use_for, do_not_use_for, consequences, on_violation_or_error, policy]\n\
          fields: {{}}\n\
@@ -226,6 +226,6 @@ fn setup_btn_with_agents(root: &Path) -> common::BtnCeremony {
     common::BtnCeremony {
         yaml_path,
         keystore: PathBuf::from(&keystore),
-        did,
+        device_identity: did,
     }
 }

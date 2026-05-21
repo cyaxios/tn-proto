@@ -48,7 +48,7 @@ fn yaml_body_two_groups_share_field(did: &str) -> String {
     format!(
         "ceremony: {{id: cer_mg, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
          keystore: {{path: ./.tn/keys}}\n\
-         me: {{did: \"{did}\"}}\n\
+         device: {{device_identity: \"{did}\"}}\n\
          public_fields: [timestamp, event_id, event_type, level]\n\
          default_policy: private\n\
          groups:\n\
@@ -56,18 +56,18 @@ fn yaml_body_two_groups_share_field(did: &str) -> String {
          \x20   policy: private\n\
          \x20   cipher: btn\n\
          \x20   recipients:\n\
-         \x20     - {{did: \"{did}\"}}\n\
+         \x20     - {{recipient_identity: \"{did}\"}}\n\
          \x20 a:\n\
          \x20   policy: private\n\
          \x20   cipher: btn\n\
          \x20   recipients:\n\
-         \x20     - {{did: \"{did}\"}}\n\
+         \x20     - {{recipient_identity: \"{did}\"}}\n\
          \x20   fields: [email]\n\
          \x20 b:\n\
          \x20   policy: private\n\
          \x20   cipher: btn\n\
          \x20   recipients:\n\
-         \x20     - {{did: \"{did}\"}}\n\
+         \x20     - {{recipient_identity: \"{did}\"}}\n\
          \x20   fields: [email]\n\
          fields: {{}}\n\
          llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
@@ -153,7 +153,7 @@ fn field_to_groups_list_is_sorted_alphabetically() {
             format!(
                 "ceremony: {{id: cer_sort, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
                  keystore: {{path: ./.tn/keys}}\n\
-                 me: {{did: \"{did}\"}}\n\
+                 device: {{device_identity: \"{did}\"}}\n\
                  public_fields: [timestamp, event_id, event_type, level]\n\
                  default_policy: private\n\
                  groups:\n\
@@ -161,18 +161,18 @@ fn field_to_groups_list_is_sorted_alphabetically() {
                  \x20   policy: private\n\
                  \x20   cipher: btn\n\
                  \x20   recipients:\n\
-                 \x20     - {{did: \"{did}\"}}\n\
+                 \x20     - {{recipient_identity: \"{did}\"}}\n\
                  \x20 zeta:\n\
                  \x20   policy: private\n\
                  \x20   cipher: btn\n\
                  \x20   recipients:\n\
-                 \x20     - {{did: \"{did}\"}}\n\
+                 \x20     - {{recipient_identity: \"{did}\"}}\n\
                  \x20   fields: [x]\n\
                  \x20 alpha:\n\
                  \x20   policy: private\n\
                  \x20   cipher: btn\n\
                  \x20   recipients:\n\
-                 \x20     - {{did: \"{did}\"}}\n\
+                 \x20     - {{recipient_identity: \"{did}\"}}\n\
                  \x20   fields: [x]\n\
                  fields: {{}}\n\
                  llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
@@ -199,7 +199,7 @@ fn field_routed_to_unknown_group_is_a_load_error() {
             format!(
                 "ceremony: {{id: cer_unknown, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
                  keystore: {{path: ./.tn/keys}}\n\
-                 me: {{did: \"{did}\"}}\n\
+                 device: {{device_identity: \"{did}\"}}\n\
                  public_fields: [timestamp]\n\
                  default_policy: private\n\
                  groups:\n\
@@ -207,7 +207,7 @@ fn field_routed_to_unknown_group_is_a_load_error() {
                  \x20   policy: private\n\
                  \x20   cipher: btn\n\
                  \x20   recipients:\n\
-                 \x20     - {{did: \"{did}\"}}\n\
+                 \x20     - {{recipient_identity: \"{did}\"}}\n\
                  fields:\n\
                  \x20 x: {{group: ghost_group}}\n\
                  llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
@@ -230,7 +230,7 @@ fn field_in_public_and_group_is_rejected() {
             format!(
                 "ceremony: {{id: cer_amb, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
                  keystore: {{path: ./.tn/keys}}\n\
-                 me: {{did: \"{did}\"}}\n\
+                 device: {{device_identity: \"{did}\"}}\n\
                  public_fields: [timestamp, event_id, event_type, level, email]\n\
                  default_policy: private\n\
                  groups:\n\
@@ -238,12 +238,12 @@ fn field_in_public_and_group_is_rejected() {
                  \x20   policy: private\n\
                  \x20   cipher: btn\n\
                  \x20   recipients:\n\
-                 \x20     - {{did: \"{did}\"}}\n\
+                 \x20     - {{recipient_identity: \"{did}\"}}\n\
                  \x20 a:\n\
                  \x20   policy: private\n\
                  \x20   cipher: btn\n\
                  \x20   recipients:\n\
-                 \x20     - {{did: \"{did}\"}}\n\
+                 \x20     - {{recipient_identity: \"{did}\"}}\n\
                  \x20   fields: [email]\n\
                  fields: {{}}\n\
                  llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
@@ -266,7 +266,7 @@ fn legacy_flat_fields_block_still_loads() {
             format!(
                 "ceremony: {{id: cer_legacy, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
                  keystore: {{path: ./.tn/keys}}\n\
-                 me: {{did: \"{did}\"}}\n\
+                 device: {{device_identity: \"{did}\"}}\n\
                  public_fields: [timestamp]\n\
                  default_policy: private\n\
                  groups:\n\
@@ -274,12 +274,12 @@ fn legacy_flat_fields_block_still_loads() {
                  \x20   policy: private\n\
                  \x20   cipher: btn\n\
                  \x20   recipients:\n\
-                 \x20     - {{did: \"{did}\"}}\n\
+                 \x20     - {{recipient_identity: \"{did}\"}}\n\
                  \x20 secrets:\n\
                  \x20   policy: private\n\
                  \x20   cipher: btn\n\
                  \x20   recipients:\n\
-                 \x20     - {{did: \"{did}\"}}\n\
+                 \x20     - {{recipient_identity: \"{did}\"}}\n\
                  fields:\n\
                  \x20 password: {{group: secrets}}\n\
                  llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",

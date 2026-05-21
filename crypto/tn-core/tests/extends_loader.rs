@@ -35,14 +35,14 @@ keystore:
   path: ./keys
 logs:
   path: ./logs/tn.ndjson
-me:
-  did: "did:key:zABC"
+device:
+  device_identity: "did:key:zABC"
 groups:
   default:
     policy: private
     cipher: btn
     recipients:
-      - did: "did:key:zABC"
+      - recipient_identity: "did:key:zABC"
 "#
     )
 }
@@ -247,14 +247,14 @@ keystore:
   path: ./keys
 logs:
   path: ./logs/tn.ndjson
-me:
-  did: "did:key:zABC"
+device:
+  device_identity: "did:key:zABC"
 groups:
   default:
     policy: private
     cipher: btn
     recipients:
-      - did: "did:key:zABC"
+      - recipient_identity: "did:key:zABC"
 "#;
     write(&parent, parent_yaml);
     write(
@@ -287,14 +287,14 @@ fn parent_owned_keys_cannot_be_overridden() {
         r#"extends: ./parent.yaml
 ceremony:
   id: cer_c
-me:
-  did: "did:key:zCHILD"
+device:
+  device_identity: "did:key:zCHILD"
 "#,
     );
     let cfg = config::load(&child).unwrap();
     assert_eq!(
         cfg.device.device_identity, "did:key:zABC",
-        "parent's me.did must survive child's attempted override",
+        "parent's device.device_identity must survive child's attempted override",
     );
 }
 
@@ -373,14 +373,14 @@ keystore:
   path: ./keys
 logs:
   path: ./logs/tn.ndjson
-me:
-  did: "did:key:zABC"
+device:
+  device_identity: "did:key:zABC"
 groups:
   default:
     policy: private
     cipher: btn
     recipients:
-      - did: "did:key:zABC"
+      - recipient_identity: "did:key:zABC"
 handlers:
   - kind: stdout
 "#;

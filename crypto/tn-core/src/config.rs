@@ -481,7 +481,7 @@ pub fn parse(yaml: &str) -> Result<Config> {
 
 /// Parent-owned top-level keys: child can never override.
 const PARENT_OWNED_KEYS: &[&str] = &[
-    "me",
+    "device",
     "keystore",
     "groups",
     "fields",

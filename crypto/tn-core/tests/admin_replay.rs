@@ -79,7 +79,7 @@ fn admin_state_ceremony_from_log_event() {
     let cer_rec = state.ceremony.as_ref().expect("ceremony must populate");
     assert_eq!(cer_rec.ceremony_id, "cer_test");
     assert_eq!(cer_rec.cipher, "btn");
-    assert_eq!(cer_rec.device_identity, cer.did);
+    assert_eq!(cer_rec.device_identity, cer.device_identity);
     assert!(
         cer_rec.created_at.is_some(),
         "log-derived ceremony carries a created_at timestamp"
@@ -110,7 +110,7 @@ fn admin_state_ceremony_fallback_when_init_routed_elsewhere() {
     let cer_rec = state.ceremony.as_ref().expect("ceremony fallback");
     assert_eq!(cer_rec.ceremony_id, "cer_test");
     assert_eq!(cer_rec.cipher, "btn");
-    assert_eq!(cer_rec.device_identity, cer.did);
+    assert_eq!(cer_rec.device_identity, cer.device_identity);
     assert!(
         cer_rec.created_at.is_none(),
         "fallback ceremony has no timestamp"

@@ -275,7 +275,7 @@ pub fn admin_event_scenarios() -> Vec<(&'static str, Value)> {
             json!({
                 "ceremony_id": "cer_byte_compare_canonical_2026",
                 "cipher": "btn",
-                "device_did": CANONICAL_DID,
+                "device_identity": CANONICAL_DID,
                 "created_at": "2026-04-25T18:00:00.000000Z",
             }),
         ),
@@ -284,7 +284,7 @@ pub fn admin_event_scenarios() -> Vec<(&'static str, Value)> {
             json!({
                 "group": "default",
                 "cipher": "btn",
-                "publisher_did": CANONICAL_DID,
+                "publisher_identity": CANONICAL_DID,
                 "added_at": "2026-04-25T18:00:01.000000Z",
             }),
         ),
@@ -293,7 +293,7 @@ pub fn admin_event_scenarios() -> Vec<(&'static str, Value)> {
             json!({
                 "group": "default",
                 "leaf_index": 7,
-                "recipient_did": "did:key:zRecipientCanonical",
+                "recipient_identity": "did:key:zRecipientCanonical",
                 "kit_sha256": format!("sha256:{}", "a".repeat(64)),
                 "cipher": "btn",
             }),
@@ -303,7 +303,7 @@ pub fn admin_event_scenarios() -> Vec<(&'static str, Value)> {
             json!({
                 "group": "default",
                 "leaf_index": 7,
-                "recipient_did": "did:key:zRecipientCanonical",
+                "recipient_identity": "did:key:zRecipientCanonical",
             }),
         ),
         (
@@ -311,7 +311,7 @@ pub fn admin_event_scenarios() -> Vec<(&'static str, Value)> {
             json!({
                 "group": "default",
                 "slot": 3,
-                "to_did": "did:key:zCouponHolder",
+                "recipient_identity": "did:key:zCouponHolder",
                 "issued_to": "did:key:zCouponHolder",
             }),
         ),
@@ -331,7 +331,7 @@ pub fn admin_event_scenarios() -> Vec<(&'static str, Value)> {
             "tn.enrolment.compiled",
             json!({
                 "group": "default",
-                "peer_did": "did:key:zPeerEnrolment",
+                "peer_identity": "did:key:zPeerEnrolment",
                 "package_sha256": format!("sha256:{}", "c".repeat(64)),
                 "compiled_at": "2026-04-25T18:00:03.000000Z",
             }),
@@ -340,7 +340,7 @@ pub fn admin_event_scenarios() -> Vec<(&'static str, Value)> {
             "tn.enrolment.absorbed",
             json!({
                 "group": "default",
-                "from_did": "did:key:zSenderEnrolment",
+                "publisher_identity": "did:key:zSenderEnrolment",
                 "package_sha256": format!("sha256:{}", "c".repeat(64)),
                 "absorbed_at": "2026-04-25T18:00:04.000000Z",
             }),
@@ -348,7 +348,7 @@ pub fn admin_event_scenarios() -> Vec<(&'static str, Value)> {
         (
             "tn.vault.linked",
             json!({
-                "vault_did": "did:web:vault.example",
+                "vault_identity": "did:web:vault.example",
                 "project_id": "proj_byte_compare",
                 "linked_at": "2026-04-25T18:00:05.000000Z",
             }),
@@ -356,7 +356,7 @@ pub fn admin_event_scenarios() -> Vec<(&'static str, Value)> {
         (
             "tn.vault.unlinked",
             json!({
-                "vault_did": "did:web:vault.example",
+                "vault_identity": "did:web:vault.example",
                 "project_id": "proj_byte_compare",
                 "reason": "operator_initiated",
                 "unlinked_at": "2026-04-25T18:00:06.000000Z",
@@ -380,7 +380,7 @@ pub fn admin_event_scenarios() -> Vec<(&'static str, Value)> {
             "tn.read.tampered_row_skipped",
             json!({
                 "envelope_event_id": "01HXYZ0000000000000000PAY1",
-                "envelope_did": CANONICAL_DID,
+                "envelope_device_identity": CANONICAL_DID,
                 "envelope_event_type": "payment.completed",
                 "envelope_sequence": 2,
             }),

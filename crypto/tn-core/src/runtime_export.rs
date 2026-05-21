@@ -511,7 +511,7 @@ fn scan_admin_envelopes(
             if rh.is_empty() || seen.contains(rh) {
                 continue;
             }
-            let did = env.get("did").and_then(Value::as_str).unwrap_or("");
+            let did = env.get("device_identity").and_then(Value::as_str).unwrap_or("");
             let seq = env.get("sequence").and_then(Value::as_u64);
             let Some(seq) = seq else { continue };
             seen.insert(rh.to_string());
@@ -648,7 +648,7 @@ fn envelope_well_formed(env: &Value) -> bool {
 }
 
 fn verify_envelope_signature(env: &Value) -> bool {
-    let did = env.get("did").and_then(Value::as_str).unwrap_or("");
+    let did = env.get("device_identity").and_then(Value::as_str).unwrap_or("");
     let row_hash = env.get("row_hash").and_then(Value::as_str).unwrap_or("");
     let sig_b64 = env.get("signature").and_then(Value::as_str).unwrap_or("");
     if sig_b64.is_empty() {
@@ -720,7 +720,7 @@ fn build_local_admin_clock(admin_log: &Path) -> Result<LocalAdminClockState> {
             seen.insert(rh.to_string());
         }
         if let (Some(d), Some(e), Some(s)) = (
-            env.get("did").and_then(Value::as_str),
+            env.get("device_identity").and_then(Value::as_str),
             env.get("event_type").and_then(Value::as_str),
             env.get("sequence").and_then(Value::as_u64),
         ) {
