@@ -1167,10 +1167,25 @@ def _absorb_admin_log_snapshot(
 
 
 def _envelope_well_formed(env: dict[str, Any]) -> bool:
-    """Coarse shape check before we reach for crypto primitives."""
+    """Coarse shape check before we reach for crypto primitives.
+
+    0.4.3a1: the signer-identity key is ``device_identity``. Pre-rename
+    snapshots that still carry ``"did"`` will fail well-formedness here
+    and be silently dropped — operators must regenerate snapshots after
+    the rename. The Mongo-style migration script in
+    ``tn_proto_web/scripts/migrate_0_4_3a1_identity_naming.py`` handles
+    the analogous flip on the broker side.
+    """
     return all(
         isinstance(env.get(k), str)
-        for k in ("did", "timestamp", "event_id", "event_type", "row_hash", "signature")
+        for k in (
+            "device_identity",
+            "timestamp",
+            "event_id",
+            "event_type",
+            "row_hash",
+            "signature",
+        )
     )
 
 

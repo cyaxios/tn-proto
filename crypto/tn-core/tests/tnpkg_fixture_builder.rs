@@ -43,11 +43,14 @@ fn build_rust_admin_snapshot_fixture() {
     let cer = common::setup_minimal_btn_ceremony(td.path());
     let rt = Runtime::init(&cer.yaml_path).unwrap();
 
-    let kit_a = td.path().join("alice.kit");
+    // The kit_bundle exporter regex (FINDINGS #5) requires the
+    // `.btn.mykit` filename suffix; non-matching files get silently
+    // skipped and the publisher's own self-kit ships in their place.
+    let kit_a = td.path().join("alice.btn.mykit");
     let leaf_a = rt
         .admin_add_recipient("default", &kit_a, Some("did:key:zAlice"))
         .unwrap();
-    let kit_b = td.path().join("bob.kit");
+    let kit_b = td.path().join("bob.btn.mykit");
     let _leaf_b = rt
         .admin_add_recipient("default", &kit_b, Some("did:key:zBob"))
         .unwrap();

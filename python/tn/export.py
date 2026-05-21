@@ -546,8 +546,8 @@ def _merge_recipient_dids(
                 merged.append(d)
     if not merged:
         raise ValueError(
-            "export(seal_for_recipient=True) requires at least one recipient "
-            "in to_did=... or to_dids=[...]."
+            "export(seal_for_recipient=True) requires at least one "
+            "recipient_identity in to_did=... or to_dids=[...]."
         )
     return merged
 

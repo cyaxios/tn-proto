@@ -54,6 +54,11 @@ def test_init_absorbs_inbox_and_reconciles(tmp_path: Path):
     import yaml as _yaml
 
     doc = _yaml.safe_load(alice_cfg.yaml_path.read_text(encoding="utf-8"))
-    bob = next(r for r in doc["groups"]["default"]["recipients"] if r["did"] == bob_cfg.device.device_identity)
+    # 0.4.3a1: yaml recipient identity key is `recipient_identity`.
+    bob = next(
+        r
+        for r in doc["groups"]["default"]["recipients"]
+        if r["recipient_identity"] == bob_cfg.device.device_identity
+    )
     assert "pub_b64" in bob, f"reconcile should have promoted Bob; yaml: {doc}"
     tn.flush_and_close()

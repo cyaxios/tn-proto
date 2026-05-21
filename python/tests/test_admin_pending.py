@@ -12,7 +12,8 @@ def test_add_recipient_without_pub_records_pending(tmp_path: Path):
     admin._add_recipient_jwe_impl(cfg, "default", "did:key:z6MkBob")
     doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     recipients = doc["groups"]["default"]["recipients"]
-    bob = next(r for r in recipients if r.get("did") == "did:key:z6MkBob")
+    # 0.4.3a1: yaml recipients use `recipient_identity:` not `did:`.
+    bob = next(r for r in recipients if r.get("recipient_identity") == "did:key:z6MkBob")
     assert "pub_b64" not in bob
 
 

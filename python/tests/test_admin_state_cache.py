@@ -244,7 +244,7 @@ def test_revocation_is_terminal_leaf_reuse(tmp_path):
         "publisher_identity": cfg.device.device_identity,
     }
     forged_row_hash = _compute_row_hash(
-        did=cfg.device.device_identity,
+        device_identity=cfg.device.device_identity,
         timestamp=forged_ts,
         event_id=forged_event_id,
         event_type="tn.recipient.added",
@@ -255,7 +255,7 @@ def test_revocation_is_terminal_leaf_reuse(tmp_path):
     )
     sig = cfg.device.sign(forged_row_hash.encode("ascii"))
     forged_env = {
-        "did": cfg.device.device_identity,
+        "device_identity": cfg.device.device_identity,
         "timestamp": forged_ts,
         "event_id": forged_event_id,
         "event_type": "tn.recipient.added",
@@ -344,7 +344,7 @@ def test_same_coordinate_fork_detection(tmp_path):
         "publisher_identity": cfg.device.device_identity,
     }
     forged_row_hash = _compute_row_hash(
-        did=cfg.device.device_identity,
+        device_identity=cfg.device.device_identity,
         timestamp=forged_ts,
         event_id="forged-coord-fork",
         event_type="tn.recipient.added",
@@ -355,7 +355,7 @@ def test_same_coordinate_fork_detection(tmp_path):
     )
     sig = cfg.device.sign(forged_row_hash.encode("ascii"))
     forged_env = {
-        "did": cfg.device.device_identity,
+        "device_identity": cfg.device.device_identity,
         "timestamp": forged_ts,
         "event_id": "forged-coord-fork",
         "event_type": "tn.recipient.added",

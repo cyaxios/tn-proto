@@ -43,9 +43,19 @@ def main() -> None:
         yaml_path = Path(td) / "tn.yaml"
         tn.init(yaml_path, cipher="btn")
 
-        leaf_a = tn.admin.add_recipient("default", recipient_did="did:key:zAlice", out_path=str(Path(td) / "alice.btn.mykit"))
-        tn.admin.add_recipient("default", recipient_did="did:key:zBob", out_path=str(Path(td) / "bob.btn.mykit"))
-        tn.admin.revoke_recipient("default", leaf_index=leaf_a)
+        # 0.4.3a1 (post-AddRecipientResult): add_recipient returns a
+        # structured result; the integer leaf index lives on `.leaf_index`.
+        add_a = tn.admin.add_recipient(
+            "default",
+            recipient_did="did:key:zAlice",
+            out_path=str(Path(td) / "alice.btn.mykit"),
+        )
+        tn.admin.add_recipient(
+            "default",
+            recipient_did="did:key:zBob",
+            out_path=str(Path(td) / "bob.btn.mykit"),
+        )
+        tn.admin.revoke_recipient("default", leaf_index=add_a.leaf_index)
         tn.vault.link("did:web:vault.example", "demo")
 
         out = tn.pkg.export(

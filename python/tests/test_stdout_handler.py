@@ -44,7 +44,9 @@ def test_stdout_handler_pretty_format_is_terse(monkeypatch):
     captured = io.BytesIO()
     h = StdoutHandler(name="stdout", stream=captured)  # default = pretty
     envelope = {
-        "did": "did:key:z6MkLongIdentifierStringHere",
+        # 0.4.3a1: wire key is `device_identity`. Pretty format still
+        # labels the line `did=…` for operator familiarity.
+        "device_identity": "did:key:z6MkLongIdentifierStringHere",
         "timestamp": "2026-05-05T22:27:23.712506Z",
         "event_type": "page_viewed",
         "level": "info",

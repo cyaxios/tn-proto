@@ -1,17 +1,17 @@
-"""tn validate must detect yaml.me.did vs keystore.local.public mismatch.
+"""tn validate must detect yaml device.device_identity vs keystore.local.public mismatch.
 
 Covers DX review #2: previously, ``tn validate`` only checked yaml
 parse + profile catalog + presence of ``default``. It missed the most
 basic ceremony invariant — that the DID written into the yaml matches
 the did:key recorded in the keystore. The very next ``tn.init`` would
-raise ``ValueError: keystore DID ... does not match yaml me.did``,
-but the validator (whose job is to surface exactly these problems)
-returned ``OK`` and exit 0.
+raise ``ValueError: keystore DID ... does not match yaml
+device.device_identity``, but the validator (whose job is to surface
+exactly these problems) returned ``OK`` and exit 0.
 
 Fix is in ``tn.cli.cmd_validate``: for each ceremony, compare
-``yaml['me']['did']`` to the contents of the matching ``local.public``
-(resolved via the yaml's ``keystore.path`` for streams, falling back
-to ``<yaml_dir>/keys/local.public`` for default).
+``yaml['device']['device_identity']`` to the contents of the matching
+``local.public`` (resolved via the yaml's ``keystore.path`` for streams,
+falling back to ``<yaml_dir>/keys/local.public`` for default).
 """
 from __future__ import annotations
 
@@ -76,7 +76,9 @@ def test_validate_catches_yaml_did_keystore_mismatch(tmp_path: Path):
         "expected non-zero exit + diagnostic"
     )
     combined = (rc.stdout + rc.stderr).decode(errors="replace")
-    assert "yaml me.did does not match keystore" in combined
+    # 0.4.3a1 renamed the yaml block `me:` → `device:` and the field
+    # `did` → `device_identity`. Validator diagnostic moved in lock-step.
+    assert "yaml device.device_identity does not match keystore" in combined
     assert fake_did in combined
     # The real keystore did:key must also appear so operators can see
     # both sides of the divergence at a glance.
@@ -96,7 +98,7 @@ def test_validate_catches_keystore_drift_after_swap(tmp_path: Path):
     )
     rc = _run_validate(tmp_path)
     assert rc.returncode != 0
-    assert b"yaml me.did does not match keystore" in rc.stdout + rc.stderr
+    assert b"yaml device.device_identity does not match keystore" in rc.stdout + rc.stderr
 
 
 def test_validate_clean_when_no_tn_directory(tmp_path: Path):

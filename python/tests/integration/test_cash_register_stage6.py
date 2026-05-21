@@ -115,6 +115,11 @@ def test_stage6_cross_publisher_btn(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     # type the same way; rows the professor can't decrypt show up in
     # entry.hidden_groups instead of as a $no_read_key sentinel in
     # plaintext.
+    #
+    # 0.4.3a1: ``tn.read`` requires an active ceremony (autoinit-load-only
+    # raises if none is bound). The professor's yaml is the legitimate
+    # context for this decrypt — re-bind it after the prior flush.
+    tn.init(professor_yaml)
     decrypted = []
     for entry in tn.read(log=student_log_path, as_recipient=prof_keystore, group="default"):
         if "default" not in entry.hidden_groups:

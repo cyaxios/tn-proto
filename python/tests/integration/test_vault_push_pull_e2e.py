@@ -437,18 +437,15 @@ def _force_admin_log_yaml(yaml_path: Path) -> None:
     test_vault_push_handler / test_vault_pull_handler.
     """
     doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-    # Both the new (admin_log_location) and legacy (protocol_events_location)
-    # keys: the Python loader honors admin_log_location, but the Rust
-    # ``Config`` deserializer (crypto/tn-core/src/config.rs) still reads
-    # the legacy ``protocol_events_location`` field. Set both to keep
-    # parity across the runtime split until the Rust side migrates.
+    # The Rust Config deserializer aliases `protocol_events_location` →
+    # `admin_log_location` (single backing field). Setting BOTH yaml keys
+    # now raises `ceremony: duplicate field admin_log_location` at load
+    # time. Use the canonical key only; the alias handles legacy yamls
+    # transparently. The {yaml_dir} template absolutises against the
+    # yaml's own directory rather than the process cwd.
     cer = doc.setdefault("ceremony", {})
-    cer["admin_log_location"] = "./.tn/admin/admin.ndjson"
-    # The Rust runtime resolves relative pel paths against the process
-    # cwd (not yaml_dir), so a literal "./.tn/admin/..." would scatter
-    # ndjson files at whatever directory the test was invoked from.
-    # Use the absolute yaml_dir explicitly via the {yaml_dir} template.
-    cer["protocol_events_location"] = "{yaml_dir}/.tn/admin/admin.ndjson"
+    cer["admin_log_location"] = "{yaml_dir}/.tn/admin/admin.ndjson"
+    cer.pop("protocol_events_location", None)
     # Pin rotate_on_init: false on the file handler. The vault flow
     # does multiple flush_and_close() + tn.init() rounds across the
     # admin-snapshot lifecycle, and session-start rotation (the new
