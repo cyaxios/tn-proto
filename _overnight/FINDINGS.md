@@ -93,3 +93,23 @@ Schema per entry:
 - Resolution: ran `npm run build` once at the start of B0.4; all 16 CLI tests went green immediately (no source changes required). Subsequent batches in this worktree will inherit the dist/.
 - Recommended action: add `pretest: "npm run build"` to `ts-sdk/package.json` so test runs always have a fresh dist. Out-of-scope for this batch; track as a small follow-on.
 - Commit (if any): n/a — `dist/` is gitignored; the `pretest` hook change is the actionable artifact.
+
+## F5: BtnPublisher.rotate() not exposed in tn-wasm — blocks B3.x BTN rotation TS parity
+
+- Batch: B3.1 (probe; blocked at first check)
+- Files: `crypto/tn-wasm/src/lib.rs` (missing #[wasm_bindgen] wrapper); `crypto/tn-wasm/pkg/tn_wasm.d.ts` (no `rotate` symbol)
+- Symptom: `grep -n "rotate" crypto/tn-wasm/pkg/tn_wasm.d.ts` returns ZERO matches. The TS SDK cannot call into Rust's PublisherState::rotate() because no wasm-bindgen wrapper exists.
+- Tried: only the grep — declined to proceed with B3.x batches because (a) wiring TS without the underlying wasm primitive is impossible, and (b) adding the wasm-bindgen wrapper is substantive Rust work that should happen with the user's eyes on it.
+- Suspected cause: the 0.4.3a1 BTN cipher rotation work shipped phases A-F across Rust (`crypto/tn-btn/`, `crypto/tn-core/`) and Python (via PyO3 wrappers in `crypto/tn-btn-py/` and `crypto/tn-core-py/`), but the wasm-bindgen path through `crypto/tn-wasm/src/lib.rs` was missed. The Python PyO3 surface in `crypto/tn-btn-py/src/lib.rs` (commit e75cf56 phase C) provides a model for what the wasm equivalent should look like.
+- Recommended action: in a follow-on Rust batch, add `#[wasm_bindgen]` wrappers around `tn_btn::PublisherState::rotate()` and any required helpers in `crypto/tn-wasm/src/lib.rs`. Mirror the PyO3 shape from `crypto/tn-btn-py/src/lib.rs`. Then `wasm-pack build --target nodejs --release` from `crypto/tn-wasm/`. Then the B3.1-B3.5 TS catchup work becomes feasible.
+- Commit (if any): n/a — work blocked on user-supervised Rust change.
+
+## F6: Trunk worktree's `crypto/tn-core-py/python/tn_core/_core.pyd` was rebuilt as a side effect of B2.1
+
+- Batch: B2.1 (Python tn_core wheel rebuild needed to regenerate binary fixtures)
+- Files: `C:/codex/tn/tn_proto/crypto/tn-core-py/python/tn_core/_core.pyd` (trunk worktree, NOT the overnight worktree)
+- Symptom: trunk Python's `_core.pyd` mtime is now today's date, even though the trunk's branch (feat/0.4.2a11-naming-flip) wasn't being committed-to.
+- Cause: regenerating the binary `.tnpkg` fixtures required running `python -m ...` from a Python venv that imports `tn_core._core`. The B2.1 subagent ran `maturin build --release crypto/tn-core-py` and then `pip install -e crypto/tn-core-py` to make the rebuilt wheel available. The editable install rebuilt the `.pyd` from the trunk's source — which is on the same branch family and has the new field names, so trunk Python ops should continue to work normally.
+- Tried: this is by design, not a defect.
+- Recommended action: none required. Flagged so the user isn't surprised by an unexpected `.pyd` rebuild.
+- Commit (if any): n/a — `.pyd` files are gitignored compiled artifacts.

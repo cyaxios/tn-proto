@@ -59,4 +59,23 @@ When a batch is BLOCKED, mark `- [ ] [BLOCKED: F<n>]` with the finding number.
 
   No new findings filed — B2.1 closed F3 and incidentally caught a phase-G gap that wasn't in F2's scope. The Python `_envelope_reserved` gap (F2) and `pretest: npm run build` follow-on (F4) remain open.
 
-(Phase 1 will populate the rest of this; placeholder.)
+- [ ] [BLOCKED: F5] B3.1 — TS wiring of BTN cipher rotate. Probe revealed `BtnPublisher.rotate()` is not exposed in `crypto/tn-wasm/pkg/tn_wasm.d.ts` (zero `rotate` symbols). The Rust `tn_btn::PublisherState::rotate()` exists (commit 73cf761) and the PyO3 surface exists (commit e75cf56), but the wasm-bindgen wrapper was missed. Needs a Rust+wasm batch before any of B3.1-B3.5 can proceed. F5 filed with the recommended fix shape.
+
+- [ ] B3.2-B3.5 — TS BTN rotation parity (retired publisher state, admin rotate driver, recipient renewal, cross-SDK rotation fixture). All blocked downstream of B3.1.
+
+- [ ] B4.1 — `set_link_state` → TS `tn.vault.setLinkState` (yaml-write port). Deferred to next session.
+- [ ] B4.2 — Re-export `KeystoreConflictError` + `isKeystoreDiverged` from TS. Deferred.
+- [ ] B4.3 — Port 2 reducer regressions (commit 578ecbb cases) to TS-side tests. Deferred.
+
+- [ ] B5.1 — Default-export consumer smoke test. Deferred.
+- [ ] B5.3 — Discriminated union cascade verification. Deferred.
+- [ ] B5.4 — Printf coverage parity with Python's loguru format-spec set. Deferred.
+
+---
+
+## End-of-session summary
+
+**Test suite: 296/296 fully green** (started at 213 pass / 83 fail).
+Five commits on `feat/0.4.3a1-ts-parity` (Phase 0 scaffold + B0.1 + B0.2 + B0.4 + B2.1).
+B3.1 blocked on F5. B3.2-B5.4 deferred to next session.
+See `_overnight/REPORT.md` for the full handover.
