@@ -7,7 +7,7 @@
 //       manifest.json    ← signed JSON; the index
 //       body/...         ← kind-specific contents
 //
-// The manifest is signed with Ed25519 by `from_did`'s device key, over
+// The manifest is signed with Ed25519 by `publisher_identity`'s device key, over
 // the canonical bytes of the manifest minus the signature field. The
 // internal TS object uses camelCase (`fromDid`, `toDid`, ...) but the
 // wire form is snake_case so Python and Rust readers see byte-identical
@@ -80,14 +80,14 @@ function toWireDict(m: Manifest, includeSignature: boolean): Record<string, unkn
   const out: Record<string, unknown> = {
     kind: m.kind,
     version: m.version,
-    from_did: m.fromDid,
+    publisher_identity: m.fromDid,
     ceremony_id: m.ceremonyId,
     as_of: m.asOf,
     scope: m.scope,
     clock: m.clock,
     event_count: m.eventCount,
   };
-  if (m.toDid !== undefined && m.toDid !== null) out["to_did"] = m.toDid;
+  if (m.toDid !== undefined && m.toDid !== null) out["recipient_identity"] = m.toDid;
   if (m.headRowHash !== undefined && m.headRowHash !== null) {
     out["head_row_hash"] = m.headRowHash;
   }
@@ -105,7 +105,7 @@ function fromWireDict(doc: unknown): Manifest {
     throw new Error(`manifest must be a JSON object; got ${typeof doc}`);
   }
   const d = doc as Record<string, unknown>;
-  const required = ["kind", "version", "from_did", "ceremony_id", "as_of"];
+  const required = ["kind", "version", "publisher_identity", "ceremony_id", "as_of"];
   const missing = required.filter((k) => !(k in d));
   if (missing.length > 0) {
     throw new Error(`manifest missing required keys: ${JSON.stringify(missing)}`);
@@ -127,7 +127,7 @@ function fromWireDict(doc: unknown): Manifest {
   const m: Manifest = {
     kind: String(d["kind"]),
     version: Math.trunc(Number(d["version"])),
-    fromDid: String(d["from_did"]),
+    fromDid: String(d["publisher_identity"]),
     ceremonyId: String(d["ceremony_id"]),
     asOf: String(d["as_of"]),
     scope: typeof d["scope"] === "string" ? (d["scope"] as string) : "admin",
@@ -137,7 +137,7 @@ function fromWireDict(doc: unknown): Manifest {
         ? (d["event_count"] as number)
         : Number(d["event_count"] ?? 0) || 0,
   };
-  if (typeof d["to_did"] === "string") m.toDid = d["to_did"] as string;
+  if (typeof d["recipient_identity"] === "string") m.toDid = d["recipient_identity"] as string;
   if (typeof d["head_row_hash"] === "string") m.headRowHash = d["head_row_hash"] as string;
   if (d["state"] !== undefined && d["state"] !== null) {
     m.state = d["state"] as Record<string, unknown>;
@@ -167,7 +167,7 @@ export function signManifest(m: Manifest, deviceKey: DeviceKey): Manifest {
   return m;
 }
 
-/** Verify a manifest's signature against `from_did`. Throws on failure;
+/** Verify a manifest's signature against `publisher_identity`. Throws on failure;
  * returns silently on success. */
 export function verifyManifest(m: Manifest): void {
   if (!m.manifestSignatureB64) {
@@ -185,7 +185,7 @@ export function verifyManifest(m: Manifest): void {
   const ok = verifySig(asDid(m.fromDid), manifestSigningBytes(m), sigBytes);
   if (!ok) {
     throw new Error(
-      `verifyManifest: signature does not verify against from_did ${JSON.stringify(m.fromDid)}`,
+      `verifyManifest: signature does not verify against publisher_identity ${JSON.stringify(m.fromDid)}`,
     );
   }
 }

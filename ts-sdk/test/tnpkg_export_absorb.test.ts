@@ -48,7 +48,7 @@ function makeCeremony(): { yamlPath: string; tmpDir: string; cleanup: () => void
   writeFileSync(join(keys, "default.btn.state"), Buffer.from(pub.toBytes()));
   writeFileSync(join(keys, "default.btn.mykit"), Buffer.from(kit));
 
-  const yaml = `ceremony:\n  id: tnpkg_test\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\nme:\n  did: ${dk.did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\n- group\n- leaf_index\n- recipient_did\n- kit_sha256\n- cipher\n- vault_did\n- project_id\n- linked_at\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n    recipients:\n    - did: ${dk.did}\nfields: {}\n`;
+  const yaml = `ceremony:\n  id: tnpkg_test\n  mode: local\n  cipher: btn\nlogs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\nme:\n  did: ${dk.did}\npublic_fields:\n- timestamp\n- event_id\n- event_type\n- level\n- group\n- leaf_index\n- recipient_identity\n- kit_sha256\n- cipher\n- vault_identity\n- project_id\n- linked_at\ndefault_policy: private\ngroups:\n  default:\n    policy: private\n    cipher: btn\n    recipients:\n    - did: ${dk.did}\nfields: {}\n`;
   const yamlPath = join(dir, "tn.yaml");
   writeFileSync(yamlPath, yaml, "utf8");
 
@@ -228,7 +228,7 @@ test("absorb surfaces leaf reuse when add(L) → revoke(L) → add(L)", async ()
         ceremony_id: cfg.ceremonyId,
         group: "default",
         leaf_index: leaf,
-        recipient_did: "did:key:zForged",
+        recipient_identity: "did:key:zForged",
         kit_sha256: "sha256:" + "0".repeat(64),
         cipher: "btn",
       };

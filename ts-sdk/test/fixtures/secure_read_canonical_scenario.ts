@@ -316,7 +316,7 @@ const ADMIN_EVENT_SCENARIOS: ReadonlyArray<readonly [string, Record<string, unkn
     {
       ceremony_id: "cer_byte_compare_canonical_2026",
       cipher: "btn",
-      device_did: CANONICAL_DID,
+      device_identity: CANONICAL_DID,
       created_at: "2026-04-25T18:00:00.000000Z",
     },
   ],
@@ -325,7 +325,7 @@ const ADMIN_EVENT_SCENARIOS: ReadonlyArray<readonly [string, Record<string, unkn
     {
       group: "default",
       cipher: "btn",
-      publisher_did: CANONICAL_DID,
+      publisher_identity: CANONICAL_DID,
       added_at: "2026-04-25T18:00:01.000000Z",
     },
   ],
@@ -334,7 +334,7 @@ const ADMIN_EVENT_SCENARIOS: ReadonlyArray<readonly [string, Record<string, unkn
     {
       group: "default",
       leaf_index: 7,
-      recipient_did: "did:key:zRecipientCanonical",
+      recipient_identity: "did:key:zRecipientCanonical",
       kit_sha256: "sha256:" + "a".repeat(64),
       cipher: "btn",
     },
@@ -344,7 +344,7 @@ const ADMIN_EVENT_SCENARIOS: ReadonlyArray<readonly [string, Record<string, unkn
     {
       group: "default",
       leaf_index: 7,
-      recipient_did: "did:key:zRecipientCanonical",
+      recipient_identity: "did:key:zRecipientCanonical",
     },
   ],
   [
@@ -372,7 +372,7 @@ const ADMIN_EVENT_SCENARIOS: ReadonlyArray<readonly [string, Record<string, unkn
     "tn.enrolment.compiled",
     {
       group: "default",
-      peer_did: "did:key:zPeerEnrolment",
+      peer_identity: "did:key:zPeerEnrolment",
       package_sha256: "sha256:" + "c".repeat(64),
       compiled_at: "2026-04-25T18:00:03.000000Z",
     },
@@ -389,7 +389,7 @@ const ADMIN_EVENT_SCENARIOS: ReadonlyArray<readonly [string, Record<string, unkn
   [
     "tn.vault.linked",
     {
-      vault_did: "did:web:vault.example",
+      vault_identity: "did:web:vault.example",
       project_id: "proj_byte_compare",
       linked_at: "2026-04-25T18:00:05.000000Z",
     },
@@ -397,7 +397,7 @@ const ADMIN_EVENT_SCENARIOS: ReadonlyArray<readonly [string, Record<string, unkn
   [
     "tn.vault.unlinked",
     {
-      vault_did: "did:web:vault.example",
+      vault_identity: "did:web:vault.example",
       project_id: "proj_byte_compare",
       reason: "operator_initiated",
       unlinked_at: "2026-04-25T18:00:06.000000Z",
@@ -422,7 +422,7 @@ const ADMIN_EVENT_SCENARIOS: ReadonlyArray<readonly [string, Record<string, unkn
     "tn.read.tampered_row_skipped",
     {
       envelope_event_id: "01HXYZ0000000000000000PAY1",
-      envelope_did: CANONICAL_DID,
+      envelope_device_identity: CANONICAL_DID,
       envelope_event_type: "payment.completed",
       envelope_sequence: 2,
     },

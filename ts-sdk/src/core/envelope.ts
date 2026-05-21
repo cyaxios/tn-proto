@@ -10,7 +10,7 @@ import type { Envelope } from "./types.js";
  */
 export function buildEnvelopeLine(env: Envelope): string {
   return rawBuildEnvelope({
-    did: env.did,
+    device_identity: env.device_identity,
     timestamp: env.timestamp,
     event_id: env.eventId,
     event_type: env.eventType,

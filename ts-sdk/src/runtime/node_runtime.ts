@@ -431,7 +431,7 @@ export class NodeRuntime {
     this.emit("info", "tn.recipient.added", {
       group,
       leaf_index: actualLeaf,
-      recipient_did: recipientDid ?? null,
+      recipient_identity: recipientDid ?? null,
       kit_sha256: `sha256:${digest}`,
       cipher: "btn",
     });
@@ -663,7 +663,7 @@ export class NodeRuntime {
     this.emit("info", "tn.recipient.revoked", {
       group,
       leaf_index: leafIndex,
-      recipient_did: recipientDid ?? null,
+      recipient_identity: recipientDid ?? null,
     });
   }
 
@@ -1004,7 +1004,7 @@ export class NodeRuntime {
     return this.emit("info", "tn.group.added", {
       group,
       cipher,
-      publisher_did: this.did,
+      publisher_identity: this.did,
       added_at: addedAt,
     });
   }
@@ -1015,12 +1015,12 @@ export class NodeRuntime {
 
   private static readonly _ADMIN_STATE_FIELD_MAP: Record<string, string> = {
     ceremonyId: "ceremony_id",
-    deviceDid: "device_did",
+    deviceDid: "device_identity",
     createdAt: "created_at",
-    publisherDid: "publisher_did",
+    publisherDid: "publisher_identity",
     addedAt: "added_at",
     leafIndex: "leaf_index",
-    recipientDid: "recipient_did",
+    recipientDid: "recipient_identity",
     kitSha256: "kit_sha256",
     mintedAt: "minted_at",
     activeStatus: "active_status",
@@ -1028,14 +1028,14 @@ export class NodeRuntime {
     retiredAt: "retired_at",
     previousKitSha256: "previous_kit_sha256",
     rotatedAt: "rotated_at",
-    toDid: "to_did",
+    toDid: "recipient_identity",
     issuedTo: "issued_to",
     issuedAt: "issued_at",
-    peerDid: "peer_did",
+    peerDid: "peer_identity",
     packageSha256: "package_sha256",
     compiledAt: "compiled_at",
     absorbedAt: "absorbed_at",
-    vaultDid: "vault_did",
+    vaultDid: "vault_identity",
     projectId: "project_id",
     linkedAt: "linked_at",
     unlinkedAt: "unlinked_at",
@@ -1336,7 +1336,7 @@ export class NodeRuntime {
         if (!isAdminEventType(et)) continue;
         const rh = env["row_hash"];
         if (typeof rh !== "string" || seen.has(rh)) continue;
-        const did = env["did"];
+        const did = env["device_identity"];
         const seq = env["sequence"];
         if (typeof did !== "string" || typeof seq !== "number") continue;
         seen.add(rh);
@@ -1429,7 +1429,7 @@ export class NodeRuntime {
         if (!s) continue;
         try {
           const env = JSON.parse(s) as Record<string, unknown>;
-          const did = env["did"];
+          const did = env["device_identity"];
           const et = env["event_type"];
           const seq = env["sequence"];
           if (typeof did === "string" && typeof et === "string" && typeof seq === "number") {
@@ -1986,7 +1986,7 @@ export class NodeRuntime {
     for (const et of ["tn.recipient.added", "tn.recipient.revoked"]) {
       for (const env of scanAttestedEventRecords(this.config, et)) {
         const g = env.group as string | undefined;
-        const did = env.recipient_did as string | undefined;
+        const did = env.recipient_identity as string | undefined;
         if (g && did) addKey(g, did);
       }
     }
@@ -2092,7 +2092,7 @@ export class NodeRuntime {
       const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH());
       const envRowHash = String(env["row_hash"] ?? "");
       const envSig = String(env["signature"] ?? "");
-      const envDid = String(env["did"] ?? "");
+      const envDid = String(env["device_identity"] ?? "");
       const envTs = String(env["timestamp"] ?? "");
       const envEventId = String(env["event_id"] ?? "");
       const envLevel = String(env["level"] ?? "");
@@ -2133,7 +2133,7 @@ export class NodeRuntime {
       let rowHashOk: boolean;
       try {
         const recomputed = rowHash({
-          did: asDid(envDid),
+          device_identity: asDid(envDid),
           timestamp: envTs,
           eventId: envEventId,
           eventType,
@@ -2200,7 +2200,7 @@ export class NodeRuntime {
     const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH);
     const envRowHash = String(env["row_hash"] ?? "");
     const envSig = String(env["signature"] ?? "");
-    const envDid = String(env["did"] ?? "");
+    const envDid = String(env["device_identity"] ?? "");
     const envTs = String(env["timestamp"] ?? "");
     const envEventId = String(env["event_id"] ?? "");
     const envLevel = String(env["level"] ?? "");
@@ -2237,7 +2237,7 @@ export class NodeRuntime {
     let rowHashOk: boolean;
     try {
       const recomputed = rowHash({
-        did: asDid(envDid),
+          device_identity: asDid(envDid),
         timestamp: envTs,
         eventId: envEventId,
         eventType,
@@ -2404,7 +2404,7 @@ function _envelopeWellFormed(env: Record<string, unknown>): boolean {
 
 function _verifyEnvelopeSignature(env: Record<string, unknown>): boolean {
   try {
-    const did = String(env["did"]);
+    const did = String(env["device_identity"]);
     const rh = String(env["row_hash"]);
     const sigB64 = String(env["signature"]);
     const sig = signatureFromB64(asSignatureB64(sigB64));
@@ -2587,13 +2587,13 @@ public_fields:
 - path
 - ceremony_id
 - cipher
-- device_did
+- device_identity
 - created_at
 - group
-- publisher_did
+- publisher_identity
 - added_at
 - leaf_index
-- recipient_did
+- recipient_identity
 - kit_sha256
 - slot
 - to_did
@@ -2603,12 +2603,12 @@ public_fields:
 - old_pool_size
 - new_pool_size
 - rotated_at
-- peer_did
+- peer_identity
 - package_sha256
 - compiled_at
 - from_did
 - absorbed_at
-- vault_did
+- vault_identity
 - project_id
 - linked_at
 - reason
@@ -2618,7 +2618,7 @@ public_fields:
 - event_types_covered
 - policy_text
 - envelope_event_id
-- envelope_did
+- envelope_device_identity
 - envelope_event_type
 - envelope_sequence
 - invalid_reasons

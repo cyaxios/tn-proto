@@ -32,7 +32,7 @@ export interface GroupHashInput {
 }
 
 export interface RowHashInput {
-  did: Did;
+  device_identity: Did;
   timestamp: string;
   eventId: string;
   eventType: string;
@@ -50,7 +50,7 @@ export interface GroupPayload {
 }
 
 export interface Envelope {
-  did: Did;
+  device_identity: Did;
   timestamp: string;
   eventId: string;
   eventType: string;

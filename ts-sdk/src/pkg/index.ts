@@ -180,7 +180,7 @@ export class PkgNamespace {
     // here we attest to the ceremony log which is the TS equivalent.
     this._rt.emit("info", "tn.offer.compiled", {
       group: opts.group,
-      peer_did: opts.peerDid,
+      peer_identity: opts.peerDid,
       package_sha256: `sha256:${packageSha256}`,
       package_path: compiled.outPath,
     });

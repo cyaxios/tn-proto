@@ -138,7 +138,7 @@ export function absorbBootstrap(
       derivedState: null,
       conflicts: [],
       rejectedReason:
-        `manifest signature does not verify against from_did ` +
+        `manifest signature does not verify against publisher_identity ` +
         `${JSON.stringify(manifest.fromDid)}. The package is corrupt, truncated, or tampered.`,
     };
   }

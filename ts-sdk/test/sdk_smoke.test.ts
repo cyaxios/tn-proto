@@ -103,7 +103,7 @@ test("admin.reduce turns a recipient.added envelope into a typed delta", () => {
     timestamp: "2026-04-23T12:00:00Z",
     group: "default",
     leaf_index: 3,
-    recipient_did: "did:key:z6Mkbob",
+    recipient_identity: "did:key:z6Mkbob",
     kit_sha256: "a".repeat(64),
     cipher: "btn",
   };
