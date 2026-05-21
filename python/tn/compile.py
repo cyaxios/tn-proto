@@ -95,7 +95,7 @@ def compile_enrolment(cfg: LoadedConfig, group: str, peer_did: str) -> Package:
             )
         except Exception as emit_err:  # noqa: BLE001 — preserve broad swallow; see body of handler
             logging.getLogger("tn.compile").warning(
-                "enrolment.compiled attestation failed for group=%s recipient_identity=%s: %s",
+                "enrolment.compiled attestation failed for group=%s to_did=%s: %s",
                 group,
                 peer_did,
                 emit_err,

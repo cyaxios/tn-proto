@@ -212,25 +212,31 @@ class BtnKeystore:
         atomic_write_bytes(self._pending_kit_path(group), self_kit)
 
     def promote_pending(self, group: str, *, retiring_epoch: int) -> None:
-        """Atomic swap: archive current active as retired.<N>, promote pending.
+        """Swap pending → active.
 
-        Sequence (each step is an atomic POSIX rename):
-          1. Rename ``<g>.btn.state`` → ``<g>.btn.state.retired.<N>``
-          2. Rename ``<g>.btn.mykit`` → ``<g>.btn.mykit.retired.<N>``
-          3. Rename ``<g>.btn.state.pending`` → ``<g>.btn.state``
-          4. Rename ``<g>.btn.mykit.pending`` → ``<g>.btn.mykit``
+        Caller contract (the rotation orchestrator in
+        :class:`BtnGroupCipher.rotate`):
+          1. write_pending  — writes the post-rotation active state +
+             self-kit to ``.pending`` paths.
+          2. write_retired_pair  — writes the lightweight retired
+             snapshot + the old self-kit to
+             ``.retired.<retiring_epoch>`` paths. This is the canonical
+             archive of the prior generation; the active state files
+             on disk are now redundant snapshots of the same data.
+          3. promote_pending (this method)  — removes the now-redundant
+             active files and renames pending → active. Two atomic
+             POSIX renames; the file removals are best-effort idempotent
+             (a crash between them is recoverable by the next init's
+             cleanup_orphan_pending + re-rotate cycle).
 
-        Crash between any two steps leaves the keystore in a
-        recoverable state. The next init detects an orphaned pending
-        pair via :meth:`cleanup_orphan_pending` (if we crashed before
-        step 1) or sees a complete promote with the next call's
-        catalog event missing (if between step 4 and the admin emit;
-        the catalog re-emit is idempotent).
+        Refuses if the retired pair is NOT present on disk at the
+        expected epoch — that means write_retired_pair didn't run and
+        a forward-secret rotation would otherwise lose the prior
+        master_seed irrecoverably.
 
-        Refuses to overwrite an existing retired pair at the same
-        epoch — that situation indicates either a re-run of an already
-        completed promote (manual cleanup needed) or a stale leftover
-        from a partially-failed prior rotation."""
+        Refuses if the pending pair is absent — write_pending must have
+        succeeded.
+        """
         state_active = self._state_path(group)
         kit_active = self._kit_path(group)
         state_pending = self._pending_state_path(group)
@@ -238,13 +244,13 @@ class BtnKeystore:
         state_retired = self._retired_state_path(group, retiring_epoch)
         kit_retired = self._retired_kit_path(group, retiring_epoch)
 
-        if state_retired.exists() or kit_retired.exists():
-            raise FileExistsError(
-                f"promote_pending: retired pair for epoch {retiring_epoch} already "
-                f"exists at {state_retired} / {kit_retired}. Refusing to overwrite. "
-                f"This usually means the previous rotation completed its promote "
-                f"but its tn.rotation.completed admin event didn't fire — investigate "
-                f"the admin log before re-running."
+        if not state_retired.exists() or not kit_retired.exists():
+            raise FileNotFoundError(
+                f"promote_pending: retired archive for epoch {retiring_epoch} "
+                f"missing at {state_retired} / {kit_retired}. "
+                f"write_retired_pair() must run before promote_pending() so the "
+                f"prior generation's master_seed isn't lost when the active "
+                f"files are replaced."
             )
         if not state_pending.exists() or not kit_pending.exists():
             raise FileNotFoundError(
@@ -252,8 +258,12 @@ class BtnKeystore:
                 f"{kit_pending}. Did write_pending() succeed?"
             )
 
-        state_active.rename(state_retired)
-        kit_active.rename(kit_retired)
+        # Active files are redundant now (their canonical archive is in
+        # .retired.<N>). Remove them so the pending → active rename can
+        # land. missing_ok=True covers the recovery case where a prior
+        # crashed rotation already removed one but not the other.
+        state_active.unlink(missing_ok=True)
+        kit_active.unlink(missing_ok=True)
         state_pending.rename(state_active)
         kit_pending.rename(kit_active)
 

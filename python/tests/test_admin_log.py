@@ -80,7 +80,7 @@ def test_admin_log_snapshot_zip_shape_and_signature(tmp_path: Path):
 
     manifest, body = _read_manifest(out)
     assert manifest.kind == "admin_log_snapshot"
-    assert manifest.from_did == cfg.device.device_identity
+    assert manifest.publisher_identity == cfg.device.device_identity
     assert manifest.scope == "admin"
     assert "body/admin.ndjson" in body
     assert manifest.event_count > 0
@@ -299,7 +299,7 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
 
     manifest = TnpkgManifest(
         kind="admin_log_snapshot",
-        from_did=cfg.device.device_identity,
+        publisher_identity=cfg.device.device_identity,
         ceremony_id=cfg.ceremony_id,
         as_of=forged_ts,
         scope="admin",

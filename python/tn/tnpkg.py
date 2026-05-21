@@ -95,11 +95,11 @@ class TnpkgManifest:
     """
 
     kind: str
-    from_did: str
+    publisher_identity: str
     ceremony_id: str
     as_of: str
     scope: str = "admin"
-    to_did: str | None = None
+    recipient_identity: str | None = None
     version: int = MANIFEST_VERSION
     clock: dict[str, dict[str, int]] = field(default_factory=dict)
     event_count: int = 0
@@ -114,15 +114,15 @@ class TnpkgManifest:
         out: dict[str, Any] = {
             "kind": self.kind,
             "version": self.version,
-            "publisher_identity": self.from_did,
+            "publisher_identity": self.publisher_identity,
             "ceremony_id": self.ceremony_id,
             "as_of": self.as_of,
             "scope": self.scope,
             "clock": self.clock,
             "event_count": self.event_count,
         }
-        if self.to_did is not None:
-            out["recipient_identity"] = self.to_did
+        if self.recipient_identity is not None:
+            out["recipient_identity"] = self.recipient_identity
         if self.head_row_hash is not None:
             out["head_row_hash"] = self.head_row_hash
         if self.state is not None:
@@ -144,11 +144,11 @@ class TnpkgManifest:
         return cls(
             kind=str(doc["kind"]),
             version=int(doc["version"]),
-            from_did=str(doc["publisher_identity"]),
+            publisher_identity=str(doc["publisher_identity"]),
             ceremony_id=str(doc["ceremony_id"]),
             as_of=str(doc["as_of"]),
             scope=str(doc.get("scope", "admin")),
-            to_did=(str(doc["recipient_identity"]) if doc.get("recipient_identity") is not None else None),
+            recipient_identity=(str(doc["recipient_identity"]) if doc.get("recipient_identity") is not None else None),
             clock=dict(doc.get("clock") or {}),
             event_count=int(doc.get("event_count", 0)),
             head_row_hash=(

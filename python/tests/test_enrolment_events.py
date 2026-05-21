@@ -128,7 +128,7 @@ def test_compile_enrolment_direct_call_emits_event(tmp_path):
     # log holds both compile events. Verify both: the reduced state, and the
     # raw envelopes.
     assert len(matches) >= 1, (
-        f"expected >=1 enrolment for peer_did={peer_did!r}, got {state['enrolments']}"
+        f"expected >=1 enrolment for to_did={peer_did!r}, got {state['enrolments']}"
     )
     raw_envs = [
         e for e in _enrolments_from_admin_log(yaml) if e.get("peer_identity") == peer_did

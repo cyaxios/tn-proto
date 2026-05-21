@@ -146,8 +146,8 @@ def test_python_reads_browser_built_tnpkg_and_verifies_signature():
     # Manifest fields match what the JS side emitted.
     assert manifest.kind == "kit_bundle"
     assert manifest.version == 1
-    assert manifest.from_did == meta["publisher_identity"]
-    assert manifest.to_did == meta["recipient_identity"]
+    assert manifest.publisher_identity == meta["publisher_identity"]
+    assert manifest.recipient_identity == meta["recipient_identity"]
     assert manifest.ceremony_id == meta["ceremony_id"]
     assert manifest.manifest_signature_b64, "manifest is signed"
 

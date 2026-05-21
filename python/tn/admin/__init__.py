@@ -1229,20 +1229,31 @@ def _renew_btn_recipients(
 
     publisher_id = cfg.device.device_identity
 
-    # Read the yaml's recipient list for this group.
-    yaml_doc = _read_yaml_doc(cfg.yaml_path)
-    g = (yaml_doc.get("groups") or {}).get(group) or {}
-    yaml_recipients = g.get("recipients") or []
+    # Canonical recipient registry is the admin event log, not yaml.
+    # The raw-kit `add_recipient_btn` path mints kits + emits
+    # tn.recipient.added events but doesn't always update yaml's
+    # recipients[]. Read from the reducer-derived state so both the
+    # tnpkg path (which updates yaml) and the raw-kit path (which
+    # doesn't) flow through the same renewal loop.
+    try:
+        live_state = state(group=group)
+    except Exception:  # noqa: BLE001
+        live_state = {"recipients": []}
+    recipients = live_state.get("recipients") or []
 
     targets: list[str] = []
-    for r in yaml_recipients:
+    seen_targets: set[str] = set()
+    for r in recipients:
         if not isinstance(r, dict):
             continue
-        if r.get("revoked_at") is not None:
+        if r.get("active_status") in ("revoked", "retired"):
             continue
-        rid = r.get("recipient_identity") or r.get("did")
+        rid = r.get("recipient_did") or r.get("recipient_identity")
         if not rid or rid == publisher_id:
             continue
+        if rid in seen_targets:
+            continue
+        seen_targets.add(rid)
         targets.append(rid)
 
     if not targets:

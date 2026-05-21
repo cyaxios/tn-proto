@@ -1118,7 +1118,7 @@ def _validate_load_doc_structure(yaml_path: Path, doc: Any) -> None:
     if "me" in doc and "device" not in doc:
         raise ValueError(
             f"{yaml_path}: legacy `me:` top-level block is no longer supported "
-            f"(0.4.3a1 renamed it to `device:`). Replace `device: {{device_identity: ...}}` with "
+            f"(0.4.3a1 renamed it to `device:`). Replace `me: {{did: ...}}` with "
             f"`device: {{device_identity: ...}}`. See "
             f"docs/superpowers/specs/2026-05-20-identity-and-key-naming.md."
         )

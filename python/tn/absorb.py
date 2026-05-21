@@ -222,7 +222,7 @@ def absorb(
             return AbsorbResult(
                 status=receipt.legacy_status,
                 reason=receipt.legacy_reason,
-                recipient_identity=None,
+                peer_did=None,
             )
         # Default mapping for snapshot kinds the old callers never saw.
         if receipt.kind == "admin_log_snapshot":
@@ -730,7 +730,7 @@ def _absorb_identity_seed(
             kind=manifest.kind,
             legacy_status="rejected",
             legacy_reason=(
-                f"identity_seed integrity check failed: manifest.publisher_identity="
+                f"identity_seed integrity check failed: manifest.from_did="
                 f"{manifest.publisher_identity!r}, body/local.public={bundle_did!r}, "
                 f"derived-from-private={derived.did!r}. The bundle's body and "
                 f"manifest disagree about which identity this is — refuse to "
@@ -1458,7 +1458,7 @@ def _absorb_project_seed(
             kind=manifest.kind,
             legacy_status="rejected",
             legacy_reason=(
-                f"project_seed integrity check failed: manifest.publisher_identity="
+                f"project_seed integrity check failed: manifest.from_did="
                 f"{manifest.publisher_identity!r}, body/keys/local.public={bundle_did!r}, "
                 f"derived-from-private={derived.did!r}. The bundle's body and "
                 f"manifest disagree about which identity this is — refuse to "

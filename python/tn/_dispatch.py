@@ -136,7 +136,7 @@ def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str
     from tn.signing import DeviceKey, _signature_from_b64
 
     _reserved = {
-        "did",
+        "device_identity",
         "timestamp",
         "event_id",
         "event_type",
@@ -171,7 +171,7 @@ def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str
         event_type = env.get("event_type", "")
         prev_hash = env.get("prev_hash", "")
         row_hash = env.get("row_hash", "")
-        did = env.get("did", "")
+        did = env.get("device_identity", "")
         sig_b64 = env.get("signature", "")
 
         # Chain linkage ------------------------------------------------

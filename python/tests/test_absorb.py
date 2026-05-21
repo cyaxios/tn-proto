@@ -68,9 +68,9 @@ def test_absorb_rejects_unsupported_kind(tmp_path: Path):
         ceremony_id="c",
         group="g",
         group_epoch=0,
-        signer_did="did:key:x",
+        device_identity="did:key:x",
         signer_verify_pub_b64="",
-        peer_did="did:key:y",
+        recipient_identity="did:key:y",
         payload={},
         compiled_at="2026-04-21T00:00:00Z",
     )

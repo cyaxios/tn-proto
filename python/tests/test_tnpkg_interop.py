@@ -193,11 +193,11 @@ def test_manifest_canonical_bytes_match_golden():
     m = TnpkgManifest(
         kind=GOLDEN_INPUT["kind"],
         version=GOLDEN_INPUT["version"],
-        from_did=GOLDEN_INPUT["publisher_identity"],
+        publisher_identity=GOLDEN_INPUT["publisher_identity"],
         ceremony_id=GOLDEN_INPUT["ceremony_id"],
         as_of=GOLDEN_INPUT["as_of"],
         scope=GOLDEN_INPUT["scope"],
-        to_did=GOLDEN_INPUT["recipient_identity"],
+        recipient_identity=GOLDEN_INPUT["recipient_identity"],
         clock=GOLDEN_INPUT["clock"],
         event_count=GOLDEN_INPUT["event_count"],
         head_row_hash=GOLDEN_INPUT["head_row_hash"],

@@ -603,11 +603,11 @@ def _apply_seal_for_recipient(
     # AAD.
     preview = TnpkgManifest(
         kind=str(kind),
-        from_did=cfg.device.device_identity if cfg is not None else "",
+        publisher_identity=cfg.device.device_identity if cfg is not None else "",
         ceremony_id=cfg.ceremony_id if cfg is not None else "",
         as_of=_now_iso(),
         scope=str(scope or extras.get("scope") or _default_scope(kind)),
-        to_did=merged_dids[0],
+        recipient_identity=merged_dids[0],
         clock=dict(extras.get("clock", {})),
         event_count=int(extras.get("event_count", 0)),
         head_row_hash=extras.get("head_row_hash"),
@@ -781,11 +781,11 @@ def export(
     #    passed for to_did.
     manifest = TnpkgManifest(
         kind=str(kind),
-        from_did=signer_did,
+        publisher_identity=signer_did,
         ceremony_id=signer_ceremony,
         as_of=sealed_as_of or _now_iso(),
         scope=str(scope or extras.get("scope") or _default_scope(kind)),
-        to_did=signer_did if kind == "identity_seed" else to_did,
+        recipient_identity=signer_did if kind == "identity_seed" else to_did,
         clock=dict(extras.get("clock", {})),
         event_count=int(extras.get("event_count", 0)),
         head_row_hash=extras.get("head_row_hash"),

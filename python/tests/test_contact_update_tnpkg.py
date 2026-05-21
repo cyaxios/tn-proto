@@ -69,8 +69,8 @@ def _signed_contact_update_zip(
     """Build a signed ``contact_update`` tnpkg zip and return bytes."""
     manifest = TnpkgManifest(
         kind="contact_update",
-        from_did=signer.did,
-        to_did=to_did,
+        publisher_identity=signer.did,
+        recipient_identity=to_did,
         ceremony_id=ceremony_id,
         as_of=datetime.now(timezone.utc).isoformat(),
         scope="default",
@@ -124,8 +124,8 @@ def test_signed_contact_update_manifest_round_trips(tmp_path: Path):
 
     manifest, body = _read_manifest(pkg_path)
     assert manifest.kind == "contact_update"
-    assert manifest.from_did == signer.did
-    assert manifest.to_did == "did:key:z6MkRecipient"
+    assert manifest.publisher_identity == signer.did
+    assert manifest.recipient_identity == "did:key:z6MkRecipient"
     assert _verify_manifest_signature(manifest) is True
     assert "body/contact_update.json" in body
 

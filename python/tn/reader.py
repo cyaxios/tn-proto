@@ -537,7 +537,7 @@ def parse_envelope_line(
 
     if verify:
         _envelope_reserved = {
-            "did", "timestamp", "event_id", "event_type", "level",
+            "device_identity", "timestamp", "event_id", "event_type", "level",
             "prev_hash", "row_hash", "signature", "sequence",
         }
         public_out = {
@@ -548,7 +548,7 @@ def parse_envelope_line(
             and k not in cfg.groups
         }
         expected_row_hash = _compute_row_hash(
-            device_identity=env.get("did", ""),
+            device_identity=env.get("device_identity", ""),
             timestamp=env.get("timestamp", ""),
             event_id=env.get("event_id", ""),
             event_type=event_type,
@@ -645,11 +645,12 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
                     plaintext[gname] = {"$decrypt_error": True}
 
             # public_out must mirror what the writer put in: envelope fields
-            # handled separately by _compute_row_hash (did/timestamp/event_id/
-            # event_type/level/prev_hash/row_hash/signature/sequence) plus
-            # group names MUST NOT appear in public_out.
+            # handled separately by _compute_row_hash (device_identity/
+            # timestamp/event_id/event_type/level/prev_hash/row_hash/
+            # signature/sequence) plus group names MUST NOT appear in
+            # public_out.
             _envelope_reserved = {
-                "did",
+                "device_identity",
                 "timestamp",
                 "event_id",
                 "event_type",

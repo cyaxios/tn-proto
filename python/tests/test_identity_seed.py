@@ -13,7 +13,7 @@ Coverage:
 * Idempotent re-absorb: same identity twice returns no_op success.
 * Tamper detection: swapping body/local.private without re-signing
   the manifest is rejected.
-* Signing-key-derived check: the manifest.from_did MUST match the DID
+* Signing-key-derived check: the manifest.publisher_identity MUST match the DID
   derived from body/local.private (caught even if the manifest sig
   itself is consistent — which it can't be, but we test the layer).
 """
@@ -61,8 +61,8 @@ def test_identity_seed_round_trip(tmp_path: Path):
 
     manifest, body = _read_manifest(out)
     assert manifest.kind == "identity_seed"
-    assert manifest.from_did == device.did
-    assert manifest.to_did == device.did
+    assert manifest.publisher_identity == device.did
+    assert manifest.recipient_identity == device.did
     assert manifest.ceremony_id == IDENTITY_SEED_CEREMONY_PLACEHOLDER
     assert manifest.scope == "identity"
     assert _verify_manifest_signature(manifest), (
@@ -182,7 +182,7 @@ def test_identity_seed_rejects_swapped_private(tmp_path: Path):
 
     Even though the manifest signature still verifies (we don't touch
     the manifest), the body/local.private no longer derives to
-    manifest.from_did. The integrity check in _absorb_identity_seed
+    manifest.publisher_identity. The integrity check in _absorb_identity_seed
     catches this.
     """
     device_a = DeviceKey.generate()
@@ -192,7 +192,7 @@ def test_identity_seed_rejects_swapped_private(tmp_path: Path):
 
     # Swap body/local.private with device_b's bytes; leave manifest +
     # local.public alone. The absorber must catch the disagreement
-    # between (manifest.from_did, body/local.public, derived-from-priv).
+    # between (manifest.publisher_identity, body/local.public, derived-from-priv).
     with zipfile.ZipFile(out, "r") as zf:
         manifest_bytes = zf.read("manifest.json")
         public_bytes = zf.read("body/local.public")
@@ -267,8 +267,8 @@ def test_export_identity_seed_with_default_device(tmp_path: Path):
     export_identity_seed(out)
     manifest, _ = _read_manifest(out)
     assert manifest.kind == "identity_seed"
-    assert manifest.from_did.startswith("did:key:z")
-    assert manifest.from_did == manifest.to_did
+    assert manifest.publisher_identity.startswith("did:key:z")
+    assert manifest.publisher_identity == manifest.recipient_identity
     assert _verify_manifest_signature(manifest)
 
 

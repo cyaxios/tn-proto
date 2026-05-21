@@ -68,37 +68,54 @@ def test_load_retired_states_skips_non_numeric_suffix(tmp_path: Path):
     assert ks.load_retired_states("default") == {}
 
 
-def test_promote_pending_archives_active_at_epoch(tmp_path: Path):
+def test_promote_pending_swaps_pending_into_active(tmp_path: Path):
+    """Happy path: write_retired_pair has already archived the prior
+    generation as the canonical RetiredPublisherState; promote_pending
+    just removes the now-redundant active files and renames pending →
+    active."""
     ks = BtnKeystore(tmp_path)
     ks.write_active("default", state_bytes=b"E0_STATE", self_kit=b"E0_KIT")
     ks.write_pending("default", state_bytes=b"E1_STATE", self_kit=b"E1_KIT")
+    # Archive the prior generation FIRST (this is what cipher.rotate()
+    # does — writes RetiredPublisherState wire bytes, distinct from the
+    # raw PublisherState bytes that were in `default.btn.state`).
+    ks.write_retired_pair(
+        "default", epoch=0,
+        state_bytes=b"E0_RETIRED_BYTES", self_kit=b"E0_KIT",
+    )
 
     ks.promote_pending("default", retiring_epoch=0)
 
     assert (tmp_path / "default.btn.state").read_bytes() == b"E1_STATE"
     assert (tmp_path / "default.btn.mykit").read_bytes() == b"E1_KIT"
-    assert (tmp_path / "default.btn.state.retired.0").read_bytes() == b"E0_STATE"
+    # Retired archive is intact (NOT overwritten by promote_pending).
+    assert (tmp_path / "default.btn.state.retired.0").read_bytes() == b"E0_RETIRED_BYTES"
     assert (tmp_path / "default.btn.mykit.retired.0").read_bytes() == b"E0_KIT"
+    # Pending files cleared by the rename.
     assert not (tmp_path / "default.btn.state.pending").exists()
     assert not (tmp_path / "default.btn.mykit.pending").exists()
 
 
-def test_promote_pending_refuses_retired_collision(tmp_path: Path):
+def test_promote_pending_refuses_missing_retired_archive(tmp_path: Path):
+    """Forward secrecy guard: if write_retired_pair didn't run, the
+    prior master_seed is about to be lost when promote_pending replaces
+    the active state. Refuse rather than silently delete."""
     ks = BtnKeystore(tmp_path)
-    ks.write_active("default", state_bytes=b"a", self_kit=b"k")
-    # Pre-existing retired pair at the epoch we're about to promote into.
-    (tmp_path / "default.btn.state.retired.0").write_bytes(b"stale")
-    (tmp_path / "default.btn.mykit.retired.0").write_bytes(b"stale")
-    ks.write_pending("default", state_bytes=b"new", self_kit=b"new")
+    ks.write_active("default", state_bytes=b"E0", self_kit=b"E0K")
+    ks.write_pending("default", state_bytes=b"E1", self_kit=b"E1K")
+    # No write_retired_pair() called.
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(FileNotFoundError):
         ks.promote_pending("default", retiring_epoch=0)
 
 
 def test_promote_pending_refuses_missing_pending(tmp_path: Path):
     ks = BtnKeystore(tmp_path)
     ks.write_active("default", state_bytes=b"a", self_kit=b"k")
-    # No write_pending() called.
+    # write_retired_pair did run, but no write_pending().
+    ks.write_retired_pair(
+        "default", epoch=0, state_bytes=b"r", self_kit=b"r",
+    )
     with pytest.raises(FileNotFoundError):
         ks.promote_pending("default", retiring_epoch=0)
 

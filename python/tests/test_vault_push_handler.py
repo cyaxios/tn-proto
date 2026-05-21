@@ -129,7 +129,7 @@ class TestVaultPushOnSchedule:
         # Body is a real signed `.tnpkg`.
         manifest, body = _read_manifest(post["body"])
         assert manifest.kind == "admin_log_snapshot"
-        assert manifest.from_did == cfg.device.device_identity
+        assert manifest.publisher_identity == cfg.device.device_identity
         assert _verify_manifest_signature(manifest)
         # Body has at least one envelope (the admin_add_recipient call).
         assert b"tn.recipient.added" in body["body/admin.ndjson"]

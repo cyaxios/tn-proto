@@ -97,8 +97,8 @@ def main() -> int:
         export(snap_path, kind="admin_log_snapshot", cfg=pub_cfg, to_did=consumer_did)
         manifest, _ = _read_manifest(snap_path.read_bytes())
         print(f"   snapshot head_row_hash = {manifest.head_row_hash}")
-        print(f"   manifest from_did = {manifest.from_did}")
-        print(f"   manifest to_did = {manifest.to_did}")
+        print(f"   manifest from_did = {manifest.publisher_identity}")
+        print(f"   manifest to_did = {manifest.recipient_identity}")
         tn.flush_and_close()
 
         # 3. POST it to the vault using the publisher's identity.

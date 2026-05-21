@@ -12,7 +12,7 @@ def test_offer_emits_signed_package(tmp_path: Path):
     cfg = load_or_create(yaml_path, cipher="jwe")
     pkg = offer(cfg, publisher_did="did:key:z6MkAlice")
     assert pkg.package_kind == "offer"
-    assert pkg.peer_did == "did:key:z6MkAlice"
+    assert pkg.recipient_identity == "did:key:z6MkAlice"
     assert "x25519_pub_b64" in pkg.payload
     assert len(base64.b64decode(pkg.payload["x25519_pub_b64"])) == 32
     assert verify(pkg) is True

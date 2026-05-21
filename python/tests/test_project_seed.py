@@ -82,7 +82,7 @@ def test_project_seed_real_fixture_round_trip(tmp_path: Path):
     manifest, body = _read_manifest(FIXTURE)
     assert manifest.kind == "project_seed"
     assert manifest.scope == "project"
-    assert manifest.from_did == manifest.to_did
+    assert manifest.publisher_identity == manifest.recipient_identity
 
     cfg = _bootstrap_cfg_for(tmp_path)
     receipt = _absorb_dispatch(cfg, FIXTURE)
@@ -216,7 +216,7 @@ def _hand_built_project_seed(out_path: Path, device: DeviceKey) -> Path:
 
     manifest = TnpkgManifest(
         kind="project_seed",
-        from_did=device.did,
+        publisher_identity=device.did,
         ceremony_id="synthetic_proj",
         as_of=datetime.now(timezone.utc).isoformat(),
         scope="project",
