@@ -40,8 +40,8 @@ function mkTempDir(prefix: string): string {
 function buildProjectSeedTnpkg(outPath: string, device: DeviceKey): string {
   const yamlText =
     `ceremony:\n  id: synthetic_proj\n  cipher: btn\n` +
-    `me:\n  did: ${device.did}\n` +
-    `groups:\n  default:\n    cipher: btn\n    recipients:\n      - did: ${device.did}\n` +
+    `device:\n  device_identity: ${device.did}\n` +
+    `groups:\n  default:\n    cipher: btn\n    recipients:\n      - recipient_identity: ${device.did}\n` +
     `keystore:\n  path: ./.tn/tn/keys\n`;
   const body: Record<string, Uint8Array> = {
     "body/tn.yaml": new TextEncoder().encode(yamlText),

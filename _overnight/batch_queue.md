@@ -13,4 +13,6 @@ When a batch is BLOCKED, mark `- [ ] [BLOCKED: F<n>]` with the finding number.
 
 ---
 
-(Phase 1 will populate this; placeholder for now.)
+- [x] B0.1 — ts-sdk naming-flip phase B (ceremony yaml `me:` → `device:`, `recipient_identity` inside group recipients) + read_shape `device_identity → did` alias (commit pending). 213→252 passes, 83→44 failures (39 fewer). 2 new failures (ex02 envelope-shape, ex02 independent-verify) caused by wasm rebuild surfacing pre-existing phase G incompleteness in `Entry.fromFlat` / `FLAT_ENVELOPE_KEYS`. Wasm artifact rebuilt under `crypto/tn-wasm/pkg/` (gitignored) to expose the renamed Rust deserializer.
+
+(Phase 1 will populate the rest of this; placeholder.)

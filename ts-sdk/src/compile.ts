@@ -204,7 +204,7 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
   if (opts.yamlPath) {
     const cfg = loadConfig(opts.yamlPath);
     if (!keystoreDir) keystoreDir = cfg.keystorePath;
-    did = cfg.me.did || null;
+    did = cfg.device.device_identity || null;
     ceremonyId = cfg.ceremonyId || null;
     yamlPath = resolve(opts.yamlPath);
   }

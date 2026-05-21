@@ -94,12 +94,12 @@ function makeCeremony(): { yamlPath: string; tmpDir: string; cleanup: () => void
   const yaml =
     `ceremony:\n  id: vpush_test\n  mode: local\n  cipher: btn\n` +
     `logs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\n` +
-    `me:\n  did: ${dk.did}\n` +
+    `device:\n  device_identity: ${dk.did}\n` +
     `public_fields:\n- timestamp\n- event_id\n- event_type\n- level\n` +
     `- group\n- leaf_index\n- recipient_identity\n- kit_sha256\n- cipher\n` +
     `default_policy: private\n` +
     `groups:\n  default:\n    policy: private\n    cipher: btn\n` +
-    `    recipients:\n    - did: ${dk.did}\nfields: {}\n`;
+    `    recipients:\n    - recipient_identity: ${dk.did}\nfields: {}\n`;
   const yamlPath = join(dir, "tn.yaml");
   writeFileSync(yamlPath, yaml, "utf8");
   return { yamlPath, tmpDir: dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };

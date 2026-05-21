@@ -174,6 +174,21 @@ Python doesn't have a Layer 1 / Layer 2 split because it's not a browser concern
 | `tn watch ...`              | `tn-js watch ...`             | ✓      | Identical kwargs (`--since`, `--verify`, `--poll`, `--once`). |
 | `tn wallet ...`             | (n/a)                         | ⊝      | Vault flows are Python-only today. |
 
+## 0.4.3a1 identity-naming flip status
+
+The 0.4.3a1 release renames identity-bearing fields to a canonical role
+vocabulary (`device_identity`, `publisher_identity`, `recipient_identity`).
+The flip lands phase by phase across the SDKs; this table tracks where
+each side is.
+
+| Surface | Python | TS | Notes |
+|---------|--------|------|-------|
+| Wire envelope (`did` → `device_identity`) | ✓ | ✓ | Phase A. |
+| tnpkg manifest (`from_did`/`to_did` → `publisher_identity`/`recipient_identity`) | ✓ | ✓ | Phase G commit `db2631d`. |
+| Ceremony yaml top-level (`me: {did: ...}` → `device: {device_identity: ...}`) | ✓ | ✓ | Phase B. TS landed in batch B0.1. Validator rejects legacy `me:` outright. |
+| Ceremony yaml `groups.<g>.recipients[].did` → `.recipient_identity` | ✓ | ✓ | Folded into TS B0.1; Rust loader strictly requires the new key. |
+| `Entry.fromFlat` / `read_shape.FLAT_ENVELOPE_KEYS` (`did` → `device_identity`) | n/a | ⊝ | Pre-existing: still exposes `did` in the flat dict; B0.1 added a wire-side alias (`device_identity` → `did`) so consumers keep working. Follow-up batch should rename through. |
+
 ## CI parity gate
 
 `tools/check_parity.py` walks the public symbols of `tn` (Python) and `@tnproto/sdk` (TS) and fails if a row is missing from this document. New verbs MUST add a row before the SDK can publish.

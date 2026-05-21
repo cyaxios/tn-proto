@@ -9,7 +9,16 @@
 import type { ReadEntry } from "./types.js";
 export type { ReadEntry } from "./types.js";
 
-/** Public envelope keys that always surface flat in the new shape (§1.1). */
+/** Public envelope keys that always surface flat in the new shape (§1.1).
+ *
+ * Note on `did` vs `device_identity`: the 0.4.3a1 naming-flip Phase A
+ * renamed the on-the-wire envelope key from `did` to `device_identity`.
+ * The flat-dict shape (this surface) still exposes the field under
+ * `did` because that's what consumers like `Entry.fromFlat` and the
+ * Python `flatten_raw_entry` parity have called it for a long time —
+ * renaming it is a follow-on naming-flip phase. For now `flattenRawEntry`
+ * reads both wire-format names and writes `did:` to the flat dict.
+ */
 export const FLAT_ENVELOPE_KEYS: readonly string[] = [
   "timestamp",
   "event_type",
@@ -29,6 +38,10 @@ export const CRYPTO_ENVELOPE_KEYS: ReadonlySet<string> = new Set([
 export const RESERVED_ENVELOPE_KEYS: ReadonlySet<string> = new Set([
   ...FLAT_ENVELOPE_KEYS,
   ...CRYPTO_ENVELOPE_KEYS,
+  // 0.4.3a1: also reserved so the wire-format `device_identity` key
+  // doesn't get accidentally surfaced twice (once via the alias copy
+  // in step 1 of flattenRawEntry, once as a "public field" in step 2).
+  "device_identity",
 ]);
 
 export function isGroupPayloadValue(v: unknown): boolean {
@@ -57,6 +70,13 @@ export function flattenRawEntry(
   // 1. Envelope basics.
   for (const k of FLAT_ENVELOPE_KEYS) {
     if (k in env) out[k] = env[k];
+  }
+  // 0.4.3a1 wire-format compatibility: phase A renamed `did` →
+  // `device_identity` on the envelope. The flat-dict shape still uses
+  // `did` (callers like Entry.fromFlat and the read_shape spec call it
+  // that), so alias the wire field here if `did` isn't already set.
+  if (!("did" in out) && "device_identity" in env) {
+    out["did"] = env["device_identity"];
   }
 
   // 2. Public fields beyond envelope basics: anything in env that isn't

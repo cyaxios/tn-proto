@@ -25,7 +25,7 @@ export interface CeremonyConfig {
   cipher: string;
   logPath: string;
   keystorePath: string;
-  me: { did: string };
+  device: { device_identity: string };
   publicFields: Set<string>;
   /**
    * Multi-group field routing: a field listed under N groups in yaml
@@ -137,7 +137,7 @@ export function substituteEnvVars(text: string, sourcePath: string): string {
 // resolver to fill in the rest.
 //
 // Merge rules (must stay in lockstep with the Python implementation):
-//   - parent-owned keys (me, keystore, groups, fields, public_fields,
+//   - parent-owned keys (device, keystore, groups, fields, public_fields,
 //     default_policy, llm_classifier): parent wins; child override warns.
 //   - ``ceremony``: shallow-merged per subfield, child wins.
 //   - ``handlers``: additive, deduped by handler name. Child first wins.
@@ -151,7 +151,7 @@ export function substituteEnvVars(text: string, sourcePath: string): string {
 // ---------------------------------------------------------------------------
 
 const PARENT_OWNED_KEYS: ReadonlyArray<string> = [
-  "me",
+  "device",
   "keystore",
   "groups",
   "fields",
@@ -323,8 +323,21 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
   doc = resolveExtends(resolved, doc);
   const yamlDir = dirname(resolved);
 
+  // 0.4.3a1 identity-naming flip: yaml top-level block renamed from
+  // `me: {did: ...}` to `device: {device_identity: ...}` (Python phase B,
+  // commit d73b7f1; TS phase B is this batch). Reject the legacy block
+  // outright so the failure surfaces at init() not at first emit, matching
+  // python/tn/config.py:_validate_load_doc_structure.
+  if (doc.me !== undefined && doc.device === undefined) {
+    throw new Error(
+      `${resolved}: legacy \`me:\` top-level block is no longer supported ` +
+        `(0.4.3a1 renamed it to \`device:\`). Replace \`me: {did: ...}\` with ` +
+        `\`device: {device_identity: ...}\`. See ` +
+        `docs/superpowers/specs/2026-05-20-identity-and-key-naming.md.`,
+    );
+  }
   const ceremony = (doc.ceremony ?? {}) as Record<string, unknown>;
-  const me = (doc.me ?? {}) as Record<string, unknown>;
+  const device = (doc.device ?? {}) as Record<string, unknown>;
   const logs = (doc.logs ?? {}) as Record<string, unknown>;
   const keystore = (doc.keystore ?? {}) as Record<string, unknown>;
   const fieldsMap = (doc.fields ?? {}) as Record<string, unknown>;
@@ -355,8 +368,16 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
   let anyGroupDeclaresFields = false;
   for (const [name, raw] of Object.entries(groups)) {
     const g = raw as Record<string, unknown>;
+    // Read tolerant: accept either `recipient_identity` (post-0.4.3a1
+    // canonical role name, written by Python's create_fresh and the
+    // post-flip TS yaml template) or legacy `did` (older fixtures still
+    // floating around). Wasm Rust strictly requires `recipient_identity`
+    // — but this loader path is the TS-only consumer, so we keep the
+    // tolerant read.
     const recipients = Array.isArray(g.recipients)
-      ? (g.recipients as Array<Record<string, unknown>>).map((r) => ({ did: String(r.did ?? "") }))
+      ? (g.recipients as Array<Record<string, unknown>>).map((r) => ({
+          did: String(r.recipient_identity ?? r.did ?? ""),
+        }))
       : [];
     groupMap.set(name, {
       name,
@@ -384,7 +405,9 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
       name: "default",
       policy: "private",
       cipher: String(ceremony.cipher ?? "btn"),
-      recipients: me.did ? [{ did: String(me.did) }] : [],
+      recipients: device.device_identity
+        ? [{ did: String(device.device_identity) }]
+        : [],
     });
   }
 
@@ -464,7 +487,7 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
     cipher: String(ceremony.cipher ?? "btn"),
     logPath: pathFromYaml(yamlDir, String(logs.path ?? "./.tn/logs/tn.ndjson")),
     keystorePath: pathFromYaml(yamlDir, String(keystore.path ?? "./.tn/keys")),
-    me: { did: String(me.did ?? "") },
+    device: { device_identity: String(device.device_identity ?? "") },
     publicFields: new Set(publicFields),
     fieldToGroups,
     groups: groupMap,

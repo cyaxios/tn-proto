@@ -74,8 +74,8 @@ function makeCeremony(withExtraRecipient: boolean = false): Ceremony {
 
   const bobDid = "did:key:z6MkfakeBobForTsInitIdempotenceTestxxxxxx";
   const recipients = withExtraRecipient
-    ? `    - did: ${dk.did}\n    - did: ${bobDid}`
-    : `    - did: ${dk.did}`;
+    ? `    - recipient_identity: ${dk.did}\n    - recipient_identity: ${bobDid}`
+    : `    - recipient_identity: ${dk.did}`;
 
   const yaml = `ceremony:
   id: init_idem
@@ -86,8 +86,8 @@ logs:
   path: ./.tn/logs/tn.ndjson
 keystore:
   path: ./.tn/keys
-me:
-  did: ${dk.did}
+device:
+  device_identity: ${dk.did}
 public_fields:
 - timestamp
 - event_id
