@@ -115,11 +115,80 @@ impl PublisherState {
         self.publisher_id
     }
 
-    /// Current epoch. Starts at 0; bumps on rotation (not yet implemented).
+    /// Current epoch. Starts at 0; bumps on every successful
+    /// [`Self::rotate`] call. Carried in the header of every
+    /// [`Ciphertext`] this state produces so readers can route to the
+    /// right key material via keywalk.
     #[inline]
     #[must_use]
     pub fn epoch(&self) -> u32 {
         self.epoch
+    }
+
+    /// Rotate this state: generate a fresh master_seed, derive a new
+    /// publisher_id, build a fresh subset-difference tree, bump epoch,
+    /// and return the new active state along with a snapshot of this
+    /// retired state.
+    ///
+    /// Consumes `self` because retaining the prior [`PublisherState`]
+    /// after rotation is never correct — every caller wants either the
+    /// new active or the retired snapshot, not both kept hot. The
+    /// retired snapshot omits the node-key cache (rebuilt on demand
+    /// from the seed when decrypting old ciphertexts).
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] if the epoch counter would overflow
+    /// `u32` (requires ~4 billion rotations on a single publisher;
+    /// refuse rather than wrap).
+    ///
+    /// # Panics
+    /// Panics if the system clock reports a time before the unix
+    /// epoch. On any supported platform this is impossible.
+    pub fn rotate(self) -> Result<crate::rotate::RotationOutcome> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let prior_seed = self.master_seed.clone();
+        let prior_publisher_id = self.publisher_id;
+        let prior_epoch = self.epoch;
+
+        // Build the new active state: fresh seed, epoch += 1, empty
+        // issued/revoked sets, leaf cursor reset to 0.
+        let mut new_seed = [0u8; KEY_LEN];
+        OsRng.fill_bytes(&mut new_seed);
+        let new_master_seed = Zeroizing::new(new_seed);
+        let new_publisher_id = derive_publisher_id(&new_master_seed);
+        let new_node_key_cache = populate_node_cache(&new_master_seed);
+
+        let active = PublisherState {
+            publisher_id: new_publisher_id,
+            epoch: prior_epoch.checked_add(1).ok_or_else(|| {
+                Error::Internal(
+                    "rotate: epoch counter would overflow u32; this requires \
+                     ~4 billion rotations on a single publisher — refuse \
+                     rather than wrap."
+                        .into(),
+                )
+            })?,
+            master_seed: new_master_seed,
+            node_key_cache: new_node_key_cache,
+            issued: BTreeSet::new(),
+            revoked: BTreeSet::new(),
+            next_leaf: 0,
+        };
+
+        let retired_at_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_secs();
+
+        let retired = crate::rotate::RetiredPublisherState {
+            master_seed: prior_seed,
+            publisher_id: prior_publisher_id,
+            epoch: prior_epoch,
+            retired_at_unix_secs,
+        };
+
+        Ok(crate::rotate::RotationOutcome { active, retired })
     }
 
     /// How many reader kits have been minted.
