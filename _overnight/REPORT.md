@@ -85,12 +85,14 @@ See `_overnight/FINDINGS.md` for full schema-per-entry details. Summary:
 
 | ID | Title | Severity | Open? |
 |---|---|---|---|
-| F1 | Batch 0 commit skipped — trunk dirty state too broad | Info | Open (user reviews diff in `_overnight/dirty_trunk_state_at_start.patch`) |
-| F2 | Python `_envelope_reserved` set in `python/tn/reader.py` still has `"did"` — TS now ahead of Python on this row | Bug (latent) | Open |
+| F1 | Batch 0 commit skipped — trunk dirty state too broad | Info | **Closed (2026-05-21)** — user did parallel cleanup; committed Python WIP across `6143475`/`8654d9e`/`dfd0bba`, reverted dirty TS WIP. Trunk now in clean state. |
+| F2 | Python `_envelope_reserved` set in `python/tn/reader.py` still has `"did"` — TS now ahead of Python on this row | Bug (latent) | **Closed by user (2026-05-21)** — fix landed in commit `6143475`. |
 | F3 | tnpkg fixtures needed rebuild after `from_did` → `publisher_identity` rename | Bug | **Closed by B2.1** |
-| F4 | Test corpus was bottlenecked on missing `dist/` — add `pretest: npm run build` to `ts-sdk/package.json` | DX | Open |
+| F4 | Test corpus was bottlenecked on missing `dist/` — add `pretest: npm run build` to `ts-sdk/package.json` | DX | **Closed (2026-05-21)** — `pretest` hook added to `ts-sdk/package.json` on the overnight branch. |
 | F5 | `BtnPublisher.rotate()` not exposed in tn-wasm — blocks B3.x | Blocker | Open |
 | F6 | Trunk's `crypto/tn-core-py/python/tn_core/_core.pyd` was rebuilt as side effect of B2.1 — informational | Info | Open (no action needed) |
+
+**F1-F4 are all resolved.** F5 remains the next-session blocker for BTN rotation parity.
 
 ---
 

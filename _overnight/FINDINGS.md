@@ -104,6 +104,40 @@ Schema per entry:
 - Recommended action: in a follow-on Rust batch, add `#[wasm_bindgen]` wrappers around `tn_btn::PublisherState::rotate()` and any required helpers in `crypto/tn-wasm/src/lib.rs`. Mirror the PyO3 shape from `crypto/tn-btn-py/src/lib.rs`. Then `wasm-pack build --target nodejs --release` from `crypto/tn-wasm/`. Then the B3.1-B3.5 TS catchup work becomes feasible.
 - Commit (if any): n/a — work blocked on user-supervised Rust change.
 
+## F1 follow-up (2026-05-21): CLOSED — user resolved in parallel
+
+The user did parallel cleanup work in the trunk during the overnight session
+(three new commits — `6143475`, `8654d9e`, `dfd0bba`) which:
+- Committed all the Python WIP that F1 had flagged (admin/__init__.py, btn_keystore.py, tnpkg.py, absorb.py, export.py, _dispatch.py, _entry.py, plus 16 test files)
+- Fixed the F2 bug (Python reader.py `_envelope_reserved`) inline
+- Reverted the dirty TS WIP (the `Tn<Schema>` generic, printf format, default export, discriminated ReadOptions). The user evidently decided to clear the TS deck so the overnight branch's parity work can land clean rather than push the TS premium-feature work alongside the naming flip.
+- Brought Python from 922 pass / 45 fail → 938 pass / 22 fail → 966 pass / 0 real failures.
+
+The only TS-side artifact still in the trunk's working tree is the orphan
+`ts-sdk/test/ts_premium_features_demo.test.ts` (untracked). It exercises the
+reverted TS premium features and will not compile until they're restored.
+Decision deferred to user: restore the WIP, or delete the demo, or move it to `_scratch/`.
+
+This finding is closed in spirit — no overnight action remains.
+
+## F2 follow-up (2026-05-21): CLOSED
+
+The user fixed Python `reader.py`'s `_envelope_reserved` post-flip bug in commit
+`6143475` ("0.4.3a1 python cascade fixes: 4 verify-path regressions + manifest
+dataclass + dispatch reader"). The fix matches what F2 recommended exactly.
+
+I had also applied an identical fix in the overnight worktree's
+`python/tn/reader.py`, but reverted it after confirming the trunk already had
+the change — keeping both branches' Python source in lockstep avoids merge
+noise.
+
+## F4 follow-up (2026-05-21): CLOSED
+
+Added `"pretest": "npm run build"` to `ts-sdk/package.json` between the
+`format:check` and `test` scripts. Verified by deleting `dist/` and running
+`npm test` — the pretest hook auto-builds dist before the test runner, and the
+296/0 result holds. Closes F4.
+
 ## F6: Trunk worktree's `crypto/tn-core-py/python/tn_core/_core.pyd` was rebuilt as a side effect of B2.1
 
 - Batch: B2.1 (Python tn_core wheel rebuild needed to regenerate binary fixtures)
