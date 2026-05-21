@@ -39,7 +39,7 @@ def test_init_absorbs_inbox_and_reconciles(tmp_path: Path):
     bob_dir.mkdir()
     bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
     tn.init(str(bob_cfg.yaml_path))
-    offer(bob_cfg, publisher_did=alice_cfg.device.did)
+    offer(bob_cfg, publisher_did=alice_cfg.device.device_identity)
     tn.flush_and_close()
     # Per-stem outbox layout: <yaml_dir>/.tn/<yaml_stem>/outbox/
     pkg_path = next((bob_dir / ".tn" / bob_cfg.yaml_path.stem / "outbox").glob("*.tnpkg"))
@@ -47,13 +47,18 @@ def test_init_absorbs_inbox_and_reconciles(tmp_path: Path):
     (inbox_dir(alice_dir) / pkg_path.name).write_bytes(pkg_path.read_bytes())
 
     # Alice declared intent for Bob (pending).
-    admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.did)
+    admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity)
 
     # Alice's init should: absorb Bob's offer, reconcile promote Bob.
     tn.init(str(alice_cfg.yaml_path))
     import yaml as _yaml
 
     doc = _yaml.safe_load(alice_cfg.yaml_path.read_text(encoding="utf-8"))
-    bob = next(r for r in doc["groups"]["default"]["recipients"] if r["did"] == bob_cfg.device.did)
+    # 0.4.3a1: yaml recipient identity key is `recipient_identity`.
+    bob = next(
+        r
+        for r in doc["groups"]["default"]["recipients"]
+        if r["recipient_identity"] == bob_cfg.device.device_identity
+    )
     assert "pub_b64" in bob, f"reconcile should have promoted Bob; yaml: {doc}"
     tn.flush_and_close()

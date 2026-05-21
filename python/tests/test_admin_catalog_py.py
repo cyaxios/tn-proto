@@ -44,7 +44,7 @@ def test_schema_shape_is_list_of_name_type_pairs():
     # schema -> list of [name, type] pairs
     assert all(isinstance(pair, list) and len(pair) == 2 for pair in r["schema"])
     names = [p[0] for p in r["schema"]]
-    assert names == ["group", "leaf_index", "recipient_did", "kit_sha256", "cipher"]
+    assert names == ["group", "leaf_index", "recipient_identity", "kit_sha256", "cipher"]
 
 
 def test_validate_emit_ok():
@@ -53,7 +53,7 @@ def test_validate_emit_ok():
         {
             "group": "default",
             "leaf_index": 2,
-            "recipient_did": "did:key:zFrank",
+            "recipient_identity": "did:key:zFrank",
             "kit_sha256": "sha256:abc",
             "cipher": "btn",
         },
@@ -82,7 +82,7 @@ def test_reduce_recipient_added_produces_correct_delta():
         "level": "info",
         "group": "default",
         "leaf_index": 2,
-        "recipient_did": "did:key:zFrank",
+        "recipient_identity": "did:key:zFrank",
         "kit_sha256": "sha256:abc",
         "cipher": "btn",
     }
@@ -90,7 +90,7 @@ def test_reduce_recipient_added_produces_correct_delta():
     assert delta["kind"] == "recipient_added"
     assert delta["group"] == "default"
     assert delta["leaf_index"] == 2
-    assert delta["recipient_did"] == "did:key:zFrank"
+    assert delta["recipient_identity"] == "did:key:zFrank"
 
 
 def test_reduce_unknown_event_returns_unknown_delta():
@@ -103,7 +103,7 @@ def test_reduce_vault_unlinked_null_reason():
     envelope = {
         "event_type": "tn.vault.unlinked",
         "did": "did:key:zA",
-        "vault_did": "did:web:tn-proto.org",
+        "vault_identity": "did:web:tn-proto.org",
         "project_id": "proj_test",
         "reason": None,
         "unlinked_at": "2026-04-22T12:00:00Z",
@@ -120,7 +120,7 @@ def test_reduce_schema_violation_raises():
         "did": "did:key:zA",
         "group": "default",
         "leaf_index": 1,
-        "recipient_did": None,
+        "recipient_identity": None,
         "cipher": "btn",
     }
     with pytest.raises(ValueError, match="schema violation"):

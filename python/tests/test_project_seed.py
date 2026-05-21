@@ -82,7 +82,7 @@ def test_project_seed_real_fixture_round_trip(tmp_path: Path):
     manifest, body = _read_manifest(FIXTURE)
     assert manifest.kind == "project_seed"
     assert manifest.scope == "project"
-    assert manifest.from_did == manifest.to_did
+    assert manifest.publisher_identity == manifest.recipient_identity
 
     cfg = _bootstrap_cfg_for(tmp_path)
     receipt = _absorb_dispatch(cfg, FIXTURE)
@@ -216,11 +216,11 @@ def _hand_built_project_seed(out_path: Path, device: DeviceKey) -> Path:
 
     manifest = TnpkgManifest(
         kind="project_seed",
-        from_did=device.did,
+        publisher_identity=device.did,
         ceremony_id="synthetic_proj",
         as_of=datetime.now(timezone.utc).isoformat(),
         scope="project",
-        to_did=device.did,
+        recipient_identity=device.did,
         state={
             "project": {
                 "schema": "tn-project-seed-v1",
@@ -303,7 +303,7 @@ def test_project_seed_rejects_non_self_addressed(tmp_path: Path):
     with zipfile.ZipFile(out, "r") as zf:
         manifest_doc = json.loads(zf.read("manifest.json").decode("utf-8"))
         members = {n: zf.read(n) for n in zf.namelist()}
-    manifest_doc["to_did"] = other.did
+    manifest_doc["recipient_identity"] = other.did
     members["manifest.json"] = json.dumps(manifest_doc, indent=2, sort_keys=True).encode("utf-8")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as zf:
         for n, d in members.items():

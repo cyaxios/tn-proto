@@ -59,7 +59,7 @@ function makeCeremony(prefix: string): { yamlPath: string; tmpDir: string; clean
     `logs:\n  path: ./.tn/logs/tn.ndjson\nkeystore:\n  path: ./.tn/keys\n` +
     `me:\n  did: ${dk.did}\n` +
     `public_fields:\n- timestamp\n- event_id\n- event_type\n- level\n` +
-    `- group\n- leaf_index\n- recipient_did\n- kit_sha256\n- cipher\n` +
+    `- group\n- leaf_index\n- recipient_identity\n- kit_sha256\n- cipher\n` +
     `default_policy: private\n` +
     `groups:\n  default:\n    policy: private\n    cipher: btn\n` +
     `    recipients:\n    - did: ${dk.did}\nfields: {}\n`;

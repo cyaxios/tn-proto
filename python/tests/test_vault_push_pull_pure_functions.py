@@ -164,7 +164,7 @@ class TestPushSnapshotPureFunction:
         assert result["stored_path"] is not None
         assert len(client.posts) == 1
         post = client.posts[0]
-        assert post["path"].startswith(f"/api/v1/inbox/{cfg.device.did}/snapshots/")
+        assert post["path"].startswith(f"/api/v1/inbox/{cfg.device.device_identity}/snapshots/")
         manifest, _body = _read_manifest(post["body"])
         assert manifest.kind == "admin_log_snapshot"
         assert _verify_manifest_signature(manifest)

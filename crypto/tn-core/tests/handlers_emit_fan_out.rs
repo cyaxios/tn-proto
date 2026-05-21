@@ -141,7 +141,7 @@ fn emit_fans_out_to_attached_handler() {
     let envs = cap.captured();
     let env = &envs[0];
     assert_eq!(env.get("event_type").and_then(Value::as_str), Some("test.event"));
-    assert_eq!(env.get("did").and_then(Value::as_str), Some(cer.did.as_str()));
+    assert_eq!(env.get("device_identity").and_then(Value::as_str), Some(cer.device_identity.as_str()));
     assert!(env.get("event_id").and_then(Value::as_str).is_some());
     assert!(env.get("row_hash").and_then(Value::as_str).is_some());
 }

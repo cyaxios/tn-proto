@@ -162,7 +162,9 @@ def test_entry_from_flat_tolerates_missing_run_id():
 
     flat = {
         "event_type": "tn.group.added",
-        "did": "did:key:zTest",
+        # Wire-format key is `device_identity` post-0.4.3a1; `from_flat`
+        # translates it to the `did` dataclass attribute for back-compat.
+        "device_identity": "did:key:zTest",
         "event_id": "00000000-0000-0000-0000-000000000001",
         "sequence": 1,
         "timestamp": "2026-05-19T01:00:00.000Z",

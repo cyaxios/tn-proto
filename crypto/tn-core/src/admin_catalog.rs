@@ -82,7 +82,7 @@ pub const CATALOG: &[AdminEventKind] = &[
         schema: &[
             ("ceremony_id", FieldType::String),
             ("cipher", FieldType::String),
-            ("device_did", FieldType::String),
+            ("device_identity", FieldType::String),
             ("created_at", FieldType::Iso8601),
         ],
         sign: true,
@@ -93,7 +93,7 @@ pub const CATALOG: &[AdminEventKind] = &[
         schema: &[
             ("group", FieldType::String),
             ("cipher", FieldType::String),
-            ("publisher_did", FieldType::String),
+            ("publisher_identity", FieldType::String),
             ("added_at", FieldType::Iso8601),
         ],
         sign: true,
@@ -104,7 +104,7 @@ pub const CATALOG: &[AdminEventKind] = &[
         schema: &[
             ("group", FieldType::String),
             ("leaf_index", FieldType::OptionalInt),
-            ("recipient_did", FieldType::OptionalString),
+            ("recipient_identity", FieldType::OptionalString),
             ("kit_sha256", FieldType::String),
             ("cipher", FieldType::String),
         ],
@@ -116,7 +116,7 @@ pub const CATALOG: &[AdminEventKind] = &[
         schema: &[
             ("group", FieldType::String),
             ("leaf_index", FieldType::OptionalInt),
-            ("recipient_did", FieldType::OptionalString),
+            ("recipient_identity", FieldType::OptionalString),
         ],
         sign: true,
         sync: true,
@@ -126,7 +126,7 @@ pub const CATALOG: &[AdminEventKind] = &[
         schema: &[
             ("group", FieldType::String),
             ("slot", FieldType::Int),
-            ("to_did", FieldType::String),
+            ("recipient_identity", FieldType::String),
             ("issued_to", FieldType::String),
         ],
         sign: true,
@@ -150,7 +150,7 @@ pub const CATALOG: &[AdminEventKind] = &[
         event_type: "tn.enrolment.compiled",
         schema: &[
             ("group", FieldType::String),
-            ("peer_did", FieldType::String),
+            ("peer_identity", FieldType::String),
             ("package_sha256", FieldType::String),
             ("compiled_at", FieldType::Iso8601),
         ],
@@ -161,7 +161,7 @@ pub const CATALOG: &[AdminEventKind] = &[
         event_type: "tn.enrolment.absorbed",
         schema: &[
             ("group", FieldType::String),
-            ("from_did", FieldType::String),
+            ("publisher_identity", FieldType::String),
             ("package_sha256", FieldType::String),
             ("absorbed_at", FieldType::Iso8601),
         ],
@@ -171,7 +171,7 @@ pub const CATALOG: &[AdminEventKind] = &[
     AdminEventKind {
         event_type: "tn.vault.linked",
         schema: &[
-            ("vault_did", FieldType::String),
+            ("vault_identity", FieldType::String),
             ("project_id", FieldType::String),
             ("linked_at", FieldType::Iso8601),
         ],
@@ -181,7 +181,7 @@ pub const CATALOG: &[AdminEventKind] = &[
     AdminEventKind {
         event_type: "tn.vault.unlinked",
         schema: &[
-            ("vault_did", FieldType::String),
+            ("vault_identity", FieldType::String),
             ("project_id", FieldType::String),
             ("reason", FieldType::OptionalString),
             ("unlinked_at", FieldType::Iso8601),
@@ -217,7 +217,7 @@ pub const CATALOG: &[AdminEventKind] = &[
         event_type: "tn.read.tampered_row_skipped",
         schema: &[
             ("envelope_event_id", FieldType::String),
-            ("envelope_did", FieldType::String),
+            ("envelope_device_identity", FieldType::String),
             ("envelope_event_type", FieldType::String),
             ("envelope_sequence", FieldType::OptionalInt),
         ],

@@ -12,7 +12,7 @@
 //! This module owns the wire format invariants (manifest schema, signing
 //! domain, zip layout). It mirrors `tn/tnpkg.py` byte-for-byte for the
 //! manifest's canonical signing bytes — the receiver verifies the signature
-//! against `from_did`'s Ed25519 public key over the RFC 8785-style canonical
+//! against `publisher_identity`'s Ed25519 public key over the RFC 8785-style canonical
 //! bytes of the manifest minus the signature field.
 
 use std::collections::BTreeMap;
@@ -96,10 +96,12 @@ pub struct Manifest {
     pub kind: ManifestKind,
     /// Schema version (currently 1).
     pub version: u32,
-    /// Producer DID — signature is verified against this DID's Ed25519 key.
-    pub from_did: String,
-    /// Optional point-to-point recipient DID.
-    pub to_did: Option<String>,
+    /// Producer device identity — signature is verified against this
+    /// device's Ed25519 key. Renamed from `from_did` in 0.4.3a1.
+    pub publisher_identity: String,
+    /// Optional point-to-point recipient identity. Renamed from
+    /// `to_did` in 0.4.3a1.
+    pub recipient_identity: Option<String>,
     /// Ceremony id this snapshot belongs to.
     pub ceremony_id: String,
     /// Wall-clock at export, RFC 3339 UTC. Diagnostic only.
@@ -126,7 +128,10 @@ impl Manifest {
         let mut out = Map::new();
         out.insert("kind".into(), Value::String(self.kind.as_str().into()));
         out.insert("version".into(), Value::Number(self.version.into()));
-        out.insert("from_did".into(), Value::String(self.from_did.clone()));
+        out.insert(
+            "publisher_identity".into(),
+            Value::String(self.publisher_identity.clone()),
+        );
         out.insert(
             "ceremony_id".into(),
             Value::String(self.ceremony_id.clone()),
@@ -135,8 +140,8 @@ impl Manifest {
         out.insert("scope".into(), Value::String(self.scope.clone()));
         out.insert("clock".into(), clock_to_json(&self.clock));
         out.insert("event_count".into(), Value::Number(self.event_count.into()));
-        if let Some(td) = &self.to_did {
-            out.insert("to_did".into(), Value::String(td.clone()));
+        if let Some(td) = &self.recipient_identity {
+            out.insert("recipient_identity".into(), Value::String(td.clone()));
         }
         if let Some(rh) = &self.head_row_hash {
             out.insert("head_row_hash".into(), Value::String(rh.clone()));
@@ -174,12 +179,12 @@ impl Manifest {
                 kind: "tnpkg manifest",
                 reason: "missing version".into(),
             })?;
-        let from_did = obj
-            .get("from_did")
+        let publisher_identity = obj
+            .get("publisher_identity")
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Malformed {
                 kind: "tnpkg manifest",
-                reason: "missing from_did".into(),
+                reason: "missing publisher_identity".into(),
             })?
             .to_string();
         let ceremony_id = obj
@@ -203,8 +208,8 @@ impl Manifest {
             .and_then(Value::as_str)
             .unwrap_or("admin")
             .to_string();
-        let to_did = obj
-            .get("to_did")
+        let recipient_identity = obj
+            .get("recipient_identity")
             .and_then(Value::as_str)
             .map(str::to_string);
         let clock = json_to_clock(obj.get("clock"));
@@ -222,8 +227,8 @@ impl Manifest {
         Ok(Self {
             kind,
             version: u32::try_from(version).unwrap_or(MANIFEST_VERSION),
-            from_did,
-            to_did,
+            publisher_identity,
+            recipient_identity,
             ceremony_id,
             as_of,
             scope,
@@ -286,7 +291,7 @@ pub fn sign_manifest(manifest: &mut Manifest, sk: &SigningKey) -> Result<()> {
     Ok(())
 }
 
-/// Verify a manifest's `manifest_signature_b64` against `from_did`'s
+/// Verify a manifest's `manifest_signature_b64` against `publisher_identity`'s
 /// Ed25519 public key. Returns `Ok(())` on success, `Err` on any failure.
 pub fn verify_manifest(manifest: &Manifest) -> Result<()> {
     let sig_b64 = manifest
@@ -296,7 +301,7 @@ pub fn verify_manifest(manifest: &Manifest) -> Result<()> {
             kind: "tnpkg manifest",
             reason: "manifest is unsigned".into(),
         })?;
-    let pub_bytes = did_key_pub(&manifest.from_did)?;
+    let pub_bytes = did_key_pub(&manifest.publisher_identity)?;
     let vk = VerifyingKey::from_bytes(&pub_bytes).map_err(|e| Error::Malformed {
         kind: "tnpkg manifest pubkey",
         reason: e.to_string(),
@@ -321,23 +326,23 @@ pub fn verify_manifest(manifest: &Manifest) -> Result<()> {
 /// Extract the 32-byte Ed25519 public key from a `did:key:z…` identifier.
 pub(crate) fn did_key_pub(did: &str) -> Result<[u8; 32]> {
     let rest = did.strip_prefix("did:key:z").ok_or_else(|| Error::Malformed {
-        kind: "tnpkg manifest from_did",
+        kind: "tnpkg manifest publisher_identity",
         reason: format!("unsupported DID form: {did:?}"),
     })?;
     let multi = bs58::decode(rest)
         .into_vec()
         .map_err(|e| Error::Malformed {
-            kind: "tnpkg manifest from_did",
+            kind: "tnpkg manifest publisher_identity",
             reason: e.to_string(),
         })?;
     if multi.len() < 2 || multi[..2] != ED25519_MULTICODEC {
         return Err(Error::Malformed {
-            kind: "tnpkg manifest from_did",
+            kind: "tnpkg manifest publisher_identity",
             reason: "manifest signing key must be Ed25519 (multicodec 0xed)".into(),
         });
     }
     let pub_bytes: [u8; 32] = multi[2..].try_into().map_err(|_| Error::Malformed {
-        kind: "tnpkg manifest from_did",
+        kind: "tnpkg manifest publisher_identity",
         reason: "DID pub bytes are not 32-byte Ed25519".into(),
     })?;
     Ok(pub_bytes)
@@ -542,8 +547,8 @@ mod tests {
         Manifest {
             kind: ManifestKind::AdminLogSnapshot,
             version: 1,
-            from_did: "did:key:zABC".into(),
-            to_did: None,
+            publisher_identity: "did:key:zABC".into(),
+            recipient_identity: None,
             ceremony_id: "cer_x".into(),
             as_of: "2026-04-24T00:00:00.000+00:00".into(),
             scope: "admin".into(),
@@ -574,7 +579,7 @@ mod tests {
         let did = format!("did:key:z{}", bs58::encode(buf).into_string());
 
         let mut m = sample_manifest();
-        m.from_did = did;
+        m.publisher_identity = did;
         sign_manifest(&mut m, &sk).unwrap();
         verify_manifest(&m).unwrap();
     }
@@ -589,7 +594,7 @@ mod tests {
         let did = format!("did:key:z{}", bs58::encode(buf).into_string());
 
         let mut m = sample_manifest();
-        m.from_did = did;
+        m.publisher_identity = did;
         sign_manifest(&mut m, &sk).unwrap();
         m.event_count += 1; // tamper
         assert!(verify_manifest(&m).is_err());

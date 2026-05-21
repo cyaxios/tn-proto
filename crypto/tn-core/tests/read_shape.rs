@@ -38,7 +38,7 @@ fn read_default_flat_shape_has_envelope_basics() {
     assert!(e.contains_key("timestamp"));
     assert!(e.contains_key("event_type"));
     assert!(e.contains_key("level"));
-    assert!(e.contains_key("did"));
+    assert!(e.contains_key("device_identity"));
     assert!(e.contains_key("sequence"));
     assert!(e.contains_key("event_id"));
     assert_eq!(e["event_type"], "order.created");

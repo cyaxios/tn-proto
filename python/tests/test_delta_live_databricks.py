@@ -174,7 +174,7 @@ handlers:
     for r in rows:
         env = json.loads(r[7])
         if DeviceKey.verify(
-            env["did"],
+            env["device_identity"],
             env["row_hash"].encode("ascii"),
             _signature_from_b64(env["signature"]),
         ):

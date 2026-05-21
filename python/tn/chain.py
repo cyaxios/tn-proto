@@ -62,7 +62,7 @@ class ChainState:
 
 def _compute_row_hash(
     *,
-    did: str,
+    device_identity: str,
     timestamp: str,
     event_id: str,
     event_type: str,
@@ -72,11 +72,11 @@ def _compute_row_hash(
     groups: dict[str, dict[str, Any]],
 ) -> str:
     """row_hash covers:
-    did + timestamp + event_id + event_type + level + prev_hash +
+    device_identity + timestamp + event_id + event_type + level + prev_hash +
     sorted(public_fields) + sorted(groups: ciphertext + field_hashes)
     """
     h = hashlib.sha256()
-    h.update(did.encode("utf-8"))
+    h.update(device_identity.encode("utf-8"))
     h.update(b"\x00")
     h.update(timestamp.encode("utf-8"))
     h.update(b"\x00")

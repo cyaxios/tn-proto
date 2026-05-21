@@ -39,8 +39,8 @@ logs:
   path: ${TN_TEST_LOG_PATH:-./.tn/logs/tn.ndjson}
 keystore:
   path: ./.tn/keys
-me:
-  did: ${TN_TEST_DID}
+device:
+  device_identity: ${TN_TEST_DID}
 groups:
   default:
     policy: private
@@ -57,7 +57,8 @@ def test_default_used_when_var_unset(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert "id: default_id" in out
     assert "literal: ${LITERAL_TEMPLATE}" in out
     assert "path: ./.tn/logs/tn.ndjson" in out
-    assert "did: did:key:zABC" in out
+    # 0.4.3a1: yaml key is `device_identity:`, not `did:`.
+    assert "device_identity: did:key:zABC" in out
 
 
 def test_var_value_overrides_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -68,7 +69,8 @@ def test_var_value_overrides_default(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     out = _substitute_env_vars(FIXTURE_YAML, tmp_path / "tn.yaml")
     assert "id: real_ceremony_42" in out
     assert "path: /var/log/tn.ndjson" in out
-    assert "did: did:key:zXYZ" in out
+    # 0.4.3a1: yaml key is `device_identity:`, not `did:`.
+    assert "device_identity: did:key:zXYZ" in out
     # Escape still survives.
     assert "literal: ${LITERAL_TEMPLATE}" in out
 

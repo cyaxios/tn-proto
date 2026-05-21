@@ -45,7 +45,8 @@ use pyo3::types::PyBytes;
 extern crate tn_btn as btn_lib;
 use btn_lib::{
     Ciphertext, Config as BtnConfig, Error as BtnLibError, LeafIndex,
-    PublisherState as RustPubState, ReaderKit,
+    PublisherState as RustPubState, ReaderKit, RetiredPublisherState as RustRetired,
+    RotationOutcome as RustOutcome,
 };
 
 mod pipeline;
@@ -53,11 +54,20 @@ mod pipeline;
 create_exception!(_core, NotEntitled, PyException);
 create_exception!(_core, BtnRuntimeError, PyException);
 
-fn err_to_py(e: BtnLibError) -> PyErr {
+pub(crate) fn err_to_py(e: BtnLibError) -> PyErr {
     match e {
         BtnLibError::NotEntitled => NotEntitled::new_err("reader not entitled"),
         _ => BtnRuntimeError::new_err(format!("{e}")),
     }
+}
+
+/// Common message for any method called on a PyPublisherState whose
+/// inner has been consumed by `rotate()`. Returned as a PyRuntimeError.
+fn consumed_err() -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(
+        "PublisherState has been consumed by rotate(); use the new active state \
+         returned in RotationOutcome.active.",
+    )
 }
 
 /// Publisher-side state.
@@ -67,14 +77,29 @@ fn err_to_py(e: BtnLibError) -> PyErr {
 /// further ciphertexts from this publisher. Leak = catastrophic.
 #[pyclass(module = "btn._core", name = "PublisherState")]
 pub(crate) struct PyPublisherState {
-    pub(crate) inner: RustPubState,
+    /// `Option` so `rotate(self)` can `take()` the inner state and
+    /// hand ownership to `tn_btn::PublisherState::rotate(self)`. Once
+    /// rotated, this wrapper is "consumed" — every subsequent method
+    /// call surfaces a RuntimeError pointing at `RotationOutcome.active`.
+    pub(crate) inner: Option<RustPubState>,
 }
 
 impl PyPublisherState {
+    pub(crate) fn require_inner(&self) -> PyResult<&RustPubState> {
+        self.inner.as_ref().ok_or_else(consumed_err)
+    }
+    pub(crate) fn require_inner_mut(&mut self) -> PyResult<&mut RustPubState> {
+        self.inner.as_mut().ok_or_else(consumed_err)
+    }
+
     /// Internal encrypt helper for the pipeline module; bypasses the
     /// Python bytes conversion.
-    pub(crate) fn encrypt_internal(&self, plaintext: &[u8]) -> btn_lib::Result<Vec<u8>> {
-        self.inner.encrypt(plaintext).map(|ct| ct.to_bytes())
+    pub(crate) fn encrypt_internal(&self, plaintext: &[u8]) -> PyResult<Vec<u8>> {
+        let inner = self.require_inner()?;
+        inner
+            .encrypt(plaintext)
+            .map(|ct| ct.to_bytes())
+            .map_err(err_to_py)
     }
 }
 
@@ -100,32 +125,34 @@ impl PyPublisherState {
             }
             None => RustPubState::setup(BtnConfig).map_err(err_to_py)?,
         };
-        Ok(Self { inner })
+        Ok(Self { inner: Some(inner) })
     }
 
     /// 32-byte publisher identifier. Stable for the lifetime of the
     /// publisher (derived from the master seed).
     #[getter]
-    fn publisher_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.publisher_id())
+    fn publisher_id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let inner = self.require_inner()?;
+        Ok(PyBytes::new_bound(py, &inner.publisher_id()))
     }
 
-    /// Current epoch counter. Starts at 0; reserved for rotation.
+    /// Current epoch counter. Starts at 0; increments on every
+    /// successful `rotate()`.
     #[getter]
-    fn epoch(&self) -> u32 {
-        self.inner.epoch()
+    fn epoch(&self) -> PyResult<u32> {
+        Ok(self.require_inner()?.epoch())
     }
 
     /// Number of currently-active reader kits.
     #[getter]
-    fn issued_count(&self) -> usize {
-        self.inner.issued_count()
+    fn issued_count(&self) -> PyResult<usize> {
+        Ok(self.require_inner()?.issued_count())
     }
 
     /// Number of revoked reader kits.
     #[getter]
-    fn revoked_count(&self) -> usize {
-        self.inner.revoked_count()
+    fn revoked_count(&self) -> PyResult<usize> {
+        Ok(self.require_inner()?.revoked_count())
     }
 
     /// Tree height for this configuration (always TREE_HEIGHT).
@@ -142,33 +169,36 @@ impl PyPublisherState {
 
     /// Mint a fresh reader kit. Returns serialized `.tnpkg` bytes.
     fn mint<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let kit = self.inner.mint().map_err(err_to_py)?;
+        let inner = self.require_inner_mut()?;
+        let kit = inner.mint().map_err(err_to_py)?;
         Ok(PyBytes::new_bound(py, &kit.to_bytes()))
     }
 
     /// Revoke a reader by their kit bytes. Idempotent.
     fn revoke_kit(&mut self, kit_bytes: &[u8]) -> PyResult<()> {
         let kit = ReaderKit::from_bytes(kit_bytes).map_err(err_to_py)?;
-        self.inner.revoke(&kit).map_err(err_to_py)
+        let inner = self.require_inner_mut()?;
+        inner.revoke(&kit).map_err(err_to_py)
     }
 
     /// Revoke a reader by leaf index directly. Idempotent.
     fn revoke_by_leaf(&mut self, leaf: u64) -> PyResult<()> {
-        self.inner
-            .revoke_by_leaf(LeafIndex(leaf))
-            .map_err(err_to_py)
+        let inner = self.require_inner_mut()?;
+        inner.revoke_by_leaf(LeafIndex(leaf)).map_err(err_to_py)
     }
 
     /// Encrypt `plaintext` for all currently-active readers. Returns
     /// serialized ciphertext bytes.
     fn encrypt<'py>(&self, py: Python<'py>, plaintext: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        let ct = self.inner.encrypt(plaintext).map_err(err_to_py)?;
+        let inner = self.require_inner()?;
+        let ct = inner.encrypt(plaintext).map_err(err_to_py)?;
         Ok(PyBytes::new_bound(py, &ct.to_bytes()))
     }
 
     /// Serialize this publisher state for persistence. Treat as secret.
-    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.to_bytes())
+    fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let inner = self.require_inner()?;
+        Ok(PyBytes::new_bound(py, &inner.to_bytes()))
     }
 
     /// Restore a publisher state from bytes previously produced by
@@ -176,6 +206,85 @@ impl PyPublisherState {
     #[staticmethod]
     fn from_bytes(bytes: &[u8]) -> PyResult<Self> {
         let inner = RustPubState::from_bytes(bytes).map_err(err_to_py)?;
+        Ok(Self { inner: Some(inner) })
+    }
+
+    /// Rotate this publisher state. Consumes the underlying Rust state;
+    /// subsequent method calls on this wrapper raise RuntimeError until
+    /// `RotationOutcome.active` is moved into a fresh PublisherState.
+    ///
+    /// Returns a `RotationOutcome` with two attributes:
+    ///   .active   — fresh PublisherState (new master_seed, new
+    ///               publisher_id, epoch = prior + 1, empty leaf
+    ///               bookkeeping)
+    ///   .retired  — RetiredPublisherState snapshot of the prior state
+    ///               (master_seed + publisher_id + epoch + retired_at_unix_secs;
+    ///               kept for keywalk on historical ciphertexts)
+    fn rotate(&mut self) -> PyResult<PyRotationOutcome> {
+        let inner = self.inner.take().ok_or_else(consumed_err)?;
+        let outcome = inner.rotate().map_err(err_to_py)?;
+        Ok(convert_outcome(outcome))
+    }
+
+    fn __repr__(&self) -> String {
+        match self.inner.as_ref() {
+            None => "PublisherState(<consumed by rotate()>)".to_string(),
+            Some(inner) => {
+                let id = inner.publisher_id();
+                let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
+                format!(
+                    "PublisherState(publisher_id={hex}, epoch={}, issued={}, revoked={})",
+                    inner.epoch(),
+                    inner.issued_count(),
+                    inner.revoked_count(),
+                )
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// RotationOutcome + RetiredPublisherState (phase A spec section 3.1)
+// -----------------------------------------------------------------------
+
+/// Frozen snapshot of a publisher state that has been retired by a
+/// rotation. Carries enough material to decrypt historical ciphertexts
+/// minted under it (via the existing reader-kit path) and to identify
+/// it on disk (publisher_id + epoch).
+#[pyclass(module = "btn._core", name = "RetiredPublisherState")]
+pub(crate) struct PyRetiredPublisherState {
+    pub(crate) inner: RustRetired,
+}
+
+#[pymethods]
+impl PyRetiredPublisherState {
+    /// 32-byte publisher_id this state served under.
+    #[getter]
+    fn publisher_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, &self.inner.publisher_id())
+    }
+
+    /// Epoch this state was active under (0, 1, 2, ...).
+    #[getter]
+    fn epoch(&self) -> u32 {
+        self.inner.epoch()
+    }
+
+    /// Wall-clock UTC seconds at which this state was retired.
+    #[getter]
+    fn retired_at_unix_secs(&self) -> u64 {
+        self.inner.retired_at_unix_secs()
+    }
+
+    /// Serialize for on-disk persistence. Treat as secret.
+    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, &self.inner.to_bytes())
+    }
+
+    /// Restore from bytes previously produced by `to_bytes()`.
+    #[staticmethod]
+    fn from_bytes(bytes: &[u8]) -> PyResult<Self> {
+        let inner = RustRetired::from_bytes(bytes).map_err(err_to_py)?;
         Ok(Self { inner })
     }
 
@@ -183,11 +292,55 @@ impl PyPublisherState {
         let id = self.inner.publisher_id();
         let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
         format!(
-            "PublisherState(publisher_id={hex}, epoch={}, issued={}, revoked={})",
+            "RetiredPublisherState(publisher_id={hex}, epoch={}, retired_at_unix_secs={})",
             self.inner.epoch(),
-            self.inner.issued_count(),
-            self.inner.revoked_count(),
+            self.inner.retired_at_unix_secs(),
         )
+    }
+}
+
+/// Result of `PublisherState.rotate()`. Has two `Option`-backed
+/// attributes that yield ownership of their inner once each (getter
+/// `take()` semantics). Re-accessing after the first read raises
+/// RuntimeError — this prevents accidental aliasing of the active
+/// state across two Python references.
+#[pyclass(module = "btn._core", name = "RotationOutcome")]
+pub(crate) struct PyRotationOutcome {
+    pub(crate) active: Option<PyPublisherState>,
+    pub(crate) retired: Option<PyRetiredPublisherState>,
+}
+
+#[pymethods]
+impl PyRotationOutcome {
+    /// Pull the new active state out of the outcome. Single-use.
+    #[getter]
+    fn active(&mut self) -> PyResult<PyPublisherState> {
+        self.active.take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "rotation outcome's active state has already been consumed",
+            )
+        })
+    }
+
+    /// Pull the retired state snapshot out of the outcome. Single-use.
+    #[getter]
+    fn retired(&mut self) -> PyResult<PyRetiredPublisherState> {
+        self.retired.take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "rotation outcome's retired state has already been consumed",
+            )
+        })
+    }
+}
+
+fn convert_outcome(outcome: RustOutcome) -> PyRotationOutcome {
+    PyRotationOutcome {
+        active: Some(PyPublisherState {
+            inner: Some(outcome.active),
+        }),
+        retired: Some(PyRetiredPublisherState {
+            inner: outcome.retired,
+        }),
     }
 }
 
@@ -246,6 +399,8 @@ fn max_leaves() -> u64 {
 #[pyo3(name = "_core")]
 fn btn_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPublisherState>()?;
+    m.add_class::<PyRetiredPublisherState>()?;
+    m.add_class::<PyRotationOutcome>()?;
     m.add_function(wrap_pyfunction!(decrypt, m)?)?;
     m.add_function(wrap_pyfunction!(ciphertext_publisher_id, m)?)?;
     m.add_function(wrap_pyfunction!(kit_publisher_id, m)?)?;

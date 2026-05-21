@@ -18,7 +18,7 @@ def test_compile_enrolment_produces_signed_package(tmp_path: Path):
     admin._add_recipient_jwe_impl(cfg, "default", "did:key:z6MkBob", os.urandom(32))
     pkg = compile_enrolment(cfg, "default", "did:key:z6MkBob")
     assert pkg.package_kind == "enrolment"
-    assert pkg.peer_did == "did:key:z6MkBob"
+    assert pkg.recipient_identity == "did:key:z6MkBob"
     assert pkg.ceremony_id == cfg.ceremony_id
     assert "sender_pub_b64" in pkg.payload
     assert len(base64.b64decode(pkg.payload["sender_pub_b64"])) == 32

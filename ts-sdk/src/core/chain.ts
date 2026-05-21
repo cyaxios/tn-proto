@@ -43,7 +43,7 @@ export function rowHash(input: RowHashInput): RowHash {
     };
   }
   const flat = {
-    did: input.did,
+    device_identity: input.device_identity,
     timestamp: input.timestamp,
     event_id: input.eventId,
     event_type: input.eventType,

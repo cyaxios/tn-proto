@@ -244,18 +244,20 @@ fn default_logs() -> Logs {
     }
 }
 
-/// Publisher identity hint.
+/// Publisher device identity block. Renamed from `Me` in 0.4.3a1
+/// (the corresponding yaml key flipped from `me:` to `device:`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Me {
+pub struct Device {
     /// `did:key:z…` of this party's device key.
-    pub did: String,
+    pub device_identity: String,
 }
 
 /// Recipient specification inside a group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupRecipient {
-    /// Recipient DID (`did:key:z…`).
-    pub did: String,
+    /// Recipient device identity (`did:key:z…`). Renamed from `did`
+    /// in 0.4.3a1 to match the canonical role vocabulary.
+    pub recipient_identity: String,
     /// BGW reader-key file path (relative to keystore).
     #[serde(default)]
     pub key: Option<String>,
@@ -322,8 +324,8 @@ pub struct Config {
     pub logs: Logs,
     /// Keystore location.
     pub keystore: Keystore,
-    /// Publisher identity.
-    pub me: Me,
+    /// Publisher device identity.
+    pub device: Device,
     /// Fields that should always be emitted in the clear.
     #[serde(default)]
     pub public_fields: Vec<String>,
@@ -479,7 +481,7 @@ pub fn parse(yaml: &str) -> Result<Config> {
 
 /// Parent-owned top-level keys: child can never override.
 const PARENT_OWNED_KEYS: &[&str] = &[
-    "me",
+    "device",
     "keystore",
     "groups",
     "fields",

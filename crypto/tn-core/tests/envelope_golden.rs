@@ -95,7 +95,7 @@ fn envelope_matches_python_golden() {
             },
         );
         let row_hash = compute_row_hash(&RowHashInput {
-            did: dk.did(),
+            device_identity: dk.did(),
             timestamp: &v.inputs.timestamp,
             event_id: &v.inputs.event_id,
             event_type: &v.inputs.event_type,
@@ -127,7 +127,7 @@ fn envelope_matches_python_golden() {
         group_payloads.insert(v.inputs.group.clone(), payload_json);
 
         let line = build_envelope(EnvelopeInput {
-            did: dk.did(),
+            device_identity: dk.did(),
             timestamp: &v.inputs.timestamp,
             event_id: &v.inputs.event_id,
             event_type: &v.inputs.event_type,

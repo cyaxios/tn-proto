@@ -37,7 +37,7 @@ PHANTOM_ITEMS: list[tuple[int, str, list[str], str]] = [
     (15, "policy_published reducer maps to StateDelta::Unknown", ["StateDelta::Unknown", "policy_published"], "review"),
     (16, "agents.md 5-field markdown schema",                ["instruction", "use_for", "do_not_use_for", "consequences", "on_violation_or_error"], "review"),
     (17, "vault retention 'append-only forever'",           ["append-only forever", "auto-prune"], "review"),
-    (18, "to_did v1 routing requirement",                    ["to_did", "broadcast_inbox", "to_did is None"], "review"),
+    (18, "to_did v1 routing requirement",                    ["recipient_identity", "broadcast_inbox", "to_did is None"], "review"),
     (19, "tn.agents field-hash emission default ON",         ["field_hashes", "tn.agents"], "review"),
     (20, "recipient_invite manifest kind",                   ["recipient_invite", "RecipientInvite"], "keep"),
     (21, "full_keystore + confirm_includes_secrets",         ["full_keystore", "confirm_includes_secrets", "FullKeystore"], "keep"),

@@ -2,13 +2,14 @@
 
 Before this fix, `tn.admin.rotate("default")` overwrote `<group>.btn.state` and
 `<group>.btn.mykit` in place, making pre-rotation entries permanently
-unreadable. Now:
+unreadable. Now (0.4.3a1):
 
-    - rotate renames old files to `.btn.state.revoked.<ts>` and
-      `.btn.mykit.revoked.<ts>`
+    - rotate archives old state+mykit as `.btn.state.retired.<N>` and
+      `.btn.mykit.retired.<N>` where N is the cipher epoch of the
+      retired material (1-indexed, monotonic).
     - Runtime::init globs all `.btn.mykit*` files and loads them into
-      one BtnReaderCipher that tries each kit until one decrypts
-    - a single `tn.read()` returns pre- AND post-rotation entries
+      one BtnReaderCipher that tries each kit until one decrypts.
+    - a single `tn.read()` returns pre- AND post-rotation entries.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ def _clean_tn():  # pyright: ignore[reportUnusedFunction]
 
 
 def test_rotate_preserves_old_kits(tmp_path):
-    """After rotate, old .btn.state and .btn.mykit are preserved as .revoked.<ts>."""
+    """After rotate, old .btn.state and .btn.mykit are preserved as .retired.<N>."""
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
     tn.info("pre.rotate", n=1)
@@ -44,7 +45,7 @@ def test_rotate_preserves_old_kits(tmp_path):
     assert (keystore / "default.btn.state").exists()
     assert (keystore / "default.btn.mykit").exists()
 
-    # Rotate — should rename old state+mykit rather than delete.
+    # Rotate — should archive old state+mykit rather than delete.
     tn.init(yaml)
     tn.admin.rotate("default")
     tn.flush_and_close()
@@ -52,11 +53,11 @@ def test_rotate_preserves_old_kits(tmp_path):
     # Current files still there with fresh content.
     assert (keystore / "default.btn.state").exists()
     assert (keystore / "default.btn.mykit").exists()
-    # Old files preserved under .revoked.<ts> suffixes.
-    revoked_states = list(keystore.glob("default.btn.state.revoked.*"))
-    revoked_kits = list(keystore.glob("default.btn.mykit.revoked.*"))
-    assert len(revoked_states) == 1, f"expected 1 revoked state, got {revoked_states}"
-    assert len(revoked_kits) == 1, f"expected 1 revoked kit, got {revoked_kits}"
+    # Old files preserved under .retired.<N> suffixes (N = retired epoch).
+    retired_states = list(keystore.glob("default.btn.state.retired.*"))
+    retired_kits = list(keystore.glob("default.btn.mykit.retired.*"))
+    assert len(retired_states) == 1, f"expected 1 retired state, got {retired_states}"
+    assert len(retired_kits) == 1, f"expected 1 retired kit, got {retired_kits}"
 
 
 def test_read_spans_rotation_boundary(tmp_path):
@@ -98,20 +99,17 @@ def test_read_spans_rotation_boundary(tmp_path):
 
 
 def test_multiple_rotations_accumulate_preserved_kits(tmp_path):
-    """Every rotation stacks another .revoked.<ts> kit; reads still span all."""
-    import time as _time
-
+    """Every rotation stacks another .retired.<N> kit; reads still span all."""
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
     tn.info("era.one", n=1)
     tn.flush_and_close()
 
-    # Two rotations in sequence (with small sleep so timestamps differ).
+    # Two rotations in sequence (epoch index is monotonic; no need to sleep).
     tn.init(yaml)
     tn.admin.rotate("default")
     tn.info("era.two", n=2)
     tn.flush_and_close()
-    _time.sleep(1.1)
 
     tn.init(yaml)
     tn.admin.rotate("default")
@@ -119,8 +117,8 @@ def test_multiple_rotations_accumulate_preserved_kits(tmp_path):
     tn.flush_and_close()
 
     keystore = tmp_path / ".tn/tn/keys"
-    revoked_kits = sorted(keystore.glob("default.btn.mykit.revoked.*"))
-    assert len(revoked_kits) == 2, f"expected 2 revoked kits, got {revoked_kits}"
+    retired_kits = sorted(keystore.glob("default.btn.mykit.retired.*"))
+    assert len(retired_kits) == 2, f"expected 2 retired kits, got {retired_kits}"
 
     # Read everything — all three eras' data entries decrypt.
     tn.init(yaml)

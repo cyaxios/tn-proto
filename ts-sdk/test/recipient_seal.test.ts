@@ -47,7 +47,7 @@ function bytesToHex(b: Uint8Array): string {
 
 interface SealFixture {
   ed25519_seed_hex: string;
-  recipient_did: string;
+  recipient_identity: string;
   bek_hex: string;
   manifest: Record<string, unknown>;
   wrap: RecipientWrap;
@@ -64,10 +64,10 @@ test("recipient_seal: TS unseal of Python-produced wrap recovers BEK", async () 
   const seed = hexToBytes(f.ed25519_seed_hex);
   const expectedBek = hexToBytes(f.bek_hex);
 
-  // recipient_did derived in JS must match Python's so the test fails
+  // recipient_identity derived in JS must match Python's so the test fails
   // loudly on a base58btc / multicodec drift before the seal path runs.
   const dk = DeviceKey.fromSeed(seed);
-  assert.equal(dk.did, f.recipient_did);
+  assert.equal(dk.did, f.recipient_identity);
 
   const aad = manifestAadForWrap(f.manifest);
   // Sanity-check AAD length matches the producer's record (Python
@@ -137,7 +137,7 @@ test("seal/unseal round-trip in TS recovers the BEK", async () => {
 
   const wrap = await sealBekForRecipient(bek, dk.did, aad);
   assert.equal(wrap.frame, WRAP_FRAME);
-  assert.equal(wrap.recipient_did, dk.did);
+  assert.equal(wrap.recipient_identity, dk.did);
   assert.equal(typeof wrap.ephemeral_x25519_pub_b64, "string");
   assert.equal(typeof wrap.wrap_nonce_b64, "string");
   assert.equal(typeof wrap.wrapped_bek_b64, "string");
@@ -235,7 +235,7 @@ test("buildRecipientWraps: multi-recipient fanout, every recipient unseals to th
   // Singular shadow only emitted when len === 1.
   assert.equal(be.recipient_wrap, undefined);
   // to_did becomes the first recipient (deterministic).
-  assert.equal(r.manifest.to_did, a.did);
+  assert.equal(r.manifest.recipient_identity, a.did);
 
   // Each device's seed unseals exactly its own wrap entry; cross-device
   // entries fail (libsodium's AEAD tag check, surfaced as UnsealError).
@@ -245,7 +245,7 @@ test("buildRecipientWraps: multi-recipient fanout, every recipient unseals to th
     [seedC, c, 2],
   ] as const) {
     const own = be.recipient_wraps[idx] as RecipientWrap;
-    assert.equal(own.recipient_did, dk.did);
+    assert.equal(own.recipient_identity, dk.did);
     const recovered = await unsealBekFromWrap(own, seed, r.aad);
     assert.equal(bytesToHex(recovered), bytesToHex(bek));
   }
@@ -260,7 +260,7 @@ test("buildRecipientWraps: single recipient emits singular shadow", async () => 
   const be = (r.manifest.state as { body_encryption: { recipient_wraps: RecipientWrap[]; recipient_wrap?: RecipientWrap } }).body_encryption;
   assert.equal(be.recipient_wraps.length, 1);
   assert.notEqual(be.recipient_wrap, undefined);
-  assert.equal(be.recipient_wrap?.recipient_did, dk.did);
+  assert.equal(be.recipient_wrap?.recipient_identity, dk.did);
   // Singular shadow has the same body as the array entry.
   assert.equal(be.recipient_wrap?.wrapped_bek_b64, be.recipient_wraps[0]?.wrapped_bek_b64);
 });
@@ -275,9 +275,9 @@ test("buildRecipientWraps: dedupes repeated DIDs preserving first-seen order", a
 
   const r = await buildRecipientWraps(bek, [a.did, b.did, a.did, b.did, a.did], skeleton);
   assert.equal(r.wraps.length, 2);
-  assert.equal(r.wraps[0]?.recipient_did, a.did);
-  assert.equal(r.wraps[1]?.recipient_did, b.did);
-  assert.equal(r.manifest.to_did, a.did);
+  assert.equal(r.wraps[0]?.recipient_identity, a.did);
+  assert.equal(r.wraps[1]?.recipient_identity, b.did);
+  assert.equal(r.manifest.recipient_identity, a.did);
 });
 
 test("buildRecipientWraps: empty list throws", async () => {
@@ -321,7 +321,7 @@ test("unseal rejects unknown frame string", async () => {
   const aad = new Uint8Array(0);
   const bogus: RecipientWrap = {
     frame: "tn-sealed-box-v999",
-    recipient_did: DeviceKey.fromSeed(seed).did,
+    recipient_identity: DeviceKey.fromSeed(seed).did,
     ephemeral_x25519_pub_b64: "AA",
     wrap_nonce_b64: "AA",
     wrapped_bek_b64: "AA",

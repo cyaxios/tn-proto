@@ -238,7 +238,7 @@ class TestPythonExampleFlow:
         traces = tn.init("traces", profile="telemetry", project_dir=tmp_path)
 
         # Same project DID across both streams.
-        assert payments.cfg.device.did == traces.cfg.device.did
+        assert payments.cfg.device.device_identity == traces.cfg.device.device_identity
 
         # Distinct ceremony_ids = independent chains.
         assert payments.cfg.ceremony_id != traces.cfg.ceremony_id
@@ -258,7 +258,7 @@ class TestPythonExampleFlow:
         consumer = tn.init("consumer", project_dir=tmp_path)
         out = tmp_path / "for-consumer.tnpkg"
         payments.bundle_for_recipient(
-            recipient_did=consumer.cfg.device.did,
+            recipient_did=consumer.cfg.device.device_identity,
             out_path=out,
             groups=["default"],
         )

@@ -36,7 +36,7 @@ def test_vault_link_emits_event(tmp_path):
     ]
     assert len(events) == 1, f"expected 1 link event, got {len(events)}"
     e = events[0]
-    assert e.fields["vault_did"] == "did:web:tn-proto.org"
+    assert e.fields["vault_identity"] == "did:web:tn-proto.org"
     assert e.fields["project_id"] == "proj_test"
     assert e.fields["linked_at"]  # non-empty ISO 8601
 

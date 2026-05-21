@@ -127,9 +127,10 @@ def main() -> int:
         print("\n--- verifying one entry with ONLY public material ---")
         sig = _signature_from_b64(first_env["signature"])
         ok = DeviceKey.verify(
-            first_env["did"], first_env["row_hash"].encode("ascii"), sig,
+            first_env["device_identity"], first_env["row_hash"].encode("ascii"), sig,
         )
-        print(f"  DID      = {first_env['did']}")
+        # 0.4.3a1: the envelope's signer-identity key is `device_identity`.
+        print(f"  DID      = {first_env['device_identity']}")
         print(f"  row_hash = {first_env['row_hash']}")
         print(f"  verify   = {ok}")
         print("  (no keystore, no network, no central authority needed.)")

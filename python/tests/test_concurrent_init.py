@@ -45,7 +45,7 @@ WORKER_SCRIPT = textwrap.dedent('''
 def _read_did_from_yaml(yaml_path: Path) -> str:
     import yaml as pyyaml
     doc = pyyaml.safe_load(yaml_path.read_text())
-    return doc["me"]["did"]
+    return doc["device"]["device_identity"]
 
 
 def _derive_did_from_public(keystore_dir: Path) -> str:

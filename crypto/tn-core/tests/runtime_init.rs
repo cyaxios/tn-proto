@@ -9,7 +9,7 @@ fn init_minimal_btn_ceremony() {
     let td = tempfile::tempdir().unwrap();
     let cer = common::setup_minimal_btn_ceremony(td.path());
     let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
-    assert_eq!(rt.did(), cer.did);
+    assert_eq!(rt.did(), cer.device_identity);
     // log_path ends with logs/tn.ndjson (forward or back slash depending on OS).
     let lp = rt.log_path().to_string_lossy();
     assert!(
@@ -25,7 +25,7 @@ fn init_fails_when_did_mismatches() {
 
     // Tamper yaml to point to a different DID.
     let yaml = std::fs::read_to_string(&cer.yaml_path).unwrap();
-    let tampered = yaml.replace(&cer.did, "did:key:zDIFFERENTXXXXXXXXXXXXXXXXXXXXXX");
+    let tampered = yaml.replace(&cer.device_identity, "did:key:zDIFFERENTXXXXXXXXXXXXXXXXXXXXXX");
     std::fs::write(&cer.yaml_path, tampered).unwrap();
 
     let result = tn_core::Runtime::init(&cer.yaml_path);
@@ -81,7 +81,7 @@ fn fresh_init_emits_ceremony_init_as_first_entry() {
     assert_eq!(env["sequence"], 1, "ceremony.init must be sequence 1");
     // did field carries the publisher DID at the top level.
     assert!(
-        env["did"]
+        env["device_identity"]
             .as_str()
             .is_some_and(|s| s.starts_with("did:key:")),
         "envelope did must start with did:key:"
@@ -103,10 +103,10 @@ fn fresh_init_emits_ceremony_init_as_first_entry() {
         "cipher must be a string in decrypted payload"
     );
     assert!(
-        pt["device_did"]
+        pt["device_identity"]
             .as_str()
             .is_some_and(|s| s.starts_with("did:key:")),
-        "device_did must start with did:key: in decrypted payload"
+        "device_identity must start with did:key: in decrypted payload"
     );
     assert!(
         pt["created_at"].as_str().is_some(),
@@ -305,7 +305,7 @@ fn yaml_dir_template_keeps_rust_dispatch_active() {
     {
         let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
         // Active btn ceremony — the runtime is fully usable.
-        assert_eq!(rt.did(), cer.did);
+        assert_eq!(rt.did(), cer.device_identity);
         drop(rt);
     }
 
@@ -355,5 +355,5 @@ fn init_seeds_chain_from_existing_log() {
 
     // init should succeed and read the pre-existing log without error.
     let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
-    assert_eq!(rt.did(), cer.did);
+    assert_eq!(rt.did(), cer.device_identity);
 }

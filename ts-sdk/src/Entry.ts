@@ -262,7 +262,7 @@ export class Entry {
       level: String(env["level"] ?? ""),
       message,
       fields,
-      did: String(env["did"] ?? ""),
+      did: String(env["device_identity"] ?? ""),
       event_id: String(env["event_id"] ?? ""),
       sequence: Number(env["sequence"] ?? 0),
       run_id: runId,

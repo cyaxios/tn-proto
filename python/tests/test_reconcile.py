@@ -20,7 +20,7 @@ def test_reconcile_promotes_pending_jwe_recipient(tmp_path: Path):
     (pending_offers_dir(tmp_path) / "did_key_z6MkBob.json").write_text(
         json.dumps(
             {
-                "signer_did": "did:key:z6MkBob",
+                "device_identity": "did:key:z6MkBob",
                 "group": "default",
                 "x25519_pub_b64": base64.b64encode(bob_pub).decode("ascii"),
                 "compiled_at": "2026-04-21T00:00:00Z",
@@ -29,9 +29,15 @@ def test_reconcile_promotes_pending_jwe_recipient(tmp_path: Path):
         encoding="utf-8",
     )
     result = _reconcile(cfg)
-    assert any(p.peer_did == "did:key:z6MkBob" for p in result.promotions)
+    # 0.4.3a1: Promotion.peer_did → Promotion.recipient_identity, yaml
+    # recipient `did:` → `recipient_identity:`.
+    assert any(p.recipient_identity == "did:key:z6MkBob" for p in result.promotions)
     doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-    bob = next(r for r in doc["groups"]["default"]["recipients"] if r["did"] == "did:key:z6MkBob")
+    bob = next(
+        r
+        for r in doc["groups"]["default"]["recipients"]
+        if r["recipient_identity"] == "did:key:z6MkBob"
+    )
     assert base64.b64decode(bob["pub_b64"]) == bob_pub
 
 

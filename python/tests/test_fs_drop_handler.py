@@ -59,7 +59,7 @@ class TestFsDropEmits:
             out_dir=outbox,
             cfg_provider=lambda: cfg,
         )
-        env = {"event_type": "tn.recipient.added", "did": cfg.device.did}
+        env = {"event_type": "tn.recipient.added", "did": cfg.device.device_identity}
         h.emit(env, b"")
 
         files = list(outbox.glob("*.tnpkg"))
@@ -80,7 +80,7 @@ class TestFsDropEmits:
             cfg_provider=lambda: cfg,
             filename_template="snap_{head_row_hash:short}.tnpkg",
         )
-        h.emit({"event_type": "tn.recipient.added", "did": cfg.device.did}, b"")
+        h.emit({"event_type": "tn.recipient.added", "did": cfg.device.device_identity}, b"")
         files = list(outbox.glob("snap_*.tnpkg"))
         assert len(files) == 1
 
@@ -98,12 +98,12 @@ class TestFsDropFilter:
         # An unrelated admin event should NOT pass `accepts()`. The
         # dispatcher relies on this check before calling emit; here we
         # mirror that contract explicitly.
-        unrelated = {"event_type": "tn.vault.linked", "did": cfg.device.did}
+        unrelated = {"event_type": "tn.vault.linked", "did": cfg.device.device_identity}
         assert h.accepts(unrelated) is False
 
         # The allowlisted event passes accepts() and (when emit fires)
         # produces a snapshot file.
-        wanted = {"event_type": "tn.recipient.added", "did": cfg.device.did}
+        wanted = {"event_type": "tn.recipient.added", "did": cfg.device.device_identity}
         assert h.accepts(wanted) is True
         h.emit(wanted, b"")
         assert len(list(outbox.glob("*.tnpkg"))) == 1
@@ -116,7 +116,7 @@ class TestFsDropFilter:
             out_dir=outbox,
             cfg_provider=lambda: cfg,
         )
-        non_admin = {"event_type": "user.login", "did": cfg.device.did}
+        non_admin = {"event_type": "user.login", "did": cfg.device.device_identity}
         assert h.accepts(non_admin) is False
 
 
@@ -129,7 +129,7 @@ class TestFsDropDedupe:
             out_dir=outbox,
             cfg_provider=lambda: cfg,
         )
-        env = {"event_type": "tn.recipient.added", "did": cfg.device.did}
+        env = {"event_type": "tn.recipient.added", "did": cfg.device.device_identity}
         h.emit(env, b"")
         h.emit(env, b"")  # Should NOT produce a second file.
         assert len(list(outbox.glob("*.tnpkg"))) == 1

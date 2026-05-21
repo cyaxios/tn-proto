@@ -45,8 +45,8 @@ def test_export_offer_round_trip(tmp_path: Path):
 
     manifest, body = _read_manifest(out)
     assert manifest.kind == "offer"
-    assert manifest.from_did == bob_cfg.device.did
-    assert manifest.to_did == "did:key:z6MkAlice"
+    assert manifest.publisher_identity == bob_cfg.device.device_identity
+    assert manifest.recipient_identity == "did:key:z6MkAlice"
     assert "body/package.json" in body
     assert _verify_manifest_signature(manifest)
 
@@ -63,7 +63,7 @@ def test_export_enrolment_round_trip(tmp_path: Path):
 
     manifest, body = _read_manifest(out)
     assert manifest.kind == "enrolment"
-    assert manifest.to_did == "did:key:z6MkBob"
+    assert manifest.recipient_identity == "did:key:z6MkBob"
     assert _verify_manifest_signature(manifest)
     body_pkg = json.loads(body["body/package.json"].decode("utf-8"))
     assert body_pkg["package_kind"] == "enrolment"

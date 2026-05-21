@@ -95,7 +95,7 @@ public_fields:
 - level
 - group
 - leaf_index
-- recipient_did
+- recipient_identity
 - kit_sha256
 - cipher
 default_policy: private
@@ -177,7 +177,7 @@ test("slice1.scan_covers_main_and_pel", () => {
     rt.emit("info", "tn.group.added", {
       group: "default",
       cipher: "btn",
-      publisher_did: c.dk.did,
+      publisher_identity: c.dk.did,
       added_at: new Date().toISOString(),
     });
 
@@ -196,7 +196,7 @@ test("slice1.scan_covers_main_and_pel", () => {
       signature: "fake",
       group: "extra",
       cipher: "btn",
-      publisher_did: c.dk.did,
+      publisher_identity: c.dk.did,
       added_at: "2026-04-23T20:00:00.000000Z",
     };
     const prior = existsSync(pelFile) ? readFileSync(pelFile, "utf8") : "";
@@ -231,7 +231,7 @@ test("slice2.init_provisions_missing_recipient", () => {
     );
 
     const bobEvents = scanRecords(logFilesFor(c.yamlPath), "tn.recipient.added").filter(
-      (env) => env.recipient_did === c.bobDid,
+      (env) => env.recipient_identity === c.bobDid,
     );
     assert.ok(bobEvents.length === 1, `no tn.recipient.added for ${c.bobDid}`);
 

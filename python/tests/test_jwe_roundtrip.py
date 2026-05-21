@@ -26,7 +26,7 @@ def main() -> int:
         tn.init(yaml_path, log_path=log_path, cipher="jwe")
         cfg = tn.current_config()
         assert cfg.cipher_name == "jwe", f"expected jwe, got {cfg.cipher_name}"
-        print(f"DID:       {cfg.device.did}")
+        print(f"DID:       {cfg.device.device_identity}")
         print(f"cipher:    {cfg.cipher_name}")
         print(f"keystore:  {cfg.keystore}")
 

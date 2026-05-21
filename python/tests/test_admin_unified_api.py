@@ -181,7 +181,7 @@ def test_add_recipient_jwe_polymorphic_dict(tmp_path: Path):
     pub = _fresh_x25519_pub()
     result = tn.admin.add_recipient(
         "default",
-        recipient={"recipient_did": "did:key:zBob", "public_key": pub},
+        recipient={"recipient_identity": "did:key:zBob", "public_key": pub},
         cfg=cfg,
     )
     assert result.updated_cfg is not None
@@ -269,7 +269,7 @@ def test_resolve_recipient_x25519_pub_b64_dict():
 
     pub = _fresh_x25519_pub()
     row = {
-        "recipient_did": "did:key:zCarol",
+        "recipient_identity": "did:key:zCarol",
         "x25519_pub_b64": base64.b64encode(pub).decode(),
     }
     out = _resolve_recipient(row)

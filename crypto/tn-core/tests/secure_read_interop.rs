@@ -81,26 +81,32 @@ fn skip_if_missing(p: &Path, label: &str) -> bool {
 
 #[test]
 fn required_byte_compare_fixtures_present() {
-    let admin_py = fixture_path(&["python", "tests", "fixtures", "python_admin_snapshot.tnpkg"]);
-    let admin_rs = rust_fixture("rust_admin_snapshot.tnpkg");
-    let admin_ts = fixture_path(&["ts-sdk", "test", "fixtures", "ts_admin_snapshot.tnpkg"]);
-
+    // 0.4.3a1: the per-SDK *_admin_snapshot.tnpkg files are NOT required
+    // here. They're signed-byte cross-language fixtures that were frozen
+    // under the legacy manifest field names (from_did / to_did); the
+    // tnpkg manifest rename in this release changed how manifest
+    // signing bytes canonicalize, so the legacy fixtures can no longer
+    // be verified. They get regenerated via each SDK's
+    // build_admin_snapshot_fixture builder after the maturin/wasm
+    // rebuilds. Until then the {python,ts}_produced_admin_snapshot
+    // tests skip cleanly via their per-test skip_if_missing.
+    //
+    // The canonical JSON fixtures below (SECURE_READ_NAME, PRE_ENC_NAME,
+    // ADMIN_NAME) ARE required — they're byte-compare references that
+    // I regenerated this release; missing or zero-byte means drift.
     let expected: Vec<PathBuf> = vec![
         // Python.
         python_fixture(SECURE_READ_NAME),
         python_fixture(PRE_ENC_NAME),
         python_fixture(ADMIN_NAME),
-        admin_py,
         // Rust.
         rust_fixture(SECURE_READ_NAME),
         rust_fixture(PRE_ENC_NAME),
         rust_fixture(ADMIN_NAME),
-        admin_rs,
         // TS.
         ts_fixture(SECURE_READ_NAME),
         ts_fixture(PRE_ENC_NAME),
         ts_fixture(ADMIN_NAME),
-        admin_ts,
     ];
 
     let mut missing: Vec<String> = Vec::new();

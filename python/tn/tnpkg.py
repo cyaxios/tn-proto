@@ -95,11 +95,11 @@ class TnpkgManifest:
     """
 
     kind: str
-    from_did: str
+    publisher_identity: str
     ceremony_id: str
     as_of: str
     scope: str = "admin"
-    to_did: str | None = None
+    recipient_identity: str | None = None
     version: int = MANIFEST_VERSION
     clock: dict[str, dict[str, int]] = field(default_factory=dict)
     event_count: int = 0
@@ -114,15 +114,15 @@ class TnpkgManifest:
         out: dict[str, Any] = {
             "kind": self.kind,
             "version": self.version,
-            "from_did": self.from_did,
+            "publisher_identity": self.publisher_identity,
             "ceremony_id": self.ceremony_id,
             "as_of": self.as_of,
             "scope": self.scope,
             "clock": self.clock,
             "event_count": self.event_count,
         }
-        if self.to_did is not None:
-            out["to_did"] = self.to_did
+        if self.recipient_identity is not None:
+            out["recipient_identity"] = self.recipient_identity
         if self.head_row_hash is not None:
             out["head_row_hash"] = self.head_row_hash
         if self.state is not None:
@@ -137,18 +137,18 @@ class TnpkgManifest:
             raise ValueError(f"manifest must be a JSON object; got {type(doc).__name__}")
         # Required keys; reject loudly if missing.
         missing = [
-            k for k in ("kind", "version", "from_did", "ceremony_id", "as_of") if k not in doc
+            k for k in ("kind", "version", "publisher_identity", "ceremony_id", "as_of") if k not in doc
         ]
         if missing:
             raise ValueError(f"manifest missing required keys: {missing}")
         return cls(
             kind=str(doc["kind"]),
             version=int(doc["version"]),
-            from_did=str(doc["from_did"]),
+            publisher_identity=str(doc["publisher_identity"]),
             ceremony_id=str(doc["ceremony_id"]),
             as_of=str(doc["as_of"]),
             scope=str(doc.get("scope", "admin")),
-            to_did=(str(doc["to_did"]) if doc.get("to_did") is not None else None),
+            recipient_identity=(str(doc["recipient_identity"]) if doc.get("recipient_identity") is not None else None),
             clock=dict(doc.get("clock") or {}),
             event_count=int(doc.get("event_count", 0)),
             head_row_hash=(
@@ -210,7 +210,7 @@ def _verify_manifest_signature(manifest: TnpkgManifest) -> bool:
     if not manifest.manifest_signature_b64:
         return False
     try:
-        pub_bytes = _did_key_pub(manifest.from_did)
+        pub_bytes = _did_key_pub(manifest.publisher_identity)
         sig = base64.b64decode(manifest.manifest_signature_b64)
         Ed25519PublicKey.from_public_bytes(pub_bytes).verify(sig, manifest.signing_bytes())
         return True

@@ -22,21 +22,21 @@ pub enum StateDelta {
     CeremonyInit {
         ceremony_id: String,
         cipher: String,
-        device_did: String,
+        device_identity: String,
         created_at: String,
     },
     /// `tn.group.added` — a publisher declared a new group.
     GroupAdded {
         group: String,
         cipher: String,
-        publisher_did: String,
+        publisher_identity: String,
         added_at: String,
     },
     /// `tn.recipient.added` — a reader kit was minted into a group.
     RecipientAdded {
         group: String,
         leaf_index: Option<u64>,
-        recipient_did: Option<String>,
+        recipient_identity: Option<String>,
         kit_sha256: String,
         cipher: String,
     },
@@ -44,13 +44,13 @@ pub enum StateDelta {
     RecipientRevoked {
         group: String,
         leaf_index: Option<u64>,
-        recipient_did: Option<String>,
+        recipient_identity: Option<String>,
     },
     /// `tn.coupon.issued` — a single-use coupon was handed to a DID.
     CouponIssued {
         group: String,
         slot: u64,
-        to_did: String,
+        recipient_identity: String,
         issued_to: String,
     },
     /// `tn.rotation.completed` — the group's kit was rotated to a new generation.
@@ -66,26 +66,26 @@ pub enum StateDelta {
     /// `tn.enrolment.compiled` — a peer enrolment package was built and signed.
     EnrolmentCompiled {
         group: String,
-        peer_did: String,
+        peer_identity: String,
         package_sha256: String,
         compiled_at: String,
     },
     /// `tn.enrolment.absorbed` — a peer's enrolment package was applied locally.
     EnrolmentAbsorbed {
         group: String,
-        from_did: String,
+        publisher_identity: String,
         package_sha256: String,
         absorbed_at: String,
     },
     /// `tn.vault.linked` — a vault was associated with a project.
     VaultLinked {
-        vault_did: String,
+        vault_identity: String,
         project_id: String,
         linked_at: String,
     },
     /// `tn.vault.unlinked` — a vault association was severed.
     VaultUnlinked {
-        vault_did: String,
+        vault_identity: String,
         project_id: String,
         reason: Option<String>,
         unlinked_at: String,
@@ -147,31 +147,31 @@ fn build_delta(event_type: &str, obj: &Map<String, Value>) -> StateDelta {
         "tn.ceremony.init" => StateDelta::CeremonyInit {
             ceremony_id: s(obj, "ceremony_id"),
             cipher: s(obj, "cipher"),
-            device_did: s(obj, "device_did"),
+            device_identity: s(obj, "device_identity"),
             created_at: s(obj, "created_at"),
         },
         "tn.group.added" => StateDelta::GroupAdded {
             group: s(obj, "group"),
             cipher: s(obj, "cipher"),
-            publisher_did: s(obj, "publisher_did"),
+            publisher_identity: s(obj, "publisher_identity"),
             added_at: s(obj, "added_at"),
         },
         "tn.recipient.added" => StateDelta::RecipientAdded {
             group: s(obj, "group"),
             leaf_index: opt_u(obj, "leaf_index"),
-            recipient_did: opt_s(obj, "recipient_did"),
+            recipient_identity: opt_s(obj, "recipient_identity"),
             kit_sha256: s(obj, "kit_sha256"),
             cipher: s(obj, "cipher"),
         },
         "tn.recipient.revoked" => StateDelta::RecipientRevoked {
             group: s(obj, "group"),
             leaf_index: opt_u(obj, "leaf_index"),
-            recipient_did: opt_s(obj, "recipient_did"),
+            recipient_identity: opt_s(obj, "recipient_identity"),
         },
         "tn.coupon.issued" => StateDelta::CouponIssued {
             group: s(obj, "group"),
             slot: u(obj, "slot"),
-            to_did: s(obj, "to_did"),
+            recipient_identity: s(obj, "recipient_identity"),
             issued_to: s(obj, "issued_to"),
         },
         "tn.rotation.completed" => StateDelta::RotationCompleted {
@@ -185,23 +185,23 @@ fn build_delta(event_type: &str, obj: &Map<String, Value>) -> StateDelta {
         },
         "tn.enrolment.compiled" => StateDelta::EnrolmentCompiled {
             group: s(obj, "group"),
-            peer_did: s(obj, "peer_did"),
+            peer_identity: s(obj, "peer_identity"),
             package_sha256: s(obj, "package_sha256"),
             compiled_at: s(obj, "compiled_at"),
         },
         "tn.enrolment.absorbed" => StateDelta::EnrolmentAbsorbed {
             group: s(obj, "group"),
-            from_did: s(obj, "from_did"),
+            publisher_identity: s(obj, "publisher_identity"),
             package_sha256: s(obj, "package_sha256"),
             absorbed_at: s(obj, "absorbed_at"),
         },
         "tn.vault.linked" => StateDelta::VaultLinked {
-            vault_did: s(obj, "vault_did"),
+            vault_identity: s(obj, "vault_identity"),
             project_id: s(obj, "project_id"),
             linked_at: s(obj, "linked_at"),
         },
         "tn.vault.unlinked" => StateDelta::VaultUnlinked {
-            vault_did: s(obj, "vault_did"),
+            vault_identity: s(obj, "vault_identity"),
             project_id: s(obj, "project_id"),
             reason: opt_s(obj, "reason"),
             unlinked_at: s(obj, "unlinked_at"),

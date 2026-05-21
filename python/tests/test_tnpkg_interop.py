@@ -60,6 +60,14 @@ def test_required_byte_compare_fixtures_present():
     healthy `main`; if a fixture is renamed, moved, or zero-byte, this test
     surfaces it loudly rather than letting the byte-compare assertions
     silently no-op.
+
+    0.4.3a1 caveat: the TS SDK identity-naming flip is a separate,
+    explicitly-deferred phase — the TS source still emits the legacy
+    ``me.did`` envelope schema, so ``ts_admin_snapshot.tnpkg`` cannot be
+    regenerated against the new wire format from this release. The TS
+    slot below is therefore *xfail-strict* until the TS rename ships:
+    the test surfaces the gap as an EXPECTED failure rather than a
+    silent skip, so it can't be forgotten.
     """
     expected: list[Path] = [
         # Python-produced fixtures (own dir).
@@ -71,7 +79,6 @@ def test_required_byte_compare_fixtures_present():
         RUST_FIXTURE_DIR / "secure_read_canonical.json",
         RUST_FIXTURE_DIR / "tn_agents_pre_encryption.json",
         # TS-produced fixtures.
-        TS_FIXTURE_DIR / "ts_admin_snapshot.tnpkg",
         TS_FIXTURE_DIR / "secure_read_canonical.json",
         TS_FIXTURE_DIR / "tn_agents_pre_encryption.json",
     ]
@@ -81,20 +88,41 @@ def test_required_byte_compare_fixtures_present():
     assert not empty, f"empty byte-compare fixtures (zero bytes): {empty}"
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "0.4.3a1: TS SDK identity-naming rename is a separate phase; the "
+        "TS fixture builder cannot emit the new wire format yet. Expect "
+        "this xfail to flip green (and remove the marker) once the TS "
+        "SDK rename ships."
+    ),
+)
+def test_ts_admin_snapshot_fixture_present():
+    """Tracked-deferral sentinel: pinned xfail so the TS fixture gap
+    stays visible in the test report. Will flip to passing as soon as
+    the TS SDK rename phase lands and ``ts_admin_snapshot.tnpkg`` is
+    regenerated under the new schema."""
+    assert (TS_FIXTURE_DIR / "ts_admin_snapshot.tnpkg").exists(), (
+        "ts_admin_snapshot.tnpkg missing — regenerate via "
+        "`node --import tsx ts-sdk/test/fixtures/build_admin_snapshot_fixture.ts` "
+        "AFTER the TS SDK identity-naming rename ships."
+    )
+
+
 def _assert_canonical_admin_state(state: dict) -> None:
     """Assert the AdminState shape matches the canonical scenario."""
     assert isinstance(state, dict), f"state must be a JSON object, got {type(state)}"
     recipients = state.get("recipients") or []
     vault_links = state.get("vault_links") or []
     assert len(recipients) == 2, f"expected 2 recipients, got {len(recipients)}"
-    dids = {r.get("recipient_did") for r in recipients}
+    dids = {r.get("recipient_identity") for r in recipients}
     assert dids == {"did:key:zAlice", "did:key:zBob"}, f"unexpected recipient DIDs: {dids}"
-    statuses = {r.get("recipient_did"): r.get("active_status") for r in recipients}
+    statuses = {r.get("recipient_identity"): r.get("active_status") for r in recipients}
     assert statuses["did:key:zAlice"] == "revoked", f"alice should be revoked: {statuses}"
     assert statuses["did:key:zBob"] == "active", f"bob should be active: {statuses}"
     assert len(vault_links) == 1, f"expected 1 vault link, got {len(vault_links)}"
     link = vault_links[0]
-    assert link.get("vault_did") == "did:web:vault.example"
+    assert link.get("vault_identity") == "did:web:vault.example"
     assert link.get("project_id") == "demo"
     assert link.get("unlinked_at") is None
 
@@ -148,7 +176,7 @@ def test_ts_produced_admin_snapshot_parses_in_python():
 GOLDEN_INPUT = {
     "kind": "admin_log_snapshot",
     "version": 1,
-    "from_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+    "publisher_identity": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
     "ceremony_id": "test_ceremony_42",
     "as_of": "2026-04-24T12:00:00.000+00:00",
     "scope": "admin",
@@ -161,11 +189,11 @@ GOLDEN_INPUT = {
     },
     "event_count": 4,
     "head_row_hash": "sha256:" + "a" * 64,
-    "to_did": "did:key:zRecipient",
+    "recipient_identity": "did:key:zRecipient",
     "state": {
         "vault_links": [
             {
-                "vault_did": "did:web:vault.example",
+                "vault_identity": "did:web:vault.example",
                 "project_id": "demo",
                 "linked_at": "2026-04-24T12:00:00.000Z",
                 "unlinked_at": None,
@@ -193,11 +221,11 @@ def test_manifest_canonical_bytes_match_golden():
     m = TnpkgManifest(
         kind=GOLDEN_INPUT["kind"],
         version=GOLDEN_INPUT["version"],
-        from_did=GOLDEN_INPUT["from_did"],
+        publisher_identity=GOLDEN_INPUT["publisher_identity"],
         ceremony_id=GOLDEN_INPUT["ceremony_id"],
         as_of=GOLDEN_INPUT["as_of"],
         scope=GOLDEN_INPUT["scope"],
-        to_did=GOLDEN_INPUT["to_did"],
+        recipient_identity=GOLDEN_INPUT["recipient_identity"],
         clock=GOLDEN_INPUT["clock"],
         event_count=GOLDEN_INPUT["event_count"],
         head_row_hash=GOLDEN_INPUT["head_row_hash"],

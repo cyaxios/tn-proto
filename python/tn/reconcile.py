@@ -35,13 +35,13 @@ _DID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 @dataclass
 class Promotion:
     group: str
-    peer_did: str
+    recipient_identity: str
 
 
 @dataclass
 class CouponIssued:
     group: str
-    peer_did: str
+    recipient_identity: str
     slot: int
 
 
@@ -71,7 +71,7 @@ def _reconcile(cfg: LoadedConfig) -> ReconcileResult:
 
         if isinstance(gcfg.cipher, JWEGroupCipher):
             for r in list(recipients):
-                did = r.get("did")
+                did = r.get("recipient_identity")
                 if not did or r.get("pub_b64"):
                     continue
                 safe = _DID_SAFE.sub("_", did)
@@ -112,7 +112,7 @@ def _reconcile(cfg: LoadedConfig) -> ReconcileResult:
                 if res.updated_cfg is not None:
                     cfg = res.updated_cfg
                 offer_path.unlink(missing_ok=True)
-                result.promotions.append(Promotion(group=group_name, peer_did=did))
+                result.promotions.append(Promotion(group=group_name, recipient_identity=did))
 
         # btn groups: yaml-declared DIDs are NOT auto-minted at init.
         # Use tn.admin_add_recipient(group, out_path, did) explicitly. The

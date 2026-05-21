@@ -66,7 +66,7 @@ function assertCanonicalAdminState(manifest: Manifest, source: string): void {
   assert.equal(recipients.length, 2, `${source}: expected 2 recipients`);
   const byDid: Record<string, string> = {};
   for (const r of recipients) {
-    const did = String(r["recipient_did"]);
+    const did = String(r["recipient_identity"]);
     const status = String(r["active_status"]);
     byDid[did] = status;
   }
@@ -74,7 +74,7 @@ function assertCanonicalAdminState(manifest: Manifest, source: string): void {
   assert.equal(byDid["did:key:zBob"], "active", `${source}: bob should be active`);
   assert.equal(vaultLinks.length, 1, `${source}: expected 1 vault link`);
   const link = vaultLinks[0]!;
-  assert.equal(link["vault_did"], "did:web:vault.example");
+  assert.equal(link["vault_identity"], "did:web:vault.example");
   assert.equal(link["project_id"], "demo");
   assert.equal(link["unlinked_at"], null);
 }
@@ -147,7 +147,7 @@ function goldenInput(): Manifest {
   m.state = {
     vault_links: [
       {
-        vault_did: "did:web:vault.example",
+        vault_identity: "did:web:vault.example",
         project_id: "demo",
         linked_at: "2026-04-24T12:00:00.000Z",
         unlinked_at: null,
@@ -194,7 +194,7 @@ test("manifest canonical bytes match golden across languages", () => {
             linked_at: "2026-04-24T12:00:00.000Z",
             project_id: "demo",
             unlinked_at: null,
-            vault_did: "did:web:vault.example",
+            vault_identity: "did:web:vault.example",
           },
         ],
       },

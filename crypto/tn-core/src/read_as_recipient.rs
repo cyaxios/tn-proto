@@ -178,7 +178,7 @@ pub fn read_as_recipient(
         // Signature verification.
         let mut sig_ok = true;
         if opts.verify_signatures {
-            let did = env_map.get("did").and_then(Value::as_str);
+            let did = env_map.get("device_identity").and_then(Value::as_str);
             let sig_str = env_map.get("signature").and_then(Value::as_str);
             match (did, sig_str, env_row) {
                 (Some(did), Some(sig_b64), Some(row)) => {

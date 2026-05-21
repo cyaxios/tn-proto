@@ -307,7 +307,7 @@ pub fn zero_hash_js() -> String {
 /// `input` is a JSON object with:
 /// ```json
 /// {
-///   "did": string,
+///   "device_identity": string,
 ///   "timestamp": string,
 ///   "event_id": string,
 ///   "event_type": string,
@@ -330,7 +330,7 @@ pub fn compute_row_hash_js(input: JsValue) -> Result<String, JsError> {
     let v = js_to_json(input)?;
     let obj = expect_object(v, "rowHash input")?;
 
-    let did = str_field(&obj, "did")?;
+    let did = str_field(&obj, "device_identity")?;
     let timestamp = str_field(&obj, "timestamp")?;
     let event_id = str_field(&obj, "event_id")?;
     let event_type = str_field(&obj, "event_type")?;
@@ -382,7 +382,7 @@ pub fn compute_row_hash_js(input: JsValue) -> Result<String, JsError> {
     }
 
     let input_ref = chain::RowHashInput {
-        did: &did,
+        device_identity: &did,
         timestamp: &timestamp,
         event_id: &event_id,
         event_type: &event_type,
@@ -411,7 +411,7 @@ fn str_field(obj: &Map<String, Value>, k: &str) -> Result<String, JsError> {
 /// `input` shape:
 /// ```json
 /// {
-///   "did": string, "timestamp": string, "event_id": string,
+///   "device_identity": string, "timestamp": string, "event_id": string,
 ///   "event_type": string, "level": string, "sequence": number,
 ///   "prev_hash": string, "row_hash": string, "signature_b64": string,
 ///   "public_fields": { [key]: value },
@@ -425,7 +425,7 @@ pub fn build_envelope_js(input: JsValue) -> Result<String, JsError> {
     let v = js_to_json(input)?;
     let obj = expect_object(v, "envelope input")?;
 
-    let did = str_field(&obj, "did")?;
+    let did = str_field(&obj, "device_identity")?;
     let timestamp = str_field(&obj, "timestamp")?;
     let event_id = str_field(&obj, "event_id")?;
     let event_type = str_field(&obj, "event_type")?;
@@ -461,7 +461,7 @@ pub fn build_envelope_js(input: JsValue) -> Result<String, JsError> {
     }
 
     let ein = envelope::EnvelopeInput {
-        did: &did,
+        device_identity: &did,
         timestamp: &timestamp,
         event_id: &event_id,
         event_type: &event_type,

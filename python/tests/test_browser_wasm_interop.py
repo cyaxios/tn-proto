@@ -124,10 +124,23 @@ def test_python_decrypts_browser_wasm_ciphertext():
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "0.4.3a1: the dashboard's vendored TS SDK bundle "
+        "(static/dashboard/vendor/tnproto-sdk-core.mjs) still emits the "
+        "legacy `from_did`/`to_did` manifest wire keys. The TS SDK "
+        "identity-naming rename is an explicitly-deferred phase. This "
+        "xfail flips green automatically once the TS SDK ships under "
+        "the new schema AND the dashboard re-vendors the bundle. "
+        "Tracked alongside test_ts_admin_snapshot_fixture_present in "
+        "test_tnpkg_interop.py."
+    ),
+)
 def test_python_reads_browser_built_tnpkg_and_verifies_signature():
     """The structural assertion: snapshot_builder.js produces a real .tnpkg
     that tn.tnpkg._read_manifest accepts and _verify_manifest_signature
-    confirms against from_did.
+    confirms against publisher_identity.
     """
     interop = _ensure_wasm_artifacts()
     pkg_path = interop / "snapshot.tnpkg"
@@ -146,8 +159,8 @@ def test_python_reads_browser_built_tnpkg_and_verifies_signature():
     # Manifest fields match what the JS side emitted.
     assert manifest.kind == "kit_bundle"
     assert manifest.version == 1
-    assert manifest.from_did == meta["from_did"]
-    assert manifest.to_did == meta["to_did"]
+    assert manifest.publisher_identity == meta["publisher_identity"]
+    assert manifest.recipient_identity == meta["recipient_identity"]
     assert manifest.ceremony_id == meta["ceremony_id"]
     assert manifest.manifest_signature_b64, "manifest is signed"
 
@@ -164,6 +177,16 @@ def test_python_reads_browser_built_tnpkg_and_verifies_signature():
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "0.4.3a1: same root cause as "
+        "test_python_reads_browser_built_tnpkg_and_verifies_signature — "
+        "the JS-built tnpkg's manifest carries the legacy `from_did`/"
+        "`to_did` wire keys, so `_read_manifest` raises before we ever "
+        "reach the kit-body. Will flip green once the TS SDK rename ships."
+    ),
+)
 def test_python_can_decrypt_kit_from_browser_built_tnpkg():
     """End-to-end: read the kit OUT of the JS-built tnpkg, then use it
     against the published ciphertext. Closes the loop on
@@ -230,7 +253,7 @@ def test_browser_extracts_package_key_from_python_built_full_keystore_body(tmp_p
     # tnpkg's body/* entries.
     keystore_dir = cfg.keystore
     expected_priv = (keystore_dir / "local.private").read_bytes()
-    expected_did = cfg.device.did
+    expected_did = cfg.device.device_identity
     assert len(expected_priv) == 32, "Ed25519 seed is 32 bytes"
 
     # Build the body zip the browser would see (same files, no

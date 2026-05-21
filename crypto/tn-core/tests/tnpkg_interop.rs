@@ -67,7 +67,10 @@ fn assert_canonical_admin_state(manifest: &Manifest) {
     let mut alice_status: Option<&str> = None;
     let mut bob_status: Option<&str> = None;
     for r in recipients {
-        let did = r.get("recipient_did").and_then(Value::as_str);
+        // 0.4.3a1: AdminState's per-recipient identity key flipped from
+        // `recipient_did` → `recipient_identity` (matches the canonical
+        // role-based naming across all SDKs).
+        let did = r.get("recipient_identity").and_then(Value::as_str);
         let status = r.get("active_status").and_then(Value::as_str);
         match did {
             Some("did:key:zAlice") => alice_status = status,
@@ -84,8 +87,9 @@ fn assert_canonical_admin_state(manifest: &Manifest) {
         .expect("state.vault_links must be an array");
     assert_eq!(vault_links.len(), 1, "expected 1 vault link");
     let link = &vault_links[0];
+    // 0.4.3a1: vault links carry `vault_identity`, not `vault_did`.
     assert_eq!(
-        link.get("vault_did").and_then(Value::as_str),
+        link.get("vault_identity").and_then(Value::as_str),
         Some("did:web:vault.example")
     );
     assert_eq!(
@@ -191,8 +195,8 @@ fn golden_input() -> Manifest {
     Manifest {
         kind: ManifestKind::AdminLogSnapshot,
         version: 1,
-        from_did: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".into(),
-        to_did: Some("did:key:zRecipient".into()),
+        publisher_identity: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".into(),
+        recipient_identity: Some("did:key:zRecipient".into()),
         ceremony_id: "test_ceremony_42".into(),
         as_of: "2026-04-24T12:00:00.000+00:00".into(),
         scope: "admin".into(),
@@ -222,7 +226,7 @@ fn golden_canonical_bytes() -> Vec<u8> {
             }
         },
         "event_count": 4,
-        "from_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+        "publisher_identity": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
         "head_row_hash": format!("sha256:{}", "a".repeat(64)),
         "kind": "admin_log_snapshot",
         "scope": "admin",
@@ -234,7 +238,7 @@ fn golden_canonical_bytes() -> Vec<u8> {
                 "vault_did": "did:web:vault.example"
             }]
         },
-        "to_did": "did:key:zRecipient",
+        "recipient_identity": "did:key:zRecipient",
         "version": 1
     });
     tn_core::canonical::canonical_bytes(&want).expect("canonical encode")

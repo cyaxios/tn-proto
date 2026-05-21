@@ -50,6 +50,7 @@ pub mod crypto;
 pub mod error;
 pub mod publisher;
 pub mod reader;
+pub mod rotate;
 pub mod tree;
 pub mod wire;
 
@@ -58,5 +59,6 @@ pub use config::Config;
 pub use error::{Error, Result};
 pub use publisher::PublisherState;
 pub use reader::ReaderKit;
+pub use rotate::{RetiredPublisherState, RotationOutcome};
 pub use tree::subset::{materialize_reader_keyset, subset_key, ReaderKeyset};
 pub use tree::{LeafIndex, NodePos};

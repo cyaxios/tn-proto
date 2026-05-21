@@ -61,11 +61,11 @@ def compile_enrolment(cfg: LoadedConfig, group: str, peer_did: str) -> Package:
         ceremony_id=cfg.ceremony_id,
         group=group,
         group_epoch=gcfg.index_epoch,
-        signer_did=cfg.device.did,
+        device_identity=cfg.device.device_identity,
         signer_verify_pub_b64="",
-        peer_did=peer_did,
+        recipient_identity=peer_did,
         payload={
-            "publisher_did": cfg.device.did,
+            "publisher_identity": cfg.device.device_identity,
             "sender_pub_b64": base64.b64encode(sender_pub).decode("ascii"),
         },
         compiled_at=_now_iso(),
@@ -88,14 +88,14 @@ def compile_enrolment(cfg: LoadedConfig, group: str, peer_did: str) -> Package:
                 "tn.enrolment.compiled",
                 {
                     "group": group,
-                    "peer_did": peer_did,
+                    "peer_identity": peer_did,
                     "package_sha256": pkg_sha,
                     "compiled_at": compiled_at,
                 },
             )
         except Exception as emit_err:  # noqa: BLE001 — preserve broad swallow; see body of handler
             logging.getLogger("tn.compile").warning(
-                "enrolment.compiled attestation failed for group=%s peer_did=%s: %s",
+                "enrolment.compiled attestation failed for group=%s to_did=%s: %s",
                 group,
                 peer_did,
                 emit_err,
@@ -114,7 +114,7 @@ def emit_to_outbox(cfg: LoadedConfig, pkg: Package) -> Path:
     from .export import export as _export
 
     out = outbox_dir(cfg.yaml_path.parent) / tnpkg_filename(
-        pkg.peer_did,
+        pkg.recipient_identity,
         pkg.package_kind,
         pkg.package_version,
     )
@@ -122,7 +122,7 @@ def emit_to_outbox(cfg: LoadedConfig, pkg: Package) -> Path:
         out,
         kind=pkg.package_kind,  # "offer" or "enrolment"
         cfg=cfg,
-        to_did=pkg.peer_did,
+        to_did=pkg.recipient_identity,
         package=pkg,
     )
 

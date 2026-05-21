@@ -76,7 +76,7 @@ class TestNonDefaultCeremonyHasRealCfg:
         cfg = h.cfg
         assert cfg.yaml_path == h.yaml_path
         # Each ceremony has its own DID (we mint fresh per-ceremony).
-        assert cfg.device.did.startswith("did:key:z")
+        assert cfg.device.device_identity.startswith("did:key:z")
         # Singleton IS bound: tn.info / tn.current_config now route
         # through this named ceremony until a subsequent tn.init.
         assert tn._dispatch_rt is not None
@@ -88,7 +88,7 @@ class TestNonDefaultCeremonyHasRealCfg:
         # one device key for all streams.
         a = tn.init("payments", project_dir=tmp_path)
         b = tn.init("agents", project_dir=tmp_path)
-        assert a.cfg.device.did == b.cfg.device.did
+        assert a.cfg.device.device_identity == b.cfg.device.device_identity
         # Different streams = different ceremony_ids (each is its
         # own evidence sequence).
         assert a.cfg.ceremony_id != b.cfg.ceremony_id
@@ -134,7 +134,7 @@ class TestKitBundleRoundtrip:
         producer = tn.init("publisher", project_dir=tmp_path)
         consumer = tn.init("subscriber", project_dir=tmp_path)
 
-        consumer_did = consumer.cfg.device.did
+        consumer_did = consumer.cfg.device.device_identity
 
         out_path = tmp_path / "for-subscriber.tnpkg"
         producer.bundle_for_recipient(
@@ -181,7 +181,7 @@ class TestKitBundleRoundtrip:
             kit_path = td_path / "default.btn.mykit"
             _admin.add_recipient(
                 "default",
-                recipient_did=b.cfg.device.did,
+                recipient_did=b.cfg.device.device_identity,
                 out_path=kit_path,
             )
             assert kit_path.is_file()
@@ -190,7 +190,7 @@ class TestKitBundleRoundtrip:
             a.export(
                 out,
                 kind="kit_bundle",
-                to_did=b.cfg.device.did,
+                to_did=b.cfg.device.device_identity,
                 keystore=td_path,
                 groups=["default"],
             )
@@ -216,7 +216,7 @@ class TestSingletonActivation:
 
         out = tmp_path / "kit.tnpkg"
         producer.bundle_for_recipient(
-            recipient_did=consumer.cfg.device.did,
+            recipient_did=consumer.cfg.device.device_identity,
             out_path=out,
             groups=["default"],
         )
@@ -232,7 +232,7 @@ class TestSingletonActivation:
         consumer = tn.init("subscriber", project_dir=tmp_path)
         out = tmp_path / "kit.tnpkg"
         producer.bundle_for_recipient(
-            recipient_did=consumer.cfg.device.did,
+            recipient_did=consumer.cfg.device.device_identity,
             out_path=out,
             groups=["default"],
         )

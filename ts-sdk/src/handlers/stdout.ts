@@ -143,7 +143,7 @@ function _formatPretty(envelope: Record<string, unknown>): string {
   if (typeof eid === "string" && eid) {
     parts.push(`id=${_short(eid, 8)}`);
   }
-  const did = envelope.did;
+  const did = envelope.device_identity;
   if (typeof did === "string" && did) {
     parts.push(`did=${_short(did, 16)}`);
   }

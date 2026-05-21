@@ -116,7 +116,7 @@ handlers:
             1
             for env in got_envs
             if DeviceKey.verify(
-                env["did"],
+                env["device_identity"],
                 env["row_hash"].encode("ascii"),
                 _signature_from_b64(env["signature"]),
             )

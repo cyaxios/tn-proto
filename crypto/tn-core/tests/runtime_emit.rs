@@ -221,7 +221,7 @@ fn log_level_wrappers_emit_with_expected_level() {
 
 #[test]
 fn emit_rejects_catalogued_admin_event_with_bad_shape() {
-    // tn.recipient.added requires group, leaf_index, recipient_did,
+    // tn.recipient.added requires group, leaf_index, recipient_identity,
     // kit_sha256, cipher. Emitting it without kit_sha256 must fail before
     // signing so the bad envelope never hits the log.
     let td = tempfile::tempdir().unwrap();
@@ -231,7 +231,7 @@ fn emit_rejects_catalogued_admin_event_with_bad_shape() {
     let mut fields = serde_json::Map::new();
     fields.insert("group".into(), serde_json::json!("default"));
     fields.insert("leaf_index".into(), serde_json::json!(1));
-    fields.insert("recipient_did".into(), serde_json::Value::Null);
+    fields.insert("recipient_identity".into(), serde_json::Value::Null);
     fields.insert("cipher".into(), serde_json::json!("btn"));
     // Intentionally omit kit_sha256.
 

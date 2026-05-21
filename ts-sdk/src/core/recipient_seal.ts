@@ -43,7 +43,7 @@ const ED25519_MULTICODEC = new Uint8Array([0xed, 0x01]);
 // ── Errors ──────────────────────────────────────────────────────────
 
 /** Raised on any failure path of {@link unsealBekFromWrap} — bad
- * frame, bad recipient_did, AEAD auth failure, malformed base64,
+ * frame, bad recipient_identity, AEAD auth failure, malformed base64,
  * wrong-length fields, etc. Callers that walk a `recipient_wraps[]`
  * array catch this per-entry and try the next one. */
 export class UnsealError extends Error {
@@ -241,7 +241,7 @@ async function aesGcmDecrypt(
  * `manifest.state.body_encryption.recipient_wraps[]`. */
 export interface RecipientWrap {
   frame: string;
-  recipient_did: string;
+  recipient_identity: string;
   ephemeral_x25519_pub_b64: string;
   wrap_nonce_b64: string;
   wrapped_bek_b64: string;
@@ -278,7 +278,7 @@ export async function sealBekForRecipient(
 
   return {
     frame: WRAP_FRAME,
-    recipient_did: recipientDid,
+    recipient_identity: recipientDid,
     ephemeral_x25519_pub_b64: bytesToB64(ephPub),
     wrap_nonce_b64: bytesToB64(nonce),
     wrapped_bek_b64: bytesToB64(wrapped),
@@ -301,7 +301,7 @@ export interface BuildRecipientWrapsResult {
  * Mirrors the fanout block in `tn_proto/python/tn/export.py`:
  *
  *   * Dedupes `recipientDids` while preserving first-seen order.
- *   * Sets `manifest.to_did` to the first DID (arbitrary but
+ *   * Sets `manifest.recipient_identity` to the first DID (arbitrary but
  *     deterministic; matches the preview AAD).
  *   * Computes AAD via {@link manifestAadForWrap}.
  *   * Seals the BEK once per DID, all bound against the same AAD.
@@ -345,7 +345,7 @@ export async function buildRecipientWraps(
 
   // Manifest is mutated locally; never touch the caller's copy.
   const manifest = deepCopyPlainJson(manifestSkeleton);
-  manifest.to_did = merged[0];
+  manifest.recipient_identity = merged[0];
 
   const aad = manifestAadForWrap(manifest);
 
@@ -390,8 +390,8 @@ export async function unsealBekFromWrap(
   if (w.frame !== WRAP_FRAME) {
     throw new UnsealError(`unsupported sealed-box frame ${JSON.stringify(w.frame)}; expected ${WRAP_FRAME}`);
   }
-  if (typeof w.recipient_did !== "string") {
-    throw new UnsealError("recipient_wrap.recipient_did missing or not a string");
+  if (typeof w.recipient_identity !== "string") {
+    throw new UnsealError("recipient_wrap.recipient_identity missing or not a string");
   }
 
   let ephPub: Uint8Array;
@@ -419,12 +419,12 @@ export async function unsealBekFromWrap(
     throw new UnsealError(`could not derive X25519 priv from device seed: ${(e as Error).message}`);
   }
 
-  // Recipient's X25519 PUBLIC key is derived from the wrap's recipient_did
+  // Recipient's X25519 PUBLIC key is derived from the wrap's recipient_identity
   // (NOT from the device seed). Defends against a malicious wrap that names
   // a different DID than the device holds.
   let recipientXPub: Uint8Array;
   try {
-    const edPub = didKeyToEd25519Pub(w.recipient_did);
+    const edPub = didKeyToEd25519Pub(w.recipient_identity);
     recipientXPub = ed25519PubToX25519Pub(edPub);
   } catch (e) {
     throw new UnsealError(`could not derive recipient X25519 pub: ${(e as Error).message}`);

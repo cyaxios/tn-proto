@@ -31,7 +31,7 @@ def test_admin_state_fresh_ceremony_has_ceremony_and_no_recipients(tmp_path):
     s = tn.admin.state()
     assert s["ceremony"] is not None
     assert s["ceremony"]["cipher"] == "btn"
-    assert s["ceremony"]["device_did"].startswith("did:")
+    assert s["ceremony"]["device_identity"].startswith("did:")
     assert s["recipients"] == []
     assert s["rotations"] == []
     assert s["vault_links"] == []
@@ -47,7 +47,7 @@ def test_admin_state_includes_recipients(tmp_path):
     s = tn.admin.state()
     assert len(s["recipients"]) == 1
     r = s["recipients"][0]
-    assert r["recipient_did"] == "did:key:zFrank"
+    assert r["recipient_identity"] == "did:key:zFrank"
     assert r["active_status"] == "active"
 
 
@@ -61,7 +61,7 @@ def test_admin_state_marks_retired_after_rotation(tmp_path):
     tn.init(yaml)
     s = tn.admin.state()
     assert len(s["rotations"]) == 1
-    frank = next(r for r in s["recipients"] if r["recipient_did"] == "did:key:zFrank")
+    frank = next(r for r in s["recipients"] if r["recipient_identity"] == "did:key:zFrank")
     assert frank["active_status"] == "retired"
     assert frank["retired_at"] is not None
 
@@ -77,7 +77,7 @@ def test_admin_state_records_vault_link_and_unlink(tmp_path):
     s = tn.admin.state()
     assert len(s["vault_links"]) == 1
     link = s["vault_links"][0]
-    assert link["vault_did"] == "did:web:tn-proto.org"
+    assert link["vault_identity"] == "did:web:tn-proto.org"
     assert link["unlinked_at"] is not None
 
 

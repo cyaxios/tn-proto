@@ -19,7 +19,7 @@ def test_absorb_offer_lands_in_pending_offers(tmp_path: Path):
     alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
     result = absorb(alice_cfg, pkg_path)
     assert result.status == "offer_stashed"
-    safe = bob_cfg.device.did.replace(":", "_")
+    safe = bob_cfg.device.device_identity.replace(":", "_")
     assert (pending_offers_dir(alice_dir) / f"{safe}.json").exists()
 
 
@@ -68,9 +68,9 @@ def test_absorb_rejects_unsupported_kind(tmp_path: Path):
         ceremony_id="c",
         group="g",
         group_epoch=0,
-        signer_did="did:key:x",
+        device_identity="did:key:x",
         signer_verify_pub_b64="",
-        peer_did="did:key:y",
+        recipient_identity="did:key:y",
         payload={},
         compiled_at="2026-04-21T00:00:00Z",
     )
@@ -102,8 +102,8 @@ def test_absorb_enrolment_makes_recipient_read(tmp_path: Path):
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
     alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
-    admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.did, bob_pub)
-    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.did)
+    admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity, bob_pub)
+    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.device_identity)
     pkg_path = emit_to_outbox(alice_cfg, pkg)
 
     result = absorb(bob_cfg, pkg_path)
@@ -147,5 +147,5 @@ def test_absorb_accepts_bytes_input(tmp_path: Path):
     alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
     result = absorb(alice_cfg, pkg_bytes)
     assert result.status == "offer_stashed", f"reason: {result.reason}"
-    safe = bob_cfg.device.did.replace(":", "_")
+    safe = bob_cfg.device.device_identity.replace(":", "_")
     assert (pending_offers_dir(alice_dir) / f"{safe}.json").exists()

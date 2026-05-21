@@ -164,7 +164,7 @@ impl FsDropHandler {
             &self.filename_template,
             &manifest.ceremony_id,
             head.as_deref(),
-            &manifest.from_did,
+            &manifest.publisher_identity,
         );
         let mut final_path = self.out_dir.join(&final_name);
         if final_path.exists() {

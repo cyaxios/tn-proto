@@ -123,13 +123,13 @@ class TestVaultPushOnSchedule:
         assert len(captured.posts) == 1
         post = captured.posts[0]
         assert "/api/v1/inbox/" in post["path"]
-        assert post["path"].startswith(f"/api/v1/inbox/{cfg.device.did}/snapshots/")
+        assert post["path"].startswith(f"/api/v1/inbox/{cfg.device.device_identity}/snapshots/")
         # head_row_hash rides as a query param for vault-side dedupe.
         assert "head_row_hash" in post["params"]
         # Body is a real signed `.tnpkg`.
         manifest, body = _read_manifest(post["body"])
         assert manifest.kind == "admin_log_snapshot"
-        assert manifest.from_did == cfg.device.did
+        assert manifest.publisher_identity == cfg.device.device_identity
         assert _verify_manifest_signature(manifest)
         # Body has at least one envelope (the admin_add_recipient call).
         assert b"tn.recipient.added" in body["body/admin.ndjson"]
@@ -172,8 +172,8 @@ class TestVaultPushOnEmit:
             trigger="on_emit",
         )
         try:
-            non_admin = {"event_type": "user.login", "did": cfg.device.did}
-            admin = {"event_type": "tn.recipient.added", "did": cfg.device.did}
+            non_admin = {"event_type": "user.login", "did": cfg.device.device_identity}
+            admin = {"event_type": "tn.recipient.added", "did": cfg.device.device_identity}
             assert h.accepts(non_admin) is False
             assert h.accepts(admin) is True
             # emit() with non-admin would never be called by the runtime

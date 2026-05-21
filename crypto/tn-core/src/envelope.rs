@@ -1,7 +1,7 @@
 //! Envelope build + ndjson serialization.
 //!
 //! Matches `tn/logger.py::emit` output format:
-//! - Envelope key order: did, timestamp, event_id, event_type, level, sequence,
+//! - Envelope key order: device_identity, timestamp, event_id, event_type, level, sequence,
 //!   prev_hash, row_hash, signature; then public fields in insertion order;
 //!   then group payloads in insertion order.
 //! - Group payload sub-object: `{"ciphertext": "<b64-std>", "field_hashes": {...}}`.
@@ -34,8 +34,8 @@ fn ser_b64<S: serde::Serializer>(b: &Vec<u8>, s: S) -> std::result::Result<S::Ok
 
 /// Input struct for [`build_envelope`].
 pub struct EnvelopeInput<'a> {
-    /// Publisher DID.
-    pub did: &'a str,
+    /// Publisher device identity (`did:key:z…`).
+    pub device_identity: &'a str,
     /// ISO-8601 UTC timestamp.
     pub timestamp: &'a str,
     /// UUID v4.
@@ -67,7 +67,7 @@ pub struct EnvelopeInput<'a> {
 /// field with a colliding name is skipped on insertion (mandatory keys
 /// always win — matches the prior `Map::entry().or_insert()` semantics).
 const MANDATORY_KEYS: [&str; 9] = [
-    "did",
+    "device_identity",
     "timestamp",
     "event_id",
     "event_type",
@@ -90,7 +90,7 @@ const MANDATORY_KEYS: [&str; 9] = [
 /// inserts + key/value allocations + a second walk during
 /// serialization. This version writes JSON straight into the output
 /// buffer for the mandatory fields (whose values are runtime-trusted
-/// strings: DIDs, ISO timestamps, hex/base64 hashes, signatures —
+/// strings: identities, ISO timestamps, hex/base64 hashes, signatures —
 /// none contain JSON-special characters) and delegates only the
 /// user-supplied ``public_fields`` and ``group_payloads`` to
 /// `serde_json::to_writer` for proper escaping.
@@ -100,7 +100,7 @@ pub fn build_envelope(input: EnvelopeInput<'_>) -> Result<String> {
 
     // Mandatory scalars — known order, runtime-controlled values
     // (no JSON-special chars). Write directly.
-    write_safe_string_field(&mut out, "did", input.did);
+    write_safe_string_field(&mut out, "device_identity", input.device_identity);
     out.push(',');
     write_safe_string_field(&mut out, "timestamp", input.timestamp);
     out.push(',');

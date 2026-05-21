@@ -1083,7 +1083,7 @@ def cmd_absorb(args: argparse.Namespace) -> int:
         with zipfile.ZipFile(package) as zf:
             if "manifest.json" in zf.namelist():
                 m = json.loads(zf.read("manifest.json").decode("utf-8"))
-                from_did = m.get("from_did")
+                from_did = m.get("publisher_identity")
                 local_did = current_config().device.did
                 if from_did and from_did == local_did and not getattr(
                     args, "allow_self_absorb", False
@@ -1217,7 +1217,7 @@ def cmd_rotate(args: argparse.Namespace) -> int:
             for rec in _admin.recipients(g):
                 if rec.get("revoked"):
                     continue
-                rdid = rec.get("recipient_did")
+                rdid = rec.get("recipient_identity")
                 if not isinstance(rdid, str):
                     continue
                 recipient_groups.setdefault(rdid, []).append(g)
@@ -2092,8 +2092,8 @@ def _validate_resolve_keystore_pub(
     project_dir: Path,  # noqa: ARG001 — kept for symmetry / future absolute paths
 ) -> Path | None:
     """Resolve the path to ``local.public`` for the ceremony at
-    ``yaml_path``. Used by ``cmd_validate`` to compare yaml.me.did
-    against the keystore's recorded did:key.
+    ``yaml_path``. Used by ``cmd_validate`` to compare
+    yaml.device.device_identity against the keystore's recorded did:key.
 
     Resolution order:
 
@@ -2197,7 +2197,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
         is_stream = "extends" in doc
         required_top: list[str] = ["ceremony"]
         if not is_stream:
-            required_top += ["logs", "keystore", "me", "groups"]
+            required_top += ["logs", "keystore", "device", "groups"]
+            if "me" in doc and "device" not in doc:
+                errors.append(
+                    f"{yaml_path}: legacy `me:` top-level block is no longer "
+                    f"supported (0.4.3a1 renamed it to `device:`). Replace "
+                    f"`device: {{device_identity: ...}}` with `device: {{device_identity: ...}}`."
+                )
         for key in required_top:
             if key not in doc:
                 errors.append(
@@ -2217,8 +2223,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 errors.append(f"{yaml_path}: logs.path is required")
             if isinstance(doc.get("keystore"), dict) and "path" not in doc["keystore"]:
                 errors.append(f"{yaml_path}: keystore.path is required")
-            if isinstance(doc.get("me"), dict) and "did" not in doc["me"]:
-                errors.append(f"{yaml_path}: me.did is required")
+            if isinstance(doc.get("device"), dict) and "device_identity" not in doc["device"]:
+                errors.append(f"{yaml_path}: device.device_identity is required")
 
         profile = (doc.get("ceremony") or {}).get("profile")
         if profile is not None and not _profiles.is_known(profile):
@@ -2281,11 +2287,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
                     f"{keystore_pub}: {exc}"
                 )
                 continue
-            yaml_did = (doc.get("me") or {}).get("did")
+            yaml_did = (doc.get("device") or {}).get("device_identity")
             if yaml_did and derived_did and yaml_did != derived_did:
                 errors.append(
-                    f"{yaml_path}: yaml me.did does not match keystore. "
-                    f"yaml me.did = {yaml_did}; "
+                    f"{yaml_path}: yaml device.device_identity does not match keystore. "
+                    f"yaml device.device_identity = {yaml_did}; "
                     f"keys/local.public = {derived_did}. "
                     "Reseat one to match the other before any further "
                     "writes — the runtime will refuse to load this "
@@ -2497,7 +2503,7 @@ def build_parser() -> argparse.ArgumentParser:
         "bundle",
         help="Mint a kit_bundle .tnpkg for one recipient (FINDINGS #5 footgun-free).",
     )
-    p_bundle.add_argument("recipient_did", help="DID of the recipient receiving the kit.")
+    p_bundle.add_argument("recipient_identity", help="DID of the recipient receiving the kit.")
     p_bundle.add_argument("out", help="Destination .tnpkg path.")
     p_bundle.add_argument(
         "--yaml", default=None,

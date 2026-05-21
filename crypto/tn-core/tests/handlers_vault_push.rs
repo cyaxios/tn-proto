@@ -67,7 +67,7 @@ fn pushes_signed_snapshot_to_mock_endpoint() {
     // Body parses as a valid signed manifest of kind admin_log_snapshot.
     let (manifest, _body) = read_tnpkg(TnpkgSource::Bytes(body)).unwrap();
     assert_eq!(manifest.kind, ManifestKind::AdminLogSnapshot);
-    assert_eq!(manifest.from_did, cer.did);
+    assert_eq!(manifest.publisher_identity, cer.device_identity);
 }
 
 #[test]

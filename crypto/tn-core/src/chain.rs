@@ -23,8 +23,8 @@ pub struct GroupInput {
 
 /// Input struct for [`compute_row_hash`].
 pub struct RowHashInput<'a> {
-    /// Publisher DID (did:key:z…).
-    pub did: &'a str,
+    /// Publisher device identity (`did:key:z…`).
+    pub device_identity: &'a str,
     /// ISO-8601 UTC timestamp.
     pub timestamp: &'a str,
     /// UUID v4.
@@ -44,7 +44,7 @@ pub struct RowHashInput<'a> {
 /// Compute the row_hash exactly as Python does: `"sha256:" + hex(sha256(concat))`.
 ///
 /// Layout (each token is followed by a `\x00` byte):
-/// 1. did, timestamp, event_id, event_type, level, prev_hash
+/// 1. device_identity, timestamp, event_id, event_type, level, prev_hash
 /// 2. public_fields sorted by key: `key=<str(value)>\x00`
 /// 3. groups sorted by name: `group:<name>\x00 ct:<ct-bytes>\x00 <fname>=<token>\x00 …`
 pub fn compute_row_hash(input: &RowHashInput<'_>) -> String {
@@ -52,7 +52,7 @@ pub fn compute_row_hash(input: &RowHashInput<'_>) -> String {
 
     // 1. Envelope scalars — each followed by \x00.
     for s in [
-        input.did,
+        input.device_identity,
         input.timestamp,
         input.event_id,
         input.event_type,

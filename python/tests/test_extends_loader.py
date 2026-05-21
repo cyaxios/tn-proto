@@ -66,13 +66,13 @@ class TestExtendsResolutionMechanics:
             _yaml.safe_dump(
                 {
                     "ceremony": {"id": "P1", "cipher": "btn", "sign": True},
-                    "me": {"did": "did:key:zParent"},
+                    "device": {"device_identity": "did:key:zParent"},
                     "keystore": {"path": "./keys"},
                     "groups": {
                         "default": {
                             "policy": "private",
                             "cipher": "btn",
-                            "recipients": [{"did": "did:key:zParent"}],
+                            "recipients": [{"recipient_identity": "did:key:zParent"}],
                         }
                     },
                     "default_policy": "private",
@@ -101,7 +101,7 @@ class TestExtendsResolutionMechanics:
         _, child = self._setup_pair(tmp_path)
         doc = _config._read_yaml_doc(child)
         merged = _config._resolve_extends(child, doc)
-        assert merged["me"]["did"] == "did:key:zParent"
+        assert merged["device"]["device_identity"] == "did:key:zParent"
         assert "default" in merged["groups"]
 
     def test_extends_resolves_keystore_to_absolute_path(self, tmp_path):
@@ -151,16 +151,16 @@ class TestExtendsResolutionMechanics:
     ):
         import logging
         _, child = self._setup_pair(tmp_path)
-        # Child illegally tries to set me.did.
+        # Child illegally tries to set device.device_identity.
         doc = _yaml.safe_load(child.read_text(encoding="utf-8"))
-        doc["me"] = {"did": "did:key:zCHILD_TRYING_TO_OVERRIDE"}
+        doc["device"] = {"did": "did:key:zCHILD_TRYING_TO_OVERRIDE"}
         child.write_text(_yaml.safe_dump(doc), encoding="utf-8")
 
         cdoc = _config._read_yaml_doc(child)
         with caplog.at_level(logging.WARNING, logger="tn"):
             merged = _config._resolve_extends(child, cdoc)
         # Parent wins.
-        assert merged["me"]["did"] == "did:key:zParent"
+        assert merged["device"]["device_identity"] == "did:key:zParent"
         # Warning was logged.
         assert any("parent-owned" in rec.message for rec in caplog.records)
 
@@ -202,7 +202,7 @@ class TestStreamYamlIsMinimal:
         assert (doc.get("ceremony") or {}).get("profile") == "transaction"
         assert "logs" in doc
         # Does NOT have parent-owned blocks.
-        for forbidden in ("me", "keystore", "groups", "default_policy", "public_fields"):
+        for forbidden in ("device", "keystore", "groups", "default_policy", "public_fields"):
             assert forbidden not in doc, (
                 f"stream yaml should not duplicate parent-owned key {forbidden!r}"
             )
@@ -212,7 +212,7 @@ class TestStreamYamlIsMinimal:
         h = tn.init("payments", profile="transaction", project_dir=tmp_path)
         cfg = _config.load(h.yaml_path)
         # Loader resolved extends — cfg has full identity + groups.
-        assert cfg.device.did.startswith("did:key:z")
+        assert cfg.device.device_identity.startswith("did:key:z")
         assert "default" in cfg.groups
 
     def test_three_streams_share_identity(self, tmp_path):
@@ -221,7 +221,7 @@ class TestStreamYamlIsMinimal:
         b = tn.init("b", profile="audit", project_dir=tmp_path)
         c = tn.init("c", profile="telemetry", project_dir=tmp_path)
         # Same DID across all three.
-        assert a.cfg.device.did == b.cfg.device.did == c.cfg.device.did
+        assert a.cfg.device.device_identity == b.cfg.device.device_identity == c.cfg.device.device_identity
         # Same keystore path.
         assert a.cfg.keystore == b.cfg.keystore == c.cfg.keystore
         # Distinct ceremony_ids.
@@ -245,7 +245,7 @@ class TestNoDriftFromDefault:
         with default_yaml.open("r", encoding="utf-8") as fh:
             doc = _yaml.safe_load(fh)
         # default has the actual identity / groups / keystore.
-        assert "me" in doc
+        assert "device" in doc
         assert "groups" in doc
         assert "keystore" in doc
 
@@ -253,5 +253,5 @@ class TestNoDriftFromDefault:
         with stream_yaml.open("r", encoding="utf-8") as fh:
             sdoc = _yaml.safe_load(fh)
         # Stream is minimal.
-        assert "me" not in sdoc
+        assert "device" not in sdoc
         assert "groups" not in sdoc

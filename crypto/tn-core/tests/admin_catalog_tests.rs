@@ -57,7 +57,7 @@ fn validate_emit_recipient_added_ok() {
     let mut m = Map::new();
     m.insert("group".into(), json!("default"));
     m.insert("leaf_index".into(), json!(2));
-    m.insert("recipient_did".into(), json!("did:key:zFrank"));
+    m.insert("recipient_identity".into(), json!("did:key:zFrank"));
     m.insert("kit_sha256".into(), json!("sha256:abc"));
     m.insert("cipher".into(), json!("btn"));
     assert!(validate_emit("tn.recipient.added", &m).is_ok());
@@ -77,7 +77,7 @@ fn validate_emit_wrong_type_fails() {
     let mut m = Map::new();
     m.insert("group".into(), json!(42)); // should be string
     m.insert("leaf_index".into(), json!(2));
-    m.insert("recipient_did".into(), Value::Null);
+    m.insert("recipient_identity".into(), Value::Null);
     m.insert("kit_sha256".into(), json!("sha256:abc"));
     m.insert("cipher".into(), json!("btn"));
     assert!(validate_emit("tn.recipient.added", &m).is_err());
@@ -92,11 +92,11 @@ fn validate_emit_unknown_event_type_fails() {
 
 #[test]
 fn optional_string_null_accepted() {
-    // tn.recipient.added: recipient_did is OptionalString.
+    // tn.recipient.added: recipient_identity is OptionalString.
     let mut m = Map::new();
     m.insert("group".into(), json!("default"));
     m.insert("leaf_index".into(), json!(0));
-    m.insert("recipient_did".into(), Value::Null);
+    m.insert("recipient_identity".into(), Value::Null);
     m.insert("kit_sha256".into(), json!("sha256:xyz"));
     m.insert("cipher".into(), json!("btn"));
     assert!(validate_emit("tn.recipient.added", &m).is_ok());

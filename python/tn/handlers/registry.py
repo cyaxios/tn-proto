@@ -235,7 +235,7 @@ def build_handlers(
             _maybe_bootstrap_from_api_key(
                 yaml_dir=yaml_dir,
                 keystore_path=keystore_path,
-                vault_did=raw["vault_did"],
+                vault_did=raw["vault_identity"],
             )
 
             alice_did, alice_priv = _load_device_key(keystore_path)
@@ -243,7 +243,7 @@ def build_handlers(
                 VaultSyncHandler(
                     name=name,
                     outbox_path=_outbox_path(yaml_dir, name),
-                    vault_did=raw["vault_did"],
+                    vault_did=raw["vault_identity"],
                     project_id=raw["project_id"],
                     alice_did=alice_did,
                     alice_private_key_bytes=alice_priv,

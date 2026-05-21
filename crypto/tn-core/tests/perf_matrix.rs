@@ -186,7 +186,7 @@ fn tn_core_full_ingest_matrix_h8() {
                     let env: serde_json::Value = serde_json::from_str(line).expect("parse");
 
                     // 2. Extract fields needed for row_hash recomputation.
-                    let did = env["did"].as_str().expect("did");
+                    let did = env["device_identity"].as_str().expect("did");
                     let timestamp = env["timestamp"].as_str().expect("ts");
                     let event_id = env["event_id"].as_str().expect("eid");
                     let event_type = env["event_type"].as_str().expect("et");
@@ -237,7 +237,7 @@ fn tn_core_full_ingest_matrix_h8() {
 
                     // 4. Recompute row_hash and compare.
                     let recomputed = compute_row_hash(&RowHashInput {
-                        did,
+                        device_identity: did,
                         timestamp,
                         event_id,
                         event_type,

@@ -60,6 +60,8 @@ pub const SUBSET_DIFFERENCE: u8 = 0x01;
 
 /// Kind byte for [`crate::PublisherState`] on-disk state.
 pub const KIND_PUBLISHER_STATE: u8 = 0x03;
+/// Kind byte for [`crate::RetiredPublisherState`] on-disk state.
+pub const KIND_RETIRED_PUBLISHER_STATE: u8 = 0x04;
 
 // ---------------------------------------------------------------------
 // Low-level byte cursor helpers.

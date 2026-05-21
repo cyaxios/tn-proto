@@ -294,7 +294,7 @@ class TNRuntime:
         level_norm = level.lower()
 
         row_hash = _compute_row_hash(
-            did=self.cfg.device.did,
+            device_identity=self.cfg.device.device_identity,
             timestamp=timestamp,
             event_id=event_id,
             event_type=event_type,
@@ -309,7 +309,7 @@ class TNRuntime:
 
         # 7. append envelope as JSON line
         envelope: dict[str, Any] = {
-            "did": self.cfg.device.did,
+            "device_identity": self.cfg.device.device_identity,
             "timestamp": timestamp,
             "event_id": event_id,
             "event_type": event_type,

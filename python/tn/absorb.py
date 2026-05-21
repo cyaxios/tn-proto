@@ -348,7 +348,7 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
             legacy_status="rejected",
             legacy_reason=(
                 f"manifest signature does not verify against from_did "
-                f"{manifest.from_did!r}. The package is corrupt, truncated, or "
+                f"{manifest.publisher_identity!r}. The package is corrupt, truncated, or "
                 f"tampered with. Ask the sender to re-export and re-send."
             ),
         )
@@ -423,7 +423,7 @@ def _try_legacy_json_package(
             legacy_status="rejected",
             legacy_reason=(
                 f"signature verification failed for {source}: the package "
-                f"claims signer {pkg.signer_did!r} but its Ed25519 sig does "
+                f"claims signer {pkg.device_identity!r} but its Ed25519 sig does "
                 f"not verify against its signer_verify_pub_b64."
             ),
         )
@@ -579,11 +579,11 @@ def _maybe_unseal_recipient_wrap(
         for entry in wraps_array:
             if not isinstance(entry, dict):
                 continue
-            rdid = entry.get("recipient_did")
+            rdid = entry.get("recipient_identity")
             if rdid == our_did:
                 candidates.append(entry)
     elif isinstance(wrap_singular, dict):
-        rdid = wrap_singular.get("recipient_did")
+        rdid = wrap_singular.get("recipient_identity")
         if rdid == our_did:
             candidates.append(wrap_singular)
 
@@ -594,13 +594,13 @@ def _maybe_unseal_recipient_wrap(
         # a clear reason.
         if isinstance(wraps_array, list):
             recipients = [
-                e.get("recipient_did")
+                e.get("recipient_identity")
                 for e in wraps_array
                 if isinstance(e, dict)
             ]
         else:
             recipients = [
-                wrap_singular.get("recipient_did")
+                wrap_singular.get("recipient_identity")
                 if isinstance(wrap_singular, dict)
                 else None
             ]
@@ -725,25 +725,25 @@ def _absorb_identity_seed(
 
     derived = _DeviceKey.from_private_bytes(priv_bytes)
     bundle_did = pub_text.decode("utf-8").strip()
-    if derived.did != bundle_did or derived.did != manifest.from_did:
+    if derived.did != bundle_did or derived.did != manifest.publisher_identity:
         return AbsorbReceipt(
             kind=manifest.kind,
             legacy_status="rejected",
             legacy_reason=(
                 f"identity_seed integrity check failed: manifest.from_did="
-                f"{manifest.from_did!r}, body/local.public={bundle_did!r}, "
+                f"{manifest.publisher_identity!r}, body/local.public={bundle_did!r}, "
                 f"derived-from-private={derived.did!r}. The bundle's body and "
                 f"manifest disagree about which identity this is — refuse to "
                 f"install."
             ),
         )
-    if manifest.from_did != manifest.to_did:
+    if manifest.publisher_identity != manifest.recipient_identity:
         return AbsorbReceipt(
             kind=manifest.kind,
             legacy_status="rejected",
             legacy_reason=(
                 f"identity_seed must be self-addressed (from_did == to_did); "
-                f"got from_did={manifest.from_did!r}, to_did={manifest.to_did!r}."
+                f"got from_did={manifest.publisher_identity!r}, to_did={manifest.recipient_identity!r}."
             ),
         )
 
@@ -1009,7 +1009,7 @@ def _build_local_admin_clock(
                 env = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            did = env.get("did")
+            did = env.get("device_identity")
             et = env.get("event_type")
             seq = env.get("sequence")
             if isinstance(did, str) and isinstance(et, str) and isinstance(seq, int):
@@ -1167,17 +1167,32 @@ def _absorb_admin_log_snapshot(
 
 
 def _envelope_well_formed(env: dict[str, Any]) -> bool:
-    """Coarse shape check before we reach for crypto primitives."""
+    """Coarse shape check before we reach for crypto primitives.
+
+    0.4.3a1: the signer-identity key is ``device_identity``. Pre-rename
+    snapshots that still carry ``"did"`` will fail well-formedness here
+    and be silently dropped — operators must regenerate snapshots after
+    the rename. The Mongo-style migration script in
+    ``tn_proto_web/scripts/migrate_0_4_3a1_identity_naming.py`` handles
+    the analogous flip on the broker side.
+    """
     return all(
         isinstance(env.get(k), str)
-        for k in ("did", "timestamp", "event_id", "event_type", "row_hash", "signature")
+        for k in (
+            "device_identity",
+            "timestamp",
+            "event_id",
+            "event_type",
+            "row_hash",
+            "signature",
+        )
     )
 
 
 def _verify_envelope_signature(env: dict[str, Any]) -> bool:
     try:
         return DeviceKey.verify(
-            env["did"],
+            env["device_identity"],
             env["row_hash"].encode("ascii"),
             _signature_from_b64(env["signature"]),
         )
@@ -1194,9 +1209,9 @@ def _stash_offer(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
     """Stash the offer in pending_offers/<signer_did>.json. Idempotent."""
     pending = pending_offers_dir(cfg.yaml_path.parent)
     pending.mkdir(parents=True, exist_ok=True)
-    safe = _DID_SAFE.sub("_", pkg.signer_did)
+    safe = _DID_SAFE.sub("_", pkg.device_identity)
     doc = {
-        "signer_did": pkg.signer_did,
+        "device_identity": pkg.device_identity,
         "signer_verify_pub_b64": pkg.signer_verify_pub_b64,
         "group": pkg.group,
         "x25519_pub_b64": pkg.payload.get("x25519_pub_b64"),
@@ -1207,7 +1222,7 @@ def _stash_offer(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
         kind="offer",
         accepted_count=1,
         legacy_status="offer_stashed",
-        legacy_reason=pkg.signer_did,
+        legacy_reason=pkg.device_identity,
     )
 
 
@@ -1225,7 +1240,7 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
 
     local_cid = (doc.get("ceremony") or {}).get("id")
     already_enrolled = any(
-        isinstance(gspec, dict) and gspec.get("publisher_did")
+        isinstance(gspec, dict) and gspec.get("publisher_identity")
         for gspec in (doc.get("groups") or {}).values()
     )
     if local_cid and local_cid != pkg.ceremony_id and already_enrolled:
@@ -1252,7 +1267,7 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
             ),
         )
     g["group_epoch"] = pkg.group_epoch
-    g["publisher_did"] = pkg.payload["publisher_did"]
+    g["publisher_identity"] = pkg.payload["publisher_identity"]
     g["sender_pub_b64"] = pkg.payload["sender_pub_b64"]
 
     mykey_path = cfg.keystore / f"{pkg.group}.jwe.mykey"
@@ -1269,10 +1284,14 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
     sk = X25519PrivateKey.from_private_bytes(mykey_path.read_bytes())
     my_pub = sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     recipients = g.setdefault("recipients", [])
-    if not any(r.get("did") == cfg.device.did for r in recipients if isinstance(r, dict)):
+    if not any(
+        r.get("recipient_identity") == cfg.device.device_identity
+        for r in recipients
+        if isinstance(r, dict)
+    ):
         recipients.append(
             {
-                "did": cfg.device.did,
+                "recipient_identity": cfg.device.device_identity,
                 "pub_b64": base64.b64encode(my_pub).decode("ascii"),
             }
         )
@@ -1297,7 +1316,7 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
                 "tn.enrolment.absorbed",
                 {
                     "group": pkg.group,
-                    "from_did": pkg.signer_did,
+                    "publisher_identity": pkg.device_identity,
                     "package_sha256": pkg_sha,
                     "absorbed_at": datetime.now(_tz.utc).isoformat(),
                 },
@@ -1306,7 +1325,7 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
             _logging.getLogger("tn.absorb").warning(
                 "enrolment.absorbed attestation failed for group=%s from=%s: %s",
                 pkg.group,
-                pkg.signer_did,
+                pkg.device_identity,
                 _emit_err,
             )
 
@@ -1314,7 +1333,7 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
         kind="enrolment",
         accepted_count=1,
         legacy_status="enrolment_applied",
-        legacy_reason=pkg.signer_did,
+        legacy_reason=pkg.device_identity,
     )
 
 
@@ -1449,25 +1468,25 @@ def _absorb_project_seed(
 
     derived = _DeviceKey.from_private_bytes(priv_bytes)
     bundle_did = pub_text.decode("utf-8").strip()
-    if derived.did != bundle_did or derived.did != manifest.from_did:
+    if derived.did != bundle_did or derived.did != manifest.publisher_identity:
         return AbsorbReceipt(
             kind=manifest.kind,
             legacy_status="rejected",
             legacy_reason=(
                 f"project_seed integrity check failed: manifest.from_did="
-                f"{manifest.from_did!r}, body/keys/local.public={bundle_did!r}, "
+                f"{manifest.publisher_identity!r}, body/keys/local.public={bundle_did!r}, "
                 f"derived-from-private={derived.did!r}. The bundle's body and "
                 f"manifest disagree about which identity this is — refuse to "
                 f"install."
             ),
         )
-    if manifest.from_did != manifest.to_did:
+    if manifest.publisher_identity != manifest.recipient_identity:
         return AbsorbReceipt(
             kind=manifest.kind,
             legacy_status="rejected",
             legacy_reason=(
                 f"project_seed must be self-addressed (from_did == to_did); "
-                f"got from_did={manifest.from_did!r}, to_did={manifest.to_did!r}."
+                f"got from_did={manifest.publisher_identity!r}, to_did={manifest.recipient_identity!r}."
             ),
         )
 

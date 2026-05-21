@@ -395,7 +395,7 @@ test("WasmRuntime: Phase 4 admin verbs round-trip", () => {
       `recipients() must contain exactly the just-added recipient, got ${active.length}; raw=${JSON.stringify(active)}`,
     );
     assert.equal(active[0]["leaf_index"], leaf);
-    assert.equal(active[0]["recipient_did"], "did:key:zRecipientPhase4");
+    assert.equal(active[0]["recipient_identity"], "did:key:zRecipientPhase4");
     assert.equal(active[0]["revoked"], false);
 
     // 3. adminRevokedCount — fresh ceremony has zero revocations.
@@ -550,7 +550,7 @@ test("WasmRuntime.vaultLink / vaultUnlink: round-trip through read()", () => {
         .map((e) => e["event_type"])
         .join(",")}`,
     );
-    assert.equal(linked["vault_did"], vaultDid);
+    assert.equal(linked["vault_identity"], vaultDid);
     assert.equal(linked["project_id"], projectId);
     assert.equal(
       typeof linked["linked_at"],
@@ -574,7 +574,7 @@ test("WasmRuntime.vaultLink / vaultUnlink: round-trip through read()", () => {
     entries = rt.read() as Array<Record<string, unknown>>;
     const unlinked = entries.find((e) => e["event_type"] === "tn.vault.unlinked");
     assert.ok(unlinked, "read() must contain tn.vault.unlinked after vaultUnlink");
-    assert.equal(unlinked["vault_did"], vaultDid);
+    assert.equal(unlinked["vault_identity"], vaultDid);
     assert.equal(unlinked["project_id"], projectId);
     assert.equal(unlinked["reason"], reason);
     assert.equal(
@@ -925,8 +925,8 @@ test("WasmRuntime: init + emit + read + mint, all through memoryStorageAdapter (
     // Generate a valid did:key (the runtime uses verifyDid on the
     // recipient DID); use the wasm primitive so we don't smuggle in
     // node-side crypto.
-    // Actually `admin_add_recipient(group, out_path, recipient_did?)` accepts
-    // a None for recipient_did per the Phase 4 binding — pass undefined to
+    // Actually `admin_add_recipient(group, out_path, recipient_identity?)` accepts
+    // a None for recipient_identity per the Phase 4 binding — pass undefined to
     // mint a kit without recording a recipient identity. Simpler path.
     const leafIndex = rt.adminAddRecipient("default", kitVirtPath, undefined);
     assert.equal(typeof leafIndex, "number", `adminAddRecipient must return a leaf index, got ${typeof leafIndex}`);

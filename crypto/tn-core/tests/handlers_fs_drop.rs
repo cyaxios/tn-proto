@@ -26,7 +26,7 @@ fn drops_signed_snapshot_on_admin_event() {
     let outbox = td.path().join("outbox");
 
     let h = FsDropHandler::new("fd", outbox.clone(), rt.clone(), None);
-    let env = json!({"event_type": "tn.recipient.added", "did": cer.did.clone()});
+    let env = json!({"event_type": "tn.recipient.added", "did": cer.device_identity.clone()});
     h.emit(&env, b"");
 
     let mut files: Vec<_> = std::fs::read_dir(&outbox)

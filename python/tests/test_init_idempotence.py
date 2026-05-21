@@ -149,7 +149,7 @@ def test_slice1_scan_covers_main_and_pel() -> None:
                 {
                     "group": "default",
                     "cipher": "btn",
-                    "publisher_did": tn.current_config().device.did,
+                    "publisher_identity": tn.current_config().device.did,
                     "added_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
@@ -240,7 +240,7 @@ def test_slice2_init_provisions_missing_recipient() -> None:
             [main_log],
             lambda env: (
                 env.get("event_type") == "tn.recipient.added"
-                and env.get("recipient_did") == bob_did
+                and env.get("recipient_identity") == bob_did
             ),
         )
         if not bob_events:

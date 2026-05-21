@@ -220,7 +220,7 @@ class TestSafeDefaults:
         assert body["ceremony"]["cipher"] == "btn"
         assert body["default_policy"] == "private"
         assert body["groups"]["default"]["policy"] == "private"
-        assert body["groups"]["default"]["recipients"] == [{"did": "did:key:zABC"}]
+        assert body["groups"]["default"]["recipients"] == [{"recipient_identity": "did:key:zABC"}]
 
     def test_fresh_dict_each_call(self):
         a = _defaults.safe_defaults_yaml(device_did="did:key:zA")
@@ -318,7 +318,7 @@ class TestInitUseList:
         cfg = _config.load(h.yaml_path)
         # Merged cfg has the project DID + groups even though the
         # on-disk stream yaml is minimal.
-        assert cfg.device.did.startswith("did:key:z")
+        assert cfg.device.device_identity.startswith("did:key:z")
         assert "default" in cfg.groups
 
     def test_init_named_ceremony_registers(self, tmp_path):

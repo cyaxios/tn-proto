@@ -8,10 +8,10 @@ def test_canonical_bytes_is_deterministic():
         ceremony_id="local_abc123",
         group="finance",
         group_epoch=1,
-        signer_did="did:key:z6MkAlice",
+        device_identity="did:key:z6MkAlice",
         signer_verify_pub_b64="AAAA",
-        peer_did="did:key:z6MkBob",
-        payload={"publisher_did": "did:key:z6MkAlice", "sender_pub_b64": "BBBB"},
+        recipient_identity="did:key:z6MkBob",
+        payload={"publisher_identity": "did:key:z6MkAlice", "sender_pub_b64": "BBBB"},
         compiled_at="2026-04-21T17:22:00Z",
     )
     assert _canonical_bytes(pkg) == _canonical_bytes(pkg)
@@ -25,9 +25,9 @@ def test_canonical_bytes_excludes_signature():
         ceremony_id="c",
         group="g",
         group_epoch=1,
-        signer_did="did:key:a",
+        device_identity="did:key:a",
         signer_verify_pub_b64="x",
-        peer_did="did:key:b",
+        recipient_identity="did:key:b",
         payload={},
         compiled_at="2026-04-21T00:00:00Z",
     )
@@ -47,9 +47,9 @@ def _mk_pkg():
         ceremony_id="c",
         group="g",
         group_epoch=1,
-        signer_did="did:key:alice",
+        device_identity="did:key:alice",
         signer_verify_pub_b64="",
-        peer_did="did:key:bob",
+        recipient_identity="did:key:bob",
         payload={"k": "v"},
         compiled_at="2026-04-21T00:00:00Z",
     )

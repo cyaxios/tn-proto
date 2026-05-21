@@ -91,7 +91,7 @@ def test_fanout_three_recipients_each_can_open(tmp_path: Path):
     wraps = body_enc.get("recipient_wraps")
     assert isinstance(wraps, list)
     assert len(wraps) == 3
-    addressed = {w["recipient_did"] for w in wraps}
+    addressed = {w["recipient_identity"] for w in wraps}
     assert addressed == {frank_dev.did, bob_dev.did, carol_dev.did}
     # Singular shadow is NOT emitted when len > 1.
     assert "recipient_wrap" not in body_enc
@@ -101,7 +101,7 @@ def test_fanout_three_recipients_each_can_open(tmp_path: Path):
         # Need a fresh path per absorb because absorb mutates keystore.
         receipt = _absorb_dispatch(cfg, out)
         assert receipt.legacy_status == "enrolment_applied", (
-            f"recipient {cfg.device.did} failed: {receipt.legacy_reason}"
+            f"recipient {cfg.device.device_identity} failed: {receipt.legacy_reason}"
         )
         assert (cfg.keystore / "default.btn.mykit").exists()
 
@@ -129,7 +129,7 @@ def test_singular_shadow_emitted_when_only_one_did(tmp_path: Path):
     assert isinstance(wraps, list) and len(wraps) == 1
     assert isinstance(wrap, dict)
     # Same content in both shapes.
-    assert wraps[0]["recipient_did"] == wrap["recipient_did"] == frank_dev.did
+    assert wraps[0]["recipient_identity"] == wrap["recipient_identity"] == frank_dev.did
     assert wraps[0]["wrapped_bek_b64"] == wrap["wrapped_bek_b64"]
 
 
@@ -219,7 +219,7 @@ def test_tampering_one_entry_doesnt_break_others(tmp_path: Path):
     doc = json.loads(manifest_bytes.decode("utf-8"))
     wraps = doc["state"]["body_encryption"]["recipient_wraps"]
     for w in wraps:
-        if w["recipient_did"] == frank_dev.did:
+        if w["recipient_identity"] == frank_dev.did:
             w["wrapped_bek_b64"] = base64.b64encode(b"\x00" * 48).decode("ascii")
             break
     new_manifest = (json.dumps(doc, sort_keys=True, indent=2) + "\n").encode("utf-8")

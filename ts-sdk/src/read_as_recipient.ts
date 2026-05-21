@@ -121,7 +121,7 @@ export function* readAsRecipient(
     // Signature verification (optional but on by default).
     let sigOk = true;
     if (verifySigs) {
-      const envDid = env["did"];
+      const envDid = env["device_identity"];
       const envSig = env["signature"];
       if (typeof envDid !== "string" || typeof envSig !== "string" || typeof envRow !== "string") {
         sigOk = false;

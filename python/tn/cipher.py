@@ -206,7 +206,7 @@ class JWEGroupCipher:
     Keystore layout::
 
         <keystore>/<group>.jwe.sender       32B X25519 private (publisher)
-        <keystore>/<group>.jwe.recipients   JSON list [{did, pub_b64}, ...]
+        <keystore>/<group>.jwe.recipients   JSON list [{recipient_identity, pub_b64}, ...]
         <keystore>/<group>.jwe.mykey        32B X25519 private (recipient)
     """
 
@@ -256,7 +256,11 @@ class JWEGroupCipher:
             pubs[missing[0]] = my_sk_new.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
         recipients_doc = [
-            {"did": d, "pub_b64": base64.b64encode(pubs[d]).decode("ascii")} for d in recipient_dids
+            {
+                "recipient_identity": d,
+                "pub_b64": base64.b64encode(pubs[d]).decode("ascii"),
+            }
+            for d in recipient_dids
         ]
         recipients_path = keystore / f"{group_name}.jwe.recipients"
         _atomic_write_text(recipients_path, json.dumps(recipients_doc, indent=2))
@@ -339,7 +343,7 @@ class JWEGroupCipher:
         for entry in doc:
             pub = base64.b64decode(entry["pub_b64"])
             kek = _derive_kek(pub, self._sender_sk)
-            cache[entry["did"]] = kek
+            cache[entry["recipient_identity"]] = kek
         self._kek_cache = cache
 
     def revoke_recipient(self, did: str) -> None:
@@ -349,7 +353,7 @@ class JWEGroupCipher:
             raise NotAPublisherError("JWE: only the publisher can revoke")
         doc = json.loads(self._recipients_path.read_text(encoding="utf-8"))
         before = len(doc)
-        doc = [e for e in doc if e["did"] != did]
+        doc = [e for e in doc if e["recipient_identity"] != did]
         if len(doc) == before:
             return  # already absent — idempotent
         _atomic_write_text(self._recipients_path, json.dumps(doc, indent=2))
@@ -367,10 +371,10 @@ class JWEGroupCipher:
         if len(pub_bytes) != 32:
             raise ValueError(f"pub_bytes must be 32 raw X25519 bytes, got {len(pub_bytes)}")
         doc = json.loads(self._recipients_path.read_text(encoding="utf-8"))
-        doc = [e for e in doc if e.get("did") != did]
+        doc = [e for e in doc if e.get("recipient_identity") != did]
         doc.append(
             {
-                "did": did,
+                "recipient_identity": did,
                 "pub_b64": base64.b64encode(pub_bytes).decode("ascii"),
             }
         )
@@ -448,6 +452,32 @@ class BtnGroupCipher:
     # in ``create`` / ``load`` / ``_persist_state`` and is the cipher's
     # private "view of the world." See _keystore_backend.py.
     _last_persisted_bytes: bytes | None = field(default=None, repr=False)
+    # Retired states keyed by the epoch they served as active. Populated
+    # at load time from `<group>.btn.state.retired.<epoch>` files, and
+    # appended-to by `rotate()`. Used by future feature surface for
+    # historical-kit re-minting; the active decrypt path doesn't need
+    # them today (runtime kit-glob already picks up retired kit files).
+    _retired_states: dict[int, Any] = field(default_factory=dict, repr=False)
+
+    # ---------------------------------------------------------------
+    # rotation properties
+    # ---------------------------------------------------------------
+
+    @property
+    def retired_state_count(self) -> int:
+        """How many retired PublisherState snapshots are loaded for
+        this group. Each represents one prior rotation epoch."""
+        return len(self._retired_states)
+
+    @property
+    def active_epoch(self) -> int:
+        """Cipher-level epoch of the active state. Starts at 0; bumps
+        on every successful `rotate()`. Distinct from yaml's
+        `index_epoch` (HMAC search-key counter) which also bumps on
+        rotate but is governed by the admin layer."""
+        if self._state is None:
+            return 0
+        return self._state.epoch
 
     @classmethod
     def create(cls, keystore: Path, group_name: str) -> BtnGroupCipher:
@@ -485,8 +515,22 @@ class BtnGroupCipher:
 
     @classmethod
     def load(cls, keystore: Path, group_name: str) -> BtnGroupCipher:
-        """Load an existing btn group from its keystore files."""
+        """Load an existing btn group from its keystore files.
+
+        0.4.3a1: also picks up the retired-state archive
+        (`<group>.btn.state.retired.<epoch>` siblings written by a
+        prior `rotate()`) and runs `cleanup_orphan_pending()` so a
+        prior rotation crash doesn't leave stale `.pending` files
+        sitting around."""
         import tn_btn as _btn
+
+        from .btn_keystore import BtnKeystore
+
+        ks = BtnKeystore(keystore)
+        # Crash recovery: a prior rotation may have crashed between
+        # write_pending and promote_pending. Clean up the pending pair
+        # so the next rotation starts from a consistent point.
+        ks.cleanup_orphan_pending(group_name)
 
         state_path = keystore / f"{group_name}.btn.state"
         kit_path = keystore / f"{group_name}.btn.mykit"
@@ -522,12 +566,32 @@ class BtnGroupCipher:
                 f"re-initing the ceremony from scratch (which wipes "
                 f"the existing publisher state)."
             )
+
+        # 0.4.3a1: parse retired-state archive into an epoch-keyed dict
+        # on the cipher. The retired *kit* files (`.btn.mykit.retired.<N>`)
+        # are picked up separately by the Rust runtime's multi-kit
+        # decrypt path; cipher.py only owns the state side.
+        retired_states: dict[int, Any] = {}
+        try:
+            for epoch, files in ks.load_retired_states(group_name).items():
+                retired_states[epoch] = _btn.RetiredPublisherState.from_bytes(
+                    files.state_bytes
+                )
+        except AttributeError:
+            # tn_btn wheel older than 0.4.3a1 doesn't expose
+            # RetiredPublisherState. Fail-soft: cipher loads but the
+            # historical-mint surface is unavailable until the wheel is
+            # rebuilt. Matches the rest of the soft-fallback pattern in
+            # this module.
+            pass
+
         return cls(
             _state=state,
             _self_kit=self_kit,
             _keystore=keystore,
             _group_name=group_name,
             _last_persisted_bytes=last_persisted,
+            _retired_states=retired_states,
         )
 
     def encrypt(self, plaintext: bytes) -> bytes:
@@ -575,3 +639,116 @@ class BtnGroupCipher:
         # CAS write succeeded — refresh our private snapshot so the
         # next _persist_state has a fresh prior to compare against.
         self._last_persisted_bytes = new_bytes
+
+    # ---------------------------------------------------------------
+    # rotate() — section 3.1 of the btn cipher rotation spec
+    # ---------------------------------------------------------------
+
+    def rotate(self) -> BtnRotationResult:
+        """Rotate this group's cipher state.
+
+        Sequence:
+          1. Drive `tn_btn.PublisherState.rotate()` to get a
+             RotationOutcome (new active + retired snapshot).
+          2. Mint a fresh self-kit on the new active state.
+          3. Write the new state + self-kit to ``.pending`` files.
+          4. Persist the retired (state, self-kit) pair to
+             ``.retired.<prior_epoch>`` files.
+          5. Atomically promote pending → active (rename dance).
+          6. Refresh in-memory ``_state`` / ``_self_kit`` /
+             ``_last_persisted_bytes`` / ``_retired_states``.
+
+        Returns a :class:`BtnRotationResult` carrying the prior +
+        new publisher_id, prior + new epoch, and the retired
+        timestamp. The admin layer uses these to populate the
+        truth-telling fields on ``tn.rotation.completed``.
+
+        Does NOT mint per-recipient kits — that's the admin layer's
+        job (it needs the yaml's recipient list, which the cipher
+        class doesn't see). See ``tn.admin._btn_rotate_impl``.
+
+        Raises :class:`NotAPublisherError` if this cipher has no
+        publisher state (read-only recipient). Raises ``RuntimeError``
+        with a recovery hint if a partial-prior-rotation left a
+        retired-pair collision on disk.
+        """
+        if self._state is None or self._keystore is None:
+            raise NotAPublisherError(
+                "btn: cannot rotate a cipher with no publisher state on disk"
+            )
+
+        from .btn_keystore import BtnKeystore
+
+        ks = BtnKeystore(self._keystore)
+        prior_publisher_id = bytes(self._state.publisher_id)
+        prior_epoch = int(self._state.epoch)
+
+        # Defense in depth: if a previous rotation got partway through
+        # (write_retired_pair committed but promote_pending didn't),
+        # the retired pair already exists for our current prior_epoch.
+        # promote_pending would later raise FileExistsError, but by
+        # then we've already consumed self._state via .rotate(). Catch
+        # it up-front so the wrapper is still usable.
+        retired_state_path = self._keystore / f"{self._group_name}.btn.state.retired.{prior_epoch}"
+        if retired_state_path.exists():
+            raise RuntimeError(
+                f"btn.rotate({self._group_name!r}): retired state for epoch "
+                f"{prior_epoch} already exists on disk at {retired_state_path}. "
+                f"A previous rotation may have crashed between write_retired_pair "
+                f"and promote_pending. Manual recovery: verify the .retired.{prior_epoch} "
+                f"pair against the current active state (they should be the SAME prior "
+                f"state if the active didn't change), then remove the duplicate pair "
+                f"and re-run rotate."
+            )
+
+        outcome = self._state.rotate()  # consumes the PyO3 wrapper's inner
+        new_active = outcome.active
+        retired_snapshot = outcome.retired
+        new_self_kit = new_active.mint()
+        new_publisher_id = bytes(new_active.publisher_id)
+        new_epoch = int(new_active.epoch)
+
+        # Step 3+4 of the promote dance: write pending state + kit,
+        # then archive the retired pair under .retired.<prior_epoch>.
+        ks.write_pending(
+            self._group_name,
+            state_bytes=new_active.to_bytes(),
+            self_kit=new_self_kit,
+        )
+        ks.write_retired_pair(
+            self._group_name,
+            epoch=prior_epoch,
+            state_bytes=retired_snapshot.to_bytes(),
+            self_kit=self._self_kit,
+        )
+        # Step 5: atomic rename swap.
+        ks.promote_pending(self._group_name, retiring_epoch=prior_epoch)
+
+        # Step 6: refresh in-memory view to match disk.
+        self._state = new_active
+        self._self_kit = new_self_kit
+        self._last_persisted_bytes = new_active.to_bytes()
+        self._retired_states[prior_epoch] = retired_snapshot
+
+        return BtnRotationResult(
+            prior_publisher_id=prior_publisher_id,
+            new_publisher_id=new_publisher_id,
+            prior_epoch=prior_epoch,
+            new_epoch=new_epoch,
+            retired_at_unix_secs=int(retired_snapshot.retired_at_unix_secs),
+        )
+
+
+@dataclass(frozen=True)
+class BtnRotationResult:
+    """Structured return from :meth:`BtnGroupCipher.rotate`.
+
+    The admin layer uses these fields to populate the truth-telling
+    payload on ``tn.rotation.completed`` and the public
+    ``RotateGroupResult`` returned to callers."""
+
+    prior_publisher_id: bytes
+    new_publisher_id: bytes
+    prior_epoch: int
+    new_epoch: int
+    retired_at_unix_secs: int

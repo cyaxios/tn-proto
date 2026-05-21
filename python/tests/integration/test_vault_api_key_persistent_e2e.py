@@ -309,11 +309,11 @@ def _build_sealed_kit_bundle(*, recipient_did: str, signer_seed: bytes,
     manifest = {
         "kind": "project_seed",
         "version": 1,
-        "from_did": body_pub_did,
+        "publisher_identity": body_pub_did,
         "ceremony_id": "_api_key_seed",
         "as_of": as_of,
         "scope": "project",
-        "to_did": body_pub_did,
+        "recipient_identity": body_pub_did,
         "clock": {},
         "event_count": 0,
         "state": {

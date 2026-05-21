@@ -35,14 +35,14 @@ keystore:
   path: ./keys
 logs:
   path: ./logs/tn.ndjson
-me:
-  did: "did:key:zABC"
+device:
+  device_identity: "did:key:zABC"
 groups:
   default:
     policy: private
     cipher: btn
     recipients:
-      - did: "did:key:zABC"
+      - recipient_identity: "did:key:zABC"
 "#
     )
 }
@@ -65,7 +65,7 @@ ceremony:
     // Inherited from parent.
     assert_eq!(cfg.ceremony.cipher, "btn");
     assert!(cfg.groups.contains_key("default"));
-    assert_eq!(cfg.me.did, "did:key:zABC");
+    assert_eq!(cfg.device.device_identity, "did:key:zABC");
     // Child override on ceremony.id wins.
     assert_eq!(cfg.ceremony.id, "cer_child");
 }
@@ -123,7 +123,7 @@ ceremony:
     let cfg = config::load(&a_path).unwrap();
     // From C (parent-owned).
     assert!(cfg.groups.contains_key("default"));
-    assert_eq!(cfg.me.did, "did:key:zABC");
+    assert_eq!(cfg.device.device_identity, "did:key:zABC");
     assert_eq!(cfg.ceremony.cipher, "btn");
     // From B (ceremony shallow merge).
     assert_eq!(cfg.ceremony.log_level, "info");
@@ -247,14 +247,14 @@ keystore:
   path: ./keys
 logs:
   path: ./logs/tn.ndjson
-me:
-  did: "did:key:zABC"
+device:
+  device_identity: "did:key:zABC"
 groups:
   default:
     policy: private
     cipher: btn
     recipients:
-      - did: "did:key:zABC"
+      - recipient_identity: "did:key:zABC"
 "#;
     write(&parent, parent_yaml);
     write(
@@ -287,14 +287,14 @@ fn parent_owned_keys_cannot_be_overridden() {
         r#"extends: ./parent.yaml
 ceremony:
   id: cer_c
-me:
-  did: "did:key:zCHILD"
+device:
+  device_identity: "did:key:zCHILD"
 "#,
     );
     let cfg = config::load(&child).unwrap();
     assert_eq!(
-        cfg.me.did, "did:key:zABC",
-        "parent's me.did must survive child's attempted override",
+        cfg.device.device_identity, "did:key:zABC",
+        "parent's device.device_identity must survive child's attempted override",
     );
 }
 
@@ -347,7 +347,7 @@ fn yaml_without_extends_loads_unchanged() {
     write(&p, &parent_btn("cer_plain"));
     let cfg = config::load(&p).unwrap();
     assert_eq!(cfg.ceremony.id, "cer_plain");
-    assert_eq!(cfg.me.did, "did:key:zABC");
+    assert_eq!(cfg.device.device_identity, "did:key:zABC");
 }
 
 #[test]
@@ -373,14 +373,14 @@ keystore:
   path: ./keys
 logs:
   path: ./logs/tn.ndjson
-me:
-  did: "did:key:zABC"
+device:
+  device_identity: "did:key:zABC"
 groups:
   default:
     policy: private
     cipher: btn
     recipients:
-      - did: "did:key:zABC"
+      - recipient_identity: "did:key:zABC"
 handlers:
   - kind: stdout
 "#;
@@ -400,7 +400,7 @@ handlers:
 
     let cfg = config::load(&payments).expect("emit_propagation-style stream yaml must load");
     // Identity + groups inherited from default.
-    assert_eq!(cfg.me.did, "did:key:zABC");
+    assert_eq!(cfg.device.device_identity, "did:key:zABC");
     assert!(cfg.groups.contains_key("default"));
     assert_eq!(cfg.ceremony.cipher, "btn");
     // Stream-specific overrides win.

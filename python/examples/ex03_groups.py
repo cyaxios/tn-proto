@@ -120,7 +120,7 @@ def main() -> int:
             "  id: partner-view\n"
             "  mode: local\n"
             "keystore: { path: ./.tn/keys }\n"
-            f"me: {{ did: {cfg.device.did} }}\n"
+            f"me: {{ did: {cfg.device.device_identity} }}\n"
             "groups:\n"
             "  default:\n"
             "    cipher: btn\n",

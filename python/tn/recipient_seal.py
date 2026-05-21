@@ -19,7 +19,7 @@ Wire shape (lives in ``manifest.state.body_encryption.recipient_wrap``)::
 
     {
         "frame": "tn-sealed-box-v1",
-        "recipient_did": "did:key:z...",
+        "recipient_identity": "did:key:z...",
         "ephemeral_x25519_pub_b64": <base64 32 bytes>,
         "wrap_nonce_b64": <base64 12 bytes>,
         "wrapped_bek_b64": <base64 ciphertext + 16-byte tag>,
@@ -223,7 +223,7 @@ def seal_bek_for_recipient(
 
     return {
         "frame": WRAP_FRAME,
-        "recipient_did": recipient_did,
+        "recipient_identity": recipient_did,
         "ephemeral_x25519_pub_b64": base64.b64encode(eph_pub_bytes).decode("ascii"),
         "wrap_nonce_b64": base64.b64encode(nonce).decode("ascii"),
         "wrapped_bek_b64": base64.b64encode(wrapped).decode("ascii"),
@@ -251,7 +251,7 @@ def unseal_bek_from_wrap(
             f"unsupported sealed-box frame {frame!r}; expected {WRAP_FRAME!r}"
         )
 
-    recipient_did = wrap.get("recipient_did")
+    recipient_did = wrap.get("recipient_identity")
     if not isinstance(recipient_did, str):
         raise UnsealError("recipient_wrap.recipient_did missing or not a string")
 

@@ -99,7 +99,7 @@ def _scan_admin_envelopes(sources: list[Path]) -> tuple[bytes, dict[str, Any]]:
             rh = env.get("row_hash")
             if isinstance(rh, str) and rh in seen:
                 continue
-            did = env.get("did")
+            did = env.get("device_identity")
             seq = env.get("sequence")
             if not (isinstance(did, str) and isinstance(seq, int) and isinstance(rh, str)):
                 continue
@@ -373,7 +373,7 @@ def export_identity_seed(
 
     If ``device`` is None, generate a fresh ``DeviceKey`` and use it. The
     caller can recover the freshly-generated DID by reading
-    ``manifest.from_did`` from the resulting tnpkg, or by passing in their
+    ``manifest.publisher_identity`` from the resulting tnpkg, or by passing in their
     own DeviceKey if they already have one.
 
     Returns the output path. The caller is responsible for protecting the
@@ -515,7 +515,7 @@ def _resolve_export_signer(
         )
     if cfg is None:
         raise ValueError(f"export(kind={kind!r}) requires cfg=... for manifest signing")
-    return cfg.device.signing_key(), cfg.device.did, cfg.ceremony_id
+    return cfg.device.signing_key(), cfg.device.device_identity, cfg.ceremony_id
 
 
 def _merge_recipient_dids(
@@ -546,8 +546,8 @@ def _merge_recipient_dids(
                 merged.append(d)
     if not merged:
         raise ValueError(
-            "export(seal_for_recipient=True) requires at least one recipient "
-            "in to_did=... or to_dids=[...]."
+            "export(seal_for_recipient=True) requires at least one "
+            "recipient_identity in to_did=... or to_dids=[...]."
         )
     return merged
 
@@ -603,11 +603,11 @@ def _apply_seal_for_recipient(
     # AAD.
     preview = TnpkgManifest(
         kind=str(kind),
-        from_did=cfg.device.did if cfg is not None else "",
+        publisher_identity=cfg.device.device_identity if cfg is not None else "",
         ceremony_id=cfg.ceremony_id if cfg is not None else "",
         as_of=_now_iso(),
         scope=str(scope or extras.get("scope") or _default_scope(kind)),
-        to_did=merged_dids[0],
+        recipient_identity=merged_dids[0],
         clock=dict(extras.get("clock", {})),
         event_count=int(extras.get("event_count", 0)),
         head_row_hash=extras.get("head_row_hash"),
@@ -781,11 +781,11 @@ def export(
     #    passed for to_did.
     manifest = TnpkgManifest(
         kind=str(kind),
-        from_did=signer_did,
+        publisher_identity=signer_did,
         ceremony_id=signer_ceremony,
         as_of=sealed_as_of or _now_iso(),
         scope=str(scope or extras.get("scope") or _default_scope(kind)),
-        to_did=signer_did if kind == "identity_seed" else to_did,
+        recipient_identity=signer_did if kind == "identity_seed" else to_did,
         clock=dict(extras.get("clock", {})),
         event_count=int(extras.get("event_count", 0)),
         head_row_hash=extras.get("head_row_hash"),

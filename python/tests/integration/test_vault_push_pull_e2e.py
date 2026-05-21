@@ -437,18 +437,15 @@ def _force_admin_log_yaml(yaml_path: Path) -> None:
     test_vault_push_handler / test_vault_pull_handler.
     """
     doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-    # Both the new (admin_log_location) and legacy (protocol_events_location)
-    # keys: the Python loader honors admin_log_location, but the Rust
-    # ``Config`` deserializer (crypto/tn-core/src/config.rs) still reads
-    # the legacy ``protocol_events_location`` field. Set both to keep
-    # parity across the runtime split until the Rust side migrates.
+    # The Rust Config deserializer aliases `protocol_events_location` →
+    # `admin_log_location` (single backing field). Setting BOTH yaml keys
+    # now raises `ceremony: duplicate field admin_log_location` at load
+    # time. Use the canonical key only; the alias handles legacy yamls
+    # transparently. The {yaml_dir} template absolutises against the
+    # yaml's own directory rather than the process cwd.
     cer = doc.setdefault("ceremony", {})
-    cer["admin_log_location"] = "./.tn/admin/admin.ndjson"
-    # The Rust runtime resolves relative pel paths against the process
-    # cwd (not yaml_dir), so a literal "./.tn/admin/..." would scatter
-    # ndjson files at whatever directory the test was invoked from.
-    # Use the absolute yaml_dir explicitly via the {yaml_dir} template.
-    cer["protocol_events_location"] = "{yaml_dir}/.tn/admin/admin.ndjson"
+    cer["admin_log_location"] = "{yaml_dir}/.tn/admin/admin.ndjson"
+    cer.pop("protocol_events_location", None)
     # Pin rotate_on_init: false on the file handler. The vault flow
     # does multiple flush_and_close() + tn.init() rounds across the
     # admin-snapshot lifecycle, and session-start rotation (the new
@@ -486,7 +483,7 @@ def _build_alice(tmp_path: Path, frank_did: str) -> dict[str, Any]:
 
     cfg = tn.current_config()
     keystore = Path(cfg.keystore)
-    alice_did = cfg.device.did
+    alice_did = cfg.device.device_identity
 
     # Mint Frank's kits before Alice closes. These admin actions also
     # produce ``tn.recipient.added`` envelopes in Alice's admin log --
@@ -541,7 +538,7 @@ def _build_frank(tmp_path: Path) -> dict[str, Any]:
         pytest.skip("vault e2e test requires the Rust runtime (btn)")
     cfg = tn.current_config()
     keystore = Path(cfg.keystore)
-    frank_did = cfg.device.did
+    frank_did = cfg.device.device_identity
     frank_priv = _read_local_priv(keystore)
     cfg_obj = tn.current_config()
     return {
@@ -639,9 +636,9 @@ def test_alice_to_frank_round_trip(tmp_path: Path, _shared_loop) -> None:
 
     # Sanity: the vault's mongo metadata records the snapshot. Run the
     # find via the shared loop so we don't open a new motor pool.
-    rec = _run(_db.inbox_snapshots().find_one({"from_did": alice["did"]}))
+    rec = _run(_db.inbox_snapshots().find_one({"publisher_identity": alice["did"]}))
     assert rec is not None, "vault did not store metadata for the pushed snapshot"
-    assert rec["to_did"] == frank["did"]
+    assert rec["recipient_identity"] == frank["did"]
 
     # 5. Install Alice's mint-kits into Frank's keystore so decrypts
     #    succeed over the absorbed admin events. (The vault doesn't ship

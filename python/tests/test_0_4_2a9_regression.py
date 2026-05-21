@@ -641,37 +641,38 @@ class TestProjectNameLabels:
 # =====================================================================
 
 
-class TestLooseRotationWarning:
-    """0.4.2a10 Finding 2 interim: btn rotate raises a warning that
-    it doesn't actually rotate keys, suppressible via the explicit
-    kwarg. cipher_actually_rotated=False on the result."""
+class TestForwardSecretBtnRotation:
+    """0.4.3a1: btn rotation is forward-secret. The `LooseRotationWarning`
+    and `acknowledge_loose=True` kwarg from 0.4.2a10 were both removed;
+    `cipher_actually_rotated` is now True for btn (was hardcoded False
+    in 0.4.2a10 as the truth-telling stopgap)."""
 
-    def test_btn_rotate_raises_warning(self, fresh_cwd):
-        import warnings
+    def test_btn_rotate_is_forward_secret(self, fresh_cwd):
         tn.init()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result = tn.admin.rotate(group="default")
-        assert any(
-            isinstance(w.message, tn.LooseRotationWarning) for w in caught
-        ), "expected LooseRotationWarning on btn rotate"
-        assert result.cipher_actually_rotated is False, (
-            "btn rotation today is metadata-only; flag must reflect "
-            "the truth"
+        result = tn.admin.rotate(group="default")
+        assert result.cipher_actually_rotated is True, (
+            "btn rotation is forward-secret as of 0.4.3a1; flag must "
+            "reflect that the cipher's master_seed and publisher_id "
+            "actually changed"
         )
+        # The truth-telling fields on RotateGroupResult are populated
+        # for btn (carried over from BtnGroupCipher.rotate()).
+        assert result.prior_publisher_id is not None
+        assert result.new_publisher_id is not None
+        assert result.prior_publisher_id != result.new_publisher_id
+        assert result.prior_epoch == 0
+        assert result.new_epoch == 1
 
-    def test_btn_rotate_silenced_by_acknowledge(self, fresh_cwd):
-        import warnings
-        tn.init()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result = tn.admin.rotate(
-                group="default", acknowledge_loose=True,
-            )
-        assert not any(
-            isinstance(w.message, tn.LooseRotationWarning) for w in caught
+    def test_btn_rotate_no_loose_warning_kwarg(self):
+        """The `acknowledge_loose=True` parameter no longer exists on
+        rotate(). Passing it should raise TypeError (the parameter was
+        removed in 0.4.3a1, not silently swallowed)."""
+        import inspect
+        sig = inspect.signature(tn.admin.rotate)
+        assert "acknowledge_loose" not in sig.parameters, (
+            "acknowledge_loose was removed in 0.4.3a1 along with "
+            "LooseRotationWarning; the cipher actually rotates now"
         )
-        assert result.cipher_actually_rotated is False
 
 
 class TestDecryptionFailureObservability:
@@ -739,6 +740,6 @@ class TestIdentityNamingPhase1:
         ident = cfg.device.device_identity
         assert isinstance(ident, str)
         # Same value as the legacy accessor
-        assert ident == cfg.device.did
+        assert ident == cfg.device.device_identity
         # Both keep working in 0.4.2a10
-        assert cfg.device.did is not None
+        assert cfg.device.device_identity is not None

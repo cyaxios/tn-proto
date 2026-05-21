@@ -26,7 +26,7 @@ fn reduce_ceremony_init() {
         json!({
             "ceremony_id": "local_abc",
             "cipher": "btn",
-            "device_did": "did:key:zAlice",
+            "device_identity": "did:key:zAlice",
             "created_at": "2026-04-22T12:00:00Z",
         }),
     );
@@ -49,7 +49,7 @@ fn reduce_group_added() {
         "tn.group.added",
         json!({
             "group": "pii", "cipher": "btn",
-            "publisher_did": "did:key:zAlice",
+            "publisher_identity": "did:key:zAlice",
             "added_at": "2026-04-22T12:00:00Z",
         }),
     );
@@ -62,18 +62,18 @@ fn reduce_recipient_added_with_did() {
         "tn.recipient.added",
         json!({
             "group": "default", "leaf_index": 2,
-            "recipient_did": "did:key:zFrank",
+            "recipient_identity": "did:key:zFrank",
             "kit_sha256": "sha256:abc", "cipher": "btn",
         }),
     );
     match reduce(&e).unwrap() {
         StateDelta::RecipientAdded {
             leaf_index,
-            recipient_did,
+            recipient_identity,
             ..
         } => {
             assert_eq!(leaf_index, Some(2));
-            assert_eq!(recipient_did.as_deref(), Some("did:key:zFrank"));
+            assert_eq!(recipient_identity.as_deref(), Some("did:key:zFrank"));
         }
         d => panic!("expected RecipientAdded, got {d:?}"),
     }
@@ -85,13 +85,13 @@ fn reduce_recipient_added_without_did() {
         "tn.recipient.added",
         json!({
             "group": "default", "leaf_index": 3,
-            "recipient_did": null,
+            "recipient_identity": null,
             "kit_sha256": "sha256:xyz", "cipher": "btn",
         }),
     );
     match reduce(&e).unwrap() {
-        StateDelta::RecipientAdded { recipient_did, .. } => {
-            assert_eq!(recipient_did, None);
+        StateDelta::RecipientAdded { recipient_identity, .. } => {
+            assert_eq!(recipient_identity, None);
         }
         d => panic!("{d:?}"),
     }
@@ -103,7 +103,7 @@ fn reduce_recipient_revoked() {
         "tn.recipient.revoked",
         json!({
             "group": "default", "leaf_index": 2,
-            "recipient_did": "did:key:zFrank",
+            "recipient_identity": "did:key:zFrank",
         }),
     );
     assert!(matches!(
@@ -118,7 +118,7 @@ fn reduce_coupon_issued() {
         "tn.coupon.issued",
         json!({
             "group": "default", "slot": 1,
-            "to_did": "did:key:zBob", "issued_to": "bob@example.com",
+            "recipient_identity": "did:key:zBob", "issued_to": "bob@example.com",
         }),
     );
     assert!(matches!(
@@ -157,7 +157,7 @@ fn reduce_enrolment_compiled_and_absorbed() {
     let c = env(
         "tn.enrolment.compiled",
         json!({
-            "group": "default", "peer_did": "did:key:zBob",
+            "group": "default", "peer_identity": "did:key:zBob",
             "package_sha256": "sha256:pkg",
             "compiled_at": "2026-04-22T12:00:00Z",
         }),
@@ -170,7 +170,7 @@ fn reduce_enrolment_compiled_and_absorbed() {
     let a = env(
         "tn.enrolment.absorbed",
         json!({
-            "group": "default", "from_did": "did:key:zAlice",
+            "group": "default", "publisher_identity": "did:key:zAlice",
             "package_sha256": "sha256:pkg",
             "absorbed_at": "2026-04-22T12:05:00Z",
         }),
@@ -186,7 +186,7 @@ fn reduce_vault_linked_and_unlinked() {
     let l = env(
         "tn.vault.linked",
         json!({
-            "vault_did": "did:web:tnproto.org",
+            "vault_identity": "did:web:tnproto.org",
             "project_id": "proj_test",
             "linked_at": "2026-04-22T12:00:00Z",
         }),
@@ -199,7 +199,7 @@ fn reduce_vault_linked_and_unlinked() {
     let u = env(
         "tn.vault.unlinked",
         json!({
-            "vault_did": "did:web:tnproto.org",
+            "vault_identity": "did:web:tnproto.org",
             "project_id": "proj_test",
             "reason": "user_request",
             "unlinked_at": "2026-04-22T13:00:00Z",
@@ -238,7 +238,7 @@ fn reduce_schema_violation_on_catalogued_event() {
         "tn.recipient.added",
         json!({
             "group": "default", "leaf_index": 1,
-            "recipient_did": null,
+            "recipient_identity": null,
             "cipher": "btn",
         }),
     );
@@ -254,7 +254,7 @@ fn serde_roundtrip_delta() {
     let d = StateDelta::RecipientAdded {
         group: "default".into(),
         leaf_index: Some(2),
-        recipient_did: Some("did:key:zFrank".into()),
+        recipient_identity: Some("did:key:zFrank".into()),
         kit_sha256: "sha256:abc".into(),
         cipher: "btn".into(),
     };

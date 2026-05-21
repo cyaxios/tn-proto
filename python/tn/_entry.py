@@ -128,7 +128,7 @@ class Entry(BaseModel):
             fields.update(body)
 
         envelope_basics = {
-            "event_type", "timestamp", "level", "did", "sequence",
+            "event_type", "timestamp", "level", "device_identity", "sequence",
             "event_id", "run_id", "prev_hash", "row_hash", "signature",
             "message",
         }
@@ -163,7 +163,7 @@ class Entry(BaseModel):
             level=env.get("level", ""),
             message=message,
             fields=fields,
-            did=env["did"],
+            did=env["device_identity"],
             event_id=env["event_id"],
             sequence=env["sequence"],
             run_id=run_id,
@@ -180,9 +180,12 @@ class Entry(BaseModel):
         ``fields``; legacy underscore-prefixed metadata (``_decrypt_errors``,
         ``_valid``) is dropped.
         """
+        # The flat dict's identity key is `device_identity` post-0.4.3a1;
+        # Entry's dataclass attribute is still `did` for back-compat with
+        # `e.did` callers. Map between them here.
         envelope_keys = {
             "event_type", "timestamp", "level", "message",
-            "did", "event_id", "sequence", "run_id",
+            "device_identity", "event_id", "sequence", "run_id",
             "prev_hash", "row_hash", "signature",
         }
         kwargs: dict[str, Any] = {}
@@ -194,6 +197,9 @@ class Entry(BaseModel):
                 hidden_groups = list(v)
             elif k.startswith("_"):
                 continue
+            elif k == "device_identity":
+                # Translate wire name -> dataclass attribute name.
+                kwargs["did"] = v
             elif k in envelope_keys:
                 kwargs[k] = v
             else:
