@@ -4379,23 +4379,39 @@ fn collect_btn_kit_bytes_with_storage(
         kits.push(storage.read_bytes(&current).map_err(Error::Io)?);
     }
 
-    // Revoked kit discovery: list directory through storage if the
-    // backend supports it; absent / errored listing means "no
-    // revoked kits" rather than a hard failure. That keeps a wasm
+    // Retired + revoked kit discovery: list directory through storage if
+    // the backend supports it; absent / errored listing means "no
+    // archived kits" rather than a hard failure. That keeps a wasm
     // `JsStorageAdapter` whose `list()` returns an empty array from
     // breaking init when no rotations have happened.
-    let prefix = format!("{group}.btn.mykit.revoked.");
+    //
+    // 0.4.3a1 introduces `.btn.mykit.retired.<epoch>` as the canonical
+    // post-rotation archive name (epoch-indexed). The legacy
+    // `.btn.mykit.revoked.<unix_ts>` shape from 0.4.2-line keystores is
+    // still loaded so pre-rename keystores keep reading. Sort each
+    // family by its own index descending so newer kits are tried first.
+    let retired_prefix = format!("{group}.btn.mykit.retired.");
+    let revoked_prefix = format!("{group}.btn.mykit.revoked.");
+    let mut retired: Vec<(std::path::PathBuf, u32)> = Vec::new();
     let mut revoked: Vec<(std::path::PathBuf, u64)> = Vec::new();
     if let Ok(entries) = storage.list(keystore) {
         for path in entries {
             let Some(name_str) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if let Some(ts_str) = name_str.strip_prefix(&prefix) {
+            if let Some(n_str) = name_str.strip_prefix(&retired_prefix) {
+                if let Ok(n) = n_str.parse::<u32>() {
+                    retired.push((path, n));
+                }
+            } else if let Some(ts_str) = name_str.strip_prefix(&revoked_prefix) {
                 let ts: u64 = ts_str.parse().unwrap_or(0);
                 revoked.push((path, ts));
             }
         }
+    }
+    retired.sort_by_key(|b| std::cmp::Reverse(b.1));
+    for (path, _) in retired {
+        kits.push(storage.read_bytes(&path).map_err(Error::Io)?);
     }
     revoked.sort_by_key(|b| std::cmp::Reverse(b.1));
     for (path, _) in revoked {
@@ -4403,6 +4419,49 @@ fn collect_btn_kit_bytes_with_storage(
     }
 
     Ok(kits)
+}
+
+/// Scan `keystore` for files of the form `<group>.btn.state.retired.<N>`
+/// (where N is a u32 — the epoch the state served as active). Returns
+/// each as `(epoch, bytes)`. Files whose suffix doesn't parse as u32
+/// are skipped silently. Used by the publisher-side init path to
+/// archive retired states alongside the active one, so historical
+/// keywalk decryption has the seed material available.
+///
+/// 0.4.3a1 only. Pre-rename keystores use `<group>.btn.state.revoked.<ts>`
+/// which intentionally is NOT picked up here — those entries archived
+/// the prior PublisherState (kind 0x03), not the new lightweight
+/// RetiredPublisherState (kind 0x04), so attempting to deserialize them
+/// as retired states would error.
+pub(crate) fn discover_retired_btn_states(
+    keystore: &Path,
+    group: &str,
+) -> std::io::Result<Vec<(u32, Vec<u8>)>> {
+    let prefix = format!("{group}.btn.state.retired.");
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(keystore) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e),
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name_str.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Ok(epoch) = rest.parse::<u32>() else {
+            continue;
+        };
+        let bytes = std::fs::read(entry.path())?;
+        out.push((epoch, bytes));
+    }
+    Ok(out)
 }
 
 /// Collect all kit files for a group: the current `<group>.btn.mykit` first,
@@ -4422,8 +4481,12 @@ fn collect_btn_kit_bytes(keystore: &Path, group: &str) -> Result<Vec<Vec<u8>>> {
         kits.push(std::fs::read(&current).map_err(Error::Io)?);
     }
 
-    // Gather all `<group>.btn.mykit.revoked.<ts>` siblings.
-    let prefix = format!("{group}.btn.mykit.revoked.");
+    // Gather both archived-kit families:
+    //   `<group>.btn.mykit.retired.<epoch>` (0.4.3a1+, epoch-indexed)
+    //   `<group>.btn.mykit.revoked.<unix_ts>` (legacy 0.4.2-line)
+    let retired_prefix = format!("{group}.btn.mykit.retired.");
+    let revoked_prefix = format!("{group}.btn.mykit.revoked.");
+    let mut retired: Vec<(std::path::PathBuf, u32)> = Vec::new();
     let mut revoked: Vec<(std::path::PathBuf, u64)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(keystore) {
         for entry in entries.flatten() {
@@ -4431,7 +4494,11 @@ fn collect_btn_kit_bytes(keystore: &Path, group: &str) -> Result<Vec<Vec<u8>>> {
             let Some(name_str) = name.to_str() else {
                 continue;
             };
-            if let Some(ts_str) = name_str.strip_prefix(&prefix) {
+            if let Some(n_str) = name_str.strip_prefix(&retired_prefix) {
+                if let Ok(n) = n_str.parse::<u32>() {
+                    retired.push((entry.path(), n));
+                }
+            } else if let Some(ts_str) = name_str.strip_prefix(&revoked_prefix) {
                 // Expect ts_str to be a unix timestamp like "1776797973"; tolerate
                 // non-numeric suffixes by falling back to 0 (gets sorted last).
                 let ts: u64 = ts_str.parse().unwrap_or(0);
@@ -4439,8 +4506,12 @@ fn collect_btn_kit_bytes(keystore: &Path, group: &str) -> Result<Vec<Vec<u8>>> {
             }
         }
     }
-    // Most-recent revoked first; that's the most likely era for any given
-    // older entry to belong to, so it's tried before deeper-history kits.
+    // Newest first within each family — most likely era for any given older
+    // entry to belong to.
+    retired.sort_by_key(|b| std::cmp::Reverse(b.1));
+    for (path, _) in retired {
+        kits.push(std::fs::read(&path).map_err(Error::Io)?);
+    }
     revoked.sort_by_key(|b| std::cmp::Reverse(b.1));
     for (path, _) in revoked {
         kits.push(std::fs::read(&path).map_err(Error::Io)?);
