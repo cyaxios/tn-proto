@@ -39,7 +39,7 @@ test("read yields Entry instances with typed attribute access", async () => {
     assert.equal(e.level, "info");
     assert.equal(e.message, null);
     assert.ok(e.sequence >= 1);
-    assert.ok(e.did.startsWith("did:key:z"));
+    assert.ok(e.device_identity.startsWith("did:key:z"));
     assert.equal(e.event_id.length, 36);
     assert.ok(e.run_id);
     assert.ok(e.prev_hash.startsWith("sha256:"));
@@ -134,7 +134,7 @@ test("inspect output truncates long DIDs", async () => {
     assert.ok(r.startsWith("Entry("));
     assert.ok(r.includes("event_type="));
     // DID truncation: long DIDs get a "..." marker.
-    if (e!.did.length > 30) {
+    if (e!.device_identity.length > 30) {
       assert.ok(r.includes("..."));
     }
   } finally {
@@ -165,7 +165,7 @@ test("toJSON round-trips through JSON.stringify", async () => {
     assert.equal(fields["x"], 1);
     assert.equal(fields["y"], "hi");
     assert.ok("row_hash" in parsed);
-    assert.ok("did" in parsed);
+    assert.ok("device_identity" in parsed);
   } finally {
     await close();
   }
@@ -301,7 +301,7 @@ test("Entry.fromRaw constructor", () => {
       event_type: "x.y",
       timestamp: "2026-05-08T03:30:20.184000Z",
       level: "info",
-      did: "did:key:zABC123",
+      device_identity: "did:key:zABC123",
       event_id: "abc-123",
       sequence: 1,
       prev_hash: "sha256:000",
@@ -318,6 +318,6 @@ test("Entry.fromRaw constructor", () => {
   assert.equal(e.event_type, "x.y");
   assert.deepEqual(e.fields, { amount: 100 }); // run_id hoisted to top
   assert.equal(e.run_id, "rid-1");
-  assert.equal(e.did, "did:key:zABC123");
+  assert.equal(e.device_identity, "did:key:zABC123");
   assert.equal(e.row_hash, "sha256:111");
 });

@@ -34,7 +34,7 @@ test("Tn.read() default returns Entry instances with envelope basics + decrypted
     assert.ok(biz, "must find the order.created entry");
     assert.equal(biz!.event_type, "order.created");
     assert.equal(biz!.level, "info");
-    assert.ok(typeof biz!.did === "string");
+    assert.ok(typeof biz!.device_identity === "string");
     assert.ok(biz!.timestamp instanceof Date);
     assert.ok(typeof biz!.sequence === "number");
     assert.ok(typeof biz!.event_id === "string");

@@ -258,7 +258,7 @@ test("AdminStateCache flags same-coordinate fork on duplicate (did, et, seq)", a
     // cache trusts the local log; signature verification happens at
     // absorb time).
     const forged = {
-      did: target!["did"],
+      device_identity: target!["device_identity"],
       timestamp: new Date().toISOString(),
       event_id: "forged-coord",
       event_type: "tn.recipient.added",

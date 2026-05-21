@@ -24,7 +24,7 @@ test("pretty format prints headers + public fields, hides crypto", () => {
     const h = new StdoutHandler({ write: cap.sink });
     h.emit(
       {
-        did: "did:key:z6MkLongIdentifierStringHere",
+        device_identity: "did:key:z6MkLongIdentifierStringHere",
         timestamp: "2026-05-05T22:27:23.712506Z",
         event_type: "page_viewed",
         level: "info",

@@ -85,7 +85,7 @@ test("WasmRuntime: full init + emit + read round-trip through nodeStorageAdapter
     // this smoke focused on the round-trip.
     assert.equal(typeof ours["sequence"], "number", "sequence must be a number");
     assert.equal(typeof ours["event_id"], "string", "event_id must be a string");
-    assert.equal(typeof ours["did"], "string", "did must be a string");
+    assert.equal(typeof ours["device_identity"], "string", "device_identity must be a string");
   } finally {
     try {
       rt.close();

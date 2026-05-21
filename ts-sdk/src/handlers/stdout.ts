@@ -87,7 +87,7 @@ const _CRYPTO_KEYS: ReadonlySet<string> = new Set([
   "prev_hash",
   "row_hash",
   "signature",
-  "did",
+  "device_identity",
   "timestamp",
   "level",
   "event_type",

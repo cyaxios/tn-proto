@@ -112,7 +112,7 @@ function _isForeignLog(logPath: string, ownDid: string): boolean {
       } catch {
         continue;
       }
-      const envDid = env["did"];
+      const envDid = env["device_identity"];
       if (typeof envDid === "string" && envDid.length > 0) {
         return envDid !== ownDid;
       }
@@ -1163,7 +1163,7 @@ export class Tn {
       "tn.read.tampered_row_skipped",
       this._mergeForEmit({
         envelope_event_id: envelope["event_id"] ?? null,
-        envelope_did: envelope["did"] ?? null,
+        envelope_device_identity: envelope["device_identity"] ?? null,
         envelope_event_type: envelope["event_type"] ?? null,
         envelope_sequence: envelope["sequence"] ?? null,
         invalid_reasons: [...new Set(reasons)].sort(),
