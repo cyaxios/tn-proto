@@ -75,37 +75,33 @@ _SECP256K1_MULTICODEC = b"\xe7\x01"  # secp256k1 public key, 33 bytes compressed
 
 @dataclass
 class DeviceKey:
-    """Ed25519 keypair + cached DID encoding.
+    """Ed25519 keypair + cached identifier encoding.
 
     `private_bytes` is the 32-byte Ed25519 seed. `public_bytes` is the
-    32-byte public key in raw encoding. `did` is the did:key form of the
-    public key with the Ed25519 multicodec prefix.
+    32-byte public key in raw encoding. `device_identity` is the
+    canonical string identifier for this device — today rendered as a
+    did:key with the Ed25519 multicodec prefix; the field name itself
+    is format-agnostic so future SDK shapes can carry alternate
+    identifier formats here without a rename.
 
-    0.4.2a10 adds `device_identity` as the canonical accessor — same
-    value as `did`, but the field name no longer claims the value
-    MUST be a did:key (today it is; future SDK shapes may decode
-    other identifier formats here). New code should reach for
-    `cfg.device.device_identity`; `cfg.device.did` stays as a
-    back-compat alias and continues to work indefinitely. See
+    0.4.3a1 flipped the canonical name from `did` to `device_identity`
+    (0.4.2a10 introduced the new name as an alias; this release inverts
+    the alias). `cfg.device.did` remains as a back-compat property
+    returning the same string — old call-sites continue to work
+    indefinitely. See
     `docs/superpowers/specs/2026-05-20-identity-and-key-naming.md`.
     """
 
     private_bytes: bytes  # 32-byte Ed25519 seed
     public_bytes: bytes  # 32-byte public key, raw
-    did: str  # did:key:z... (legacy attribute name — see device_identity)
+    device_identity: str  # did:key:z... (today; format-agnostic name)
 
     @property
-    def device_identity(self) -> str:
-        """The canonical identifier string for this device. Today
-        renders as a did:key string (same value as `self.did`); the
-        attribute name is format-agnostic.
-
-        Use this in new code. `self.did` is kept as a back-compat
-        alias — both return the same string. See the existing
-        `signing_key()` method for the crypto-layer accessor; this
-        property is the user-facing LABEL surface.
-        """
-        return self.did
+    def did(self) -> str:
+        """Back-compat alias for `device_identity`. Pre-0.4.3a1 code
+        reached for `cfg.device.did`; the alias keeps that working.
+        New code should use `device_identity` directly."""
+        return self.device_identity
 
     @classmethod
     def generate(cls) -> Self:
