@@ -5,6 +5,96 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3a1] - 2026-05-20 — identity-naming flip + btn rotation hook
+
+Single coordinated cut of the identity-and-key naming spec
+(`docs/superpowers/specs/2026-05-20-identity-and-key-naming.md`),
+flipping the canonical vocabulary from `did` / role-suffixed
+`*_did` fields to `device_identity` / `*_identity`. Pre-`0.4.3a1`
+logs and yamls are not loadable in this release; the project has
+no production data to preserve so no migration tool ships.
+
+The 0.4.3 btn cipher rotation (separate spec) was originally
+queued as its own release; that work is still pending and will
+land on this same branch before tag.
+
+### Wire format
+
+- **Envelope top-level field** flips from `"did": "..."` to
+  `"device_identity": "..."`. row_hash and signature math are
+  byte-identical across the rename (the hasher consumes field
+  *values*, not field *names*) so pre-rename signed logs remain
+  signature-verifiable — only the envelope JSON shape changes.
+  This contradicts handover land-mine #1 but is provable from
+  `chain_golden` passing byte-identically after the flip.
+- **`compute_row_hash` parameter** (Python + Rust) renamed
+  `did=` → `device_identity=`. All four Python call sites
+  (`logger.py`, `reader.py` ×2, `_dispatch.py`) updated.
+
+### Admin event payload field names
+
+Catalog + reducer + emit-site rename across all 11 admin events:
+
+```
+device_did      → device_identity     (tn.ceremony.init)
+publisher_did   → publisher_identity  (tn.group.added)
+recipient_did   → recipient_identity  (tn.recipient.added/.revoked)
+to_did          → recipient_identity  (tn.coupon.issued; collapsed)
+peer_did        → peer_identity       (tn.enrolment.compiled)
+from_did        → publisher_identity  (tn.enrolment.absorbed; collapsed)
+vault_did       → vault_identity      (tn.vault.linked/.unlinked)
+envelope_did    → envelope_device_identity (tn.read.tampered_row_skipped)
+```
+
+### yaml schema
+
+- Top-level `me: {did: ...}` block renamed to
+  `device: {device_identity: ...}`. The yaml loader rejects the
+  legacy `me:` block at structural validation with a pointer to
+  this entry.
+- Group recipient list entries `{"did": "did:key:z..."}` flipped
+  to `{"recipient_identity": "did:key:z..."}` for both the yaml
+  shape and the JWE sidecar (`<group>.jwe.recipients`).
+
+### Python API
+
+- `DeviceKey.device_identity` is now the canonical dataclass
+  field; `DeviceKey.did` is a `@property` returning the same
+  string for back-compat. Code that did `cfg.device.did`
+  continues to work indefinitely; new code should reach for
+  `cfg.device.device_identity`.
+- `RotateGroupResult.cipher_actually_rotated` (shipped in
+  0.4.2a10) is still `False` for btn until the cipher rotation
+  spec lands on this branch; flips to `True` then.
+
+### `LooseRotationWarning` (0.4.2a10 stopgap)
+
+Still raised on btn `tn.admin.rotate(...)`. Removal is bundled
+with the cipher rotation work (`docs/superpowers/specs/
+2026-05-20-btn-cipher-rotation.md`), pending land on this
+branch before tag.
+
+### Cascade still in flight on this branch
+
+- TS SDK + wasm envelope/admin reads — Phase G of the handover;
+  not yet committed. Until landed, the
+  `secure_read_interop::{python,ts}_admin_events_byte_compare`
+  Rust tests fail (they compare against TS/Python committed
+  reference output that doesn't yet carry the new shape).
+- tnpkg manifest field rename
+  (`signer_did`/`from_did`/`to_did` on the kit_bundle /
+  enrolment / offer / identity_seed manifest wire format) —
+  not in this commit; queued as a follow-on.
+- tn_proto_web mongo schema + API column rename — cross-repo;
+  Phase H of the handover, not yet committed.
+- Python maturin wheels need rebuild (`nox -s build_core
+  build_btn`) before `pip install` picks up the new
+  `tn_core` / `tn_btn` field shapes; otherwise tests that
+  import the extension fail with `ModuleNotFoundError` cleanup.
+
+Status at tag time: 44/47 Rust test suites green; remaining 3
+are scoped to phases G + tnpkg manifest follow-on.
+
 ## [0.4.2a6] - 2026-05-19
 
 One bug filed against `0.4.2a5`. Python-only — no Rust changes;
