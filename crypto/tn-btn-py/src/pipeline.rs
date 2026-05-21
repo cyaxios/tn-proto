@@ -192,9 +192,7 @@ pub fn build_envelope_line<'py>(
     let body = canonical_body(&fields);
 
     // 2. Encrypt.
-    let ct = publisher_state
-        .encrypt_internal(&body)
-        .map_err(|e| PyValueError::new_err(format!("btn encrypt: {e}")))?;
+    let ct = publisher_state.encrypt_internal(&body)?;
 
     // 3. HMAC index tokens per field.
     let mut field_hashes: Vec<(String, String)> = Vec::with_capacity(fields.len());
