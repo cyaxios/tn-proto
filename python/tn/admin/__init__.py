@@ -239,16 +239,20 @@ def _rotate_impl(
     revoke_did: str | None = None,
     pool_size: int | None = None,
     cfg: LoadedConfig | None = None,
+    btn_cipher_result: Any | None = None,
 ) -> LoadedConfig:
     """Rotate a group's cipher: regenerate keys + bump index_epoch.
 
     Behavior differs per cipher:
       jwe: regenerates the sender X25519 key + recipient list. Old
            sender/mykey/recipients files renamed `.revoked.<ts>`.
-      btn: regenerates the publisher state + self-kit. Old state/mykit
-           files renamed `.revoked.<ts>` so pre-rotation entries stay
-           readable by holders of the old kit (via the runtime's
-           multi-kit read path).
+      btn: the public `rotate()` verb (above) has already driven the
+           btn cipher's forward-secret rotation via
+           `BtnGroupCipher.rotate()` — new master_seed, new
+           publisher_id, atomic promote on disk. This impl just bumps
+           the yaml's `index_epoch` and emits the truth-telling
+           `tn.rotation.completed` event. `btn_cipher_result` carries
+           the prior/new publisher_id + epoch from the cipher layer.
 
     Index epoch always bumps, so the old index key is invalidated for
     search on future entries under both ciphers.
@@ -272,12 +276,18 @@ def _rotate_impl(
     ts = int(time.time())
 
     # Capture the best-effort SHA-256 of the pre-rotation key material BEFORE
-    # renaming. Per-cipher priority:
-    #   btn  -> <group>.btn.mykit   (reader kit, most stable cross-cipher proxy)
-    #   jwe  -> <group>.jwe.mykey
+    # renaming. For btn the kit is now archived under
+    # `<g>.btn.mykit.retired.<prior_epoch>` (already written by the
+    # BtnGroupCipher.rotate() pipeline); read its sha256 from there.
     _prev_candidates: list[Path] = []
     if cfg.cipher_name == "btn":
-        _prev_candidates = [cfg.keystore / f"{group}.btn.mykit"]
+        if btn_cipher_result is not None:
+            _prev_candidates = [
+                cfg.keystore / f"{group}.btn.mykit.retired.{btn_cipher_result.prior_epoch}",
+                cfg.keystore / f"{group}.btn.mykit",
+            ]
+        else:
+            _prev_candidates = [cfg.keystore / f"{group}.btn.mykit"]
     else:  # jwe
         _prev_candidates = [cfg.keystore / f"{group}.jwe.mykey"]
 
@@ -292,29 +302,41 @@ def _rotate_impl(
             break
 
     if cfg.cipher_name == "btn":
-        # Preserve the old publisher state + self-kit so pre-rotation entries
-        # stay readable by anyone who still holds the old kit (including the
-        # publisher themselves, through the runtime's multi-kit read path).
-        for suffix in ("btn.state", "btn.mykit"):
-            src = cfg.keystore / f"{group}.{suffix}"
-            if src.exists():
-                _rename_revoked(src, ts)
+        # 0.4.3a1: btn rotation's disk side already happened in
+        # BtnGroupCipher.rotate() before we got here. No file
+        # renames needed; the cipher promoted pending → active and
+        # archived prior → retired.<epoch> in one atomic dance.
+        # We just need the yaml-side index_epoch bump (below) and
+        # the admin event emit.
+        pass
     else:  # jwe
         for suffix in ("jwe.sender", "jwe.recipients", "jwe.mykey"):
             src = cfg.keystore / f"{group}.{suffix}"
             if src.exists():
                 _rename_revoked(src, ts)
 
-    new_group = _create_group(
-        cfg.keystore,
-        group,
-        master_index_key=cfg.master_index_key,
-        ceremony_id=cfg.ceremony_id,
-        cipher_name=cfg.cipher_name,
-        pool_size=pool,
-        epoch=old.index_epoch + 1,
-    )
-    cfg.groups[group] = new_group
+    # Bump yaml-side index_epoch (HMAC search-key generation). For btn
+    # this lives ALONGSIDE the cipher's own epoch which already bumped
+    # in BtnGroupCipher.rotate(); they happen to advance in lockstep
+    # but are conceptually distinct counters.
+    if cfg.cipher_name == "btn":
+        new_index_epoch = old.index_epoch + 1
+        # Cipher already rotated; just refresh the index_epoch field
+        # on the existing GroupConfig.
+        from dataclasses import replace as _replace
+        cfg.groups[group] = _replace(old, index_epoch=new_index_epoch)
+    else:
+        new_group = _create_group(
+            cfg.keystore,
+            group,
+            master_index_key=cfg.master_index_key,
+            ceremony_id=cfg.ceremony_id,
+            cipher_name=cfg.cipher_name,
+            pool_size=pool,
+            epoch=old.index_epoch + 1,
+        )
+        cfg.groups[group] = new_group
+        new_index_epoch = new_group.index_epoch
 
     _update_yaml(
         cfg,
@@ -324,7 +346,7 @@ def _rotate_impl(
             pool,
             cfg.device.device_identity,
             revoke_did,
-            new_epoch=new_group.index_epoch,
+            new_epoch=new_index_epoch,
         ),
     )
 
@@ -334,18 +356,33 @@ def _rotate_impl(
         # compat but omit actual values.
         _old_pool: int | None = None
         _new_pool: int | None = None
+        event_fields: dict[str, Any] = {
+            "group": group,
+            "cipher": cfg.cipher_name,
+            "generation": new_index_epoch,
+            "previous_kit_sha256": prev_kit_sha,
+            "old_pool_size": _old_pool,
+            "new_pool_size": _new_pool,
+            "rotated_at": datetime.now(_tz.utc).isoformat(),
+        }
+        # 0.4.3a1 truth-telling fields for btn. JWE rotations don't yet
+        # surface their X25519 sender keypair as a publisher_identity
+        # (separate naming work). For btn we have explicit prior/new
+        # publisher_id values from BtnGroupCipher.rotate().
+        if btn_cipher_result is not None:
+            event_fields["cipher_actually_rotated"] = True
+            event_fields["prior_epoch"] = btn_cipher_result.prior_epoch
+            event_fields["new_epoch"] = btn_cipher_result.new_epoch
+            event_fields["prior_publisher_id_hex"] = (
+                btn_cipher_result.prior_publisher_id.hex()
+            )
+            event_fields["new_publisher_id_hex"] = (
+                btn_cipher_result.new_publisher_id.hex()
+            )
         _lg._require_init().emit(
             "info",
             "tn.rotation.completed",
-            {
-                "group": group,
-                "cipher": cfg.cipher_name,
-                "generation": new_group.index_epoch,
-                "previous_kit_sha256": prev_kit_sha,
-                "old_pool_size": _old_pool,
-                "new_pool_size": _new_pool,
-                "rotated_at": datetime.now(_tz.utc).isoformat(),
-            },
+            event_fields,
         )
 
     _maybe_autosync(cfg)
@@ -1136,27 +1173,13 @@ class RotateGroupResult:
     generation: int | None = None
     updated_cfg: LoadedConfig | None = None
     cipher_actually_rotated: bool = False
-
-
-class LooseRotationWarning(UserWarning):
-    """Raised by `tn.admin.rotate` on btn ceremonies to surface that
-    the cipher's encryption keys are NOT being rotated.
-
-    Today's btn `rotate` is metadata-only: it bumps the yaml's
-    `index_epoch` (the HMAC key for searchable-encryption tokens),
-    refreshes the publisher's self-kit, and emits a
-    `tn.rotation.completed` attestation — but the btn cipher's
-    `master_seed` and derived `publisher_id` are unchanged.
-    Pre-rotation recipient kits continue to decrypt post-rotation
-    ciphertexts byte-for-byte. There is no forward secrecy.
-
-    The real cipher-level rotation lands in 0.4.3. See
-    `docs/superpowers/specs/2026-05-20-btn-cipher-rotation.md` for
-    the design.
-
-    Suppressible via `tn.admin.rotate(..., acknowledge_loose=True)`.
-    The warning is sticky on btn rotate calls until that release.
-    """
+    # 0.4.3a1 truth-telling fields. Populated for btn rotations; jwe
+    # leaves them None for now (its own pubkey rename is a separate
+    # piece of work).
+    prior_publisher_id: bytes | None = None
+    new_publisher_id: bytes | None = None
+    prior_epoch: int | None = None
+    new_epoch: int | None = None
 
 
 def rotate(
@@ -1164,29 +1187,30 @@ def rotate(
     *,
     revoke_did: str | None = None,
     pool_size: int | None = None,
-    acknowledge_loose: bool = False,
     cfg: Any | None = None,
 ) -> RotateGroupResult:
     """Rotate group keys.
 
-    On JWE ceremonies this is a real forward-secret rotation:
-    the cover set is re-wrapped under fresh keys, and old recipient
-    kits no longer decrypt post-rotation entries.
+    Both ciphers run a real forward-secret rotation as of 0.4.3a1:
 
-    On btn ceremonies, **this verb is metadata-only as of 0.4.2a10**.
-    The yaml's `index_epoch` ticks, the publisher's self-kit is
-    refreshed, and a `tn.rotation.completed` attestation is emitted,
-    but the cipher's `master_seed` and `publisher_id` are unchanged.
-    A pre-rotation recipient kit decrypts post-rotation ciphertexts.
-    There is no forward secrecy on btn yet. A `LooseRotationWarning`
-    is raised on every btn rotate call (suppressible via
-    `acknowledge_loose=True`) so callers don't silently rely on
-    forward secrecy that isn't there.
+      - **JWE**: the cover set is re-wrapped under fresh keys; old
+        recipient kits no longer decrypt post-rotation entries.
 
-    Real btn cipher rotation lands in 0.4.3 — see
-    `docs/superpowers/specs/2026-05-20-btn-cipher-rotation.md`.
+      - **btn**: drives `BtnGroupCipher.rotate()` which mints a fresh
+        master_seed, derives a new publisher_id, bumps the cipher
+        epoch, archives the prior state under
+        `<group>.btn.state.retired.<epoch>`, and atomically promotes
+        the new state into place. Pre-rotation recipient kits fail
+        to decrypt post-rotation ciphertexts (publisher_id mismatch).
+        See `docs/superpowers/specs/2026-05-20-btn-cipher-rotation.md`.
 
     `revoke_did` + `pool_size` are JWE-only.
+
+    Removed in 0.4.3a1: the `LooseRotationWarning` and the
+    `acknowledge_loose=True` parameter from 0.4.2a10 — that warning
+    was the stopgap for the metadata-only window before the cipher
+    rotation actually landed. Both gone now; btn rotation is
+    forward-secret.
     """
     if cfg is None:
         from .. import current_config
@@ -1201,38 +1225,28 @@ def rotate(
     if cipher == "btn":
         if revoke_did is not None or pool_size is not None:
             raise ValueError(
-                "tn.admin.rotate: revoke_did and pool_size are JWE-only."
+                "tn.admin.rotate: revoke_did and pool_size are JWE-only. "
+                "For btn, call tn.admin.revoke_recipient(group, "
+                "recipient_did=...) first, then tn.admin.rotate(group)."
             )
-        # 0.4.2a10: surface the metadata-only truth. The architectural
-        # slot for real rotation exists (publisher_id + epoch fields
-        # in every ciphertext) but the operation isn't built. See the
-        # 0.4.3 design doc referenced in LooseRotationWarning.
-        if not acknowledge_loose:
-            import warnings as _warnings
-            _warnings.warn(
-                (
-                    "tn.admin.rotate on btn is metadata-only as of "
-                    "0.4.2a10: the cipher's encryption keys are NOT "
-                    "rotated, and pre-rotation recipient kits will "
-                    "still decrypt post-rotation entries. For forward "
-                    "secrecy on btn, await 0.4.3 (see docs/superpowers/"
-                    "specs/2026-05-20-btn-cipher-rotation.md). To "
-                    "suppress this warning, pass acknowledge_loose=True."
-                ),
-                LooseRotationWarning,
-                stacklevel=2,
-            )
-        # _rotate_impl handles btn internally — no separate runtime rotate.
-        # btn rotations bump index_epoch and rename old state/mykit but
-        # don't expose a "generation" counter at this layer; we report
-        # the new index_epoch as the generation for symmetry.
-        updated = _rotate_impl(group, cfg=cfg)
-        new_epoch = updated.groups[group].index_epoch
+        cipher_result = group_spec.cipher.rotate()
+        # The cipher already drove the disk-side atomic promote dance
+        # and updated its in-memory _state. _rotate_impl now just runs
+        # the yaml-side index_epoch bump + the truth-telling event emit.
+        updated = _rotate_impl(
+            group,
+            cfg=cfg,
+            btn_cipher_result=cipher_result,
+        )
         return RotateGroupResult(
             cipher="btn",
-            generation=new_epoch,
+            generation=cipher_result.new_epoch,
             updated_cfg=None,
-            cipher_actually_rotated=False,
+            cipher_actually_rotated=True,
+            prior_publisher_id=cipher_result.prior_publisher_id,
+            new_publisher_id=cipher_result.new_publisher_id,
+            prior_epoch=cipher_result.prior_epoch,
+            new_epoch=cipher_result.new_epoch,
         )
 
     elif cipher == "jwe":

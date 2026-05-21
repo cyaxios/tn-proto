@@ -89,7 +89,6 @@ def is_keystore_diverged(exc: BaseException) -> bool:
     msg = str(exc)
     return "diverged" in msg
 from .admin import (
-    LooseRotationWarning,
     ensure_group,
     set_link_state,
 )
