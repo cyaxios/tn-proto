@@ -188,6 +188,7 @@ each side is.
 | Ceremony yaml top-level (`me: {did: ...}` → `device: {device_identity: ...}`) | ✓ | ✓ | Phase B. TS landed in batch B0.1. Validator rejects legacy `me:` outright. |
 | Ceremony yaml `groups.<g>.recipients[].did` → `.recipient_identity` | ✓ | ✓ | Folded into TS B0.1; Rust loader strictly requires the new key. |
 | `Entry.fromFlat` / `read_shape.FLAT_ENVELOPE_KEYS` / `Entry.device_identity` (`did` → `device_identity`) | n/a | ✓ | TS landed in batch B0.2: `FLAT_ENVELOPE_KEYS`, `Entry` typed attribute, `Entry.toJSON()`, `Entry.fromFlat`/`fromRaw`, `Entry.[util.inspect.custom]`, stdout `_CRYPTO_KEYS`, otel `ATTR_FIELDS`, `tn-js` CLI read output, and three internal `env["did"]` readers all flipped end-to-end. B0.1's wire-side alias removed. Python keeps `Entry.did` for now — TS is ahead on this row. |
+| Runtime `_ENVELOPE_RESERVED` set (read-side row_hash recompute filter) | ⊝ | ✓ | TS landed in B0.4 (`ts-sdk/src/runtime/node_runtime.ts:81`): `"did"` → `"device_identity"`. Without this, `device_identity` leaks into `publicFields` during row_hash recompute, double-hashes, and every `verify: true` read fails. Python equivalent at `python/tn/reader.py:540, 651` still has `"did"` (see F2 in `_overnight/FINDINGS.md`) — TS is ahead. |
 
 ## CI parity gate
 

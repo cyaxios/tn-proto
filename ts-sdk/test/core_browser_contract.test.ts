@@ -132,7 +132,7 @@ test("rowHash + ZERO_HASH have the expected shapes", () => {
   assert.match(ZERO_HASH(), /^sha256:[0-9a-f]{64}$/);
   // rowHash takes a structured input and returns "sha256:..."
   const h = rowHash({
-    did: asDid("did:key:zNobody"),
+    device_identity: asDid("did:key:zNobody"),
     timestamp: "2026-05-01T00:00:00.000Z",
     eventId: "00000000-0000-0000-0000-000000000000",
     eventType: "test.fixture",

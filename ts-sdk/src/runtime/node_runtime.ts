@@ -78,8 +78,12 @@ import type { ReadEntry } from "../core/read_shape.js";
 export type { ReadEntry };
 
 // Envelope fields that are NOT public fields and NOT group payloads.
+// 0.4.3a1 phase G: wire key flipped from `did` to `device_identity` so the
+// reserved-keys set must follow. Otherwise the read-side row_hash recompute
+// leaks `device_identity` into `publicFields`, double-hashes it, and every
+// verify check fails. Matches python/tn/reader.py:_envelope_reserved post-flip.
 const _ENVELOPE_RESERVED = new Set([
-  "did",
+  "device_identity",
   "timestamp",
   "event_id",
   "event_type",

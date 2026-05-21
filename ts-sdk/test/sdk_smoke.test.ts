@@ -65,7 +65,7 @@ test("rowHash + buildEnvelopeLine round-trip a public-only entry", () => {
   const seed = new Uint8Array(32);
   const dk = DeviceKey.fromSeed(seed);
   const rh = rowHash({
-    did: dk.did,
+    device_identity: dk.did,
     timestamp: "2026-04-23T12:00:00Z",
     eventId: "11111111-2222-3333-4444-555555555555",
     eventType: "order.created",
@@ -77,7 +77,7 @@ test("rowHash + buildEnvelopeLine round-trip a public-only entry", () => {
 
   const sig = dk.sign(new Uint8Array(Buffer.from(rh, "utf8")));
   const line = buildEnvelopeLine({
-    did: dk.did,
+    device_identity: dk.did,
     timestamp: "2026-04-23T12:00:00Z",
     eventId: "11111111-2222-3333-4444-555555555555",
     eventType: "order.created",

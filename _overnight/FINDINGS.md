@@ -57,3 +57,39 @@ Schema per entry:
 - Commit (if any): n/a — work intentionally not committed.
 
 - Worktree posture: The overnight worktree at `C:/codex/tn/tn_proto/.worktrees/ts-parity-overnight/` was created off `feat/0.4.2a11-naming-flip` at HEAD `578ecbb` (last commit "0.4.3a1 cross-SDK fixtures + 2 reducer/well-formed regressions caught"). The dirty WIP stays in the trunk working tree at `C:/codex/tn/tn_proto/`, untouched. Overnight work proceeds against the committed Python source as the parity oracle, which is the correct behavior anyway.
+
+## F2: Python reader's `_envelope_reserved` set is post-flip-incomplete (still has `did`)
+
+- Batch: B0.4 (parity-oracle observation while fixing the TS twin)
+- Files:
+  - `python/tn/reader.py:540-542` — `_envelope_reserved` set inside `parse_envelope_line` still lists `"did"` instead of `"device_identity"`. Line 551 then passes `device_identity=env.get("did", "")` which returns `""` because the wire key is `device_identity` (per `python/tn/logger.py:312`). Net effect: any caller that takes the `verify=True` branch of `parse_envelope_line` computes a wrong row_hash and reports `row_hash: false`. The streaming `_read` path at lines 651-668 is correct (`env["device_identity"]` on line 668) but its `_envelope_reserved` set still has `"did"` (line 652) which means `device_identity` leaks into `public_out` and double-hashes — same bug as the TS side I just fixed.
+- Symptom: not exercised by any current Python test (would surface as `row_hash: false` on any read-with-verify of a writer-produced log). The wire format produces `device_identity` (per logger.py:312), so reading it back recomputes the wrong hash because `device_identity` is added to `public_fields` then hashed both as a primary input and as a public-fields entry.
+- Tried: nothing in this batch — out of scope per the worktree's "ts-sdk writes only" restriction (per `feedback_scope_tn_proto_web` global memory: writes restricted to tn_proto_web; sibling repos read-only — and `python/` lives under the same repo as ts-sdk but the scope-of-this-session was TS).
+- Suspected cause: B0.1 / B0.2 equivalent work in Python (the phase B → phase G `did → device_identity` flip) wasn't completed for reader.py's two reserved-keys sets and `parse_envelope_line`'s row_hash arg lookup.
+- Recommended action: in a follow-on Python-side batch, change `"did"` → `"device_identity"` in both `_envelope_reserved` sets (lines 540, 652) and change `env.get("did", "")` → `env["device_identity"]` on line 551.
+- Commit (if any): n/a — observation only, fix deferred.
+
+## F3: tnpkg fixtures need rebuild after `from_did` → `publisher_identity` manifest-field rename
+
+- Batch: B0.4 (10 remaining failures after yaml-fragment fixes; identified but not addressed)
+- Files (10 tests in 5 files):
+  - `test/tnpkg_interop.test.ts` — "Rust-produced admin_log_snapshot parses in TS" + "manifest canonical bytes match golden across languages"
+  - `test/tnpkg_export_absorb.test.ts` — "export(admin_log_snapshot) → absorb on a fresh peer applies envelopes" + "absorb surfaces leaf reuse when add(L) → revoke(L) → add(L)"
+  - `test/dirt_easy_flow.test.ts` — "dirt-easy: project_seed bootstrap returns a usable Tn"
+  - `test/identity_project_seed.test.ts` — "project_seed real-fixture round-trip via Tn.absorb in a fresh dir"
+  - `test/secure_read_interop.test.ts` — "required byte-compare fixtures present" + "TS local admin_events matches committed fixture" + "Python admin_events byte-compare" + "Rust admin_events byte-compare"
+- Symptom: `Error: manifest missing required keys: ["publisher_identity"]` on read. The TS reader (`ts-sdk/src/core/tnpkg.ts:108`) now strictly requires `publisher_identity`, but the on-disk fixture `test/fixtures/Agentic20.project.tnpkg`'s `manifest.json` still uses the legacy `from_did` key. Same for `python/tests/fixtures/python_admin_snapshot.tnpkg` and `ts-sdk/test/fixtures/ts_admin_snapshot.tnpkg` (latter is missing entirely per the byte-compare test).
+- Tried: nothing — out of scope for the yaml-fragment batch.
+- Suspected cause: the manifest field rename `from_did → publisher_identity` (visible in the TS reader's required-keys list and the Python admin_events fixture builder) landed before the binary fixtures were regenerated. The Python writer at `python/tn/_pkg_impl.py` and Rust tnpkg writer need an audit to confirm they emit `publisher_identity`; then fixtures need rebuilding.
+- Recommended action: a "tnpkg manifest field flip" batch that (a) confirms all three SDK writers emit `publisher_identity` (not `from_did`), (b) regenerates the binary fixtures, (c) updates the byte-compare golden hashes if the canonical signing-bytes changed.
+- Commit (if any): n/a — observation only, fix deferred to a separate batch (likely B0.5 or B1.x).
+
+## F4: Test corpus was bottlenecked on missing `dist/` build artifacts (16 CLI tests)
+
+- Batch: B0.4 (resolved as a side effect, but worth noting for future overnight planners)
+- Files: `test/cli_rotate.test.ts` (8 tests), `test/cli_streams_validate.test.ts` (7 tests), `test/cli_watch.test.ts` (1 test)
+- Symptom: All 16 CLI tests failed with `ERR_MODULE_NOT_FOUND: Cannot find module '.../ts-sdk/dist/index.js' imported from .../ts-sdk/bin/tn-js.mjs`. The CLI binary at `bin/tn-js.mjs` is wired to import from `dist/`, not `src/`.
+- Cause: this worktree was checked out without a `dist/` build, and `npm test` doesn't run `npm run build` as a precondition.
+- Resolution: ran `npm run build` once at the start of B0.4; all 16 CLI tests went green immediately (no source changes required). Subsequent batches in this worktree will inherit the dist/.
+- Recommended action: add `pretest: "npm run build"` to `ts-sdk/package.json` so test runs always have a fresh dist. Out-of-scope for this batch; track as a small follow-on.
+- Commit (if any): n/a — `dist/` is gitignored; the `pretest` hook change is the actionable artifact.
