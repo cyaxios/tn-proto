@@ -53,6 +53,35 @@ _BEARER_PREFIX = "tn_apikey_"
 _HTTP_TIMEOUT_SEC = 15.0
 
 
+def _tn_user_agent() -> str:
+    """Self-identifying User-Agent string for every outbound HTTP call.
+
+    Defaults to ``tn-protocol/<installed-version>`` so Cloudflare's
+    Browser Integrity Check stops 403'ing us with ``error code: 1010``
+    (the default ``Python-urllib/3.x`` UA gets blocked at the CF edge
+    before requests reach the vault application). Falls back to
+    ``tn-protocol/dev`` when the package metadata is unreachable
+    (editable install from a fresh checkout without ``pip install -e``).
+
+    UA is NOT an auth boundary; the real boundary stays at the DID
+    signature on /auth/verify. Self-identifying just stops the edge
+    from rejecting legitimate clients AND gives the vault operational
+    visibility into client versions later.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return f"tn-protocol/{version('tn-protocol')}"
+        except PackageNotFoundError:
+            return "tn-protocol/dev"
+    except Exception:  # noqa: BLE001 - never block startup on UA resolution
+        return "tn-protocol/dev"
+
+
+_DEFAULT_HEADERS = {"User-Agent": _tn_user_agent()}
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
@@ -119,10 +148,17 @@ def _parse_bearer(bearer: str) -> tuple[bytes, str, bytes] | None:
 
 
 def _http_post(url: str, body: bytes, *, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+    # Defaults: Content-Type for the body + a self-identifying UA so the
+    # Cloudflare edge stops 403'ing us with `error code: 1010`. Caller
+    # overrides land last so explicit headers always win.
     req = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json", **(headers or {})},
+        headers={
+            "Content-Type": "application/json",
+            **_DEFAULT_HEADERS,
+            **(headers or {}),
+        },
         method="POST",
     )
     try:
@@ -133,7 +169,11 @@ def _http_post(url: str, body: bytes, *, headers: dict[str, str] | None = None) 
 
 
 def _http_get(url: str, *, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
-    req = urllib.request.Request(url, headers=headers or {}, method="GET")
+    req = urllib.request.Request(
+        url,
+        headers={**_DEFAULT_HEADERS, **(headers or {})},
+        method="GET",
+    )
     try:
         with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_SEC) as resp:
             return resp.status, resp.read()

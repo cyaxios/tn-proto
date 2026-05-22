@@ -38,6 +38,33 @@ DEFAULT_VAULT_URL = "https://vault.tn-proto.org"
 ENV_VAULT_URL = "TN_VAULT_URL"
 
 
+def _tn_user_agent() -> str:
+    """Self-identifying User-Agent for outbound HTTP calls.
+
+    Mirrors ``tn.bootstrap._tn_user_agent`` so the urllib (cold-start
+    bootstrap) and httpx (warm-path VaultClient) request shapes carry
+    the same UA. Both routes need it because Cloudflare's Browser
+    Integrity Check 403s any request whose UA matches the default
+    ``Python-urllib/3.x`` shape with ``error code: 1010``. httpx
+    happens to send ``python-httpx/X.Y.Z`` which avoids the block
+    today, but pinning our own UA gives the vault operational
+    visibility into client versions and decouples us from httpx's UA
+    string changing.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return f"tn-protocol/{version('tn-protocol')}"
+        except PackageNotFoundError:
+            return "tn-protocol/dev"
+    except Exception:  # noqa: BLE001
+        return "tn-protocol/dev"
+
+
+_DEFAULT_HEADERS = {"User-Agent": _tn_user_agent()}
+
+
 def resolve_vault_url(base_url: str | None = None) -> str:
     """Resolve vault URL with the standard precedence:
     explicit arg > TN_VAULT_URL env var > DEFAULT_VAULT_URL (local).
@@ -105,7 +132,9 @@ def redeem_connect_code(
     }
     url = f"{resolve_vault_url(base_url).rstrip('/')}/api/v1/account/connect-codes/redeem"
     owns_client = http_client is None
-    client = http_client or httpx.Client(timeout=DEFAULT_TIMEOUT)
+    client = http_client or httpx.Client(
+        timeout=DEFAULT_TIMEOUT, headers=_DEFAULT_HEADERS
+    )
     try:
         resp = client.post(url, json=payload)
     finally:
@@ -146,7 +175,9 @@ class VaultClient:
     def __post_init__(self):
         self.base_url = self.base_url.rstrip("/")
         if self._http is None:
-            self._http = httpx.Client(timeout=DEFAULT_TIMEOUT)
+            self._http = httpx.Client(
+                timeout=DEFAULT_TIMEOUT, headers=_DEFAULT_HEADERS
+            )
 
     # -- Factory -----------------------------------------------------
 
