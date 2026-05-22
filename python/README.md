@@ -282,6 +282,88 @@ reader by email, watch absorb status, and trigger rotations.
 Everything the dashboard does is backed by the same `.tnpkg` format
 that `tn.export` and `tn.absorb` produce locally.
 
+## Running TN in containers and CI
+
+On your laptop, `tn init` writes an identity to your home directory
+and you're done. In a container or a CI job there's no home
+directory, and you can't bake an identity into the image: anyone
+with the image would have your keys. The way TN gets identity onto
+a fresh container is the **API key bootstrap**. Set it up once per
+project and forget about it.
+
+The mental model: `TN_API_KEY` is a single string you paste into
+your platform's secret store. When your container boots, it trades
+that string with the vault for its keystore, then runs normally.
+
+### 1. Mint an API key
+
+Sign in at `https://vault.tn-proto.org/account`, open the project
+this deploy will write to, click **API keys** → **Generate
+persistent key**, and copy the result. The key looks like:
+
+```
+tn_apikey_<43-char block>_<22-char block>
+```
+
+That single string is everything your container needs. It's
+reusable across deploys; you don't regenerate it per build.
+
+### 2. Hand it to your platform as a secret
+
+Put the key in your platform's secret store. The container reads it
+from the environment variable `TN_API_KEY`:
+
+| Platform                        | Where the secret goes                                |
+|---------------------------------|------------------------------------------------------|
+| Cloudflare Workers / Containers | `wrangler secret put TN_API_KEY`, or Secrets Store   |
+| GitHub Actions                  | Repository or org secret `TN_API_KEY`                |
+| AWS                             | Secrets Manager or SSM Parameter, exposed as env var |
+| GCP                             | Secret Manager, exposed as env var                   |
+| Azure                           | Key Vault, exposed as env var                        |
+| Plain Docker                    | `-e TN_API_KEY=...` (never commit it)                |
+
+### 3. Deploy
+
+Your container boots, sees `TN_API_KEY`, fetches its keystore from
+the vault, and starts serving. First boot has one extra round trip
+to the vault; subsequent restarts reuse the local cache and skip it.
+
+That's the entire setup. No keys in the image, no identity files in
+the repo, no startup script.
+
+### Disk wins over env
+
+If a project keystore already exists at
+`<keystore>/local.private`, TN uses it and ignores `TN_API_KEY`
+entirely. This means:
+
+- On your laptop, after `tn init`, your local keystore takes
+  precedence even if `TN_API_KEY` is set in your shell.
+- In a container with persistent storage (Cloudflare Containers'
+  R2-backed volume, a mounted EBS, etc.), the keystore survives
+  across cold starts; only the very first boot does the bootstrap
+  round trip.
+- To force a re-bootstrap, delete the keystore directory and
+  restart.
+
+The on-disk paths are the same on every OS; the only thing that
+varies is where the per-user identity file lives:
+
+| OS               | Per-user identity file               |
+|------------------|--------------------------------------|
+| macOS / Linux    | `~/.local/share/tn/identity.json`    |
+| Windows          | `%APPDATA%\tn\identity.json`         |
+
+Override with `TN_IDENTITY_DIR` if you want a non-default location.
+The per-project keystore is always under `.tn/<ceremony>/keys/`
+relative to wherever your project lives.
+
+### Rotating the key
+
+Generate a new key in the vault UI, update the secret in your
+platform, redeploy. Running containers keep working until they
+restart; new ones come up with the new key.
+
 ## Groups
 
 A group is a cipher domain. Every event you write lands in one or
