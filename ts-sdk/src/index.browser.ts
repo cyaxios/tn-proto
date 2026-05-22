@@ -43,6 +43,11 @@ export {
 } from "./browser/create_fresh.js";
 
 export {
+  consoleHandler,
+  type ConsoleHandler,
+} from "./browser/console_handler.js";
+
+export {
   localStorageStorageAdapter,
   LocalStorageQuotaError,
   type LocalStorageAdapter,

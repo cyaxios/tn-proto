@@ -14,6 +14,7 @@
 
 import { WasmRuntime } from "tn-wasm";
 import { createFreshCeremony, type CreateFreshOptions } from "./create_fresh.js";
+import { consoleHandler, type ConsoleHandler } from "./console_handler.js";
 import { localStorageStorageAdapter } from "../runtime/storage_localstorage.js";
 import type { JsStorageCallbacks } from "../runtime/storage_node.js";
 
@@ -41,6 +42,18 @@ export interface BrowserRuntimeOptions {
    * almost certainly want to change this too.
    */
   yamlPath?: string;
+  /**
+   * Default-on console handler — every emit also prints to
+   * `globalThis.console` via the level-appropriate method
+   * (`console.debug` / `console.info` / `console.warn` /
+   * `console.error`). Pass `false` to silence the handler; the wasm
+   * runtime still writes the encrypted envelope to storage either way.
+   * Pass a `ConsoleHandler` to swap in a custom sink (useful for tests
+   * and for piping logs to a remote endpoint in production).
+   *
+   * The JS / browser equivalent of Node's `opts.stdout`. Default: true.
+   */
+  console?: boolean | ConsoleHandler;
 }
 
 /**
@@ -55,11 +68,20 @@ export class BrowserRuntime {
   readonly storage: JsStorageCallbacks;
   /** Resolved yaml path the wasm runtime loaded from. */
   readonly yamlPath: string;
+  /** Console handler invoked before each wasm emit. `null` when the
+   *  caller passed `console: false`. */
+  private readonly _console: ConsoleHandler | null;
 
-  private constructor(wasm: WasmRuntime, storage: JsStorageCallbacks, yamlPath: string) {
+  private constructor(
+    wasm: WasmRuntime,
+    storage: JsStorageCallbacks,
+    yamlPath: string,
+    consoleSink: ConsoleHandler | null,
+  ) {
     this._wasm = wasm;
     this.storage = storage;
     this.yamlPath = yamlPath;
+    this._console = consoleSink;
   }
 
   /**
@@ -83,7 +105,22 @@ export class BrowserRuntime {
     // responsibility for the init event) and doesn't apply here — the
     // browser runtime IS the wasm runtime, no lazy attach.
     const wasm = WasmRuntime.initWith(yamlPath, storage, {});
-    return new BrowserRuntime(wasm, storage, yamlPath);
+
+    // Resolve the console sink. `false` disables; `true` (or omitted)
+    // builds the default handler; a `ConsoleHandler` is taken verbatim.
+    // The actual fan-out happens inside each emit method below, where
+    // we still have the plaintext fields the caller passed in (the
+    // wasm-side handler would only see the post-encryption envelope).
+    let consoleSink: ConsoleHandler | null;
+    if (opts.console === false) {
+      consoleSink = null;
+    } else if (opts.console && typeof opts.console === "object") {
+      consoleSink = opts.console;
+    } else {
+      consoleSink = consoleHandler();
+    }
+
+    return new BrowserRuntime(wasm, storage, yamlPath, consoleSink);
   }
 
   /** The publisher DID this runtime emits as. `did:key:z…`. */
@@ -93,26 +130,31 @@ export class BrowserRuntime {
 
   /** Severity-less attested event. See `WasmRuntime.log`. */
   log(eventType: string, fields: Record<string, unknown>): void {
+    this._console?.emit("", eventType, fields);
     this._wasm.log(eventType, fields);
   }
 
   /** DEBUG-level attested event. */
   debug(eventType: string, fields: Record<string, unknown>): void {
+    this._console?.emit("debug", eventType, fields);
     this._wasm.debug(eventType, fields);
   }
 
   /** INFO-level attested event. */
   info(eventType: string, fields: Record<string, unknown>): void {
+    this._console?.emit("info", eventType, fields);
     this._wasm.info(eventType, fields);
   }
 
   /** WARNING-level attested event. */
   warning(eventType: string, fields: Record<string, unknown>): void {
+    this._console?.emit("warning", eventType, fields);
     this._wasm.warning(eventType, fields);
   }
 
   /** ERROR-level attested event. */
   error(eventType: string, fields: Record<string, unknown>): void {
+    this._console?.emit("error", eventType, fields);
     this._wasm.error(eventType, fields);
   }
 
