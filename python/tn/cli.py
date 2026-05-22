@@ -70,7 +70,7 @@ from . import wallet_restore as _wallet_restore
 from . import wallet_restore_loopback as _wallet_restore_loopback
 from . import wallet_restore_passphrase as _wallet_restore_passphrase
 from .identity import Identity, IdentityError, _default_identity_path
-from .vault_client import VaultClient, resolve_vault_url
+from .vault_client import VaultClient, VaultError, resolve_vault_url
 
 # ---------------------------------------------------------------------
 # Helpers
@@ -489,6 +489,75 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
     finally:
         client.close()
         flush_and_close()
+    return 0
+
+
+# ---------------------------------------------------------------------
+# `tn account connect <code>` — bind this device's DID to a vault account
+# ---------------------------------------------------------------------
+
+
+def cmd_account_connect(args: argparse.Namespace) -> int:
+    """Redeem a connect code against the vault and persist the binding.
+
+    The receive-side dashboard mints a single-use ``tn_connect_<random>``
+    code when the operator clicks "Connect a new app or device". The
+    CLI counterpart pastes that code here. We load the device key from
+    ``identity.json``, sign SHA-256 of the code with it, POST
+    ``{code, did, signature_b64}`` to
+    ``/api/v1/account/connect-codes/redeem``, and on success persist the
+    returned ``account_id`` into the ceremony's sync state so subsequent
+    verbs (``tn sync --pull``, ``tn absorb``) know which account this
+    DID belongs to.
+
+    The endpoint is intentionally unauthenticated — the code + signature
+    are the authorization. Once the bind lands the DID is in the
+    account's ``minted_dids[]`` and subsequent DID-challenge auth calls
+    against ``/account/*`` routes work for this DID.
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+    )
+
+    from .sync_state import mark_account_bound
+    from .vault_client import redeem_connect_code
+
+    identity_path = _default_identity_path()
+    identity = _load_identity_or_die(identity_path)
+
+    yaml_path = _resolve_yaml_or_discover(args.yaml)
+
+    sk = Ed25519PrivateKey.from_private_bytes(identity.device_private_key_bytes())
+    base_url = args.vault or identity.linked_vault
+
+    try:
+        resp = redeem_connect_code(args.code, identity.did, sk, base_url=base_url)
+    except VaultError as exc:
+        _die(
+            f"connect-code redeem failed (status={exc.status}): {exc.body or exc}",
+            code=1,
+        )
+
+    account_id = resp.get("account_id")
+    if not isinstance(account_id, str) or not account_id:
+        _die(
+            "vault accepted the redeem but the response did not include "
+            f"an account_id: {resp!r}",
+        )
+
+    # Persist the account binding into the ceremony's sync state so
+    # subsequent CLI verbs (sync --pull, absorb -> /received-kits) can
+    # find the bound account without re-reading the connect-code.
+    mark_account_bound(yaml_path, account_id)
+
+    print(f"Connected to vault account {account_id}")
+    project_id = resp.get("project_id")
+    project_name = resp.get("project_name")
+    if project_id:
+        print(f"  project_id:   {project_id}")
+    if project_name:
+        print(f"  project_name: {project_name}")
+    print(f"  did:          {identity.did}")
     return 0
 
 
@@ -2497,6 +2566,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true", help="Confirm you want to display the phrase on screen."
     )
     p_export.set_defaults(func=cmd_wallet_export_mnemonic)
+
+    # --- tn account -------------------------------------------------
+    # Connect-code redemption: bind THIS device's DID to an existing
+    # OAuth vault account so subsequent /account/* routes accept this
+    # DID's challenge-issued JWT. The CLI counterpart to the dashboard's
+    # "Connect a new app or device" action.
+    p_account = sub.add_parser("account", help="Vault account binding operations.")
+    asub = p_account.add_subparsers(dest="averb", required=True)
+
+    p_connect = asub.add_parser(
+        "connect",
+        help="Redeem a tn_connect_<...> code to bind this device's DID to a vault account.",
+    )
+    p_connect.add_argument(
+        "code",
+        help="The single-use connect code copied from the vault dashboard.",
+    )
+    p_connect.add_argument(
+        "--yaml", default=None,
+        help="Path to your tn.yaml. Default: discover via the standard chain.",
+    )
+    p_connect.add_argument(
+        "--vault", default=None,
+        help="Vault URL. Default: identity.linked_vault, then $TN_VAULT_URL, then the hosted vault.",
+    )
+    p_connect.set_defaults(func=cmd_account_connect)
 
     # --- tn bundle [--yaml=...] <recipient_did> <out> -----------
     p_bundle = sub.add_parser(
