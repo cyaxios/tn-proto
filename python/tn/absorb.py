@@ -987,11 +987,20 @@ def _maybe_post_received_kit(
 
     try:
         client = VaultClient.for_identity(identity, base_url)
-    except Exception:  # noqa: BLE001 — auth or transport failure is non-fatal
+    except Exception as exc:  # noqa: BLE001 — auth/transport non-fatal
+        # Surface the real failure (typed exception + first ~120 chars of
+        # any vault response body) so operators don't have to monkey-patch
+        # this function to debug 4xx/5xx. Local absorb already succeeded
+        # so we stay best-effort.
+        exc_type = type(exc).__name__
+        detail = _short_exc_detail(exc)
         _log.warning(
-            "received-kits POST skipped: vault auth failed (account_id=%s, publisher=%s)",
+            "received-kits POST skipped: vault auth failed "
+            "(account_id=%s, publisher=%s, exc=%s%s)",
             account_id,
             publisher_did,
+            exc_type,
+            f": {detail}" if detail else "",
         )
         return
     try:
@@ -1012,17 +1021,44 @@ def _maybe_post_received_kit(
             publisher_did,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort; local absorb wins
+        # Same diagnostic shape as the auth failure above. If the vault
+        # returned a typed VaultError, status code + body excerpt are
+        # included so a 4xx vs 5xx vs network error is distinguishable.
+        exc_type = type(exc).__name__
+        detail = _short_exc_detail(exc)
         _log.warning(
-            "received-kits POST failed (account_id=%s, publisher=%s): %s",
+            "received-kits POST failed (account_id=%s, publisher=%s, "
+            "exc=%s%s)",
             account_id,
             publisher_did,
-            exc,
+            exc_type,
+            f": {detail}" if detail else "",
         )
     finally:
         try:
             client.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _short_exc_detail(exc: BaseException) -> str:
+    """Format an exception for one-line log inclusion.
+
+    For ``VaultError`` (status + body), returns ``HTTP <status>: <body
+    excerpt>``. For everything else, the first ~120 chars of ``str(exc)``.
+    Returns ``""`` when there's nothing useful to say.
+    """
+    status = getattr(exc, "status", None)
+    body = getattr(exc, "body", None)
+    if isinstance(status, int) and body:
+        snippet = body if len(body) <= 120 else body[:117] + "..."
+        return f"HTTP {status}: {snippet}"
+    if isinstance(status, int):
+        return f"HTTP {status}"
+    msg = str(exc).strip()
+    if not msg:
+        return ""
+    return msg if len(msg) <= 120 else msg[:117] + "..."
 
 
 def _restore_stream_yamls(
