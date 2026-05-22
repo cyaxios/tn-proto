@@ -461,6 +461,14 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
     tn_init(yaml_path, identity=identity)
     cfg = current_config()
 
+    # --pull is independent of the linked-vault push state: receive-side
+    # parity. The DID was bound to a vault account via `tn account
+    # connect`, so we can hit /api/v1/account/inbox over that DID's
+    # challenge-issued JWT and stage every snapshot addressed to any of
+    # the account's owned DIDs (the dashboard does the same aggregation).
+    if getattr(args, "pull", False):
+        return _cmd_wallet_sync_pull(cfg, identity, yaml_path)
+
     if not cfg.is_linked():
         _die(f"ceremony {cfg.ceremony_id} is not linked; run `tn wallet link` first")
 
@@ -490,6 +498,133 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
         client.close()
         flush_and_close()
     return 0
+
+
+def _cmd_wallet_sync_pull(cfg: Any, identity: Identity, yaml_path: Path) -> int:
+    """Drain the vault's account-scoped inbox into the local inbox dir.
+
+    Reuses the dashboard's account aggregator
+    (``GET /api/v1/account/inbox``) so a CLI operator sees the same
+    listing the browser does — every snapshot addressed to any DID in
+    ``accounts.minted_dids[]`` belonging to this account.
+
+    Per the receive-side parity brief: we intentionally do NOT call
+    ``tn.absorb`` here. The handler-resident ``pull_inbox`` does that
+    (it's the scheduled daemon path), but the CLI verb stops at staging
+    so the operator can inspect the file and run ``tn absorb`` as a
+    separate, observable step. This also keeps the verb usable for
+    `tn sync --pull && for f in ...; do tn absorb "$f"; done` shell
+    scripts without re-implementing absorb's manifest checks.
+
+    Each snapshot lands at
+    ``<conventions.inbox_dir(yaml_path)>/<from_did>/<ceremony_id>/<ts>.tnpkg``,
+    mirroring the vault's URL shape so the absorb step is just a file
+    path. Already-staged files are skipped (idempotent).
+    """
+    from . import flush_and_close
+    from .conventions import inbox_dir
+    from .sync_state import get_account_id, is_account_bound
+
+    account_id = get_account_id(yaml_path)
+    if not is_account_bound(yaml_path) or not account_id:
+        flush_and_close()
+        _die(
+            "no account binding for this ceremony. Run "
+            "`tn account connect <code>` first to bind this DID to a "
+            "vault account.",
+            code=2,
+        )
+
+    vault_url = identity.linked_vault or resolve_vault_url(None)
+    client = VaultClient.for_identity(identity, vault_url)
+    staged: list[Path] = []
+    skipped = 0
+    try:
+        listing = _list_account_inbox(client)
+        items = listing.get("items") or []
+        if not items:
+            print(f"Pulled 0 snapshot(s) for account {account_id}.")
+            return 0
+
+        target_root = inbox_dir(yaml_path)
+        for item in items:
+            if item.get("consumed_at"):
+                # Already absorbed by another device / the dashboard;
+                # don't re-stage.
+                continue
+            from_did = item.get("publisher_identity")
+            ceremony_id = item.get("ceremony_id")
+            ts = item.get("ts")
+            if not (
+                isinstance(from_did, str)
+                and isinstance(ceremony_id, str)
+                and isinstance(ts, str)
+            ):
+                continue
+
+            dest_dir = target_root / _safe_path_seg(from_did) / _safe_path_seg(
+                ceremony_id
+            )
+            dest = dest_dir / f"{ts}.tnpkg"
+            if dest.exists():
+                skipped += 1
+                continue
+
+            body = _download_account_inbox_snapshot(
+                client, from_did=from_did, ceremony_id=ceremony_id, ts=ts
+            )
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(body)
+            staged.append(dest)
+
+            kind = item.get("kind") or "?"
+            size = item.get("byte_size") or len(body)
+            print(
+                f"staged {kind} from {from_did[:24]}... "
+                f"({size} bytes) -> {dest}"
+            )
+    finally:
+        client.close()
+        flush_and_close()
+
+    print(
+        f"Pulled {len(staged)} snapshot(s); run `tn absorb <path>` "
+        f"on each to materialize."
+    )
+    if skipped:
+        print(f"  ({skipped} already staged locally and skipped)")
+    return 0
+
+
+def _safe_path_seg(seg: str) -> str:
+    """Path-sanitize a DID / ceremony_id / ts segment.
+
+    DIDs contain ':' which is illegal in Windows path components, and
+    we don't want a malicious server-supplied value to escape the inbox
+    root via '/' or '..'. Replace path-reserved chars with '_' and
+    reject anything that walks above the inbox root.
+    """
+    cleaned = seg.replace(":", "_").replace("/", "_").replace("\\", "_")
+    if cleaned in ("", ".", "..") or cleaned.startswith(".."):
+        raise ValueError(f"unsafe path segment: {seg!r}")
+    return cleaned
+
+
+def _list_account_inbox(client: VaultClient) -> dict:
+    """GET /api/v1/account/inbox using the client's existing bearer."""
+    resp = client._request("GET", "/api/v1/account/inbox")
+    client._raise_for_status(resp)
+    return resp.json()
+
+
+def _download_account_inbox_snapshot(
+    client: VaultClient, *, from_did: str, ceremony_id: str, ts: str
+) -> bytes:
+    """Download the raw .tnpkg body via the account-auth route."""
+    path = f"/api/v1/account/inbox/{from_did}/{ceremony_id}/{ts}.tnpkg"
+    resp = client._request("GET", path)
+    client._raise_for_status(resp)
+    return resp.content
 
 
 # ---------------------------------------------------------------------
@@ -2496,6 +2631,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--drain-queue",
         action="store_true",
         help="Retry any pending autosync failures; clear queue on success.",
+    )
+    p_sync.add_argument(
+        "--pull",
+        action="store_true",
+        help=(
+            "Drain the vault's account inbox into the local inbox dir. "
+            "Requires `tn account connect` to have bound this DID to "
+            "an account. Does not auto-absorb: run `tn absorb <path>` "
+            "on each staged file."
+        ),
     )
     p_sync.set_defaults(func=cmd_wallet_sync)
 
