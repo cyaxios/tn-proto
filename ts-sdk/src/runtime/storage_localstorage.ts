@@ -324,29 +324,32 @@ const _B64_CHARS =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 function _b64Encode(bytes: Uint8Array): string {
+  // Local-binding aliases keep TS's noUncheckedIndexedAccess happy
+  // without `!`-littering every line. The loop bounds guarantee every
+  // index is in range, so the `?? 0` fallback never fires at runtime.
   let out = "";
   let i = 0;
   for (; i + 3 <= bytes.length; i += 3) {
-    const a = bytes[i];
-    const b = bytes[i + 1];
-    const c = bytes[i + 2];
-    out += _B64_CHARS[a >> 2];
-    out += _B64_CHARS[((a & 0x03) << 4) | (b >> 4)];
-    out += _B64_CHARS[((b & 0x0f) << 2) | (c >> 6)];
-    out += _B64_CHARS[c & 0x3f];
+    const a = bytes[i] ?? 0;
+    const b = bytes[i + 1] ?? 0;
+    const c = bytes[i + 2] ?? 0;
+    out += _B64_CHARS.charAt(a >> 2);
+    out += _B64_CHARS.charAt(((a & 0x03) << 4) | (b >> 4));
+    out += _B64_CHARS.charAt(((b & 0x0f) << 2) | (c >> 6));
+    out += _B64_CHARS.charAt(c & 0x3f);
   }
   const rem = bytes.length - i;
   if (rem === 1) {
-    const a = bytes[i];
-    out += _B64_CHARS[a >> 2];
-    out += _B64_CHARS[(a & 0x03) << 4];
+    const a = bytes[i] ?? 0;
+    out += _B64_CHARS.charAt(a >> 2);
+    out += _B64_CHARS.charAt((a & 0x03) << 4);
     out += "==";
   } else if (rem === 2) {
-    const a = bytes[i];
-    const b = bytes[i + 1];
-    out += _B64_CHARS[a >> 2];
-    out += _B64_CHARS[((a & 0x03) << 4) | (b >> 4)];
-    out += _B64_CHARS[(b & 0x0f) << 2];
+    const a = bytes[i] ?? 0;
+    const b = bytes[i + 1] ?? 0;
+    out += _B64_CHARS.charAt(a >> 2);
+    out += _B64_CHARS.charAt(((a & 0x03) << 4) | (b >> 4));
+    out += _B64_CHARS.charAt((b & 0x0f) << 2);
     out += "=";
   }
   return out;
@@ -376,23 +379,27 @@ function _b64Decode(s: string): Uint8Array {
   const out = new Uint8Array(byteLen);
   let oi = 0;
   let i = 0;
+  // _B64_LOOKUP is a 128-slot Int16Array (.charCodeAt for printable ASCII
+  // stays in range); reads always return `number`. The `?? 0` fallbacks
+  // exist purely to satisfy noUncheckedIndexedAccess and never fire at
+  // runtime — input is already trimmed to base64 chars by the caller.
   for (; i + 4 <= usable; i += 4) {
-    const a = _B64_LOOKUP[s.charCodeAt(i)];
-    const b = _B64_LOOKUP[s.charCodeAt(i + 1)];
-    const c = _B64_LOOKUP[s.charCodeAt(i + 2)];
-    const d = _B64_LOOKUP[s.charCodeAt(i + 3)];
+    const a = _B64_LOOKUP[s.charCodeAt(i)] ?? 0;
+    const b = _B64_LOOKUP[s.charCodeAt(i + 1)] ?? 0;
+    const c = _B64_LOOKUP[s.charCodeAt(i + 2)] ?? 0;
+    const d = _B64_LOOKUP[s.charCodeAt(i + 3)] ?? 0;
     out[oi++] = (a << 2) | (b >> 4);
     out[oi++] = ((b & 0x0f) << 4) | (c >> 2);
     out[oi++] = ((c & 0x03) << 6) | d;
   }
   if (tail === 2) {
-    const a = _B64_LOOKUP[s.charCodeAt(i)];
-    const b = _B64_LOOKUP[s.charCodeAt(i + 1)];
+    const a = _B64_LOOKUP[s.charCodeAt(i)] ?? 0;
+    const b = _B64_LOOKUP[s.charCodeAt(i + 1)] ?? 0;
     out[oi++] = (a << 2) | (b >> 4);
   } else if (tail === 3) {
-    const a = _B64_LOOKUP[s.charCodeAt(i)];
-    const b = _B64_LOOKUP[s.charCodeAt(i + 1)];
-    const c = _B64_LOOKUP[s.charCodeAt(i + 2)];
+    const a = _B64_LOOKUP[s.charCodeAt(i)] ?? 0;
+    const b = _B64_LOOKUP[s.charCodeAt(i + 1)] ?? 0;
+    const c = _B64_LOOKUP[s.charCodeAt(i + 2)] ?? 0;
     out[oi++] = (a << 2) | (b >> 4);
     out[oi++] = ((b & 0x0f) << 4) | (c >> 2);
   }

@@ -3,7 +3,8 @@
 // downstream HTML can <script type="module" src="..."> directly.
 //
 // What it contains:
-//   * The @tnproto/sdk/core surface (everything exported from dist/core/).
+//   * The @tnproto/sdk browser surface — `Tn`, `init`, `info`, `read`,
+//     `close`, plus all helpers from dist/index.browser.js.
 //   * @noble/hashes and fflate inlined (resolved from ts-sdk/node_modules).
 //   * tn-wasm aliased to crypto/tn-wasm/pkg-web (fetch/initSync, no node:*).
 //   * The tn_wasm_bg.wasm binary inlined as a Uint8Array via esbuild's
@@ -28,7 +29,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const SDK_ROOT = resolve(HERE, "..");
 const REPO_ROOT = resolve(SDK_ROOT, "..");
 
-const SDK_DIST_CORE = resolve(SDK_ROOT, "dist", "core", "index.js");
+const SDK_DIST_BROWSER = resolve(SDK_ROOT, "dist", "index.browser.js");
 const WASM_WEB_JS   = resolve(REPO_ROOT, "crypto", "tn-wasm", "pkg-web", "tn_wasm.js");
 const WASM_BG       = resolve(REPO_ROOT, "crypto", "tn-wasm", "pkg-web", "tn_wasm_bg.wasm");
 const SDK_NODE_MODULES = resolve(SDK_ROOT, "node_modules");
@@ -37,14 +38,14 @@ const OUT_DIR = resolve(SDK_ROOT, "dist");
 const OUT = resolve(OUT_DIR, "browser.mjs");
 
 for (const [label, p] of [
-  ["SDK dist/core",       SDK_DIST_CORE],
-  ["tn-wasm pkg-web JS",  WASM_WEB_JS],
-  ["tn-wasm .wasm",       WASM_BG],
-  ["SDK node_modules",    SDK_NODE_MODULES],
+  ["SDK dist/index.browser", SDK_DIST_BROWSER],
+  ["tn-wasm pkg-web JS",     WASM_WEB_JS],
+  ["tn-wasm .wasm",          WASM_BG],
+  ["SDK node_modules",       SDK_NODE_MODULES],
 ]) {
   if (!existsSync(p)) {
     console.error(`error: ${label} not found at ${p}`);
-    if (label.includes("dist/core")) {
+    if (label.includes("index.browser")) {
       console.error("hint: run 'npm run build' in ts-sdk/ first.");
     } else if (label.includes("tn-wasm")) {
       console.error(
@@ -60,7 +61,8 @@ for (const [label, p] of [
 //   1. Imports wasm bytes from the .wasm file (esbuild's binary loader
 //      turns this into a Uint8Array constant inlined into the bundle).
 //   2. Calls initSync on the pkg-web glue with those bytes.
-//   3. Re-exports the entire @tnproto/sdk/core surface.
+//   3. Re-exports the entire @tnproto/sdk/browser surface (Tn class,
+//      module-level singleton fns, storage adapters, types).
 //
 // We write the entry to disk because esbuild's stdin plugin can't
 // pick up the same node-modules resolution + plugin pipeline that
@@ -82,8 +84,8 @@ writeFileSync(
     '',
     'initSync({ module: WASM_BYTES });',
     '',
-    '// Re-export every public symbol the browser-safe core entry exposes.',
-    'export * from "@tnproto/sdk-core-entry";',
+    '// Re-export every public symbol the browser entry exposes.',
+    'export * from "@tnproto/sdk-browser-entry";',
     '',
   ].join("\n")
 );
@@ -101,12 +103,12 @@ const tnWasmAlias = {
       path: WASM_BG,
     }));
 
-    // "@tnproto/sdk-core-entry" -> the SDK's dist/core/index.js. We use
-    // a synthetic name (instead of importing dist/core/index.js by
-    // relative path) so the entry file doesn't bake in a path that
+    // "@tnproto/sdk-browser-entry" -> the SDK's dist/index.browser.js.
+    // We use a synthetic name (instead of importing dist/index.browser.js
+    // by relative path) so the entry file doesn't bake in a path that
     // breaks when this script runs from a worktree.
-    b.onResolve({ filter: /^@tnproto\/sdk-core-entry$/ }, () => ({
-      path: SDK_DIST_CORE,
+    b.onResolve({ filter: /^@tnproto\/sdk-browser-entry$/ }, () => ({
+      path: SDK_DIST_BROWSER,
     }));
   },
 };
