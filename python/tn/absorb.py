@@ -870,6 +870,13 @@ def _absorb_kit_bundle(
     # ``<project_root>/<name>/tn.yaml`` verbatim, preserving the
     # packed ``ceremony.id``. See #33.
     _restore_stream_yamls(cfg, body, ts)
+    # Best-effort: tell the vault we materialized this kit so the
+    # dashboard's /projects -> Received tab surfaces it next to the
+    # ones absorbed in-browser. No-op when the ceremony isn't bound
+    # to a vault account (the common offline / pre-`tn account
+    # connect` case). Failures are logged and swallowed — local
+    # materialization already succeeded, the vault row is metadata.
+    _maybe_post_received_kit(cfg, manifest, body)
     return AbsorbReceipt(
         kind=manifest.kind,
         accepted_count=accepted,
@@ -877,6 +884,181 @@ def _absorb_kit_bundle(
         legacy_status="enrolment_applied" if accepted else "no_op",
         replaced_kit_paths=replaced,
     )
+
+
+def _maybe_post_received_kit(
+    cfg: LoadedConfig, manifest: TnpkgManifest, body: dict[str, bytes]
+) -> None:
+    """Best-effort POST to ``/api/v1/account/received-kits`` after a
+    successful ``kit_bundle`` / ``full_keystore`` absorb.
+
+    The dashboard's "Absorb" action does this from the browser; the CLI
+    counterpart calls it here so a CLI-only operator sees the same
+    "Received project" tile on the /projects view that a browser-side
+    absorb produces. Without this hook, ``tn sync --pull && tn absorb``
+    materializes the keystore but leaves the dashboard blank.
+
+    Wire shape (matches routes_received_kits.ReceivedKitCreate exactly):
+
+        {
+            "project_id":        manifest.ceremony_id,
+            "publisher_identity": manifest.publisher_identity,
+            "recipient_identity": cfg.device.device_identity,
+            "label":              <scope or publisher DID prefix>,
+            "kit_blob_b64":       base64 of body/<group>.btn.mykit,
+            "manifest":           full manifest.json dict,
+            "source_ts":          manifest.as_of,
+            "source_ceremony_id": manifest.ceremony_id,
+        }
+
+    Auth: a fresh VaultClient using the DID-challenge JWT for this
+    device's DID. The route accepts that token because ``tn account
+    connect`` $addToSet'd this DID into the account's minted_dids[].
+
+    Skipped silently when:
+      - ``tn account connect`` has not bound this ceremony to a vault
+        account (no account_id in sync state);
+      - the absorbing identity is ephemeral / has no on-disk
+        identity.json (we don't have keys to authenticate with);
+      - the network / vault is unreachable. Local absorb already
+        succeeded; we don't want the absence of an internet to
+        invalidate the keystore install.
+    """
+    import logging
+
+    _log = logging.getLogger("tn.absorb.received_kits")
+    try:
+        from .sync_state import get_account_id, is_account_bound
+    except ImportError:
+        return  # extremely defensive: shouldn't happen in-tree
+
+    try:
+        if not is_account_bound(cfg.yaml_path):
+            return
+        account_id = get_account_id(cfg.yaml_path)
+        if not account_id:
+            return
+    except Exception:  # noqa: BLE001 — best-effort lookup
+        return
+
+    # Pick the kit_blob to ship. The body carries one
+    # body/<group>.btn.mykit per group in the bundle; prefer
+    # ``default.btn.mykit`` (the most common single-group case) and
+    # otherwise pick the first kit-shaped body entry deterministically.
+    kit_blob: bytes | None = None
+    for name in ("body/default.btn.mykit",):
+        if name in body:
+            kit_blob = body[name]
+            break
+    if kit_blob is None:
+        for name in sorted(body.keys()):
+            if name.startswith("body/") and name.endswith(".btn.mykit"):
+                kit_blob = body[name]
+                break
+
+    import base64 as _b64
+
+    kit_blob_b64 = (
+        _b64.b64encode(kit_blob).decode("ascii") if kit_blob is not None else None
+    )
+
+    # Identity load: we need the device key to DID-challenge auth. If
+    # there's no on-disk identity, skip the vault POST entirely (the
+    # operator is using an ephemeral runtime, the dashboard-row hook
+    # doesn't apply).
+    try:
+        from .identity import Identity, _default_identity_path
+
+        identity = Identity.load(_default_identity_path())
+    except Exception:  # noqa: BLE001 — no identity.json = ephemeral runtime
+        return
+
+    try:
+        from .vault_client import VaultClient, resolve_vault_url
+    except ImportError:
+        return
+
+    publisher_did = manifest.publisher_identity
+    recipient_did = cfg.device.device_identity if cfg.device is not None else (
+        manifest.recipient_identity or ""
+    )
+    label = manifest.scope or (publisher_did[:24] if publisher_did else None)
+    base_url = identity.linked_vault or resolve_vault_url(None)
+
+    try:
+        client = VaultClient.for_identity(identity, base_url)
+    except Exception as exc:  # noqa: BLE001 — auth/transport non-fatal
+        # Surface the real failure (typed exception + first ~120 chars of
+        # any vault response body) so operators don't have to monkey-patch
+        # this function to debug 4xx/5xx. Local absorb already succeeded
+        # so we stay best-effort.
+        exc_type = type(exc).__name__
+        detail = _short_exc_detail(exc)
+        _log.warning(
+            "received-kits POST skipped: vault auth failed "
+            "(account_id=%s, publisher=%s, exc=%s%s)",
+            account_id,
+            publisher_did,
+            exc_type,
+            f": {detail}" if detail else "",
+        )
+        return
+    try:
+        client.post_received_kit(
+            project_id=manifest.ceremony_id,
+            publisher_identity=publisher_did,
+            recipient_identity=recipient_did,
+            label=label,
+            kit_blob_b64=kit_blob_b64,
+            manifest=manifest.to_dict(),
+            source_ts=manifest.as_of,
+            source_ceremony_id=manifest.ceremony_id,
+        )
+        _log.info(
+            "received-kits POST ok (account_id=%s, project_id=%s, publisher=%s)",
+            account_id,
+            manifest.ceremony_id,
+            publisher_did,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort; local absorb wins
+        # Same diagnostic shape as the auth failure above. If the vault
+        # returned a typed VaultError, status code + body excerpt are
+        # included so a 4xx vs 5xx vs network error is distinguishable.
+        exc_type = type(exc).__name__
+        detail = _short_exc_detail(exc)
+        _log.warning(
+            "received-kits POST failed (account_id=%s, publisher=%s, "
+            "exc=%s%s)",
+            account_id,
+            publisher_did,
+            exc_type,
+            f": {detail}" if detail else "",
+        )
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _short_exc_detail(exc: BaseException) -> str:
+    """Format an exception for one-line log inclusion.
+
+    For ``VaultError`` (status + body), returns ``HTTP <status>: <body
+    excerpt>``. For everything else, the first ~120 chars of ``str(exc)``.
+    Returns ``""`` when there's nothing useful to say.
+    """
+    status = getattr(exc, "status", None)
+    body = getattr(exc, "body", None)
+    if isinstance(status, int) and body:
+        snippet = body if len(body) <= 120 else body[:117] + "..."
+        return f"HTTP {status}: {snippet}"
+    if isinstance(status, int):
+        return f"HTTP {status}"
+    msg = str(exc).strip()
+    if not msg:
+        return ""
+    return msg if len(msg) <= 120 else msg[:117] + "..."
 
 
 def _restore_stream_yamls(

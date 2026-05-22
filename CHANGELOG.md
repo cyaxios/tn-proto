@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3a2] - 2026-05-22 -- CLI receive-side parity + CF 1010 UA fix
+
+Three CLI/SDK additions to close the dashboard receive-side parity
+gap, plus a small but important fix for non-CF egress clients:
+
+* **tn account connect <code>**: new CLI verb that redeems a
+  one-shot tn_connect_<random> code minted from the vault dashboards
+  Identities tab. Signs sha256(code) with the local Ed25519 device
+  key and POSTs {code, did, signature_b64} to
+  /api/v1/account/connect-codes/redeem. On success the device DID
+  joins the human OAuth accounts minted_dids[], and subsequent
+  vault calls from that DID resolve to the human account_id (via the
+  vault-sides connect-bound-DID-first lookup in deps.py).
+* **tn wallet sync --pull**: drains the vault accounts inbox into a
+  local staging dir. Uses the dashboard-shaped
+  GET /api/v1/account/inbox aggregator so a CLI operator sees the
+  same listing the browser does. Stops at staging; tn absorb is
+  the separate materialization step (observable + scriptable).
+* **tn absorb**: when absorbing a kit_bundle tnpkg and the
+  ceremony is account-bound, also POSTs the manifest + body to
+  /api/v1/account/received-kits so the dashboards /projects
+  Received tab shows the CLI-absorbed kit alongside browser-absorbed
+  ones. Best-effort + non-fatal -- local materialization is the
+  source of truth.
+
+* **CF 1010 fix**: every outbound HTTP call in tn.bootstrap and
+  tn.vault_client now sets User-Agent: tn-protocol/<version>.
+  The default Python-urllib/3.x UA was getting 403d at the CF
+  edge with body error code: 1010 before requests reached the
+  vault application, blocking bootstrap_from_api_key from any
+  non-CF-trusted egress (local dev, CI, AWS / GCP / Azure). Auth
+  boundary stays at the DID signature on /auth/verify; UA is purely
+  for routing past the Browser Integrity Check.
+
+* **tn absorb error visibility**: the best-effort POST to
+  /received-kits now surfaces the real failure (typed exception
+  name + first 120 chars of response body) instead of a generic
+  vault auth failed. Failures still swallow into a WARNING; local
+  absorb still wins.
+
 ## [0.4.3a1] - 2026-05-20 — identity-naming flip + btn rotation hook
 
 Single coordinated cut of the identity-and-key naming spec

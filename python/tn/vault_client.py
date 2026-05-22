@@ -17,6 +17,7 @@ paths the SDK exposes are synchronous. Async callers can wrap.
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,6 +38,33 @@ DEFAULT_VAULT_URL = "https://vault.tn-proto.org"
 ENV_VAULT_URL = "TN_VAULT_URL"
 
 
+def _tn_user_agent() -> str:
+    """Self-identifying User-Agent for outbound HTTP calls.
+
+    Mirrors ``tn.bootstrap._tn_user_agent`` so the urllib (cold-start
+    bootstrap) and httpx (warm-path VaultClient) request shapes carry
+    the same UA. Both routes need it because Cloudflare's Browser
+    Integrity Check 403s any request whose UA matches the default
+    ``Python-urllib/3.x`` shape with ``error code: 1010``. httpx
+    happens to send ``python-httpx/X.Y.Z`` which avoids the block
+    today, but pinning our own UA gives the vault operational
+    visibility into client versions and decouples us from httpx's UA
+    string changing.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return f"tn-protocol/{version('tn-protocol')}"
+        except PackageNotFoundError:
+            return "tn-protocol/dev"
+    except Exception:  # noqa: BLE001
+        return "tn-protocol/dev"
+
+
+_DEFAULT_HEADERS = {"User-Agent": _tn_user_agent()}
+
+
 def resolve_vault_url(base_url: str | None = None) -> str:
     """Resolve vault URL with the standard precedence:
     explicit arg > TN_VAULT_URL env var > DEFAULT_VAULT_URL (local).
@@ -47,6 +75,79 @@ def resolve_vault_url(base_url: str | None = None) -> str:
     if base_url:
         return base_url
     return os.environ.get(ENV_VAULT_URL, DEFAULT_VAULT_URL)
+
+
+def redeem_connect_code(
+    code: str,
+    did: str,
+    sk: Ed25519PrivateKey,
+    *,
+    base_url: str | None = None,
+    http_client: httpx.Client | None = None,
+) -> dict:
+    """Redeem a connect code against the vault to bind ``did`` to an account.
+
+    The connect-code flow is the headless companion to the dashboard's
+    "Connect a new app or device" action. The account owner mints a code
+    in their browser; the operator pastes that code into this CLI; we
+    sign the SHA-256 of the code's UTF-8 bytes with the device key and
+    POST ``{code, did, signature_b64}`` to
+    ``/api/v1/account/connect-codes/redeem``.
+
+    On success the vault $addToSets the DID into ``accounts.minted_dids[]``
+    so subsequent OAuth / DID-challenge sessions on this DID are
+    recognised as belonging to the account.
+
+    Returns the parsed JSON response (``{account_id, did, project_id,
+    project_name, recipient_dids, name, bound_at}``).
+
+    Raises :class:`VaultError` with the server-provided status / body on
+    any non-2xx response: 400 (malformed signature), 401 (signature
+    verification failed), 404 (unknown code), 409 (consumed or DID
+    bound elsewhere), 410 (expired).
+
+    Parameters
+    ----------
+    code
+        The ``tn_connect_<random>`` code copied from the vault UI.
+    did
+        The redeemer's ``did:key:z...`` (Ed25519 only).
+    sk
+        Ed25519 private key matching ``did``. Used to sign the SHA-256
+        of the code's UTF-8 bytes.
+    base_url
+        Optional vault base URL. Falls back to ``resolve_vault_url``
+        (which honors ``TN_VAULT_URL`` env + ``DEFAULT_VAULT_URL``).
+    http_client
+        Optional pre-built ``httpx.Client`` for tests / connection
+        reuse. A throwaway client is built when omitted.
+    """
+    message = hashlib.sha256(code.encode("utf-8")).digest()
+    signature = sk.sign(message)
+    sig_b64 = base64.b64encode(signature).decode("ascii")
+    payload = {
+        "code": code,
+        "did": did,
+        "signature_b64": sig_b64,
+    }
+    url = f"{resolve_vault_url(base_url).rstrip('/')}/api/v1/account/connect-codes/redeem"
+    owns_client = http_client is None
+    client = http_client or httpx.Client(
+        timeout=DEFAULT_TIMEOUT, headers=_DEFAULT_HEADERS
+    )
+    try:
+        resp = client.post(url, json=payload)
+    finally:
+        if owns_client:
+            client.close()
+    if resp.status_code >= 400:
+        body = resp.text[:512] if resp.text else ""
+        raise VaultError(
+            f"POST /api/v1/account/connect-codes/redeem returned {resp.status_code}",
+            status=resp.status_code,
+            body=body,
+        )
+    return resp.json()
 
 
 class VaultError(RuntimeError):
@@ -74,7 +175,9 @@ class VaultClient:
     def __post_init__(self):
         self.base_url = self.base_url.rstrip("/")
         if self._http is None:
-            self._http = httpx.Client(timeout=DEFAULT_TIMEOUT)
+            self._http = httpx.Client(
+                timeout=DEFAULT_TIMEOUT, headers=_DEFAULT_HEADERS
+            )
 
     # -- Factory -----------------------------------------------------
 
@@ -352,6 +455,49 @@ class VaultClient:
     def delete_passkey_seed(self) -> None:
         resp = self._request("DELETE", "/api/v1/account/passkey-seed")
         self._raise_for_status(resp)
+
+    # -- Account binding (connect-code redemption) -----------------
+
+    def post_received_kit(
+        self,
+        *,
+        project_id: str,
+        publisher_identity: str,
+        recipient_identity: str,
+        label: str | None,
+        kit_blob_b64: str | None,
+        manifest: dict | None,
+        source_ts: str | None,
+        source_ceremony_id: str | None,
+    ) -> dict:
+        """Record a kit_bundle absorption against the bound vault account.
+
+        Counterpart to the dashboard's Absorb action. Lets a CLI-side
+        absorb tell the vault "this account holds a reader leaf in
+        <publisher>'s project" so the /projects -> Received tab on the
+        dashboard surfaces it alongside browser-absorbed kits.
+
+        Auth: standard bearer (the DID-challenge JWT this client holds).
+        The route accepts that token because the DID was bound to the
+        account via ``redeem_connect_code``.
+        """
+        body = {
+            "project_id": project_id,
+            "publisher_identity": publisher_identity,
+            "recipient_identity": recipient_identity,
+            "label": label,
+            "kit_blob_b64": kit_blob_b64,
+            "manifest": manifest,
+            "source_ts": source_ts,
+            "source_ceremony_id": source_ceremony_id,
+        }
+        resp = self._request(
+            "POST",
+            "/api/v1/account/received-kits",
+            json_body=body,
+        )
+        self._raise_for_status(resp)
+        return resp.json()
 
     # -- Reset (dev/test) ------------------------------------------
 

@@ -1,0 +1,183 @@
+# TN — The agent transaction protocol
+
+> A library for writing signed, encrypted, append-only log entries
+> per business event. Every action, a TransactioN. Python and
+> TypeScript bindings share a byte-identical wire format.
+
+Install: `pip install tn-protocol`. Source:
+`https://github.com/cyaxios/tn-proto`.
+
+## Mental model
+
+- A **ceremony** is one (publisher, ciphers, recipients) tuple.
+  State lives on disk under `.tn/<ceremony>/`.
+- An **entry** is one signed, encrypted protocol envelope. Every
+  `tn.info` / `tn.log` call writes exactly one envelope.
+- A **stream** is a named ceremony layered on a shared project
+  identity (via `extends:` in tn.yaml). All streams under a project
+  sign with the same DID.
+- A **group** is a cipher domain inside a ceremony. Each event
+  routes into one or more groups based on yaml field rules. Each
+  group has its own readers.
+- A **kit** is one reader's per-group key material. The publisher
+  mints kits; readers absorb them.
+- A **`.tnpkg`** is a signed zip wrapper for moving state between
+  participants: bundles, snapshots, invites, identity seeds.
+
+## The five verbs
+
+- `tn.init(name=None, *, profile="transaction", ...)` — resolve or
+  create a ceremony and bind the runtime. `tn.init()` with no args
+  resolves `default`.
+- `tn.info / tn.warning / tn.error / tn.debug` — write one signed
+  encrypted envelope at that level. Threshold-aware: silenced when
+  below `tn.set_level`.
+- `tn.log(event_type, *, level="", **fields)` — severity-less write
+  (default `level=""`). Ignores threshold. Use this for custom
+  levels (`"trace"`, `"audit"`) or events that must survive the
+  filter. Not an alias for `tn.info`.
+- `tn.read(...)` — iterate decoded entries from disk. Default
+  `all_runs=True` (every entry on disk).
+- `tn.watch(...)` — tail the log live (async iterator).
+
+`tn.absorb(path)` and `tn.export(path, kind=...)` move `.tnpkg`
+bundles in and out. `tn.bundle_for_recipient(did, path)` mints a
+kit and bundles it in one step.
+
+## Where state lives
+
+- **Per-user identity** (device DID + signing key, one per human or
+  machine): `~/.local/share/tn/identity.json` on POSIX,
+  `%APPDATA%\tn\identity.json` on Windows. Override with
+  `TN_IDENTITY_DIR`.
+- **Per-project ceremony state**: `<project>/.tn/<ceremony>/`,
+  containing `tn.yaml`, `keys/`, `logs/`, `admin/`, optional
+  `vault/` cache.
+- **Vault state** (when linked): cached locally under the ceremony
+  dir, plus the remote vault project at
+  `https://vault.tn-proto.org` or a self-hosted instance.
+
+## Vault: linked by default, network-quiet by default
+
+Fresh ceremonies are minted `mode: linked` against
+`https://vault.tn-proto.org`. Nothing reaches the network until an
+explicit vault verb fires (`tn wallet link`, `tn wallet restore`,
+etc.). To opt out at init: `tn.init(link=False)` or env var
+`TN_NO_LINK=1`. For fully air-gapped, set `ceremony.mode: local`
+in `tn.yaml`.
+
+Vault auth is DID challenge / verify: the client signs a server
+nonce with its Ed25519 device key; the vault returns a JWT.
+Implementation: `python/tn/vault_client.py:164` and
+`python/tn/bootstrap.py:144`.
+
+## Container and CI bootstrap
+
+A container has no home directory and no on-disk keystore.
+Cold-start uses the `TN_API_KEY` environment variable:
+
+1. Mint a persistent key at
+   `https://vault.tn-proto.org/account` (Projects → API keys →
+   Generate persistent key). Format:
+   `tn_apikey_<43-char>_<22-char>`.
+2. Plant the bearer in the platform's secret store as env var
+   `TN_API_KEY`. Cloudflare Secrets Store, GitHub Actions secrets,
+   AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, plain
+   Docker `-e` — all work the same way at the consumer.
+3. Deploy. On first boot, `tn.bootstrap.bootstrap_from_api_key`
+   exchanges the bearer for the sealed keystore via the vault's
+   `/api/v1/api-keys/{key_id}/sealed-bundle` endpoint and writes it
+   to disk. Subsequent boots reuse the on-disk cache.
+
+**Precedence: disk wins over env.** If
+`<keystore>/local.private` already exists, TN ignores `TN_API_KEY`
+and uses the on-disk keystore. To force re-bootstrap, delete the
+keystore directory.
+
+Implementation: `python/tn/handlers/registry.py:454` for the gate,
+`python/tn/bootstrap.py` for the full flow.
+
+## Cipher modes
+
+- `btn` — NNL subset-difference broadcast tree. Sub-millisecond
+  encrypt for thousands of readers; selective revocation without
+  rekeying survivors. The default.
+- `jwe` — per-recipient envelope. One ciphertext per reader.
+  Simpler; doesn't scale to thousands.
+
+Both modes speak the same on-disk wire format. Choose per-group in
+`tn.yaml`. Encryption is always on; the protocol floor.
+
+## Profiles
+
+`tn.init(profile=...)` picks a curated bundle:
+
+| profile     | encrypts | signs | chains | flush    | default sink   |
+|-------------|----------|-------|--------|----------|----------------|
+| transaction | yes      | yes   | yes    | fsync    | file_rotating  |
+| audit       | yes      | yes   | yes    | buffered | file_rotating  |
+| secure_log  | yes      | yes   | no     | buffered | file_rotating  |
+| telemetry   | yes      | no    | no     | async    | stdout         |
+| stdout      | yes      | no    | no     | async    | stdout         |
+
+Profiles are SDK-fixed, not user-composable. Pick the closest
+match and override individual axes in `tn.yaml` only when needed.
+
+## `.tnpkg` shipping format
+
+Universal signed-zip wrapper for moving TN state between machines.
+Manifest is Ed25519-signed by `publisher_identity`. Kinds in v1:
+
+- `admin_log_snapshot` — chain catch-up
+- `offer` / `enrolment` / `recipient_invite` — JWE bootstrap
+- `kit_bundle` — one reader's key material
+- `full_keystore` — entire keystore including secrets; opt-in
+- `identity_seed` — minimal "this is who I am" bundle, self-signed
+- `contact_update` — vault-emitted inbox event
+
+Verbs: `tn.export(path, kind=...)`, `tn.absorb(path)`,
+`tn.bundle_for_recipient(did, path)`.
+
+## CLI
+
+- `tn init [./project]` — provision identity + ceremony
+- `tn add_recipient <group> <name>` — mint a kit, wrap as `.tnpkg`
+- `tn rotate` — rotate group keys; emit per-recipient `.tnpkg`
+- `tn absorb <pkg>` — install someone's bundle
+- `tn read [--all-runs]` — decoded entries to stdout
+- `tn wallet status|link|restore` — vault operations
+- `tn validate` — validate the project's config tree
+- `tn streams` — list ceremonies under `.tn/`
+
+Non-interactive by default; safe in CI and containers. A TTY
+enables prompts where useful.
+
+## Cross-language parity
+
+| binding         | install                    | use case                       |
+|-----------------|----------------------------|--------------------------------|
+| Python          | `pip install tn-protocol`  | reference, CLI, services       |
+| TypeScript/Node | `@tn/sdk` (npm)            | Node services, build tools     |
+| Browser (WASM)  | bundled via `tn-proto-web` | in-browser verify and decrypt  |
+
+Every binding reads byte-identical envelopes. Cross-language parity
+is enforced by CI on every PR.
+
+## Key paths into the source
+
+- `python/tn/__init__.py` — public surface
+- `python/tn/identity.py` — per-user identity, BIP-39, HKDF chain
+- `python/tn/_layout.py` — on-disk layout rules for `.tn/<name>/`
+- `python/tn/bootstrap.py` — `TN_API_KEY` cold-start
+- `python/tn/vault_client.py` — vault HTTP client (DID auth, sync,
+  restore)
+- `python/tn/wallet.py` — link, sync, restore ceremonies
+- `python/tn/tnpkg.py` — manifest schema, signed-zip wire format
+- `python/tn/btn_keystore.py` — on-disk btn rotation layout
+- `python/tn/_keystore_backend.py` — atomic write + CAS + lock
+- `docs/directory-layout.md` — full layout contract
+- `docs/sdk-parity.md` — cross-language wire-format contract
+
+## License
+
+Apache-2.0.
