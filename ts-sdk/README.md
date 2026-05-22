@@ -23,15 +23,109 @@ verb shape — is documented in
 Read that before changing anything in this SDK that touches disk
 paths or the `Tn.init` surface.
 
-## Install
+## Consuming this SDK
+
+Node ≥ 20. The package ships a Node entry plus a browser-safe
+`@tnproto/sdk/core` subpath for use in MV3 extensions and other
+no-fs environments.
+
+**`@tnproto/sdk` is not yet on the npm registry.** Until it is, downstream
+projects pull it in one of two ways. Pick the one that matches your
+project's deployment model.
+
+### Mode A — sibling-source + custom bundle (browser dashboards)
+
+The proto-vault dashboard (`tn-proto-org/tn_proto_web`) works this way.
+You don't `npm install` anything; you check out `tn_proto` as a sibling
+directory and bundle the SDK's browser-safe core entry into a single
+self-contained ESM file that's checked into your repo.
+
+```text
+your-org/
+  tn_proto/                 <- this repo, sibling
+  your-project/             <- consumer
+    scripts/build_sdk_bundle.mjs
+    static/vendor/tnproto-sdk-core.mjs    <- esbuild output, committed
+```
+
+The proto-vault script that does this lives at
+[`tn_proto_web/scripts/build_sdk_bundle.mjs`](https://github.com/cyaxios/tn-proto-org/blob/main/scripts/build_sdk_bundle.mjs)
+— copy it as a template. The build inlines `@noble/hashes` and `fflate`
+(the SDK's runtime deps), aliases `tn-wasm` to the browser-targeted
+`pkg-web` build, and outputs a no-`node:*`-imports ESM you can ship to a
+browser without a bundler step at consumer-install time. Rebuild after
+any change to the SDK; that's a manual step today, intentional —
+you decide when to pick up SDK changes.
+
+### Mode B — local tarball (servers, CLIs, witness-style consumers)
+
+Every tagged release of `tn-proto` produces a packed `.tgz` via the
+[`release-typescript.yml`](../.github/workflows/release-typescript.yml)
+workflow. The tarball is uploaded as a workflow artifact (90-day
+retention) so any consumer can pull it down and `npm install` it
+without a registry.
+
+Grab the tarball:
+
+```bash
+# From the most recent tag run:
+gh run download \
+  --repo cyaxios/tn-proto \
+  --name tnproto-sdk-tarball \
+  --dir ./vendor
+# -> ./vendor/tnproto-sdk-0.4.3-alpha.2.tgz
+```
+
+Reference it from your consumer's `package.json`:
+
+```json
+{
+  "dependencies": {
+    "@tnproto/sdk": "file:./vendor/tnproto-sdk-0.4.3-alpha.2.tgz"
+  }
+}
+```
+
+`npm install` resolves `file:` URLs by copying the tarball contents into
+`node_modules/@tnproto/sdk/`, exactly as if it had been pulled from the
+registry. Pin the version in the filename so a stale tarball can't
+silently downgrade you.
+
+For local development (no tag yet), produce the same tarball from your
+checkout:
+
+```bash
+cd tn_proto/ts-sdk
+npm run build
+npm pack          # writes tnproto-sdk-<version>.tgz to ts-sdk/
+```
+
+Then point your consumer at `file:../tn_proto/ts-sdk/tnproto-sdk-<version>.tgz`.
+
+### Mode C — npm registry (future)
+
+When `@tnproto/sdk` is published the install becomes:
 
 ```bash
 npm install @tnproto/sdk
 ```
 
-Node ≥ 20 required. The package ships a Node entry plus a browser-safe
-`@tnproto/sdk/core` subpath for use in MV3 extensions and other
-no-fs environments.
+That path is gated on adding an `NPM_TOKEN` secret and a
+`PUBLISH_TO_NPM=true` repo variable to `tn-proto`. The workflow already
+publishes under the `alpha` dist-tag, so consumers using the bare name
+keep resolving to the most recent stable once one ships; alpha consumers
+opt in with `npm install @tnproto/sdk@alpha`. See the header of
+[`release-typescript.yml`](../.github/workflows/release-typescript.yml)
+for the enable steps.
+
+### Quick reference for the current TN repos
+
+| Repo                            | Mode | Where the SDK lands |
+|---------------------------------|------|--------------------------------------------------|
+| `tn-proto-org/tn_proto_web`     | A    | `static/dashboard/vendor/tnproto-sdk-core.mjs`   |
+| `cyaxios/witness` (future)      | B    | `./vendor/tnproto-sdk-<version>.tgz` via `gh run download` |
+| anything else needing browser   | A    | use the proto-vault template script              |
+| anything else needing Node-side | B    | tarball + `file:` reference                      |
 
 ## Quickstart
 
