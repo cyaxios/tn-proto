@@ -1,6 +1,6 @@
 {
   "name": "@tnproto/sdk",
-  "version": "0.4.2-alpha.6",
+  "version": "0.4.3-alpha.2",
   "description": "TN protocol SDK for TypeScript — attested logging with broadcast encryption. Wraps tn-wasm (Rust) with idiomatic types.",
   "type": "module",
   "engines": {

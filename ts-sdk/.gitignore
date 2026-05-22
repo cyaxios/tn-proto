@@ -1,3 +1,5 @@
 node_modules/
 dist/
 *.tsbuildinfo
+# npm pack output — release-typescript.yml builds + uploads this as an artifact.
+*.tgz

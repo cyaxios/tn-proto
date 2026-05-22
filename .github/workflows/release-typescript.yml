@@ -1,17 +1,29 @@
 name: release-typescript
 
-# Publish @tnproto/sdk to npm on tag push (mirrors release-python.yml's
-# trigger). The tag drives the version: the workflow asserts
-# package.json's version matches the tag's "v..." prefix-stripped form
-# so a tag of v0.4.1a2 expects package.json version "0.4.1-alpha.2"
-# (npm-semver translation of Python-style alpha tags).
+# On tag push (mirroring release-python.yml), build @tnproto/sdk, run
+# typecheck + bundle, and produce a real `.tgz` tarball attached as a
+# workflow artifact. The tarball name matches package.json's version,
+# so for tag v0.4.3a2 the artifact is tnproto-sdk-0.4.3-alpha.2.tgz.
 #
-# Required repo secret:
-#   NPM_TOKEN  — npm automation token. Generate at
-#                https://www.npmjs.com/settings/<user>/tokens (type:
-#                Automation; scope: read-and-write to @tnproto).
+# NPM PUBLISHING IS GATED OFF BY DEFAULT.
 #
-# Manual trigger: workflow_dispatch lets you dry-run without tagging.
+# The npm publish step only runs when the `NPM_TOKEN` secret AND the
+# `PUBLISH_TO_NPM` repo variable are both set. Without either, the
+# workflow logs a notice and exits 0 — so a missing secret never
+# fails the release pipeline. The packed tarball is always uploaded
+# as an artifact for local install (`npm install ./*.tgz`).
+#
+# When you're ready to publish to npm:
+#   1. Generate an automation token at
+#      https://www.npmjs.com/settings/<user>/tokens
+#      (type: Automation; scope: read-and-write on @tnproto).
+#   2. Add `NPM_TOKEN` as a repo secret:
+#      https://github.com/cyaxios/tn-proto/settings/secrets/actions
+#   3. Add `PUBLISH_TO_NPM = true` as a repo *variable* (not a secret):
+#      https://github.com/cyaxios/tn-proto/settings/variables/actions
+#   4. Push the next tag. The workflow will publish under the `alpha`
+#      dist-tag (so default `npm install @tnproto/sdk` keeps resolving
+#      to the most recent stable, not whatever alpha just shipped).
 
 on:
   push:
@@ -19,17 +31,17 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "skip npm publish (build + pack only)"
+      publish:
+        description: "attempt npm publish (requires NPM_TOKEN + PUBLISH_TO_NPM var)"
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   publish:
-    name: build + publish @tnproto/sdk
+    name: build + pack @tnproto/sdk
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,21 +69,46 @@ jobs:
       - name: Build
         working-directory: ts-sdk
         run: npm run build
-      - name: Pack (smoke test the tarball)
+      - name: Pack tarball
         working-directory: ts-sdk
-        run: npm pack --dry-run
-      - name: Publish to npm
-        if: github.event_name == 'push' || inputs.dry_run == false
+        run: |
+          npm pack
+          ls -la *.tgz
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tnproto-sdk-tarball
+          path: ts-sdk/tnproto-sdk-*.tgz
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish to npm (gated)
+        # Push events: rely on PUBLISH_TO_NPM repo variable.
+        # workflow_dispatch: rely on the `publish` input.
+        if: |
+          (github.event_name == 'push' && vars.PUBLISH_TO_NPM == 'true')
+          || (github.event_name == 'workflow_dispatch' && inputs.publish)
         working-directory: ts-sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -z "${NODE_AUTH_TOKEN}" ]; then
-            echo "::error::NPM_TOKEN secret is not set. Add it at" \
-              "https://github.com/${{ github.repository }}/settings/secrets/actions" \
-              "(scope: read-and-write on @tnproto)."
-            exit 1
+            echo "::notice::NPM_TOKEN not set; skipping npm publish."
+            echo "The packed tarball is uploaded as the 'tnproto-sdk-tarball' workflow artifact."
+            echo "To enable automatic publishing, add NPM_TOKEN as a repo secret and"
+            echo "set the PUBLISH_TO_NPM repo variable to 'true'."
+            exit 0
           fi
-          # --provenance attaches a transparency record (npm 9.5+); --access public
-          # is required for scoped packages on a free npm account.
-          npm publish --access public --provenance
+          # --provenance attaches a transparency record (npm 9.5+);
+          # --access public is required for scoped packages on a free npm account;
+          # --tag alpha publishes under the alpha dist-tag so consumers using the
+          # bare name (`npm i @tnproto/sdk`) keep resolving to the latest stable,
+          # not to whichever prerelease shipped most recently.
+          npm publish --access public --provenance --tag alpha
+      - name: Publish gate notice (default path)
+        if: |
+          (github.event_name == 'push' && vars.PUBLISH_TO_NPM != 'true')
+          || (github.event_name == 'workflow_dispatch' && !inputs.publish)
+        run: |
+          echo "::notice::npm publish is gated off."
+          echo "The packed tarball is available as the 'tnproto-sdk-tarball' artifact."
+          echo "Install it locally with:  npm install ./tnproto-sdk-*.tgz"
