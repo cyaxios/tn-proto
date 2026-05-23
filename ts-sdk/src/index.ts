@@ -122,7 +122,27 @@ export {
 } from "./admin/log.js";
 export { loadConfig } from "./runtime/config.js";
 export { loadKeystore } from "./runtime/keystore.js";
-export { absorbBootstrap, isBootstrapKind } from "./runtime/absorb_bootstrap.js";
+export {
+  absorbBootstrap,
+  absorbSealedBootstrap,
+  isBootstrapKind,
+} from "./runtime/absorb_bootstrap.js";
+export {
+  encryptBodyBlob,
+  decryptBodyBlob,
+  BODY_CIPHER_SUITE,
+  BODY_FRAME,
+} from "./core/body_encryption.js";
+export {
+  buildRecipientWraps,
+  manifestAadForWrap,
+  sealBekForRecipient,
+  unsealBekFromWrap,
+  UnsealError,
+  WRAP_FRAME,
+  type RecipientWrap,
+} from "./core/recipient_seal.js";
+export { fromWireDict, toWireDict } from "./core/tnpkg.js";
 export {
   DEFAULT_VAULT_URL,
   ENV_VAULT_URL,

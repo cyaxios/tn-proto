@@ -218,22 +218,28 @@ process.env.TN_API_KEY = "not_a_bearer";
     return new Response("", { status: 404 });
   };
 
-  try {
-    await bootstrapFromApiKey({ vaultDid: "did:key:z6MkfakeBootstrap" });
-    assert(false, "expected UnsealNotWiredError, got nothing");
-  } catch (err) {
-    assert(err instanceof UnsealNotWiredError,
-      `throws UnsealNotWiredError (got ${err?.constructor?.name})`);
-    if (err instanceof UnsealNotWiredError) {
-      assert(err.result.did.startsWith("did:key:z"),
-        `result.did is a did:key (${err.result.did.slice(0, 24)}...)`);
-      assert(err.result.vaultBase === "http://fake.vault.invalid",
-        `result.vaultBase respects TN_VAULT_DEFAULT_BASE`);
-      assert(err.result.sealedBytes.length > 0,
-        `result.sealedBytes carries the fetched bundle (${err.result.sealedBytes.length}B)`);
-      assert(err.result.kind === "project_seed",
-        `result.kind matches server response`);
-    }
+  // The fake sealed bundle isn't a real tnpkg — the absorb step will
+  // reject it with a "not a valid `.tnpkg` zip" reason, but only AFTER
+  // every env-var-honoring network call has fired. That's what we're
+  // proving here: the env vars (TN_API_KEY, TN_VAULT_DEFAULT_BASE)
+  // drove a complete /auth/challenge -> /auth/verify -> /sealed-bundle
+  // round-trip with the right Bearer + URL.
+  const result = await bootstrapFromApiKey({ vaultDid: "did:key:z6MkfakeBootstrap" });
+  assert(result !== null,
+    "bootstrapFromApiKey returned a result (not null fallthrough)");
+  if (result !== null) {
+    assert(result.did.startsWith("did:key:z"),
+      `result.did is a did:key (${result.did.slice(0, 24)}...)`);
+    assert(result.vaultBase === "http://fake.vault.invalid",
+      `result.vaultBase respects TN_VAULT_DEFAULT_BASE`);
+    assert(result.sealedBytes.length > 0,
+      `result.sealedBytes carries the fetched bundle (${result.sealedBytes.length}B)`);
+    assert(result.kind === "project_seed",
+      `result.kind matches server response`);
+    assert(result.receipt !== undefined,
+      `result.receipt is populated (shape verified by _sealed_absorb_smoke.mjs)`);
+    assert(typeof result.receipt.rejectedReason === "string",
+      `result.receipt.rejectedReason populated (fake sealed bundle is not a real tnpkg, so absorb rejects — expected)`);
   }
   assert(captured.length === 3,
     `fired 3 network calls (got ${captured.length}: ${captured.map(c => c.method + " " + c.url.replace("http://fake.vault.invalid", "")).join(", ")})`);

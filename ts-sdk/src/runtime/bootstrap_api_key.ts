@@ -44,6 +44,8 @@ import { Buffer } from "node:buffer";
 import { DeviceKey } from "../core/signing.js";
 import { resolveDidEndpoint } from "../vault/url.js";
 import { signatureB64 } from "../raw.js";
+import { absorbSealedBootstrap } from "./absorb_bootstrap.js";
+import type { AbsorbReceipt } from "../core/results.js";
 
 const _BEARER_PREFIX = "tn_apikey_";
 const _HTTP_TIMEOUT_MS = 15_000;
@@ -254,11 +256,10 @@ export async function challengeVerify(
 }
 
 /**
- * Result of the network-only portion of the api-key flow. `sealedBytes`
- * is the recipient-wrapped tnpkg the server delivered; turning it into
- * an installed keystore is the unseal+absorb step that hasn't been
- * wired up yet (see {@link UnsealNotWiredError} below and the doc at
- * the bottom of this file).
+ * Result of the full api-key flow: every step from `parseBearer`
+ * through the on-disk install. `receipt` is the same shape any other
+ * `Tn.absorb` returns — accepted/deduped counts, conflicts, rejection
+ * reason (if any).
  */
 export interface ApiKeyFetchResult {
   did: string;
@@ -266,50 +267,58 @@ export interface ApiKeyFetchResult {
   token: string;
   sealedBytes: Uint8Array;
   /** Optional `kind` field the server reports alongside the bundle
-   *  (e.g. "project_seed"). Pure diagnostic; informational only. */
+   *  (e.g. "project_seed"). Diagnostic. */
   kind?: string;
+  /** The on-disk install receipt. `rejectedReason` populated only on
+   *  failure — caller can `if (!result.receipt.rejectedReason)` to gate
+   *  follow-on actions like sync-state stamping. */
+  receipt: AbsorbReceipt;
 }
 
 /**
- * Surface this when the network half of the bootstrap succeeded but the
- * unseal+install bridge in TS isn't yet ported. Caller (handler-builder)
- * should log + fall through to the existing INIT-UPLOAD path so users
- * aren't left with a half-bootstrapped node.
+ * Thrown when the unseal+install bridge isn't available — i.e. the
+ * caller is on an older TS SDK that hasn't been rebuilt against the
+ * sealed-bundle absorb path. Today's `bootstrapFromApiKey` always
+ * completes the install in-process, so this is unreachable on this
+ * branch; kept exported for type compatibility with the previous shape.
+ *
+ * @deprecated Reachable on older branches only; this branch lands the
+ * unseal+install integration so the success path returns an
+ * `ApiKeyFetchResult` directly.
  */
 export class UnsealNotWiredError extends Error {
-  readonly result: ApiKeyFetchResult;
-  constructor(result: ApiKeyFetchResult) {
-    super(
-      `bootstrap: fetched ${result.sealedBytes.length}-byte sealed bundle from ` +
-        `${result.vaultBase} but TS hasn't yet wired the recipient-wrap unseal ` +
-        `step in absorbBootstrap. See the doc-comment at the bottom of ` +
-        `runtime/bootstrap_api_key.ts for the integration sketch (core/` +
-        `recipient_seal.ts has the primitives — unsealBekFromWrap + ` +
-        `manifestAadForWrap). Falling through to INIT-UPLOAD path until ` +
-        `that bridge lands.`,
-    );
+  readonly result: ApiKeyFetchResult | { sealedBytes: Uint8Array; vaultBase: string; did: string };
+  constructor(result: ApiKeyFetchResult | { sealedBytes: Uint8Array; vaultBase: string; did: string }) {
+    super(`UnsealNotWiredError (deprecated): unseal+install is now wired in absorbSealedBootstrap.`);
     this.name = "UnsealNotWiredError";
     this.result = result;
   }
 }
 
 /**
- * Read $TN_API_KEY from env (if set), run the network flow, return the
- * fetched-but-not-yet-absorbed result OR `null` when there's no env
- * var / parse failure / network failure.
+ * Read $TN_API_KEY from env (if set), run the full cold-start: parse
+ * bearer, derive DID, /auth/challenge + /auth/verify, GET sealed
+ * bundle, unseal it with the bearer's seed, decrypt the body, install
+ * the keystore + yaml at `opts.cwd`. Returns the merged
+ * {@link ApiKeyFetchResult} on success, or `null` when there's no env
+ * var / parse failure / network failure / vault rejection.
  *
  * Never throws on user / network / vault-rejection failures — these
- * surface as `null` so the caller can fall through to other paths.
- * THROWS exactly one kind: {@link UnsealNotWiredError} on the success-
- * path-with-pending-unseal case (so the caller can `instanceof`-route).
+ * surface as `null` so the caller can fall through to the existing
+ * INIT-UPLOAD path.
  *
  * `vaultDid` is the DID of the vault as written in the yaml (typically
  * `did:key:z...` or `did:web:host`). It's resolved to an HTTP base via
- * `resolveDidEndpoint`.
+ * `resolveDidEndpoint`. `cwd` is the install root for the project_seed
+ * absorb (yaml + keystore land under it); defaults to `process.cwd()`.
+ *
+ * Matches the contract of python/tn/bootstrap.py::bootstrap_from_api_key
+ * (returns success / fall-through; never raises).
  */
 export async function bootstrapFromApiKey(opts: {
   vaultDid: string;
   apiKey?: string | undefined;
+  cwd?: string;
 }): Promise<ApiKeyFetchResult | null> {
   const apiKey = opts.apiKey ?? process.env["TN_API_KEY"];
   if (!apiKey) return null;
@@ -389,62 +398,57 @@ export async function bootstrapFromApiKey(opts: {
     return null;
   }
 
-  const result: ApiKeyFetchResult = {
+  // Unseal + install. The seed both authenticated the /auth/verify and
+  // is the recipient seed for the sealed bundle — the wraps inside are
+  // addressed to the DID we derived from it. Failure during unseal /
+  // body decrypt / on-disk install all surface as a populated
+  // receipt.rejectedReason rather than a thrown exception, so callers
+  // can route on it the same way they handle any other absorb result.
+  let receipt: AbsorbReceipt;
+  try {
+    receipt = await absorbSealedBootstrap(sealedBytes, {
+      seed: parsed.seed,
+      ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+    });
+  } catch (err) {
+    console.warn(
+      `bootstrap: absorbSealedBootstrap threw (${(err as Error).message ?? String(err)}); ` +
+        `falling through to INIT-UPLOAD`,
+    );
+    return null;
+  }
+
+  if (receipt.rejectedReason) {
+    console.warn(`bootstrap: absorb rejected sealed bundle: ${receipt.rejectedReason}`);
+    // Still return the result — caller may want to inspect the
+    // receipt to decide whether to retry, log, or fall through. The
+    // rejectedReason is the signal that the install didn't land.
+  }
+
+  return {
     did,
     vaultBase: base,
     token,
     sealedBytes,
     ...(kind !== undefined ? { kind } : {}),
+    receipt,
   };
-
-  // Network half succeeded. Surface the bundle to the caller via the
-  // pending-unseal exception so a typed catch can route it to either
-  // (a) "log + INIT-UPLOAD fallback" today, or (b) a future
-  // absorbBootstrapWithSeed call once the bridge lands.
-  throw new UnsealNotWiredError(result);
 }
 
 // ---------------------------------------------------------------------------
-// Follow-up integration sketch — for the next session that lands the
-// sealed-bundle unseal+install pipeline.
+// Wired-in: the unseal+install bridge.
 // ---------------------------------------------------------------------------
 //
-// The Python flow at python/tn/bootstrap.py:336-388 does this:
+// The success path now calls `absorbSealedBootstrap(sealedBytes,
+// {seed, cwd})` from `runtime/absorb_bootstrap.ts`. That function
+// reads the tnpkg, picks the recipient wrap whose `recipient_identity`
+// matches the seed-derived DID, unseals the BEK with `unsealBekFromWrap`
+// (from `core/recipient_seal.ts`), decrypts `body/encrypted.bin` with
+// `decryptBodyBlob` (from `core/body_encryption.ts`), and dispatches
+// to the existing `_bootstrapProjectSeed` / `_bootstrapIdentitySeed`
+// installers. Returns an `AbsorbReceipt` exactly like the rest of the
+// absorb surface — `rejectedReason` populated on any failure path.
 //
-//   1. Build a synthetic LoadedConfig with the API-key seed as the
-//      device key. Empty everything else.
-//   2. _absorb_dispatch(cfg, sealed_bytes) — routes by manifest.kind.
-//   3. For kind="project_seed", _absorb_project_seed is called. That
-//      function checks for manifest.state.body_encryption.recipient_wraps,
-//      uses _maybe_unseal_recipient_wrap to recover the BEK using
-//      cfg.device.private_bytes, decrypts the body with the BEK, then
-//      installs the unsealed body/keys/local.private + body/tn.yaml.
-//
-// To port:
-//   * Extend `src/runtime/absorb_bootstrap.ts::_bootstrapProjectSeed`
-//     so it checks for `manifest.state.body_encryption.recipient_wraps`,
-//     and if present:
-//       - walks each wrap calling `unsealBekFromWrap(wrap, seed, aad)`
-//         from `src/core/recipient_seal.ts`. The first one that
-//         doesn't throw `UnsealError` is ours.
-//       - decrypt body with the BEK (probably AES-GCM with a body-
-//         level nonce; check `state.body_encryption.body_nonce_b64`
-//         and Python's symmetric_decrypt_body in tnpkg or absorb).
-//       - swap `body` for the decrypted map and continue down the
-//         existing unsealed-body code path.
-//   * Add a top-level `absorbBootstrapWithSeed(sealed, {seed, cwd})`
-//     that takes the seed via opt instead of fishing it out of a cfg.
-//     Internal — used by this module only.
-//   * Replace the throw of `UnsealNotWiredError` here with:
-//       const receipt = absorbBootstrapWithSeed(sealedBytes, {
-//         seed: parsed.seed,
-//         cwd,
-//       });
-//       if (receipt.rejectedReason) return null;
-//       return result;
-//
-// The handler-builder caller (the function that today calls
-// `bootstrapFromApiKey`) wraps the call in a try/catch on
-// UnsealNotWiredError and treats it as "fetched but not installed —
-// log, fall through to INIT-UPLOAD". When the bridge lands, the catch
-// is unreachable and the success path returns a non-null result.
+// The `UnsealNotWiredError` class above is retained as a deprecated
+// no-op export for type compatibility with callers of older SDK
+// versions; it is no longer thrown by this file.
