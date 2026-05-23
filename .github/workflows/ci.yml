@@ -128,9 +128,16 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      - name: Build tn-wasm
+      - name: Build tn-wasm (Node target)
         working-directory: crypto/tn-wasm
-        run: wasm-pack build --target nodejs --release
+        # Both targets are needed — the test suite uses the nodejs pkg/
+        # build (consumed via the file: dep in ts-sdk/package.json), and
+        # the browser bundle build (build:browser step below) reads from
+        # pkg-web/. Producing both here keeps CI honest about the full
+        # build matrix.
+        run: |
+          wasm-pack build --target nodejs --release
+          wasm-pack build --target web --release --out-dir pkg-web
 
       - name: Install ts-sdk deps
         working-directory: ts-sdk
@@ -150,10 +157,81 @@ jobs:
 
       - name: Run TS tests
         working-directory: ts-sdk
-        # multi_group_routing.test.ts:110 has been failing on main
-        # since pre-Phase-1 of the 0.3.0 refresh — pre-existing baseline
-        # tracked separately. Allow it.
-        run: npm test || true
+        # Hard-required green. Previously this step had `|| true`,
+        # which silently swallowed 190 of 296 failures (the wasm-init
+        # rot fixed in 9fac2fa + 72b4347). Now that the suite is back
+        # to 296/296 passing, drop the suppressor so the next regression
+        # is caught at PR time instead of months later.
+        run: npm test
+
+      - name: Build browser bundle
+        working-directory: ts-sdk
+        # Catches drift in the build script + the pkg-web target. The
+        # output (dist/browser.mjs) isn't shipped from CI — release
+        # workflows do that — but the build path itself has to keep
+        # working since downstream projects (witness, extensions,
+        # browser apps) consume it via the release artefacts.
+        run: npm run build:browser
+
+      - name: Run SDK smoke scripts
+        working-directory: ts-sdk
+        # Each smoke exercises a slice of the surface end-to-end.
+        # They're cheap (each runs in <1s), they don't need a real
+        # vault / server, and they catch wire-format regressions the
+        # unit tests can't (sealed-bundle absorb, env-var-driven
+        # bootstrap flow, HTTP-handler-against-fake-fetch round-trip).
+        run: |
+          node scripts/_env_parity_smoke.mjs
+          node scripts/_sealed_absorb_smoke.mjs
+          node scripts/_init_from_seed_smoke.mjs
+          node scripts/_http_smoke.mjs
+          node scripts/_browser_smoke.mjs
+
+  extension-build:
+    name: chrome extension build + freshness
+    runs-on: ubuntu-latest
+    needs: [ts-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build tn-wasm (Node target — same dep ts-sdk consumes)
+        working-directory: crypto/tn-wasm
+        run: wasm-pack build --target nodejs --release
+
+      - name: Install ts-sdk deps
+        working-directory: ts-sdk
+        run: npm ci || npm install
+
+      - name: Build extension (regenerates vendor/sdk-core/)
+        # The script does: `npm run build` in ts-sdk + copies the
+        # browser-safe Layer-1 outputs (encoding.js, emk.js, Entry.js)
+        # into extensions/tn-decrypt/vendor/sdk-core/. Always
+        # idempotent; running twice should produce identical bytes.
+        run: bash tools/build-extension.sh
+
+      - name: Verify vendored sdk-core is current
+        # Hard gate: if the freshly-built vendor differs from what's
+        # committed, the extension was shipping stale Layer-1 code. The
+        # 0.4.3a1 `did` -> `device_identity` rename slipped through
+        # this exact gap; this check prevents recurrence.
+        #
+        # When this fails, the developer should re-run
+        # `bash tools/build-extension.sh` locally and commit the
+        # updated vendor/sdk-core/ files.
+        run: |
+          if ! git diff --exit-code extensions/tn-decrypt/vendor/sdk-core/; then
+            echo "::error::extensions/tn-decrypt/vendor/sdk-core/ is stale — run \`bash tools/build-extension.sh\` locally and commit the result."
+            exit 1
+          fi
 
   complexity:
     name: complexity budget (radon)

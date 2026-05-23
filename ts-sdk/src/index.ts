@@ -2,6 +2,12 @@
 // which is compiled from the tn-core Rust crate. If you need a primitive
 // not re-exported here, pull from `@tnproto/sdk/raw`.
 
+// Side-effect: eagerly initSync the wasm so every re-exported symbol
+// (DeviceKey, BtnPublisher, WasmRuntime, ...) is callable immediately.
+// The browser entry (src/index.browser.ts) doesn't import this — its
+// bundle script handles wasm init via the inlined-bytes path.
+import "./runtime/_node_wasm_init.js";
+
 export * from "./core/types.js";
 export * from "./core/canonical.js";
 export * from "./core/chain.js";
@@ -122,7 +128,44 @@ export {
 } from "./admin/log.js";
 export { loadConfig } from "./runtime/config.js";
 export { loadKeystore } from "./runtime/keystore.js";
-export { absorbBootstrap, isBootstrapKind } from "./runtime/absorb_bootstrap.js";
+export {
+  absorbBootstrap,
+  absorbSealedBootstrap,
+  isBootstrapKind,
+} from "./runtime/absorb_bootstrap.js";
+export {
+  encryptBodyBlob,
+  decryptBodyBlob,
+  BODY_CIPHER_SUITE,
+  BODY_FRAME,
+} from "./core/body_encryption.js";
+export {
+  buildRecipientWraps,
+  manifestAadForWrap,
+  sealBekForRecipient,
+  unsealBekFromWrap,
+  UnsealError,
+  WRAP_FRAME,
+  type RecipientWrap,
+} from "./core/recipient_seal.js";
+export { fromWireDict, toWireDict } from "./core/tnpkg.js";
+export {
+  DEFAULT_VAULT_URL,
+  ENV_VAULT_URL,
+  ENV_VAULT_DEFAULT_BASE,
+  ENV_NO_LINK,
+  resolveVaultUrl,
+  resolveDidEndpoint,
+  isAutoLinkDisabled,
+} from "./vault/url.js";
+export {
+  bootstrapFromApiKey,
+  challengeVerify,
+  parseBearer,
+  UnsealNotWiredError,
+  type ApiKeyFetchResult,
+  type ParsedBearer,
+} from "./runtime/bootstrap_api_key.js";
 // readAsRecipient is no longer exported from the public surface;
 // use `Tn.read({asRecipient})` for foreign-publisher reads.
 export {

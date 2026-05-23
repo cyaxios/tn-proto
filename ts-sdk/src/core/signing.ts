@@ -16,6 +16,36 @@ interface RawDeviceKey {
 }
 
 /**
+ * Decode a standard-base64 string into raw bytes.
+ *
+ * Used to decode device-key material from the wasm-bindgen JSON shape
+ * (the Rust glue returns seed and public key as standard-base64
+ * strings; see `device_key_to_js` in `crypto/tn-wasm/src/lib.rs`).
+ *
+ * Pure JS + `atob` so the same code path runs in Node and in
+ * browsers — we used to call `Buffer.from(s, "base64")` here, which
+ * threw `ReferenceError: Buffer is not defined` when the SDK ran
+ * inside a browser bundle without a Node polyfill.
+ *
+ * @param s - standard-base64 string (with or without padding; `atob`
+ *   accepts both in practice).
+ *
+ * @returns The decoded bytes.
+ *
+ * @remarks
+ * Not exported — only `DeviceKey.fromRaw` uses it. Internal to this
+ * module.
+ *
+ * @internal
+ */
+function _decodeStandardBase64(s: string): Uint8Array {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
  * Ed25519 device identity. Holds the 32-byte seed and exposes the
  * derived public key + did:key encoding. Signing is delegated to the
  * Rust core via WASM, which guarantees byte-identical output to
@@ -48,8 +78,8 @@ export class DeviceKey {
   }
 
   private static fromRaw(raw: RawDeviceKey): DeviceKey {
-    const seed = new Uint8Array(Buffer.from(raw.seed_b64, "base64"));
-    const pk = new Uint8Array(Buffer.from(raw.public_key_b64, "base64"));
+    const seed = _decodeStandardBase64(raw.seed_b64);
+    const pk = _decodeStandardBase64(raw.public_key_b64);
     return new DeviceKey(seed, pk, asDid(raw.did));
   }
 

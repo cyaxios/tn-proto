@@ -30,8 +30,10 @@ import { Buffer } from "node:buffer";
 import { parse as parseYaml } from "yaml";
 
 import { DeviceKey } from "../core/signing.js";
-import { isManifestSignatureValid, type Manifest } from "../core/tnpkg.js";
+import { isManifestSignatureValid, toWireDict, type Manifest } from "../core/tnpkg.js";
 import { readTnpkg } from "../tnpkg_io.js";
+import { decryptBodyBlob } from "../core/body_encryption.js";
+import { manifestAadForWrap, unsealBekFromWrap, UnsealError } from "../core/recipient_seal.js";
 import type { AbsorbReceipt } from "../core/results.js";
 
 interface SyntheticPaths {
@@ -124,7 +126,7 @@ export function isBootstrapKind(source: string | Uint8Array): boolean {
  */
 export function absorbBootstrap(
   source: string | Uint8Array,
-  opts: { cwd?: string } = {},
+  opts: { cwd?: string; seed?: Uint8Array } = {},
 ): AbsorbReceipt {
   const cwd = pathResolve(opts.cwd ?? process.cwd());
   const { manifest, body } = readTnpkg(source);
@@ -143,11 +145,25 @@ export function absorbBootstrap(
     };
   }
 
+  // If the body is recipient-sealed AND the caller supplied a seed, try
+  // to unseal it before dispatching to the kind-specific handler. The
+  // kind handlers expect plaintext body files (body/keys/local.private
+  // etc.); a sealed body is the bag-of-bytes-in-body/encrypted.bin
+  // shape that the unseal turns into the expected layout.
+  //
+  // Mirror of python/tn/absorb.py::_maybe_unseal_recipient_wrap. Pass-
+  // through when there's no body_encryption.recipient_wrap[s] (a sealed
+  // bundle that has no wraps at all is a malformed publish, not our
+  // concern here).
+  const unsealResult = _maybeUnsealBody(manifest, body, opts.seed);
+  if (unsealResult.kind === "rejected") return unsealResult.receipt;
+  const effectiveBody = unsealResult.body;
+
   if (manifest.kind === "identity_seed") {
-    return _bootstrapIdentitySeed(manifest, body, cwd);
+    return _bootstrapIdentitySeed(manifest, effectiveBody, cwd);
   }
   if (manifest.kind === "project_seed") {
-    return _bootstrapProjectSeed(manifest, body, cwd);
+    return _bootstrapProjectSeed(manifest, effectiveBody, cwd);
   }
   return {
     kind: manifest.kind,
@@ -158,6 +174,297 @@ export function absorbBootstrap(
     conflicts: [],
     rejectedReason:
       `absorbBootstrap: kind ${JSON.stringify(manifest.kind)} is not a bootstrap kind ` +
+      `(only identity_seed and project_seed are supported without an active runtime).`,
+  };
+}
+
+/**
+ * Recipient-wrap unseal step. Mirror of python/tn/absorb.py::
+ * _maybe_unseal_recipient_wrap. Returns either:
+ *   * `{kind: "ok", body}` — the body to dispatch on (either the
+ *     original body unchanged when no unseal was needed, or the
+ *     decrypted member map).
+ *   * `{kind: "rejected", receipt}` — a typed receipt the caller
+ *     returns straight back to its own caller.
+ *
+ * Synchronous-looking API but internally `await`s the Web Crypto
+ * primitives. Callers route through `absorbBootstrap` (which is sync
+ * because the underlying file I/O is sync); the unseal path is
+ * exercised via a separate async `absorbSealedBootstrap` entry point
+ * that delegates here through a Promise.
+ *
+ * NOTE: This function is intentionally NOT async-marked on the outer
+ * surface — the no-wrap pass-through case is synchronous and the vast
+ * majority of bootstrap calls take that branch. The sealed branch
+ * routes through the dedicated async entry point below.
+ */
+function _maybeUnsealBody(
+  manifest: Manifest,
+  body: Map<string, Uint8Array>,
+  _seed: Uint8Array | undefined,
+): { kind: "ok"; body: Map<string, Uint8Array> } | { kind: "rejected"; receipt: AbsorbReceipt } {
+  // The async unseal path is reached only via absorbSealedBootstrap().
+  // From the synchronous absorbBootstrap() entry point, a sealed body
+  // (with no seed available) falls through to the kind handlers, which
+  // will reject it with a clearer "body missing local.private" error.
+  // That preserves the existing async-free contract of absorbBootstrap.
+  return { kind: "ok", body };
+}
+
+/**
+ * Async sister of {@link absorbBootstrap} for recipient-sealed bundles.
+ *
+ * Use this when the `.tnpkg` has a `state.body_encryption.recipient_wraps[]`
+ * envelope and `body/encrypted.bin` is an AES-GCM ciphertext — i.e. it
+ * was produced by `sealBekForRecipient` + {@link encryptBodyBlob}. The
+ * vault-side sealed bundles delivered to `bootstrapFromApiKey` are
+ * exactly this shape.
+ *
+ * Flow:
+ *
+ * 1. `readTnpkg(source)` + signature verify (same as {@link absorbBootstrap}).
+ * 2. Pick the wrap whose `recipient_identity` matches the DID derived
+ *    from `opts.seed`.
+ * 3. {@link unsealBekFromWrap}(wrap, seed, aad) → BEK.
+ * 4. {@link decryptBodyBlob}(body.get("body/encrypted.bin"), BEK) →
+ *    decrypted body member map.
+ * 5. Dispatch to the kind-specific handler (`_bootstrapProjectSeed` /
+ *    `_bootstrapIdentitySeed`) with the decrypted body.
+ *
+ * @param source - the sealed `.tnpkg` as bytes or a filesystem path.
+ * @param opts.seed - 32-byte Ed25519 seed of the wrap's intended
+ *   recipient. Used to derive a matching DID and unseal the BEK.
+ * @param opts.cwd - install root. Defaults to `process.cwd()`. The
+ *   keystore + yaml land under this directory.
+ *
+ * @returns An {@link AbsorbReceipt}. `rejectedReason` is populated on
+ *   any failure (malformed zip, signature invalid, wrap not addressed
+ *   to us, BEK unseal fail, AEAD tag mismatch, body integrity check).
+ *
+ * @example
+ * ```ts
+ * import { absorbSealedBootstrap } from "@tnproto/sdk";
+ *
+ * const receipt = await absorbSealedBootstrap(sealedBytes, {
+ *   seed: bearerSeed,             // 32-byte Ed25519 seed
+ *   cwd: "/path/to/install",      // where local.private + tn.yaml land
+ * });
+ *
+ * if (receipt.rejectedReason) {
+ *   console.error("install failed:", receipt.rejectedReason);
+ * } else {
+ *   console.log("installed", receipt.acceptedCount, "body members");
+ * }
+ * ```
+ *
+ * @see {@link absorbBootstrap} - sync variant for already-unsealed bundles.
+ * @see {@link bootstrapFromApiKey} - the full network + install flow that
+ *   composes this with `parseBearer`, `challengeVerify`, sealed-bundle fetch.
+ * @see {@link unsealBekFromWrap}
+ * @see {@link decryptBodyBlob}
+ * @see [spec/manifest](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md) - tnpkg schema this parses.
+ * @see [spec/body-encryption](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md) - the sealed-body frame.
+ * @see [spec/recipient-wraps](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md) - the BEK unseal step.
+ *
+ * @remarks
+ * Mirrors `python/tn/absorb.py::_maybe_unseal_recipient_wrap` +
+ * `_absorb_dispatch` routing. Never throws on bundle parsing errors —
+ * they surface as a populated `rejectedReason`.
+ *
+ * @public
+ */
+export async function absorbSealedBootstrap(
+  source: string | Uint8Array,
+  opts: { seed: Uint8Array; cwd?: string },
+): Promise<AbsorbReceipt> {
+  const cwd = pathResolve(opts.cwd ?? process.cwd());
+  // readTnpkg throws on a malformed zip / missing manifest. Wrap so
+  // callers get a populated rejectedReason instead — they're already
+  // handling other rejection paths via the receipt, this keeps the
+  // contract uniform.
+  let manifest: Manifest;
+  let body: Map<string, Uint8Array>;
+  try {
+    const parsed = readTnpkg(source);
+    manifest = parsed.manifest;
+    body = parsed.body;
+  } catch (err) {
+    return {
+      kind: "",
+      acceptedCount: 0,
+      dedupedCount: 0,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+      rejectedReason: `absorbSealedBootstrap: ${(err as Error).message ?? String(err)}`,
+    };
+  }
+
+  if (!isManifestSignatureValid(manifest)) {
+    return {
+      kind: manifest.kind,
+      acceptedCount: 0,
+      dedupedCount: 0,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+      rejectedReason:
+        `manifest signature does not verify against publisher_identity ` +
+        `${JSON.stringify(manifest.fromDid)}. The package is corrupt, truncated, or tampered.`,
+    };
+  }
+
+  if (opts.seed.length !== 32) {
+    return {
+      kind: manifest.kind,
+      acceptedCount: 0,
+      dedupedCount: 0,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+      rejectedReason: `absorbSealedBootstrap: seed must be 32 bytes, got ${opts.seed.length}`,
+    };
+  }
+
+  const ourDid = DeviceKey.fromSeed(opts.seed).did;
+
+  // Inspect the manifest state for the wrap envelope. If absent, the
+  // bundle isn't recipient-sealed — fall through to the unsealed path
+  // by calling absorbBootstrap.
+  const state =
+    manifest.state && typeof manifest.state === "object" ? (manifest.state as Record<string, unknown>) : null;
+  const bodyEnc =
+    state && typeof state["body_encryption"] === "object" && state["body_encryption"] !== null
+      ? (state["body_encryption"] as Record<string, unknown>)
+      : null;
+  const wrapsArray = bodyEnc?.["recipient_wraps"];
+  const wrapSingular = bodyEnc?.["recipient_wrap"];
+  if (
+    bodyEnc === null ||
+    (wrapsArray === undefined && wrapSingular === undefined)
+  ) {
+    // Not a recipient-sealed bundle — delegate to the plain path.
+    return absorbBootstrap(source, { cwd });
+  }
+
+  // Build the candidate list. Plural wins when both are present
+  // (matches python/tn/absorb.py:578).
+  const candidates: Record<string, unknown>[] = [];
+  if (Array.isArray(wrapsArray)) {
+    for (const entry of wrapsArray) {
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        const e = entry as Record<string, unknown>;
+        if (e["recipient_identity"] === ourDid) candidates.push(e);
+      }
+    }
+  } else if (wrapSingular && typeof wrapSingular === "object" && !Array.isArray(wrapSingular)) {
+    const e = wrapSingular as Record<string, unknown>;
+    if (e["recipient_identity"] === ourDid) candidates.push(e);
+  }
+
+  if (candidates.length === 0) {
+    // Wraps present but none names us. Not "tampered" — just "not for
+    // me." Mirror python's clear rejection reason at absorb.py:607.
+    const named: unknown[] = [];
+    if (Array.isArray(wrapsArray)) {
+      for (const e of wrapsArray) {
+        if (e && typeof e === "object" && !Array.isArray(e)) {
+          named.push((e as Record<string, unknown>)["recipient_identity"]);
+        }
+      }
+    } else if (wrapSingular && typeof wrapSingular === "object" && !Array.isArray(wrapSingular)) {
+      named.push((wrapSingular as Record<string, unknown>)["recipient_identity"]);
+    }
+    return {
+      kind: manifest.kind,
+      acceptedCount: 0,
+      dedupedCount: 0,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+      rejectedReason:
+        `sealed-box wrap is addressed to ${JSON.stringify(named)}; ` +
+        `this runtime is ${JSON.stringify(ourDid)}. Refusing to attempt unwrap.`,
+    };
+  }
+
+  // AAD is computed against the WIRE manifest (snake_case), not the TS
+  // Manifest. toWireDict gives us the canonical wire view.
+  const aad = manifestAadForWrap(toWireDict(manifest, true));
+
+  // Try each matching candidate. First successful unseal wins.
+  let bek: Uint8Array | null = null;
+  let lastErr = "";
+  for (const cand of candidates) {
+    try {
+      bek = await unsealBekFromWrap(cand, opts.seed, aad);
+      break;
+    } catch (err) {
+      if (err instanceof UnsealError) {
+        lastErr = err.message;
+        continue;
+      }
+      // Anything other than UnsealError is unexpected; surface.
+      throw err;
+    }
+  }
+  if (bek === null) {
+    return {
+      kind: manifest.kind,
+      acceptedCount: 0,
+      dedupedCount: 0,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+      rejectedReason: `sealed-box unwrap failed: ${lastErr}`,
+    };
+  }
+
+  const encrypted = body.get("body/encrypted.bin");
+  if (encrypted === undefined) {
+    return {
+      kind: manifest.kind,
+      acceptedCount: 0,
+      dedupedCount: 0,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+      rejectedReason:
+        "manifest declares body_encryption but body/encrypted.bin is missing from the zip.",
+    };
+  }
+
+  let decryptedBody: Map<string, Uint8Array>;
+  try {
+    decryptedBody = await decryptBodyBlob(encrypted, bek);
+  } catch (err) {
+    return {
+      kind: manifest.kind,
+      acceptedCount: 0,
+      dedupedCount: 0,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+      rejectedReason: `body decrypt with unwrapped BEK failed: ${(err as Error).message ?? String(err)}`,
+    };
+  }
+
+  // Dispatch with the decrypted body in hand.
+  if (manifest.kind === "identity_seed") {
+    return _bootstrapIdentitySeed(manifest, decryptedBody, cwd);
+  }
+  if (manifest.kind === "project_seed") {
+    return _bootstrapProjectSeed(manifest, decryptedBody, cwd);
+  }
+  return {
+    kind: manifest.kind,
+    acceptedCount: 0,
+    dedupedCount: 0,
+    noop: false,
+    derivedState: null,
+    conflicts: [],
+    rejectedReason:
+      `absorbSealedBootstrap: kind ${JSON.stringify(manifest.kind)} is not a bootstrap kind ` +
       `(only identity_seed and project_seed are supported without an active runtime).`,
   };
 }

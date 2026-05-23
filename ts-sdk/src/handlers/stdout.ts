@@ -27,6 +27,16 @@ export class StdoutHandler extends BaseTNHandler {
   }
 
   emit(envelope: Record<string, unknown>, rawLine: string): void {
+    // Admin / protocol-bookkeeping events (event_type prefixed `tn.`)
+    // are suppressed by default to reduce stdout noise. Set
+    // `TN_STDOUT_INCLUDE_ADMIN=1` to opt them back in. Mirrors
+    // python/tn/handlers/stdout.py:219.
+    const eventType = String(envelope["event_type"] ?? "");
+    if (eventType.startsWith("tn.")) {
+      const include = (process.env["TN_STDOUT_INCLUDE_ADMIN"] ?? "").trim();
+      if (include !== "1") return;
+    }
+
     // Format selection (precedence high → low):
     //   1. ``TN_STDOUT_FORMAT`` env var (``pretty`` | ``json``)
     //   2. ``format:`` constructor option (forthcoming)
