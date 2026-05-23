@@ -643,6 +643,30 @@ def error(event_type: str, **fields: Any) -> dict[str, Any]:
 
 
 def current_config() -> LoadedConfig:
+    """Return the active ceremony's loaded config.
+
+    Returns:
+        LoadedConfig: The in-memory snapshot of the active yaml — yaml
+        path, ceremony id, cipher, groups, public-fields set, handler
+        specs, device identity, etc. Read-only snapshot; mutations
+        won't propagate. Call :func:`tn.logger.reload_from_yaml` after
+        a yaml edit to rebind the live runtime.
+
+    Raises:
+        RuntimeError: If :func:`tn.init` hasn't been called yet AND
+            auto-init is blocked by ``TN_STRICT=1``.
+
+    Example:
+        >>> import tn
+        >>> tn.init()
+        >>> cfg = tn.current_config()
+        >>> cfg.ceremony_id
+        'local_a1b2c3d4'
+
+    See Also:
+        :func:`tn.using_rust`: Diagnostic — is the Rust runtime active?
+        `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_: Ceremony structure.
+    """
     return _require_init().cfg
 
 
@@ -689,7 +713,32 @@ def reload_from_yaml() -> None:
 
 
 def flush_and_close(*, timeout: float = 30.0) -> None:
-    """Close all handlers (drains async outboxes best-effort)."""
+    """Close all handlers and release the active runtime.
+
+    Drains async outboxes on a best-effort basis (Kafka / S3 / Delta
+    exporters write pending events out before shutdown), then releases
+    the in-memory runtime so the next :func:`tn.init` mints fresh.
+
+    Idempotent — safe to call multiple times, calling on a never-
+    initialised process is a no-op. Auto-registered as an atexit hook
+    on first :func:`tn.init` so processes that forget to call it still
+    drain on normal interpreter shutdown.
+
+    Args:
+        timeout: Maximum seconds to wait for async outboxes to drain.
+            Per-handler; total wall-clock can be up to
+            ``timeout * len(async_handlers)``. Default 30.
+
+    Example:
+        >>> import tn
+        >>> tn.init()
+        >>> tn.info("user.signed_in", user_id="u_123")
+        >>> tn.flush_and_close()  # drains + releases the runtime
+
+    See Also:
+        :func:`tn.init`: The constructor side of the lifecycle.
+        :func:`tn.current_config`: Read the active runtime config.
+    """
     global _runtime
     with _runtime_lock:
         if _runtime is not None:

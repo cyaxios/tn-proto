@@ -1,10 +1,12 @@
 """Canonical serialization for deterministic field hashing.
 
-PRD §3.4: `sha256(canonical_serialize(value))` — the same value must
-always produce the same hash, across publishers and readers, across
-Python versions. We use RFC 8785-style JSON Canonical Serialization
-lite (sorted keys, no whitespace, no optional separators), good enough
-for a pairwise-agreeable deterministic encoding.
+The reference Python implementation of the TN canonical-bytes wire
+spec. ``sha256(canonical_bytes(value))`` is the chain of trust under
+every signature and row_hash in the protocol; the same value MUST
+always produce identical bytes across publishers, readers, languages,
+and time. We use RFC 8785-style JSON Canonical Serialization lite
+(sorted keys, no whitespace, no optional separators) plus three
+TN-specific extensions for bytes / Decimal / datetime.
 
 Supported types:
     None, bool, int, float, str, bytes, list/tuple, dict[str, ...],
@@ -15,6 +17,15 @@ Non-standard encodings:
     datetime   -> ISO-8601 string in UTC
     Decimal    -> string ("4.99")      # preserves precision; reader gets a
                                         # str back and parses to Decimal as needed
+
+See Also:
+    `docs/spec/canonical-bytes.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/canonical-bytes.md>`_:
+        The full wire spec including golden vectors. Treat the spec as
+        authoritative; this module is a conformant implementation.
+    ``crypto/tn-core/tests/fixtures/canonical_vectors.json``:
+        Golden vectors every TN canonicalizer must reproduce.
+    ``crypto/tn-core/src/canonical.rs``:
+        The Rust mirror implementation.
 """
 
 from __future__ import annotations
@@ -58,7 +69,47 @@ def _encode(value: Any) -> Any:
 
 
 def _canonical_bytes(value: Any) -> bytes:
-    """Serialize `value` to deterministic bytes suitable for hashing."""
+    """Serialize ``value`` to deterministic UTF-8 bytes for hashing or signing.
+
+    Sort-key recursive JSON encoding with no whitespace plus TN's
+    sentinel-wrappers for bytes (``$b64``), :class:`decimal.Decimal`
+    (str), and :class:`datetime.datetime` (ISO-8601 UTC). The output
+    is byte-identical to the Rust and TS implementations for any
+    valid input.
+
+    Args:
+        value: A JSON-shaped value (None, bool, int, float, str,
+            list, tuple, dict[str, ...]) optionally containing bytes,
+            Decimal, or datetime — those are wrapped per the spec.
+
+    Returns:
+        UTF-8 encoded bytes. Newlines, leading whitespace, or
+        non-canonical key ordering are NEVER present in the output.
+
+    Raises:
+        ValueError: If a float is NaN / Inf, or a Decimal is NaN /
+            Inf — these have no canonical encoding.
+        TypeError: If ``value`` contains a type outside the supported
+            set (e.g. a custom class, set, complex number).
+
+    Example:
+        >>> from tn.canonical import _canonical_bytes
+        >>> _canonical_bytes({"b": 2, "a": 1})
+        b'{"a":1,"b":2}'
+        >>> _canonical_bytes({"ts": __import__("datetime").datetime(2026, 5, 22)})
+        b'{"ts":"2026-05-22T00:00:00Z"}'
+        >>> _canonical_bytes({"data": b"hi"})
+        b'{"data":{"$b64":"aGk="}}'
+
+    Note:
+        Underscore-prefixed (legacy). The wasm + Rust exports use the
+        public name ``canonicalBytes`` / ``canonical_bytes``; see
+        ``docs/spec/discrepancies.md#canonical-bytes-public-api``.
+
+    See Also:
+        `docs/spec/canonical-bytes.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/canonical-bytes.md>`_:
+            Wire spec + golden vectors.
+    """
     return json.dumps(
         _encode(value),
         sort_keys=True,
