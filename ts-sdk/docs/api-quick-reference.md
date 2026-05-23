@@ -349,9 +349,13 @@ diagnostics.
   `python/tn/`. Names are snake_case there (`tn.set_context` ↔
   `tn.setContext`).
 - **The Rust core** that wasm wraps is at `crypto/tn-core/`.
-- **The canonical wire format** (envelope shape, row_hash algorithm,
-  signature scheme) is defined in the spec docs at
-  `docs/spec/` *(consolidating; see `docs/spec/index.md`)*.
+- **The canonical wire format** is defined under
+  [`docs/spec/`](../../docs/spec/) — `canonical-bytes`, `envelope`,
+  `row-hash`, `signing`, `manifest`, `body-encryption`,
+  `recipient-wraps`, `vault-http`, `env-vars`. Known
+  cross-implementation drift is catalogued in
+  [`docs/spec/discrepancies.md`](../../docs/spec/discrepancies.md);
+  read it before porting to a new language.
 
 When the spec and the libraries disagree, the spec wins — libraries
 are conformant implementations, not the source of truth.

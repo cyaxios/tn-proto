@@ -166,6 +166,8 @@ function _writeUtf8(storage: JsStorageCallbacks, path: string, text: string): vo
  *   server has already minted the publisher state.
  * @see {@link BrowserRuntime.init} - the higher-level wrapper that
  *   calls this on a fresh storage prefix and then loads the runtime.
+ * @see [spec/envelope](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md) - the wire shape the new ceremony will emit.
+ * @see [spec/signing#did-format](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md#did-format) - the DID this mints.
  *
  * @remarks
  * Mirror of `createFreshCeremony` in `src/runtime/node_runtime.ts`.

@@ -69,6 +69,8 @@ let _processRunId: string | null = null;
  * `TN_RUN_ID` read at `crypto/tn-core/src/runtime.rs:860`.
  *
  * @see {@link _resetProcessRunIdForTests} — test-only reset hook.
+ * @see [spec/env-vars#tn_run_id](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/env-vars.md) - the cross-process run-id contract.
+ * @see [spec/envelope](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md) - where the run_id appears (as a public field on every emit).
  * @public
  */
 export function ensureProcessRunId(): string {
