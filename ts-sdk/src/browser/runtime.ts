@@ -1,16 +1,20 @@
-// Browser-side runtime.
-//
-// Thin JS wrapper around wasm `WasmRuntime`. Mirrors the slice of
-// `NodeRuntime` that the `Tn` class actually calls — emit verbs, read,
-// did, close, level mgmt — without any of the Node-specific
-// infrastructure (handler registry, log rotation, agent-policy load,
-// admin BtnPublisher cache). Those land in later PRs as the
-// corresponding namespaces are ported.
-//
-// All disk I/O routes through a `JsStorageCallbacks` adapter — the
-// localStorage one by default. The wasm runtime calls those callbacks
-// for every read/write/append; this class never touches storage
-// directly.
+/**
+ * Browser-side runtime.
+ *
+ * Thin JS wrapper around wasm `WasmRuntime`. Mirrors the slice of
+ * `NodeRuntime` that the {@link Tn} class actually calls — emit verbs,
+ * read, did, close, level management — without any of the Node-specific
+ * infrastructure (handler registry, log rotation, agent-policy load,
+ * admin BtnPublisher cache). Those land in later PRs as the
+ * corresponding namespaces are ported.
+ *
+ * All disk I/O routes through a {@link JsStorageCallbacks} adapter —
+ * {@link localStorageStorageAdapter} by default. The wasm runtime calls
+ * those callbacks for every read/write/append; this class never
+ * touches storage directly.
+ *
+ * @packageDocumentation
+ */
 
 import { WasmRuntime } from "tn-wasm";
 import { createFreshCeremony, type CreateFreshOptions } from "./create_fresh.js";
@@ -21,7 +25,13 @@ import { localStorageStorageAdapter } from "../runtime/storage_localstorage.js";
 import { memoryStorageAdapter } from "../runtime/storage_memory.js";
 import type { JsStorageCallbacks } from "../runtime/storage_node.js";
 
-/** Options for `BrowserRuntime.init`. */
+/**
+ * Options for {@link BrowserRuntime.init}. All optional; sensible
+ * defaults for the standard browser use case (localStorage, console-on,
+ * no HTTP shipping).
+ *
+ * @public
+ */
 export interface BrowserRuntimeOptions {
   /**
    * Storage adapter used for every fs-like callback the wasm runtime
@@ -77,10 +87,15 @@ export interface BrowserRuntimeOptions {
 }
 
 /**
- * Options for `BrowserRuntime.initFromSeed` / `Tn.initFromSeed`. The
- * seed material is required; storage + side-effect knobs are optional
- * with witness-friendly defaults (in-memory storage, no console, HTTP
- * shipping opt-in).
+ * Options for {@link BrowserRuntime.initFromSeed} / {@link Tn.initFromSeed}.
+ * The seed material is required; storage + side-effect knobs are
+ * optional with witness-friendly defaults (in-memory storage, no
+ * console, HTTP shipping opt-in).
+ *
+ * Extends {@link CreateFromSeedOptions} — every keystore knob from
+ * there is also accepted here.
+ *
+ * @public
  */
 export interface BrowserRuntimeFromSeedOptions extends CreateFromSeedOptions {
   /**
@@ -102,8 +117,28 @@ export interface BrowserRuntimeFromSeedOptions extends CreateFromSeedOptions {
 }
 
 /**
- * Wraps a single `WasmRuntime` handle. Construct via the static `init`
- * factory; never `new BrowserRuntime` directly.
+ * Wraps a single wasm `WasmRuntime` handle plus the JS-side console +
+ * HTTP sinks. Construct via the static {@link BrowserRuntime.init} or
+ * {@link BrowserRuntime.initFromSeed} factories; never
+ * `new BrowserRuntime` directly.
+ *
+ * Most consumers should use the higher-level {@link Tn} class instead
+ * — it adds context-stack merging, level filters, run-id stamping, and
+ * the namespaced `tn.admin` / `tn.pkg` / `tn.vault` / `tn.agents` /
+ * `tn.handlers` placeholders. `BrowserRuntime` is the low-level
+ * runtime layer underneath.
+ *
+ * @example
+ * ```ts
+ * import { BrowserRuntime } from "@tnproto/sdk/browser";
+ *
+ * const rt = BrowserRuntime.init();   // mints fresh ceremony on first call
+ * rt.info("hello.world", { who: "alice" });
+ * for (const e of rt.read()) console.log(e);
+ * await rt.close();   // awaits HTTP flush + closes wasm
+ * ```
+ *
+ * @public
  */
 export class BrowserRuntime {
   /** The wasm runtime handle this instance owns. */
@@ -137,11 +172,40 @@ export class BrowserRuntime {
   }
 
   /**
-   * Load a ceremony from `storage`, creating a fresh one on first call.
+   * Load a ceremony from `storage`, minting fresh on first call.
    *
-   * Mirrors `NodeRuntime.init`: if the yaml doesn't exist at
-   * `opts.yamlPath`, call `createFreshCeremony` first; then hand the
-   * yaml + storage to `WasmRuntime.initWith` and cache the handle.
+   * If the yaml doesn't exist at `opts.yamlPath`,
+   * {@link createFreshCeremony} runs first; then the yaml + storage
+   * are handed to `WasmRuntime.initWith` and the handle is cached.
+   *
+   * @param opts - see {@link BrowserRuntimeOptions}.
+   *
+   * @returns A ready-to-use `BrowserRuntime`. Subsequent calls in the
+   *   same origin with the same `storage` re-load the same ceremony
+   *   (same DID, same chain).
+   *
+   * @throws Error - propagated from `createFreshCeremony` (clobber
+   *   guard) or `WasmRuntime.initWith` (malformed yaml, missing
+   *   keystore members).
+   *
+   * @example
+   * ```ts
+   * import { BrowserRuntime } from "@tnproto/sdk/browser";
+   *
+   * // Default: localStorage adapter, console-on, no HTTP.
+   * const rt = BrowserRuntime.init();
+   *
+   * // With HTTP shipping + custom storage.
+   * const rt2 = BrowserRuntime.init({
+   *   storage: memoryStorageAdapter(),
+   *   http: "https://ingest.example.com/intake",
+   *   console: false,
+   * });
+   * ```
+   *
+   * @see {@link BrowserRuntime.initFromSeed} - the variant for
+   *   server-provisioned credentials.
+   * @see {@link Tn.init} - the higher-level wrapper.
    */
   static init(opts: BrowserRuntimeOptions = {}): BrowserRuntime {
     const storage = opts.storage ?? localStorageStorageAdapter();
@@ -160,19 +224,49 @@ export class BrowserRuntime {
 
   /**
    * Bootstrap a runtime from caller-supplied seed material instead of
-   * minting fresh on the JS side. Use when the server has already
-   * generated the device key + publisher state (witness-style flows
-   * where every browser session adopts server-provisioned creds).
+   * minting fresh on the JS side.
    *
-   * Defaults differ from `init`:
-   *   * `storage` defaults to a fresh in-memory adapter (no persistence
-   *     between sessions — server re-issues creds on every page load).
-   *   * `console` defaults to OFF (production session vibes; turn on
-   *     explicitly for debugging).
+   * Use when a server has already generated the device key + BTN
+   * publisher state (witness-style flows where every browser session
+   * adopts server-provisioned credentials).
    *
+   * Defaults differ from {@link BrowserRuntime.init}:
+   *
+   * - `storage` defaults to a fresh in-memory adapter (no persistence
+   *   between sessions — server re-issues creds on every page load).
+   * - `console` defaults to OFF (production-session vibes; turn on
+   *   explicitly for debugging).
+   *
+   * @param opts - see {@link BrowserRuntimeFromSeedOptions}. `seed` +
+   *   `btnPublisherState` are required.
+   *
+   * @returns A ready-to-use `BrowserRuntime` bound to the supplied
+   *   identity. `rt.did()` matches `DeviceKey.fromSeed(opts.seed).did`.
+   *
+   * @throws Error - propagated from {@link createFromSeed} (bad seed
+   *   length, empty publisher state, clobber guard).
+   *
+   * @example
+   * ```ts
+   * import { BrowserRuntime } from "@tnproto/sdk/browser";
+   *
+   * const rt = BrowserRuntime.initFromSeed({
+   *   seed: b64decode(PUBLISHER_SEED_B64),
+   *   btnPublisherState: b64decode(BTN_PUBLISHER_STATE_B64),
+   *   http: { url: INGEST_URL, headers: { "X-Agreement": agreementId } },
+   * });
+   * ```
+   *
+   * @see {@link BrowserRuntime.init} - the fresh-mint variant.
+   * @see {@link createFromSeed} - the lower-level synthesis helper.
+   * @see {@link Tn.initFromSeed} - the higher-level wrapper with the
+   *   full `Tn` surface.
+   *
+   * @remarks
    * The yaml + keystore the wasm runtime reads are byte-identical to
-   * what `init` produces — only the source of the seed bytes differs.
-   * See `createFromSeed` for the synthesis details.
+   * what {@link BrowserRuntime.init} produces — only the source of the
+   * seed + publisher-state bytes differs. See {@link createFromSeed}
+   * for the synthesis details.
    */
   static initFromSeed(opts: BrowserRuntimeFromSeedOptions): BrowserRuntime {
     const storage = opts.storage ?? memoryStorageAdapter();

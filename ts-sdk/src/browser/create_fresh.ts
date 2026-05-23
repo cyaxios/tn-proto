@@ -1,33 +1,40 @@
-// Browser-side fresh-ceremony bootstrap.
-//
-// JS port of `createFreshCeremony` in ../runtime/node_runtime.ts. Same
-// output (byte-identical yaml + keystore layout) so the wasm runtime
-// reads what we write here exactly the way it would read what the Node
-// or Python sides produce. The only differences are mechanical:
-//
-//   * Random bytes from `crypto.getRandomValues` (browser + worker-safe)
-//     instead of Node's `crypto.randomBytes`.
-//   * Disk writes go through a `JsStorageCallbacks` adapter instead of
-//     `node:fs`. The default adapter is the localStorage one; tests can
-//     hand in the in-memory adapter.
-//   * Paths are opaque storage keys, not filesystem paths — there's no
-//     `dirname` / `relative` step. Yaml `keystore.path` is just the
-//     directory key the wasm runtime will use to look up `local.private`
-//     etc.
-//   * No `Buffer`. Hex / utf-8 are pure JS.
-//
-// The yaml literal mirrors `createFreshCeremony`'s byte-for-byte —
-// public-fields list, group block, llm_classifier defaults — so a yaml
-// minted in the browser can be diffed against a Python-minted one and
-// only the ceremony id + DID differ.
+/**
+ * Browser-side fresh-ceremony bootstrap.
+ *
+ * JS port of `createFreshCeremony` in `src/runtime/node_runtime.ts`.
+ * Same output (byte-identical yaml + keystore layout) so the wasm
+ * runtime reads what we write here exactly the way it would read what
+ * the Node or Python sides produce. The only differences are
+ * mechanical:
+ *
+ * - Random bytes come from `crypto.getRandomValues` (browser- and
+ *   worker-safe) instead of Node's `crypto.randomBytes`.
+ * - Disk writes go through a {@link JsStorageCallbacks} adapter
+ *   instead of `node:fs`. The default is the localStorage one; tests
+ *   pass the in-memory adapter.
+ * - Paths are opaque storage keys, not filesystem paths — no
+ *   `dirname` / `relative` step. The yaml's `keystore.path` is just
+ *   the directory key the wasm runtime will use to look up
+ *   `local.private` etc.
+ * - No `Buffer`. Hex and UTF-8 are pure JS.
+ *
+ * The yaml literal mirrors `createFreshCeremony`'s byte-for-byte —
+ * public-fields list, group block, `llm_classifier` defaults — so a
+ * yaml minted in the browser can be diffed against a Python-minted one
+ * and only the ceremony id + DID differ.
+ *
+ * @packageDocumentation
+ */
 
 import { DeviceKey } from "../core/signing.js";
 import { BtnPublisher } from "../raw.js";
 import type { JsStorageCallbacks } from "../runtime/storage_node.js";
 
 /**
- * Knobs for `createFreshCeremony`. All optional — the defaults match
+ * Knobs for {@link createFreshCeremony}. All optional — defaults match
  * the Node side's "stem == yamlBasename without extension" convention.
+ *
+ * @public
  */
 export interface CreateFreshOptions {
   /**
@@ -60,13 +67,26 @@ export interface CreateFreshOptions {
 
 /**
  * Result of a successful fresh-ceremony bootstrap.
+ *
+ * @public
  */
 export interface CreateFreshResult {
-  /** The absolute storage key the yaml manifest was written at. */
+  /**
+   * Absolute storage key the yaml manifest was written to. Typically
+   * `"/v/tn.yaml"`. Pass this to {@link BrowserRuntime.init} via
+   * `opts.yamlPath` to load the freshly-minted ceremony.
+   */
   yamlPath: string;
-  /** The newly-minted publisher DID (`did:key:z…`). */
+  /**
+   * Newly-minted publisher DID (`did:key:z…`). 49 characters; uniquely
+   * identifies this ceremony's emit-side identity for the lifetime of
+   * the storage prefix.
+   */
   did: string;
-  /** The randomly-chosen ceremony id (e.g. `local_a1b2c3d4`). */
+  /**
+   * Ceremony id baked into the yaml — `"local_"` + 8 random hex chars.
+   * Used by the wasm runtime as a chain-disambiguation prefix.
+   */
   ceremonyId: string;
 }
 
@@ -96,12 +116,64 @@ function _writeUtf8(storage: JsStorageCallbacks, path: string, text: string): vo
 }
 
 /**
- * Mint a fresh ceremony in `storage` and return paths to the artefacts.
+ * Mint a fresh ceremony in `storage` and write all required artefacts.
  *
- * Idempotency: if `local.private` already exists under the resolved
- * keystore prefix, this throws rather than clobber. Mirrors the Node
- * side's clobber guard. Callers that want "init or reuse" should check
- * `storage.exists(...)` for the yaml first and skip this entirely.
+ * Generates a new Ed25519 device key (or accepts a caller-supplied
+ * seed via {@link CreateFreshOptions.devicePrivateBytes}), mints a
+ * fresh BTN publisher state for the default group, auto-injects the
+ * reserved `tn.agents` group, allocates an index-master HMAC key, and
+ * writes the yaml + keystore layout the wasm runtime reads at init.
+ *
+ * @param storage - storage adapter the wasm runtime will use. Most
+ *   callers pass the result of {@link localStorageStorageAdapter} or
+ *   {@link memoryStorageAdapter}.
+ * @param opts - optional knobs; see {@link CreateFreshOptions}.
+ *
+ * @returns A {@link CreateFreshResult} carrying the yaml path, DID,
+ *   and ceremony id. Pass `yamlPath` to {@link BrowserRuntime.init} to
+ *   load the freshly-minted ceremony.
+ *
+ * @throws Error - when `local.private` already exists under the
+ *   resolved keystore prefix (clobber guard). Callers that want
+ *   "init-or-reuse" should `storage.exists(...)` the yaml first and
+ *   skip this function entirely on a hit.
+ * @throws Error - when `opts.devicePrivateBytes` is supplied with a
+ *   length other than 32.
+ *
+ * @example
+ * ```ts
+ * import { createFreshCeremony, memoryStorageAdapter } from "@tnproto/sdk/browser";
+ *
+ * const storage = memoryStorageAdapter();
+ * const { yamlPath, did, ceremonyId } = createFreshCeremony(storage);
+ * // -> { yamlPath: "/v/tn.yaml", did: "did:key:z6Mk…", ceremonyId: "local_a1b2c3d4" }
+ * ```
+ *
+ * @example
+ * ```ts
+ * // Bind the ceremony to a pre-existing 32-byte seed (identity_seed bootstrap).
+ * import { createFreshCeremony } from "@tnproto/sdk/browser";
+ *
+ * const result = createFreshCeremony(storage, {
+ *   devicePrivateBytes: importedSeed,   // 32-byte Ed25519 seed
+ *   root: "/my-app",
+ *   stem: "main",
+ * });
+ * ```
+ *
+ * @see {@link createFromSeed} - bootstrap from server-provisioned
+ *   seed + publisher state (witness-style flow). Use this when the
+ *   server has already minted the publisher state.
+ * @see {@link BrowserRuntime.init} - the higher-level wrapper that
+ *   calls this on a fresh storage prefix and then loads the runtime.
+ *
+ * @remarks
+ * Mirror of `createFreshCeremony` in `src/runtime/node_runtime.ts`.
+ * Same yaml literal, same keystore filenames, same field order — a
+ * yaml minted here is bit-equivalent to one minted by the Node side
+ * modulo the ceremony id and device DID.
+ *
+ * @public
  */
 export function createFreshCeremony(
   storage: JsStorageCallbacks,

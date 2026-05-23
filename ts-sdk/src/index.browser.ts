@@ -1,23 +1,34 @@
-// Public entry point for the @tnproto/sdk browser bundle.
-//
-// Mirrors the Python module-level call surface so the simplest browser
-// usage reads exactly like Python:
-//
-//   import * as tn from "@tnproto/sdk/browser";  // or via the prebuilt browser.mjs
-//   await tn.init();
-//   tn.info("hello.world", { who: "alice" });
-//   for (const e of tn.read()) console.log(e);
-//   await tn.close();
-//
-// Power users who want explicit instance management still use the `Tn`
-// class directly — `import { Tn } from "@tnproto/sdk/browser"`.
-//
-// This file lives next to `src/index.ts` (the Node entry) and re-exports
-// only the surface that's currently wired for the browser. Other Tn
-// verbs (admin / pkg / vault / agents / watch / use / absorb / ephemeral)
-// exist as throwing placeholders on the `Tn` class so the API shape
-// stays intact; they'll light up as the underlying modules go
-// browser-pure.
+/**
+ * Public entry point for the `@tnproto/sdk` browser bundle.
+ *
+ * Mirrors the Python module-level call surface so the simplest browser
+ * usage reads exactly like Python:
+ *
+ * ```ts
+ * import * as tn from "@tnproto/sdk/browser";  // or via the prebuilt browser.mjs
+ * await tn.init();
+ * tn.info("hello.world", { who: "alice" });
+ * for (const e of tn.read()) console.log(e);
+ * await tn.close();
+ * ```
+ *
+ * Power users who want explicit instance management still use the
+ * {@link Tn} class directly:
+ *
+ * ```ts
+ * import { Tn } from "@tnproto/sdk/browser";
+ * const tn = await Tn.init();
+ * ```
+ *
+ * This file lives next to `src/index.ts` (the Node entry) and re-exports
+ * only the surface that's currently wired for the browser. Other Tn
+ * verbs (`admin` / `pkg` / `vault` / `agents` / `watch` / `use` /
+ * `absorb` / `ephemeral`) exist as throwing placeholders on the
+ * {@link Tn} class so the API shape stays intact; they'll light up as
+ * the underlying modules go browser-pure.
+ *
+ * @packageDocumentation
+ */
 
 // ---------------------------------------------------------------------------
 // Class + types
@@ -88,8 +99,8 @@ export {
 } from "./raw.js";
 
 // ---------------------------------------------------------------------------
-// Module-level singleton surface — mirrors Python `tn.init / tn.info /
-// tn.read / tn.close` etc. Same shape as src/index.ts's singleton block.
+// Module-level singleton surface — mirrors Python `tn.init` / `tn.info` /
+// `tn.read` / `tn.close`. Same shape as `src/index.ts`'s singleton block.
 // ---------------------------------------------------------------------------
 
 import {
@@ -98,8 +109,21 @@ import {
   type TnInitFromSeedOptions as _TnInitFromSeedOptions,
 } from "./browser/tn.js";
 
+/**
+ * Process-singleton {@link Tn} instance backing the bare module-level
+ * verbs (`tn.init`, `tn.info`, ...). `null` before the first `init`
+ * call.
+ *
+ * @internal
+ */
 let _defaultTn: _Tn | null = null;
 
+/**
+ * Throw a helpful "call init first" error if the bare verbs are used
+ * before `tn.init()`.
+ *
+ * @internal
+ */
 function _requireDefault(verb: string): _Tn {
   if (_defaultTn === null) {
     throw new Error(
@@ -110,7 +134,35 @@ function _requireDefault(verb: string): _Tn {
   return _defaultTn;
 }
 
-/** Initialize the default ceremony. Mirrors Python `tn.init()`. */
+/**
+ * Initialize the default ceremony. If one was previously initialized,
+ * it's closed first (best-effort) so the singleton always reflects
+ * the latest call.
+ *
+ * Mirror of Python `tn.init()`.
+ *
+ * @param opts - see {@link TnInitOptions}.
+ *
+ * @returns The newly-initialized `Tn` instance. Most callers don't
+ *   capture this — the bare verbs (`tn.info`, `tn.read`, ...) use it
+ *   implicitly via the module-level singleton.
+ *
+ * @example
+ * ```ts
+ * import * as tn from "@tnproto/sdk/browser";
+ *
+ * await tn.init();
+ * tn.info("hello.world", { who: "alice" });
+ * for (const e of tn.read()) console.log(e);
+ * await tn.close();
+ * ```
+ *
+ * @see {@link initFromSeed} - server-provisioned credentials variant.
+ * @see {@link Tn.init} - the class-level factory if you need an
+ *   explicit instance.
+ *
+ * @public
+ */
 export async function init(opts?: _TnInitOptions): Promise<_Tn> {
   if (_defaultTn !== null) {
     try {
@@ -126,9 +178,33 @@ export async function init(opts?: _TnInitOptions): Promise<_Tn> {
 
 /**
  * Initialize the default ceremony from caller-supplied seed material
- * (witness-style: the server has already minted the device key + btn
+ * (witness-style: the server has already minted the device key + BTN
  * publisher state and ships them per session). Closes any existing
  * default first.
+ *
+ * @param opts - see {@link TnInitFromSeedOptions}. `seed` and
+ *   `btnPublisherState` are required.
+ *
+ * @returns The newly-initialized `Tn` instance.
+ *
+ * @example
+ * ```ts
+ * import * as tn from "@tnproto/sdk/browser";
+ *
+ * await tn.initFromSeed({
+ *   seed: b64decode(PUBLISHER_SEED_B64),
+ *   btnPublisherState: b64decode(BTN_PUBLISHER_STATE_B64),
+ *   http: { url: INGEST_URL, headers: { "X-Agreement": agreementId } },
+ * });
+ *
+ * tn.info("witness.observer", { kind: "agreement.success" });
+ * await tn.close();
+ * ```
+ *
+ * @see {@link init} - fresh-mint variant.
+ * @see {@link Tn.initFromSeed} - class-level factory.
+ *
+ * @public
  */
 export async function initFromSeed(opts: _TnInitFromSeedOptions): Promise<_Tn> {
   if (_defaultTn !== null) {
@@ -143,7 +219,22 @@ export async function initFromSeed(opts: _TnInitFromSeedOptions): Promise<_Tn> {
   return _defaultTn;
 }
 
-/** Severity-less attested event. Mirrors Python `tn.log(...)`. */
+/**
+ * Severity-less attested event. Delegates to the singleton's
+ * {@link Tn.log}. See that method for parameter docs.
+ *
+ * @throws Error - when called before {@link init} / {@link initFromSeed}.
+ *
+ * @example
+ * ```ts
+ * import { init, log } from "@tnproto/sdk/browser";
+ *
+ * await init();
+ * log("schema.migrated", { from: "v1", to: "v2" });
+ * ```
+ *
+ * @public
+ */
 export function log(
   eventType: string,
   msgOrFields?: string | Record<string, unknown>,
@@ -152,6 +243,12 @@ export function log(
   _requireDefault("log").log(eventType, msgOrFields, fieldsIfMessage);
 }
 
+/**
+ * DEBUG-level attested event on the singleton. See {@link Tn.debug}.
+ *
+ * @throws Error - when called before {@link init} / {@link initFromSeed}.
+ * @public
+ */
 export function debug(
   eventType: string,
   msgOrFields?: string | Record<string, unknown>,
@@ -160,6 +257,21 @@ export function debug(
   _requireDefault("debug").debug(eventType, msgOrFields, fieldsIfMessage);
 }
 
+/**
+ * INFO-level attested event on the singleton. See {@link Tn.info}.
+ *
+ * @throws Error - when called before {@link init} / {@link initFromSeed}.
+ *
+ * @example
+ * ```ts
+ * import { init, info } from "@tnproto/sdk/browser";
+ *
+ * await init();
+ * info("user.signed_in", { user_id: "u_123" });
+ * ```
+ *
+ * @public
+ */
 export function info(
   eventType: string,
   msgOrFields?: string | Record<string, unknown>,
@@ -168,6 +280,12 @@ export function info(
   _requireDefault("info").info(eventType, msgOrFields, fieldsIfMessage);
 }
 
+/**
+ * WARNING-level attested event on the singleton. See {@link Tn.warning}.
+ *
+ * @throws Error - when called before {@link init} / {@link initFromSeed}.
+ * @public
+ */
 export function warning(
   eventType: string,
   msgOrFields?: string | Record<string, unknown>,
@@ -176,6 +294,12 @@ export function warning(
   _requireDefault("warning").warning(eventType, msgOrFields, fieldsIfMessage);
 }
 
+/**
+ * ERROR-level attested event on the singleton. See {@link Tn.error}.
+ *
+ * @throws Error - when called before {@link init} / {@link initFromSeed}.
+ * @public
+ */
 export function error(
   eventType: string,
   msgOrFields?: string | Record<string, unknown>,
@@ -184,12 +308,36 @@ export function error(
   _requireDefault("error").error(eventType, msgOrFields, fieldsIfMessage);
 }
 
-/** Read attested entries from the default ceremony's log. */
+/**
+ * Read attested entries from the singleton's log. See {@link Tn.read}.
+ *
+ * @returns Array of flat-shaped entries (envelope basics + decrypted
+ *   fields hoisted to top level).
+ *
+ * @throws Error - when called before {@link init} / {@link initFromSeed}.
+ *
+ * @example
+ * ```ts
+ * import { init, info, read } from "@tnproto/sdk/browser";
+ *
+ * await init();
+ * info("test.event", { ok: true });
+ * for (const e of read()) console.log(e.sequence, e.event_type);
+ * ```
+ *
+ * @public
+ */
 export function read(): Array<Record<string, unknown>> {
   return _requireDefault("read").read();
 }
 
-/** Audit-grade read returning `{envelope, plaintext}` per entry. */
+/**
+ * Audit-grade read returning `{envelope, plaintext}` per entry. See
+ * {@link Tn.readRaw}.
+ *
+ * @throws Error - when called before {@link init} / {@link initFromSeed}.
+ * @public
+ */
 export function readRaw(): Array<Record<string, unknown>> {
   return _requireDefault("readRaw").readRaw();
 }

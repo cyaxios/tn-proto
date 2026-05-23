@@ -1,38 +1,49 @@
-// Browser-side bootstrap from a caller-supplied seed + publisher state.
-//
-// Sister to `create_fresh.ts`. Where `createFreshCeremony` mints every
-// secret on the JS side, `createFromSeed` adopts secrets the caller
-// already has (typically server-minted, baked into a per-agreement
-// delivery template). The yaml + keystore layout is identical — same
-// wasm runtime reads the same files — only the source of the bytes
-// differs.
-//
-// Use case anchor: the witness harness today ships an `(seed, did,
-// btn_publisher_state)` triple per agreement so the browser can emit
-// signed envelopes WITHOUT having to mint a fresh ceremony at page
-// load. This module is the JS port of that bootstrap.
-//
-// On-the-fly mints (we have to write these even when the caller
-// doesn't logically need them — the wasm runtime's init reads them
-// during the bring-up sequence):
-//
-//   * `default.btn.mykit` — minted from the supplied publisher state.
-//     Consumes one leaf in the publisher's tree; emit-only callers can
-//     ignore it. (Bypassing this is a follow-up: would require either
-//     a wasm flag that skips self-kit validation, or writing a sentinel
-//     zero-length file. Neither exists today.)
-//   * `index_master.key` — fresh 32 random bytes unless the caller
-//     supplies one. Field-hash tokens hash with this; for emit-only
-//     transient sessions a fresh one per page load is fine.
-//   * `tn.agents` group state + self-kit — minted fresh. The yaml
-//     schema requires the reserved group to exist; we honor that with
-//     a private group nobody outside this runtime can read.
+/**
+ * Browser-side bootstrap from a caller-supplied seed + publisher state.
+ *
+ * Sister to `create_fresh.ts`. Where {@link createFreshCeremony} mints
+ * every secret on the JS side, {@link createFromSeed} adopts secrets
+ * the caller already has — typically server-minted, baked into a
+ * per-agreement delivery template. The yaml + keystore layout is
+ * identical (the same wasm runtime reads the same files); only the
+ * source of the seed + publisher-state bytes differs.
+ *
+ * ## Use-case anchor
+ *
+ * The witness harness today ships a `(seed, did, btn_publisher_state)`
+ * triple per agreement so the browser can emit signed envelopes
+ * without having to mint a fresh ceremony at page load. This module is
+ * the JS port of that bootstrap.
+ *
+ * ## On-the-fly mints
+ *
+ * These are written even when the caller doesn't logically need them
+ * — the wasm runtime's init reads each one during the bring-up
+ * sequence:
+ *
+ * - `default.btn.mykit` — minted from the supplied publisher state.
+ *   Consumes one leaf in the publisher's tree; emit-only callers can
+ *   ignore it.
+ * - `index_master.key` — fresh 32 random bytes unless the caller
+ *   supplies one. Field-hash tokens hash with this; for emit-only
+ *   transient sessions a fresh one per page load is fine.
+ * - `tn.agents` group state + self-kit — minted fresh. The yaml
+ *   schema requires the reserved group to exist; we honor that with a
+ *   private group nobody outside this runtime can read.
+ *
+ * @packageDocumentation
+ */
 
 import { DeviceKey } from "../core/signing.js";
 import { BtnPublisher } from "../raw.js";
 import type { JsStorageCallbacks } from "../runtime/storage_node.js";
 
-/** Inputs for `createFromSeed`. */
+/**
+ * Inputs for {@link createFromSeed}. Server-provisioned credentials
+ * are required; everything else has sensible defaults.
+ *
+ * @public
+ */
 export interface CreateFromSeedOptions {
   /**
    * 32-byte Ed25519 seed. Typically delivered from a server that
@@ -67,13 +78,26 @@ export interface CreateFromSeedOptions {
   ceremonyId?: string;
 }
 
-/** Result of `createFromSeed`. */
+/**
+ * Result of {@link createFromSeed}.
+ *
+ * @public
+ */
 export interface CreateFromSeedResult {
-  /** Storage key the synthesised yaml manifest was written to. */
+  /**
+   * Absolute storage key the synthesised yaml manifest was written to.
+   * Pass to {@link BrowserRuntime.init} via `opts.yamlPath`.
+   */
   yamlPath: string;
-  /** The DID derived from the supplied seed. */
+  /**
+   * DID derived from the supplied seed. Matches what
+   * `DeviceKey.fromSeed(opts.seed).did` would return.
+   */
   did: string;
-  /** The ceremony id baked into the yaml. */
+  /**
+   * Ceremony id baked into the yaml. Either `opts.ceremonyId` (when
+   * supplied) or `"local_" + 8 random hex chars`.
+   */
   ceremonyId: string;
 }
 
@@ -97,14 +121,59 @@ function _writeUtf8(storage: JsStorageCallbacks, path: string, text: string): vo
 }
 
 /**
- * Adopt a caller-supplied seed + btn publisher state, synthesise the
- * yaml + keystore files the wasm runtime needs, write them to
- * `storage`, and return the resolved yaml path.
+ * Adopt a caller-supplied seed + BTN publisher state, synthesise the
+ * yaml + keystore files the wasm runtime needs, and write them to
+ * `storage`.
  *
- * Idempotency: refuses to clobber an existing keystore (same guard as
- * `createFreshCeremony`). Callers that intend to re-bootstrap on every
- * page load should hand in a fresh storage adapter rather than reuse
- * one across sessions.
+ * The result of this call leaves `storage` in the same shape
+ * {@link createFreshCeremony} would have produced, but with the device
+ * identity bound to the caller's bytes instead of newly-minted ones.
+ * Subsequent `BrowserRuntime.init({yamlPath: result.yamlPath, storage})`
+ * loads it.
+ *
+ * @param storage - storage adapter the wasm runtime will use. For the
+ *   witness pattern (no persistence between sessions), pass a fresh
+ *   {@link memoryStorageAdapter} per page load.
+ * @param opts - seed + publisher state and (optionally) ceremony
+ *   knobs; see {@link CreateFromSeedOptions}.
+ *
+ * @returns A {@link CreateFromSeedResult} carrying the yaml path, the
+ *   DID derived from `opts.seed`, and the ceremony id.
+ *
+ * @throws Error - when `opts.seed.length !== 32`.
+ * @throws Error - when `opts.btnPublisherState.length === 0`.
+ * @throws Error - when `opts.indexMaster` is supplied with a length
+ *   other than 32.
+ * @throws Error - when `local.private` already exists under the
+ *   resolved keystore prefix (clobber guard). Callers reusing an
+ *   adapter across sessions should clear it first or hand in a fresh
+ *   one.
+ *
+ * @example
+ * ```ts
+ * import { createFromSeed, memoryStorageAdapter } from "@tnproto/sdk/browser";
+ *
+ * // Server-delivered credentials (e.g. from the witness's delivery template).
+ * const storage = memoryStorageAdapter();
+ * const { yamlPath, did } = createFromSeed(storage, {
+ *   seed: b64decode(PUBLISHER_SEED_B64),
+ *   btnPublisherState: b64decode(BTN_PUBLISHER_STATE_B64),
+ *   ceremonyId: agreementId,   // optional: pin to the server's id
+ * });
+ * // did matches DeviceKey.fromSeed(PUBLISHER_SEED).did
+ * ```
+ *
+ * @see {@link createFreshCeremony} - the "no caller bytes, mint
+ *   everything" variant.
+ * @see {@link Tn.initFromSeed} - the higher-level wrapper that calls
+ *   this and returns a usable `Tn` instance with handlers wired up.
+ *
+ * @remarks
+ * The yaml written here is byte-identical to what `createFreshCeremony`
+ * produces (same template, same field order, same `tn.agents` block),
+ * differing only in the device DID and the optional ceremony id.
+ *
+ * @public
  */
 export function createFromSeed(
   storage: JsStorageCallbacks,

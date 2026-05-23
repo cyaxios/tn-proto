@@ -592,28 +592,75 @@ export class Tn {
   }
 
   /**
-   * Enable or disable strict mode. When `true`, `Tn.init()` with no yaml
-   * path throws if the discovery chain finds no file rather than silently
-   * minting a fresh ceremony. Mirrors Python `tn.set_strict(enabled)`.
+   * Enable or disable strict mode programmatically.
    *
-   * Honors the programmatic override over `TN_STRICT` — calling
-   * `Tn.setStrict(false)` after the user set `TN_STRICT=1` in env will
-   * win until the next `Tn.clearStrict()`. Matches `python/tn/
-   * _autoinit.set_strict()` precedence.
+   * When strict mode is on, `Tn.init()` with no yaml path THROWS if
+   * the discovery chain finds no file — rather than silently minting
+   * a fresh ceremony. Use in production to ensure no accidental
+   * fresh-ceremony minting on a misconfigured deploy.
+   *
+   * Precedence (mirror of `python/tn/_autoinit.is_strict()`):
+   *
+   * 1. {@link Tn.setStrict} programmatic override.
+   * 2. `TN_STRICT` env var — truthy when lowercased value is in
+   *    `{"1", "true", "yes", "on"}`.
+   * 3. Default: false (auto-mint allowed).
+   *
+   * @param enabled - new programmatic-override value.
+   *
+   * @example
+   * ```ts
+   * // Production: block any accidental fresh-mint.
+   * Tn.setStrict(true);
+   * await Tn.init();   // throws if no yaml found
+   *
+   * // Test: undo the override.
+   * Tn.clearStrict();  // falls back to env
+   * ```
+   *
+   * @see {@link Tn.clearStrict} {@link Tn.isStrict}
+   * @public
    */
   static setStrict(enabled: boolean): void {
     _strictOverride = enabled;
   }
 
   /**
-   * Drop the programmatic strict-mode override and fall back to the
-   * `TN_STRICT` env var. Mirrors `python/tn/_autoinit.reset_state_for_tests`.
+   * Drop the programmatic strict-mode override. After this, strict
+   * mode is determined solely by the `TN_STRICT` env var.
+   *
+   * @example
+   * ```ts
+   * beforeEach(() => Tn.clearStrict());   // tests start neutral
+   * ```
+   *
+   * @see {@link Tn.setStrict}
+   *
+   * @remarks
+   * Mirrors `python/tn/_autoinit.reset_state_for_tests`.
+   *
+   * @public
    */
   static clearStrict(): void {
     _strictOverride = null;
   }
 
-  /** Read the active strict-mode flag (override wins, env second). */
+  /**
+   * Read the effective strict-mode flag.
+   *
+   * @returns The programmatic override if set; otherwise the
+   *   `TN_STRICT` env-var truthy check; otherwise `false`.
+   *
+   * @example
+   * ```ts
+   * if (Tn.isStrict()) {
+   *   // Don't auto-mint; require an explicit yaml path.
+   * }
+   * ```
+   *
+   * @see {@link Tn.setStrict}
+   * @public
+   */
   static isStrict(): boolean {
     return _strictMode();
   }

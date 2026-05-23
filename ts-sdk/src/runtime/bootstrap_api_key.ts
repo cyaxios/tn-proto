@@ -1,43 +1,37 @@
-// Cold-start keystore bootstrap from a TN_API_KEY bearer.
-//
-// TS port of python/tn/bootstrap.py. Mirrors the flow on a fresh node
-// that has only $TN_API_KEY in env:
-//
-//   1. Caller has an empty keystore + a yaml that declares vault.sync.
-//   2. The handler-builder spots the empty keystore + the env var and
-//      calls bootstrapFromApiKey() BEFORE constructing the vault.sync
-//      handler (which would otherwise raise on a missing local.private).
-//   3. We split the bearer into seed + key_id, derive the DID, run the
-//      standard /api/v1/auth/{challenge,verify} flow to mint a JWT,
-//      pull the sealed kit_bundle via
-//      /api/v1/api-keys/{key_id}/sealed-bundle, and hand the bytes to
-//      the absorb path. The absorb path knows how to unseal recipient-
-//      wrapped bundles via the device seed.
-//   4. Absorb installs the body into the keystore (a project_seed
-//      tnpkg with the publisher's keys + tn.yaml). The keystore is now
-//      hot.
-//
-// We never throw — failures return False so the caller can fall
-// through to the existing INIT-UPLOAD-and-claim-URL path. Contract is
-// "best-effort cold start": a stale / revoked / consumed bearer leaves
-// the keystore in whatever state it was in (typically still empty), and
-// the existing flow takes over.
-//
-// **PARTIAL PORT — see end of this file.** The Python implementation
-// chains into `_absorb_dispatch -> _maybe_unseal_recipient_wrap` which
-// recovers the BEK from `manifest.state.body_encryption.recipient_wraps`
-// using the bearer's seed and decrypts the project_seed body. The TS
-// `absorbBootstrap` (src/runtime/absorb_bootstrap.ts) does NOT yet
-// integrate the unseal step from `core/recipient_seal.ts`, so this
-// module does the env-var-honoring half — read TN_API_KEY, derive DID,
-// challenge/verify, fetch the sealed bundle — and surfaces a clearly-
-// named `UnsealNotWiredError` once the bundle is in hand. Filling in
-// the unseal+install bridge is a follow-up task; see the doc-comment at
-// the bottom for the exact integration sketch.
-//
-// This module is internal — there is no public `Tn.bootstrapFromApiKey`
-// symbol. The handler-builder is the only caller; users discover the
-// feature by setting TN_API_KEY.
+/**
+ * Cold-start keystore bootstrap from a `TN_API_KEY` bearer.
+ *
+ * TS port of `python/tn/bootstrap.py`. Mirrors the flow on a fresh node
+ * that has only `$TN_API_KEY` in env:
+ *
+ * 1. Caller has an empty keystore + a yaml that declares `vault.sync`.
+ * 2. The handler-builder spots the empty keystore + the env var and
+ *    calls {@link bootstrapFromApiKey} BEFORE constructing the
+ *    `vault.sync` handler (which would otherwise raise on a missing
+ *    `local.private`).
+ * 3. We split the bearer into seed + key_id, derive the DID, run the
+ *    standard `/api/v1/auth/{challenge,verify}` flow to mint a JWT,
+ *    pull the sealed kit_bundle via
+ *    `/api/v1/api-keys/{key_id}/sealed-bundle`, and hand the bytes to
+ *    {@link absorbSealedBootstrap}, which unseals the recipient wrap
+ *    with the bearer's seed and installs the project_seed body.
+ * 4. The keystore is now hot — `local.private`, `local.public`, and a
+ *    fresh `tn.yaml` live under the keystore dir.
+ *
+ * **Failure contract:** never throws. A stale / revoked / consumed
+ * bearer leaves the keystore in whatever state it was in (typically
+ * still empty), and the function returns `null` so the caller can
+ * fall through to the existing INIT-UPLOAD-and-claim-URL path. The
+ * only case that surfaces a populated {@link ApiKeyFetchResult} with
+ * a `receipt.rejectedReason` is when every network step succeeded but
+ * the absorb step rejected (e.g. malformed sealed bundle).
+ *
+ * This module is internal — there is no public
+ * `Tn.bootstrapFromApiKey` symbol. The handler-builder is the only
+ * caller; users discover the feature by setting `TN_API_KEY`.
+ *
+ * @packageDocumentation
+ */
 
 import { Buffer } from "node:buffer";
 
@@ -67,25 +61,65 @@ const _DEFAULT_HEADERS: Record<string, string> = {
 };
 
 /**
- * Parsed bearer payload. `seed` is the 32-byte Ed25519 seed; `keyIdB64`
- * is the URL-safe-no-pad base64 string (used verbatim in the sealed-
- * bundle GET URL so the server's lookup matches its stored encoding);
- * `keyIdBytes` is the decoded 16-byte key id (returned for callers that
- * want it but currently unused).
+ * Parsed bearer payload returned by {@link parseBearer}.
+ *
+ * @public
  */
 export interface ParsedBearer {
+  /**
+   * 32-byte Ed25519 seed. Pass to {@link DeviceKey.fromSeed} to derive
+   * the bearer's DID, or to {@link absorbSealedBootstrap} as the
+   * recipient seed for unsealing a sealed `.tnpkg`.
+   */
   seed: Uint8Array;
+  /**
+   * URL-safe-no-pad base64 of the 16-byte key id (22 chars). Used
+   * verbatim in the sealed-bundle GET URL — the server stores keys
+   * under this exact encoding, so any re-encoding would miss.
+   */
   keyIdB64: string;
+  /**
+   * Decoded 16-byte key id. Returned for callers that want it; the
+   * bootstrap flow itself uses `keyIdB64`.
+   */
   keyIdBytes: Uint8Array;
 }
 
 /**
- * Split `tn_apikey_<seed_43chars>_<key_id_22chars>` into raw bytes.
- * Returns `null` on shape failure. Length-pinned: seed_b64 is exactly
- * 43 chars (32 bytes URL-safe-no-pad), key_id_b64 is exactly 22 chars
- * (16 bytes URL-safe-no-pad).
+ * Split a `tn_apikey_<seed_43chars>_<key_id_22chars>` bearer string
+ * into its raw byte components.
  *
- * Mirrors python/tn/bootstrap.py:_parse_bearer line-for-line.
+ * Length-pinned by design: the bearer is exactly
+ * `len("tn_apikey_") + 43 + 1 + 22 = 76` characters. Splitting on the
+ * last `_` would be wrong because the seed's URL-safe-no-pad base64
+ * can legitimately contain `_` or `-`; we pin the split by length.
+ *
+ * @param bearer - the raw bearer string from `$TN_API_KEY` or an
+ *   equivalent caller-supplied source.
+ *
+ * @returns The {@link ParsedBearer} on success, or `null` on shape
+ *   failure (wrong prefix, wrong length, non-base64 chars, decoded
+ *   lengths off). Never throws.
+ *
+ * @example
+ * ```ts
+ * import { parseBearer } from "@tnproto/sdk";
+ *
+ * const parsed = parseBearer(process.env.TN_API_KEY ?? "");
+ * if (parsed === null) {
+ *   console.warn("malformed TN_API_KEY");
+ * } else {
+ *   const did = DeviceKey.fromSeed(parsed.seed).did;
+ * }
+ * ```
+ *
+ * @see {@link bootstrapFromApiKey} - the full cold-start flow that
+ *   uses this internally.
+ *
+ * @remarks
+ * Mirrors `python/tn/bootstrap.py::_parse_bearer` line-for-line.
+ *
+ * @public
  */
 export function parseBearer(bearer: string): ParsedBearer | null {
   if (typeof bearer !== "string" || !bearer.startsWith(_BEARER_PREFIX)) return null;
@@ -172,10 +206,46 @@ async function _httpGet(
 }
 
 /**
- * Run /auth/challenge + /auth/verify against `base`, return JWT on
- * success or `null` on any failure path.
+ * Run the vault's `/auth/challenge` + `/auth/verify` flow.
  *
- * Mirrors python/tn/bootstrap.py:_challenge_verify.
+ * 1. POST `/api/v1/auth/challenge` with `{did}` to get a nonce.
+ * 2. Ed25519-sign the nonce with `seed`.
+ * 3. POST `/api/v1/auth/verify` with `{did, nonce, signature}` to get
+ *    a JWT.
+ *
+ * @param base - vault base URL. Typically resolved via
+ *   {@link resolveDidEndpoint}.
+ * @param did - the DID derived from `seed`. The vault echoes this
+ *   back; mismatch would fail the verify step.
+ * @param seed - 32-byte Ed25519 seed corresponding to `did`. Used
+ *   to sign the nonce.
+ *
+ * @returns The JWT on success, or `null` on any failure (network
+ *   error, non-200 response, malformed JSON, missing nonce/token).
+ *   Never throws — every failure path logs at WARN and returns null.
+ *
+ * @example
+ * ```ts
+ * import { challengeVerify, resolveDidEndpoint, parseBearer } from "@tnproto/sdk";
+ * import { DeviceKey } from "@tnproto/sdk";
+ *
+ * const parsed = parseBearer(process.env.TN_API_KEY!);
+ * if (!parsed) throw new Error("bad bearer");
+ * const did = DeviceKey.fromSeed(parsed.seed).did;
+ * const base = await resolveDidEndpoint("did:web:vault.example.com");
+ * const jwt = await challengeVerify(base, did, parsed.seed);
+ * // jwt -> use as `Authorization: Bearer <jwt>` for subsequent requests
+ * ```
+ *
+ * @see {@link bootstrapFromApiKey} - the full cold-start flow that
+ *   uses this internally.
+ *
+ * @remarks
+ * Mirrors `python/tn/bootstrap.py::_challenge_verify`. Uses a
+ * self-identifying `tn-protocol-ts/dev` User-Agent so the Cloudflare
+ * edge doesn't 1010-block the request.
+ *
+ * @public
  */
 export async function challengeVerify(
   base: string,
@@ -256,22 +326,40 @@ export async function challengeVerify(
 }
 
 /**
- * Result of the full api-key flow: every step from `parseBearer`
- * through the on-disk install. `receipt` is the same shape any other
- * `Tn.absorb` returns — accepted/deduped counts, conflicts, rejection
- * reason (if any).
+ * Result of a successful (or post-install-rejected) {@link bootstrapFromApiKey}
+ * call.
+ *
+ * Every step from {@link parseBearer} through the on-disk install
+ * succeeded enough to produce a result. `receipt.rejectedReason`
+ * populated when the bundle was fetched but the absorb step refused
+ * to install — typically because the bundle was malformed or addressed
+ * to a different DID.
+ *
+ * @public
  */
 export interface ApiKeyFetchResult {
+  /** The DID derived from the bearer's seed. Matches the wrap's
+   *  intended recipient on a healthy round-trip. */
   did: string;
+  /** Resolved vault base URL — what `resolveDidEndpoint(opts.vaultDid)`
+   *  returned. Useful for diagnostic logs. */
   vaultBase: string;
+  /** JWT the vault minted for the bearer's DID. Caller is free to
+   *  reuse this for follow-up vault calls if it wants to. */
   token: string;
+  /** Raw bytes of the sealed `.tnpkg` the vault delivered. Kept for
+   *  diagnostics; the install was already attempted via
+   *  {@link absorbSealedBootstrap}. */
   sealedBytes: Uint8Array;
-  /** Optional `kind` field the server reports alongside the bundle
-   *  (e.g. "project_seed"). Diagnostic. */
+  /** Optional `kind` the vault reports alongside the bundle (e.g.
+   *  `"project_seed"`). Pure diagnostic. */
   kind?: string;
-  /** The on-disk install receipt. `rejectedReason` populated only on
-   *  failure — caller can `if (!result.receipt.rejectedReason)` to gate
-   *  follow-on actions like sync-state stamping. */
+  /**
+   * On-disk install receipt. `rejectedReason` is populated only when
+   * the unseal/decrypt/install step refused; consumers can do
+   * `if (!result.receipt.rejectedReason)` to gate follow-on actions
+   * like sync-state stamping.
+   */
   receipt: AbsorbReceipt;
 }
 
@@ -296,24 +384,66 @@ export class UnsealNotWiredError extends Error {
 }
 
 /**
- * Read $TN_API_KEY from env (if set), run the full cold-start: parse
- * bearer, derive DID, /auth/challenge + /auth/verify, GET sealed
- * bundle, unseal it with the bearer's seed, decrypt the body, install
- * the keystore + yaml at `opts.cwd`. Returns the merged
- * {@link ApiKeyFetchResult} on success, or `null` when there's no env
- * var / parse failure / network failure / vault rejection.
+ * Run the full cold-start from a `TN_API_KEY` bearer.
  *
- * Never throws on user / network / vault-rejection failures — these
- * surface as `null` so the caller can fall through to the existing
- * INIT-UPLOAD path.
+ * 1. Read `TN_API_KEY` from env (or accept `opts.apiKey` for explicit
+ *    callers — tests, CLIs).
+ * 2. {@link parseBearer} — split the bearer into seed + key id.
+ * 3. {@link DeviceKey.fromSeed} — derive the bearer's DID.
+ * 4. {@link resolveDidEndpoint} — find the vault HTTP base from
+ *    `opts.vaultDid`.
+ * 5. {@link challengeVerify} — Ed25519-sign the challenge nonce, mint
+ *    a JWT.
+ * 6. GET `/api/v1/api-keys/{key_id_b64}/sealed-bundle` with the JWT —
+ *    pull the recipient-sealed `.tnpkg`.
+ * 7. {@link absorbSealedBootstrap} — unseal the BEK with the bearer's
+ *    seed, decrypt the body, install the keystore + yaml at
+ *    `opts.cwd`.
  *
- * `vaultDid` is the DID of the vault as written in the yaml (typically
- * `did:key:z...` or `did:web:host`). It's resolved to an HTTP base via
- * `resolveDidEndpoint`. `cwd` is the install root for the project_seed
- * absorb (yaml + keystore land under it); defaults to `process.cwd()`.
+ * Returns the merged {@link ApiKeyFetchResult} on success (with
+ * `receipt.rejectedReason` populated only when step 7 refused), or
+ * `null` when any of steps 1–6 fails (no env var, malformed bearer,
+ * network failure, vault rejection).
  *
- * Matches the contract of python/tn/bootstrap.py::bootstrap_from_api_key
- * (returns success / fall-through; never raises).
+ * @param opts.vaultDid - the DID of the vault as written in the yaml
+ *   (typically `did:key:z…` or `did:web:host`). Resolved to an HTTP
+ *   base via {@link resolveDidEndpoint}.
+ * @param opts.apiKey - explicit bearer. When omitted, reads
+ *   `process.env.TN_API_KEY`. Pass explicitly when calling outside the
+ *   env-var-driven flow (tests, CLI tools).
+ * @param opts.cwd - install root for the project_seed absorb. Defaults
+ *   to `process.cwd()`. The yaml and keystore land under it.
+ *
+ * @returns The {@link ApiKeyFetchResult} on success, or `null` on
+ *   fallthrough (caller should try the next bootstrap path). Never
+ *   throws on user / network / vault-rejection failures.
+ *
+ * @example
+ * ```ts
+ * import { bootstrapFromApiKey } from "@tnproto/sdk";
+ *
+ * const result = await bootstrapFromApiKey({
+ *   vaultDid: "did:web:vault.example.com",
+ * });
+ *
+ * if (result === null) {
+ *   console.warn("TN_API_KEY missing or vault rejected; falling through");
+ * } else if (result.receipt.rejectedReason) {
+ *   console.error("sealed bundle install failed:", result.receipt.rejectedReason);
+ * } else {
+ *   console.log("cold-started keystore from api-key for", result.did);
+ * }
+ * ```
+ *
+ * @see {@link parseBearer}
+ * @see {@link challengeVerify}
+ * @see {@link absorbSealedBootstrap}
+ *
+ * @remarks
+ * Mirrors `python/tn/bootstrap.py::bootstrap_from_api_key`. Same
+ * never-throws contract; same `null`-on-failure semantics.
+ *
+ * @public
  */
 export async function bootstrapFromApiKey(opts: {
   vaultDid: string;

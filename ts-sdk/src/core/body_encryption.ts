@@ -1,30 +1,44 @@
-// AES-256-GCM body encryption for sealed tnpkg bundles.
-//
-// Mirrors python/tn/export.py:_encrypt_body_in_place + decrypt_body_blob
-// byte-for-byte. Same frame, same nonce length, same outer "STORED zip
-// of body files" plaintext. A bundle produced by Python decrypts here,
-// and vice versa.
-//
-// Wire layout:
-//
-//   body/encrypted.bin = 12-byte AES-GCM nonce || ciphertext+tag
-//
-// Plaintext (inside the AEAD): a STORED zip of the body members at
-// their original `body/<name>` keys, entries sorted by name so the
-// plaintext bytes are deterministic for a given body (test-friendly
-// and lets producers compare ciphertext hashes across implementations).
-//
-// AAD on the body AEAD is empty — the manifest's `ciphertext_sha256`
-// hash, recorded in `state.body_encryption`, provides the integrity
-// binding (the manifest itself is signed).
+/**
+ * AES-256-GCM body encryption for sealed `.tnpkg` bundles.
+ *
+ * Mirrors `python/tn/export.py::_encrypt_body_in_place` +
+ * `decrypt_body_blob` byte-for-byte. A bundle produced by Python
+ * decrypts here, and vice versa.
+ *
+ * ## Wire layout
+ *
+ * ```text
+ * body/encrypted.bin = 12-byte AES-GCM nonce || ciphertext+tag
+ * ```
+ *
+ * The plaintext (inside the AEAD) is a STORED zip of the body members
+ * at their original `body/<name>` keys. Entries are sorted by name so
+ * the plaintext bytes are deterministic for a given body — test-friendly
+ * and lets producers compare ciphertext hashes across implementations.
+ *
+ * AAD on the body AEAD is empty. The manifest's `ciphertext_sha256`
+ * hash (recorded in `state.body_encryption`) provides the integrity
+ * binding via the signed manifest.
+ *
+ * @packageDocumentation
+ */
 
 import { packTnpkg, parseTnpkg, type ZipEntry } from "./tnpkg_archive.js";
 
-/** Cipher-suite identifier the manifest carries.
- *  Matches python/tn/export.py:_encrypt_body_in_place. */
+/**
+ * Cipher-suite identifier recorded in `manifest.state.body_encryption.cipher_suite`.
+ * Matches `python/tn/export.py::_encrypt_body_in_place`.
+ *
+ * @public
+ */
 export const BODY_CIPHER_SUITE = "aes-256-gcm";
 
-/** Frame identifier baked into manifest.state.body_encryption.frame. */
+/**
+ * Frame identifier recorded in `manifest.state.body_encryption.frame`.
+ * Identifies the v2 wire format (STORED-zip plaintext inside AES-GCM).
+ *
+ * @public
+ */
 export const BODY_FRAME = "tn-encrypted-body-v2-zip";
 
 const NONCE_BYTES = 12;
@@ -33,13 +47,47 @@ const TAG_BYTES = 16;
 /**
  * Pack `body` into a STORED zip and AES-GCM-encrypt it under `key`.
  *
- * `body` keys arrive as `body/<name>` (the same shape the outer tnpkg
- * uses); entries are sorted by name to keep the plaintext deterministic.
+ * The keys in `body` arrive as `body/<name>` (matching the outer tnpkg
+ * layout); entries are sorted by name to keep the plaintext bytes
+ * deterministic across implementations.
  *
- * Returns the bytes that should live at the outer tnpkg's
- * `body/encrypted.bin` slot.
+ * @param body - the body members to encrypt. Keys are `body/<name>`
+ *   logical paths (e.g. `body/keys/local.private`); values are the
+ *   raw file bytes. Accepts either a `Map` or a plain object.
+ * @param key - 32-byte AES-256 key (the Body Encryption Key, BEK).
+ *   Typically supplied by {@link sealBekForRecipient} on the producer
+ *   side and recovered by {@link unsealBekFromWrap} on the consumer.
  *
- * Mirror of `_encrypt_body_in_place` in python/tn/export.py.
+ * @returns The bytes that should be written to the outer tnpkg's
+ *   `body/encrypted.bin` slot. Layout: `nonce || ciphertext+tag`.
+ *
+ * @throws Error - when `key.length !== 32`.
+ *
+ * @example
+ * ```ts
+ * import { encryptBodyBlob } from "@tnproto/sdk";
+ *
+ * const bek = crypto.getRandomValues(new Uint8Array(32));
+ * const body = new Map([
+ *   ["body/tn.yaml", new TextEncoder().encode("ceremony: ...")],
+ *   ["body/keys/local.private", seedBytes],
+ * ]);
+ *
+ * const encrypted = await encryptBodyBlob(body, bek);
+ * // encrypted -> the bytes for tnpkg "body/encrypted.bin"
+ * ```
+ *
+ * @see {@link decryptBodyBlob} - the inverse operation.
+ * @see {@link BODY_CIPHER_SUITE} / {@link BODY_FRAME} - record these in
+ *   the manifest's `state.body_encryption` so the consumer knows what
+ *   to invoke.
+ *
+ * @remarks
+ * Mirrors `python/tn/export.py::_encrypt_body_in_place`. AAD is empty
+ * (the manifest's `ciphertext_sha256` provides integrity via the
+ * signed manifest, so the AEAD doesn't need to re-bind it).
+ *
+ * @public
  */
 export async function encryptBodyBlob(
   body: Map<string, Uint8Array> | Record<string, Uint8Array>,
@@ -87,20 +135,60 @@ export async function encryptBodyBlob(
 }
 
 /**
- * Inverse of `encryptBodyBlob`. Returns a `{name: bytes}` map keyed by
+ * Decrypt a sealed body blob into its original member map.
+ *
+ * Inverse of {@link encryptBodyBlob}. Reads the 12-byte nonce prefix,
+ * AES-GCM-decrypts the remainder with the supplied key, then parses
+ * the resulting STORED zip back into a `{name: bytes}` map keyed by
  * the same `body/<name>` shape the producer started with.
  *
- * Mirror of `decrypt_body_blob` in python/tn/export.py.
+ * @param blob - the bytes from `body/encrypted.bin`. Must be at least
+ *   `12 + 16` bytes (nonce + AEAD tag).
+ * @param key - the 32-byte BEK used by the producer's
+ *   {@link encryptBodyBlob}. Typically recovered via
+ *   {@link unsealBekFromWrap}.
  *
- * Throws on:
- *   * Input shorter than `NONCE_BYTES + TAG_BYTES` (12 + 16).
- *   * AES-GCM tag check failure (bad key, tampered ciphertext).
- *   * Inner-zip parse failure.
+ * @returns The original body member map. Keys are `body/<name>`
+ *   matching what the producer passed in. Iteration order matches the
+ *   sort order the producer used (alphabetical by name).
  *
- * Does NOT honor Python's legacy-binary-frame fallback — that branch
- * was for pre-2026-04-29 ciphertexts only and is documented in Python
- * as "drop after next state wipe." TS never produced the legacy frame,
- * so we never have to read it.
+ * @throws Error - when:
+ *   - `key.length !== 32` (wrong key length)
+ *   - `blob.length < 28` (truncated input)
+ *   - AES-GCM tag check fails (wrong key, tampered ciphertext, or
+ *     truncation past the `< 28` check)
+ *   - The decrypted plaintext doesn't start with `PK\\x03\\x04` (not a
+ *     STORED zip — likely a pre-2026-04-29 legacy frame, unsupported
+ *     on the TS side)
+ *
+ * @example
+ * ```ts
+ * import { decryptBodyBlob, unsealBekFromWrap, manifestAadForWrap } from "@tnproto/sdk";
+ *
+ * // 1. Recover BEK from a recipient wrap using our seed.
+ * const aad = manifestAadForWrap(manifest);
+ * const bek = await unsealBekFromWrap(wrap, ourSeed, aad);
+ *
+ * // 2. Decrypt the encrypted body blob.
+ * const body = await decryptBodyBlob(encryptedBytes, bek);
+ *
+ * // 3. Read installed members.
+ * const seed = body.get("body/keys/local.private");
+ * const yaml = body.get("body/tn.yaml");
+ * ```
+ *
+ * @see {@link encryptBodyBlob}
+ * @see {@link unsealBekFromWrap}
+ * @see {@link absorbSealedBootstrap} - the full sealed-tnpkg install flow that
+ *   composes BEK unseal + body decrypt + keystore write.
+ *
+ * @remarks
+ * Mirrors `python/tn/export.py::decrypt_body_blob` for the v2 frame.
+ * The pre-2026-04-29 legacy binary frame fallback that Python carries
+ * is intentionally not implemented here — TS never produced the legacy
+ * frame, so refusing to read it is correct.
+ *
+ * @public
  */
 export async function decryptBodyBlob(
   blob: Uint8Array,

@@ -1,24 +1,30 @@
-// HTTP handler — ship each attested envelope to a remote URL.
-//
-// Witness-style transport: the wasm runtime fans every signed envelope
-// through here, and we POST it to `opts.url`. The body is the canonical
-// ndjson line the runtime would have written to a log file — byte-for-
-// byte identical, so the server's signature / row_hash / chain checks
-// run against exactly what was attested.
-//
-// Cut-point note: this handler attaches via wasm `addHandler`, so it
-// fires AFTER encryption + signing. That's intentional — the wire bytes
-// must be the attested envelope, not the caller's plaintext. The
-// JS-layer `consoleHandler` is the opposite (plaintext, pre-encrypt);
-// the two are complementary, not competitors.
-//
-// Default behavior is a 2-second batched queue with retries on 5xx and
-// best-effort flushes on `pagehide` / `beforeunload`. Mirrors what the
-// witness template does today.
+/**
+ * HTTP handler — ship each attested envelope to a remote URL.
+ *
+ * Witness-style transport: the wasm runtime fans every signed envelope
+ * through here, and we POST it to {@link HttpHandlerOptions.url}. The
+ * body is the canonical ndjson line the runtime would have written to
+ * a log file — byte-for-byte identical, so server-side signature /
+ * `row_hash` / chain checks run against exactly what was attested.
+ *
+ * **Cut-point note:** this handler attaches via wasm `addHandler`, so
+ * it fires AFTER encryption + signing. That's intentional — the wire
+ * bytes must be the attested envelope, not the caller's plaintext. The
+ * JS-layer {@link consoleHandler} is the opposite (plaintext,
+ * pre-encrypt); the two are complementary, not competitors.
+ *
+ * Default behavior: 2-second batched queue, retries on 5xx, best-effort
+ * `keepalive: true` flush on `pagehide` / `beforeunload`. Mirrors what
+ * the witness template does today.
+ *
+ * @packageDocumentation
+ */
 
 /**
- * Knobs for `httpHandler`. The only required field is `url`; everything
- * else has a sensible default.
+ * Knobs for {@link httpHandler}. Only {@link HttpHandlerOptions.url}
+ * is required; everything else has a sensible default.
+ *
+ * @public
  */
 export interface HttpHandlerOptions {
   /**
@@ -71,32 +77,69 @@ export interface HttpHandlerOptions {
 }
 
 /**
- * Shape the wasm runtime's `addHandler(...)` accepts. Same as
- * `crypto/tn-wasm/src/handlers.rs::JsHandler::from_js`.
+ * Shape the wasm runtime's `addHandler(...)` accepts. Mirrors
+ * `crypto/tn-wasm/src/handlers.rs::JsHandler::from_js`. The wasm side
+ * fans every signed envelope through `emit`, with `accepts` as an
+ * optional pre-filter and `close` as a teardown hook.
+ *
+ * @public
  */
 export interface WasmHandlerCallbacks {
+  /** Stable name for dedup + diagnostics. */
   name: string;
+  /**
+   * Receive a single attested envelope.
+   *
+   * @param envelope - the decoded envelope as a plain JS object.
+   *   Includes signatures, hashes, sequence — but the group payloads
+   *   are still encrypted ciphertext blobs (the bytes haven't been
+   *   decrypted for this handler).
+   * @param rawLine - the canonical ndjson bytes the runtime wrote.
+   *   This is what goes on the wire for an HTTP ship — the server's
+   *   signature / `row_hash` / chain checks recompute over these exact
+   *   bytes, so re-serializing `envelope` would break verification.
+   */
   emit(envelope: Record<string, unknown>, rawLine: Uint8Array): void;
+  /**
+   * Optional pre-filter. When supplied and returning `false`, the
+   * envelope skips this handler's `emit`. Useful for level filters,
+   * event-type allow-lists, etc.
+   */
   accepts?(envelope: Record<string, unknown>): boolean;
+  /**
+   * Optional teardown. Called when the wasm runtime closes. Should
+   * release resources but not synchronously block on long-running
+   * I/O — the wasm side calls this fire-and-forget.
+   */
   close?(): void;
 }
 
 /**
- * Returned by `httpHandler`. Carries the wasm-bound callback shape
- * (passed to `wasm.addHandler`) plus a JS-facing `flushPending()` so
- * `BrowserRuntime.close()` can `await` the final drain before tearing
- * down the wasm runtime.
+ * Returned by {@link httpHandler}. Carries the wasm-bound callback
+ * shape (passed to `wasm.addHandler`) plus a JS-facing
+ * {@link HttpHandlerInstance.flushPending} so `BrowserRuntime.close()`
+ * can `await` the final drain before tearing down the wasm runtime.
  *
- * Wasm-side `close()` is fire-and-forget from JS's POV; relying on it
- * to ship in-flight envelopes before the script exits is racey. The
+ * **Why `flushPending` exists separately from `close`:** the wasm-side
+ * `close()` is fire-and-forget from JS's POV; relying on it to ship
+ * in-flight envelopes before the script exits is racey. The
  * `flushPending()` Promise resolves once every queued envelope has
- * either succeeded (2xx), failed terminally (4xx), or been requeued for
- * retry (5xx / network). Caller can choose to keep awaiting if it
+ * either succeeded (2xx), failed terminally (4xx), or been requeued
+ * for retry (5xx / network). Caller can choose to keep awaiting if it
  * cares about the requeued ones — typically they let those wait for
  * the next page load or just let them drop.
+ *
+ * @public
  */
 export interface HttpHandlerInstance extends WasmHandlerCallbacks {
-  /** Await every queued envelope's first ship attempt. */
+  /**
+   * Drain the in-memory queue: kick off a flush, wait for every
+   * pending POST to settle. Idempotent.
+   *
+   * @returns A promise that resolves after the in-flight POSTs settle
+   *   (success, terminal-4xx-drop, or 5xx-requeue). Does NOT chain
+   *   further flushes of the requeue; call again for that.
+   */
   flushPending(): Promise<void>;
 }
 
@@ -104,6 +147,63 @@ export interface HttpHandlerInstance extends WasmHandlerCallbacks {
  * Build an HTTP-shipping handler suitable for
  * `wasm.addHandler(httpHandler({ url: "..." }))` or for the `http:`
  * knob on `Tn.init(...)`.
+ *
+ * @param opts - {@link HttpHandlerOptions}. Only `url` is required.
+ *
+ * @returns An {@link HttpHandlerInstance} carrying both the wasm
+ *   handler contract and a JS-facing `flushPending()` for graceful
+ *   shutdown.
+ *
+ * @example
+ * ```ts
+ * import { Tn, httpHandler } from "@tnproto/sdk/browser";
+ *
+ * // URL-only shorthand via Tn.init.
+ * await Tn.init({ http: "https://ingest.example.com/intake" });
+ *
+ * // Full options.
+ * await Tn.init({
+ *   http: {
+ *     url: "https://ingest.example.com/intake",
+ *     headers: { "X-Agreement": agreementId },
+ *     batchIntervalMs: 2000,         // queue + flush every 2s
+ *     flushOnUnload: true,           // ship on pagehide/beforeunload
+ *   },
+ * });
+ *
+ * tn.info("user.signed_in", { user_id: "u_123" });
+ * // ...
+ * await tn.close();   // awaits the final HTTP flush before resolving
+ * ```
+ *
+ * @example
+ * ```ts
+ * // Immediate-ship mode (no queue, one fetch per emit).
+ * import { httpHandler } from "@tnproto/sdk/browser";
+ *
+ * const h = httpHandler({
+ *   url: INGEST_URL,
+ *   batchIntervalMs: 0,
+ *   fetch: customFetch,
+ *   onError: (err, env) => report(err, env.event_id),
+ * });
+ * // h is suitable for wasm.addHandler(h)
+ * ```
+ *
+ * @see {@link consoleHandler} - the orthogonal "show in DevTools" sink.
+ * @see {@link HttpHandlerOptions} - all knobs documented.
+ *
+ * @remarks
+ * - 5xx responses requeue automatically; 4xx drop with the error
+ *   surfaced via `opts.onError`.
+ * - On `pagehide` / `beforeunload` (when `flushOnUnload !== false`),
+ *   pending envelopes ship with `keepalive: true` so the browser is
+ *   allowed to complete the request after the tab unloads.
+ * - The body POSTed is the canonical ndjson bytes from the runtime,
+ *   not a re-serialized envelope. Server-side signature verification
+ *   depends on byte-identity.
+ *
+ * @public
  */
 export function httpHandler(opts: HttpHandlerOptions): HttpHandlerInstance {
   const url = opts.url;

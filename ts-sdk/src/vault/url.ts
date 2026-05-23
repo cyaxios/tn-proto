@@ -1,61 +1,155 @@
-// Vault URL resolution — TS port of python/tn/vault_client.py
-// (`resolve_vault_url`) + python/tn/identity.py (`_resolve_did_endpoint`).
-//
-// Two distinct helpers because the two Python functions resolve
-// different things: `resolve_vault_url` is "where do my own vault
-// requests go" (caller arg > TN_VAULT_URL > default), while
-// `resolve_did_endpoint` is "where does *this DID's* vault live"
-// (did:key uses TN_VAULT_DEFAULT_BASE; did:web fetches the DID doc).
-//
-// Both env reads match Python's semantics byte-for-byte so dev-mode
-// "point at localhost" configs (TN_VAULT_URL=http://localhost:8790 etc.)
-// work across the SDK boundary.
+/**
+ * Vault URL resolution helpers.
+ *
+ * Two helpers, two different questions:
+ *
+ * - {@link resolveVaultUrl} answers "where do *my own* vault requests
+ *   go?" — explicit arg > `TN_VAULT_URL` env > default. Mirrors
+ *   `python/tn/vault_client.py::resolve_vault_url`.
+ *
+ * - {@link resolveDidEndpoint} answers "where does *this DID's* vault
+ *   live?" — `did:key:` uses `TN_VAULT_DEFAULT_BASE`; `did:web:` fetches
+ *   the DID document. Mirrors `python/tn/identity.py::_resolve_did_endpoint`.
+ *
+ * Plus {@link isAutoLinkDisabled} — the `TN_NO_LINK` env-var predicate
+ * that future auto-link code in TS will gate on.
+ *
+ * Both env-var reads match Python's semantics byte-for-byte so dev-mode
+ * "point at localhost" configs work across the SDK boundary.
+ *
+ * @packageDocumentation
+ */
 
-/** Default vault URL when caller doesn't pass one and TN_VAULT_URL is
- *  unset. Mirrors `python/tn/vault_client.py::DEFAULT_VAULT_URL`. */
+/**
+ * Default vault URL when no explicit argument and no `TN_VAULT_URL`
+ * env var is set. Points at the hosted tn-proto vault.
+ *
+ * Mirrors `python/tn/vault_client.py::DEFAULT_VAULT_URL`.
+ *
+ * @public
+ */
 export const DEFAULT_VAULT_URL = "https://vault.tn-proto.org";
 
-/** Env var name. Centralised here and in identity-DID resolution. */
+/**
+ * Env var name for the primary vault URL. Read by
+ * {@link resolveVaultUrl}.
+ *
+ * @public
+ */
 export const ENV_VAULT_URL = "TN_VAULT_URL";
 
-/** Env var name for the did:key default-vault hint. */
+/**
+ * Env var name for the `did:key:` default-vault hint. Read by
+ * {@link resolveDidEndpoint}.
+ *
+ * @public
+ */
 export const ENV_VAULT_DEFAULT_BASE = "TN_VAULT_DEFAULT_BASE";
 
 /**
- * Resolve vault URL with the standard precedence: explicit arg >
- * `TN_VAULT_URL` env var > `DEFAULT_VAULT_URL`. Mirrors Python's
- * `vault_client.resolve_vault_url`.
+ * Resolve the vault base URL using the standard precedence:
+ *
+ * 1. Explicit `baseUrl` argument (when truthy).
+ * 2. `TN_VAULT_URL` env var.
+ * 3. {@link DEFAULT_VAULT_URL} (the hosted tn-proto vault).
+ *
+ * @param baseUrl - optional explicit base URL. `null` and `undefined`
+ *   both fall through to the env var.
+ *
+ * @returns The resolved vault base URL. No trailing-slash normalisation
+ *   is applied here; callers that build paths should
+ *   `url.replace(/\/+$/, "")` defensively before appending.
+ *
+ * @example
+ * ```ts
+ * import { resolveVaultUrl } from "@tnproto/sdk";
+ *
+ * // No arg, no env: returns DEFAULT_VAULT_URL.
+ * resolveVaultUrl();                        // "https://vault.tn-proto.org"
+ *
+ * // Env: TN_VAULT_URL=http://localhost:8790
+ * resolveVaultUrl();                        // "http://localhost:8790"
+ *
+ * // Explicit arg wins over env.
+ * resolveVaultUrl("https://other.example"); // "https://other.example"
+ * ```
+ *
+ * @see {@link resolveDidEndpoint} - for "where does this DID's vault live?"
+ * @see {@link ENV_VAULT_URL}
+ * @see {@link DEFAULT_VAULT_URL}
+ *
+ * @remarks
+ * Mirrors `python/tn/vault_client.py::resolve_vault_url`. Pure function;
+ * no I/O.
+ *
+ * @public
  */
 export function resolveVaultUrl(baseUrl?: string | null): string {
   if (baseUrl) return baseUrl;
   return process.env[ENV_VAULT_URL] ?? DEFAULT_VAULT_URL;
 }
 
-// In-process cache: did_str -> base URL string. Mirrors Python's
-// `_did_endpoint_cache` — `did:web` document fetches happen at most
-// once per process per DID.
+/**
+ * In-process cache: `did_str` -> base URL. Mirrors Python's
+ * `_did_endpoint_cache`. `did:web:` document fetches happen at most
+ * once per (process, DID).
+ *
+ * @internal
+ */
 const _didEndpointCache: Map<string, string> = new Map();
 
 /**
  * Derive the HTTP base URL for a vault service from a DID string.
  *
- * Supported DID methods (matches python/tn/identity.py:_resolve_did_endpoint):
+ * Supported DID methods:
  *
- * - `did:key:z...`  -> `TN_VAULT_DEFAULT_BASE` env var, default
- *   `https://vault.tn-proto.org`. The key is self-describing — there's
- *   no document to fetch.
+ * - `did:key:z...` — the key is self-describing; no document to
+ *   fetch. The transport URL comes from `TN_VAULT_DEFAULT_BASE`
+ *   ({@link DEFAULT_VAULT_URL} when unset). Set the env var to
+ *   `http://localhost:8790` to point at a local tn-proto-org instance
+ *   for dev/tests.
  *
- * - `did:web:<host>` or `did:web:<host>:<path:segments>` -> fetch
- *   `https://<host>/.well-known/did.json` once per process, look for
- *   a `service` entry with `type === "TnVaultEndpoint"`, use its
- *   `serviceEndpoint`. Falls back to `https://<host>` when no
- *   matching service is found OR when the fetch fails.
+ * - `did:web:<host>` or `did:web:<host>:<path:segments>` — fetches
+ *   `https://<host>/.well-known/did.json` once per process, looks for
+ *   a `service` entry whose `type === "TnVaultEndpoint"`, and uses
+ *   its `serviceEndpoint`. Falls back to `https://<host>` when no
+ *   matching service entry is found OR when the fetch fails.
  *
- * Returns a string with NO trailing slash (rstrip-equivalent).
- * Throws on unsupported DID methods.
+ * Results are memoised per-DID for the lifetime of the process; the
+ * first call for a given DID may incur a network round-trip
+ * (`did:web:` only), every call thereafter is `O(1)` map lookup.
  *
- * Async because did:web requires an HTTP fetch. Callers in synchronous
- * code paths can wrap in a one-shot Promise + `await`.
+ * @param didStr - the DID to resolve. Must be `did:key:` or `did:web:`.
+ *
+ * @returns The HTTP base URL with no trailing slash. Use as the prefix
+ *   for vault API paths like `${base}/api/v1/auth/challenge`.
+ *
+ * @throws Error - when `didStr` uses an unsupported DID method. Empty
+ *   strings, malformed prefixes, and `did:plc:`/`did:ion:`/etc all
+ *   raise.
+ *
+ * @example
+ * ```ts
+ * import { resolveDidEndpoint } from "@tnproto/sdk";
+ *
+ * // did:key — uses TN_VAULT_DEFAULT_BASE (or DEFAULT_VAULT_URL).
+ * const base1 = await resolveDidEndpoint("did:key:z6MkfakeDidKeyForTest");
+ * // -> "https://vault.tn-proto.org"
+ *
+ * // did:web — fetches /.well-known/did.json from the host.
+ * const base2 = await resolveDidEndpoint("did:web:vault.example.com");
+ * // -> the TnVaultEndpoint serviceEndpoint, or "https://vault.example.com"
+ * ```
+ *
+ * @see {@link resolveVaultUrl} - for explicit base URLs (not DID-derived).
+ * @see {@link ENV_VAULT_DEFAULT_BASE}
+ *
+ * @remarks
+ * Mirrors `python/tn/identity.py::_resolve_did_endpoint`. Trailing
+ * slashes are stripped from the returned URL (consistent with Python's
+ * `.rstrip("/")`).
+ *
+ * @public
  */
 export async function resolveDidEndpoint(didStr: string): Promise<string> {
   const cached = _didEndpointCache.get(didStr);
@@ -110,25 +204,68 @@ export async function resolveDidEndpoint(didStr: string): Promise<string> {
   );
 }
 
-/** Test-only: clear the did-endpoint cache. */
+/**
+ * Clear the did-endpoint cache. Test-only; production code must not
+ * call this.
+ *
+ * @example
+ * ```ts
+ * import { _resetDidEndpointCacheForTests, resolveDidEndpoint } from "@tnproto/sdk";
+ *
+ * afterEach(() => _resetDidEndpointCacheForTests());
+ * ```
+ *
+ * @internal
+ */
 export function _resetDidEndpointCacheForTests(): void {
   _didEndpointCache.clear();
 }
 
-/** Env var name for the auto-link opt-out. */
+/**
+ * Env var name for the auto-link opt-out. Read by
+ * {@link isAutoLinkDisabled}.
+ *
+ * @public
+ */
 export const ENV_NO_LINK = "TN_NO_LINK";
 
 /**
- * Whether auto-link is disabled by env. Mirrors the
- * `TN_NO_LINK=1` check in python/tn/__init__.py:494.
+ * Whether the `TN_NO_LINK=1` env var is set, signalling that any
+ * auto-link path should be skipped.
  *
- * Currently consulted by no code in the TS SDK — the auto-link path
- * itself hasn't been ported (depends on the `Identity` class, which
- * is Python-only today). Helper sits here so a future auto-link impl
- * picks up the env-var gate as a one-line check rather than
- * re-discovering the convention. The explicit `tn.vault.link(...)`
- * verb is deliberately NOT gated by this — it's an explicit user
- * call, not an automatic action.
+ * Mirrors the gate at `python/tn/__init__.py:494`. Only the exact
+ * string `"1"` is treated as enabled (after trim), matching Python.
+ *
+ * @returns `true` iff `TN_NO_LINK` is exactly `"1"`; `false` otherwise
+ *   (including unset, empty, `"yes"`, `"true"`).
+ *
+ * @example
+ * ```ts
+ * import { isAutoLinkDisabled } from "@tnproto/sdk";
+ *
+ * // TN_NO_LINK=1 in env
+ * isAutoLinkDisabled();   // true
+ *
+ * // TN_NO_LINK=yes in env (NOT "1", so Python ignores it; we do too)
+ * isAutoLinkDisabled();   // false
+ *
+ * // TN_NO_LINK unset
+ * isAutoLinkDisabled();   // false
+ * ```
+ *
+ * @remarks
+ * Consulted by no code in the TS SDK today — the auto-link path itself
+ * hasn't been ported (depends on the `Identity` class, which is
+ * Python-only). The helper sits ready so a future TS auto-link can
+ * gate on the env var with a one-line check rather than re-discovering
+ * the convention.
+ *
+ * **Explicitly NOT gated by this:** `tn.vault.link(...)` and
+ * `tn.vault.unlink(...)`. Those are explicit user calls; surprising
+ * them with a silent no-op based on env would be wrong.
+ *
+ * @see {@link ENV_NO_LINK}
+ * @public
  */
 export function isAutoLinkDisabled(): boolean {
   return (process.env[ENV_NO_LINK] ?? "").trim() === "1";

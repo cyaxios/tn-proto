@@ -212,19 +212,63 @@ function _maybeUnsealBody(
 }
 
 /**
- * Async sister of `absorbBootstrap` for recipient-sealed bundles.
- * Mandatory `seed` is the 32-byte Ed25519 seed of the recipient whose
- * wrap is present in `manifest.state.body_encryption.recipient_wraps[]`.
+ * Async sister of {@link absorbBootstrap} for recipient-sealed bundles.
+ *
+ * Use this when the `.tnpkg` has a `state.body_encryption.recipient_wraps[]`
+ * envelope and `body/encrypted.bin` is an AES-GCM ciphertext — i.e. it
+ * was produced by `sealBekForRecipient` + {@link encryptBodyBlob}. The
+ * vault-side sealed bundles delivered to `bootstrapFromApiKey` are
+ * exactly this shape.
  *
  * Flow:
- *   1. readTnpkg + signature verify (same as absorbBootstrap).
- *   2. Pick the wrap whose `recipient_identity` matches our DID.
- *   3. unsealBekFromWrap(wrap, seed, aad) → BEK.
- *   4. decryptBodyBlob(body.get("body/encrypted.bin"), BEK) → new body
- *      member map.
- *   5. Dispatch to the kind-specific handler with the decrypted body.
  *
- * Returns the same AbsorbReceipt shape `absorbBootstrap` does.
+ * 1. `readTnpkg(source)` + signature verify (same as {@link absorbBootstrap}).
+ * 2. Pick the wrap whose `recipient_identity` matches the DID derived
+ *    from `opts.seed`.
+ * 3. {@link unsealBekFromWrap}(wrap, seed, aad) → BEK.
+ * 4. {@link decryptBodyBlob}(body.get("body/encrypted.bin"), BEK) →
+ *    decrypted body member map.
+ * 5. Dispatch to the kind-specific handler (`_bootstrapProjectSeed` /
+ *    `_bootstrapIdentitySeed`) with the decrypted body.
+ *
+ * @param source - the sealed `.tnpkg` as bytes or a filesystem path.
+ * @param opts.seed - 32-byte Ed25519 seed of the wrap's intended
+ *   recipient. Used to derive a matching DID and unseal the BEK.
+ * @param opts.cwd - install root. Defaults to `process.cwd()`. The
+ *   keystore + yaml land under this directory.
+ *
+ * @returns An {@link AbsorbReceipt}. `rejectedReason` is populated on
+ *   any failure (malformed zip, signature invalid, wrap not addressed
+ *   to us, BEK unseal fail, AEAD tag mismatch, body integrity check).
+ *
+ * @example
+ * ```ts
+ * import { absorbSealedBootstrap } from "@tnproto/sdk";
+ *
+ * const receipt = await absorbSealedBootstrap(sealedBytes, {
+ *   seed: bearerSeed,             // 32-byte Ed25519 seed
+ *   cwd: "/path/to/install",      // where local.private + tn.yaml land
+ * });
+ *
+ * if (receipt.rejectedReason) {
+ *   console.error("install failed:", receipt.rejectedReason);
+ * } else {
+ *   console.log("installed", receipt.acceptedCount, "body members");
+ * }
+ * ```
+ *
+ * @see {@link absorbBootstrap} - sync variant for already-unsealed bundles.
+ * @see {@link bootstrapFromApiKey} - the full network + install flow that
+ *   composes this with `parseBearer`, `challengeVerify`, sealed-bundle fetch.
+ * @see {@link unsealBekFromWrap}
+ * @see {@link decryptBodyBlob}
+ *
+ * @remarks
+ * Mirrors `python/tn/absorb.py::_maybe_unseal_recipient_wrap` +
+ * `_absorb_dispatch` routing. Never throws on bundle parsing errors —
+ * they surface as a populated `rejectedReason`.
+ *
+ * @public
  */
 export async function absorbSealedBootstrap(
   source: string | Uint8Array,
