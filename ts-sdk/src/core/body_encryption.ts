@@ -229,6 +229,7 @@ export async function decryptBodyBlob(
       `decryptBodyBlob: AES-GCM decrypt failed (wrong key or tampered ciphertext): ${
         (err as Error).message ?? String(err)
       }`,
+      { cause: err },
     );
   }
 

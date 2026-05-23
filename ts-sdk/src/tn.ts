@@ -19,7 +19,6 @@
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve, isAbsolute as pathIsAbsolute } from "node:path";
-import { randomUUID } from "node:crypto";
 
 import { NodeRuntime, setSigning as _runtimeSetSigning } from "./runtime/node_runtime.js";
 import { iterLogFiles } from "./runtime/reconcile.js";
