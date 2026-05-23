@@ -14,9 +14,11 @@
 
 import { WasmRuntime } from "tn-wasm";
 import { createFreshCeremony, type CreateFreshOptions } from "./create_fresh.js";
+import { createFromSeed, type CreateFromSeedOptions } from "./create_from_seed.js";
 import { consoleHandler, type ConsoleHandler } from "./console_handler.js";
 import { httpHandler, type HttpHandlerOptions, type HttpHandlerInstance } from "./http_handler.js";
 import { localStorageStorageAdapter } from "../runtime/storage_localstorage.js";
+import { memoryStorageAdapter } from "../runtime/storage_memory.js";
 import type { JsStorageCallbacks } from "../runtime/storage_node.js";
 
 /** Options for `BrowserRuntime.init`. */
@@ -75,6 +77,31 @@ export interface BrowserRuntimeOptions {
 }
 
 /**
+ * Options for `BrowserRuntime.initFromSeed` / `Tn.initFromSeed`. The
+ * seed material is required; storage + side-effect knobs are optional
+ * with witness-friendly defaults (in-memory storage, no console, HTTP
+ * shipping opt-in).
+ */
+export interface BrowserRuntimeFromSeedOptions extends CreateFromSeedOptions {
+  /**
+   * Storage adapter. Default: a fresh `memoryStorageAdapter()` — the
+   * witness pattern is "every page load re-bootstraps from server-
+   * provisioned creds, never persists between sessions." Pass an
+   * explicit adapter for other shapes.
+   */
+  storage?: JsStorageCallbacks;
+  /**
+   * Same shape as `BrowserRuntimeOptions.console`. Default `false` for
+   * `initFromSeed` — server-shipped credentials usually mean a
+   * production session where dev-mode console noise is unwanted. Set to
+   * `true` (or a custom `ConsoleHandler`) to enable.
+   */
+  console?: boolean | ConsoleHandler;
+  /** Same shape as `BrowserRuntimeOptions.http`. Default: off. */
+  http?: string | HttpHandlerOptions;
+}
+
+/**
  * Wraps a single `WasmRuntime` handle. Construct via the static `init`
  * factory; never `new BrowserRuntime` directly.
  */
@@ -124,6 +151,57 @@ export class BrowserRuntime {
       createFreshCeremony(storage, opts.createFresh ?? {});
     }
 
+    return BrowserRuntime._wireUpWasm(storage, yamlPath, {
+      console: opts.console,
+      http: opts.http,
+      consoleDefaultOn: true,
+    });
+  }
+
+  /**
+   * Bootstrap a runtime from caller-supplied seed material instead of
+   * minting fresh on the JS side. Use when the server has already
+   * generated the device key + publisher state (witness-style flows
+   * where every browser session adopts server-provisioned creds).
+   *
+   * Defaults differ from `init`:
+   *   * `storage` defaults to a fresh in-memory adapter (no persistence
+   *     between sessions — server re-issues creds on every page load).
+   *   * `console` defaults to OFF (production session vibes; turn on
+   *     explicitly for debugging).
+   *
+   * The yaml + keystore the wasm runtime reads are byte-identical to
+   * what `init` produces — only the source of the seed bytes differs.
+   * See `createFromSeed` for the synthesis details.
+   */
+  static initFromSeed(opts: BrowserRuntimeFromSeedOptions): BrowserRuntime {
+    const storage = opts.storage ?? memoryStorageAdapter();
+    const result = createFromSeed(storage, opts);
+    return BrowserRuntime._wireUpWasm(storage, result.yamlPath, {
+      console: opts.console,
+      http: opts.http,
+      consoleDefaultOn: false,
+    });
+  }
+
+  /**
+   * Shared plumbing: hand the yaml + storage to wasm, wire up the
+   * console + http handlers per the caller's opts, and box the result
+   * in a `BrowserRuntime` instance.
+   *
+   * `consoleDefaultOn` is the only place `init` and `initFromSeed`
+   * disagree on default behavior. `init` defaults to console-on (dev
+   * usage); `initFromSeed` defaults to off (production usage).
+   */
+  private static _wireUpWasm(
+    storage: JsStorageCallbacks,
+    yamlPath: string,
+    sinks: {
+      console: boolean | ConsoleHandler | undefined;
+      http: string | HttpHandlerOptions | undefined;
+      consoleDefaultOn: boolean;
+    },
+  ): BrowserRuntime {
     // `initWith` is the variant that takes an opts object; we pass an
     // empty bag for now. `skipCeremonyInitEmit` is a NodeRuntime concern
     // (it attaches wasm lazily after the TS side has already taken
@@ -131,18 +209,18 @@ export class BrowserRuntime {
     // browser runtime IS the wasm runtime, no lazy attach.
     const wasm = WasmRuntime.initWith(yamlPath, storage, {});
 
-    // Resolve the console sink. `false` disables; `true` (or omitted)
-    // builds the default handler; a `ConsoleHandler` is taken verbatim.
-    // The actual fan-out happens inside each emit method below, where
-    // we still have the plaintext fields the caller passed in (the
-    // wasm-side handler would only see the post-encryption envelope).
+    // Resolve the console sink. The default depends on the caller —
+    // `init` defaults console on (dev usage); `initFromSeed` defaults
+    // off (production usage).
     let consoleSink: ConsoleHandler | null;
-    if (opts.console === false) {
+    if (sinks.console === false) {
       consoleSink = null;
-    } else if (opts.console && typeof opts.console === "object") {
-      consoleSink = opts.console;
-    } else {
+    } else if (sinks.console && typeof sinks.console === "object") {
+      consoleSink = sinks.console;
+    } else if (sinks.console === true) {
       consoleSink = consoleHandler();
+    } else {
+      consoleSink = sinks.consoleDefaultOn ? consoleHandler() : null;
     }
 
     // Resolve the HTTP sink. Default off. String -> URL only; object ->
@@ -151,9 +229,9 @@ export class BrowserRuntime {
     // server must see to verify the chain. We also keep a JS-side
     // reference so `close()` can await the final flush.
     let httpSink: HttpHandlerInstance | null = null;
-    if (opts.http !== undefined) {
+    if (sinks.http !== undefined) {
       const httpOpts: HttpHandlerOptions =
-        typeof opts.http === "string" ? { url: opts.http } : opts.http;
+        typeof sinks.http === "string" ? { url: sinks.http } : sinks.http;
       httpSink = httpHandler(httpOpts);
       wasm.addHandler(httpSink);
     }

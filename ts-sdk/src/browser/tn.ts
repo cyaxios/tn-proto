@@ -28,7 +28,11 @@
 // surface inspection (`typeof tn.admin === "object"`,
 // `typeof Tn.init === "function"`) stays honest.
 
-import { BrowserRuntime, type BrowserRuntimeOptions } from "./runtime.js";
+import {
+  BrowserRuntime,
+  type BrowserRuntimeOptions,
+  type BrowserRuntimeFromSeedOptions,
+} from "./runtime.js";
 import { normalizeLogFields } from "../_log_fields.js";
 
 // ---------------------------------------------------------------------------
@@ -95,6 +99,13 @@ function _stubNamespace<T extends Record<string, unknown>>(name: string, keys: r
 
 /** Options forwarded to `Tn.init`. Wraps `BrowserRuntimeOptions`. */
 export interface TnInitOptions extends BrowserRuntimeOptions {}
+
+/**
+ * Options forwarded to `Tn.initFromSeed`. Wraps
+ * `BrowserRuntimeFromSeedOptions` — see that interface for the field
+ * docs.
+ */
+export interface TnInitFromSeedOptions extends BrowserRuntimeFromSeedOptions {}
 
 // ---------------------------------------------------------------------------
 // Tn class
@@ -188,6 +199,27 @@ export class Tn {
    */
   static async init(opts?: TnInitOptions): Promise<Tn> {
     const rt = BrowserRuntime.init(opts ?? {});
+    return new Tn(rt);
+  }
+
+  /**
+   * Bootstrap a `Tn` from caller-supplied seed material (32-byte
+   * Ed25519 seed + a pre-minted `BtnPublisher.toBytes()` state) rather
+   * than minting fresh on the client. Use this when a server has
+   * already generated the device identity + publisher state per
+   * session / agreement and delivers them to the browser.
+   *
+   * Compared to `Tn.init`:
+   *   * `storage` defaults to a fresh in-memory adapter (no
+   *     persistence between sessions).
+   *   * `console` defaults to OFF — production-session vibes; pass
+   *     `console: true` to opt in to dev visibility.
+   *
+   * Construction is async to mirror `Tn.init`; the underlying work is
+   * synchronous so the returned Promise resolves on the next microtask.
+   */
+  static async initFromSeed(opts: TnInitFromSeedOptions): Promise<Tn> {
+    const rt = BrowserRuntime.initFromSeed(opts);
     return new Tn(rt);
   }
 

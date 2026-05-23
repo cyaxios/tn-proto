@@ -29,6 +29,7 @@ export {
   NotYetWiredForBrowserError,
   type LogLevel,
   type TnInitOptions,
+  type TnInitFromSeedOptions,
 } from "./browser/tn.js";
 
 export {
@@ -41,6 +42,12 @@ export {
   type CreateFreshOptions,
   type CreateFreshResult,
 } from "./browser/create_fresh.js";
+
+export {
+  createFromSeed,
+  type CreateFromSeedOptions,
+  type CreateFromSeedResult,
+} from "./browser/create_from_seed.js";
 
 export {
   consoleHandler,
@@ -85,7 +92,11 @@ export {
 // tn.read / tn.close` etc. Same shape as src/index.ts's singleton block.
 // ---------------------------------------------------------------------------
 
-import { Tn as _Tn, type TnInitOptions as _TnInitOptions } from "./browser/tn.js";
+import {
+  Tn as _Tn,
+  type TnInitOptions as _TnInitOptions,
+  type TnInitFromSeedOptions as _TnInitFromSeedOptions,
+} from "./browser/tn.js";
 
 let _defaultTn: _Tn | null = null;
 
@@ -110,6 +121,25 @@ export async function init(opts?: _TnInitOptions): Promise<_Tn> {
     _defaultTn = null;
   }
   _defaultTn = await _Tn.init(opts);
+  return _defaultTn;
+}
+
+/**
+ * Initialize the default ceremony from caller-supplied seed material
+ * (witness-style: the server has already minted the device key + btn
+ * publisher state and ships them per session). Closes any existing
+ * default first.
+ */
+export async function initFromSeed(opts: _TnInitFromSeedOptions): Promise<_Tn> {
+  if (_defaultTn !== null) {
+    try {
+      await _defaultTn.close();
+    } catch {
+      // Best-effort close; never let a stale singleton block re-init.
+    }
+    _defaultTn = null;
+  }
+  _defaultTn = await _Tn.initFromSeed(opts);
   return _defaultTn;
 }
 
