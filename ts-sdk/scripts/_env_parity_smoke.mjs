@@ -5,20 +5,13 @@
 //
 //   node scripts/_env_parity_smoke.mjs
 
-// Initialize the wasm before any DeviceKey / wasm-backed call. The
-// nodejs pkg target ships initSync; we feed it the .wasm bytes
-// directly so we don't depend on the default `fetch` path (which
-// errors on file:// URLs under Node).
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve as pathResolve } from "node:path";
-import { initSync } from "tn-wasm";
-
-const __here = dirname(fileURLToPath(import.meta.url));
-const wasmBytes = readFileSync(
-  pathResolve(__here, "..", "..", "crypto", "tn-wasm", "pkg", "tn_wasm_bg.wasm"),
-);
-initSync({ module: wasmBytes });
+// Side-effect import: the nodejs target of tn-wasm self-instantiates
+// its .wasm at module load (see pkg/tn_wasm.js bottom). No `initSync`
+// call is needed — the nodejs target doesn't export one (only the
+// web/bundler targets do). Bare `import "tn-wasm"` is sufficient to
+// make every DeviceKey / wasm-backed call ready by the time the next
+// import resolves.
+import "tn-wasm";
 
 import {
   Tn,

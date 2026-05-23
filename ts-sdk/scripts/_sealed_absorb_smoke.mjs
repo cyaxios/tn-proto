@@ -18,16 +18,14 @@
 // to prove the unseal+install bridge works.
 
 import { readFileSync, existsSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve as pathResolve, join } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { initSync } from "tn-wasm";
 
-const __here = dirname(fileURLToPath(import.meta.url));
-const wasmBytes = readFileSync(
-  pathResolve(__here, "..", "..", "crypto", "tn-wasm", "pkg", "tn_wasm_bg.wasm"),
-);
-initSync({ module: wasmBytes });
+// Side-effect import: the nodejs target of tn-wasm self-instantiates
+// its .wasm at module load (see pkg/tn_wasm.js bottom — readFileSync +
+// new WebAssembly.Instance + __wbindgen_start). No `initSync` call is
+// needed (the nodejs target doesn't export one — only web/bundler do).
+import "tn-wasm";
 
 const {
   DeviceKey,

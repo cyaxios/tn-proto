@@ -1,23 +1,26 @@
 // Test-runner-level wasm init.
 //
 // Loaded via `node --import ./test/_setup_wasm.mjs --test ...` so it
-// runs ONCE before any test file gets imported. Calls `initSync` on
-// the tn-wasm pkg glue with the .wasm bytes off disk; after that,
-// every wasm-backed export is callable from any test, regardless of
-// whether that test goes through `src/index.ts` (which has its own
-// init) or imports browser-safe Layer 1 modules directly (which
-// deliberately do not — they're tested for browser-safety).
+// runs ONCE before any test file gets imported.
 //
-// initSync is idempotent — production paths that init themselves
-// (NodeRuntime.attachWasm via src/runtime/_node_wasm_init.ts) keep
-// working.
-
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-import { initSync } from "tn-wasm";
-
-const wasmJsUrl = import.meta.resolve("tn-wasm");
-const wasmDir = dirname(fileURLToPath(wasmJsUrl));
-const wasmBytes = readFileSync(resolve(wasmDir, "tn_wasm_bg.wasm"));
-initSync({ module: wasmBytes });
+// The nodejs target of tn-wasm (the file: dep ts-sdk consumes) auto-
+// instantiates the .wasm at module load time — see the bottom of
+// `pkg/tn_wasm.js`:
+//
+//     const wasmBytes = require('fs').readFileSync(...);
+//     const wasmModule = new WebAssembly.Module(wasmBytes);
+//     let wasm = new WebAssembly.Instance(...).exports;
+//     wasm.__wbindgen_start();
+//
+// So a bare side-effect `import "tn-wasm"` here is enough: every
+// wasm-bound export is callable as soon as the module finishes
+// loading, regardless of whether a given test file goes through
+// `src/index.ts` (which also imports tn-wasm) or imports browser-safe
+// Layer 1 modules directly.
+//
+// `initSync` is NOT exported by the nodejs-target glue — only by the
+// web / bundler targets. Earlier versions of this file called
+// `initSync({module: bytes})` here, which silently failed at runtime
+// (`initSync is undefined`) and broke the typecheck on the now-removed
+// `src/runtime/_node_wasm_init.ts`.
+import "tn-wasm";

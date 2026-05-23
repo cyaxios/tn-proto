@@ -182,6 +182,16 @@ failing with `Cannot read properties of undefined (reading
 '__wbindgen_malloc')`. Fixed in PR #78 commit 9fac2fa via
 `src/runtime/_node_wasm_init.ts`.
 
+**Follow-up (post-merge):** `_node_wasm_init.ts` was removed because
+wasm-pack's `--target nodejs` glue already self-instantiates the
+.wasm at module load (`readFileSync` + `new WebAssembly.Instance` +
+`__wbindgen_start` at the bottom of `pkg/tn_wasm.js`). The file
+imported `initSync` which the nodejs target does NOT export (only
+the web/bundler targets do), so CI typecheck started failing once
+the silent-pass shim came off the ts-sdk test step. Replaced with a
+side-effect `import "tn-wasm"` at the same import sites; same
+outcome at runtime, no broken `initSync` call.
+
 ### ts-run-id-stamp
 
 Node TS didn't stamp `process.env.TN_RUN_ID` before wasm init, so
