@@ -115,8 +115,105 @@ def _surface_diag(verb: str, event_type: str, fields: dict[str, Any]) -> None:
 # zero parameter-passing overhead at call time.
 # ---------------------------------------------------------------------------
 
+# Per-level docstrings — synthesised onto the closure verbs below so
+# `help(tn.info)`, Pylance hover, and LLM RAG see real documentation
+# instead of empty bodies. Each template is a Google-style docstring
+# (Pylance renders these natively). The factory below substitutes
+# `{summary}` and `{see_also_peers}` per level.
+_VERB_DOC_TEMPLATE = """{summary}
+
+{detail}
+
+Args:
+    event_type: Dotted event identifier matching
+        ``[A-Za-z0-9._-]{{1,64}}``. Examples: ``"user.signed_in"``,
+        ``"payment.captured"``, ``"schema.migrated"``.
+    _sign: Per-call override for envelope signing. ``None`` (the
+        default) falls through to the session-level / yaml-level
+        ``sign`` flag; ``True`` forces a signature on this row;
+        ``False`` skips signing.
+    **fields: Plaintext fields to encrypt into the configured groups
+        and chain into the log. Values are JSON-shaped: str, int,
+        float, bool, None, list, dict, plus TN-specific sentinels
+        for bytes (``$b64``), :class:`decimal.Decimal` (string), and
+        :class:`datetime.datetime` (ISO-8601 UTC).
+
+Raises:
+    TypeError: If positional arguments other than ``event_type`` are
+        supplied. Use keyword arguments for fields.
+    RuntimeError: If :func:`tn.init` hasn't been called yet AND
+        auto-init is blocked by ``TN_STRICT=1``.
+
+Example:
+    >>> import tn
+    >>> tn.init()
+    >>> tn.{name}("hello.world", who="alice")
+    >>> tn.{name}("startup")  # no fields is OK
+
+See Also:
+    {see_also_peers}
+    :func:`tn.read`: Read entries back.
+    :func:`tn.log`: Severity-less variant — always emits regardless
+        of the level threshold.
+    `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_: The wire shape this emit produces.
+    `docs/spec/row-hash.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/row-hash.md>`_: The chain-link hash inside each envelope.
+"""
+
+
+def _docstring_for(name: str) -> str:
+    """Build the Google-style docstring for one of the level verbs.
+
+    Factored out of :func:`_make_levelled_verb` so the templates stay
+    readable and each level can carry its own summary + peer
+    cross-references in ``See Also`` without nested f-string mess.
+    """
+    summary = {
+        "debug": "DEBUG-level attested event (level 10).",
+        "info": "INFO-level attested event (level 20).",
+        "warning": "WARNING-level attested event (level 30).",
+        "error": "ERROR-level attested event (level 40).",
+    }[name]
+    detail = {
+        "debug": (
+            "Verbose diagnostic events: cache lookups, trace markers,\n"
+            "internal state. Suppressed when the process-wide level\n"
+            "threshold (via :func:`tn.set_level`) is above DEBUG."
+        ),
+        "info": (
+            "The most common emit verb — use for routine business\n"
+            "events that should be visible on stdout and persisted to\n"
+            "the chain. Suppressed when the process-wide level\n"
+            "threshold is above INFO."
+        ),
+        "warning": (
+            "Recoverable anomalies: rate limits approaching, retries,\n"
+            "degraded paths. Suppressed when the process-wide level\n"
+            "threshold is above WARNING."
+        ),
+        "error": (
+            "Unrecoverable failures: caught exceptions, terminal\n"
+            "protocol errors, integrity check failures. Writes to the\n"
+            "diagnostic surface FIRST (before the threshold check) so\n"
+            "error-level events show in stderr even when the main-log\n"
+            "threshold drops them."
+        ),
+    }[name]
+    peers = {
+        "debug": ":func:`tn.info`, :func:`tn.warning`, :func:`tn.error`",
+        "info": ":func:`tn.debug`, :func:`tn.warning`, :func:`tn.error`",
+        "warning": ":func:`tn.debug`, :func:`tn.info`, :func:`tn.error`",
+        "error": ":func:`tn.debug`, :func:`tn.info`, :func:`tn.warning`",
+    }[name]
+    return _VERB_DOC_TEMPLATE.format(
+        summary=summary,
+        detail=detail,
+        name=name,
+        see_also_peers=peers,
+    )
+
+
 def _make_levelled_verb(name: str, level_int: int, *, surface_first: bool = False):
-    """Return a verb function bound to (name, level_int).
+    """Return a verb function bound to ``(name, level_int)``.
 
     The returned function is a regular module-level callable; the
     closure-captured ``name``, ``level_int``, ``surface_first`` are
@@ -126,6 +223,11 @@ def _make_levelled_verb(name: str, level_int: int, *, surface_first: bool = Fals
     ``surface_first=True`` mirrors ``error``'s historical ordering:
     even when the main-log threshold drops the emit, the diagnostic
     surface still gets it.
+
+    The synthesised verb carries ``__doc__``, ``__name__``, and
+    ``__qualname__`` so ``help(tn.info)``, Pylance / PyCharm hover,
+    and LLM RAG over source all see real documentation — the closure
+    is invisible at the IDE / introspection layer.
     """
     if surface_first:
         def verb(event_type: str, *args: Any, _sign: bool | None = None, **fields: Any) -> None:
@@ -153,6 +255,7 @@ def _make_levelled_verb(name: str, level_int: int, *, surface_first: bool = Fals
             _emit_with_splice(name, event_type, fields, sign)
     verb.__name__ = name
     verb.__qualname__ = name
+    verb.__doc__ = _docstring_for(name)
     return verb
 
 
@@ -169,22 +272,50 @@ def log(
     _sign: bool | None = None,
     **fields: Any,
 ) -> None:
-    """Emit an entry with a caller-chosen level (default: severity-less).
+    """Emit an attested event with a caller-chosen level (default: severity-less).
 
-    DX review #13: ``tn.log`` is **not** an alias of ``tn.info`` — it
-    emits with whatever ``level=`` you pass, defaulting to ``""``
-    (the severity-less slot on ``Entry.level``). Use it when:
+    ``tn.log`` is **not** an alias of ``tn.info`` — it emits with
+    whatever ``level=`` you pass, defaulting to ``""`` (the
+    severity-less slot on :class:`tn.Entry`). ``log`` has NO threshold
+    check — the caller-chosen level isn't on the standard four-rung
+    ladder, so there's nothing to compare against. For
+    threshold-aware emits use :func:`tn.debug` / :func:`tn.info` /
+    :func:`tn.warning` / :func:`tn.error`.
 
-      * You want a level outside the standard four
-        (``tn.log("scan.start", level="trace")``).
-      * You want an explicit severity-less event
-        (``tn.log("system.boot")``).
-      * You're bridging from a foreign logger and want the level
-        string verbatim (``tn.log("e", level=loguru_record["level"])``).
+    Args:
+        event_type: Dotted event identifier matching
+            ``[A-Za-z0-9._-]{1,64}``. Examples: ``"system.boot"``,
+            ``"scan.start"``, ``"audit.checkpoint"``.
+        level: Level string written verbatim into the envelope's
+            ``level`` field. Default ``""`` (severity-less). Use
+            arbitrary strings like ``"trace"`` or pass through a
+            foreign logger's level name (``loguru_record["level"]``).
+        _sign: Per-call signing override. ``None`` falls through to
+            the session/yaml default; ``True`` forces signing;
+            ``False`` skips it.
+        **fields: Plaintext fields to encrypt into the configured
+            groups and chain into the log. JSON-shaped values plus
+            TN sentinels (bytes -> ``$b64``, Decimal -> string,
+            datetime -> ISO-8601 UTC).
 
-    ``log`` has no threshold check — the caller-chosen level isn't on
-    the standard four-rung ladder, so there's nothing to compare
-    against. For threshold-aware emits use the named verbs.
+    Raises:
+        TypeError: If positional args other than ``event_type`` are
+            supplied.
+        RuntimeError: If :func:`tn.init` hasn't been called and
+            ``TN_STRICT=1`` blocks auto-init.
+
+    Example:
+        >>> import tn
+        >>> tn.init()
+        >>> tn.log("system.boot")              # severity-less
+        >>> tn.log("scan.start", level="trace")  # custom level
+        >>> tn.log("audit.checkpoint", level="audit", row=42)
+
+    See Also:
+        :func:`tn.info`: Threshold-aware INFO emit.
+        :func:`tn.warning`: Threshold-aware WARNING emit.
+        :func:`tn.set_level`: Process-wide threshold control.
+        `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_: The wire shape this emit produces.
     """
     if args:
         _raise_extra_positionals("log", args)
