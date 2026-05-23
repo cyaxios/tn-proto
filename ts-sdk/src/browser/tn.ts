@@ -399,8 +399,17 @@ export class Tn {
   // Lifecycle
   // -------------------------------------------------------------------------
 
+  /**
+   * Drain any pending out-of-process handlers (HTTP queue, future
+   * fan-out targets) without closing the runtime. Mirror of Python's
+   * `tn.flush()`.
+   */
+  async flush(): Promise<void> {
+    await this._rt.flush();
+  }
+
   /** Flush and close. Idempotent at the JS level. */
   async close(): Promise<void> {
-    this._rt.close();
+    await this._rt.close();
   }
 }

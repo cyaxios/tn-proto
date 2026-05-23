@@ -15,6 +15,7 @@
 import { WasmRuntime } from "tn-wasm";
 import { createFreshCeremony, type CreateFreshOptions } from "./create_fresh.js";
 import { consoleHandler, type ConsoleHandler } from "./console_handler.js";
+import { httpHandler, type HttpHandlerOptions, type HttpHandlerInstance } from "./http_handler.js";
 import { localStorageStorageAdapter } from "../runtime/storage_localstorage.js";
 import type { JsStorageCallbacks } from "../runtime/storage_node.js";
 
@@ -54,6 +55,23 @@ export interface BrowserRuntimeOptions {
    * The JS / browser equivalent of Node's `opts.stdout`. Default: true.
    */
   console?: boolean | ConsoleHandler;
+  /**
+   * Default-off HTTP shipping. Pass a URL string (or full
+   * `HttpHandlerOptions`) to register an `httpHandler` on the wasm
+   * runtime; every attested envelope is then POSTed to that endpoint
+   * (default: 2-second batched queue, retries on 5xx, drains on
+   * `pagehide` / `beforeunload`).
+   *
+   * The handler ships the canonical ndjson bytes the runtime wrote —
+   * byte-for-byte what would persist to a log file — so server-side
+   * signature / row_hash / chain checks run against exactly what was
+   * attested. The wasm runtime's local log write still happens; pair
+   * with a `memoryStorageAdapter()` if you want the local copy to be
+   * ephemeral.
+   *
+   * Default: no HTTP shipping.
+   */
+  http?: string | HttpHandlerOptions;
 }
 
 /**
@@ -71,17 +89,24 @@ export class BrowserRuntime {
   /** Console handler invoked before each wasm emit. `null` when the
    *  caller passed `console: false`. */
   private readonly _console: ConsoleHandler | null;
+  /** HTTP handler registered with the wasm runtime, if any. Kept on
+   *  the JS side so `close()` can await its `flushPending()` before
+   *  tearing down the wasm runtime (wasm-side close is fire-and-
+   *  forget). `null` when the caller didn't opt in to HTTP shipping. */
+  private readonly _http: HttpHandlerInstance | null;
 
   private constructor(
     wasm: WasmRuntime,
     storage: JsStorageCallbacks,
     yamlPath: string,
     consoleSink: ConsoleHandler | null,
+    httpSink: HttpHandlerInstance | null,
   ) {
     this._wasm = wasm;
     this.storage = storage;
     this.yamlPath = yamlPath;
     this._console = consoleSink;
+    this._http = httpSink;
   }
 
   /**
@@ -120,7 +145,20 @@ export class BrowserRuntime {
       consoleSink = consoleHandler();
     }
 
-    return new BrowserRuntime(wasm, storage, yamlPath, consoleSink);
+    // Resolve the HTTP sink. Default off. String -> URL only; object ->
+    // full options. The handler is registered on the wasm side so it
+    // gets the post-encryption / post-signing envelope bytes — what the
+    // server must see to verify the chain. We also keep a JS-side
+    // reference so `close()` can await the final flush.
+    let httpSink: HttpHandlerInstance | null = null;
+    if (opts.http !== undefined) {
+      const httpOpts: HttpHandlerOptions =
+        typeof opts.http === "string" ? { url: opts.http } : opts.http;
+      httpSink = httpHandler(httpOpts);
+      wasm.addHandler(httpSink);
+    }
+
+    return new BrowserRuntime(wasm, storage, yamlPath, consoleSink, httpSink);
   }
 
   /** The publisher DID this runtime emits as. `did:key:z…`. */
@@ -195,8 +233,25 @@ export class BrowserRuntime {
     return WasmRuntime.isEnabledFor(level);
   }
 
-  /** Explicit flush + close. Idempotent at the JS level. */
-  close(): void {
+  /**
+   * Drain pending out-of-process handlers (e.g. the HTTP queue) without
+   * tearing down the runtime. Use before navigating away if you want to
+   * give every queued envelope a chance to land. No-op when no handler
+   * has anything queued.
+   */
+  async flush(): Promise<void> {
+    if (this._http !== null) {
+      await this._http.flushPending();
+    }
+  }
+
+  /**
+   * Explicit flush + close. Awaits any pending HTTP shipments before
+   * closing the wasm runtime so envelopes the caller already enqueued
+   * don't get dropped on shutdown.
+   */
+  async close(): Promise<void> {
+    await this.flush();
     this._wasm.close();
   }
 }

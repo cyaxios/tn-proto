@@ -48,6 +48,12 @@ export {
 } from "./browser/console_handler.js";
 
 export {
+  httpHandler,
+  type HttpHandlerOptions,
+  type WasmHandlerCallbacks,
+} from "./browser/http_handler.js";
+
+export {
   localStorageStorageAdapter,
   LocalStorageQuotaError,
   type LocalStorageAdapter,
@@ -156,6 +162,16 @@ export function read(): Array<Record<string, unknown>> {
 /** Audit-grade read returning `{envelope, plaintext}` per entry. */
 export function readRaw(): Array<Record<string, unknown>> {
   return _requireDefault("readRaw").readRaw();
+}
+
+/**
+ * Drain any pending out-of-process handlers (HTTP queue, future
+ * fan-out targets) without releasing the runtime. Mirror of Python's
+ * `tn.flush()`.
+ */
+export async function flush(): Promise<void> {
+  if (_defaultTn === null) return;
+  await _defaultTn.flush();
 }
 
 /** Flush and release the default ceremony. Mirrors Python `tn.flush_and_close()`. */
