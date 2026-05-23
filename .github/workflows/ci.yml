@@ -187,6 +187,52 @@ jobs:
           node scripts/_http_smoke.mjs
           node scripts/_browser_smoke.mjs
 
+  extension-build:
+    name: chrome extension build + freshness
+    runs-on: ubuntu-latest
+    needs: [ts-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build tn-wasm (Node target — same dep ts-sdk consumes)
+        working-directory: crypto/tn-wasm
+        run: wasm-pack build --target nodejs --release
+
+      - name: Install ts-sdk deps
+        working-directory: ts-sdk
+        run: npm ci || npm install
+
+      - name: Build extension (regenerates vendor/sdk-core/)
+        # The script does: `npm run build` in ts-sdk + copies the
+        # browser-safe Layer-1 outputs (encoding.js, emk.js, Entry.js)
+        # into extensions/tn-decrypt/vendor/sdk-core/. Always
+        # idempotent; running twice should produce identical bytes.
+        run: bash tools/build-extension.sh
+
+      - name: Verify vendored sdk-core is current
+        # Hard gate: if the freshly-built vendor differs from what's
+        # committed, the extension was shipping stale Layer-1 code. The
+        # 0.4.3a1 `did` -> `device_identity` rename slipped through
+        # this exact gap; this check prevents recurrence.
+        #
+        # When this fails, the developer should re-run
+        # `bash tools/build-extension.sh` locally and commit the
+        # updated vendor/sdk-core/ files.
+        run: |
+          if ! git diff --exit-code extensions/tn-decrypt/vendor/sdk-core/; then
+            echo "::error::extensions/tn-decrypt/vendor/sdk-core/ is stale — run \`bash tools/build-extension.sh\` locally and commit the result."
+            exit 1
+          fi
+
   complexity:
     name: complexity budget (radon)
     runs-on: ubuntu-latest
