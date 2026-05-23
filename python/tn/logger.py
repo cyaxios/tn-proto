@@ -620,25 +620,78 @@ def _require_init() -> TNRuntime:
     return _runtime
 
 
+# ---------------------------------------------------------------------------
+# Legacy module-level emit verbs.
+#
+# These predate the threshold-aware closures in :mod:`tn.emit`. The
+# public surface (``tn.debug`` / ``tn.info`` / ``tn.warning`` /
+# ``tn.error`` / ``tn.log``) is bound from ``tn.emit`` in
+# ``tn/__init__.py``; nothing inside tn-proto imports these helpers
+# directly. They survive only as a private fallback in case external
+# code historically reached into ``tn.logger.info`` etc. — new code
+# must NOT use them. They skip the level threshold, the surface-logger
+# diagnostic, and the per-call ``_sign`` override that the public verbs
+# carry.
+#
+# Mark for removal in 0.5.x. If you find yourself reaching for these,
+# use ``import tn; tn.info(...)`` instead.
+# ---------------------------------------------------------------------------
+
+
 def log(event_type: str, **fields: Any) -> dict[str, Any]:
-    """Severity-less log. Use this when the event isn't fundamentally
-    debug/info/warning/error — it's just a fact to attest."""
+    """Severity-less emit (legacy).
+
+    .. deprecated:: 0.4.3a1
+        Use :func:`tn.log` (bound from :mod:`tn.emit`) instead. This
+        module-level path bypasses the level threshold, the surface
+        diagnostic logger, and the per-call ``_sign`` override.
+
+    :meta private:
+    """
     return _require_init().emit("", event_type, fields)
 
 
 def debug(event_type: str, **fields: Any) -> dict[str, Any]:
+    """DEBUG-level emit (legacy).
+
+    .. deprecated:: 0.4.3a1
+        Use :func:`tn.debug` instead.
+
+    :meta private:
+    """
     return _require_init().emit("debug", event_type, fields)
 
 
 def info(event_type: str, **fields: Any) -> dict[str, Any]:
+    """INFO-level emit (legacy).
+
+    .. deprecated:: 0.4.3a1
+        Use :func:`tn.info` instead.
+
+    :meta private:
+    """
     return _require_init().emit("info", event_type, fields)
 
 
 def warning(event_type: str, **fields: Any) -> dict[str, Any]:
+    """WARNING-level emit (legacy).
+
+    .. deprecated:: 0.4.3a1
+        Use :func:`tn.warning` instead.
+
+    :meta private:
+    """
     return _require_init().emit("warning", event_type, fields)
 
 
 def error(event_type: str, **fields: Any) -> dict[str, Any]:
+    """ERROR-level emit (legacy).
+
+    .. deprecated:: 0.4.3a1
+        Use :func:`tn.error` instead.
+
+    :meta private:
+    """
     return _require_init().emit("error", event_type, fields)
 
 

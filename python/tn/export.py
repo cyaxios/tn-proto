@@ -12,6 +12,36 @@ All exports require an active ``LoadedConfig`` (the producer's ceremony)
 unless the caller passes a sufficient set of explicit ``cfg=...`` /
 ``keystore=...`` overrides. The signing identity is always the producer's
 ``cfg.device``.
+
+Body-encryption layer
+=====================
+
+Two non-overlapping paths can lock the body bytes:
+
+* **BYOK** (``encrypt_body_with=`` 32 bytes): caller brings their own
+  AES-256-GCM key. Used by the init-upload self-backup flow where the
+  vault must see ciphertext only and the BEK travels in the URL
+  fragment to the recipient's browser.
+* **Recipient-direction sealed-box** (``seal_for_recipient=True``):
+  ``export`` mints a fresh BEK per call, encrypts the body in place,
+  then wraps the BEK for each recipient DID via the X25519 sealed-box
+  construction in :mod:`tn.recipient_seal`. Wraps land in
+  ``manifest.state.body_encryption.recipient_wraps`` (canonical
+  plural) and additionally ``recipient_wrap`` (singular shadow for
+  pre-multi absorbers when there's exactly one recipient).
+
+The two modes are mutually exclusive — ``export`` raises if both are
+supplied.
+
+See Also:
+    `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
+        Wire spec for the encrypted-body layer (AES-256-GCM frame,
+        STORED-zip plaintext, ciphertext_sha256 binding in the
+        manifest).
+    `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
+        Sealed-box wrap shape + AAD construction.
+    `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
+        Manifest schema (every kind this module emits).
 """
 
 from __future__ import annotations
@@ -562,22 +592,53 @@ def _apply_seal_for_recipient(
     to_did: str | None,
     to_dids: list[str] | None,
 ) -> tuple[dict[str, bytes], dict[str, Any], str, str]:
-    """Mint a fresh per-export BEK, encrypt the body, wrap the BEK for
-    each recipient DID.
+    """Mint a fresh BEK, encrypt the body, and wrap the BEK per recipient.
 
-    Returns ``(body, extras, to_did, sealed_as_of)``. The ``to_did``
-    return is the canonical display addressee (first entry in the
-    merged recipient list) — the caller overrides its own ``to_did``
-    with this. The ``sealed_as_of`` return must be reused on the final
-    manifest so its canonical bytes match the AAD we computed against
-    the preview.
+    The recipient-direction sealed-box path. Per the second-release
+    encrypted-kit-bundle spec, only callers who hold a recipient's
+    device key can recover the BEK and decrypt the body. Always emits
+    the plural ``recipient_wraps`` array (canonical forward shape) and
+    additionally the singular ``recipient_wrap`` shadow when there's
+    exactly one entry — back-compat for older absorbers that only know
+    the singular shape.
 
-    Per the second-release encrypted-kit-bundle spec: only callers who
-    hold a recipient's device key can recover the BEK and decrypt the
-    body. We always emit the plural ``recipient_wraps`` array (canonical
-    forward shape) and additionally emit the singular ``recipient_wrap``
-    shadow when there's exactly one entry — back-compat for older
-    absorbers that only know the singular shape.
+    Args:
+        kind: Export kind. Must be ``"kit_bundle"`` or
+            ``"full_keystore"`` today; other kinds raise.
+        cfg: Producer's :class:`LoadedConfig`. Used for the preview
+            manifest's ``publisher_identity`` / ``ceremony_id`` so the
+            AAD matches the final signed manifest.
+        body: Plaintext body-file map. Mutated in place via
+            :func:`_encrypt_body_in_place`.
+        extras: Manifest extras dict. The returned copy gains
+            ``state.body_encryption.recipient_wraps`` (and the singular
+            ``recipient_wrap`` shadow when ``len == 1``).
+        scope: Optional manifest scope override (cascades into the
+            preview manifest the AAD is computed against).
+        to_did: Primary recipient DID. Becomes the manifest's display
+            ``recipient_identity``.
+        to_dids: Optional additional recipient DIDs. Each gets its own
+            entry in the ``recipient_wraps`` array.
+
+    Returns:
+        ``(body, extras, to_did, sealed_as_of)``.
+
+        * ``to_did`` is the canonical display addressee (first entry
+          in the merged recipient list) — the caller overrides its
+          own ``to_did`` with this.
+        * ``sealed_as_of`` MUST be reused on the final manifest so its
+          canonical bytes match the AAD computed against the preview.
+
+    Raises:
+        ValueError: If ``kind`` doesn't support sealed-box export, or
+            if no recipient DIDs were supplied.
+
+    See Also:
+        :func:`_encrypt_body_in_place`: Step 1 (body encryption).
+        :func:`tn.recipient_seal.seal_bek_for_recipient`: Step 2 (per-recipient wrap).
+        :func:`tn.recipient_seal.manifest_aad_for_wrap`: AAD construction.
+        `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
+            Wire spec.
     """
     if kind not in ("kit_bundle", "full_keystore"):
         raise ValueError(
@@ -648,73 +709,101 @@ def export(
 ) -> Path:
     """Pack a `.tnpkg` from local ceremony state.
 
-    Parameters
-    ----------
-    out_path:
-        Destination file (zip). Parent dirs are created on demand.
-    kind:
-        Dispatch discriminator (see ``ExportKind``).
-    cfg:
-        The producer's ``LoadedConfig``. Required for every kind that
-        needs identity / ceremony context. Pass explicitly so tests can
-        skip the runtime singleton.
-    to_did:
-        Optional point-to-point address. Stored verbatim in the manifest.
-    scope:
-        Optional scope override. Defaults vary per kind: admin snapshots
-        use ``"admin"``; kit bundles use ``"kit_bundle"`` / ``"full"``.
-    confirm_includes_secrets:
-        REQUIRED True for ``kind="full_keystore"`` — the export bundles
-        the publisher's raw private keys (``local.private``,
-        ``index_master.key``). Misuse is a foot-gun, so the gate is
-        explicit.
-    package:
-        For ``kind="offer"`` / ``"enrolment"``: the already-built and
-        signed ``Package`` to wrap. We do not rebuild the package here
-        so callers retain control over the package signature domain.
-    keystore:
-        For ``kind="kit_bundle"`` / ``"full_keystore"``: override the
-        keystore directory. Defaults to ``cfg.keystore``.
-    groups:
-        For ``kind="kit_bundle"`` / ``"full_keystore"``: optional list of
-        group names to include. None means all groups.
-    encrypt_body_with:
-        Optional 32-byte AES-256-GCM key. When supplied, every body file
-        is concatenated, AES-GCM encrypted under this key, and replaced
-        in the zip with a single ``body/encrypted.bin`` member (12-byte
-        random nonce prepended to ciphertext). The manifest's
-        ``state.body_encryption`` block records the cipher suite + the
-        encrypted-blob hash so a downstream consumer can verify the
-        ciphertext byte-for-byte without holding the key.
+    The single producer entry for every `.tnpkg` kind. Dispatches on
+    ``kind`` into the per-kind body builder, optionally encrypts the
+    body (BYOK or recipient-direction sealed-box — see the module
+    docstring), signs the manifest with the producer's device key,
+    and writes the zip.
 
-        Used by the ``vault.push`` handler in init-upload mode (per D-19
-        / plan ``2026-04-28-pending-claim-flow.md`` §"How the handler
-        distinguishes…"): the handler generates a fresh BEK per upload,
-        passes it here, and that key travels in the URL fragment to the
-        browser claim page (D-5). The vault stores ciphertext only (D-1).
-    device:
-        Required for ``kind="identity_seed"``. A ``DeviceKey`` whose
-        Ed25519 keypair becomes BOTH the bundle's ``from_did`` /
-        ``to_did`` AND the manifest signer. The bundle is self-issued.
-    nickname:
-        Optional human-readable label for ``kind="identity_seed"``. Lands
-        in ``manifest.state.identity.nickname``.
-    ceremony_id_stub:
-        Optional ``ceremony_id`` for ``kind="identity_seed"``. Defaults to
-        ``IDENTITY_SEED_CEREMONY_PLACEHOLDER`` ("_identity_seed"). Identity
-        bundles aren't tied to a real ceremony — the operator picks one
-        once a host installs the identity and starts a ceremony.
-    seal_for_recipient:
-        For ``kind="kit_bundle"`` (and conceivably future kinds): mint a
-        fresh per-export AES-256-GCM BEK, encrypt the body with it via
-        the existing ``_encrypt_body_in_place`` machinery, AND wrap the
-        BEK to the recipient's identity (named by ``to_did``) using the
-        sealed-box construction in ``tn.recipient_seal``. The result is a
-        ``.tnpkg`` whose body is unreadable to anyone but the holder of
-        ``to_did``'s device key. Requires ``to_did`` to be set.
-        Mutually exclusive with ``encrypt_body_with``: caller can either
-        bring their own BEK (init-upload self-backup pattern) or ask the
-        export to mint+wrap one (recipient-direction pattern), not both.
+    Args:
+        out_path: Destination file (zip). Parent directories are
+            created on demand.
+        kind: Dispatch discriminator. See :data:`ExportKind` for the
+            allowed values.
+        cfg: The producer's :class:`LoadedConfig`. Required for every
+            kind that needs identity / ceremony context. Pass
+            explicitly so tests can skip the runtime singleton.
+        to_did: Optional point-to-point address. Stored verbatim in
+            the manifest's ``recipient_identity`` field.
+        scope: Optional scope override. Defaults vary per kind: admin
+            snapshots use ``"admin"``; kit bundles use ``"kit_bundle"``
+            / ``"full"``.
+        confirm_includes_secrets: REQUIRED ``True`` for
+            ``kind="full_keystore"`` — the export bundles the
+            publisher's raw private keys (``local.private``,
+            ``index_master.key``). Foot-gun gate; misuse otherwise.
+        package: For ``kind="offer"`` / ``"enrolment"``: the
+            already-built and signed :class:`Package` to wrap.
+            ``export`` does not rebuild the package so callers retain
+            control over the package signature domain.
+        keystore: For ``kind="kit_bundle"`` / ``"full_keystore"``:
+            override the keystore directory. Defaults to
+            ``cfg.keystore``.
+        groups: For ``kind="kit_bundle"`` / ``"full_keystore"``:
+            optional list of group names to include. ``None`` means
+            all groups.
+        encrypt_body_with: BYOK path. 32-byte AES-256-GCM key. When
+            supplied, every body file is rolled into a STORED zip,
+            AES-GCM encrypted under this key, and the body becomes a
+            single ``body/encrypted.bin`` member (12-byte random nonce
+            prepended to ciphertext). ``manifest.state.body_encryption``
+            records the cipher suite + ciphertext SHA-256 so a consumer
+            can verify the ciphertext byte-for-byte without holding the
+            key. Mutually exclusive with ``seal_for_recipient``.
+        device: Required for ``kind="identity_seed"``. A
+            :class:`DeviceKey` whose Ed25519 keypair becomes BOTH the
+            bundle's ``from_did`` / ``to_did`` AND the manifest signer
+            (self-issued).
+        nickname: Optional human-readable label for
+            ``kind="identity_seed"``. Lands in
+            ``manifest.state.identity.nickname``.
+        ceremony_id_stub: Optional ``ceremony_id`` for
+            ``kind="identity_seed"``. Defaults to
+            :data:`IDENTITY_SEED_CEREMONY_PLACEHOLDER`
+            (``"_identity_seed"``). Identity bundles aren't tied to a
+            real ceremony — the operator picks one once a host installs
+            the identity and starts a ceremony.
+        seal_for_recipient: Recipient-direction sealed-box path. Mints
+            a fresh per-export BEK, encrypts the body, AND wraps the
+            BEK to each recipient via :mod:`tn.recipient_seal`.
+            Requires ``to_did`` (and/or ``to_dids``). Mutually
+            exclusive with ``encrypt_body_with``.
+        to_dids: Optional additional recipient DIDs alongside
+            ``to_did``. Each gets its own entry in the
+            ``recipient_wraps`` array. Only meaningful with
+            ``seal_for_recipient=True``.
+
+    Returns:
+        ``Path`` of the written `.tnpkg` (equal to ``Path(out_path)``).
+
+    Raises:
+        ValueError: On invalid argument combinations (e.g. both
+            ``encrypt_body_with=`` and ``seal_for_recipient=True``,
+            ``encrypt_body_with=`` not 32 bytes,
+            ``seal_for_recipient=True`` on a kind that doesn't
+            support it).
+        NotImplementedError: For reserved-but-unwired kinds (e.g.
+            ``"recipient_invite"``).
+
+    Example:
+        >>> from tn.export import export
+        >>> from pathlib import Path
+        >>> export(  # doctest: +SKIP
+        ...     Path("alice.tnpkg"),
+        ...     kind="kit_bundle",
+        ...     cfg=cfg,
+        ...     to_did="did:key:z6Mk...",
+        ...     seal_for_recipient=True,
+        ... )
+
+    See Also:
+        :func:`decrypt_body_blob`: Inverse of the body-encryption
+            layer.
+        :mod:`tn.recipient_seal`: Sealed-box wrap primitives.
+        `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
+            Wire spec.
+        `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
+            Manifest schema.
     """
     # 1. Pre-flight validation (single deterministic failure point
     #    before we touch a zip).
@@ -800,26 +889,50 @@ def _encrypt_body_in_place(
     extras: dict[str, Any],
     key: bytes,
 ) -> tuple[dict[str, bytes], dict[str, Any]]:
-    """Combine all body files and encrypt under ``key``.
+    """Combine all body files into a STORED zip and AES-256-GCM encrypt.
 
     Resolves the "Open #1" decision from
     ``2026-04-28-pending-claim-flow.md``: combined-blob (one
     ``body/encrypted.bin``) over per-file encryption. Combining is
     simpler, matches the "vault sees one opaque blob" spirit (D-1).
 
-    Layout:
-      body/encrypted.bin   = 12-byte AES-GCM nonce || ciphertext+tag
+    Layout::
 
-    The plaintext we encrypt is a STORED zip (no compression) of the
-    body files at their original names. STORED is chosen so the
-    plaintext is identifiable by the standard `PK\\x03\\x04` magic
-    bytes, can be popped open with stock unzip tools by an advanced
-    user, and aligns the inner-layer format with the OUTER tnpkg
-    envelope (also STORED). fflate is already vendored on the browser
-    side; Python ``zipfile`` is stdlib; the format is a one-liner in
-    every language we ship.
+        body/encrypted.bin   = 12-byte AES-GCM nonce || ciphertext+tag
 
-    See D-N (body plaintext is a STORED zip) in the decisions log.
+    The plaintext is a STORED zip (no compression) of the body files
+    at their original names. STORED is chosen so the plaintext is
+    identifiable by the standard ``PK\\x03\\x04`` magic bytes, can be
+    popped open with stock unzip tools by an advanced user, and
+    aligns the inner-layer format with the OUTER tnpkg envelope (also
+    STORED). fflate is already vendored on the browser side; Python
+    ``zipfile`` is stdlib; the format is a one-liner in every language
+    we ship.
+
+    Args:
+        body: ``{path_inside_zip: bytes}`` map of plaintext body
+            files. Replaced wholesale by a single ``body/encrypted.bin``
+            in the returned ``body``.
+        extras: Manifest extras dict. The returned copy gains a
+            ``state.body_encryption`` block carrying ``cipher_suite``,
+            ``nonce_bytes``, ``frame``, and ``ciphertext_sha256`` so
+            the consumer can verify the ciphertext without holding
+            the key.
+        key: 32-byte AES-256-GCM key (the BEK). Caller is responsible
+            for sourcing the key (BYOK path: explicit user-supplied;
+            recipient-direction path: minted by
+            :func:`_apply_seal_for_recipient`).
+
+    Returns:
+        ``(new_body, new_extras)`` — ready to feed into the manifest
+        builder + zip writer.
+
+    See Also:
+        :func:`decrypt_body_blob`: The inverse.
+        :func:`_apply_seal_for_recipient`: Wraps the BEK for
+            recipients after this step.
+        `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
+            Wire spec.
     """
     import io as _io
     import os as _os
@@ -858,12 +971,40 @@ def _encrypt_body_in_place(
 
 
 def decrypt_body_blob(blob: bytes, key: bytes) -> dict[str, bytes]:
-    """Inverse of :func:`_encrypt_body_in_place`. Public helper for tests
-    and future ``tn absorb`` / browser parity.
+    """Decrypt an encrypted-body blob back into its body-file map.
 
-    Returns a ``{name: bytes}`` dict. Tries the new STORED-zip plaintext
-    format first (PK\\x03\\x04 magic). Falls back to the legacy custom
-    binary frame for ciphertexts produced before commit 2026-04-29.
+    Inverse of :func:`_encrypt_body_in_place`. Public helper for
+    tests, ``tn absorb``, and browser parity.
+
+    Args:
+        blob: Raw bytes of ``body/encrypted.bin`` — 12-byte nonce
+            followed by ciphertext + 16-byte AES-GCM tag.
+        key: 32-byte AES-256-GCM key (the BEK). For BYOK exports this
+            is the same key the caller passed to ``encrypt_body_with=``;
+            for recipient-direction exports this is the BEK recovered
+            via :func:`tn.recipient_seal.unseal_bek_from_wrap`.
+
+    Returns:
+        ``{path_inside_zip: bytes}`` — the original body files.
+
+    Raises:
+        ValueError: If ``blob`` is shorter than the nonce+tag minimum,
+            if the plaintext is too short for any known frame, or if
+            the legacy frame is malformed.
+        cryptography.exceptions.InvalidTag: If ``key`` is wrong or the
+            ciphertext was tampered with.
+
+    Note:
+        Tries the canonical STORED-zip plaintext frame first
+        (``PK\\x03\\x04`` magic). Falls back to the legacy custom
+        binary frame for ciphertexts produced before commit
+        2026-04-29 — kept until the next state wipe.
+
+    See Also:
+        :func:`_encrypt_body_in_place`: The inverse.
+        :mod:`tn.recipient_seal`: BEK recovery for sealed exports.
+        `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
+            Wire spec.
     """
     import io as _io
     import struct as _struct

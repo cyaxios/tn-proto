@@ -189,12 +189,47 @@ class VaultClient:
         *,
         auto_auth: bool = True,
     ) -> VaultClient:
-        """Build a vault client for `identity` against `base_url`.
+        """Build a vault client for ``identity`` against ``base_url``.
 
-        If `base_url` is None, falls back to the TN_VAULT_URL env var
-        and finally to DEFAULT_VAULT_URL (the hosted tn-proto vault at
-        https://vault.tn-proto.org). Set TN_VAULT_URL to point at a
-        self-hosted tnproto-org instance for local dev.
+        The standard factory. URL resolution honours the precedence
+        ``explicit arg > TN_VAULT_URL env > DEFAULT_VAULT_URL`` via
+        :func:`resolve_vault_url`. With ``auto_auth=True`` the client
+        runs the DID challenge/verify dance immediately so callers can
+        issue authenticated requests right away; pass ``False`` to
+        defer (e.g. when feeding a mock client in tests).
+
+        Args:
+            identity: The :class:`tn.identity.Identity` the client
+                speaks for. Provides both the DID (for the auth
+                challenge) and the wrap key (for :meth:`upload_file` /
+                :meth:`download_file`).
+            base_url: Optional vault URL override. ``None`` falls back
+                to ``TN_VAULT_URL`` then ``DEFAULT_VAULT_URL`` (the
+                hosted tn-proto vault). Point at
+                ``http://localhost:8790`` for self-hosted dev.
+            auto_auth: When ``True`` (default) calls
+                :meth:`authenticate` before returning. Set to ``False``
+                if the caller will inject a token manually.
+
+        Returns:
+            A ready-to-use :class:`VaultClient`. Use it as a context
+            manager (``with VaultClient.for_identity(...) as c:``) to
+            close the underlying HTTP pool automatically.
+
+        Raises:
+            VaultError: If ``auto_auth=True`` and the DID
+                challenge/verify roundtrip fails.
+
+        Example:
+            >>> from tn.identity import Identity
+            >>> from tn.vault_client import VaultClient
+            >>> identity = Identity.load()  # doctest: +SKIP
+            >>> with VaultClient.for_identity(identity) as vc:  # doctest: +SKIP
+            ...     projects = vc.list_projects()
+
+        See Also:
+            :func:`resolve_vault_url`: URL precedence logic.
+            :meth:`authenticate`: The challenge/verify dance.
         """
         c = cls(base_url=resolve_vault_url(base_url), identity=identity)
         if auto_auth:
@@ -202,6 +237,12 @@ class VaultClient:
         return c
 
     def close(self) -> None:
+        """Close the underlying ``httpx.Client`` connection pool.
+
+        Idempotent. Called automatically by ``__exit__`` so callers
+        using ``with VaultClient.for_identity(...) as c:`` don't need
+        to invoke this directly.
+        """
         self._http.close()
 
     def __enter__(self):
@@ -265,7 +306,38 @@ class VaultClient:
     # -- Auth (DID challenge/verify) --------------------------------
 
     def authenticate(self) -> str:
-        """Run /auth/challenge + /auth/verify and cache the JWT."""
+        """Run the DID challenge/verify dance and cache the JWT.
+
+        Implements the two-step nonce protocol:
+
+        1. ``POST /api/v1/auth/challenge`` with ``{did}``. The vault
+           returns a one-shot nonce bound to that DID.
+        2. Sign the UTF-8 bytes of the nonce with the Ed25519 device
+           key (URL-safe base64, no padding — matches envelope
+           signature convention).
+        3. ``POST /api/v1/auth/verify`` with ``{did, nonce, signature}``.
+           On success the vault returns a JWT, which gets cached on
+           the instance for subsequent requests.
+
+        :meth:`_request` calls this automatically on ``401`` once per
+        call, so most callers never invoke it directly — the factory
+        :meth:`for_identity` runs it for them at construction time.
+
+        Returns:
+            The freshly issued JWT (also cached on ``self.token``).
+
+        Raises:
+            VaultError: On any non-2xx response from either step
+                (``400`` malformed request, ``401`` signature
+                verification failed, ``404`` unknown DID, ``410``
+                expired challenge, ``5xx`` server error).
+
+        See Also:
+            :meth:`for_identity`: Calls this for you when
+                ``auto_auth=True``.
+            `docs/spec/vault-http.md#auth <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md#auth>`_:
+                Wire spec.
+        """
         # Step 1: challenge
         resp = self._http.post(
             f"{self.base_url}/api/v1/auth/challenge",
@@ -298,6 +370,28 @@ class VaultClient:
     # -- Projects ---------------------------------------------------
 
     def create_project(self, name: str, *, ceremony_id: str | None = None) -> dict:
+        """Create a new project bound to the authed account.
+
+        ``POST /api/v1/projects``. Auto-authenticates if no JWT is
+        cached.
+
+        Args:
+            name: Display name for the project.
+            ceremony_id: Optional ceremony id to bind the project to.
+                When omitted, the vault generates one.
+
+        Returns:
+            The project dict ``{id, name, ceremony_id, created_at, ...}``.
+
+        Raises:
+            VaultError: On any non-2xx response.
+
+        See Also:
+            :meth:`list_projects`, :meth:`get_project`,
+            :meth:`delete_project`.
+            `docs/spec/vault-http.md#project-routes <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md#project-routes>`_:
+                Wire spec.
+        """
         resp = self._request(
             "POST",
             "/api/v1/projects",
@@ -307,16 +401,54 @@ class VaultClient:
         return resp.json()
 
     def list_projects(self) -> list[dict]:
+        """List every project bound to the authed account.
+
+        ``GET /api/v1/projects``.
+
+        Returns:
+            List of project dicts. Empty list if the account owns no
+            projects. Order matches the vault's storage order (no
+            guarantee).
+
+        Raises:
+            VaultError: On any non-2xx response.
+        """
         resp = self._request("GET", "/api/v1/projects")
         self._raise_for_status(resp)
         return resp.json()
 
     def get_project(self, project_id: str) -> dict:
+        """Fetch a single project's metadata.
+
+        ``GET /api/v1/projects/{project_id}``.
+
+        Args:
+            project_id: The project's UUID-shaped id.
+
+        Returns:
+            The project dict ``{id, name, ceremony_id, ...}``.
+
+        Raises:
+            VaultError: ``404`` if the project doesn't exist or the
+                authed account can't see it; ``403`` if cross-account.
+        """
         resp = self._request("GET", f"/api/v1/projects/{project_id}")
         self._raise_for_status(resp)
         return resp.json()
 
     def delete_project(self, project_id: str) -> None:
+        """Delete a project and every file under it.
+
+        ``DELETE /api/v1/projects/{project_id}``. Permanent — the
+        vault does NOT keep a soft-delete tombstone. Callers should
+        confirm with the user before invoking.
+
+        Args:
+            project_id: The project's UUID-shaped id.
+
+        Raises:
+            VaultError: ``404`` if missing, ``403`` if cross-account.
+        """
         resp = self._request("DELETE", f"/api/v1/projects/{project_id}")
         self._raise_for_status(resp)
 
@@ -328,7 +460,35 @@ class VaultClient:
         file_name: str,
         sealed: SealedBlob,
     ) -> dict:
-        """Upload a pre-sealed blob. Returns the vault's file metadata."""
+        """Upload a pre-sealed blob.
+
+        ``PUT /api/v1/projects/{project_id}/files/{file_name}``.
+        Use when the caller has already sealed the blob (e.g. via
+        :func:`tn.sealing._seal`) and wants direct upload without
+        re-sealing.
+
+        Args:
+            project_id: Owner project's id.
+            file_name: Destination filename inside the project. The
+                vault treats this as an opaque key; namespacing /
+                folder separators are caller-defined.
+            sealed: Pre-sealed payload. Serialised via
+                :meth:`SealedBlob.to_bytes` and sent as
+                ``application/octet-stream``.
+
+        Returns:
+            The vault's file metadata dict
+            ``{name, size, sha256, uploaded_at, ...}``.
+
+        Raises:
+            VaultError: ``404`` (no such project), ``413`` (payload
+                too large), other 4xx/5xx.
+
+        See Also:
+            :meth:`upload_file`: Convenience wrapper that seals the
+                plaintext for you.
+            :meth:`download_sealed`: The inverse.
+        """
         wire = sealed.to_bytes()
         resp = self._request(
             "PUT",
@@ -347,7 +507,37 @@ class VaultClient:
         *,
         ceremony_id: str,
     ) -> dict:
-        """Seal `plaintext` under this identity's wrap key and upload."""
+        """Seal ``plaintext`` under this identity's wrap key and upload.
+
+        The convenience wrapper for the common case where the caller
+        holds raw bytes. It runs :func:`tn.sealing._seal` with the
+        identity's vault wrap key and the standard AAD tuple
+        (``did``, ``ceremony_id``, ``file_name``) and then forwards to
+        :meth:`upload_sealed`.
+
+        Args:
+            project_id: Owner project's id.
+            file_name: Destination filename inside the project. Bound
+                into the seal AAD — :meth:`download_file` MUST be
+                called with the same ``file_name`` or unsealing fails.
+            plaintext: Raw bytes to seal and upload.
+            ceremony_id: Ceremony that scopes the wrap key. Bound into
+                the seal AAD — :meth:`download_file` MUST be called
+                with the same ``ceremony_id``.
+
+        Returns:
+            The vault's file metadata dict (see :meth:`upload_sealed`).
+
+        Raises:
+            VaultError: On any non-2xx response.
+
+        See Also:
+            :meth:`upload_sealed`: Lower-level entry that takes a
+                pre-built :class:`SealedBlob`.
+            :meth:`download_file`: The inverse.
+            `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
+                AAD construction + seal/unseal spec.
+        """
         wk = self.identity.vault_wrap_key()
         blob = _seal(
             plaintext,
@@ -359,6 +549,30 @@ class VaultClient:
         return self.upload_sealed(project_id, file_name, blob)
 
     def download_sealed(self, project_id: str, file_name: str) -> SealedBlob:
+        """Download a file's raw sealed blob without unsealing.
+
+        ``GET /api/v1/projects/{project_id}/files/{file_name}``.
+
+        Use when the caller wants to inspect / forward the sealed
+        bytes (e.g. mirroring to another vault, or unsealing later
+        with a different wrap key context).
+
+        Args:
+            project_id: Owner project's id.
+            file_name: File key inside the project.
+
+        Returns:
+            The :class:`SealedBlob` parsed from the response body.
+
+        Raises:
+            VaultError: ``404`` if the file (or project) doesn't exist;
+                ``403`` if cross-account; other 4xx/5xx.
+
+        See Also:
+            :meth:`download_file`: Convenience wrapper that unseals for
+                you.
+            :meth:`upload_sealed`: The inverse.
+        """
         resp = self._request(
             "GET",
             f"/api/v1/projects/{project_id}/files/{file_name}",
@@ -373,7 +587,35 @@ class VaultClient:
         *,
         ceremony_id: str,
     ) -> bytes:
-        """Download + _unseal + verify AAD."""
+        """Download a file and unseal it under this identity's wrap key.
+
+        Inverse of :meth:`upload_file`. Runs :meth:`download_sealed`
+        then :func:`tn.sealing._unseal` with the AAD tuple
+        (``did``, ``ceremony_id``, ``file_name``) — the seal MUST have
+        been written with the same tuple or unsealing raises.
+
+        Args:
+            project_id: Owner project's id.
+            file_name: File key inside the project. Must match what
+                was passed to :meth:`upload_file`.
+            ceremony_id: Ceremony id that scopes the wrap key. Must
+                match what was passed to :meth:`upload_file`.
+
+        Returns:
+            The original plaintext bytes.
+
+        Raises:
+            VaultError: ``404`` / ``403`` from the HTTP layer.
+            cryptography.exceptions.InvalidTag: AAD mismatch or
+                tampered ciphertext.
+
+        See Also:
+            :meth:`upload_file`: The inverse.
+            :meth:`download_sealed`: Lower-level entry that returns the
+                raw :class:`SealedBlob` without unsealing.
+            `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
+                AAD construction + seal/unseal spec.
+        """
         blob = self.download_sealed(project_id, file_name)
         return _unseal(
             blob,
@@ -384,11 +626,41 @@ class VaultClient:
         )
 
     def list_files(self, project_id: str) -> list[dict]:
+        """List every file under a project.
+
+        ``GET /api/v1/projects/{project_id}/files``.
+
+        Args:
+            project_id: Owner project's id.
+
+        Returns:
+            List of file metadata dicts
+            ``[{name, size, sha256, uploaded_at, ...}]``. Empty list
+            if the project holds no files. Order matches the vault's
+            storage order (no guarantee).
+
+        Raises:
+            VaultError: ``404`` if the project doesn't exist; ``403``
+                if cross-account.
+        """
         resp = self._request("GET", f"/api/v1/projects/{project_id}/files")
         self._raise_for_status(resp)
         return resp.json()
 
     def delete_file(self, project_id: str, file_name: str) -> None:
+        """Delete a single file from a project.
+
+        ``DELETE /api/v1/projects/{project_id}/files/{file_name}``.
+        Permanent — no soft-delete tombstone.
+
+        Args:
+            project_id: Owner project's id.
+            file_name: File key inside the project.
+
+        Raises:
+            VaultError: ``404`` if the file (or project) doesn't exist;
+                ``403`` if cross-account.
+        """
         resp = self._request(
             "DELETE",
             f"/api/v1/projects/{project_id}/files/{file_name}",
@@ -398,7 +670,24 @@ class VaultClient:
     # -- Restore ----------------------------------------------------
 
     def restore_manifest(self, project_id: str) -> dict:
-        """Get the list of files to pull down for recovery."""
+        """Fetch the project's restore manifest.
+
+        ``POST /api/v1/projects/{project_id}/restore``. Returns the
+        list of files a fresh device needs to pull down to rebuild
+        the project's local state. Used by the recovery flow after
+        a passkey-driven seed restore.
+
+        Args:
+            project_id: Owner project's id.
+
+        Returns:
+            Manifest dict ``{project_id, files: [{name, sha256, size,
+            ...}], generated_at, ...}``.
+
+        Raises:
+            VaultError: ``404`` if the project doesn't exist; ``403``
+                if cross-account.
+        """
         resp = self._request("POST", f"/api/v1/projects/{project_id}/restore")
         self._raise_for_status(resp)
         return resp.json()
@@ -406,11 +695,46 @@ class VaultClient:
     # -- Account prefs ---------------------------------------------
 
     def get_prefs(self) -> dict:
+        """Fetch the authed account's preferences.
+
+        ``GET /api/v1/account/prefs``.
+
+        Returns:
+            Prefs dict. Currently the only field is
+            ``default_new_ceremony_mode`` (``"per-project"`` or
+            ``"per-recipient"``) but the shape is forward-compatible.
+
+        Raises:
+            VaultError: On any non-2xx response.
+
+        See Also:
+            :meth:`put_prefs`: The setter.
+        """
         resp = self._request("GET", "/api/v1/account/prefs")
         self._raise_for_status(resp)
         return resp.json()
 
     def put_prefs(self, default_new_ceremony_mode: str) -> dict:
+        """Update the authed account's preferences.
+
+        ``PUT /api/v1/account/prefs``. Replaces (not merges) the
+        prefs document.
+
+        Args:
+            default_new_ceremony_mode: ``"per-project"`` or
+                ``"per-recipient"``. Drives whether the dashboard's
+                "new ceremony" action mints one ceremony per project
+                or one per recipient.
+
+        Returns:
+            The persisted prefs dict (mirror of :meth:`get_prefs`).
+
+        Raises:
+            VaultError: ``400`` on unknown mode value; other 4xx/5xx.
+
+        See Also:
+            :meth:`get_prefs`: The getter.
+        """
         resp = self._request(
             "PUT",
             "/api/v1/account/prefs",
@@ -429,6 +753,31 @@ class VaultClient:
         nonce_b64: str,
         salt_b64: str,
     ) -> None:
+        """Store a passkey-sealed seed for account recovery.
+
+        ``POST /api/v1/account/passkey-seed``. The vault holds the
+        ciphertext only — the unwrapping happens browser-side via the
+        WebAuthn PRF extension. Without the original authenticator
+        nobody (including the vault operator) can recover the seed.
+
+        Args:
+            credential_id: WebAuthn credential id (base64url) that
+                identifies which passkey produced the seal.
+            sealed_seed_blob_b64: Ciphertext of the device seed, base64
+                (standard, padded).
+            nonce_b64: AEAD nonce used during sealing, base64 (standard,
+                padded).
+            salt_b64: HKDF salt fed into the PRF-derived KEK, base64
+                (standard, padded).
+
+        Raises:
+            VaultError: ``400`` on malformed inputs; ``409`` if a seed
+                is already stored under a different credential and the
+                server policy refuses overwrite.
+
+        See Also:
+            :meth:`get_passkey_seed`, :meth:`delete_passkey_seed`.
+        """
         resp = self._request(
             "POST",
             "/api/v1/account/passkey-seed",
@@ -442,6 +791,23 @@ class VaultClient:
         self._raise_for_status(resp)
 
     def get_passkey_seed(self) -> dict | None:
+        """Fetch the passkey-sealed seed for this account (if any).
+
+        ``GET /api/v1/account/passkey-seed``. The recovery flow on a
+        fresh device hits this to pull the ciphertext, then unwraps it
+        browser-side via WebAuthn PRF.
+
+        Returns:
+            Dict ``{credential_id, sealed_seed_blob_b64, nonce_b64,
+            salt_b64}`` if a seed is stored, or ``None`` (HTTP 404)
+            if the account hasn't registered one yet.
+
+        Raises:
+            VaultError: On any non-2xx response other than 404.
+
+        See Also:
+            :meth:`put_passkey_seed`, :meth:`delete_passkey_seed`.
+        """
         resp = self._request(
             "GET",
             "/api/v1/account/passkey-seed",
@@ -453,6 +819,18 @@ class VaultClient:
         return resp.json()
 
     def delete_passkey_seed(self) -> None:
+        """Remove the passkey-sealed seed from the vault.
+
+        ``DELETE /api/v1/account/passkey-seed``. Use when rotating
+        the recovery passkey — call this then re-register via
+        :meth:`put_passkey_seed`.
+
+        Raises:
+            VaultError: On any non-2xx response.
+
+        See Also:
+            :meth:`put_passkey_seed`, :meth:`get_passkey_seed`.
+        """
         resp = self._request("DELETE", "/api/v1/account/passkey-seed")
         self._raise_for_status(resp)
 
@@ -474,12 +852,42 @@ class VaultClient:
 
         Counterpart to the dashboard's Absorb action. Lets a CLI-side
         absorb tell the vault "this account holds a reader leaf in
-        <publisher>'s project" so the /projects -> Received tab on the
-        dashboard surfaces it alongside browser-absorbed kits.
+        <publisher>'s project" so the ``/projects -> Received`` tab on
+        the dashboard surfaces it alongside browser-absorbed kits.
 
         Auth: standard bearer (the DID-challenge JWT this client holds).
         The route accepts that token because the DID was bound to the
-        account via ``redeem_connect_code``.
+        account via :func:`redeem_connect_code`.
+
+        Args:
+            project_id: Publisher's project id the kit belongs to.
+            publisher_identity: Publisher's ``did:key:z…``.
+            recipient_identity: This client's ``did:key:z…`` (the
+                reader leaf the kit grants).
+            label: Optional human label for the kit (mirrors the
+                dashboard's free-text field).
+            kit_blob_b64: Standard-padded base64 of the absorbed kit
+                bytes, or ``None`` if the caller has already stored
+                them out-of-band.
+            manifest: Optional decoded manifest dict to embed in the
+                record so the dashboard can render it without a
+                follow-up fetch.
+            source_ts: ISO-8601 timestamp of the originating entry
+                (helps the dashboard sort + dedupe).
+            source_ceremony_id: Ceremony id the kit was issued under.
+
+        Returns:
+            The persisted record dict
+            ``{id, project_id, publisher_identity, recipient_identity,
+            label, source_ts, source_ceremony_id, created_at, ...}``.
+
+        Raises:
+            VaultError: ``400`` on malformed inputs; ``404`` if the
+                publisher's project isn't visible to this account.
+
+        See Also:
+            :func:`redeem_connect_code`: How the calling DID got bound
+                to the account in the first place.
         """
         body = {
             "project_id": project_id,
@@ -502,8 +910,23 @@ class VaultClient:
     # -- Reset (dev/test) ------------------------------------------
 
     def reset_account(self) -> dict:
-        """Dev/test convenience: wipe all projects+files+passkey-seed+prefs
-        for the authenticated DID. Body echoes DID to confirm intent."""
+        """Wipe all projects, files, passkey-seed, and prefs for the authed DID.
+
+        ``POST /api/v1/account/reset``. Body echoes the DID under
+        ``{"confirm": <did>}`` to make accidental triggering harder.
+
+        Dev/test convenience — production accounts should never call
+        this. The vault may gate this route behind a deployment-time
+        flag.
+
+        Returns:
+            Dict ``{wiped: {projects: int, files: int, ...}}`` summarising
+            what was removed.
+
+        Raises:
+            VaultError: ``403`` if the route is disabled on this
+                deployment; other 4xx/5xx.
+        """
         resp = self._request(
             "POST",
             "/api/v1/account/reset",
