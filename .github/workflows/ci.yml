@@ -128,9 +128,16 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      - name: Build tn-wasm
+      - name: Build tn-wasm (Node target)
         working-directory: crypto/tn-wasm
-        run: wasm-pack build --target nodejs --release
+        # Both targets are needed — the test suite uses the nodejs pkg/
+        # build (consumed via the file: dep in ts-sdk/package.json), and
+        # the browser bundle build (build:browser step below) reads from
+        # pkg-web/. Producing both here keeps CI honest about the full
+        # build matrix.
+        run: |
+          wasm-pack build --target nodejs --release
+          wasm-pack build --target web --release --out-dir pkg-web
 
       - name: Install ts-sdk deps
         working-directory: ts-sdk
@@ -150,10 +157,35 @@ jobs:
 
       - name: Run TS tests
         working-directory: ts-sdk
-        # multi_group_routing.test.ts:110 has been failing on main
-        # since pre-Phase-1 of the 0.3.0 refresh — pre-existing baseline
-        # tracked separately. Allow it.
-        run: npm test || true
+        # Hard-required green. Previously this step had `|| true`,
+        # which silently swallowed 190 of 296 failures (the wasm-init
+        # rot fixed in 9fac2fa + 72b4347). Now that the suite is back
+        # to 296/296 passing, drop the suppressor so the next regression
+        # is caught at PR time instead of months later.
+        run: npm test
+
+      - name: Build browser bundle
+        working-directory: ts-sdk
+        # Catches drift in the build script + the pkg-web target. The
+        # output (dist/browser.mjs) isn't shipped from CI — release
+        # workflows do that — but the build path itself has to keep
+        # working since downstream projects (witness, extensions,
+        # browser apps) consume it via the release artefacts.
+        run: npm run build:browser
+
+      - name: Run SDK smoke scripts
+        working-directory: ts-sdk
+        # Each smoke exercises a slice of the surface end-to-end.
+        # They're cheap (each runs in <1s), they don't need a real
+        # vault / server, and they catch wire-format regressions the
+        # unit tests can't (sealed-bundle absorb, env-var-driven
+        # bootstrap flow, HTTP-handler-against-fake-fetch round-trip).
+        run: |
+          node scripts/_env_parity_smoke.mjs
+          node scripts/_sealed_absorb_smoke.mjs
+          node scripts/_init_from_seed_smoke.mjs
+          node scripts/_http_smoke.mjs
+          node scripts/_browser_smoke.mjs
 
   complexity:
     name: complexity budget (radon)
