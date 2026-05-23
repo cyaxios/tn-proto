@@ -43,6 +43,7 @@ import {
   resolveAdminLogPath,
 } from "../admin/log.js";
 import { BtnPublisher, btnKitLeaf } from "../raw.js";
+import { ensureProcessRunId } from "../_run_id.js";
 import { decryptGroup, type GroupKits } from "../core/decrypt.js";
 import type { TNHandler } from "../handlers/index.js";
 
@@ -707,6 +708,15 @@ export class NodeRuntime {
    */
   attachWasm(): WasmRuntime {
     if (this.wasm !== null) return this.wasm;
+    // Stamp $TN_RUN_ID before wasm reads env at init. The wasm side
+    // reads via std::env::var("TN_RUN_ID") (see
+    // crypto/tn-core/src/runtime.rs:860); if we don't set it first,
+    // wasm mints its own fresh UUID and the JS / wasm sides stamp
+    // mismatched run_ids on every emit — at which point `wasm.read()`'s
+    // current-run filter silently drops every entry written via the
+    // wasm path. Mirrors python/tn/__init__.py:268 (which writes the
+    // env right before the Rust runtime sees it).
+    ensureProcessRunId();
     try {
       this.wasm = WasmRuntime.initWith(
         this.config.yamlPath,

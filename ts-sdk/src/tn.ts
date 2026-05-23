@@ -75,8 +75,34 @@ function _levelValue(level: LogLevel): number {
 // ---------------------------------------------------------------------------
 // Module-level strict mode. When true, Tn.init() with no yaml path throws
 // rather than silently minting a fresh ceremony.
+//
+// Source order matches Python's `_autoinit.is_strict()`:
+//   1. `Tn.setStrict(...)` programmatic override (tracked via
+//      `_strictOverride !== null`).
+//   2. `TN_STRICT` env var — truthy when its lowercased value is in
+//      {"1", "true", "yes", "on"} (mirror of python/tn/_autoinit.py:71).
+//   3. Default: false.
 // ---------------------------------------------------------------------------
-let _strictMode = false;
+const _STRICT_TRUTHY = new Set(["1", "true", "yes", "on"]);
+
+function _envStrict(): boolean {
+  const raw = (process.env["TN_STRICT"] ?? "").trim().toLowerCase();
+  return _STRICT_TRUTHY.has(raw);
+}
+
+/** Programmatic override; `null` falls through to the env-var check. */
+let _strictOverride: boolean | null = null;
+
+/** Effective strict-mode flag. Honors the override first, env second. */
+function _strictMode(): boolean {
+  if (_strictOverride !== null) return _strictOverride;
+  return _envStrict();
+}
+
+// Process-singleton `run_id`. Implementation lives in `./_run_id.ts`
+// so `node_runtime.ts` can stamp the same env var before wasm-init
+// without an import cycle through `Tn`.
+import { ensureProcessRunId as _ensureProcessRunId } from "./_run_id.js";
 
 // ---------------------------------------------------------------------------
 // _shouldEnableStdout — same logic as TNClient's internal helper.
@@ -273,7 +299,13 @@ export class Tn {
   private constructor(rt: NodeRuntime, ownedTempdir?: string) {
     this._rt = rt;
     this._ownedTempdir = ownedTempdir;
-    this._runId = randomUUID().replace(/-/g, "");
+    // Process-singleton, NOT per-instance: every Tn handle in this
+    // process stamps the same run_id so reads can filter to "this run
+    // only" the way Python does. `_ensureProcessRunId` also writes
+    // `process.env["TN_RUN_ID"]` so the wasm runtime — which reads that
+    // env at init (crypto/tn-core/src/runtime.rs:860) — picks up the
+    // same value and stamps matching `run_id`s on its own writes.
+    this._runId = _ensureProcessRunId();
     this.admin = new AdminNamespace(rt);
     this.pkg = new PkgNamespace(rt);
     this.vault = new VaultNamespace(rt, (f) => this._mergeForEmit(f));
@@ -341,11 +373,12 @@ export class Tn {
       }
 
       if (resolvedPath === undefined) {
-        if (_strictMode) {
+        if (_strictMode()) {
           throw new Error(
             "Tn.init: no yaml path provided and strict mode is on. " +
               "Set TN_YAML env var, create ./tn.yaml, set TN_HOME, " +
-              "or pass a path explicitly to Tn.init().",
+              "or pass a path explicitly to Tn.init(). " +
+              "(Strict mode is on via Tn.setStrict(true) or TN_STRICT=1.)",
           );
         }
         // Fall back to ephemeral.
@@ -562,9 +595,27 @@ export class Tn {
    * Enable or disable strict mode. When `true`, `Tn.init()` with no yaml
    * path throws if the discovery chain finds no file rather than silently
    * minting a fresh ceremony. Mirrors Python `tn.set_strict(enabled)`.
+   *
+   * Honors the programmatic override over `TN_STRICT` — calling
+   * `Tn.setStrict(false)` after the user set `TN_STRICT=1` in env will
+   * win until the next `Tn.clearStrict()`. Matches `python/tn/
+   * _autoinit.set_strict()` precedence.
    */
   static setStrict(enabled: boolean): void {
-    _strictMode = enabled;
+    _strictOverride = enabled;
+  }
+
+  /**
+   * Drop the programmatic strict-mode override and fall back to the
+   * `TN_STRICT` env var. Mirrors `python/tn/_autoinit.reset_state_for_tests`.
+   */
+  static clearStrict(): void {
+    _strictOverride = null;
+  }
+
+  /** Read the active strict-mode flag (override wins, env second). */
+  static isStrict(): boolean {
+    return _strictMode();
   }
 
   /**
