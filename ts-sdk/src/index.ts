@@ -123,6 +123,23 @@ export {
 export { loadConfig } from "./runtime/config.js";
 export { loadKeystore } from "./runtime/keystore.js";
 export { absorbBootstrap, isBootstrapKind } from "./runtime/absorb_bootstrap.js";
+export {
+  DEFAULT_VAULT_URL,
+  ENV_VAULT_URL,
+  ENV_VAULT_DEFAULT_BASE,
+  ENV_NO_LINK,
+  resolveVaultUrl,
+  resolveDidEndpoint,
+  isAutoLinkDisabled,
+} from "./vault/url.js";
+export {
+  bootstrapFromApiKey,
+  challengeVerify,
+  parseBearer,
+  UnsealNotWiredError,
+  type ApiKeyFetchResult,
+  type ParsedBearer,
+} from "./runtime/bootstrap_api_key.js";
 // readAsRecipient is no longer exported from the public surface;
 // use `Tn.read({asRecipient})` for foreign-publisher reads.
 export {
