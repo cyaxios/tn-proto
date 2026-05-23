@@ -192,6 +192,8 @@ export interface HttpHandlerInstance extends WasmHandlerCallbacks {
  *
  * @see {@link consoleHandler} - the orthogonal "show in DevTools" sink.
  * @see {@link HttpHandlerOptions} - all knobs documented.
+ * @see [spec/envelope](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md) - the bytes posted to the URL (canonical ndjson).
+ * @see [spec/signing](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md) - signature verification on the server depends on byte-identity.
  *
  * @remarks
  * - 5xx responses requeue automatically; 4xx drop with the error

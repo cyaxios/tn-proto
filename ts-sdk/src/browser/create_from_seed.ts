@@ -167,6 +167,8 @@ function _writeUtf8(storage: JsStorageCallbacks, path: string, text: string): vo
  *   everything" variant.
  * @see {@link Tn.initFromSeed} - the higher-level wrapper that calls
  *   this and returns a usable `Tn` instance with handlers wired up.
+ * @see [spec/manifest#kinds](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md#kinds) - the `project_seed` kind this synthesises.
+ * @see [spec/vault-http#api-key-cold-start](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md#api-key-cold-start) - witness-style server flow.
  *
  * @remarks
  * The yaml written here is byte-identical to what `createFreshCeremony`
