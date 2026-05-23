@@ -2,6 +2,12 @@
 // which is compiled from the tn-core Rust crate. If you need a primitive
 // not re-exported here, pull from `@tnproto/sdk/raw`.
 
+// Side-effect: eagerly initSync the wasm so every re-exported symbol
+// (DeviceKey, BtnPublisher, WasmRuntime, ...) is callable immediately.
+// The browser entry (src/index.browser.ts) doesn't import this — its
+// bundle script handles wasm init via the inlined-bytes path.
+import "./runtime/_node_wasm_init.js";
+
 export * from "./core/types.js";
 export * from "./core/canonical.js";
 export * from "./core/chain.js";
