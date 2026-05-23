@@ -29,6 +29,16 @@ The wrap binds to the manifest via AAD: the AES-GCM AAD is the canonical
 bytes of the manifest with both ``manifest_signature_b64`` and the
 ``recipient_wrap`` block itself excluded. Lifting a wrap from one
 manifest into another fails decryption because the AAD differs.
+
+See Also:
+    `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
+        Authoritative wire spec for the sealed-box wrap shape,
+        Ed25519 to X25519 conversion, and HKDF salt/info derivation.
+    `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
+        How the wrapped BEK fits into the larger body-encryption layer
+        (BEK derives per-row body-encryption keys via HKDF).
+    `docs/spec/canonical-bytes.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/canonical-bytes.md>`_:
+        The byte-stable JSON encoding the AAD relies on.
 """
 
 from __future__ import annotations
@@ -159,6 +169,25 @@ def manifest_aad_for_wrap(manifest_dict: dict[str, Any]) -> bytes:
 
     Everything else (kind, from_did, to_did, ceremony_id, scope, clock,
     event_count, head_row_hash, the rest of body_encryption) is bound.
+
+    Args:
+        manifest_dict: The full manifest dict as it will land on the
+            wire, possibly carrying an in-progress ``recipient_wrap``
+            and/or signature — both are stripped in a defensive copy
+            before canonical encoding. The caller's dict is NOT
+            mutated.
+
+    Returns:
+        The byte-stable AAD ready to pass to
+        :func:`seal_bek_for_recipient` (producer side) or
+        :func:`unseal_bek_from_wrap` (recipient side).
+
+    See Also:
+        :func:`seal_bek_for_recipient`, :func:`unseal_bek_from_wrap`.
+        :func:`tn.canonical._canonical_bytes`: The byte-stable JSON
+            encoding the AAD relies on.
+        `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
+            AAD construction spec.
     """
     # Deep-copy so the caller's dict is not mutated.
     m = json.loads(json.dumps(manifest_dict, sort_keys=True))
@@ -184,8 +213,46 @@ def seal_bek_for_recipient(
 ) -> dict[str, str]:
     """Wrap ``bek`` so only ``recipient_did``'s holder can recover it.
 
-    Returns the dict suitable for embedding directly into
-    ``manifest.state.body_encryption.recipient_wrap``.
+    Generates a fresh ephemeral X25519 keypair, runs ECDH against the
+    recipient's X25519 pubkey (birationally derived from their Ed25519
+    DID), feeds the shared secret through HKDF-SHA256 with salt
+    ``ephemeral_pub || recipient_x_pub`` and info :data:`WRAP_HKDF_INFO`,
+    then AES-256-GCM-encrypts ``bek`` under the derived key with ``aad``
+    bound in.
+
+    Args:
+        bek: The 32-byte Body Encryption Key (or seed) to wrap. Caller
+            is responsible for generating this — typically via
+            ``os.urandom(32)`` or a deterministic ceremony seed.
+        recipient_did: The recipient's ``did:key:z...`` identifier.
+            Must be an Ed25519 DID (multicodec 0xed). Raises
+            :class:`ValueError` for secp256k1 or malformed DIDs.
+        aad: Additional authenticated data — typically the output of
+            :func:`manifest_aad_for_wrap` so the wrap binds to its
+            manifest and can't be lifted to a different one.
+
+    Returns:
+        Dict with five string fields suitable for direct embedding into
+        ``manifest.state.body_encryption.recipient_wrap``. See module
+        docstring for the wire shape.
+
+    Raises:
+        ValueError: If ``bek`` is not 32 bytes, or if ``recipient_did``
+            is malformed or uses a non-Ed25519 curve.
+
+    Example:
+        >>> import os
+        >>> wrap = seal_bek_for_recipient(
+        ...     bek=os.urandom(32),
+        ...     recipient_did="did:key:z6Mk...",  # doctest: +SKIP
+        ...     aad=b"manifest-canonical-bytes",
+        ... )
+
+    See Also:
+        :func:`unseal_bek_from_wrap`: The inverse.
+        :func:`manifest_aad_for_wrap`: Build the right AAD.
+        `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
+            Wire spec.
     """
     if len(bek) != 32:
         raise ValueError(
@@ -237,10 +304,44 @@ def unseal_bek_from_wrap(
 ) -> bytes:
     """Recover the BEK from a recipient_wrap dict.
 
-    ``device_priv_seed`` is the 32-byte Ed25519 seed (the bytes stored
-    in ``<keystore>/local.private``).
+    Inverse of :func:`seal_bek_for_recipient`. Validates the wrap's
+    frame, decodes the ephemeral X25519 pubkey and the wrapped
+    ciphertext, converts the caller's Ed25519 seed to its X25519
+    counterpart, runs ECDH against the embedded ephemeral pub, derives
+    the same HKDF key the producer used, and AES-256-GCM-decrypts
+    with ``aad`` bound in.
 
-    Raises ``UnsealError`` on any failure.
+    The recipient's X25519 PUBLIC key used in the HKDF salt is
+    rederived from the wrap's ``recipient_identity`` field — not from
+    ``device_priv_seed`` — so a malicious wrap that names a different
+    DID than the one the recipient holds fails authentication rather
+    than silently succeeding under the wrong identity.
+
+    Args:
+        wrap: The :data:`WRAP_FRAME` dict as embedded in
+            ``manifest.state.body_encryption.recipient_wrap``.
+        device_priv_seed: The 32-byte Ed25519 seed (the bytes stored
+            in ``<keystore>/local.private``). Not the expanded 64-byte
+            secret key, not a hex string.
+        aad: Additional authenticated data — must match what the
+            producer passed to :func:`seal_bek_for_recipient`.
+            Typically the output of :func:`manifest_aad_for_wrap`
+            against the same manifest the wrap was embedded in.
+
+    Returns:
+        The 32-byte BEK.
+
+    Raises:
+        UnsealError: For every failure mode — unknown frame,
+            malformed wrap fields, DID/seed shape mismatch, AEAD
+            authentication failure (wrong key, wrong AAD, tampered
+            ciphertext), or recovered BEK with wrong length.
+
+    See Also:
+        :func:`seal_bek_for_recipient`: The inverse.
+        :func:`manifest_aad_for_wrap`: Build the right AAD.
+        `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
+            Wire spec.
     """
     if not isinstance(wrap, dict):
         raise UnsealError(f"recipient_wrap is not an object: {type(wrap).__name__}")
