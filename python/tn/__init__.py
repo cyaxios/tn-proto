@@ -1132,15 +1132,40 @@ def _register_atexit_flush_once() -> None:
 
 
 def _flush_and_close_impl(*, timeout: float = 30.0) -> None:
-    """Close all handlers (drains async outboxes best-effort).
+    """Close all handlers and release the active runtime.
 
-    You usually don't need to call ``tn.flush_and_close()`` explicitly
-    — ``tn.init()`` registers an ``atexit`` hook that drains handlers
-    on normal interpreter shutdown. Call this only when you need
-    deterministic flush *before* the process exits (e.g., before
-    forking, before assertion checks in tests, or in long-running
-    services that re-init periodically). For deterministic scoping
-    use ``with tn.session(): ...`` instead.
+    Drains async outboxes on a best-effort basis (Kafka / S3 / Delta
+    exporters write pending events out before shutdown), then
+    releases the in-memory runtime so the next :func:`tn.init` mints
+    fresh.
+
+    You usually don't need to call this explicitly — :func:`tn.init`
+    registers an ``atexit`` hook that drains handlers on normal
+    interpreter shutdown. Call this only when you need deterministic
+    flush *before* the process exits (e.g., before forking, before
+    assertion checks in tests, or in long-running services that
+    re-init periodically). For deterministic scoping use
+    ``with tn.session(): ...`` instead.
+
+    Idempotent — safe to call multiple times; calling on a
+    never-initialised process is a no-op.
+
+    Args:
+        timeout: Maximum seconds to wait for each async outbox to
+            drain. Per-handler; total wall-clock can be up to
+            ``timeout * len(async_handlers)``. Default 30.
+
+    Example:
+        >>> import tn
+        >>> tn.init()
+        >>> tn.info("checkout.completed", order_id="o_456")
+        >>> tn.flush_and_close()  # ensures the event ships before exit
+
+    See Also:
+        :func:`tn.init`: The constructor side of the lifecycle.
+        :func:`tn.session`: Context manager that auto-flushes on exit.
+        :func:`tn.current_config`: Read the active ceremony config
+            before flushing.
     """
     global _dispatch_rt, _cached_admin_state, _agent_policy_doc
     _surface.info(
@@ -1196,7 +1221,38 @@ def _flush_and_close_impl(*, timeout: float = 30.0) -> None:
 
 
 def _current_config_impl():
-    """Return the LoadedConfig for the active ceremony."""
+    """Return the :class:`LoadedConfig` for the active ceremony.
+
+    Read-only snapshot of the yaml that was loaded at :func:`tn.init`
+    time — ceremony id, cipher, groups, public-fields set, handler
+    specs, device identity, log paths, keystore paths. Mutating the
+    returned object won't propagate to the live runtime; for that
+    use :func:`tn.logger.reload_from_yaml` after editing the yaml on
+    disk.
+
+    Returns:
+        LoadedConfig: The active ceremony's in-memory config.
+
+    Raises:
+        RuntimeError: If no runtime is active. Call :func:`tn.init`
+            (or :func:`tn.absorb` for a freshly-downloaded
+            ``project_seed`` / ``identity_seed``) first.
+
+    Example:
+        >>> import tn
+        >>> tn.init()
+        >>> cfg = tn.current_config()
+        >>> cfg.ceremony_id
+        'local_a1b2c3d4'
+        >>> list(cfg.groups.keys())
+        ['default', 'tn.agents']
+
+    See Also:
+        :func:`tn.using_rust`: Diagnostic — is the Rust runtime active?
+        :func:`tn.init`: How the config gets loaded.
+        `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
+            Ceremony / yaml structure.
+    """
     from . import logger as _lg
 
     if _lg._runtime is None:

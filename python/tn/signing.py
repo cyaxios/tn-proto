@@ -1,27 +1,39 @@
-"""Ed25519 signing + did:key derivation for TN device identities.
+"""Ed25519 signing + ``did:key:`` derivation for TN device identities.
 
-Entries are signed by the device's long-lived Ed25519 key; the signature
-covers the row hash that transitively covers every other envelope field.
-did:key encoding uses the Ed25519 multicodec (0xed) so readers can extract
-the verifying public key from the DID alone with no external resolver.
+Entries are signed by the device's long-lived Ed25519 key; the
+signature covers the ``row_hash`` that transitively covers every
+other envelope field. ``did:key:`` encoding uses the Ed25519
+multicodec (``0xed``) so readers can extract the verifying public key
+from the DID alone with no external resolver.
 
-We use the `cryptography` package which ships as a binary wheel on every
-platform we target. Ed25519 signing runs at approximately 50 to 100
-microseconds per call on commodity CPUs, an order of magnitude faster
-than ECDSA over secp256k1 and with deterministic signatures (no per-call
-nonce entropy requirement).
+We use the ``cryptography`` package which ships as a binary wheel on
+every platform we target. Ed25519 signing runs at approximately 50 to
+100 microseconds per call on commodity CPUs, an order of magnitude
+faster than ECDSA over secp256k1 and with deterministic signatures
+(no per-call nonce entropy requirement).
 
-did:key encoding:
+``did:key:`` encoding::
+
     did:key:<multibase-base58btc>(<multicodec-pub>|<raw-pub-bytes>)
 
     Ed25519:    multicodec 0xed, varint 2 bytes: 0xed 0x01, pub = 32 bytes
     secp256k1:  multicodec 0xe7, varint 2 bytes: 0xe7 0x01, pub = 33 bytes compressed
 
-TN signs only with Ed25519. The verify path additionally accepts secp256k1
-DIDs so that readers receiving entries whose publisher holds a secp256k1
-identity (for example, an ATProto-federated party) can verify without a
-translation layer. The sign path is deliberately single-curve to keep the
-hot code-path simple.
+TN signs only with Ed25519. The verify path additionally accepts
+secp256k1 DIDs so that readers receiving entries whose publisher
+holds a secp256k1 identity (for example, an ATProto-federated party)
+can verify without a translation layer. The sign path is deliberately
+single-curve to keep the hot code-path simple. The Rust mirror at
+``crypto/tn-core/src/signing.rs`` returns ``Ok(false)`` for secp256k1
+without erroring — see ``docs/spec/discrepancies.md#secp256k1-verify``.
+
+See Also:
+    `docs/spec/signing.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md>`_:
+        Authoritative wire spec — Ed25519 + did:key + the two
+        base64 conventions (URL-safe-no-pad for envelope signatures,
+        standard-with-pad for manifest signatures).
+    `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_:
+        Where ``signature`` lives in the wire envelope.
 """
 
 from __future__ import annotations
@@ -105,6 +117,32 @@ class DeviceKey:
 
     @classmethod
     def generate(cls) -> Self:
+        """Mint a fresh Ed25519 device key from the OS RNG.
+
+        The new key is NOT persisted anywhere — callers are
+        responsible for writing it (typically via
+        :func:`tn.config.create_fresh` or
+        :func:`tn.identity.Identity.create_new`).
+
+        Returns:
+            A fully-populated ``DeviceKey`` carrying random
+            ``private_bytes`` (32), the matching ``public_bytes`` (32),
+            and the derived ``device_identity`` (``did:key:z…``).
+
+        Example:
+            >>> from tn.signing import DeviceKey
+            >>> dk = DeviceKey.generate()
+            >>> dk.device_identity.startswith("did:key:z")
+            True
+            >>> len(dk.private_bytes), len(dk.public_bytes)
+            (32, 32)
+
+        See Also:
+            :meth:`DeviceKey.from_private_bytes`: Restore from an
+                existing 32-byte seed.
+            `docs/spec/signing.md#identity <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md>`_:
+                DID + key format spec.
+        """
         priv = Ed25519PrivateKey.generate()
         priv_bytes = priv.private_bytes(
             encoding=serialization.Encoding.Raw,
@@ -119,6 +157,39 @@ class DeviceKey:
 
     @classmethod
     def from_private_bytes(cls, priv_bytes: bytes) -> Self:
+        """Restore a ``DeviceKey`` from a 32-byte Ed25519 seed.
+
+        Use when loading from disk (``<keystore>/local.private``),
+        from a server-delivered API-key bearer, or any other
+        externally-managed seed.
+
+        Args:
+            priv_bytes: Exactly 32 bytes — the raw Ed25519 seed. NOT
+                the multicodec-wrapped form, NOT a DER-encoded key,
+                NOT a hex string.
+
+        Returns:
+            A fully-populated ``DeviceKey``. The derived ``device_identity``
+            (``did:key:z…``) matches the public key the seed produces.
+
+        Raises:
+            ValueError: If ``priv_bytes`` is not exactly 32 bytes long.
+
+        Example:
+            >>> from tn.signing import DeviceKey
+            >>> seed = bytes(32)  # all zeros — fine for the demo
+            >>> dk = DeviceKey.from_private_bytes(seed)
+            >>> dk.device_identity.startswith("did:key:z")
+            True
+            >>> # Round-trip: same seed -> same DID.
+            >>> DeviceKey.from_private_bytes(seed).device_identity == dk.device_identity
+            True
+
+        See Also:
+            :meth:`DeviceKey.generate`: Mint a fresh key from the OS RNG.
+            `docs/spec/signing.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md>`_:
+                Ed25519 + did:key wire spec.
+        """
         if len(priv_bytes) != 32:
             raise ValueError("Ed25519 private key seed must be 32 bytes")
         priv = Ed25519PrivateKey.from_private_bytes(priv_bytes)
