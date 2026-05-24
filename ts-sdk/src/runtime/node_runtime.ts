@@ -6,12 +6,16 @@
 // Only btn ceremonies are supported. A ceremony whose groups use jwe or
 // bgw will throw on emit/read, pointing the caller at the Python path.
 
-// Side-effect: eagerly initSync the wasm so DeviceKey.fromSeed and
-// the BtnPublisher class are callable as soon as this module loads.
-// Mirrors the same import in src/index.ts; safe to double-import,
-// initSync is idempotent. Required for callers that bypass index.ts
-// (e.g. tests that import { Tn } from "../src/tn.js" directly).
-import "./_node_wasm_init.js";
+// Side-effect import: the nodejs target of tn-wasm self-instantiates
+// its .wasm at module load time (see the bottom of pkg/tn_wasm.js).
+// Mirrors the same import in src/index.ts; importing tn-wasm twice is
+// a no-op. Required for callers that bypass index.ts (e.g. tests that
+// import { Tn } from "../src/tn.js" directly).
+//
+// `initSync` is NOT exported by the nodejs-target glue — only by the
+// web/bundler targets. The browser entry handles its own init via the
+// inlined-bytes path.
+import "tn-wasm";
 
 import {
   existsSync,

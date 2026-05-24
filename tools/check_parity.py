@@ -146,6 +146,63 @@ KNOWN_OMISSIONS = {
     # table by the absorb / Tn.absorb rows. NEW in 0.4.0a2.
     # ------------------------------------------------------------------
     "absorbBootstrap", "isBootstrapKind",
+
+    # ------------------------------------------------------------------
+    # Sealed-bundle absorb (TS-only entry; parallels Python tn.absorb's
+    # internal sealed-bundle path that runs inside the same verb). NEW
+    # in 0.4.3a1 — second-release encrypted-kit-bundle work.
+    # ------------------------------------------------------------------
+    "absorbSealedBootstrap",
+
+    # ------------------------------------------------------------------
+    # Env-var parity helpers (TN_API_KEY / TN_VAULT_URL /
+    # TN_VAULT_DEFAULT_BASE / TN_NO_LINK). The vars themselves are
+    # documented per-row in the parity table; these are the TS-side
+    # accessors. Python's equivalents live inside tn.vault_client
+    # (`resolve_vault_url`) and tn.bootstrap (the bearer parser) — not
+    # exported at the top level. NEW in 0.4.3a1.
+    # ------------------------------------------------------------------
+    "bootstrapFromApiKey", "parseBearer", "challengeVerify",
+    "resolveVaultUrl", "resolveDidEndpoint", "isAutoLinkDisabled",
+    "ApiKeyFetchResult", "ParsedBearer",
+
+    # ------------------------------------------------------------------
+    # Recipient-seal Layer 1 helpers (sealed-box wrap producer /
+    # consumer + AAD builder). Python's counterparts live in
+    # tn.recipient_seal — internal module, not on the public `tn.*`
+    # surface. The user-facing wrap path is Tn.exportPkg's
+    # seal_for_recipient flow (parity-row covered). NEW in 0.4.3a1.
+    # ------------------------------------------------------------------
+    "buildRecipientWraps", "sealBekForRecipient", "unsealBekFromWrap",
+    "manifestAadForWrap", "RecipientWrap", "UnsealError",
+    "UnsealNotWiredError", "WRAP_FRAME",
+
+    # ------------------------------------------------------------------
+    # Body-encryption Layer 1 helpers. Python's counterparts live in
+    # tn.export (`_encrypt_body_in_place`, `decrypt_body_blob`) — not
+    # public. The user-facing path on both sides is tn.export /
+    # Tn.exportPkg with `encrypt_body_with=` / `seal_for_recipient=`.
+    # NEW in 0.4.3a1.
+    # ------------------------------------------------------------------
+    "encryptBodyBlob", "decryptBodyBlob",
+    "BODY_CIPHER_SUITE", "BODY_FRAME",
+
+    # ------------------------------------------------------------------
+    # Manifest wire-dict round-trip helpers (TS-only public; Python
+    # round-trips through `TnpkgManifest.from_dict` / `to_dict` which
+    # live on the class). Layer 1 primitive — covered by tn.pkg rows.
+    # ------------------------------------------------------------------
+    "fromWireDict", "toWireDict",
+
+    # ------------------------------------------------------------------
+    # Vault URL constants. The env vars they reflect (TN_VAULT_URL,
+    # TN_VAULT_DEFAULT_BASE, TN_NO_LINK) are themselves documented as
+    # parity rows; the constants are the TS-side names for the same
+    # behaviour. Python keeps them as module-level names inside
+    # tn.vault_client (`DEFAULT_VAULT_URL`, `ENV_VAULT_URL`).
+    # ------------------------------------------------------------------
+    "DEFAULT_VAULT_URL", "ENV_VAULT_URL",
+    "ENV_VAULT_DEFAULT_BASE", "ENV_NO_LINK",
 }
 
 

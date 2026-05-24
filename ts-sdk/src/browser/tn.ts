@@ -158,18 +158,23 @@ function _stubNamespace<T extends Record<string, unknown>>(name: string, keys: r
  * Options forwarded to {@link Tn.init}. Identical to
  * {@link BrowserRuntimeOptions} — see that interface for field docs.
  *
+ * Aliased (rather than `interface ... extends`) so the typechecker
+ * carries the field-by-field shape into hover output instead of an
+ * opaque supertype reference, and so eslint's `no-empty-object-type`
+ * rule doesn't fire on the empty interface body.
+ *
  * @public
  */
-export interface TnInitOptions extends BrowserRuntimeOptions {}
+export type TnInitOptions = BrowserRuntimeOptions;
 
 /**
  * Options forwarded to {@link Tn.initFromSeed}. Identical to
  * {@link BrowserRuntimeFromSeedOptions} — see that interface for
- * field docs.
+ * field docs. Aliased for the same reasons as {@link TnInitOptions}.
  *
  * @public
  */
-export interface TnInitFromSeedOptions extends BrowserRuntimeFromSeedOptions {}
+export type TnInitFromSeedOptions = BrowserRuntimeFromSeedOptions;
 
 // ---------------------------------------------------------------------------
 // Tn class

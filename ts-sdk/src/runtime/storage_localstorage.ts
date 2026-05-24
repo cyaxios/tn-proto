@@ -283,7 +283,6 @@ export function localStorageStorageAdapter(
 
     size() {
       let n = 0;
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for (const _ of _entries()) n += 1;
       return n;
     },
@@ -395,13 +394,13 @@ function _b64Decode(s: string): Uint8Array {
   if (tail === 2) {
     const a = _B64_LOOKUP[s.charCodeAt(i)] ?? 0;
     const b = _B64_LOOKUP[s.charCodeAt(i + 1)] ?? 0;
-    out[oi++] = (a << 2) | (b >> 4);
+    out[oi] = (a << 2) | (b >> 4);
   } else if (tail === 3) {
     const a = _B64_LOOKUP[s.charCodeAt(i)] ?? 0;
     const b = _B64_LOOKUP[s.charCodeAt(i + 1)] ?? 0;
     const c = _B64_LOOKUP[s.charCodeAt(i + 2)] ?? 0;
-    out[oi++] = (a << 2) | (b >> 4);
-    out[oi++] = ((b & 0x0f) << 4) | (c >> 2);
+    out[oi] = (a << 2) | (b >> 4);
+    out[oi + 1] = ((b & 0x0f) << 4) | (c >> 2);
   }
   return out;
 }

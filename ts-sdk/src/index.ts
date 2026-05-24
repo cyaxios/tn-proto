@@ -2,11 +2,16 @@
 // which is compiled from the tn-core Rust crate. If you need a primitive
 // not re-exported here, pull from `@tnproto/sdk/raw`.
 
-// Side-effect: eagerly initSync the wasm so every re-exported symbol
-// (DeviceKey, BtnPublisher, WasmRuntime, ...) is callable immediately.
+// Wasm init note: wasm-pack's `--target nodejs` glue auto-instantiates
+// the .wasm at module load time (see the bottom of pkg/tn_wasm.js —
+// `let wasm = new WebAssembly.Instance(...).exports; wasm.__wbindgen_start();`).
+// So a plain `import "tn-wasm"` is sufficient on Node — no explicit
+// `initSync` is required, and `initSync` is NOT exported by the
+// nodejs-target glue (only by the web/bundler targets).
 // The browser entry (src/index.browser.ts) doesn't import this — its
-// bundle script handles wasm init via the inlined-bytes path.
-import "./runtime/_node_wasm_init.js";
+// bundle script handles wasm init via the inlined-bytes path against
+// the pkg-web build.
+import "tn-wasm";
 
 export * from "./core/types.js";
 export * from "./core/canonical.js";
