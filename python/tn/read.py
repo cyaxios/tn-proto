@@ -264,27 +264,93 @@ def read(
     all_runs: bool = True,
     on_skip: Callable[[dict[str, Any], str], None] | None = None,
 ) -> _ReadIterator:
-    """Iterate log entries.
+    """Iterate attested log entries from the active ceremony.
 
-    Default mode yields :class:`Entry` instances. Pass ``raw=True`` to
-    yield on-disk envelope dicts unchanged (forensics / chain auditors).
+    Default mode yields :class:`Entry` instances — flat-shaped dicts
+    with the six envelope basics (``timestamp``, ``event_type``,
+    ``level``, ``device_identity``, ``sequence``, ``event_id``) plus
+    every readable group's decrypted fields hoisted to the top level.
+    Pass ``raw=True`` to yield ``{envelope, plaintext, valid}`` audit
+    triples unchanged for forensics / chain inspection.
 
-    ``all_runs`` defaults to ``True``: a fresh process returns every
-    entry on disk. Pass ``all_runs=False`` to restrict the result to
-    entries this process emitted in the current run.
+    Args:
+        where: Optional predicate ``(Entry|dict) -> bool``. Entries
+            that return ``False`` are skipped. Applied AFTER decrypt
+            and verify so the predicate sees the same shape callers
+            iterate.
+        verify: Signature / row_hash / chain verification mode.
+            ``False`` (default): no verification; yield every row.
+            ``True`` / ``"skip"``: verify; silently drop bad rows.
+            ``"raise"``: verify; raise :class:`VerifyError` on the
+            first bad row.
+        raw: ``False`` (default) yields :class:`Entry` instances.
+            ``True`` yields ``{envelope, plaintext, valid}`` dicts —
+            the on-disk envelope unchanged plus the decrypted
+            per-group plaintext map and the per-row validity flags.
+        log: Source log address. ``None`` (default) reads the active
+            ceremony's main log. Accepted forms:
 
-    The default surface is the main user log only. Admin envelopes
-    (``tn.*``) live in a separate log; address them explicitly:
+            * ``"admin"`` — alias for ``cfg.admin_log_location``.
+            * Absolute or relative path (``str`` or :class:`Path`).
+            * Template with ``{event_type}`` / ``{event_class}`` /
+              ``{date}`` / ``{yaml_dir}`` / ``{ceremony_id}`` /
+              ``{did}`` tokens — every matching file is read in turn.
+        as_recipient: Path to a single recipient kit (``*.btn.mykit``
+            or ``*.jwe.mykey``). When set, decryption uses ONLY that
+            kit — useful for offline cross-publisher audits. When
+            unset and ``log`` is non-default, every kit in the active
+            keystore is tried per envelope.
+        group: Group name when ``as_recipient`` is set (selects which
+            kit in that directory to load). Default ``"default"``.
+        all_runs: ``True`` (default) yields entries from every run on
+            disk. ``False`` filters to entries this process emitted
+            in the current run only (per ``TN_RUN_ID``).
+        on_skip: Optional callback invoked per dropped row when
+            ``verify="skip"``. Receives ``(envelope_dict, reason)``.
+            Useful for surfacing chain breaks without raising.
 
-        tn.read(log="admin")                       # alias sugar
-        tn.read(log=cfg.admin_log_location)        # explicit path
-        tn.read(log="./.tn/admin/admin.ndjson")    # literal
+    Yields:
+        :class:`Entry` (default) or ``dict`` (when ``raw=True``).
+        The iterator exposes a ``.stats`` property after exhaustion
+        with ``read`` / ``decrypted`` / ``skipped`` / ``invalid``
+        counts.
 
-    ``log=`` also accepts a template with ``{event_type}`` /
-    ``{event_class}`` / ``{date}`` / ``{yaml_dir}`` / ``{ceremony_id}``
-    / ``{did}`` tokens, in which case every matching file is read
-    back in turn. This mirrors :func:`tn.watch` — both verbs share
-    the same resolver so any addressing form works uniformly.
+    Raises:
+        VerifyError: If ``verify="raise"`` and a row fails signature
+            / row_hash / chain verification.
+        RuntimeError: If :func:`tn.init` hasn't been called and
+            ``TN_STRICT=1`` blocks auto-init.
+        FileNotFoundError: If ``log`` resolves to a path that
+            doesn't exist.
+
+    Example:
+        >>> import tn
+        >>> tn.init()
+        >>> tn.info("user.signed_in", user_id="u_123")
+
+        >>> # Default: every entry from this ceremony's main log.
+        >>> for e in tn.read():
+        ...     print(e.sequence, e.event_type)
+
+        >>> # Verified read; raise on tamper.
+        >>> for e in tn.read(verify="raise"):
+        ...     process(e)
+
+        >>> # Audit-grade with full envelopes.
+        >>> for row in tn.read(raw=True):
+        ...     check_signature(row["envelope"]["signature"])
+
+        >>> # Read the admin log (tn.* protocol events).
+        >>> for e in tn.read(log="admin"):
+        ...     print(e.event_type)   # e.g. "tn.recipient.added"
+
+    See Also:
+        :func:`tn.watch`: Tail the log live (async generator).
+        :func:`tn.info` / :func:`tn.log`: The producer side.
+        `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_:
+            The wire shape this returns.
+        `docs/spec/row-hash.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/row-hash.md>`_:
+            The chain-link hash ``verify`` checks.
     """
     _check_verify_kwarg(verify)
 
@@ -591,22 +657,92 @@ async def watch(
     since: str | int = "now",
     poll_interval: float = 0.3,
 ) -> AsyncIterator[Entry] | AsyncIterator[dict[str, Any]]:
-    """Tail the log live, yielding entries as they arrive.
+    """Tail the active ceremony's log live, yielding entries as they arrive.
 
-    Async generator. Use ``async for entry in tn.watch(...)``.
+    Async generator — use ``async for entry in tn.watch(...)``. Polls
+    the underlying ndjson file(s) every ``poll_interval`` seconds;
+    decrypted, optionally verified entries flow out as they're
+    appended. Cancel by breaking out of the loop or letting the
+    coroutine be garbage-collected.
 
-    The default surface tails the main user log only. Admin envelopes
-    (``tn.*``) live in a separate log and must be addressed
-    explicitly:
+    Args:
+        where: Optional predicate ``(Entry|dict) -> bool``. Entries
+            that return ``False`` are skipped. Applied AFTER decrypt
+            so the predicate sees the iterator's yield shape.
+        verify: Signature / row_hash / chain verification mode. Same
+            three values as :func:`tn.read` (``False`` /
+            ``"skip"`` / ``"raise"``). Today watch is best-effort
+            here: malformed rows are silently skipped regardless of
+            mode (see ``docs/sdk-parity.md`` for the rationale).
+        raw: ``False`` (default) yields :class:`Entry` instances.
+            ``True`` yields flat-dict envelopes — same shape as
+            :func:`tn.read` (raw=True) modulo signature: watch
+            doesn't expose the per-row ``valid`` block today.
+        log: Source log address. ``None`` (default) tails the active
+            ceremony's main log. Same forms as :func:`tn.read`:
+            ``"admin"`` alias, absolute / relative path, or a
+            template with ``{event_type}`` / ``{event_class}`` /
+            ``{date}`` / ``{yaml_dir}`` / ``{ceremony_id}`` /
+            ``{did}`` tokens (every matching file tailed in parallel).
+        as_recipient: NOT SUPPORTED on watch (raises
+            :class:`NotImplementedError`). For one-shot foreign reads
+            use :func:`tn.read` with ``as_recipient=``.
+        group: Reserved for future ``as_recipient`` support.
+        since: Starting cursor. ``"now"`` (default) yields only
+            entries appended AFTER the call. ``"start"`` replays
+            from the beginning of the log. An ``int`` is a sequence
+            number (resume after that seq). A string in ISO-8601
+            form is a timestamp (resume from the first entry whose
+            timestamp >= the cursor).
+        poll_interval: Seconds between file-tail polls. Default
+            ``0.3``. Lower = lower latency, higher CPU. The
+            underlying watcher uses ``inotify`` / ``FSEvents`` /
+            ``ReadDirectoryChangesW`` where available; poll-interval
+            is the fallback ceiling.
 
-        tn.watch(log="admin")                       # alias sugar
-        tn.watch(log=cfg.admin_log_location)        # explicit path
-        tn.watch(log="./.tn/admin/admin.ndjson")    # literal
+    Yields:
+        :class:`Entry` (default) or ``dict`` (when ``raw=True``).
+        The generator never completes on its own — it tails forever
+        until cancelled.
 
-    ``log=`` also accepts a template with ``{event_type}`` /
-    ``{event_class}`` / ``{date}`` / ``{yaml_dir}`` / ``{ceremony_id}``
-    / ``{did}`` tokens; every matching file is tailed in parallel.
-    Symmetric with :func:`tn.read`.
+    Raises:
+        NotImplementedError: If ``as_recipient`` is set (use
+            :func:`tn.read` for foreign reads).
+        RuntimeError: If :func:`tn.init` hasn't been called and
+            ``TN_STRICT=1`` blocks auto-init.
+        FileNotFoundError: If ``log`` resolves to a path that
+            doesn't exist (and isn't a template that produces zero
+            files — which is allowed; watch waits for the first
+            match).
+
+    Example:
+        >>> import asyncio
+        >>> import tn
+        >>>
+        >>> async def main():
+        ...     tn.init()
+        ...     async for entry in tn.watch():
+        ...         print(entry.sequence, entry.event_type)
+        ...         if entry.event_type == "scan.done":
+        ...             break
+        >>> # asyncio.run(main())  # would block forever otherwise
+
+        >>> # Tail admin events (tn.* protocol bookkeeping).
+        >>> async def admin_watcher():
+        ...     async for e in tn.watch(log="admin"):
+        ...         if e.event_type == "tn.recipient.added":
+        ...             notify(e)
+
+        >>> # Resume from a specific sequence after a crash.
+        >>> async def resume(last_seq):
+        ...     async for e in tn.watch(since=last_seq):
+        ...         process(e)
+
+    See Also:
+        :func:`tn.read`: Synchronous one-shot read of every entry.
+        :func:`tn.info` / :func:`tn.log`: The producer side.
+        `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_:
+            The wire shape this yields.
     """
     _check_verify_kwarg(verify)
 

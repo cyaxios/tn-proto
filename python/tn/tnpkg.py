@@ -1,40 +1,50 @@
-"""Universal `.tnpkg` wrapper — signed manifest + kind-specific body.
+"""Universal ``.tnpkg`` wrapper — signed manifest + kind-specific body.
 
-Per docs/superpowers/plans/2026-04-24-tn-admin-log-architecture.md (Section 2),
-every `.tnpkg` is a zip archive with this structure::
+Every ``.tnpkg`` is a STORED zip archive with this structure::
 
-    foo.tnpkg/                    # zip archive
+    foo.tnpkg/                    # zip archive (STORED, no compression)
       manifest.json               # signed JSON; the index
       body/...                    # kind-specific contents
 
-The manifest is signed with Ed25519 by ``from_did``'s device key, over the
-RFC 8785-style canonical bytes of the manifest minus the signature field.
-This module owns the wire-format invariants (manifest schema, signature
-domain, zip layout). Producer / consumer dispatch lives in ``tn.export``
-and ``tn.absorb``.
+The manifest is signed with Ed25519 by ``publisher_identity``'s device
+key, over the RFC 8785-style canonical bytes of the manifest minus the
+``manifest_signature_b64`` field. This module owns the wire-format
+invariants (manifest schema, signature domain, zip layout). Producer /
+consumer dispatch lives in :mod:`tn.export` and :mod:`tn.absorb`.
 
 Kinds shipped in v1:
-    admin_log_snapshot     body/admin.ndjson — every admin envelope this
-                           writer has emitted, in chain order.
-    offer                  body/package.json — JWE bootstrap offer
-                           (existing ``Package`` shape).
-    enrolment              body/package.json — JWE enrolment package.
-    kit_bundle             body/<group>.btn.mykit files — readers-only,
-                           no publisher state.
-    full_keystore          body/keys/* — every keystore file, including
-                           private material. Producer must opt in via
-                           ``confirm_includes_secrets=True``.
-    identity_seed          body/local.private + body/local.public + body/tn.yaml
-                           — the minimal "this is who I am" bundle a fresh
-                           recipient absorbs to bootstrap a TN identity.
-                           Self-signed by the very key it carries (from_did
-                           == to_did). See
-                           docs/superpowers/specs/2026-05-03-identity-issuance-design.md.
 
-The legacy three-format ``.tnpkg`` situation (pretty JSON, kit-bundle zip,
-raw kit body inside ``tn-invite-*.zip``) is replaced. Old callers like
-``packaging.dump_tnpkg`` / ``packaging.load_tnpkg`` are wrapped on top of
-the new manifest header.
+    admin_log_snapshot     ``body/admin.ndjson`` — every admin
+                           envelope this writer has emitted, in chain
+                           order.
+    offer                  ``body/package.json`` — JWE bootstrap offer.
+    enrolment              ``body/package.json`` — JWE enrolment.
+    kit_bundle             ``body/<group>.btn.mykit`` files —
+                           readers-only, no publisher state.
+    full_keystore          ``body/keys/*`` — every keystore file,
+                           including private material. Producer must
+                           opt in via ``confirm_includes_secrets=True``.
+    identity_seed          ``body/local.private`` + ``body/local.public``
+                           + ``body/tn.yaml`` — minimal "this is who I am"
+                           bundle a fresh recipient absorbs to bootstrap
+                           a TN identity. Self-signed (from_did == to_did).
+    contact_update         Contact-record sync from the vault inbox.
+
+See `docs/spec/discrepancies.md#manifest-kinds <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/discrepancies.md#manifest-kinds>`_
+for the cross-implementation kind-recognition state — Rust + TS lag on
+``identity_seed`` and ``project_seed`` at the type level even though
+all three implementations handle both kinds at runtime.
+
+See Also:
+    `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
+        Authoritative wire spec — manifest schema + signature.
+    `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
+        Sealed body frame for bundles whose body is encrypted.
+    `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
+        Per-recipient BEK seal inside ``state.body_encryption``.
+    `docs/spec/signing.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md>`_:
+        Manifest signatures use standard base64 with padding (distinct
+        from envelope signatures' URL-safe-no-pad encoding).
 """
 
 from __future__ import annotations
@@ -163,19 +173,77 @@ class TnpkgManifest:
         )
 
     def signing_bytes(self) -> bytes:
-        """Canonical bytes of the manifest with ``manifest_signature_b64``
-        excluded — the exact domain over which the producer signs."""
+        """Canonical bytes of the manifest with ``manifest_signature_b64`` removed.
+
+        The exact byte sequence the producer signs. Receivers
+        recompute this domain by stripping the same field from the
+        on-wire manifest and re-canonicalising. Both sides MUST
+        produce identical bytes for verification to succeed.
+
+        Returns:
+            UTF-8 canonical-bytes of the manifest minus the signature
+            field. See
+            `docs/spec/canonical-bytes.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/canonical-bytes.md>`_
+            for the encoding rule.
+
+        See Also:
+            :meth:`sign`: Produces ``manifest_signature_b64`` over
+                these bytes.
+            `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
+                Manifest signature spec.
+        """
         d = self.to_dict()
         d.pop("manifest_signature_b64", None)
         return _canonical_bytes(d)
 
     def sign(self, sk: Ed25519PrivateKey) -> TnpkgManifest:
-        """Populate ``manifest_signature_b64`` in-place and return self.
+        """Sign the manifest in place and return self.
 
-        Caller is responsible for ensuring ``from_did`` already names the
-        device whose key is ``sk``. We do not cross-check here — the
-        receiver verifies the signature against ``from_did``'s did:key
-        public bytes, which is the load-bearing check.
+        Computes ``sk.sign(self.signing_bytes())`` and writes the
+        result into ``manifest_signature_b64`` as **standard base64
+        with padding** (distinct from envelope signatures' URL-safe-
+        no-pad encoding — see
+        `docs/spec/signing.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md>`_).
+
+        Caller is responsible for ensuring ``publisher_identity``
+        already names the device whose key is ``sk``. We do NOT
+        cross-check here — receivers verify the signature against
+        ``publisher_identity``'s did:key public bytes, which is the
+        load-bearing check.
+
+        Idempotent in shape — calling twice produces the same
+        signature bytes for the same ``sk`` (Ed25519 is deterministic).
+
+        Args:
+            sk: The Ed25519 private key. Typically obtained via
+                :meth:`tn.signing.DeviceKey.signing_key` from the
+                publisher's keystore.
+
+        Returns:
+            ``self``, with ``manifest_signature_b64`` populated.
+            Returned for fluent-API convenience: ``m.sign(sk).to_dict()``.
+
+        Example:
+            >>> from tn.tnpkg import TnpkgManifest
+            >>> from tn.signing import DeviceKey
+            >>> dk = DeviceKey.generate()
+            >>> m = TnpkgManifest(
+            ...     kind="offer",
+            ...     publisher_identity=dk.device_identity,
+            ...     ceremony_id="demo",
+            ...     as_of="2026-05-22T00:00:00.000000+00:00",
+            ... )
+            >>> m.sign(dk.signing_key())  # doctest: +ELLIPSIS
+            TnpkgManifest(...)
+            >>> m.manifest_signature_b64 is not None
+            True
+
+        See Also:
+            :meth:`signing_bytes`: The exact bytes this signs.
+            :func:`tn.tnpkg._verify_manifest_signature`: The verify
+                side.
+            `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
+                Manifest signature spec.
         """
         sig = sk.sign(self.signing_bytes())
         self.manifest_signature_b64 = base64.b64encode(sig).decode("ascii")
