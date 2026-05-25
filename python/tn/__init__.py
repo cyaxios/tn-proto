@@ -137,34 +137,29 @@ _surface = logging.getLogger("tn.surface")
 # config. Useful for diagnosing test-ordering bugs in the bulk pytest
 # run where stdout/stderr are captured per test.
 #
-# Default fallback: when the env var is unset we still tee to a process-
-# scoped file under TEMP so a developer running pytest casually sees the
-# trace. Path is printed to stderr at module import.
+# Opt-in only: without the env var we do NOT open any file. Earlier versions
+# tee'd to $TEMP unconditionally, which surprised library consumers (pyright
+# language servers, jupyter kernels, `python -c "import tn"`) by leaving a
+# tn_surface_pid*.log behind on every import.
 import os as _os_for_surface
-import tempfile as _tempfile_for_surface
 
-_surface_log_path = (
-    _os_for_surface.environ.get("TN_SURFACE_LOG")
-    or str(_os_for_surface.path.join(
-        _tempfile_for_surface.gettempdir(),
-        f"tn_surface_pid{_os_for_surface.getpid()}.log",
-    ))
-)
-try:
-    _surface_fh = logging.FileHandler(_surface_log_path, encoding="utf-8", delay=False)
-    _surface_fh.setFormatter(
-        logging.Formatter("%(asctime)s [pid=%(process)d] %(name)s | %(message)s")
-    )
-    _surface.addHandler(_surface_fh)
-    _surface.setLevel(logging.INFO)
-    _surface.propagate = False  # don't double-emit through root
-    _surface.info(
-        "=== tn module imported, surface log opened at %s (pid=%d) ===",
-        _surface_log_path, _os_for_surface.getpid(),
-    )
-except Exception:
-    # Best-effort: never let logging bootstrap failure break import.
-    pass
+_surface_log_path = _os_for_surface.environ.get("TN_SURFACE_LOG")
+if _surface_log_path:
+    try:
+        _surface_fh = logging.FileHandler(_surface_log_path, encoding="utf-8", delay=False)
+        _surface_fh.setFormatter(
+            logging.Formatter("%(asctime)s [pid=%(process)d] %(name)s | %(message)s")
+        )
+        _surface.addHandler(_surface_fh)
+        _surface.setLevel(logging.INFO)
+        _surface.propagate = False  # don't double-emit through root
+        _surface.info(
+            "=== tn module imported, surface log opened at %s (pid=%d) ===",
+            _surface_log_path, _os_for_surface.getpid(),
+        )
+    except Exception:
+        # Best-effort: never let logging bootstrap failure break import.
+        pass
 
 _dispatch_rt: DispatchRuntime | None = None
 
