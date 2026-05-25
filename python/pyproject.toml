@@ -110,6 +110,11 @@ where   = ["."]
 include = ["tn*"]
 exclude = ["tests*", "tools*", "scenarios*", "examples*", "bench*", "docs*"]
 
+# PEP 561 marker — ships `tn/py.typed` so pyright/mypy treat the package
+# as typed for downstream consumers.
+[tool.setuptools.package-data]
+tn = ["py.typed"]
+
 # ---------------------------------------------------------------------------
 # Lint / format / type-check config.
 # ---------------------------------------------------------------------------
