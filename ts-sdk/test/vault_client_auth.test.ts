@@ -32,7 +32,7 @@ test("VaultClient.authenticate — challenge/verify dance issues a JWT", { skip:
   const identity = vaultIdentityFromDeviceKey(device);
   const client = await VaultClient.forIdentity(identity, VAULT_URL, { autoAuth: true });
   assert.ok(client.token, "client should have a token after authenticate");
-  assert.match(client.token ?? "", /^eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/, "expected JWT shape");
+  assert.match(client.token ?? "", /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/, "expected JWT shape");
 });
 
 test("VaultClient.listProjects — returns array for fresh DID", { skip: !reachable && "vault not reachable" }, async () => {

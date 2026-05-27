@@ -7,34 +7,37 @@ network call leaves the test process.
 The verbs proxy a Cloudflare Worker — operational only, gated by
 ``TN_FIREHOSE_ENABLED=1`` so the surface stays hidden from the default
 CLI install.
+
+IMPLEMENTATION NOTE: Earlier versions of this file used
+``importlib.reload(sys.modules['tn.cli'])`` to make the env-var gate
+take effect at parser-build time. That reload replaces every function
+object in tn.cli with a fresh instance, which silently breaks any other
+test that imported a function from tn.cli at module-load time (its
+reference goes stale; e.g. ``test_show_env_subcommand_wired_into_parser``
+asserts ``args.func is cmd_show_env`` and fails after a reload).
+
+The current approach patches the gate function ``_firehose_enabled``
+directly via ``monkeypatch.setattr``. No reload happens, no module-level
+function-object identity changes, no spooky action at a distance.
 """
 
 from __future__ import annotations
 
 import contextlib
-import importlib
 import io
 import json
-import sys
 
 import httpx
 import pytest
 
-
-def _reload_cli():
-    """Re-import tn.cli so the gate sees the current env var state."""
-    if "tn.cli" in sys.modules:
-        return importlib.reload(sys.modules["tn.cli"])
-    import tn.cli as cli_mod  # noqa: F401
-    return importlib.import_module("tn.cli")
+from tn import cli
 
 
 # ── Gate visibility ──────────────────────────────────────────────────
 
 
 def test_firehose_absent_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TN_FIREHOSE_ENABLED", raising=False)
-    cli = _reload_cli()
+    monkeypatch.setattr(cli, "_firehose_enabled", lambda: False)
     parser = cli.build_parser()
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -49,8 +52,7 @@ def test_firehose_absent_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_firehose_present_when_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TN_FIREHOSE_ENABLED", "1")
-    cli = _reload_cli()
+    monkeypatch.setattr(cli, "_firehose_enabled", lambda: True)
     parser = cli.build_parser()
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -65,8 +67,7 @@ def test_firehose_present_when_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_firehose_dispatch_unknown_when_env_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("TN_FIREHOSE_ENABLED", raising=False)
-    cli = _reload_cli()
+    monkeypatch.setattr(cli, "_firehose_enabled", lambda: False)
     parser = cli.build_parser()
     # argparse raises SystemExit with code 2 on unknown verb.
     with pytest.raises(SystemExit):
@@ -80,9 +81,8 @@ def test_firehose_stats_dispatches_via_httpx(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("TN_FIREHOSE_ENABLED", "1")
+    monkeypatch.setattr(cli, "_firehose_enabled", lambda: True)
     monkeypatch.setenv("TN_FIREHOSE_URL", "http://worker.invalid")
-    cli = _reload_cli()
 
     captured: dict = {}
 
@@ -93,20 +93,15 @@ def test_firehose_stats_dispatches_via_httpx(
 
     transport = httpx.MockTransport(handler)
 
-    real_get = httpx.get
-
     def fake_get(url, *args, **kwargs):
         kwargs.setdefault("timeout", 5.0)
         with httpx.Client(transport=transport) as c:
             return c.get(url, *args, **kwargs)
 
     monkeypatch.setattr(cli.httpx, "get", fake_get)
-    try:
-        parser = cli.build_parser()
-        args = parser.parse_args(["firehose", "stats", "t1"])
-        rc = args.func(args)
-    finally:
-        monkeypatch.setattr(cli.httpx, "get", real_get)
+    parser = cli.build_parser()
+    args = parser.parse_args(["firehose", "stats", "t1"])
+    rc = args.func(args)
 
     assert rc == 0
     assert captured["url"].endswith("/stats/t1")
@@ -118,9 +113,8 @@ def test_firehose_stats_dispatches_via_httpx(
 def test_firehose_stats_missing_url_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("TN_FIREHOSE_ENABLED", "1")
+    monkeypatch.setattr(cli, "_firehose_enabled", lambda: True)
     monkeypatch.delenv("TN_FIREHOSE_URL", raising=False)
-    cli = _reload_cli()
     parser = cli.build_parser()
     args = parser.parse_args(["firehose", "stats", "t1"])
     with pytest.raises(SystemExit) as excinfo:
@@ -131,10 +125,9 @@ def test_firehose_stats_missing_url_errors(
 def test_firehose_list_requires_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("TN_FIREHOSE_ENABLED", "1")
+    monkeypatch.setattr(cli, "_firehose_enabled", lambda: True)
     monkeypatch.setenv("TN_FIREHOSE_URL", "http://worker.invalid")
     monkeypatch.delenv("TN_FIREHOSE_TOKEN", raising=False)
-    cli = _reload_cli()
     parser = cli.build_parser()
     args = parser.parse_args(["firehose", "list", "did:key:zSomething"])
     with pytest.raises(SystemExit) as excinfo:
