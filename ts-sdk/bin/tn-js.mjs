@@ -44,12 +44,20 @@ import {
   asSignatureB64,
   buildEnvelopeLine,
   canonicalize,
+  close as tnClose,
   compileKitBundleToFile,
+  config as tnConfig,
+  init as tnInit,
   rowHash,
   signatureB64,
   signatureFromB64,
   verify,
 } from "../dist/index.js";
+
+import { AccountConnectError, AccountNamespace } from "../dist/account/index.js";
+import { VaultClient, VaultError, vaultIdentityFromDeviceKey } from "../dist/vault/client.js";
+import { WalletNamespace } from "../dist/wallet/index.js";
+import { loadKeystore } from "../dist/runtime/keystore.js";
 
 function die(msg) {
   process.stderr.write(`tn-js: ${msg}\n`);
@@ -765,8 +773,286 @@ async function adminCmd() {
   }
 }
 
+// ── init: bootstrap or attach to a ceremony ────────────────────────────
+// Wraps the programmatic `tn.init(yamlPath?)` from @tnproto/sdk. With no
+// yamlPath, the discovery chain runs (./tn.yaml -> ./.tn/default/tn.yaml).
+// Prints a JSON receipt {ok, yaml_path, ceremony_id, did} to stdout.
+//
+// NOTE: this is the LIGHT init that parallels Python's programmatic
+// `tn.init(yaml_path)`. The full Python CLI ceremony bootstrap (mnemonic
+// generation, keystore mint, vault claim URL emission) is tracked
+// separately and requires the wallet/account SDK port to land first.
+async function initCmd() {
+  const rest = argv.slice(3);
+  let yamlPath = null;
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i];
+    if (a === "--yaml") yamlPath = rest[++i];
+    else if (a === "-h" || a === "--help") {
+      stdout.write(
+        "tn-js init [<yaml-path>] [--yaml <yaml-path>]\n" +
+          "  Initialize or attach to a TN ceremony. With no path, discovers\n" +
+          "  ./tn.yaml or ./.tn/default/tn.yaml. Prints JSON receipt on stdout.\n",
+      );
+      return;
+    } else if (!a.startsWith("-") && yamlPath === null) {
+      yamlPath = a;
+    }
+  }
+
+  const tn = await tnInit(yamlPath ?? undefined);
+  let did = null;
+  let ceremonyId = null;
+  try {
+    const cfg = /** @type {Record<string, unknown>} */ (tn.config() ?? {});
+    if (typeof cfg.ceremonyId === "string") ceremonyId = cfg.ceremonyId;
+    const device = /** @type {Record<string, unknown> | undefined} */ (cfg.device);
+    if (device && typeof device.device_identity === "string") did = device.device_identity;
+  } catch {
+    // Config readback is best-effort; init itself succeeded.
+  }
+  stdout.write(
+    JSON.stringify({
+      ok: true,
+      yaml_path: yamlPath ?? "(discovery)",
+      ceremony_id: ceremonyId,
+      did,
+    }) + "\n",
+  );
+  await tnClose();
+}
+
+// ── vault: link / unlink — emits the corresponding log events ──────────
+// Wraps tn.vault.link / tn.vault.unlink. These only emit log events
+// (tn.vault.linked / tn.vault.unlinked); the yaml ceremony.mode flip is
+// Python-only today (see VaultNamespace.setLinkState docstring).
+async function vaultCmd() {
+  const sub = argv[3];
+  const rest = argv.slice(4);
+  const opts = { yaml: null, vaultDid: null, projectId: null, reason: null };
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i];
+    if (a === "--yaml") opts.yaml = rest[++i];
+    else if (a === "--reason") opts.reason = rest[++i];
+    else if (!a.startsWith("-")) {
+      if (opts.vaultDid === null) opts.vaultDid = a;
+      else if (opts.projectId === null) opts.projectId = a;
+    }
+  }
+  if (sub !== "link" && sub !== "unlink") {
+    die(
+      `vault: unknown subcommand ${sub}. try: vault link <vault-did> <project-id> [--yaml <path>]`,
+    );
+  }
+  if (!opts.vaultDid || !opts.projectId) {
+    die(`vault ${sub}: <vault-did> and <project-id> are required positionals`);
+  }
+  const tn = await tnInit(opts.yaml ?? undefined);
+  try {
+    const receipt =
+      sub === "link"
+        ? await tn.vault.link(opts.vaultDid, opts.projectId)
+        : await tn.vault.unlink(opts.vaultDid, opts.projectId, opts.reason ?? undefined);
+    stdout.write(
+      JSON.stringify({
+        ok: true,
+        verb: `vault.${sub}`,
+        event_id: receipt.eventId,
+        row_hash: receipt.rowHash,
+        vault_did: opts.vaultDid,
+        project_id: opts.projectId,
+      }) + "\n",
+    );
+  } finally {
+    await tnClose();
+  }
+}
+
+// ── show: read-only config inspection ──────────────────────────────────
+// `show env` mirrors Python's `tn show env`: prints a JSON snapshot of the
+// resolved ceremony configuration (me.did, ceremony.id/cipher/mode,
+// keystore.path, handlers, public_fields).
+async function showCmd() {
+  const sub = argv[3];
+  const rest = argv.slice(4);
+  let yamlPath = null;
+  for (let i = 0; i < rest.length; i += 1) {
+    if (rest[i] === "--yaml") yamlPath = rest[++i];
+  }
+  if (sub !== "env") {
+    die(`show: unknown subcommand ${sub}. try: show env [--yaml <path>]`);
+  }
+  await tnInit(yamlPath ?? undefined);
+  try {
+    const cfg = tnConfig();
+    // Pick only the safe summary fields. TS NodeRuntime exposes config with
+    // its own field shape (camelCase, flatter than the yaml). Mirror the
+    // documented `show env` contract: a stable JSON snapshot, not a raw dump.
+    const c = /** @type {Record<string, unknown>} */ (cfg ?? {});
+    const device = /** @type {Record<string, unknown> | undefined} */ (c.device);
+    const handlers = /** @type {unknown[] | undefined} */ (c.handlers);
+    const publicFields = c.publicFields;
+    const publicFieldsCount = Array.isArray(publicFields)
+      ? publicFields.length
+      : publicFields && typeof publicFields === "object"
+        ? Object.keys(publicFields).length
+        : 0;
+    stdout.write(
+      JSON.stringify(
+        {
+          ok: true,
+          me: { did: (device && typeof device === "object" && typeof device.device_identity === "string") ? device.device_identity : null },
+          ceremony: {
+            id: typeof c.ceremonyId === "string" ? c.ceremonyId : null,
+            cipher: typeof c.cipher === "string" ? c.cipher : null,
+            mode: typeof c.mode === "string" ? c.mode : null,
+          },
+          keystore: { path: typeof c.keystorePath === "string" ? c.keystorePath : null },
+          logs: { path: typeof c.logPath === "string" ? c.logPath : null },
+          handlers_count: Array.isArray(handlers) ? handlers.length : 0,
+          public_fields_count: publicFieldsCount,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+  } finally {
+    await tnClose();
+  }
+}
+
+// ── wallet: link / unlink ──────────────────────────────────────────────
+// Wraps WalletNamespace.link/unlink. Loads DeviceKey from the ceremony's
+// keystore for vault auth; mutates ceremony.yaml to flip mode -> linked.
+async function walletCmd() {
+  const sub = argv[3];
+  const rest = argv.slice(4);
+  const opts = { yaml: null, vaultUrl: null, projectName: null };
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i];
+    if (a === "--yaml") opts.yaml = rest[++i];
+    else if (a === "--name" || a === "--project-name") opts.projectName = rest[++i];
+    else if (!a.startsWith("-") && opts.vaultUrl === null) opts.vaultUrl = a;
+  }
+  if (sub === "unlink") {
+    if (!opts.yaml) die("wallet unlink: --yaml <path> is required");
+    WalletNamespace.unlink(opts.yaml);
+    stdout.write(JSON.stringify({ ok: true, verb: "wallet.unlink", yaml: opts.yaml }) + "\n");
+    return;
+  }
+  if (sub !== "link") {
+    die(`wallet: unknown subcommand ${sub}. try: wallet link <vault-url> [--yaml <path>] [--name <project>]`);
+  }
+  if (!opts.vaultUrl) die("wallet link: <vault-url> positional is required");
+  if (!opts.yaml) die("wallet link: --yaml <path> is required");
+
+  // Load DeviceKey from the ceremony's keystore so we can authenticate
+  // against the vault as the same identity that owns the ceremony.
+  const tn = await tnInit(opts.yaml);
+  const cfg = /** @type {Record<string, unknown>} */ (tn.config() ?? {});
+  await tnClose();
+  const keystorePath = typeof cfg.keystorePath === "string" ? cfg.keystorePath : null;
+  if (!keystorePath) die(`wallet link: ceremony at ${opts.yaml} has no keystorePath`);
+  const ks = loadKeystore(keystorePath);
+
+  const client = await VaultClient.forIdentity(vaultIdentityFromDeviceKey(ks.device), opts.vaultUrl);
+  const linkOpts = {};
+  if (opts.projectName) linkOpts.projectName = opts.projectName;
+  try {
+    const result = await WalletNamespace.link(client, opts.yaml, linkOpts);
+    stdout.write(
+      JSON.stringify({
+        ok: true,
+        verb: "wallet.link",
+        project_id: result.projectId,
+        project_name: result.projectName,
+        vault_base_url: result.vaultBaseUrl,
+        newly_linked: result.newlyLinked,
+      }) + "\n",
+    );
+  } catch (e) {
+    if (e instanceof VaultError) {
+      die(`wallet link: ${e.message}${e.status !== null ? ` (status=${e.status})` : ""}`);
+    }
+    throw e;
+  }
+}
+
+// ── account: connect ──────────────────────────────────────────────────
+// Wraps AccountNamespace.connect. Loads DeviceKey from the ceremony's
+// keystore; redeems the connect code against the vault; persists the
+// resulting account binding into ceremony sync state.
+async function accountCmd() {
+  const sub = argv[3];
+  const rest = argv.slice(4);
+  const opts = { yaml: null, vaultUrl: null, code: null };
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i];
+    if (a === "--yaml") opts.yaml = rest[++i];
+    else if (a === "--vault" || a === "--vault-url") opts.vaultUrl = rest[++i];
+    else if (!a.startsWith("-") && opts.code === null) opts.code = a;
+  }
+  if (sub !== "connect") {
+    die(`account: unknown subcommand ${sub}. try: account connect <code> [--vault <url>] [--yaml <path>]`);
+  }
+  if (!opts.code) die("account connect: <code> positional is required");
+  if (!opts.yaml) die("account connect: --yaml <path> is required");
+
+  const tn = await tnInit(opts.yaml);
+  const cfg = /** @type {Record<string, unknown>} */ (tn.config() ?? {});
+  await tnClose();
+  const keystorePath = typeof cfg.keystorePath === "string" ? cfg.keystorePath : null;
+  if (!keystorePath) die(`account connect: ceremony at ${opts.yaml} has no keystorePath`);
+  const ks = loadKeystore(keystorePath);
+
+  // Vault URL: explicit --vault > ceremony's linked_vault (from cfg) > error.
+  let vaultUrl = opts.vaultUrl;
+  if (!vaultUrl) {
+    const ceremony = /** @type {Record<string, unknown> | undefined} */ (cfg.ceremony);
+    const linked = ceremony && typeof ceremony.linked_vault === "string" ? ceremony.linked_vault : null;
+    vaultUrl = linked || null;
+  }
+  if (!vaultUrl) {
+    die("account connect: --vault <url> required (ceremony has no linked_vault to fall back to)");
+  }
+
+  try {
+    const result = await AccountNamespace.connect(opts.code, vaultUrl, ks.device, { yamlPath: opts.yaml });
+    stdout.write(
+      JSON.stringify({
+        ok: true,
+        verb: "account.connect",
+        account_id: result.accountId,
+        did: result.did,
+        project_id: result.projectId ?? null,
+        project_name: result.projectName ?? null,
+      }) + "\n",
+    );
+  } catch (e) {
+    if (e instanceof AccountConnectError) {
+      die(`account connect: ${e.message}${e.status !== null ? ` (status=${e.status})` : ""}`);
+    }
+    throw e;
+  }
+}
+
 const cmd = argv[2];
 switch (cmd) {
+  case "init":
+    await initCmd();
+    break;
+  case "vault":
+    await vaultCmd();
+    break;
+  case "wallet":
+    await walletCmd();
+    break;
+  case "account":
+    await accountCmd();
+    break;
+  case "show":
+    await showCmd();
+    break;
   case "seal":
     await sealCmd();
     break;
@@ -801,7 +1087,20 @@ switch (cmd) {
   case "--help":
   case "-h":
     process.stderr.write(
-      "tn-js <seal|verify|canonical|info|read|watch>\n" +
+      "tn-js <init|wallet|account|vault|show|seal|verify|canonical|info|read|watch|streams|validate|compile|admin>\n" +
+        "  init       [<yaml-path>] — initialize / attach to a ceremony, print receipt JSON\n" +
+        "  wallet link <vault-url> --yaml <path> [--name <project>]\n" +
+        "             create vault project + flip ceremony.mode to linked\n" +
+        "  wallet unlink --yaml <path>\n" +
+        "             flip ceremony.mode back to local (yaml-only; vault project untouched)\n" +
+        "  account connect <code> --yaml <path> [--vault <url>]\n" +
+        "             redeem a vault connect code; binds device DID to the account\n" +
+        "             and persists account_id into ceremony sync state\n" +
+        "  vault link <vault-did> <project-id> [--yaml <path>]\n" +
+        "             emit tn.vault.linked event into the ceremony's log\n" +
+        "  vault unlink <vault-did> <project-id> [--reason <text>] [--yaml <path>]\n" +
+        "             emit tn.vault.unlinked event into the ceremony's log\n" +
+        "  show env   [--yaml <path>] — print resolved ceremony config as JSON\n" +
         "  seal       stdin JSON -> ndjson envelope line on stdout\n" +
         "  verify     ndjson envelope line -> {ok, ...} on stdout\n" +
         "  canonical  stdin JSON -> canonical UTF-8 line on stdout\n" +

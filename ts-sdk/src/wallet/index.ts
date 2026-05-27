@@ -1,0 +1,181 @@
+// Port of tn_proto/python/tn/wallet.py — WalletNamespace.
+//
+// PHASE 1 (this file): link_ceremony — uses VaultClient.createProject +
+// inline yaml mutation to flip ceremony.mode local -> linked.
+//
+// PHASE 2 (deferred): sync_ceremony, restore_ceremony — those need the
+// sealed file-upload surface on VaultClient (Phase 2 of vault/client.ts)
+// AND the identity.vault_wrap_key (not yet ported from Python).
+//
+// Pattern: methods take an already-authed VaultClient + the ceremony's
+// yamlPath. Returning a structured result mirrors Python's dataclasses.
+
+import { readFileSync, writeFileSync } from "node:fs";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+
+import { VaultError, type VaultClient } from "../vault/client.js";
+
+export interface LinkResult {
+  /** Project id created (or reused) on the vault. */
+  projectId: string;
+  /** Vault base URL the ceremony is now linked to. */
+  vaultBaseUrl: string;
+  /** Whether the ceremony was newly linked vs already linked (idempotency). */
+  newlyLinked: boolean;
+  /** Project name used at the vault. */
+  projectName: string;
+}
+
+interface CeremonyYamlShape {
+  ceremony?: {
+    id?: string;
+    mode?: "local" | "linked" | string;
+    linked_vault?: string;
+    linked_project_id?: string;
+    project_name?: string;
+    [k: string]: unknown;
+  };
+  [k: string]: unknown;
+}
+
+/**
+ * Read, mutate, and write a ceremony yaml to flip link state. Mirrors
+ * Python's `tn.admin.set_link_state` — the *persistent* half of
+ * link_ceremony. Idempotent: writing the same state twice is a no-op.
+ */
+function setLinkStateInYaml(
+  yamlPath: string,
+  fields: { mode: "linked" | "local"; linkedVault?: string; linkedProjectId?: string },
+): void {
+  const raw = readFileSync(yamlPath, "utf-8");
+  const doc = parseYaml(raw) as CeremonyYamlShape;
+  const ceremony = doc.ceremony ?? (doc.ceremony = {});
+  ceremony.mode = fields.mode;
+  if (fields.linkedVault !== undefined) ceremony.linked_vault = fields.linkedVault;
+  if (fields.linkedProjectId !== undefined) ceremony.linked_project_id = fields.linkedProjectId;
+  // For mode=local, clear the linked fields so the on-disk shape mirrors
+  // a freshly-initialized local ceremony (Python's set_link_state does
+  // the same).
+  if (fields.mode === "local") {
+    ceremony.linked_vault = "";
+    ceremony.linked_project_id = "";
+  }
+  writeFileSync(yamlPath, stringifyYaml(doc), "utf-8");
+}
+
+/**
+ * Read just the ceremony.mode and linked_vault from a yaml without
+ * loading the full config. Lets `link` decide whether work is needed.
+ */
+function readLinkState(yamlPath: string): { mode: string; linkedVault: string; linkedProjectId: string; projectName: string; ceremonyId: string } {
+  const raw = readFileSync(yamlPath, "utf-8");
+  const doc = parseYaml(raw) as CeremonyYamlShape;
+  const c = doc.ceremony ?? {};
+  return {
+    mode: typeof c.mode === "string" ? c.mode : "local",
+    linkedVault: typeof c.linked_vault === "string" ? c.linked_vault : "",
+    linkedProjectId: typeof c.linked_project_id === "string" ? c.linked_project_id : "",
+    projectName: typeof c.project_name === "string" ? c.project_name : "",
+    ceremonyId: typeof c.id === "string" ? c.id : "",
+  };
+}
+
+export class WalletNamespace {
+  /**
+   * Bind a local ceremony to a vault project.
+   *
+   * Port of Python `tn.wallet.link_ceremony(cfg, client, project_name=...)`.
+   *
+   * Idempotent: if the ceremony is already linked to the same vault, returns
+   * the existing state untouched. If linked to a *different* vault, throws
+   * VaultError (the user must `wallet.unlink` first — not yet ported).
+   *
+   * If `createProject` returns 409, the method falls back to `listProjects`
+   * and reuses the matching project (the same recovery path Python takes).
+   */
+  static async link(
+    client: VaultClient,
+    yamlPath: string,
+    opts: { projectName?: string } = {},
+  ): Promise<LinkResult> {
+    const state = readLinkState(yamlPath);
+
+    // Idempotent shortcut: already linked to the same vault.
+    if (state.mode === "linked" && state.linkedVault === client.baseUrl) {
+      return {
+        projectId: state.linkedProjectId,
+        vaultBaseUrl: state.linkedVault,
+        newlyLinked: false,
+        projectName: state.projectName || state.ceremonyId,
+      };
+    }
+    if (state.mode === "linked" && state.linkedVault && state.linkedVault !== client.baseUrl) {
+      throw new VaultError(
+        `ceremony ${state.ceremonyId} is already linked to ${state.linkedVault}; ` +
+          `unlink first before re-linking to ${client.baseUrl}`,
+      );
+    }
+
+    const name = opts.projectName || state.projectName || state.ceremonyId;
+    if (!name) {
+      throw new VaultError(
+        `wallet.link: ceremony at ${yamlPath} has no project_name or ceremony.id; ` +
+          `pass projectName explicitly`,
+      );
+    }
+
+    let project: Record<string, unknown>;
+    try {
+      const createOpts: { ceremonyId?: string } = {};
+      if (state.ceremonyId) createOpts.ceremonyId = state.ceremonyId;
+      project = await client.createProject(name, createOpts);
+    } catch (e) {
+      if (e instanceof VaultError && e.status === 409) {
+        const list = await client.listProjects();
+        const match = list.find((p) => p.name === name);
+        if (!match) {
+          throw new VaultError(
+            `wallet.link: vault returned 409 for project ${JSON.stringify(name)} ` +
+              `but listProjects returned no match — cannot re-link`,
+            { status: 409 },
+          );
+        }
+        project = match;
+      } else {
+        throw e;
+      }
+    }
+
+    const projectId = (project.id ?? project._id) as string | undefined;
+    if (!projectId) {
+      throw new VaultError(
+        `wallet.link: createProject response missing id: ${JSON.stringify(project)}`,
+      );
+    }
+
+    setLinkStateInYaml(yamlPath, {
+      mode: "linked",
+      linkedVault: client.baseUrl,
+      linkedProjectId: projectId,
+    });
+
+    return {
+      projectId,
+      vaultBaseUrl: client.baseUrl,
+      newlyLinked: true,
+      projectName: name,
+    };
+  }
+
+  /**
+   * Flip the ceremony yaml back to mode=local and clear linked_*. Mirrors
+   * Python's `set_link_state(mode="local")`. Does NOT call the vault to
+   * delete the project (that's a separate operator decision).
+   */
+  static unlink(yamlPath: string): void {
+    setLinkStateInYaml(yamlPath, { mode: "local" });
+  }
+}
+
+// Internal exports for tests that want to verify yaml mutation directly.
+export const _internals = { setLinkStateInYaml, readLinkState };
