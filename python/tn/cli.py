@@ -136,6 +136,23 @@ def _stamp_project_labels(
         _yaml.safe_dump(doc, fh, sort_keys=False)
 
 
+def _format_expires_local(expires_iso: str) -> str:
+    """Render the vault's ISO-8601 UTC `expires_at` as local-time + UTC offset.
+
+    Falls back to the raw ISO string on any parse failure so the operator
+    is never deprived of the value just because the local-tz lookup hiccupped.
+    """
+    from datetime import datetime
+    try:
+        # Python 3.11+ handles trailing 'Z' and +00:00 the same way.
+        dt = datetime.fromisoformat(expires_iso.replace("Z", "+00:00"))
+        local = dt.astimezone()
+        tz_label = local.strftime("%Z") or local.strftime("%z")
+        return f"{local.strftime('%Y-%m-%d %H:%M:%S')} {tz_label}".strip()
+    except (TypeError, ValueError):
+        return expires_iso
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """Scaffold identity (if absent) + ceremony at <project>/tn.yaml."""
     # Quiet the stdout handler by default: it echoes every log envelope
@@ -257,12 +274,11 @@ def cmd_init(args: argparse.Namespace) -> int:
         cipher=args.cipher,
         link=False,
     )
-    # 0.4.2a9: stamp the operator-chosen project/version labels into
-    # the freshly-minted yaml so the vault link (next step) uses
-    # human names instead of the random ceremony_id. Default to the
-    # basename of the project dir when --project-name is omitted, so
-    # `tn init mycompany_payments` Just Works for the common case.
-    project_name = args.project_name or project_dir.name
+    # 0.5.0a2: the positional `project` IS the project name (no separate
+    # --project-name flag). Stamp it into the freshly-minted yaml so the
+    # vault link (next step) uses the human name instead of the random
+    # ceremony_id.
+    project_name = project_dir.name
     version_name = args.version_name  # None → wallet falls through to project_name
     _stamp_project_labels(yaml_path, project_name, version_name)
     tn_init(yaml_path, identity=identity, link=False)
@@ -314,12 +330,17 @@ def cmd_init(args: argparse.Namespace) -> int:
             print()
             print(f"[tn init] Backed up to {vault_url}")
             print(f"[tn init]   vault_id:   {result['vault_id']}")
-            print(f"[tn init]   expires:    {result['expires_at']}")
+            print(f"[tn init]   expires:    {_format_expires_local(result['expires_at'])}")
             if result.get("reused"):
                 print(f"[tn init]   (reusing live pending-claim within TTL)")
             print()
-            print("[tn init] CLAIM URL — open this in your browser to attach the project to your account:")
+            print("[tn init] CLAIM URL - open this in your browser to attach the project to your account:")
             print(f"  {result['claim_url']}")
+            print()
+            print("[tn init] Already have a vault account, or want to attach this project later?")
+            print(f"[tn init]   1. Sign in at {vault_url}/account")
+            print(f"[tn init]   2. On the Projects tab, mint a connect code")
+            print(f"[tn init]   3. Run:  tn account connect <code> --yaml {yaml_path}")
             print()
         except Exception as e:
             print(f"[tn init] WARN backup to vault failed: {e}")
@@ -2712,29 +2733,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- tn init -------------------------------------------------
     p_init = sub.add_parser("init", help="Scaffold identity + ceremony.")
-    p_init.add_argument("project", help="Path to the new project directory.")
-    # 0.4.2a9: vault-link labels stamped into the yaml at mint.
-    # ``--project-name`` becomes ``account_projects.name`` in the
-    # vault (one row per operator-named project, multiple publishers
-    # under one row). Defaults to ``basename(<project>)``.
-    # ``--version-name`` becomes ``account_projects.publishers[].nickname``;
-    # defaults to ``project_name`` when omitted.
     p_init.add_argument(
-        "--project-name",
-        default=None,
+        "project",
         help=(
-            "Operator label for vault-side project grouping. Two TN "
-            "installs that share this name AND belong to the same "
-            "account merge into one vault project. Defaults to the "
-            "basename of <project>."
+            "Project name. The ceremony is created at ./.tn/<project>/. "
+            "If a path is passed, only the basename is used."
         ),
     )
+    # ``--version-name`` stamps a per-instance nickname inside the vault
+    # project (e.g. 'laptop-dev', 'ci', 'prod'). Defaults to <project>.
+    # The legacy --project-name flag was dropped (0.5.0a2): the positional
+    # IS the project name; there is no separate vault-side label to
+    # specify. Operators who want a different vault label later can
+    # rename via a future `tn wallet relabel` verb.
     p_init.add_argument(
         "--version-name",
         default=None,
         help=(
             "Per-instance nickname inside the project (e.g. "
-            "'laptop-dev', 'ci', 'prod'). Defaults to <project-name>."
+            "'laptop-dev', 'ci', 'prod'). Defaults to <project>."
         ),
     )
     # ``btn`` is the shipping default cipher; ``jwe`` is the pure-Python
