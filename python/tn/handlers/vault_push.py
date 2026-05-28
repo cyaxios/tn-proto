@@ -359,7 +359,10 @@ def init_upload(
         pass
 
     # POST to /api/v1/pending-claims (no auth — D-19 / plan §"Wire contract").
-    resp = client.post_pending_claim(body)
+    # Pass the operator-chosen project name so the vault can label the
+    # bound project with a human name instead of leaving it "unknown".
+    project_name = getattr(cfg, "project_name", None)
+    resp = client.post_pending_claim(body, project_name=project_name)
     vault_id = resp["vault_id"]
     expires_at = resp["expires_at"]
 
@@ -782,7 +785,9 @@ class _SnapshotPostingClient:
             resp = vc._http.request("POST", url, content=body, headers=headers)
         vc._raise_for_status(resp)
 
-    def post_pending_claim(self, body: bytes) -> dict[str, Any]:
+    def post_pending_claim(
+        self, body: bytes, *, project_name: str | None = None
+    ) -> dict[str, Any]:
         """Unauthenticated POST to /api/v1/pending-claims (D-19, D-1).
 
         Returns the JSON body ``{"vault_id": ..., "expires_at": ...}``.
@@ -796,6 +801,11 @@ class _SnapshotPostingClient:
         ``docs/superpowers/plans/2026-04-29-contact-update-tnpkg.md``,
         D-25). The header is optional for backward compatibility — the
         endpoint just stores ``None`` and skips emit if it's missing.
+
+        Sends ``X-Project-Name`` (when the ceremony carries one) so the
+        vault can label the bound project with a human name instead of
+        leaving it "unknown" in the account's project list. Optional and
+        backward-compatible — older vaults ignore the header.
         """
         vc = self._vc
         url = f"{vc.base_url}/api/v1/pending-claims"
@@ -813,6 +823,8 @@ class _SnapshotPostingClient:
             publisher_did = getattr(device, "did", None) if device else None
         if publisher_did:
             headers["X-Publisher-Did"] = publisher_did
+        if project_name:
+            headers["X-Project-Name"] = project_name
         resp = vc._http.request("POST", url, content=body, headers=headers)
         vc._raise_for_status(resp)
         return resp.json()

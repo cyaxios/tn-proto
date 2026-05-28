@@ -74,8 +74,11 @@ class _CapturedClient:
     ) -> None:
         self.inbox_posts.append({"path": path, "body": body, "params": dict(params or {})})
 
-    def post_pending_claim(self, body: bytes) -> dict[str, Any]:
+    def post_pending_claim(
+        self, body: bytes, *, project_name: str | None = None
+    ) -> dict[str, Any]:
         self.pending_posts.append(body)
+        self.last_project_name = project_name
         return {"vault_id": self.next_vault_id, "expires_at": self.next_expires_at}
 
     def close(self) -> None:
@@ -468,7 +471,7 @@ class _BarrieredClient(_CapturedClient):
             [f"01CONC{i:020d}" for i in range(n_parties + 4)]
         )
 
-    def post_pending_claim(self, body: bytes):
+    def post_pending_claim(self, body: bytes, *, project_name: str | None = None):
         # Wait until both threads are inside this method before either
         # one is allowed to continue. Without the handler's _init_lock,
         # both would proceed past here in parallel; with the lock, only
