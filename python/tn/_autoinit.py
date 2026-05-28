@@ -171,6 +171,30 @@ def _emit_autoinit_notice(yaml_path: Path, did: str, was_created: bool) -> None:
     _notice_printed = True
 
 
+def _resolve_project_ceremony_yaml() -> Path | None:
+    """Find a project-named ceremony under ``<cwd>/.tn/`` (0.5.0a2 layout).
+
+    The ``tn init <project>`` flow names the ceremony after the project
+    (``.tn/<project>/tn.yaml``) rather than the legacy ``.tn/default/``.
+    This resolver supports that layout for discovery:
+
+      * If a ``default`` ceremony exists, it is NOT handled here (the
+        caller checks ``.tn/default/`` first for back-compat).
+      * If exactly one project ceremony exists, return it.
+      * If multiple exist, return ``None`` (ambiguous — the caller falls
+        through and the user must disambiguate via ``$TN_YAML``).
+
+    Returns ``None`` when ``.tn/`` is absent or holds zero/many ceremonies.
+    """
+    from ._layout import ceremony_yaml_path, list_ceremonies_on_disk
+
+    names = [n for n in list_ceremonies_on_disk() if n != "default"]
+    if len(names) == 1:
+        p = ceremony_yaml_path(names[0]).resolve()
+        return p if p.exists() else None
+    return None
+
+
 def _resolve_existing_yaml() -> Path | None:
     """Walk the discovery chain LOAD-ONLY: return a yaml path that
     already exists, or ``None`` if no ceremony is found.
@@ -197,6 +221,11 @@ def _resolve_existing_yaml() -> Path | None:
     multi_yaml = (Path.cwd() / ".tn" / "default" / "tn.yaml").resolve()
     if multi_yaml.exists():
         return multi_yaml
+    # 0.5.0a2: project-named ceremony (`.tn/<project>/tn.yaml`) when no
+    # `default` exists and exactly one project ceremony is on disk.
+    project_yaml = _resolve_project_ceremony_yaml()
+    if project_yaml is not None:
+        return project_yaml
     # NOTE: $TN_HOME/tn.yaml is intentionally NOT in the auto-discovery
     # chain. A project's tn calls must scope to that project; the old
     # behavior (silently attaching to ~/.tn/tn.yaml from prior work)
@@ -244,6 +273,12 @@ def _resolve_discovery_yaml() -> tuple[Path, bool] | None:
     multi_yaml = (Path.cwd() / ".tn" / "default" / "tn.yaml").resolve()
     if multi_yaml.exists():
         return (multi_yaml, False)
+
+    # Step 4b (0.5.0a2): project-named ceremony `.tn/<project>/tn.yaml`
+    # when there's no `default` and exactly one project ceremony exists.
+    project_yaml = _resolve_project_ceremony_yaml()
+    if project_yaml is not None:
+        return (project_yaml, False)
 
     # NOTE: $TN_HOME/tn.yaml is intentionally NOT in this chain. A
     # fresh `python script.py` in a project directory must scope to
