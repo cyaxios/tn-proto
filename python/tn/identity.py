@@ -155,6 +155,11 @@ class Identity:
     # default. When present, `tn wallet export-mnemonic` can re-display.
     mnemonic_stored: str | None = None
     linked_vault: str | None = None
+    # Account this device's DID is bound to, remembered from the most
+    # recent `tn account connect`. Lets a later `tn init` auto-attach a
+    # new project to the same account (warm path) instead of minting a
+    # browser claim URL. None until the first connect.
+    linked_account_id: str | None = None
     prefs_version: int = 0
     prefs: IdentityPrefs = field(default_factory=IdentityPrefs)
     version: int = IDENTITY_SCHEMA_VERSION
@@ -312,6 +317,7 @@ class Identity:
             seed_b64=doc.get("seed_b64"),
             mnemonic_stored=doc.get("mnemonic_stored"),
             linked_vault=doc.get("linked_vault"),
+            linked_account_id=doc.get("linked_account_id"),
             prefs_version=int(doc.get("prefs_version", 0)),
             prefs=IdentityPrefs.from_dict(doc.get("prefs")),
             version=int(doc.get("version", IDENTITY_SCHEMA_VERSION)),
@@ -354,6 +360,7 @@ class Identity:
             "seed_b64": self.seed_b64,
             "mnemonic_stored": self.mnemonic_stored,
             "linked_vault": self.linked_vault,
+            "linked_account_id": self.linked_account_id,
             "prefs_version": self.prefs_version,
             "prefs": asdict(self.prefs),
         }
