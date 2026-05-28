@@ -191,6 +191,7 @@ def _ensure_ceremony_on_disk(
     keystore_dir: Path | None = None,
     admin_log_path: Path | None = None,
     link: bool | None = None,
+    as_root: bool = False,
 ) -> Path:
     """Create ``.tn/<name>/`` with a real, loadable ``tn.yaml`` if the
     directory does not already exist. Returns the yaml path.
@@ -264,7 +265,11 @@ def _ensure_ceremony_on_disk(
         if yaml_path.is_file():
             # Another process finished while we waited; load that.
             return yaml_path
-        if name == DEFAULT_CEREMONY_NAME:
+        if name == DEFAULT_CEREMONY_NAME or as_root:
+            # `as_root` lets a project-named ceremony (0.5.0a2 layout,
+            # `.tn/<project>/`) mint its own keystore instead of being a
+            # stream that references `../default/keys`. The literal
+            # "default" name keeps the same behaviour for back-compat.
             return _create_default_ceremony(
                 name=name,
                 yaml_path=yaml_path,

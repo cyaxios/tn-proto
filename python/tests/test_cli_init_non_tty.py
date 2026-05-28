@@ -48,14 +48,16 @@ def _run_init_non_tty(project_dir: Path, *extra_args: str) -> subprocess.Complet
 
 def test_init_non_tty_succeeds(tmp_path: Path):
     """Without a TTY and without --mnemonic-file, init should still
-    provision a fresh identity + ceremony at ``.tn/default/``.
-    0.4.2a9 aligned the CLI's layout with Python's ``tn.init()``,
-    so the yaml lives under ``.tn/default/`` rather than at the
-    project root."""
+    provision a fresh identity + ceremony.
+
+    0.5.0a2 flipped the layout: the ceremony is rooted at
+    ``<parent>/.tn/<project>/`` (the project name IS the ceremony name),
+    not ``<project>/.tn/default/``. For ``tn init <tmp>/proj`` that's
+    ``<tmp>/.tn/proj/tn.yaml``."""
     project = tmp_path / "proj"
     res = _run_init_non_tty(project)
     assert res.returncode == 0, f"stdout={res.stdout!r} stderr={res.stderr!r}"
-    assert (project / ".tn" / "default" / "tn.yaml").exists()
+    assert (project.parent / ".tn" / project.name / "tn.yaml").exists()
 
 
 def test_init_non_tty_announces_mode(tmp_path: Path):

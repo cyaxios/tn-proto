@@ -190,8 +190,30 @@ def cmd_init(args: argparse.Namespace) -> int:
             "into identity.json (treat that file as a secret).",
         )
 
-    project_dir = Path(args.project).resolve()
-    project_dir.mkdir(parents=True, exist_ok=True)
+    # 0.5.0a2 layout: the ceremony lives at <cwd>/.tn/<project>/ — the
+    # project name IS the ceremony name, all of it nested under a single
+    # .tn/ at the cwd. (Prior layout put .tn under a per-project dir:
+    # <cwd>/<project>/.tn/default/.) `project` may be passed as a bare
+    # name or a path; only the basename is used as the ceremony name.
+    from ._layout import (
+        ceremony_yaml_path as _ceremony_yaml_path,
+        is_valid_ceremony_name as _is_valid_ceremony_name,
+        tn_root as _tn_root,
+    )
+
+    _project_arg = Path(args.project)
+    ceremony_name = _project_arg.name
+    if not _is_valid_ceremony_name(ceremony_name):
+        _die(
+            f"invalid project name {ceremony_name!r}: use letters, digits, "
+            f"underscore, or dash (must not start with a dash, and 'tn' is "
+            f"reserved)."
+        )
+    # Root the .tn/ at the parent of the project path. A bare name
+    # (`tn init Foo`) roots at cwd -> ./.tn/Foo/. A path
+    # (`tn init /abs/proj`) roots at its parent -> /abs/.tn/proj/.
+    project_dir = (_project_arg.parent if str(_project_arg.parent) != "." else Path.cwd()).resolve()
+    _tn_root(project_dir).mkdir(parents=True, exist_ok=True)
 
     identity_path = _default_identity_path()
 
@@ -227,18 +249,17 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"[tn init]   DID: {identity.did}")
 
     # -- Create or attach to ceremony -------------------------------
-    # 0.4.2a9: CLI now uses the SAME layout Python's `tn.init()` produces
-    # — `<project>/.tn/default/tn.yaml` — so the two entry points are
-    # interchangeable. Re-running `tn init <same project>` is idempotent:
-    # it re-attaches to the existing default ceremony instead of erroring
-    # out. `--force` still nukes and re-mints (with a backup of the prior
-    # identity-bound material into `.tn/_overwritten_<UTC>/`).
+    # 0.5.0a2: the ceremony is rooted at <cwd>/.tn/<project>/ — the
+    # project name IS the ceremony name. Re-running `tn init <same name>`
+    # is idempotent: re-attach instead of erroring. `--force` nukes and
+    # re-mints (with a backup of the prior material into
+    # `.tn/_overwritten_<UTC>/`).
     from . import current_config, flush_and_close
     from . import init as tn_init
-    from ._multi import DEFAULT_CEREMONY_NAME, _ensure_ceremony_on_disk
+    from ._multi import _ensure_ceremony_on_disk
 
-    default_dir = project_dir / ".tn" / DEFAULT_CEREMONY_NAME
-    yaml_path = default_dir / "tn.yaml"
+    ceremony_d = _tn_root(project_dir) / ceremony_name
+    yaml_path = ceremony_d / "tn.yaml"
 
     if yaml_path.exists() and args.force:
         # Move the existing ceremony aside so --force never deletes data
@@ -246,14 +267,14 @@ def cmd_init(args: argparse.Namespace) -> int:
         import shutil
         from datetime import datetime, timezone
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup = project_dir / ".tn" / f"_overwritten_{stamp}"
-        shutil.move(str(default_dir), str(backup))
+        backup = _tn_root(project_dir) / f"_overwritten_{ceremony_name}_{stamp}"
+        shutil.move(str(ceremony_d), str(backup))
         print(f"[tn init] --force: prior ceremony moved to {backup}")
 
     if yaml_path.exists():
         # Idempotent re-attach. Matches Python `tn.init()`'s behaviour:
-        # if a default ceremony is already there, attach to it; don't
-        # mint a second one and don't error.
+        # if the ceremony is already there, attach to it; don't mint a
+        # second one and don't error.
         tn_init(yaml_path, identity=identity, link=False)
         cfg = current_config()
         print(f"[tn init] Reusing ceremony {cfg.ceremony_id} at {yaml_path}")
@@ -262,12 +283,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         flush_and_close()
         return 0
 
-    # Use the same canonical-layout primitive the Python init uses.
-    # That builds `.tn/<name>/{keys,logs,admin}/` cleanly under
-    # project_dir, avoiding the per-yaml-stem nesting that
-    # create_fresh's bare defaults would produce.
+    # Mint the ceremony as a ROOT (its own keystore) under the project
+    # name. `as_root=True` makes _ensure_ceremony_on_disk mint keys even
+    # though the name isn't the literal "default".
     _ensure_ceremony_on_disk(
-        DEFAULT_CEREMONY_NAME,
+        ceremony_name,
+        as_root=True,
         project_dir=project_dir,
         device_did=identity.did,
         profile=None,
@@ -278,7 +299,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     # --project-name flag). Stamp it into the freshly-minted yaml so the
     # vault link (next step) uses the human name instead of the random
     # ceremony_id.
-    project_name = project_dir.name
+    project_name = ceremony_name
     version_name = args.version_name  # None → wallet falls through to project_name
     _stamp_project_labels(yaml_path, project_name, version_name)
     tn_init(yaml_path, identity=identity, link=False)
