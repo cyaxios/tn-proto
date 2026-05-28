@@ -292,7 +292,9 @@ class _AsgiPushClient:
 
         _run(_go())
 
-    def post_pending_claim(self, body: bytes) -> dict[str, Any]:
+    def post_pending_claim(
+        self, body: bytes, *, project_name: str | None = None
+    ) -> dict[str, Any]:
         """Mirror the real client's unauthenticated init-upload POST.
 
         Endpoint is explicitly unauthenticated per spec; we send
@@ -300,16 +302,19 @@ class _AsgiPushClient:
         to this package's inbox at bind time (D-25).
         """
         async def _go():
+            headers = {
+                "Content-Type": "application/octet-stream",
+                "X-Publisher-Did": self._did,
+            }
+            if project_name:
+                headers["X-Project-Name"] = project_name
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as ac:
                 r = await ac.post(
                     "/api/v1/pending-claims",
                     content=body,
-                    headers={
-                        "Content-Type": "application/octet-stream",
-                        "X-Publisher-Did": self._did,
-                    },
+                    headers=headers,
                 )
                 if r.status_code >= 400:
                     raise AssertionError(
