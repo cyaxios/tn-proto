@@ -153,6 +153,64 @@ def _format_expires_local(expires_iso: str) -> str:
         return expires_iso
 
 
+def _try_warm_attach(
+    yaml_path: Path, identity: Identity, vault_url: str, cipher: str | None
+) -> bool:
+    """Attach a freshly-minted ceremony to the device's vault account.
+
+    The warm counterpart to the pending-claim/claim-URL flow. Reuses the
+    authenticated wallet path: a DID-challenge JWT (the device key is a
+    minted DID on the account) authorises ``link_ceremony`` to register
+    the project and ``sync_ceremony`` to upload the initial backup — the
+    same work the browser claim performs, minus the browser.
+
+    Returns True when the project is linked under the account; False on
+    any pre-binding failure (auth or link), so the caller can fall back
+    to minting a claim URL. Never raises.
+    """
+    from . import current_config, flush_and_close
+    from . import init as tn_init
+
+    try:
+        client = VaultClient.for_identity(identity, vault_url)
+    except Exception as e:  # noqa: BLE001 — auth failure must not break init
+        print(f"[tn init] WARN account auth failed ({e}); using claim URL instead")
+        return False
+
+    try:
+        tn_init(yaml_path, cipher=cipher or "btn", identity=identity, link=False)
+        cfg = current_config()
+        _wallet.link_ceremony(cfg, client)
+    except Exception as e:  # noqa: BLE001 — pre-binding failure -> cold fallback
+        print(f"[tn init] WARN account attach failed ({e}); using claim URL instead")
+        try:
+            client.close()
+        except Exception:
+            pass
+        return False
+
+    # Past link_ceremony the project row exists; we are committed to the
+    # warm path. sync errors are reported but don't revert to claim URL
+    # (that would double-register the project).
+    try:
+        result = _wallet.sync_ceremony(cfg, client)
+        print()
+        print("[tn init] Attached to your vault account (no browser needed).")
+        print(f"[tn init]   project:  {cfg.project_name or cfg.ceremony_id}")
+        print(f"[tn init]   linked:   {vault_url}/projects/{cfg.linked_project_id}")
+        print(f"[tn init]   uploaded: {len(result.uploaded)} file(s)")
+        if result.errors:
+            print(f"[tn init]   WARN {len(result.errors)} upload error(s): {result.errors}")
+        print()
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+        flush_and_close()
+    return True
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """Scaffold identity (if absent) + ceremony at <project>/tn.yaml."""
     # Quiet the stdout handler by default: it echoes every log envelope
@@ -339,6 +397,17 @@ def cmd_init(args: argparse.Namespace) -> int:
         if identity.linked_vault is None:
             identity.linked_vault = vault_url
             identity.ensure_written(identity_path)
+
+        # Warm path: if this device already belongs to a vault account,
+        # attach the new project to that account over the device DID's
+        # challenge-issued JWT — no browser claim needed. The warm signal
+        # is TN_API_KEY in the environment (wins) or, as a fallback, the
+        # account remembered in identity.json from a prior
+        # `tn account connect`. Falls through to the claim-URL flow if
+        # the authenticated attach can't be completed.
+        warm_signal = os.environ.get("TN_API_KEY") or identity.linked_account_id
+        if warm_signal and _try_warm_attach(yaml_path, identity, vault_url, args.cipher):
+            return 0
 
         client = None
         try:
@@ -730,6 +799,13 @@ def cmd_account_connect(args: argparse.Namespace) -> int:
     # subsequent CLI verbs (sync --pull, absorb -> /received-kits) can
     # find the bound account without re-reading the connect-code.
     mark_account_bound(yaml_path, account_id)
+
+    # Also remember the account globally in identity.json so a later
+    # `tn init` of a *different* project can auto-attach to this same
+    # account (warm path) instead of minting a browser claim URL.
+    if identity.linked_account_id != account_id:
+        identity.linked_account_id = account_id
+        identity.ensure_written(identity_path)
 
     print(f"Connected to vault account {account_id}")
     project_id = resp.get("project_id")
