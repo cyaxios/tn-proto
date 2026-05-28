@@ -2465,6 +2465,11 @@ export interface CreateFreshOptions {
   /** Optional ``ceremony.profile`` to stamp into the freshly-written
    *  yaml. Mirrors Python's profile catalog. */
   profile?: string;
+  /** Optional ``ceremony.project_name`` — the operator-chosen project
+   *  label. The vault uses it to name the bound project (instead of the
+   *  random ceremony_id) when this ceremony links/claims. Mirrors
+   *  Python's `_stamp_project_labels`. */
+  projectName?: string;
   /** Optional 32-byte Ed25519 seed. If set, the ceremony binds to
    *  that key (so the DID written into tn.yaml matches a previously
    *  installed identity). If omitted, a fresh random seed is generated.
@@ -2574,6 +2579,7 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
     ? rel(opts.adminLogPath, `./.tn/${yamlStem}/admin/admin.ndjson`)
     : `./.tn/${yamlStem}/admin/admin.ndjson`;
   const _profileLine = opts.profile ? `\n  profile: ${opts.profile}` : "";
+  const _projectNameLine = opts.projectName ? `\n  project_name: ${opts.projectName}` : "";
 
   // Write the yaml. Public fields list covers both the business
   // defaults and the entire admin-catalog field set so catalog events
@@ -2582,10 +2588,14 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
   const yaml = `ceremony:
   id: ${cid}
   mode: local
+  linked_vault: ''
+  linked_project_id: ''
+  sync_logs: false
   cipher: btn
   sign: true${_profileLine}
   admin_log_location: ${_adminLogStr}
   log_level: debug
+  chain: true${_projectNameLine}
 logs:
   path: ${_logPathStr}
 keystore:
@@ -2628,7 +2638,6 @@ public_fields:
 - recipient_identity
 - kit_sha256
 - slot
-- to_did
 - issued_to
 - generation
 - previous_kit_sha256
@@ -2638,7 +2647,6 @@ public_fields:
 - peer_identity
 - package_sha256
 - compiled_at
-- from_did
 - absorbed_at
 - vault_identity
 - project_id
@@ -2675,6 +2683,10 @@ groups:
     - policy
     auto_populated_by_policy: true
 fields: {}
+llm_classifier:
+  enabled: false
+  provider: ''
+  model: ''
 `;
   writeFileSync(yamlPath, yaml, "utf8");
 }

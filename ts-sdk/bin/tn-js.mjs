@@ -34,7 +34,7 @@ import { Buffer } from "node:buffer";
 import { stdin, stdout, argv, exit } from "node:process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve as pathResolve } from "node:path";
+import { basename, dirname, join, resolve as pathResolve } from "node:path";
 
 import {
   DeviceKey,
@@ -54,6 +54,7 @@ import {
   verify,
 } from "../dist/index.js";
 
+import { ensureCeremonyOnDisk } from "../dist/multi.js";
 import { AccountConnectError, AccountNamespace } from "../dist/account/index.js";
 import { VaultClient, VaultError, vaultIdentityFromDeviceKey } from "../dist/vault/client.js";
 import { WalletNamespace } from "../dist/wallet/index.js";
@@ -774,33 +775,59 @@ async function adminCmd() {
 }
 
 // ── init: bootstrap or attach to a ceremony ────────────────────────────
-// Wraps the programmatic `tn.init(yamlPath?)` from @tnproto/sdk. With no
-// yamlPath, the discovery chain runs (./tn.yaml -> ./.tn/default/tn.yaml).
-// Prints a JSON receipt {ok, yaml_path, ceremony_id, did} to stdout.
+// Mirrors Python's `tn init <project>` (cmd_init). The positional is a
+// PROJECT NAME, not a yaml path: it mints (or re-attaches to) a ROOT
+// ceremony at `<projectDir>/.tn/<name>/tn.yaml` with its own keystore,
+// admin log, and logs — the 0.5.0a2 flipped layout. The basename is the
+// ceremony name; any leading path component is the project dir (so
+// `tn-js init foo/bar` lands at `foo/.tn/bar/`).
 //
-// NOTE: this is the LIGHT init that parallels Python's programmatic
-// `tn.init(yaml_path)`. The full Python CLI ceremony bootstrap (mnemonic
-// generation, keystore mint, vault claim URL emission) is tracked
-// separately and requires the wallet/account SDK port to land first.
+//   tn-js init <name>        mint/attach root ceremony at .tn/<name>/
+//   tn-js init --yaml <path> attach to an explicit yaml (back-compat)
+//   tn-js init               discovery chain (./tn.yaml, ./.tn/default/)
+//
+// Prints a JSON receipt {ok, yaml_path, ceremony_id, did} to stdout.
 async function initCmd() {
   const rest = argv.slice(3);
   let yamlPath = null;
+  let projectArg = null;
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
     if (a === "--yaml") yamlPath = rest[++i];
     else if (a === "-h" || a === "--help") {
       stdout.write(
-        "tn-js init [<yaml-path>] [--yaml <yaml-path>]\n" +
-          "  Initialize or attach to a TN ceremony. With no path, discovers\n" +
-          "  ./tn.yaml or ./.tn/default/tn.yaml. Prints JSON receipt on stdout.\n",
+        "tn-js init [<project-name>] [--yaml <yaml-path>]\n" +
+          "  Mint or attach to a TN ceremony. A <project-name> mints a root\n" +
+          "  ceremony at <cwd>/.tn/<name>/ (own keystore + admin + logs).\n" +
+          "  --yaml attaches to an explicit yaml; no arg runs discovery\n" +
+          "  (./tn.yaml -> ./.tn/default/tn.yaml). Prints JSON receipt.\n",
       );
       return;
-    } else if (!a.startsWith("-") && yamlPath === null) {
-      yamlPath = a;
+    } else if (!a.startsWith("-") && projectArg === null) {
+      projectArg = a;
     }
   }
 
-  const tn = await tnInit(yamlPath ?? undefined);
+  // Resolve the ceremony yaml. A bare project name flips into the
+  // `.tn/<name>/` layout via an as-root mint (mirrors Python cmd_init's
+  // `_ensure_ceremony_on_disk(name, as_root=True, project_dir=...)`).
+  // ensureCeremonyOnDisk is idempotent — re-running attaches to the
+  // existing ceremony instead of erroring.
+  let resolvedYaml = yamlPath;
+  if (resolvedYaml === null && projectArg !== null) {
+    if (/\.ya?ml$/i.test(projectArg)) {
+      // Positional is an explicit yaml path — attach mode (back-compat).
+      resolvedYaml = projectArg;
+    } else {
+      // Positional is a project name — flip into `.tn/<name>/` (root mint).
+      const ceremonyName = basename(projectArg);
+      const parent = dirname(projectArg);
+      const projectDir = parent === "." ? process.cwd() : pathResolve(parent);
+      resolvedYaml = ensureCeremonyOnDisk(ceremonyName, { projectDir, asRoot: true });
+    }
+  }
+
+  const tn = await tnInit(resolvedYaml ?? undefined);
   let did = null;
   let ceremonyId = null;
   try {
@@ -814,7 +841,7 @@ async function initCmd() {
   stdout.write(
     JSON.stringify({
       ok: true,
-      yaml_path: yamlPath ?? "(discovery)",
+      yaml_path: resolvedYaml ?? "(discovery)",
       ceremony_id: ceremonyId,
       did,
     }) + "\n",

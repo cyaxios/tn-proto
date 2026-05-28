@@ -293,7 +293,6 @@ public_fields:
 - recipient_identity
 - kit_sha256
 - slot
-- to_did
 - issued_to
 - generation
 - previous_kit_sha256
@@ -303,7 +302,6 @@ public_fields:
 - peer_identity
 - package_sha256
 - compiled_at
-- from_did
 - absorbed_at
 - vault_identity
 - project_id
