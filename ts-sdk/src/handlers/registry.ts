@@ -139,6 +139,16 @@ function parseFilter(raw: unknown): FilterSpec | undefined {
   if (typeof r["level"] === "string") { spec.level = r["level"]; hasAny = true; }
   if (Array.isArray(r["levelIn"])) { spec.levelIn = r["levelIn"] as string[]; hasAny = true; }
 
+  // Python RFC shorthand grammar (flat snake_case) — so a Python-authored
+  // `filter:` block (e.g. firehose's `level_in:`) parses identically in TS.
+  // Mirrors python/tn/handlers/filter.py:Filter.from_spec.
+  if (typeof r["event_type"] === "string") { spec.eventType = r["event_type"] as string; hasAny = true; }
+  if (typeof r["event_type_prefix"] === "string") { spec.eventTypePrefix = r["event_type_prefix"] as string; hasAny = true; }
+  if (typeof r["not_event_type_prefix"] === "string") { spec.notEventTypePrefix = r["not_event_type_prefix"] as string; hasAny = true; }
+  if (Array.isArray(r["event_type_in"])) { spec.eventTypeIn = r["event_type_in"] as string[]; hasAny = true; }
+  if (Array.isArray(r["level_in"])) { spec.levelIn = r["level_in"] as string[]; hasAny = true; }
+  if (typeof r["sync"] === "boolean") { spec.sync = r["sync"] as boolean; hasAny = true; }
+
   return hasAny ? spec : undefined;
 }
 
