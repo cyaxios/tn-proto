@@ -79,10 +79,22 @@ impl std::error::Error for ValidateError {}
 pub const CATALOG: &[AdminEventKind] = &[
     AdminEventKind {
         event_type: "tn.ceremony.init",
+        // NOTE: `device_identity` is intentionally NOT a schema field
+        // here. It is the mandatory reserved envelope scalar (hashed
+        // first in the row_hash preimage and always written at envelope
+        // root by `build_envelope`), exactly like every other admin
+        // event identifies its publisher. Listing it as a public field
+        // *and* having it as the scalar made the writer hash it twice
+        // (scalar + public) on any ceremony whose yaml carries
+        // `device_identity` in public_fields (every Python/TS-written
+        // ceremony via DEFAULT_PUBLIC_FIELDS), while spec-correct readers
+        // exclude the reserved scalar — so `tn.ceremony.init` failed
+        // row_hash verification cross-SDK. The reducer reads
+        // `device_identity` from the envelope scalar, so it needs no
+        // catalog field. See `on_ceremony_init` + docs/spec/row-hash.md.
         schema: &[
             ("ceremony_id", FieldType::String),
             ("cipher", FieldType::String),
-            ("device_identity", FieldType::String),
             ("created_at", FieldType::Iso8601),
         ],
         sign: true,

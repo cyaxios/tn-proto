@@ -102,11 +102,15 @@ fn fresh_init_emits_ceremony_init_as_first_entry() {
         pt["cipher"].as_str().is_some(),
         "cipher must be a string in decrypted payload"
     );
+    // `device_identity` is deliberately NOT a ceremony.init payload/catalog
+    // field — it is the reserved envelope scalar (asserted via
+    // env["device_identity"] above). Carrying it as a public field too
+    // double-hashed it relative to spec-correct readers and broke
+    // cross-SDK row_hash verification; see admin_catalog.rs +
+    // docs/spec/row-hash.md.
     assert!(
-        pt["device_identity"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("did:key:")),
-        "device_identity must start with did:key: in decrypted payload"
+        pt.get("device_identity").is_none(),
+        "device_identity must NOT appear in the ceremony.init payload; it is the envelope scalar"
     );
     assert!(
         pt["created_at"].as_str().is_some(),

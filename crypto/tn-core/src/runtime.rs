@@ -931,7 +931,19 @@ impl Runtime {
             let mut init_fields = serde_json::Map::new();
             init_fields.insert("ceremony_id".into(), serde_json::json!(rt.cfg.ceremony.id));
             init_fields.insert("cipher".into(), serde_json::json!(rt.cfg.ceremony.cipher));
-            init_fields.insert("device_identity".into(), serde_json::json!(rt.device.did()));
+            // NOTE: do NOT add `device_identity` here. It is the mandatory
+            // reserved envelope scalar (hashed first in the row_hash
+            // preimage — docs/spec/row-hash.md) and `build_envelope`
+            // always writes it at envelope root. On any ceremony whose
+            // yaml lists `device_identity` under public_fields (every
+            // Python/TS-written ceremony via DEFAULT_PUBLIC_FIELDS),
+            // adding it here too routes it into the public field block so
+            // the writer hashes it twice (scalar + public) while
+            // spec-correct readers exclude the reserved scalar and hash it
+            // once — the two disagree and `tn.ceremony.init` fails
+            // row_hash verify cross-SDK. The admin catalog schema for
+            // tn.ceremony.init was updated to match (no device_identity
+            // field); the reducer reads it from the envelope scalar.
             init_fields.insert("created_at".into(), serde_json::json!(now));
             if let Err(e) = rt.emit("info", "tn.ceremony.init", init_fields) {
                 log::warn!(
@@ -2584,8 +2596,17 @@ impl Runtime {
             }
 
             // Recompute row_hash from envelope + decrypted/raw groups.
+            // The reserved set MUST exclude the same scalars the writer
+            // treats as scalars. The wire key for the publisher identity
+            // is `device_identity` (0.4.3a1 phase G flipped it from the
+            // legacy `did`); leaving the stale `did` here let the
+            // `device_identity` scalar leak into `public_out` for a
+            // ceremony whose yaml lists it under public_fields, double-
+            // hashing it relative to the corrected writer. Mirrors
+            // `python/tn/reader.py::_envelope_reserved` and
+            // `ts-sdk/.../node_runtime.ts::_ENVELOPE_RESERVED`.
             let envelope_reserved: HashSet<&'static str> = [
-                "did",
+                "device_identity",
                 "timestamp",
                 "event_id",
                 "event_type",
