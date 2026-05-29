@@ -143,6 +143,8 @@ No compat shims — the deletions are hard. The branch is the alpha-track.
 | Python | TS | Status | Notes |
 |--------|------|--------|-------|
 | `tn.identity` | (parts of `@tnproto/sdk/core`) | ⚠ | TS exposes via Layer 1 module surface; not a 1:1 module mirror. |
+| `tn.identity.Identity` / `_default_identity_path()` | `Identity` / `defaultIdentityPath()` / `defaultIdentityDir()` | ✓ | NEW 0.5.0a2. Machine-global device identity at `$XDG_DATA_HOME/tn/identity.json` (Python-compatible schema). `tn-js init` seeds every ceremony from it so they share one DID; `account connect` stamps `linked_account_id` for warm-attach. |
+| `tn.handlers.vault_push.init_upload(cfg, client, vault_base=...)` | `initUpload(rt, opts)` / `await tn.initUpload(opts)` | ✓ | NEW 0.5.0a2. Mints a BEK, exports an AES-GCM-encrypted `full_keystore` tnpkg, POSTs it unauthenticated to `/api/v1/pending-claims`, returns the claim URL. Browser-redeem verified end-to-end. |
 | `tn.sealing` | (parts of `@tnproto/sdk/core`) | ⚠ | |
 | `tn.wallet` | (not yet) | ⊝ | TS gap; future work. |
 | `tn.vault_client` | (not yet) | ⊝ | TS gap; future work. |

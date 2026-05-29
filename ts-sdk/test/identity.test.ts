@@ -59,7 +59,7 @@ test("save preserves unknown fields (Python-written identity.json)", () => {
 
   // Mint, then re-load and re-save — a field the Python writer adds
   // (mnemonic_stored) must survive a TS round-trip.
-  const id = Identity.loadOrMint(path);
+  Identity.loadOrMint(path);
   const doc = JSON.parse(readFileSync(path, "utf8"));
   doc.mnemonic_stored = true;
   doc.prefs = { default_new_ceremony_mode: "stream" };

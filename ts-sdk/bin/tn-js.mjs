@@ -936,7 +936,7 @@ async function initCmd() {
 // any auth/link failure so the caller falls back to the cold claim-URL path.
 // Mirrors Python's `_try_warm_attach`.
 async function _tryWarmAttach(_tn, yamlPath, identity, vaultBase) {
-  let client = null;
+  let client;
   try {
     const vid = vaultIdentityFromDeviceKey(identity.deviceKey());
     client = await VaultClient.forIdentity(vid, vaultBase);

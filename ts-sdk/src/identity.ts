@@ -93,7 +93,7 @@ export class Identity {
     try {
       doc = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
     } catch (e) {
-      throw new Error(`identity.json parse error at ${p}: ${(e as Error).message}`);
+      throw new Error(`identity.json parse error at ${p}: ${(e as Error).message}`, { cause: e });
     }
     const encMethod = String(doc["device_priv_enc_method"] ?? "none");
     if (encMethod !== "none") {
