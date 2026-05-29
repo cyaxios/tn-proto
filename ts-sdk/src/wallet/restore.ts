@@ -288,6 +288,67 @@ export async function restoreWithBek(opts: RestoreOptions): Promise<RestoreResul
   };
 }
 
+export interface RestoreViaLoopbackOptions {
+  /** Vault base URL — e.g. https://vault.tn-proto.org. */
+  vaultUrl: string;
+  /** Output directory for restored files. */
+  outDir: string;
+  /** Token wait timeout (ms). Default 300_000. */
+  timeoutMs?: number;
+  /** Override the loopback state nonce / port (tests). */
+  state?: string;
+  loopbackPort?: number;
+  /** Called with the `/restore?...` URL the operator must open in a browser. */
+  onRestoreUrl?: (url: string) => void;
+  /** Optional fetch override (tests). */
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Full multi-device restore via the browser loopback dance. Mirrors
+ * Python's `tn wallet restore`: start a loopback receiver, hand the
+ * operator a `/restore` URL, wait for the browser to POST the
+ * TransferToken (the browser does the passkey-PRF/AWK unwrap and returns
+ * the raw BEK), then fetch + decrypt + write the keystore.
+ *
+ * The headless CLI never needs the account login credential — the browser
+ * performs the unwrap and delivers the raw BEK over loopback (127.0.0.1).
+ */
+export async function restoreViaLoopback(
+  opts: RestoreViaLoopbackOptions,
+): Promise<RestoreResult & { accountId: string }> {
+  const { LoopbackReceiver } = await import("./restore_loopback.js");
+  const base = opts.vaultUrl.replace(/\/+$/, "");
+  const startOpts: { allowOrigin: string; state?: string; port?: number } = { allowOrigin: base };
+  if (opts.state !== undefined) startOpts.state = opts.state;
+  if (opts.loopbackPort !== undefined) startOpts.port = opts.loopbackPort;
+  const rx = await LoopbackReceiver.start(startOpts);
+  try {
+    const restoreUrl =
+      `${base}/restore?return_to=${encodeURIComponent(rx.callbackUrl)}` +
+      `&state=${encodeURIComponent(rx.state)}`;
+    opts.onRestoreUrl?.(restoreUrl);
+
+    const waitOpts: { timeoutMs?: number } = {};
+    if (opts.timeoutMs !== undefined) waitOpts.timeoutMs = opts.timeoutMs;
+    const token = await rx.waitForToken(waitOpts);
+
+    const bek = _b64decodeLoose(token.rawBekB64);
+    const restoreOpts: RestoreOptions = {
+      vaultUrl: base,
+      projectId: token.projectId,
+      bearer: token.vaultJwt,
+      bek,
+      outDir: opts.outDir,
+    };
+    if (opts.fetchImpl !== undefined) restoreOpts.fetchImpl = opts.fetchImpl;
+    const result = await restoreWithBek(restoreOpts);
+    return { ...result, accountId: token.accountId };
+  } finally {
+    rx.shutdown();
+  }
+}
+
 /** Internals exposed for tests. */
 export const _internals = {
   b64decodeLoose: _b64decodeLoose,
