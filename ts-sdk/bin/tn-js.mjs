@@ -60,6 +60,7 @@ import { Identity } from "../dist/identity.js";
 import { AccountConnectError, AccountNamespace } from "../dist/account/index.js";
 import { VaultClient, VaultError, vaultIdentityFromDeviceKey } from "../dist/vault/client.js";
 import { WalletNamespace } from "../dist/wallet/index.js";
+import { restoreViaLoopback } from "../dist/wallet/restore.js";
 import { loadKeystore } from "../dist/runtime/keystore.js";
 
 function die(msg) {
@@ -1100,13 +1101,54 @@ async function showCmd() {
 async function walletCmd() {
   const sub = argv[3];
   const rest = argv.slice(4);
-  const opts = { yaml: null, vaultUrl: null, projectName: null };
+  const opts = { yaml: null, vaultUrl: null, projectName: null, out: null, timeoutMs: null };
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
     if (a === "--yaml") opts.yaml = rest[++i];
     else if (a === "--name" || a === "--project-name") opts.projectName = rest[++i];
+    else if (a === "--vault") opts.vaultUrl = rest[++i];
+    else if (a === "--out") opts.out = rest[++i];
+    else if (a === "--timeout") opts.timeoutMs = Number(rest[++i]) * 1000;
     else if (!a.startsWith("-") && opts.vaultUrl === null) opts.vaultUrl = a;
   }
+
+  // wallet restore: multi-device restore via the browser loopback dance.
+  // Prints a /restore URL; the operator opens it, the browser does the
+  // passkey unwrap and POSTs the raw BEK back over loopback; we then fetch
+  // + decrypt + write the keystore. Mirrors Python `tn wallet restore`.
+  if (sub === "restore") {
+    const vaultUrl = opts.vaultUrl || process.env.TN_VAULT_URL;
+    if (!vaultUrl) die("wallet restore: --vault <url> (or TN_VAULT_URL) is required");
+    if (!opts.out) die("wallet restore: --out <dir> is required");
+    const loopOpts = {
+      vaultUrl,
+      outDir: opts.out,
+      onRestoreUrl: (url) => {
+        stdout.write("\n[tn wallet restore] Open this URL in your browser to authorize the restore:\n");
+        stdout.write(`  ${url}\n\n`);
+        stdout.write("[tn wallet restore] Waiting for the browser to deliver the unwrapped key...\n");
+      },
+    };
+    if (opts.timeoutMs) loopOpts.timeoutMs = opts.timeoutMs;
+    try {
+      const res = await restoreViaLoopback(loopOpts);
+      stdout.write(`\n[tn wallet restore] Restored ${res.filesWritten.length} file(s) to ${res.outDir}\n`);
+      stdout.write(
+        JSON.stringify({
+          ok: true,
+          verb: "wallet.restore",
+          project_id: res.projectId,
+          account_id: res.accountId,
+          out_dir: res.outDir,
+          files_written: res.filesWritten,
+        }) + "\n",
+      );
+    } catch (e) {
+      die(`wallet restore: ${e?.message ?? e}`);
+    }
+    return;
+  }
+
   if (sub === "unlink") {
     if (!opts.yaml) die("wallet unlink: --yaml <path> is required");
     WalletNamespace.unlink(opts.yaml);
@@ -1114,7 +1156,12 @@ async function walletCmd() {
     return;
   }
   if (sub !== "link") {
-    die(`wallet: unknown subcommand ${sub}. try: wallet link <vault-url> [--yaml <path>] [--name <project>]`);
+    die(
+      `wallet: unknown subcommand ${sub}. try: ` +
+        `wallet link <vault-url> [--yaml <path>] [--name <project>] | ` +
+        `wallet unlink --yaml <path> | ` +
+        `wallet restore --vault <url> --out <dir>`,
+    );
   }
   if (!opts.vaultUrl) die("wallet link: <vault-url> positional is required");
   if (!opts.yaml) die("wallet link: --yaml <path> is required");
