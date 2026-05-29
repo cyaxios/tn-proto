@@ -30,6 +30,7 @@ import {
   type VaultPullAbsorber,
 } from "./vault_pull.js";
 import { VaultPushHandler, type VaultPostClient } from "./vault_push.js";
+import { TnFirehoseHandler } from "./firehose.js";
 
 /** Adapters injected by the host so handlers can build / absorb / POST without
  * a hard dependency on TNClient (avoids a cyclic import). */
@@ -235,6 +236,23 @@ export function buildHandlers(
           filter: filterSpec,
         } as ConstructorParameters<typeof VaultPullHandler>[1]),
       );
+      continue;
+    }
+    if (kind === "tn.firehose" || kind === "firehose") {
+      // Encrypted log streaming to the vault's per-project firehose WS.
+      // Mirrors python/tn/handlers/firehose.py (Phase-A stub BEK). No host
+      // adapter needed — the handler opens its own WebSocket.
+      const endpoint = requireStr(raw, "endpoint", "tn.firehose");
+      const projectId = requireStr(raw, "project_id", "tn.firehose");
+      const keyId = (raw["key_id"] as string | undefined) ?? null;
+      const fhFilter = parseFilter(raw["filter"]);
+      const fhOpts: ConstructorParameters<typeof TnFirehoseHandler>[1] = {
+        endpoint,
+        projectId,
+        keyId,
+      };
+      if (fhFilter !== undefined) fhOpts.filter = fhFilter;
+      out.push(new TnFirehoseHandler(name, fhOpts));
       continue;
     }
     if (kind === "fs.drop") {
