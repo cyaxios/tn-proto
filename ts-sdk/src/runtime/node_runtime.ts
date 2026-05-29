@@ -57,6 +57,7 @@ import {
 import { BtnPublisher, btnKitLeaf } from "../raw.js";
 import { ensureProcessRunId } from "../_run_id.js";
 import { decryptGroup, type GroupKits } from "../core/decrypt.js";
+import { getProfile, isKnownProfile } from "../profiles.js";
 import type { TNHandler } from "../handlers/index.js";
 
 function readKitLeaf(kitBytes: Uint8Array): bigint {
@@ -2643,6 +2644,12 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
     : `./.tn/${yamlStem}/admin/admin.ndjson`;
   const _profileLine = opts.profile ? `\n  profile: ${opts.profile}` : "";
   const _projectNameLine = opts.projectName ? `\n  project_name: ${opts.projectName}` : "";
+  // Derive the chain flag from the profile catalog so the Rust/wasm core
+  // honours it (secure_log / telemetry -> chains=false). An absent or
+  // unknown profile keeps the conservative default (transaction chains).
+  // Mirrors python/tn/_multi.py:_stamp_profile_into_yaml.
+  const _chains =
+    opts.profile && isKnownProfile(opts.profile) ? getProfile(opts.profile).chains : true;
 
   // Write the yaml. Public fields list covers both the business
   // defaults and the entire admin-catalog field set so catalog events
@@ -2658,7 +2665,7 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
   sign: true${_profileLine}
   admin_log_location: ${_adminLogStr}
   log_level: debug
-  chain: true${_projectNameLine}
+  chain: ${_chains}${_projectNameLine}
 logs:
   path: ${_logPathStr}
 keystore:

@@ -297,6 +297,11 @@ function _createStreamYaml(
     `ceremony:\n` +
     `  id: ${cid}\n` +
     `  sign: ${p.signs}\n` +
+    // Propagate the profile's chains flag so the Rust/wasm core honours it
+    // (chains=false -> empty prev_hash, sequence still advances). Without
+    // this the core defaults to chain: true and links every row regardless
+    // of profile. Mirrors python/tn/_multi.py:_create_stream_yaml.
+    `  chain: ${p.chains}\n` +
     `  profile: ${profile}\n` +
     `  admin_log_location: ${adminPath}\n` +
     `  log_level: debug\n` +
