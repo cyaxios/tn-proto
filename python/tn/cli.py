@@ -1385,6 +1385,39 @@ def cmd_add_recipient(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_group_add(args: argparse.Namespace) -> int:
+    """Add a group to an existing ceremony post-init::
+
+        python -m tn group add <name> [--fields a,b,c] [--cipher btn|jwe]
+
+    Group-add was previously API-only (``tn.ensure_group``). Under the
+    multi-ceremony layout the group is written to the authoritative
+    project-root yaml (the head of a stream's ``extends:`` chain), so it
+    persists for fresh-process readers and a later ``tn add_recipient``.
+    """
+    from . import current_config, ensure_group, flush_and_close
+    from . import init as tn_init
+
+    yaml_path = _resolve_yaml_or_discover(args.yaml)
+    fields = (
+        [f.strip() for f in args.fields.split(",") if f.strip()]
+        if args.fields
+        else None
+    )
+
+    tn_init(yaml_path)
+    try:
+        cfg = current_config()
+        ensure_group(cfg, args.name, fields=fields, cipher=args.cipher)
+        print(f"[tn group add] added group {args.name!r}")
+        if fields:
+            print(f"[tn group add]   fields: {', '.join(fields)}")
+        print(f"[tn group add]   cipher: {args.cipher or cfg.cipher_name}")
+    finally:
+        flush_and_close()
+    return 0
+
+
 def cmd_absorb(args: argparse.Namespace) -> int:
     from . import current_config, flush_and_close
     from . import init as tn_init
@@ -3093,6 +3126,35 @@ def build_parser() -> argparse.ArgumentParser:
              "without being able to read its contents.",
     )
     p_add.set_defaults(func=cmd_add_recipient)
+
+    # --- tn group add <name> -----------------------------------
+    # Group-add was API-only (tn.ensure_group); this verb exposes it on
+    # the CLI. Under the multi-ceremony layout the group lands in the
+    # authoritative project-root yaml, so it survives for fresh-process
+    # readers and a subsequent `tn add_recipient`.
+    p_group = sub.add_parser(
+        "group",
+        help="Group management for an existing ceremony.",
+    )
+    g_sub = p_group.add_subparsers(dest="group_verb", required=True)
+    p_group_add = g_sub.add_parser(
+        "add",
+        help="Add a group post-init: `tn group add <name> [--fields a,b]`.",
+    )
+    p_group_add.add_argument("name", help="Group name to add (e.g. partners).")
+    p_group_add.add_argument(
+        "--fields", default=None,
+        help="Comma-separated field names to route into this group.",
+    )
+    p_group_add.add_argument(
+        "--cipher", default=None, choices=["btn", "jwe"],
+        help="Cipher for the new group. Default: the ceremony's cipher.",
+    )
+    p_group_add.add_argument(
+        "--yaml", default=None,
+        help="Path to your tn.yaml. Default: discover via $TN_YAML / ./tn.yaml / ~/.tn/tn.yaml.",
+    )
+    p_group_add.set_defaults(func=cmd_group_add)
 
     # --- tn absorb <package> -----------------------------------
     p_absorb = sub.add_parser(

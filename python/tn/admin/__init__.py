@@ -86,7 +86,9 @@ def ensure_group(
 
     if group in cfg.groups and key_exists:
         if fields:
-            _update_yaml(cfg, lambda doc: _yaml_add_fields(doc, group, fields))
+            _update_authoritative_yaml(
+                cfg, lambda doc: _yaml_add_fields(doc, group, fields), key="groups"
+            )
             # Keep the in-memory routing consistent with what we just wrote
             # to disk. Without this, a second ensure_group(..., fields=[...])
             # on an existing group updates tn.yaml but leaves
@@ -105,7 +107,7 @@ def ensure_group(
     )
     cfg.groups[group] = new_group
 
-    _update_yaml(
+    _update_authoritative_yaml(
         cfg,
         lambda doc: _yaml_add_group(
             doc,
@@ -115,6 +117,7 @@ def ensure_group(
             fields,
             cipher_name=internal_cipher,
         ),
+        key="groups",
     )
     if fields:
         for f in fields:
@@ -340,7 +343,7 @@ def _rotate_impl(
         cfg.groups[group] = new_group
         new_index_epoch = new_group.index_epoch
 
-    _update_yaml(
+    _update_authoritative_yaml(
         cfg,
         lambda doc: _yaml_rotate_group(
             doc,
@@ -350,6 +353,7 @@ def _rotate_impl(
             revoke_did,
             new_epoch=new_index_epoch,
         ),
+        key="groups",
     )
 
     # Attested rotation event. Catalog-validated by the runtime before signing.
@@ -457,7 +461,7 @@ def _add_recipient_jwe_impl(
             ):
                 recipients.append({"recipient_identity": did})
 
-        _update_yaml(cfg, _mutate_pending)
+        _update_authoritative_yaml(cfg, _mutate_pending, key="groups")
         if _lg._runtime is not None:
             _lg._require_init().emit(
                 "",
@@ -496,7 +500,7 @@ def _add_recipient_jwe_impl(
         )
         g["recipients"] = recipients
 
-    _update_yaml(cfg, _mutate)
+    _update_authoritative_yaml(cfg, _mutate, key="groups")
 
     if _lg._runtime is not None:
         _lg._require_init().emit(
@@ -582,7 +586,7 @@ def _revoke_recipient_jwe_impl(cfg: LoadedConfig, group: str, did: str) -> Loade
             if r.get("recipient_identity") != did
         ]
 
-    _update_yaml(cfg, _mutate)
+    _update_authoritative_yaml(cfg, _mutate, key="groups")
 
     if _lg._runtime is not None:
         _lg._require_init().emit(
@@ -689,10 +693,44 @@ def _append_sync_queue(ceremony_id: str, err_msg: str) -> None:
 
 
 def _update_yaml(cfg: LoadedConfig, mutator) -> None:
+    """Apply ``mutator`` to ``cfg.yaml_path`` (the loaded yaml itself).
+
+    Use this for stream-local keys — e.g. the ``ceremony`` block, which
+    is shallow-merged with the child winning. For parent-owned keys
+    (``groups`` / ``fields`` / ``recipients``) use
+    :func:`_update_authoritative_yaml`, which writes to the head of the
+    ``extends:`` chain so the change is not discarded on the next load.
+    """
     with open(cfg.yaml_path, encoding="utf-8") as f:
         doc = yaml.safe_load(f) or {}
     mutator(doc)
     with open(cfg.yaml_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(doc, f, sort_keys=False)
+
+
+def _update_authoritative_yaml(cfg: LoadedConfig, mutator, *, key: str = "groups") -> None:
+    """Apply ``mutator`` to the yaml that authoritatively owns ``key``.
+
+    Under the multi-ceremony layout a named stream's yaml carries
+    ``extends: ../default/tn.yaml`` and inherits ``groups`` / ``fields`` /
+    ``recipients`` from the project root. Those keys are parent-owned:
+    writing them into the stream yaml (``cfg.yaml_path``) is silently
+    discarded on the next load ("child sets parent-owned key 'groups';
+    parent wins"), so the group / recipient never persists and a
+    fresh-process ``add_recipient`` fails with "unknown group". Group and
+    recipient mutations therefore target the chain root.
+
+    For a ceremony with no ``extends:`` the authoritative yaml resolves
+    back to ``cfg.yaml_path``, so the legacy single-file layout is
+    unchanged.
+    """
+    from ..config import authoritative_yaml_for
+
+    target = authoritative_yaml_for(cfg.yaml_path, key)
+    with open(target, encoding="utf-8") as f:
+        doc = yaml.safe_load(f) or {}
+    mutator(doc)
+    with open(target, "w", encoding="utf-8") as f:
         yaml.safe_dump(doc, f, sort_keys=False)
 
 

@@ -1094,6 +1094,61 @@ def _resolve_extends(yaml_path: Path, doc: dict[str, Any], _seen: set[Path] | No
     return merged
 
 
+def authoritative_yaml_for(yaml_path: Path, key: str) -> Path:
+    """Return the yaml in ``yaml_path``'s ``extends:`` chain that owns ``key``.
+
+    Parent-owned keys (``groups``, ``fields``, ``device``, ``keystore``,
+    ``recipients`` nested under ``groups``, ...) are authoritative only at
+    the head of the ``extends:`` chain. A named *stream* yaml that
+    ``extends: ../default/tn.yaml`` must NOT write them into itself:
+    :func:`_resolve_extends` discards a child's copy of a parent-owned key
+    on the next load ("child sets parent-owned key 'groups'; parent
+    wins"), so the write is silently lost.
+
+    This walks from ``yaml_path`` toward the chain root and returns the
+    path of the yaml *closest to the root* that declares ``key`` — that
+    is the one whose value actually survives the merge. If no yaml in the
+    chain declares ``key`` yet, the chain root is returned so a
+    first-time write lands authoritatively. For a yaml with no
+    ``extends:`` the chain is a single node and the result is
+    ``yaml_path`` itself, so the legacy single-file layout is unaffected.
+
+    Raises ``ValueError`` on an ``extends:`` cycle or a missing /
+    malformed ``extends:`` target (mirrors :func:`_resolve_extends`).
+    """
+    yaml_path = yaml_path.resolve()
+    chain: list[Path] = []  # [leaf, ..., root]
+    declarers: list[Path] = []  # subset of chain that declares `key`, same order
+    seen: set[Path] = set()
+    cur = yaml_path
+    while True:
+        if cur in seen:
+            raise ValueError(
+                f"{cur}: extends cycle detected while resolving the "
+                f"authoritative yaml for key {key!r}."
+            )
+        seen.add(cur)
+        doc = _read_yaml_doc(cur)
+        chain.append(cur)
+        if key in doc:
+            declarers.append(cur)
+        extends = doc.get("extends")
+        if not extends:
+            break
+        if not isinstance(extends, str):
+            raise ValueError(
+                f"{cur}: extends must be a string path, got {type(extends).__name__}"
+            )
+        parent = (cur.parent / extends).resolve()
+        if not parent.is_file():
+            raise ValueError(f"{cur}: extends target {parent} does not exist")
+        cur = parent
+    # `declarers` is in leaf->root order; the entry closest to the root is
+    # the one the merge keeps (parent wins). Fall back to the chain root
+    # when nothing declares the key yet.
+    return declarers[-1] if declarers else chain[-1]
+
+
 @dataclass(frozen=True)
 class _CeremonySettings:
     """Validated ceremony-block scalars resolved from yaml.
