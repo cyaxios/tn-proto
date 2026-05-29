@@ -13,6 +13,13 @@ import { test } from "node:test";
 // the wasm package is built.
 import { StdoutHandler } from "../src/handlers/stdout.js";
 
+// These tests assert the raw NDJSON line is written verbatim to the sink.
+// The handler defaults to the `pretty` format (TN_STDOUT_FORMAT=pretty);
+// force `json` so we exercise the raw-line path. node:test isolates each
+// test file in its own process, so this env set is contained. The pretty
+// format itself is covered by stdout_pretty.test.ts.
+process.env["TN_STDOUT_FORMAT"] = "json";
+
 // ----------------------------------------------------------------------
 // Unit tests against the handler in isolation.
 // ----------------------------------------------------------------------

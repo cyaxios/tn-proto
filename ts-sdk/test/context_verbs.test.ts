@@ -61,10 +61,11 @@ test("setContext fields land on emitted entries", async () => {
     c.info("evt.ctx", { marker: "m1" });
     c.clearContext();
 
-    // Find the emitted envelope.
+    // Find the emitted envelope. raw read yields the flat envelope
+    // (see read_shape.test.ts).
     const entries = [...c.read({ raw: true })];
     const env = entries
-      .map((e) => (e as { envelope: Record<string, unknown> }).envelope)
+      .map((e) => e as Record<string, unknown>)
       .find((e) => e["event_type"] === "evt.ctx");
     assert.ok(env, "evt.ctx envelope not found");
 
