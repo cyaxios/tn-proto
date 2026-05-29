@@ -32,7 +32,8 @@ test("setLevel('error') filters debug/info/warning, keeps error + log()", async 
 
     const events = new Set<string>();
     for (const entry of c.read({ raw: true })) {
-      const t = (entry as { envelope: Record<string, unknown> }).envelope["event_type"];
+      // raw read yields the flat envelope (see read_shape.test.ts).
+      const t = (entry as Record<string, unknown>)["event_type"];
       if (typeof t === "string") events.add(t);
     }
 

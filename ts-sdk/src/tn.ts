@@ -73,7 +73,17 @@ export const LOG_LEVELS: typeof _LOG_LEVELS = _LOG_LEVELS;
 let _tnLogLevelThreshold: number = _LOG_LEVELS.debug;
 
 function _levelValue(level: LogLevel): number {
-  return _LOG_LEVELS[level];
+  const v = _LOG_LEVELS[level];
+  if (v === undefined) {
+    // Without this guard an unknown name sets the threshold to `undefined`,
+    // which makes every `value <= threshold` comparison false and silently
+    // drops all emits. Fail loud instead.
+    throw new Error(
+      `unknown log level ${JSON.stringify(level)}; expected one of ` +
+        `${Object.keys(_LOG_LEVELS).join(", ")}`,
+    );
+  }
+  return v;
 }
 
 // ---------------------------------------------------------------------------
