@@ -32,7 +32,7 @@
 import { createInterface } from "node:readline";
 import { Buffer } from "node:buffer";
 import { stdin, stdout, argv, exit } from "node:process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve as pathResolve } from "node:path";
 
@@ -55,6 +55,7 @@ import {
 } from "../dist/index.js";
 
 import { ensureCeremonyOnDisk } from "../dist/multi.js";
+import { resolveVaultUrl } from "../dist/vault/url.js";
 import { AccountConnectError, AccountNamespace } from "../dist/account/index.js";
 import { VaultClient, VaultError, vaultIdentityFromDeviceKey } from "../dist/vault/client.js";
 import { WalletNamespace } from "../dist/wallet/index.js";
@@ -782,25 +783,38 @@ async function adminCmd() {
 // ceremony name; any leading path component is the project dir (so
 // `tn-js init foo/bar` lands at `foo/.tn/bar/`).
 //
-//   tn-js init <name>        mint/attach root ceremony at .tn/<name>/
+//   tn-js init <name>        mint/attach root ceremony at .tn/<name>/, back up
+//                            to the vault and print a claim URL
+//   tn-js init <name> --no-link   mint only; no vault backup / claim URL
+//   tn-js init <name> --link <url>  override the vault base URL
 //   tn-js init --yaml <path> attach to an explicit yaml (back-compat)
 //   tn-js init               discovery chain (./tn.yaml, ./.tn/default/)
 //
-// Prints a JSON receipt {ok, yaml_path, ceremony_id, did} to stdout.
+// On a fresh mint (unless --no-link) this backs the ceremony up to the
+// vault as a pending claim and prints a CLAIM URL the operator opens in a
+// browser to attach the project to their account. Mirrors Python cmd_init.
+//
+// Prints a JSON receipt {ok, yaml_path, ceremony_id, did, claim_url?} to stdout.
 async function initCmd() {
   const rest = argv.slice(3);
   let yamlPath = null;
   let projectArg = null;
+  let noLink = false;
+  let linkUrl = null;
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
     if (a === "--yaml") yamlPath = rest[++i];
+    else if (a === "--no-link") noLink = true;
+    else if (a === "--link") linkUrl = rest[++i];
     else if (a === "-h" || a === "--help") {
       stdout.write(
-        "tn-js init [<project-name>] [--yaml <yaml-path>]\n" +
+        "tn-js init [<project-name>] [--yaml <yaml-path>] [--no-link] [--link <url>]\n" +
           "  Mint or attach to a TN ceremony. A <project-name> mints a root\n" +
-          "  ceremony at <cwd>/.tn/<name>/ (own keystore + admin + logs).\n" +
-          "  --yaml attaches to an explicit yaml; no arg runs discovery\n" +
-          "  (./tn.yaml -> ./.tn/default/tn.yaml). Prints JSON receipt.\n",
+          "  ceremony at <cwd>/.tn/<name>/ (own keystore + admin + logs) and,\n" +
+          "  unless --no-link, backs it up to the vault and prints a claim URL.\n" +
+          "  --link <url> overrides the vault base URL (default: TN_VAULT_URL\n" +
+          "  or the hosted vault). --yaml attaches to an explicit yaml; no arg\n" +
+          "  runs discovery (./tn.yaml -> ./.tn/default/tn.yaml).\n",
       );
       return;
     } else if (!a.startsWith("-") && projectArg === null) {
@@ -814,15 +828,20 @@ async function initCmd() {
   // ensureCeremonyOnDisk is idempotent — re-running attaches to the
   // existing ceremony instead of erroring.
   let resolvedYaml = yamlPath;
+  let flipMint = false;
+  let wasFresh = false;
   if (resolvedYaml === null && projectArg !== null) {
     if (/\.ya?ml$/i.test(projectArg)) {
       // Positional is an explicit yaml path — attach mode (back-compat).
       resolvedYaml = projectArg;
     } else {
       // Positional is a project name — flip into `.tn/<name>/` (root mint).
+      flipMint = true;
       const ceremonyName = basename(projectArg);
       const parent = dirname(projectArg);
       const projectDir = parent === "." ? process.cwd() : pathResolve(parent);
+      const expectedYaml = join(projectDir, ".tn", ceremonyName, "tn.yaml");
+      wasFresh = !existsSync(expectedYaml);
       resolvedYaml = ensureCeremonyOnDisk(ceremonyName, { projectDir, asRoot: true });
     }
   }
@@ -838,15 +857,74 @@ async function initCmd() {
   } catch {
     // Config readback is best-effort; init itself succeeded.
   }
+
+  // Cold-path vault backup + claim URL. Only on a fresh flip-mint, unless
+  // --no-link. Mirrors Python cmd_init: a re-attach to an existing ceremony
+  // does NOT re-upload. Failures warn but never fail init — the on-disk
+  // ceremony is still valid.
+  let claimUrl = null;
+  if (flipMint && wasFresh && !noLink) {
+    const vaultBase = resolveVaultUrl(linkUrl ?? undefined);
+    try {
+      const res = await tn.initUpload({ vaultBase });
+      claimUrl = res.claimUrl;
+      stdout.write(`\n[tn init] Backed up to ${vaultBase}\n`);
+      stdout.write(`[tn init]   vault_id:   ${res.vaultId}\n`);
+      stdout.write(`[tn init]   expires:    ${_formatExpiresLocal(res.expiresAt)}\n`);
+      stdout.write(
+        `\n[tn init] CLAIM URL - open this in your browser to attach the project to your account:\n`,
+      );
+      stdout.write(`  ${res.claimUrl}\n`);
+      stdout.write(
+        `\n[tn init] Already have a vault account, or want to attach this project later?\n`,
+      );
+      stdout.write(`[tn init]   1. Sign in at ${vaultBase}/account\n`);
+      stdout.write(`[tn init]   2. On the Projects tab, mint a connect code\n`);
+      stdout.write(`[tn init]   3. Run:  tn-js account connect <code> --yaml ${resolvedYaml}\n\n`);
+    } catch (e) {
+      stdout.write(`[tn init] WARN backup to vault failed: ${e?.message ?? e}\n`);
+      stdout.write(`[tn init]   The ceremony at ${resolvedYaml} is still valid.\n`);
+    }
+  }
+
   stdout.write(
     JSON.stringify({
       ok: true,
       yaml_path: resolvedYaml ?? "(discovery)",
       ceremony_id: ceremonyId,
       did,
+      ...(claimUrl ? { claim_url: claimUrl } : {}),
     }) + "\n",
   );
   await tnClose();
+}
+
+// Render the vault's ISO-8601 UTC `expires_at` as local-time + tz label.
+// Falls back to the raw ISO string on parse failure. Mirrors Python's
+// _format_expires_local.
+function _formatExpiresLocal(expiresIso) {
+  try {
+    const dt = new Date(expiresIso);
+    if (Number.isNaN(dt.getTime())) return expiresIso;
+    const pad = (n) => String(n).padStart(2, "0");
+    const local =
+      `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ` +
+      `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+    // tz label from Intl when available, else numeric offset.
+    let tz = "";
+    try {
+      const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(dt);
+      tz = parts.find((p) => p.type === "timeZoneName")?.value ?? "";
+    } catch {
+      const off = -dt.getTimezoneOffset();
+      const sign = off >= 0 ? "+" : "-";
+      const abs = Math.abs(off);
+      tz = `UTC${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+    }
+    return `${local} ${tz}`.trim();
+  } catch {
+    return expiresIso;
+  }
 }
 
 // ── vault: link / unlink — emits the corresponding log events ──────────
