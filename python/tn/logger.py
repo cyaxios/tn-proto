@@ -333,7 +333,9 @@ class TNRuntime:
 
         # Route protocol events (tn.*) to separate file if configured
         if event_type.startswith("tn.") and self.cfg.protocol_events_location != "main_log":
-            pel_path = self.cfg.resolve_protocol_events_path(event_type)
+            pel_path = self.cfg.resolve_protocol_events_path(
+                event_type, event_id=event_id
+            )
             pel_path.parent.mkdir(parents=True, exist_ok=True)
             with open(pel_path, "a", encoding="utf-8") as _pel_f:
                 _pel_f.write(line)

@@ -746,7 +746,7 @@ impl Runtime {
             // Literal path — render once (returns the path with
             // any relative root resolved against yaml_dir) and
             // open the single writer.
-            let path = log_path_template.render("");
+            let path = log_path_template.render("", "");
             let writer = LogFileWriter::open(&path, Arc::clone(&storage))?;
             crate::log_file::LogWriters::Literal {
                 path,
@@ -800,7 +800,7 @@ impl Runtime {
                         writers: Mutex::new(std::collections::HashMap::new()),
                     }
                 } else {
-                    let path = pel_template.render("");
+                    let path = pel_template.render("", "");
                     let writer = LogFileWriter::open(&path, Arc::clone(&storage))?;
                     crate::log_file::LogWriters::Literal {
                         path,
@@ -1471,9 +1471,21 @@ impl Runtime {
         // disagree with the writer pool when the PEL template
         // contains `{event_class}`.
         let target_path: PathBuf = if pel_routed {
-            self.pel_writer.path_for(event_type)
+            self.pel_writer.path_for(event_type, &eid)
         } else {
-            self.log_writer.path_for(event_type)
+            self.log_writer.path_for(event_type, &eid)
+        };
+        // `{event_id}` templates render a unique file per emit, so the
+        // file is never shared with another row and there is nothing to
+        // coordinate cross-process. Skip the advisory lock + tail-scan
+        // (which would otherwise litter one `.emit.lock` per event and
+        // always read an empty just-created file) but keep the in-memory
+        // chain advance/commit so prev_hash linkage is preserved within
+        // a process and re-seeded from the glob at init across restarts.
+        let per_event = if pel_routed {
+            self.pel_writer.is_per_event()
+        } else {
+            self.log_writer.is_per_event()
         };
         let lock_path = {
             let mut s = target_path.as_os_str().to_os_string();
@@ -1622,7 +1634,7 @@ impl Runtime {
                 } else {
                     &self.log_writer
                 };
-                let writer_arc = match writers.writer_for(event_type) {
+                let writer_arc = match writers.writer_for(event_type, &eid) {
                     Ok(a) => a,
                     Err(e) => {
                         deferred_err = Some(e);
@@ -1646,7 +1658,7 @@ impl Runtime {
             }};
         }
 
-        if chain_enabled {
+        if chain_enabled && !per_event {
             let storage_for_lock = Arc::clone(&self.storage);
             let _lock_t0 = if crate::perf::enabled() {
                 Some(std::time::Instant::now())
@@ -1732,7 +1744,7 @@ impl Runtime {
                 } else {
                     &self.log_writer
                 };
-                let writer_arc = match writers.writer_for(event_type) {
+                let writer_arc = match writers.writer_for(event_type, &eid) {
                     Ok(a) => a,
                     Err(e) => {
                         deferred_err = Some(e);
@@ -1801,6 +1813,24 @@ impl Runtime {
                 line_out = Some(line);
                 Ok(())
             })?;
+        } else if chain_enabled {
+            // Chained `{event_id}` template: one unique file per emit,
+            // so there is no shared file to coordinate and no point
+            // acquiring the advisory lock or tail-scanning the
+            // just-created (empty) file. The in-memory ChainState is
+            // the authoritative tip within this process — it already
+            // carries the previous emit's row_hash — and `Runtime::init`
+            // re-seeds it by globbing every rendered file across a
+            // restart. So advance + write + commit without the lock.
+            let (seq, prev_hash) = self.chain.advance(event_type);
+            let result: std::io::Result<()> = (|| {
+                let (row_hash, line) = build_and_write!(seq, &prev_hash);
+                self.chain.commit(event_type, &row_hash);
+                row_hash_out = Some(row_hash);
+                line_out = Some(line);
+                Ok(())
+            })();
+            result?;
         } else {
             // Lockless emit for unchained profiles. No advisory
             // lock means no `.emit.lock` artifact on disk, no
@@ -4676,7 +4706,7 @@ fn seed_chain_from_template(
     // Resolve the parent directory we'll walk. Use `render` with a
     // placeholder event_type and take its parent — that gives us the
     // absolute path with yaml_dir already resolved.
-    let sample = template.render("__seed_probe__");
+    let sample = template.render("__seed_probe__", "__seed_probe__");
     let Some(parent_dir) = sample.parent() else {
         return Ok(false);
     };

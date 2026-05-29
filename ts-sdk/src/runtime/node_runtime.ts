@@ -29,7 +29,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve as pathResolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 
@@ -72,7 +72,7 @@ import { loadKeystore, type LoadedKeystore } from "./keystore.js";
 import { scanAttestedEventRecords, yamlRecipientDids } from "./reconcile.js";
 import { WasmRuntime } from "tn-wasm";
 import { nodeStorageAdapter } from "./storage_node.js";
-import { lastEmitReceipt } from "./wasm_shim.js";
+import { lastEmitReceipt, receiptFromLine } from "./wasm_shim.js";
 // Re-export for callers that still consume it through this module.
 export { lastEmitReceipt };
 
@@ -133,6 +133,70 @@ export function setSigning(enabled: boolean | null): void {
 /** Read the active session-level signing override (test/debug helper). */
 export function getSessionSignOverride(): boolean | null {
   return _sessionSignOverride;
+}
+
+/** True iff `s` contains a `{token}` substitution placeholder. */
+function hasTemplateTokens(s: string): boolean {
+  return /\{[^}]+\}/.test(s);
+}
+
+/**
+ * Expand a templated `logs.path` (e.g. `./logs/{event_id}.ndjson`) into
+ * the concrete files it could have produced, by replacing every
+ * `{token}` with a `*` wildcard and matching existing files. Relative
+ * patterns anchor to `yamlDir` (the ceremony directory), matching the
+ * write side and Python's `_log_targets.resolve_log_target`.
+ *
+ * Generic over the token set: any `{...}` becomes `*`, so `{event_id}`
+ * works the same as `{event_class}` / `{date}` without enumerating
+ * tokens here. Returns existing files only (a non-templated path is
+ * returned as-is so the caller's existence check is unchanged).
+ */
+function expandTemplatedLogPath(pattern: string, yamlDir: string): string[] {
+  if (!hasTemplateTokens(pattern)) return [pattern];
+  const globbed = pattern.replace(/\{[^}]+\}/g, "*");
+  let abs = globbed;
+  if (!isAbsolute(globbed)) {
+    const rel = globbed.replace(/^\.[\\/]/, "");
+    abs = join(yamlDir, rel);
+  }
+  // Walk segment-by-segment from the longest static prefix, expanding
+  // each `*`-bearing segment via readdir. Handles tokens in the
+  // basename (the common `{event_id}.ndjson` case) and in a single
+  // directory level (`{event_class}/{date}.ndjson`).
+  const segs = abs.split(/[\\/]+/);
+  let bases: string[] = [segs[0]!.length > 0 ? segs[0]! : "/"];
+  for (let i = 1; i < segs.length; i++) {
+    const seg = segs[i]!;
+    if (seg.length === 0) continue;
+    const next: string[] = [];
+    if (seg.includes("*") || seg.includes("?")) {
+      const re = new RegExp(
+        "^" + seg.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
+      );
+      for (const base of bases) {
+        let entries: string[];
+        try {
+          entries = readdirSync(base);
+        } catch {
+          continue;
+        }
+        for (const e of entries) {
+          if (re.test(e)) next.push(join(base, e));
+        }
+      }
+    } else {
+      for (const base of bases) next.push(join(base, seg));
+    }
+    bases = next;
+  }
+  return bases.filter((p) => {
+    try {
+      return statSync(p).isFile();
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -345,48 +409,21 @@ export class NodeRuntime {
         ? signOverride
         : _sessionSignOverride;
     const w = this.attachWasm();
-    if (
-      timestampOverride !== undefined ||
-      eventIdOverride !== undefined ||
-      resolvedSign !== null
-    ) {
-      w.emitWithOverrideSign(
-        level,
-        eventType,
-        fieldsOut,
-        timestampOverride ?? null,
-        eventIdOverride ?? null,
-        resolvedSign,
-      );
-    } else {
-      w.emit(level, eventType, fieldsOut);
-    }
-    const path = eventType.startsWith("tn.")
-      ? this._resolvePelPath(eventType)
-      : undefined;
-    return lastEmitReceipt(w, path);
-  }
-
-  /** Resolve the admin / protocol-events file path that wasm WILL write
-   *  this `eventType` to, mirroring `Runtime::resolve_pel` in
-   *  `tn-core/src/runtime.rs`. Supports the documented template
-   *  placeholders. Falls back to `resolveAdminLogPath` for the
-   *  template-less case so the static default stays consistent. */
-  private _resolvePelPath(eventType: string): string {
-    const tmpl = this.config.protocolEventsLocation;
-    if (!tmpl || tmpl === "main_log" || !tmpl.includes("{")) {
-      return resolveAdminLogPath(this.config);
-    }
-    const eventClass = eventType.split(".")[1] ?? "unknown";
-    const date = new Date().toISOString().slice(0, 10);
-    const filled = tmpl
-      .replace(/\{event_type\}/g, eventType)
-      .replace(/\{event_class\}/g, eventClass)
-      .replace(/\{date\}/g, date)
-      .replace(/\{yaml_dir\}/g, this.config.yamlDir)
-      .replace(/\{ceremony_id\}/g, this.config.ceremonyId)
-      .replace(/\{did\}/g, this.did);
-    return pathResolve(this.config.yamlDir, filled);
+    // Build the receipt from the emit's own returned line rather than
+    // reading the row back off disk. The read-back can't locate the row
+    // for a templated `logs.path` (e.g. `./logs/{event_id}.ndjson`),
+    // where each emit lands in its own per-event file rather than the
+    // single main log. The returned line is the canonical envelope
+    // regardless of which file the runtime wrote it to.
+    const line = w.emitReturningLine(
+      level,
+      eventType,
+      fieldsOut,
+      timestampOverride ?? null,
+      eventIdOverride ?? null,
+      resolvedSign,
+    );
+    return receiptFromLine(line);
   }
 
   /** Emit-side splice (spec §2.6).
@@ -2245,7 +2282,16 @@ export class NodeRuntime {
     };
 
     if (logPath !== undefined) {
-      collect(logPath);
+      // A templated `log` (e.g. `./logs/{event_id}.ndjson`) glob-expands
+      // to every rendered file and merges them — symmetric with the
+      // write side that fanned them out. Non-templated paths collect
+      // the single file as before.
+      if (hasTemplateTokens(logPath)) {
+        const yamlDir = dirname(this.config.yamlPath);
+        for (const f of expandTemplatedLogPath(logPath, yamlDir)) collect(f);
+      } else {
+        collect(logPath);
+      }
     } else {
       collect(this.config.logPath);
       const adminPath = resolveAdminLogPath(this.config);

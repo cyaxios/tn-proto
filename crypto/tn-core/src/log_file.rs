@@ -358,21 +358,33 @@ pub enum LogWriters {
 }
 
 impl LogWriters {
-    /// Resolve the rendered path for an emit with this event_type.
-    /// Cheap on the literal path (clone of cached PathBuf); does
-    /// one template render on the templated path.
-    pub fn path_for(&self, event_type: &str) -> PathBuf {
+    /// Resolve the rendered path for an emit with this event_type /
+    /// event_id. Cheap on the literal path (clone of cached PathBuf);
+    /// does one template render on the templated path.
+    pub fn path_for(&self, event_type: &str, event_id: &str) -> PathBuf {
         match self {
             LogWriters::Literal { path, .. } => path.clone(),
-            LogWriters::Templated { template, .. } => template.render(event_type),
+            LogWriters::Templated { template, .. } => template.render(event_type, event_id),
         }
     }
 
     /// Return (or lazy-create) the writer for a row whose
-    /// `event_type` would render to a given path. The returned
+    /// `event_type` / `event_id` render to a given path. The returned
     /// `Arc<Mutex<LogFileWriter>>` lives independently of the pool
     /// — caller drops the pool mutex before locking the writer.
-    pub fn writer_for(&self, event_type: &str) -> Result<Arc<Mutex<LogFileWriter>>> {
+    ///
+    /// `{event_id}` templates ([`PathTemplate::is_per_event`]) render
+    /// to a unique path per emit, so pooling a writer per rendered
+    /// path would grow the pool — and the OS file-handle count —
+    /// without bound. For those we open a *fresh* writer that is NOT
+    /// inserted into the pool: the caller appends its single row and
+    /// drops the `Arc`, which closes the handle (open-write-close).
+    /// Rotation / backup_count are moot for one-row files.
+    pub fn writer_for(
+        &self,
+        event_type: &str,
+        event_id: &str,
+    ) -> Result<Arc<Mutex<LogFileWriter>>> {
         match self {
             LogWriters::Literal { writer, .. } => Ok(writer.clone()),
             LogWriters::Templated {
@@ -380,7 +392,14 @@ impl LogWriters {
                 storage,
                 writers,
             } => {
-                let path = template.render(event_type);
+                let path = template.render(event_type, event_id);
+                if template.is_per_event() {
+                    // Unique path per emit — don't pool. The returned
+                    // Arc is the sole reference; once the caller drops
+                    // it the handle closes.
+                    let w = LogFileWriter::open(&path, storage.clone())?;
+                    return Ok(Arc::new(Mutex::new(w)));
+                }
                 let mut pool = writers
                     .lock()
                     .expect("log writers pool mutex poisoned");
@@ -399,6 +418,17 @@ impl LogWriters {
     /// path (any rendered path may differ per event_type).
     pub fn is_templated(&self) -> bool {
         matches!(self, LogWriters::Templated { .. })
+    }
+
+    /// True iff this writer set renders a unique file per emit
+    /// (template contains `{event_id}`). Drives the runtime's
+    /// lockless open-write-close emit path — see
+    /// `Runtime::emit_inner`.
+    pub fn is_per_event(&self) -> bool {
+        match self {
+            LogWriters::Literal { .. } => false,
+            LogWriters::Templated { template, .. } => template.is_per_event(),
+        }
     }
 
     /// Consume the writer pool, flushing each writer. Called from

@@ -36,7 +36,7 @@ from . import indexing as _indexing
 from .signing import DeviceKey
 
 _KNOWN_PEL_TOKENS = frozenset(
-    {"event_type", "event_class", "date", "yaml_dir", "ceremony_id", "did"}
+    {"event_type", "event_class", "event_id", "date", "yaml_dir", "ceremony_id", "did"}
 )
 
 
@@ -132,7 +132,7 @@ def _substitute_env_vars(text: str, source_path: Path) -> str:
 def _validate_path_template(
     template: str, yaml_dir: Path, *, key_name: str
 ) -> None:
-    """Validate a path template against the six TN tokens.
+    """Validate a path template against the known TN tokens.
 
     Used for both ``ceremony.admin_log_location`` and ``logs.path`` so
     the substitution rules and the safety check (must resolve under
@@ -149,6 +149,7 @@ def _validate_path_template(
     dummy = template
     dummy = dummy.replace("{event_type}", "tn.test")
     dummy = dummy.replace("{event_class}", "tn")
+    dummy = dummy.replace("{event_id}", "0190aaaa-0000-7000-8000-000000000000")
     dummy = dummy.replace("{date}", "2026-01-01")
     dummy = dummy.replace("{yaml_dir}", str(yaml_dir))
     dummy = dummy.replace("{ceremony_id}", "local_test1234")
@@ -369,13 +370,23 @@ class LoadedConfig:
                 seen.append(g.cipher.name)
         return seen
 
-    def resolve_protocol_events_path(self, event_type: str) -> Path:
-        """Render the admin-log path template for a single event_type."""
+    def resolve_protocol_events_path(
+        self, event_type: str, *, event_id: str = ""
+    ) -> Path:
+        """Render the admin-log path template for a single event.
+
+        ``event_id`` is only consumed by templates that contain the
+        ``{event_id}`` token; callers that don't have an id handy can
+        omit it (an admin template without ``{event_id}`` renders the
+        same regardless).
+        """
         return self._render_path_template(
-            self.protocol_events_location, event_type=event_type,
+            self.protocol_events_location,
+            event_type=event_type,
+            event_id=event_id,
         )
 
-    def resolve_log_path_for(self, event_type: str) -> Path:
+    def resolve_log_path_for(self, event_type: str, *, event_id: str = "") -> Path:
         """Render the main-log path template for a single event_type.
 
         Mirrors :meth:`resolve_protocol_events_path` but for ``logs.path``.
@@ -386,19 +397,29 @@ class LoadedConfig:
         :meth:`resolve_log_path` (the literal path).
 
         Read side: ``tn.read(log=cfg.log_path)`` already glob-expands
-        the same six tokens via ``_log_targets.resolve_log_target``, so
+        the same tokens via ``_log_targets.resolve_log_target``, so
         the round-trip is symmetric without further changes.
-        """
-        return self._render_path_template(self.log_path, event_type=event_type)
 
-    def _render_path_template(self, template: str, *, event_type: str) -> Path:
-        """Substitute the six TN path tokens against ``event_type`` /
-        the cermony's static identity, then resolve relative paths
-        against the yaml directory.
+        ``event_id`` is consumed only by ``{event_id}`` templates (one
+        file per event). The Rust runtime renders that token itself on
+        the accelerated path; this method backs the pure-Python
+        fallback (``FileTemplatedRotatingHandler``) and the read-side
+        resolver.
+        """
+        return self._render_path_template(
+            self.log_path, event_type=event_type, event_id=event_id
+        )
+
+    def _render_path_template(
+        self, template: str, *, event_type: str, event_id: str = ""
+    ) -> Path:
+        """Substitute the TN path tokens against ``event_type`` /
+        ``event_id`` / the cermony's static identity, then resolve
+        relative paths against the yaml directory.
 
         Tokens recognised (matches ``_KNOWN_PEL_TOKENS`` in this file):
-        ``{event_type}``, ``{event_class}``, ``{date}``, ``{yaml_dir}``,
-        ``{ceremony_id}``, ``{did}``.
+        ``{event_type}``, ``{event_class}``, ``{event_id}``, ``{date}``,
+        ``{yaml_dir}``, ``{ceremony_id}``, ``{did}``.
 
         Single source of truth for both ``resolve_protocol_events_path``
         and ``resolve_log_path_for`` so the substitution rules stay
@@ -410,6 +431,7 @@ class LoadedConfig:
         result = template
         result = result.replace("{event_type}", event_type)
         result = result.replace("{event_class}", event_type.split(".")[0])
+        result = result.replace("{event_id}", event_id)
         result = result.replace("{date}", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
         result = result.replace("{yaml_dir}", str(yaml_dir))
         result = result.replace("{ceremony_id}", self.ceremony_id)
@@ -1350,7 +1372,7 @@ def load(yaml_path: Path) -> LoadedConfig:
 
     logs_block = doc.get("logs") or {}
     log_path = str(logs_block.get("path") or "./.tn/logs/tn.ndjson")
-    # Validate the main-log path template (if any). Same six tokens
+    # Validate the main-log path template (if any). Same tokens
     # the admin log accepts; the runtime writer renders per-envelope.
     # See LoadedConfig.resolve_log_path_for / FileTemplatedRotatingHandler.
     if "{" in log_path:

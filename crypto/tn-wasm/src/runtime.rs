@@ -491,6 +491,39 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// Full-control emit that returns the canonical envelope NDJSON line
+    /// (or `undefined` when the log-level threshold filtered the emit).
+    ///
+    /// Mirrors the PyO3 binding's line-returning emit. The host (TS
+    /// `NodeRuntime`) parses the returned line to synthesize the
+    /// `EmitReceipt` directly, instead of reading the row back off the
+    /// log. That read-back breaks for templated `logs.path` (e.g.
+    /// `./logs/{event_id}.ndjson`) where the just-written row lives in a
+    /// per-event file, not the single main log — the line is the source
+    /// of truth regardless of where it was written.
+    #[wasm_bindgen(js_name = "emitReturningLine")]
+    pub fn emit_returning_line_js(
+        &self,
+        level: &str,
+        event_type: &str,
+        fields: JsValue,
+        timestamp: Option<String>,
+        event_id: Option<String>,
+        sign: Option<bool>,
+    ) -> Result<Option<String>, JsError> {
+        let map = fields_object(fields)?;
+        self.inner
+            .emit_with_override_sign_returning_line(
+                level,
+                event_type,
+                map,
+                timestamp.as_deref(),
+                event_id.as_deref(),
+                sign,
+            )
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     /// Severity-less attested event (envelope carries `level: ""`).
     ///
     /// Bypasses the log-level threshold filter by design — this is the

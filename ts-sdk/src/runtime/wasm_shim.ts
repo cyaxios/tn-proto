@@ -15,6 +15,33 @@ import type { WasmRuntime } from "tn-wasm";
 import type { EmitReceipt } from "../core/results.js";
 import { asRowHash } from "../core/types.js";
 
+/** Synthesize an EmitReceipt from a canonical envelope NDJSON line (the
+ *  value returned by `wasm.emitReturningLine`). `null` / `undefined` —
+ *  the emit was filtered by the log-level threshold and produced no
+ *  envelope — yields a zero receipt. This is the templating-safe path:
+ *  the line is the envelope regardless of which file it was written to,
+ *  so it works for `./logs/{event_id}.ndjson` and friends where the row
+ *  isn't in the single main log. */
+export function receiptFromLine(line: string | null | undefined): EmitReceipt {
+  if (line === null || line === undefined || line.trim() === "") {
+    return { eventId: "", rowHash: asRowHash(""), sequence: 0 };
+  }
+  let env: Record<string, unknown>;
+  try {
+    env = JSON.parse(line.trim()) as Record<string, unknown>;
+  } catch (e) {
+    throw new Error(
+      `receiptFromLine: malformed envelope line: ${(e as Error).message}`,
+      { cause: e },
+    );
+  }
+  return {
+    eventId: String(env["event_id"] ?? ""),
+    rowHash: asRowHash(String(env["row_hash"] ?? "")),
+    sequence: Number(env["sequence"] ?? 0),
+  };
+}
+
 /** Read the last envelope and synthesize an EmitReceipt. The caller should
  *  invoke this *immediately* after a wasm.* method that wrote a single
  *  envelope; if multiple emits raced, you get the most recent.

@@ -183,13 +183,15 @@ class FileTemplatedRotatingHandler(SyncHandler):
     """Main-log handler that renders a path template per envelope.
 
     Used when ``logs.path`` in the ceremony yaml contains any of the
-    six TN path tokens (``{event_type}``, ``{event_class}``, ``{date}``,
-    ``{yaml_dir}``, ``{ceremony_id}``, ``{did}``). On every
+    TN path tokens (``{event_type}``, ``{event_class}``, ``{event_id}``,
+    ``{date}``, ``{yaml_dir}``, ``{ceremony_id}``, ``{did}``). On every
     :meth:`emit` the template is rendered against the envelope's
-    ``event_type`` plus the cermony's static identity, producing a
-    concrete absolute path. The handler caches one inner
+    ``event_type`` / ``event_id`` plus the cermony's static identity,
+    producing a concrete absolute path. The handler caches one inner
     :class:`_BytesRotatingFileHandler` per rendered path so file
-    descriptors aren't reopened on every write.
+    descriptors aren't reopened on every write — except for
+    ``{event_id}`` templates (unique path per emit), which use an
+    open-write-close path so the descriptor count stays bounded.
 
     Mirrors the admin log's per-event-type fan-out (see
     :meth:`LoadedConfig.resolve_protocol_events_path`) so a single
@@ -225,10 +227,20 @@ class FileTemplatedRotatingHandler(SyncHandler):
         self._backup_count = backup_count
         self._rotate_on_init = rotate_on_init
         self._lock = threading.Lock()
+        # ``{event_id}`` is unique per emit, so a template containing it
+        # renders to a distinct file for every event. Caching a writer
+        # per rendered path (as the pooled path below does) would grow
+        # ``self._handlers`` — and the open file-handle count — without
+        # bound. For those templates we open-write-close each row
+        # instead (rotation / backup_count are moot for one-row files).
+        # Mirrors the Rust runtime's per-event writer policy
+        # (``LogWriters::writer_for`` in crypto/tn-core/src/log_file.rs).
+        self._per_event = "{event_id}" in template
         # path-string -> handler. Bounded by the cardinality of the
         # template's expansion (event_type * date * ...). Per-day per-
         # event-type traffic should never blow this up; if it ever
-        # does, an LRU eviction layer is a one-screen addition.
+        # does, an LRU eviction layer is a one-screen addition. Stays
+        # empty for ``{event_id}`` templates (write-once-close).
         self._handlers: dict[str, _BytesRotatingFileHandler] = {}
 
     def _handler_for(self, event_type: str) -> _BytesRotatingFileHandler:
@@ -265,6 +277,22 @@ class FileTemplatedRotatingHandler(SyncHandler):
         )
         if not isinstance(event_type, str):
             event_type = "tn.unrouted"
+        if self._per_event:
+            event_id = (
+                envelope.get("event_id") if isinstance(envelope, dict) else None
+            )
+            if not isinstance(event_id, str) or not event_id:
+                event_id = "tn.unrouted"
+            path = self._cfg.resolve_log_path_for(event_type, event_id=event_id)
+            with self._lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # Open-write-close: one row, then release the handle so
+                # a long run can't accumulate one descriptor per event.
+                # Append mode is defensive — a re-emitted event_id keeps
+                # both rows rather than clobbering the first.
+                with open(path, "ab") as f:
+                    f.write(raw_line)
+            return
         with self._lock:
             self._handler_for(event_type).emit_bytes(raw_line)
 
