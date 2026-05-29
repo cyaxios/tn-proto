@@ -186,6 +186,7 @@ export {
   type InitUploadOptions,
   type InitUploadResult,
 } from "./handlers/init_upload.js";
+export { Identity, defaultIdentityPath, defaultIdentityDir } from "./identity.js";
 export {
   compileKitBundle,
   compileKitBundleToFile,

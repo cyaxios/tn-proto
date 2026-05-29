@@ -161,7 +161,16 @@ export function migrateLegacyLayout(projectDir?: string): string | null {
  */
 export function ensureCeremonyOnDisk(
   name: string,
-  opts: { projectDir?: string; profile?: string; asRoot?: boolean } = {},
+  opts: {
+    projectDir?: string;
+    profile?: string;
+    asRoot?: boolean;
+    /** Seed the ceremony's device key from this 32-byte Ed25519 seed
+     *  instead of minting a random one. Used by `tn-js init` to bind every
+     *  ceremony to the machine-global identity (so they share one DID).
+     *  Only honoured on the default / as-root mint path. */
+    devicePrivateBytes?: Uint8Array;
+  } = {},
 ): string {
   const yamlPath = ceremonyYamlPath(name, opts.projectDir);
   if (existsSync(yamlPath)) return yamlPath;
@@ -185,7 +194,14 @@ export function ensureCeremonyOnDisk(
     // stays unstamped.
     const projectName =
       opts.asRoot && name !== DEFAULT_CEREMONY_NAME ? name : undefined;
-    return _createDefaultCeremony(name, yamlPath, opts.projectDir, profile, projectName);
+    return _createDefaultCeremony(
+      name,
+      yamlPath,
+      opts.projectDir,
+      profile,
+      projectName,
+      opts.devicePrivateBytes,
+    );
   }
   return _createStreamYaml(name, yamlPath, opts.projectDir, profile);
 }
@@ -196,6 +212,7 @@ function _createDefaultCeremony(
   projectDir: string | undefined,
   profile: ProfileName,
   projectName?: string,
+  devicePrivateBytes?: Uint8Array,
 ): string {
   const ydir = ceremonyDir(name, projectDir);
   mkdirSync(ydir, { recursive: true });
@@ -209,6 +226,7 @@ function _createDefaultCeremony(
       adminLogPath: string;
       profile: ProfileName;
       projectName?: string;
+      devicePrivateBytes?: Uint8Array;
     } = {
       keystoreDir: join(ydir, "keys"),
       logPath: join(ydir, "logs", "tn.ndjson"),
@@ -216,6 +234,7 @@ function _createDefaultCeremony(
       profile,
     };
     if (projectName !== undefined) freshOpts.projectName = projectName;
+    if (devicePrivateBytes !== undefined) freshOpts.devicePrivateBytes = devicePrivateBytes;
     createFreshCeremony(yamlPath, freshOpts);
   } catch (e) {
     throw new TNCreateFailed(
