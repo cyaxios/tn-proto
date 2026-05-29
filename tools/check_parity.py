@@ -203,6 +203,14 @@ KNOWN_OMISSIONS = {
     # ------------------------------------------------------------------
     "DEFAULT_VAULT_URL", "ENV_VAULT_URL",
     "ENV_VAULT_DEFAULT_BASE", "ENV_NO_LINK",
+
+    # ------------------------------------------------------------------
+    # init-upload option/result types. Pure data shapes for the
+    # `initUpload` / `Tn.initUpload` verb (which IS a parity row).
+    # Python's `init_upload` returns a plain dict, so there are no named
+    # Python counterparts. NEW in 0.5.0a2.
+    # ------------------------------------------------------------------
+    "InitUploadOptions", "InitUploadResult",
 }
 
 

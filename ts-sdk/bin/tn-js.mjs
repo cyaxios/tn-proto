@@ -32,9 +32,9 @@
 import { createInterface } from "node:readline";
 import { Buffer } from "node:buffer";
 import { stdin, stdout, argv, exit } from "node:process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve as pathResolve } from "node:path";
+import { basename, dirname, join, resolve as pathResolve } from "node:path";
 
 import {
   DeviceKey,
@@ -54,6 +54,9 @@ import {
   verify,
 } from "../dist/index.js";
 
+import { ensureCeremonyOnDisk } from "../dist/multi.js";
+import { resolveVaultUrl } from "../dist/vault/url.js";
+import { Identity } from "../dist/identity.js";
 import { AccountConnectError, AccountNamespace } from "../dist/account/index.js";
 import { VaultClient, VaultError, vaultIdentityFromDeviceKey } from "../dist/vault/client.js";
 import { WalletNamespace } from "../dist/wallet/index.js";
@@ -774,33 +777,89 @@ async function adminCmd() {
 }
 
 // ── init: bootstrap or attach to a ceremony ────────────────────────────
-// Wraps the programmatic `tn.init(yamlPath?)` from @tnproto/sdk. With no
-// yamlPath, the discovery chain runs (./tn.yaml -> ./.tn/default/tn.yaml).
-// Prints a JSON receipt {ok, yaml_path, ceremony_id, did} to stdout.
+// Mirrors Python's `tn init <project>` (cmd_init). The positional is a
+// PROJECT NAME, not a yaml path: it mints (or re-attaches to) a ROOT
+// ceremony at `<projectDir>/.tn/<name>/tn.yaml` with its own keystore,
+// admin log, and logs — the 0.5.0a2 flipped layout. The basename is the
+// ceremony name; any leading path component is the project dir (so
+// `tn-js init foo/bar` lands at `foo/.tn/bar/`).
 //
-// NOTE: this is the LIGHT init that parallels Python's programmatic
-// `tn.init(yaml_path)`. The full Python CLI ceremony bootstrap (mnemonic
-// generation, keystore mint, vault claim URL emission) is tracked
-// separately and requires the wallet/account SDK port to land first.
+//   tn-js init <name>        mint/attach root ceremony at .tn/<name>/, back up
+//                            to the vault and print a claim URL
+//   tn-js init <name> --no-link   mint only; no vault backup / claim URL
+//   tn-js init <name> --link <url>  override the vault base URL
+//   tn-js init --yaml <path> attach to an explicit yaml (back-compat)
+//   tn-js init               discovery chain (./tn.yaml, ./.tn/default/)
+//
+// On a fresh mint (unless --no-link) this backs the ceremony up to the
+// vault as a pending claim and prints a CLAIM URL the operator opens in a
+// browser to attach the project to their account. Mirrors Python cmd_init.
+//
+// Prints a JSON receipt {ok, yaml_path, ceremony_id, did, claim_url?} to stdout.
 async function initCmd() {
   const rest = argv.slice(3);
   let yamlPath = null;
+  let projectArg = null;
+  let noLink = false;
+  let linkUrl = null;
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
     if (a === "--yaml") yamlPath = rest[++i];
+    else if (a === "--no-link") noLink = true;
+    else if (a === "--link") linkUrl = rest[++i];
     else if (a === "-h" || a === "--help") {
       stdout.write(
-        "tn-js init [<yaml-path>] [--yaml <yaml-path>]\n" +
-          "  Initialize or attach to a TN ceremony. With no path, discovers\n" +
-          "  ./tn.yaml or ./.tn/default/tn.yaml. Prints JSON receipt on stdout.\n",
+        "tn-js init [<project-name>] [--yaml <yaml-path>] [--no-link] [--link <url>]\n" +
+          "  Mint or attach to a TN ceremony. A <project-name> mints a root\n" +
+          "  ceremony at <cwd>/.tn/<name>/ (own keystore + admin + logs) and,\n" +
+          "  unless --no-link, backs it up to the vault and prints a claim URL.\n" +
+          "  --link <url> overrides the vault base URL (default: TN_VAULT_URL\n" +
+          "  or the hosted vault). --yaml attaches to an explicit yaml; no arg\n" +
+          "  runs discovery (./tn.yaml -> ./.tn/default/tn.yaml).\n",
       );
       return;
-    } else if (!a.startsWith("-") && yamlPath === null) {
-      yamlPath = a;
+    } else if (!a.startsWith("-") && projectArg === null) {
+      projectArg = a;
     }
   }
 
-  const tn = await tnInit(yamlPath ?? undefined);
+  // Resolve the ceremony yaml. A bare project name flips into the
+  // `.tn/<name>/` layout via an as-root mint (mirrors Python cmd_init's
+  // `_ensure_ceremony_on_disk(name, as_root=True, project_dir=...)`).
+  // ensureCeremonyOnDisk is idempotent — re-running attaches to the
+  // existing ceremony instead of erroring.
+  // Load-or-mint the machine-global device identity. Every flip-minted
+  // ceremony is seeded from it so they share ONE device DID — the
+  // precondition for warm-attach (a prior `account connect` mints that DID
+  // onto the account; future inits reuse it). Mirrors Python's global
+  // ~/.config/tn/identity.json model.
+  const identity = Identity.loadOrMint();
+
+  let resolvedYaml = yamlPath;
+  let flipMint = false;
+  let wasFresh = false;
+  if (resolvedYaml === null && projectArg !== null) {
+    if (/\.ya?ml$/i.test(projectArg)) {
+      // Positional is an explicit yaml path — attach mode (back-compat).
+      resolvedYaml = projectArg;
+    } else {
+      // Positional is a project name — flip into `.tn/<name>/` (root mint),
+      // seeded from the global identity's device key.
+      flipMint = true;
+      const ceremonyName = basename(projectArg);
+      const parent = dirname(projectArg);
+      const projectDir = parent === "." ? process.cwd() : pathResolve(parent);
+      const expectedYaml = join(projectDir, ".tn", ceremonyName, "tn.yaml");
+      wasFresh = !existsSync(expectedYaml);
+      resolvedYaml = ensureCeremonyOnDisk(ceremonyName, {
+        projectDir,
+        asRoot: true,
+        devicePrivateBytes: identity.seed,
+      });
+    }
+  }
+
+  const tn = await tnInit(resolvedYaml ?? undefined);
   let did = null;
   let ceremonyId = null;
   try {
@@ -811,15 +870,129 @@ async function initCmd() {
   } catch {
     // Config readback is best-effort; init itself succeeded.
   }
+
+  // Vault attach. Only on a fresh flip-mint, unless --no-link. Mirrors
+  // Python cmd_init: a re-attach to an existing ceremony does NOT re-upload.
+  //
+  //   WARM path: if TN_API_KEY is set (wins) or the global identity already
+  //   carries a linked_account_id, try to authenticate (DID-challenge — the
+  //   device DID is a minted DID on the account) and attach the project
+  //   directly via wallet.link. No browser, no claim URL.
+  //
+  //   COLD path: otherwise (or if warm-attach fails), mint a pending claim
+  //   and print a CLAIM URL the operator opens in a browser.
+  //
+  // Failures warn but never fail init — the on-disk ceremony is still valid.
+  let claimUrl = null;
+  let attached = false;
+  if (flipMint && wasFresh && !noLink) {
+    const vaultBase = resolveVaultUrl(linkUrl ?? undefined);
+    const warmSignal = process.env.TN_VAULT_API_KEY || process.env.TN_API_KEY || identity.linkedAccountId;
+    if (warmSignal) {
+      attached = await _tryWarmAttach(tn, resolvedYaml, identity, vaultBase);
+    }
+    if (!attached) {
+      // Cold fallback: pending-claim + claim URL.
+      try {
+        const res = await tn.initUpload({ vaultBase });
+        claimUrl = res.claimUrl;
+        stdout.write(`\n[tn init] Backed up to ${vaultBase}\n`);
+        stdout.write(`[tn init]   vault_id:   ${res.vaultId}\n`);
+        stdout.write(`[tn init]   expires:    ${_formatExpiresLocal(res.expiresAt)}\n`);
+        stdout.write(
+          `\n[tn init] CLAIM URL - open this in your browser to attach the project to your account:\n`,
+        );
+        stdout.write(`  ${res.claimUrl}\n`);
+        stdout.write(
+          `\n[tn init] Already have a vault account, or want to attach this project later?\n`,
+        );
+        stdout.write(`[tn init]   1. Sign in at ${vaultBase}/account\n`);
+        stdout.write(`[tn init]   2. On the Projects tab, mint a connect code\n`);
+        stdout.write(`[tn init]   3. Run:  tn-js account connect <code> --yaml ${resolvedYaml}\n\n`);
+      } catch (e) {
+        stdout.write(`[tn init] WARN backup to vault failed: ${e?.message ?? e}\n`);
+        stdout.write(`[tn init]   The ceremony at ${resolvedYaml} is still valid.\n`);
+      }
+    }
+  }
+
   stdout.write(
     JSON.stringify({
       ok: true,
-      yaml_path: yamlPath ?? "(discovery)",
+      yaml_path: resolvedYaml ?? "(discovery)",
       ceremony_id: ceremonyId,
       did,
+      ...(claimUrl ? { claim_url: claimUrl } : {}),
+      ...(attached ? { attached: true } : {}),
     }) + "\n",
   );
   await tnClose();
+}
+
+// Warm-attach: authenticate to the vault with the global device identity
+// (DID-challenge — the device DID is a minted DID on the account after a
+// prior `account connect`) and register the project directly via
+// wallet.link. No browser, no claim URL. Returns true on success; false on
+// any auth/link failure so the caller falls back to the cold claim-URL path.
+// Mirrors Python's `_try_warm_attach`.
+async function _tryWarmAttach(_tn, yamlPath, identity, vaultBase) {
+  let client;
+  try {
+    const vid = vaultIdentityFromDeviceKey(identity.deviceKey());
+    client = await VaultClient.forIdentity(vid, vaultBase);
+  } catch (e) {
+    stdout.write(
+      `[tn init] WARN account auth failed (${e?.message ?? e}); using claim URL instead\n`,
+    );
+    return false;
+  }
+  try {
+    const res = await WalletNamespace.link(client, yamlPath);
+    stdout.write(`\n[tn init] Attached to your vault account (no browser needed).\n`);
+    stdout.write(`[tn init]   project:    ${res.projectName}\n`);
+    stdout.write(`[tn init]   project_id: ${res.projectId}\n`);
+    stdout.write(`[tn init]   linked:     ${vaultBase}\n\n`);
+    return true;
+  } catch (e) {
+    stdout.write(
+      `[tn init] WARN account attach failed (${e?.message ?? e}); using claim URL instead\n`,
+    );
+    return false;
+  } finally {
+    try {
+      client?.close?.();
+    } catch {
+      /* no-op */
+    }
+  }
+}
+
+// Render the vault's ISO-8601 UTC `expires_at` as local-time + tz label.
+// Falls back to the raw ISO string on parse failure. Mirrors Python's
+// _format_expires_local.
+function _formatExpiresLocal(expiresIso) {
+  try {
+    const dt = new Date(expiresIso);
+    if (Number.isNaN(dt.getTime())) return expiresIso;
+    const pad = (n) => String(n).padStart(2, "0");
+    const local =
+      `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ` +
+      `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+    // tz label from Intl when available, else numeric offset.
+    let tz = "";
+    try {
+      const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(dt);
+      tz = parts.find((p) => p.type === "timeZoneName")?.value ?? "";
+    } catch {
+      const off = -dt.getTimezoneOffset();
+      const sign = off >= 0 ? "+" : "-";
+      const abs = Math.abs(off);
+      tz = `UTC${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+    }
+    return `${local} ${tz}`.trim();
+  } catch {
+    return expiresIso;
+  }
 }
 
 // ── vault: link / unlink — emits the corresponding log events ──────────
@@ -1018,6 +1191,26 @@ async function accountCmd() {
 
   try {
     const result = await AccountNamespace.connect(opts.code, vaultUrl, ks.device, { yamlPath: opts.yaml });
+
+    // Stamp the account binding onto the machine-global identity so future
+    // `tn-js init <name>` runs warm-attach to this account automatically
+    // (no browser). Mirrors Python cmd_account_connect persisting
+    // identity.linked_account_id. Best-effort: a stamp failure must not
+    // fail the connect (the per-ceremony sync-state binding already
+    // succeeded inside AccountNamespace.connect).
+    let globalStamped = false;
+    try {
+      const identity = Identity.loadOrMint();
+      if (identity.linkedAccountId !== result.accountId || identity.linkedVault !== vaultUrl) {
+        identity.linkedAccountId = result.accountId;
+        identity.linkedVault = vaultUrl;
+        identity.save();
+      }
+      globalStamped = true;
+    } catch (e) {
+      stdout.write(`[account connect] WARN could not stamp global identity: ${e?.message ?? e}\n`);
+    }
+
     stdout.write(
       JSON.stringify({
         ok: true,
@@ -1026,6 +1219,7 @@ async function accountCmd() {
         did: result.did,
         project_id: result.projectId ?? null,
         project_name: result.projectName ?? null,
+        global_identity_stamped: globalStamped,
       }) + "\n",
     );
   } catch (e) {

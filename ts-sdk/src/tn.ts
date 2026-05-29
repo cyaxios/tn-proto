@@ -21,6 +21,11 @@ import { tmpdir } from "node:os";
 import { join, resolve as pathResolve, isAbsolute as pathIsAbsolute } from "node:path";
 
 import { NodeRuntime, setSigning as _runtimeSetSigning } from "./runtime/node_runtime.js";
+import {
+  initUpload as _initUpload,
+  type InitUploadOptions,
+  type InitUploadResult,
+} from "./handlers/init_upload.js";
 import { iterLogFiles } from "./runtime/reconcile.js";
 import type { EmitReceipt } from "./core/results.js";
 import { watch as _watchFlat, type WatchOptions as _WatchFlatOptions } from "./watch.js";
@@ -803,6 +808,19 @@ export class Tn {
   /** Always false — Tn wraps NodeRuntime (pure-TS), not a Rust WASM runtime. */
   usingRust(): boolean {
     return false;
+  }
+
+  /**
+   * Back up this ceremony to a vault as a pending claim and return a
+   * claim URL. Mirrors Python's `tn init` vault flow / `init_upload`.
+   *
+   * Mints a fresh BEK, exports an AES-256-GCM-encrypted `full_keystore`
+   * tnpkg, POSTs it UNAUTHENTICATED to `/api/v1/pending-claims`, and
+   * returns `{vaultId, expiresAt, claimUrl, passwordB64}`. The claim URL
+   * fragment carries the BEK; the vault never sees it.
+   */
+  async initUpload(opts: InitUploadOptions): Promise<InitUploadResult> {
+    return _initUpload(this._rt, opts);
   }
 
   /** Flush handlers and (for ephemeral instances) remove the tempdir.

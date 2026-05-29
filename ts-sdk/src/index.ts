@@ -182,6 +182,12 @@ export {
 } from "./runtime/reconcile.js";
 export * from "./handlers/index.js";
 export {
+  initUpload,
+  type InitUploadOptions,
+  type InitUploadResult,
+} from "./handlers/init_upload.js";
+export { Identity, defaultIdentityPath, defaultIdentityDir } from "./identity.js";
+export {
   compileKitBundle,
   compileKitBundleToFile,
   type CompileKitBundleOptions,

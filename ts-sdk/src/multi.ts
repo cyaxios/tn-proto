@@ -161,7 +161,16 @@ export function migrateLegacyLayout(projectDir?: string): string | null {
  */
 export function ensureCeremonyOnDisk(
   name: string,
-  opts: { projectDir?: string; profile?: string } = {},
+  opts: {
+    projectDir?: string;
+    profile?: string;
+    asRoot?: boolean;
+    /** Seed the ceremony's device key from this 32-byte Ed25519 seed
+     *  instead of minting a random one. Used by `tn-js init` to bind every
+     *  ceremony to the machine-global identity (so they share one DID).
+     *  Only honoured on the default / as-root mint path. */
+    devicePrivateBytes?: Uint8Array;
+  } = {},
 ): string {
   const yamlPath = ceremonyYamlPath(name, opts.projectDir);
   if (existsSync(yamlPath)) return yamlPath;
@@ -174,29 +183,59 @@ export function ensureCeremonyOnDisk(
     );
   }
 
-  if (name === DEFAULT_CEREMONY_NAME) {
-    return _createDefaultCeremony(yamlPath, opts.projectDir, profile);
+  // `asRoot` lets a project-named ceremony (0.5.0a2 layout, `.tn/<project>/`)
+  // mint its own keystore instead of being a stream that references
+  // `../default/keys`. The literal "default" name keeps the same behaviour
+  // for back-compat. Mirrors python/tn/_multi.py:_ensure_ceremony_on_disk.
+  if (name === DEFAULT_CEREMONY_NAME || opts.asRoot) {
+    // For an as-root *named* project, stamp ceremony.project_name = name
+    // so the vault labels the bound project with the human name (mirrors
+    // Python's `_stamp_project_labels`). The literal "default" ceremony
+    // stays unstamped.
+    const projectName =
+      opts.asRoot && name !== DEFAULT_CEREMONY_NAME ? name : undefined;
+    return _createDefaultCeremony(
+      name,
+      yamlPath,
+      opts.projectDir,
+      profile,
+      projectName,
+      opts.devicePrivateBytes,
+    );
   }
   return _createStreamYaml(name, yamlPath, opts.projectDir, profile);
 }
 
 function _createDefaultCeremony(
+  name: string,
   yamlPath: string,
   projectDir: string | undefined,
   profile: ProfileName,
+  projectName?: string,
+  devicePrivateBytes?: Uint8Array,
 ): string {
-  const ydir = ceremonyDir(DEFAULT_CEREMONY_NAME, projectDir);
+  const ydir = ceremonyDir(name, projectDir);
   mkdirSync(ydir, { recursive: true });
   for (const sub of ["keys", "logs", "admin", "vault"]) {
     mkdirSync(join(ydir, sub), { recursive: true });
   }
   try {
-    createFreshCeremony(yamlPath, {
+    const freshOpts: {
+      keystoreDir: string;
+      logPath: string;
+      adminLogPath: string;
+      profile: ProfileName;
+      projectName?: string;
+      devicePrivateBytes?: Uint8Array;
+    } = {
       keystoreDir: join(ydir, "keys"),
       logPath: join(ydir, "logs", "tn.ndjson"),
       adminLogPath: join(ydir, "admin", "admin.ndjson"),
       profile,
-    });
+    };
+    if (projectName !== undefined) freshOpts.projectName = projectName;
+    if (devicePrivateBytes !== undefined) freshOpts.devicePrivateBytes = devicePrivateBytes;
+    createFreshCeremony(yamlPath, freshOpts);
   } catch (e) {
     throw new TNCreateFailed(
       `could not create fresh ceremony at ${yamlPath}: ${(e as Error).message}`,

@@ -47,6 +47,7 @@ import {
   type VectorClock,
 } from "../core/tnpkg.js";
 import { readTnpkg, writeTnpkg } from "../tnpkg_io.js";
+import { encryptBodyBlob, BODY_CIPHER_SUITE, BODY_FRAME } from "../core/body_encryption.js";
 import {
   appendAdminEnvelopes,
   existingRowHashes,
@@ -1170,6 +1171,68 @@ export class NodeRuntime {
     if (extras.headRowHash !== undefined) manifest.headRowHash = extras.headRowHash;
     if (extras.state !== undefined) manifest.state = extras.state;
 
+    signManifest(manifest, this.keystore.device);
+    return writeTnpkg(outPath, manifest, body);
+  }
+
+  /**
+   * Export an AES-256-GCM-encrypted `full_keystore` tnpkg (BYOK / BEK).
+   *
+   * Mirrors Python's `export(kind="full_keystore", encrypt_body_with=bek)`
+   * (the init-upload / pending-claim path, D-19 / D-5). The body files are
+   * packed, AES-GCM-encrypted under `bek` into a single
+   * `body/encrypted.bin` member, and the manifest's `state.body_encryption`
+   * block records the cipher suite + frame + ciphertext hash so a consumer
+   * can verify the blob without holding the key.
+   *
+   * The browser claim page (`static/claim/claim.js::decryptBody`) unzips
+   * the outer tnpkg, pulls `body/encrypted.bin`, and AES-GCM-decrypts with
+   * the BEK delivered in the claim URL fragment. The blob layout
+   * (`nonce || ciphertext+tag`, empty AAD) is produced by
+   * {@link encryptBodyBlob} and matches that consumer byte-for-byte.
+   *
+   * Async because `encryptBodyBlob` uses the WebCrypto SubtleCrypto API.
+   *
+   * @param bek - 32-byte AES-256 body encryption key (caller-minted).
+   * @param outPath - where to write the `.tnpkg`.
+   * @param opts - optional group filter (defaults to all groups).
+   * @returns the written path.
+   */
+  async exportFullKeystoreEncrypted(
+    bek: Uint8Array,
+    outPath: string,
+    opts: { groups?: string[] } = {},
+  ): Promise<string> {
+    if (bek.length !== 32) {
+      throw new Error(
+        `exportFullKeystoreEncrypted: bek must be 32 bytes (AES-256); got ${bek.length}`,
+      );
+    }
+    const built = this._buildKitBundleBody({ full: true, groups: opts.groups });
+    const encrypted = await encryptBodyBlob(built.body, bek);
+    const ciphertextSha = "sha256:" + createHash("sha256").update(Buffer.from(encrypted)).digest("hex");
+
+    // Replace the plaintext body members with the single encrypted blob and
+    // merge the body_encryption descriptor into the existing state (which
+    // carries the kit metadata). Mirrors Python `_encrypt_body_in_place`.
+    const body: Record<string, Uint8Array> = { "body/encrypted.bin": encrypted };
+    const state: Record<string, unknown> = {
+      ...built.state,
+      body_encryption: {
+        cipher_suite: BODY_CIPHER_SUITE,
+        nonce_bytes: 12,
+        frame: BODY_FRAME,
+        ciphertext_sha256: ciphertextSha,
+      },
+    };
+
+    const manifest = newManifest({
+      kind: "full_keystore",
+      fromDid: this.config.device.device_identity,
+      ceremonyId: this.config.ceremonyId,
+      scope: "full",
+    });
+    manifest.state = state;
     signManifest(manifest, this.keystore.device);
     return writeTnpkg(outPath, manifest, body);
   }
@@ -2465,6 +2528,11 @@ export interface CreateFreshOptions {
   /** Optional ``ceremony.profile`` to stamp into the freshly-written
    *  yaml. Mirrors Python's profile catalog. */
   profile?: string;
+  /** Optional ``ceremony.project_name`` — the operator-chosen project
+   *  label. The vault uses it to name the bound project (instead of the
+   *  random ceremony_id) when this ceremony links/claims. Mirrors
+   *  Python's `_stamp_project_labels`. */
+  projectName?: string;
   /** Optional 32-byte Ed25519 seed. If set, the ceremony binds to
    *  that key (so the DID written into tn.yaml matches a previously
    *  installed identity). If omitted, a fresh random seed is generated.
@@ -2574,6 +2642,7 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
     ? rel(opts.adminLogPath, `./.tn/${yamlStem}/admin/admin.ndjson`)
     : `./.tn/${yamlStem}/admin/admin.ndjson`;
   const _profileLine = opts.profile ? `\n  profile: ${opts.profile}` : "";
+  const _projectNameLine = opts.projectName ? `\n  project_name: ${opts.projectName}` : "";
 
   // Write the yaml. Public fields list covers both the business
   // defaults and the entire admin-catalog field set so catalog events
@@ -2582,10 +2651,14 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
   const yaml = `ceremony:
   id: ${cid}
   mode: local
+  linked_vault: ''
+  linked_project_id: ''
+  sync_logs: false
   cipher: btn
   sign: true${_profileLine}
   admin_log_location: ${_adminLogStr}
   log_level: debug
+  chain: true${_projectNameLine}
 logs:
   path: ${_logPathStr}
 keystore:
@@ -2628,7 +2701,6 @@ public_fields:
 - recipient_identity
 - kit_sha256
 - slot
-- to_did
 - issued_to
 - generation
 - previous_kit_sha256
@@ -2638,7 +2710,6 @@ public_fields:
 - peer_identity
 - package_sha256
 - compiled_at
-- from_did
 - absorbed_at
 - vault_identity
 - project_id
@@ -2675,6 +2746,10 @@ groups:
     - policy
     auto_populated_by_policy: true
 fields: {}
+llm_classifier:
+  enabled: false
+  provider: ''
+  model: ''
 `;
   writeFileSync(yamlPath, yaml, "utf8");
 }

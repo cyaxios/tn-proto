@@ -23,6 +23,13 @@ export interface CeremonyConfig {
   ceremonyId: string;
   mode: string;
   cipher: string;
+  /**
+   * Optional ``ceremony.project_name`` — the operator-chosen human label
+   * for this project. Passed to the vault on link/init-upload so the
+   * bound project is named instead of carrying the random ceremony id.
+   * Mirrors Python's ``LoadedConfig.project_name``.
+   */
+  projectName?: string;
   logPath: string;
   keystorePath: string;
   device: { device_identity: string };
@@ -485,6 +492,9 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
     ceremonyId: String(ceremony.id ?? ""),
     mode: String(ceremony.mode ?? "local"),
     cipher: String(ceremony.cipher ?? "btn"),
+    ...(ceremony.project_name != null && String(ceremony.project_name) !== ""
+      ? { projectName: String(ceremony.project_name) }
+      : {}),
     logPath: pathFromYaml(yamlDir, String(logs.path ?? "./.tn/logs/tn.ndjson")),
     keystorePath: pathFromYaml(yamlDir, String(keystore.path ?? "./.tn/keys")),
     device: { device_identity: String(device.device_identity ?? "") },
