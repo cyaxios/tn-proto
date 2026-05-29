@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { createDecipheriv } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Buffer } from "node:buffer";
 
 import {
@@ -76,24 +79,48 @@ test("wrong AAD (event_type swap) fails the auth tag", () => {
   assert.throws(() => Buffer.concat([decipher.update(Buffer.from(ct)), decipher.final()]));
 });
 
-test("constructor validates endpoint, project_id, key_id", () => {
-  assert.throws(() => new TnFirehoseHandler("fh", { endpoint: "ftp://x", projectId: PROJECT }), /http/);
-  assert.throws(() => new TnFirehoseHandler("fh", { endpoint: "https://v", projectId: "not-a-uuid" }), /project_id/);
+test("constructor validates endpoint, project_id, key_id", async () => {
+  const outboxDir = mkdtempSync(join(tmpdir(), "fh-ctor-"));
+  // Validation throws BEFORE the async base init, so a missing outboxDir is
+  // irrelevant for the throwing cases.
   assert.throws(
-    () => new TnFirehoseHandler("fh", { endpoint: "https://v", projectId: PROJECT, keyId: "badkey" }),
+    () => new TnFirehoseHandler("fh", { endpoint: "ftp://x", projectId: PROJECT, outboxDir }),
+    /http/,
+  );
+  assert.throws(
+    () => new TnFirehoseHandler("fh", { endpoint: "https://v", projectId: "not-a-uuid", outboxDir }),
+    /project_id/,
+  );
+  assert.throws(
+    () =>
+      new TnFirehoseHandler("fh", { endpoint: "https://v", projectId: PROJECT, keyId: "badkey", outboxDir }),
     /key_id/,
   );
   // Valid construction does not throw.
-  const h = new TnFirehoseHandler("fh", { endpoint: "https://v", projectId: PROJECT, keyId: "fhk_abc234" });
-  assert.equal(h.resolved_address(), `wss://v/firehose/${PROJECT}`);
+  const h = new TnFirehoseHandler("fh", {
+    endpoint: "https://v",
+    projectId: PROJECT,
+    keyId: "fhk_abc234",
+    outboxDir,
+  });
+  try {
+    assert.equal(h.resolved_address(), `wss://v/firehose/${PROJECT}`);
+  } finally {
+    await h.closeAsync({ timeoutMs: 500 });
+  }
 });
 
-test("filter gates which envelopes reach emit (accepts)", () => {
+test("filter gates which envelopes reach emit (accepts)", async () => {
   const h = new TnFirehoseHandler("fh", {
     endpoint: "https://v",
     projectId: PROJECT,
     filter: { levelIn: ["warning", "error"] },
+    outboxDir: mkdtempSync(join(tmpdir(), "fh-filter-")),
   });
-  assert.equal(h.accepts({ event_type: "x", level: "info" }), false);
-  assert.equal(h.accepts({ event_type: "x", level: "error" }), true);
+  try {
+    assert.equal(h.accepts({ event_type: "x", level: "info" }), false);
+    assert.equal(h.accepts({ event_type: "x", level: "error" }), true);
+  } finally {
+    await h.closeAsync({ timeoutMs: 500 });
+  }
 });

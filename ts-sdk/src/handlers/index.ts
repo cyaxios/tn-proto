@@ -1,5 +1,12 @@
-export { BaseTNHandler, compileFilter } from "./base.js";
+export { BaseTNHandler, AsyncTNHandler, compileFilter } from "./base.js";
 export type { FilterSpec, TNHandler } from "./base.js";
+export {
+  DurableOutbox,
+  OutboxWorker,
+  type OutboxItem,
+  type OutboxWorkerOptions,
+  type PublishFn,
+} from "./outbox.js";
 export { FileHandler } from "./file.js";
 export type { FileHandlerOptions } from "./file.js";
 export { OpenTelemetryHandler } from "./otel.js";
