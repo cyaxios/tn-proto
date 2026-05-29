@@ -325,11 +325,23 @@ export class Tn {
     this.vault = new VaultNamespace(rt, (f) => this._mergeForEmit(f));
     this.agents = new AgentsNamespace(rt);
     this.handlers = new HandlersNamespace(rt);
-    // Best-effort policy bookkeeping — mirrors TNClient constructor.
+    // Best-effort policy bookkeeping — mirrors TNClient constructor. Init
+    // must not block on it, but a real regression here shouldn't vanish
+    // without a trace: surface it on stderr under TN_DEBUG (matching this
+    // file's env-gated stderr convention; no console dependency).
     try {
       this._maybeEmitPolicyPublished();
-    } catch {
-      // Init must not block on best-effort policy bookkeeping.
+    } catch (e) {
+      if (process.env["TN_DEBUG"]) {
+        try {
+          process.stderr.write(
+            `[tn:debug] policy bookkeeping failed in Tn.init: ` +
+              `${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}\n`,
+          );
+        } catch {
+          /* ignore broken stderr */
+        }
+      }
     }
   }
 
