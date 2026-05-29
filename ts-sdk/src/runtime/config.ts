@@ -2,7 +2,7 @@
 // consumes in Python. Only btn ceremonies are supported; jwe/bgw fall
 // outside the Rust-backed path (those stay Python-owned for now).
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -316,6 +316,69 @@ function resolveExtends(
   }
 
   return merged;
+}
+
+/**
+ * Return the yaml in ``yamlPath``'s ``extends:`` chain that authoritatively
+ * owns ``key``.
+ *
+ * Parent-owned keys (``groups``, ``fields``, ``device``, ``keystore``,
+ * ``public_fields``, ...) are authoritative only at the head of the
+ * ``extends:`` chain. A named *stream* yaml that
+ * ``extends: ../default/tn.yaml`` must NOT write them into itself:
+ * {@link resolveExtends} discards a child's copy of a parent-owned key on
+ * the next load ("child sets parent-owned key 'groups'; parent wins"), so
+ * the write is silently lost — the group/recipient never persists and a
+ * fresh-process load can't route through it.
+ *
+ * This walks from ``yamlPath`` toward the chain root and returns the path
+ * of the yaml *closest to the root* that declares ``key`` — that is the
+ * one whose value actually survives the merge (parent wins). If no yaml in
+ * the chain declares ``key`` yet, the chain root is returned so a
+ * first-time write lands authoritatively. For a yaml with no ``extends:``
+ * the chain is a single node and the result is ``yamlPath`` itself, so the
+ * legacy single-file layout is unaffected.
+ *
+ * Mirrors python/tn/config.py::authoritative_yaml_for. Throws on an
+ * ``extends:`` cycle or a missing / malformed ``extends:`` target, matching
+ * {@link resolveExtends}.
+ */
+export function authoritativeYamlFor(yamlPath: string, key: string): string {
+  const start = resolve(yamlPath);
+  const chain: string[] = []; // [leaf, ..., root]
+  const declarers: string[] = []; // subset of chain that declares `key`, same order
+  const seen = new Set<string>();
+  let cur = start;
+  for (;;) {
+    if (seen.has(cur)) {
+      throw new Error(
+        `${cur}: extends cycle detected while resolving the ` +
+          `authoritative yaml for key '${key}'.`,
+      );
+    }
+    seen.add(cur);
+    const doc = readYamlDoc(cur);
+    chain.push(cur);
+    if (key in doc) declarers.push(cur);
+    const extendsField = doc.extends;
+    if (!extendsField) break;
+    if (typeof extendsField !== "string") {
+      throw new Error(
+        `${cur}: extends must be a string path, got ${typeof extendsField}`,
+      );
+    }
+    const parent = resolve(dirname(cur), extendsField);
+    if (!existsSync(parent)) {
+      throw new Error(`${cur}: extends target ${parent} does not exist`);
+    }
+    cur = parent;
+  }
+  // `declarers` is in leaf->root order; the entry closest to the root is the
+  // one the merge keeps (parent wins). Fall back to the chain root when
+  // nothing declares the key yet so a first-time write lands authoritatively.
+  return declarers.length > 0
+    ? declarers[declarers.length - 1]!
+    : chain[chain.length - 1]!;
 }
 
 export function loadConfig(yamlPath: string): CeremonyConfig {

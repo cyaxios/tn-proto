@@ -67,7 +67,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { ZERO_HASH, rowHash } from "../core/chain.js";
 import { signatureFromB64, verify } from "../core/signing.js";
 import { asDid, asRowHash, asSignatureB64, type RowHash } from "../core/types.js";
-import { loadConfig, type CeremonyConfig, type GroupConfig } from "./config.js";
+import { authoritativeYamlFor, loadConfig, type CeremonyConfig, type GroupConfig } from "./config.js";
 import { loadKeystore, type LoadedKeystore } from "./keystore.js";
 import { scanAttestedEventRecords, yamlRecipientDids } from "./reconcile.js";
 import { WasmRuntime } from "tn-wasm";
@@ -588,7 +588,18 @@ export class NodeRuntime {
     // (Python does), but we still bump it so a future TS index
     // implementation, or a Python reader replaying the same log,
     // sees the same epoch progression.
-    const yamlPath = this.config.yamlPath;
+    //
+    // `groups` is parent-owned: under the multi-ceremony layout a named
+    // stream's yaml carries `extends: ../default/tn.yaml` and inherits
+    // `groups` from the project root. Writing the epoch into the stream
+    // yaml (`this.config.yamlPath`) is silently discarded on the next
+    // load ("child sets parent-owned key 'groups'; parent wins"), so the
+    // bump never persists. Route the write to the yaml that
+    // authoritatively owns `groups` (the head of the `extends:` chain).
+    // For a no-extends ceremony this resolves back to `this.config.yamlPath`,
+    // so the legacy single-file layout is unchanged. Mirrors Python's
+    // tn.admin._update_authoritative_yaml(..., key="groups").
+    const yamlPath = authoritativeYamlFor(this.config.yamlPath, "groups");
     let nextEpoch = 1;
     try {
       const text = readFileSync(yamlPath, "utf8");
@@ -1023,10 +1034,22 @@ export class NodeRuntime {
     });
   }
 
-  /** Emit `tn.group.added` for a group that isn't yet attested in the log.
-   * Returns the emit receipt. Caller is responsible for checking idempotency
-   * before calling. */
+  /** Add a group post-init and emit `tn.group.added`. Returns the emit
+   * receipt. Caller is responsible for checking idempotency before calling.
+   *
+   * For btn (the only cipher NodeRuntime supports) this mirrors Python's
+   * `tn.admin.ensure_group`: it mints the group's key material and persists
+   * the `groups.<name>` block to the AUTHORITATIVE yaml so the group both
+   * survives the next load and is routable. See {@link persistBtnGroup}.
+   *
+   * jwe groups stay log-only: NodeRuntime can't mint jwe key material, and
+   * writing a jwe group to the yaml would break the next wasm attach (the
+   * Rust/wasm runtime resolves `extends:` and errors when a resolved group
+   * has no cipher state on disk). jwe ceremonies are Python-owned. */
   adminEnsureGroup(group: string, cipher: "btn" | "jwe"): EmitReceipt {
+    if (cipher === "btn") {
+      this.persistBtnGroup(group);
+    }
     const addedAt = new Date().toISOString();
     return this.emit("info", "tn.group.added", {
       group,
@@ -1034,6 +1057,77 @@ export class NodeRuntime {
       publisher_identity: this.did,
       added_at: addedAt,
     });
+  }
+
+  /** Mint a fresh btn group and persist it AUTHORITATIVELY.
+   *
+   * Mirrors Python's `tn.admin.ensure_group` (btn branch) +
+   * `_update_authoritative_yaml(..., key="groups")`:
+   *
+   *   1. Mint a `BtnPublisher` and write `<group>.btn.state` +
+   *      `<group>.btn.mykit` into the keystore (skipped when a state file
+   *      already exists, so a re-ensure never discards an existing tree).
+   *   2. Register the publisher + a `GroupConfig` in the in-memory config so
+   *      same-process emit / addRecipient route through the new group
+   *      without a re-init.
+   *   3. Write the `groups.<name>` block to the yaml that AUTHORITATIVELY
+   *      owns `groups` — the head of the `extends:` chain. Under the
+   *      multi-ceremony layout a named stream's yaml carries
+   *      `extends: ../default/tn.yaml` and `groups` is parent-owned:
+   *      writing it into the stream yaml (`this.config.yamlPath`) is
+   *      silently discarded on the next load ("child sets parent-owned key
+   *      'groups'; parent wins"), so the group vanishes and a fresh-process
+   *      load can't route through it. {@link authoritativeYamlFor} walks to
+   *      the chain root; for a no-extends ceremony it resolves back to
+   *      `this.config.yamlPath`, leaving the legacy single-file layout
+   *      unchanged.
+   *   4. Drop the cached wasm runtime so the next emit / read re-attaches
+   *      off the updated yaml + keystore and sees the new group. */
+  private persistBtnGroup(group: string): void {
+    const keystore = this.config.keystorePath;
+    const statePath = join(keystore, `${group}.btn.state`);
+    const mykitPath = join(keystore, `${group}.btn.mykit`);
+
+    if (!existsSync(statePath)) {
+      if (!existsSync(keystore)) mkdirSync(keystore, { recursive: true });
+      const pub = new BtnPublisher(new Uint8Array(randomBytes(32)));
+      const selfKit = pub.mint();
+      writeFileSync(statePath, Buffer.from(pub.toBytes()));
+      writeFileSync(mykitPath, Buffer.from(selfKit));
+      this.publishers.set(group, pub);
+    } else if (!this.publishers.has(group)) {
+      this.publishers.set(group, BtnPublisher.fromBytes(new Uint8Array(readFileSync(statePath))));
+    }
+
+    // Keep the in-memory config consistent so same-process routing sees the
+    // new group immediately (matches Python's `cfg.groups[group] = ...`).
+    if (!this.config.groups.has(group)) {
+      this.config.groups.set(group, {
+        name: group,
+        policy: "private",
+        cipher: "btn",
+        recipients: this.did ? [{ did: this.did }] : [],
+      });
+    }
+
+    // Persist the group block to the yaml that authoritatively owns
+    // `groups` (head of the extends chain). See the method doc above.
+    const target = authoritativeYamlFor(this.config.yamlPath, "groups");
+    const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
+    const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
+    if (!groups[group]) {
+      groups[group] = {
+        policy: "private",
+        cipher: "btn",
+        recipients: [{ recipient_identity: this.did }],
+      };
+      doc.groups = groups;
+      writeFileSync(target, stringifyYaml(doc), "utf8");
+    }
+
+    // Force the next emit/read to re-attach wasm off the freshly-written
+    // yaml + keystore so it builds the new group's cipher.
+    this._resetWasmAfterAdminWrite();
   }
 
   // ---------------------------------------------------------------------------
