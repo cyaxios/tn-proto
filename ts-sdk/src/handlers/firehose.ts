@@ -22,7 +22,7 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
 
-import { BaseTNHandler, type FilterSpec } from "./base.js";
+import { AsyncTNHandler, type FilterSpec } from "./base.js";
 
 const _PROJECT_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const _KEY_ID_RE = /^fhk_[A-Za-z2-7]+$/;
@@ -85,6 +85,12 @@ export interface FirehoseHandlerOptions {
   projectId: string;
   keyId?: string | null;
   filter?: FilterSpec;
+  /** Durable-outbox directory. Frames are enqueued here and delivered with
+   *  at-least-once retry by the worker. Required for durability. */
+  outboxDir: string;
+  maxRetries?: number;
+  backoffInitialMs?: number;
+  backoffMaxMs?: number;
 }
 
 /** Minimal structural type for the WebSocket we send binary frames on. */
@@ -99,17 +105,16 @@ interface WsLike {
 /**
  * Streaming firehose handler. Mirrors python/tn/handlers/firehose.py.
  */
-export class TnFirehoseHandler extends BaseTNHandler {
+export class TnFirehoseHandler extends AsyncTNHandler {
   private readonly _endpoint: string;
   private readonly _projectId: string;
   private readonly _keyId: string | null;
   private readonly _bek: Uint8Array;
   private _ws: WsLike | null = null;
   private _connecting: Promise<WsLike> | null = null;
-  private readonly _pending: Uint8Array[] = [];
 
   constructor(name: string, opts: FirehoseHandlerOptions) {
-    super(name, opts.filter);
+    // Validate before super() (no `this` access — pure arg checks).
     if (typeof opts.endpoint !== "string" || !/^https?:\/\//.test(opts.endpoint)) {
       throw new Error(`tn.firehose[${name}]: endpoint must be an http(s) URL, got ${String(opts.endpoint)}`);
     }
@@ -119,6 +124,12 @@ export class TnFirehoseHandler extends BaseTNHandler {
     if (opts.keyId != null && !_KEY_ID_RE.test(opts.keyId)) {
       throw new Error(`tn.firehose[${name}]: key_id ${opts.keyId} not in expected shape (fhk_<base32>)`);
     }
+    const asyncOpts: ConstructorParameters<typeof AsyncTNHandler>[1] = { outboxDir: opts.outboxDir };
+    if (opts.filter !== undefined) asyncOpts.filter = opts.filter;
+    if (opts.maxRetries !== undefined) asyncOpts.maxRetries = opts.maxRetries;
+    if (opts.backoffInitialMs !== undefined) asyncOpts.backoffInitialMs = opts.backoffInitialMs;
+    if (opts.backoffMaxMs !== undefined) asyncOpts.backoffMaxMs = opts.backoffMaxMs;
+    super(name, asyncOpts);
     this._endpoint = opts.endpoint.replace(/\/+$/, "");
     this._projectId = opts.projectId;
     this._keyId = opts.keyId ?? null;
@@ -129,9 +140,15 @@ export class TnFirehoseHandler extends BaseTNHandler {
     return firehoseWsUrl(this._endpoint, this._projectId);
   }
 
-  emit(envelope: Record<string, unknown>, rawLine: string): void {
-    // accepts()/filter is applied by the runtime before emit; encrypt the
-    // frame synchronously, then send best-effort (fire-and-forget).
+  /**
+   * Encrypt the frame and send it over the WS. Throws on any
+   * connect/send failure so the outbox worker retries with backoff (the
+   * frame stays durably queued until a send succeeds).
+   */
+  protected override async publish(
+    envelope: Record<string, unknown>,
+    rawLine: string,
+  ): Promise<void> {
     const eventType = String(envelope["event_type"] ?? "");
     const frame = encryptFirehoseFrame(
       this._bek,
@@ -140,16 +157,31 @@ export class TnFirehoseHandler extends BaseTNHandler {
       eventType,
       new TextEncoder().encode(rawLine),
     );
-    void this._send(frame);
+    let ws: WsLike;
+    try {
+      ws = await this._ensureConnected();
+      ws.send(frame);
+    } catch (e) {
+      // Drop the connection so the retry reopens, then re-throw so the
+      // outbox holds the frame for redelivery.
+      this._ws = null;
+      throw e instanceof Error ? e : new Error(String(e));
+    }
   }
 
-  private async _send(frame: Uint8Array): Promise<void> {
-    try {
-      const ws = await this._ensureConnected();
-      ws.send(frame);
-    } catch {
-      // Best-effort: drop the connection so the next frame reopens.
-      this._ws = null;
+  protected override finalFlush(): void {
+    this._closeWs();
+  }
+
+  private _closeWs(): void {
+    const ws = this._ws;
+    this._ws = null;
+    if (ws) {
+      try {
+        ws.close();
+      } catch {
+        /* best-effort */
+      }
     }
   }
 
@@ -188,18 +220,6 @@ export class TnFirehoseHandler extends BaseTNHandler {
       }
     });
     return ws;
-  }
-
-  override close(): void {
-    const ws = this._ws;
-    this._ws = null;
-    if (ws) {
-      try {
-        ws.close();
-      } catch {
-        /* best-effort */
-      }
-    }
   }
 }
 

@@ -99,3 +99,85 @@ export abstract class BaseTNHandler implements TNHandler {
     return null;
   }
 }
+
+/**
+ * Base for network handlers that need at-least-once delivery. Mirrors
+ * python/tn/handlers/base.py:AsyncHandler — `emit` enqueues to a durable
+ * outbox; a background worker drains it, calling the subclass's `publish`
+ * with exponential-backoff retries. A crash mid-send leaves the item on
+ * disk so it's redelivered on next start.
+ *
+ * Subclasses implement `publish(envelope, raw)` (throw/reject on failure ->
+ * retry) and may override `finalFlush()` (emit a last partial batch on
+ * close).
+ */
+export abstract class AsyncTNHandler extends BaseTNHandler {
+  private _outbox: import("./outbox.js").DurableOutbox | null = null;
+  private _worker: import("./outbox.js").OutboxWorker | null = null;
+  private readonly _ready: Promise<void>;
+
+  constructor(
+    name: string,
+    opts: {
+      outboxDir: string;
+      filter?: FilterSpec;
+      maxRetries?: number;
+      backoffInitialMs?: number;
+      backoffMaxMs?: number;
+    },
+  ) {
+    super(name, opts.filter);
+    // Lazy-load the outbox module so base.ts stays free of fs/queue deps
+    // until an async handler is actually constructed.
+    this._ready = (async () => {
+      const { DurableOutbox, OutboxWorker } = await import("./outbox.js");
+      this._outbox = new DurableOutbox(opts.outboxDir);
+      const workerOpts: import("./outbox.js").OutboxWorkerOptions = { name };
+      if (opts.maxRetries !== undefined) workerOpts.maxRetries = opts.maxRetries;
+      if (opts.backoffInitialMs !== undefined) workerOpts.backoffInitialMs = opts.backoffInitialMs;
+      if (opts.backoffMaxMs !== undefined) workerOpts.backoffMaxMs = opts.backoffMaxMs;
+      this._worker = new OutboxWorker(this._outbox, (e, r) => this.publish(e, r), workerOpts);
+      this._worker.start();
+    })();
+  }
+
+  /** Resolves once the outbox + worker are initialized. */
+  whenReady(): Promise<void> {
+    return this._ready;
+  }
+
+  override emit(envelope: Record<string, unknown>, rawLine: string): void {
+    // Enqueue durably; the worker delivers with retry. If the async init is
+    // still pending, buffer the put behind the ready promise so nothing is
+    // dropped.
+    if (this._outbox) {
+      this._outbox.put({ envelope, raw: rawLine });
+    } else {
+      void this._ready.then(() => this._outbox?.put({ envelope, raw: rawLine }));
+    }
+  }
+
+  /** Actually send to the network. Throw/reject on failure -> retry. */
+  protected abstract publish(envelope: Record<string, unknown>, raw: string): Promise<void> | void;
+
+  /** Hook after the worker drains, before close. Buffering subclasses override. */
+  protected finalFlush(): void {
+    /* no-op */
+  }
+
+  override close(): void {
+    // Best-effort synchronous close; for a clean drain await closeAsync().
+    void this.closeAsync();
+  }
+
+  /** Drain the outbox (up to timeoutMs), then stop the worker + flush. */
+  async closeAsync(opts: { timeoutMs?: number } = {}): Promise<void> {
+    await this._ready;
+    if (this._worker) await this._worker.stop(opts);
+    try {
+      this.finalFlush();
+    } catch {
+      /* best-effort */
+    }
+  }
+}

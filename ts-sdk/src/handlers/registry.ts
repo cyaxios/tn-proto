@@ -246,10 +246,13 @@ export function buildHandlers(
       const projectId = requireStr(raw, "project_id", "tn.firehose");
       const keyId = (raw["key_id"] as string | undefined) ?? null;
       const fhFilter = parseFilter(raw["filter"]);
+      // Per-handler durable outbox dir under the ceremony's .tn/outbox/.
+      const fhOutbox = join(yamlDir, ".tn", "outbox", `firehose_${name}`);
       const fhOpts: ConstructorParameters<typeof TnFirehoseHandler>[1] = {
         endpoint,
         projectId,
         keyId,
+        outboxDir: fhOutbox,
       };
       if (fhFilter !== undefined) fhOpts.filter = fhFilter;
       out.push(new TnFirehoseHandler(name, fhOpts));
