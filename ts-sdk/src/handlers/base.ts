@@ -9,6 +9,12 @@ export interface FilterSpec {
   eventTypeIn?: readonly string[];
   level?: string;
   levelIn?: readonly string[];
+  /**
+   * Bool match on the envelope's `sync` field. `undefined` means "do not
+   * filter on sync". When the envelope has no `sync` field the runtime
+   * treats it as `true` (mirrors python/tn/handlers/filter.py).
+   */
+  sync?: boolean;
 }
 
 export interface TNHandler {
@@ -44,6 +50,7 @@ export function compileFilter(
     eventTypeIn,
     level: levelExact,
     levelIn,
+    sync: syncWant,
   } = spec;
 
   const etSet = eventTypeIn ? new Set(eventTypeIn) : undefined;
@@ -58,6 +65,12 @@ export function compileFilter(
     if (etSet !== undefined && !etSet.has(et)) return false;
     if (levelExact !== undefined && lv !== levelExact) return false;
     if (lvSet !== undefined && !lvSet.has(lv)) return false;
+    if (syncWant !== undefined) {
+      // Missing `sync` field is treated as true (matches Python).
+      const envSync = env["sync"];
+      const effective = envSync === undefined ? true : Boolean(envSync);
+      if (effective !== syncWant) return false;
+    }
     return true;
   };
 }

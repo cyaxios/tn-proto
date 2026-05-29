@@ -30,6 +30,7 @@ import {
   type VaultPullAbsorber,
 } from "./vault_pull.js";
 import { VaultPushHandler, type VaultPostClient } from "./vault_push.js";
+import { TnFirehoseHandler } from "./firehose.js";
 
 /** Adapters injected by the host so handlers can build / absorb / POST without
  * a hard dependency on TNClient (avoids a cyclic import). */
@@ -139,6 +140,16 @@ function parseFilter(raw: unknown): FilterSpec | undefined {
   if (typeof r["level"] === "string") { spec.level = r["level"]; hasAny = true; }
   if (Array.isArray(r["levelIn"])) { spec.levelIn = r["levelIn"] as string[]; hasAny = true; }
 
+  // Python RFC shorthand grammar (flat snake_case) — so a Python-authored
+  // `filter:` block (e.g. firehose's `level_in:`) parses identically in TS.
+  // Mirrors python/tn/handlers/filter.py:Filter.from_spec.
+  if (typeof r["event_type"] === "string") { spec.eventType = r["event_type"] as string; hasAny = true; }
+  if (typeof r["event_type_prefix"] === "string") { spec.eventTypePrefix = r["event_type_prefix"] as string; hasAny = true; }
+  if (typeof r["not_event_type_prefix"] === "string") { spec.notEventTypePrefix = r["not_event_type_prefix"] as string; hasAny = true; }
+  if (Array.isArray(r["event_type_in"])) { spec.eventTypeIn = r["event_type_in"] as string[]; hasAny = true; }
+  if (Array.isArray(r["level_in"])) { spec.levelIn = r["level_in"] as string[]; hasAny = true; }
+  if (typeof r["sync"] === "boolean") { spec.sync = r["sync"] as boolean; hasAny = true; }
+
   return hasAny ? spec : undefined;
 }
 
@@ -225,6 +236,23 @@ export function buildHandlers(
           filter: filterSpec,
         } as ConstructorParameters<typeof VaultPullHandler>[1]),
       );
+      continue;
+    }
+    if (kind === "tn.firehose" || kind === "firehose") {
+      // Encrypted log streaming to the vault's per-project firehose WS.
+      // Mirrors python/tn/handlers/firehose.py (Phase-A stub BEK). No host
+      // adapter needed — the handler opens its own WebSocket.
+      const endpoint = requireStr(raw, "endpoint", "tn.firehose");
+      const projectId = requireStr(raw, "project_id", "tn.firehose");
+      const keyId = (raw["key_id"] as string | undefined) ?? null;
+      const fhFilter = parseFilter(raw["filter"]);
+      const fhOpts: ConstructorParameters<typeof TnFirehoseHandler>[1] = {
+        endpoint,
+        projectId,
+        keyId,
+      };
+      if (fhFilter !== undefined) fhOpts.filter = fhFilter;
+      out.push(new TnFirehoseHandler(name, fhOpts));
       continue;
     }
     if (kind === "fs.drop") {

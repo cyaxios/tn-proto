@@ -5,6 +5,13 @@ export type { FileHandlerOptions } from "./file.js";
 export { OpenTelemetryHandler } from "./otel.js";
 export type { OtelLogRecord, OtelLogger, OpenTelemetryHandlerOptions } from "./otel.js";
 export { StdoutHandler } from "./stdout.js";
+export {
+  TnFirehoseHandler,
+  stubBek,
+  firehoseWsUrl,
+  encryptFirehoseFrame,
+  type FirehoseHandlerOptions,
+} from "./firehose.js";
 
 // Admin-log push/pull handlers (plan 2026-04-24 §5.2; commit 78f5617).
 export {
