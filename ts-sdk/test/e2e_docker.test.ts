@@ -16,7 +16,7 @@
 
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as pathResolve } from "node:path";
@@ -80,6 +80,41 @@ function runCli(args: string[], cwd: string, env: Record<string, string>): Promi
   });
 }
 
+// Mongo back door: read the vault's DB directly to prove the write landed,
+// not just that the CLI printed a happy receipt. Uses `docker exec` + mongosh
+// in the tne2e-mongo container (dep-free — no mongodb driver needed). Returns
+// null if docker/mongosh/the container isn't available, so the DB assertions
+// are best-effort (the CLI-level asserts still gate the test).
+const MONGO_CONTAINER = process.env["TN_E2E_MONGO_CONTAINER"] ?? "tne2e-mongo";
+const VAULT_DB = process.env["TN_E2E_VAULT_DB"] ?? "tn_vault_e2e";
+
+function mongoReachable(): boolean {
+  const r = spawnSync(
+    "docker",
+    ["exec", MONGO_CONTAINER, "mongosh", VAULT_DB, "--quiet", "--eval", "1"],
+    { encoding: "utf8" },
+  );
+  return r.status === 0;
+}
+const _mongoOk = mongoReachable();
+
+function mongoFindOne(collection: string, query: Record<string, unknown>): Record<string, unknown> | null {
+  const evalJs = `JSON.stringify(db.${collection}.findOne(${JSON.stringify(query)}))`;
+  const r = spawnSync(
+    "docker",
+    ["exec", MONGO_CONTAINER, "mongosh", VAULT_DB, "--quiet", "--eval", evalJs],
+    { encoding: "utf8" },
+  );
+  if (r.status !== 0 || !r.stdout) return null;
+  const out = r.stdout.trim();
+  if (!out || out === "null") return null;
+  try {
+    return JSON.parse(out) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 function jsonReceipt(stdout: string): Record<string, unknown> | null {
   for (const line of stdout.trim().split(/\r?\n/).reverse()) {
     const s = line.trim();
@@ -132,6 +167,18 @@ test("e2e: tn-js init emits a claim URL + flipped .tn/<name>/ layout", gate, asy
   // project_name stamped for the vault label.
   const doc = parseYaml(readFileSync(yamlPath, "utf8")) as { ceremony?: { project_name?: string } };
   assert.equal(doc.ceremony?.project_name, "E2eProj");
+
+  // BACK DOOR: the pending-claim must actually exist in the vault's mongo,
+  // carrying the project_name the SDK sent via X-Project-Name — what the CLI
+  // receipt alone can't prove (a stale vault prints a claim URL but stores no
+  // project_name). Best-effort: skips if docker/mongosh isn't available.
+  const vaultId = (receipt!["claim_url"] as string).split("/claim/")[1]!.split("#")[0]!;
+  if (_mongoOk) {
+    const row = mongoFindOne("pending_claims", { _id: vaultId });
+    assert.ok(row, `vault DB must have a pending_claims row for ${vaultId}`);
+    assert.equal(row!["project_name"], "E2eProj", "vault DB pending_claim.project_name");
+    assert.ok(row!["body_b64"], "vault DB pending_claim has encrypted body");
+  }
 });
 
 // ── 2. init --no-link mints with NO claim URL ─────────────────────────────
@@ -172,6 +219,18 @@ test("e2e: warm-attach attaches a new project with no browser (shared DID)", gat
   const receiptB = jsonReceipt(b.stdout);
   assert.equal(receiptB?.["attached"], true);
   assert.equal(receiptB?.["did"], didA, "ProjA and ProjB must share one device DID");
+
+  // BACK DOOR: warm-attach must actually bind a project to the account in the
+  // vault's mongo (account_projects), with the device DID in publishers —
+  // proving "Attached" is real DB state, not stdout. Best-effort.
+  if (_mongoOk) {
+    const ap = mongoFindOne("account_projects", { account_id: accountId });
+    assert.ok(ap, `vault DB must have an account_projects row for ${accountId}`);
+    assert.ok(
+      JSON.stringify(ap!["publishers"] ?? "").includes(String(didA)),
+      "vault DB account_projects publishers should include the device DID",
+    );
+  }
 });
 
 // ── 4. add-recipient (group-add) works first try ─────────────────────────
