@@ -342,9 +342,28 @@ class DispatchRuntime:
         # visibility. We keep StdoutHandler instances in the
         # effective list when ``_cached_in_ipython`` is true even if
         # they were ``_tn_default``-marked.
+        # Canonical main-log address Rust owns. For a templated
+        # ``logs.path`` this is the template string itself (e.g.
+        # ``./logs/{event_type}.ndjson``); the Rust runtime renders it
+        # per-event and writes the single canonical copy. The Python
+        # registry builds a ``FileTemplatedRotatingHandler`` for that same
+        # main-log template, but the ``_tn_default`` sentinel is only set
+        # by the registry when the yaml handler's *literal* ``path`` string
+        # equals ``cfg.logs.path`` — a templated sink exposes ``_template``
+        # (not a literal ``path``), so it never matched, never got marked,
+        # and ran in the fan-out below, double-writing every event (the
+        # rendered file from Python PLUS Rust's own write). Match by
+        # template here so the one-file-sink invariant holds for the
+        # templated path too.
+        canonical_log_path: str | None = None
+        cfg = getattr(self._py_rt, "cfg", None) if self._py_rt else None
+        if cfg is not None:
+            canonical_log_path = getattr(cfg, "log_path", None)
+
         effective: list = []
         handlers_obj = getattr(self._py_rt, "handlers", None) if self._py_rt else None
         if handlers_obj:
+            from tn.handlers.file import FileTemplatedRotatingHandler as _Templated
             from tn.handlers.stdout import StdoutHandler as _StdoutHandler
             for h in list(handlers_obj):
                 is_default = bool(getattr(h, "_tn_default", False))
@@ -354,6 +373,18 @@ class DispatchRuntime:
                     continue
                 if is_default:
                     # Rust owns this destination; skip the Python copy.
+                    continue
+                # Templated main-log sink whose template is the canonical
+                # ``logs.path``: Rust already renders + writes the one
+                # canonical copy per event, so running the Python mirror
+                # double-writes. Skip it. Templated handlers at a
+                # *different* template (a secondary fan-out destination)
+                # and literal secondary file handlers are unaffected.
+                if (
+                    isinstance(h, _Templated)
+                    and canonical_log_path is not None
+                    and getattr(h, "_template", None) == canonical_log_path
+                ):
                     continue
                 effective.append(h)
         self._cached_effective_handlers = effective
