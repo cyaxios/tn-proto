@@ -35,6 +35,13 @@ import threading
 from pathlib import Path
 from typing import Any
 
+# Re-export the Rust-bound runtime exception so callers can write a
+# stable `except tn.KeystoreConflictError` instead of dipping into the
+# private `tn_core._core` module. The class is shared across runtime
+# failures, so check the message string when distinguishing
+# divergence-retry from other faults: see `is_keystore_diverged()`.
+from tn_core._core import TnRuntimeError as KeystoreConflictError
+
 from . import (
     _agents_policy,
     _autoinit,
@@ -56,13 +63,6 @@ from ._dispatch import (  # should_use_rust re-exported for diagnostics
 from ._entry import Entry, VerifyError
 from .absorb import AbsorbReceipt, AbsorbResult, LeafReuseAttempt
 from .absorb import absorb as _raw_absorb
-
-# Re-export the Rust-bound runtime exception so callers can write a
-# stable `except tn.KeystoreConflictError` instead of dipping into the
-# private `tn_core._core` module. The class is shared across runtime
-# failures, so check the message string when distinguishing
-# divergence-retry from other faults: see `is_keystore_diverged()`.
-from tn_core._core import TnRuntimeError as KeystoreConflictError
 
 
 def is_keystore_diverged(exc: BaseException) -> bool:
@@ -101,7 +101,9 @@ from .admin.cache import (
 from .admin.cache import LeafReuseAttempt as CacheLeafReuseAttempt  # noqa: F401
 from .compile import compile_enrolment
 from .context import (
-    _context as _ctx_var,  # noqa: F401 — read by `_emit_via` hot path
+    _context as _ctx_var,
+)
+from .context import (
     clear_context,
     get_context,
     scope,
@@ -209,8 +211,8 @@ def _init_impl(
     stdout: bool | None = None,
     link: bool | None = None,
     device_private_bytes: bytes | None = None,
-    keystore_dir: "str | Path | None" = None,
-    admin_log_path: "str | Path | None" = None,
+    keystore_dir: str | Path | None = None,
+    admin_log_path: str | Path | None = None,
 ) -> None:
     """Initialize TN for this process.
 
@@ -1033,6 +1035,7 @@ def __dir__() -> list[str]:
 # the helpers (_emit_with_splice, _resolve_sign) still live in this
 # package init; emit.py imports them back when called.
 # --------------------------------------------------------------------------
+from . import emit as _emit_module  # noqa: E402
 from ._handle import (  # noqa: E402
     TN,
     MultiCeremonyEmitNotImplemented,
@@ -1066,7 +1069,6 @@ from ._read_impl import (  # noqa: F401, E402
     _rotated_backup_paths,
 )
 from ._registry import TNNotFound  # noqa: E402
-from . import emit as _emit_module  # noqa: E402
 from .emit import debug, error, info, log, warning  # noqa: E402
 
 # 0.4.2a7 hot-path lift: bind ``_emit_with_splice`` / ``_resolve_sign``
@@ -1096,7 +1098,6 @@ from .read import (  # noqa: E402
     read,
     watch,
 )
-
 
 # atexit registration: tn.init() registers _atexit_flush once per
 # process so handlers drain on normal interpreter exit without the

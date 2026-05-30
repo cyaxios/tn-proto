@@ -751,6 +751,8 @@ def _apply_seal_for_recipient(
 
     from .recipient_seal import (
         manifest_aad_for_wrap as _aad_for_wrap,
+    )
+    from .recipient_seal import (
         seal_bek_for_recipient as _seal_bek,
     )
 
@@ -1189,8 +1191,8 @@ def canonical_manifest_bytes(manifest: TnpkgManifest) -> bytes:
 
 
 __all__ = [
-    "ExportKind",
     "IDENTITY_SEED_CEREMONY_PLACEHOLDER",
+    "ExportKind",
     "canonical_manifest_bytes",
     "decrypt_body_blob",
     "export",

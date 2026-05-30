@@ -757,7 +757,7 @@ def reload_from_yaml() -> None:
         new_cfg = _config.load(_runtime.cfg.yaml_path)
         _runtime.cfg = new_cfg
     # Reload the Rust-side dispatch runtime against the updated yaml.
-    from . import _dispatch_rt as _current_dispatch_rt  # noqa: PLC0415
+    from . import _dispatch_rt as _current_dispatch_rt
 
     if _current_dispatch_rt is not None:
         try:
