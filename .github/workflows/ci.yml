@@ -283,6 +283,24 @@ jobs:
             exit 1
           fi
 
+      - name: Code-health report (informational)
+        # Worst-first LOC / longest-function / radon-CC table across all
+        # three language surfaces (python, ts-sdk, rust). Doesn't fail —
+        # it's the visibility companion to the ratchet gate below, the
+        # same way the CC report above pairs with the F-rank gate. Uses
+        # the radon installed for this job for the Python CC column.
+        run: python scripts/code_health.py --top 25
+
+      - name: Code-health ratchet (line-count budget)
+        # Hard gate, mirroring the F-rank gate above: enforces
+        # .code-health-budget.json. Listed files may not exceed their
+        # grandfathered ceiling, and any new/unlisted file must stay
+        # under the global ceiling (800). Files may only shrink — when a
+        # refactor shrinks a listed file, run
+        # `python scripts/check_code_health.py --update` and commit the
+        # lowered budget. See docs/CODE_HEALTH.md.
+        run: python scripts/check_code_health.py
+
   parity-check:
     name: SDK parity check
     runs-on: ubuntu-latest

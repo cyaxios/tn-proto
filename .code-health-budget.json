@@ -1,0 +1,27 @@
+{
+  "$schema_note": "Code-health ratchet budget. Each entry under 'files' maps a source file to its grandfathered ceiling (its physical line count when first recorded). RULE: files may only SHRINK. A file may never exceed its recorded budget; when a refactor shrinks it, lower the budget to match (run `python scripts/check_code_health.py --update` or edit by hand). Any new/unlisted source file must stay under 'global_ceiling'. See docs/CODE_HEALTH.md.",
+  "global_ceiling": 800,
+  "files": {
+    "crypto/tn-core/src/runtime.rs": 4927,
+    "python/tn/cli.py": 3343,
+    "ts-sdk/src/runtime/node_runtime.ts": 2902,
+    "python/tn/admin/__init__.py": 1882,
+    "python/tn/absorb.py": 1790,
+    "python/tn/_multi.py": 1503,
+    "python/tn/config.py": 1499,
+    "python/tn/__init__.py": 1389,
+    "ts-sdk/bin/tn-js.mjs": 1382,
+    "ts-sdk/src/tn.ts": 1371,
+    "crypto/tn-core/src/admin_cache.rs": 1273,
+    "python/tn/export.py": 1101,
+    "crypto/tn-wasm/src/runtime.rs": 986,
+    "python/tn/admin/cache.py": 938,
+    "python/tn/vault_client.py": 936,
+    "crypto/tn-core-py/src/lib.rs": 916,
+    "ts-sdk/src/browser/tn.ts": 889,
+    "python/tn/handlers/vault_push.py": 871,
+    "crypto/tn-core/src/runtime_export.rs": 867,
+    "crypto/tn-core/src/config.rs": 823,
+    "python/tn/logger.py": 801
+  }
+}
