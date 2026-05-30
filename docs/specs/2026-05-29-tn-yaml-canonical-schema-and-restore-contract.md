@@ -289,3 +289,46 @@ cipher= btn
 group_count= 2
 groups= ['default', 'tn.agents']
 ```
+
+---
+
+## 8. Phase-0 design-review addendum (orchestrator, 2026-05-29)
+
+Reviewed the spec above against the code; the schema + restore contract are
+accepted. Four amendments are now **law** for Phases 1-3:
+
+1. **`project_seed` is a SECRET-bearing artifact.** The seed installs
+   `keys/local.private` (`absorb.py:1577`+), i.e. it carries private key
+   material. Therefore the new `export(kind="project_seed")` MUST be gated
+   the same way `full_keystore` is — `confirm_includes_secrets=True`
+   (`export.py:447`) — and the tn-js/`tn import` UX must make the
+   secrets nature explicit (it is a full identity+keys backup, not a public
+   manifest). Restore on a fresh device needs those private keys, so the
+   secrets ARE the point — but minting must never be silent/accidental.
+
+2. **`link=False` gets FIXED, not worked around.** Per the standing
+   "honor declared config at runtime" rule: `tn.init(yaml, link=False)`
+   must thread `link=False` through to `create_fresh`'s `_is_unlinked`
+   branch (`config.py:669-671`) and produce `mode: local`. Phase 3 fixes
+   the API thread-through; restore tests then mint self-contained local
+   seeds via the public API, not only via the CLI side-door.
+
+3. **Conformance (Phase 1) is SHAPE-based, not byte-equal.** Golden carries
+   placeholder DIDs/ids/paths. The conformance test normalizes volatile
+   values (every `did:key:...`, `ceremony.id`, `linked_*`, `*.path`,
+   timestamps) before comparing. It asserts: (a) all REQUIRED canonical
+   keys present with canonical *shape* — top-level `device.device_identity`,
+   `groups.<g>.recipients[].recipient_identity`, required `ceremony.*`;
+   (b) FORBIDDEN keys ABSENT — top-level `me:`, `project_id:`, `label:`;
+   (c) the doc loads through `config.load`. `llm_classifier` and `handlers`
+   are OPTIONAL (loader treats them optional, `config.py:1455`/`:1475`);
+   the two ts-sdk producers legitimately differ there, so conformance must
+   not require them.
+
+4. **Public-fields lockstep.** Phase 2 aligns the browser
+   `DEFAULT_PUBLIC_FIELDS` mirror (`yaml_profile.js:39-77`) to the Python
+   list — drop the legacy `*_did` aliases (`device_did`, `publisher_did`,
+   `recipient_did`, `to_did`, `peer_did`, `from_did`, `envelope_did`). The
+   set is additive so this is non-breaking, but the user wants consistency.
+
+Everything else in §1-§7 is approved as the Phase 1+ baseline.
