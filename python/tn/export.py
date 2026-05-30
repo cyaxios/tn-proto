@@ -73,6 +73,7 @@ ExportKind = Literal[
     "full_keystore",
     "recipient_invite",
     "identity_seed",
+    "project_seed",
 ]
 
 # Sentinel ceremony_id for identity_seed bundles. The kind doesn't belong
@@ -310,6 +311,88 @@ def _build_kit_bundle_body(
     return body, extras
 
 
+def _build_project_seed_body(
+    cfg: LoadedConfig,
+    keystore: Path,
+    *,
+    groups_filter: list[str] | None,
+) -> tuple[dict[str, bytes], dict[str, Any]]:
+    """Body for ``kind="project_seed"`` — a complete identity+config backup.
+
+    Mirrors the dashboard "Create Project" bundle consumed by
+    :func:`tn.absorb._absorb_project_seed`. Unlike ``full_keystore``
+    (which lays key files flat under ``body/``), project_seed nests all
+    key material under ``body/keys/<name>`` and carries the full canonical
+    ``tn.yaml`` at ``body/tn.yaml``. The enclosing manifest is
+    self-addressed (from_did == to_did == the device DID).
+
+    Body shape::
+
+        body/tn.yaml
+        body/keys/local.private        (32-byte Ed25519 seed)
+        body/keys/local.public         (did:key text)
+        body/keys/index_master.key
+        body/keys/<group>.btn.mykit
+        body/keys/<group>.btn.state
+    """
+    import re as _re
+
+    keystore = Path(keystore).resolve()
+    if not keystore.is_dir():
+        raise FileNotFoundError(f"project_seed: keystore directory not found: {keystore}")
+    if cfg.yaml_path is None or not cfg.yaml_path.exists():
+        raise FileNotFoundError(
+            "project_seed: cfg.yaml_path does not exist; cannot back up tn.yaml"
+        )
+
+    group_filter = set(groups_filter) if groups_filter else None
+    kit_re = _re.compile(r"^(.+?)\.btn\.(mykit|state)$")
+
+    body: dict[str, bytes] = {"body/tn.yaml": cfg.yaml_path.read_bytes()}
+    keys_meta: list[str] = []
+
+    for entry in sorted(keystore.iterdir()):
+        if not entry.is_file():
+            continue
+        name = entry.name
+        if name in ("local.private", "local.public", "index_master.key"):
+            body[f"body/keys/{name}"] = entry.read_bytes()
+            keys_meta.append(name)
+            continue
+        m = kit_re.match(name)
+        if m:
+            group = m.group(1)
+            if group_filter is not None and group not in group_filter:
+                continue
+            body[f"body/keys/{name}"] = entry.read_bytes()
+            keys_meta.append(name)
+
+    for required in ("body/keys/local.private", "body/keys/local.public"):
+        if required not in body:
+            short = required[len("body/keys/") :]
+            raise FileNotFoundError(
+                f"project_seed: keystore is missing {short!r} in {keystore}; "
+                f"cannot build a restorable seed."
+            )
+
+    # Loud zero-byte marker (lives at body/ root, NOT body/keys/, so the
+    # absorb-side key installer skips it). Mirrors full_keystore.
+    body["body/WARNING_CONTAINS_PRIVATE_KEYS"] = b""
+
+    extras: dict[str, Any] = {
+        "scope": "project",
+        "state": {
+            "project": {
+                "ceremony_id": cfg.ceremony_id,
+                "project_name": cfg.project_name,
+                "keys": sorted(keys_meta),
+            },
+            "kind": "project-seed",
+        },
+    }
+    return body, extras
+
+
 def _build_identity_seed_body(
     device: Any,
     *,
@@ -453,6 +536,17 @@ def _validate_export_args(
         )
     if cfg is None and kind in {"admin_log_snapshot", "offer", "enrolment"}:
         raise ValueError(f"export(kind={kind!r}) requires cfg=...")
+    if kind == "project_seed" and not confirm_includes_secrets:
+        raise ValueError(
+            "export(kind='project_seed') writes the device's raw private keys "
+            "(local.private + index_master.key + per-group key material) into the "
+            "zip alongside the full tn.yaml — a complete identity+config backup for "
+            "restore on a fresh device. Pass confirm_includes_secrets=True to acknowledge."
+        )
+    if kind == "project_seed" and cfg is None:
+        raise ValueError(
+            "export(kind='project_seed') requires cfg=... (the live ceremony to back up)."
+        )
     if kind == "identity_seed" and device is None:
         raise ValueError(
             "export(kind='identity_seed') requires device=<DeviceKey>; the bundle "
@@ -511,6 +605,14 @@ def _build_export_body(
     if kind == "identity_seed":
         assert device is not None  # guarded by _validate_export_args
         return _build_identity_seed_body(device, nickname=nickname)
+    if kind == "project_seed":
+        assert cfg is not None  # guarded by _validate_export_args
+        ks = (
+            Path(keystore).resolve()
+            if keystore is not None
+            else Path(cfg.keystore).resolve()
+        )
+        return _build_project_seed_body(cfg, ks, groups_filter=groups)
     if kind == "recipient_invite":
         raise NotImplementedError(
             f"export(kind={kind!r}) is reserved in the manifest schema but not "
@@ -874,7 +976,7 @@ def export(
         ceremony_id=signer_ceremony,
         as_of=sealed_as_of or _now_iso(),
         scope=str(scope or extras.get("scope") or _default_scope(kind)),
-        recipient_identity=signer_did if kind == "identity_seed" else to_did,
+        recipient_identity=signer_did if kind in ("identity_seed", "project_seed") else to_did,
         clock=dict(extras.get("clock", {})),
         event_count=int(extras.get("event_count", 0)),
         head_row_hash=extras.get("head_row_hash"),
@@ -1060,6 +1162,8 @@ def _default_scope(kind: str) -> str:
         return "full"
     if kind == "identity_seed":
         return "identity"
+    if kind == "project_seed":
+        return "project"
     return "admin"
 
 

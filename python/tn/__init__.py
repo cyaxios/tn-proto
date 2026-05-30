@@ -302,6 +302,7 @@ def _init_impl(
             identity=identity,
             extra_handlers=extra_handlers,
             stdout=stdout,
+            link=link,
             device_private_bytes=device_private_bytes,
             keystore_dir=keystore_dir,
             admin_log_path=admin_log_path,

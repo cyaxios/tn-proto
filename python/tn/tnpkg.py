@@ -91,6 +91,15 @@ KNOWN_KINDS = frozenset(
         # local.private + local.public + a stub tn.yaml. Self-signed by
         # the carried Ed25519 key (from_did == to_did).
         "identity_seed",
+        # project_seed (2026-05-29 yaml-identity-ironout): the complete
+        # identity+config backup. Body nests key material under
+        # ``body/keys/<name>`` and carries the full canonical tn.yaml at
+        # ``body/tn.yaml``. Self-addressed (from_did == to_did). Minted by
+        # tn.export(kind="project_seed", confirm_includes_secrets=True) and
+        # by the dashboard "Create Project" flow; consumed by
+        # tn.absorb._absorb_project_seed. The single cross-surface restore
+        # artifact (Python / ts-sdk / tn-js / browser).
+        "project_seed",
     }
 )
 
