@@ -27,7 +27,6 @@ import sys
 import textwrap
 from pathlib import Path
 
-
 _DRIVER = textwrap.dedent(
     """
     import glob, json, os, subprocess, sys
@@ -54,7 +53,13 @@ _DRIVER = textwrap.dedent(
 
     logs_dir = os.path.join(work, ".tn", "T", "logs")
     counts = {}
-    for fp in glob.glob(os.path.join(logs_dir, "**", "*"), recursive=True):
+    # Count only ndjson log files. tn-core's chain machinery drops a
+    # persistent ``<log>.emit.lock`` advisory-lock sidecar next to each
+    # log (cleanup is intentionally absent in FsStorage), so a bare
+    # ``**/*`` glob would pick that 0-byte file up and make the
+    # exact-key assertions flap. The double-write invariant is about
+    # ndjson rows, so restrict the glob to ``*.ndjson``.
+    for fp in glob.glob(os.path.join(logs_dir, "**", "*.ndjson"), recursive=True):
         if os.path.isfile(fp):
             with open(fp, "rb") as fh:
                 counts[os.path.basename(fp)] = sum(1 for ln in fh if ln.strip())
@@ -71,10 +76,8 @@ def _run_case(tmp_path: Path, logs_path: str, read_arg: str) -> dict:
         text=True,
         check=True,
     )
-    line = next(
-        ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT::")
-    )
-    return json.loads(line[len("RESULT::"):])
+    line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT::"))
+    return json.loads(line[len("RESULT::") :])
 
 
 def test_templated_logs_path_writes_each_event_once(tmp_path):
@@ -98,7 +101,11 @@ def test_templated_logs_path_writes_each_event_once(tmp_path):
 def test_default_logs_path_single_write_unchanged(tmp_path):
     res = _run_case(tmp_path, "./logs/tn.ndjson", "./logs/tn.ndjson")
     counts = res["counts"]
-    # Non-templated path: one file, 3 events + the tn.ceremony.init row.
+    # Non-templated path: exactly one main-log file, written once per
+    # event (no double-write). The 3 ``evt`` rows land in ``tn.ndjson``;
+    # ``tn.ceremony.init`` is routed to the split admin log
+    # (``admin_log_location: ./admin/admin.ndjson`` in the scaffolded
+    # yaml), not the main log, so the main log holds exactly N rows.
     assert list(counts) == ["tn.ndjson"], counts
-    assert counts["tn.ndjson"] == 4, counts
-    assert res["read"] == 4, res
+    assert counts["tn.ndjson"] == 3, counts
+    assert res["read"] == 3, res

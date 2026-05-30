@@ -90,6 +90,23 @@ def build_handlers(
     # skips just that one at fan-out time. The rest stay in the
     # effective list and write via Python.
     canonical_logs_path: str | None = getattr(cfg, "log_path", None) if cfg else None
+    # When ``logs.path`` is templated, the Rust runtime renders the
+    # template per event and writes the single canonical copy. But the
+    # ``tn init`` scaffolder always writes a ``handlers:`` block whose
+    # primary ``file.rotating`` (``name: main``) ``path`` is the LITERAL
+    # stem (``./logs/tn.ndjson``), not the template. An operator who edits
+    # only ``logs.path`` to add a token (e.g. ``{event_type}``) leaves the
+    # handler at the stem, so its ``path`` no longer string-matches
+    # ``canonical_logs_path`` (now the template). Without recognizing that
+    # drift, the stem handler never gets ``_tn_default`` and runs in the
+    # post-Rust fan-out — double-writing every event to the stem file.
+    # Treat the first primary ``name: main`` file sink as the Rust-owned
+    # main log in that case too, so exactly one sink writes the main log.
+    # ``cfg.log_path`` is the raw ``logs.path`` string; a TN path
+    # template carries ``{`` tokens (``{event_type}``, ``{event_id}``,
+    # ``{event_class}``, ``{date}``).
+    logs_path_is_templated = isinstance(canonical_logs_path, str) and "{" in canonical_logs_path
+    _claimed_drift_main = False
 
     out: list[TNHandler] = []
     for raw in specs:
@@ -144,7 +161,23 @@ def build_handlers(
             # fan-out list. Pre-0.4.2a7 every file.rotating got the
             # sentinel, which made multi-file fan-out (one canonical
             # + N filtered secondaries) silently drop the secondaries.
-            if isinstance(raw_path, str) and canonical_logs_path == raw_path:
+            is_canonical = isinstance(raw_path, str) and canonical_logs_path == raw_path
+            if (
+                not is_canonical
+                and logs_path_is_templated
+                and not _claimed_drift_main
+                and name == "main"
+                and isinstance(raw_path, str)
+                and "{" not in raw_path
+            ):
+                # Drift case: templated ``logs.path`` but this primary
+                # ``name: main`` file sink stayed at the literal stem. It
+                # is the same logical main log Rust now owns. Claim only
+                # the first such sink; deliberate secondary file handlers
+                # at other paths keep their Python fan-out.
+                is_canonical = True
+                _claimed_drift_main = True
+            if is_canonical:
                 handler._tn_default = True  # type: ignore[attr-defined]
             out.append(handler)
         elif kind == "file.timed_rotating":
@@ -310,9 +343,7 @@ def build_handlers(
                     on=raw.get("on"),
                     scope=str(raw.get("scope", "admin")),
                     trigger=str(raw.get("trigger", "on_emit")),
-                    filename_template=str(
-                        raw.get("filename_template", DEFAULT_FILENAME_TEMPLATE)
-                    ),
+                    filename_template=str(raw.get("filename_template", DEFAULT_FILENAME_TEMPLATE)),
                     filter_spec=filter_spec,
                 )
             )
@@ -321,9 +352,7 @@ def build_handlers(
 
             in_dir = _resolve_path(raw["in_dir"], yaml_dir)
             archive = (
-                _resolve_path(raw["archive_dir"], yaml_dir)
-                if raw.get("archive_dir")
-                else None
+                _resolve_path(raw["archive_dir"], yaml_dir) if raw.get("archive_dir") else None
             )
             poll = _parse_duration(raw.get("poll_interval", 30.0))
             out.append(
