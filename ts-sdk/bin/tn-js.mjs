@@ -66,7 +66,9 @@ import {
   toWireDict,
   verify,
 } from "../dist/index.js";
-import { newManifest } from "../dist/core/tnpkg.js";
+// newManifest is loaded dynamically inside exportCmd: the dist core module
+// is CJS-interop and its named exports aren't statically resolvable via a
+// top-level `import { newManifest }` (crashes every command at load).
 
 import { ensureCeremonyOnDisk } from "../dist/multi.js";
 import { resolveVaultUrl } from "../dist/vault/url.js";
@@ -320,7 +322,7 @@ function readCmd() {
   }
 }
 
-function exportCmd() {
+async function exportCmd() {
   // tn-js export --kind project_seed --out <file> [--yaml <path>] --include-secrets
   const rest = argv.slice(3);
   let yamlPath = null;
@@ -343,18 +345,20 @@ function exportCmd() {
     );
   }
 
-  const cfg = tnConfig(yamlPath);
-  const did = cfg.device.deviceIdentity;
-  const ceremonyId = cfg.ceremonyId;
-  const yamlDir = dirname(pathResolve(yamlPath));
-  const ksPath = cfg.keystorePath || "./.tn/keys";
+  // Resolve identity/keystore straight from disk (no runtime init needed):
+  // the keystore's local.public is the authoritative DID, and absorb only
+  // cares about the body files + manifest, not a live runtime.
+  const { parse: parseYaml } = await import("yaml");
+  const yamlAbs = pathResolve(yamlPath);
+  const doc = parseYaml(readFileSync(yamlAbs, "utf8")) || {};
+  const ceremonyId = doc?.ceremony?.id ?? "";
+  const ksPath = doc?.keystore?.path || "./.tn/keys";
+  const yamlDir = dirname(yamlAbs);
   const keysDir = isAbsolute(ksPath) ? ksPath : pathResolve(yamlDir, ksPath);
   if (!existsSync(keysDir)) die(`export: keystore dir not found: ${keysDir}`);
+  const did = readFileSync(join(keysDir, "local.public"), "utf8").trim();
 
   // Body: canonical tn.yaml + every key file nested under body/keys/.
-  const entries = [
-    { name: "manifest.json", data: null }, // placeholder; replaced below
-  ];
   const body = [
     { name: "body/tn.yaml", data: new Uint8Array(readFileSync(pathResolve(yamlPath))) },
   ];
@@ -365,7 +369,9 @@ function exportCmd() {
   }
 
   // Self-addressed manifest (fromDid === toDid === device DID), signed
-  // by the device key loaded from the keystore.
+  // by the device key loaded from the keystore. newManifest is loaded
+  // dynamically (CJS-interop named export; see import note at top).
+  const { newManifest } = await import("../dist/core/tnpkg.js");
   const manifest = newManifest({
     kind: "project_seed",
     fromDid: did,
@@ -393,7 +399,6 @@ function exportCmd() {
     { name: "manifest.json", data: new TextEncoder().encode(manifestJson) },
     ...body,
   ]);
-  void entries;
   mkdirSync(dirname(pathResolve(outPath)), { recursive: true });
   writeFileSync(pathResolve(outPath), Buffer.from(tnpkgBytes));
   stdout.write(
