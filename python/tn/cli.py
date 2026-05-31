@@ -1517,7 +1517,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         from . import current_config, flush_and_close
         restored_did = current_config().device.device_identity
         flush_and_close()
-    except Exception:
+    except Exception:  # noqa: BLE001 — DID display is best-effort
         pass
 
     print(f"[tn import] restored kind={kind} files={accepted}")
