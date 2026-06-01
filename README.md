@@ -248,6 +248,105 @@ the same envelope decrypts identically under Python and TypeScript.
 The cross-language parity table lives at
 [`docs/sdk-parity.md`](docs/sdk-parity.md) and is enforced by CI.
 
+## Development: rebuilding the Rust core
+
+`btn` (and templated `logs.path` rendering + file writing) lives in the
+shared Rust core at `crypto/tn-core`. Both SDKs delegate to it — Python
+through the `tn_core` PyO3 wheel, TypeScript through `tn-wasm` — so a
+core edit is **invisible** until you rebuild the downstream artifact and
+reinstall it into the active interpreter.
+
+`maturin develop` is unreliable here: it reports success but leaves the
+already-loaded `site-packages/tn_core/_core.pyd` in place, so tests keep
+running the old binary. Build a wheel and force-reinstall it instead:
+
+```bash
+cd crypto/tn-core-py
+python -m maturin build --out ../../dist          # debug build is fine for iteration
+WHEEL=$(ls -t ../../dist/tn_core-*.whl | head -1)
+python -m pip install --force-reinstall --no-deps "$WHEEL"
+```
+
+Confirm the core actually recompiled by looking for `Compiling tn-core`
+in the maturin output (if it's absent, only the binding rebuilt), and
+sanity-check the install by comparing the `mtime` of
+`site-packages/tn_core/_core.pyd` against your edit.
+
+The TypeScript/wasm side is the analogous rebuild. The node target is a
+symlinked dep, so no reinstall is needed; the browser target is separate
+and easy to forget — rebuild both:
+
+```bash
+cd crypto/tn-wasm
+wasm-pack build --target nodejs --release             # consumed by ts-sdk + its tests
+wasm-pack build --target web --release --out-dir pkg-web   # browser bundle
+```
+
+**Windows pip-lock gotcha** (pip 26.x): if any Python process still has
+`_core.pyd` mmapped — a hung `pytest` is the usual culprit —
+`--force-reinstall` prints "Installed 1 package" but does **not**
+overwrite the locked file. It renames it to `~~_core` and silently
+leaves `tn_core/` empty. Recover by:
+
+1. Killing the stale Python processes and deleting any leftover
+   `~-_core` / `~~_core` / `~n_core` directories in
+   `…/Python3xx/Lib/site-packages/`.
+2. Extracting the wheel by hand (it's a zip) over the package:
+
+```powershell
+Expand-Archive $WHEEL $tmp -Force
+Copy-Item $tmp/tn_core <site-packages>/tn_core -Recurse -Force
+Copy-Item $tmp/tn_core-*.dist-info <site-packages>/ -Recurse -Force
+```
+
+## Releasing to TestPyPI
+
+Releases are automated by
+[`.github/workflows/release-python.yml`](.github/workflows/release-python.yml).
+It builds all three Python packages — `tn-btn`, `tn-core` (Rust wheels
+via maturin, across Linux/macOS/Windows), and `tn-protocol` (pure-Python
+wheel + sdist) — collects every artifact, and uploads them with
+`pypa/gh-action-pypi-publish` (`skip-existing: true`, so re-runs are
+idempotent). TestPyPI is the default target; real PyPI is opt-in.
+
+The canonical, full release flow:
+
+```bash
+# 1. Bump the version in python/pyproject.toml (PEP 440, e.g. 0.5.0a5).
+#    Keep the three packages aligned per docs/sdk-parity.md.
+
+# 2. Commit, then tag with a leading v and push the tag — this is what
+#    triggers the publish workflow.
+git tag -a v0.5.0a5 -m "0.5.0a5: <summary>"
+git push origin <branch>
+git push origin v0.5.0a5
+
+# 3. Watch the run; alpha/beta/rc tags auto-flag as a prerelease and a
+#    GitHub Release is created from the tag's annotation.
+gh run watch --repo cyaxios/tn-proto
+```
+
+To dry-run (or publish) **without** cutting a tag, use the manual
+dispatch and pick the target (`testpypi` | `pypi` | `none`):
+
+```bash
+gh workflow run release-python.yml --repo cyaxios/tn-proto -f target=testpypi
+```
+
+Required repo secrets: `TESTPYPI_API_TOKEN` (and `PYPI_API_TOKEN` only
+when promoting to real PyPI). Tokens are generated at
+<https://test.pypi.org/manage/account/token/>.
+
+Install a published TestPyPI build. TestPyPI doesn't host the regular
+dependencies, so point `--extra-index-url` at real PyPI for those:
+
+```bash
+pip install \
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple/ \
+  tn-protocol
+```
+
 ## Layout
 
 ```
