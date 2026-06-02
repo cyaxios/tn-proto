@@ -584,7 +584,10 @@ function nonEmptyString(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
 }
 
-function normalizeVaultConfig(
+// Exported for the cross-language vault-normalization contract test
+// (ts-sdk/test/vault_normalize_contract.test.ts). Internal primitive,
+// not part of the public SDK surface.
+export function normalizeVaultConfig(
   yamlPath: string,
   vault: Record<string, unknown> | null,
   ceremony: Record<string, unknown>,
