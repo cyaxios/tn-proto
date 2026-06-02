@@ -113,20 +113,16 @@ impl WasmRuntime {
     ) -> Result<WasmRuntime, JsError> {
         let normalized = yaml_path.replace('\\', "/");
         let storage = JsStorageAdapter::from_js(storage)?;
-        let skip_ceremony_init_emit = js_sys::Reflect::get(
-            &opts,
-            &JsValue::from_str("skipCeremonyInitEmit"),
-        )
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-        let skip_policy_published_emit = js_sys::Reflect::get(
-            &opts,
-            &JsValue::from_str("skipPolicyPublishedEmit"),
-        )
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        let skip_ceremony_init_emit =
+            js_sys::Reflect::get(&opts, &JsValue::from_str("skipCeremonyInitEmit"))
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        let skip_policy_published_emit =
+            js_sys::Reflect::get(&opts, &JsValue::from_str("skipPolicyPublishedEmit"))
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
         let init_opts = RuntimeInitOptions {
             skip_ceremony_init_emit,
             skip_policy_published_emit,
@@ -197,12 +193,7 @@ impl WasmRuntime {
     /// log-level threshold filtered it" shape that the PyO3 binding
     /// exposes lands in Phase 3 alongside the other emit variants.)
     #[wasm_bindgen(js_name = "emit")]
-    pub fn emit_js(
-        &self,
-        level: &str,
-        event_type: &str,
-        fields: JsValue,
-    ) -> Result<(), JsError> {
+    pub fn emit_js(&self, level: &str, event_type: &str, fields: JsValue) -> Result<(), JsError> {
         let value = js_to_json(fields)?;
         let map = match value {
             serde_json::Value::Object(m) => m,
@@ -225,15 +216,16 @@ impl WasmRuntime {
     /// Returns `Entry[]` (a JS array of plain objects).
     #[wasm_bindgen(js_name = "read")]
     pub fn read_js(&self) -> Result<JsValue, JsError> {
-        let entries = self.inner.read().map_err(|e| JsError::new(&e.to_string()))?;
+        let entries = self
+            .inner
+            .read()
+            .map_err(|e| JsError::new(&e.to_string()))?;
         // FlatEntry is `Map<String, Value>`, so serializing the Vec
         // directly produces a JS `Array<object>` after the JSON.parse
         // round-trip. Going through the `json_to_js` helper keeps null
         // values intact (see lib.rs comment).
-        let arr: Vec<serde_json::Value> = entries
-            .into_iter()
-            .map(serde_json::Value::Object)
-            .collect();
+        let arr: Vec<serde_json::Value> =
+            entries.into_iter().map(serde_json::Value::Object).collect();
         json_to_js(&serde_json::Value::Array(arr))
     }
 
@@ -250,10 +242,8 @@ impl WasmRuntime {
             .inner
             .read_all_runs()
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let arr: Vec<serde_json::Value> = entries
-            .into_iter()
-            .map(serde_json::Value::Object)
-            .collect();
+        let arr: Vec<serde_json::Value> =
+            entries.into_iter().map(serde_json::Value::Object).collect();
         json_to_js(&serde_json::Value::Array(arr))
     }
 
@@ -266,10 +256,8 @@ impl WasmRuntime {
             .inner
             .read_with_verify()
             .map_err(|e| JsError::new(&e.to_string()))?;
-        let arr: Vec<serde_json::Value> = entries
-            .into_iter()
-            .map(serde_json::Value::Object)
-            .collect();
+        let arr: Vec<serde_json::Value> =
+            entries.into_iter().map(serde_json::Value::Object).collect();
         json_to_js(&serde_json::Value::Array(arr))
     }
 
@@ -342,13 +330,19 @@ impl WasmRuntime {
             let mut flat = entry.fields;
             if let Some(instr) = entry.instructions {
                 let mut id = serde_json::Map::new();
-                id.insert("instruction".into(), serde_json::Value::String(instr.instruction));
+                id.insert(
+                    "instruction".into(),
+                    serde_json::Value::String(instr.instruction),
+                );
                 id.insert("use_for".into(), serde_json::Value::String(instr.use_for));
                 id.insert(
                     "do_not_use_for".into(),
                     serde_json::Value::String(instr.do_not_use_for),
                 );
-                id.insert("consequences".into(), serde_json::Value::String(instr.consequences));
+                id.insert(
+                    "consequences".into(),
+                    serde_json::Value::String(instr.consequences),
+                );
                 id.insert(
                     "on_violation_or_error".into(),
                     serde_json::Value::String(instr.on_violation_or_error),
@@ -635,11 +629,7 @@ impl WasmRuntime {
     /// `revoke_recipient`. Accepts the leaf index as a JS `number`
     /// (we widen to `u64` for `tn-core`).
     #[wasm_bindgen(js_name = "adminRevokeRecipient")]
-    pub fn admin_revoke_recipient_js(
-        &self,
-        group: &str,
-        leaf_index: u32,
-    ) -> Result<(), JsError> {
+    pub fn admin_revoke_recipient_js(&self, group: &str, leaf_index: u32) -> Result<(), JsError> {
         self.inner
             .admin_revoke_recipient(group, u64::from(leaf_index))
             .map_err(|e| JsError::new(&e.to_string()))
@@ -684,11 +674,7 @@ impl WasmRuntime {
     /// field names from `RecipientEntry` survive intact through the
     /// serde roundtrip.
     #[wasm_bindgen(js_name = "recipients")]
-    pub fn recipients_js(
-        &self,
-        group: &str,
-        include_revoked: bool,
-    ) -> Result<JsValue, JsError> {
+    pub fn recipients_js(&self, group: &str, include_revoked: bool) -> Result<JsValue, JsError> {
         let entries = self
             .inner
             .recipients(group, include_revoked)

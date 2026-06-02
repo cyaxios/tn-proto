@@ -122,9 +122,9 @@
     if (!o || typeof o !== "object" || Array.isArray(o)) return false;
     return (
       typeof o.event_type === "string" &&
-      typeof o.did === "string" &&
+      (typeof o.device_identity === "string" || typeof o.did === "string") &&
       typeof o.event_id === "string" &&
-      typeof o.sequence === "number"
+      (typeof o.sequence === "number" || typeof o.sequence === "string")
     );
   }
 
@@ -137,7 +137,7 @@
   //   HH:MM:SS.mmm LEVEL  seq=N  event_type  k=v  k=v
   function _envelopeToEntryLine(env) {
     const ENVELOPE_KEYS = new Set([
-      "event_type", "timestamp", "level", "message", "did",
+      "event_type", "timestamp", "level", "message", "device_identity", "did",
       "event_id", "sequence", "run_id", "prev_hash", "row_hash", "signature",
     ]);
     const ts = env.timestamp instanceof Date

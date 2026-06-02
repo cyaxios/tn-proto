@@ -34,7 +34,7 @@ const pubIdHex = Array.from(btnKitPublisherId(kitBytes)).map(b => b.toString(16)
 // does in routes_invite.py (STORED for manifest, DEFLATED for kit).
 // We'll write both entries STORED to keep the test portable; the
 // browser reader handles STORED and DEFLATED.
-import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { existsSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -46,8 +46,9 @@ const manifest = { invitation_id: "01ABC", project_name: "file-import-test", not
 writeFileSync(join(tdir, "manifest.json"), JSON.stringify(manifest, null, 2));
 
 // Use Python to build a real PKZIP (guaranteed ZIP format).
-const py = process.env.TN_PYTHON
-  || resolve(here, "../../../../.venv/Scripts/python.exe");
+const linuxPy = resolve(here, "../../../.venv_linux/bin/python");
+const winPy = resolve(here, "../../../.venv/Scripts/python.exe");
+const py = process.env.TN_PYTHON || (existsSync(linuxPy) ? linuxPy : winPy);
 const zipPath = join(tdir, "invitation.zip");
 const pyScript = `
 import zipfile, sys
@@ -58,7 +59,7 @@ with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
 `;
 const r = spawnSync(py, ["-c", pyScript, zipPath], { encoding: "utf8" });
 if (r.status !== 0) {
-  console.error("failed to build test zip:", r.stderr);
+  console.error("failed to build test zip:", r.error?.message || r.stderr);
   process.exit(2);
 }
 

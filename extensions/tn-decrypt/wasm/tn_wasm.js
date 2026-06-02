@@ -3,7 +3,7 @@
 /**
  * Publisher-side btn state.
  *
- * Wraps `btn::PublisherState`. The constructor is equivalent to
+ * Wraps `tn_btn::PublisherState`. The constructor is equivalent to
  * `BtnPublisher.new(seed)` in Python: if `seed` is 32 bytes, the
  * publisher is deterministic; otherwise a random seed is generated.
  *
@@ -176,6 +176,794 @@ export class BtnPublisher {
 if (Symbol.dispose) BtnPublisher.prototype[Symbol.dispose] = BtnPublisher.prototype.free;
 
 /**
+ * JS-side wrapper around a single `tn-core` `Runtime` instance.
+ *
+ * Owns an `Arc<Runtime>` so the JS handle can be cloned-by-reference
+ * in the future without forcing a `Runtime` copy. `Drop` releases the
+ * shared reference; `close()` exists for callers that want an explicit
+ * flush + a `Result` they can await on.
+ */
+export class WasmRuntime {
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(WasmRuntime.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmRuntimeFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmRuntimeFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmruntime_free(ptr, 0);
+    }
+    /**
+     * Register a JS-supplied handler. Subsequent emits fan out
+     * through it (subject to its `accepts` filter, if any).
+     *
+     * `callbacks` is a JS object: `{ name: string, emit: fn,
+     * accepts?: fn, close?: fn }`. See `JsHandler::from_js` for the
+     * full contract.
+     * @param {any} callbacks
+     */
+    addHandler(callbacks) {
+        const ret = wasm.wasmruntime_addHandler(this.__wbg_ptr, callbacks);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Mint kits for `runtimeDid` across the requested groups + the
+     * reserved `tn.agents` group, then export a `kit_bundle` `.tnpkg`
+     * at `outPath`. Optional `label` writes a sidecar `.label` file
+     * next to the bundle (best-effort).
+     *
+     * `groups` is a JS array of strings; entries that aren't strings
+     * are silently dropped. Returns the absolute bundle path.
+     * Mirrors PyO3 `admin_add_agent_runtime`.
+     * @param {string} runtime_did
+     * @param {any[]} groups
+     * @param {string} out_path
+     * @param {string | null} [label]
+     * @returns {string}
+     */
+    adminAddAgentRuntime(runtime_did, groups, out_path, label) {
+        let deferred6_0;
+        let deferred6_1;
+        try {
+            const ptr0 = passStringToWasm0(runtime_did, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArrayJsValueToWasm0(groups, wasm.__wbindgen_malloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(out_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len2 = WASM_VECTOR_LEN;
+            var ptr3 = isLikeNone(label) ? 0 : passStringToWasm0(label, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len3 = WASM_VECTOR_LEN;
+            const ret = wasm.wasmruntime_adminAddAgentRuntime(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+            var ptr5 = ret[0];
+            var len5 = ret[1];
+            if (ret[3]) {
+                ptr5 = 0; len5 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred6_0 = ptr5;
+            deferred6_1 = len5;
+            return getStringFromWasm0(ptr5, len5);
+        } finally {
+            wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
+        }
+    }
+    /**
+     * Mint a fresh btn reader kit for `group`, write it to
+     * `outPath`, persist the updated publisher state, and return the
+     * new recipient's leaf index.
+     *
+     * Optional `recipientDid` (`did:key:…`) attaches identity to the
+     * `tn.recipient.added` attested event the publisher emits as a
+     * side-effect. Mirrors PyO3 `add_recipient`.
+     * @param {string} group
+     * @param {string} out_path
+     * @param {string | null} [recipient_did]
+     * @returns {number}
+     */
+    adminAddRecipient(group, out_path, recipient_did) {
+        const ptr0 = passStringToWasm0(group, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(out_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(recipient_did) ? 0 : passStringToWasm0(recipient_did, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_adminAddRecipient(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * Revoke the recipient at `leafIndex` in `group`. Persists the
+     * updated state and emits `tn.recipient.revoked`. Mirrors PyO3
+     * `revoke_recipient`. Accepts the leaf index as a JS `number`
+     * (we widen to `u64` for `tn-core`).
+     * @param {string} group
+     * @param {number} leaf_index
+     */
+    adminRevokeRecipient(group, leaf_index) {
+        const ptr0 = passStringToWasm0(group, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_adminRevokeRecipient(this.__wbg_ptr, ptr0, len0, leaf_index);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Number of recipients currently marked revoked in `group`'s
+     * publisher state. Mirrors PyO3 `revoked_count`. Returned as a
+     * JS `number`.
+     * @param {string} group
+     * @returns {number}
+     */
+    adminRevokedCount(group) {
+        const ptr0 = passStringToWasm0(group, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_adminRevokedCount(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * Replay the log through the admin reducer and return the full
+     * `AdminState` as a plain JS object. `group` is optional — pass
+     * `null` for the all-groups view, a string to scope to one
+     * group's rows. Mirrors PyO3 `admin_state`.
+     * @param {string | null} [group]
+     * @returns {any}
+     */
+    adminState(group) {
+        var ptr0 = isLikeNone(group) ? 0 : passStringToWasm0(group, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_adminState(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Mint a fresh kit for `recipientDid` across one or more groups
+     * and bundle them into a single `.tnpkg` at `outPath`. `groups`
+     * is optional — pass `null`/`undefined` to bundle every non-
+     * internal group declared in the active ceremony.
+     *
+     * Mirrors PyO3 `bundle_for_recipient` and Python
+     * `tn.bundle_for_recipient`. Returns the absolute bundle path.
+     * @param {string} recipient_did
+     * @param {string} out_path
+     * @param {any[] | null} [groups]
+     * @returns {string}
+     */
+    bundleForRecipient(recipient_did, out_path, groups) {
+        let deferred5_0;
+        let deferred5_1;
+        try {
+            const ptr0 = passStringToWasm0(recipient_did, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(out_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            var ptr2 = isLikeNone(groups) ? 0 : passArrayJsValueToWasm0(groups, wasm.__wbindgen_malloc);
+            var len2 = WASM_VECTOR_LEN;
+            const ret = wasm.wasmruntime_bundleForRecipient(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            var ptr4 = ret[0];
+            var len4 = ret[1];
+            if (ret[3]) {
+                ptr4 = 0; len4 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred5_0 = ptr4;
+            deferred5_1 = len4;
+            return getStringFromWasm0(ptr4, len4);
+        } finally {
+            wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+        }
+    }
+    /**
+     * Explicit flush + close.
+     *
+     * Consumes `self`. Optional — the `Runtime`'s own `Drop` impl
+     * flushes OS file buffers via `File::Drop`. Use `close()` when
+     * you want to surface a flush error to JS rather than let it slip
+     * past.
+     *
+     * Implementation note: we can only call `Runtime::close(self)`
+     * when we hold the unique owner of the `Arc`. If JS code clones
+     * the handle (it can't today, but it might in a later phase),
+     * the unwrap falls back to a best-effort drop without surfacing
+     * flush errors.
+     */
+    close() {
+        const ptr = this.__destroy_into_raw();
+        const ret = wasm.wasmruntime_close(ptr);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * DEBUG-level attested event.
+     * @param {string} event_type
+     * @param {any} fields
+     */
+    debug(event_type, fields) {
+        const ptr0 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_debug(this.__wbg_ptr, ptr0, len0, fields);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * This runtime's publisher DID (`did:key:z…`).
+     * @returns {string}
+     */
+    did() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmruntime_did(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Emit one envelope at `level` for `eventType` with `fields`.
+     *
+     * `fields` must be a JS object that maps to a JSON object — keys
+     * are strings, values are anything `JSON.stringify` accepts. The
+     * envelope is signed (or not) per the ceremony yaml; use
+     * `emitOverrideSign` (Phase 3) for per-call control.
+     *
+     * Returns `undefined` on success; throws on schema violations,
+     * I/O failures, or a non-object `fields` value. (The richer
+     * "returns the envelope ndjson line on success, `None` if the
+     * log-level threshold filtered it" shape that the PyO3 binding
+     * exposes lands in Phase 3 alongside the other emit variants.)
+     * @param {string} level
+     * @param {string} event_type
+     * @param {any} fields
+     */
+    emit(level, event_type, fields) {
+        const ptr0 = passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_emit(this.__wbg_ptr, ptr0, len0, ptr1, len1, fields);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Emit with an explicit `sign` override.
+     *
+     * `None` (JS `null`/`undefined`) keeps the ceremony default;
+     * `Some(true)` forces a signature; `Some(false)` skips it.
+     * @param {string} level
+     * @param {string} event_type
+     * @param {any} fields
+     * @param {boolean | null} [sign]
+     */
+    emitOverrideSign(level, event_type, fields, sign) {
+        const ptr0 = passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_emitOverrideSign(this.__wbg_ptr, ptr0, len0, ptr1, len1, fields, isLikeNone(sign) ? 0xFFFFFF : sign ? 1 : 0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Full-control emit that returns the canonical envelope NDJSON line
+     * (or `undefined` when the log-level threshold filtered the emit).
+     *
+     * Mirrors the PyO3 binding's line-returning emit. The host (TS
+     * `NodeRuntime`) parses the returned line to synthesize the
+     * `EmitReceipt` directly, instead of reading the row back off the
+     * log. That read-back breaks for templated `logs.path` (e.g.
+     * `./logs/{event_id}.ndjson`) where the just-written row lives in a
+     * per-event file, not the single main log — the line is the source
+     * of truth regardless of where it was written.
+     * @param {string} level
+     * @param {string} event_type
+     * @param {any} fields
+     * @param {string | null} [timestamp]
+     * @param {string | null} [event_id]
+     * @param {boolean | null} [sign]
+     * @returns {string | undefined}
+     */
+    emitReturningLine(level, event_type, fields, timestamp, event_id, sign) {
+        const ptr0 = passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(timestamp) ? 0 : passStringToWasm0(timestamp, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(event_id) ? 0 : passStringToWasm0(event_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_emitReturningLine(this.__wbg_ptr, ptr0, len0, ptr1, len1, fields, ptr2, len2, ptr3, len3, isLikeNone(sign) ? 0xFFFFFF : sign ? 1 : 0);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        let v5;
+        if (ret[0] !== 0) {
+            v5 = getStringFromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v5;
+    }
+    /**
+     * Emit with explicit `timestamp` / `event_id` overrides.
+     *
+     * `null`/`undefined` for either argument falls back to the
+     * runtime's defaults (`OffsetDateTime::now_utc()` and a fresh
+     * UUID). Signing follows the ceremony's yaml `sign` flag — use
+     * `emitWithOverrideSign` for per-call signing control.
+     * @param {string} level
+     * @param {string} event_type
+     * @param {any} fields
+     * @param {string | null} [timestamp]
+     * @param {string | null} [event_id]
+     */
+    emitWith(level, event_type, fields, timestamp, event_id) {
+        const ptr0 = passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(timestamp) ? 0 : passStringToWasm0(timestamp, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(event_id) ? 0 : passStringToWasm0(event_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_emitWith(this.__wbg_ptr, ptr0, len0, ptr1, len1, fields, ptr2, len2, ptr3, len3);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Full-control emit: explicit timestamp, event_id, and sign override.
+     * @param {string} level
+     * @param {string} event_type
+     * @param {any} fields
+     * @param {string | null} [timestamp]
+     * @param {string | null} [event_id]
+     * @param {boolean | null} [sign]
+     */
+    emitWithOverrideSign(level, event_type, fields, timestamp, event_id, sign) {
+        const ptr0 = passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(timestamp) ? 0 : passStringToWasm0(timestamp, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(event_id) ? 0 : passStringToWasm0(event_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_emitWithOverrideSign(this.__wbg_ptr, ptr0, len0, ptr1, len1, fields, ptr2, len2, ptr3, len3, isLikeNone(sign) ? 0xFFFFFF : sign ? 1 : 0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * ERROR-level attested event.
+     * @param {string} event_type
+     * @param {any} fields
+     */
+    error(event_type, fields) {
+        const ptr0 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_error(this.__wbg_ptr, ptr0, len0, fields);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * The active threshold as a level name (or the numeric stringified
+     * value when it doesn't match one of the four standard names).
+     * @returns {string}
+     */
+    static getLevel() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmruntime_getLevel();
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Names of every group declared in the active ceremony yaml, in
+     * `BTreeMap` (alphabetical) order — matches what
+     * `Runtime::group_names` returns.
+     * @returns {any[]}
+     */
+    groupNames() {
+        const ret = wasm.wasmruntime_groupNames(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * INFO-level attested event.
+     * @param {string} event_type
+     * @param {any} fields
+     */
+    info(event_type, fields) {
+        const ptr0 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_info(this.__wbg_ptr, ptr0, len0, fields);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Load a ceremony from `yamlPath` using a JS-supplied storage
+     * callbacks object.
+     *
+     * The `storage` argument must be a JS object with the property
+     * shape documented in `crypto/tn-wasm/src/storage.rs` — `read`,
+     * `write`, `append`, `exists`, `list`, `rename`, `remove`,
+     * `createDirAll`, `casWrite` (synchronous function values).
+     * Node consumers wrap `fs.*Sync` methods; future browser
+     * consumers wrap an IndexedDB shim.
+     *
+     * Internally constructs a [`JsStorageAdapter`] around the
+     * callbacks and hands it to `Runtime::init_with_storage`. Every
+     * file read during init (yaml, device key, master index key,
+     * per-group cipher state + kits, agents.md) goes through the
+     * adapter. Subsequent emit / read / admin call sites still talk
+     * to `std::fs::*` directly; finishing the migration is Phase 7
+     * follow-up work documented in the storage abstraction's
+     * `Storage` trait comment.
+     *
+     * Errors surface as `JsError` with the Rust `Display` message.
+     * @param {string} yaml_path
+     * @param {any} storage
+     * @returns {WasmRuntime}
+     */
+    static init(yaml_path, storage) {
+        const ptr0 = passStringToWasm0(yaml_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_init(ptr0, len0, storage);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmRuntime.__wrap(ret[0]);
+    }
+    /**
+     * Like `init` but takes an `opts` object with extra knobs that
+     * SDK wrappers need.
+     *
+     * Recognised keys on `opts`:
+     * * `skipCeremonyInitEmit`: bool — when true, suppress the
+     *   auto-emit of `tn.ceremony.init` even when the ceremony looks
+     *   fresh. Used by the TS `NodeRuntime` so the lazy `attachWasm()`
+     *   hop doesn't double-attest a ceremony the TS path has already
+     *   wired up.
+     *
+     * Returns a fully-constructed [`WasmRuntime`]. Errors surface as
+     * [`JsError`] with the Rust `Display` message.
+     * @param {string} yaml_path
+     * @param {any} storage
+     * @param {any} opts
+     * @returns {WasmRuntime}
+     */
+    static initWith(yaml_path, storage, opts) {
+        const ptr0 = passStringToWasm0(yaml_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_initWith(ptr0, len0, storage, opts);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmRuntime.__wrap(ret[0]);
+    }
+    /**
+     * True iff `level` would currently emit. Use as a guard for
+     * expensive log-arg construction (mirrors Python's
+     * `Logger.isEnabledFor`).
+     * @param {string} level
+     * @returns {boolean}
+     */
+    static isEnabledFor(level) {
+        const ptr0 = passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_isEnabledFor(ptr0, len0);
+        return ret !== 0;
+    }
+    /**
+     * Severity-less attested event (envelope carries `level: ""`).
+     *
+     * Bypasses the log-level threshold filter by design — this is the
+     * "this is a fact" primitive whose semantics shouldn't depend on
+     * the active level.
+     * @param {string} event_type
+     * @param {any} fields
+     */
+    log(event_type, fields) {
+        const ptr0 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_log(this.__wbg_ptr, ptr0, len0, fields);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Absolute path of the main ndjson log this runtime writes to.
+     * @returns {string}
+     */
+    logPath() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmruntime_logPath(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Read every entry from the main log as flat JS objects.
+     *
+     * Matches the PyO3 `Runtime.read()` default shape: six envelope
+     * basics (`timestamp`, `event_type`, `level`, `did`, `sequence`,
+     * `event_id`) plus every readable group's decrypted fields
+     * hoisted to the top level. Filtered to the current process's
+     * `run_id` by default — to span every run use `readAllRuns`
+     * (Phase 2).
+     *
+     * Returns `Entry[]` (a JS array of plain objects).
+     * @returns {any}
+     */
+    read() {
+        const ret = wasm.wasmruntime_read(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Like `read()` but returns entries from every run on disk (not
+     * just the current process's `$TN_RUN_ID`). Use for audit /
+     * compliance reports that span the whole log lifetime.
+     *
+     * Mirrors the PyO3 `Runtime.read_all_runs()` shape: same flat dicts
+     * as `read()`, just unfiltered. Phase 2 surface per the wasm
+     * widening plan.
+     * @returns {any}
+     */
+    readAllRuns() {
+        const ret = wasm.wasmruntime_readAllRuns(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Read all entries from an explicit `logPath` as `{envelope,
+     * plaintext}` records (audit-grade shape). Mirrors PyO3
+     * `read_raw(log_path=…)` / Python `tn.read_raw(log_path=…)` —
+     * useful for cross-publisher reads where the caller absorbed a
+     * foreign kit and wants to decrypt that party's log.
+     *
+     * Returns the same `{envelope, plaintext}` shape that `readRaw()`
+     * produces; consumers who want the flat hoisted shape can post-
+     * process or call `readWithVerify` once it grows a path arg.
+     * @param {string} log_path
+     * @returns {any}
+     */
+    readFrom(log_path) {
+        const ptr0 = passStringToWasm0(log_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_readFrom(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * As [`Self::read_raw_with_validity_js`] but reads from an
+     * explicit `logPath`. Mirrors Python
+     * `tn.read_raw_with_validity(log_path=…)`.
+     * @param {string} log_path
+     * @returns {any}
+     */
+    readFromWithValidity(log_path) {
+        const ptr0 = passStringToWasm0(log_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_readFromWithValidity(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Audit-grade read: returns one object per entry with the full
+     * on-disk `envelope` (including `prev_hash` / `row_hash` /
+     * `signature` / `groups`) plus a `plaintext` map of per-group
+     * decrypted values. Mirrors PyO3 `Runtime.read_raw()` — key name is
+     * `plaintext` (not the Rust field name `plaintext_per_group`) so
+     * the JS surface matches Python.
+     * @returns {any}
+     */
+    readRaw() {
+        const ret = wasm.wasmruntime_readRaw(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Audit-grade read against the runtime's own log with explicit
+     * per-row validity flags. Returns one object per entry:
+     * `{envelope, plaintext, valid: {signature, row_hash, chain}}`.
+     * Mirrors PyO3's `(ReadEntry, ValidFlags)` tuple — flattened into
+     * a single dict for the JS surface so consumers don't need a
+     * tuple shim. Mirrors Python `tn.read_raw_with_validity()`.
+     * @returns {any}
+     */
+    readRawWithValidity() {
+        const ret = wasm.wasmruntime_readRawWithValidity(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Like `read()` but adds a `_valid: {signature, row_hash, chain}`
+     * block to each flat entry so callers can inspect verification
+     * status without raising. Mirrors PyO3 `Runtime.read_with_verify()`.
+     * @returns {any}
+     */
+    readWithVerify() {
+        const ret = wasm.wasmruntime_readWithVerify(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Return the current recipient roster for `group` by replaying
+     * the log. When `includeRevoked` is true, revoked recipients are
+     * appended after the active ones. Mirrors PyO3 `recipients`.
+     * Returns a JS array of plain objects (`{leafIndex, recipientDid,
+     * mintedAt, kitSha256, revoked, revokedAt}`); the snake_case
+     * field names from `RecipientEntry` survive intact through the
+     * serde roundtrip.
+     * @param {string} group
+     * @param {boolean} include_revoked
+     * @returns {any}
+     */
+    recipients(group, include_revoked) {
+        const ptr0 = passStringToWasm0(group, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_recipients(this.__wbg_ptr, ptr0, len0, include_revoked);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Verified read (sig + row_hash + chain). On failure, behavior
+     * follows `onInvalid`:
+     *   - `"skip"` — drop the bad row, append a
+     *     `tn.read.tampered_row_skipped` admin event (default).
+     *   - `"raise"` — throw a JS error.
+     *   - `"forensic"` — keep the row, attach `_valid` and
+     *     `_invalid_reasons` markers.
+     *
+     * Each returned entry is a flat dict shaped like `read()`, plus an
+     * optional `instructions` block when the caller holds the
+     * `tn.agents` kit (mirroring PyO3 `Runtime.secure_read()`).
+     * `_hidden_groups` / `_decrypt_errors` are surfaced as arrays when
+     * non-empty.
+     * @param {string} on_invalid
+     * @returns {any}
+     */
+    secureRead(on_invalid) {
+        const ptr0 = passStringToWasm0(on_invalid, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_secureRead(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Set the process-wide log-level threshold by name. Accepts
+     * "debug" / "info" / "warning" / "error" (case-insensitive,
+     * "warn" aliases "warning"). Throws on unknown names.
+     * @param {string} level
+     */
+    static setLevel(level) {
+        const ptr0 = passStringToWasm0(level, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_setLevel(ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Set the process-wide threshold from a numeric value (10/20/
+     * 30/40 etc.). Lets callers plug in custom severities without
+     * the string map.
+     * @param {number} level
+     */
+    static setLevelValue(level) {
+        wasm.wasmruntime_setLevelValue(level);
+    }
+    /**
+     * Emit a signed `tn.vault.linked` admin event recording that this
+     * ceremony is paired with `vaultDid`'s `projectId`. Idempotent —
+     * an active link to the same `(vault_did, project_id)` is a no-op.
+     * Mirrors PyO3 `vault_link` and Python `tn.vault_link`.
+     * @param {string} vault_did
+     * @param {string} project_id
+     */
+    vaultLink(vault_did, project_id) {
+        const ptr0 = passStringToWasm0(vault_did, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(project_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_vaultLink(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Emit a signed `tn.vault.unlinked` admin event recording that the
+     * pairing between this ceremony and `vaultDid`'s `projectId` has
+     * been severed. `reason` is an optional free-form string; pass
+     * `null`/`undefined` to omit (the event will carry `reason: null`).
+     * Mirrors PyO3 `vault_unlink` and Python `tn.vault_unlink`.
+     * @param {string} vault_did
+     * @param {string} project_id
+     * @param {string | null} [reason]
+     */
+    vaultUnlink(vault_did, project_id, reason) {
+        const ptr0 = passStringToWasm0(vault_did, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(project_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(reason) ? 0 : passStringToWasm0(reason, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_vaultUnlink(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * WARNING-level attested event.
+     * @param {string} event_type
+     * @param {any} fields
+     */
+    warning(event_type, fields) {
+        const ptr0 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmruntime_warning(this.__wbg_ptr, ptr0, len0, fields);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+}
+if (Symbol.dispose) WasmRuntime.prototype[Symbol.dispose] = WasmRuntime.prototype.free;
+
+/**
  * List the catalogued admin event kinds.
  *
  * Returns `[{event_type, sign, sync, schema: [[name, type], ...]}, ...]`.
@@ -322,7 +1110,7 @@ export function btnTreeHeight() {
  * `input` shape:
  * ```json
  * {
- *   "did": string, "timestamp": string, "event_id": string,
+ *   "device_identity": string, "timestamp": string, "event_id": string,
  *   "event_type": string, "level": string, "sequence": number,
  *   "prev_hash": string, "row_hash": string, "signature_b64": string,
  *   "public_fields": { [key]: value },
@@ -403,7 +1191,7 @@ export function canonicalJson(value) {
  * `input` is a JSON object with:
  * ```json
  * {
- *   "did": string,
+ *   "device_identity": string,
  *   "timestamp": string,
  *   "event_id": string,
  *   "event_type": string,
@@ -558,6 +1346,90 @@ export function indexToken(group_index_key, field_name, value) {
 }
 
 /**
+ * True iff vector clock `a` dominates `b` on every `(did, event_type)`
+ * coordinate.
+ * @param {any} a
+ * @param {any} b
+ * @returns {boolean}
+ */
+export function manifestClockDominates(a, b) {
+    const ret = wasm.manifestClockDominates(a, b);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] !== 0;
+}
+
+/**
+ * Pointwise max of two vector clocks.
+ * @param {any} a
+ * @param {any} b
+ * @returns {any}
+ */
+export function manifestClockMerge(a, b) {
+    const ret = wasm.manifestClockMerge(a, b);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * List the manifest kinds recognized by the Rust core.
+ * @returns {any}
+ */
+export function manifestKnownKinds() {
+    const ret = wasm.manifestKnownKinds();
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Canonical signing bytes for a manifest, with `manifest_signature_b64`
+ * stripped by the Rust core.
+ * @param {any} manifest_doc
+ * @returns {Uint8Array}
+ */
+export function manifestSigningBytes(manifest_doc) {
+    const ret = wasm.manifestSigningBytes(manifest_doc);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v1;
+}
+
+/**
+ * Normalize a manifest wire dictionary through the Rust manifest parser.
+ * @param {any} manifest_doc
+ * @returns {any}
+ */
+export function manifestToWireDict(manifest_doc) {
+    const ret = wasm.manifestToWireDict(manifest_doc);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Return true iff the manifest signature verifies against
+ * `publisher_identity`.
+ * @param {any} manifest_doc
+ * @returns {boolean}
+ */
+export function manifestVerifySignature(manifest_doc) {
+    const ret = wasm.manifestVerifySignature(manifest_doc);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] !== 0;
+}
+
+/**
  * Sign `message` with the 32-byte Ed25519 seed. Returns a 64-byte
  * signature.
  * @param {Uint8Array} seed
@@ -617,6 +1489,42 @@ export function signatureFromB64(s) {
 }
 
 /**
+ * Read a `.tnpkg` archive from bytes.
+ *
+ * Returns `{ manifest, body }`, where `body` is an array of
+ * `{ name, data: Uint8Array }` entries. Signature verification is a separate
+ * manifest operation, matching Rust/Python.
+ * @param {Uint8Array} bytes
+ * @returns {any}
+ */
+export function tnpkgReadBytes(bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.tnpkgReadBytes(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Write a `.tnpkg` archive to bytes from a manifest wire dictionary and
+ * body entries (`[{ name, data: Uint8Array }, ...]`).
+ * @param {any} manifest_doc
+ * @param {any} entries
+ * @returns {Uint8Array}
+ */
+export function tnpkgWriteBytes(manifest_doc, entries) {
+    const ret = wasm.tnpkgWriteBytes(manifest_doc, entries);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v1;
+}
+
+/**
  * Verify a signature against an Ed25519 `did:key:z…` identity.
  *
  * Returns `false` for non-Ed25519 DIDs (secp256k1 verify deferred to
@@ -664,6 +1572,11 @@ function __wbg_get_imports() {
             const ret = Error(getStringFromWasm0(arg0, arg1));
             return ret;
         },
+        __wbg___wbindgen_boolean_get_6ea149f0a8dcc5ff: function(arg0) {
+            const v = arg0;
+            const ret = typeof(v) === 'boolean' ? v : undefined;
+            return isLikeNone(ret) ? 0xFFFFFF : ret ? 1 : 0;
+        },
         __wbg___wbindgen_debug_string_ab4b34d23d6778bd: function(arg0, arg1) {
             const ret = debugString(arg1);
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -673,6 +1586,10 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_is_function_3baa9db1a987f47d: function(arg0) {
             const ret = typeof(arg0) === 'function';
+            return ret;
+        },
+        __wbg___wbindgen_is_null_52ff4ec04186736f: function(arg0) {
+            const ret = arg0 === null;
             return ret;
         },
         __wbg___wbindgen_is_object_63322ec0cd6ea4ef: function(arg0) {
@@ -699,23 +1616,96 @@ function __wbg_get_imports() {
         __wbg___wbindgen_throw_6b64449b9b9ed33c: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
+        __wbg_call_14b169f759b26747: function() { return handleError(function (arg0, arg1) {
+            const ret = arg0.call(arg1);
+            return ret;
+        }, arguments); },
+        __wbg_call_86e39d65afc3d9db: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
+            const ret = arg0.call(arg1, arg2, arg3, arg4);
+            return ret;
+        }, arguments); },
         __wbg_call_a24592a6f349a97e: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = arg0.call(arg1, arg2);
+            return ret;
+        }, arguments); },
+        __wbg_call_bb28efe6b2f55b86: function() { return handleError(function (arg0, arg1, arg2, arg3) {
+            const ret = arg0.call(arg1, arg2, arg3);
             return ret;
         }, arguments); },
         __wbg_crypto_38df2bab126b63dc: function(arg0) {
             const ret = arg0.crypto;
             return ret;
         },
+        __wbg_from_0dbf29f09e7fb200: function(arg0) {
+            const ret = Array.from(arg0);
+            return ret;
+        },
         __wbg_getRandomValues_c44a50d8cfdaebeb: function() { return handleError(function (arg0, arg1) {
             arg0.getRandomValues(arg1);
         }, arguments); },
+        __wbg_getRandomValues_ef12552bf5acd2fe: function() { return handleError(function (arg0, arg1) {
+            globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
+        }, arguments); },
+        __wbg_getTime_da7c55f52b71e8c6: function(arg0) {
+            const ret = arg0.getTime();
+            return ret;
+        },
+        __wbg_get_6011fa3a58f61074: function() { return handleError(function (arg0, arg1) {
+            const ret = Reflect.get(arg0, arg1);
+            return ret;
+        }, arguments); },
+        __wbg_get_8360291721e2339f: function(arg0, arg1) {
+            const ret = arg0[arg1 >>> 0];
+            return ret;
+        },
+        __wbg_get_unchecked_17f53dad852b9588: function(arg0, arg1) {
+            const ret = arg0[arg1 >>> 0];
+            return ret;
+        },
+        __wbg_instanceof_Uint8Array_152ba1f289edcf3f: function(arg0) {
+            let result;
+            try {
+                result = arg0 instanceof Uint8Array;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
+            return ret;
+        },
+        __wbg_isArray_c3109d14ffc06469: function(arg0) {
+            const ret = Array.isArray(arg0);
+            return ret;
+        },
+        __wbg_length_3d4ecd04bd8d22f1: function(arg0) {
+            const ret = arg0.length;
+            return ret;
+        },
         __wbg_length_9f1775224cf1d815: function(arg0) {
             const ret = arg0.length;
             return ret;
         },
         __wbg_msCrypto_bd5a034af96bcba6: function(arg0) {
             const ret = arg0.msCrypto;
+            return ret;
+        },
+        __wbg_new_0_4d657201ced14de3: function() {
+            const ret = new Date();
+            return ret;
+        },
+        __wbg_new_0c7403db6e782f19: function(arg0) {
+            const ret = new Uint8Array(arg0);
+            return ret;
+        },
+        __wbg_new_682678e2f47e32bc: function() {
+            const ret = new Array();
+            return ret;
+        },
+        __wbg_new_aa8d0fa9762c29bd: function() {
+            const ret = new Object();
+            return ret;
+        },
+        __wbg_new_from_slice_b5ea43e23f6008c0: function(arg0, arg1) {
+            const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
         },
         __wbg_new_with_length_8c854e41ea4dae9b: function(arg0) {
@@ -726,6 +1716,10 @@ function __wbg_get_imports() {
             const ret = arg0.node;
             return ret;
         },
+        __wbg_now_0cce8c6798af1870: function() { return handleError(function () {
+            const ret = Date.now();
+            return ret;
+        }, arguments); },
         __wbg_parse_1bbc9c053611d0a7: function() { return handleError(function (arg0, arg1) {
             const ret = JSON.parse(getStringFromWasm0(arg0, arg1));
             return ret;
@@ -737,11 +1731,19 @@ function __wbg_get_imports() {
         __wbg_prototypesetcall_a6b02eb00b0f4ce2: function(arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
         },
+        __wbg_push_471a5b068a5295f6: function(arg0, arg1) {
+            const ret = arg0.push(arg1);
+            return ret;
+        },
         __wbg_randomFillSync_6c25eac9869eb53c: function() { return handleError(function (arg0, arg1) {
             arg0.randomFillSync(arg1);
         }, arguments); },
         __wbg_require_b4edbdcf3e2a1ef0: function() { return handleError(function () {
             const ret = module.require;
+            return ret;
+        }, arguments); },
+        __wbg_set_022bee52d0b05b19: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = Reflect.set(arg0, arg1, arg2);
             return ret;
         }, arguments); },
         __wbg_static_accessor_GLOBAL_8cfadc87a297ca02: function() {
@@ -801,6 +1803,9 @@ function __wbg_get_imports() {
 const BtnPublisherFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_btnpublisher_free(ptr >>> 0, 1));
+const WasmRuntimeFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmruntime_free(ptr >>> 0, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
@@ -873,6 +1878,17 @@ function debugString(val) {
     return className;
 }
 
+function getArrayJsValueFromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    const mem = getDataViewMemory0();
+    const result = [];
+    for (let i = ptr; i < ptr + 4 * len; i += 4) {
+        result.push(wasm.__wbindgen_externrefs.get(mem.getUint32(i, true)));
+    }
+    wasm.__externref_drop_slice(ptr, len);
+    return result;
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
@@ -916,6 +1932,16 @@ function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
     WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayJsValueToWasm0(array, malloc) {
+    const ptr = malloc(array.length * 4, 4) >>> 0;
+    for (let i = 0; i < array.length; i++) {
+        const add = addToExternrefTable0(array[i]);
+        getDataViewMemory0().setUint32(ptr + 4 * i, add, true);
+    }
+    WASM_VECTOR_LEN = array.length;
     return ptr;
 }
 
