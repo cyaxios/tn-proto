@@ -15,9 +15,6 @@ const _pkgPath = join(_here, "..", "package.json");
 
 // Files intentionally NOT in the run set. Each MUST have a reason.
 const ALLOWLIST: Record<string, string> = {
-  "test/recipient_seal.test.ts":
-    "stale Python fixture (missing recipient_identity after the *_identity rename); " +
-    "needs fixtures/build_recipient_seal_fixture.py regenerated before re-adding.",
   "test/wasm_runtime_smoke.test.ts":
     "smoke test for the wasm runtime, which is on the deprecation path " +
     "(see plans/2026-05-13-wasm-widen-and-fallback-deprecate.md); not worth " +
