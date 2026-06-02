@@ -792,7 +792,13 @@ def set_link_state(
             vault_block["autosync"] = False
             vault_block.setdefault("sync_interval_seconds", 600)
 
-    _update_yaml(cfg, _mutate)
+    # Link state is project-scoped: a named stream inherits its
+    # ceremony/vault link from the default (the extends-chain root), so
+    # the mutation must land at the root — otherwise unlinking a stream
+    # only writes a stream-local override and leaves the project linked.
+    # For a single-file ceremony the authoritative yaml resolves back to
+    # cfg.yaml_path, so the legacy single-file layout is unchanged.
+    _update_authoritative_yaml(cfg, _mutate, key="vault")
 
     cfg.mode = mode
     if mode == "linked":
