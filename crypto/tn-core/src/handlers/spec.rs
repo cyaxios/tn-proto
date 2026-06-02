@@ -1,4 +1,7 @@
-//! Shared parsing for handler YAML specs.
+//! Shared parsing for handler YAML specs. Internal primitive supporting the
+//! handler implementations; the handler interface + [`crate::Runtime`]
+//! fan-out is the entry point (behind `tn.info()` / `tn log`). Reach here
+//! directly only to parse a handler spec by hand.
 //!
 //! The Python registry parses each handler kind ad-hoc (see
 //! `python/tn/handlers/registry.py`). The Rust side normalizes specs

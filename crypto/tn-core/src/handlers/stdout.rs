@@ -1,4 +1,7 @@
-//! Stdout handler — write envelope info to stdout.
+//! Stdout handler — write envelope info to stdout. A handler implementation;
+//! the handler interface + [`crate::Runtime`] fan-out is the entry point
+//! (behind `tn.info()` / `tn log`). Internal primitive — reach here directly
+//! only to configure or inspect the stdout sink.
 //!
 //! Mirrors `tn.handlers.stdout.StdoutHandler` (Python) and
 //! `StdoutHandler` (TS). Default-on per `Runtime::init` so out-of-the-box

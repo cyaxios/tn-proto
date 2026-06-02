@@ -1,4 +1,6 @@
-//! Stage-level perf instrumentation for the emit hot path.
+//! Internal stage-timing instrumentation (`TN_PERF_TRACE`) for the write hot
+//! path; not a protocol surface. See [`crate::Runtime`] for the actual
+//! event API. Reach here directly only to read or reset stage timings.
 //!
 //! Enabled when the `TN_PERF_TRACE` env var is set at process start.
 //! Each named stage accumulates `count` and `total_ns` into a static

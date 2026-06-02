@@ -1,4 +1,8 @@
-//! Markdown loader for `.tn/config/agents.md` policy files.
+//! Markdown loader for `.tn/config/agents.md` policy files. Internal
+//! primitive: most readers want the high-level API instead — see
+//! [`crate::Runtime`], which loads and enforces agent policy as part of the
+//! write path (behind `tn.info()` / `tn log`). Reach here directly only to
+//! parse an `agents.md` file on its own.
 //!
 //! Mirrors `tn-protocol/python/tn/_agents_policy.py` byte-for-byte. Each
 //! event type is a `## <event_type>` section; each section MUST have all
