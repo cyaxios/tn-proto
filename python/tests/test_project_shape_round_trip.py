@@ -44,12 +44,8 @@ def test_full_keystore_packs_stream_yamls(tmp_path: Path) -> None:
     payments_yaml_bytes = payments.yaml_path.read_bytes()
     audits_yaml_bytes = audits.yaml_path.read_bytes()
 
-    # Re-bind the module singleton to the default ceremony before
-    # exporting: post-#a7 each tn.use(...) rebinds the singleton
-    # (last-init-wins), so the trailing singleton would be audits'.
-    # full_keystore export uses cfg.yaml_path.parent.parent as the
-    # project root for stream discovery, so we need the default cfg
-    # for the walk to find payments/ and audits/ as siblings.
+    # Export from the Project root config so the packer walks
+    # .tn/<project>/streams/ and finds all stream overlays.
     tn.init()
 
     out = tmp_path / "snapshot.tnpkg"
@@ -99,8 +95,8 @@ def test_full_keystore_absorbs_stream_yamls(
     payments_id_a = _yaml.safe_load(payments.yaml_path.read_text())["ceremony"]["id"]
     audits_id_a = _yaml.safe_load(audits.yaml_path.read_text())["ceremony"]["id"]
 
-    # Re-bind to default before exporting (see sibling test for the
-    # rationale: each tn.use(...) rebinds the singleton post-#a7).
+    # Export from the Project root config so stream overlay discovery
+    # starts from .tn/<project>/.
     tn.init()
     out = tmp_path / "snapshot.tnpkg"
     cfg_a = tn.current_config()
@@ -114,8 +110,8 @@ def test_full_keystore_absorbs_stream_yamls(
 
     # --- Call the absorber directly against a fresh project root ---
     # We pin the target keystore so absorb writes there, not back into
-    # the source project. Streams should appear under
-    # <node_b_root>/<stream>/tn.yaml.
+    # the source project. Streams should appear under the target
+    # Project's streams/ directory.
     from tn.absorb import _absorb_dispatch
     from tn.config import LoadedConfig
 

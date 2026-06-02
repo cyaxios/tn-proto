@@ -68,9 +68,9 @@ def test_atexit_drains_without_explicit_flush(tmp_path: Path) -> None:
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
-    # Find the log file the subprocess produced. The default location
-    # is ./.tn/default/logs/tn.ndjson under cwd.
-    log_path = tmp_path / ".tn" / "default" / "logs" / "tn.ndjson"
+    # Find the log file the subprocess produced. Fresh init uses the
+    # cwd-named Project root.
+    log_path = tmp_path / ".tn" / tmp_path.name / "logs" / "default.ndjson"
     assert log_path.exists(), (
         f"log file missing - atexit didn't drain. "
         f"stderr from subprocess:\n{result.stderr}"

@@ -117,7 +117,8 @@ def test_watch_admin_yields_all_entries_including_runid_less(tmp_path: Path):
         tn.ensure_group(cfg, "ops", fields=["operator"])
         tn.flush_and_close()
 
-        admin = pathlib.Path("./.tn/default/admin/admin.ndjson")
+        project = pathlib.Path.cwd().name
+        admin = pathlib.Path("./.tn") / project / "admin" / "default.ndjson"
         on_disk = len(admin.read_text().splitlines())
 
         tn.init()

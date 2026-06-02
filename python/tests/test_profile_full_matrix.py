@@ -62,16 +62,17 @@ def _emit_and_inspect(tmp_path: Path, profile: str) -> dict:
         os.environ["TN_NO_STDOUT"] = "1"
         import tn
         tn.init(profile={profile!r})
+        cfg = tn.current_config()
+        yaml_path = pathlib.Path(cfg.yaml_path)
+        log = pathlib.Path(cfg.resolve_log_path())
         tn.info("matrix.evt", x=1, message="hello")
         tn.flush_and_close()
-        yaml_path = pathlib.Path("./.tn/default/tn.yaml")
         import yaml
         cer = (yaml.safe_load(yaml_path.read_text()) or {{}}).get("ceremony", {{}})
         handlers = yaml.safe_load(yaml_path.read_text()).get("handlers") or []
         # Capture sink kinds from yaml so the matrix test can check
         # what handler-set this profile produced.
         sink_kinds = sorted({{h.get("kind") for h in handlers if isinstance(h, dict)}})
-        log = pathlib.Path("./.tn/default/logs/tn.ndjson")
         if log.is_file() and log.read_text().strip():
             last = json.loads(log.read_text().splitlines()[-1])
         else:

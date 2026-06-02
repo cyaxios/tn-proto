@@ -86,8 +86,9 @@ class TestNonDefaultCeremonyHasRealCfg:
         # Shared identity: every stream's DID is the project's DID.
         # Distinct ceremony_ids per stream (each has its own chain),
         # one device key for all streams.
-        a = tn.init("payments", project_dir=tmp_path)
-        b = tn.init("agents", project_dir=tmp_path)
+        tn.init(project="default", project_dir=tmp_path)
+        a = tn.use("payments", project_dir=tmp_path)
+        b = tn.use("agents", project_dir=tmp_path)
         assert a.cfg.device.device_identity == b.cfg.device.device_identity
         # Different streams = different ceremony_ids (each is its
         # own evidence sequence).
@@ -95,11 +96,12 @@ class TestNonDefaultCeremonyHasRealCfg:
 
     def test_streams_share_default_keystore(self, tmp_path):
         # The "directories don't need those files" property: stream
-        # subdirs don't have their own keys/. The keystore lives at
-        # default, and streams reference it via relative path.
-        h = tn.init("payments", project_dir=tmp_path)
+        # overlays don't have their own keys/. The keystore lives at
+        # the Project root, and streams reference it via relative path.
+        tn.init(project="default", project_dir=tmp_path)
+        h = tn.use("payments", project_dir=tmp_path)
         default_keys = tmp_path / ".tn" / "default" / "keys"
-        stream_keys = tmp_path / ".tn" / "payments" / "keys"
+        stream_keys = tmp_path / ".tn" / "default" / "streams" / "keys"
         assert default_keys.is_dir(), "default keystore should exist"
         assert (default_keys / "local.private").is_file()
         assert not stream_keys.exists(), (
@@ -109,15 +111,16 @@ class TestNonDefaultCeremonyHasRealCfg:
         assert h.cfg.keystore == default_keys.resolve()
 
     def test_streams_lightweight_directories(self, tmp_path):
-        # Stream dirs hold only logs/ + admin/ (and the yaml).
-        # No keys/, no vault/.
-        tn.init("payments", project_dir=tmp_path)
-        sd = tmp_path / ".tn" / "payments"
-        assert (sd / "logs").is_dir()
-        assert (sd / "admin").is_dir()
-        assert (sd / "tn.yaml").is_file()
-        assert not (sd / "keys").exists()
-        assert not (sd / "vault").exists()
+        # Stream overlays are yaml-only; logs/admin are Project-level
+        # directories keyed by stream name. No stream keys/, no stream vault/.
+        tn.init(project="default", project_dir=tmp_path)
+        h = tn.use("payments", project_dir=tmp_path)
+        project_root = tmp_path / ".tn" / "default"
+        assert h.yaml_path == project_root / "streams" / "payments.yaml"
+        assert (project_root / "logs").is_dir()
+        assert (project_root / "admin").is_dir()
+        assert not (project_root / "streams" / "keys").exists()
+        assert not (project_root / "streams" / "vault").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +134,9 @@ class TestKitBundleRoundtrip:
         # Two independent ceremonies in the same project. Producer
         # mints a kit for the consumer's DID and bundles it; consumer
         # absorbs the bundle.
-        producer = tn.init("publisher", project_dir=tmp_path)
-        consumer = tn.init("subscriber", project_dir=tmp_path)
+        tn.init(project="default", project_dir=tmp_path)
+        producer = tn.use("publisher", project_dir=tmp_path)
+        consumer = tn.use("subscriber", project_dir=tmp_path)
 
         consumer_did = consumer.cfg.device.device_identity
 

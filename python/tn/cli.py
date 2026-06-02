@@ -585,12 +585,11 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
     if getattr(args, "pull", False):
         return _cmd_wallet_sync_pull(cfg, identity, yaml_path)
 
-    if not cfg.is_linked():
+    link = _wallet.vault_link_info(cfg)
+    if not link.enabled or not link.url:
         _die(f"ceremony {cfg.ceremony_id} is not linked; run `tn wallet link` first")
 
-    if cfg.linked_vault is None:
-        _die(f"ceremony {cfg.ceremony_id} reports linked but linked_vault is empty")
-    client = VaultClient.for_identity(identity, cfg.linked_vault)
+    client = VaultClient.for_identity(identity, link.url)
     try:
         if args.drain_queue:
             pending_before = len(_wallet.read_sync_queue(cfg.ceremony_id))
@@ -605,7 +604,7 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
             return 0
 
         result = _wallet.sync_ceremony(cfg, client)
-        print(f"Synced {cfg.ceremony_id} -> {cfg.linked_vault}")
+        print(f"Synced {cfg.ceremony_id} -> {link.url}")
         print(f"  uploaded {len(result.uploaded)} files: {result.uploaded}")
         if result.errors:
             print(f"  WARN {len(result.errors)} errors: {result.errors}")

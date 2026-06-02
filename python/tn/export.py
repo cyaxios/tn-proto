@@ -58,6 +58,7 @@ from .packaging import Package
 from .tnpkg import (
     KNOWN_KINDS,
     TnpkgManifest,
+    _validate_tnpkg_body_name,
     _write_tnpkg,
 )
 
@@ -263,36 +264,33 @@ def _build_kit_bundle_body(
 
     if full and cfg is not None and cfg.yaml_path is not None and cfg.yaml_path.exists():
         body["body/tn.yaml"] = cfg.yaml_path.read_bytes()
-        # Pack every named stream's yaml verbatim. Streams live in named
-        # sibling subdirectories of the project root, each with its own
-        # ``tn.yaml`` carrying the chain's ``ceremony.id``. We pack the
-        # yaml as-is so absorb can restore the same chain identity on
-        # the receiving node. Streams have no key material of their own
-        # (they extend default), so we don't recurse into logs/ or admin/.
-        #
-        # Project root location depends on the on-disk layout:
-        # * New (preferred): ``<root>/default/tn.yaml`` → root is parent.parent
-        # * Legacy: ``<root>/tn.yaml`` → root is parent
-        # We pick the root by walking up until we find subdirs with
-        # tn.yaml siblings (other than default's own dir).
+        # Pack every named stream's yaml verbatim. New Project-root layout
+        # stores overlays as ``<project>/streams/<name>.yaml``; older
+        # ceremony layout stored streams as sibling ``<name>/tn.yaml`` dirs.
+        # The package keeps the legacy archive shape
+        # ``body/streams/<name>/tn.yaml`` so older readers can keep parsing
+        # while restore maps it to the local layout.
         from ._defaults import DEFAULT_CEREMONY_NAME
 
         default_dir = cfg.yaml_path.parent
-        if default_dir.name == DEFAULT_CEREMONY_NAME:
+        streams_dir = default_dir / "streams"
+        if streams_dir.is_dir():
+            for stream_yaml in sorted(streams_dir.glob("*.yaml")):
+                if stream_yaml.stem == DEFAULT_CEREMONY_NAME:
+                    continue
+                body[f"body/streams/{stream_yaml.stem}/tn.yaml"] = stream_yaml.read_bytes()
+        elif default_dir.name == DEFAULT_CEREMONY_NAME:
             project_root = default_dir.parent
             default_dir_name: str | None = default_dir.name
-        else:
-            project_root = default_dir
-            default_dir_name = None
-        if project_root.is_dir():
-            for entry in sorted(project_root.iterdir()):
-                if not entry.is_dir():
-                    continue
-                if default_dir_name is not None and entry.name == default_dir_name:
-                    continue
-                stream_yaml = entry / "tn.yaml"
-                if stream_yaml.is_file():
-                    body[f"body/streams/{entry.name}/tn.yaml"] = stream_yaml.read_bytes()
+            if project_root.is_dir():
+                for entry in sorted(project_root.iterdir()):
+                    if not entry.is_dir():
+                        continue
+                    if default_dir_name is not None and entry.name == default_dir_name:
+                        continue
+                    stream_yaml = entry / "tn.yaml"
+                    if stream_yaml.is_file():
+                        body[f"body/streams/{entry.name}/tn.yaml"] = stream_yaml.read_bytes()
 
     if full:
         # Loud zero-byte marker. Keeping it under ``body/`` matches the new
@@ -1038,20 +1036,14 @@ def _encrypt_body_in_place(
         `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
             Wire spec.
     """
-    import io as _io
     import os as _os
-    import zipfile as _zipfile
 
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     # Pack the body files into a STORED zip. Sort entries by name so the
     # plaintext bytes are deterministic for a given body, which is
     # desirable for tests + ciphertext-hash equality.
-    buf = _io.BytesIO()
-    with _zipfile.ZipFile(buf, "w", compression=_zipfile.ZIP_STORED) as zf:
-        for name in sorted(body.keys()):
-            zf.writestr(name, body[name])
-    plaintext = buf.getvalue()
+    plaintext = pack_body_plaintext_zip(body)
 
     nonce = _os.urandom(12)
     aesgcm = AESGCM(key)
@@ -1072,6 +1064,29 @@ def _encrypt_body_in_place(
     }
     new_extras["state"] = state
     return new_body, new_extras
+
+
+def pack_body_plaintext_zip(body: dict[str, bytes]) -> bytes:
+    """Canonical STORED-ZIP plaintext for sealed ``.tnpkg`` bodies.
+
+    Entries are sorted and written with standard :mod:`zipfile` as STORED
+    members with a fixed DOS timestamp. The protocol requires a stock ZIP
+    plaintext that any unzip tool can inspect after the BEK is recovered; it
+    does not require owning ZIP record serialization.
+    """
+    import io as _io
+    import zipfile as _zipfile
+
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w", compression=_zipfile.ZIP_STORED) as zf:
+        for name in sorted(body.keys()):
+            _validate_tnpkg_body_name(name)
+            info = _zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = _zipfile.ZIP_STORED
+            info.create_system = 0
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, bytes(body[name]))
+    return buf.getvalue()
 
 
 def decrypt_body_blob(blob: bytes, key: bytes) -> dict[str, bytes]:

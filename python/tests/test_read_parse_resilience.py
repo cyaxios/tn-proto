@@ -15,7 +15,6 @@ recognises the sentinel and routes it to ``stats.skipped_parse``.
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 from pathlib import Path
@@ -40,18 +39,10 @@ def three_entries_with_bad_middle(tmp_path: Path):
     tn.info("c", x=3)
     tn.flush_and_close()
 
-    log = tmp_path / ".tn" / "default" / "logs" / "tn.ndjson"
+    log = tmp_path / ".tn" / tmp_path.name / "logs" / "default.ndjson"
     lines = log.read_text().splitlines()
     assert len(lines) >= 3, f"expected 3 user entries, got {lines!r}"
-    doc = json.loads(lines[1])
-    raw = bytearray(
-        base64.urlsafe_b64decode(doc["default"]["ciphertext"] + "==")
-    )
-    raw[20] ^= 0x01  # corrupt one byte of ciphertext
-    doc["default"]["ciphertext"] = (
-        base64.urlsafe_b64encode(bytes(raw)).rstrip(b"=").decode()
-    )
-    lines[1] = json.dumps(doc)
+    lines[1] = "{not-json"  # unambiguous row-level parse error
     log.write_text("\n".join(lines) + "\n")
 
     tn.init()  # rebind runtime against the mutated file

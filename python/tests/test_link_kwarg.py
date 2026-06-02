@@ -44,7 +44,7 @@ def _run_init(tmp_path: Path, init_kwargs: str) -> Path:
         f"init({init_kwargs}) failed: stdout={rc.stdout!r} "
         f"stderr={rc.stderr!r}"
     )
-    return tmp_path / ".tn" / "default" / "tn.yaml"
+    return tmp_path / ".tn" / tmp_path.name / "tn.yaml"
 
 
 def test_link_false_produces_local_mode(tmp_path: Path):
@@ -58,6 +58,10 @@ def test_link_false_produces_local_mode(tmp_path: Path):
         f"link=False should empty linked_vault, got "
         f"{cer['linked_vault']!r}"
     )
+    assert doc["vault"]["enabled"] is False
+    assert doc["vault"]["url"] == ""
+    assert doc["vault"]["autosync"] is False
+    assert doc["vault"]["sync_interval_seconds"] == 600
 
 
 def test_link_true_keeps_linked_mode(tmp_path: Path):
@@ -66,6 +70,9 @@ def test_link_true_keeps_linked_mode(tmp_path: Path):
     cer = doc["ceremony"]
     assert cer["mode"] == "linked"
     assert cer["linked_vault"]  # non-empty URL
+    assert doc["vault"]["enabled"] is True
+    assert doc["vault"]["url"] == cer["linked_vault"]
+    assert doc["vault"]["autosync"] is True
 
 
 def test_link_omitted_defaults_to_linked(tmp_path: Path):

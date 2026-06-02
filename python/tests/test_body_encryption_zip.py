@@ -8,11 +8,25 @@ See D-N "body plaintext is a STORED zip" in the vault decisions log.
 from __future__ import annotations
 
 import os
+import json
+import hashlib
 import struct
 import zipfile
 from io import BytesIO
+from pathlib import Path
 
-from tn.export import _encrypt_body_in_place, decrypt_body_blob
+from tn.export import _encrypt_body_in_place, decrypt_body_blob, pack_body_plaintext_zip
+
+REPO = Path(__file__).resolve().parents[2]
+FIXTURE_DIR = REPO / "tests" / "fixtures" / "body_encryption"
+
+
+def _fixture_json() -> dict:
+    return json.loads((FIXTURE_DIR / "vector.json").read_text("utf-8"))
+
+
+def _fixture_hex(name: str) -> bytes:
+    return bytes.fromhex((FIXTURE_DIR / name).read_text("utf-8").strip())
 
 
 def _example_body() -> dict[str, bytes]:
@@ -46,6 +60,32 @@ def test_encrypt_then_decrypt_round_trip_uses_stored_zip():
     # Round-trip via the public decrypt helper.
     recovered = decrypt_body_blob(blob, key)
     assert recovered == body
+
+
+def test_pack_body_plaintext_zip_is_standard_stored_zip():
+    fixture = _fixture_json()
+    body = {name: value.encode("utf-8") for name, value in fixture["body_utf8"].items()}
+
+    plaintext = pack_body_plaintext_zip(body)
+
+    with zipfile.ZipFile(BytesIO(plaintext)) as zf:
+        infos = zf.infolist()
+        assert [info.filename for info in infos] == sorted(body)
+        assert all(info.compress_type == zipfile.ZIP_STORED for info in infos)
+        assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in infos)
+        recovered = {name: zf.read(name) for name in zf.namelist()}
+    assert recovered == body
+
+
+def test_decrypt_body_blob_matches_shared_fixture():
+    fixture = _fixture_json()
+    key = bytes.fromhex(fixture["key_hex"])
+    blob = _fixture_hex("sealed_blob.hex")
+
+    recovered = decrypt_body_blob(blob, key)
+
+    assert {name: value.decode("utf-8") for name, value in recovered.items()} == fixture["body_utf8"]
+    assert "sha256:" + hashlib.sha256(blob).hexdigest() == fixture["sealed_blob_sha256"]
 
 
 def test_decrypted_plaintext_is_readable_stored_zip():

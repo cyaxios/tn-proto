@@ -37,10 +37,10 @@ from .vault_client import VaultClient, VaultError
 def _ceremony_files(cfg: LoadedConfig) -> list[tuple[str, Path]]:
     """Return [(file_name_on_vault, local_path), ...] for sync.
 
-    Includes every regular file in the keystore + tn.yaml. Log files
-    (logs/tn.ndjson + rotated backups) are included IFF the ceremony
-    yaml sets `ceremony.sync_logs: true` (spec §9.4 option B).
-    Default stays option A — logs local-only.
+    Includes every regular file in the keystore plus ``tn.yaml``.
+    Application logs are never wallet/vault-synced; vault sync is for
+    project control state and key continuity, not user-emitted log
+    history.
     """
     out: list[tuple[str, Path]] = []
     # Keystore files — any regular file directly under keys/
@@ -49,15 +49,6 @@ def _ceremony_files(cfg: LoadedConfig) -> list[tuple[str, Path]]:
             out.append((p.name, p))
     # The yaml itself (stored at vault path "tn.yaml")
     out.append(("tn.yaml", cfg.yaml_path))
-    # Log files, only if opted in via ceremony.sync_logs
-    if getattr(cfg, "sync_logs", False):
-        logs_dir = cfg.resolve_log_path().parent
-        if logs_dir.is_dir():
-            for p in sorted(logs_dir.iterdir()):
-                if p.is_file():
-                    # Prefix with "logs/" so the vault file_name is unique
-                    # vs keystore entries.
-                    out.append((f"logs__{p.name}", p))
     return out
 
 
@@ -72,6 +63,35 @@ class SyncResult:
     skipped: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
     project_id: str | None = None
+
+
+@dataclass(frozen=True)
+class VaultLinkInfo:
+    enabled: bool
+    url: str | None
+    project_id: str | None
+
+
+def vault_link_info(cfg: LoadedConfig) -> VaultLinkInfo:
+    """Return normalized vault sync coordinates for ``cfg``.
+
+    The project-level ``vault:`` block is authoritative when present. Legacy
+    ``ceremony.linked_*`` fields remain fallback inputs while old YAMLs migrate.
+    """
+    enabled = bool(getattr(cfg, "vault_enabled", False))
+    url = getattr(cfg, "vault_url", None) or getattr(cfg, "linked_vault", None)
+    project_id = getattr(cfg, "vault_linked_project_id", None) or getattr(
+        cfg,
+        "linked_project_id",
+        None,
+    )
+    if not enabled and getattr(cfg, "vault_declared", False):
+        return VaultLinkInfo(enabled=False, url=None, project_id=None)
+    if not enabled and getattr(cfg, "linked_vault", None):
+        enabled = True
+    if not enabled:
+        return VaultLinkInfo(enabled=False, url=None, project_id=None)
+    return VaultLinkInfo(enabled=True, url=url, project_id=project_id)
 
 
 # ---------------------------------------------------------------------
@@ -201,22 +221,23 @@ def sync_ceremony(
     files do not abort the whole sync; they're collected in
     SyncResult.errors.
     """
-    if not cfg.is_linked():
+    link = vault_link_info(cfg)
+    if not link.enabled or not link.url:
         raise RuntimeError(
-            f"ceremony {cfg.ceremony_id} is not linked; call link_ceremony() first",
+            f"ceremony {cfg.ceremony_id} has vault sync disabled; call link_ceremony() first",
         )
-    if cfg.linked_project_id is None:
+    if link.project_id is None:
         raise RuntimeError(
             f"ceremony {cfg.ceremony_id} claims linked mode but has no "
-            f"linked_project_id; relink to repair",
+            f"vault.linked_project_id; relink or absorb a project_seed to repair",
         )
 
-    result = SyncResult(project_id=cfg.linked_project_id)
+    result = SyncResult(project_id=link.project_id)
     for file_name, path in _ceremony_files(cfg):
         try:
             data = path.read_bytes()
             client.upload_file(
-                cfg.linked_project_id,
+                link.project_id,
                 file_name,
                 data,
                 ceremony_id=cfg.ceremony_id,

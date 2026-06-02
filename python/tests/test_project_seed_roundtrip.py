@@ -85,6 +85,9 @@ print("FLOW1_OK=1")
     assert "\nproject_id:" not in yaml_text
     assert "\nlabel:" not in yaml_text
     assert {"body/tn.yaml", "body/keys/local.private", "body/keys/local.public"} <= names
+    assert not any("/logs/" in n or n.endswith(".ndjson") for n in names), (
+        f"project_seed must not include application logs; saw {sorted(names)}"
+    )
 
     # Restore into a fresh dir, prove identity + key usability.
     flow2 = f'''
