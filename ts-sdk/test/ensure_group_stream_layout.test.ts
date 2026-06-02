@@ -1,11 +1,12 @@
 /**
  * ``ensureGroup`` / ``rotateGroup`` must persist parent-owned keys
- * AUTHORITATIVELY under the flipped multi-ceremony layout.
+ * AUTHORITATIVELY under the project-root stream layout.
  *
- * A named ceremony (``Tn.openCeremony("X")``) is a *stream*: its yaml at
- * ``<project>/.tn/X/tn.yaml`` carries ``extends: ../default/tn.yaml`` and
+ * A named stream (``Tn.use("X")``) has an overlay at
+ * ``<project>/.tn/<project-name>/streams/X.yaml`` carrying
+ * ``extends: ../tn.yaml`` and
  * inherits ``device`` / ``keystore`` / ``groups`` / ``fields`` /
- * ``recipients`` from the project root ``.tn/default/tn.yaml``. Those keys
+ * ``recipients`` from the project root ``.tn/<project-name>/tn.yaml``. Those keys
  * are parent-owned — ``config.resolveExtends`` discards a child's copy on
  * the next load ("child sets parent-owned key 'groups'; parent wins").
  *
@@ -18,7 +19,7 @@
  *     and was never routable.
  *
  * The fix routes both writes through ``authoritativeYamlFor`` so they land
- * in the chain-root ``.tn/default/tn.yaml``. Mirrors the Python suite at
+ * in the chain-root ``.tn/<project-name>/tn.yaml``. Mirrors the Python suite at
  * python/tests/test_ensure_group_stream_layout.py.
  */
 import { test } from "node:test";
@@ -32,6 +33,10 @@ import { Tn } from "../src/tn.js";
 
 function makeProject(): string {
   return mkdtempSync(join(tmpdir(), "tn-ensure-stream-"));
+}
+
+function projectName(project: string): string {
+  return project.split(/[\\/]/).pop() ?? "";
 }
 
 /** Run `fn` with console.warn captured; returns the collected lines. */
@@ -54,7 +59,7 @@ test("ensureGroup on a stream lands the group in the authoritative root yaml, no
   try {
     let warnings: string[] = [];
     warnings = await captureWarnings(async () => {
-      const tn = await Tn.openCeremony("X", { projectDir: project });
+      const tn = await Tn.use("X", { projectDir: project });
       try {
         await tn.admin.ensureGroup("partners");
       } finally {
@@ -62,8 +67,8 @@ test("ensureGroup on a stream lands the group in the authoritative root yaml, no
       }
     });
 
-    const rootPath = join(project, ".tn", "default", "tn.yaml");
-    const streamPath = join(project, ".tn", "X", "tn.yaml");
+    const rootPath = join(project, ".tn", projectName(project), "tn.yaml");
+    const streamPath = join(project, ".tn", projectName(project), "streams", "X.yaml");
     const rootDoc = parseYaml(readFileSync(rootPath, "utf8")) as Record<string, unknown>;
     const streamDoc = parseYaml(readFileSync(streamPath, "utf8")) as Record<string, unknown>;
     const rootGroups = (rootDoc.groups ?? {}) as Record<string, unknown>;
@@ -71,7 +76,7 @@ test("ensureGroup on a stream lands the group in the authoritative root yaml, no
     assert.ok(
       "partners" in rootGroups,
       "group 'partners' did not persist in the authoritative root yaml " +
-        ".tn/default/tn.yaml; ensureGroup wrote it to the stream yaml where " +
+        ".tn/<project>/tn.yaml; ensureGroup wrote it to the stream yaml where " +
         "groups are non-authoritative (or did not write yaml at all).",
     );
     assert.ok(
@@ -83,7 +88,7 @@ test("ensureGroup on a stream lands the group in the authoritative root yaml, no
     // group is genuinely routable, not just declared. Mirrors Python's
     // ensure_group calling _create_group before the yaml write.
     assert.ok(
-      existsSync(join(project, ".tn", "default", "keys", "partners.btn.state")),
+      existsSync(join(project, ".tn", projectName(project), "keys", "partners.btn.state")),
       "partners.btn.state was not minted in the shared keystore; the group " +
         "would not be routable by a fresh process.",
     );
@@ -103,7 +108,7 @@ test("rotateGroup on a stream bumps index_epoch in the authoritative root yaml, 
   const project = makeProject();
   try {
     const warnings = await captureWarnings(async () => {
-      const tn = await Tn.openCeremony("X", { projectDir: project });
+      const tn = await Tn.use("X", { projectDir: project });
       try {
         await tn.admin.rotate("default");
       } finally {
@@ -111,12 +116,11 @@ test("rotateGroup on a stream bumps index_epoch in the authoritative root yaml, 
       }
     });
 
-    const rootPath = join(project, ".tn", "default", "tn.yaml");
-    const streamPath = join(project, ".tn", "X", "tn.yaml");
+    const rootPath = join(project, ".tn", projectName(project), "tn.yaml");
+    const streamPath = join(project, ".tn", projectName(project), "streams", "X.yaml");
     const rootDoc = parseYaml(readFileSync(rootPath, "utf8")) as Record<string, unknown>;
     const streamDoc = parseYaml(readFileSync(streamPath, "utf8")) as Record<string, unknown>;
-    const rootDefault = ((rootDoc.groups ?? {}) as Record<string, Record<string, unknown>>)
-      .default;
+    const rootDefault = ((rootDoc.groups ?? {}) as Record<string, Record<string, unknown>>).default;
 
     assert.equal(
       rootDefault?.index_epoch,

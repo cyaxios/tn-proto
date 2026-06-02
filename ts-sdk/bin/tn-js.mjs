@@ -40,7 +40,6 @@ import {
   readdirSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as pathResolve } from "node:path";
@@ -58,13 +57,12 @@ import {
   compileKitBundleToFile,
   config as tnConfig,
   init as tnInit,
-  packTnpkg,
   rowHash,
   signManifest,
   signatureB64,
   signatureFromB64,
-  toWireDict,
   verify,
+  writeTnpkg,
 } from "../dist/index.js";
 // newManifest is loaded dynamically inside exportCmd: the dist core module
 // is CJS-interop and its named exports aren't statically resolvable via a
@@ -359,13 +357,13 @@ async function exportCmd() {
   const did = readFileSync(join(keysDir, "local.public"), "utf8").trim();
 
   // Body: canonical tn.yaml + every key file nested under body/keys/.
-  const body = [
-    { name: "body/tn.yaml", data: new Uint8Array(readFileSync(pathResolve(yamlPath))) },
-  ];
+  const body = {
+    "body/tn.yaml": new Uint8Array(readFileSync(pathResolve(yamlPath))),
+  };
   for (const name of readdirSync(keysDir)) {
     const p = join(keysDir, name);
     if (!statSync(p).isFile()) continue;
-    body.push({ name: `body/keys/${name}`, data: new Uint8Array(readFileSync(p)) });
+    body[`body/keys/${name}`] = new Uint8Array(readFileSync(p));
   }
 
   // Self-addressed manifest (fromDid === toDid === device DID), signed
@@ -381,32 +379,15 @@ async function exportCmd() {
   });
   const device = DeviceKey.fromSeed(new Uint8Array(readFileSync(join(keysDir, "local.private"))));
   const signed = signManifest(manifest, device);
-  const manifestJson =
-    JSON.stringify(
-      toWireDict(signed, true),
-      (key, value) => {
-        if (value && typeof value === "object" && !Array.isArray(value)) {
-          const sorted = {};
-          for (const k of Object.keys(value).sort()) sorted[k] = value[k];
-          return sorted;
-        }
-        return value;
-      },
-      2,
-    ) + "\n";
-
-  const tnpkgBytes = packTnpkg([
-    { name: "manifest.json", data: new TextEncoder().encode(manifestJson) },
-    ...body,
-  ]);
   mkdirSync(dirname(pathResolve(outPath)), { recursive: true });
-  writeFileSync(pathResolve(outPath), Buffer.from(tnpkgBytes));
+  const outResolved = writeTnpkg(pathResolve(outPath), signed, body);
+  const bytes = statSync(outResolved).size;
   stdout.write(
     JSON.stringify({
       ok: true,
       kind: "project_seed",
-      out: pathResolve(outPath),
-      bytes: tnpkgBytes.length,
+      out: outResolved,
+      bytes,
       device_identity: did,
       restore: `tn-js import ${basename(outPath)}`,
     }) + "\n",

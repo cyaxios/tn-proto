@@ -153,6 +153,30 @@ test("Tn.init() discovery picks up multi-ceremony ./.tn/default/tn.yaml", async 
   }
 });
 
+test("Tn.init() creates project-root layout from cwd name when nothing exists", async () => {
+  const dir = mkTempDir("tn-dirt-project-root-");
+  try {
+    const prior = process.cwd();
+    process.chdir(dir);
+    try {
+      const projectName = dir.split(/[\\/]/).pop() ?? "";
+      const tn = await Tn.init(undefined, { stdout: false });
+      const cfg = tn.config() as { yamlPath: string; logPath?: string };
+      assert.equal(
+        pathResolve(cfg.yamlPath),
+        pathResolve(join(dir, ".tn", projectName, "tn.yaml")),
+      );
+      assert.ok(existsSync(join(dir, ".tn", projectName, "streams", "default.yaml")));
+      assert.ok(!existsSync(join(dir, ".tn", "default", "tn.yaml")));
+      await tn.close();
+    } finally {
+      process.chdir(prior);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("Tn.absorb on a non-bootstrap bundle throws a helpful error", async () => {
   const dir = mkTempDir("tn-dirt-nonboot-");
   try {
