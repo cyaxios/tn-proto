@@ -128,3 +128,43 @@ def test_warm_attach_sync_errors_still_attached(tmp_path: Path, capsys, monkeypa
     out = capsys.readouterr().out
     assert "Attached to your vault account" in out
     assert "upload error" in out
+
+
+# --- warm-attach signal: which credential to use, or fall through -----
+#
+# The decision the cmd_init gate makes BEFORE calling _try_warm_attach.
+# TN_API_KEY (explicit operator key) always wins; the remembered account
+# in identity.json only applies when the target vault is the one that
+# account actually lives on.
+
+
+def _signal_identity(*, account_id, linked_vault):
+    return SimpleNamespace(linked_account_id=account_id, linked_vault=linked_vault)
+
+
+def test_warm_signal_uses_account_when_vault_matches(monkeypatch):
+    monkeypatch.delenv("TN_API_KEY", raising=False)
+    identity = _signal_identity(account_id="acct_1", linked_vault="https://vault.local")
+    assert cli._warm_attach_signal(identity, "https://vault.local") == "acct_1"
+
+
+def test_warm_signal_skips_account_when_vault_differs(monkeypatch):
+    # Regression #6: a device whose account lives on vault A must NOT warm-
+    # attach to vault B (e.g. `tn init --link B`); fall through to claim URL.
+    monkeypatch.delenv("TN_API_KEY", raising=False)
+    identity = _signal_identity(account_id="acct_1", linked_vault="https://vault.A")
+    assert cli._warm_attach_signal(identity, "https://vault.B") is None
+
+
+def test_warm_signal_api_key_wins_regardless_of_vault(monkeypatch):
+    # Explicit TN_API_KEY is the operator's deliberate choice for this run;
+    # it is honored even when the remembered vault differs from the target.
+    monkeypatch.setenv("TN_API_KEY", "key_xyz")
+    identity = _signal_identity(account_id="acct_1", linked_vault="https://vault.A")
+    assert cli._warm_attach_signal(identity, "https://vault.B") == "key_xyz"
+
+
+def test_warm_signal_none_when_no_credentials(monkeypatch):
+    monkeypatch.delenv("TN_API_KEY", raising=False)
+    identity = _signal_identity(account_id=None, linked_vault=None)
+    assert cli._warm_attach_signal(identity, "https://vault.local") is None
