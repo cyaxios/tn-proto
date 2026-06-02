@@ -12,14 +12,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
 
-use crate::admin_cache::{
-    is_admin_event_type, resolve_admin_log_path, ChainConflict,
-};
+use crate::admin_cache::{is_admin_event_type, resolve_admin_log_path, ChainConflict};
 use crate::runtime::{AdminState, Runtime};
 use crate::signing::DeviceKey;
 use crate::tnpkg::{
-    clock_dominates, read_tnpkg, sign_manifest, write_tnpkg, Manifest, ManifestKind,
-    TnpkgSource, VectorClock,
+    clock_dominates, read_tnpkg, sign_manifest, write_tnpkg, Manifest, ManifestKind, TnpkgSource,
+    VectorClock,
 };
 use crate::{Error, Result};
 
@@ -85,14 +83,16 @@ impl Runtime {
     /// surface from filesystem writes or zip serialization.
     #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
     pub fn export(&self, out_path: &Path, opts: ExportOptions) -> Result<PathBuf> {
-        let kind = opts.kind.ok_or_else(|| {
-            Error::InvalidConfig("export: ExportOptions.kind is required".into())
-        })?;
+        let kind = opts
+            .kind
+            .ok_or_else(|| Error::InvalidConfig("export: ExportOptions.kind is required".into()))?;
 
-        if matches!(kind, ManifestKind::FullKeystore) && !opts.confirm_includes_secrets {
+        if matches!(kind, ManifestKind::FullKeystore | ManifestKind::ProjectSeed)
+            && !opts.confirm_includes_secrets
+        {
             return Err(Error::InvalidConfig(
-                "export(kind=FullKeystore) writes the publisher's raw private keys \
-                 (local.private + index_master.key) into the zip. Pass \
+                "export(kind=FullKeystore|ProjectSeed) writes the publisher's raw private keys \
+                 into the zip. Pass \
                  confirm_includes_secrets=true to acknowledge."
                     .into(),
             ));
@@ -141,7 +141,11 @@ impl Runtime {
                 state_obj.insert("kits".into(), Value::Array(kits_meta));
                 state_obj.insert(
                     "kind".into(),
-                    Value::String(if full { "full-keystore".into() } else { "readers-only".into() }),
+                    Value::String(if full {
+                        "full-keystore".into()
+                    } else {
+                        "readers-only".into()
+                    }),
                 );
                 state_value = Some(Value::Object(state_obj));
                 scope_default = if full { "full" } else { "kit_bundle" };
@@ -156,6 +160,41 @@ impl Runtime {
                     "export(kind=ContactUpdate) not yet wired in Rust",
                 ));
             }
+            ManifestKind::IdentitySeed => {
+                body = build_identity_seed_body(&self.device);
+                let mut identity = Map::new();
+                identity.insert("schema".into(), Value::String("tn-identity-seed-v1".into()));
+                identity.insert("nickname".into(), Value::Null);
+                identity.insert("minted_at".into(), Value::String(now_iso_millis()));
+                let mut state = Map::new();
+                state.insert("identity".into(), Value::Object(identity));
+                state_value = Some(Value::Object(state));
+                scope_default = "identity";
+            }
+            ManifestKind::ProjectSeed => {
+                let (b, keys_meta) = build_project_seed_body(
+                    &self.yaml_path,
+                    &self.keystore_path(),
+                    &self.device,
+                    opts.groups.as_deref(),
+                )?;
+                body = b;
+                let mut project = Map::new();
+                project.insert(
+                    "ceremony_id".into(),
+                    Value::String(self.cfg.ceremony.id.clone()),
+                );
+                project.insert("project_name".into(), Value::String(self.project_name()));
+                project.insert(
+                    "keys".into(),
+                    Value::Array(keys_meta.into_iter().map(Value::String).collect()),
+                );
+                let mut state = Map::new();
+                state.insert("project".into(), Value::Object(project));
+                state.insert("kind".into(), Value::String("project-seed".into()));
+                state_value = Some(Value::Object(state));
+                scope_default = "project";
+            }
         }
 
         // Assemble + sign manifest.
@@ -163,7 +202,14 @@ impl Runtime {
             kind,
             version: crate::tnpkg::MANIFEST_VERSION,
             publisher_identity: self.did().to_string(),
-            recipient_identity: opts.to_did.clone(),
+            recipient_identity: if matches!(
+                kind,
+                ManifestKind::IdentitySeed | ManifestKind::ProjectSeed
+            ) {
+                Some(self.did().to_string())
+            } else {
+                opts.to_did.clone()
+            },
             ceremony_id: self.cfg.ceremony.id.clone(),
             as_of: now_iso_millis(),
             scope: opts.scope.clone().unwrap_or_else(|| scope_default.into()),
@@ -278,6 +324,21 @@ impl Runtime {
                 ),
                 replaced_kit_paths: Vec::new(),
             }),
+            ManifestKind::IdentitySeed | ManifestKind::ProjectSeed => Ok(AbsorbReceipt {
+                kind: manifest.kind.as_str().into(),
+                accepted_count: 0,
+                deduped_count: 0,
+                noop: false,
+                derived_state: None,
+                conflicts: Vec::new(),
+                legacy_status: "stashed".into(),
+                legacy_reason: format!(
+                    "absorb: kind {:?} round-trips through read_manifest but \
+                     Rust runtime has no bootstrap handler yet.",
+                    manifest.kind.as_str()
+                ),
+                replaced_kit_paths: Vec::new(),
+            }),
         }
     }
 
@@ -297,8 +358,7 @@ impl Runtime {
         let yaml_dir = self.yaml_dir();
         let admin_log = resolve_admin_log_path(&yaml_dir, &self.cfg);
 
-        let (local_clock, mut seen, mut revoked_leaves) =
-            build_local_admin_clock(&admin_log)?;
+        let (local_clock, mut seen, mut revoked_leaves) = build_local_admin_clock(&admin_log)?;
 
         if clock_dominates(&local_clock, &manifest.clock) {
             return Ok(noop_receipt(manifest));
@@ -402,7 +462,11 @@ impl Runtime {
             noop: false,
             derived_state: None,
             conflicts: Vec::new(),
-            legacy_status: if accepted > 0 { "enrolment_applied".into() } else { "no_op".into() },
+            legacy_status: if accepted > 0 {
+                "enrolment_applied".into()
+            } else {
+                "no_op".into()
+            },
             legacy_reason: String::new(),
             replaced_kit_paths: replaced,
         })
@@ -459,6 +523,15 @@ impl Runtime {
     fn device_private_bytes(&self) -> [u8; 32] {
         self.device.private_bytes()
     }
+
+    fn project_name(&self) -> String {
+        self.yaml_dir()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("default")
+            .to_string()
+    }
 }
 
 /// Source of bytes to read a `.tnpkg` from for `Runtime::absorb`.
@@ -511,7 +584,10 @@ fn scan_admin_envelopes(
             if rh.is_empty() || seen.contains(rh) {
                 continue;
             }
-            let did = env.get("device_identity").and_then(Value::as_str).unwrap_or("");
+            let did = env
+                .get("device_identity")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let seq = env.get("sequence").and_then(Value::as_u64);
             let Some(seq) = seq else { continue };
             seen.insert(rh.to_string());
@@ -540,7 +616,10 @@ fn build_kit_bundle_body(
     if !keystore.is_dir() {
         return Err(Error::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("kit_bundle: keystore directory not found: {}", keystore.display()),
+            format!(
+                "kit_bundle: keystore directory not found: {}",
+                keystore.display()
+            ),
         )));
     }
     let group_set: Option<HashSet<String>> = groups_filter.map(|gs| gs.iter().cloned().collect());
@@ -590,10 +669,7 @@ fn build_kit_bundle_body(
             body.insert(format!("body/{name_str}"), std::fs::read(entry.path())?);
         } else if full {
             if let Some(group) = name_str.strip_suffix(".btn.state") {
-                if group_set
-                    .as_ref()
-                    .map_or(true, |f| f.contains(group))
-                {
+                if group_set.as_ref().map_or(true, |f| f.contains(group)) {
                     body.insert(format!("body/{name_str}"), std::fs::read(entry.path())?);
                 }
             }
@@ -612,6 +688,102 @@ fn build_kit_bundle_body(
     }
 
     Ok((body, kits_meta))
+}
+
+fn build_identity_seed_body(device: &DeviceKey) -> BTreeMap<String, Vec<u8>> {
+    let stub_yaml = format!(
+        "# Identity seed stub written by tn-core export(kind='identity_seed').\n\
+         # Replace this file with a real ceremony tn.yaml when joining one.\n\
+         identity:\n\
+           did: {}\n",
+        device.did()
+    );
+    let mut body = BTreeMap::new();
+    body.insert("body/local.private".into(), device.private_bytes().to_vec());
+    body.insert("body/local.public".into(), device.did().as_bytes().to_vec());
+    body.insert("body/tn.yaml".into(), stub_yaml.into_bytes());
+    body
+}
+
+type ProjectSeedBody = (BTreeMap<String, Vec<u8>>, Vec<String>);
+
+fn build_project_seed_body(
+    yaml_path: &Path,
+    keystore: &Path,
+    device: &DeviceKey,
+    groups_filter: Option<&[String]>,
+) -> Result<ProjectSeedBody> {
+    if !yaml_path.is_file() {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("project_seed: yaml file not found: {}", yaml_path.display()),
+        )));
+    }
+    if !keystore.is_dir() {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "project_seed: keystore directory not found: {}",
+                keystore.display()
+            ),
+        )));
+    }
+
+    let group_set: Option<HashSet<String>> = groups_filter.map(|gs| gs.iter().cloned().collect());
+    let mut body: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut keys_meta: Vec<String> = Vec::new();
+    body.insert("body/tn.yaml".into(), std::fs::read(yaml_path)?);
+
+    let mut entries: Vec<_> = std::fs::read_dir(keystore)?.flatten().collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let include = match name_str {
+            "local.private" | "local.public" | "index_master.key" => true,
+            _ => {
+                if let Some(group) = name_str.strip_suffix(".btn.mykit") {
+                    group_set.as_ref().map_or(true, |f| f.contains(group))
+                } else if let Some(group) = name_str.strip_suffix(".btn.state") {
+                    group_set.as_ref().map_or(true, |f| f.contains(group))
+                } else {
+                    false
+                }
+            }
+        };
+        if include {
+            body.insert(
+                format!("body/keys/{name_str}"),
+                std::fs::read(entry.path())?,
+            );
+            keys_meta.push(name_str.to_string());
+        }
+    }
+
+    if !body.contains_key("body/keys/local.private") {
+        body.insert(
+            "body/keys/local.private".into(),
+            device.private_bytes().to_vec(),
+        );
+        keys_meta.push("local.private".into());
+    }
+    if !body.contains_key("body/keys/local.public") {
+        body.insert(
+            "body/keys/local.public".into(),
+            device.did().as_bytes().to_vec(),
+        );
+        keys_meta.push("local.public".into());
+    }
+
+    keys_meta.sort();
+    keys_meta.dedup();
+    body.insert("body/WARNING_CONTAINS_PRIVATE_KEYS".into(), Vec::new());
+    Ok((body, keys_meta))
 }
 
 fn append_admin_envelopes(admin_log: &Path, envelopes: &[Value]) -> Result<()> {
@@ -648,7 +820,10 @@ fn envelope_well_formed(env: &Value) -> bool {
 }
 
 fn verify_envelope_signature(env: &Value) -> bool {
-    let did = env.get("device_identity").and_then(Value::as_str).unwrap_or("");
+    let did = env
+        .get("device_identity")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let row_hash = env.get("row_hash").and_then(Value::as_str).unwrap_or("");
     let sig_b64 = env.get("signature").and_then(Value::as_str).unwrap_or("");
     if sig_b64.is_empty() {

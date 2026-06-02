@@ -94,7 +94,10 @@ ceremony:
     // re-parsing the serialized config.
     let cfg = config::load(&child).unwrap();
     let s = serde_yml::to_string(&serde_yml::to_value(&cfg).unwrap()).unwrap();
-    assert!(!s.contains("extends:"), "extends key must not survive merge");
+    assert!(
+        !s.contains("extends:"),
+        "extends key must not survive merge"
+    );
 }
 
 #[test]
@@ -299,10 +302,10 @@ device:
 }
 
 #[test]
-fn handlers_are_additive_with_dedup() {
+fn child_handlers_replace_parent_handlers() {
     // Parent declares a stdout handler. Child adds a file.rotating
-    // handler. Both should appear in the merged config, with child's
-    // entries first (per Python: `child + parent`, dedupe by name/kind).
+    // handler. The child declared handlers, so its list replaces the
+    // parent's list.
     let td = tempfile::tempdir().unwrap();
     let parent = td.path().join("parent.yaml");
     let child = td.path().join("child.yaml");
@@ -325,16 +328,12 @@ handlers:
 "#,
     );
     let cfg = config::load(&child).unwrap();
-    // Both handlers present, deduped by name/kind.
     let kinds: Vec<&str> = cfg
         .handlers
         .iter()
         .filter_map(|h| h.get("kind").and_then(serde_yml::Value::as_str))
         .collect();
-    assert!(
-        kinds.contains(&"file.rotating") && kinds.contains(&"stdout"),
-        "handlers merge dropped one or both: {kinds:?}",
-    );
+    assert_eq!(kinds, vec!["file.rotating"]);
 }
 
 #[test]
@@ -418,12 +417,11 @@ handlers:
     // assertion for parity is the load succeeds + identity inherits;
     // profile-only assertions belong to the multi-ceremony layer.
     let _ = prof;
-    // Handlers: child's file.rotating + parent's stdout, both present.
+    // Handlers: child declared handlers, so parent's stdout is replaced.
     let kinds: Vec<&str> = cfg
         .handlers
         .iter()
         .filter_map(|h| h.get("kind").and_then(serde_yml::Value::as_str))
         .collect();
-    assert!(kinds.contains(&"file.rotating"));
-    assert!(kinds.contains(&"stdout"));
+    assert_eq!(kinds, vec!["file.rotating"]);
 }

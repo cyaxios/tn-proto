@@ -100,8 +100,7 @@ fn record(stage: &'static str, ns: u64) {
 /// expensive stages appear first.
 pub fn snapshot() -> Vec<(&'static str, StageStats)> {
     let g = counters().lock().expect("perf counters mutex poisoned");
-    let mut out: Vec<(&'static str, StageStats)> =
-        g.iter().map(|(k, v)| (*k, *v)).collect();
+    let mut out: Vec<(&'static str, StageStats)> = g.iter().map(|(k, v)| (*k, *v)).collect();
     out.sort_by(|a, b| b.1.total_ns.cmp(&a.1.total_ns));
     out
 }

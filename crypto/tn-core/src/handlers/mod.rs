@@ -54,9 +54,9 @@
 // link.
 #![allow(clippy::must_use_candidate)]
 
-pub mod spec;
 pub mod fs_drop;
 pub mod fs_scan;
+pub mod spec;
 pub mod stdout;
 pub mod vault_pull;
 pub mod vault_push;

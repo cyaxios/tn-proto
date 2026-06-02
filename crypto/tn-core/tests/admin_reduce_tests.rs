@@ -90,7 +90,9 @@ fn reduce_recipient_added_without_did() {
         }),
     );
     match reduce(&e).unwrap() {
-        StateDelta::RecipientAdded { recipient_identity, .. } => {
+        StateDelta::RecipientAdded {
+            recipient_identity, ..
+        } => {
             assert_eq!(recipient_identity, None);
         }
         d => panic!("{d:?}"),
@@ -282,12 +284,10 @@ fn catalog_and_reducer_do_not_drift() {
     // catalog-valid (so the publisher can sign + the reducer can validate
     // shape) but carry no admin-state mutation — they intentionally
     // resolve to StateDelta::Unknown. Per 2026-04-25 read-ergonomics spec.
-    let no_state_mutation: std::collections::HashSet<&str> = [
-        "tn.agents.policy_published",
-        "tn.read.tampered_row_skipped",
-    ]
-    .into_iter()
-    .collect();
+    let no_state_mutation: std::collections::HashSet<&str> =
+        ["tn.agents.policy_published", "tn.read.tampered_row_skipped"]
+            .into_iter()
+            .collect();
 
     for kind in CATALOG {
         let mut fields = serde_json::Map::new();

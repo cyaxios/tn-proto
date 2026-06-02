@@ -185,11 +185,9 @@ impl LocalKeystore {
             // Storage trait contract: CAS pre-image mismatch surfaces
             // as `AlreadyExists`. Map to the typed Conflict variant so
             // callers can match on it without inspecting io::Error.
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                Err(KeystoreError::Conflict {
-                    group: group.to_string(),
-                })
-            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(KeystoreError::Conflict {
+                group: group.to_string(),
+            }),
             Err(e) => Err(KeystoreError::Io(e)),
         }
     }
@@ -301,11 +299,7 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(td.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.contains(".tmp."))
-            })
+            .filter(|e| e.file_name().to_str().is_some_and(|n| n.contains(".tmp.")))
             .collect();
         assert!(leftovers.is_empty(), "tmp file leaked: {leftovers:?}");
     }

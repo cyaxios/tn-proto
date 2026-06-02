@@ -58,6 +58,12 @@ pub enum ManifestKind {
     /// recognizes the kind so manifests round-trip through
     /// `read_manifest`; absorb is not implemented yet.
     ContactUpdate,
+    /// Minimal identity/capability bootstrap bundle.
+    IdentitySeed,
+    /// Root-authoritative project state package. The public name is
+    /// retained for compatibility; target semantics are additive unless
+    /// creating a missing Project.
+    ProjectSeed,
 }
 
 impl ManifestKind {
@@ -71,6 +77,8 @@ impl ManifestKind {
             Self::KitBundle => "kit_bundle",
             Self::FullKeystore => "full_keystore",
             Self::ContactUpdate => "contact_update",
+            Self::IdentitySeed => "identity_seed",
+            Self::ProjectSeed => "project_seed",
         }
     }
 
@@ -84,6 +92,8 @@ impl ManifestKind {
             "kit_bundle" => Some(Self::KitBundle),
             "full_keystore" => Some(Self::FullKeystore),
             "contact_update" => Some(Self::ContactUpdate),
+            "identity_seed" => Some(Self::IdentitySeed),
+            "project_seed" => Some(Self::ProjectSeed),
             _ => None,
         }
     }
@@ -172,13 +182,13 @@ impl Manifest {
             kind: "tnpkg manifest",
             reason: format!("unknown kind {kind_s:?}"),
         })?;
-        let version = obj
-            .get("version")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| Error::Malformed {
-                kind: "tnpkg manifest",
-                reason: "missing version".into(),
-            })?;
+        let version =
+            obj.get("version")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| Error::Malformed {
+                    kind: "tnpkg manifest",
+                    reason: "missing version".into(),
+                })?;
         let publisher_identity = obj
             .get("publisher_identity")
             .and_then(Value::as_str)
@@ -310,10 +320,13 @@ pub fn verify_manifest(manifest: &Manifest) -> Result<()> {
         kind: "tnpkg manifest signature",
         reason: e.to_string(),
     })?;
-    let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| Error::Malformed {
-        kind: "tnpkg manifest signature",
-        reason: "expected 64-byte Ed25519 signature".into(),
-    })?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::Malformed {
+            kind: "tnpkg manifest signature",
+            reason: "expected 64-byte Ed25519 signature".into(),
+        })?;
     let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
     let msg = manifest.signing_bytes()?;
     vk.verify(&msg, &sig).map_err(|e| Error::Malformed {
@@ -325,10 +338,12 @@ pub fn verify_manifest(manifest: &Manifest) -> Result<()> {
 
 /// Extract the 32-byte Ed25519 public key from a `did:key:z…` identifier.
 pub(crate) fn did_key_pub(did: &str) -> Result<[u8; 32]> {
-    let rest = did.strip_prefix("did:key:z").ok_or_else(|| Error::Malformed {
-        kind: "tnpkg manifest publisher_identity",
-        reason: format!("unsupported DID form: {did:?}"),
-    })?;
+    let rest = did
+        .strip_prefix("did:key:z")
+        .ok_or_else(|| Error::Malformed {
+            kind: "tnpkg manifest publisher_identity",
+            reason: format!("unsupported DID form: {did:?}"),
+        })?;
     let multi = bs58::decode(rest)
         .into_vec()
         .map_err(|e| Error::Malformed {
@@ -375,6 +390,9 @@ pub fn write_tnpkg(out_path: &Path, manifest: &Manifest, body: &BodyContents) ->
             "write_tnpkg: manifest is unsigned. Call sign_manifest before writing.".into(),
         ));
     }
+    for name in body.keys() {
+        validate_tnpkg_body_name(name)?;
+    }
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -396,6 +414,60 @@ pub fn write_tnpkg(out_path: &Path, manifest: &Manifest, body: &BodyContents) ->
         zw.write_all(data)?;
     }
     zw.finish().map_err(zip_err)?;
+    Ok(())
+}
+
+/// Encode a `.tnpkg` zip into memory. Manifest must already be signed.
+///
+/// This is the filesystem-free sibling of [`write_tnpkg`], used by WASM and
+/// other bindings that operate on byte arrays rather than paths.
+pub fn write_tnpkg_bytes(manifest: &Manifest, body: &BodyContents) -> Result<Vec<u8>> {
+    if manifest.manifest_signature_b64.is_none() {
+        return Err(Error::InvalidConfig(
+            "write_tnpkg_bytes: manifest is unsigned. Call sign_manifest before writing.".into(),
+        ));
+    }
+    for name in body.keys() {
+        validate_tnpkg_body_name(name)?;
+    }
+
+    let cursor = Cursor::new(Vec::new());
+    let mut zw = zip::ZipWriter::new(cursor);
+    let opts: zip::write::SimpleFileOptions =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    let manifest_json = manifest_pretty_json(&manifest.to_json())?;
+    zw.start_file("manifest.json", opts).map_err(zip_err)?;
+    zw.write_all(manifest_json.as_bytes())?;
+
+    for (name, data) in body {
+        zw.start_file(name, opts).map_err(zip_err)?;
+        zw.write_all(data)?;
+    }
+    let cursor = zw.finish().map_err(zip_err)?;
+    Ok(cursor.into_inner())
+}
+
+fn validate_tnpkg_body_name(name: &str) -> Result<()> {
+    if !name.starts_with("body/") || name == "body/" {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: format!("invalid package member {name:?}; expected manifest.json or body/..."),
+        });
+    }
+    if name.starts_with('/')
+        || name.contains('\\')
+        || name
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: format!(
+                "invalid package member {name:?}; only POSIX relative body paths are allowed"
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -447,7 +519,7 @@ fn sort_keys_recursive(v: &Value) -> Value {
 /// `verify_manifest` on the returned manifest.
 #[allow(clippy::needless_pass_by_value)]
 pub fn read_tnpkg(source: TnpkgSource<'_>) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
-    match source {
+    let bytes = match source {
         TnpkgSource::Path(p) => {
             if !p.exists() {
                 return Err(Error::Io(std::io::Error::new(
@@ -455,14 +527,90 @@ pub fn read_tnpkg(source: TnpkgSource<'_>) -> Result<(Manifest, BTreeMap<String,
                     format!("absorb: source path does not exist: {}", p.display()),
                 )));
             }
-            let f = std::fs::File::open(p)?;
-            read_tnpkg_inner(f)
+            std::fs::read(p)?
         }
-        TnpkgSource::Bytes(b) => {
-            let cursor = Cursor::new(b.to_vec());
-            read_tnpkg_inner(cursor)
-        }
+        TnpkgSource::Bytes(b) => b.to_vec(),
+    };
+    validate_zip_manifest_entry_count(&bytes)?;
+    read_tnpkg_inner(Cursor::new(bytes))
+}
+
+fn validate_zip_manifest_entry_count(bytes: &[u8]) -> Result<()> {
+    let Some(eocd_offset) = find_eocd(bytes) else {
+        return Ok(());
+    };
+    if eocd_offset + 22 > bytes.len() {
+        return Ok(());
     }
+    let entry_count = u16::from_le_bytes([bytes[eocd_offset + 10], bytes[eocd_offset + 11]]);
+    let cd_size = u32::from_le_bytes([
+        bytes[eocd_offset + 12],
+        bytes[eocd_offset + 13],
+        bytes[eocd_offset + 14],
+        bytes[eocd_offset + 15],
+    ]) as usize;
+    let cd_offset = u32::from_le_bytes([
+        bytes[eocd_offset + 16],
+        bytes[eocd_offset + 17],
+        bytes[eocd_offset + 18],
+        bytes[eocd_offset + 19],
+    ]) as usize;
+    if cd_offset
+        .checked_add(cd_size)
+        .is_none_or(|end| end > bytes.len())
+    {
+        return Ok(());
+    }
+
+    let mut cur = cd_offset;
+    let mut manifest_count = 0usize;
+    for _ in 0..entry_count {
+        if cur.checked_add(46).is_none_or(|end| end > bytes.len()) {
+            return Ok(());
+        }
+        if u32::from_le_bytes([bytes[cur], bytes[cur + 1], bytes[cur + 2], bytes[cur + 3]])
+            != 0x0201_4b50
+        {
+            return Ok(());
+        }
+        let name_len = u16::from_le_bytes([bytes[cur + 28], bytes[cur + 29]]) as usize;
+        let extra_len = u16::from_le_bytes([bytes[cur + 30], bytes[cur + 31]]) as usize;
+        let comment_len = u16::from_le_bytes([bytes[cur + 32], bytes[cur + 33]]) as usize;
+        let name_start = cur + 46;
+        let name_end = match name_start.checked_add(name_len) {
+            Some(end) if end <= bytes.len() => end,
+            _ => return Ok(()),
+        };
+        if bytes.get(name_start..name_end) == Some(b"manifest.json".as_slice()) {
+            manifest_count += 1;
+        }
+        cur = match name_end
+            .checked_add(extra_len)
+            .and_then(|n| n.checked_add(comment_len))
+        {
+            Some(next) => next,
+            None => return Ok(()),
+        };
+    }
+    if manifest_count > 1 {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: format!(
+                "zip contains {manifest_count} manifest.json entries; the .tnpkg format requires exactly one"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn find_eocd(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 22 {
+        return None;
+    }
+    let min_start = bytes.len().saturating_sub(22 + 0xffff);
+    (min_start..=bytes.len() - 22)
+        .rev()
+        .find(|&i| bytes[i..i + 4] == [0x50, 0x4b, 0x05, 0x06])
 }
 
 fn read_tnpkg_inner<R: Read + Seek>(reader: R) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
@@ -470,12 +618,35 @@ fn read_tnpkg_inner<R: Read + Seek>(reader: R) -> Result<(Manifest, BTreeMap<Str
         kind: "tnpkg zip",
         reason: e.to_string(),
     })?;
-    // Pull manifest first.
-    let manifest_doc: Value = {
-        let mut mf = zip_r.by_name("manifest.json").map_err(|_| Error::Malformed {
+    let names: Vec<String> = (0..zip_r.len())
+        .filter_map(|i| zip_r.by_index(i).ok().map(|f| f.name().to_string()))
+        .collect();
+    let manifest_count = names
+        .iter()
+        .filter(|name| name.as_str() == "manifest.json")
+        .count();
+    if manifest_count == 0 {
+        return Err(Error::Malformed {
             kind: "tnpkg zip",
             reason: "missing manifest.json".into(),
-        })?;
+        });
+    }
+    if manifest_count != 1 {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: format!(
+                "zip contains {manifest_count} manifest.json entries; the .tnpkg format requires exactly one"
+            ),
+        });
+    }
+    // Pull manifest first.
+    let manifest_doc: Value = {
+        let mut mf = zip_r
+            .by_name("manifest.json")
+            .map_err(|e| Error::Malformed {
+                kind: "tnpkg zip",
+                reason: e.to_string(),
+            })?;
         let mut buf = Vec::new();
         mf.read_to_end(&mut buf)?;
         serde_json::from_slice(&buf)?
@@ -484,13 +655,11 @@ fn read_tnpkg_inner<R: Read + Seek>(reader: R) -> Result<(Manifest, BTreeMap<Str
 
     // Pull every other entry into the body map.
     let mut body: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let names: Vec<String> = (0..zip_r.len())
-        .filter_map(|i| zip_r.by_index(i).ok().map(|f| f.name().to_string()))
-        .collect();
     for name in names {
         if name == "manifest.json" {
             continue;
         }
+        validate_tnpkg_body_name(&name)?;
         let mut entry = zip_r.by_name(&name).map_err(|e| Error::Malformed {
             kind: "tnpkg zip",
             reason: e.to_string(),

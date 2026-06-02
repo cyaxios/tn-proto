@@ -47,10 +47,13 @@ fn src() -> &'static Path {
 
 #[test]
 fn required_var_present_is_substituted() {
-    with_env(&[("TN_RS_TEST_HOST", Some("atlas.cluster.example"))], || {
-        let out = substitute_env_vars("uri: ${TN_RS_TEST_HOST}\n", src()).unwrap();
-        assert_eq!(out, "uri: atlas.cluster.example\n");
-    });
+    with_env(
+        &[("TN_RS_TEST_HOST", Some("atlas.cluster.example"))],
+        || {
+            let out = substitute_env_vars("uri: ${TN_RS_TEST_HOST}\n", src()).unwrap();
+            assert_eq!(out, "uri: atlas.cluster.example\n");
+        },
+    );
 }
 
 #[test]

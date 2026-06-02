@@ -17,7 +17,9 @@ use crate::{
     admin_reduce::{reduce as admin_reduce_envelope, StateDelta},
     agents_policy::PolicyDocument,
     canonical::canonical_bytes,
-    chain::{chain_tip_from_log_tail_reverse, compute_row_hash, ChainState, GroupInput, RowHashInput},
+    chain::{
+        chain_tip_from_log_tail_reverse, compute_row_hash, ChainState, GroupInput, RowHashInput,
+    },
     cipher::{
         btn::{BtnPublisherCipher, BtnReaderCipher},
         GroupCipher,
@@ -571,9 +573,8 @@ impl Runtime {
         // `JsStorageAdapter` can satisfy the request from its JS-side
         // callback rather than `std::fs::read_to_string`.
         let yaml_bytes = storage.read_bytes(yaml_path).map_err(Error::Io)?;
-        let yaml_str = std::str::from_utf8(&yaml_bytes).map_err(|e| {
-            Error::InvalidConfig(format!("yaml is not valid UTF-8: {e}"))
-        })?;
+        let yaml_str = std::str::from_utf8(&yaml_bytes)
+            .map_err(|e| Error::InvalidConfig(format!("yaml is not valid UTF-8: {e}")))?;
         let expanded = crate::config::substitute_env_vars(yaml_str, yaml_path)?;
         // Resolve `extends:` chain through the same Storage backend so
         // stream yamls written by `createFreshCeremony` (which carry
@@ -619,8 +620,7 @@ impl Runtime {
             // and `<group>.btn.mykit` through storage.
             let (cipher, maybe_pub_cipher, mykit_bytes) =
                 build_cipher_with_admin_with_storage(spec, &keystore, name, &storage)?;
-            let hmac_template =
-                crate::indexing::build_hmac_template(&index_key)?;
+            let hmac_template = crate::indexing::build_hmac_template(&index_key)?;
             groups.insert(
                 name.clone(),
                 Arc::new(RwLock::new(GroupState {
@@ -778,13 +778,15 @@ impl Runtime {
                             writer: writer.clone(),
                         }
                     }
-                    crate::log_file::LogWriters::Templated { template, storage: stor, .. } => {
-                        crate::log_file::LogWriters::Templated {
-                            template: template.clone(),
-                            storage: Arc::clone(stor),
-                            writers: Mutex::new(std::collections::HashMap::new()),
-                        }
-                    }
+                    crate::log_file::LogWriters::Templated {
+                        template,
+                        storage: stor,
+                        ..
+                    } => crate::log_file::LogWriters::Templated {
+                        template: template.clone(),
+                        storage: Arc::clone(stor),
+                        writers: Mutex::new(std::collections::HashMap::new()),
+                    },
                 }
             } else {
                 let pel_template = crate::path_template::PathTemplate::parse(
@@ -894,10 +896,12 @@ impl Runtime {
                 .and_then(|v| v.as_str())
                 .map(crate::handlers::StdoutFormat::parse)
                 .unwrap_or_default();
-            rt.add_handler(Arc::new(crate::handlers::StdoutHandler::with_format_and_filter(
-                format,
-                crate::handlers::spec::FilterSpec::default(),
-            )));
+            rt.add_handler(Arc::new(
+                crate::handlers::StdoutHandler::with_format_and_filter(
+                    format,
+                    crate::handlers::spec::FilterSpec::default(),
+                ),
+            ));
         }
 
         // Honor an optional yaml `ceremony.log_level` so operators can
@@ -1013,12 +1017,7 @@ impl Runtime {
     /// Returns `Result<()>` for cross-language parity (Python `tn.log`
     /// returns `None`, TS `tn.log` returns `void`). Internal callers that
     /// need the row_hash / event_id / sequence drop down to `emit_inner`.
-    pub fn emit(
-        &self,
-        level: &str,
-        event_type: &str,
-        fields: Map<String, Value>,
-    ) -> Result<()> {
+    pub fn emit(&self, level: &str, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit_inner(level, event_type, fields, None, None, None)
             .map(|_| ())
     }
@@ -1257,10 +1256,7 @@ impl Runtime {
                         if public_groups.contains(gname) {
                             public_out.insert(k, v);
                         } else {
-                            per_group
-                                .entry(gname.clone())
-                                .or_default()
-                                .insert(k, v);
+                            per_group.entry(gname.clone()).or_default().insert(k, v);
                         }
                     } else {
                         for gname in routed {
@@ -1315,9 +1311,8 @@ impl Runtime {
         // per-call sign override (`sign=true` passed explicitly) also
         // pulls it back in since the signature is over row_hash bytes.
         let chain_enabled_for_row_hash = self.cfg.ceremony.chain;
-        let need_row_hash = chain_enabled_for_row_hash
-            || self.cfg.ceremony.sign
-            || sign.unwrap_or(false);
+        let need_row_hash =
+            chain_enabled_for_row_hash || self.cfg.ceremony.sign || sign.unwrap_or(false);
 
         // 2. Index tokens + 3. Encrypt per group.
         let mut group_inputs_for_hash: BTreeMap<String, GroupInput> = BTreeMap::new();
@@ -1345,18 +1340,19 @@ impl Runtime {
             // (outer) is still the total; these four sum to it.
             let _sort_t0 = if crate::perf::enabled() {
                 Some(std::time::Instant::now())
-            } else { None };
+            } else {
+                None
+            };
             let sorted: BTreeMap<String, Value> = plain.into_iter().collect();
             if let Some(t0) = _sort_t0 {
-                crate::perf::record_ns(
-                    "emit:group_encrypt.sort",
-                    t0.elapsed().as_nanos() as u64,
-                );
+                crate::perf::record_ns("emit:group_encrypt.sort", t0.elapsed().as_nanos() as u64);
             }
 
             let _idx_t0 = if crate::perf::enabled() {
                 Some(std::time::Instant::now())
-            } else { None };
+            } else {
+                None
+            };
             let mut field_hashes: BTreeMap<String, String> = BTreeMap::new();
             for (k, v) in &sorted {
                 field_hashes.insert(
@@ -1373,9 +1369,10 @@ impl Runtime {
 
             let _canon_t0 = if crate::perf::enabled() {
                 Some(std::time::Instant::now())
-            } else { None };
-            let plaintext_bytes =
-                canonical_bytes(&Value::Object(sorted.into_iter().collect()))?;
+            } else {
+                None
+            };
+            let plaintext_bytes = canonical_bytes(&Value::Object(sorted.into_iter().collect()))?;
             if let Some(t0) = _canon_t0 {
                 crate::perf::record_ns(
                     "emit:group_encrypt.canonical_bytes",
@@ -1385,22 +1382,23 @@ impl Runtime {
 
             let _enc_t0 = if crate::perf::enabled() {
                 Some(std::time::Instant::now())
-            } else { None };
+            } else {
+                None
+            };
             let ct = match gstate.cipher.encrypt(&plaintext_bytes) {
                 Ok(ct) => ct,
                 Err(Error::NotAPublisher { .. }) => continue,
                 Err(e) => return Err(e),
             };
             if let Some(t0) = _enc_t0 {
-                crate::perf::record_ns(
-                    "emit:group_encrypt.cipher",
-                    t0.elapsed().as_nanos() as u64,
-                );
+                crate::perf::record_ns("emit:group_encrypt.cipher", t0.elapsed().as_nanos() as u64);
             }
 
             let _build_t0 = if crate::perf::enabled() {
                 Some(std::time::Instant::now())
-            } else { None };
+            } else {
+                None
+            };
             // group_inputs_for_hash only feeds compute_row_hash; skip
             // the clones when no row_hash will be computed (chain=F
             // sign=F pure-log mode).
@@ -1460,8 +1458,7 @@ impl Runtime {
             None
         };
         let is_protocol = event_type.starts_with("tn.");
-        let pel_routed =
-            is_protocol && self.cfg.ceremony.protocol_events_location != "main_log";
+        let pel_routed = is_protocol && self.cfg.ceremony.protocol_events_location != "main_log";
         // Derive the on-disk path from the writer pool's template so
         // the advisory-lock file always sits next to the file we're
         // actually appending to. Going through `pel_writer.path_for`
@@ -1552,7 +1549,9 @@ impl Runtime {
                 //    consumes it (chain=F sign=F pure-log mode).
                 let _rh_t0 = if crate::perf::enabled() {
                     Some(std::time::Instant::now())
-                } else { None };
+                } else {
+                    None
+                };
                 let row_hash = if need_row_hash {
                     let public_bmap: BTreeMap<String, Value> =
                         public_out_for_lock.clone().into_iter().collect();
@@ -1580,7 +1579,9 @@ impl Runtime {
                 // 6. Sign: respects per-call override, then ceremony default.
                 let _sign_t0 = if crate::perf::enabled() {
                     Some(std::time::Instant::now())
-                } else { None };
+                } else {
+                    None
+                };
                 let should_sign = sign.unwrap_or(self.cfg.ceremony.sign);
                 let sig_b64 = if should_sign {
                     let sig = self.device.sign(row_hash.as_bytes());
@@ -1595,7 +1596,9 @@ impl Runtime {
                 // 7. Envelope serialize.
                 let _env_t0 = if crate::perf::enabled() {
                     Some(std::time::Instant::now())
-                } else { None };
+                } else {
+                    None
+                };
                 let line = match build_envelope(EnvelopeInput {
                     device_identity: self.device.did(),
                     timestamp: &ts,
@@ -1622,7 +1625,9 @@ impl Runtime {
                 // 8. Append to log file (or the resolved pel for tn.* events).
                 let _wr_t0 = if crate::perf::enabled() {
                     Some(std::time::Instant::now())
-                } else { None };
+                } else {
+                    None
+                };
                 // Get-or-create the writer for this event_type's
                 // rendered path. PEL admin emits route through
                 // `pel_writer`; everything else through `log_writer`.
@@ -1667,10 +1672,7 @@ impl Runtime {
             };
             storage_for_lock.with_advisory_lock(&lock_path, &mut || {
                 if let Some(t0) = _lock_t0 {
-                    crate::perf::record_ns(
-                        "emit:lock_acquire",
-                        t0.elapsed().as_nanos() as u64,
-                    );
+                    crate::perf::record_ns("emit:lock_acquire", t0.elapsed().as_nanos() as u64);
                 }
                 // Under the lock: refresh in-memory chain tip from
                 // disk truth. If another process appended rows since
@@ -1748,9 +1750,7 @@ impl Runtime {
                     Ok(a) => a,
                     Err(e) => {
                         deferred_err = Some(e);
-                        return Err(std::io::Error::other(
-                            "writer_for failed (deferred)",
-                        ));
+                        return Err(std::io::Error::other("writer_for failed (deferred)"));
                     }
                 };
                 let bytes_opt: Option<Vec<u8>> = {
@@ -1758,9 +1758,10 @@ impl Runtime {
                     match w.read_tail_if_grown(TIP_REFRESH_TAIL_WINDOW) {
                         Ok(opt) => opt,
                         Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(e) => return Err(e).map_err(|err| {
-                            std::io::Error::other(format!("read_tail: {err}"))
-                        }),
+                        Err(e) => {
+                            return Err(e)
+                                .map_err(|err| std::io::Error::other(format!("read_tail: {err}")))
+                        }
                     }
                 };
                 if let Some(bytes) = bytes_opt {
@@ -1773,10 +1774,7 @@ impl Runtime {
                     }
                 }
                 if let Some(t0) = _tip_t0 {
-                    crate::perf::record_ns(
-                        "emit:tip_refresh",
-                        t0.elapsed().as_nanos() as u64,
-                    );
+                    crate::perf::record_ns("emit:tip_refresh", t0.elapsed().as_nanos() as u64);
                 }
 
                 // 4. Chain advance (now reflects disk truth).
@@ -1787,10 +1785,7 @@ impl Runtime {
                 };
                 let (seq, prev_hash) = self.chain.advance(event_type);
                 if let Some(t0) = _adv_t0 {
-                    crate::perf::record_ns(
-                        "emit:chain_advance",
-                        t0.elapsed().as_nanos() as u64,
-                    );
+                    crate::perf::record_ns("emit:chain_advance", t0.elapsed().as_nanos() as u64);
                 }
 
                 let (row_hash, line) = build_and_write!(seq, &prev_hash);
@@ -1803,10 +1798,7 @@ impl Runtime {
                 };
                 self.chain.commit(event_type, &row_hash);
                 if let Some(t0) = _cm_t0 {
-                    crate::perf::record_ns(
-                        "emit:chain_commit",
-                        t0.elapsed().as_nanos() as u64,
-                    );
+                    crate::perf::record_ns("emit:chain_commit", t0.elapsed().as_nanos() as u64);
                 }
 
                 row_hash_out = Some(row_hash);
@@ -1862,10 +1854,8 @@ impl Runtime {
         if let Some(e) = deferred_err {
             return Err(e);
         }
-        let row_hash =
-            row_hash_out.expect("with_advisory_lock returned Ok but row_hash unset");
-        let line =
-            line_out.expect("with_advisory_lock returned Ok but line unset");
+        let row_hash = row_hash_out.expect("with_advisory_lock returned Ok but row_hash unset");
+        let line = line_out.expect("with_advisory_lock returned Ok but line unset");
 
         // 10. Fan out to handlers. Mirrors Python `tn/logger.py:343` and
         //     TS `node_runtime.ts:376`. A handler whose filter rejects
@@ -1923,10 +1913,7 @@ impl Runtime {
     /// # Panics
     /// Panics if the internal handlers mutex is poisoned.
     pub fn handler_count(&self) -> usize {
-        self.handlers
-            .lock()
-            .expect("handlers mutex poisoned")
-            .len()
+        self.handlers.lock().expect("handlers mutex poisoned").len()
     }
 
     fn fan_out_to_handlers(&self, raw_line: &[u8], event_type: &str, event_id: &str) {
@@ -2018,7 +2005,10 @@ impl Runtime {
     /// #12).
     pub fn read_all_runs(&self) -> Result<Vec<FlatEntry>> {
         let raw = self.read_raw()?;
-        Ok(raw.into_iter().map(|r| flatten_raw_entry(&r, false)).collect())
+        Ok(raw
+            .into_iter()
+            .map(|r| flatten_raw_entry(&r, false))
+            .collect())
     }
 
     /// Like [`Runtime::read`] but adds a `_valid: {signature, row_hash,
@@ -2149,11 +2139,7 @@ impl Runtime {
 
     /// Append a `tn.read.tampered_row_skipped` admin event with public
     /// fields only. The bad row's payload is NOT exposed.
-    fn emit_tampered_row_skipped(
-        &self,
-        entry: &ReadEntry,
-        reasons: &[&'static str],
-    ) -> Result<()> {
+    fn emit_tampered_row_skipped(&self, entry: &ReadEntry, reasons: &[&'static str]) -> Result<()> {
         let env = entry.envelope.as_object();
         let event_id = env
             .and_then(|o| o.get("event_id"))
@@ -2176,10 +2162,7 @@ impl Runtime {
         fields.insert("envelope_event_id".into(), Value::String(event_id));
         fields.insert("envelope_device_identity".into(), Value::String(did));
         fields.insert("envelope_event_type".into(), Value::String(event_type));
-        fields.insert(
-            "envelope_sequence".into(),
-            sequence.unwrap_or(Value::Null),
-        );
+        fields.insert("envelope_sequence".into(), sequence.unwrap_or(Value::Null));
         fields.insert(
             "invalid_reasons".into(),
             Value::Array(
@@ -2370,9 +2353,7 @@ impl Runtime {
             sidecar_str.push(".label");
             let sidecar = PathBuf::from(sidecar_str);
             if let Err(e) = self.storage.write_bytes(&sidecar, lbl.as_bytes()) {
-                log::warn!(
-                    "admin_add_agent_runtime: failed to write label sidecar: {e}"
-                );
+                log::warn!("admin_add_agent_runtime: failed to write label sidecar: {e}");
             }
         }
 
@@ -2408,10 +2389,7 @@ impl Runtime {
     // helpers would force ValidFlags re-aggregation per row, which
     // breaks the audit-grade trace the reader produces in one pass.
     #[allow(clippy::cognitive_complexity)]
-    pub fn read_from_with_validity(
-        &self,
-        log_path: &Path,
-    ) -> Result<Vec<(ReadEntry, ValidFlags)>> {
+    pub fn read_from_with_validity(&self, log_path: &Path) -> Result<Vec<(ReadEntry, ValidFlags)>> {
         if !self.storage.exists(log_path) {
             return Ok(Vec::new());
         }
@@ -2463,10 +2441,7 @@ impl Runtime {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            let sequence = env
-                .get("sequence")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            let sequence = env.get("sequence").and_then(Value::as_u64).unwrap_or(0);
             let did = env
                 .get("device_identity")
                 .and_then(Value::as_str)
@@ -2528,9 +2503,8 @@ impl Runtime {
                             let ct = match STANDARD.decode(ct_str) {
                                 Ok(b) => b,
                                 Err(e) => {
-                                    row_parse_error = Some(format!(
-                                        "ciphertext base64 in group {k:?}: {e}"
-                                    ));
+                                    row_parse_error =
+                                        Some(format!("ciphertext base64 in group {k:?}: {e}"));
                                     break 'group_loop;
                                 }
                             };
@@ -2540,8 +2514,7 @@ impl Runtime {
                             {
                                 for (fname, fv) in fh_obj {
                                     if let Some(s) = fv.as_str() {
-                                        field_hashes
-                                            .insert(fname.clone(), s.to_string());
+                                        field_hashes.insert(fname.clone(), s.to_string());
                                     }
                                 }
                             }
@@ -2554,9 +2527,8 @@ impl Runtime {
                             );
                             // Decrypt if we hold a kit for this group.
                             if let Some(gstate_arc) = self.groups.get(k) {
-                                let gstate = gstate_arc
-                                    .read()
-                                    .expect("group state RwLock poisoned");
+                                let gstate =
+                                    gstate_arc.read().expect("group state RwLock poisoned");
                                 match gstate.cipher.decrypt(&ct) {
                                     Ok(pt) => {
                                         match serde_json::from_slice::<Value>(&pt) {
@@ -2590,10 +2562,8 @@ impl Runtime {
                                     }
                                 }
                             } else {
-                                plaintext_per_group.insert(
-                                    k.clone(),
-                                    serde_json::json!({"$no_read_key": true}),
-                                );
+                                plaintext_per_group
+                                    .insert(k.clone(), serde_json::json!({"$no_read_key": true}));
                             }
                         }
                     }
@@ -2655,9 +2625,7 @@ impl Runtime {
                     if envelope_reserved.contains(k.as_str()) {
                         continue;
                     }
-                    if v.as_object()
-                        .is_some_and(|o| o.contains_key("ciphertext"))
-                    {
+                    if v.as_object().is_some_and(|o| o.contains_key("ciphertext")) {
                         continue;
                     }
                     if !public_set.contains(k.as_str()) {
@@ -2694,24 +2662,22 @@ impl Runtime {
             // sentinel as "row_hash is not a load-bearing field for
             // this ceremony shape" — same shape the writer
             // documents at emit time.
-            let row_hash_ok = if !self.cfg.ceremony.chain
-                && !self.cfg.ceremony.sign
-                && row_hash.is_empty()
-            {
-                true
-            } else {
-                let expected = compute_row_hash(&RowHashInput {
-                    device_identity: &did,
-                    timestamp: &timestamp,
-                    event_id: &event_id,
-                    event_type: &event_type,
-                    level: &level,
-                    prev_hash: &prev,
-                    public_fields: &public_out,
-                    groups: &groups_for_hash,
-                });
-                expected == row_hash
-            };
+            let row_hash_ok =
+                if !self.cfg.ceremony.chain && !self.cfg.ceremony.sign && row_hash.is_empty() {
+                    true
+                } else {
+                    let expected = compute_row_hash(&RowHashInput {
+                        device_identity: &did,
+                        timestamp: &timestamp,
+                        event_id: &event_id,
+                        event_type: &event_type,
+                        level: &level,
+                        prev_hash: &prev,
+                        public_fields: &public_out,
+                        groups: &groups_for_hash,
+                    });
+                    expected == row_hash
+                };
 
             // Signature: empty signature counts as `false` (unsigned mode
             // is intentionally fail-closed for verifiers — matches Python).
@@ -2719,12 +2685,8 @@ impl Runtime {
                 false
             } else {
                 match signature_from_b64(&signature) {
-                    Ok(sig_bytes) => DeviceKey::verify_did(
-                        &did,
-                        row_hash.as_bytes(),
-                        &sig_bytes,
-                    )
-                    .unwrap_or(false),
+                    Ok(sig_bytes) => DeviceKey::verify_did(&did, row_hash.as_bytes(), &sig_bytes)
+                        .unwrap_or(false),
                     Err(_) => false,
                 }
             };
@@ -2807,9 +2769,8 @@ impl Runtime {
                 let ct = match STANDARD.decode(ct_b64) {
                     Ok(b) => b,
                     Err(e) => {
-                        row_parse_error = Some(format!(
-                            "ciphertext base64 in group {gname:?}: {e}"
-                        ));
+                        row_parse_error =
+                            Some(format!("ciphertext base64 in group {gname:?}: {e}"));
                         break 'group_loop;
                     }
                 };
@@ -2820,9 +2781,8 @@ impl Runtime {
                             plaintext_per_group.insert(gname.clone(), v);
                         }
                         Err(e) => {
-                            row_parse_error = Some(format!(
-                                "plaintext json in group {gname:?}: {e}"
-                            ));
+                            row_parse_error =
+                                Some(format!("plaintext json in group {gname:?}: {e}"));
                             break 'group_loop;
                         }
                     },
@@ -3135,11 +3095,7 @@ impl Runtime {
     /// carries validity flags, this function trusts whatever `read()`
     /// returned. Tampered envelopes that still parse and pass schema will
     /// be reflected in the roster.
-    pub fn recipients(
-        &self,
-        group: &str,
-        include_revoked: bool,
-    ) -> Result<Vec<RecipientEntry>> {
+    pub fn recipients(&self, group: &str, include_revoked: bool) -> Result<Vec<RecipientEntry>> {
         let mut active: BTreeMap<u64, RecipientEntry> = BTreeMap::new();
         let mut revoked: BTreeMap<u64, RecipientEntry> = BTreeMap::new();
 
@@ -3498,7 +3454,10 @@ impl Runtime {
         }
 
         let mut fields = Map::new();
-        fields.insert("vault_identity".into(), Value::String(vault_did.to_string()));
+        fields.insert(
+            "vault_identity".into(),
+            Value::String(vault_did.to_string()),
+        );
         fields.insert("project_id".into(), Value::String(project_id.to_string()));
         fields.insert(
             "linked_at".into(),
@@ -3521,7 +3480,10 @@ impl Runtime {
         reason: Option<&str>,
     ) -> Result<()> {
         let mut fields = Map::new();
-        fields.insert("vault_identity".into(), Value::String(vault_did.to_string()));
+        fields.insert(
+            "vault_identity".into(),
+            Value::String(vault_did.to_string()),
+        );
         fields.insert("project_id".into(), Value::String(project_id.to_string()));
         fields.insert(
             "unlinked_at".into(),
@@ -4015,8 +3977,7 @@ fn rotation_first_time_this_process(log_path: &Path) -> bool {
     // succeeds, and the returned absolute path differs from the first
     // run's key — so the guard's HashSet sees them as distinct paths.
     let key = if let Some(parent) = log_path.parent() {
-        let canon_parent =
-            std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+        let canon_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
         match log_path.file_name() {
             Some(name) => canon_parent.join(name),
             None => canon_parent,
@@ -4046,7 +4007,10 @@ fn read_rotation_config(handlers: &[serde_yml::Value]) -> (bool, usize) {
         if kind != Some("file.rotating") && kind != Some("file") {
             continue;
         }
-        let rotate = h.get("rotate_on_init").and_then(serde_yml::Value::as_bool).unwrap_or(false);
+        let rotate = h
+            .get("rotate_on_init")
+            .and_then(serde_yml::Value::as_bool)
+            .unwrap_or(false);
         let backup_count = h
             .get("backup_count")
             .and_then(serde_yml::Value::as_u64)
@@ -4305,7 +4269,10 @@ fn is_absolute_xplat_path(p: &Path) -> bool {
     let bytes = s.as_bytes();
     if bytes.len() >= 3 {
         let drive = bytes[0];
-        if drive.is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'/' || bytes[2] == b'\\') {
+        if drive.is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'/' || bytes[2] == b'\\')
+        {
             return true;
         }
     }
@@ -4768,10 +4735,7 @@ fn seed_chain_from_template(
 
 /// Scan a single ndjson file for any line whose `event_type` is `tn.ceremony.init`.
 /// Returns `true` if found, `false` if file absent or not found.
-fn scan_for_ceremony_init(
-    path: &Path,
-    storage: &Arc<dyn crate::storage::Storage>,
-) -> Result<bool> {
+fn scan_for_ceremony_init(path: &Path, storage: &Arc<dyn crate::storage::Storage>) -> Result<bool> {
     if !storage.exists(path) {
         return Ok(false);
     }
@@ -4868,23 +4832,19 @@ fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
     // default group: btn publisher state + self-reader kit.
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
-    let mut pub_state =
-        tn_btn::PublisherState::setup_with_seed(tn_btn::Config, seed).map_err(|e| {
-            std::io::Error::other(format!("btn setup failed: {e:?}"))
-        })?;
-    let kit = pub_state.mint().map_err(|e| {
-        std::io::Error::other(format!("btn mint failed: {e:?}"))
-    })?;
+    let mut pub_state = tn_btn::PublisherState::setup_with_seed(tn_btn::Config, seed)
+        .map_err(|e| std::io::Error::other(format!("btn setup failed: {e:?}")))?;
+    let kit = pub_state
+        .mint()
+        .map_err(|e| std::io::Error::other(format!("btn mint failed: {e:?}")))?;
     atomic_write_bytes(&keystore.join("default.btn.state"), &pub_state.to_bytes())?;
     atomic_write_bytes(&keystore.join("default.btn.mykit"), &kit.to_bytes())?;
 
     // tn.agents reserved group: btn publisher state + self-reader kit.
     let mut agents_seed = [0u8; 32];
     OsRng.fill_bytes(&mut agents_seed);
-    let mut agents_state =
-        tn_btn::PublisherState::setup_with_seed(tn_btn::Config, agents_seed).map_err(|e| {
-            std::io::Error::other(format!("btn setup (tn.agents) failed: {e:?}"))
-        })?;
+    let mut agents_state = tn_btn::PublisherState::setup_with_seed(tn_btn::Config, agents_seed)
+        .map_err(|e| std::io::Error::other(format!("btn setup (tn.agents) failed: {e:?}")))?;
     let agents_kit = agents_state
         .mint()
         .map_err(|e| std::io::Error::other(format!("btn mint (tn.agents) failed: {e:?}")))?;

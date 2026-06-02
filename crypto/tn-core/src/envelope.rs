@@ -112,8 +112,7 @@ pub fn build_envelope(input: EnvelopeInput<'_>) -> Result<String> {
     out.push(',');
     // u64 number — itoa-free fast path via std `write!`.
     use std::fmt::Write as _;
-    write!(out, "\"sequence\":{}", input.sequence)
-        .expect("write to String is infallible");
+    write!(out, "\"sequence\":{}", input.sequence).expect("write to String is infallible");
     out.push(',');
     write_safe_string_field(&mut out, "prev_hash", input.prev_hash);
     out.push(',');

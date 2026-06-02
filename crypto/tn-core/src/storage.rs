@@ -129,10 +129,7 @@ pub trait Storage: Send + Sync {
     /// `O_APPEND | O_CREAT` (or the Windows equivalent). On NTFS
     /// this saves ~200 µs per emit relative to `OpenOptions::open`
     /// every time. See `LogFileWriter` for the consumer.
-    fn open_append_writer(
-        &self,
-        path: &Path,
-    ) -> io::Result<Option<Box<dyn io::Write + Send>>> {
+    fn open_append_writer(&self, path: &Path) -> io::Result<Option<Box<dyn io::Write + Send>>> {
         let _ = path;
         Ok(None)
     }
@@ -243,14 +240,18 @@ impl Storage for FsStorage {
         use std::io::{Read, Seek, SeekFrom};
         let _t0_open = if crate::perf::enabled() {
             Some(std::time::Instant::now())
-        } else { None };
+        } else {
+            None
+        };
         let mut f = std::fs::OpenOptions::new().read(true).open(path)?;
         if let Some(t) = _t0_open {
             crate::perf::record_ns("emit:tip_refresh.open", t.elapsed().as_nanos() as u64);
         }
         let _t0_meta = if crate::perf::enabled() {
             Some(std::time::Instant::now())
-        } else { None };
+        } else {
+            None
+        };
         let len = f.metadata()?.len();
         if let Some(t) = _t0_meta {
             crate::perf::record_ns("emit:tip_refresh.metadata", t.elapsed().as_nanos() as u64);
@@ -263,7 +264,9 @@ impl Storage for FsStorage {
         let mut buf = Vec::with_capacity(cap);
         let _t0_read = if crate::perf::enabled() {
             Some(std::time::Instant::now())
-        } else { None };
+        } else {
+            None
+        };
         f.read_to_end(&mut buf)?;
         if let Some(t) = _t0_read {
             crate::perf::record_ns("emit:tip_refresh.read", t.elapsed().as_nanos() as u64);
@@ -271,10 +274,7 @@ impl Storage for FsStorage {
         Ok(buf)
     }
 
-    fn open_append_writer(
-        &self,
-        path: &Path,
-    ) -> io::Result<Option<Box<dyn io::Write + Send>>> {
+    fn open_append_writer(&self, path: &Path) -> io::Result<Option<Box<dyn io::Write + Send>>> {
         // Pin one OS handle for the lifetime of the writer instead of
         // the open/write/close-per-emit pattern that `append_bytes`
         // uses. Saves ~200 µs/emit on NTFS (two CreateFileW +

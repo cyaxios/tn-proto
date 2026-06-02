@@ -98,11 +98,7 @@ impl VaultPullHandler {
     ///
     /// # Errors
     /// Missing required fields or unknown `on_absorb_error` mode.
-    pub fn from_spec(
-        spec: &HandlerSpec,
-        runtime: Arc<Runtime>,
-        yaml_dir: &Path,
-    ) -> Result<Self> {
+    pub fn from_spec(spec: &HandlerSpec, runtime: Arc<Runtime>, yaml_dir: &Path) -> Result<Self> {
         let ctx = "vault.pull";
         let endpoint = spec::require_str(&spec.raw, "endpoint", ctx)?;
         let project_id = spec::require_str(&spec.raw, "project_id", ctx)?;
@@ -110,16 +106,15 @@ impl VaultPullHandler {
             spec.raw.get("poll_interval").unwrap_or(&JsonValue::Null),
             DEFAULT_POLL_INTERVAL_SEC,
         )?;
-        let on_absorb_error =
-            match spec::str_field(&spec.raw, "on_absorb_error").unwrap_or("log") {
-                "log" => OnAbsorbError::Log,
-                "raise" => OnAbsorbError::Raise,
-                other => {
-                    return Err(Error::InvalidConfig(format!(
-                        "vault.pull: on_absorb_error must be 'log' or 'raise', got {other:?}"
-                    )));
-                }
-            };
+        let on_absorb_error = match spec::str_field(&spec.raw, "on_absorb_error").unwrap_or("log") {
+            "log" => OnAbsorbError::Log,
+            "raise" => OnAbsorbError::Raise,
+            other => {
+                return Err(Error::InvalidConfig(format!(
+                    "vault.pull: on_absorb_error must be 'log' or 'raise', got {other:?}"
+                )));
+            }
+        };
         let cursor_path = yaml_dir.join(".tn").join("admin").join(CURSOR_FILE);
 
         Ok(Self {
@@ -230,10 +225,7 @@ impl VaultPullHandler {
     fn tick_locked(&self) -> Result<usize> {
         let mut cursor = self.load_cursor();
         let did = self.runtime.device.did();
-        let items = match self
-            .client
-            .list_incoming(did, cursor.as_deref())
-        {
+        let items = match self.client.list_incoming(did, cursor.as_deref()) {
             Ok(items) => items,
             Err(e) => {
                 if self.on_absorb_error == OnAbsorbError::Raise {
@@ -270,9 +262,7 @@ impl VaultPullHandler {
             };
             match self.runtime.absorb(AbsorbSource::Bytes(&blob)) {
                 Ok(receipt) => {
-                    if !receipt.legacy_reason.is_empty()
-                        || receipt.legacy_status == "rejected"
-                    {
+                    if !receipt.legacy_reason.is_empty() || receipt.legacy_status == "rejected" {
                         log::warn!(
                             "[{}] vault.pull: absorb rejected {}: {}",
                             self.name,
@@ -285,10 +275,7 @@ impl VaultPullHandler {
                     // Per spec §4.1: prefer server-supplied since_marker
                     // (opaque, order-preserving). Fall back to received_at
                     // for vault implementations that don't emit since_marker.
-                    let cursor_value = item
-                        .since_marker
-                        .as_deref()
-                        .or(item.received_at.as_deref());
+                    let cursor_value = item.since_marker.as_deref().or(item.received_at.as_deref());
                     if let Some(ts) = cursor_value {
                         match &highest {
                             None => highest = Some(ts.to_string()),
@@ -360,8 +347,8 @@ impl VaultPullHandler {
         if let Some(c) = cursor {
             obj.insert("last_seen".into(), JsonValue::String(c.to_string()));
         }
-        let pretty = serde_json::to_string_pretty(&JsonValue::Object(obj))
-            .unwrap_or_else(|_| "{}".into());
+        let pretty =
+            serde_json::to_string_pretty(&JsonValue::Object(obj)).unwrap_or_else(|_| "{}".into());
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, pretty)?;
         std::fs::rename(&tmp, path)?;
@@ -389,12 +376,7 @@ impl TnHandler for VaultPullHandler {
         self.stop.store(true, Ordering::SeqCst);
         let (_, cv) = &*self.cv;
         cv.notify_all();
-        if let Some(h) = self
-            .join
-            .lock()
-            .expect("vault.pull close join lock")
-            .take()
-        {
+        if let Some(h) = self.join.lock().expect("vault.pull close join lock").take() {
             let _ = h.join();
         }
     }
@@ -406,12 +388,7 @@ impl Drop for VaultPullHandler {
             self.stop.store(true, Ordering::SeqCst);
             let (_, cv) = &*self.cv;
             cv.notify_all();
-            if let Some(h) = self
-                .join
-                .lock()
-                .expect("vault.pull drop join lock")
-                .take()
-            {
+            if let Some(h) = self.join.lock().expect("vault.pull drop join lock").take() {
                 let _ = h.join();
             }
         }
@@ -429,7 +406,10 @@ impl VaultInboxClient for NullInboxClient {
         Ok(vec![])
     }
     fn download(&self, _path: &str) -> std::result::Result<Vec<u8>, String> {
-        Err("vault.pull: no HTTP client wired (NullInboxClient). Inject one via with_client.".into())
+        Err(
+            "vault.pull: no HTTP client wired (NullInboxClient). Inject one via with_client."
+                .into(),
+        )
     }
 }
 

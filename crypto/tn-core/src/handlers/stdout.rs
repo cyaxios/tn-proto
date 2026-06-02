@@ -145,10 +145,7 @@ fn render_pretty(envelope: &Value) -> Vec<u8> {
         ts.to_string()
     };
 
-    let level_raw = envelope
-        .get("level")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let level_raw = envelope.get("level").and_then(Value::as_str).unwrap_or("");
     let level = if level_raw.is_empty() {
         "LOG".to_string()
     } else {

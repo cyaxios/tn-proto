@@ -106,8 +106,6 @@ pub fn index_token_with_template(
     let mut hex_buf = [0u8; 64];
     hex::encode_to_slice(tag.as_slice(), &mut hex_buf)
         .expect("32-byte digest into 64-char buffer is infallible");
-    out.push_str(
-        std::str::from_utf8(&hex_buf).expect("hex::encode_to_slice emits ASCII"),
-    );
+    out.push_str(std::str::from_utf8(&hex_buf).expect("hex::encode_to_slice emits ASCII"));
     Ok(out)
 }

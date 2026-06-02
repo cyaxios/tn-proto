@@ -32,6 +32,7 @@
 pub mod admin_catalog;
 pub mod admin_reduce;
 pub mod agents_policy;
+pub mod body_encryption;
 pub mod canonical;
 pub mod chain;
 pub mod cipher;
@@ -71,9 +72,8 @@ pub use admin_cache::{AdminStateCache, ChainConflict, LKV_VERSION};
 #[cfg(feature = "fs")]
 pub use runtime::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
-    AdminRotation, AdminState, AdminVaultLink, FlatEntry, Instructions, OnInvalid,
-    ReadEntry, RecipientEntry, Runtime, RuntimeInitOptions, SecureEntry, SecureReadOptions,
-    ValidFlags,
+    AdminRotation, AdminState, AdminVaultLink, FlatEntry, Instructions, OnInvalid, ReadEntry,
+    RecipientEntry, Runtime, RuntimeInitOptions, SecureEntry, SecureReadOptions, ValidFlags,
 };
 #[cfg(feature = "fs")]
 pub use runtime_export::{AbsorbReceipt, AbsorbSource, ExportOptions};

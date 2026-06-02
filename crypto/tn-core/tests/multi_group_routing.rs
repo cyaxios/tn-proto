@@ -30,11 +30,18 @@ fn make_ceremony(root: &Path, group_names: &[&str], yaml_body: &dyn Fn(&str) -> 
     std::fs::write(keystore.join("index_master.key"), [0x11u8; 32]).unwrap();
 
     for (i, name) in group_names.iter().enumerate() {
-        let seed: [u8; 32] = std::array::from_fn(|j| ((j as u8).wrapping_mul(5)).wrapping_add(7).wrapping_add(i as u8 * 13));
-        let mut pub_state =
-            tn_btn::PublisherState::setup_with_seed(tn_btn::Config, seed).unwrap();
+        let seed: [u8; 32] = std::array::from_fn(|j| {
+            ((j as u8).wrapping_mul(5))
+                .wrapping_add(7)
+                .wrapping_add(i as u8 * 13)
+        });
+        let mut pub_state = tn_btn::PublisherState::setup_with_seed(tn_btn::Config, seed).unwrap();
         let kit = pub_state.mint().unwrap();
-        std::fs::write(keystore.join(format!("{name}.btn.state")), pub_state.to_bytes()).unwrap();
+        std::fs::write(
+            keystore.join(format!("{name}.btn.state")),
+            pub_state.to_bytes(),
+        )
+        .unwrap();
         std::fs::write(keystore.join(format!("{name}.btn.mykit")), kit.to_bytes()).unwrap();
     }
 
@@ -84,7 +91,10 @@ fn config_inverts_groups_fields_into_sorted_map() {
     );
     let cfg: Config = load_config(&yaml).unwrap();
     let map = cfg.field_to_groups().unwrap();
-    assert_eq!(map.get("email").unwrap(), &vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(
+        map.get("email").unwrap(),
+        &vec!["a".to_string(), "b".to_string()]
+    );
 }
 
 #[test]
@@ -133,9 +143,7 @@ fn emit_encrypts_a_field_into_every_listed_group() {
         .read_raw()
         .unwrap()
         .into_iter()
-        .filter(|e| {
-            e.envelope["event_type"].as_str().unwrap_or("") == "evt.multi"
-        })
+        .filter(|e| e.envelope["event_type"].as_str().unwrap_or("") == "evt.multi")
         .collect();
     assert_eq!(entries.len(), 1);
     let pt = &entries[0].plaintext_per_group;
@@ -146,11 +154,8 @@ fn emit_encrypts_a_field_into_every_listed_group() {
 #[test]
 fn field_to_groups_list_is_sorted_alphabetically() {
     let td = tempfile::tempdir().unwrap();
-    let yaml = make_ceremony(
-        td.path(),
-        &["default", "zeta", "alpha"],
-        &|did| {
-            format!(
+    let yaml = make_ceremony(td.path(), &["default", "zeta", "alpha"], &|did| {
+        format!(
                 "ceremony: {{id: cer_sort, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
                  keystore: {{path: ./.tn/keys}}\n\
                  device: {{device_identity: \"{did}\"}}\n\
@@ -177,8 +182,7 @@ fn field_to_groups_list_is_sorted_alphabetically() {
                  fields: {{}}\n\
                  llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
             )
-        },
-    );
+    });
     let cfg: Config = load_config(&yaml).unwrap();
     let map = cfg.field_to_groups().unwrap();
     assert_eq!(
@@ -192,11 +196,8 @@ fn field_routed_to_unknown_group_is_a_load_error() {
     // Use the legacy flat `fields:` block to point at a non-existent group;
     // canonical `groups[<g>].fields` can't reference other groups.
     let td = tempfile::tempdir().unwrap();
-    let yaml = make_ceremony(
-        td.path(),
-        &["default"],
-        &|did| {
-            format!(
+    let yaml = make_ceremony(td.path(), &["default"], &|did| {
+        format!(
                 "ceremony: {{id: cer_unknown, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
                  keystore: {{path: ./.tn/keys}}\n\
                  device: {{device_identity: \"{did}\"}}\n\
@@ -212,10 +213,11 @@ fn field_routed_to_unknown_group_is_a_load_error() {
                  \x20 x: {{group: ghost_group}}\n\
                  llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
             )
-        },
-    );
+    });
     let cfg: Config = load_config(&yaml).unwrap();
-    let err = cfg.field_to_groups().expect_err("expected unknown-group error");
+    let err = cfg
+        .field_to_groups()
+        .expect_err("expected unknown-group error");
     let msg = format!("{err}");
     assert!(msg.contains("unknown group"), "unexpected error: {msg}");
 }
@@ -223,11 +225,8 @@ fn field_routed_to_unknown_group_is_a_load_error() {
 #[test]
 fn field_in_public_and_group_is_rejected() {
     let td = tempfile::tempdir().unwrap();
-    let yaml = make_ceremony(
-        td.path(),
-        &["default", "a"],
-        &|did| {
-            format!(
+    let yaml = make_ceremony(td.path(), &["default", "a"], &|did| {
+        format!(
                 "ceremony: {{id: cer_amb, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
                  keystore: {{path: ./.tn/keys}}\n\
                  device: {{device_identity: \"{did}\"}}\n\
@@ -248,8 +247,7 @@ fn field_in_public_and_group_is_rejected() {
                  fields: {{}}\n\
                  llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
             )
-        },
-    );
+    });
     let cfg: Config = load_config(&yaml).unwrap();
     let err = cfg.field_to_groups().expect_err("expected ambiguity error");
     let msg = format!("{err}");
@@ -259,11 +257,8 @@ fn field_in_public_and_group_is_rejected() {
 #[test]
 fn legacy_flat_fields_block_still_loads() {
     let td = tempfile::tempdir().unwrap();
-    let yaml = make_ceremony(
-        td.path(),
-        &["default", "secrets"],
-        &|did| {
-            format!(
+    let yaml = make_ceremony(td.path(), &["default", "secrets"], &|did| {
+        format!(
                 "ceremony: {{id: cer_legacy, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
                  keystore: {{path: ./.tn/keys}}\n\
                  device: {{device_identity: \"{did}\"}}\n\
@@ -284,8 +279,7 @@ fn legacy_flat_fields_block_still_loads() {
                  \x20 password: {{group: secrets}}\n\
                  llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
             )
-        },
-    );
+    });
     let cfg: Config = load_config(&yaml).unwrap();
     let map = cfg.field_to_groups().unwrap();
     assert_eq!(map.get("password").unwrap(), &vec!["secrets".to_string()]);

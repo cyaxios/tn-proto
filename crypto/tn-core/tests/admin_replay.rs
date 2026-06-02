@@ -30,7 +30,10 @@ fn recipients_add_revoke_roundtrip_with_and_without_include_revoked() {
     let active = rt.recipients("default", false).unwrap();
     assert_eq!(active.len(), 1, "active should drop revoked leaf_a");
     assert_eq!(active[0].leaf_index, leaf_b);
-    assert_eq!(active[0].recipient_identity.as_deref(), Some("did:key:zBob"));
+    assert_eq!(
+        active[0].recipient_identity.as_deref(),
+        Some("did:key:zBob")
+    );
     assert!(!active[0].revoked);
     assert!(active[0].kit_sha256.is_some());
     assert!(active[0].minted_at.is_some());
@@ -194,11 +197,8 @@ fn admin_state_rotation_retires_active_recipients() {
 
     // Recipient B (active before rotation) becomes "retired"; recipient A
     // stays "revoked" (rotation only touches still-active rows).
-    let by_leaf: std::collections::BTreeMap<u64, &tn_core::AdminRecipientRecord> = state
-        .recipients
-        .iter()
-        .map(|r| (r.leaf_index, r))
-        .collect();
+    let by_leaf: std::collections::BTreeMap<u64, &tn_core::AdminRecipientRecord> =
+        state.recipients.iter().map(|r| (r.leaf_index, r)).collect();
     let rec_a = by_leaf.get(&leaf_a).expect("A must be present");
     assert_eq!(
         rec_a.active_status, "revoked",

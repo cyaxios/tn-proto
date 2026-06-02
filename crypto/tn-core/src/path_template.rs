@@ -65,12 +65,7 @@ impl PathTemplate {
     /// Parse `template` into segments, pre-substituting the three
     /// init-time tokens. Returns an error for unknown `{...}` tokens
     /// so misconfigured yamls fail at init, not on first emit.
-    pub fn parse(
-        template: &str,
-        yaml_dir: &Path,
-        ceremony_id: &str,
-        did: &str,
-    ) -> Result<Self> {
+    pub fn parse(template: &str, yaml_dir: &Path, ceremony_id: &str, did: &str) -> Result<Self> {
         // Substitute init-time tokens first. The result still
         // contains per-emit tokens (if any) plus literals.
         let did_short: String = {
@@ -93,14 +88,11 @@ impl PathTemplate {
         while let Some((i, c)) = chars.next() {
             if c == '{' {
                 // Find the matching `}` and extract the token.
-                let close = pre[i..]
-                    .find('}')
-                    .map(|j| i + j)
-                    .ok_or_else(|| {
-                        Error::InvalidConfig(format!(
-                            "logs.path template {template:?}: unclosed '{{' at offset {i}",
-                        ))
-                    })?;
+                let close = pre[i..].find('}').map(|j| i + j).ok_or_else(|| {
+                    Error::InvalidConfig(format!(
+                        "logs.path template {template:?}: unclosed '{{' at offset {i}",
+                    ))
+                })?;
                 let token = &pre[i + 1..close];
                 if !buf.is_empty() {
                     segments.push(Segment::Literal(std::mem::take(&mut buf)));
@@ -133,9 +125,7 @@ impl PathTemplate {
         if !buf.is_empty() {
             segments.push(Segment::Literal(buf));
         }
-        let is_templated = segments
-            .iter()
-            .any(|s| !matches!(s, Segment::Literal(_)));
+        let is_templated = segments.iter().any(|s| !matches!(s, Segment::Literal(_)));
         Ok(PathTemplate {
             segments,
             yaml_dir: yaml_dir.to_path_buf(),
@@ -216,10 +206,9 @@ impl PathTemplate {
         for seg in &self.segments {
             match seg {
                 Segment::Literal(lit) => s.push_str(lit),
-                Segment::EventType
-                | Segment::EventClass
-                | Segment::EventId
-                | Segment::Date => s.push('*'),
+                Segment::EventType | Segment::EventClass | Segment::EventId | Segment::Date => {
+                    s.push('*')
+                }
             }
         }
         s
@@ -240,12 +229,24 @@ mod tests {
         assert!(!t.is_templated());
         assert!(!t.is_per_event());
         let p = t.render("any.event", "ignored");
-        assert_eq!(p, PathBuf::from("/cer/logs/tn.ndjson").to_path_buf().canonicalize().unwrap_or(PathBuf::from("/cer/logs/tn.ndjson")));
+        assert_eq!(
+            p,
+            PathBuf::from("/cer/logs/tn.ndjson")
+                .to_path_buf()
+                .canonicalize()
+                .unwrap_or(PathBuf::from("/cer/logs/tn.ndjson"))
+        );
     }
 
     #[test]
     fn event_class_templating() {
-        let t = PathTemplate::parse("./logs/{event_class}.ndjson", &yaml_dir(), "cer_x", "did:key:z").unwrap();
+        let t = PathTemplate::parse(
+            "./logs/{event_class}.ndjson",
+            &yaml_dir(),
+            "cer_x",
+            "did:key:z",
+        )
+        .unwrap();
         assert!(t.is_templated());
         let p1 = t.render("order.created", "");
         let p2 = t.render("payment.captured", "");
@@ -255,14 +256,26 @@ mod tests {
 
     #[test]
     fn event_type_templating() {
-        let t = PathTemplate::parse("./logs/{event_type}.ndjson", &yaml_dir(), "cer_x", "did:key:z").unwrap();
+        let t = PathTemplate::parse(
+            "./logs/{event_type}.ndjson",
+            &yaml_dir(),
+            "cer_x",
+            "did:key:z",
+        )
+        .unwrap();
         let p = t.render("order.created", "");
         assert_eq!(p.file_name().unwrap(), "order.created.ndjson");
     }
 
     #[test]
     fn event_id_templating() {
-        let t = PathTemplate::parse("./logs/{event_id}.ndjson", &yaml_dir(), "cer_x", "did:key:z").unwrap();
+        let t = PathTemplate::parse(
+            "./logs/{event_id}.ndjson",
+            &yaml_dir(),
+            "cer_x",
+            "did:key:z",
+        )
+        .unwrap();
         assert!(t.is_templated());
         assert!(t.is_per_event());
         // event_type is irrelevant; the id alone drives the file name.
@@ -295,7 +308,13 @@ mod tests {
 
     #[test]
     fn event_id_glob_pattern() {
-        let t = PathTemplate::parse("./logs/{event_id}.ndjson", &yaml_dir(), "cer_x", "did:key:z").unwrap();
+        let t = PathTemplate::parse(
+            "./logs/{event_id}.ndjson",
+            &yaml_dir(),
+            "cer_x",
+            "did:key:z",
+        )
+        .unwrap();
         assert_eq!(t.glob_pattern(), "./logs/*.ndjson");
     }
 
@@ -321,7 +340,13 @@ mod tests {
 
     #[test]
     fn unknown_token_rejected() {
-        let err = PathTemplate::parse("./logs/{unknown_tok}.ndjson", &yaml_dir(), "cer_x", "did:key:z").unwrap_err();
+        let err = PathTemplate::parse(
+            "./logs/{unknown_tok}.ndjson",
+            &yaml_dir(),
+            "cer_x",
+            "did:key:z",
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown token"), "got: {msg}");
         assert!(msg.contains("unknown_tok"), "got: {msg}");
@@ -329,25 +354,31 @@ mod tests {
 
     #[test]
     fn unclosed_brace_rejected() {
-        let err = PathTemplate::parse("./logs/{event_type.ndjson", &yaml_dir(), "cer_x", "did:key:z").unwrap_err();
+        let err = PathTemplate::parse(
+            "./logs/{event_type.ndjson",
+            &yaml_dir(),
+            "cer_x",
+            "did:key:z",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unclosed"));
     }
 
     #[test]
     fn glob_pattern_replaces_tokens_with_star() {
-        let t = PathTemplate::parse("./logs/{event_class}/{date}.ndjson", &yaml_dir(), "cer_x", "did:key:z").unwrap();
+        let t = PathTemplate::parse(
+            "./logs/{event_class}/{date}.ndjson",
+            &yaml_dir(),
+            "cer_x",
+            "did:key:z",
+        )
+        .unwrap();
         assert_eq!(t.glob_pattern(), "./logs/*/*.ndjson");
     }
 
     #[test]
     fn empty_did_handled() {
-        let t = PathTemplate::parse(
-            "./logs/{did}/log.ndjson",
-            &yaml_dir(),
-            "cer_x",
-            "",
-        )
-        .unwrap();
+        let t = PathTemplate::parse("./logs/{did}/log.ndjson", &yaml_dir(), "cer_x", "").unwrap();
         assert!(!t.is_templated());
         let p = t.render("x", "y");
         assert_eq!(p, PathBuf::from("/cer/logs/log.ndjson"));

@@ -207,10 +207,7 @@ impl AdminStateCache {
     /// Construct a fresh cache. Loads from `<yaml_dir>/.tn/admin/admin.lkv.json`
     /// if present; otherwise replays from the underlying admin log.
     pub fn new(yaml_path: &Path, cfg: Config, log_path: PathBuf) -> Result<Self> {
-        let yaml_dir = yaml_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
+        let yaml_dir = yaml_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let admin_log_path = resolve_admin_log_path(&yaml_dir, &cfg);
         let lkv_path = lkv_path_for(&yaml_dir);
         let mut c = Self {
@@ -509,16 +506,16 @@ impl AdminStateCache {
 
         let ts = env.get("timestamp").and_then(Value::as_str);
         match et.unwrap_or("") {
-            "tn.ceremony.init"      => self.on_ceremony_init(env, ts),
-            "tn.group.added"        => self.on_group_added(env, ts),
-            "tn.recipient.added"    => self.on_recipient_added(env, ts, rh),
-            "tn.recipient.revoked"  => self.on_recipient_revoked(env, ts, rh),
+            "tn.ceremony.init" => self.on_ceremony_init(env, ts),
+            "tn.group.added" => self.on_group_added(env, ts),
+            "tn.recipient.added" => self.on_recipient_added(env, ts, rh),
+            "tn.recipient.revoked" => self.on_recipient_revoked(env, ts, rh),
             "tn.rotation.completed" => self.on_rotation_completed(env, ts),
-            "tn.coupon.issued"      => self.on_coupon_issued(env, ts),
+            "tn.coupon.issued" => self.on_coupon_issued(env, ts),
             "tn.enrolment.compiled" => self.on_enrolment_compiled(env, ts),
             "tn.enrolment.absorbed" => self.on_enrolment_absorbed(env, ts),
-            "tn.vault.linked"       => self.on_vault_linked(env, ts),
-            "tn.vault.unlinked"     => self.on_vault_unlinked(env, ts),
+            "tn.vault.linked" => self.on_vault_linked(env, ts),
+            "tn.vault.unlinked" => self.on_vault_unlinked(env, ts),
             _ => { /* unknown admin event_type — clock updates only */ }
         }
     }
@@ -626,7 +623,9 @@ impl AdminStateCache {
         );
         o.insert(
             "publisher_identity".into(),
-            env.get("publisher_identity").cloned().unwrap_or(Value::Null),
+            env.get("publisher_identity")
+                .cloned()
+                .unwrap_or(Value::Null),
         );
         o.insert(
             "added_at".into(),
@@ -681,7 +680,9 @@ impl AdminStateCache {
         o.insert("leaf_index".into(), Value::Number(leaf.into()));
         o.insert(
             "recipient_identity".into(),
-            env.get("recipient_identity").cloned().unwrap_or(Value::Null),
+            env.get("recipient_identity")
+                .cloned()
+                .unwrap_or(Value::Null),
         );
         o.insert(
             "kit_sha256".into(),
@@ -791,7 +792,11 @@ impl AdminStateCache {
                 .or_else(|| ts.map(|s| Value::String(s.to_string())))
                 .unwrap_or(Value::Null),
         );
-        if let Some(arr) = self.state.get_mut("rotations").and_then(Value::as_array_mut) {
+        if let Some(arr) = self
+            .state
+            .get_mut("rotations")
+            .and_then(Value::as_array_mut)
+        {
             arr.push(Value::Object(o));
         }
     }
@@ -820,10 +825,15 @@ impl AdminStateCache {
             "group".into(),
             env.get("group").cloned().unwrap_or(Value::Null),
         );
-        o.insert("slot".into(), env.get("slot").cloned().unwrap_or(Value::Null));
+        o.insert(
+            "slot".into(),
+            env.get("slot").cloned().unwrap_or(Value::Null),
+        );
         o.insert(
             "recipient_identity".into(),
-            env.get("recipient_identity").cloned().unwrap_or(Value::Null),
+            env.get("recipient_identity")
+                .cloned()
+                .unwrap_or(Value::Null),
         );
         o.insert(
             "issued_to".into(),
@@ -948,7 +958,10 @@ impl AdminStateCache {
     }
 
     fn on_vault_linked(&mut self, env: &Value, ts: Option<&str>) {
-        let vd = env.get("vault_identity").and_then(Value::as_str).unwrap_or("");
+        let vd = env
+            .get("vault_identity")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if vd.is_empty() {
             return;
         }
@@ -979,7 +992,10 @@ impl AdminStateCache {
     }
 
     fn on_vault_unlinked(&mut self, env: &Value, ts: Option<&str>) {
-        let vd = env.get("vault_identity").and_then(Value::as_str).unwrap_or("");
+        let vd = env
+            .get("vault_identity")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let Some(arr) = self
             .state
             .get_mut("vault_links")
@@ -1028,8 +1044,7 @@ impl AdminStateCache {
             o.insert("leaf_index".into(), Value::Number((*li).into()));
             o.insert(
                 "row_hash".into(),
-                rh.clone()
-                    .map_or(Value::Null, Value::String),
+                rh.clone().map_or(Value::Null, Value::String),
             );
             revoked_arr.push(Value::Object(o));
         }
@@ -1038,10 +1053,7 @@ impl AdminStateCache {
             let mut o = Map::new();
             o.insert("group".into(), Value::String(g.clone()));
             o.insert("generation".into(), Value::Number((*gen).into()));
-            o.insert(
-                "previous_kit_sha256".into(),
-                Value::String(prev.clone()),
-            );
+            o.insert("previous_kit_sha256".into(), Value::String(prev.clone()));
             rotations_arr.push(Value::Object(o));
         }
         let mut coord_arr = Vec::new();
@@ -1085,9 +1097,10 @@ impl AdminStateCache {
         doc.insert("_coord_to_row_hash".into(), Value::Array(coord_arr));
 
         let serialized = serde_json::to_string_pretty(&Value::Object(doc))?;
-        let tmp = self
-            .lkv_path
-            .with_file_name(format!("{}.tmp", file_name_or(&self.lkv_path, "admin.lkv.json")));
+        let tmp = self.lkv_path.with_file_name(format!(
+            "{}.tmp",
+            file_name_or(&self.lkv_path, "admin.lkv.json")
+        ));
         {
             let mut f = OpenOptions::new()
                 .write(true)
@@ -1152,10 +1165,9 @@ impl AdminStateCache {
     /// ceremony mismatch means the file is stale; the caller drops
     /// it and rebuilds.
     fn lkv_doc_is_current(&self, m: &Map<String, Value>) -> bool {
-        let version_ok =
-            m.get("version").and_then(Value::as_u64) == Some(u64::from(LKV_VERSION));
-        let ceremony_ok = m.get("ceremony_id").and_then(Value::as_str)
-            == Some(self.cfg.ceremony.id.as_str());
+        let version_ok = m.get("version").and_then(Value::as_u64) == Some(u64::from(LKV_VERSION));
+        let ceremony_ok =
+            m.get("ceremony_id").and_then(Value::as_str) == Some(self.cfg.ceremony.id.as_str());
         version_ok && ceremony_ok
     }
 

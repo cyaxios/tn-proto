@@ -110,7 +110,9 @@ pub enum Error {
     /// Raised by `keystore_backend::LocalKeystore::write_state` and
     /// surfaced on the runtime admin verbs so the operator sees a
     /// recoverable, named failure rather than silent data loss.
-    #[error("keystore state for group {group:?} has diverged on disk; re-read and retry the admin verb")]
+    #[error(
+        "keystore state for group {group:?} has diverged on disk; re-read and retry the admin verb"
+    )]
     KeystoreConflict {
         /// Group whose state file diverged.
         group: String,

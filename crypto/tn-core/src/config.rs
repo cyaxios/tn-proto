@@ -132,7 +132,11 @@ fn is_valid_var_name(name: &str) -> bool {
 }
 
 fn line_of(text: &str, offset: usize) -> usize {
-    text[..offset.min(text.len())].bytes().filter(|&b| b == b'\n').count() + 1
+    text[..offset.min(text.len())]
+        .bytes()
+        .filter(|&b| b == b'\n')
+        .count()
+        + 1
 }
 
 /// Top-level ceremony metadata.
@@ -151,7 +155,8 @@ pub struct Ceremony {
     /// Project id for linked-mode ceremonies.
     #[serde(default)]
     pub linked_project_id: Option<String>,
-    /// Sync logs flag for wallet-linked ceremonies.
+    /// Legacy/ignored sync logs flag. Vault sync never includes
+    /// application logs.
     #[serde(default)]
     pub sync_logs: bool,
     /// Where to route `tn.*` admin events: `"main_log"` or path template.
@@ -196,6 +201,57 @@ pub struct Ceremony {
     /// missing key both leave the threshold at its current value.
     #[serde(default)]
     pub log_level: String,
+}
+
+/// Project-level vault sync configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Vault {
+    /// Whether vault behavior is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Vault base URL.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub url: Option<String>,
+    /// Vault-side project id. Empty strings normalize to `None`.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub linked_project_id: Option<String>,
+    /// Whether the conceptual `vault.sync` handler should be active.
+    #[serde(default)]
+    pub autosync: bool,
+    /// Sync interval in seconds.
+    #[serde(default = "default_vault_sync_interval_seconds")]
+    pub sync_interval_seconds: u64,
+}
+
+impl Default for Vault {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: None,
+            linked_project_id: None,
+            autosync: false,
+            sync_interval_seconds: default_vault_sync_interval_seconds(),
+        }
+    }
+}
+
+fn default_vault_sync_interval_seconds() -> u64 {
+    600
+}
+
+fn empty_string_as_none<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<String>::deserialize(deserializer)?;
+    Ok(v.and_then(|s| {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }))
 }
 
 fn default_local() -> String {
@@ -257,6 +313,7 @@ pub struct Device {
 pub struct GroupRecipient {
     /// Recipient device identity (`did:key:z…`). Renamed from `did`
     /// in 0.4.3a1 to match the canonical role vocabulary.
+    #[serde(alias = "did")]
     pub recipient_identity: String,
     /// BGW reader-key file path (relative to keystore).
     #[serde(default)]
@@ -317,6 +374,12 @@ pub struct LlmClassifier {
 pub struct Config {
     /// Ceremony metadata.
     pub ceremony: Ceremony,
+    /// Project-level vault settings.
+    #[serde(default)]
+    pub vault: Vault,
+    /// Whether the source YAML explicitly declared a `vault:` block.
+    #[serde(skip)]
+    pub vault_declared: bool,
     /// Main log destination. Optional in yaml (defaults to `./.tn/logs/tn.ndjson`
     /// relative to the yaml dir) for backwards compatibility with pre-existing
     /// ceremony files.
@@ -346,6 +409,42 @@ pub struct Config {
 }
 
 impl Config {
+    /// Return the canonical project-level vault view, bridging legacy
+    /// `ceremony.linked_*` fields when the new `vault:` block is absent.
+    #[must_use]
+    pub fn normalized_vault(&self) -> Vault {
+        if self.vault_declared || self.vault.enabled || self.vault.url.is_some() {
+            return Vault {
+                enabled: self.vault.enabled,
+                url: self.vault.url.clone(),
+                linked_project_id: self.vault.linked_project_id.clone(),
+                autosync: if self.vault.enabled {
+                    self.vault.autosync
+                } else {
+                    false
+                },
+                sync_interval_seconds: self.vault.sync_interval_seconds,
+            };
+        }
+        let legacy_url = self
+            .ceremony
+            .linked_vault
+            .as_ref()
+            .and_then(|s| non_empty_string(s));
+        let legacy_project_id = self
+            .ceremony
+            .linked_project_id
+            .as_ref()
+            .and_then(|s| non_empty_string(s));
+        Vault {
+            enabled: legacy_url.is_some(),
+            url: legacy_url,
+            linked_project_id: legacy_project_id,
+            autosync: self.ceremony.linked_vault.is_some(),
+            sync_interval_seconds: default_vault_sync_interval_seconds(),
+        }
+    }
+
     /// Build the inverted multi-group field routing map.
     ///
     /// The new canonical source of truth is each group's own
@@ -384,7 +483,9 @@ impl Config {
                  will be removed in a future release."
             );
             for (fname, route) in &self.fields {
-                out.entry(fname.clone()).or_default().push(route.group.clone());
+                out.entry(fname.clone())
+                    .or_default()
+                    .push(route.group.clone());
             }
         }
 
@@ -403,10 +504,7 @@ impl Config {
 
         // Validate: a field cannot be both public and group-routed.
         let public: std::collections::BTreeSet<&String> = self.public_fields.iter().collect();
-        let overlap: Vec<&String> = out
-            .keys()
-            .filter(|f| public.contains(f))
-            .collect();
+        let overlap: Vec<&String> = out.keys().filter(|f| public.contains(f)).collect();
         if !overlap.is_empty() {
             return Err(Error::Yaml(format!(
                 "fields {overlap:?} appear in both public_fields and a \
@@ -426,6 +524,15 @@ impl Config {
     }
 }
 
+fn non_empty_string(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Parse a tn.yaml document from a string.
 ///
 /// Enforces the reserved-namespace rule (per 2026-04-25 read-ergonomics
@@ -438,7 +545,24 @@ impl Config {
 /// view; this entry point is for self-contained yamls only (round-trip
 /// tests, fixtures, callers that already inlined the parent).
 pub fn parse(yaml: &str) -> Result<Config> {
-    let cfg: Config = serde_yml::from_str(yaml).map_err(|e| Error::Yaml(e.to_string()))?;
+    let value: serde_yml::Value =
+        serde_yml::from_str(yaml).map_err(|e| Error::Yaml(e.to_string()))?;
+    let vault_declared = match &value {
+        serde_yml::Value::Mapping(map) => {
+            map.contains_key(&serde_yml::Value::String("vault".into()))
+        }
+        _ => false,
+    };
+    let mut cfg: Config = serde_yml::from_value(value).map_err(|e| Error::Yaml(e.to_string()))?;
+    cfg.vault_declared = vault_declared;
+    if cfg.vault_declared {
+        apply_vault_block_defaults(&mut cfg.vault, yaml);
+        if cfg.vault.enabled && cfg.vault.url.is_none() {
+            return Err(Error::InvalidConfig(
+                "vault.enabled=true requires vault.url".into(),
+            ));
+        }
+    }
     for gname in cfg.groups.keys() {
         if gname.starts_with("tn.") && gname != "tn.agents" {
             return Err(Error::ReservedGroupName {
@@ -447,6 +571,32 @@ pub fn parse(yaml: &str) -> Result<Config> {
         }
     }
     Ok(cfg)
+}
+
+fn apply_vault_block_defaults(vault: &mut Vault, yaml: &str) {
+    let vault_lines: Vec<&str> = yaml
+        .lines()
+        .skip_while(|line| {
+            let trimmed = line.trim();
+            trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.starts_with("vault:")
+        })
+        .skip(1)
+        .take_while(|line| {
+            line.starts_with(' ') || line.starts_with('\t') || line.trim().is_empty()
+        })
+        .collect();
+    let enabled_declared = vault_lines
+        .iter()
+        .any(|line| line.trim_start().starts_with("enabled:"));
+    if !enabled_declared {
+        vault.enabled = true;
+    }
+    let autosync_declared = vault_lines
+        .iter()
+        .any(|line| line.trim_start().starts_with("autosync:"));
+    if !autosync_declared {
+        vault.autosync = vault.enabled;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -468,7 +618,7 @@ pub fn parse(yaml: &str) -> Result<Config> {
 //     have an equivalent ergonomic logger plumbed through here, so we
 //     stay silent and match the on-disk merged shape).
 //   - `ceremony`: shallow-merged per subfield, child wins.
-//   - `handlers`: additive, deduped by handler name/kind. Child first wins.
+//   - `handlers`: child replaces parent when declared, including [].
 //   - all other top-level keys: child wins if set, else parent's.
 //
 // Path absolutization: parent's relative paths in `keystore.path`,
@@ -510,7 +660,10 @@ fn is_absolute_xplat(p: &str) -> bool {
     let bytes = p.as_bytes();
     if bytes.len() >= 3 {
         let drive = bytes[0];
-        if (drive.is_ascii_alphabetic()) && bytes[1] == b':' && (bytes[2] == b'/' || bytes[2] == b'\\') {
+        if (drive.is_ascii_alphabetic())
+            && bytes[1] == b':'
+            && (bytes[2] == b'/' || bytes[2] == b'\\')
+        {
             return true;
         }
     }
@@ -519,7 +672,11 @@ fn is_absolute_xplat(p: &str) -> bool {
 
 fn absolutize_path_str(p: &str, base: &Path) -> String {
     let pp = Path::new(p);
-    let joined = if is_absolute_xplat(p) { pp.to_path_buf() } else { base.join(pp) };
+    let joined = if is_absolute_xplat(p) {
+        pp.to_path_buf()
+    } else {
+        base.join(pp)
+    };
     normalize_path(&joined).to_string_lossy().into_owned()
 }
 
@@ -630,31 +787,10 @@ fn merge_parent_into_child(
             continue;
         }
         if key_s == "handlers" {
-            let parent_h: Vec<serde_yml::Value> = match merged.remove("handlers") {
-                Some(serde_yml::Value::Sequence(s)) => s,
-                _ => Vec::new(),
-            };
-            let child_h: Vec<serde_yml::Value> = match child_val {
+            let out: Vec<serde_yml::Value> = match child_val {
                 serde_yml::Value::Sequence(s) => s.clone(),
                 _ => Vec::new(),
             };
-            let mut seen_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-            let mut out: Vec<serde_yml::Value> = Vec::new();
-            // Child handlers first (per Python: child wins on dedupe by name).
-            for h in child_h.into_iter().chain(parent_h.into_iter()) {
-                let serde_yml::Value::Mapping(ref hm) = h else { continue };
-                let name = hm
-                    .get("name")
-                    .and_then(serde_yml::Value::as_str)
-                    .or_else(|| hm.get("kind").and_then(serde_yml::Value::as_str))
-                    .unwrap_or("")
-                    .to_string();
-                if name.is_empty() || seen_names.contains(&name) {
-                    continue;
-                }
-                seen_names.insert(name);
-                out.push(h);
-            }
             merged.insert(
                 serde_yml::Value::String("handlers".into()),
                 serde_yml::Value::Sequence(out),

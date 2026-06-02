@@ -31,9 +31,7 @@ fn revoke_then_subsequent_decrypt_fails_for_revoked_kit() {
 
     // Mint a new reader kit via admin.
     let kit_path = td.path().join("reader_a.btn.mykit");
-    let leaf_a = rt
-        .admin_add_recipient("default", &kit_path, None)
-        .unwrap();
+    let leaf_a = rt.admin_add_recipient("default", &kit_path, None).unwrap();
     assert!(kit_path.exists(), "admin should write kit file");
 
     // Revoke reader_a.
@@ -86,9 +84,7 @@ fn add_recipient_persists_state_across_runtime_reload() {
     let cer = common::setup_minimal_btn_ceremony(td.path());
     let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
     let kit_path = td.path().join("reader_new.btn.mykit");
-    let _leaf = rt
-        .admin_add_recipient("default", &kit_path, None)
-        .unwrap();
+    let _leaf = rt.admin_add_recipient("default", &kit_path, None).unwrap();
     drop(rt);
 
     // Reload Runtime — the persisted state should reflect the minted kit.
