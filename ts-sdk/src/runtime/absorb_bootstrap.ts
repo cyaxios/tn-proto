@@ -97,7 +97,10 @@ function _ts(): string {
   return new Date().toISOString().replace(/[:.]/g, "").slice(0, 15) + "Z";
 }
 
-function _projectSeedVaultYamlPatch(
+// Exported for the cross-language absorb vault-adoption contract test
+// (ts-sdk/test/absorb_vault_adoption_contract.test.ts). The leading
+// underscore marks it internal, not part of the public SDK surface.
+export function _projectSeedVaultYamlPatch(
   existingYaml: Uint8Array,
   incomingYaml: Uint8Array,
 ): { patched?: Uint8Array; vaultOnly: boolean } {
