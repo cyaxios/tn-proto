@@ -669,16 +669,24 @@ def create_fresh(
         "auto_populated_by_policy": True,
     }
 
-    from .vault_client import DEFAULT_VAULT_URL
+    from .vault_client import resolve_vault_url
 
     # DX review #5: ``link=False`` produces an unlinked (offline)
     # ceremony — no ``linked_vault`` URL, ``mode: local``. ``link=True``
     # or ``link=None`` (the legacy default) preserves the linked
     # behaviour. Callers that want an air-gap deploy now have a
     # documented init-time knob; the kwarg used to silently no-op.
-    _is_unlinked = link is False
+    # ``TN_NO_LINK=1`` is the env-level equivalent of ``link=False`` and
+    # is honored here so the opt-out reaches the yaml stamping — not just
+    # the auto-link upload path in ``tn.__init__``.
+    _env_no_link = os.environ.get("TN_NO_LINK", "").strip() == "1"
+    _is_unlinked = (link is False) or _env_no_link
     _yaml_mode = "local" if _is_unlinked else "linked"
-    _yaml_vault_url = "" if _is_unlinked else DEFAULT_VAULT_URL
+    # Resolve the link URL through the standard precedence
+    # (explicit arg > ``TN_VAULT_URL`` > ``DEFAULT_VAULT_URL``) rather than
+    # hardcoding prod, so pointing ``TN_VAULT_URL`` at a local vault mints
+    # a ceremony linked to *that* vault.
+    _yaml_vault_url = "" if _is_unlinked else resolve_vault_url(None)
 
     doc = {
         # All ceremony defaults are written explicitly so the yaml is a
