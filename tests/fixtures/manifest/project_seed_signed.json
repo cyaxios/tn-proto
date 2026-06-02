@@ -1,0 +1,28 @@
+{
+  "as_of": "2026-05-31T12:00:00.000+00:00",
+  "ceremony_id": "project_payroll_root",
+  "clock": {
+    "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK": {
+      "tn.project.created": 1,
+      "tn.vault.linked": 1
+    }
+  },
+  "event_count": 2,
+  "head_row_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "kind": "project_seed",
+  "manifest_signature_b64": "j9NcWMKwdeNQSq7AQoDEGzaUyJ568oTI8GI8vgz4MhGUeFYh10GDIvFf6TzNgdoz6FIfoam92+J0bRkBFQ8IDw==",
+  "publisher_identity": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+  "recipient_identity": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+  "scope": "project",
+  "state": {
+    "project": {
+      "name": "payroll",
+      "version": "v1"
+    },
+    "vault": {
+      "linked_project_id": "prj_payroll_123",
+      "url": "https://vault.tn-proto.org"
+    }
+  },
+  "version": 1
+}
