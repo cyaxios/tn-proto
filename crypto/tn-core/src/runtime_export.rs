@@ -1,6 +1,13 @@
-//! `Runtime::export` and `Runtime::absorb` — the new universal `.tnpkg`
-//! producer / consumer (Section 3.2 of the 2026-04-24 admin log architecture
-//! plan). Mirrors `tn/export.py` and `tn/absorb.py`.
+//! `.tnpkg` producer / consumer: [`Runtime::export`] and [`Runtime::absorb`].
+//!
+//! The universal package path (Section 3.2 of the 2026-04-24 admin log
+//! architecture plan), behind the `tn export` / `tn absorb` CLI verbs.
+//! [`Runtime::export`] packs local ceremony state into a signed `.tnpkg`
+//! described by [`ExportOptions`]; [`Runtime::absorb`] reads one back, verifies
+//! its manifest, applies it, and returns an [`AbsorbReceipt`]. The wire format
+//! itself lives in [`crate::tnpkg`]; this module is the runtime-side glue that
+//! gathers what goes in the body and folds what comes out. Mirrors
+//! `tn/export.py` and `tn/absorb.py`.
 
 #![cfg(feature = "fs")]
 
@@ -21,7 +28,17 @@ use crate::tnpkg::{
 };
 use crate::{Error, Result};
 
-/// Options for `Runtime::export`. Mirrors Python's keyword args.
+/// What to pack and how, for [`Runtime::export`].
+///
+/// [`kind`](Self::kind) is the one required field — it selects the package kind
+/// and thus which of the other fields matter. `Offer` / `Enrolment` need
+/// [`package_body`](Self::package_body); `KitBundle` / `FullKeystore` /
+/// `ProjectSeed` honor [`groups`](Self::groups); `FullKeystore` and
+/// `ProjectSeed` additionally require
+/// [`confirm_includes_secrets`](Self::confirm_includes_secrets) because they
+/// write raw private keys. Defaults are all-empty / `None`, so build with
+/// `ExportOptions { kind: Some(...), ..Default::default() }`. Mirrors Python's
+/// keyword args.
 #[derive(Debug, Clone, Default)]
 pub struct ExportOptions {
     /// Manifest kind / dispatch discriminator.
@@ -41,7 +58,18 @@ pub struct ExportOptions {
     pub package_body: Option<Vec<u8>>,
 }
 
-/// Receipt returned from `Runtime::absorb`.
+/// Outcome of a [`Runtime::absorb`] call.
+///
+/// Absorb is total — it returns a receipt rather than erroring on a bad or
+/// rejected package — so the *receipt* is where you learn what happened. For
+/// admin snapshots, [`accepted_count`](Self::accepted_count) /
+/// [`deduped_count`](Self::deduped_count) / [`noop`](Self::noop) describe how
+/// many envelopes were new, and [`conflicts`](Self::conflicts) surfaces any
+/// equivocation detected. For other kinds,
+/// [`legacy_status`](Self::legacy_status) / [`legacy_reason`](Self::legacy_reason)
+/// carry the disposition (`"rejected"`, `"stashed"`, …). Always inspect
+/// [`replaced_kit_paths`](Self::replaced_kit_paths) after a kit absorb to see
+/// whether existing keystore files were swapped aside.
 #[derive(Debug, Clone)]
 pub struct AbsorbReceipt {
     /// Manifest kind that drove dispatch.
@@ -75,12 +103,46 @@ pub struct AbsorbReceipt {
 }
 
 impl Runtime {
-    /// Pack a `.tnpkg` from local ceremony state.
+    /// Pack a signed `.tnpkg` from local ceremony state and write it to
+    /// `out_path`.
+    ///
+    /// Gathers the body for `opts.kind` (admin envelopes, reader kits, an
+    /// identity/project seed, or a caller-supplied package payload), assembles
+    /// and Ed25519-signs the manifest with this runtime's device key, and writes
+    /// the archive via [`crate::tnpkg::write_tnpkg`]. The package is
+    /// self-describing and verifiable by any holder of the producer's
+    /// `did:key`. Returns the path written (the same `out_path`). This is the
+    /// engine behind `tn export`.
     ///
     /// # Errors
-    /// Returns `Error::InvalidConfig` for `kind=FullKeystore` without
-    /// `confirm_includes_secrets=true` (the foot-gun gate). Other errors
-    /// surface from filesystem writes or zip serialization.
+    /// Returns [`crate::Error::InvalidConfig`] when `opts.kind` is unset, when a
+    /// `FullKeystore` / `ProjectSeed` export omits
+    /// `confirm_includes_secrets = true` (the foot-gun gate on exporting raw
+    /// private keys), or when a kind's required inputs are missing (e.g. an
+    /// `Offer` without `package_body`, or a kit bundle over an empty keystore).
+    /// Returns [`crate::Error::NotImplemented`] for kinds Rust does not yet
+    /// produce (`RecipientInvite`, `ContactUpdate`). Filesystem and zip failures
+    /// surface as their underlying [`crate::Error`] variants.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// use tn_core::{Runtime, ManifestKind, ExportOptions};
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::init(Path::new("tn.yaml"))?;
+    /// let written = rt.export(
+    ///     Path::new("snapshot.tnpkg"),
+    ///     ExportOptions {
+    ///         kind: Some(ManifestKind::AdminLogSnapshot),
+    ///         ..Default::default()
+    ///     },
+    /// )?;
+    /// assert_eq!(written, Path::new("snapshot.tnpkg"));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
     pub fn export(&self, out_path: &Path, opts: ExportOptions) -> Result<PathBuf> {
         let kind = opts
@@ -229,8 +291,41 @@ impl Runtime {
         Ok(out_path.to_path_buf())
     }
 
-    /// Apply a `.tnpkg` to local state. Validates manifest signature, dedupes
-    /// admin envelopes by row_hash, advances LKV state. Idempotent.
+    /// Apply a `.tnpkg` to local state and return a receipt.
+    ///
+    /// Reads the package, verifies its manifest signature against the declared
+    /// producer, then dispatches on [`crate::ManifestKind`]: admin snapshots are
+    /// deduped by `row_hash` and appended to the admin log (advancing LKV
+    /// state); kit bundles are written into the keystore (existing files moved
+    /// aside to `.previous.<UTC>` sidecars); other kinds are stashed for the
+    /// caller. Idempotent — re-absorbing the same package is a no-op (see
+    /// [`AbsorbReceipt::noop`]) — and total: a malformed, unverifiable, or
+    /// unsupported package yields a rejected/stashed [`AbsorbReceipt`] rather
+    /// than an `Err`. The engine behind `tn absorb`.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error`] only on a genuine local failure while applying
+    /// an *accepted* package (e.g. an I/O error appending to the admin log or
+    /// writing a kit). Bad input — not a zip, signature mismatch, missing body —
+    /// is reported on the returned receipt, not as an error.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// use tn_core::{Runtime, AbsorbSource};
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::init(Path::new("tn.yaml"))?;
+    /// let receipt = rt.absorb(AbsorbSource::Path(Path::new("snapshot.tnpkg")))?;
+    /// if receipt.legacy_status == "rejected" {
+    ///     eprintln!("package rejected: {}", receipt.legacy_reason);
+    /// } else {
+    ///     println!("accepted {} new envelope(s)", receipt.accepted_count);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     #[allow(clippy::needless_pass_by_value)]
     pub fn absorb(&self, source: AbsorbSource<'_>) -> Result<AbsorbReceipt> {
         let tn_source = match source {
@@ -472,15 +567,28 @@ impl Runtime {
         })
     }
 
-    /// Path to the yaml this runtime was initialized from.
+    /// Borrow the path to the `tn.yaml` this runtime was initialized from.
+    ///
+    /// The ceremony's config file; its parent directory is the anchor for the
+    /// runtime's `.tn/` log and keystore tree.
     pub fn yaml_path(&self) -> &Path {
         &self.yaml_path
     }
 
-    /// Return every admin envelope from the runtime's logs as merged JSON
-    /// objects (envelope root + decrypted group plaintexts merged on top).
-    /// Used by `AdminStateCache` to drive its reducer without re-implementing
-    /// envelope decryption.
+    /// Collect every admin envelope from the runtime's logs as merged JSON
+    /// objects.
+    ///
+    /// Each entry is the envelope root with its decrypted per-group plaintexts
+    /// merged on top, so admin fields read at the top level regardless of which
+    /// group carried them. This is the decryption-aware feed
+    /// [`crate::AdminStateCache`] folds to build admin state — it lets the cache
+    /// avoid re-implementing envelope decryption. Non-admin event types are
+    /// filtered out.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] if reading or decrypting the underlying log
+    /// entries fails.
     pub fn admin_envelopes_merged(&self) -> Result<Vec<Value>> {
         let entries = self.read_raw()?;
         let mut out = Vec::new();
@@ -534,11 +642,13 @@ impl Runtime {
     }
 }
 
-/// Source of bytes to read a `.tnpkg` from for `Runtime::absorb`.
+/// Where [`Runtime::absorb`] reads a `.tnpkg` from.
+///
+/// The absorb-side mirror of [`crate::tnpkg::TnpkgSource`].
 pub enum AbsorbSource<'a> {
-    /// On-disk path.
+    /// On-disk path to the `.tnpkg` archive.
     Path(&'a Path),
-    /// In-memory bytes.
+    /// In-memory `.tnpkg` bytes (the byte-array path for non-fs hosts).
     Bytes(&'a [u8]),
 }
 

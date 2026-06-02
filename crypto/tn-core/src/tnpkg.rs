@@ -36,21 +36,51 @@ pub const MANIFEST_VERSION: u32 = 1;
 
 /// Vector clock keyed by `did -> {event_type -> max sequence}`.
 ///
-/// `BTreeMap` for deterministic JSON serialization (sorted keys), matching
-/// Python's `dict` + canonical_bytes serialization exactly.
+/// Summarizes how far a package's log has advanced: for each producing device
+/// and each event type, the highest sequence number seen. Absorb compares the
+/// incoming manifest's clock against the receiver's local clock to decide
+/// whether the package carries anything new (see [`clock_dominates`]) and merges
+/// the two on accept (see [`clock_merge`]).
+///
+/// `BTreeMap` (not `HashMap`) for deterministic JSON serialization (sorted
+/// keys), matching Python's `dict` + canonical-bytes serialization exactly —
+/// the clock rides inside the signed manifest, so its byte layout must be
+/// stable across implementations.
 pub type VectorClock = BTreeMap<String, BTreeMap<String, u64>>;
 
-/// Kind discriminator on the wire. Snake-case to match Python's
-/// `KNOWN_KINDS` set exactly.
+/// Dispatch discriminator for a `.tnpkg` — what the package *is*, and thus how
+/// [`crate::Runtime::absorb`] routes it.
+///
+/// Serializes snake-case to match Python's `KNOWN_KINDS` set exactly (the kind
+/// is a manifest field, so the wire spelling is load-bearing). Use
+/// [`as_str`](Self::as_str) for the wire string and [`from_wire`](Self::from_wire)
+/// to parse one back. Several kinds are recognized for round-tripping but not yet
+/// applied by the Rust runtime — see the per-variant notes and
+/// [`crate::Runtime::absorb`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(missing_docs)]
 pub enum ManifestKind {
+    /// Materialized admin-log snapshot (`body/admin.ndjson` + reduced state).
+    /// The convergent kind: absorb dedupes envelopes by `row_hash` and advances
+    /// local admin state. Produced by `tn export --kind admin_log_snapshot`.
     AdminLogSnapshot,
+    /// Enrolment *offer* package (a `body/package.json` payload). Round-trips
+    /// through Rust; the offer/enrolment handlers live on the Python side, so
+    /// Rust absorb stashes it for the caller to route.
     Offer,
+    /// Enrolment package (counterpart to [`Offer`](Self::Offer)). Stashed by
+    /// Rust absorb; applied on the Python side today.
     Enrolment,
+    /// Point-to-point recipient invite. Reserved in the kind catalog; export
+    /// and absorb are not yet wired in Rust.
     RecipientInvite,
+    /// Bundle of reader kits (`*.btn.mykit`) — no private signing material.
+    /// Absorb writes the kits into the local keystore (existing files are
+    /// preserved to `.previous.<UTC>` sidecars).
     KitBundle,
+    /// Full keystore export including raw private keys. The foot-gun kind:
+    /// export requires `confirm_includes_secrets = true`. Absorbs like a
+    /// [`KitBundle`](Self::KitBundle).
     FullKeystore,
     /// Session 8 (plan `2026-04-29-contact-update-tnpkg.md`,
     /// spec §4.6 / D-11): vault-emitted notification that a
@@ -67,7 +97,19 @@ pub enum ManifestKind {
 }
 
 impl ManifestKind {
-    /// Wire form of the kind (snake_case).
+    /// Return the wire form of the kind (snake_case).
+    ///
+    /// The exact string written to / read from the manifest's `kind` field, and
+    /// the spelling cross-implementation fixtures pin. Inverse of
+    /// [`from_wire`](Self::from_wire).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tn_core::ManifestKind;
+    ///
+    /// assert_eq!(ManifestKind::AdminLogSnapshot.as_str(), "admin_log_snapshot");
+    /// ```
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AdminLogSnapshot => "admin_log_snapshot",
@@ -83,6 +125,19 @@ impl ManifestKind {
     }
 
     /// Parse a wire string back into a `ManifestKind`.
+    ///
+    /// Returns `None` for any string outside the catalog — an unknown `kind` is
+    /// a malformed manifest, surfaced as [`crate::Error::Malformed`] by
+    /// [`Manifest::from_json`]. Inverse of [`as_str`](Self::as_str).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tn_core::ManifestKind;
+    ///
+    /// assert_eq!(ManifestKind::from_wire("kit_bundle"), Some(ManifestKind::KitBundle));
+    /// assert_eq!(ManifestKind::from_wire("not_a_kind"), None);
+    /// ```
     pub fn from_wire(s: &str) -> Option<Self> {
         match s {
             "admin_log_snapshot" => Some(Self::AdminLogSnapshot),
@@ -99,7 +154,57 @@ impl ManifestKind {
     }
 }
 
-/// Decoded `.tnpkg` manifest. Mirrors Python's `TnpkgManifest` shape.
+/// Decoded `.tnpkg` manifest — the signed index at the head of every package.
+///
+/// The manifest names the package's kind, producer, recipient, ceremony,
+/// vector clock, and (for snapshots) a copy of the reduced state, then carries
+/// an Ed25519 signature over its own canonical bytes. It is the integrity and
+/// dispatch surface of the `.tnpkg` format: a receiver verifies the signature
+/// against [`publisher_identity`](Self::publisher_identity) before trusting the
+/// body, and routes on [`kind`](Self::kind). Mirrors Python's `TnpkgManifest`
+/// shape field-for-field.
+///
+/// The signature is computed over [`signing_bytes`](Self::signing_bytes) (the
+/// canonical form *minus* the signature field) so that signing and verifying
+/// agree on the exact bytes. Build a manifest, call [`sign_manifest`] with the
+/// producer's Ed25519 key, then [`write_tnpkg`]; on the read side
+/// [`read_tnpkg`] parses it and the caller runs [`verify_manifest`].
+///
+/// # Examples
+///
+/// A manifest round-trips through JSON, and [`signing_bytes`](Self::signing_bytes)
+/// is stable regardless of whether the signature field is populated (this is
+/// what lets a signer and a verifier bind identical bytes):
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// use tn_core::{Manifest, ManifestKind};
+///
+/// let mut manifest = Manifest {
+///     kind: ManifestKind::AdminLogSnapshot,
+///     version: 1,
+///     publisher_identity: "did:key:zExample".into(),
+///     recipient_identity: None,
+///     ceremony_id: "cer_demo".into(),
+///     as_of: "2026-06-02T00:00:00.000+00:00".into(),
+///     scope: "admin".into(),
+///     clock: BTreeMap::new(),
+///     event_count: 0,
+///     head_row_hash: None,
+///     state: None,
+///     manifest_signature_b64: None,
+/// };
+///
+/// // JSON round-trip preserves the dispatch kind.
+/// let reparsed = Manifest::from_json(&manifest.to_json()).unwrap();
+/// assert_eq!(reparsed.kind, ManifestKind::AdminLogSnapshot);
+///
+/// // signing_bytes ignores manifest_signature_b64, so populating it later
+/// // does not change the bytes a signature is computed over.
+/// let before = manifest.signing_bytes().unwrap();
+/// manifest.manifest_signature_b64 = Some("not-a-real-signature".into());
+/// assert_eq!(manifest.signing_bytes().unwrap(), before);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Manifest {
     /// Dispatch discriminator.
@@ -131,9 +236,13 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Build a JSON object whose key set matches Python's `to_dict()`. Skips
-    /// optional fields when `None` so the canonical form is stable across
-    /// tiny variations in caller code.
+    /// Serialize to a JSON object whose key set matches Python's `to_dict()`.
+    ///
+    /// Optional fields are omitted (not emitted as `null`) when `None`, so the
+    /// canonical form is stable regardless of which optionals a caller left
+    /// unset — important because these bytes feed [`signing_bytes`](Self::signing_bytes).
+    /// This is the in-memory JSON shape; [`write_tnpkg`] handles pretty-printing
+    /// for on-disk `manifest.json`.
     pub fn to_json(&self) -> Value {
         let mut out = Map::new();
         out.insert("kind".into(), Value::String(self.kind.as_str().into()));
@@ -165,7 +274,19 @@ impl Manifest {
         Value::Object(out)
     }
 
-    /// Parse a manifest from a JSON object. Required fields must be present.
+    /// Parse a manifest from a JSON object.
+    ///
+    /// The required fields (`kind`, `version`, `publisher_identity`,
+    /// `ceremony_id`, `as_of`) must be present; the rest default (`scope`
+    /// defaults to `"admin"`, `event_count` to `0`, optionals to `None`). Does
+    /// not verify the signature — that is [`verify_manifest`]'s job. Inverse of
+    /// [`to_json`](Self::to_json).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::Malformed`] if `doc` is not a JSON object, a
+    /// required field is missing, or `kind` is outside the
+    /// [`ManifestKind`] catalog.
     pub fn from_json(doc: &Value) -> Result<Self> {
         let obj = doc.as_object().ok_or_else(|| Error::Malformed {
             kind: "tnpkg manifest",
@@ -250,7 +371,19 @@ impl Manifest {
         })
     }
 
-    /// Canonical bytes the producer signs (manifest minus the signature).
+    /// Compute the canonical bytes the producer signs — the manifest minus its
+    /// own signature field.
+    ///
+    /// Serializes via [`to_json`](Self::to_json), drops
+    /// `manifest_signature_b64`, and runs the bytes through the crate's
+    /// RFC 8785-style canonicalizer. Signing and verifying both call this, so
+    /// they bind the identical byte string regardless of whether the signature
+    /// field is already populated. Pure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] if canonicalization fails (e.g. a non-finite
+    /// number somewhere in [`state`](Self::state)).
     pub fn signing_bytes(&self) -> Result<Vec<u8>> {
         let mut v = self.to_json();
         if let Value::Object(m) = &mut v {
@@ -292,8 +425,19 @@ fn json_to_clock(v: Option<&Value>) -> VectorClock {
     out
 }
 
-/// Sign a manifest in place, populating `manifest_signature_b64` over the
-/// canonical bytes of the manifest minus that field.
+/// Sign a manifest in place, populating
+/// [`manifest_signature_b64`](Manifest::manifest_signature_b64).
+///
+/// Signs [`Manifest::signing_bytes`] (the canonical form minus the signature)
+/// with `sk` and stores the standard-base64 Ed25519 signature back on the
+/// manifest. `sk` must be the signing key whose public half is encoded in
+/// [`Manifest::publisher_identity`], or the later [`verify_manifest`] will fail.
+/// Side effect: mutates `manifest`.
+///
+/// # Errors
+///
+/// Returns [`crate::Error`] if [`Manifest::signing_bytes`] fails to
+/// canonicalize.
 pub fn sign_manifest(manifest: &mut Manifest, sk: &SigningKey) -> Result<()> {
     let bytes = manifest.signing_bytes()?;
     let sig = sk.sign(&bytes);
@@ -301,8 +445,22 @@ pub fn sign_manifest(manifest: &mut Manifest, sk: &SigningKey) -> Result<()> {
     Ok(())
 }
 
-/// Verify a manifest's `manifest_signature_b64` against `publisher_identity`'s
-/// Ed25519 public key. Returns `Ok(())` on success, `Err` on any failure.
+/// Verify a manifest's signature against its declared producer.
+///
+/// Decodes the Ed25519 public key from [`Manifest::publisher_identity`]
+/// (`did:key:z…`), decodes the standard-base64
+/// [`manifest_signature_b64`](Manifest::manifest_signature_b64), and checks it
+/// over [`Manifest::signing_bytes`]. This is the gate
+/// [`crate::Runtime::absorb`] runs before trusting a package's body. Pure
+/// (reads only the manifest); `Ok(())` means the producer named in the manifest
+/// signed exactly these bytes.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::Malformed`] when the manifest is unsigned, the
+/// `publisher_identity` is not a verifiable Ed25519 `did:key`, the signature is
+/// not valid 64-byte base64, or the signature does not verify (tampered
+/// manifest).
 pub fn verify_manifest(manifest: &Manifest) -> Result<()> {
     let sig_b64 = manifest
         .manifest_signature_b64
@@ -337,6 +495,10 @@ pub fn verify_manifest(manifest: &Manifest) -> Result<()> {
 }
 
 /// Extract the 32-byte Ed25519 public key from a `did:key:z…` identifier.
+///
+/// Internal helper for [`verify_manifest`]. Public callers verify `did:key`
+/// signatures through [`crate::DeviceKey::verify_did`] (behind `tn init`),
+/// not this function.
 pub(crate) fn did_key_pub(did: &str) -> Result<[u8; 32]> {
     let rest = did
         .strip_prefix("did:key:z")
@@ -367,15 +529,21 @@ pub(crate) fn did_key_pub(did: &str) -> Result<[u8; 32]> {
 // Body contents — caller-supplied logical path -> bytes mapping.
 // --------------------------------------------------------------------------
 
-/// Body contents for a `.tnpkg`. Caller is responsible for prefixing entries
-/// with `body/` per the format. Manifest is added by `write_tnpkg`.
+/// Body payload for a `.tnpkg`: logical entry name → raw bytes.
+///
+/// Every key must be a POSIX-relative path under `body/` (e.g.
+/// `body/admin.ndjson`); the writers reject anything else. The caller owns the
+/// `body/` prefix and the per-kind layout — the `manifest.json` entry is added
+/// by [`write_tnpkg`] / [`write_tnpkg_bytes`], never here. `BTreeMap` keeps the
+/// zip entry order deterministic.
 pub type BodyContents = BTreeMap<String, Vec<u8>>;
 
-/// Source of bytes to read a `.tnpkg` from.
+/// Where [`read_tnpkg`] reads a `.tnpkg` archive from.
 pub enum TnpkgSource<'a> {
-    /// On-disk path.
+    /// On-disk path to the `.tnpkg` zip.
     Path(&'a Path),
-    /// In-memory bytes.
+    /// In-memory `.tnpkg` zip bytes (the filesystem-free path, used by WASM
+    /// and other byte-array bindings).
     Bytes(&'a [u8]),
 }
 
@@ -383,7 +551,20 @@ pub enum TnpkgSource<'a> {
 // Zip writer / reader
 // --------------------------------------------------------------------------
 
-/// Write a `.tnpkg` zip to `out_path`. Manifest must already be signed.
+/// Write a signed `.tnpkg` zip to `out_path`.
+///
+/// Emits `manifest.json` (pretty-printed, sorted keys, trailing newline — byte-
+/// for-byte with Python's `json.dumps(..., sort_keys=True, indent=2) + "\n"`)
+/// followed by every `body/...` entry, all stored uncompressed. Creates parent
+/// directories as needed. The manifest must already be signed (call
+/// [`sign_manifest`] first). Use [`write_tnpkg_bytes`] for the in-memory
+/// variant.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::InvalidConfig`] if the manifest is unsigned,
+/// [`crate::Error::Malformed`] if any `body` key is not a valid `body/...`
+/// POSIX-relative path, or [`crate::Error::Io`] on filesystem / zip failures.
 pub fn write_tnpkg(out_path: &Path, manifest: &Manifest, body: &BodyContents) -> Result<()> {
     if manifest.manifest_signature_b64.is_none() {
         return Err(Error::InvalidConfig(
@@ -417,10 +598,17 @@ pub fn write_tnpkg(out_path: &Path, manifest: &Manifest, body: &BodyContents) ->
     Ok(())
 }
 
-/// Encode a `.tnpkg` zip into memory. Manifest must already be signed.
+/// Encode a signed `.tnpkg` zip into memory and return the bytes.
 ///
-/// This is the filesystem-free sibling of [`write_tnpkg`], used by WASM and
-/// other bindings that operate on byte arrays rather than paths.
+/// The filesystem-free sibling of [`write_tnpkg`], used by WASM and other
+/// bindings that operate on byte arrays rather than paths. Same zip layout and
+/// same signed-manifest precondition.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::InvalidConfig`] if the manifest is unsigned,
+/// [`crate::Error::Malformed`] if any `body` key is not a valid `body/...`
+/// POSIX-relative path, or a zip-serialization error.
 pub fn write_tnpkg_bytes(manifest: &Manifest, body: &BodyContents) -> Result<Vec<u8>> {
     if manifest.manifest_signature_b64.is_none() {
         return Err(Error::InvalidConfig(
@@ -514,9 +702,21 @@ fn sort_keys_recursive(v: &Value) -> Value {
     }
 }
 
-/// Read a `.tnpkg` and return the parsed manifest plus a body map (entry name
-/// → bytes). Does **not** verify the signature; the caller must call
-/// `verify_manifest` on the returned manifest.
+/// Read a `.tnpkg` and return the parsed manifest plus its body map (entry name
+/// → bytes).
+///
+/// Parses `manifest.json` and collects every `body/...` entry, validating that
+/// the archive contains exactly one `manifest.json` and only well-formed body
+/// paths. Does **not** verify the signature — the caller runs [`verify_manifest`]
+/// on the returned manifest (as [`crate::Runtime::absorb`] does). Inverse of
+/// [`write_tnpkg`] / [`write_tnpkg_bytes`].
+///
+/// # Errors
+///
+/// Returns [`crate::Error::Io`] if a [`TnpkgSource::Path`] does not exist or
+/// cannot be read, or [`crate::Error::Malformed`] if the bytes are not a valid
+/// zip, lack exactly one `manifest.json`, carry an illegal body path, or hold a
+/// manifest that fails [`Manifest::from_json`].
 #[allow(clippy::needless_pass_by_value)]
 pub fn read_tnpkg(source: TnpkgSource<'_>) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
     let bytes = match source {
@@ -675,7 +875,31 @@ fn read_tnpkg_inner<R: Read + Seek>(reader: R) -> Result<(Manifest, BTreeMap<Str
 // Vector clock helpers
 // --------------------------------------------------------------------------
 
-/// True iff `a` dominates `b` on every `(did, event_type)` coordinate.
+/// Return `true` iff `a` is at or ahead of `b` on every `(did, event_type)`
+/// coordinate.
+///
+/// A coordinate absent from `a` counts as sequence `0`. Absorb uses this to
+/// short-circuit: if the receiver's local clock dominates an incoming
+/// manifest's clock, the package carries nothing new and absorb is a no-op.
+/// Pure; not symmetric — equal clocks dominate each other, but a clock that is
+/// behind on any single coordinate does not dominate.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// use tn_core::VectorClock;
+/// use tn_core::tnpkg::clock_dominates;
+///
+/// let mut ahead: VectorClock = BTreeMap::new();
+/// ahead.entry("did:key:zA".into()).or_default().insert("tn.recipient.added".into(), 5);
+///
+/// let mut behind: VectorClock = BTreeMap::new();
+/// behind.entry("did:key:zA".into()).or_default().insert("tn.recipient.added".into(), 3);
+///
+/// assert!(clock_dominates(&ahead, &behind));   // 5 >= 3
+/// assert!(!clock_dominates(&behind, &ahead));  // 3 <  5
+/// ```
 pub fn clock_dominates(a: &VectorClock, b: &VectorClock) -> bool {
     for (did, et_map) in b {
         let a_map = a.get(did);
@@ -689,7 +913,13 @@ pub fn clock_dominates(a: &VectorClock, b: &VectorClock) -> bool {
     true
 }
 
-/// Pointwise max of two vector clocks. Pure; does not mutate inputs.
+/// Merge two vector clocks by taking the pointwise maximum on every coordinate.
+///
+/// The least-upper-bound of `a` and `b`: the result holds, for each
+/// `(did, event_type)`, the larger of the two sequences (or whichever clock has
+/// the coordinate at all). This is how a receiver advances its clock after
+/// accepting a package. Pure; neither input is mutated. Commutative and
+/// idempotent.
 pub fn clock_merge(a: &VectorClock, b: &VectorClock) -> VectorClock {
     let mut out = a.clone();
     for (did, et_map) in b {

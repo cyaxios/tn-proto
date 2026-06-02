@@ -1,4 +1,35 @@
-//! Runtime: stateful composition of config, identity, ciphers, chain, log file.
+//! [`Runtime`] is the crate's primary interface: the front door behind
+//! the `tn.*` SDK verbs and the `tn` CLI.
+//!
+//! A `Runtime` is a stateful composition of one ceremony's config,
+//! device identity, per-group ciphers, the per-event_type hash chain,
+//! and an open append-only log writer. You load one with
+//! [`Runtime::init`] (or [`Runtime::ephemeral`] for a throwaway one),
+//! then call the write / read / admin verbs on it.
+//!
+//! User-verb mapping — the public methods here back the `tn.*` SDK
+//! verbs (and, through the SDK, the `tn` CLI):
+//!
+//! | This crate | `tn.*` SDK verb |
+//! |---|---|
+//! | [`Runtime::init`] | `tn.init()` |
+//! | [`Runtime::log`] / [`Runtime::info`] / [`Runtime::warning`] / [`Runtime::error`] / [`Runtime::debug`] | `tn.log()` / `tn.info()` / `tn.warning()` / `tn.error()` / `tn.debug()` |
+//! | [`Runtime::read`] | `tn.read()` |
+//! | [`Runtime::secure_read`] | `tn.secure_read()` |
+//! | [`Runtime::recipients`] | `tn.recipients()` |
+//! | [`Runtime::admin_state`] | `tn.admin_state()` |
+//! | [`Runtime::admin_add_recipient`] | `tn.admin_add_recipient()` |
+//! | [`Runtime::admin_revoke_recipient`] | `tn.admin_revoke_recipient()` |
+//! | [`Runtime::bundle_for_recipient`] | `tn.bundle_for_recipient()` |
+//! | [`Runtime::vault_link`] / [`Runtime::vault_unlink`] | `tn.vault_link()` / `tn.vault_unlink()` |
+//!
+//! The export / absorb verbs (`tn.export()` / `tn.absorb()`) hang off
+//! this same `Runtime` but are implemented in the sibling
+//! `runtime_export` module (`Runtime::export` / `Runtime::absorb`). Key
+//! rotation builds on the admin recipient machinery here.
+//!
+//! Every fallible verb returns [`crate::Result`], surfacing the shared
+//! [`crate::Error`] taxonomy across the language boundary.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -36,20 +67,45 @@ use crate::{
 // tn_btn::LeafIndex needed by admin verbs.
 // tn-btn is a direct dependency of tn-core (in Cargo.toml).
 
-/// One decoded log entry returned from `read_raw`.
+/// One decoded log entry in the audit-grade shape returned by
+/// [`Runtime::read_raw`].
+///
+/// This is the lossless view: the verbatim on-the-wire envelope plus a
+/// side map of the plaintext for each group this runtime could decrypt.
+/// The default [`Runtime::read`] flattens this into a [`FlatEntry`];
+/// reach for `ReadEntry` when you need the envelope's crypto plumbing
+/// (`prev_hash` / `row_hash` / `signature` / ciphertext blocks) intact
+/// for auditing.
+///
+/// Groups present in the envelope but not in `plaintext_per_group` are
+/// ones this runtime holds no kit for. Sentinel plaintext values
+/// `{"$no_read_key": true}` (group present, no kit) and
+/// `{"$decrypt_error": true}` (decrypt threw) only appear when the entry
+/// is produced through [`Runtime::read_raw_with_validity`].
 pub struct ReadEntry {
-    /// Raw envelope value.
+    /// The verbatim envelope as parsed off the log line, including the
+    /// reserved scalars, public fields, and one `{ciphertext,
+    /// field_hashes}` block per group.
     pub envelope: Value,
-    /// Per-group decrypted plaintext (only groups we can decrypt). May
-    /// also carry sentinel values `{"$no_read_key": true}` (group present
-    /// but no kit) or `{"$decrypt_error": true}` (decrypt threw) when
-    /// produced through [`Runtime::read_raw_with_validity`].
+    /// Decrypted plaintext keyed by group name — only the groups this
+    /// runtime holds a kit for. May also carry the sentinel values
+    /// `{"$no_read_key": true}` / `{"$decrypt_error": true}` (see the
+    /// type-level note) when produced through
+    /// [`Runtime::read_raw_with_validity`].
     pub plaintext_per_group: BTreeMap<String, Value>,
 }
 
 /// Flat-shape entry returned from [`Runtime::read`] /
-/// [`Runtime::read_with_verify`]. The six envelope basics + decrypted
-/// fields from every readable group land at the top level. Per the
+/// [`Runtime::read_with_verify`] — the everyday read shape.
+///
+/// A plain JSON object (`serde_json::Map`) where the six envelope basics
+/// (`timestamp`, `event_type`, `level`, `did`, `sequence`, `event_id`)
+/// and the decrypted fields from every readable group are merged at the
+/// top level, so a caller can index a field by name without walking the
+/// envelope's group structure. Crypto plumbing (`prev_hash`, `row_hash`,
+/// `signature`, ciphertext blocks) is dropped. `_hidden_groups` /
+/// `_decrypt_errors` marker keys appear only when non-empty;
+/// [`Runtime::read_with_verify`] adds a `_valid` block. Per the
 /// 2026-04-25 read-ergonomics spec §1.1.
 pub type FlatEntry = Map<String, Value>;
 
@@ -81,11 +137,19 @@ pub enum OnInvalid {
 }
 
 /// Options for [`Runtime::secure_read`]. Mirrors Python's keyword args.
+///
+/// `Default` gives the fail-closed everyday behavior: verify every
+/// entry, silently skip the ones that don't verify (recording a
+/// `tn.read.tampered_row_skipped` admin event per drop), and read this
+/// runtime's own log.
 #[derive(Debug, Clone, Default)]
 pub struct SecureReadOptions {
-    /// What to do on a non-verifying entry.
+    /// What to do on a non-verifying entry — see [`OnInvalid`]. Default
+    /// [`OnInvalid::Skip`].
     pub on_invalid: OnInvalid,
-    /// Optional log path override; falls back to the runtime's own log.
+    /// Read this log path instead of the runtime's own log. `None` (the
+    /// default) reads [`Runtime::log_path`]. Use to verify a foreign
+    /// publisher's exported log.
     pub log_path: Option<PathBuf>,
 }
 
@@ -284,8 +348,31 @@ pub struct AdminVaultLink {
     pub unlinked_at: Option<String>,
 }
 
-/// Aggregate admin state derived by replaying the log through
-/// `admin_reduce::reduce`. Mirrors Python `tn.admin_state(group=…)`.
+/// Aggregate admin state derived by replaying the attested log through
+/// the admin reducer. Mirrors Python `tn.admin_state(group=…)`.
+///
+/// Produced by [`Runtime::admin_state`]. This is the materialized view
+/// of every governance event in the log — who the publisher is, which
+/// groups exist, the recipient lifecycle, rotations, coupons, peer
+/// enrolments, and vault links — with no sidecar state file required:
+/// the log is the source of truth. Every field is a plain owned record
+/// (de/serializable) so callers can render it directly.
+///
+/// # Examples
+///
+/// ```no_run
+/// use tn_core::Runtime;
+/// use std::path::Path;
+///
+/// # fn main() -> tn_core::Result<()> {
+/// let rt = Runtime::init(Path::new("tn.yaml"))?;
+/// let state = rt.admin_state(Some("default"))?; // scope to one group
+/// for r in &state.recipients {
+///     println!("leaf {} is {}", r.leaf_index, r.active_status);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AdminState {
     /// Either the `tn.ceremony.init` record or, if absent, a record
@@ -306,7 +393,9 @@ pub struct AdminState {
     pub vault_links: Vec<AdminVaultLink>,
 }
 
-/// Per-group runtime state: cipher + derived index key.
+/// Internal: per-group cipher + derived index key held inside
+/// [`Runtime`]; backs every group on the write / read paths (surfaced as
+/// `tn.info()` / `tn.read()`).
 pub(crate) struct GroupState {
     pub(crate) cipher: Arc<dyn GroupCipher>,
     pub(crate) index_key: [u8; 32],
@@ -318,14 +407,52 @@ pub(crate) struct GroupState {
     pub(crate) hmac_template: hmac::Hmac<sha2::Sha256>,
 }
 
-/// Stateful TN runtime: one per ceremony.
+/// The crate's primary interface: one stateful runtime per ceremony.
 ///
-/// Holds identity, per-group ciphers, chain state, and an open log writer.
-/// Constructed via [`Runtime::init`]; emit/read/close are implemented in
-/// subsequent tasks.
+/// A `Runtime` ties together a ceremony's loaded config, device
+/// identity, per-group ciphers, the per-event_type hash chain, and an
+/// open append-only log writer. It is the object the `tn.*` SDK verbs
+/// and the `tn` CLI drive — see the module docs for the full
+/// verb-to-method mapping.
 ///
-/// Manual `Debug` impl: internal fields contain crypto material and OS file
-/// handles that do not implement `Debug` themselves.
+/// Lifecycle: load with [`Runtime::init`] (or [`Runtime::ephemeral`]),
+/// write attested events with [`Runtime::info`] / [`Runtime::log`] /
+/// [`Runtime::warning`] / … , read them back with [`Runtime::read`] /
+/// [`Runtime::secure_read`], manage recipients with the `admin_*` verbs,
+/// then optionally [`Runtime::close`] for an explicit flush (dropping
+/// also flushes via the file handles' own `Drop`).
+///
+/// A `Runtime` is `Send + Sync`; the write path serializes writers across
+/// threads and processes via an advisory file lock so concurrent
+/// publishers to the same log don't branch the chain.
+///
+/// The manual `Debug` impl prints only `yaml_path`, `did`, and
+/// `log_path` — the other fields hold crypto material and OS file
+/// handles that do not implement `Debug`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use tn_core::Runtime;
+/// use std::path::Path;
+///
+/// # fn main() -> tn_core::Result<()> {
+/// let rt = Runtime::init(Path::new("tn.yaml"))?;
+///
+/// // Write an attested event (backs `tn.info()`).
+/// let mut fields = serde_json::Map::new();
+/// fields.insert("amount".into(), serde_json::json!(42));
+/// rt.info("order.placed", fields)?;
+///
+/// // Read it back as a flat dict (backs `tn.read()`).
+/// for entry in rt.read()? {
+///     println!("{}", entry["event_type"]);
+/// }
+///
+/// rt.close()?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct Runtime {
     pub(crate) yaml_path: PathBuf,
     pub(crate) cfg: Config,
@@ -462,11 +589,16 @@ impl Runtime {
     /// `tn.set_level()` and TS `TNClient.setLevel()`. (AVL J3.2.)
     ///
     /// Accepts the four standard names ("debug" / "info" / "warning" /
-    /// "error") case-insensitively, plus "warn" as an alias for warning.
-    /// Returns `Err(Error::InvalidConfig)` for unrecognized names.
+    /// "error") case-insensitively, plus "warn" as an alias for warning,
+    /// and the empty string ("always emit").
     ///
     /// The severity-less [`Runtime::log`] always emits regardless of the
     /// threshold — it's an explicit "this is a fact" primitive.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`](crate::Error::InvalidConfig) when `level`
+    /// is not one of the recognized names.
     pub fn set_level(level: &str) -> Result<()> {
         let normalized = level.to_lowercase();
         let v = match normalized.as_str() {
@@ -512,13 +644,61 @@ impl Runtime {
         level_value(level) >= LOG_LEVEL_THRESHOLD.load(Ordering::Relaxed)
     }
 
-    /// Load a ceremony from `yaml_path` and return a ready-to-use Runtime.
+    /// Load the ceremony at `yaml_path` and return a ready-to-use
+    /// `Runtime`. This is the front door — it backs `tn.init()` /
+    /// `tn init`.
     ///
-    /// Native filesystem-backed factory. Internally delegates to
-    /// [`Runtime::init_with_storage`] passing an `FsStorage` so the
-    /// two paths share a single body. Use `init_with_storage`
-    /// directly when you need an injected storage backend (wasm,
+    /// Reads the ceremony yaml (resolving any `extends:` chain), loads
+    /// the device key + master index key from the keystore, builds a
+    /// cipher for every declared group, seeds the per-event_type hash
+    /// chain from the existing log, and opens the append-only writer.
+    ///
+    /// Side effects on a successful load:
+    /// - **Session rotation.** On the first `init` for a given log path
+    ///   in this process, an existing non-empty log is rolled to
+    ///   `<name>.1` (older backups shift forward) so the new session
+    ///   writes a fresh file. Opt out with yaml
+    ///   `handlers[*].rotate_on_init: false`. Re-`init` in the same
+    ///   process appends instead of rotating.
+    /// - **Ceremony attestation.** A *fresh* ceremony (no prior
+    ///   `tn.ceremony.init` anywhere in the log) writes one as its first
+    ///   attested event. A `tn.agents.policy_published` event is written
+    ///   when the loaded `agents.md` policy hash differs from the last
+    ///   published one.
+    /// - **Stdout handler.** A JSON-line stdout handler is attached
+    ///   unless `TN_NO_STDOUT=1` or the yaml `handlers:` list omits a
+    ///   `stdout` entry.
+    ///
+    /// Native filesystem-backed factory: delegates to
+    /// [`Runtime::init_with_storage`] with an `FsStorage`. Use that
+    /// method directly when you need an injected storage backend (wasm,
     /// tests, in-memory sandboxes).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`](crate::Error::Io) if the yaml, device seed, or
+    /// `index_master.key` can't be read.
+    /// [`Error::InvalidConfig`](crate::Error::InvalidConfig) on malformed
+    /// yaml, a keystore DID that disagrees with `device.device_identity`,
+    /// a wrong-length master key, or a group that can't be built (e.g. a
+    /// btn group with neither state nor kit on disk). [`Error::Yaml`](crate::Error::Yaml)
+    /// on a yaml parse failure. [`Error::NotImplemented`](crate::Error::NotImplemented)
+    /// for a JWE/BGW group (those run through the Python runtime in this
+    /// plan). The ceremony-init / policy-published attestations are
+    /// best-effort and never fail the load.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tn_core::Runtime;
+    /// use std::path::Path;
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::init(Path::new("tn.yaml"))?;
+    /// println!("loaded ceremony for {}", rt.did());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn init(yaml_path: &Path) -> Result<Self> {
         crate::perf::init_from_env();
         let storage: Arc<dyn crate::storage::Storage> = Arc::new(crate::storage::FsStorage::new());
@@ -529,7 +709,11 @@ impl Runtime {
     ///
     /// Thin wrapper over [`Runtime::init_with_options`] using
     /// `RuntimeInitOptions::default()`. See that method for the full
-    /// docstring.
+    /// docstring; [`Runtime::init`] is the everyday native entry point.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::init_with_options`].
     ///
     /// [`Storage`]: crate::storage::Storage
     pub fn init_with_storage(
@@ -555,6 +739,18 @@ impl Runtime {
     /// `opts` lets the caller suppress side-effects that are
     /// inappropriate when the SDK has already initialized the
     /// ceremony out-of-band — see [`RuntimeInitOptions`].
+    ///
+    /// This is the shared body behind [`Runtime::init`] and
+    /// [`Runtime::init_with_storage`]; see [`Runtime::init`] for the
+    /// session-rotation and attestation side effects.
+    ///
+    /// # Errors
+    ///
+    /// Same set as [`Runtime::init`]: [`Error::Io`](crate::Error::Io) /
+    /// [`Error::InvalidConfig`](crate::Error::InvalidConfig) /
+    /// [`Error::Yaml`](crate::Error::Yaml) /
+    /// [`Error::NotImplemented`](crate::Error::NotImplemented) from
+    /// reading the yaml + keystore and building each group's cipher.
     ///
     /// [`Storage`]: crate::storage::Storage
     #[allow(clippy::too_many_lines)]
@@ -981,6 +1177,24 @@ impl Runtime {
     /// Always uses `cipher: btn` because (a) it's hermetic — no JWE
     /// keypair wiring required — and (b) it's the cipher the cross-SDK
     /// test surface targets first.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`](crate::Error::Io) if the tempdir can't be created or
+    /// the fresh ceremony can't be minted to disk, plus any error from
+    /// the subsequent [`Runtime::init`] of the minted ceremony.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tn_core::Runtime;
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::ephemeral()?; // throwaway btn ceremony in a tempdir
+    /// rt.info("smoke.test", serde_json::Map::new())?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn ephemeral() -> Result<Self> {
         let td = tempfile::Builder::new()
             .prefix("tn-ephemeral-")
@@ -1009,24 +1223,57 @@ impl Runtime {
         self.cfg.groups.keys().cloned().collect()
     }
 
-    /// Emit an event with current timestamp and fresh UUID.
+    /// Write one attested event at `level` with the current timestamp
+    /// and a fresh time-sortable event_id.
     ///
-    /// Signing follows the ceremony's `sign` config flag; use
-    /// [`Runtime::emit_override_sign`] to override on a per-call basis.
+    /// This is the general write primitive behind the level shortcuts
+    /// ([`Runtime::info`], [`Runtime::warning`], …). `level` is one of
+    /// `"debug"` / `"info"` / `"warning"` / `"error"` (case-insensitive)
+    /// or `""` for a severity-less fact; an event whose level is below
+    /// the active [`Runtime::set_level`] threshold is dropped (and `Ok`
+    /// is returned). `fields` are classified per the yaml: each routes to
+    /// its group's encrypted block or to the public envelope; a
+    /// per-runtime `run_id` is auto-injected so [`Runtime::read`] can
+    /// default-filter to the current run.
+    ///
+    /// The entry is sealed, hash-chained, optionally signed (per the
+    /// ceremony's `sign` flag — override with
+    /// [`Runtime::emit_override_sign`]), appended to the log, and fanned
+    /// out to every attached handler.
     ///
     /// Returns `Result<()>` for cross-language parity (Python `tn.log`
     /// returns `None`, TS `tn.log` returns `void`). Internal callers that
     /// need the row_hash / event_id / sequence drop down to `emit_inner`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`](crate::Error::InvalidConfig) if
+    /// `event_type` is empty or has illegal characters, or a field has no
+    /// group route and no `default` group to absorb it.
+    /// [`Error::Malformed`](crate::Error::Malformed) if a known `tn.*`
+    /// admin event fails its catalog schema. [`Error::Io`](crate::Error::Io)
+    /// if the log can't be written, plus cipher / JSON errors from
+    /// sealing the payload. Handler fan-out failures are logged and
+    /// swallowed, never returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal log-writer or group-state lock is poisoned.
     pub fn emit(&self, level: &str, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit_inner(level, event_type, fields, None, None, None)
             .map(|_| ())
     }
 
-    /// Emit with explicit timestamp and event_id; used by deterministic tests.
+    /// Write an attested event with an explicit `timestamp` and
+    /// `event_id`; used by deterministic tests and replay.
     ///
     /// Signing follows the ceremony's `sign` config flag. Use
     /// [`Runtime::emit_override_sign`] or [`Runtime::emit_with_override_sign`]
     /// when the caller wants to flip signing for one entry.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     ///
     /// # Panics
     ///
@@ -1043,10 +1290,15 @@ impl Runtime {
             .map(|_| ())
     }
 
-    /// Emit with an explicit `sign` override and current timestamp / fresh UUID.
+    /// Write an attested event with an explicit `sign` override, current
+    /// timestamp, and a fresh event_id.
     ///
     /// `Some(true)` forces a signature regardless of yaml config;
     /// `Some(false)` skips the signature; `None` uses the ceremony default.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn emit_override_sign(
         &self,
         level: &str,
@@ -1058,10 +1310,15 @@ impl Runtime {
             .map(|_| ())
     }
 
-    /// Full-control emit: explicit timestamp, event_id, and sign override.
+    /// Write an attested event with full control: explicit timestamp,
+    /// event_id, and sign override.
     ///
     /// `sign=None` uses the ceremony default; `Some(true)` forces signing;
     /// `Some(false)` skips signing.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn emit_with_override_sign(
         &self,
         level: &str,
@@ -1086,6 +1343,10 @@ impl Runtime {
     /// out to its own native handlers (file, stdout). Mirrors what TS does
     /// natively in-process — Python pays the JSON-parse cost once on the
     /// returned line rather than re-encrypting + re-signing in pure Python.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn emit_with_override_sign_returning_line(
         &self,
         level: &str,
@@ -1098,30 +1359,78 @@ impl Runtime {
         self.emit_inner(level, event_type, fields, timestamp, event_id, sign)
     }
 
-    /// Severity-less attested event. Matches Python `tn.log(event_type, **fields)`.
+    /// Write a severity-less attested event. Backs `tn.log()`.
     ///
-    /// Use when the event isn't fundamentally debug/info/warning/error — it's a
-    /// fact to attest. The emitted envelope carries `level: ""`.
+    /// Use when the event isn't fundamentally debug/info/warning/error —
+    /// it's a fact to attest. The envelope carries `level: ""`, which
+    /// always passes the [`Runtime::set_level`] threshold (a fact's
+    /// semantics shouldn't depend on the filter).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn log(&self, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit("", event_type, fields)
     }
 
-    /// DEBUG-level attested event. Matches Python `tn.debug(event_type, **fields)`.
+    /// Write a DEBUG-level attested event. Backs `tn.debug()`.
+    ///
+    /// Dropped when the active threshold is above DEBUG — see
+    /// [`Runtime::set_level`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn debug(&self, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit("debug", event_type, fields)
     }
 
-    /// INFO-level attested event. Matches Python `tn.info(event_type, **fields)`.
+    /// Write an INFO-level attested event. Backs `tn.info()`.
+    ///
+    /// Dropped when the active threshold is above INFO — see
+    /// [`Runtime::set_level`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tn_core::Runtime;
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::ephemeral()?;
+    /// let mut fields = serde_json::Map::new();
+    /// fields.insert("order_id".into(), serde_json::json!("ord_123"));
+    /// rt.info("order.placed", fields)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn info(&self, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit("info", event_type, fields)
     }
 
-    /// WARNING-level attested event. Matches Python `tn.warning(event_type, **fields)`.
+    /// Write a WARNING-level attested event. Backs `tn.warning()`.
+    ///
+    /// Dropped when the active threshold is above WARNING — see
+    /// [`Runtime::set_level`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn warning(&self, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit("warning", event_type, fields)
     }
 
-    /// ERROR-level attested event. Matches Python `tn.error(event_type, **fields)`.
+    /// Write an ERROR-level attested event. Backs `tn.error()`.
+    ///
+    /// The highest standard level — always passes any standard threshold.
+    /// See [`Runtime::set_level`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn error(&self, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit("error", event_type, fields)
     }
@@ -1973,21 +2282,51 @@ impl Runtime {
         }
     }
 
-    /// Read all entries from this runtime's log file, decrypting every group
-    /// this runtime can decrypt.
+    /// Read this runtime's log, decrypting every group it holds a kit
+    /// for, and return the entries as flat dicts. Backs `tn.read()`.
     ///
-    /// **Default shape: flat dicts** per the 2026-04-25 read-ergonomics
-    /// spec. The six envelope basics (`timestamp`, `event_type`, `level`,
-    /// `did`, `sequence`, `event_id`) plus every readable group's
-    /// decrypted fields land at the top level. `_hidden_groups` /
-    /// `_decrypt_errors` markers surface only when non-empty. The six
-    /// reserved `tn.agents` field names DO appear in the flat dict by
-    /// default; use [`Runtime::secure_read`] to lift them into a separate
-    /// `instructions` block instead.
+    /// **Default shape: flat dicts** ([`FlatEntry`]) per the 2026-04-25
+    /// read-ergonomics spec. The six envelope basics (`timestamp`,
+    /// `event_type`, `level`, `did`, `sequence`, `event_id`) plus every
+    /// readable group's decrypted fields land at the top level.
+    /// `_hidden_groups` / `_decrypt_errors` markers surface only when
+    /// non-empty. The six reserved `tn.agents` field names DO appear in
+    /// the flat dict by default; use [`Runtime::secure_read`] to lift them
+    /// into a separate `instructions` block instead.
     ///
-    /// Use [`Runtime::read_raw`] for the audit-grade `{envelope,
-    /// plaintext_per_group}` shape, [`Runtime::read_with_verify`] for the
-    /// flat shape plus a `_valid` block.
+    /// **Scoped to the current run.** Only entries stamped with this
+    /// process's `run_id` are returned, so a naive filter doesn't pick up
+    /// rows from prior runs; use [`Runtime::read_all_runs`] for the full
+    /// log history. This call verifies nothing — use
+    /// [`Runtime::read_with_verify`] for the flat shape plus a `_valid`
+    /// block, [`Runtime::secure_read`] for the fail-closed verified path,
+    /// or [`Runtime::read_raw`] for the audit-grade `{envelope,
+    /// plaintext_per_group}` shape.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`](crate::Error::Io) if the log can't be read, plus
+    /// cipher / JSON errors. A malformed individual row does not abort the
+    /// read — it surfaces as a `<parse-error>` sentinel entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal group-state lock is poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tn_core::Runtime;
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::ephemeral()?;
+    /// rt.info("page.viewed", serde_json::Map::new())?;
+    /// for entry in rt.read()? {
+    ///     println!("{} @ {}", entry["event_type"], entry["timestamp"]);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn read(&self) -> Result<Vec<FlatEntry>> {
         let raw = self.read_raw()?;
         Ok(raw
@@ -2003,6 +2342,10 @@ impl Runtime {
     /// just happened" queries should stick with [`Runtime::read`] so a
     /// naive filter doesn't pull in entries from prior runs (FINDINGS.md
     /// #12).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::read`].
     pub fn read_all_runs(&self) -> Result<Vec<FlatEntry>> {
         let raw = self.read_raw()?;
         Ok(raw
@@ -2012,7 +2355,18 @@ impl Runtime {
     }
 
     /// Like [`Runtime::read`] but adds a `_valid: {signature, row_hash,
-    /// chain}` block to each flat dict per spec §1.3.
+    /// chain}` block to each flat dict per spec §1.3, so the caller can
+    /// see per-entry verification results without dropping rows. Unlike
+    /// [`Runtime::secure_read`] this is fail-*open*: invalid entries are
+    /// still returned, just flagged. Spans every run.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::read`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal `RwLock` is poisoned.
     pub fn read_with_verify(&self) -> Result<Vec<FlatEntry>> {
         let raw = self.read_raw_with_validity()?;
         Ok(raw
@@ -2029,26 +2383,72 @@ impl Runtime {
             .collect())
     }
 
-    /// Read all entries as the audit-grade `ReadEntry` shape (envelope +
-    /// per-group decrypted plaintext). Mirrors the pre-2026-04-25
-    /// `Runtime::read()` return.
+    /// Read all entries (every run) in the audit-grade [`ReadEntry`]
+    /// shape — verbatim envelope plus per-group decrypted plaintext.
+    /// Mirrors the pre-2026-04-25 `Runtime::read()` return. Reach for this
+    /// when you need the crypto plumbing the flat shape drops.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::read`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal `RwLock` is poisoned.
     pub fn read_raw(&self) -> Result<Vec<ReadEntry>> {
         let log_path = self.log_path.clone();
         self.read_from(&log_path)
     }
 
-    /// Iterate verified entries — fail-closed on any (signature,
-    /// row_hash, chain) failure. Per the 2026-04-25 read-ergonomics spec §3.
+    /// Read verified entries — fail-closed on any (signature, row_hash,
+    /// chain) failure. Backs `tn.secure_read()`. Per the 2026-04-25
+    /// read-ergonomics spec §3.
     ///
-    /// Returns flat dicts in the same default shape as [`Runtime::read`],
-    /// plus an `instructions` block when the caller holds the
-    /// `tn.agents` kit and the entry carries a populated `tn.agents`
-    /// group. The six `tn.agents` field names are NOT flattened into
-    /// `fields` — they land in `instructions` as a separate concern.
+    /// This is the read path to use when the integrity of each row
+    /// matters: every entry is verified, and a non-verifying one is
+    /// handled per [`SecureReadOptions::on_invalid`] — silently dropped
+    /// ([`OnInvalid::Skip`], the default), turned into an error
+    /// ([`OnInvalid::Raise`]), or surfaced with its failure reasons for an
+    /// auditor ([`OnInvalid::Forensic`]).
     ///
-    /// `on_invalid` controls the failure mode (skip / raise / forensic).
-    /// Under `Skip` (default), a `tn.read.tampered_row_skipped` admin
-    /// event is appended to the local log for each dropped row.
+    /// Returns [`SecureEntry`] values: the flat decrypted `fields` in the
+    /// same default shape as [`Runtime::read`], plus an `instructions`
+    /// block when the caller holds the `tn.agents` kit and the entry
+    /// carries a populated `tn.agents` group. The six `tn.agents` field
+    /// names are NOT flattened into `fields` — they land in
+    /// `instructions` as a separate concern.
+    ///
+    /// Side effect: under [`OnInvalid::Skip`], a
+    /// `tn.read.tampered_row_skipped` admin event (public fields only —
+    /// never the bad row's payload) is appended to the local log for each
+    /// dropped row so monitoring can surface tampering.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`](crate::Error::Malformed) on the first
+    /// non-verifying entry when `on_invalid` is [`OnInvalid::Raise`], plus
+    /// the [`Runtime::read`] error set from reading + decrypting the log.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal `RwLock` is poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tn_core::{Runtime, SecureReadOptions, OnInvalid};
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::ephemeral()?;
+    /// let opts = SecureReadOptions { on_invalid: OnInvalid::Raise, ..Default::default() };
+    /// for entry in rt.secure_read(opts)? {
+    ///     // entry.fields is the verified flat dict; entry.instructions
+    ///     // carries the tn.agents policy when the kit is held.
+    ///     let _ = entry.fields;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     #[allow(clippy::needless_pass_by_value)]
     pub fn secure_read(&self, opts: SecureReadOptions) -> Result<Vec<SecureEntry>> {
         let raw_with_valid = match opts.log_path.as_deref() {
@@ -2176,13 +2576,17 @@ impl Runtime {
     }
 
     /// Mint a fresh kit for `recipient_did` across one or more groups
-    /// and bundle them into a single `.tnpkg` at `out_path`.
+    /// and bundle them into a single `.tnpkg` at `out_path`. Backs
+    /// `tn.bundle_for_recipient()`.
     ///
-    /// Mirrors Python's `tn.bundle_for_recipient` and TS's
-    /// `client.bundleForRecipient` — closes the cross-binding parity
-    /// gap surfaced by the cash-register survey (Rust callers had no
-    /// equivalent ergonomic verb and faced the canonical-filename +
-    /// temp-dir + export dance by hand).
+    /// The ergonomic one-call path for handing a recipient their reader
+    /// kits: it mints (via [`Runtime::admin_add_recipient`], so each mint
+    /// also writes a `tn.recipient.added` attestation), names the kit
+    /// files canonically, and exports the bundle. Mirrors Python's
+    /// `tn.bundle_for_recipient` and TS's `client.bundleForRecipient` —
+    /// closes the cross-binding parity gap surfaced by the cash-register
+    /// survey (Rust callers had no equivalent ergonomic verb and faced the
+    /// canonical-filename + temp-dir + export dance by hand).
     ///
     /// `groups = None` defaults to every NON-internal group declared in
     /// the active ceremony (excludes `tn.agents` — that group is for
@@ -2193,9 +2597,15 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// - `InvalidConfig` if no real groups are available, or a requested
-    ///   group is not declared in the yaml.
-    /// - Filesystem errors from minting kits or writing the bundle.
+    /// - [`InvalidConfig`](crate::Error::InvalidConfig) if no real groups
+    ///   are available, or a requested group is not declared in the yaml.
+    /// - Filesystem errors from minting kits or writing the bundle, plus
+    ///   any error propagated from [`Runtime::admin_add_recipient`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal admin lock is poisoned (see
+    /// [`Runtime::admin_add_recipient`]).
     pub fn bundle_for_recipient(
         &self,
         recipient_did: &str,
@@ -2281,9 +2691,15 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// - `InvalidConfig` if a requested group is not declared in this
-    ///   ceremony's yaml.
-    /// - Filesystem errors from minting kits or writing the bundle.
+    /// - [`InvalidConfig`](crate::Error::InvalidConfig) if a requested
+    ///   group is not declared in this ceremony's yaml.
+    /// - Filesystem errors from minting kits or writing the bundle, plus
+    ///   any error propagated from [`Runtime::admin_add_recipient`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal admin lock is poisoned (see
+    /// [`Runtime::admin_add_recipient`]).
     pub fn admin_add_agent_runtime(
         &self,
         runtime_did: &str,
@@ -2362,12 +2778,18 @@ impl Runtime {
         Ok(out)
     }
 
-    /// Read all entries plus per-entry validity flags
-    /// `(signature, row_hash, chain)`.
+    /// Read all entries in the audit-grade [`ReadEntry`] shape, each
+    /// paired with its [`ValidFlags`] `(signature, row_hash, chain)`. The
+    /// low-level building block behind [`Runtime::read_with_verify`] and
+    /// [`Runtime::secure_read`].
     ///
     /// Verification mirrors Python `tn.reader._read`: chain integrity
     /// per event_type, row_hash recomputed from canonical inputs,
     /// signature checked against the envelope's `did`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::read`].
     ///
     /// # Panics
     ///
@@ -2377,7 +2799,12 @@ impl Runtime {
         self.read_from_with_validity(&log_path)
     }
 
-    /// As [`Runtime::read_raw_with_validity`] but for an explicit log path.
+    /// As [`Runtime::read_raw_with_validity`] but reads an explicit
+    /// `log_path` instead of this runtime's own log.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::read`].
     ///
     /// # Panics
     ///
@@ -2718,6 +3145,13 @@ impl Runtime {
     /// `log_path` (the post-flush "reading my own log" case), skip the
     /// foreign route and use the regular self-decrypt path.
     ///
+    /// Returns an empty vec when `log_path` does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::read`], plus any error from the foreign-reader
+    /// route when `log_path` is another publisher's log.
+    ///
     /// # Panics
     ///
     /// Panics if an internal `RwLock` is poisoned (another thread panicked while
@@ -2810,11 +3244,17 @@ impl Runtime {
         Ok(out)
     }
 
-    /// Explicit close: flushes the log file and consumes self.
+    /// Explicit close: flush every open log writer and consume `self`.
     ///
     /// Dropping a `Runtime` without calling `close` is fine; `File`'s own
     /// Drop impl flushes OS buffers. Calling `close` gives you a
     /// `Result` you can surface if flushing errored.
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok(())` — the underlying flush is
+    /// best-effort. The `Result` is kept so a future fail-on-flush
+    /// tightening is non-breaking.
     pub fn close(self) -> Result<()> {
         // Hand the LogWriters dispatchers off — for literal paths
         // this flushes the single writer; for templated pools it
@@ -2836,27 +3276,65 @@ impl Runtime {
     // second cipher and reuses these same public names.
     // ------------------------------------------------------------------
 
-    /// Mint a new reader kit for `group`, write it to `out_kit_path`, persist
-    /// the updated publisher state, and return the recipient identifier (leaf
-    /// index for btn).
+    /// Mint a new reader kit for `group`, write it to `out_kit_path`,
+    /// persist the updated publisher state, and return the recipient
+    /// identifier (the btn leaf index). Backs `tn.admin_add_recipient()`.
+    ///
+    /// `out_kit_path`'s basename MUST end with `.btn.mykit` (e.g.
+    /// `default.btn.mykit`) — the bundle exporter's regex requires it, and
+    /// a mismatched name would silently ship the publisher's own self-kit
+    /// in its place. For per-recipient bundling use
+    /// [`Runtime::bundle_for_recipient`], which handles minting + the
+    /// canonical filename + export in one call.
+    ///
+    /// The publisher state write is atomic and compare-and-swap guarded:
+    /// state is persisted before the kit file, and a concurrent writer
+    /// that moved the on-disk state out from under us surfaces as
+    /// [`Error::KeystoreConflict`](crate::Error::KeystoreConflict) (re-read
+    /// and retry). After the swap, subsequent writes encrypt to the
+    /// enlarged recipient set.
     ///
     /// When `recipient_did` is `Some`, a `tn.recipient.added` event is
-    /// appended to the log carrying the leaf index + recipient DID + kit SHA.
-    /// Readers can replay these events to reconstruct the recipient map
-    /// without any sidecar state file; the attested log is the source of truth.
+    /// appended to the log carrying the leaf index + recipient DID + kit
+    /// SHA. Readers can replay these events to reconstruct the recipient
+    /// map without any sidecar state file; the attested log is the source
+    /// of truth. (The attestation is best-effort: a write failure is
+    /// logged, not returned — the kit is already minted and persisted.)
     ///
     /// Matches Python `tn.admin_add_recipient(group, out_path, recipient_did)`.
     ///
     /// # Errors
-    /// - `InvalidConfig` if `group` is not a btn group in this runtime.
-    /// - `Io` if the state or kit file cannot be written.
-    /// - `Btn` if the tree is exhausted or minting fails.
+    /// - [`InvalidConfig`](crate::Error::InvalidConfig) if `out_kit_path`
+    ///   lacks the `.btn.mykit` suffix or `group` is not a btn publisher
+    ///   group in this runtime.
+    /// - [`KeystoreConflict`](crate::Error::KeystoreConflict) if another
+    ///   writer raced the state CAS — re-read and retry.
+    /// - [`Io`](crate::Error::Io) if the state or kit file cannot be written.
+    /// - [`Btn`](crate::Error::Btn) if the tree is exhausted or minting fails.
     ///
     /// # Panics
     ///
     /// Panics if the group's `PublisherState` mutex is poisoned by a prior panic
     /// while holding it. The runtime treats a poisoned admin mutex as an
     /// unrecoverable invariant violation.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tn_core::Runtime;
+    /// use std::path::Path;
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::init(Path::new("tn.yaml"))?;
+    /// let leaf = rt.admin_add_recipient(
+    ///     "default",
+    ///     Path::new("default.btn.mykit"),
+    ///     Some("did:key:zRecipient"),
+    /// )?;
+    /// println!("minted leaf {leaf}");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn admin_add_recipient(
         &self,
         group: &str,
@@ -2982,18 +3460,26 @@ impl Runtime {
         Ok(leaf_index)
     }
 
-    /// Revoke the reader identified by `leaf_index` in `group`.
+    /// Revoke the reader identified by `leaf_index` in `group`. Backs
+    /// `tn.admin_revoke_recipient()`.
     ///
-    /// Persists the updated publisher state to disk and swaps the cipher so
-    /// subsequent `emit` calls exclude the revoked leaf. Emits a
-    /// `tn.recipient.revoked` attested event.
+    /// Persists the updated publisher state to disk under the same atomic
+    /// CAS guard as [`Runtime::admin_add_recipient`], swaps the cipher so
+    /// subsequent writes exclude the revoked leaf, and writes a
+    /// `tn.recipient.revoked` attested event (best-effort — a failed
+    /// attestation is logged, not returned, since the state is already
+    /// persisted). Revocation does not re-key existing readers; only a
+    /// rotation retires the generation.
     ///
     /// Matches Python `tn.admin_revoke_recipient(group, leaf_index)`.
     ///
     /// # Errors
-    /// - `InvalidConfig` if `group` is not a btn publisher group.
-    /// - `Io` if the state file cannot be written.
-    /// - `Btn` if `leaf_index` is out of range.
+    /// - [`InvalidConfig`](crate::Error::InvalidConfig) if `group` is not
+    ///   a btn publisher group.
+    /// - [`KeystoreConflict`](crate::Error::KeystoreConflict) if another
+    ///   writer raced the state CAS — re-read and retry.
+    /// - [`Io`](crate::Error::Io) if the state file cannot be written.
+    /// - [`Btn`](crate::Error::Btn) if `leaf_index` is out of range.
     ///
     /// # Panics
     ///
@@ -3077,16 +3563,25 @@ impl Runtime {
         Ok(pub_cipher.state().revoked_count())
     }
 
-    /// Return the current recipient roster for `group` by replaying the log
-    /// through the admin reducer. Mirrors Python `tn.recipients(group, …)`
-    /// and TypeScript `client.recipients(group, …)`.
+    /// Return the current recipient roster for `group` by replaying the
+    /// log through the admin reducer. Backs `tn.recipients()`; mirrors
+    /// Python `tn.recipients(group, …)` and TypeScript
+    /// `client.recipients(group, …)`.
     ///
-    /// Active recipients are returned sorted by `leaf_index`; when
-    /// `include_revoked` is true, revoked entries are appended after the
-    /// active ones (also sorted by leaf_index).
+    /// Each [`RecipientEntry`] compresses the lifecycle into a single
+    /// `revoked` boolean (use [`Runtime::admin_state`] for the full
+    /// active/revoked/retired status). Active recipients are returned
+    /// sorted by `leaf_index`; when `include_revoked` is true, revoked
+    /// entries are appended after the active ones (also sorted by
+    /// leaf_index).
     ///
     /// Reducer errors on a single envelope are warn-logged and skipped — a
     /// single corrupt admin event does not abort the whole replay.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::read`] (this replays the log to build the
+    /// roster).
     ///
     /// **Divergence from Python/TS:** Rust's `read()` does not currently
     /// produce per-event signature/row_hash/chain validity flags, so
@@ -3177,8 +3672,9 @@ impl Runtime {
         Ok(out)
     }
 
-    /// Return the full local admin state by replaying the log through the
-    /// admin reducer. Mirrors Python `tn.admin_state(group=…)`.
+    /// Return the full local [`AdminState`] by replaying the log through
+    /// the admin reducer. Backs `tn.admin_state()`; mirrors Python
+    /// `tn.admin_state(group=…)`.
     ///
     /// When `group` is `Some`, the `groups`, `recipients`, `rotations`,
     /// `coupons`, and `enrolments` lists are filtered to that group.
@@ -3188,6 +3684,14 @@ impl Runtime {
     /// btn ceremonies — the publisher state lives on disk, not the
     /// attested log), the ceremony record is reconstructed from the
     /// active config with `created_at == None`.
+    ///
+    /// A single admin event that fails to reduce is warn-logged and
+    /// skipped rather than aborting the replay.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::read`] (this replays the log to build the
+    /// state).
     #[allow(clippy::too_many_lines)] // single replay loop; splitting fragments invariants
     pub fn admin_state(&self, group: Option<&str>) -> Result<AdminState> {
         let mut state = AdminState::default();
@@ -3438,6 +3942,11 @@ impl Runtime {
     /// `vault_did` (i.e. an entry whose `unlinked_at` is `None`), this is a
     /// no-op. Mirrors Python `tn.vault_link(vault_did, project_id)`,
     /// which returns `None`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`]. (The idempotency pre-check tolerates a
+    /// failed `admin_state` read and proceeds to the write.)
     pub fn vault_link(&self, vault_did: &str, project_id: &str) -> Result<()> {
         // Idempotency check — match Python: an active link to the same
         // vault_did short-circuits. admin_state failures do NOT block the
@@ -3473,6 +3982,10 @@ impl Runtime {
     /// `reason` is an optional free-form string forwarded into the event.
     ///
     /// Mirrors Python `tn.vault_unlink(vault_did, project_id, reason)`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn vault_unlink(
         &self,
         vault_did: &str,
@@ -4439,6 +4952,9 @@ fn collect_btn_kit_bytes_with_storage(
     Ok(kits)
 }
 
+/// Internal: feeds [`Runtime`]'s historical-decrypt path on the read
+/// side (surfaced as `tn.read()` / `tn read`).
+///
 /// Scan `keystore` for files of the form `<group>.btn.state.retired.<N>`
 /// (where N is a u32 — the epoch the state served as active). Returns
 /// each as `(epoch, bytes)`. Files whose suffix doesn't parse as u32

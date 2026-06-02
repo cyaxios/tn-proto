@@ -197,7 +197,7 @@ pub struct Ceremony {
     /// "warning" / "error", case-insensitive. ``"debug"`` (default)
     /// emits every verb; raising drops lower-priority emits before any
     /// work. Honored at init unless the caller already invoked
-    /// [`Runtime::set_level`] programmatically. Empty string and
+    /// [`crate::Runtime::set_level`] programmatically. Empty string and
     /// missing key both leave the threshold at its current value.
     #[serde(default)]
     pub log_level: String,

@@ -49,12 +49,31 @@ const ADMIN_PREFIXES: &[&str] = &[
     "tn.vault.",
 ];
 
-/// True iff `event_type` is an admin event subject to the dedicated log.
+/// Return `true` iff `event_type` belongs to the admin namespace.
+///
+/// Admin events (those under `tn.ceremony.`, `tn.group.`, `tn.recipient.`,
+/// `tn.rotation.`, `tn.coupon.`, `tn.enrolment.`, `tn.vault.`) are the ones the
+/// dedicated admin log and this cache track. Must match
+/// `tn/admin_log.py::_ADMIN_PREFIXES`. Pure.
+///
+/// # Examples
+///
+/// ```
+/// use tn_core::admin_cache::is_admin_event_type;
+///
+/// assert!(is_admin_event_type("tn.recipient.added"));
+/// assert!(!is_admin_event_type("tn.info"));
+/// ```
 pub fn is_admin_event_type(event_type: &str) -> bool {
     ADMIN_PREFIXES.iter().any(|p| event_type.starts_with(p))
 }
 
-/// Default admin log path: `<yaml_dir>/.tn/admin/admin.ndjson`.
+/// Return the default admin-log path relative to the yaml dir:
+/// `./.tn/admin/admin.ndjson`.
+///
+/// The location used when no explicit `protocol_events_location` is configured.
+/// See [`resolve_admin_log_path`] for the full resolution that honors config
+/// overrides.
 pub fn default_admin_log_relative() -> &'static str {
     "./.tn/admin/admin.ndjson"
 }
@@ -102,7 +121,12 @@ pub fn resolve_admin_log_path(yaml_dir: &Path, cfg: &Config) -> PathBuf {
     }
 }
 
-/// LKV file path: `<yaml_dir>/.tn/admin/admin.lkv.json`.
+/// Resolve the LKV cache-file path for a yaml dir:
+/// `<yaml_dir>/.tn/admin/admin.lkv.json`.
+///
+/// Where [`AdminStateCache`] persists its materialized state between runs. The
+/// admin log (`admin.ndjson`) is the source of truth; this file is a
+/// rebuildable cache.
 pub fn lkv_path_for(yaml_dir: &Path) -> PathBuf {
     yaml_dir.join(".tn").join("admin").join("admin.lkv.json")
 }
@@ -111,34 +135,57 @@ pub fn lkv_path_for(yaml_dir: &Path) -> PathBuf {
 // Conflict types (mirror Python's dataclasses).
 // --------------------------------------------------------------------------
 
-/// Equivocation / divergence signal surfaced via `head_conflicts`.
+/// An equivocation / divergence signal detected while folding the admin log.
+///
+/// Conflicts are *facts about the log*, not errors: the offending envelope is
+/// still recorded (signed events are facts), but the inconsistency is surfaced
+/// here so callers can react. Read them via
+/// [`AdminStateCache::head_conflicts`]; a [`SameCoordinateFork`](Self::SameCoordinateFork)
+/// specifically flips [`AdminStateCache::diverged`] to `true`. Serializes with
+/// a snake-case `kind` tag (`leaf_reuse_attempt`, `same_coordinate_fork`,
+/// `rotation_conflict`) to match Python's dataclasses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[allow(missing_docs)]
 pub enum ChainConflict {
-    /// `tn.recipient.added` arrived for a `(group, leaf_index)` already
-    /// revoked / retired in local state.
+    /// A `tn.recipient.added` arrived for a `(group, leaf_index)` that was
+    /// already revoked / retired in local state. Revocation is absorbing, so
+    /// the re-add is excluded from `state.recipients` and flagged here.
     LeafReuseAttempt {
+        /// Group whose leaf was reused.
         group: String,
+        /// Leaf index that was already revoked / retired.
         leaf_index: u64,
+        /// `row_hash` of the rejected re-add envelope.
         attempted_row_hash: String,
+        /// `row_hash` of the revocation that closed this leaf, if known.
         originally_revoked_at_row_hash: Option<String>,
     },
     /// Two envelopes share `(did, event_type, sequence)` but carry different
-    /// `row_hash`.
+    /// `row_hash` — the same producer wrote two different events at one
+    /// coordinate (a fork in its chain).
     SameCoordinateFork {
+        /// Producing device identity.
         did: String,
+        /// Event type at the forked coordinate.
         event_type: String,
+        /// Sequence number at the forked coordinate.
         sequence: u64,
+        /// `row_hash` of the first envelope seen at this coordinate.
         row_hash_a: String,
+        /// `row_hash` of the second, conflicting envelope.
         row_hash_b: String,
     },
-    /// Two `tn.rotation.completed` envelopes share `(group, generation)`
-    /// but disagree on `previous_kit_sha256`.
+    /// Two `tn.rotation.completed` envelopes share `(group, generation)` but
+    /// disagree on `previous_kit_sha256` — divergent histories of the same
+    /// rotation.
     RotationConflict {
+        /// Group whose rotation forked.
         group: String,
+        /// Generation number both envelopes claim.
         generation: u64,
+        /// `previous_kit_sha256` from the first envelope.
         previous_kit_sha256_a: String,
+        /// `previous_kit_sha256` from the second, conflicting envelope.
         previous_kit_sha256_b: String,
     },
 }
@@ -160,8 +207,11 @@ fn empty_state() -> Value {
     Value::Object(out)
 }
 
-/// Source of merged admin envelopes for the cache. Production callers pass
-/// a `Runtime` reference; tests can supply a fixed list.
+/// Where [`AdminStateCache::refresh_with`] pulls merged admin envelopes from.
+///
+/// Production callers pass a live [`Runtime`] (the cache pulls decrypted,
+/// merged envelopes through it); tests and runtime-less callers supply a
+/// pre-collected list.
 pub enum CacheSource<'a> {
     /// Pull envelopes via `Runtime::admin_envelopes_merged()`. The Runtime
     /// owns decryption; the cache only folds.
@@ -172,12 +222,40 @@ pub enum CacheSource<'a> {
     Envelopes(Vec<Value>),
 }
 
-/// Materialized AdminState cache. One per ceremony / Runtime.
+/// Materialized AdminState cache (the "last known value", LKV). One per
+/// ceremony / [`Runtime`].
 ///
-/// The cache holds an Arc<Runtime>-style backref via `runtime` so it can
-/// re-pull merged admin envelopes on `refresh()` / `state()` without the
-/// caller threading the runtime through every call. Lifetime-erased via
-/// `Arc` so the cache itself is `'static`.
+/// Folds the admin log into a queryable [`AdminState`](crate::AdminState)
+/// document plus a [`VectorClock`], persisting the result to
+/// `<yaml_dir>/.tn/admin/admin.lkv.json` so a later run rehydrates instead of
+/// replaying from scratch. This is the engine behind `tn.admin.*` reads.
+/// Folding is idempotent (envelopes dedupe by `row_hash`) and convergent under
+/// the rules in the module docs, surfacing equivocation as
+/// [`ChainConflict`]s rather than failing.
+///
+/// Build one bound to a [`Runtime`] with [`from_runtime_arc`](Self::from_runtime_arc)
+/// (or [`from_runtime`](Self::from_runtime)); the `Arc` backref lets
+/// [`state`](Self::state) / [`refresh`](Self::refresh) re-pull fresh merged
+/// envelopes without the caller threading the runtime through every call. The
+/// `Arc` also lifetime-erases the backref so the cache itself is `'static`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::Path;
+/// use std::sync::Arc;
+/// use tn_core::{Runtime, AdminStateCache};
+///
+/// # fn main() -> tn_core::Result<()> {
+/// let rt = Arc::new(Runtime::init(Path::new("tn.yaml"))?);
+/// let mut cache = AdminStateCache::from_runtime_arc(&rt)?;
+///
+/// // Active recipients in the default group, conflicts (if any) alongside.
+/// let active = cache.recipients("default", false)?;
+/// println!("{} active; diverged={}", active.len(), cache.diverged());
+/// # Ok(())
+/// # }
+/// ```
 pub struct AdminStateCache {
     #[allow(dead_code)]
     yaml_dir: PathBuf,
@@ -204,8 +282,20 @@ pub struct AdminStateCache {
 }
 
 impl AdminStateCache {
-    /// Construct a fresh cache. Loads from `<yaml_dir>/.tn/admin/admin.lkv.json`
-    /// if present; otherwise replays from the underlying admin log.
+    /// Construct a cache for the ceremony at `yaml_path`, rehydrating from the
+    /// LKV file if one is present and current.
+    ///
+    /// Loads `<yaml_dir>/.tn/admin/admin.lkv.json` when it exists and matches
+    /// the current schema version and ceremony; a stale or missing file leaves
+    /// the cache empty (callers then drive a fresh fold). Holds no runtime
+    /// backref — pair with [`refresh_with`](Self::refresh_with) to feed
+    /// envelopes, or prefer [`from_runtime_arc`](Self::from_runtime_arc).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] only on an unexpected failure constructing the
+    /// cache; a missing/unreadable/stale LKV file is handled internally (the
+    /// cache simply starts empty).
     pub fn new(yaml_path: &Path, cfg: Config, log_path: PathBuf) -> Result<Self> {
         let yaml_dir = yaml_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let admin_log_path = resolve_admin_log_path(&yaml_dir, &cfg);
@@ -231,9 +321,18 @@ impl AdminStateCache {
         Ok(c)
     }
 
-    /// Construct a cache backed by `rt` and replay all current admin
-    /// envelopes into it. Convenience that combines `new()` +
-    /// `refresh_with(rt)`.
+    /// Construct a cache for `rt` and fold all current admin envelopes into it.
+    ///
+    /// Convenience that combines [`new`](Self::new) with one
+    /// [`refresh_with`](Self::refresh_with) over `rt`, then persists. Does
+    /// **not** keep a backref, so later [`state`](Self::state) /
+    /// [`refresh`](Self::refresh) calls will not auto-pull new envelopes — use
+    /// [`from_runtime_arc`](Self::from_runtime_arc) for a self-refreshing cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] if loading the config, pulling merged envelopes
+    /// from `rt`, or persisting the LKV file fails.
     pub fn from_runtime(rt: &Runtime) -> Result<Self> {
         let cfg = crate::config::load(rt.yaml_path())?;
         let mut c = Self::new(rt.yaml_path(), cfg, rt.log_path().to_path_buf())?;
@@ -244,9 +343,18 @@ impl AdminStateCache {
         Ok(c)
     }
 
-    /// Construct a cache backed by an `Arc<Runtime>` so subsequent
-    /// `refresh()` / `state()` calls can pull fresh envelopes without
-    /// callers threading the runtime through.
+    /// Construct a self-refreshing cache backed by an `Arc<Runtime>`.
+    ///
+    /// Like [`from_runtime`](Self::from_runtime) but retains the `Arc` backref,
+    /// so subsequent [`state`](Self::state) / [`recipients`](Self::recipients) /
+    /// [`refresh`](Self::refresh) calls re-pull fresh merged envelopes through
+    /// the runtime automatically. The recommended constructor for a long-lived
+    /// cache. Folds and persists once before returning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] if loading the config, pulling merged envelopes
+    /// from `rt`, or persisting the LKV file fails.
     pub fn from_runtime_arc(rt: &std::sync::Arc<Runtime>) -> Result<Self> {
         let cfg = crate::config::load(rt.yaml_path())?;
         let mut c = Self::new(rt.yaml_path(), cfg, rt.log_path().to_path_buf())?;
@@ -257,8 +365,19 @@ impl AdminStateCache {
         Ok(c)
     }
 
-    /// Refresh the cache from a `CacheSource`. Returns the number of new
-    /// envelopes ingested.
+    /// Fold envelopes from an explicit [`CacheSource`] into the cache and
+    /// persist.
+    ///
+    /// The injection point for runtime-less callers and tests: pass
+    /// [`CacheSource::Envelopes`] to fold a fixed list, or
+    /// [`CacheSource::Runtime`] to pull through a runtime once. Deduped by
+    /// `row_hash`, so re-folding overlapping input is safe. Returns the count of
+    /// newly-ingested envelopes (the [`at_offset`](Self::at_offset) delta).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] if pulling from a `CacheSource::Runtime` source
+    /// or persisting the LKV file fails.
     pub fn refresh_with(&mut self, source: CacheSource<'_>) -> Result<usize> {
         let envs = match source {
             CacheSource::Runtime(rt) => rt.admin_envelopes_merged()?,
@@ -286,27 +405,49 @@ impl AdminStateCache {
         self.at_offset = self.row_hashes.len();
     }
 
-    /// Number of admin envelopes replayed into this cache.
+    /// Return the number of distinct admin envelopes folded into this cache.
+    ///
+    /// A monotonic progress counter (the count of unique `row_hash`es seen), not
+    /// a byte offset.
     pub fn at_offset(&self) -> usize {
         self.at_offset
     }
 
-    /// row_hash of the most recently replayed admin envelope.
+    /// Borrow the `row_hash` of the most recently folded admin envelope, if any.
+    ///
+    /// The cache's head pointer; `None` before any envelope has been folded.
     pub fn head_row_hash(&self) -> Option<&str> {
         self.head_row_hash.as_deref()
     }
 
-    /// All detected conflicts (informational).
+    /// Borrow the conflicts detected so far (informational).
+    ///
+    /// Equivocation signals accumulated while folding — see [`ChainConflict`].
+    /// Empty when the log is internally consistent.
     pub fn head_conflicts(&self) -> &[ChainConflict] {
         &self.head_conflicts
     }
 
-    /// Vector clock view (read-only).
+    /// Borrow the cache's vector clock (read-only).
+    ///
+    /// `did -> {event_type -> max sequence}` across every folded envelope.
     pub fn clock(&self) -> &VectorClock {
         &self.clock
     }
 
-    /// Current materialized AdminState. Auto-refreshes if the log advanced.
+    /// Borrow the current materialized [`AdminState`](crate::AdminState),
+    /// auto-refreshing first if the cache holds a runtime backref.
+    ///
+    /// The returned JSON is the full admin document (`ceremony`, `groups`,
+    /// `recipients`, `rotations`, `coupons`, `enrolments`, `vault_links`). When
+    /// the cache was built via [`from_runtime_arc`](Self::from_runtime_arc) this
+    /// re-pulls and folds any newly-arrived envelopes (then persists) before
+    /// returning; otherwise it returns the last folded state as-is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] if the auto-refresh (pull merged envelopes /
+    /// persist LKV) fails.
     pub fn state(&mut self) -> Result<&Value> {
         if let Some(rt) = self.runtime.clone() {
             let envs = rt.admin_envelopes_merged()?;
@@ -318,8 +459,16 @@ impl AdminStateCache {
         Ok(&self.state)
     }
 
-    /// Filtered recipients by group; drops non-active rows when
-    /// `include_revoked=false`. Mirrors Python's `cache.recipients()`.
+    /// Return the recipients in `group`, sorted by leaf index.
+    ///
+    /// With `include_revoked = false` only `active` rows are returned; with
+    /// `true` revoked and retired rows are included too. Auto-refreshes first
+    /// when the cache holds a runtime backref (see [`state`](Self::state)).
+    /// Mirrors Python's `cache.recipients()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] if the auto-refresh fails.
     pub fn recipients(&mut self, group: &str, include_revoked: bool) -> Result<Vec<Value>> {
         if let Some(rt) = self.runtime.clone() {
             let envs = rt.admin_envelopes_merged()?;
@@ -351,19 +500,32 @@ impl AdminStateCache {
         Ok(out)
     }
 
-    /// True iff any same-coordinate fork has been observed.
+    /// Return `true` iff a [`ChainConflict::SameCoordinateFork`] has been
+    /// observed.
+    ///
+    /// The "this chain has equivocated" flag — a producer wrote two different
+    /// events at one `(did, event_type, sequence)` coordinate. Other conflict
+    /// kinds (leaf reuse, rotation conflict) do not set this; inspect
+    /// [`head_conflicts`](Self::head_conflicts) for the full picture.
     pub fn diverged(&self) -> bool {
         self.head_conflicts
             .iter()
             .any(|c| matches!(c, ChainConflict::SameCoordinateFork { .. }))
     }
 
-    /// Force a reload. Returns the number of new envelopes ingested.
+    /// Force a reload and return the number of new envelopes ingested.
     ///
-    /// When the cache was built with a runtime backref (`from_runtime_arc`)
-    /// this re-pulls merged envelopes through `Runtime::admin_envelopes_merged`.
-    /// Otherwise it falls back to scanning the underlying ndjson directly
-    /// (Python parity; only useful when admin fields ride at envelope root).
+    /// When the cache was built with a runtime backref
+    /// ([`from_runtime_arc`](Self::from_runtime_arc)) this re-pulls merged
+    /// envelopes through [`Runtime::admin_envelopes_merged`]. Otherwise it falls
+    /// back to scanning the underlying ndjson directly (Python parity; only
+    /// useful when admin fields ride at the envelope root rather than inside an
+    /// encrypted group). Persists the LKV file afterward.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] if pulling merged envelopes or persisting the
+    /// LKV file fails.
     pub fn refresh(&mut self) -> Result<usize> {
         let before = self.at_offset;
         if let Some(rt) = self.runtime.clone() {
