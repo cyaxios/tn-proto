@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1a1] - 2026-06-03 -- cross-language parity bar + vault link/sync fixes
+
+Puts Python, TypeScript, and the browser on one verified wire format and
+lands a cluster of vault link/sync fixes. The three implementations share
+the same manifest, tnpkg, body-encryption, and btn-wire formats, proven by
+shared golden vectors that run as contract tests in both SDKs.
+
+### Cross-language parity
+
+- spec-next contracts for manifest, tnpkg, and body encryption, aligned
+  across tn-core, the Python SDK, the TS SDK, and the extension wasm.
+- Shared cross-language golden vectors (recipient wraps, absorb
+  vault-metadata adoption, btn wire decode, vault-block normalization)
+  wired as contract tests so Python and TypeScript cannot drift silently.
+- Profile-immutability conflict policy pinned in TypeScript to match Python.
+- SDK parity for layout, config, tnpkg, absorb, export, wallet, and
+  multi-ceremony across both SDKs.
+
+### Vault link/sync (7-bug cluster)
+
+- `create_fresh` honors `TN_NO_LINK` and `TN_VAULT_URL`.
+- `set_link_state` writes link state to the extends-chain root, so named
+  streams inherit it.
+- vault pull uses the real account-inbox API.
+- `linked_project_id` persists across named streams.
+- warm-attach requires `identity.linked_vault == vault_url`; an explicit
+  `TN_API_KEY` stays exempt.
+- restore decrypts cross-implementation backups (zip-body and
+  separate-nonce blob formats, with the body AAD applied).
+
+### tn-core
+
+- rustdoc completeness pass across the crate.
+- Split the four 1000+ line files (`runtime`, `admin_cache`, `tnpkg`,
+  `runtime_export`) into focused submodules; behavior preserved.
+
+### Packaging
+
+- `tn-protocol` / `tn-core` / `tn-btn` at `0.5.1a1`; `@tnproto/sdk` at
+  `0.5.1-alpha.1`. Wheels for macOS (arm64), Linux (manylinux x86_64), and
+  Windows (amd64), plus sdists.
+- README trimmed to the TestPyPI install and a getting-started section.
+
+### CI
+
+- pytest matrix hardened for Windows: skip the backslash tnpkg-member case
+  where zipfile rewrites `os.sep`, and drive the CLI tests through
+  `python -m tn.cli` so they resolve in non-venv installs.
+- TS revoke test de-flaked via `admin.cache().refresh()` before the state
+  read.
+- `check_parity` KNOWN_OMISSIONS gains `packBodyPlaintextZip`.
+
 ## [0.4.3a2] - 2026-05-22 -- CLI receive-side parity + CF 1010 UA fix
 
 Three CLI/SDK additions to close the dashboard receive-side parity
