@@ -5,6 +5,7 @@ __pycache__/
 .Python
 *.egg-info/
 dist/
+dist_win/
 dist-wheelhouse/
 build/
 .venv-test/
@@ -16,6 +17,7 @@ build/
 htmlcov/
 .tox/
 .venv/
+.venv_win/
 venv/
 env/
 
