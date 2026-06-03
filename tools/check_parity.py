@@ -102,7 +102,7 @@ KNOWN_OMISSIONS = {
     # ------------------------------------------------------------------
     "Manifest", "ManifestKind", "VectorClock", "BodyContents",
     "ZipEntry", "ParsedZipEntry",
-    "CompileKitBundleOptions", "CompiledManifest", "CompiledPackage",
+    "CompileKitBundleOptions", "CompiledManifest", "CompiledKitMeta", "CompiledPackage",
     "newManifest", "signManifest", "verifyManifest",
     "manifestSigningBytes", "isManifestSignatureValid",
     "compileKitBundle", "compileKitBundleToFile",

@@ -113,10 +113,16 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
   let fromDid: string | null = null;
   let ceremonyId = "";
   let yamlPath: string | null = null;
+  // Where the signing seed (local.private/local.public) lives. With a yaml
+  // this is the ceremony's authoritative keystore, which may differ from
+  // `keystoreDir`: `tn admin rotate` stages the kits to bundle in a temp dir
+  // that holds NO private key, and must sign with the real ceremony's device.
+  let signingDir: string | null = null;
 
   if (opts.yamlPath) {
     const cfg = loadConfig(opts.yamlPath);
     if (!keystoreDir) keystoreDir = cfg.keystorePath;
+    signingDir = resolve(cfg.keystorePath);
     fromDid = cfg.device.device_identity || null;
     ceremonyId = cfg.ceremonyId || "";
     yamlPath = resolve(opts.yamlPath);
@@ -124,6 +130,7 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
   if (!keystoreDir) {
     throw new Error("compileKitBundle: provide keystoreDir or yamlPath");
   }
+  if (!signingDir) signingDir = keystoreDir;
   if (!existsSync(keystoreDir) || !statSync(keystoreDir).isDirectory()) {
     throw new Error(`compileKitBundle: keystore directory not found: ${keystoreDir}`);
   }
@@ -132,7 +139,7 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
   // otherwise read the keystore's local.public (the DID the signing seed
   // derives), so `manifest_signature_b64` always verifies against it.
   if (!fromDid) {
-    const pubPath = join(keystoreDir, "local.public");
+    const pubPath = join(signingDir, "local.public");
     if (!existsSync(pubPath)) {
       throw new Error(`compileKitBundle: no device DID (missing ${pubPath} and no yaml device_identity)`);
     }
@@ -142,7 +149,7 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
     throw new Error("compileKitBundle: could not resolve a publisher device DID");
   }
 
-  const privPath = join(keystoreDir, "local.private");
+  const privPath = join(signingDir, "local.private");
   if (!existsSync(privPath)) {
     throw new Error(`compileKitBundle: signing seed not found: ${privPath}`);
   }

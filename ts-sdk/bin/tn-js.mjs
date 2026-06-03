@@ -917,6 +917,7 @@ async function adminCmd() {
           }
           const result = compileKitBundleToFile({
             keystoreDir: tmpDir,
+            yamlPath: opts.yaml,
             outPath: pkgPath,
             groups: groupList,
             label: `rotation@${tsStamp}`,
