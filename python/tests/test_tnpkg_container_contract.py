@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import warnings
 import zipfile
@@ -56,7 +57,15 @@ def test_tnpkg_reader_accepts_manifest_and_body_members(tmp_path: Path):
         "keys/local.private",
         "body/",
         "body/../manifest.json",
-        "body\\keys\\local.private",
+        pytest.param(
+            "body\\keys\\local.private",
+            marks=pytest.mark.skipif(
+                os.sep != "/",
+                reason="zipfile rewrites os.sep to '/' on Windows, so a literal "
+                "backslash member name cannot be authored here; the reader's "
+                "backslash guard is still exercised on POSIX runners.",
+            ),
+        ),
     ],
 )
 def test_tnpkg_reader_rejects_invalid_non_manifest_members(tmp_path: Path, bad_name: str):
