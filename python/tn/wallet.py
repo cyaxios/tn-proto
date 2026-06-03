@@ -107,10 +107,17 @@ def link_ceremony(
 ) -> LoadedConfig:
     """Create a vault project for this ceremony and flip mode=linked.
 
-    Idempotent: if the ceremony is already linked to the same vault,
-    returns cfg unchanged. If linked to a different vault, raises.
+    Idempotent: if the ceremony is already linked to the same vault *and*
+    has claimed a project, returns cfg unchanged. A ceremony born linked
+    (mode=linked, vault set, but no project id yet) is NOT fully linked —
+    it still needs a project claim, so we fall through and create one. If
+    linked to a *different* vault, raises.
     """
-    if cfg.is_linked() and cfg.linked_vault == client.base_url:
+    if (
+        cfg.is_linked()
+        and cfg.linked_vault == client.base_url
+        and cfg.linked_project_id
+    ):
         return cfg
     if cfg.mode == "linked" and cfg.linked_vault and cfg.linked_vault != client.base_url:
         raise RuntimeError(

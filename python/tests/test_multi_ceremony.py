@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 
 import pytest  # type: ignore[import-not-found]
+import yaml
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
@@ -43,6 +44,7 @@ from tn import (
     TNNotFound,
 )
 from tn import _autoinit, _defaults, _layout, _registry
+from tn import config as _config
 
 
 # Anything that triggers the legacy ``create_fresh`` path (i.e. binds
@@ -321,6 +323,38 @@ class TestInitUseList:
         # on-disk stream yaml is minimal.
         assert cfg.device.device_identity.startswith("did:key:z")
         assert "default" in cfg.groups
+
+    def test_unlink_named_stream_reaches_default_root(self, tmp_path, monkeypatch):
+        """Unlinking a named stream clears the link at the extends-chain
+        root (the default ceremony), not just the stream's own yaml.
+
+        Regression: ``admin.set_link_state`` wrote ``cfg.yaml_path``, so
+        for a stream that inherits its vault/link state from default the
+        unlink landed a stream-local override and left the project's link
+        on the default intact. Link state is project-scoped — it must
+        reach the root.
+        """
+        monkeypatch.delenv("TN_NO_LINK", raising=False)
+        monkeypatch.delenv("TN_VAULT_URL", raising=False)
+
+        default_handle = tn.init(project_dir=tmp_path, cipher="jwe")
+        default_yaml = default_handle.yaml_path
+        default_doc = yaml.safe_load(default_yaml.read_text(encoding="utf-8"))
+        assert default_doc["ceremony"]["mode"] == "linked"
+
+        h = tn.use("payments", project_dir=tmp_path)
+        stream_cfg = _config.load(h.yaml_path)
+        # The stream inherits linked state from default via extends.
+        assert stream_cfg.mode == "linked"
+        assert stream_cfg.yaml_path != default_yaml
+
+        tn.set_link_state(stream_cfg, mode="local")
+
+        # The link is cleared at the ROOT (default) — the whole project
+        # unlinks, not just this one stream's view.
+        default_doc = yaml.safe_load(default_yaml.read_text(encoding="utf-8"))
+        assert default_doc["ceremony"]["mode"] == "local"
+        assert default_doc["vault"]["enabled"] is False
 
     def test_init_named_ceremony_registers(self, tmp_path):
         tn.init("payments", project_dir=tmp_path)

@@ -213,3 +213,59 @@ class TestPullInboxPureFunction:
         result = pull_inbox(cfg, client, since_cursor="prev-cursor")
         assert result == {"absorbed": 0, "new_cursor": "prev-cursor"}
         assert client.list_calls == ["prev-cursor"]
+
+    def test_pull_inbox_accepts_raw_vault_client(self):
+        """pull_inbox accepts a raw VaultClient — the object a caller
+        naturally hands ``tn.vault_pull_inbox`` — by wrapping it in the
+        inbox adapter, instead of AttributeError-ing on the missing
+        ``list_incoming``. Regression #4.
+        """
+
+        class _FakeResp:
+            status_code = 200
+            content = b'{"items": []}'
+
+            def json(self):
+                return {"items": []}
+
+        class _FakeHttp:
+            def __init__(self):
+                self.requests: list[tuple[str, str]] = []
+
+            def request(self, method, url, headers=None):
+                self.requests.append((method, url))
+                return _FakeResp()
+
+        class _RawVaultClientLike:
+            # The VaultClient surface the inbox adapter needs — but with NO
+            # list_incoming/download, exactly like the real VaultClient a
+            # caller naturally constructs and passes in.
+            def __init__(self):
+                self.base_url = "http://127.0.0.1:8790"
+                self.token = "tok"
+                self._http = _FakeHttp()
+
+            def _headers(self, extra=None):
+                return {}
+
+            def _raise_for_status(self, resp):
+                return None
+
+            def authenticate(self):
+                return "tok"
+
+        class _FakeDevice:
+            device_identity = "did:key:zConsumer"
+
+        class _FakeCfg:
+            device = _FakeDevice()
+
+        raw = _RawVaultClientLike()
+        result = pull_inbox(_FakeCfg(), raw, on_absorb_error="raise")
+        assert result["absorbed"] == 0
+        # The wrap happened: the inbox endpoint was actually queried.
+        assert raw._http.requests, "pull_inbox should query the inbox via the adapter"
+        method, url = raw._http.requests[0]
+        assert method == "GET"
+        assert "/api/v1/inbox/" in url
+        assert url.endswith("/incoming")

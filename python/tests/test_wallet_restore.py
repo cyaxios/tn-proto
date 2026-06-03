@@ -14,6 +14,7 @@ Refs: D-3, D-19, D-20, D-22; spec section 9.9; plan
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import socket
@@ -22,13 +23,14 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
+import zipfile
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from tn import wallet_restore as wr
 from tn import wallet_restore_loopback as wrl
-
+from tn.export import pack_body_plaintext_zip
 
 # ── LoopbackReceiver ──────────────────────────────────────────────────
 
@@ -426,6 +428,105 @@ def test_decrypt_blob_rejects_wrong_key():
     ct = AESGCM(bek).encrypt(nonce, b"hi", None)
     with pytest.raises(wr.RestoreError):
         wr._decrypt_blob_with_bek(nonce + ct, other)
+
+
+# ── decrypt_blob_with_bek: multi-format (InvalidTag regression, #7) ───
+#
+# Prod encrypted_backups blobs come in two shapes the single-layout
+# decrypt never handled: a .tnpkg envelope (agent/bind-minted) and a
+# separate-nonce+AAD body (browser-minted). Feeding the tnpkg's PK header
+# to AES-GCM as a nonce was the InvalidTag bug.
+
+
+_RESTORE_BODY = {
+    "body/keys/local.private": b"\x11" * 32,
+    "body/tn.yaml": b"device:\n  device_identity: did:key:zTest\n",
+}
+
+
+def _tnpkg_envelope_blob(body: dict[str, bytes], bek: bytes) -> bytes:
+    """Format B: a plaintext .tnpkg STORED zip whose body/encrypted.bin
+    member is nonce(12)||ciphertext+tag (AAD None)."""
+    nonce = os.urandom(12)
+    inner = nonce + AESGCM(bek).encrypt(nonce, pack_body_plaintext_zip(body), None)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("manifest.json", b"{}")
+        zf.writestr("body/encrypted.bin", inner)
+    return buf.getvalue()
+
+
+def test_decrypt_tnpkg_envelope_format():
+    """Format B (the InvalidTag bug blob): ciphertext_b64 is a plaintext
+    .tnpkg whose body/encrypted.bin holds the real ciphertext."""
+    bek = os.urandom(32)
+    blob = _tnpkg_envelope_blob(_RESTORE_BODY, bek)
+    plaintext = wr._decrypt_blob_with_bek(blob, bek)
+    assert wr._try_unpack_export_frame(plaintext) == _RESTORE_BODY
+
+
+def test_decrypt_separate_nonce_aad_format():
+    """Browser shape: ciphertext-only body, separate nonce, AAD bound to
+    'tn-vault-body-v1'."""
+    bek = os.urandom(32)
+    nonce = os.urandom(12)
+    ct = AESGCM(bek).encrypt(
+        nonce, pack_body_plaintext_zip(_RESTORE_BODY), b"tn-vault-body-v1"
+    )
+    plaintext = wr._decrypt_blob_with_bek(
+        ct, bek, nonce_b64=base64.b64encode(nonce).decode("ascii")
+    )
+    assert wr._try_unpack_export_frame(plaintext) == _RESTORE_BODY
+
+
+def test_decrypt_separate_nonce_wrong_aad_rejected():
+    """A separate-nonce body sealed without the bound AAD must not decrypt
+    on the AAD path."""
+    bek = os.urandom(32)
+    nonce = os.urandom(12)
+    ct = AESGCM(bek).encrypt(nonce, b"x", None)  # sealed AAD=None
+    with pytest.raises(wr.RestoreError):
+        wr._decrypt_blob_with_bek(
+            ct, bek, nonce_b64=base64.b64encode(nonce).decode("ascii")
+        )
+
+
+def test_decrypt_tnpkg_envelope_wrong_bek_rejected():
+    bek = os.urandom(32)
+    blob = _tnpkg_envelope_blob(_RESTORE_BODY, bek)
+    with pytest.raises(wr.RestoreError):
+        wr._decrypt_blob_with_bek(blob, os.urandom(32))
+
+
+def test_restore_with_token_tnpkg_envelope(monkeypatch, tmp_path):
+    """End-to-end Format B: the fetch carries the zero-placeholder nonce
+    the bind handler writes; the tnpkg (PK) layout takes precedence and
+    the inner body is recovered."""
+    bek = os.urandom(32)
+    blob = _tnpkg_envelope_blob({"body/keys/local.public": b"did:key:zABC"}, bek)
+
+    def fake_request(*, method, url, bearer, timeout=30.0):
+        body = json.dumps(
+            {
+                "project_id": "01HXPROJ",
+                "ciphertext_b64": base64.b64encode(blob).decode("ascii"),
+                "nonce_b64": base64.b64encode(b"\x00" * 12).decode("ascii"),
+                "kdf": "embedded",
+            }
+        ).encode("utf-8")
+        return 200, body, {"content-type": "application/json"}
+
+    monkeypatch.setattr(wr, "_http_request", fake_request)
+    token = wrl.TransferToken(
+        vault_jwt="j",
+        account_id="a",
+        project_id="01HXPROJ",
+        raw_bek_b64=base64.urlsafe_b64encode(bek).decode("ascii"),
+    )
+    result = wr._restore_with_token(
+        vault_url="http://127.0.0.1:9999", token=token, out_dir=tmp_path
+    )
+    assert any(p.name == "local.public" for p in result.files_written)
 
 
 # ── write_restored_bytes ──────────────────────────────────────────────

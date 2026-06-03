@@ -153,6 +153,27 @@ def _format_expires_local(expires_iso: str) -> str:
         return expires_iso
 
 
+def _warm_attach_signal(identity: Identity, vault_url: str) -> str | None:
+    """Pick the credential for the warm (no-browser) attach, or None to
+    fall through to the claim-URL flow.
+
+    ``TN_API_KEY`` is an explicit, operator-supplied key for this run and
+    always wins. The remembered ``identity.linked_account_id`` only
+    applies when the target ``vault_url`` is the vault that account
+    actually lives on (``identity.linked_vault``): re-pointing a device at
+    a different vault (e.g. ``tn init --link <other>``) must NOT reuse the
+    old account, or the project would be registered on the wrong vault
+    under the bare device DID instead of being claimed under the user's
+    account there.
+    """
+    api_key = os.environ.get("TN_API_KEY")
+    if api_key:
+        return api_key
+    if identity.linked_account_id and identity.linked_vault == vault_url:
+        return identity.linked_account_id
+    return None
+
+
 def _try_warm_attach(
     yaml_path: Path, identity: Identity, vault_url: str, cipher: str | None
 ) -> bool:
@@ -404,9 +425,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         # challenge-issued JWT — no browser claim needed. The warm signal
         # is TN_API_KEY in the environment (wins) or, as a fallback, the
         # account remembered in identity.json from a prior
-        # `tn account connect`. Falls through to the claim-URL flow if
-        # the authenticated attach can't be completed.
-        warm_signal = os.environ.get("TN_API_KEY") or identity.linked_account_id
+        # `tn account connect` — the latter only when the target vault is
+        # that account's vault (see _warm_attach_signal). Falls through to
+        # the claim-URL flow if the authenticated attach can't be completed.
+        warm_signal = _warm_attach_signal(identity, vault_url)
         if warm_signal and _try_warm_attach(yaml_path, identity, vault_url, args.cipher):
             return 0
 
