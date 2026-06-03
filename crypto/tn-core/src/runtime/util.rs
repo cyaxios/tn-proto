@@ -1,16 +1,24 @@
 //! Small leaf helpers shared across the `runtime` submodules: timestamp
-//! formatting, the SHA-256 digest used for kit fingerprints, event-type
-//! validation, and the cross-platform path helpers.
+//! formatting, the SHA-256 digest used for kit fingerprints, and
+//! event-type validation.
+//!
+//! The cross-platform path helpers (`resolve`, `is_absolute_xplat_path`)
+//! moved to [`crate::pathutil`] once non-runtime modules needed them; they
+//! are re-exported here so the runtime submodules keep importing them via
+//! `super::util`.
 //!
 //! None of these touch [`Runtime`](super::Runtime) state; they are pure
 //! functions factored out so the init / write / read / admin modules can
 //! all reach them without duplicating the logic.
 
-use std::path::{Path, PathBuf};
-
 use time::OffsetDateTime;
 
 use crate::{Error, Result};
+
+// Path resolution is host-agnostic and shared beyond `runtime`, so it
+// lives in `crate::pathutil`. Re-exported so `super::util::{resolve,
+// is_absolute_xplat_path}` keeps resolving for the runtime submodules.
+pub(crate) use crate::pathutil::{is_absolute_xplat_path, resolve};
 
 pub(crate) fn current_timestamp() -> String {
     let now = OffsetDateTime::now_utc();
@@ -52,36 +60,4 @@ pub(crate) fn validate_event_type(et: &str) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-pub(crate) fn resolve(base: &Path, p: &Path) -> PathBuf {
-    if is_absolute_xplat_path(p) {
-        p.to_path_buf()
-    } else {
-        base.join(p)
-    }
-}
-
-/// Cross-platform absolute-path test. Mirrors
-/// `config::is_absolute_xplat` but works on `&Path` so callers in the
-/// runtime don't have to round-trip through a string. Required for
-/// wasm32 hosts on Windows where `Path::is_absolute()` follows Unix
-/// rules and would mis-classify `C:\…` as relative, causing
-/// `extends:`-resolved paths to double-join.
-pub(crate) fn is_absolute_xplat_path(p: &Path) -> bool {
-    if p.is_absolute() {
-        return true;
-    }
-    let s = p.to_string_lossy();
-    let bytes = s.as_bytes();
-    if bytes.len() >= 3 {
-        let drive = bytes[0];
-        if drive.is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && (bytes[2] == b'/' || bytes[2] == b'\\')
-        {
-            return true;
-        }
-    }
-    false
 }

@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::config::Config;
+use crate::pathutil::resolve;
 use crate::runtime::Runtime;
 use crate::tnpkg::VectorClock;
 
@@ -123,12 +124,7 @@ pub fn resolve_admin_log_path(yaml_dir: &Path, cfg: &Config) -> PathBuf {
         return yaml_dir.join(".tn").join("admin").join("admin.ndjson");
     }
 
-    let p = Path::new(&substituted);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        yaml_dir.join(p)
-    }
+    resolve(yaml_dir, Path::new(&substituted))
 }
 
 /// Resolve the LKV cache-file path for a yaml dir:

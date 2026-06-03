@@ -70,6 +70,7 @@ pub mod envelope;
 pub mod error;
 pub mod indexing;
 pub mod path_template;
+pub(crate) mod pathutil;
 pub mod perf;
 pub mod signing;
 pub mod storage;

@@ -35,6 +35,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::pathutil::resolve;
 use crate::{Error, Result};
 
 /// One piece of a parsed path template.
@@ -162,12 +163,7 @@ impl PathTemplate {
         // Literal segment.
         if !self.is_templated {
             if let Some(Segment::Literal(lit)) = self.segments.first() {
-                let p = Path::new(lit);
-                return if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    self.yaml_dir.join(p)
-                };
+                return resolve(&self.yaml_dir, Path::new(lit));
             }
         }
         let mut s = String::with_capacity(64);
@@ -193,12 +189,7 @@ impl PathTemplate {
                 }
             }
         }
-        let p = Path::new(&s);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.yaml_dir.join(p)
-        }
+        resolve(&self.yaml_dir, Path::new(&s))
     }
 
     /// Render a glob-style pattern that matches every concrete path
@@ -308,6 +299,38 @@ mod tests {
         assert!(t.is_per_event());
         let p = t.render("order.created", "abc-123");
         assert_eq!(p, PathBuf::from("/cer/logs/order/abc-123.ndjson"));
+    }
+
+    #[test]
+    fn windows_absolute_literal_is_not_joined_onto_yaml_dir() {
+        // Regression guard for the wasm32/Windows double-join bug: a
+        // ceremony whose `logs.path` is an absolute Windows path must
+        // render to that path, not `yaml_dir\C:\…`. `Path::is_absolute()`
+        // is false for `C:\…` on Unix + wasm32, so this failed before the
+        // xplat resolver was wired in here.
+        let t =
+            PathTemplate::parse("C:\\logs\\tn.ndjson", &yaml_dir(), "cer_x", "did:key:z").unwrap();
+        assert!(!t.is_templated());
+        assert_eq!(
+            t.render("any.event", "ignored"),
+            PathBuf::from("C:\\logs\\tn.ndjson"),
+        );
+    }
+
+    #[test]
+    fn windows_absolute_templated_is_not_joined_onto_yaml_dir() {
+        let t = PathTemplate::parse(
+            "C:\\logs\\{event_type}.ndjson",
+            &yaml_dir(),
+            "cer_x",
+            "did:key:z",
+        )
+        .unwrap();
+        assert!(t.is_templated());
+        assert_eq!(
+            t.render("order.created", "ignored"),
+            PathBuf::from("C:\\logs\\order.created.ndjson"),
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value as JsonValue;
 
+use crate::pathutil::resolve;
 use crate::{Error, Result};
 
 /// Compiled filter — mirror of Python `tn.filters.compile_filter` and
@@ -223,20 +224,19 @@ pub fn parse_duration(v: &JsonValue, default_secs: f64) -> Result<f64> {
     )))
 }
 
-/// Resolve a path relative to `yaml_dir` if not absolute.
+/// Resolve a path relative to `yaml_dir` if not absolute. Uses the
+/// cross-platform absolute-path check so a ceremony's Windows `C:\…`
+/// handler path is honored on wasm32 hosts (where `Path::is_absolute()`
+/// follows Unix rules) instead of being double-joined onto `yaml_dir`.
 pub fn resolve_path(p: &str, yaml_dir: &Path) -> PathBuf {
-    let candidate = Path::new(p);
-    if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        yaml_dir.join(candidate)
-    }
+    resolve(yaml_dir, Path::new(p))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn duration_string_seconds() {
@@ -273,5 +273,20 @@ mod tests {
         };
         assert!(f.matches(&json!({"event_type": "tn.recipient.added"})));
         assert!(!f.matches(&json!({"event_type": "user.signup"})));
+    }
+
+    #[test]
+    fn resolve_path_honors_windows_absolute() {
+        // Regression guard: `C:\…` is absolute even though
+        // `Path::is_absolute()` says otherwise on Unix + wasm32, so it
+        // must not be joined onto `yaml_dir`.
+        assert_eq!(
+            resolve_path("logs/drop.ndjson", Path::new("/cer")),
+            PathBuf::from("/cer/logs/drop.ndjson"),
+        );
+        assert_eq!(
+            resolve_path("C:\\data\\drop", Path::new("/cer")),
+            PathBuf::from("C:\\data\\drop"),
+        );
     }
 }
