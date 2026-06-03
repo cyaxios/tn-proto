@@ -1,4 +1,7 @@
-//! `fs.scan` handler — pick up `.tnpkg` files from a watched directory.
+//! `fs.scan` handler — pick up `.tnpkg` files from a watched directory. A
+//! handler implementation; the handler interface + [`crate::Runtime`] fan-out
+//! is the entry point (behind `tn.info()` / `tn log`). Internal primitive —
+//! reach here directly only to configure or inspect this scan source.
 //!
 //! Mirrors `python/tn/handlers/fs_scan.py`. Polls a directory for
 //! `.tnpkg` files, calls [`crate::Runtime::absorb`] for each, then
@@ -60,11 +63,7 @@ impl FsScanHandler {
     /// # Errors
     /// `Error::InvalidConfig` for unknown `on_processed` values or when
     /// the required `in_dir` is missing.
-    pub fn from_spec(
-        spec: &HandlerSpec,
-        runtime: Arc<Runtime>,
-        yaml_dir: &Path,
-    ) -> Result<Self> {
+    pub fn from_spec(spec: &HandlerSpec, runtime: Arc<Runtime>, yaml_dir: &Path) -> Result<Self> {
         let ctx = "fs.scan";
         let in_dir_str = spec::require_str(&spec.raw, "in_dir", ctx)?;
         let in_dir = spec::resolve_path(&in_dir_str, yaml_dir);
@@ -190,8 +189,8 @@ impl FsScanHandler {
         for entry in entries {
             match self.runtime.absorb(AbsorbSource::Path(&entry)) {
                 Ok(receipt) => {
-                    let rejected = !receipt.legacy_reason.is_empty()
-                        || receipt.legacy_status == "rejected";
+                    let rejected =
+                        !receipt.legacy_reason.is_empty() || receipt.legacy_status == "rejected";
                     if rejected {
                         log::warn!(
                             "[{}] fs.scan: rejecting {}: {}",
@@ -280,12 +279,7 @@ impl FsScanHandler {
         self.stop.store(true, Ordering::SeqCst);
         let (_, cv) = &*self.cv;
         cv.notify_all();
-        if let Some(h) = self
-            .join
-            .lock()
-            .expect("fs.scan close join lock")
-            .take()
-        {
+        if let Some(h) = self.join.lock().expect("fs.scan close join lock").take() {
             // Best-effort join; don't panic on a poisoned scheduler.
             let _ = h.join();
         }

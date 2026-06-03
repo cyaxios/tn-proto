@@ -155,8 +155,9 @@ def _validate_path_template(
     dummy = dummy.replace("{ceremony_id}", "local_test1234")
     dummy = dummy.replace("{did}", "z6MkTestAAAAAAAA")
     resolved = Path(dummy).resolve() if Path(dummy).is_absolute() else (yaml_dir / dummy).resolve()
+    allowed_root = yaml_dir.parent if yaml_dir.name == "streams" else yaml_dir
     try:
-        resolved.relative_to(yaml_dir.resolve())
+        resolved.relative_to(allowed_root.resolve())
     except ValueError as err:
         raise ValueError(f"{key_name} resolves outside ceremony directory") from err
 
@@ -271,7 +272,16 @@ class LoadedConfig:
     mode: str = "local"  # "local" | "linked"
     linked_vault: str | None = None  # e.g. "https://vault.tn-proto.org"
     linked_project_id: str | None = None  # vault-side project id
-    sync_logs: bool = False  # §9.4 option B: also sync ndjson logs
+    # Project-level vault block normalized from `vault:` (preferred) or
+    # legacy `ceremony.linked_*` fields. Vault sync never includes app logs.
+    vault_enabled: bool = False
+    vault_declared: bool = False
+    vault_url: str | None = None
+    vault_linked_project_id: str | None = None
+    vault_autosync: bool = False
+    vault_sync_interval_seconds: int = 600
+    # Legacy parsed field. Vault sync never includes application logs.
+    sync_logs: bool = False
     # DX review #6: ``ceremony.sign`` mirrored on the loaded config so
     # readers can decide whether to verify signatures. False means the
     # writer chose to skip Ed25519 signing (profile=telemetry/stdout);
@@ -659,16 +669,24 @@ def create_fresh(
         "auto_populated_by_policy": True,
     }
 
-    from .vault_client import DEFAULT_VAULT_URL
+    from .vault_client import resolve_vault_url
 
     # DX review #5: ``link=False`` produces an unlinked (offline)
     # ceremony — no ``linked_vault`` URL, ``mode: local``. ``link=True``
     # or ``link=None`` (the legacy default) preserves the linked
     # behaviour. Callers that want an air-gap deploy now have a
     # documented init-time knob; the kwarg used to silently no-op.
-    _is_unlinked = link is False
+    # ``TN_NO_LINK=1`` is the env-level equivalent of ``link=False`` and
+    # is honored here so the opt-out reaches the yaml stamping — not just
+    # the auto-link upload path in ``tn.__init__``.
+    _env_no_link = os.environ.get("TN_NO_LINK", "").strip() == "1"
+    _is_unlinked = (link is False) or _env_no_link
     _yaml_mode = "local" if _is_unlinked else "linked"
-    _yaml_vault_url = "" if _is_unlinked else DEFAULT_VAULT_URL
+    # Resolve the link URL through the standard precedence
+    # (explicit arg > ``TN_VAULT_URL`` > ``DEFAULT_VAULT_URL``) rather than
+    # hardcoding prod, so pointing ``TN_VAULT_URL`` at a local vault mints
+    # a ceremony linked to *that* vault.
+    _yaml_vault_url = "" if _is_unlinked else resolve_vault_url(None)
 
     doc = {
         # All ceremony defaults are written explicitly so the yaml is a
@@ -687,7 +705,6 @@ def create_fresh(
             "mode": _yaml_mode,
             "linked_vault": _yaml_vault_url,
             "linked_project_id": "",
-            "sync_logs": False,
             "cipher": cipher,
             # Sign every entry's row_hash with the device's Ed25519 key.
             # ``sign: false`` flips chain-only mode (still tamper-evident
@@ -707,6 +724,13 @@ def create_fresh(
             # and is honored at init unless the caller already set a
             # threshold programmatically via ``tn.set_level()``.
             "log_level": "debug",
+        },
+        "vault": {
+            "enabled": not _is_unlinked,
+            "url": _yaml_vault_url,
+            "linked_project_id": "",
+            "autosync": not _is_unlinked,
+            "sync_interval_seconds": 600,
         },
         # Where `tn.info` writes and `tn.read` reads. Single path, no template
         # substitution. For event-type-based file splitting use a `handlers:`
@@ -1150,6 +1174,16 @@ def authoritative_yaml_for(yaml_path: Path, key: str) -> Path:
 
 
 @dataclass(frozen=True)
+class _VaultSettings:
+    present: bool
+    enabled: bool
+    url: str | None
+    linked_project_id: str | None
+    autosync: bool
+    sync_interval_seconds: int
+
+
+@dataclass(frozen=True)
 class _CeremonySettings:
     """Validated ceremony-block scalars resolved from yaml.
 
@@ -1162,7 +1196,7 @@ class _CeremonySettings:
     mode: str  # "local" | "linked"
     linked_vault: str | None
     linked_project_id: str | None
-    sync_logs: bool
+    sync_logs: bool  # legacy/ignored; vault sync never includes app logs
     # DX review #6: surface ``ceremony.sign`` on the loaded config so
     # ``tn.read(verify=True)`` can consult it. Yamls written with
     # ``sign: false`` ship empty signatures; the reader skips the
@@ -1221,8 +1255,80 @@ def _validate_load_doc_structure(yaml_path: Path, doc: Any) -> None:
             )
 
 
+def _resolve_vault_settings(
+    yaml_path: Path,
+    vault_block: Any,
+    ceremony_block: dict[str, Any],
+) -> _VaultSettings:
+    """Normalize the project-level ``vault:`` block with legacy fallback."""
+    legacy_url = _str_or_none(ceremony_block.get("linked_vault"))
+    legacy_project_id = _str_or_none(ceremony_block.get("linked_project_id"))
+    if vault_block is None:
+        return _VaultSettings(
+            present=False,
+            enabled=bool(legacy_url),
+            url=legacy_url,
+            linked_project_id=legacy_project_id,
+            autosync=bool(legacy_url),
+            sync_interval_seconds=600,
+        )
+    if not isinstance(vault_block, dict):
+        raise ValueError(f"{yaml_path}: vault must be a mapping when present")
+
+    enabled = bool(vault_block.get("enabled", True))
+    url = _str_or_none(vault_block.get("url"))
+    linked_project_id = _str_or_none(vault_block.get("linked_project_id"))
+    autosync = bool(vault_block.get("autosync", enabled))
+    raw_interval = vault_block.get("sync_interval_seconds", 600)
+    try:
+        interval = int(raw_interval)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{yaml_path}: vault.sync_interval_seconds must be an integer"
+        ) from exc
+    if interval <= 0:
+        raise ValueError(f"{yaml_path}: vault.sync_interval_seconds must be positive")
+    if enabled and not url:
+        raise ValueError(f"{yaml_path}: vault.enabled=true requires vault.url")
+    return _VaultSettings(
+        present=True,
+        enabled=enabled,
+        url=url if enabled else None,
+        linked_project_id=linked_project_id if enabled else None,
+        autosync=autosync if enabled else False,
+        sync_interval_seconds=interval,
+    )
+
+
+def _rust_config_summary(yaml_path: Path) -> dict[str, Any]:
+    """Load and normalize YAML through ``tn_core``.
+
+    This is the shared control-plane check for the Python SDK. Python still
+    materializes ``LoadedConfig`` because it owns Python cipher/handler objects,
+    but the YAML grammar, extends merge, reserved-name rule, field routing, and
+    normalized vault view are validated by Rust first.
+    """
+    from tn_core import _core as _tn_core
+
+    return dict(_tn_core.config_load_summary(str(yaml_path)))
+
+
+def _vault_settings_from_rust(yaml_path: Path, summary: dict[str, Any]) -> _VaultSettings:
+    vault = summary.get("vault")
+    if not isinstance(vault, dict):
+        raise ValueError(f"{yaml_path}: tn_core returned malformed vault summary")
+    return _VaultSettings(
+        present=bool(vault.get("declared", False)),
+        enabled=bool(vault.get("enabled", False)),
+        url=_str_or_none(vault.get("url")),
+        linked_project_id=_str_or_none(vault.get("linked_project_id")),
+        autosync=bool(vault.get("autosync", False)),
+        sync_interval_seconds=int(vault.get("sync_interval_seconds", 600)),
+    )
+
+
 def _resolve_ceremony_settings(
-    yaml_path: Path, ceremony_block: dict[str, Any]
+    yaml_path: Path, ceremony_block: dict[str, Any], vault_settings: _VaultSettings
 ) -> _CeremonySettings:
     """Validate and pack the ``ceremony:`` block scalars.
 
@@ -1242,8 +1348,16 @@ def _resolve_ceremony_settings(
     mode = str(ceremony_block.get("mode") or "local")
     if mode not in ("local", "linked"):
         raise ValueError(f"{yaml_path}: unknown ceremony.mode {mode!r}")
-    linked_vault = ceremony_block.get("linked_vault") or None
-    linked_project_id = ceremony_block.get("linked_project_id") or None
+    linked_vault = (
+        vault_settings.url
+        if vault_settings.present
+        else _str_or_none(ceremony_block.get("linked_vault"))
+    )
+    linked_project_id = (
+        vault_settings.linked_project_id
+        if vault_settings.present
+        else _str_or_none(ceremony_block.get("linked_project_id"))
+    )
     if mode == "linked" and not linked_vault:
         raise ValueError(
             f"{yaml_path}: ceremony.mode=linked requires ceremony.linked_vault",
@@ -1421,8 +1535,11 @@ def load(yaml_path: Path) -> LoadedConfig:
     doc = _resolve_extends(yaml_path, doc)
 
     _validate_load_doc_structure(yaml_path, doc)
+    field_to_groups = _build_field_to_groups(doc, yaml_path)
+    rust_summary = _rust_config_summary(yaml_path)
     ceremony_block = doc.get("ceremony") or {}
-    settings = _resolve_ceremony_settings(yaml_path, ceremony_block)
+    vault_settings = _vault_settings_from_rust(yaml_path, rust_summary)
+    settings = _resolve_ceremony_settings(yaml_path, ceremony_block, vault_settings)
     pel = _resolve_admin_log_location(yaml_path, ceremony_block)
 
     logs_block = doc.get("logs") or {}
@@ -1447,8 +1564,6 @@ def load(yaml_path: Path) -> LoadedConfig:
         )
         for name, spec in doc["groups"].items()
     }
-
-    field_to_groups = _build_field_to_groups(doc, yaml_path)
 
     # Hand the LLM classifier its config so the stub knows if it's
     # "enabled" (it currently does nothing either way).
@@ -1476,6 +1591,12 @@ def load(yaml_path: Path) -> LoadedConfig:
         mode=settings.mode,
         linked_vault=settings.linked_vault,
         linked_project_id=settings.linked_project_id,
+        vault_enabled=vault_settings.enabled,
+        vault_declared=vault_settings.present,
+        vault_url=vault_settings.url,
+        vault_linked_project_id=vault_settings.linked_project_id,
+        vault_autosync=vault_settings.autosync,
+        vault_sync_interval_seconds=vault_settings.sync_interval_seconds,
         sync_logs=settings.sync_logs,
         sign=settings.sign,
         chain=settings.chain,

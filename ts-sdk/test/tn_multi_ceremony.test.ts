@@ -74,14 +74,8 @@ test("Tn.openCeremony rejects invalid ceremony names", async () => {
       Tn.openCeremony("bad/name", { projectDir: project }),
       /invalid ceremony name/,
     );
-    await assert.rejects(
-      Tn.openCeremony("", { projectDir: project }),
-      /invalid ceremony name/,
-    );
-    await assert.rejects(
-      Tn.openCeremony("tn", { projectDir: project }),
-      /invalid ceremony name/,
-    );
+    await assert.rejects(Tn.openCeremony("", { projectDir: project }), /invalid ceremony name/);
+    await assert.rejects(Tn.openCeremony("tn", { projectDir: project }), /invalid ceremony name/);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -117,16 +111,17 @@ test("Tn.openCeremony auto-creates a named stream that extends default", async (
     const tn = await Tn.openCeremony("payments", { projectDir: project });
     try {
       // Stream yaml exists.
-      const streamYaml = join(project, ".tn", "payments", "tn.yaml");
+      const projectName = project.split(/[\\/]/).pop() ?? "";
+      const streamYaml = join(project, ".tn", projectName, "streams", "payments.yaml");
       assert.ok(existsSync(streamYaml));
       // It contains extends: pointing at default.
       const text = readFileSync(streamYaml, "utf8");
-      assert.match(text, /extends:.*default\/tn\.yaml/);
+      assert.match(text, /extends:.*\.\.\/tn\.yaml/);
       // Default also got created (parent of the stream).
-      assert.ok(existsSync(join(project, ".tn", "default", "tn.yaml")));
-      assert.ok(existsSync(join(project, ".tn", "default", "keys", "local.private")));
+      assert.ok(existsSync(join(project, ".tn", projectName, "tn.yaml")));
+      assert.ok(existsSync(join(project, ".tn", projectName, "keys", "local.private")));
       // Stream itself has no keys/ dir (shared identity).
-      assert.ok(!existsSync(join(project, ".tn", "payments", "keys")));
+      assert.ok(!existsSync(join(project, ".tn", projectName, "streams", "keys")));
     } finally {
       await tn.close();
     }
@@ -143,8 +138,9 @@ test("Tn.openCeremony stamps profile into stream yaml", async () => {
       profile: "telemetry",
     });
     try {
+      const projectName = project.split(/[\\/]/).pop() ?? "";
       const text = readFileSync(
-        join(project, ".tn", "traces", "tn.yaml"),
+        join(project, ".tn", projectName, "streams", "traces.yaml"),
         "utf8",
       );
       assert.match(text, /profile:\s*telemetry/);
@@ -153,5 +149,31 @@ test("Tn.openCeremony stamps profile into stream yaml", async () => {
     }
   } finally {
     rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("Tn.use cache is scoped by projectDir and stream name", async () => {
+  const projectA = makeProject();
+  const projectB = makeProject();
+  try {
+    const a1 = await Tn.use("api", { projectDir: projectA });
+    const a2 = await Tn.use("api", { projectDir: projectA });
+    const b1 = await Tn.use("api", { projectDir: projectB });
+    const b2 = await Tn.use("api", { projectDir: projectB });
+    try {
+      assert.equal(a1, a2);
+      assert.equal(b1, b2);
+      assert.notEqual(a1, b1);
+      const projectAName = projectA.split(/[\\/]/).pop() ?? "";
+      const projectBName = projectB.split(/[\\/]/).pop() ?? "";
+      assert.ok(existsSync(join(projectA, ".tn", projectAName, "streams", "api.yaml")));
+      assert.ok(existsSync(join(projectB, ".tn", projectBName, "streams", "api.yaml")));
+    } finally {
+      await a1.close();
+      await b1.close();
+    }
+  } finally {
+    rmSync(projectA, { recursive: true, force: true });
+    rmSync(projectB, { recursive: true, force: true });
   }
 });

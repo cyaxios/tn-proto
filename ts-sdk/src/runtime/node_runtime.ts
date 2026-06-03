@@ -58,6 +58,7 @@ import { BtnPublisher, btnKitLeaf } from "../raw.js";
 import { ensureProcessRunId } from "../_run_id.js";
 import { decryptGroup, type GroupKits } from "../core/decrypt.js";
 import { getProfile, isKnownProfile } from "../profiles.js";
+import { DEFAULT_VAULT_URL } from "../vault/url.js";
 import type { TNHandler } from "../handlers/index.js";
 
 function readKitLeaf(kitBytes: Uint8Array): bigint {
@@ -1243,9 +1244,9 @@ export class NodeRuntime {
           JSON.stringify([...KNOWN_KINDS].sort()),
       );
     }
-    if (kind === "full_keystore" && !opts.confirmIncludesSecrets) {
+    if ((kind === "full_keystore" || kind === "project_seed") && !opts.confirmIncludesSecrets) {
       throw new Error(
-        "export(kind='full_keystore') writes the publisher's raw private keys. " +
+        `export(kind='${kind}') writes the publisher's raw private keys. ` +
           "Pass confirmIncludesSecrets=true to acknowledge.",
       );
     }
@@ -1282,6 +1283,11 @@ export class NodeRuntime {
       body = built.body;
       extras.state = built.state;
       extras.scope = kind === "full_keystore" ? "full" : "kit_bundle";
+    } else if (kind === "project_seed") {
+      const built = this._buildProjectSeedBody({ groups: opts.groups });
+      body = built.body;
+      extras.state = built.state;
+      extras.scope = "project";
     }
 
     const manifestArgs: {
@@ -1296,7 +1302,11 @@ export class NodeRuntime {
       ceremonyId: this.config.ceremonyId,
       scope: opts.scope ?? extras.scope ?? _defaultScope(kind),
     };
-    if (opts.toDid !== undefined) manifestArgs.toDid = opts.toDid;
+    if (kind === "project_seed") {
+      manifestArgs.toDid = this.config.device.device_identity;
+    } else if (opts.toDid !== undefined) {
+      manifestArgs.toDid = opts.toDid;
+    }
     const manifest = newManifest(manifestArgs);
     if (extras.clock) manifest.clock = extras.clock;
     if (extras.eventCount !== undefined) manifest.eventCount = extras.eventCount;
@@ -1636,6 +1646,63 @@ export class NodeRuntime {
     };
   }
 
+  private _buildProjectSeedBody(opts: { groups: string[] | undefined }): {
+    body: Record<string, Uint8Array>;
+    state: Record<string, unknown>;
+  } {
+    const keystore = this.config.keystorePath;
+    if (!existsSync(keystore) || !statSync(keystore).isDirectory()) {
+      throw new Error(`project_seed: keystore directory not found: ${keystore}`);
+    }
+    const yamlPath = this.config.yamlPath;
+    if (!existsSync(yamlPath)) {
+      throw new Error(`project_seed: yaml path does not exist: ${yamlPath}`);
+    }
+
+    const groupFilter = opts.groups && opts.groups.length > 0 ? new Set(opts.groups) : null;
+    const keyRe = /^(.+?)\.btn\.(mykit|state)$/;
+    const body: Record<string, Uint8Array> = {
+      "body/tn.yaml": new Uint8Array(readFileSync(yamlPath)),
+    };
+    const keysMeta: string[] = [];
+
+    for (const entry of readdirSync(keystore).sort()) {
+      const p = join(keystore, entry);
+      if (!statSync(p).isFile()) continue;
+      if (entry === "local.private" || entry === "local.public" || entry === "index_master.key") {
+        body[`body/keys/${entry}`] = new Uint8Array(readFileSync(p));
+        keysMeta.push(entry);
+        continue;
+      }
+      const m = keyRe.exec(entry);
+      if (m) {
+        const group = m[1]!;
+        if (groupFilter && !groupFilter.has(group)) continue;
+        body[`body/keys/${entry}`] = new Uint8Array(readFileSync(p));
+        keysMeta.push(entry);
+      }
+    }
+
+    for (const required of ["body/keys/local.private", "body/keys/local.public"]) {
+      if (!(required in body)) {
+        throw new Error(`project_seed: keystore is missing ${required.slice("body/keys/".length)}`);
+      }
+    }
+
+    body["body/WARNING_CONTAINS_PRIVATE_KEYS"] = new Uint8Array(0);
+    return {
+      body,
+      state: {
+        project: {
+          ceremony_id: this.config.ceremonyId,
+          project_name: this.config.projectName,
+          keys: keysMeta.slice().sort(),
+        },
+        kind: "project-seed",
+      },
+    };
+  }
+
   private _absorbAdminLogSnapshot(
     manifest: Manifest,
     body: Map<string, Uint8Array>,
@@ -1815,6 +1882,87 @@ export class NodeRuntime {
       }
     }
     return count;
+  }
+
+  private _projectSeedVaultYamlPatch(
+    existingYaml: Uint8Array,
+    incomingYaml: Uint8Array,
+  ): { patched?: Uint8Array; vaultOnly: boolean } {
+    const nonEmpty = (value: unknown): string | undefined =>
+      typeof value === "string" && value.trim() ? value.trim() : undefined;
+    let existingDoc: Record<string, unknown>;
+    let incomingDoc: Record<string, unknown>;
+    try {
+      existingDoc = (parseYaml(Buffer.from(existingYaml).toString("utf8")) as Record<string, unknown>) ?? {};
+      incomingDoc = (parseYaml(Buffer.from(incomingYaml).toString("utf8")) as Record<string, unknown>) ?? {};
+    } catch {
+      return { vaultOnly: false };
+    }
+    if (typeof existingDoc !== "object" || typeof incomingDoc !== "object") {
+      return { vaultOnly: false };
+    }
+    const existingVault = existingDoc["vault"] as Record<string, unknown> | undefined;
+    const incomingVault = incomingDoc["vault"] as Record<string, unknown> | undefined;
+    if (!existingVault || !incomingVault || typeof existingVault !== "object" || typeof incomingVault !== "object") {
+      return { vaultOnly: false };
+    }
+    if (existingVault["enabled"] === false) return { vaultOnly: false };
+
+    const patchedDoc = structuredClone(existingDoc);
+    const patchedVault = patchedDoc["vault"] as Record<string, unknown>;
+    let changed = false;
+    for (const field of ["url", "linked_project_id"] as const) {
+      if (!nonEmpty(patchedVault[field])) {
+        const incomingValue = nonEmpty(incomingVault[field]);
+        if (incomingValue) {
+          patchedVault[field] = incomingValue;
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      patchedVault["enabled"] = true;
+      if (patchedVault["autosync"] === undefined) patchedVault["autosync"] = true;
+      if (patchedVault["sync_interval_seconds"] === undefined) {
+        patchedVault["sync_interval_seconds"] = incomingVault["sync_interval_seconds"] ?? 600;
+      }
+      const ceremony = patchedDoc["ceremony"] as Record<string, unknown> | undefined;
+      const incomingCeremony = incomingDoc["ceremony"] as Record<string, unknown> | undefined;
+      if (ceremony && incomingCeremony && typeof ceremony === "object" && typeof incomingCeremony === "object") {
+        if (!nonEmpty(ceremony["linked_vault"])) {
+          const incomingUrl = nonEmpty(incomingCeremony["linked_vault"]);
+          if (incomingUrl) ceremony["linked_vault"] = incomingUrl;
+        }
+        if (!nonEmpty(ceremony["linked_project_id"])) {
+          const incomingProjectId = nonEmpty(incomingCeremony["linked_project_id"]);
+          if (incomingProjectId) ceremony["linked_project_id"] = incomingProjectId;
+        }
+      }
+      const encoded = new TextEncoder().encode(stringifyYaml(patchedDoc));
+      return Buffer.from(encoded).equals(Buffer.from(existingYaml))
+        ? { vaultOnly: true }
+        : { patched: encoded, vaultOnly: true };
+    }
+
+    const blankVaultMetadata = (doc: Record<string, unknown>): Record<string, unknown> => {
+      const clone = structuredClone(doc);
+      const vault = clone["vault"] as Record<string, unknown> | undefined;
+      if (vault && typeof vault === "object") {
+        vault["url"] = "";
+        vault["linked_project_id"] = "";
+      }
+      const ceremony = clone["ceremony"] as Record<string, unknown> | undefined;
+      if (ceremony && typeof ceremony === "object") {
+        ceremony["linked_vault"] = "";
+        ceremony["linked_project_id"] = "";
+      }
+      return clone;
+    };
+    return {
+      vaultOnly:
+        JSON.stringify(blankVaultMetadata(existingDoc)) ===
+        JSON.stringify(blankVaultMetadata(incomingDoc)),
+    };
   }
 
   /**
@@ -2065,28 +2213,36 @@ export class NodeRuntime {
       const existing = readFileSync(yamlTarget);
       if (Buffer.from(existing).equals(Buffer.from(yamlBytes))) {
         deduped += 1;
-      } else if (this._userEventCount() === 0) {
-        try {
-          renameSync(yamlTarget, `${yamlTarget}.previous.${ts}`);
-        } catch {
-          /* best effort */
-        }
-        replaced.push(yamlTarget);
-        mkdirSync(dirname(yamlTarget), { recursive: true });
-        writeFileSync(yamlTarget, Buffer.from(yamlBytes));
-        accepted += 1;
       } else {
-        return {
-          kind: manifest.kind,
-          acceptedCount: 0,
-          dedupedCount: 0,
-          noop: false,
-          derivedState: null,
-          conflicts: [],
-          rejectedReason:
-            `refusing to overwrite existing tn.yaml at ${yamlTarget}: contents differ and the local ` +
-            `log already contains user-emitted entries.`,
-        };
+        const patch = this._projectSeedVaultYamlPatch(existing, yamlBytes);
+        if (patch.patched !== undefined) {
+          writeFileSync(yamlTarget, Buffer.from(patch.patched));
+          accepted += 1;
+        } else if (patch.vaultOnly) {
+          deduped += 1;
+        } else if (this._userEventCount() === 0) {
+          try {
+            renameSync(yamlTarget, `${yamlTarget}.previous.${ts}`);
+          } catch {
+            /* best effort */
+          }
+          replaced.push(yamlTarget);
+          mkdirSync(dirname(yamlTarget), { recursive: true });
+          writeFileSync(yamlTarget, Buffer.from(yamlBytes));
+          accepted += 1;
+        } else {
+          return {
+            kind: manifest.kind,
+            acceptedCount: 0,
+            dedupedCount: 0,
+            noop: false,
+            derivedState: null,
+            conflicts: [],
+            rejectedReason:
+              `refusing to overwrite existing tn.yaml at ${yamlTarget}: contents differ and the local ` +
+              `log already contains user-emitted entries.`,
+          };
+        }
       }
     } else {
       mkdirSync(dirname(yamlTarget), { recursive: true });
@@ -2619,6 +2775,8 @@ function _defaultScope(kind: ManifestKind | string): string {
       return "kit_bundle";
     case "full_keystore":
       return "full";
+    case "project_seed":
+      return "project";
     default:
       return "admin";
   }
@@ -2806,6 +2964,12 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
   admin_log_location: ${_adminLogStr}
   log_level: debug
   chain: ${_chains}${_projectNameLine}
+vault:
+  enabled: true
+  url: ${DEFAULT_VAULT_URL}
+  linked_project_id: ''
+  autosync: true
+  sync_interval_seconds: 600
 logs:
   path: ${_logPathStr}
 keystore:

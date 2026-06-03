@@ -24,18 +24,34 @@ import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 
 import { createFreshCeremony } from "./runtime/node_runtime.js";
-import {
-  DEFAULT_PROFILE,
-  getProfile,
-  isKnownProfile,
-  type ProfileName,
-} from "./profiles.js";
+import { DEFAULT_PROFILE, getProfile, isKnownProfile, type ProfileName } from "./profiles.js";
 
 export const TN_ROOT_DIRNAME = ".tn";
 export const DEFAULT_CEREMONY_NAME = "default";
 export const LEGACY_DEFAULT_DIRNAME = "tn";
 
 const _CEREMONY_NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/;
+
+export interface ProjectLayout {
+  workspace: string;
+  project: string;
+  projectDir: string;
+  projectYaml: string;
+  keysDir: string;
+  streamsDir: string;
+  logsDir: string;
+  adminDir: string;
+  vaultDir: string;
+}
+
+export interface StreamLayout {
+  project: ProjectLayout;
+  stream: string;
+  streamYaml: string;
+  logPath: string;
+  adminLogPath: string;
+  extendsRelpath: string;
+}
 
 export class TNInvalidName extends Error {
   constructor(message: string) {
@@ -72,6 +88,63 @@ export function tnRoot(projectDir?: string): string {
   return resolve(projectDir ?? process.cwd(), TN_ROOT_DIRNAME);
 }
 
+export function defaultProjectName(projectDir?: string): string {
+  const workspace = resolve(projectDir ?? process.cwd());
+  const parts = workspace.split(/[\\/]+/);
+  const name = parts[parts.length - 1] ?? "";
+  if (!isValidCeremonyName(name)) {
+    throw new TNInvalidName(
+      `invalid ceremony name ${JSON.stringify(name)}: must match ` +
+        "[a-zA-Z0-9_][a-zA-Z0-9_-]* and is not 'tn' (reserved).",
+    );
+  }
+  return name;
+}
+
+export function projectLayout(project?: string, projectDir?: string): ProjectLayout {
+  const name = project ?? defaultProjectName(projectDir);
+  if (!isValidCeremonyName(name)) {
+    throw new TNInvalidName(
+      `invalid ceremony name ${JSON.stringify(name)}: must match ` +
+        "[a-zA-Z0-9_][a-zA-Z0-9_-]* and is not 'tn' (reserved).",
+    );
+  }
+  const workspace = resolve(projectDir ?? process.cwd());
+  const pdir = join(workspace, TN_ROOT_DIRNAME, name);
+  return {
+    workspace,
+    project: name,
+    projectDir: pdir,
+    projectYaml: join(pdir, "tn.yaml"),
+    keysDir: join(pdir, "keys"),
+    streamsDir: join(pdir, "streams"),
+    logsDir: join(pdir, "logs"),
+    adminDir: join(pdir, "admin"),
+    vaultDir: join(pdir, "vault"),
+  };
+}
+
+export function streamLayout(
+  stream = DEFAULT_CEREMONY_NAME,
+  opts: { project?: string; projectDir?: string } = {},
+): StreamLayout {
+  if (!isValidCeremonyName(stream)) {
+    throw new TNInvalidName(
+      `invalid ceremony name ${JSON.stringify(stream)}: must match ` +
+        "[a-zA-Z0-9_][a-zA-Z0-9_-]* and is not 'tn' (reserved).",
+    );
+  }
+  const pl = projectLayout(opts.project, opts.projectDir);
+  return {
+    project: pl,
+    stream,
+    streamYaml: join(pl.streamsDir, `${stream}.yaml`),
+    logPath: join(pl.logsDir, `${stream}.ndjson`),
+    adminLogPath: join(pl.adminDir, `${stream}.ndjson`),
+    extendsRelpath: "../tn.yaml",
+  };
+}
+
 /** Return the directory for ceremony ``name``. */
 export function ceremonyDir(name: string, projectDir?: string): string {
   if (!isValidCeremonyName(name)) {
@@ -99,10 +172,7 @@ export function listCeremoniesOnDisk(projectDir?: string): string[] {
   if (!existsSync(root)) return [];
   const out: string[] = [];
   for (const child of readdirSync(root)) {
-    if (
-      !isValidCeremonyName(child) &&
-      child !== LEGACY_DEFAULT_DIRNAME
-    ) {
+    if (!isValidCeremonyName(child) && child !== LEGACY_DEFAULT_DIRNAME) {
       continue;
     }
     if (existsSync(join(root, child, "tn.yaml"))) {
@@ -145,8 +215,9 @@ export function migrateLegacyLayout(projectDir?: string): string | null {
 }
 
 /**
- * Create ``.tn/<name>/`` with a real, loadable ``tn.yaml`` if the
- * directory does not already exist. Returns the yaml path.
+ * Legacy ceremony/stream creator for the sibling ``.tn/<name>/tn.yaml``
+ * layout. New project-root code uses ``ensureProjectLayoutOnDisk`` and
+ * ``ensureProjectStreamOnDisk``.
  *
  * Two-mode behavior — mirrors python/tn/_multi.py:_ensure_ceremony_on_disk:
  *
@@ -192,8 +263,7 @@ export function ensureCeremonyOnDisk(
     // so the vault labels the bound project with the human name (mirrors
     // Python's `_stamp_project_labels`). The literal "default" ceremony
     // stays unstamped.
-    const projectName =
-      opts.asRoot && name !== DEFAULT_CEREMONY_NAME ? name : undefined;
+    const projectName = opts.asRoot && name !== DEFAULT_CEREMONY_NAME ? name : undefined;
     return _createDefaultCeremony(
       name,
       yamlPath,
@@ -204,6 +274,117 @@ export function ensureCeremonyOnDisk(
     );
   }
   return _createStreamYaml(name, yamlPath, opts.projectDir, profile);
+}
+
+export function ensureProjectLayoutOnDisk(
+  project?: string,
+  opts: {
+    projectDir?: string;
+    profile?: string;
+    devicePrivateBytes?: Uint8Array;
+  } = {},
+): string {
+  const profile = opts.profile ?? DEFAULT_PROFILE;
+  if (!isKnownProfile(profile)) {
+    throw new TNCreateFailed(
+      `unknown profile ${JSON.stringify(profile)}; catalog: ` +
+        '["transaction","audit","secure_log","telemetry"]',
+    );
+  }
+  const layout = projectLayout(project, opts.projectDir);
+  if (existsSync(layout.projectYaml)) return layout.projectYaml;
+  for (const d of [
+    layout.projectDir,
+    layout.keysDir,
+    layout.streamsDir,
+    layout.logsDir,
+    layout.adminDir,
+    layout.vaultDir,
+  ]) {
+    mkdirSync(d, { recursive: true });
+  }
+  const freshOpts: {
+    keystoreDir: string;
+    logPath: string;
+    adminLogPath: string;
+    profile: ProfileName;
+    projectName: string;
+    devicePrivateBytes?: Uint8Array;
+  } = {
+    keystoreDir: layout.keysDir,
+    logPath: join(layout.logsDir, `${DEFAULT_CEREMONY_NAME}.ndjson`),
+    adminLogPath: join(layout.adminDir, `${DEFAULT_CEREMONY_NAME}.ndjson`),
+    profile,
+    projectName: layout.project,
+  };
+  if (opts.devicePrivateBytes !== undefined) {
+    freshOpts.devicePrivateBytes = opts.devicePrivateBytes;
+  }
+  createFreshCeremony(layout.projectYaml, freshOpts);
+  const defaultOverlay = join(layout.streamsDir, `${DEFAULT_CEREMONY_NAME}.yaml`);
+  if (!existsSync(defaultOverlay)) {
+    writeFileSync(defaultOverlay, "extends: ../tn.yaml\n", "utf8");
+  }
+  return layout.projectYaml;
+}
+
+export function ensureProjectStreamOnDisk(
+  stream = DEFAULT_CEREMONY_NAME,
+  opts: { project?: string; projectDir?: string; profile?: string } = {},
+): string {
+  const profile = opts.profile ?? DEFAULT_PROFILE;
+  if (!isKnownProfile(profile)) {
+    throw new TNCreateFailed(
+      `unknown profile ${JSON.stringify(profile)}; catalog: ` +
+        '["transaction","audit","secure_log","telemetry"]',
+    );
+  }
+  const projectOpts: { projectDir?: string; profile: ProfileName } = {
+    profile: DEFAULT_PROFILE,
+  };
+  if (opts.projectDir !== undefined) projectOpts.projectDir = opts.projectDir;
+  ensureProjectLayoutOnDisk(opts.project, projectOpts);
+  const streamOpts: { project?: string; projectDir?: string } = {};
+  if (opts.project !== undefined) streamOpts.project = opts.project;
+  if (opts.projectDir !== undefined) streamOpts.projectDir = opts.projectDir;
+  const layout = streamLayout(stream, streamOpts);
+  if (existsSync(layout.streamYaml)) return layout.streamYaml;
+  mkdirSync(layout.project.streamsDir, { recursive: true });
+  mkdirSync(layout.project.logsDir, { recursive: true });
+  mkdirSync(layout.project.adminDir, { recursive: true });
+
+  if (stream === DEFAULT_CEREMONY_NAME) {
+    writeFileSync(layout.streamYaml, "extends: ../tn.yaml\n", "utf8");
+    return layout.streamYaml;
+  }
+
+  const p = getProfile(profile);
+  const logPath = `../logs/${stream}.ndjson`;
+  const adminPath = `../admin/${stream}.ndjson`;
+  const handlers: string[] = [];
+  if (p.default_sink === "file_rotating") {
+    handlers.push(
+      `- kind: file.rotating\n  name: main\n  path: ${logPath}\n  ` +
+        `max_bytes: 5242880\n  backup_count: 5\n  rotate_on_init: false`,
+    );
+  }
+  handlers.push("- kind: stdout\n  name: stdout");
+  const yaml =
+    `extends: ${layout.extendsRelpath}\n` +
+    `ceremony:\n` +
+    `  id: ${_mintStreamCeremonyId(stream)}\n` +
+    `  sign: ${p.signs}\n` +
+    `  chain: ${p.chains}\n` +
+    `  profile: ${profile}\n` +
+    `  admin_log_location: ${adminPath}\n` +
+    `  log_level: debug\n` +
+    `logs:\n` +
+    `  path: ${logPath}\n` +
+    `handlers:\n` +
+    handlers.join("\n") +
+    "\n";
+  writeFileSync(layout.streamYaml, yaml, "utf8");
+  return layout.streamYaml;
 }
 
 function _createDefaultCeremony(
@@ -314,9 +495,7 @@ function _createStreamYaml(
   try {
     writeFileSync(yamlPath, yaml, "utf8");
   } catch (e) {
-    throw new TNCreateFailed(
-      `could not write stream yaml ${yamlPath}: ${(e as Error).message}`,
-    );
+    throw new TNCreateFailed(`could not write stream yaml ${yamlPath}: ${(e as Error).message}`);
   }
   return yamlPath;
 }
@@ -328,10 +507,7 @@ function _createStreamYaml(
  * profile, log a warning (operator-wins). Unknown profile names
  * raise — that's misconfig at the call site, not a conflict.
  */
-export function checkProfileConflict(
-  yamlPath: string,
-  profile: string | undefined,
-): void {
+export function checkProfileConflict(yamlPath: string, profile: string | undefined): void {
   if (profile !== undefined && !isKnownProfile(profile)) {
     throw new TNCreateFailed(
       `unknown profile ${JSON.stringify(profile)}; catalog: ` +

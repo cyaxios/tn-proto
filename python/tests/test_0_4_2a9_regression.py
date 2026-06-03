@@ -372,12 +372,13 @@ class TestExtendsHandlersListReplaces:
         parent = tn.init(stdout=False)
         parent.info("parent.event", x=1)
         tn.flush_and_close()
-        child = tn.init("bench", profile="stdout", stdout=False)
+        child = tn.use("bench", profile="telemetry")
         child.info("child.event", x=2)
         tn.flush_and_close()
 
-        parent_log = fresh_cwd / ".tn" / "default" / "logs" / "tn.ndjson"
-        child_log = fresh_cwd / ".tn" / "bench" / "logs" / "bench.ndjson"
+        project_root = fresh_cwd / ".tn" / fresh_cwd.name
+        parent_log = project_root / "logs" / "default.ndjson"
+        child_log = project_root / "logs" / "bench.ndjson"
 
         parent_envs = _envelopes_from(parent_log)
         child_envs = _envelopes_from(child_log)
@@ -398,9 +399,9 @@ class TestExtendsHandlersListReplaces:
         file.rotating."""
         tn.init(stdout=False)
         tn.flush_and_close()
-        tn.init("bench", profile="stdout", stdout=False)
+        tn.use("bench", profile="stdout")
         tn.flush_and_close()
-        parent_log = fresh_cwd / ".tn" / "default" / "logs" / "tn.ndjson"
+        parent_log = fresh_cwd / ".tn" / fresh_cwd.name / "logs" / "default.ndjson"
         parent_envs = _envelopes_from(parent_log)
         admin_types = [
             e.get("event_type") for e in parent_envs
@@ -422,7 +423,7 @@ class TestExtendsHandlersListReplaces:
         from tn.config import _read_yaml_doc, _resolve_extends
         tn.init(stdout=False)
         tn.flush_and_close()
-        child = tn.init("bench", profile="audit", stdout=False)
+        child = tn.use("bench", profile="audit")
         yaml_path = Path(child.cfg.yaml_path)
         text = yaml_path.read_text()
         # Surgically rewrite the handlers block.
@@ -450,7 +451,7 @@ class TestExtendsHandlersListReplaces:
         from tn.config import _read_yaml_doc, _resolve_extends
         tn.init(stdout=False)
         tn.flush_and_close()
-        child = tn.init("bench", profile="audit", stdout=False)
+        child = tn.use("bench", profile="audit")
         yaml_path = Path(child.cfg.yaml_path)
         text = yaml_path.read_text()
         parts = text.split("handlers:")
@@ -499,21 +500,21 @@ class TestBenchScenarioIntegration:
         tn.flush_and_close()
         # Bench: child stream with telemetry profile (signed=False,
         # chained=False, BUT writes a file).
-        child = tn.init("bench", profile="telemetry", stdout=False)
+        child = tn.use("bench", profile="telemetry")
         n = 100
         for i in range(n):
             child.info("bench.evt", i=i)
         tn.flush_and_close()
 
         # Reload the child and verify the round-trip the bench expects.
-        h = tn.init("bench", profile="telemetry", stdout=False)
+        h = tn.use("bench", profile="telemetry")
         rows = list(h.read(verify=False))
         assert len(rows) == n, (
             f"bench expected {n} rows, h.read() yielded {len(rows)}"
         )
 
         # And: no leakage into the parent log (bug 2 fix).
-        parent_log = fresh_cwd / ".tn" / "default" / "logs" / "tn.ndjson"
+        parent_log = fresh_cwd / ".tn" / fresh_cwd.name / "logs" / "default.ndjson"
         parent_envs = _envelopes_from(parent_log)
         leaked = [
             e for e in parent_envs if e.get("event_type") == "bench.evt"
@@ -539,35 +540,45 @@ class TestProjectNameLabels:
         h = tn.init(project="myproj", version="laptop-dev")
         cfg = h.cfg
         assert cfg.project_name == "myproj", (
-            f"project= kwarg should stamp ceremony.project_name; "
+            f"project= kwarg should create/stamp the named Project; "
             f"got {cfg.project_name!r}"
         )
         assert cfg.version_name == "laptop-dev"
-        # And it survives across re-init in a fresh process via the
-        # yaml on disk.
+        assert h.yaml_path == fresh_cwd / ".tn" / "myproj" / "tn.yaml"
+        # And it survives across re-init by naming the same Project.
         tn.flush_and_close()
-        h2 = tn.init()
+        h2 = tn.init(project="myproj")
         assert h2.cfg.project_name == "myproj"
         assert h2.cfg.version_name == "laptop-dev"
 
     def test_python_init_no_project_leaves_field_none(self, fresh_cwd):
-        """Without `project=`, the yaml carries no stamp — preserves
-        existing legacy ceremony behaviour for back-compat."""
+        """Without `project=`, init selects the cwd-named Project."""
         h = tn.init()
-        assert h.cfg.project_name is None
+        assert h.cfg.project_name == fresh_cwd.name
         assert h.cfg.version_name is None
 
     def test_stamp_is_additive_not_overwriting(self, fresh_cwd):
-        """A second `tn.init(project='other')` on an already-stamped
-        ceremony does NOT replace the original stamp. Matches the
-        immutable-after-mint promise for profile/ceremony_id."""
-        tn.init(project="first")
+        """A second label on the same explicit YAML does not replace
+        the original stamp. Plain `project=` now selects a Project root;
+        this keeps the old additive-label invariant covered for callers
+        that bind a stable YAML directly."""
+        yaml_path = fresh_cwd / "tn.yaml"
+        tn.init(yaml_path=yaml_path, project="first")
         tn.flush_and_close()
-        tn.init(project="second")
+        tn.init(yaml_path=yaml_path, project="second")
         assert tn.current_config().project_name == "first", (
             "project_name should be immutable after mint; "
             "second init must not overwrite"
         )
+
+    def test_second_project_kwarg_selects_different_project_root(self, fresh_cwd):
+        first = tn.init(project="first")
+        tn.flush_and_close()
+        second = tn.init(project="second")
+
+        assert first.yaml_path == fresh_cwd / ".tn" / "first" / "tn.yaml"
+        assert second.yaml_path == fresh_cwd / ".tn" / "second" / "tn.yaml"
+        assert second.cfg.project_name == "second"
 
     def test_wallet_link_uses_project_name(self, fresh_cwd):
         """The vault-link path resolves the project name via
@@ -611,7 +622,8 @@ class TestProjectNameLabels:
         pre-0.4.2a9 behaviour: vault project name = ceremony_id."""
         from tn import wallet as _wallet
 
-        h = tn.init(link=False)  # no project=, mode=local so link runs fresh
+        yaml_path = fresh_cwd / "tn.yaml"
+        h = tn.init(yaml_path=yaml_path, link=False)
         cfg = h.cfg
         assert cfg.project_name is None
 

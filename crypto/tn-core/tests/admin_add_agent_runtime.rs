@@ -51,12 +51,8 @@ fn unknown_group_errors() {
     let cer = setup_btn_with_agents(td.path());
     let rt = Runtime::init(&cer.yaml_path).unwrap();
     let out_path = td.path().join("agent.tnpkg");
-    let res = rt.admin_add_agent_runtime(
-        "did:key:zRuntimeAgent",
-        &["nonexistent"],
-        &out_path,
-        None,
-    );
+    let res =
+        rt.admin_add_agent_runtime("did:key:zRuntimeAgent", &["nonexistent"], &out_path, None);
     assert!(res.is_err());
 }
 

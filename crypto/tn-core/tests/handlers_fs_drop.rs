@@ -41,7 +41,10 @@ fn drops_signed_snapshot_on_admin_event() {
     let bytes = std::fs::read(&files[0]).unwrap();
     let (manifest, _body) = read_tnpkg(TnpkgSource::Bytes(&bytes)).unwrap();
     assert_eq!(manifest.kind, ManifestKind::AdminLogSnapshot);
-    assert!(manifest.head_row_hash.is_some(), "head_row_hash should be set");
+    assert!(
+        manifest.head_row_hash.is_some(),
+        "head_row_hash should be set"
+    );
     // The default template includes the short head hash; verify it appears in
     // the filename.
     let head = manifest.head_row_hash.as_ref().unwrap();
@@ -74,9 +77,7 @@ fn idempotent_when_head_unchanged() {
     let n = std::fs::read_dir(&outbox)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path().extension().and_then(|s| s.to_str()) == Some("tnpkg")
-        })
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("tnpkg"))
         .count();
     assert_eq!(n, 1, "second emit should not duplicate when head unchanged");
 }

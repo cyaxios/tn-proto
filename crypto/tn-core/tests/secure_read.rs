@@ -50,7 +50,9 @@ fn secure_read_skip_default_emits_tampered_event() {
     let obj = env.as_object_mut().unwrap();
     obj.insert(
         "row_hash".into(),
-        Value::String("sha256:0000000000000000000000000000000000000000000000000000000000000000".into()),
+        Value::String(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        ),
     );
     *last = serde_json::to_string(&env).unwrap();
     std::fs::write(&log_path, lines.join("\n") + "\n").unwrap();
@@ -97,7 +99,9 @@ fn secure_read_raise_returns_err_on_first_failure() {
     let mut env: serde_json::Value = serde_json::from_str(last).unwrap();
     env.as_object_mut().unwrap().insert(
         "row_hash".into(),
-        Value::String("sha256:1111111111111111111111111111111111111111111111111111111111111111".into()),
+        Value::String(
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
+        ),
     );
     *last = serde_json::to_string(&env).unwrap();
     std::fs::write(&log_path, lines.join("\n") + "\n").unwrap();
@@ -126,7 +130,9 @@ fn secure_read_forensic_surfaces_invalid_reasons() {
     let mut env: serde_json::Value = serde_json::from_str(last).unwrap();
     env.as_object_mut().unwrap().insert(
         "row_hash".into(),
-        Value::String("sha256:2222222222222222222222222222222222222222222222222222222222222222".into()),
+        Value::String(
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+        ),
     );
     *last = serde_json::to_string(&env).unwrap();
     std::fs::write(&log_path, lines.join("\n") + "\n").unwrap();
@@ -143,7 +149,12 @@ fn secure_read_forensic_surfaces_invalid_reasons() {
         .iter()
         .find(|e| e.fields.get("event_type").and_then(Value::as_str) == Some("evt.test"))
         .expect("forensic surfaces tampered row");
-    let reasons = bad.fields.get("_invalid_reasons").unwrap().as_array().unwrap();
+    let reasons = bad
+        .fields
+        .get("_invalid_reasons")
+        .unwrap()
+        .as_array()
+        .unwrap();
     let s: Vec<&str> = reasons.iter().filter_map(Value::as_str).collect();
     assert!(s.contains(&"row_hash") || s.contains(&"signature"));
 }
@@ -153,7 +164,11 @@ fn secure_read_attaches_instructions_when_kit_held() {
     let td = tempfile::tempdir().unwrap();
     let cer = setup_btn_with_agents(td.path());
     std::fs::create_dir_all(td.path().join(".tn").join("config")).unwrap();
-    std::fs::write(td.path().join(".tn").join("config").join("agents.md"), POLICY).unwrap();
+    std::fs::write(
+        td.path().join(".tn").join("config").join("agents.md"),
+        POLICY,
+    )
+    .unwrap();
     let rt = Runtime::init(&cer.yaml_path).unwrap();
     let mut f = serde_json::Map::new();
     f.insert("amount".into(), json!(7));

@@ -34,6 +34,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tn.absorb import _absorb_dispatch, absorb
 from tn.config import LoadedConfig, load as load_cfg
@@ -178,7 +179,12 @@ def test_project_seed_dirt_easy_bootstrap_flow(tmp_path: Path):
         os.chdir(old_cwd)
 
 
-def _hand_built_project_seed(out_path: Path, device: DeviceKey) -> Path:
+def _hand_built_project_seed(
+    out_path: Path,
+    device: DeviceKey,
+    *,
+    vault_project_id: str = "",
+) -> Path:
     """Build a minimal project_seed bundle using only Python (no
     dashboard JS). Mirrors the body shape the dashboard emits so the
     handler can be exercised on synthetic input where ``Agentic20`` is
@@ -202,7 +208,16 @@ def _hand_built_project_seed(out_path: Path, device: DeviceKey) -> Path:
     yaml_text = (
         "ceremony:\n"
         "  id: synthetic_proj\n"
+        "  mode: linked\n"
         "  cipher: btn\n"
+        "  linked_vault: https://vault.example\n"
+        f"  linked_project_id: {vault_project_id!r}\n"
+        "vault:\n"
+        "  enabled: true\n"
+        "  url: https://vault.example\n"
+        f"  linked_project_id: {vault_project_id!r}\n"
+        "  autosync: true\n"
+        "  sync_interval_seconds: 600\n"
         "me:\n"
         f"  did: {device.did}\n"
         "groups:\n"
@@ -257,6 +272,35 @@ def test_project_seed_hand_built_round_trip(tmp_path: Path):
     assert (cfg.keystore / "default.btn.state").exists()
     assert (cfg.keystore / "tn.agents.btn.mykit").exists()
     assert cfg.yaml_path.exists()
+
+
+def test_project_seed_adopts_empty_vault_project_id_without_overwriting(tmp_path: Path):
+    device = DeviceKey.generate()
+    cfg = _bootstrap_cfg_for(tmp_path)
+    empty = tmp_path / "empty.project.tnpkg"
+    linked = tmp_path / "linked.project.tnpkg"
+    other = tmp_path / "other.project.tnpkg"
+    _hand_built_project_seed(empty, device, vault_project_id="")
+    _hand_built_project_seed(linked, device, vault_project_id="proj_remote")
+    _hand_built_project_seed(other, device, vault_project_id="proj_other")
+
+    first = _absorb_dispatch(cfg, empty)
+    assert first.legacy_status == "enrolment_applied", first.legacy_reason
+    log_path = tmp_path / ".tn" / "tn" / "logs" / "tn.ndjson"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text('{"event_type":"app.event"}\n', encoding="utf-8")
+
+    second = _absorb_dispatch(cfg, linked)
+    assert second.legacy_status == "enrolment_applied", second.legacy_reason
+    doc = yaml.safe_load(cfg.yaml_path.read_text(encoding="utf-8"))
+    assert doc["vault"]["linked_project_id"] == "proj_remote"
+    assert doc["ceremony"]["linked_project_id"] == "proj_remote"
+
+    third = _absorb_dispatch(cfg, other)
+    assert third.legacy_status == "no_op", third.legacy_reason
+    doc = yaml.safe_load(cfg.yaml_path.read_text(encoding="utf-8"))
+    assert doc["vault"]["linked_project_id"] == "proj_remote"
+    assert doc["ceremony"]["linked_project_id"] == "proj_remote"
 
 
 def test_project_seed_rejects_swapped_private(tmp_path: Path):

@@ -207,22 +207,15 @@ handlers:
   }
 });
 
-test("extends: handlers merge additively, deduped by name", () => {
+test("extends: child handlers replace parent handlers", () => {
   const td = makeProject();
   try {
     const { child } = writeParentChild(td);
     // Child has file.rotating "main"; parent has stdout "stdout".
-    // Both should be present in the merged config.
+    // The child declared handlers, so only the child list survives.
     const cfg = loadConfig(child);
-    // Verify both handler kinds came through (parent + child).
-    // CeremonyConfig stores raw handlers; pull from .doc-equivalent.
-    // The CeremonyConfig type doesn't expose handlers directly — they go to
-    // NodeRuntime via the runtime layer. We assert via a side effect:
-    // if extends merge worked, the cfg loaded without error AND has the
-    // child's logs.path AND parent's keystore.
-    assert.equal(cfg.ceremonyId, "C1");
-    // (Handlers list goes through NodeRuntime.init; covered in a deeper
-    // integration test once we add stream-creation in TS.)
+    const names = cfg.handlers.map((h) => String(h.name ?? h.kind ?? ""));
+    assert.deepEqual(names, ["main"]);
   } finally {
     rmSync(td, { recursive: true, force: true });
   }

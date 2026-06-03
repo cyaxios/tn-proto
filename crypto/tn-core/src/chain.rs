@@ -1,4 +1,8 @@
-//! Chain state and row_hash computation (PRD §5).
+//! Per-event-type hash chain and `row_hash` computation — the tamper-
+//! evidence linkage the signature commits to. Internal primitive: start at
+//! [`crate::Runtime`] (write/read of attested events, behind `tn.info()` /
+//! `tn read`) and [`crate::Manifest`] (signed packages, behind `tn export`).
+//! Reach here directly only to recompute or audit a chain hash.
 //!
 //! Mirrors `tn/chain.py` byte-for-byte: SHA-256 over the concatenation of
 //! envelope fields with null separators, then the groups' ciphertexts and
@@ -96,9 +100,7 @@ pub fn compute_row_hash(input: &RowHashInput<'_>) -> String {
     let mut hex_buf = [0u8; 64];
     hex::encode_to_slice(digest.as_slice(), &mut hex_buf)
         .expect("32-byte digest into 64-char buffer is infallible");
-    out.push_str(
-        std::str::from_utf8(&hex_buf).expect("hex::encode_to_slice emits ASCII"),
-    );
+    out.push_str(std::str::from_utf8(&hex_buf).expect("hex::encode_to_slice emits ASCII"));
     out
 }
 
@@ -255,10 +257,7 @@ pub fn chain_tips_from_ndjson(bytes: &[u8]) -> HashMap<String, (u64, String)> {
 /// `event_type` (caller treats this as ZERO_HASH / seq=0, matching
 /// the existing init-time semantics). Malformed lines are silently
 /// skipped, same contract as `chain_tips_from_ndjson`.
-pub fn chain_tip_from_log_tail_reverse(
-    bytes: &[u8],
-    event_type: &str,
-) -> Option<(u64, String)> {
+pub fn chain_tip_from_log_tail_reverse(bytes: &[u8], event_type: &str) -> Option<(u64, String)> {
     // Trim trailing newline(s) so the final line, if it doesn't end
     // in `\n`, still scans as one line rather than as an empty
     // segment after a phantom newline.
@@ -404,10 +403,8 @@ mod chain_tip_tests {
     #[test]
     fn multi_file_reverse_scan_falls_back_to_backup() {
         let active: &[u8] = b"{\"event_type\":\"b\",\"sequence\":1,\"row_hash\":\"sha256:bb\"}\n";
-        let backup1: &[u8] =
-            b"{\"event_type\":\"a\",\"sequence\":3,\"row_hash\":\"sha256:a3\"}\n";
-        let backup2: &[u8] =
-            b"{\"event_type\":\"a\",\"sequence\":2,\"row_hash\":\"sha256:a2\"}\n\
+        let backup1: &[u8] = b"{\"event_type\":\"a\",\"sequence\":3,\"row_hash\":\"sha256:a3\"}\n";
+        let backup2: &[u8] = b"{\"event_type\":\"a\",\"sequence\":2,\"row_hash\":\"sha256:a2\"}\n\
               {\"event_type\":\"x\",\"sequence\":1,\"row_hash\":\"sha256:x1\"}\n";
         let files: Vec<&[u8]> = vec![active, backup1, backup2];
         assert_eq!(
@@ -424,8 +421,7 @@ mod chain_tip_tests {
     #[test]
     fn multi_file_reverse_scan_active_wins_over_backup() {
         let active: &[u8] = b"{\"event_type\":\"a\",\"sequence\":5,\"row_hash\":\"sha256:a5\"}\n";
-        let backup1: &[u8] =
-            b"{\"event_type\":\"a\",\"sequence\":3,\"row_hash\":\"sha256:a3\"}\n";
+        let backup1: &[u8] = b"{\"event_type\":\"a\",\"sequence\":3,\"row_hash\":\"sha256:a3\"}\n";
         let files: Vec<&[u8]> = vec![active, backup1];
         assert_eq!(
             chain_tip_from_log_files_reverse(&files, "a"),

@@ -6,7 +6,7 @@ whose ``me.did`` did not match the keystore's ``local.public``. The
 subsequent ``tn.init`` in any process would then raise
 ``ValueError: keystore DID ... does not match yaml me.did``.
 
-Fix is in ``tn._multi._ceremony_create_lock`` — a per-name sentinel
+Fix is in ``tn._multi._ceremony_create_lock`` — a per-project sentinel
 acquired with ``O_CREAT | O_EXCL`` around the create branch of
 ``_ensure_ceremony_on_disk``. The first arrival mints; subsequent
 arrivals either spin until the yaml appears or proceed when the lock
@@ -94,10 +94,11 @@ def test_concurrent_init_does_not_corrupt(tmp_path: Path, workers: int):
 
     # On-disk consistency: yaml's me.did must match the did derived
     # from the keystore. This was the failure mode before the fix.
-    yaml_path = tmp_path / ".tn" / "default" / "tn.yaml"
+    project_root = tmp_path / ".tn" / tmp_path.name
+    yaml_path = project_root / "tn.yaml"
     assert yaml_path.is_file(), "tn.yaml not written"
     yaml_did = _read_did_from_yaml(yaml_path)
-    keystore_dir = tmp_path / ".tn" / "default" / "keys"
+    keystore_dir = project_root / "keys"
     derived_did = _derive_did_from_public(keystore_dir)
     assert yaml_did == derived_did, (
         f"yaml.me.did {yaml_did} != did derived from keystore {derived_did}"
@@ -146,7 +147,7 @@ def test_create_lock_releases_after_success(tmp_path: Path):
         tn.flush_and_close()
     finally:
         os.chdir(cwd)
-    lock = tmp_path / ".tn" / ".init.default.lock"
+    lock = tmp_path / ".tn" / f".init.{tmp_path.name}.lock"
     assert not lock.exists(), f"lock file leaked: {lock}"
 
 
@@ -154,7 +155,7 @@ def test_create_lock_reaps_stale(tmp_path: Path):
     """A pre-existing lock file older than 60s is reaped on next init."""
     import time
     (tmp_path / ".tn").mkdir(parents=True)
-    stale = tmp_path / ".tn" / ".init.default.lock"
+    stale = tmp_path / ".tn" / f".init.{tmp_path.name}.lock"
     stale.write_text("pid=99999\n")
     # Backdate by 120s so the stale-recovery path fires.
     past = time.time() - 120.0
@@ -168,5 +169,5 @@ def test_create_lock_reaps_stale(tmp_path: Path):
         tn.flush_and_close()
     finally:
         os.chdir(cwd)
-    assert (tmp_path / ".tn" / "default" / "tn.yaml").is_file()
+    assert (tmp_path / ".tn" / tmp_path.name / "tn.yaml").is_file()
     assert not stale.exists()

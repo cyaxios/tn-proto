@@ -24,8 +24,7 @@ use tn_core::agents_policy::parse_policy_text;
 use tn_core::canonical::canonical_bytes;
 use tn_core::runtime::{flatten_raw_entry, ReadEntry};
 
-pub const CANONICAL_DID: &str =
-    "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+pub const CANONICAL_DID: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
 pub const CANONICAL_POLICY_PATH: &str = ".tn/config/agents.md";
 pub const CANONICAL_POLICY_TEXT: &str = "# TN Agents Policy\n\
 version: 1\n\
@@ -224,10 +223,7 @@ pub fn build_tn_agents_pre_encryption() -> Value {
     let cb = canonical_bytes(&splice_value).expect("canonical encode");
     let mut top = Map::new();
     top.insert("splice_dict".into(), splice_value);
-    top.insert(
-        "canonical_bytes_hex".into(),
-        Value::String(hex_encode(&cb)),
-    );
+    top.insert("canonical_bytes_hex".into(), Value::String(hex_encode(&cb)));
     top.insert(
         "canonical_bytes_len".into(),
         Value::Number(serde_json::Number::from(cb.len() as u64)),
@@ -396,10 +392,7 @@ pub fn build_admin_events_canonical() -> Value {
         let cb = canonical_bytes(&fields).expect("canonical encode");
         let mut entry = Map::new();
         entry.insert("fields".into(), fields);
-        entry.insert(
-            "canonical_bytes_hex".into(),
-            Value::String(hex_encode(&cb)),
-        );
+        entry.insert("canonical_bytes_hex".into(), Value::String(hex_encode(&cb)));
         entry.insert(
             "canonical_bytes_len".into(),
             Value::Number(serde_json::Number::from(cb.len() as u64)),

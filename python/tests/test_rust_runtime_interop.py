@@ -14,6 +14,7 @@ Rust writes, Python reads:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,8 +27,9 @@ sys.path.insert(0, str(HERE.parent))  # tn-protocol/python on sys.path
 #   HERE.parents[1] = tn-protocol/    (workspace Cargo.toml, where cargo build runs)
 #   HERE.parents[2] = content_platform/  (repo root)
 TN_PROTO = HERE.parents[1]  # tn-protocol/
-RUST_BIN_DEBUG = TN_PROTO / "target" / "debug" / "tn-core-cli.exe"
-RUST_BIN_RELEASE = TN_PROTO / "target" / "release" / "tn-core-cli.exe"
+RUST_BIN_NAME = "tn-core-cli.exe" if os.name == "nt" else "tn-core-cli"
+RUST_BIN_DEBUG = TN_PROTO / "target" / "debug" / RUST_BIN_NAME
+RUST_BIN_RELEASE = TN_PROTO / "target" / "release" / RUST_BIN_NAME
 
 
 def _rust_bin() -> Path:

@@ -26,6 +26,8 @@ PY_INIT = ROOT / "python" / "tn" / "__init__.py"
 # etc.); types, internal helpers, and sub-namespace re-exports are tracked
 # implicitly by the verbs that produce/consume them.
 KNOWN_OMISSIONS = {
+    # Internal body-zip helper for tnpkg packing; not a public cross-language verb.
+    "packBodyPlaintextZip",
     # ------------------------------------------------------------------
     # Result types and option objects (covered by their verbs).
     # ------------------------------------------------------------------

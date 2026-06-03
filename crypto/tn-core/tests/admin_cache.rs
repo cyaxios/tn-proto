@@ -40,10 +40,9 @@ fn cache_state_matches_admin_state_after_add() {
     let mut cache = cache_for(&rt);
     let state = cache.state().unwrap();
     let recipients = state.get("recipients").unwrap().as_array().unwrap();
-    assert!(recipients
-        .iter()
-        .any(|r| r.get("recipient_identity").and_then(|v| v.as_str())
-            == Some("did:key:zRecipientA")));
+    assert!(recipients.iter().any(
+        |r| r.get("recipient_identity").and_then(|v| v.as_str()) == Some("did:key:zRecipientA")
+    ));
 }
 
 #[test]
@@ -91,7 +90,10 @@ fn recipients_filter_active_only_by_default() {
     let mut cache = cache_for(&rt);
     let _ = cache.state().unwrap();
     let active = cache.recipients("default", false).unwrap();
-    assert!(active.is_empty(), "revoked rows must be excluded by default");
+    assert!(
+        active.is_empty(),
+        "revoked rows must be excluded by default"
+    );
     let all = cache.recipients("default", true).unwrap();
     assert!(!all.is_empty());
 }
@@ -124,12 +126,21 @@ fn cache_persists_to_disk_across_instances() {
         let _ = cache.refresh().unwrap();
     }
     let lkv = td.path().join(".tn").join("admin").join("admin.lkv.json");
-    assert!(lkv.exists(), "lkv file should be written: {}", lkv.display());
+    assert!(
+        lkv.exists(),
+        "lkv file should be written: {}",
+        lkv.display()
+    );
 
     // New cache instance should load and reflect the same state.
     let mut cache2 = cache_for(&rt);
     let state2 = cache2.state().unwrap();
-    assert!(!state2.get("recipients").unwrap().as_array().unwrap().is_empty());
+    assert!(!state2
+        .get("recipients")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

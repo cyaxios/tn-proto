@@ -1,0 +1,11 @@
+[
+  "admin_log_snapshot",
+  "offer",
+  "enrolment",
+  "recipient_invite",
+  "kit_bundle",
+  "full_keystore",
+  "contact_update",
+  "identity_seed",
+  "project_seed"
+]

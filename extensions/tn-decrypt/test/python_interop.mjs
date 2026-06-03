@@ -33,14 +33,14 @@
 import { Buffer } from "node:buffer";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const extRoot = resolve(here, "..");
-const repoRoot = resolve(here, "../../../..");
+const repoRoot = resolve(here, "../../..");
 
 let passed = 0, failed = 0;
 function ok(m) { console.log(`[ok]   ${m}`); passed += 1; }
@@ -55,8 +55,9 @@ function hex(bytes) {
 const fixtureDir = join(tmpdir(), `tn-ext-py-interop-${Date.now()}`);
 mkdirSync(fixtureDir, { recursive: true });
 
-const pyBin = process.env.TN_PYTHON
-  || resolve(repoRoot, ".venv/Scripts/python.exe");
+const linuxPy = resolve(repoRoot, ".venv_linux/bin/python");
+const winPy = resolve(repoRoot, ".venv/Scripts/python.exe");
+const pyBin = process.env.TN_PYTHON || (existsSync(linuxPy) ? linuxPy : winPy);
 const fixtureScript = resolve(here, "python_fixture_gen.py");
 
 console.log(`[ext:test] generating Python fixture at ${fixtureDir}`);
@@ -65,6 +66,7 @@ const proc = spawnSync(pyBin, [fixtureScript, fixtureDir], {
 });
 if (proc.status !== 0) {
   console.error(`[ext:test] python fixture generator failed (rc=${proc.status})`);
+  if (proc.error) console.error("error:", proc.error.message);
   console.error("stdout:", proc.stdout);
   console.error("stderr:", proc.stderr);
   process.exit(2);

@@ -412,7 +412,7 @@ if (typeof ExtEntryMod.Entry === "function" && typeof ExtEntryMod.VerifyError ==
 
 const SAMPLE_ENV = {
   event_type: "tn.info",
-  did: "did:key:z6MkpTH9mHZxTokFiCHBVnQ8X2j4qZHGr5h2sN7vVhPkXm9Q",
+  device_identity: "did:key:z6MkpTH9mHZxTokFiCHBVnQ8X2j4qZHGr5h2sN7vVhPkXm9Q",
   event_id: "ev_01HK9YR8MQT7C3PAZRP8X9JV2N",
   sequence: 7,
   timestamp: "2026-05-08T12:34:56.789Z",
@@ -427,15 +427,15 @@ function _isTnEnvelope(o) {
   if (!o || typeof o !== "object" || Array.isArray(o)) return false;
   return (
     typeof o.event_type === "string" &&
-    typeof o.did === "string" &&
+    (typeof o.device_identity === "string" || typeof o.did === "string") &&
     typeof o.event_id === "string" &&
-    typeof o.sequence === "number"
+    (typeof o.sequence === "number" || typeof o.sequence === "string")
   );
 }
 
 function _envelopeToEntryLine(env) {
   const ENVELOPE_KEYS = new Set([
-    "event_type", "timestamp", "level", "message", "did",
+    "event_type", "timestamp", "level", "message", "device_identity", "did",
     "event_id", "sequence", "run_id", "prev_hash", "row_hash", "signature",
   ]);
   const ts = env.timestamp instanceof Date

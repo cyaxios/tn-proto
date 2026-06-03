@@ -17,17 +17,11 @@
 // runtime methods directly because building a NodeRuntime requires a
 // loadable yaml, which is the chicken-and-egg case we're solving.
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve as pathResolve, isAbsolute as pathIsAbsolute } from "node:path";
 import { Buffer } from "node:buffer";
 
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { DeviceKey } from "../core/signing.js";
 import { isManifestSignatureValid, toWireDict, type Manifest } from "../core/tnpkg.js";
@@ -63,9 +57,7 @@ function _syntheticPaths(cwd: string, yamlBytes: Uint8Array | undefined): Synthe
     }
   }
   const yamlPath = pathResolve(cwd, "tn.yaml");
-  const keystore = pathIsAbsolute(keystoreRel)
-    ? keystoreRel
-    : pathResolve(cwd, keystoreRel);
+  const keystore = pathIsAbsolute(keystoreRel) ? keystoreRel : pathResolve(cwd, keystoreRel);
   const logPath = pathIsAbsolute(logRel) ? logRel : pathResolve(cwd, logRel);
   return { yamlPath, keystore, logPath };
 }
@@ -103,6 +95,102 @@ function _userEventCount(logPath: string): number {
 
 function _ts(): string {
   return new Date().toISOString().replace(/[:.]/g, "").slice(0, 15) + "Z";
+}
+
+// Exported for the cross-language absorb vault-adoption contract test
+// (ts-sdk/test/absorb_vault_adoption_contract.test.ts). The leading
+// underscore marks it internal, not part of the public SDK surface.
+export function _projectSeedVaultYamlPatch(
+  existingYaml: Uint8Array,
+  incomingYaml: Uint8Array,
+): { patched?: Uint8Array; vaultOnly: boolean } {
+  const nonEmpty = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim() ? value.trim() : undefined;
+  let existingDoc: Record<string, unknown>;
+  let incomingDoc: Record<string, unknown>;
+  try {
+    existingDoc =
+      (parseYaml(Buffer.from(existingYaml).toString("utf8")) as Record<string, unknown>) ?? {};
+    incomingDoc =
+      (parseYaml(Buffer.from(incomingYaml).toString("utf8")) as Record<string, unknown>) ?? {};
+  } catch {
+    return { vaultOnly: false };
+  }
+  if (typeof existingDoc !== "object" || typeof incomingDoc !== "object") {
+    return { vaultOnly: false };
+  }
+  const existingVault = existingDoc["vault"] as Record<string, unknown> | undefined;
+  const incomingVault = incomingDoc["vault"] as Record<string, unknown> | undefined;
+  if (
+    !existingVault ||
+    !incomingVault ||
+    typeof existingVault !== "object" ||
+    typeof incomingVault !== "object"
+  ) {
+    return { vaultOnly: false };
+  }
+  if (existingVault["enabled"] === false) return { vaultOnly: false };
+
+  const patchedDoc = structuredClone(existingDoc);
+  const patchedVault = patchedDoc["vault"] as Record<string, unknown>;
+  let changed = false;
+  for (const field of ["url", "linked_project_id"] as const) {
+    if (!nonEmpty(patchedVault[field])) {
+      const incomingValue = nonEmpty(incomingVault[field]);
+      if (incomingValue) {
+        patchedVault[field] = incomingValue;
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    patchedVault["enabled"] = true;
+    if (patchedVault["autosync"] === undefined) patchedVault["autosync"] = true;
+    if (patchedVault["sync_interval_seconds"] === undefined) {
+      patchedVault["sync_interval_seconds"] = incomingVault["sync_interval_seconds"] ?? 600;
+    }
+    const ceremony = patchedDoc["ceremony"] as Record<string, unknown> | undefined;
+    const incomingCeremony = incomingDoc["ceremony"] as Record<string, unknown> | undefined;
+    if (
+      ceremony &&
+      incomingCeremony &&
+      typeof ceremony === "object" &&
+      typeof incomingCeremony === "object"
+    ) {
+      if (!nonEmpty(ceremony["linked_vault"])) {
+        const incomingUrl = nonEmpty(incomingCeremony["linked_vault"]);
+        if (incomingUrl) ceremony["linked_vault"] = incomingUrl;
+      }
+      if (!nonEmpty(ceremony["linked_project_id"])) {
+        const incomingProjectId = nonEmpty(incomingCeremony["linked_project_id"]);
+        if (incomingProjectId) ceremony["linked_project_id"] = incomingProjectId;
+      }
+    }
+    const encoded = new TextEncoder().encode(stringifyYaml(patchedDoc));
+    return Buffer.from(encoded).equals(Buffer.from(existingYaml))
+      ? { vaultOnly: true }
+      : { patched: encoded, vaultOnly: true };
+  }
+
+  const blankVaultMetadata = (doc: Record<string, unknown>): Record<string, unknown> => {
+    const clone = structuredClone(doc);
+    const vault = clone["vault"] as Record<string, unknown> | undefined;
+    if (vault && typeof vault === "object") {
+      vault["url"] = "";
+      vault["linked_project_id"] = "";
+    }
+    const ceremony = clone["ceremony"] as Record<string, unknown> | undefined;
+    if (ceremony && typeof ceremony === "object") {
+      ceremony["linked_vault"] = "";
+      ceremony["linked_project_id"] = "";
+    }
+    return clone;
+  };
+  return {
+    vaultOnly:
+      JSON.stringify(blankVaultMetadata(existingDoc)) ===
+      JSON.stringify(blankVaultMetadata(incomingDoc)),
+  };
 }
 
 /** True iff ``source`` is an ``identity_seed`` / ``project_seed`` bundle. */
@@ -332,17 +420,16 @@ export async function absorbSealedBootstrap(
   // bundle isn't recipient-sealed — fall through to the unsealed path
   // by calling absorbBootstrap.
   const state =
-    manifest.state && typeof manifest.state === "object" ? (manifest.state as Record<string, unknown>) : null;
+    manifest.state && typeof manifest.state === "object"
+      ? (manifest.state as Record<string, unknown>)
+      : null;
   const bodyEnc =
     state && typeof state["body_encryption"] === "object" && state["body_encryption"] !== null
       ? (state["body_encryption"] as Record<string, unknown>)
       : null;
   const wrapsArray = bodyEnc?.["recipient_wraps"];
   const wrapSingular = bodyEnc?.["recipient_wrap"];
-  if (
-    bodyEnc === null ||
-    (wrapsArray === undefined && wrapSingular === undefined)
-  ) {
+  if (bodyEnc === null || (wrapsArray === undefined && wrapSingular === undefined)) {
     // Not a recipient-sealed bundle — delegate to the plain path.
     return absorbBootstrap(source, { cwd });
   }
@@ -682,28 +769,36 @@ function _bootstrapProjectSeed(
     const existing = readFileSync(paths.yamlPath);
     if (Buffer.from(existing).equals(Buffer.from(yamlBytes))) {
       deduped += 1;
-    } else if (_userEventCount(paths.logPath) === 0) {
-      try {
-        renameSync(paths.yamlPath, `${paths.yamlPath}.previous.${ts}`);
-      } catch {
-        /* best effort */
-      }
-      replaced.push(paths.yamlPath);
-      mkdirSync(dirname(paths.yamlPath), { recursive: true });
-      writeFileSync(paths.yamlPath, Buffer.from(yamlBytes));
-      accepted += 1;
     } else {
-      return {
-        kind: manifest.kind,
-        acceptedCount: 0,
-        dedupedCount: 0,
-        noop: false,
-        derivedState: null,
-        conflicts: [],
-        rejectedReason:
-          `refusing to overwrite existing tn.yaml at ${paths.yamlPath}: contents differ and the ` +
-          `local log already contains user-emitted entries.`,
-      };
+      const patch = _projectSeedVaultYamlPatch(existing, yamlBytes);
+      if (patch.patched !== undefined) {
+        writeFileSync(paths.yamlPath, Buffer.from(patch.patched));
+        accepted += 1;
+      } else if (patch.vaultOnly) {
+        deduped += 1;
+      } else if (_userEventCount(paths.logPath) === 0) {
+        try {
+          renameSync(paths.yamlPath, `${paths.yamlPath}.previous.${ts}`);
+        } catch {
+          /* best effort */
+        }
+        replaced.push(paths.yamlPath);
+        mkdirSync(dirname(paths.yamlPath), { recursive: true });
+        writeFileSync(paths.yamlPath, Buffer.from(yamlBytes));
+        accepted += 1;
+      } else {
+        return {
+          kind: manifest.kind,
+          acceptedCount: 0,
+          dedupedCount: 0,
+          noop: false,
+          derivedState: null,
+          conflicts: [],
+          rejectedReason:
+            `refusing to overwrite existing tn.yaml at ${paths.yamlPath}: contents differ and the ` +
+            `local log already contains user-emitted entries.`,
+        };
+      }
     }
   } else {
     mkdirSync(dirname(paths.yamlPath), { recursive: true });

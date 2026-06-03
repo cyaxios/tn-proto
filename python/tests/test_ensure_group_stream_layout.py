@@ -1,10 +1,10 @@
 """``ensure_group`` must persist groups AUTHORITATIVELY under the
-flipped multi-ceremony layout.
+project-root stream layout.
 
-A named ceremony (``tn.init("X")``) is a *stream*: its yaml at
-``<cwd>/.tn/X/tn.yaml`` carries ``extends: ../default/tn.yaml`` and
+A named stream (``tn.use("X")``) has an overlay at
+``<cwd>/.tn/<project>/streams/X.yaml`` carrying ``extends: ../tn.yaml`` and
 inherits ``device`` / ``keystore`` / ``groups`` / ``fields`` /
-``recipients`` from the project root ``.tn/default/tn.yaml``. Those keys
+``recipients`` from the project root ``.tn/<project>/tn.yaml``. Those keys
 are parent-owned — ``config._resolve_extends`` discards a child's copy
 on the next load ("child sets parent-owned key 'groups'; parent wins").
 
@@ -82,7 +82,7 @@ def _run(tmp_path: Path, body: str, name: str = "case.py") -> str:
 
 def test_ensure_group_on_stream_writes_to_authoritative_root(tmp_path: Path):
     """ensure_group on a named stream must land the group in the root
-    ``.tn/default/tn.yaml`` (authoritative), NOT the stream yaml, and
+    ``.tn/<project>/tn.yaml`` (authoritative), NOT the stream yaml, and
     must NOT trip the "child sets parent-owned key" warning."""
     body = textwrap.dedent('''
         import os, json, logging, pathlib
@@ -95,26 +95,28 @@ def test_ensure_group_on_stream_writes_to_authoritative_root(tmp_path: Path):
         lg.addHandler(_H()); lg.setLevel(logging.WARNING)
 
         import tn
-        tn.init("X", link=False)
-        cfg = tn.current_config()
+        tn.init(link=False)
+        handle = tn.use("X")
+        cfg = handle.cfg
         tn.ensure_group(cfg, "partners", fields=["amount", "status"])
         tn.flush_and_close()
 
-        root = pathlib.Path("./.tn/default/tn.yaml").read_text()
-        stream = pathlib.Path("./.tn/X/tn.yaml").read_text()
+        project = pathlib.Path.cwd().name
+        root = pathlib.Path("./.tn") / project / "tn.yaml"
+        stream = pathlib.Path("./.tn") / project / "streams" / "X.yaml"
         import yaml
-        root_doc = yaml.safe_load(root)
+        root_doc = yaml.safe_load(root.read_text())
         print(json.dumps({
             "root_has_partners": "partners" in (root_doc.get("groups") or {}),
             "root_has_amount_field": "amount" in (root_doc.get("fields") or {}),
-            "stream_declares_groups": "groups" in (yaml.safe_load(stream) or {}),
+            "stream_declares_groups": "groups" in (yaml.safe_load(stream.read_text()) or {}),
             "parent_owned_warnings": [m for m in warned if "parent-owned" in m],
         }))
     ''').strip()
     payload = json.loads(_run(tmp_path, body))
     assert payload["root_has_partners"], (
         "group 'partners' did not persist in the authoritative root yaml "
-        ".tn/default/tn.yaml; ensure_group wrote it to the stream yaml "
+        ".tn/<project>/tn.yaml; ensure_group wrote it to the stream yaml "
         "where groups are non-authoritative."
     )
     assert payload["root_has_amount_field"], (
@@ -140,8 +142,9 @@ def test_group_added_on_stream_survives_fresh_process(tmp_path: Path):
         import os
         os.environ["TN_NO_STDOUT"] = "1"
         import tn
-        tn.init("X", link=False)
-        tn.ensure_group(tn.current_config(), "partners", fields=["amount", "status"])
+        tn.init(link=False)
+        handle = tn.use("X")
+        tn.ensure_group(handle.cfg, "partners", fields=["amount", "status"])
         tn.flush_and_close()
     ''').strip()
     _run(tmp_path, proc_a, name="proc_a.py")
@@ -150,13 +153,16 @@ def test_group_added_on_stream_survives_fresh_process(tmp_path: Path):
         import os, json, pathlib
         os.environ["TN_NO_STDOUT"] = "1"
         import tn
-        tn.init("X", link=False)
-        cfg = tn.current_config()
+        tn.init(link=False)
+        handle = tn.use("X")
+        cfg = handle.cfg
         has_partners = "partners" in cfg.groups
-        tn.info("deal.signed", amount=4999, status="closed", note="x")
+        handle.info("deal.signed", amount=4999, status="closed", note="x")
         tn.flush_and_close()
+        project = pathlib.Path.cwd().name
         last = json.loads(
-            pathlib.Path("./.tn/X/logs/X.ndjson").read_text().splitlines()[-1]
+            (pathlib.Path("./.tn") / project / "logs" / "X.ndjson")
+                .read_text().splitlines()[-1]
         )
         groups = [
             k for k in last
@@ -185,8 +191,9 @@ def test_add_recipient_on_stream_added_group_in_fresh_process(tmp_path: Path):
         import os
         os.environ["TN_NO_STDOUT"] = "1"
         import tn
-        tn.init("X", link=False)
-        tn.ensure_group(tn.current_config(), "partners", fields=["amount", "status"])
+        tn.init(link=False)
+        handle = tn.use("X")
+        tn.ensure_group(handle.cfg, "partners", fields=["amount", "status"])
         tn.flush_and_close()
     ''').strip()
     _run(tmp_path, proc_a, name="proc_a.py")
@@ -196,14 +203,19 @@ def test_add_recipient_on_stream_added_group_in_fresh_process(tmp_path: Path):
         os.environ["TN_NO_STDOUT"] = "1"
         import tn
         from tn import admin
-        tn.init("X", link=False)
+        tn.init(link=False)
+        handle = tn.use("X")
         out = admin.add_recipient(
             "partners",
             recipient_did="did:key:zLabel-bob",
             out_path="bob.tnpkg",
+            cfg=handle.cfg,
         )
         tn.flush_and_close()
-        admin_log = pathlib.Path("./.tn/X/admin/admin.ndjson")
+        project = pathlib.Path.cwd().name
+        # ensure_group emits through the active Project root runtime; tn.use()
+        # does not rebind the singleton.
+        admin_log = pathlib.Path("./.tn") / project / "admin" / "default.ndjson"
         added = False
         if admin_log.is_file():
             for line in admin_log.read_text().splitlines():
@@ -226,9 +238,9 @@ def test_add_recipient_on_stream_added_group_in_fresh_process(tmp_path: Path):
         "did not run."
     )
     assert payload["group_added_event"], (
-        "no tn.group.added admin event for 'partners' was recorded on the "
-        "stream admin log."
-    )
+            "no tn.group.added admin event for 'partners' was recorded on the "
+            "Project root admin log."
+        )
 
 
 @requires_btn
@@ -241,15 +253,18 @@ def test_cli_group_add_writes_to_authoritative_root_on_stream(tmp_path: Path):
         import os
         os.environ["TN_NO_STDOUT"] = "1"
         import tn
-        tn.init("X", link=False)
+        tn.init(link=False)
+        tn.use("X")
         tn.flush_and_close()
     ''').strip()
     _run(tmp_path, bootstrap, name="bootstrap.py")
-    assert (tmp_path / ".tn" / "X" / "tn.yaml").is_file()
+    project = tmp_path.name
+    stream_yaml = tmp_path / ".tn" / project / "streams" / "X.yaml"
+    assert stream_yaml.is_file()
 
     add = _run_cli(
         tmp_path, "group", "add", "partners",
-        "--fields", "amount,status", "--yaml", ".tn/X/tn.yaml",
+        "--fields", "amount,status", "--yaml", f".tn/{project}/streams/X.yaml",
     )
     assert add.returncode == 0, f"group add failed: {add.stderr!r}"
     assert "child sets parent-owned key" not in add.stderr, (
@@ -258,11 +273,11 @@ def test_cli_group_add_writes_to_authoritative_root_on_stream(tmp_path: Path):
 
     import yaml as _yaml
 
-    root_doc = _yaml.safe_load((tmp_path / ".tn" / "default" / "tn.yaml").read_text())
-    stream_doc = _yaml.safe_load((tmp_path / ".tn" / "X" / "tn.yaml").read_text())
+    root_doc = _yaml.safe_load((tmp_path / ".tn" / project / "tn.yaml").read_text())
+    stream_doc = _yaml.safe_load(stream_yaml.read_text())
     assert "partners" in (root_doc.get("groups") or {}), (
         "`tn group add` did not persist 'partners' in the authoritative "
-        "root .tn/default/tn.yaml."
+        "root .tn/<project>/tn.yaml."
     )
     assert "groups" not in stream_doc, (
         "`tn group add` polluted the stream yaml with a parent-owned "
@@ -272,7 +287,12 @@ def test_cli_group_add_writes_to_authoritative_root_on_stream(tmp_path: Path):
     # The full repro: a fresh-process add_recipient against the
     # stream-added group succeeds and mints a bundle.
     add_rcpt = _run_cli(
-        tmp_path, "add_recipient", "partners", "bob", "--yaml", ".tn/X/tn.yaml",
+        tmp_path,
+        "add_recipient",
+        "partners",
+        "bob",
+        "--yaml",
+        f".tn/{project}/streams/X.yaml",
     )
     assert add_rcpt.returncode == 0, (
         f"add_recipient against the stream-added group failed: {add_rcpt.stderr!r}"

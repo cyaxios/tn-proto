@@ -126,7 +126,9 @@ fn emit_fans_out_to_attached_handler() {
     // reflect only what this test attaches.
     // SAFETY: tests in this file are self-contained; setting TN_NO_STDOUT
     // is safe here because no other thread observes the env var change.
-    unsafe { std::env::set_var("TN_NO_STDOUT", "1"); }
+    unsafe {
+        std::env::set_var("TN_NO_STDOUT", "1");
+    }
     let td = tempfile::tempdir().unwrap();
     let cer = setup_minimal_btn_ceremony(td.path());
     let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
@@ -137,11 +139,21 @@ fn emit_fans_out_to_attached_handler() {
 
     rt.emit("info", "test.event", fields("hello")).unwrap();
 
-    assert_eq!(cap.count(), 1, "handler should have received exactly one envelope");
+    assert_eq!(
+        cap.count(),
+        1,
+        "handler should have received exactly one envelope"
+    );
     let envs = cap.captured();
     let env = &envs[0];
-    assert_eq!(env.get("event_type").and_then(Value::as_str), Some("test.event"));
-    assert_eq!(env.get("device_identity").and_then(Value::as_str), Some(cer.device_identity.as_str()));
+    assert_eq!(
+        env.get("event_type").and_then(Value::as_str),
+        Some("test.event")
+    );
+    assert_eq!(
+        env.get("device_identity").and_then(Value::as_str),
+        Some(cer.device_identity.as_str())
+    );
     assert!(env.get("event_id").and_then(Value::as_str).is_some());
     assert!(env.get("row_hash").and_then(Value::as_str).is_some());
 }
@@ -172,7 +184,11 @@ fn accepts_filter_is_respected() {
     rt.add_handler(allow.clone());
     rt.emit("info", "foo.event", fields("yes")).unwrap();
     assert_eq!(allow.count(), 1, "handler accepting foo.event should fire");
-    assert_eq!(only.count(), 0, "the recipient-only handler still must not fire");
+    assert_eq!(
+        only.count(),
+        0,
+        "the recipient-only handler still must not fire"
+    );
 }
 
 #[test]
@@ -214,7 +230,9 @@ fn emit_with_no_handlers_is_a_noop() {
     // envelope or otherwise differ in observable behavior.
     // Opt out of default-on stdout so handler_count is truly zero.
     // SAFETY: see note in emit_fans_out_to_attached_handler.
-    unsafe { std::env::set_var("TN_NO_STDOUT", "1"); }
+    unsafe {
+        std::env::set_var("TN_NO_STDOUT", "1");
+    }
     let td = tempfile::tempdir().unwrap();
     let cer = setup_minimal_btn_ceremony(td.path());
     let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
@@ -226,9 +244,9 @@ fn emit_with_no_handlers_is_a_noop() {
     // know the file write happened.
     let entries = rt.read().unwrap();
     assert!(
-        entries.iter().any(|e| {
-            e.get("event_type").and_then(Value::as_str) == Some("test.event")
-        }),
+        entries
+            .iter()
+            .any(|e| { e.get("event_type").and_then(Value::as_str) == Some("test.event") }),
         "expected test.event in flat read shape, got {entries:?}"
     );
     // Suppress unused-import lint when read shape changes.

@@ -23,7 +23,7 @@
  * @packageDocumentation
  */
 
-import { packTnpkg, parseTnpkg, type ZipEntry } from "./tnpkg_archive.js";
+import { unzipSync, zipSync, type Zippable } from "fflate";
 
 /**
  * Cipher-suite identifier recorded in `manifest.state.body_encryption.cipher_suite`.
@@ -43,6 +43,48 @@ export const BODY_FRAME = "tn-encrypted-body-v2-zip";
 
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
+const BODY_ZIP_MTIME = new Date(1980, 0, 1, 0, 0, 0);
+
+function validateBodyName(name: string): void {
+  if (!name.startsWith("body/") || name === "body/") {
+    throw new Error(
+      `body encryption: invalid package member ${JSON.stringify(name)}; expected body/...`,
+    );
+  }
+  if (
+    name.startsWith("/") ||
+    name.includes("\\") ||
+    name.split("/").some((p) => p === "" || p === "." || p === "..")
+  ) {
+    throw new Error(
+      `body encryption: invalid package member ${JSON.stringify(name)}; only POSIX relative body paths are allowed`,
+    );
+  }
+}
+
+/**
+ * Canonical STORED-ZIP plaintext for sealed `.tnpkg` bodies.
+ *
+ * Entries are sorted and written through `fflate` as standard STORED ZIP
+ * members with a fixed DOS timestamp. The body-encryption frame needs a
+ * stock ZIP plaintext that any unzip tool can inspect after BEK recovery;
+ * it does not require local ZIP record serialization.
+ *
+ * @public
+ */
+export function packBodyPlaintextZip(
+  body: Map<string, Uint8Array> | Record<string, Uint8Array>,
+): Uint8Array {
+  const map: Map<string, Uint8Array> = body instanceof Map ? body : new Map(Object.entries(body));
+  const entries: Zippable = {};
+  for (const name of [...map.keys()].sort()) {
+    validateBodyName(name);
+    const data = map.get(name);
+    if (data === undefined) continue;
+    entries[name] = [data, { level: 0, mtime: BODY_ZIP_MTIME }];
+  }
+  return zipSync(entries, { level: 0, mtime: BODY_ZIP_MTIME });
+}
 
 /**
  * Pack `body` into a STORED zip and AES-GCM-encrypt it under `key`.
@@ -98,34 +140,16 @@ export async function encryptBodyBlob(
     throw new Error(`encryptBodyBlob: key must be 32 bytes (AES-256); got ${key.length}`);
   }
 
-  // Pack into a STORED zip, entries sorted by name for determinism.
-  const entries: ZipEntry[] = [];
-  const map: Map<string, Uint8Array> =
-    body instanceof Map ? body : new Map(Object.entries(body));
-  const names = [...map.keys()].sort();
-  for (const name of names) {
-    const data = map.get(name);
-    if (data === undefined) continue;
-    entries.push({ name, data });
-  }
-  const plaintext = packTnpkg(entries);
+  const plaintext = packBodyPlaintextZip(body);
 
   // 12-byte nonce + AES-GCM encrypt, no AAD.
   const nonce = new Uint8Array(NONCE_BYTES);
   globalThis.crypto.getRandomValues(nonce);
-  const k = await globalThis.crypto.subtle.importKey(
-    "raw",
-    key,
-    { name: "AES-GCM" },
-    false,
-    ["encrypt"],
-  );
+  const k = await globalThis.crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, [
+    "encrypt",
+  ]);
   const ct = new Uint8Array(
-    await globalThis.crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: nonce },
-      k,
-      plaintext,
-    ),
+    await globalThis.crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, k, plaintext),
   );
 
   // Wire format: nonce || ciphertext+tag.
@@ -208,21 +232,13 @@ export async function decryptBodyBlob(
   const nonce = blob.subarray(0, NONCE_BYTES);
   const ciphertext = blob.subarray(NONCE_BYTES);
 
-  const k = await globalThis.crypto.subtle.importKey(
-    "raw",
-    key,
-    { name: "AES-GCM" },
-    false,
-    ["decrypt"],
-  );
+  const k = await globalThis.crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, [
+    "decrypt",
+  ]);
   let plaintext: Uint8Array;
   try {
     plaintext = new Uint8Array(
-      await globalThis.crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: nonce },
-        k,
-        ciphertext,
-      ),
+      await globalThis.crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, k, ciphertext),
     );
   } catch (err) {
     throw new Error(
@@ -250,8 +266,10 @@ export async function decryptBodyBlob(
   }
 
   const out = new Map<string, Uint8Array>();
-  for (const entry of parseTnpkg(plaintext)) {
-    out.set(entry.name, entry.data);
+  const entries = unzipSync(plaintext);
+  for (const [name, data] of Object.entries(entries).sort(([a], [b]) => a.localeCompare(b))) {
+    validateBodyName(name);
+    out.set(name, data);
   }
   return out;
 }

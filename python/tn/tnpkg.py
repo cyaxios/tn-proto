@@ -50,19 +50,15 @@ See Also:
 from __future__ import annotations
 
 import base64
-import json
-import zipfile
 from dataclasses import dataclass, field
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
-    Ed25519PublicKey,
 )
+from tn_core import _core as _tn_core
 
-from .canonical import _canonical_bytes as _canonical_bytes
 from .signing import DeviceKey, _b58decode
 
 # Manifest schema version. Bump if the manifest's required fields change in
@@ -71,28 +67,7 @@ MANIFEST_VERSION = 1
 
 # v1 dispatch discriminators. Adding a new kind requires an absorb handler
 # in ``tn.absorb`` and (for snapshots) a producer in ``tn.export``.
-KNOWN_KINDS = frozenset(
-    {
-        "admin_log_snapshot",
-        "offer",
-        "enrolment",
-        "recipient_invite",
-        "kit_bundle",
-        "full_keystore",
-        # contact_update (Session 8, plan
-        # docs/superpowers/plans/2026-04-29-contact-update-tnpkg.md, spec
-        # §4.6 / D-11): the vault emits this kind into a publisher's inbox
-        # after a counterparty claims a share-link or backup-link. Body
-        # schema lives in tn.contacts._validate_contact_update_body.
-        "contact_update",
-        # identity_seed (2026-05-03 second-release, spec
-        # docs/superpowers/specs/2026-05-03-identity-issuance-design.md):
-        # the minimal "fresh recipient identity" bundle. Body has
-        # local.private + local.public + a stub tn.yaml. Self-signed by
-        # the carried Ed25519 key (from_did == to_did).
-        "identity_seed",
-    }
-)
+KNOWN_KINDS = frozenset(_tn_core.manifest_known_kinds())
 
 
 @dataclass
@@ -121,53 +96,43 @@ class TnpkgManifest:
         """Return a plain dict suitable for ``json.dump``. Omits ``None`` /
         unset optional fields so the canonical form is stable across tiny
         variations in caller code."""
-        out: dict[str, Any] = {
-            "kind": self.kind,
-            "version": self.version,
-            "publisher_identity": self.publisher_identity,
-            "ceremony_id": self.ceremony_id,
-            "as_of": self.as_of,
-            "scope": self.scope,
-            "clock": self.clock,
-            "event_count": self.event_count,
-        }
-        if self.recipient_identity is not None:
-            out["recipient_identity"] = self.recipient_identity
-        if self.head_row_hash is not None:
-            out["head_row_hash"] = self.head_row_hash
-        if self.state is not None:
-            out["state"] = self.state
-        if self.manifest_signature_b64 is not None:
-            out["manifest_signature_b64"] = self.manifest_signature_b64
-        return out
+        return dict(_tn_core.manifest_to_dict(_manifest_doc_from_dataclass(self)))
 
     @classmethod
     def from_dict(cls, doc: dict[str, Any]) -> TnpkgManifest:
         if not isinstance(doc, dict):
             raise ValueError(f"manifest must be a JSON object; got {type(doc).__name__}")
-        # Required keys; reject loudly if missing.
         missing = [
-            k for k in ("kind", "version", "publisher_identity", "ceremony_id", "as_of") if k not in doc
+            k
+            for k in ("kind", "version", "publisher_identity", "ceremony_id", "as_of")
+            if k not in doc
         ]
         if missing:
             raise ValueError(f"manifest missing required keys: {missing}")
+        normalized = dict(_tn_core.manifest_to_dict(doc))
         return cls(
-            kind=str(doc["kind"]),
-            version=int(doc["version"]),
-            publisher_identity=str(doc["publisher_identity"]),
-            ceremony_id=str(doc["ceremony_id"]),
-            as_of=str(doc["as_of"]),
-            scope=str(doc.get("scope", "admin")),
-            recipient_identity=(str(doc["recipient_identity"]) if doc.get("recipient_identity") is not None else None),
-            clock=dict(doc.get("clock") or {}),
-            event_count=int(doc.get("event_count", 0)),
-            head_row_hash=(
-                str(doc["head_row_hash"]) if doc.get("head_row_hash") is not None else None
+            kind=str(normalized["kind"]),
+            version=int(normalized["version"]),
+            publisher_identity=str(normalized["publisher_identity"]),
+            ceremony_id=str(normalized["ceremony_id"]),
+            as_of=str(normalized["as_of"]),
+            scope=str(normalized.get("scope", "admin")),
+            recipient_identity=(
+                str(normalized["recipient_identity"])
+                if normalized.get("recipient_identity") is not None
+                else None
             ),
-            state=(doc["state"] if doc.get("state") is not None else None),
+            clock=dict(normalized.get("clock") or {}),
+            event_count=int(normalized.get("event_count", 0)),
+            head_row_hash=(
+                str(normalized["head_row_hash"])
+                if normalized.get("head_row_hash") is not None
+                else None
+            ),
+            state=(normalized["state"] if normalized.get("state") is not None else None),
             manifest_signature_b64=(
-                str(doc["manifest_signature_b64"])
-                if doc.get("manifest_signature_b64") is not None
+                str(normalized["manifest_signature_b64"])
+                if normalized.get("manifest_signature_b64") is not None
                 else None
             ),
         )
@@ -192,9 +157,7 @@ class TnpkgManifest:
             `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
                 Manifest signature spec.
         """
-        d = self.to_dict()
-        d.pop("manifest_signature_b64", None)
-        return _canonical_bytes(d)
+        return bytes(_tn_core.manifest_signing_bytes(_manifest_doc_from_dataclass(self)))
 
     def sign(self, sk: Ed25519PrivateKey) -> TnpkgManifest:
         """Sign the manifest in place and return self.
@@ -250,17 +213,23 @@ class TnpkgManifest:
         return self
 
 
-def _did_key_pub(did: str) -> bytes:
-    """Extract the raw 32-byte Ed25519 public key from a did:key: identifier.
+def _verify_manifest_signature(manifest: TnpkgManifest) -> bool:
+    """True iff ``manifest_signature_b64`` verifies against ``from_did``'s
+    Ed25519 public key. Returns False on any decode / verify error.
+    """
+    return bool(_tn_core.manifest_verify_signature(_manifest_doc_from_dataclass(manifest)))
 
-    Mirrors ``signing.DeviceKey.verify`` decoding for the Ed25519 case so
-    we can verify a manifest without instantiating a ``DeviceKey``.
+
+def _did_key_pub(did: str) -> bytes:
+    """Extract the raw 32-byte Ed25519 public key from a did:key identifier.
+
+    Kept for tests and browser interop helpers that need public-key bytes
+    directly. Manifest verification itself is delegated to ``tn_core``.
     """
     if not did.startswith("did:key:z"):
         raise ValueError(f"unsupported DID form for manifest signature: {did!r}")
     multicodec = _b58decode(did[len("did:key:z") :])
     prefix, pub_bytes = multicodec[:2], multicodec[2:]
-    # Ed25519 multicodec varint = b"\xed\x01"; we only sign with Ed25519.
     if prefix != b"\xed\x01":
         raise ValueError(
             f"manifest signing key must be Ed25519 (multicodec 0xed); "
@@ -271,19 +240,26 @@ def _did_key_pub(did: str) -> bytes:
     return pub_bytes
 
 
-def _verify_manifest_signature(manifest: TnpkgManifest) -> bool:
-    """True iff ``manifest_signature_b64`` verifies against ``from_did``'s
-    Ed25519 public key. Returns False on any decode / verify error.
-    """
-    if not manifest.manifest_signature_b64:
-        return False
-    try:
-        pub_bytes = _did_key_pub(manifest.publisher_identity)
-        sig = base64.b64decode(manifest.manifest_signature_b64)
-        Ed25519PublicKey.from_public_bytes(pub_bytes).verify(sig, manifest.signing_bytes())
-        return True
-    except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
-        return False
+def _manifest_doc_from_dataclass(manifest: TnpkgManifest) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "kind": manifest.kind,
+        "version": manifest.version,
+        "publisher_identity": manifest.publisher_identity,
+        "ceremony_id": manifest.ceremony_id,
+        "as_of": manifest.as_of,
+        "scope": manifest.scope,
+        "clock": manifest.clock,
+        "event_count": manifest.event_count,
+    }
+    if manifest.recipient_identity is not None:
+        out["recipient_identity"] = manifest.recipient_identity
+    if manifest.head_row_hash is not None:
+        out["head_row_hash"] = manifest.head_row_hash
+    if manifest.state is not None:
+        out["state"] = manifest.state
+    if manifest.manifest_signature_b64 is not None:
+        out["manifest_signature_b64"] = manifest.manifest_signature_b64
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -310,33 +286,23 @@ def _write_tnpkg(
             "present."
         )
     out_path = Path(out_path).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_STORED) as zf:
-        zf.writestr(
-            "manifest.json",
-            json.dumps(manifest.to_dict(), sort_keys=True, indent=2) + "\n",
-        )
-        for name, data in body_files.items():
-            zf.writestr(name, data)
+    _tn_core.tnpkg_write(str(out_path), manifest.to_dict(), body_files)
     return out_path
 
 
-def _open_zip(source: Path | str | bytes | bytearray) -> zipfile.ZipFile:
-    """Open a `.tnpkg` zip from a path or in-memory bytes. Raises
-    ValueError with a friendly message on a non-zip input.
-    """
-    if isinstance(source, (bytes, bytearray)):
-        try:
-            return zipfile.ZipFile(BytesIO(bytes(source)), "r")
-        except zipfile.BadZipFile as exc:
-            raise ValueError(f"absorb: input bytes are not a valid `.tnpkg` zip: {exc}") from exc
-    p = Path(source)
-    if not p.exists():
-        raise FileNotFoundError(f"absorb: source path does not exist: {p}")
-    try:
-        return zipfile.ZipFile(p, "r")
-    except zipfile.BadZipFile as exc:
-        raise ValueError(f"absorb: {p} is not a valid `.tnpkg` zip: {exc}") from exc
+def _validate_tnpkg_body_name(name: str) -> None:
+    """Validate a non-manifest member name in the `.tnpkg` container."""
+    if not name.startswith("body/") or name == "body/":
+        raise ValueError(
+            f"tnpkg: invalid package member {name!r}; expected manifest.json or body/..."
+        )
+    parts = name.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"tnpkg: invalid package member {name!r}; path traversal is forbidden")
+    if name.startswith("/") or "\\" in name:
+        raise ValueError(
+            f"tnpkg: invalid package member {name!r}; only POSIX relative paths are allowed"
+        )
 
 
 def _read_manifest(source: Path | str | bytes | bytearray) -> tuple[TnpkgManifest, dict[str, bytes]]:
@@ -345,22 +311,13 @@ def _read_manifest(source: Path | str | bytes | bytearray) -> tuple[TnpkgManifes
     ``body_files`` maps every non-manifest entry name to its raw bytes.
     Does not verify the signature — the caller is expected to.
     """
-    with _open_zip(source) as zf:
-        names = zf.namelist()
-        if "manifest.json" not in names:
-            raise ValueError(
-                "absorb: zip is missing `manifest.json`. The `.tnpkg` format "
-                "requires a top-level signed manifest; this archive does not "
-                "have one. Was it produced by an old / external tool?"
-            )
-        manifest_doc = json.loads(zf.read("manifest.json").decode("utf-8"))
-        manifest = TnpkgManifest.from_dict(manifest_doc)
-        body: dict[str, bytes] = {}
-        for name in names:
-            if name == "manifest.json":
-                continue
-            body[name] = zf.read(name)
-        return manifest, body
+    rust_source: bytes | str
+    if isinstance(source, (bytes, bytearray)):
+        rust_source = bytes(source)
+    else:
+        rust_source = str(source)
+    manifest_doc, body = _tn_core.tnpkg_read(rust_source)
+    return TnpkgManifest.from_dict(dict(manifest_doc)), dict(body)
 
 
 # --------------------------------------------------------------------------

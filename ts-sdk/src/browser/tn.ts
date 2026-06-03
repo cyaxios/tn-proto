@@ -408,9 +408,10 @@ export class Tn {
   }
 
   /**
-   * `Tn.absorb(source)` — install a `.tnpkg`. Not yet wired for browser:
-   * needs a browser-pure tnpkg reader (the Node side uses fs to read
-   * the file). Track in the browser-surface plan.
+   * `Tn.absorb(source)` — install a `.tnpkg`. Not yet wired for browser.
+   * The shared WASM tnpkg reader exists; the remaining browser work is
+   * applying package body members into the configured storage adapter
+   * without Node filesystem assumptions.
    */
   static async absorb(_source: string): Promise<Tn> {
     throw new NotYetWiredForBrowserError("absorb");

@@ -1,4 +1,8 @@
 //! btn cipher adapter: wraps `tn_btn::PublisherState` and `tn_btn::ReaderKit`.
+//! A concrete cipher backing [`crate::Runtime`]; selected by group cipher
+//! policy. Internal primitive — most readers want the high-level API instead
+//! (`tn.info()` / `tn read`); reach here directly only to drive btn
+//! encrypt/decrypt yourself.
 //!
 //! Two types:
 //!

@@ -7,10 +7,11 @@ Lifecycle (the four-line dirt-easy summary):
     3. for e in tn.read(): print(e)           # iterate + decrypt
     4. tn.flush_and_close()                   # drain handlers (optional)
 
-Step 1 is optional once a ceremony is on disk; ``tn.info`` will discover
-``./tn.yaml`` (legacy) or ``./.tn/default/tn.yaml`` (multi-ceremony) on
-first use. Step 4 is optional in short scripts but recommended in
-long-running processes.
+Step 1 is optional once a Project is on disk; ``tn.info`` will discover
+``./tn.yaml`` (legacy), legacy ``./.tn/default/tn.yaml``, or an existing
+project-root ``./.tn/<project>/tn.yaml`` on first use. Fresh auto-init
+creates ``./.tn/<cwd-name>/tn.yaml``. Step 4 is optional in short scripts
+but recommended in long-running processes.
 
 Public API:
     tn.init(yaml_path)          # load or create ceremony + open log file
@@ -35,6 +36,13 @@ import threading
 from pathlib import Path
 from typing import Any
 
+# Re-export the Rust-bound runtime exception so callers can write a
+# stable `except tn.KeystoreConflictError` instead of dipping into the
+# private `tn_core._core` module. The class is shared across runtime
+# failures, so check the message string when distinguishing
+# divergence-retry from other faults: see `is_keystore_diverged()`.
+from tn_core._core import TnRuntimeError as KeystoreConflictError
+
 from . import (
     _agents_policy,
     _autoinit,
@@ -56,13 +64,6 @@ from ._dispatch import (  # should_use_rust re-exported for diagnostics
 from ._entry import Entry, VerifyError
 from .absorb import AbsorbReceipt, AbsorbResult, LeafReuseAttempt
 from .absorb import absorb as _raw_absorb
-
-# Re-export the Rust-bound runtime exception so callers can write a
-# stable `except tn.KeystoreConflictError` instead of dipping into the
-# private `tn_core._core` module. The class is shared across runtime
-# failures, so check the message string when distinguishing
-# divergence-retry from other faults: see `is_keystore_diverged()`.
-from tn_core._core import TnRuntimeError as KeystoreConflictError
 
 
 def is_keystore_diverged(exc: BaseException) -> bool:
@@ -101,7 +102,9 @@ from .admin.cache import (
 from .admin.cache import LeafReuseAttempt as CacheLeafReuseAttempt  # noqa: F401
 from .compile import compile_enrolment
 from .context import (
-    _context as _ctx_var,  # noqa: F401 — read by `_emit_via` hot path
+    _context as _ctx_var,
+)
+from .context import (
     clear_context,
     get_context,
     scope,
@@ -209,8 +212,8 @@ def _init_impl(
     stdout: bool | None = None,
     link: bool | None = None,
     device_private_bytes: bytes | None = None,
-    keystore_dir: "str | Path | None" = None,
-    admin_log_path: "str | Path | None" = None,
+    keystore_dir: str | Path | None = None,
+    admin_log_path: str | Path | None = None,
 ) -> None:
     """Initialize TN for this process.
 
@@ -219,9 +222,11 @@ def _init_impl(
 
       1. ``$TN_YAML`` env var
       2. ``./tn.yaml`` in the current working directory (legacy layout)
-      3. ``./.tn/default/tn.yaml`` (multi-ceremony layout)
-      4. ``$TN_HOME/tn.yaml`` (default ``~/.tn/tn.yaml``)
-      5. None of the above → mint a fresh ceremony at ``./.tn/default/``
+      3. ``./.tn/default/tn.yaml`` (legacy multi-ceremony layout)
+      4. exactly one ``./.tn/<project>/tn.yaml`` project-root layout
+      5. ``$TN_HOME/tn.yaml`` (default ``~/.tn/tn.yaml``)
+      6. None of the above → mint a fresh Project at
+         ``./.tn/<cwd-name>/tn.yaml``
 
     With an explicit path, that path is used verbatim and the discovery
     chain is skipped. ``TN_STRICT=1`` blocks the no-arg form (raises
@@ -302,6 +307,7 @@ def _init_impl(
             identity=identity,
             extra_handlers=extra_handlers,
             stdout=stdout,
+            link=link,
             device_private_bytes=device_private_bytes,
             keystore_dir=keystore_dir,
             admin_log_path=admin_log_path,
@@ -1032,6 +1038,7 @@ def __dir__() -> list[str]:
 # the helpers (_emit_with_splice, _resolve_sign) still live in this
 # package init; emit.py imports them back when called.
 # --------------------------------------------------------------------------
+from . import emit as _emit_module  # noqa: E402
 from ._handle import (  # noqa: E402
     TN,
     MultiCeremonyEmitNotImplemented,
@@ -1065,7 +1072,6 @@ from ._read_impl import (  # noqa: F401, E402
     _rotated_backup_paths,
 )
 from ._registry import TNNotFound  # noqa: E402
-from . import emit as _emit_module  # noqa: E402
 from .emit import debug, error, info, log, warning  # noqa: E402
 
 # 0.4.2a7 hot-path lift: bind ``_emit_with_splice`` / ``_resolve_sign``
@@ -1095,7 +1101,6 @@ from .read import (  # noqa: E402
     read,
     watch,
 )
-
 
 # atexit registration: tn.init() registers _atexit_flush once per
 # process so handlers drain on normal interpreter exit without the

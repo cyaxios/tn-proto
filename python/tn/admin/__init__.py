@@ -618,7 +618,7 @@ def _maybe_autosync(cfg: LoadedConfig) -> None:
 
     if os.environ.get("TN_WALLET_AUTOSYNC") != "1":
         return
-    if not cfg.is_linked():
+    if not cfg.is_linked() and not getattr(cfg, "vault_enabled", False):
         return
 
     err_msg: str | None = None
@@ -628,9 +628,10 @@ def _maybe_autosync(cfg: LoadedConfig) -> None:
         from ..vault_client import VaultClient
 
         identity = Identity.load(_default_identity_path())
-        if cfg.linked_vault is None:
-            raise RuntimeError("ceremony has no linked_vault; cannot sync")
-        client = VaultClient.for_identity(identity, cfg.linked_vault)
+        link = _wallet.vault_link_info(cfg)
+        if not link.enabled or not link.url:
+            raise RuntimeError("ceremony has no vault.url; cannot sync")
+        client = VaultClient.for_identity(identity, link.url)
         try:
             result = _wallet.sync_ceremony(cfg, client)
             if result.errors:
@@ -769,25 +770,55 @@ def set_link_state(
 
     def _mutate(doc: dict[str, Any]) -> None:
         ceremony_block = doc.setdefault("ceremony", {})
+        vault_block = doc.setdefault("vault", {})
         ceremony_block["mode"] = mode
         if mode == "linked":
             ceremony_block["linked_vault"] = linked_vault
             if linked_project_id:
                 ceremony_block["linked_project_id"] = linked_project_id
+            vault_block["enabled"] = True
+            vault_block["url"] = linked_vault
+            current_project_id = vault_block.get("linked_project_id")
+            if linked_project_id and not current_project_id:
+                vault_block["linked_project_id"] = linked_project_id
+            vault_block["autosync"] = bool(vault_block.get("autosync", True))
+            vault_block.setdefault("sync_interval_seconds", 600)
         else:
             ceremony_block.pop("linked_vault", None)
             ceremony_block.pop("linked_project_id", None)
+            vault_block["enabled"] = False
+            vault_block["url"] = ""
+            vault_block["linked_project_id"] = ""
+            vault_block["autosync"] = False
+            vault_block.setdefault("sync_interval_seconds", 600)
 
-    _update_yaml(cfg, _mutate)
+    # Link state is project-scoped: a named stream inherits its
+    # ceremony/vault link from the default (the extends-chain root), so
+    # the mutation must land at the root — otherwise unlinking a stream
+    # only writes a stream-local override and leaves the project linked.
+    # For a single-file ceremony the authoritative yaml resolves back to
+    # cfg.yaml_path, so the legacy single-file layout is unchanged.
+    _update_authoritative_yaml(cfg, _mutate, key="vault")
 
     cfg.mode = mode
     if mode == "linked":
         cfg.linked_vault = linked_vault
         if linked_project_id:
             cfg.linked_project_id = linked_project_id
+        cfg.vault_enabled = True
+        cfg.vault_url = linked_vault
+        if linked_project_id and not cfg.vault_linked_project_id:
+            cfg.vault_linked_project_id = linked_project_id
+        cfg.vault_autosync = True
+        cfg.vault_sync_interval_seconds = cfg.vault_sync_interval_seconds or 600
     else:
         cfg.linked_vault = None
         cfg.linked_project_id = None
+        cfg.vault_enabled = False
+        cfg.vault_url = None
+        cfg.vault_linked_project_id = None
+        cfg.vault_autosync = False
+        cfg.vault_sync_interval_seconds = cfg.vault_sync_interval_seconds or 600
     return cfg
 
 

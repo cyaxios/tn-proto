@@ -25,7 +25,10 @@ fn init_fails_when_did_mismatches() {
 
     // Tamper yaml to point to a different DID.
     let yaml = std::fs::read_to_string(&cer.yaml_path).unwrap();
-    let tampered = yaml.replace(&cer.device_identity, "did:key:zDIFFERENTXXXXXXXXXXXXXXXXXXXXXX");
+    let tampered = yaml.replace(
+        &cer.device_identity,
+        "did:key:zDIFFERENTXXXXXXXXXXXXXXXXXXXXXX",
+    );
     std::fs::write(&cer.yaml_path, tampered).unwrap();
 
     let result = tn_core::Runtime::init(&cer.yaml_path);

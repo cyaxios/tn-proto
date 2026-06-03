@@ -1,5 +1,8 @@
 //! Decrypt a foreign publisher's ndjson log with a kit dropped into a
-//! local keystore directory by `Runtime::absorb`.
+//! local keystore directory by `Runtime::absorb`. Internal primitive: most
+//! readers want the high-level API instead — see [`crate::Runtime`] for the
+//! full read path (behind `tn.read()` / `tn read`). Reach here directly only
+//! for a cross-publisher decrypt that bypasses your own ceremony setup.
 //!
 //! Mirrors Python `tn.read_as_recipient(log_path, keystore_dir, group=)`
 //! and TS `readAsRecipient(logPath, keystorePath, opts?)`. Closes the

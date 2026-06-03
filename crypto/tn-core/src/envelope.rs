@@ -1,6 +1,10 @@
-//! Envelope build + ndjson serialization.
+//! TN envelope assembly and ndjson serialization — the on-the-wire record
+//! shape. Internal primitive: most readers want the high-level API instead —
+//! see [`crate::Runtime`] (write/read attested events, behind `tn.info()` /
+//! `tn read`) and [`crate::Manifest`] (signed packages, behind `tn export`).
+//! Reach here directly only when hand-building or parsing raw envelope bytes.
 //!
-//! Matches `tn/logger.py::emit` output format:
+//! Matches `tn/logger.py` output format:
 //! - Envelope key order: device_identity, timestamp, event_id, event_type, level, sequence,
 //!   prev_hash, row_hash, signature; then public fields in insertion order;
 //!   then group payloads in insertion order.
@@ -112,8 +116,7 @@ pub fn build_envelope(input: EnvelopeInput<'_>) -> Result<String> {
     out.push(',');
     // u64 number — itoa-free fast path via std `write!`.
     use std::fmt::Write as _;
-    write!(out, "\"sequence\":{}", input.sequence)
-        .expect("write to String is infallible");
+    write!(out, "\"sequence\":{}", input.sequence).expect("write to String is infallible");
     out.push(',');
     write_safe_string_field(&mut out, "prev_hash", input.prev_hash);
     out.push(',');

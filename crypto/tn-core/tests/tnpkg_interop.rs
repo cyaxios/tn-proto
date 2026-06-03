@@ -92,14 +92,9 @@ fn assert_canonical_admin_state(manifest: &Manifest) {
         link.get("vault_identity").and_then(Value::as_str),
         Some("did:web:vault.example")
     );
-    assert_eq!(
-        link.get("project_id").and_then(Value::as_str),
-        Some("demo")
-    );
+    assert_eq!(link.get("project_id").and_then(Value::as_str), Some("demo"));
     assert!(
-        link.get("unlinked_at")
-            .map(|v| v.is_null())
-            .unwrap_or(true),
+        link.get("unlinked_at").map(|v| v.is_null()).unwrap_or(true),
         "vault link must still be active (unlinked_at == null)"
     );
 }
@@ -121,10 +116,9 @@ fn python_produced_admin_snapshot_parses_in_rust() {
     if skip_if_missing(&p, "python") {
         return;
     }
-    let (manifest, body) = read_tnpkg(TnpkgSource::Path(&p))
-        .expect("read python_admin_snapshot.tnpkg");
-    verify_manifest(&manifest)
-        .expect("Python-produced manifest signature must verify in Rust");
+    let (manifest, body) =
+        read_tnpkg(TnpkgSource::Path(&p)).expect("read python_admin_snapshot.tnpkg");
+    verify_manifest(&manifest).expect("Python-produced manifest signature must verify in Rust");
     assert_eq!(manifest.kind, ManifestKind::AdminLogSnapshot);
     assert!(body.contains_key("body/admin.ndjson"));
     assert!(
@@ -141,10 +135,8 @@ fn ts_produced_admin_snapshot_parses_in_rust() {
     if skip_if_missing(&p, "ts") {
         return;
     }
-    let (manifest, body) = read_tnpkg(TnpkgSource::Path(&p))
-        .expect("read ts_admin_snapshot.tnpkg");
-    verify_manifest(&manifest)
-        .expect("TS-produced manifest signature must verify in Rust");
+    let (manifest, body) = read_tnpkg(TnpkgSource::Path(&p)).expect("read ts_admin_snapshot.tnpkg");
+    verify_manifest(&manifest).expect("TS-produced manifest signature must verify in Rust");
     assert_eq!(manifest.kind, ManifestKind::AdminLogSnapshot);
     assert!(body.contains_key("body/admin.ndjson"));
     assert!(
@@ -163,7 +155,8 @@ fn ts_produced_admin_snapshot_parses_in_rust() {
 // --------------------------------------------------------------------------
 
 fn golden_input() -> Manifest {
-    let mut clock_inner: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut clock_inner: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
     clock_inner.insert("tn.recipient.added".into(), 2);
     clock_inner.insert("tn.recipient.revoked".into(), 1);
     clock_inner.insert("tn.vault.linked".into(), 1);

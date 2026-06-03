@@ -141,6 +141,7 @@ export {
 export {
   encryptBodyBlob,
   decryptBodyBlob,
+  packBodyPlaintextZip,
   BODY_CIPHER_SUITE,
   BODY_FRAME,
 } from "./core/body_encryption.js";

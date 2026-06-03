@@ -1,4 +1,8 @@
-//! HKDF-SHA256 per-group index key + HMAC-SHA256 field tokens.
+//! HKDF-SHA256 per-group index keys and HMAC-SHA256 equality-search field
+//! tokens. Internal primitive: most readers want the high-level API instead
+//! — see [`crate::Runtime`] (events and queryable fields, behind `tn.info()`
+//! / `tn read`). Reach here directly only when computing or matching raw
+//! index tokens.
 //!
 //! Mirrors `tn/indexing.py` exactly:
 //! - HKDF-SHA256, info = `b"tn-index:v1:" + ceremony + b":" + group + b":" + decimal(epoch)`
@@ -106,8 +110,6 @@ pub fn index_token_with_template(
     let mut hex_buf = [0u8; 64];
     hex::encode_to_slice(tag.as_slice(), &mut hex_buf)
         .expect("32-byte digest into 64-char buffer is infallible");
-    out.push_str(
-        std::str::from_utf8(&hex_buf).expect("hex::encode_to_slice emits ASCII"),
-    );
+    out.push_str(std::str::from_utf8(&hex_buf).expect("hex::encode_to_slice emits ASCII"));
     Ok(out)
 }

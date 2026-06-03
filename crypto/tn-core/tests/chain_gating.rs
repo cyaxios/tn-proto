@@ -88,7 +88,9 @@ fn read_envelopes(log: &std::path::Path) -> Vec<Value> {
 
 #[test]
 fn chain_true_default_creates_lock_file_and_advances_sequence() {
-    unsafe { std::env::set_var("TN_NO_STDOUT", "1"); }
+    unsafe {
+        std::env::set_var("TN_NO_STDOUT", "1");
+    }
     let td = tempfile::tempdir().unwrap();
     let cer = setup_minimal_btn_ceremony(td.path());
     // No patching — chain defaults to true.
@@ -126,7 +128,9 @@ fn chain_true_default_creates_lock_file_and_advances_sequence() {
 
 #[test]
 fn chain_false_skips_lock_file_and_writes_unchained_sentinels() {
-    unsafe { std::env::set_var("TN_NO_STDOUT", "1"); }
+    unsafe {
+        std::env::set_var("TN_NO_STDOUT", "1");
+    }
     let td = tempfile::tempdir().unwrap();
     let cer = setup_minimal_btn_ceremony(td.path());
     add_ceremony_flag(&cer.yaml_path, "chain: false");

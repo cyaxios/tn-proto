@@ -58,6 +58,7 @@ from .packaging import Package
 from .tnpkg import (
     KNOWN_KINDS,
     TnpkgManifest,
+    _validate_tnpkg_body_name,
     _write_tnpkg,
 )
 
@@ -73,6 +74,7 @@ ExportKind = Literal[
     "full_keystore",
     "recipient_invite",
     "identity_seed",
+    "project_seed",
 ]
 
 # Sentinel ceremony_id for identity_seed bundles. The kind doesn't belong
@@ -262,36 +264,33 @@ def _build_kit_bundle_body(
 
     if full and cfg is not None and cfg.yaml_path is not None and cfg.yaml_path.exists():
         body["body/tn.yaml"] = cfg.yaml_path.read_bytes()
-        # Pack every named stream's yaml verbatim. Streams live in named
-        # sibling subdirectories of the project root, each with its own
-        # ``tn.yaml`` carrying the chain's ``ceremony.id``. We pack the
-        # yaml as-is so absorb can restore the same chain identity on
-        # the receiving node. Streams have no key material of their own
-        # (they extend default), so we don't recurse into logs/ or admin/.
-        #
-        # Project root location depends on the on-disk layout:
-        # * New (preferred): ``<root>/default/tn.yaml`` → root is parent.parent
-        # * Legacy: ``<root>/tn.yaml`` → root is parent
-        # We pick the root by walking up until we find subdirs with
-        # tn.yaml siblings (other than default's own dir).
+        # Pack every named stream's yaml verbatim. New Project-root layout
+        # stores overlays as ``<project>/streams/<name>.yaml``; older
+        # ceremony layout stored streams as sibling ``<name>/tn.yaml`` dirs.
+        # The package keeps the legacy archive shape
+        # ``body/streams/<name>/tn.yaml`` so older readers can keep parsing
+        # while restore maps it to the local layout.
         from ._defaults import DEFAULT_CEREMONY_NAME
 
         default_dir = cfg.yaml_path.parent
-        if default_dir.name == DEFAULT_CEREMONY_NAME:
+        streams_dir = default_dir / "streams"
+        if streams_dir.is_dir():
+            for stream_yaml in sorted(streams_dir.glob("*.yaml")):
+                if stream_yaml.stem == DEFAULT_CEREMONY_NAME:
+                    continue
+                body[f"body/streams/{stream_yaml.stem}/tn.yaml"] = stream_yaml.read_bytes()
+        elif default_dir.name == DEFAULT_CEREMONY_NAME:
             project_root = default_dir.parent
             default_dir_name: str | None = default_dir.name
-        else:
-            project_root = default_dir
-            default_dir_name = None
-        if project_root.is_dir():
-            for entry in sorted(project_root.iterdir()):
-                if not entry.is_dir():
-                    continue
-                if default_dir_name is not None and entry.name == default_dir_name:
-                    continue
-                stream_yaml = entry / "tn.yaml"
-                if stream_yaml.is_file():
-                    body[f"body/streams/{entry.name}/tn.yaml"] = stream_yaml.read_bytes()
+            if project_root.is_dir():
+                for entry in sorted(project_root.iterdir()):
+                    if not entry.is_dir():
+                        continue
+                    if default_dir_name is not None and entry.name == default_dir_name:
+                        continue
+                    stream_yaml = entry / "tn.yaml"
+                    if stream_yaml.is_file():
+                        body[f"body/streams/{entry.name}/tn.yaml"] = stream_yaml.read_bytes()
 
     if full:
         # Loud zero-byte marker. Keeping it under ``body/`` matches the new
@@ -305,6 +304,88 @@ def _build_kit_bundle_body(
         "state": {
             "kits": kits_meta,
             "kind": "full-keystore" if full else "readers-only",
+        },
+    }
+    return body, extras
+
+
+def _build_project_seed_body(
+    cfg: LoadedConfig,
+    keystore: Path,
+    *,
+    groups_filter: list[str] | None,
+) -> tuple[dict[str, bytes], dict[str, Any]]:
+    """Body for ``kind="project_seed"`` — a complete identity+config backup.
+
+    Mirrors the dashboard "Create Project" bundle consumed by
+    :func:`tn.absorb._absorb_project_seed`. Unlike ``full_keystore``
+    (which lays key files flat under ``body/``), project_seed nests all
+    key material under ``body/keys/<name>`` and carries the full canonical
+    ``tn.yaml`` at ``body/tn.yaml``. The enclosing manifest is
+    self-addressed (from_did == to_did == the device DID).
+
+    Body shape::
+
+        body/tn.yaml
+        body/keys/local.private        (32-byte Ed25519 seed)
+        body/keys/local.public         (did:key text)
+        body/keys/index_master.key
+        body/keys/<group>.btn.mykit
+        body/keys/<group>.btn.state
+    """
+    import re as _re
+
+    keystore = Path(keystore).resolve()
+    if not keystore.is_dir():
+        raise FileNotFoundError(f"project_seed: keystore directory not found: {keystore}")
+    if cfg.yaml_path is None or not cfg.yaml_path.exists():
+        raise FileNotFoundError(
+            "project_seed: cfg.yaml_path does not exist; cannot back up tn.yaml"
+        )
+
+    group_filter = set(groups_filter) if groups_filter else None
+    kit_re = _re.compile(r"^(.+?)\.btn\.(mykit|state)$")
+
+    body: dict[str, bytes] = {"body/tn.yaml": cfg.yaml_path.read_bytes()}
+    keys_meta: list[str] = []
+
+    for entry in sorted(keystore.iterdir()):
+        if not entry.is_file():
+            continue
+        name = entry.name
+        if name in ("local.private", "local.public", "index_master.key"):
+            body[f"body/keys/{name}"] = entry.read_bytes()
+            keys_meta.append(name)
+            continue
+        m = kit_re.match(name)
+        if m:
+            group = m.group(1)
+            if group_filter is not None and group not in group_filter:
+                continue
+            body[f"body/keys/{name}"] = entry.read_bytes()
+            keys_meta.append(name)
+
+    for required in ("body/keys/local.private", "body/keys/local.public"):
+        if required not in body:
+            short = required[len("body/keys/") :]
+            raise FileNotFoundError(
+                f"project_seed: keystore is missing {short!r} in {keystore}; "
+                f"cannot build a restorable seed."
+            )
+
+    # Loud zero-byte marker (lives at body/ root, NOT body/keys/, so the
+    # absorb-side key installer skips it). Mirrors full_keystore.
+    body["body/WARNING_CONTAINS_PRIVATE_KEYS"] = b""
+
+    extras: dict[str, Any] = {
+        "scope": "project",
+        "state": {
+            "project": {
+                "ceremony_id": cfg.ceremony_id,
+                "project_name": cfg.project_name,
+                "keys": sorted(keys_meta),
+            },
+            "kind": "project-seed",
         },
     }
     return body, extras
@@ -453,6 +534,17 @@ def _validate_export_args(
         )
     if cfg is None and kind in {"admin_log_snapshot", "offer", "enrolment"}:
         raise ValueError(f"export(kind={kind!r}) requires cfg=...")
+    if kind == "project_seed" and not confirm_includes_secrets:
+        raise ValueError(
+            "export(kind='project_seed') writes the device's raw private keys "
+            "(local.private + index_master.key + per-group key material) into the "
+            "zip alongside the full tn.yaml — a complete identity+config backup for "
+            "restore on a fresh device. Pass confirm_includes_secrets=True to acknowledge."
+        )
+    if kind == "project_seed" and cfg is None:
+        raise ValueError(
+            "export(kind='project_seed') requires cfg=... (the live ceremony to back up)."
+        )
     if kind == "identity_seed" and device is None:
         raise ValueError(
             "export(kind='identity_seed') requires device=<DeviceKey>; the bundle "
@@ -511,6 +603,14 @@ def _build_export_body(
     if kind == "identity_seed":
         assert device is not None  # guarded by _validate_export_args
         return _build_identity_seed_body(device, nickname=nickname)
+    if kind == "project_seed":
+        assert cfg is not None  # guarded by _validate_export_args
+        ks = (
+            Path(keystore).resolve()
+            if keystore is not None
+            else Path(cfg.keystore).resolve()
+        )
+        return _build_project_seed_body(cfg, ks, groups_filter=groups)
     if kind == "recipient_invite":
         raise NotImplementedError(
             f"export(kind={kind!r}) is reserved in the manifest schema but not "
@@ -649,6 +749,8 @@ def _apply_seal_for_recipient(
 
     from .recipient_seal import (
         manifest_aad_for_wrap as _aad_for_wrap,
+    )
+    from .recipient_seal import (
         seal_bek_for_recipient as _seal_bek,
     )
 
@@ -874,7 +976,7 @@ def export(
         ceremony_id=signer_ceremony,
         as_of=sealed_as_of or _now_iso(),
         scope=str(scope or extras.get("scope") or _default_scope(kind)),
-        recipient_identity=signer_did if kind == "identity_seed" else to_did,
+        recipient_identity=signer_did if kind in ("identity_seed", "project_seed") else to_did,
         clock=dict(extras.get("clock", {})),
         event_count=int(extras.get("event_count", 0)),
         head_row_hash=extras.get("head_row_hash"),
@@ -934,20 +1036,14 @@ def _encrypt_body_in_place(
         `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
             Wire spec.
     """
-    import io as _io
     import os as _os
-    import zipfile as _zipfile
 
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     # Pack the body files into a STORED zip. Sort entries by name so the
     # plaintext bytes are deterministic for a given body, which is
     # desirable for tests + ciphertext-hash equality.
-    buf = _io.BytesIO()
-    with _zipfile.ZipFile(buf, "w", compression=_zipfile.ZIP_STORED) as zf:
-        for name in sorted(body.keys()):
-            zf.writestr(name, body[name])
-    plaintext = buf.getvalue()
+    plaintext = pack_body_plaintext_zip(body)
 
     nonce = _os.urandom(12)
     aesgcm = AESGCM(key)
@@ -968,6 +1064,29 @@ def _encrypt_body_in_place(
     }
     new_extras["state"] = state
     return new_body, new_extras
+
+
+def pack_body_plaintext_zip(body: dict[str, bytes]) -> bytes:
+    """Canonical STORED-ZIP plaintext for sealed ``.tnpkg`` bodies.
+
+    Entries are sorted and written with standard :mod:`zipfile` as STORED
+    members with a fixed DOS timestamp. The protocol requires a stock ZIP
+    plaintext that any unzip tool can inspect after the BEK is recovered; it
+    does not require owning ZIP record serialization.
+    """
+    import io as _io
+    import zipfile as _zipfile
+
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w", compression=_zipfile.ZIP_STORED) as zf:
+        for name in sorted(body.keys()):
+            _validate_tnpkg_body_name(name)
+            info = _zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = _zipfile.ZIP_STORED
+            info.create_system = 0
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, bytes(body[name]))
+    return buf.getvalue()
 
 
 def decrypt_body_blob(blob: bytes, key: bytes) -> dict[str, bytes]:
@@ -1060,6 +1179,8 @@ def _default_scope(kind: str) -> str:
         return "full"
     if kind == "identity_seed":
         return "identity"
+    if kind == "project_seed":
+        return "project"
     return "admin"
 
 
@@ -1085,8 +1206,8 @@ def canonical_manifest_bytes(manifest: TnpkgManifest) -> bytes:
 
 
 __all__ = [
-    "ExportKind",
     "IDENTITY_SEED_CEREMONY_PLACEHOLDER",
+    "ExportKind",
     "canonical_manifest_bytes",
     "decrypt_body_blob",
     "export",

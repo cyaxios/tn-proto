@@ -17,10 +17,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ::tn_core::admin_cache::ChainConflict;
-use ::tn_core::tnpkg::ManifestKind;
-use ::tn_core::{
-    AbsorbSource, AdminStateCache, Error as TnError, ExportOptions, Runtime,
+use ::tn_core::tnpkg::{
+    read_tnpkg, verify_manifest, write_tnpkg, BodyContents, Manifest, ManifestKind, TnpkgSource,
 };
+use ::tn_core::{AbsorbSource, AdminStateCache, Error as TnError, ExportOptions, Runtime};
 
 create_exception!(_core, TnRuntimeError, PyException);
 create_exception!(_core, NotEntitled, PyException);
@@ -109,10 +109,7 @@ impl PyRuntime {
         };
         let fields_json = pydict_to_json(fields)?;
         if let Some(t0) = _py_t0 {
-            tn_core::perf::record_ns(
-                "emit:py_dict_marshal",
-                t0.elapsed().as_nanos() as u64,
-            );
+            tn_core::perf::record_ns("emit:py_dict_marshal", t0.elapsed().as_nanos() as u64);
         }
         let _wrap_t0 = if tn_core::perf::enabled() {
             Some(std::time::Instant::now())
@@ -135,10 +132,7 @@ impl PyRuntime {
             // Includes both Runtime::emit_inner (which has its own
             // emit:_TOTAL marker) AND the return-wrap into PyBytes.
             // Subtract emit:_TOTAL to isolate the wrap-back cost.
-            tn_core::perf::record_ns(
-                "emit:py_call_and_wrap",
-                t0.elapsed().as_nanos() as u64,
-            );
+            tn_core::perf::record_ns("emit:py_call_and_wrap", t0.elapsed().as_nanos() as u64);
         }
         result
     }
@@ -234,11 +228,7 @@ impl PyRuntime {
     ///
     /// `on_invalid` is one of "skip" (default), "raise", "forensic".
     #[pyo3(signature = (on_invalid="skip"))]
-    fn secure_read<'py>(
-        &self,
-        py: Python<'py>,
-        on_invalid: &str,
-    ) -> PyResult<Bound<'py, PyList>> {
+    fn secure_read<'py>(&self, py: Python<'py>, on_invalid: &str) -> PyResult<Bound<'py, PyList>> {
         use ::tn_core::OnInvalid;
         let mode = match on_invalid {
             "skip" => OnInvalid::Skip,
@@ -623,14 +613,15 @@ impl PyRuntime {
         d.set_item(intern!(py, "noop"), receipt.noop)?;
         d.set_item(
             intern!(py, "derived_state"),
-            receipt
-                .derived_state
-                .map_or_else(|| py.None(), |s| {
+            receipt.derived_state.map_or_else(
+                || py.None(),
+                |s| {
                     serde_json::to_value(s)
                         .ok()
                         .and_then(|v| json_to_py(py, &v).ok().map(|b| b.unbind()))
                         .map_or_else(|| py.None(), |o| o.into_py(py))
-                }),
+                },
+            ),
         )?;
         let conflicts = PyList::empty_bound(py);
         for c in &receipt.conflicts {
@@ -875,11 +866,14 @@ fn perf_snapshot(py: Python<'_>) -> PyResult<PyObject> {
     let snap = tn_core::perf::snapshot();
     let list = PyList::empty_bound(py);
     for (stage, stats) in snap {
-        let tup = PyTuple::new_bound(py, &[
-            stage.to_object(py),
-            stats.count.to_object(py),
-            stats.total_ns.to_object(py),
-        ]);
+        let tup = PyTuple::new_bound(
+            py,
+            &[
+                stage.to_object(py),
+                stats.count.to_object(py),
+                stats.total_ns.to_object(py),
+            ],
+        );
         list.append(tup)?;
     }
     Ok(list.into())
@@ -892,6 +886,157 @@ fn perf_reset() {
     tn_core::perf::reset();
 }
 
+#[pyfunction]
+fn manifest_known_kinds<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty_bound(py);
+    for kind in [
+        ManifestKind::AdminLogSnapshot,
+        ManifestKind::Offer,
+        ManifestKind::Enrolment,
+        ManifestKind::RecipientInvite,
+        ManifestKind::KitBundle,
+        ManifestKind::FullKeystore,
+        ManifestKind::ContactUpdate,
+        ManifestKind::IdentitySeed,
+        ManifestKind::ProjectSeed,
+    ] {
+        list.append(kind.as_str())?;
+    }
+    Ok(list)
+}
+
+#[pyfunction]
+fn manifest_to_dict<'py>(
+    py: Python<'py>,
+    manifest_doc: &Bound<'_, PyDict>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let manifest = manifest_from_pydict(manifest_doc)?;
+    json_to_py(py, &manifest.to_json())
+}
+
+#[pyfunction]
+fn manifest_signing_bytes<'py>(
+    py: Python<'py>,
+    manifest_doc: &Bound<'_, PyDict>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let manifest = manifest_from_pydict(manifest_doc)?;
+    let bytes = manifest.signing_bytes().map_err(err_to_py)?;
+    Ok(PyBytes::new_bound(py, &bytes))
+}
+
+#[pyfunction]
+fn manifest_verify_signature(manifest_doc: &Bound<'_, PyDict>) -> PyResult<bool> {
+    let manifest = manifest_from_pydict(manifest_doc)?;
+    Ok(verify_manifest(&manifest).is_ok())
+}
+
+#[pyfunction]
+fn tnpkg_read<'py>(py: Python<'py>, source: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTuple>> {
+    let (manifest, body) = if let Ok(b) = source.extract::<Vec<u8>>() {
+        read_tnpkg(TnpkgSource::Bytes(&b)).map_err(err_to_py)?
+    } else if let Ok(s) = source.extract::<String>() {
+        read_tnpkg(TnpkgSource::Path(Path::new(&s))).map_err(err_to_py)?
+    } else {
+        return Err(PyValueError::new_err(
+            "tnpkg_read: source must be bytes or a path string",
+        ));
+    };
+
+    let manifest_py = json_to_py(py, &manifest.to_json())?;
+    let body_py = PyDict::new_bound(py);
+    for (name, data) in body {
+        body_py.set_item(name, PyBytes::new_bound(py, &data))?;
+    }
+    Ok(PyTuple::new_bound(py, &[manifest_py, body_py.into_any()]))
+}
+
+#[pyfunction]
+fn tnpkg_write(
+    out_path: &str,
+    manifest_doc: &Bound<'_, PyDict>,
+    body_files: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let manifest = manifest_from_pydict(manifest_doc)?;
+    let mut body = BodyContents::new();
+    for (k, v) in body_files.iter() {
+        let name: String = k.extract()?;
+        let data: Vec<u8> = v.extract()?;
+        body.insert(name, data);
+    }
+    let path = Path::new(out_path);
+    write_tnpkg(path, &manifest, &body).map_err(err_to_py)?;
+    Ok(path.display().to_string())
+}
+
+#[pyfunction]
+fn config_load_summary<'py>(py: Python<'py>, yaml_path: &str) -> PyResult<Bound<'py, PyDict>> {
+    let cfg = tn_core::config::load(Path::new(yaml_path)).map_err(err_to_py)?;
+    let vault = cfg.normalized_vault();
+    let field_to_groups = cfg.field_to_groups().map_err(err_to_py)?;
+
+    let out = PyDict::new_bound(py);
+    out.set_item(intern!(py, "ceremony_id"), cfg.ceremony.id)?;
+    out.set_item(intern!(py, "cipher"), cfg.ceremony.cipher)?;
+    out.set_item(intern!(py, "mode"), cfg.ceremony.mode)?;
+    out.set_item(intern!(py, "sign"), cfg.ceremony.sign)?;
+    out.set_item(intern!(py, "chain"), cfg.ceremony.chain)?;
+    out.set_item(intern!(py, "log_path"), cfg.logs.path)?;
+    out.set_item(
+        intern!(py, "admin_log_location"),
+        cfg.ceremony.protocol_events_location,
+    )?;
+    out.set_item(intern!(py, "keystore_path"), cfg.keystore.path)?;
+    out.set_item(intern!(py, "device_identity"), cfg.device.device_identity)?;
+    out.set_item(
+        intern!(py, "groups"),
+        json_to_py(
+            py,
+            &serde_json::Value::Array(
+                cfg.groups
+                    .keys()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        )?,
+    )?;
+    out.set_item(
+        intern!(py, "field_to_groups"),
+        json_to_py(
+            py,
+            &serde_json::to_value(field_to_groups)
+                .map_err(|e| PyValueError::new_err(format!("config_load_summary: {e}")))?,
+        )?,
+    )?;
+
+    let vault_py = PyDict::new_bound(py);
+    vault_py.set_item(intern!(py, "enabled"), vault.enabled)?;
+    vault_py.set_item(
+        intern!(py, "url"),
+        vault.url.map_or_else(|| py.None(), |s| s.into_py(py)),
+    )?;
+    vault_py.set_item(
+        intern!(py, "linked_project_id"),
+        vault
+            .linked_project_id
+            .map_or_else(|| py.None(), |s| s.into_py(py)),
+    )?;
+    vault_py.set_item(intern!(py, "autosync"), vault.autosync)?;
+    vault_py.set_item(
+        intern!(py, "sync_interval_seconds"),
+        vault.sync_interval_seconds,
+    )?;
+    vault_py.set_item(intern!(py, "declared"), cfg.vault_declared)?;
+    out.set_item(intern!(py, "vault"), vault_py)?;
+
+    Ok(out)
+}
+
+fn manifest_from_pydict(d: &Bound<'_, PyDict>) -> PyResult<Manifest> {
+    let value = serde_json::Value::Object(pydict_to_json(d)?);
+    Manifest::from_json(&value).map_err(err_to_py)
+}
+
 #[pymodule]
 #[pyo3(name = "_core")]
 fn tn_core_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -902,6 +1047,13 @@ fn tn_core_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("NotAPublisher", py.get_type_bound::<NotAPublisher>())?;
     m.add_function(wrap_pyfunction!(perf_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(perf_reset, m)?)?;
+    m.add_function(wrap_pyfunction!(manifest_known_kinds, m)?)?;
+    m.add_function(wrap_pyfunction!(manifest_to_dict, m)?)?;
+    m.add_function(wrap_pyfunction!(manifest_signing_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(manifest_verify_signature, m)?)?;
+    m.add_function(wrap_pyfunction!(tnpkg_read, m)?)?;
+    m.add_function(wrap_pyfunction!(tnpkg_write, m)?)?;
+    m.add_function(wrap_pyfunction!(config_load_summary, m)?)?;
     crate::admin::register(m)?;
     // Make `import tn_core._core.admin` (and thus `from tn_core.admin import …`)
     // work. PyO3 submodules are not automatically registered in sys.modules;

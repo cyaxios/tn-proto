@@ -19,6 +19,7 @@ import { createDecipheriv } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
+import { unzipSync } from "fflate";
 
 const DEFAULT_HEADERS: Record<string, string> = {
   "User-Agent": "tnproto-sdk-ts/0.4.3",
@@ -152,9 +153,8 @@ export function decryptBlobWithBek(blob: Uint8Array, bek: Uint8Array): Uint8Arra
 /**
  * Try to parse plaintext as either a STORED zip (PK\x03\x04 magic) OR the
  * Session 4 LEGACY-COMPAT-2026-04-29 frame. Returns null if neither.
- * For the zip path we only handle STORED (uncompressed) entries — the
- * Python impl uses python's zipfile which would handle DEFLATE too, but
- * tn.export only writes STORED so this stays simple.
+ * For the zip path we use the same browser-safe ZIP reader as the rest of
+ * the TypeScript SDK instead of maintaining a second local ZIP parser.
  */
 export function tryUnpackExportFrame(plaintext: Uint8Array): Map<string, Uint8Array> | null {
   // ── Path 1: STORED zip (PK\x03\x04) ──────────────────────────
@@ -199,30 +199,14 @@ export function tryUnpackExportFrame(plaintext: Uint8Array): Map<string, Uint8Ar
   return out;
 }
 
-/** Minimal STORED-only zip unpacker (matches what tn.export emits). */
 function _unpackStoredZip(buf: Uint8Array): Map<string, Uint8Array> {
   const out = new Map<string, Uint8Array>();
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  let pos = 0;
-  while (pos < buf.length) {
-    if (pos + 4 > buf.length) break;
-    const sig = view.getUint32(pos, true);
-    // Local file header signature 0x04034b50 ("PK\x03\x04") (little-endian).
-    if (sig !== 0x04034b50) break;
-    if (pos + 30 > buf.length) throw new RestoreError("truncated zip local header");
-    const compMethod = view.getUint16(pos + 8, true);
-    if (compMethod !== 0) {
-      throw new RestoreError(`zip member compression ${compMethod} not supported (STORED only)`);
+  try {
+    for (const [name, data] of Object.entries(unzipSync(buf))) {
+      out.set(name, data);
     }
-    const compSize = view.getUint32(pos + 18, true);
-    const fileNameLen = view.getUint16(pos + 26, true);
-    const extraLen = view.getUint16(pos + 28, true);
-    const nameStart = pos + 30;
-    const dataStart = nameStart + fileNameLen + extraLen;
-    if (dataStart + compSize > buf.length) throw new RestoreError("zip member data overruns buffer");
-    const name = new TextDecoder("utf-8").decode(buf.subarray(nameStart, nameStart + fileNameLen));
-    out.set(name, new Uint8Array(buf.subarray(dataStart, dataStart + compSize)));
-    pos = dataStart + compSize;
+  } catch (err) {
+    throw new RestoreError(`invalid zip export frame: ${(err as Error).message}`);
   }
   return out;
 }

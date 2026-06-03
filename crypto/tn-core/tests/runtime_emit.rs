@@ -136,7 +136,12 @@ fn protocol_events_route_to_separate_file() {
     // 0.4.2a8: `{event_class}` is the first dotted segment, matching
     // `python/tn/config.py::resolve_path_template` (`event_type.split(".")[0]`).
     // For `tn.key.rotate` that's `tn`.
-    let protocol_log = td.path().join(".tn").join("logs").join("protocol").join("tn.ndjson");
+    let protocol_log = td
+        .path()
+        .join(".tn")
+        .join("logs")
+        .join("protocol")
+        .join("tn.ndjson");
     drop(rt);
 
     let main = std::fs::read_to_string(&main_log).unwrap();

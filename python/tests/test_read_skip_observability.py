@@ -21,6 +21,10 @@ from pathlib import Path
 import pytest
 
 
+def _default_log(tmp_path: Path) -> Path:
+    return tmp_path / ".tn" / tmp_path.name / "logs" / "default.ndjson"
+
+
 @pytest.fixture()
 def ceremony(tmp_path: Path):
     cwd = os.getcwd()
@@ -71,7 +75,7 @@ def _tamper_event_type(log_path: Path, line_idx: int) -> None:
 
 def test_skip_mode_returns_stats(ceremony):
     tn, tmp_path = ceremony
-    log = tmp_path / ".tn" / "default" / "logs" / "tn.ndjson"
+    log = _default_log(tmp_path)
     _tamper_event_type(log, 1)
 
     result = tn.read(verify="skip")
@@ -86,7 +90,7 @@ def test_skip_mode_returns_stats(ceremony):
 
 def test_skip_mode_fires_on_skip_callback(ceremony):
     tn, tmp_path = ceremony
-    log = tmp_path / ".tn" / "default" / "logs" / "tn.ndjson"
+    log = _default_log(tmp_path)
     _tamper_event_type(log, 1)
 
     seen: list[tuple[str, str]] = []
@@ -108,7 +112,7 @@ def test_skip_mode_fires_on_skip_callback(ceremony):
 
 def test_verify_true_fires_callback_before_raise(ceremony):
     tn, tmp_path = ceremony
-    log = tmp_path / ".tn" / "default" / "logs" / "tn.ndjson"
+    log = _default_log(tmp_path)
     _tamper_event_type(log, 1)
 
     seen: list[tuple[str, str]] = []
@@ -147,7 +151,7 @@ def test_verify_false_yields_around_parse_error(ceremony):
     fires the callback.
     """
     tn, tmp_path = ceremony
-    log = tmp_path / ".tn" / "default" / "logs" / "tn.ndjson"
+    log = _default_log(tmp_path)
     import base64
     lines = log.read_text().splitlines()
     doc = json.loads(lines[1])
@@ -176,7 +180,7 @@ def test_verify_false_yields_around_parse_error(ceremony):
 def test_on_skip_callback_exceptions_dont_break_iteration(ceremony):
     """A buggy observer must not tank the read loop."""
     tn, tmp_path = ceremony
-    log = tmp_path / ".tn" / "default" / "logs" / "tn.ndjson"
+    log = _default_log(tmp_path)
     _tamper_event_type(log, 1)
 
     def boom(env, reason):

@@ -1,5 +1,5 @@
 """End-to-end tests for ``tn.use(name)``: the verb a user actually
-reaches for when they want a logger handle for a named ceremony.
+reaches for when they want a logger handle for a named stream.
 
 Style:
     Each test reads like a small documentation example. No mocks, no
@@ -8,7 +8,7 @@ Style:
     cares about.
 
 Coverage:
-    * ``tn.use(name)`` returns an isolated, named handle.
+    * ``tn.use(name)`` returns an isolated, named stream handle.
     * Second call with the same name returns the SAME handle (registry).
     * Different names give different handles, different logs.
     * Emits land in the named ceremony's log only.
@@ -80,7 +80,8 @@ def test_use_returns_a_handle_named_after_the_ceremony():
     payments = tn.use("payments")
     assert payments.name == "payments"
     assert payments.yaml_path.is_file()
-    assert payments.yaml_path.parent.name == "payments"
+    assert payments.yaml_path.parent.name == "streams"
+    assert payments.yaml_path.name == "payments.yaml"
 
 
 @requires_btn
@@ -98,14 +99,14 @@ def test_use_is_a_registry_get_or_create():
 @requires_btn
 def test_use_with_different_names_returns_different_handles():
     """``tn.use("a")`` and ``tn.use("b")`` give you two distinct
-    handles, each rooted at their own ``.tn/<name>/`` directory."""
+    handles, each with its own stream overlay in the current Project."""
     import tn
 
     a = tn.use("alpha")
     b = tn.use("beta")
     assert a is not b
     assert a.name != b.name
-    assert a.yaml_path.parent != b.yaml_path.parent
+    assert a.yaml_path != b.yaml_path
 
 
 # ---------------------------------------------------------------------------

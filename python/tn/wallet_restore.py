@@ -13,17 +13,18 @@ Refs: D-3 (account vs package), D-19 (handler-driven sync), D-20
 from __future__ import annotations
 
 import base64
+import io
 import json
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-from urllib.parse import urljoin
-
 import urllib.error
 import urllib.request
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import urljoin
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .wallet_restore_loopback import TransferToken
-
 
 # ── Errors ────────────────────────────────────────────────────────────
 
@@ -98,8 +99,8 @@ def _fetch_encrypted_blob(
     vault_url: str,
     project_id: str,
     bearer: str,
-) -> bytes:
-    """GET the encrypted-blob ciphertext bytes for ``project_id``.
+) -> tuple[bytes, str | None]:
+    """GET the encrypted-blob ciphertext (+ optional nonce) for ``project_id``.
 
     Per the plan, the new endpoint is
     ``GET /api/v1/projects/{id}/encrypted-blob`` and returns the raw
@@ -146,37 +147,100 @@ def _fetch_encrypted_blob(
     ct_b64 = doc.get("ciphertext_b64") or doc.get("ciphertext")
     if not ct_b64:
         raise RestoreError("encrypted blob response missing ciphertext field")
-    return _b64decode_loose(ct_b64)
+    # The browser-minted body shape carries the nonce as a separate field;
+    # the tnpkg-envelope and legacy shapes embed/prefix it instead, so this
+    # is optional. _decrypt_blob_with_bek picks the layout per record.
+    nonce_b64 = doc.get("nonce_b64") or doc.get("nonce")
+    return _b64decode_loose(ct_b64), (nonce_b64 or None)
 
 
 # ── AES-GCM decrypt ───────────────────────────────────────────────────
 
+# Format A (browser-minted) binds this AAD into the body seal; mirrors
+# tn_proto_web/static/dashboard/aes_gcm.js ``AAD_BODY``.
+_BODY_AAD = b"tn-vault-body-v1"
 
-def _decrypt_blob_with_bek(blob: bytes, bek: bytes) -> bytes:
-    """Decrypt ``blob`` (nonce||ciphertext+tag) under a 32-byte BEK.
 
-    Mirrors the encryption shape produced by ``tn.export(...,
-    encrypt_body_with=BEK)`` in :mod:`tn.export` and the browser
-    publisher orchestration. Raises :class:`RestoreError` on any
-    structural or AEAD failure.
+def _aesgcm_open(
+    bek: bytes, nonce: bytes, ct: bytes, aad: bytes | None, *, kind: str
+) -> bytes:
+    """AES-256-GCM open with a clean :class:`RestoreError` on failure."""
+    try:
+        return AESGCM(bytes(bek)).decrypt(nonce, ct, aad)
+    except Exception as e:  # noqa: BLE001 — surface a clean failure
+        raise RestoreError(
+            f"decryption failed for {kind} (wrong BEK or corrupted blob): "
+            f"{type(e).__name__}",
+        ) from e
+
+
+def _extract_encrypted_member(tnpkg: bytes) -> bytes:
+    """Pull ``body/encrypted.bin`` out of a ``.tnpkg`` (STORED outer zip).
+
+    The bind/agent-minted backup stores the whole tnpkg envelope as the
+    blob; the real ciphertext is this inner member.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(tnpkg)) as zf:
+            names = zf.namelist()
+            if "body/encrypted.bin" in names:
+                return zf.read("body/encrypted.bin")
+            matches = [n for n in names if n.endswith("encrypted.bin")]
+            if matches:
+                return zf.read(matches[0])
+            raise RestoreError(
+                f"tnpkg envelope has no body/encrypted.bin member (has: {names})",
+            )
+    except zipfile.BadZipFile as e:
+        raise RestoreError(f"blob looked like a zip but could not be opened: {e}") from e
+
+
+def _decrypt_blob_with_bek(
+    blob: bytes, bek: bytes, *, nonce_b64: str | None = None
+) -> bytes:
+    """Decrypt a vault encrypted-backup blob under a 32-byte BEK, returning
+    the inner plaintext (a STORED zip of body files; unpacked downstream by
+    :func:`_try_unpack_export_frame`).
+
+    Handles the on-the-wire shapes that coexist in the vault's
+    ``encrypted_backups`` store — the single-layout assumption here was the
+    ``InvalidTag`` bug:
+
+    * **tnpkg envelope** (agent/bind-minted): ``blob`` is a plaintext
+      ``.tnpkg`` ZIP (``PK\\x03\\x04``) whose ``body/encrypted.bin`` member
+      is ``nonce(12)||ciphertext+tag`` sealed with AAD=None.
+    * **separate-nonce** (browser-minted): ``blob`` is ``ciphertext+tag``
+      only; the nonce arrives as ``nonce_b64`` and the AAD is
+      ``tn-vault-body-v1``.
+    * **nonce-prefixed** (legacy/simple): ``blob`` is
+      ``nonce(12)||ciphertext+tag`` with AAD=None.
+
+    Raises :class:`RestoreError` on any structural or AEAD failure.
     """
     if not isinstance(bek, (bytes, bytearray)) or len(bek) != 32:
         raise RestoreError("BEK must be 32 bytes")
+
+    # tnpkg envelope: the real ciphertext is the inner body member. Checked
+    # first so a zero-placeholder ``nonce_b64`` on these records is ignored.
+    if blob[:4] == b"PK\x03\x04":
+        inner = _extract_encrypted_member(blob)
+        if len(inner) < 12 + 16:
+            raise RestoreError(
+                f"inner body blob too short ({len(inner)} bytes; need nonce+tag)",
+            )
+        return _aesgcm_open(bek, inner[:12], inner[12:], None, kind="tnpkg body")
+
+    # Separate-nonce body (browser): nonce supplied out-of-band + bound AAD.
+    if nonce_b64:
+        nonce = _b64decode_loose(nonce_b64)
+        return _aesgcm_open(bek, nonce, blob, _BODY_AAD, kind="separate-nonce body")
+
+    # Legacy/simple: nonce prefixed on the ciphertext, no AAD.
     if len(blob) < 12 + 16:
         raise RestoreError(
             f"ciphertext too short ({len(blob)} bytes; need nonce+tag)",
         )
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-    nonce, ct = blob[:12], blob[12:]
-    aesgcm = AESGCM(bytes(bek))
-    try:
-        return aesgcm.decrypt(nonce, ct, None)
-    except Exception as e:  # noqa: BLE001 — surface a clean failure
-        raise RestoreError(
-            "decryption failed (wrong BEK or corrupted blob): "
-            f"{type(e).__name__}",
-        ) from e
+    return _aesgcm_open(bek, blob[:12], blob[12:], None, kind="nonce-prefixed body")
 
 
 # ── Plaintext unpack ──────────────────────────────────────────────────
@@ -320,12 +384,12 @@ def _restore_with_token(
             f"raw_bek_b64 decoded to {len(bek)} bytes; expected 32",
         )
 
-    blob = _fetch_encrypted_blob(
+    ct_bytes, nonce_b64 = _fetch_encrypted_blob(
         vault_url=vault_url,
         project_id=token.project_id,
         bearer=token.vault_jwt,
     )
-    plaintext = _decrypt_blob_with_bek(blob, bek)
+    plaintext = _decrypt_blob_with_bek(ct_bytes, bek, nonce_b64=nonce_b64)
     out_dir = Path(out_dir).resolve()
     files_written, raw_blob_path, notes = _write_restored_bytes(
         plaintext=plaintext,

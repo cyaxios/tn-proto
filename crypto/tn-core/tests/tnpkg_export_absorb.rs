@@ -46,6 +46,44 @@ fn export_admin_log_snapshot_round_trip() {
 }
 
 #[test]
+fn export_admin_log_snapshot_excludes_application_events() {
+    let td = tempfile::tempdir().unwrap();
+    let rt = fresh_runtime(&td);
+
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "invoice_id".into(),
+        serde_json::Value::String("inv_secret_001".into()),
+    );
+    rt.emit("info", "billing.invoice.created", fields).unwrap();
+    rt.admin_add_recipient(
+        "default",
+        &td.path().join("k1.btn.mykit"),
+        Some("did:key:zRecipientA"),
+    )
+    .unwrap();
+
+    let out = td.path().join("snap.tnpkg");
+    rt.export(
+        &out,
+        ExportOptions {
+            kind: Some(ManifestKind::AdminLogSnapshot),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let (manifest, body) = read_tnpkg(TnpkgSource::Path(&out)).unwrap();
+    verify_manifest(&manifest).expect("manifest signature must verify");
+    assert_eq!(manifest.kind, ManifestKind::AdminLogSnapshot);
+    assert_eq!(body.keys().collect::<Vec<_>>(), vec!["body/admin.ndjson"]);
+    let admin_body = String::from_utf8(body["body/admin.ndjson"].clone()).unwrap();
+    assert!(admin_body.contains("tn.recipient.added"));
+    assert!(!admin_body.contains("billing.invoice.created"));
+    assert!(!admin_body.contains("inv_secret_001"));
+}
+
+#[test]
 fn export_kit_bundle_only() {
     let td = tempfile::tempdir().unwrap();
     let rt = fresh_runtime(&td);
@@ -62,9 +100,7 @@ fn export_kit_bundle_only() {
     verify_manifest(&manifest).unwrap();
     assert_eq!(manifest.kind, ManifestKind::KitBundle);
     // body/<group>.btn.mykit should be present.
-    assert!(body
-        .keys()
-        .any(|k| k.ends_with(".btn.mykit")));
+    assert!(body.keys().any(|k| k.ends_with(".btn.mykit")));
     // The marker must NOT be present for kit_bundle (only full_keystore).
     assert!(!body.contains_key("body/WARNING_CONTAINS_PRIVATE_KEYS"));
 }
@@ -101,11 +137,132 @@ fn export_full_keystore_requires_confirm() {
 }
 
 #[test]
+fn export_full_keystore_excludes_application_logs() {
+    let td = tempfile::tempdir().unwrap();
+    let rt = fresh_runtime(&td);
+    std::fs::create_dir_all(td.path().join(".tn").join("logs")).unwrap();
+    std::fs::write(
+        td.path().join(".tn").join("logs").join("tn.ndjson"),
+        b"{\"event_type\":\"app.secret\"}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        td.path().join(".tn").join("logs").join("tn.ndjson.1"),
+        b"{\"event_type\":\"rotated.secret\"}\n",
+    )
+    .unwrap();
+
+    let out = td.path().join("full.tnpkg");
+    rt.export(
+        &out,
+        ExportOptions {
+            kind: Some(ManifestKind::FullKeystore),
+            confirm_includes_secrets: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let (manifest, body) = read_tnpkg(TnpkgSource::Path(&out)).unwrap();
+    verify_manifest(&manifest).unwrap();
+    assert_eq!(manifest.kind, ManifestKind::FullKeystore);
+    assert!(body.contains_key("body/local.private"));
+    for name in body.keys() {
+        assert!(
+            !name.contains("/logs/") && !name.ends_with(".ndjson"),
+            "full_keystore must not include application log member {name}"
+        );
+    }
+}
+
+#[test]
+fn export_identity_seed_is_self_addressed() {
+    let td = tempfile::tempdir().unwrap();
+    let rt = fresh_runtime(&td);
+    let out = td.path().join("identity.tnpkg");
+    rt.export(
+        &out,
+        ExportOptions {
+            kind: Some(ManifestKind::IdentitySeed),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let (manifest, body) = read_tnpkg(TnpkgSource::Path(&out)).unwrap();
+    verify_manifest(&manifest).unwrap();
+    assert_eq!(manifest.kind, ManifestKind::IdentitySeed);
+    assert_eq!(manifest.publisher_identity, rt.did());
+    assert_eq!(manifest.recipient_identity.as_deref(), Some(rt.did()));
+    assert_eq!(manifest.scope, "identity");
+    assert_eq!(body["body/local.private"].len(), 32);
+    assert_eq!(
+        String::from_utf8(body["body/local.public"].clone()).unwrap(),
+        rt.did()
+    );
+    assert!(body.contains_key("body/tn.yaml"));
+}
+
+#[test]
+fn export_project_seed_requires_confirm_and_excludes_logs() {
+    let td = tempfile::tempdir().unwrap();
+    let rt = fresh_runtime(&td);
+    std::fs::create_dir_all(td.path().join(".tn").join("logs")).unwrap();
+    std::fs::write(
+        td.path().join(".tn").join("logs").join("tn.ndjson"),
+        b"{\"event_type\":\"app.secret\"}\n",
+    )
+    .unwrap();
+    let out = td.path().join("project.tnpkg");
+
+    let err = rt.export(
+        &out,
+        ExportOptions {
+            kind: Some(ManifestKind::ProjectSeed),
+            confirm_includes_secrets: false,
+            ..Default::default()
+        },
+    );
+    assert!(err.is_err(), "project_seed without confirm must fail");
+
+    rt.export(
+        &out,
+        ExportOptions {
+            kind: Some(ManifestKind::ProjectSeed),
+            confirm_includes_secrets: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let (manifest, body) = read_tnpkg(TnpkgSource::Path(&out)).unwrap();
+    verify_manifest(&manifest).unwrap();
+    assert_eq!(manifest.kind, ManifestKind::ProjectSeed);
+    assert_eq!(manifest.publisher_identity, rt.did());
+    assert_eq!(manifest.recipient_identity.as_deref(), Some(rt.did()));
+    assert_eq!(manifest.scope, "project");
+    assert!(body.contains_key("body/tn.yaml"));
+    assert!(body.contains_key("body/keys/local.private"));
+    assert!(body.contains_key("body/keys/local.public"));
+    assert!(body.contains_key("body/WARNING_CONTAINS_PRIVATE_KEYS"));
+    for name in body.keys() {
+        assert!(
+            !name.contains("/logs/") && !name.ends_with(".ndjson"),
+            "project_seed must not include application log member {name}"
+        );
+    }
+}
+
+#[test]
 fn absorb_admin_log_snapshot_idempotent() {
     let td_a = tempfile::tempdir().unwrap();
     let rt_a = fresh_runtime(&td_a);
-    rt_a.admin_add_recipient("default", &td_a.path().join("k.btn.mykit"), Some("did:key:zRecipient"))
-        .unwrap();
+    rt_a.admin_add_recipient(
+        "default",
+        &td_a.path().join("k.btn.mykit"),
+        Some("did:key:zRecipient"),
+    )
+    .unwrap();
 
     // Producer A exports.
     let out = td_a.path().join("snap.tnpkg");
@@ -124,7 +281,10 @@ fn absorb_admin_log_snapshot_idempotent() {
     let rt_b = fresh_runtime(&td_b);
     let r1 = rt_b.absorb(AbsorbSource::Bytes(&bytes)).unwrap();
     assert!(!r1.noop);
-    assert!(r1.accepted_count >= 1, "first absorb should accept envelopes");
+    assert!(
+        r1.accepted_count >= 1,
+        "first absorb should accept envelopes"
+    );
 
     let r2 = rt_b.absorb(AbsorbSource::Bytes(&bytes)).unwrap();
     // Second absorb: clock dominates, so noop=true OR accepted=0 with all
@@ -231,9 +391,7 @@ fn equivocation_leaf_reuse_is_flagged() {
     // revoke in chain order, except the first leaf's add+revoke pair).
     let td_b = tempfile::tempdir().unwrap();
     let rt_b = fresh_runtime(&td_b);
-    let _r = rt_b
-        .absorb(AbsorbSource::Path(out.as_path()))
-        .unwrap();
+    let _r = rt_b.absorb(AbsorbSource::Path(out.as_path())).unwrap();
 
     // Now construct a new snapshot from A that adds another leaf at the
     // revoked index. This requires emitting a manual envelope. We do this

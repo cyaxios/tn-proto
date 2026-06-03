@@ -1,4 +1,7 @@
-//! Shared parsing for handler YAML specs.
+//! Shared parsing for handler YAML specs. Internal primitive supporting the
+//! handler implementations; the handler interface + [`crate::Runtime`]
+//! fan-out is the entry point (behind `tn.info()` / `tn log`). Reach here
+//! directly only to parse a handler spec by hand.
 //!
 //! The Python registry parses each handler kind ad-hoc (see
 //! `python/tn/handlers/registry.py`). The Rust side normalizes specs
@@ -99,7 +102,6 @@ fn yaml_to_json(v: &serde_yml::Value) -> Result<JsonValue> {
         .map_err(|e| Error::InvalidConfig(format!("handler spec yaml->json parse: {e}")))
 }
 
-
 /// Lower-cased string field lookup with fallback.
 pub fn str_field<'a>(v: &'a JsonValue, key: &str) -> Option<&'a str> {
     v.get(key).and_then(JsonValue::as_str)
@@ -108,7 +110,11 @@ pub fn str_field<'a>(v: &'a JsonValue, key: &str) -> Option<&'a str> {
 /// Required string field — returns InvalidConfig when missing or non-string.
 pub fn require_str(v: &JsonValue, key: &str, ctx: &str) -> Result<String> {
     str_field(v, key).map_or_else(
-        || Err(Error::InvalidConfig(format!("{ctx}: missing required string field {key:?}"))),
+        || {
+            Err(Error::InvalidConfig(format!(
+                "{ctx}: missing required string field {key:?}"
+            )))
+        },
         |s| Ok(s.to_string()),
     )
 }
@@ -256,9 +262,7 @@ mod tests {
 
     #[test]
     fn duration_number() {
-        assert!(
-            (parse_duration(&json!(45), 1.0).expect("45 parses") - 45.0).abs() < f64::EPSILON
-        );
+        assert!((parse_duration(&json!(45), 1.0).expect("45 parses") - 45.0).abs() < f64::EPSILON);
     }
 
     #[test]
