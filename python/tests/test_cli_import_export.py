@@ -13,16 +13,17 @@ import sys
 import zipfile
 from pathlib import Path
 
-# The full subcommand CLI is the ``tn`` console script (tn.cli:main).
-# ``python -m tn`` is only the read-shortcut (__main__.py), so drive the
-# installed console script that sits next to the venv interpreter.
-_SCRIPTS = Path(sys.executable).parent
-_TN = str(_SCRIPTS / ("tn.exe" if sys.platform == "win32" else "tn"))
+# Drive the full subcommand CLI (tn.cli:main) through the running
+# interpreter. ``python -m tn.cli`` invokes main() via the module's
+# __main__ guard and resolves identically in a venv or a bare install on
+# every platform, unlike a console-script path (on Windows, non-venv
+# installs place scripts under Scripts\, not next to python.exe). Matches
+# the other CLI tests (test_cli_rotate, test_show_and_stdout_polish).
 
 
 def _run(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [_TN, *args],
+        [sys.executable, "-m", "tn.cli", *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,
