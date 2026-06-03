@@ -1335,7 +1335,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     try:
         groups = args.groups.split(",") if args.groups else None
         out = bundle_for_recipient(
-            args.recipient_did,
+            args.recipient,
             args.out,
             groups=groups,
             seal_for_recipient=getattr(args, "seal_for_recipient", False),
@@ -1345,7 +1345,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         # tn.recipient.added event in the log. Print a one-line summary
         # the user can hand off alongside the .tnpkg.
         print(f"[tn bundle] wrote {out}")
-        print(f"[tn bundle]   recipient: {args.recipient_did}")
+        print(f"[tn bundle]   recipient: {args.recipient}")
         print(f"[tn bundle]   ceremony:  {cfg.ceremony_id}  (cipher={cfg.cipher_name})")
         print(f"[tn bundle]   groups:    {groups or sorted(g for g in cfg.groups if g != 'tn.agents')}")
     finally:
@@ -3204,7 +3204,7 @@ def build_parser() -> argparse.ArgumentParser:
         "bundle",
         help="Mint a kit_bundle .tnpkg for one recipient (FINDINGS #5 footgun-free).",
     )
-    p_bundle.add_argument("recipient_identity", help="DID of the recipient receiving the kit.")
+    p_bundle.add_argument("recipient", help="DID of the recipient receiving the kit.")
     p_bundle.add_argument("out", help="Destination .tnpkg path.")
     p_bundle.add_argument(
         "--yaml", default=None,
