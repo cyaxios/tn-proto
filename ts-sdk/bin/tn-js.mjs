@@ -1509,7 +1509,14 @@ switch (cmd) {
         "             Package *.btn.mykit files into a .tnpkg (zip w/ manifest.json + kits) that the\n" +
         "             Chrome extension, Python SDK, and tn-js can all import.\n" +
         "             --kit filters to named groups; --full also writes publisher state + signing seed.\n" +
-        "             --yaml <path> may be used in place of --keystore to infer the keystore dir.\n",
+        "             --yaml <path> may be used in place of --keystore to infer the keystore dir.\n" +
+        "  export     --kind project_seed --out <file> --include-secrets [--yaml <path>]\n" +
+        "             Mint a project_seed .tnpkg (tn.yaml + raw keystore) to carry to\n" +
+        "             another device. Restore it there with `tn-js import`.\n" +
+        "  import     <package> [--cwd <dir>]\n" +
+        "             Bootstrap a ceremony from a downloaded project_seed .tnpkg: writes\n" +
+        "             tn.yaml + keystore into the cwd and makes it live. The 'carry a\n" +
+        "             seed to a new device' entry point (tn-js has no `absorb` verb).\n",
     );
     exit(cmd ? 0 : 1);
     break;

@@ -411,7 +411,8 @@ export class Tn {
           throw new Error(
             "Tn.init: no yaml path provided and strict mode is on. " +
               "Set TN_YAML env var, create ./tn.yaml, set TN_HOME, " +
-              "or pass a path explicitly to Tn.init(). " +
+              "or pass a path explicitly to Tn.init(). To start from a " +
+              "downloaded seed, run `tn-js import <seed.tnpkg>`. " +
               "(Strict mode is on via Tn.setStrict(true) or TN_STRICT=1.)",
           );
         }

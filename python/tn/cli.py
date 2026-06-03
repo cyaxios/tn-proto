@@ -29,9 +29,22 @@ no interactive prompts unless a TTY is detected):
                              Vault-linked ceremonies push state to the
                              vault as a side effect (autosync hook).
 
-    tn absorb <package>      Install a .tnpkg into the active ceremony.
-                             Bootstrap kinds (project_seed, identity_seed)
-                             auto-bind the runtime when no init is bound.
+    tn absorb <package>      Install a .tnpkg into the ceremony already
+                             active here (run from a project dir or pass
+                             --yaml). It does NOT create a ceremony; to
+                             start one from a downloaded seed, use
+                             `tn import`.
+
+    tn import <package>      Bootstrap a ceremony from a downloaded
+                             project_seed .tnpkg: writes tn.yaml + the
+                             keystore into the current directory and binds
+                             the runtime. The "carry a seed to a new
+                             device" entry point.
+
+    tn export --kind         Mint a project_seed .tnpkg (tn.yaml + raw
+        project_seed         keystore) from the active ceremony to carry
+        --include-secrets    to another device, where `tn import` restores
+        --out <path>         it.
 
     tn read [<log>]          Print a log in flat decoded form.
 
@@ -1303,9 +1316,12 @@ def _resolve_yaml_or_discover(arg: str | None) -> Path:
             f"multiple ceremony yamls in cwd ({names}). Pass --yaml to disambiguate."
         )
     _die(
-        "no yaml found. Looked at $TN_YAML, ./tn.yaml, ~/.tn/tn.yaml, and "
-        "any *.yaml in the cwd with a ceremony: block. Pass --yaml or `cd` "
-        "into a project directory."
+        "no ceremony found here. Looked at $TN_YAML, ./tn.yaml, "
+        "~/.tn/tn.yaml, and any *.yaml in the cwd with a ceremony: block.\n"
+        "  - Restoring a downloaded seed (.tnpkg)?  run: tn import <seed.tnpkg>\n"
+        "  - Starting a brand-new project?          run: tn init <name>\n"
+        "  - Ceremony lives elsewhere?              pass --yaml <path>, or cd "
+        "into its directory."
     )
 
 
@@ -3273,7 +3289,11 @@ def build_parser() -> argparse.ArgumentParser:
     # --- tn absorb <package> -----------------------------------
     p_absorb = sub.add_parser(
         "absorb",
-        help="Absorb a .tnpkg (kit bundle, enrolment, etc.) into the active ceremony.",
+        help=(
+            "Absorb a .tnpkg (kit bundle, enrolment, etc.) into the ceremony "
+            "already active here. It does not create a ceremony; to start one "
+            "from a downloaded seed, use `tn import` instead."
+        ),
     )
     p_absorb.add_argument("package", help="Path to the .tnpkg to absorb.")
     p_absorb.add_argument(
