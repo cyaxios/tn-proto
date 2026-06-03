@@ -436,6 +436,45 @@ function importCmd() {
   );
 }
 
+function absorbCmd() {
+  // tn-js absorb <package> --yaml <path> — install a .tnpkg (kit bundle,
+  // enrolment, etc.) into an EXISTING ceremony. Mirrors Python `tn absorb`.
+  // To bootstrap a NEW ceremony from a downloaded seed, use `tn-js import`.
+  const rest = argv.slice(3);
+  let pkg = null;
+  let yaml = null;
+  for (let i = 0; i < rest.length; i += 1) {
+    if (rest[i] === "--yaml") yaml = rest[++i];
+    else if (!rest[i].startsWith("--")) pkg = rest[i];
+  }
+  if (!pkg) die("absorb: <package> path is required");
+  if (!yaml) {
+    die(
+      "absorb: --yaml <path> is required. absorb installs a .tnpkg into an " +
+        "existing ceremony; to bootstrap a new one from a downloaded seed, " +
+        "use `tn-js import <seed.tnpkg>`.",
+    );
+  }
+  if (!existsSync(yaml)) {
+    die(
+      `absorb: ceremony yaml not found: ${yaml}. absorb needs an existing ` +
+        "ceremony; to start one from a downloaded seed, use `tn-js import`.",
+    );
+  }
+  const pkgPath = pathResolve(pkg);
+  if (!existsSync(pkgPath) || statSync(pkgPath).size === 0) {
+    die(`absorb: package not found or empty: ${pkgPath}`);
+  }
+  const rt = NodeRuntime.init(yaml);
+  const receipt = rt.absorbPkg(pkgPath);
+  if (receipt.rejectedReason) {
+    die(`absorb rejected: ${receipt.rejectedReason}`);
+  }
+  stdout.write(
+    JSON.stringify({ ok: true, kind: receipt.kind, accepted: receipt.acceptedCount }) + "\n",
+  );
+}
+
 async function watchCmd() {
   // Args after the subcommand: --yaml <path>, --since <start|now|<seq>|<iso-ts>>,
   // --verify, --poll <ms>, --once.
@@ -1460,11 +1499,14 @@ switch (cmd) {
   case "import":
     importCmd();
     break;
+  case "absorb":
+    absorbCmd();
+    break;
   case undefined:
   case "--help":
   case "-h":
     process.stderr.write(
-      "tn-js <init|wallet|account|vault|show|seal|verify|canonical|info|read|watch|streams|validate|compile|admin|export|import>\n" +
+      "tn-js <init|wallet|account|vault|show|seal|verify|canonical|info|read|watch|streams|validate|compile|admin|absorb|export|import>\n" +
         "  init       [<yaml-path>] — initialize / attach to a ceremony, print receipt JSON\n" +
         "  wallet link <vault-url> --yaml <path> [--name <project>]\n" +
         "             create vault project + flip ceremony.mode to linked\n" +
@@ -1510,13 +1552,17 @@ switch (cmd) {
         "             Chrome extension, Python SDK, and tn-js can all import.\n" +
         "             --kit filters to named groups; --full also writes publisher state + signing seed.\n" +
         "             --yaml <path> may be used in place of --keystore to infer the keystore dir.\n" +
+        "  absorb     <package> --yaml <path>\n" +
+        "             Install a received .tnpkg (kit bundle, enrolment) INTO the\n" +
+        "             existing ceremony at --yaml. To START a ceremony from a\n" +
+        "             downloaded seed, use `import` instead.\n" +
         "  export     --kind project_seed --out <file> --include-secrets [--yaml <path>]\n" +
         "             Mint a project_seed .tnpkg (tn.yaml + raw keystore) to carry to\n" +
         "             another device. Restore it there with `tn-js import`.\n" +
         "  import     <package> [--cwd <dir>]\n" +
         "             Bootstrap a ceremony from a downloaded project_seed .tnpkg: writes\n" +
         "             tn.yaml + keystore into the cwd and makes it live. The 'carry a\n" +
-        "             seed to a new device' entry point (tn-js has no `absorb` verb).\n",
+        "             seed to a new device' entry point.\n",
     );
     exit(cmd ? 0 : 1);
     break;
