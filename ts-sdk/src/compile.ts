@@ -24,24 +24,17 @@
 //
 // The manifest is Ed25519-signed by the keystore's device key so
 // `absorb` accepts it (absorb rejects unsigned / mis-signed manifests).
-// `publisher_identity` is resolved from the yaml's
-// `device.device_identity` when `--yaml` is given, else from the
-// keystore's `local.public` (which is the same DID the signing seed
-// derives, so the signature always verifies).
+// All wire-format work (canonical signing bytes, the signature, and the
+// zip packing) goes through the Rust core via wasm; this module only
+// reads the keystore and assembles the body.
 
 import { Buffer } from "node:buffer";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { DeviceKey } from "./core/signing.js";
-import {
-  type BodyContents,
-  type Manifest,
-  newManifest,
-  signManifest,
-  toWireDict,
-} from "./core/tnpkg.js";
-import { tnpkgWriteBytes } from "./raw.js";
+import { type BodyContents, type Manifest, newManifest, signManifest } from "./core/tnpkg.js";
+import { packTnpkgBytes } from "./tnpkg_io.js";
 import { loadConfig } from "./runtime/config.js";
 
 export interface CompileKitBundleOptions {
@@ -86,38 +79,31 @@ function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(Buffer.from(bytes)).digest("hex");
 }
 
-/** Serialize a signed manifest + body to `.tnpkg` zip bytes (in memory).
- * Mirrors `writeTnpkg` (Layer 2) but returns bytes instead of writing. */
-function packManifestBundle(manifest: Manifest, body: BodyContents): Uint8Array {
-  if (!manifest.manifestSignatureB64) {
-    throw new Error("packManifestBundle: manifest is unsigned; call signManifest(...) first.");
-  }
-  const wireDoc = toWireDict(manifest, true);
-  const entries = Object.keys(body)
-    .sort()
-    .map((name) => ({ name, data: body[name]! }));
-  return new Uint8Array(tnpkgWriteBytes(wireDoc, entries));
+/** Where to read kits from, the publisher DID, and the signing key. */
+interface SigningMaterial {
+  /** Directory the reader kits to bundle are read from. */
+  keystoreDir: string;
+  /** Publisher DID stamped as `publisher_identity` (and the key that signs). */
+  fromDid: string;
+  ceremonyId: string;
+  /** Resolved tn.yaml path (only used for `--full` self-backup), or null. */
+  yamlPath: string | null;
+  deviceKey: DeviceKey;
 }
 
-// ---------------------------------------------------------------------------
-// Public: compile to in-memory package + optional write-to-file
-// ---------------------------------------------------------------------------
-
 /**
- * Build a canonical `.tnpkg` kit bundle in memory. Reads kits (and, with
- * `full`, private material) from the keystore, builds + signs a canonical
- * manifest, and packs kits under `body/`. Pure w.r.t. disk: reads only.
+ * Resolve the kit source dir, publisher DID, and signing key. The signing
+ * seed comes from the yaml's keystore when `yamlPath` is given (the
+ * authoritative ceremony), which may differ from `keystoreDir`:
+ * `tn admin rotate` stages the kits to bundle in a temp dir that holds no
+ * private key, and must sign with the real ceremony's device.
  */
-export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage {
+function resolveSigningMaterial(opts: CompileKitBundleOptions): SigningMaterial {
   let keystoreDir = opts.keystoreDir ? resolve(opts.keystoreDir) : null;
+  let signingDir: string | null = null;
   let fromDid: string | null = null;
   let ceremonyId = "";
   let yamlPath: string | null = null;
-  // Where the signing seed (local.private/local.public) lives. With a yaml
-  // this is the ceremony's authoritative keystore, which may differ from
-  // `keystoreDir`: `tn admin rotate` stages the kits to bundle in a temp dir
-  // that holds NO private key, and must sign with the real ceremony's device.
-  let signingDir: string | null = null;
 
   if (opts.yamlPath) {
     const cfg = loadConfig(opts.yamlPath);
@@ -135,13 +121,15 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
     throw new Error(`compileKitBundle: keystore directory not found: ${keystoreDir}`);
   }
 
-  // Resolve the publisher DID. Prefer the yaml's device.device_identity;
-  // otherwise read the keystore's local.public (the DID the signing seed
-  // derives), so `manifest_signature_b64` always verifies against it.
+  // Prefer the yaml's device.device_identity; else the keystore's
+  // local.public (the DID the signing seed derives), so the signature
+  // always verifies against publisher_identity.
   if (!fromDid) {
     const pubPath = join(signingDir, "local.public");
     if (!existsSync(pubPath)) {
-      throw new Error(`compileKitBundle: no device DID (missing ${pubPath} and no yaml device_identity)`);
+      throw new Error(
+        `compileKitBundle: no device DID (missing ${pubPath} and no yaml device_identity)`,
+      );
     }
     fromDid = readFileSync(pubPath, "utf8").trim();
   }
@@ -155,6 +143,19 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
   }
   const deviceKey = DeviceKey.fromSeed(new Uint8Array(readFileSync(privPath)));
 
+  return { keystoreDir, fromDid, ceremonyId, yamlPath, deviceKey };
+}
+
+/**
+ * Read the reader kits (and, with `full`, the publisher's private
+ * material) from `keystoreDir` into a `.tnpkg` body map. Returns the body
+ * (every entry under `body/`) and the per-kit metadata for `state.kits`.
+ */
+function collectKitBundleBody(
+  keystoreDir: string,
+  opts: CompileKitBundleOptions,
+  yamlPath: string | null,
+): { body: BodyContents; kitsMeta: CompiledKitMeta[] } {
   const entries = readdirSync(keystoreDir).sort();
   const groupFilter = opts.groups && opts.groups.length > 0 ? new Set(opts.groups) : null;
   const body: BodyContents = {};
@@ -171,23 +172,22 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
   }
 
   if (kitsMeta.length === 0) {
-    const suffix = groupFilter ? ` matching groups [${Array.from(groupFilter).sort().join(", ")}]` : "";
+    const suffix = groupFilter
+      ? ` matching groups [${Array.from(groupFilter).sort().join(", ")}]`
+      : "";
     throw new Error(`compileKitBundle: no *.btn.mykit files in ${keystoreDir}${suffix}`);
   }
 
   if (opts.full) {
     for (const name of ["local.private", "local.public", "index_master.key"]) {
       const p = join(keystoreDir, name);
-      if (existsSync(p)) {
-        body[`body/${name}`] = new Uint8Array(readFileSync(p));
-      }
+      if (existsSync(p)) body[`body/${name}`] = new Uint8Array(readFileSync(p));
     }
     for (const name of entries) {
-      if (/\.btn\.state$/.test(name)) {
-        const group = name.replace(/\.btn\.state$/, "");
-        if (groupFilter && !groupFilter.has(group)) continue;
-        body[`body/${name}`] = new Uint8Array(readFileSync(join(keystoreDir, name)));
-      }
+      if (!/\.btn\.state$/.test(name)) continue;
+      const group = name.replace(/\.btn\.state$/, "");
+      if (groupFilter && !groupFilter.has(group)) continue;
+      body[`body/${name}`] = new Uint8Array(readFileSync(join(keystoreDir, name)));
     }
     if (yamlPath && existsSync(yamlPath)) {
       body["body/tn.yaml"] = new Uint8Array(readFileSync(yamlPath));
@@ -195,19 +195,33 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
     body["body/WARNING_CONTAINS_PRIVATE_KEYS"] = new Uint8Array(0);
   }
 
+  return { body, kitsMeta };
+}
+
+// ---------------------------------------------------------------------------
+// Public: compile to in-memory package + optional write-to-file
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a canonical signed `.tnpkg` kit bundle in memory: read kits from
+ * the keystore, build + sign a canonical manifest (kind `kit_bundle`, or
+ * `full_keystore` with `full`), and pack under `body/`. Pure w.r.t. disk:
+ * reads only. Signing + zip packing run in the Rust core via wasm.
+ */
+export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage {
+  const { keystoreDir, fromDid, ceremonyId, yamlPath, deviceKey } = resolveSigningMaterial(opts);
+  const { body, kitsMeta } = collectKitBundleBody(keystoreDir, opts, yamlPath);
+
   const manifest = newManifest({
     kind: opts.full ? "full_keystore" : "kit_bundle",
     fromDid,
     ceremonyId,
     scope: opts.full ? "full" : "kit_bundle",
   });
-  manifest.state = {
-    kits: kitsMeta,
-    kind: opts.full ? "full-keystore" : "readers-only",
-  };
+  manifest.state = { kits: kitsMeta, kind: opts.full ? "full-keystore" : "readers-only" };
   signManifest(manifest, deviceKey);
 
-  return { manifest, zipBytes: packManifestBundle(manifest, body) };
+  return { manifest, zipBytes: packTnpkgBytes(manifest, body) };
 }
 
 /**

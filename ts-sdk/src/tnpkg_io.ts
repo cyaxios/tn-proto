@@ -15,25 +15,34 @@ export type { ZipEntry } from "./core/tnpkg_archive.js";
 export type { ParsedZipEntry } from "./core/tnpkg_archive.js";
 export { packTnpkg, parseTnpkg } from "./core/tnpkg_archive.js";
 
-/** Write a `.tnpkg` zip to `outPath`. The manifest must already be
- * signed (see `signManifest`). `body` keys are logical paths inside the
- * zip — typically `body/...` per the format. */
-export function writeTnpkg(outPath: string, manifest: Manifest, body: BodyContents): string {
+/** Serialize a signed `.tnpkg` to zip bytes in memory. The manifest must
+ * already be signed (see `signManifest`). `body` keys are logical paths
+ * inside the zip (typically `body/...` per the format). Shared by
+ * `writeTnpkg` and in-memory callers such as `compileKitBundle`. The zip
+ * layout itself is produced by the Rust core via `tnpkgWriteBytes`. */
+export function packTnpkgBytes(manifest: Manifest, body: BodyContents): Uint8Array {
   if (!manifest.manifestSignatureB64) {
     throw new Error(
-      "writeTnpkg: manifest is unsigned. Call signManifest(...) before writing — " +
+      "packTnpkgBytes: manifest is unsigned. Call signManifest(...) first; " +
         "the wire format requires manifest_signature_b64 to be present.",
     );
   }
-  const resolved = pathResolve(outPath);
-  const dir = dirname(resolved);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-
   const wireDoc = toWireDict(manifest, true);
   const entries = Object.keys(body)
     .sort()
     .map((name) => ({ name, data: body[name]! }));
-  writeFileSync(resolved, Buffer.from(tnpkgWriteBytes(wireDoc, entries)));
+  return new Uint8Array(tnpkgWriteBytes(wireDoc, entries));
+}
+
+/** Write a `.tnpkg` zip to `outPath`. The manifest must already be
+ * signed (see `signManifest`). `body` keys are logical paths inside the
+ * zip (typically `body/...` per the format). */
+export function writeTnpkg(outPath: string, manifest: Manifest, body: BodyContents): string {
+  const bytes = packTnpkgBytes(manifest, body);
+  const resolved = pathResolve(outPath);
+  const dir = dirname(resolved);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(resolved, Buffer.from(bytes));
   return resolved;
 }
 
