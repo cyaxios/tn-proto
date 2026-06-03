@@ -1,4 +1,8 @@
-//! Field → group classifier.
+//! Field → group classifier — decides which cipher group a field lands in.
+//! Internal primitive: most readers want the high-level API instead — see
+//! [`crate::Runtime`], which routes fields through this classifier as it
+//! writes events (behind `tn.info()` / `tn log`). Reach here directly only
+//! to resolve a field's group by hand.
 //!
 //! Stub: returns the configured `fields[<name>].group` if set, otherwise
 //! `"default"` (or the first group alphabetically if no `default` group exists).

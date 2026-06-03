@@ -1,4 +1,7 @@
-//! Static registry of admin event kinds.
+//! Internal admin-log machinery behind [`crate::Runtime`]'s admin verbs
+//! (`tn.admin.*` / `tn rotate`); see [`crate::AdminState`]. Holds the static
+//! registry of admin event kinds. Reach here directly only to inspect or
+//! validate a single admin event schema.
 //!
 //! Each `AdminEventKind` describes one `tn.*` event: its event_type string,
 //! its field schema, and its sync/sign policy. The catalog is a compile-

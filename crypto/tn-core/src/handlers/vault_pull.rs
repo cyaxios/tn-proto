@@ -1,4 +1,7 @@
-//! `vault.pull` handler — fetch admin-log snapshots from a TN vault.
+//! `vault.pull` handler — fetch admin-log snapshots from a TN vault. A
+//! handler implementation; the handler interface + [`crate::Runtime`] fan-out
+//! is the entry point (behind `tn.info()` / `tn log`). Internal primitive —
+//! reach here directly only to configure or inspect this pull source.
 //!
 //! Mirrors `python/tn/handlers/vault_pull.py`. On a schedule, GETs new
 //! `.tnpkg` files from the vault inbox addressed to this DID and calls

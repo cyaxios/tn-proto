@@ -27,82 +27,146 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Synchronous byte-storage surface used by [`crate::Runtime`].
+/// The synchronous byte-storage extension point used by [`crate::Runtime`].
 ///
-/// All methods take `&self` so a single `Arc<dyn Storage>` can be
-/// shared across runtime clones / handlers / admin verbs without
-/// locking. Implementations are expected to be `Send + Sync` for the
-/// same reason.
+/// Every place the runtime touches durable bytes — log files, keystore blobs,
+/// the LKV cache — goes through this trait, so a host can swap the backing
+/// store without the runtime knowing. The native default is [`FsStorage`]
+/// (`std::fs`); wasm wrappers implement it against JS-host callbacks and
+/// construct the runtime via [`crate::Runtime::init_with_storage`]. See the
+/// module docs for *why* this indirection exists (wasm has no usable
+/// `std::fs`).
 ///
-/// Paths are interpreted as the storage backend sees fit. The default
-/// [`FsStorage`] treats absolute paths as absolute and relative paths
-/// as relative-to-cwd (no internal root) — `Runtime::init` always
-/// hands fully-resolved absolute paths anyway. A wasm storage backend
-/// is free to treat the entire `Path` as an opaque key into an
-/// IndexedDB / JS-side cache.
+/// The trait is **synchronous** by contract: callers invoke it on their own
+/// thread and expect the bytes to be there on return. Several methods carry
+/// performance- or correctness-critical contracts ([`cas_write`](Self::cas_write)'s
+/// compare-and-swap, [`with_advisory_lock`](Self::with_advisory_lock)'s
+/// cross-process exclusion) — implementors must honor them, and three methods
+/// ship correct-but-slow default bodies that fast backends override.
+///
+/// All methods take `&self` so a single `Arc<dyn Storage>` can be shared across
+/// runtime clones / handlers / admin verbs without locking. Implementations
+/// must be `Send + Sync` for the same reason.
+///
+/// Paths are interpreted as the backend sees fit. The default [`FsStorage`]
+/// treats absolute paths as absolute and relative paths as relative-to-cwd (no
+/// internal root) — `Runtime::init` always hands fully-resolved absolute paths
+/// anyway. A wasm backend is free to treat the entire `Path` as an opaque key
+/// into an IndexedDB / JS-side cache.
 pub trait Storage: Send + Sync {
-    /// Read the full contents of `path`. Returns [`io::ErrorKind::NotFound`]
-    /// if no such entry exists.
+    /// Read the full contents of `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::NotFound`] if no such entry exists, or any other
+    /// [`io::Error`] the backend raises.
     fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>>;
 
-    /// Overwrite `path` with `data` (creating parents as needed for
-    /// fs-backed impls).
+    /// Overwrite `path` with `data`, creating parent directories as needed
+    /// (fs-backed impls).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the write (or parent creation) fails.
     fn write_bytes(&self, path: &Path, data: &[u8]) -> io::Result<()>;
 
-    /// Append `data` to `path` (creating the file + parents if missing).
+    /// Append `data` to `path`, creating the file and parents if missing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the open or append fails.
     fn append_bytes(&self, path: &Path, data: &[u8]) -> io::Result<()>;
 
-    /// Whether `path` exists.
+    /// Report whether `path` exists.
     fn exists(&self, path: &Path) -> bool;
 
-    /// List entries inside `dir`. Returned paths are full paths
-    /// (i.e. `dir.join(child_name)`), matching what
-    /// `std::fs::read_dir(...).map(|e| e.path())` would yield.
+    /// List the entries inside `dir`.
+    ///
+    /// Returned paths are full paths (`dir.join(child_name)`), matching what
+    /// `std::fs::read_dir(...).map(|e| e.path())` yields. Order is
+    /// backend-defined; callers that need determinism sort.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if `dir` cannot be read (e.g. missing or not a
+    /// directory).
     fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>>;
 
-    /// Atomic rename from `from` to `to`. Required for the keystore's
-    /// tmp+rename atomic-write commit point.
+    /// Atomically rename `from` to `to`.
+    ///
+    /// Required for the keystore's tmp+rename atomic-write commit point, so the
+    /// rename must be atomic on the backend (replacing any existing `to`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the rename fails (e.g. `from` missing, or a
+    /// cross-device move on backends that can't do it atomically).
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
 
-    /// Remove a file (no-op for missing entries — match `fs::remove_file`
-    /// semantics that bubble `NotFound`).
+    /// Remove the file at `path`.
+    ///
+    /// Matches `std::fs::remove_file` semantics, including bubbling
+    /// [`io::ErrorKind::NotFound`] for a missing entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if removal fails or the entry does not exist.
     fn remove(&self, path: &Path) -> io::Result<()>;
 
     /// Recursively create `dir` and any missing parents.
+    ///
+    /// Succeeds if the directory already exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if any component cannot be created.
     fn create_dir_all(&self, dir: &Path) -> io::Result<()>;
 
-    /// Atomic compare-and-swap write of `path`. The contract:
+    /// Atomically compare-and-swap the contents of `path`.
+    ///
+    /// The guard behind every keystore state mutation: it commits `new` only if
+    /// the on-disk bytes still equal `prior`, so a concurrent writer cannot be
+    /// silently clobbered. The contract implementors must honor:
     /// 1. Lock the entry (or its sibling lock file) exclusively.
     /// 2. Read current contents (or `None` if missing).
     /// 3. If current != `prior`, return [`io::ErrorKind::AlreadyExists`]
     ///    so the caller can recognise the CAS failure.
     /// 4. Otherwise atomically replace with `new`.
     ///
-    /// Used by `keystore_backend::LocalKeystore::write_state`. Native
-    /// `FsStorage` implements this via `fs4` (when the `fs-locking`
-    /// feature is on) or a best-effort tmp+rename (when it's off — on
-    /// `wasm32` there's no other process to race against). Wasm
-    /// adapters typically implement CAS via a single IndexedDB
-    /// transaction (the JS side gives us the primitive).
+    /// Used by `keystore_backend::LocalKeystore::write_state` (which surfaces a
+    /// CAS failure to callers as [`crate::Error::KeystoreConflict`]). Native
+    /// `FsStorage` implements this via `fs4` (when the `fs-locking` feature is
+    /// on) or a best-effort tmp+rename (when it's off — on `wasm32` there's no
+    /// other process to race against). Wasm adapters typically implement CAS via
+    /// a single IndexedDB transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::AlreadyExists`] when the on-disk pre-image does
+    /// not match `prior` (the CAS lost the race; callers should match the
+    /// *kind*, not the message), or another [`io::Error`] on lock / read / write
+    /// failure.
     fn cas_write(&self, path: &Path, prior: Option<&[u8]>, new: &[u8]) -> io::Result<()>;
 
-    /// Read at most the last `max_bytes` of `path`. If the file is
-    /// smaller than the window, returns the whole file. Used by the
-    /// emit-time chain-tip refresh to avoid reading megabytes of log
-    /// on every emit just to find the latest row — the tip is almost
-    /// always within the last few KB of the file.
+    /// Read at most the last `max_bytes` of `path`.
     ///
-    /// The default impl is correct-but-slow (calls `read_bytes` then
-    /// slices the tail). `FsStorage` overrides with a
-    /// `seek(SeekFrom::End)` + `read_to_end` for the fast path; on
-    /// NTFS this drops chain-mode emit latency from ~10 ms (whole-
-    /// file read of a 1 MB log) to ~50 µs.
+    /// Returns the whole file when it is smaller than the window. The chain-tip
+    /// refresh calls this on every write to find the latest row without reading
+    /// megabytes of log — the tip is almost always within the last few KB.
     ///
-    /// Caller-side note: the first line of the returned buffer may
-    /// be a partial line (we sliced into the middle of a row). The
-    /// reverse-scan ndjson walker handles that — `serde_json::from_slice`
-    /// fails on the partial leading line and the helper silently
-    /// skips it.
+    /// The default impl is correct-but-slow (calls [`read_bytes`](Self::read_bytes)
+    /// then slices the tail). `FsStorage` overrides with a `seek(SeekFrom::End)`
+    /// + `read_to_end` fast path; on NTFS this drops chain-mode write latency
+    /// from ~10 ms (whole-file read of a 1 MB log) to ~50 µs.
+    ///
+    /// Caller-side note: the first line of the returned buffer may be a partial
+    /// line (the window can start mid-row). The reverse-scan ndjson walker
+    /// handles that — `serde_json::from_slice` fails on the partial leading line
+    /// and the helper silently skips it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if `path` cannot be opened or read.
     fn read_bytes_tail(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
         let bytes = self.read_bytes(path)?;
         if bytes.len() <= max_bytes {
@@ -111,41 +175,53 @@ pub trait Storage: Send + Sync {
         Ok(bytes[bytes.len() - max_bytes..].to_vec())
     }
 
-    /// Open `path` for append-only writes and return a pinned writer
-    /// suitable for repeated emits. The caller holds the returned
-    /// writer for as long as it needs and calls `write_all` (then
-    /// optionally `flush`) on it per emit — saving the open + close
-    /// syscalls that `append_bytes` pays on every call.
+    /// Open `path` for append-only writes and return a pinned writer suitable
+    /// for repeated appends.
     ///
-    /// Returning `Ok(None)` instructs the caller to fall back to
-    /// `append_bytes` per write. This is appropriate for storage
-    /// backends that don't have an OS-level append-mode handle to
-    /// pin (in-memory, IndexedDB, wasm). The default implementation
-    /// returns `None` so non-fs backends stay correct without
-    /// overriding.
+    /// The caller holds the returned writer and calls `write_all` (then
+    /// optionally `flush`) per record — saving the open + close syscalls that
+    /// [`append_bytes`](Self::append_bytes) pays on every call.
     ///
-    /// Fs-backed implementations should override to return
-    /// `Ok(Some(writer))` wrapping a long-lived `File` opened with
-    /// `O_APPEND | O_CREAT` (or the Windows equivalent). On NTFS
-    /// this saves ~200 µs per emit relative to `OpenOptions::open`
-    /// every time. See `LogFileWriter` for the consumer.
+    /// Returning `Ok(None)` tells the caller to fall back to
+    /// [`append_bytes`](Self::append_bytes) per record. That is appropriate for
+    /// backends with no OS-level append-mode handle to pin (in-memory,
+    /// IndexedDB, wasm). The default implementation returns `None`, so non-fs
+    /// backends stay correct without overriding.
+    ///
+    /// Fs-backed implementations should override to return `Ok(Some(writer))`
+    /// wrapping a long-lived `File` opened with `O_APPEND | O_CREAT` (or the
+    /// Windows equivalent). On NTFS this saves ~200 µs per write relative to
+    /// `OpenOptions::open` every time. See `LogFileWriter` for the consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the backend supports pinned writers but
+    /// fails to open the handle (e.g. parent creation or open failure).
     fn open_append_writer(&self, path: &Path) -> io::Result<Option<Box<dyn io::Write + Send>>> {
         let _ = path;
         Ok(None)
     }
 
-    /// Acquire an advisory cross-process lock on `path` for the
-    /// duration of `f`. On native `FsStorage` with `fs-locking`, this
-    /// uses `fs4`'s `flock`/`LockFileEx`. On wasm (single-threaded,
-    /// single-process), the lock is a no-op — `f()` runs immediately.
+    /// Run `f` while holding an advisory cross-process lock on `path`.
     ///
-    /// Implementations should pass through `f`'s return value
-    /// unchanged. The `io::Result<R>` wrapping is for the lock
-    /// acquisition itself (open + flock); `f` is expected to handle
-    /// its own errors.
+    /// Serializes the critical section against other processes (and, for
+    /// `FsStorage`, other threads): the lock is held for the duration of `f` and
+    /// released afterward, even if `f` errors. On native `FsStorage` with
+    /// `fs-locking` this uses `fs4`'s `flock` / `LockFileEx`. On wasm
+    /// (single-threaded, single-process) the lock is a no-op and `f()` runs
+    /// immediately.
     ///
-    /// Default no-op implementation is provided so wasm adapters
-    /// don't need to override it.
+    /// Implementations must pass through `f`'s return value unchanged. The outer
+    /// [`io::Result`] is for the lock acquisition itself (open + flock); `f`
+    /// owns its own errors.
+    ///
+    /// A default no-op implementation is provided so wasm adapters need not
+    /// override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if acquiring the lock fails, or whatever error
+    /// `f` returns once the lock is held.
     fn with_advisory_lock(
         &self,
         path: &Path,

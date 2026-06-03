@@ -1,12 +1,22 @@
-//! `Runtime::export` and `Runtime::absorb` — the new universal `.tnpkg`
-//! producer / consumer (Section 3.2 of the 2026-04-24 admin log architecture
-//! plan). Mirrors `tn/export.py` and `tn/absorb.py`.
+//! `.tnpkg` producer / consumer: [`Runtime::export`] and [`Runtime::absorb`].
+//!
+//! The universal package path (Section 3.2 of the 2026-04-24 admin log
+//! architecture plan), behind the `tn export` / `tn absorb` CLI verbs.
+//! [`Runtime::export`] packs local ceremony state into a signed `.tnpkg`
+//! described by [`ExportOptions`]; [`Runtime::absorb`] reads one back, verifies
+//! its manifest, applies it, and returns an [`AbsorbReceipt`]. The wire format
+//! itself lives in [`crate::tnpkg`]; this module is the runtime-side glue that
+//! gathers what goes in the body and folds what comes out. Mirrors
+//! `tn/export.py` and `tn/absorb.py`.
 
 #![cfg(feature = "fs")]
 
-use std::collections::{BTreeMap, HashSet};
-use std::fs::OpenOptions;
-use std::io::Write;
+mod admin_clock;
+mod receipts;
+mod seed_builders;
+mod util;
+
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -14,14 +24,30 @@ use time::OffsetDateTime;
 
 use crate::admin_cache::{is_admin_event_type, resolve_admin_log_path, ChainConflict};
 use crate::runtime::{AdminState, Runtime};
-use crate::signing::DeviceKey;
 use crate::tnpkg::{
     clock_dominates, read_tnpkg, sign_manifest, write_tnpkg, Manifest, ManifestKind, TnpkgSource,
     VectorClock,
 };
 use crate::{Error, Result};
 
-/// Options for `Runtime::export`. Mirrors Python's keyword args.
+use admin_clock::{
+    append_admin_envelopes, build_local_admin_clock, scan_admin_envelopes, try_accept_admin_envelope,
+};
+use receipts::{noop_receipt, rejected_receipt};
+use seed_builders::{build_identity_seed_body, build_kit_bundle_body, build_project_seed_body};
+use util::now_iso_millis;
+
+/// What to pack and how, for [`Runtime::export`].
+///
+/// [`kind`](Self::kind) is the one required field — it selects the package kind
+/// and thus which of the other fields matter. `Offer` / `Enrolment` need
+/// [`package_body`](Self::package_body); `KitBundle` / `FullKeystore` /
+/// `ProjectSeed` honor [`groups`](Self::groups); `FullKeystore` and
+/// `ProjectSeed` additionally require
+/// [`confirm_includes_secrets`](Self::confirm_includes_secrets) because they
+/// write raw private keys. Defaults are all-empty / `None`, so build with
+/// `ExportOptions { kind: Some(...), ..Default::default() }`. Mirrors Python's
+/// keyword args.
 #[derive(Debug, Clone, Default)]
 pub struct ExportOptions {
     /// Manifest kind / dispatch discriminator.
@@ -41,7 +67,18 @@ pub struct ExportOptions {
     pub package_body: Option<Vec<u8>>,
 }
 
-/// Receipt returned from `Runtime::absorb`.
+/// Outcome of a [`Runtime::absorb`] call.
+///
+/// Absorb is total — it returns a receipt rather than erroring on a bad or
+/// rejected package — so the *receipt* is where you learn what happened. For
+/// admin snapshots, [`accepted_count`](Self::accepted_count) /
+/// [`deduped_count`](Self::deduped_count) / [`noop`](Self::noop) describe how
+/// many envelopes were new, and [`conflicts`](Self::conflicts) surfaces any
+/// equivocation detected. For other kinds,
+/// [`legacy_status`](Self::legacy_status) / [`legacy_reason`](Self::legacy_reason)
+/// carry the disposition (`"rejected"`, `"stashed"`, …). Always inspect
+/// [`replaced_kit_paths`](Self::replaced_kit_paths) after a kit absorb to see
+/// whether existing keystore files were swapped aside.
 #[derive(Debug, Clone)]
 pub struct AbsorbReceipt {
     /// Manifest kind that drove dispatch.
@@ -75,12 +112,46 @@ pub struct AbsorbReceipt {
 }
 
 impl Runtime {
-    /// Pack a `.tnpkg` from local ceremony state.
+    /// Pack a signed `.tnpkg` from local ceremony state and write it to
+    /// `out_path`.
+    ///
+    /// Gathers the body for `opts.kind` (admin envelopes, reader kits, an
+    /// identity/project seed, or a caller-supplied package payload), assembles
+    /// and Ed25519-signs the manifest with this runtime's device key, and writes
+    /// the archive via [`crate::tnpkg::write_tnpkg`]. The package is
+    /// self-describing and verifiable by any holder of the producer's
+    /// `did:key`. Returns the path written (the same `out_path`). This is the
+    /// engine behind `tn export`.
     ///
     /// # Errors
-    /// Returns `Error::InvalidConfig` for `kind=FullKeystore` without
-    /// `confirm_includes_secrets=true` (the foot-gun gate). Other errors
-    /// surface from filesystem writes or zip serialization.
+    /// Returns [`crate::Error::InvalidConfig`] when `opts.kind` is unset, when a
+    /// `FullKeystore` / `ProjectSeed` export omits
+    /// `confirm_includes_secrets = true` (the foot-gun gate on exporting raw
+    /// private keys), or when a kind's required inputs are missing (e.g. an
+    /// `Offer` without `package_body`, or a kit bundle over an empty keystore).
+    /// Returns [`crate::Error::NotImplemented`] for kinds Rust does not yet
+    /// produce (`RecipientInvite`, `ContactUpdate`). Filesystem and zip failures
+    /// surface as their underlying [`crate::Error`] variants.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// use tn_core::{Runtime, ManifestKind, ExportOptions};
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::init(Path::new("tn.yaml"))?;
+    /// let written = rt.export(
+    ///     Path::new("snapshot.tnpkg"),
+    ///     ExportOptions {
+    ///         kind: Some(ManifestKind::AdminLogSnapshot),
+    ///         ..Default::default()
+    ///     },
+    /// )?;
+    /// assert_eq!(written, Path::new("snapshot.tnpkg"));
+    /// # Ok(())
+    /// # }
+    /// ```
     #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
     pub fn export(&self, out_path: &Path, opts: ExportOptions) -> Result<PathBuf> {
         let kind = opts
@@ -229,8 +300,41 @@ impl Runtime {
         Ok(out_path.to_path_buf())
     }
 
-    /// Apply a `.tnpkg` to local state. Validates manifest signature, dedupes
-    /// admin envelopes by row_hash, advances LKV state. Idempotent.
+    /// Apply a `.tnpkg` to local state and return a receipt.
+    ///
+    /// Reads the package, verifies its manifest signature against the declared
+    /// producer, then dispatches on [`crate::ManifestKind`]: admin snapshots are
+    /// deduped by `row_hash` and appended to the admin log (advancing LKV
+    /// state); kit bundles are written into the keystore (existing files moved
+    /// aside to `.previous.<UTC>` sidecars); other kinds are stashed for the
+    /// caller. Idempotent — re-absorbing the same package is a no-op (see
+    /// [`AbsorbReceipt::noop`]) — and total: a malformed, unverifiable, or
+    /// unsupported package yields a rejected/stashed [`AbsorbReceipt`] rather
+    /// than an `Err`. The engine behind `tn absorb`.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error`] only on a genuine local failure while applying
+    /// an *accepted* package (e.g. an I/O error appending to the admin log or
+    /// writing a kit). Bad input — not a zip, signature mismatch, missing body —
+    /// is reported on the returned receipt, not as an error.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// use tn_core::{Runtime, AbsorbSource};
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::init(Path::new("tn.yaml"))?;
+    /// let receipt = rt.absorb(AbsorbSource::Path(Path::new("snapshot.tnpkg")))?;
+    /// if receipt.legacy_status == "rejected" {
+    ///     eprintln!("package rejected: {}", receipt.legacy_reason);
+    /// } else {
+    ///     println!("accepted {} new envelope(s)", receipt.accepted_count);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     #[allow(clippy::needless_pass_by_value)]
     pub fn absorb(&self, source: AbsorbSource<'_>) -> Result<AbsorbReceipt> {
         let tn_source = match source {
@@ -472,15 +576,28 @@ impl Runtime {
         })
     }
 
-    /// Path to the yaml this runtime was initialized from.
+    /// Borrow the path to the `tn.yaml` this runtime was initialized from.
+    ///
+    /// The ceremony's config file; its parent directory is the anchor for the
+    /// runtime's `.tn/` log and keystore tree.
     pub fn yaml_path(&self) -> &Path {
         &self.yaml_path
     }
 
-    /// Return every admin envelope from the runtime's logs as merged JSON
-    /// objects (envelope root + decrypted group plaintexts merged on top).
-    /// Used by `AdminStateCache` to drive its reducer without re-implementing
-    /// envelope decryption.
+    /// Collect every admin envelope from the runtime's logs as merged JSON
+    /// objects.
+    ///
+    /// Each entry is the envelope root with its decrypted per-group plaintexts
+    /// merged on top, so admin fields read at the top level regardless of which
+    /// group carried them. This is the decryption-aware feed
+    /// [`crate::AdminStateCache`] folds to build admin state — it lets the cache
+    /// avoid re-implementing envelope decryption. Non-admin event types are
+    /// filtered out.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] if reading or decrypting the underlying log
+    /// entries fails.
     pub fn admin_envelopes_merged(&self) -> Result<Vec<Value>> {
         let entries = self.read_raw()?;
         let mut out = Vec::new();
@@ -534,509 +651,12 @@ impl Runtime {
     }
 }
 
-/// Source of bytes to read a `.tnpkg` from for `Runtime::absorb`.
+/// Where [`Runtime::absorb`] reads a `.tnpkg` from.
+///
+/// The absorb-side mirror of [`crate::tnpkg::TnpkgSource`].
 pub enum AbsorbSource<'a> {
-    /// On-disk path.
+    /// On-disk path to the `.tnpkg` archive.
     Path(&'a Path),
-    /// In-memory bytes.
+    /// In-memory `.tnpkg` bytes (the byte-array path for non-fs hosts).
     Bytes(&'a [u8]),
-}
-
-// --------------------------------------------------------------------------
-// Helpers
-// --------------------------------------------------------------------------
-
-fn now_iso_millis() -> String {
-    let now = OffsetDateTime::now_utc();
-    let fmt = time::macros::format_description!(
-        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]+00:00"
-    );
-    now.format(&fmt)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00.000+00:00".into())
-}
-
-fn scan_admin_envelopes(
-    sources: &[PathBuf],
-) -> Result<(Vec<u8>, VectorClock, u64, Option<String>)> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut out = Vec::new();
-    let mut clock: VectorClock = BTreeMap::new();
-    let mut head_row_hash: Option<String> = None;
-
-    for path in sources {
-        if !path.exists() {
-            continue;
-        }
-        let raw = std::fs::read_to_string(path)?;
-        for line in raw.lines() {
-            let stripped = line.trim();
-            if stripped.is_empty() {
-                continue;
-            }
-            let Ok(env) = serde_json::from_str::<Value>(stripped) else {
-                continue;
-            };
-            let et = env.get("event_type").and_then(Value::as_str).unwrap_or("");
-            if !is_admin_event_type(et) {
-                continue;
-            }
-            let rh = env.get("row_hash").and_then(Value::as_str).unwrap_or("");
-            if rh.is_empty() || seen.contains(rh) {
-                continue;
-            }
-            let did = env
-                .get("device_identity")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let seq = env.get("sequence").and_then(Value::as_u64);
-            let Some(seq) = seq else { continue };
-            seen.insert(rh.to_string());
-            out.extend_from_slice(stripped.as_bytes());
-            out.push(b'\n');
-            let slot = clock.entry(did.to_string()).or_default();
-            let cur = slot.get(et).copied().unwrap_or(0);
-            if seq > cur {
-                slot.insert(et.to_string(), seq);
-            }
-            head_row_hash = Some(rh.to_string());
-        }
-    }
-
-    let count = u64::try_from(seen.len()).unwrap_or(u64::MAX);
-    Ok((out, clock, count, head_row_hash))
-}
-
-type KitBundleBody = (BTreeMap<String, Vec<u8>>, Vec<Value>);
-
-fn build_kit_bundle_body(
-    keystore: &Path,
-    full: bool,
-    groups_filter: Option<&[String]>,
-) -> Result<KitBundleBody> {
-    if !keystore.is_dir() {
-        return Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "kit_bundle: keystore directory not found: {}",
-                keystore.display()
-            ),
-        )));
-    }
-    let group_set: Option<HashSet<String>> = groups_filter.map(|gs| gs.iter().cloned().collect());
-    let mut body: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let mut kits_meta: Vec<Value> = Vec::new();
-
-    let mut entries: Vec<_> = std::fs::read_dir(keystore)?.flatten().collect();
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-
-    for entry in entries {
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        if let Some(group) = name_str.strip_suffix(".btn.mykit").and_then(|g| {
-            // Reject `<g>.btn.mykit.revoked.N` style — the strip above would
-            // already fail on those (suffix mismatch).
-            if g.is_empty() {
-                None
-            } else {
-                Some(g)
-            }
-        }) {
-            if let Some(filter) = &group_set {
-                if !filter.contains(group) {
-                    continue;
-                }
-            }
-            let data = std::fs::read(entry.path())?;
-            let mut o = Map::new();
-            o.insert("name".into(), Value::String(name_str.to_string()));
-            o.insert(
-                "sha256".into(),
-                Value::String(format!("sha256:{}", hex::encode(sha2_256(&data)))),
-            );
-            o.insert("bytes".into(), Value::Number(data.len().into()));
-            kits_meta.push(Value::Object(o));
-            body.insert(format!("body/{name_str}"), data);
-        } else if full
-            && (name_str == "local.private"
-                || name_str == "local.public"
-                || name_str == "index_master.key")
-        {
-            body.insert(format!("body/{name_str}"), std::fs::read(entry.path())?);
-        } else if full {
-            if let Some(group) = name_str.strip_suffix(".btn.state") {
-                if group_set.as_ref().map_or(true, |f| f.contains(group)) {
-                    body.insert(format!("body/{name_str}"), std::fs::read(entry.path())?);
-                }
-            }
-        }
-    }
-
-    if kits_meta.is_empty() {
-        return Err(Error::InvalidConfig(format!(
-            "kit_bundle: no *.btn.mykit files in {}",
-            keystore.display()
-        )));
-    }
-
-    if full {
-        body.insert("body/WARNING_CONTAINS_PRIVATE_KEYS".into(), Vec::new());
-    }
-
-    Ok((body, kits_meta))
-}
-
-fn build_identity_seed_body(device: &DeviceKey) -> BTreeMap<String, Vec<u8>> {
-    let stub_yaml = format!(
-        "# Identity seed stub written by tn-core export(kind='identity_seed').\n\
-         # Replace this file with a real ceremony tn.yaml when joining one.\n\
-         identity:\n\
-           did: {}\n",
-        device.did()
-    );
-    let mut body = BTreeMap::new();
-    body.insert("body/local.private".into(), device.private_bytes().to_vec());
-    body.insert("body/local.public".into(), device.did().as_bytes().to_vec());
-    body.insert("body/tn.yaml".into(), stub_yaml.into_bytes());
-    body
-}
-
-type ProjectSeedBody = (BTreeMap<String, Vec<u8>>, Vec<String>);
-
-fn build_project_seed_body(
-    yaml_path: &Path,
-    keystore: &Path,
-    device: &DeviceKey,
-    groups_filter: Option<&[String]>,
-) -> Result<ProjectSeedBody> {
-    if !yaml_path.is_file() {
-        return Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("project_seed: yaml file not found: {}", yaml_path.display()),
-        )));
-    }
-    if !keystore.is_dir() {
-        return Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "project_seed: keystore directory not found: {}",
-                keystore.display()
-            ),
-        )));
-    }
-
-    let group_set: Option<HashSet<String>> = groups_filter.map(|gs| gs.iter().cloned().collect());
-    let mut body: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let mut keys_meta: Vec<String> = Vec::new();
-    body.insert("body/tn.yaml".into(), std::fs::read(yaml_path)?);
-
-    let mut entries: Vec<_> = std::fs::read_dir(keystore)?.flatten().collect();
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        let include = match name_str {
-            "local.private" | "local.public" | "index_master.key" => true,
-            _ => {
-                if let Some(group) = name_str.strip_suffix(".btn.mykit") {
-                    group_set.as_ref().map_or(true, |f| f.contains(group))
-                } else if let Some(group) = name_str.strip_suffix(".btn.state") {
-                    group_set.as_ref().map_or(true, |f| f.contains(group))
-                } else {
-                    false
-                }
-            }
-        };
-        if include {
-            body.insert(
-                format!("body/keys/{name_str}"),
-                std::fs::read(entry.path())?,
-            );
-            keys_meta.push(name_str.to_string());
-        }
-    }
-
-    if !body.contains_key("body/keys/local.private") {
-        body.insert(
-            "body/keys/local.private".into(),
-            device.private_bytes().to_vec(),
-        );
-        keys_meta.push("local.private".into());
-    }
-    if !body.contains_key("body/keys/local.public") {
-        body.insert(
-            "body/keys/local.public".into(),
-            device.did().as_bytes().to_vec(),
-        );
-        keys_meta.push("local.public".into());
-    }
-
-    keys_meta.sort();
-    keys_meta.dedup();
-    body.insert("body/WARNING_CONTAINS_PRIVATE_KEYS".into(), Vec::new());
-    Ok((body, keys_meta))
-}
-
-fn append_admin_envelopes(admin_log: &Path, envelopes: &[Value]) -> Result<()> {
-    if let Some(parent) = admin_log.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(admin_log)?;
-    for env in envelopes {
-        let line = serde_json::to_string(env)?;
-        f.write_all(line.as_bytes())?;
-        f.write_all(b"\n")?;
-    }
-    f.flush()?;
-    Ok(())
-}
-
-fn envelope_well_formed(env: &Value) -> bool {
-    for k in [
-        "device_identity",
-        "timestamp",
-        "event_id",
-        "event_type",
-        "row_hash",
-        "signature",
-    ] {
-        if env.get(k).and_then(Value::as_str).is_none() {
-            return false;
-        }
-    }
-    true
-}
-
-fn verify_envelope_signature(env: &Value) -> bool {
-    let did = env
-        .get("device_identity")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let row_hash = env.get("row_hash").and_then(Value::as_str).unwrap_or("");
-    let sig_b64 = env.get("signature").and_then(Value::as_str).unwrap_or("");
-    if sig_b64.is_empty() {
-        // Unsigned mode: envelopes ride the chain on row_hash alone. Treat as
-        // valid for absorb purposes — the chain hash is the integrity check.
-        return true;
-    }
-    let Ok(sig) = crate::signing::signature_from_b64(sig_b64) else {
-        return false;
-    };
-    DeviceKey::verify_did(did, row_hash.as_bytes(), &sig).unwrap_or(false)
-}
-
-fn sha2_256(data: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(data);
-    h.finalize().into()
-}
-
-// ----------------------------------------------------------------------
-// absorb_admin_log_snapshot helpers
-// ----------------------------------------------------------------------
-
-/// Receiver-side admin state recovered from disk for the snapshot
-/// absorb path: ``(local_clock, seen_row_hashes, revoked_leaves)``.
-///
-/// Aliased so the function signature and the orchestrator's
-/// destructuring read at a glance — and so clippy doesn't trip
-/// `type_complexity` on the nested generics.
-type LocalAdminClockState = (
-    VectorClock,
-    HashSet<String>,
-    BTreeMap<(String, u64), Option<String>>,
-);
-
-/// Replay the receiver's existing admin log to recover the trio
-/// ``(local_clock, seen_row_hashes, revoked_leaves)``.
-///
-/// The vector clock and the seen-set are the dedupe signals; the
-/// revoked-leaves map is what the per-envelope accept loop checks
-/// to surface ``LeafReuseAttempt`` conflicts on incoming
-/// ``tn.recipient.added`` envelopes whose leaf was previously
-/// revoked locally.
-///
-/// Missing log file is fine: returns three empty containers, as
-/// though the receiver had never seen any admin envelope. Malformed
-/// lines (non-JSON, non-string row_hash) are silently skipped — they
-/// can't be matched against anyway.
-fn build_local_admin_clock(admin_log: &Path) -> Result<LocalAdminClockState> {
-    let mut local_clock: VectorClock = BTreeMap::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut revoked_leaves: BTreeMap<(String, u64), Option<String>> = BTreeMap::new();
-
-    if !admin_log.exists() {
-        return Ok((local_clock, seen, revoked_leaves));
-    }
-    let text = std::fs::read_to_string(admin_log)?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(env) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let rh = env.get("row_hash").and_then(Value::as_str);
-        if let Some(rh) = rh {
-            seen.insert(rh.to_string());
-        }
-        if let (Some(d), Some(e), Some(s)) = (
-            env.get("device_identity").and_then(Value::as_str),
-            env.get("event_type").and_then(Value::as_str),
-            env.get("sequence").and_then(Value::as_u64),
-        ) {
-            let slot = local_clock.entry(d.to_string()).or_default();
-            let cur = slot.get(e).copied().unwrap_or(0);
-            if s > cur {
-                slot.insert(e.to_string(), s);
-            }
-        }
-        if env.get("event_type").and_then(Value::as_str) == Some("tn.recipient.revoked") {
-            if let (Some(g), Some(li)) = (
-                env.get("group").and_then(Value::as_str),
-                env.get("leaf_index").and_then(Value::as_u64),
-            ) {
-                revoked_leaves.insert((g.to_string(), li), rh.map(str::to_string));
-            }
-        }
-    }
-    Ok((local_clock, seen, revoked_leaves))
-}
-
-/// Decide whether one admin log line should be accepted into the
-/// receiver's log.
-///
-/// In-place mutations on success: appends to ``accepted``, marks the
-/// row_hash in ``seen``, may push a ``LeafReuseAttempt`` to
-/// ``conflicts``, may update ``revoked_leaves`` if the envelope is
-/// itself a ``tn.recipient.revoked``. Increments ``deduped`` when
-/// the envelope's row_hash is already in ``seen``.
-///
-/// All malformed / unsigned / dedupe-skip cases are silent no-ops —
-/// the caller's totals are accurate against the well-formed input
-/// only.
-fn try_accept_admin_envelope(
-    line: &str,
-    seen: &mut HashSet<String>,
-    revoked_leaves: &mut BTreeMap<(String, u64), Option<String>>,
-    accepted: &mut Vec<Value>,
-    conflicts: &mut Vec<ChainConflict>,
-    deduped: &mut usize,
-) {
-    let line = line.trim();
-    if line.is_empty() {
-        return;
-    }
-    let Ok(env) = serde_json::from_str::<Value>(line) else {
-        return;
-    };
-    if !envelope_well_formed(&env) || !verify_envelope_signature(&env) {
-        return;
-    }
-    let rh = env
-        .get("row_hash")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if rh.is_empty() {
-        return;
-    }
-    if seen.contains(&rh) {
-        *deduped += 1;
-        return;
-    }
-
-    let event_type = env.get("event_type").and_then(Value::as_str);
-    match event_type {
-        Some("tn.recipient.added") => {
-            record_leaf_reuse_if_revoked(&env, &rh, revoked_leaves, conflicts);
-        }
-        Some("tn.recipient.revoked") => {
-            track_revoked_leaf(&env, &rh, revoked_leaves);
-        }
-        _ => {}
-    }
-    accepted.push(env);
-    seen.insert(rh);
-}
-
-fn record_leaf_reuse_if_revoked(
-    env: &Value,
-    rh: &str,
-    revoked_leaves: &BTreeMap<(String, u64), Option<String>>,
-    conflicts: &mut Vec<ChainConflict>,
-) {
-    let (Some(g), Some(li)) = (
-        env.get("group").and_then(Value::as_str),
-        env.get("leaf_index").and_then(Value::as_u64),
-    ) else {
-        return;
-    };
-    let key = (g.to_string(), li);
-    if let Some(rev_rh) = revoked_leaves.get(&key).cloned() {
-        conflicts.push(ChainConflict::LeafReuseAttempt {
-            group: g.to_string(),
-            leaf_index: li,
-            attempted_row_hash: rh.to_string(),
-            originally_revoked_at_row_hash: rev_rh,
-        });
-    }
-}
-
-fn track_revoked_leaf(
-    env: &Value,
-    rh: &str,
-    revoked_leaves: &mut BTreeMap<(String, u64), Option<String>>,
-) {
-    let (Some(g), Some(li)) = (
-        env.get("group").and_then(Value::as_str),
-        env.get("leaf_index").and_then(Value::as_u64),
-    ) else {
-        return;
-    };
-    revoked_leaves.insert((g.to_string(), li), Some(rh.to_string()));
-}
-
-/// Receipt for the "manifest is already dominated" short-circuit.
-fn noop_receipt(manifest: &Manifest) -> AbsorbReceipt {
-    AbsorbReceipt {
-        kind: manifest.kind.as_str().into(),
-        accepted_count: 0,
-        deduped_count: 0,
-        noop: true,
-        derived_state: None,
-        conflicts: Vec::new(),
-        legacy_status: String::new(),
-        legacy_reason: String::new(),
-        replaced_kit_paths: Vec::new(),
-    }
-}
-
-/// Receipt for the "body missing/malformed" rejection paths.
-fn rejected_receipt(manifest: &Manifest, reason: &str) -> AbsorbReceipt {
-    AbsorbReceipt {
-        kind: manifest.kind.as_str().into(),
-        accepted_count: 0,
-        deduped_count: 0,
-        noop: false,
-        derived_state: None,
-        conflicts: Vec::new(),
-        legacy_status: "rejected".into(),
-        legacy_reason: reason.into(),
-        replaced_kit_paths: Vec::new(),
-    }
 }

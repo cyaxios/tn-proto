@@ -1,4 +1,8 @@
-//! Canonical JSON serialization (RFC 8785 lite).
+//! Canonical JSON byte encoding — the deterministic serialization the
+//! signing domain stands on. Internal primitive: most readers want the
+//! high-level API instead — see [`crate::Runtime`] (events, behind
+//! `tn.info()` / `tn read`) and [`crate::Manifest`] (packages, behind
+//! `tn export`). Reach here directly only when you need raw canonical bytes.
 //!
 //! Matches `tn/canonical.py::canonical_bytes` byte-for-byte:
 //! - sorted keys at every nesting level

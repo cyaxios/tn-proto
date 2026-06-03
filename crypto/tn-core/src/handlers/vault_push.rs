@@ -1,4 +1,7 @@
-//! `vault.push` handler — POST `.tnpkg` admin snapshots to a TN vault.
+//! `vault.push` handler — POST `.tnpkg` admin snapshots to a TN vault. A
+//! handler implementation; the handler interface + [`crate::Runtime`] fan-out
+//! is the entry point (behind `tn.info()` / `tn log`). Internal primitive —
+//! reach here directly only to configure or inspect this push sink.
 //!
 //! Mirrors `python/tn/handlers/vault_push.py`. Builds an admin-log
 //! snapshot via [`crate::Runtime::export`] and POSTs it to:

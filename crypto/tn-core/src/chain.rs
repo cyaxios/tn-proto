@@ -1,4 +1,8 @@
-//! Chain state and row_hash computation (PRD §5).
+//! Per-event-type hash chain and `row_hash` computation — the tamper-
+//! evidence linkage the signature commits to. Internal primitive: start at
+//! [`crate::Runtime`] (write/read of attested events, behind `tn.info()` /
+//! `tn read`) and [`crate::Manifest`] (signed packages, behind `tn export`).
+//! Reach here directly only to recompute or audit a chain hash.
 //!
 //! Mirrors `tn/chain.py` byte-for-byte: SHA-256 over the concatenation of
 //! envelope fields with null separators, then the groups' ciphertexts and

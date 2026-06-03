@@ -1,4 +1,7 @@
-//! `fs.scan` handler — pick up `.tnpkg` files from a watched directory.
+//! `fs.scan` handler — pick up `.tnpkg` files from a watched directory. A
+//! handler implementation; the handler interface + [`crate::Runtime`] fan-out
+//! is the entry point (behind `tn.info()` / `tn log`). Internal primitive —
+//! reach here directly only to configure or inspect this scan source.
 //!
 //! Mirrors `python/tn/handlers/fs_scan.py`. Polls a directory for
 //! `.tnpkg` files, calls [`crate::Runtime::absorb`] for each, then

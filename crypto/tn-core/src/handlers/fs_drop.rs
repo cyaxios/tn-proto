@@ -1,6 +1,9 @@
-//! `fs.drop` handler — write `.tnpkg` admin snapshots to a watched dir.
+//! `fs.drop` handler — write `.tnpkg` admin snapshots to a watched dir. A
+//! handler implementation; the handler interface + [`crate::Runtime`] fan-out
+//! is the entry point (behind `tn.info()` / `tn log`). Internal primitive —
+//! reach here directly only to configure or inspect this drop sink.
 //!
-//! Mirrors `python/tn/handlers/fs_drop.py`. On each accepted emit (an
+//! Mirrors `python/tn/handlers/fs_drop.py`. On each accepted write (an
 //! envelope whose `event_type` starts with `tn.`), build an admin-log
 //! snapshot via [`crate::Runtime::export`] and place it in `out_dir`.
 //! A peer's [`super::FsScanHandler`] (or any other process) consumes

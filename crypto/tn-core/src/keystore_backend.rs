@@ -1,4 +1,8 @@
 //! Atomic + CAS + flock keystore writes for the publisher state file.
+//! Internal primitive: most readers want the high-level API instead — see
+//! [`crate::Runtime`], which persists publisher state through this backend
+//! during admin verbs (behind `tn.info()` / `tn read`). Reach here directly
+//! only when performing a guarded state-file write yourself.
 //!
 //! Rust counterpart to `python/tn/_keystore_backend.py`. The publisher
 //! state file (`<group>.btn.state`) is the **cryptographic ledger of
@@ -15,7 +19,7 @@
 //! 3. **Compare-and-swap** — re-read on-disk state under the lock
 //!    and compare it byte-for-byte against the caller's `prior`
 //!    snapshot. On divergence the caller's view is stale; the write
-//!    is refused and a [`KeystoreConflictError`] is returned so the
+//!    is refused and a [`KeystoreError::Conflict`] is returned so the
 //!    caller can re-read, re-apply their mutation, and retry. This
 //!    prevents the lost-update problem the lock alone wouldn't catch.
 //!

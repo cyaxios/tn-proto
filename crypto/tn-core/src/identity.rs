@@ -1,4 +1,8 @@
-//! DeviceKey keystore I/O.
+//! DeviceKey keystore I/O — load or mint the on-disk Ed25519 device seed.
+//! Internal primitive: most readers want the high-level API instead — see
+//! [`crate::Runtime`], which loads the device identity for you at ceremony
+//! open (behind `tn.info()` / `tn read`). Reach here directly only to
+//! manage the raw seed file.
 //!
 //! Matches the Python layout at `tn/config.py`: the 32-byte Ed25519 seed is
 //! persisted at `<keystore>/local.private` as raw bytes.

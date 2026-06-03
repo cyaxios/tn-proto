@@ -1,4 +1,8 @@
-//! HKDF-SHA256 per-group index key + HMAC-SHA256 field tokens.
+//! HKDF-SHA256 per-group index keys and HMAC-SHA256 equality-search field
+//! tokens. Internal primitive: most readers want the high-level API instead
+//! — see [`crate::Runtime`] (events and queryable fields, behind `tn.info()`
+//! / `tn read`). Reach here directly only when computing or matching raw
+//! index tokens.
 //!
 //! Mirrors `tn/indexing.py` exactly:
 //! - HKDF-SHA256, info = `b"tn-index:v1:" + ceremony + b":" + group + b":" + decimal(epoch)`

@@ -1,6 +1,10 @@
-//! Envelope build + ndjson serialization.
+//! TN envelope assembly and ndjson serialization — the on-the-wire record
+//! shape. Internal primitive: most readers want the high-level API instead —
+//! see [`crate::Runtime`] (write/read attested events, behind `tn.info()` /
+//! `tn read`) and [`crate::Manifest`] (signed packages, behind `tn export`).
+//! Reach here directly only when hand-building or parsing raw envelope bytes.
 //!
-//! Matches `tn/logger.py::emit` output format:
+//! Matches `tn/logger.py` output format:
 //! - Envelope key order: device_identity, timestamp, event_id, event_type, level, sequence,
 //!   prev_hash, row_hash, signature; then public fields in insertion order;
 //!   then group payloads in insertion order.

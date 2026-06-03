@@ -1,4 +1,8 @@
-//! Path-template parsing for templated `logs.path` ceremonies.
+//! Path-template parsing for templated `logs.path` ceremonies. Internal
+//! primitive: most readers want the high-level API instead — see
+//! [`crate::Runtime`], which renders these templates for you when writing
+//! events (behind `tn.info()` / `tn log`). Reach here directly only to
+//! resolve a `logs.path` template by hand.
 //!
 //! TN supports seven template tokens in `logs.path` (matching Python's
 //! `LoadedConfig._render_path_template` in `python/tn/config.py`):

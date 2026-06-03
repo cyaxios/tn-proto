@@ -1,4 +1,8 @@
-//! Append-only ndjson file + line iterator.
+//! Append-only ndjson file writer and line iterator — the on-disk
+//! attestation log. Internal primitive: most readers want the high-level API
+//! instead — see [`crate::Runtime`], which writes and reads these files for
+//! you (behind `tn.info()` / `tn read`). Reach here directly only for raw
+//! line-level file I/O.
 //!
 //! Both reader and writer route every byte through an
 //! [`Arc<dyn Storage>`](crate::storage::Storage) handle rather than
@@ -164,7 +168,7 @@ impl LogFileWriter {
         Ok(buf)
     }
 
-    /// Like [`read_tail`] but returns `Ok(None)` when the file size
+    /// Like [`Self::read_tail`] but returns `Ok(None)` when the file size
     /// matches what we've written ourselves — i.e. no other process
     /// has appended since our last write, and the caller's
     /// in-memory chain state is already current.
