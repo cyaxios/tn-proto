@@ -753,6 +753,13 @@ export class NodeRuntime {
     }
   }
 
+  /** True iff a WasmRuntime companion is currently attached (the Rust/WASM
+   *  core services the emit path). False before the first emit (wasm
+   *  attaches lazily) and after teardown (_resetWasmAfterAdminWrite / close). */
+  isWasmActive(): boolean {
+    return this.wasm !== null;
+  }
+
   /**
    * Lazily attach a `WasmRuntime` companion. Returns the cached handle
    * if one already exists; otherwise builds a fresh `WasmRuntime`
@@ -2919,17 +2926,27 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
   function rel(absOrRel: string, fallback: string): string {
     if (!absOrRel) return fallback;
     const target = absOrRel;
-    // If already relative-looking, pass through.
+    // Already relative-looking: pass through, normalizing separators.
     if (!target.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(target)) {
-      return target.startsWith("./") ? target : `./${target}`;
+      const norm = target.replace(/\\/g, "/");
+      return norm.startsWith("./") ? norm : `./${norm}`;
     }
-    // Compute relative-from-yamlDir if possible; otherwise leave absolute.
-    try {
-      const rel = relative(yamlDir, target).replace(/\\/g, "/");
-      return rel ? `./${rel}` : "./";
-    } catch {
-      return target.replace(/\\/g, "/");
+    // Absolute input: relativize against yamlDir. On Windows this can return
+    // an absolute drive-letter path (cross-drive), because path.relative does
+    // NOT throw across drives; it returns the absolute target. A drive-letter,
+    // UNC, or POSIX-absolute result must never be serialized into yaml; it is
+    // machine-local and leaks the author's filesystem layout.
+    const r = relative(yamlDir, target).replace(/\\/g, "/");
+    if (r === "") return "./";
+    if (/^[A-Za-z]:[\\/]/.test(r) || r.startsWith("/") || r.startsWith("//")) {
+      throw new Error(
+        `createFreshCeremony: cannot write a portable yaml path for ${JSON.stringify(target)} ` +
+          `relative to ceremony dir ${JSON.stringify(yamlDir)} (different drive or volume). ` +
+          `Place the keystore/log/admin path on the same drive as the ceremony yaml, ` +
+          `or pass a path relative to it.`,
+      );
     }
+    return `./${r}`;
   }
   const _keystorePathStr = opts.keystoreDir
     ? rel(opts.keystoreDir, `./.tn/${yamlStem}/keys`)

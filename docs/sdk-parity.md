@@ -14,6 +14,96 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 | ⚠ | Minor divergence (typically wire form vs idiomatic shape). Documented inline. |
 | ⊝ | Not yet ported on one side. Tracked. |
 
+## Route matrix: where each verb is backed (BTN / default)
+
+This section answers a different question than the verb tables below. The
+tables ask "does the verb exist on both sides with matching semantics."
+This matrix asks "what actually executes the work", specifically whether
+the Rust core does the load-bearing computation, and where the two SDKs
+deliberately diverge in *how* they reach the same output.
+
+The BTN cipher path is the default and the one documented here. The
+upgraded machine-readable parity tool (`tools/check_parity.py` and its
+route data) is the separate, authoritative source for CI; this file is the
+human reference.
+
+Columns:
+
+- **Python form**: the public Python call.
+- **TS module form**: the TS call via the module/static surface.
+- **TS instance form**: the TS call on a `Tn` instance (where it differs).
+- **Rust-backing**: what the Rust core contributes, and whether the two
+  SDKs are implementation-parity, output-parity, or a documented exception.
+
+Legend for the Rust-backing column:
+
+- **Rust-backed (both)**: both SDKs route the load-bearing work through the
+  Rust core. Implementation parity.
+- **Output-parity**: the SDKs reach an equivalent result by different
+  routes (one orchestrates in its own language); the *output* is equivalent
+  even though the *implementation* is not. Intentional.
+- **Exception**: no shared Rust runtime binding is used; each SDK
+  implements at its own SDK layer. Listed under "Known intentional
+  omissions / exceptions" with a one-line reason.
+
+| Verb | Python form | TS module form | TS instance form | Rust-backing |
+|------|-------------|----------------|------------------|--------------|
+| emit | `tn.emit(level, event_type, fields)` | `tn.emit(level, eventType, fields)` | `tn.emit(...)` | **Rust-backed (both).** py `PyRuntime.emit`; ts `WasmRuntime.emitReturningLine`. |
+| log | `tn.log(event_type, **fields)` | `tn.log(eventType, fields?)` | `tn.log(...)` | **Rust-backed (both).** Routes through the same core emit path. |
+| info | `tn.info(...)` | `tn.info(...)` | `tn.info(...)` | **Rust-backed (both).** Core emit path. |
+| debug | `tn.debug(...)` | `tn.debug(...)` | `tn.debug(...)` | **Rust-backed (both).** Core emit path. |
+| warning | `tn.warning(...)` | `tn.warning(...)` | `tn.warning(...)` | **Rust-backed (both).** Core emit path. |
+| error | `tn.error(...)` | `tn.error(...)` | `tn.error(...)` | **Rust-backed (both).** Core emit path. |
+| read | `tn.read(...)` | `tn.read({...})` | `tn.read({...})` | **Output-parity (documented exception).** Python uses Rust decrypt plus Python-side verify/shape; TS is fully TS-orchestrated. Same yielded `Entry` / envelope, different internals. |
+| session / ephemeral | `tn.session(yaml_or_tmpdir?)` | `await Tn.ephemeral(opts?)` | n/a (factory) | **Output-parity.** Both spin up a throwaway ceremony in a tempdir and return a ready handle (`TNClient.ephemeral()` lineage). Lifecycle helper, not a Rust binding. |
+| admin.add_recipient | `tn.admin.add_recipient(group, ...)` | `await tn.admin.addRecipient(group, opts)` | same | **Rust-backed (both).** py `add_recipient` -> `_rt.add_recipient`; ts `addRecipient` -> `WasmRuntime.adminAddRecipient`. The core mints the kit, persists state, and emits `tn.recipient.added`. TS invalidates its in-process publisher cache after the WASM write so later TS-side rotate/ensure-group reload from disk. |
+| admin.revoke_recipient | `tn.admin.revoke_recipient(group, ...)` | `await tn.admin.revokeRecipient(group, opts)` | same | **Rust-backed (both).** py `revoke_recipient` -> `_rt.revoke_recipient`; ts `revokeRecipient` -> `WasmRuntime.adminRevokeRecipient`. The core revokes, persists, and emits `tn.recipient.revoked` (recipient_identity null on both). |
+| admin.revoked_count | `tn.admin.revoked_count(group)` | `tn.admin.revokedCount(group)` | same | **Rust-backed (both).** py `revoked_count` -> `revoked_count_btn` -> `_rt.revoked_count`; ts `revokedCount` -> `WasmRuntime.adminRevokedCount`. Both read the count off the Rust core. |
+| admin.recipients | `tn.admin.recipients(group)` | `tn.admin.recipients(group, opts?)` | same | **Output-parity (unification pending).** Python replays via the Rust `tn_core.admin.reduce` helper; TS replays via its own pure-TS `AdminStateReducer`. They are NOT the same code today: the core's `adminState`/`recipients` read the main log only, not the dedicated admin PEL, so they cannot yet be the shared path. Both apply the ceremony-from-config fallback + active-first sort and yield equivalent rosters. |
+| admin.state | `tn.admin.state(group?)` | `tn.admin.state(group?)` | same | **Output-parity (unification pending).** Same as recipients: Python via `tn_core.admin.reduce`, TS via its own `AdminStateReducer`; equivalent state. Sharing the core's `adminState` is blocked until it reads both the main and admin-PEL logs (tracked as unification work). |
+| admin.rotate | `tn.admin.rotate(group)` | `await tn.admin.rotate(group)` | same | **Exception.** No Rust runtime binding for rotate; SDK-layer in both languages. (btn is output-parity; jwe is Python-only.) |
+| admin.ensure_group | `tn.admin.ensure_group(group, ...)` | `await tn.admin.ensureGroup(group, opts?)` | same | **Exception.** No Rust runtime binding; SDK-layer in both. Python rewrites yaml on first call; TS emits the attested event only. |
+| pkg.export | `tn.pkg.export(opts, out_path)` | `await tn.pkg.export(opts, outPath)` | same | **Exception.** No WASM runtime binding; PyO3 has methods but the Python SDK does not use them either. Both orchestrate with Rust *helpers* (`manifest_signing_bytes` / `tnpkg_write`). |
+| pkg.absorb | `tn.pkg.absorb(source)` | `await tn.pkg.absorb(source)` | same | **Exception.** Same shape as export: no runtime binding used; both orchestrate with the Rust tnpkg *helpers*. |
+| pkg.bundle_for_recipient | `tn.pkg.bundle_for_recipient(opts)` | `await tn.pkg.bundleForRecipient(opts)` | same | **Output-parity.** A monolithic WASM `bundleForRecipient` exists but is intentionally unused (it emits a different bundle shape); both SDKs loop per-kit `add_recipient` (now Rust-backed) and assemble the bundle in their own layer, matching each other. |
+| agents.add_runtime | `tn.admin.add_agent_runtime(opts)` | `await tn.agents.addRuntime(opts)` | same | **Output-parity.** Both loop per-kit `add_recipient` and orchestrate the bundle in their own layer; both mint a kit + emit `tn.agents.runtime_added`. (TS lifts to `tn.agents.*`; Python kept under `tn.admin.*`.) |
+| vault.link | `tn.vault.link(vault_did, project_id)` | `await tn.vault.link(vaultDid, projectId)` | same | **Output-parity (decision).** BOTH emit `tn.vault.linked` via the emit path; the dedicated Rust `vault_link` binding is intentionally unused. |
+| vault.unlink | `tn.vault.unlink(vault_did, project_id, reason?)` | `await tn.vault.unlink(vaultDid, projectId, reason?)` | same | **Output-parity (decision).** BOTH emit `tn.vault.unlinked` via the emit path; the dedicated Rust `vault_unlink` binding is intentionally unused. |
+
+### Known intentional omissions / exceptions
+
+Each of these is a place where the SDKs do NOT share a Rust runtime binding,
+by design. They are not parity gaps to close; they are documented contracts.
+
+- **read**: Python uses Rust decrypt + Python-side verify/shape; TS is
+  fully TS-orchestrated. Output-parity, not implementation-parity (the
+  yielded `Entry` / envelope is equivalent).
+- **admin.add_recipient / revoke_recipient / revoked_count**: TS does not
+  call the PyO3-style runtime methods; it orchestrates in TS over the same
+  Rust `tn-btn` crate (`BtnPublisher`) so it can keep coherent in-process
+  publisher state. Output (kit bytes, `tn.recipient.*` events, counts) is
+  equivalent.
+- **admin.rotate / admin.ensure_group**: no Rust runtime binding exists;
+  both are implemented at the SDK layer in each language.
+- **pkg.export / pkg.absorb**: no WASM runtime binding; PyO3 exposes
+  methods but the Python SDK does not use them either. Both SDKs orchestrate
+  with the Rust *helpers* `manifest_signing_bytes` / `tnpkg_write`.
+- **pkg.bundle_for_recipient / agents.add_runtime**: both loop per-kit
+  `add_recipient` and assemble the bundle in their own layer; there is no
+  single monolithic Rust call for the bundle.
+- **vault.link / vault.unlink**: both emit a `tn.vault.*` event via the
+  emit path; the dedicated Rust `vault_link` / `vault_unlink` binding is
+  intentionally unused. This is the locked decision, not an oversight.
+
+### Known follow-up
+
+Rust/WASM `adminState` appears to miss dedicated admin-log rows in one
+vault-link setup. Using Rust admin state as the TS source of truth would
+need a core/runtime investigation before it can replace the current
+TS-side replay. This is factual and tracked separately; it does not affect
+the output-parity claims above (the TS admin replay path is the source of
+truth today).
+
 ## Core verbs
 
 | Python | TS | Status | Notes |
@@ -22,6 +112,7 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 | `tn.use(name?, profile?, ...)` | `await Tn.use(name, opts?)` | ✓ | Get-or-create a multi-ceremony handle by registry name. TS interns by `(projectDir, name)`; Python interns by name. NEW in 0.3.0a4. `Tn.openCeremony` is a deprecated alias on the TS side. |
 | `tn.list_ceremonies()` | `Tn.listCeremonies(projectDir?)` | ✓ | Return ceremony names registered/found under `.tn/<name>/`. Sync on both. NEW in 0.3.0a4. |
 | `tn.flush_and_close()` | `await tn.close()` | ✓ | TS async; Python sync. |
+| `tn.session(yaml_or_tmpdir?)` | `await Tn.ephemeral(opts?)` | ✓ | Throwaway ceremony in a tempdir, returns a ready handle. `TNClient.ephemeral()` lineage. Lifecycle helper (not a Rust binding); Python is a context manager, TS is a factory + `tn.close()`. |
 | `tn.log(event_type, **fields)` | `tn.log(eventType, fields?)` | ✓ | Sync on both. |
 | `tn.debug(...)` | `tn.debug(...)` | ✓ | Sync. |
 | `tn.info(...)` | `tn.info(...)` | ✓ | Sync. |
@@ -65,6 +156,7 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 |--------|------|--------|-------|
 | `tn.admin.add_recipient(group, ...)` | `await tn.admin.addRecipient(group, opts)` | ✓ | TS returns `AddRecipientResult`; Python returns `AddRecipientResult` dataclass. |
 | `tn.admin.revoke_recipient(group, ...)` | `await tn.admin.revokeRecipient(group, opts)` | ✓ | Returns `RevokeRecipientResult`. |
+| `tn.admin.revoked_count(group)` | `tn.admin.revokedCount(group)` | ✓ | Sync on both. Reads the revoked-leaf count off the Rust `tn-btn` publisher (`revoked_count` / `BtnPublisher.revokedCount()`). |
 | `tn.admin.rotate(group)` | `await tn.admin.rotate(group)` | ✓ (btn) / ⚠ (jwe) | Both languages bump `index_epoch`, regenerate the publisher's self-kit, rename old material `.revoked.<ts>`, and emit `tn.rotation.completed`. JWE rotation is Python-only today. |
 | `tn.admin.ensure_group(group, ...)` | `await tn.admin.ensureGroup(group, opts?)` | ⚠ | Python rewrites yaml on first call; TS only emits the attested event (no yaml-write). |
 | `tn.admin.set_link_state(state)` | `await tn.vault.setLinkState(state)` | ⊝ | TS: stub-throws ("yaml-write not yet ported"). Python mutates `ceremony.mode` in yaml. |
@@ -86,8 +178,8 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 
 | Python | TS | Status | Notes |
 |--------|------|--------|-------|
-| `tn.vault.link(vault_did, project_id)` | `await tn.vault.link(vaultDid, projectId)` | ✓ | Emits `tn.vault.linked`. |
-| `tn.vault.unlink(vault_did, project_id, reason?)` | `await tn.vault.unlink(vaultDid, projectId, reason?)` | ✓ | Emits `tn.vault.unlinked`. |
+| `tn.vault.link(vault_did, project_id)` | `await tn.vault.link(vaultDid, projectId)` | ✓ | Emits `tn.vault.linked` `{ vault_identity, project_id, linked_at }` on both sides via the emit path. The dedicated Rust `vault_link` binding is intentionally unused (see route matrix + omissions). |
+| `tn.vault.unlink(vault_did, project_id, reason?)` | `await tn.vault.unlink(vaultDid, projectId, reason?)` | ✓ | Emits `tn.vault.unlinked` `{ vault_identity, project_id, reason, unlinked_at }` on both sides via the emit path. One idiomatic nuance: Python always writes `reason` (value `None` when omitted); TS leaves the `reason` key absent when no reason is passed. event_type + other field names identical. |
 
 ## tn.agents
 

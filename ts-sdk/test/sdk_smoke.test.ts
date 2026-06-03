@@ -5,7 +5,7 @@ import { test } from "node:test";
 import {
   DeviceKey,
   ZERO_HASH,
-  admin,
+  adminCatalog,
   asDid,
   buildEnvelopeLine,
   canonicalize,
@@ -96,7 +96,7 @@ test("rowHash + buildEnvelopeLine round-trip a public-only entry", () => {
   assert.equal(envelope.amount, 100);
 });
 
-test("admin.reduce turns a recipient.added envelope into a typed delta", () => {
+test("adminCatalog.reduce turns a recipient.added envelope into a typed delta", () => {
   const envelope = {
     event_type: "tn.recipient.added",
     did: "did:key:z6Mktest",
@@ -107,13 +107,13 @@ test("admin.reduce turns a recipient.added envelope into a typed delta", () => {
     kit_sha256: "a".repeat(64),
     cipher: "btn",
   };
-  const delta = admin.reduce(envelope);
+  const delta = adminCatalog.reduce(envelope);
   assert.equal(delta.kind, "recipient_added");
   assert.equal((delta as Record<string, unknown>).group, "default");
 });
 
-test("admin.catalogKinds lists 10 kinds", () => {
-  const kinds = admin.catalogKinds();
+test("adminCatalog.catalogKinds lists 10 kinds", () => {
+  const kinds = adminCatalog.catalogKinds();
   assert.ok(kinds.length >= 10);
   for (const k of kinds) {
     assert.ok(k.event_type.startsWith("tn."));

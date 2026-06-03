@@ -868,9 +868,12 @@ export class Tn {
     return this._rt.config;
   }
 
-  /** Always false — Tn wraps NodeRuntime (pure-TS), not a Rust WASM runtime. */
+  /** True iff this ceremony's runtime has an attached Rust/WASM core
+   *  servicing the emit path. False before the first emit (wasm attaches
+   *  lazily) and after an admin-driven runtime reset. Mirrors Python's
+   *  `using_rust`. The read path remains pure-TS today. */
   usingRust(): boolean {
-    return false;
+    return this._rt.isWasmActive();
   }
 
   /**

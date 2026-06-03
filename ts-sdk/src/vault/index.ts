@@ -28,9 +28,12 @@ export class VaultNamespace {
     const fields: Record<string, unknown> = {
       vault_identity: vaultDid,
       project_id: projectId,
+      // Match Python's _vault_unlink_impl: `reason` is always written,
+      // null when the caller omits it (not absent). Keeps the on-log
+      // event byte-equivalent across the two SDKs.
+      reason: reason ?? null,
       unlinked_at: new Date().toISOString(),
     };
-    if (reason !== undefined) fields["reason"] = reason;
     return this._rt.emit("info", "tn.vault.unlinked", this._merge(fields));
   }
 
