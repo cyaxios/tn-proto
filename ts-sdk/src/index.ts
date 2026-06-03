@@ -192,7 +192,7 @@ export {
   compileKitBundle,
   compileKitBundleToFile,
   type CompileKitBundleOptions,
-  type CompiledManifest,
+  type CompiledKitMeta,
   type CompiledPackage,
 } from "./compile.js";
 export {

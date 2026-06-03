@@ -733,7 +733,7 @@ function compileCmd() {
         out: result.outPath,
         kits: result.kits,
         kind: result.manifest.kind,
-        label: result.manifest.label,
+        label: opts.label ?? null,
       }) + "\n",
     );
   } catch (e) {

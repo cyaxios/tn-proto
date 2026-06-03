@@ -1,33 +1,47 @@
 // Compile btn keystore material into a `.tnpkg` file (a ZIP archive)
 // that the Chrome extension, the Python SDK, and any other TN reader
 // can consume. This is the TS/Node analog of
-// `tn.compile.compile_kit_bundle` in Python.
+// `tn.compile.compile_kit_bundle` in Python — which delegates to
+// `tn.export`, so the artifact is a *canonical* signed `.tnpkg`, not the
+// legacy `"tnpkg-v1"` manifest this module used to write.
 //
 // .tnpkg layout
 // -------------
 //
-//   manifest.json           small metadata (label, note, created_at,
-//                           ceremony_id, did, kit_sha256 per kit).
-//                           Optional but always written by this
-//                           function.
-//   <group>.btn.mykit       raw reader-kit bytes, one per group.
-//                           Multiple allowed.
-//   <group>.btn.mykit.revoked.<ts>   rotation-preserved kits.
+//   manifest.json           canonical signed manifest (see core/tnpkg.ts).
+//                           kind "kit_bundle" (readers-only) or
+//                           "full_keystore" (with `--full`). The
+//                           reader-kit metadata lives under `state.kits`.
+//   body/<group>.btn.mykit  raw reader-kit bytes, one per group. Kits live
+//                           under `body/`, NOT the zip root — that is the
+//                           shape `absorb` accepts.
+//   body/<group>.btn.mykit.revoked.<ts>   rotation-preserved kits.
 //
 // With `full: true` the archive additionally carries the publisher
-// seed + state + index master + tn.yaml so the recipient ends up with
-// a complete ceremony. Don't use that for sharing; use it for
-// self-backup only.
+// seed + state + index master + tn.yaml under `body/` so the recipient
+// ends up with a complete ceremony, plus a `body/WARNING_CONTAINS_PRIVATE_KEYS`
+// marker. Don't use that for sharing; use it for self-backup only.
 //
-// The archive uses STORED compression (method 0). Kits are tiny (a couple
-// of KB each), and the shared browser-safe `.tnpkg` helper keeps archive
-// behavior aligned with the rest of the SDK.
+// The manifest is Ed25519-signed by the keystore's device key so
+// `absorb` accepts it (absorb rejects unsigned / mis-signed manifests).
+// `publisher_identity` is resolved from the yaml's
+// `device.device_identity` when `--yaml` is given, else from the
+// keystore's `local.public` (which is the same DID the signing seed
+// derives, so the signature always verifies).
 
 import { Buffer } from "node:buffer";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { packTnpkg, type ZipEntry } from "./core/tnpkg_archive.js";
+import { DeviceKey } from "./core/signing.js";
+import {
+  type BodyContents,
+  type Manifest,
+  newManifest,
+  signManifest,
+  toWireDict,
+} from "./core/tnpkg.js";
+import { tnpkgWriteBytes } from "./raw.js";
 import { loadConfig } from "./runtime/config.js";
 
 export interface CompileKitBundleOptions {
@@ -37,9 +51,13 @@ export interface CompileKitBundleOptions {
   yamlPath?: string;
   /** If set, include ONLY these group names (e.g. ["trading", "chat"]). Default: all. */
   groups?: string[];
-  /** Human-readable label the Chrome extension shows in the popup. */
+  /**
+   * Human-readable label. Retained for CLI back-compat; the canonical
+   * manifest has no `label` field, so this is currently ignored by the
+   * artifact (kept so callers don't break).
+   */
   label?: string;
-  /** Optional free-form note the recipient sees at import time. */
+  /** Optional free-form note. Retained for back-compat; not serialized. */
   note?: string;
   /**
    * Include publisher-side material (signing seed, publisher state,
@@ -49,19 +67,16 @@ export interface CompileKitBundleOptions {
   full?: boolean;
 }
 
-export interface CompiledManifest {
-  version: "tnpkg-v1";
-  label: string | null;
-  note: string | null;
-  did: string | null;
-  ceremony_id: string | null;
-  kind: "readers-only" | "full-keystore";
-  created_at: string;
-  kits: Array<{ name: string; sha256: string; bytes: number }>;
+/** A reader-kit entry recorded in the manifest's `state.kits`. */
+export interface CompiledKitMeta {
+  name: string;
+  sha256: string;
+  bytes: number;
 }
 
 export interface CompiledPackage {
-  manifest: CompiledManifest;
+  /** Canonical signed manifest (see core/tnpkg.ts). */
+  manifest: Manifest;
   zipBytes: Uint8Array;
 }
 
@@ -71,25 +86,39 @@ function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(Buffer.from(bytes)).digest("hex");
 }
 
+/** Serialize a signed manifest + body to `.tnpkg` zip bytes (in memory).
+ * Mirrors `writeTnpkg` (Layer 2) but returns bytes instead of writing. */
+function packManifestBundle(manifest: Manifest, body: BodyContents): Uint8Array {
+  if (!manifest.manifestSignatureB64) {
+    throw new Error("packManifestBundle: manifest is unsigned; call signManifest(...) first.");
+  }
+  const wireDoc = toWireDict(manifest, true);
+  const entries = Object.keys(body)
+    .sort()
+    .map((name) => ({ name, data: body[name]! }));
+  return new Uint8Array(tnpkgWriteBytes(wireDoc, entries));
+}
+
 // ---------------------------------------------------------------------------
 // Public: compile to in-memory package + optional write-to-file
 // ---------------------------------------------------------------------------
 
 /**
- * Build a `.tnpkg` package in memory. Pure function: reads from disk,
- * writes nothing.
+ * Build a canonical `.tnpkg` kit bundle in memory. Reads kits (and, with
+ * `full`, private material) from the keystore, builds + signs a canonical
+ * manifest, and packs kits under `body/`. Pure w.r.t. disk: reads only.
  */
 export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage {
   let keystoreDir = opts.keystoreDir ? resolve(opts.keystoreDir) : null;
-  let did: string | null = null;
-  let ceremonyId: string | null = null;
+  let fromDid: string | null = null;
+  let ceremonyId = "";
   let yamlPath: string | null = null;
 
   if (opts.yamlPath) {
     const cfg = loadConfig(opts.yamlPath);
     if (!keystoreDir) keystoreDir = cfg.keystorePath;
-    did = cfg.device.device_identity || null;
-    ceremonyId = cfg.ceremonyId || null;
+    fromDid = cfg.device.device_identity || null;
+    ceremonyId = cfg.ceremonyId || "";
     yamlPath = resolve(opts.yamlPath);
   }
   if (!keystoreDir) {
@@ -99,10 +128,30 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
     throw new Error(`compileKitBundle: keystore directory not found: ${keystoreDir}`);
   }
 
-  const entries = readdirSync(keystoreDir);
+  // Resolve the publisher DID. Prefer the yaml's device.device_identity;
+  // otherwise read the keystore's local.public (the DID the signing seed
+  // derives), so `manifest_signature_b64` always verifies against it.
+  if (!fromDid) {
+    const pubPath = join(keystoreDir, "local.public");
+    if (!existsSync(pubPath)) {
+      throw new Error(`compileKitBundle: no device DID (missing ${pubPath} and no yaml device_identity)`);
+    }
+    fromDid = readFileSync(pubPath, "utf8").trim();
+  }
+  if (!fromDid) {
+    throw new Error("compileKitBundle: could not resolve a publisher device DID");
+  }
+
+  const privPath = join(keystoreDir, "local.private");
+  if (!existsSync(privPath)) {
+    throw new Error(`compileKitBundle: signing seed not found: ${privPath}`);
+  }
+  const deviceKey = DeviceKey.fromSeed(new Uint8Array(readFileSync(privPath)));
+
+  const entries = readdirSync(keystoreDir).sort();
   const groupFilter = opts.groups && opts.groups.length > 0 ? new Set(opts.groups) : null;
-  const zipEntries: ZipEntry[] = [];
-  const manifestKits: CompiledManifest["kits"] = [];
+  const body: BodyContents = {};
+  const kitsMeta: CompiledKitMeta[] = [];
 
   for (const name of entries) {
     const m = KIT_RE.exec(name);
@@ -110,12 +159,12 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
     const group = m[1]!;
     if (groupFilter && !groupFilter.has(group)) continue;
     const data = new Uint8Array(readFileSync(join(keystoreDir, name)));
-    zipEntries.push({ name, data });
-    manifestKits.push({ name, sha256: `sha256:${sha256Hex(data)}`, bytes: data.length });
+    body[`body/${name}`] = data;
+    kitsMeta.push({ name, sha256: `sha256:${sha256Hex(data)}`, bytes: data.length });
   }
 
-  if (manifestKits.length === 0) {
-    const suffix = groupFilter ? ` matching groups [${Array.from(groupFilter).join(", ")}]` : "";
+  if (kitsMeta.length === 0) {
+    const suffix = groupFilter ? ` matching groups [${Array.from(groupFilter).sort().join(", ")}]` : "";
     throw new Error(`compileKitBundle: no *.btn.mykit files in ${keystoreDir}${suffix}`);
   }
 
@@ -123,52 +172,51 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
     for (const name of ["local.private", "local.public", "index_master.key"]) {
       const p = join(keystoreDir, name);
       if (existsSync(p)) {
-        zipEntries.push({ name, data: new Uint8Array(readFileSync(p)) });
+        body[`body/${name}`] = new Uint8Array(readFileSync(p));
       }
     }
     for (const name of entries) {
       if (/\.btn\.state$/.test(name)) {
         const group = name.replace(/\.btn\.state$/, "");
         if (groupFilter && !groupFilter.has(group)) continue;
-        zipEntries.push({ name, data: new Uint8Array(readFileSync(join(keystoreDir, name))) });
+        body[`body/${name}`] = new Uint8Array(readFileSync(join(keystoreDir, name)));
       }
     }
     if (yamlPath && existsSync(yamlPath)) {
-      zipEntries.push({ name: "tn.yaml", data: new Uint8Array(readFileSync(yamlPath)) });
+      body["body/tn.yaml"] = new Uint8Array(readFileSync(yamlPath));
     }
+    body["body/WARNING_CONTAINS_PRIVATE_KEYS"] = new Uint8Array(0);
   }
 
-  const manifest: CompiledManifest = {
-    version: "tnpkg-v1",
-    label: opts.label ?? null,
-    note: opts.note ?? null,
-    did,
-    ceremony_id: ceremonyId,
-    kind: opts.full ? "full-keystore" : "readers-only",
-    created_at: new Date().toISOString(),
-    kits: manifestKits,
-  };
-  zipEntries.unshift({
-    name: "manifest.json",
-    data: new Uint8Array(Buffer.from(JSON.stringify(manifest, null, 2) + "\n")),
+  const manifest = newManifest({
+    kind: opts.full ? "full_keystore" : "kit_bundle",
+    fromDid,
+    ceremonyId,
+    scope: opts.full ? "full" : "kit_bundle",
   });
+  manifest.state = {
+    kits: kitsMeta,
+    kind: opts.full ? "full-keystore" : "readers-only",
+  };
+  signManifest(manifest, deviceKey);
 
-  return { manifest, zipBytes: packTnpkg(zipEntries) };
+  return { manifest, zipBytes: packManifestBundle(manifest, body) };
 }
 
 /**
- * Compile + write to `outPath`. Ensures the file name ends with
- * `.tnpkg`; if the caller passes a different suffix, we still write the
- * zip but warn so they know the convention.
+ * Compile + write to `outPath`. Returns the canonical manifest, the
+ * resolved path, and the kit file basenames (derived from
+ * `manifest.state.kits`) so existing callers keep working.
  */
 export function compileKitBundleToFile(opts: CompileKitBundleOptions & { outPath: string }): {
-  manifest: CompiledManifest;
+  manifest: Manifest;
   outPath: string;
   kits: string[];
 } {
   const { manifest, zipBytes } = compileKitBundle(opts);
   const outResolved = resolve(opts.outPath);
   writeFileSync(outResolved, zipBytes);
-  const kits = manifest.kits.map((k) => k.name);
+  const stateKits = (manifest.state?.["kits"] as CompiledKitMeta[] | undefined) ?? [];
+  const kits = stateKits.map((k) => k.name);
   return { manifest, outPath: outResolved, kits };
 }
