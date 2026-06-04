@@ -5,232 +5,249 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TN Browser SDK</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.0/dist/fonts/geist-sans/style.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.0/dist/fonts/geist-mono/style.css">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=PT+Serif:ital,wght@0,400;0,700;1,400&family=Raleway:wght@300;400;500;600&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg:        #0c0c0c;
-      --surface:   #141414;
-      --border:    #232323;
-      --text:      #e2e2e2;
-      --muted:     #666;
-      --accent:    #a78bfa;
-      --green:     #4ade80;
-      --yellow:    #fbbf24;
-      --red:       #f87171;
-      --slate:     #64748b;
-      --radius:    8px;
+      --bg:          #f6f7f9;
+      --surface:     #ffffff;
+      --ink:         #2a3333;
+      --ink-soft:    #4d4d4d;
+      --ink-mid:     #666666;
+      --muted:       #9aa2ab;
+      --hair:        #e6e8ec;
+      --hair-soft:   #f0f1f4;
+      --accent:      #2a3333;
+      --accent-soft: #eef1f3;
+      --good:        #3d8b5a;
+      --warn:        #a0783d;
+      --danger:      #b6475d;
+      --shadow:      0 0 6px rgba(168, 178, 209, 0.35);
+      --shadow-lg:   0 8px 28px rgba(168, 178, 209, 0.28);
+      --serif:       "PT Serif", Georgia, serif;
+      --sans:        "Raleway", system-ui, sans-serif;
+      --mono:        "SF Mono", "Fira Code", Consolas, monospace;
+      --radius:      4px;
     }
 
     body {
       background: var(--bg);
-      color: var(--text);
-      font-family: 'Geist Sans', system-ui, sans-serif;
+      color: var(--ink);
+      font-family: var(--sans);
       font-size: 14px;
       line-height: 1.6;
-      min-height: 100vh;
+      font-weight: 400;
     }
 
-    /* ── Layout ─────────────────────────────────────────── */
+    /* ── Header ──────────────────────────────────────────── */
     header {
-      padding: 48px 40px 32px;
-      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      border-bottom: 1px solid var(--hair);
+      padding: 40px 40px 32px;
     }
 
     .wordmark {
+      font-family: var(--sans);
       font-size: 11px;
       font-weight: 600;
-      letter-spacing: 0.12em;
+      letter-spacing: 0.14em;
       text-transform: uppercase;
-      color: var(--accent);
-      margin-bottom: 12px;
+      color: var(--muted);
+      margin-bottom: 10px;
     }
 
     header h1 {
-      font-size: 28px;
-      font-weight: 500;
-      color: #fff;
+      font-family: var(--serif);
+      font-size: 30px;
+      font-weight: 400;
+      color: var(--ink);
       margin-bottom: 6px;
     }
 
     header p {
-      color: var(--muted);
+      color: var(--ink-mid);
       font-size: 14px;
+      font-weight: 300;
     }
 
+    /* ── Layout ──────────────────────────────────────────── */
     .layout {
       display: flex;
-      max-width: 1100px;
+      max-width: 1060px;
       margin: 0 auto;
       padding: 0 24px;
     }
 
     nav {
-      width: 180px;
+      width: 172px;
       flex-shrink: 0;
-      padding: 32px 0;
+      padding: 28px 0;
       position: sticky;
       top: 0;
       height: 100vh;
       overflow-y: auto;
     }
 
-    nav a {
-      display: block;
-      padding: 6px 12px;
-      color: var(--muted);
-      text-decoration: none;
-      font-size: 13px;
-      border-radius: 4px;
-      transition: color 0.15s, background 0.15s;
-    }
-
-    nav a:hover, nav a.active {
-      color: var(--text);
-      background: var(--surface);
-    }
-
-    nav .nav-label {
-      font-size: 11px;
+    .nav-label {
+      font-size: 10px;
       font-weight: 600;
-      letter-spacing: 0.08em;
+      letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--muted);
-      padding: 6px 12px 2px;
-      margin-top: 8px;
+      padding: 4px 12px 6px;
     }
+
+    nav a {
+      display: block;
+      padding: 5px 12px;
+      color: var(--ink-mid);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 400;
+      border-radius: var(--radius);
+      transition: color 0.12s, background 0.12s;
+    }
+
+    nav a:hover { color: var(--ink); background: var(--hair-soft); }
+    nav a.active { color: var(--ink); font-weight: 500; background: var(--accent-soft); }
 
     main {
       flex: 1;
-      padding: 32px 0 80px 40px;
+      padding: 28px 0 80px 36px;
       min-width: 0;
     }
 
     /* ── Cards ───────────────────────────────────────────── */
     .card {
       background: var(--surface);
-      border: 1px solid var(--border);
+      border: 1px solid var(--hair);
       border-radius: var(--radius);
-      margin-bottom: 24px;
+      margin-bottom: 20px;
       overflow: hidden;
+      box-shadow: var(--shadow);
     }
 
     .card-header {
-      padding: 16px 20px 12px;
-      border-bottom: 1px solid var(--border);
+      padding: 14px 20px 12px;
+      border-bottom: 1px solid var(--hair-soft);
       display: flex;
       align-items: baseline;
-      gap: 12px;
+      gap: 10px;
+      flex-wrap: wrap;
     }
 
     .card-header h2 {
-      font-size: 15px;
-      font-weight: 500;
-      color: #fff;
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--ink);
     }
 
     .card-header p {
       font-size: 13px;
-      color: var(--muted);
-    }
-
-    .card-body {
-      padding: 0;
+      color: var(--ink-mid);
+      font-weight: 300;
     }
 
     /* ── Code blocks ─────────────────────────────────────── */
     pre.code {
-      font-family: 'Geist Mono', 'JetBrains Mono', monospace;
-      font-size: 12.5px;
-      line-height: 1.7;
-      padding: 16px 20px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.75;
+      padding: 14px 20px;
       overflow-x: auto;
-      color: #c9d1d9;
-      background: #0d1117;
-      border-bottom: 1px solid var(--border);
+      color: var(--ink-soft);
+      background: var(--bg);
+      border-bottom: 1px solid var(--hair);
     }
 
-    .kw  { color: #ff7b72; }
-    .fn  { color: #d2a8ff; }
-    .str { color: #a5d6ff; }
-    .cm  { color: #8b949e; font-style: italic; }
-    .num { color: #79c0ff; }
-    .id  { color: #e6edf3; }
+    .kw  { color: #b36b00; }
+    .fn  { color: #116688; }
+    .str { color: #338855; }
+    .cm  { color: var(--muted); font-style: italic; }
+    .num { color: #b36b00; }
 
     /* ── Run bar ─────────────────────────────────────────── */
     .run-bar {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       padding: 10px 20px;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid var(--hair-soft);
+      background: var(--surface);
     }
 
     button {
-      font-family: 'Geist Sans', sans-serif;
-      font-size: 12px;
-      font-weight: 500;
-      padding: 5px 14px;
-      border-radius: 5px;
-      border: 1px solid var(--border);
-      background: var(--bg);
-      color: var(--text);
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--hair);
+      background: var(--surface);
+      color: var(--ink-soft);
       cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
-      letter-spacing: 0.01em;
+      transition: border-color 0.12s, color 0.12s, box-shadow 0.12s;
     }
 
-    button:hover { border-color: var(--accent); color: var(--accent); }
-    button:active { background: #1e1840; }
+    button:hover { border-color: var(--ink-mid); color: var(--ink); }
 
     button.run {
+      background: var(--accent);
+      color: #fff;
       border-color: var(--accent);
-      color: var(--accent);
     }
-    button.run:hover { background: #1e1840; }
+
+    button.run:hover { background: #1f2828; box-shadow: var(--shadow); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
 
     .status {
-      font-size: 12px;
+      font-family: var(--mono);
+      font-size: 11px;
       color: var(--muted);
-      font-family: 'Geist Mono', monospace;
     }
-    .status.ok  { color: var(--green); }
-    .status.err { color: var(--red); }
+    .status.ok  { color: var(--good); }
+    .status.err { color: var(--danger); }
 
     /* ── Output panel ────────────────────────────────────── */
     .output {
-      font-family: 'Geist Mono', monospace;
+      font-family: var(--mono);
       font-size: 12px;
-      line-height: 1.65;
-      padding: 14px 20px;
-      min-height: 56px;
+      line-height: 1.7;
+      padding: 12px 20px;
+      min-height: 52px;
       white-space: pre-wrap;
       word-break: break-all;
       color: var(--muted);
+      background: var(--surface);
     }
 
-    .output.has-content { color: var(--text); }
+    .output.has-content { color: var(--ink-soft); }
 
-    .entry-line { display: block; }
-    .lvl-info    { color: var(--green); }
-    .lvl-warning { color: var(--yellow); }
-    .lvl-error   { color: var(--red); }
-    .lvl-debug   { color: var(--slate); }
+    .lvl-info    { color: var(--good); }
+    .lvl-warning { color: var(--warn); }
+    .lvl-error   { color: var(--danger); }
+    .lvl-debug   { color: var(--muted); }
     .dim         { color: var(--muted); }
+    .did-box     { color: var(--accent); word-break: break-all; }
 
-    /* ── Decode section textarea ─────────────────────────── */
+    /* ── Decode textarea ─────────────────────────────────── */
     textarea {
       width: 100%;
-      font-family: 'Geist Mono', monospace;
+      font-family: var(--mono);
       font-size: 12px;
-      line-height: 1.65;
-      padding: 14px 20px;
-      background: #0d1117;
-      color: #c9d1d9;
+      line-height: 1.7;
+      padding: 12px 20px;
+      background: var(--bg);
+      color: var(--ink-soft);
       border: none;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid var(--hair);
       resize: vertical;
       min-height: 140px;
       outline: none;
@@ -240,30 +257,22 @@
     .badge {
       font-size: 10px;
       font-weight: 600;
-      letter-spacing: 0.06em;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
       padding: 2px 6px;
       border-radius: 3px;
-      background: #1c1c2e;
+      background: var(--accent-soft);
       color: var(--accent);
-      border: 1px solid #2d2b55;
+      border: 1px solid var(--hair);
       flex-shrink: 0;
     }
 
-    /* ── DID display ─────────────────────────────────────── */
-    .did-box {
-      font-family: 'Geist Mono', monospace;
-      font-size: 11px;
-      color: var(--accent);
-      word-break: break-all;
-    }
-
-    @media (max-width: 700px) {
+    @media (max-width: 680px) {
       .layout { flex-direction: column; padding: 0 16px; }
-      nav { width: 100%; height: auto; position: static; padding: 16px 0; display: flex; flex-wrap: wrap; gap: 4px; }
-      nav .nav-label { display: none; }
+      nav { width: 100%; height: auto; position: static; padding: 12px 0; display: flex; flex-wrap: wrap; gap: 2px; }
+      .nav-label { display: none; }
       main { padding: 16px 0 48px; }
-      header { padding: 32px 16px 24px; }
+      header { padding: 28px 16px 20px; }
     }
   </style>
 </head>
@@ -295,17 +304,15 @@
           <h2>Init</h2>
           <p>Create a ceremony. Your device gets a unique attested identity.</p>
         </div>
-        <div class="card-body">
-<pre class="code"><span class="kw">import</span> <span class="id">* as tn</span> <span class="kw">from</span> <span class="str">"@tnproto/sdk/browser"</span>;
+<pre class="code"><span class="kw">import</span> * as tn <span class="kw">from</span> <span class="str">"@tnproto/sdk/browser"</span>;
 
 <span class="kw">await</span> <span class="fn">tn.init</span>();
 <span class="fn">console.log</span>(<span class="fn">tn.did</span>()); <span class="cm">// did:key:z...</span></pre>
-          <div class="run-bar">
-            <button class="run" data-example="init">Run</button>
-            <span class="status" id="init-status"></span>
-          </div>
-          <div class="output" id="init-output">Click Run to initialize a TN session.</div>
+        <div class="run-bar">
+          <button class="run" data-example="init">Run</button>
+          <span class="status" id="init-status"></span>
         </div>
+        <div class="output" id="init-output">Click Run to initialize a TN session.</div>
       </div>
     </section>
 
@@ -314,19 +321,17 @@
       <div class="card">
         <div class="card-header">
           <h2>Emit</h2>
-          <p>Write attested log entries. Every call is signed and chained.</p>
+          <p>Write attested log entries at any severity. Every call is signed and chained.</p>
         </div>
-        <div class="card-body">
-<pre class="code"><span class="fn">tn.info</span>(<span class="str">"payment.processed"</span>, { <span class="id">amount</span>: <span class="num">99.00</span>, <span class="id">currency</span>: <span class="str">"USD"</span> });
-<span class="fn">tn.warning</span>(<span class="str">"rate.limit.approaching"</span>, { <span class="id">threshold</span>: <span class="num">0.92</span> });
-<span class="fn">tn.error</span>(<span class="str">"auth.failed"</span>, { <span class="id">ip</span>: <span class="str">"10.0.0.1"</span>, <span class="id">attempts</span>: <span class="num">3</span> });
-<span class="fn">tn.debug</span>(<span class="str">"cache.miss"</span>, { <span class="id">key</span>: <span class="str">"user:42:profile"</span> });</pre>
-          <div class="run-bar">
-            <button class="run" data-example="emit">Run</button>
-            <span class="status" id="emit-status"></span>
-          </div>
-          <div class="output" id="emit-output">Init first, then run.</div>
+<pre class="code"><span class="fn">tn.info</span>(<span class="str">"payment.processed"</span>, { amount: <span class="num">99.00</span>, currency: <span class="str">"USD"</span> });
+<span class="fn">tn.warning</span>(<span class="str">"rate.limit.approaching"</span>, { threshold: <span class="num">0.92</span> });
+<span class="fn">tn.error</span>(<span class="str">"auth.failed"</span>, { ip: <span class="str">"10.0.0.1"</span>, attempts: <span class="num">3</span> });
+<span class="fn">tn.debug</span>(<span class="str">"cache.miss"</span>, { key: <span class="str">"user:42:profile"</span> });</pre>
+        <div class="run-bar">
+          <button class="run" data-example="emit">Run</button>
+          <span class="status" id="emit-status"></span>
         </div>
+        <div class="output" id="emit-output">Init first, then run.</div>
       </div>
     </section>
 
@@ -337,21 +342,14 @@
           <h2>Read</h2>
           <p>Read back typed Entry objects from the session log.</p>
         </div>
-        <div class="card-body">
-<pre class="code"><span class="kw">for</span> (<span class="kw">const</span> <span class="id">entry</span> <span class="kw">of</span> <span class="fn">tn.read</span>()) {
-  <span class="fn">console.log</span>(
-    <span class="id">entry</span>.<span class="id">level</span>,
-    <span class="id">entry</span>.<span class="id">event_type</span>,
-    <span class="id">entry</span>.<span class="id">sequence</span>,
-    <span class="id">entry</span>.<span class="id">fields</span>
-  );
+<pre class="code"><span class="kw">for</span> (<span class="kw">const</span> entry <span class="kw">of</span> <span class="fn">tn.read</span>()) {
+  <span class="fn">console.log</span>(entry.level, entry.event_type, entry.sequence, entry.fields);
 }</pre>
-          <div class="run-bar">
-            <button class="run" data-example="read">Run</button>
-            <span class="status" id="read-status"></span>
-          </div>
-          <div class="output" id="read-output">Emit some entries first.</div>
+        <div class="run-bar">
+          <button class="run" data-example="read">Run</button>
+          <span class="status" id="read-status"></span>
         </div>
+        <div class="output" id="read-output">Emit some entries first.</div>
       </div>
     </section>
 
@@ -362,19 +360,17 @@
           <h2>Context</h2>
           <p>Scope fields across a group of events without repeating them.</p>
         </div>
-        <div class="card-body">
-<pre class="code"><span class="fn">tn.setContext</span>({ <span class="id">session_id</span>: <span class="str">"sess_abc"</span>, <span class="id">user_id</span>: <span class="str">"u_123"</span> });
+<pre class="code"><span class="fn">tn.setContext</span>({ session_id: <span class="str">"sess_abc"</span>, user_id: <span class="str">"u_123"</span> });
 
-<span class="fn">tn.info</span>(<span class="str">"page.view"</span>, { <span class="id">path</span>: <span class="str">"/dashboard"</span> });
-<span class="fn">tn.info</span>(<span class="str">"action.click"</span>, { <span class="id">element</span>: <span class="str">"export_button"</span> });
+<span class="fn">tn.info</span>(<span class="str">"page.view"</span>, { path: <span class="str">"/dashboard"</span> });
+<span class="fn">tn.info</span>(<span class="str">"action.click"</span>, { element: <span class="str">"export_button"</span> });
 
 <span class="fn">tn.clearContext</span>(); <span class="cm">// stop attaching session fields</span></pre>
-          <div class="run-bar">
-            <button class="run" data-example="context">Run</button>
-            <span class="status" id="context-status"></span>
-          </div>
-          <div class="output" id="context-output">Init first, then run.</div>
+        <div class="run-bar">
+          <button class="run" data-example="context">Run</button>
+          <span class="status" id="context-status"></span>
         </div>
+        <div class="output" id="context-output">Init first, then run.</div>
       </div>
     </section>
 
@@ -384,21 +380,18 @@
         <div class="card-header">
           <h2>Decode</h2>
           <span class="badge">Any source</span>
-          <p>Turn any TN-formatted JSON object into a typed Entry — fetch, SSE, wherever.</p>
+          <p>Turn any TN-formatted JSON into a typed Entry — fetch, SSE, vault API, anywhere.</p>
         </div>
-        <div class="card-body">
-<pre class="code"><span class="kw">import</span> { <span class="fn">decodeEntry</span> } <span class="kw">from</span> <span class="str">"@tnproto/sdk/browser"</span>;
+<pre class="code"><span class="kw">import</span> { decodeEntry } <span class="kw">from</span> <span class="str">"@tnproto/sdk/browser"</span>;
 
-<span class="cm">// works on any JS object — not just from tn.read()</span>
-<span class="kw">const</span> <span class="id">entry</span> = <span class="fn">decodeEntry</span>(<span class="id">envelope</span>);
-<span class="fn">console.log</span>(<span class="id">entry</span>.<span class="id">event_type</span>, <span class="id">entry</span>.<span class="id">fields</span>);</pre>
-          <textarea id="decode-input" spellcheck="false"></textarea>
-          <div class="run-bar">
-            <button class="run" data-example="decode">Decode</button>
-            <span class="status" id="decode-status"></span>
-          </div>
-          <div class="output" id="decode-output">Paste or edit a TN envelope above, then click Decode.</div>
+<span class="kw">const</span> entry = <span class="fn">decodeEntry</span>(envelope); <span class="cm">// any JS object</span>
+<span class="fn">console.log</span>(entry.event_type, entry.fields);</pre>
+        <textarea id="decode-input" spellcheck="false"></textarea>
+        <div class="run-bar">
+          <button class="run" data-example="decode">Decode</button>
+          <span class="status" id="decode-status"></span>
         </div>
+        <div class="output" id="decode-output">Edit the envelope above, then click Decode.</div>
       </div>
     </section>
 
@@ -407,22 +400,19 @@
       <div class="card">
         <div class="card-header">
           <h2>Chain</h2>
-          <p>Every entry carries a hash chain and Ed25519 signature. Nothing is hand-wavy.</p>
+          <p>Every entry carries a hash chain and Ed25519 signature.</p>
         </div>
-        <div class="card-body">
-<pre class="code"><span class="kw">const</span> <span class="id">entries</span> = <span class="fn">tn.read</span>();
-<span class="kw">const</span> <span class="id">e</span> = <span class="id">entries</span>[<span class="num">0</span>];
+<pre class="code"><span class="kw">const</span> [e] = <span class="fn">tn.read</span>();
 
-<span class="fn">console.log</span>(<span class="str">"seq      "</span>, <span class="id">e</span>.<span class="id">sequence</span>);
-<span class="fn">console.log</span>(<span class="str">"row_hash "</span>, <span class="id">e</span>.<span class="id">row_hash</span>);
-<span class="fn">console.log</span>(<span class="str">"prev_hash"</span>, <span class="id">e</span>.<span class="id">prev_hash</span>);
-<span class="fn">console.log</span>(<span class="str">"signature"</span>, <span class="id">e</span>.<span class="id">signature</span>);</pre>
-          <div class="run-bar">
-            <button class="run" data-example="chain">Run</button>
-            <span class="status" id="chain-status"></span>
-          </div>
-          <div class="output" id="chain-output">Emit some entries first.</div>
+<span class="fn">console.log</span>(<span class="str">"seq      "</span>, e.sequence);
+<span class="fn">console.log</span>(<span class="str">"row_hash "</span>, e.row_hash);
+<span class="fn">console.log</span>(<span class="str">"prev_hash"</span>, e.prev_hash);
+<span class="fn">console.log</span>(<span class="str">"signature"</span>, e.signature);</pre>
+        <div class="run-bar">
+          <button class="run" data-example="chain">Run</button>
+          <span class="status" id="chain-status"></span>
         </div>
+        <div class="output" id="chain-output">Emit some entries first.</div>
       </div>
     </section>
 
@@ -431,9 +421,7 @@
 
 <script type="module">
   import * as tn from "../dist/browser.mjs";
-  const { decodeEntry, Entry } = tn;
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  const { decodeEntry } = tn;
 
   function setStatus(id, msg, kind = "") {
     const el = document.getElementById(id + "-status");
@@ -452,24 +440,17 @@
   }
 
   function fmtEntry(entry) {
-    const ts = entry.timestamp instanceof Date
-      ? entry.timestamp.toISOString().slice(11, 23)
-      : String(entry.timestamp).slice(11, 23);
+    const ts = (entry.timestamp instanceof Date ? entry.timestamp : new Date(entry.timestamp))
+      .toISOString().slice(11, 23);
     const lvl = String(entry.level).toUpperCase().padEnd(7);
     const fields = Object.keys(entry.fields ?? {}).length > 0
-      ? "  " + JSON.stringify(entry.fields)
-      : "";
-    return `<span class="entry-line"><span class="dim">${ts}</span>  `
-      + `<span class="${levelClass(entry.level)}">${lvl}</span>  `
-      + `<span>${entry.event_type}</span>`
-      + `<span class="dim">${fields}</span></span>`;
+      ? "  " + JSON.stringify(entry.fields) : "";
+    return `<span><span class="dim">${ts}</span>  <span class="${levelClass(entry.level)}">${lvl}</span>  ${entry.event_type}<span class="dim">${fields}</span></span>`;
   }
 
   function esc(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-
-  // ── Examples ──────────────────────────────────────────────────────────────
 
   async function runInit() {
     setStatus("init", "running...");
@@ -477,20 +458,18 @@
     const d = tn.did();
     setOutput("init", `<span class="dim">did  </span><span class="did-box">${esc(d)}</span>\n<span class="dim">ready to emit</span>`);
     setStatus("init", "ok", "ok");
-    // Populate the decode textarea with a live envelope
     const entries = tn.read();
     if (entries.length > 0) populateDecodeBox(entries[0]);
   }
 
   async function runEmit() {
     setStatus("emit", "running...");
-    if (!tn.did || !tn.did()) { await tn.init(); }
+    try { tn.did(); } catch { await tn.init(); }
     tn.info("payment.processed", { amount: 99.00, currency: "USD" });
     tn.warning("rate.limit.approaching", { threshold: 0.92 });
     tn.error("auth.failed", { ip: "10.0.0.1", attempts: 3 });
     tn.debug("cache.miss", { key: "user:42:profile" });
-    const entries = tn.read();
-    const last4 = entries.slice(-4);
+    const last4 = tn.read().slice(-4);
     setOutput("emit", last4.map(fmtEntry).join("\n"));
     setStatus("emit", `${last4.length} entries written`, "ok");
     populateDecodeBox(last4[0]);
@@ -499,7 +478,7 @@
   async function runRead() {
     setStatus("read", "running...");
     const entries = tn.read();
-    if (entries.length === 0) {
+    if (!entries.length) {
       setOutput("read", '<span class="dim">no entries — run Emit first</span>');
       setStatus("read", "empty");
       return;
@@ -510,79 +489,63 @@
 
   async function runContext() {
     setStatus("context", "running...");
-    if (!tn.did || !tn.did()) { await tn.init(); }
+    try { tn.did(); } catch { await tn.init(); }
     tn.setContext({ session_id: "sess_abc", user_id: "u_123" });
     tn.info("page.view", { path: "/dashboard" });
     tn.info("action.click", { element: "export_button" });
     tn.clearContext();
-    const entries = tn.read();
-    const last2 = entries.slice(-2);
-    setOutput("context", last2.map(fmtEntry).join("\n")
-      + `\n<span class="dim">\nsession_id and user_id attached to both entries</span>`);
+    const last2 = tn.read().slice(-2);
+    setOutput("context",
+      last2.map(fmtEntry).join("\n") +
+      `\n<span class="dim">\nsession_id + user_id on both entries</span>`);
     setStatus("context", "ok", "ok");
   }
 
   async function runDecode() {
     setStatus("decode", "running...");
     const raw = document.getElementById("decode-input").value.trim();
-    if (!raw) {
-      setStatus("decode", "paste an envelope first", "err");
-      return;
-    }
+    if (!raw) { setStatus("decode", "paste an envelope first", "err"); return; }
     let obj;
-    try {
-      obj = JSON.parse(raw);
-    } catch {
-      setStatus("decode", "invalid JSON", "err");
-      return;
-    }
+    try { obj = JSON.parse(raw); } catch { setStatus("decode", "invalid JSON", "err"); return; }
     try {
       const entry = decodeEntry(obj);
-      const lines = [
+      setOutput("decode", [
         `<span class="dim">event_type  </span>${esc(entry.event_type)}`,
         `<span class="dim">level       </span><span class="${levelClass(entry.level)}">${esc(entry.level)}</span>`,
         `<span class="dim">sequence    </span>${entry.sequence}`,
-        `<span class="dim">device_id   </span>${esc(entry.device_identity.slice(0, 32))}...`,
+        `<span class="dim">device_id   </span>${esc(entry.device_identity.slice(0, 36))}...`,
         `<span class="dim">fields      </span>${esc(JSON.stringify(entry.fields))}`,
-        entry.hidden_groups.length > 0
+        entry.hidden_groups.length
           ? `<span class="dim">hidden      </span><span class="lvl-warning">${esc(entry.hidden_groups.join(", "))}</span>`
           : `<span class="dim">hidden      </span><span class="dim">none</span>`,
-      ];
-      setOutput("decode", lines.join("\n"));
+      ].join("\n"));
       setStatus("decode", "ok", "ok");
-    } catch (err) {
-      setStatus("decode", String(err), "err");
-    }
+    } catch (err) { setStatus("decode", String(err), "err"); }
   }
 
   async function runChain() {
     setStatus("chain", "running...");
     const entries = tn.read();
-    if (entries.length === 0) {
+    if (!entries.length) {
       setOutput("chain", '<span class="dim">no entries — run Emit first</span>');
       setStatus("chain", "empty");
       return;
     }
     const e = entries[0];
-    const lines = [
+    setOutput("chain", [
       `<span class="dim">seq       </span>${e.sequence}`,
       `<span class="dim">row_hash  </span>${esc(e.row_hash)}`,
       `<span class="dim">prev_hash </span>${esc(e.prev_hash)}`,
       `<span class="dim">signature </span>${esc(e.signature.slice(0, 48))}...`,
-    ];
-    setOutput("chain", lines.join("\n"));
+    ].join("\n"));
     setStatus("chain", "ok", "ok");
   }
 
-  // ── Decode textarea pre-fill ──────────────────────────────────────────────
-
   function populateDecodeBox(entry) {
     if (!entry) return;
-    document.getElementById("decode-input").value =
-      JSON.stringify(entry, null, 2);
+    document.getElementById("decode-input").value = JSON.stringify(entry, null, 2);
   }
 
-  // Set placeholder envelope in decode box on load
   document.getElementById("decode-input").value = JSON.stringify({
     event_type: "order.placed",
     timestamp: new Date().toISOString(),
@@ -598,40 +561,26 @@
     total: 149.00,
   }, null, 2);
 
-  // ── Wire buttons ──────────────────────────────────────────────────────────
-
   const runners = { init: runInit, emit: runEmit, read: runRead, context: runContext, decode: runDecode, chain: runChain };
 
   document.querySelectorAll("button[data-example]").forEach(btn => {
     btn.addEventListener("click", async () => {
-      const key = btn.dataset.example;
       btn.disabled = true;
-      try {
-        await runners[key]();
-      } catch (err) {
-        setStatus(key, String(err).replace("Error: ", ""), "err");
-        console.error(err);
-      } finally {
-        btn.disabled = false;
-      }
+      try { await runners[btn.dataset.example](); }
+      catch (err) { setStatus(btn.dataset.example, String(err).replace("Error: ", ""), "err"); }
+      finally { btn.disabled = false; }
     });
   });
 
-  // ── Nav highlight on scroll ───────────────────────────────────────────────
-
-  const sections = document.querySelectorAll("section[id]");
-  const navLinks = document.querySelectorAll("nav a");
-
   const observer = new IntersectionObserver(entries => {
     entries.forEach(e => {
-      if (e.isIntersecting) {
-        navLinks.forEach(a => a.classList.toggle("active", a.getAttribute("href") === "#" + e.target.id));
-      }
+      if (e.isIntersecting)
+        document.querySelectorAll("nav a").forEach(a =>
+          a.classList.toggle("active", a.getAttribute("href") === "#" + e.target.id));
     });
   }, { threshold: 0.4 });
 
-  sections.forEach(s => observer.observe(s));
-
+  document.querySelectorAll("section[id]").forEach(s => observer.observe(s));
 </script>
 </body>
 </html>
