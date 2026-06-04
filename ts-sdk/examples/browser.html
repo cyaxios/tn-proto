@@ -576,13 +576,26 @@ entry[<span class="str">"compliance"</span>] = { ciphertext: <span class="fn">se
     return { info: "lvl-info", warning: "lvl-warning", error: "lvl-error", debug: "lvl-debug" }[lvl] ?? "";
   }
 
+  // Known envelope keys that are never user fields
+  const _ENV = new Set(["event_type","timestamp","level","message","device_identity",
+    "event_id","sequence","run_id","prev_hash","row_hash","signature"]);
+
+  function getFields(entry) {
+    // typed Entry (from decodeEntry) has .fields; flat dict (from tn.read()) has user
+    // fields at the top level — filter out the envelope keys to recover them
+    if (entry.fields !== undefined) return entry.fields;
+    return Object.fromEntries(
+      Object.entries(entry).filter(([k]) => !_ENV.has(k) && !k.startsWith("_"))
+    );
+  }
+
   function fmtEntry(entry) {
     const ts = (entry.timestamp instanceof Date ? entry.timestamp : new Date(entry.timestamp))
       .toISOString().slice(11, 23);
     const lvl = String(entry.level).toUpperCase().padEnd(7);
-    const fields = Object.keys(entry.fields ?? {}).length > 0
-      ? "  " + JSON.stringify(entry.fields) : "";
-    return `<span><span class="dim">${ts}</span>  <span class="${levelClass(entry.level)}">${lvl}</span>  ${entry.event_type}<span class="dim">${fields}</span></span>`;
+    const fields = getFields(entry);
+    const fieldsStr = Object.keys(fields).length > 0 ? "  " + JSON.stringify(fields) : "";
+    return `<span><span class="dim">${ts}</span>  <span class="${levelClass(entry.level)}">${lvl}</span>  ${entry.event_type}<span class="dim">${esc(fieldsStr)}</span></span>`;
   }
 
   function esc(s) {
