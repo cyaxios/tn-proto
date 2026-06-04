@@ -15,6 +15,8 @@ pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/
 
 `tn-protocol` is the SDK; `tn-core` and `tn-btn` are the Rust-backed wheels that provide native acceleration and the default `btn` cipher. Pure-Python install (`tn-protocol` alone) works too, on the `jwe` cipher.
 
+The current alpha is `v0.5.1a2`. See the [changelog](CHANGELOG.md) for what changed, or the [releases page](https://github.com/cyaxios/tn-proto/releases) for the wheels and sdists.
+
 ## Getting started
 
 The first run mints a ceremony at `./.tn/default/` — nothing to configure.
