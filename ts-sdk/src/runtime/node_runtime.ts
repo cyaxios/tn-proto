@@ -41,6 +41,7 @@ import {
   clockDominates,
   isManifestSignatureValid,
   newManifest,
+  nowIsoMillis,
   signManifest,
   type Manifest,
   type ManifestKind,
@@ -1192,6 +1193,114 @@ export class NodeRuntime {
     this._resetWasmAfterAdminWrite();
   }
 
+  /**
+   * Flip `ceremony.mode` (local <-> linked) in the AUTHORITATIVE yaml.
+   *
+   * Byte-faithful port of the persistent half of Python's
+   * `tn.admin.set_link_state` (`python/tn/admin/__init__.py::set_link_state`
+   * + its inner `_mutate`, which writes via
+   * `_update_authoritative_yaml(..., key="vault")`). Two reasons the write
+   * must touch more than `ceremony.mode`:
+   *
+   *   1. Python's config loader REJECTS a `mode: linked` yaml that has no
+   *      `linked_vault` (`config.py::_resolve_ceremony_settings`:
+   *      "ceremony.mode=linked requires ceremony.linked_vault"). A bare
+   *      mode flip would produce a yaml Python can't even load. So linking
+   *      requires a vault URL and writes the `vault:` block Python writes.
+   *   2. Link state is project-scoped: the mutation lands at the head of
+   *      the `extends:` chain (key="vault"), so unlinking a named stream
+   *      flips the project rather than writing a discarded stream-local
+   *      override. For a single-file ceremony the authoritative yaml
+   *      resolves back to `this.config.yamlPath`, leaving the legacy
+   *      single-file layout unchanged.
+   *
+   * Idempotent on re-link to the same vault; re-linking an already-linked
+   * ceremony to a DIFFERENT vault throws (mirrors Python's RuntimeError).
+   *
+   * The in-memory `this.config.mode` is `readonly`, so callers needing the
+   * updated mode in-process should `loadConfig(yamlPath)` again; the next
+   * wasm attach picks the change up off disk regardless.
+   *
+   * @param mode - target `ceremony.mode` (`"local"` == unlinked).
+   * @param opts - vault binding; `linkedVault` is REQUIRED when
+   *   `mode === "linked"` (Python's `set_link_state` raises without it).
+   */
+  setCeremonyMode(
+    mode: "local" | "linked",
+    opts: { linkedVault?: string; linkedProjectId?: string } = {},
+  ): void {
+    if (mode !== "local" && mode !== "linked") {
+      throw new Error(`setCeremonyMode: mode must be 'local' or 'linked', got ${JSON.stringify(mode)}`);
+    }
+    const linkedVault = opts.linkedVault;
+    const linkedProjectId = opts.linkedProjectId;
+    if (mode === "linked" && (linkedVault === undefined || linkedVault === "")) {
+      throw new Error("setCeremonyMode: linked mode requires a linkedVault URL");
+    }
+
+    // Python's set_link_state resolves the authoritative yaml with
+    // key="vault"; match that so the write lands on the same node Python
+    // would pick (the chain entry that owns `vault`, else the root).
+    const target = authoritativeYamlFor(this.config.yamlPath, "vault");
+    const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
+    const ceremony = (doc.ceremony ?? {}) as Record<string, unknown>;
+    const vault = (doc.vault ?? {}) as Record<string, unknown>;
+
+    // Re-link guard (Python: raises when already linked to a different
+    // vault). Resolve the current linked vault the same way the loader
+    // does: vault.url when the vault block is present, else
+    // ceremony.linked_vault.
+    if (mode === "linked") {
+      const currentVault =
+        vault.url !== undefined && vault.url !== ""
+          ? String(vault.url)
+          : ceremony.linked_vault !== undefined
+            ? String(ceremony.linked_vault)
+            : "";
+      if (
+        String(ceremony.mode ?? "local") === "linked" &&
+        currentVault &&
+        currentVault !== linkedVault
+      ) {
+        throw new Error(
+          `setCeremonyMode: ceremony is already linked to ${currentVault}; ` +
+            `unlink first before re-linking to ${String(linkedVault)}`,
+        );
+      }
+    }
+
+    // Mirror Python's `_mutate` field-for-field.
+    ceremony.mode = mode;
+    if (mode === "linked") {
+      ceremony.linked_vault = linkedVault;
+      if (linkedProjectId !== undefined && linkedProjectId !== "") {
+        ceremony.linked_project_id = linkedProjectId;
+      }
+      vault.enabled = true;
+      vault.url = linkedVault;
+      if (linkedProjectId !== undefined && linkedProjectId !== "" && !vault.linked_project_id) {
+        vault.linked_project_id = linkedProjectId;
+      }
+      vault.autosync = Boolean(vault.autosync ?? true);
+      if (vault.sync_interval_seconds === undefined) vault.sync_interval_seconds = 600;
+    } else {
+      delete ceremony.linked_vault;
+      delete ceremony.linked_project_id;
+      vault.enabled = false;
+      vault.url = "";
+      vault.linked_project_id = "";
+      vault.autosync = false;
+      if (vault.sync_interval_seconds === undefined) vault.sync_interval_seconds = 600;
+    }
+    doc.ceremony = ceremony;
+    doc.vault = vault;
+    writeFileSync(target, stringifyYaml(doc), "utf8");
+
+    // Force the next emit/read to re-attach wasm off the updated yaml so
+    // the runtime's view of the mode stays consistent with disk.
+    this._resetWasmAfterAdminWrite();
+  }
+
   // ---------------------------------------------------------------------------
   // AdminState wire-format conversion helpers
   // ---------------------------------------------------------------------------
@@ -1285,6 +1394,7 @@ export class NodeRuntime {
       headRowHash?: string;
       state?: Record<string, unknown>;
       scope?: string;
+      ceremonyId?: string;
     } = {};
 
     if (kind === "admin_log_snapshot") {
@@ -1312,6 +1422,33 @@ export class NodeRuntime {
       body = built.body;
       extras.state = built.state;
       extras.scope = "project";
+    } else if (kind === "identity_seed") {
+      const built = this._buildIdentitySeedBody(
+        opts.nickname !== undefined ? { nickname: opts.nickname } : {},
+      );
+      body = built.body;
+      extras.state = built.state;
+      extras.scope = "identity";
+      // identity_seed is self-issued: no enclosing ceremony, so stamp the
+      // placeholder ceremony id (mirrors Python's _resolve_export_signer).
+      extras.ceremonyId = IDENTITY_SEED_CEREMONY_PLACEHOLDER;
+    } else if (kind === "contact_update") {
+      // Producer-side mirror of the vault-emitted contact_update tnpkg.
+      // Python has no `export(kind="contact_update")` (the vault server
+      // emits these), so there's no Python producer to byte-match; we
+      // build the body Python's `_absorb_contact_update` consumes and
+      // validate it up front the same way the reducer does.
+      if (opts.contactUpdate === undefined) {
+        throw new Error(`export(kind="contact_update") requires opts.contactUpdate=<body>.`);
+      }
+      const errors = _validateContactUpdateBody(opts.contactUpdate);
+      if (errors.length > 0) {
+        throw new Error(`export(kind="contact_update"): invalid body — ${errors.join("; ")}`);
+      }
+      // Canonical, sorted JSON so the on-the-wire body is deterministic.
+      body["body/contact_update.json"] = new TextEncoder().encode(
+        _canonicalContactUpdateJson(opts.contactUpdate),
+      );
     }
 
     const manifestArgs: {
@@ -1323,10 +1460,12 @@ export class NodeRuntime {
     } = {
       kind,
       fromDid: this.config.device.device_identity,
-      ceremonyId: this.config.ceremonyId,
+      ceremonyId: extras.ceremonyId ?? this.config.ceremonyId,
       scope: opts.scope ?? extras.scope ?? _defaultScope(kind),
     };
-    if (kind === "project_seed") {
+    if (kind === "project_seed" || kind === "identity_seed") {
+      // Self-addressed: from_did == to_did. The absorb side rejects a
+      // bundle whose from/to disagree (tamper guard).
       manifestArgs.toDid = this.config.device.device_identity;
     } else if (opts.toDid !== undefined) {
       manifestArgs.toDid = opts.toDid;
@@ -1448,6 +1587,8 @@ export class NodeRuntime {
       receipt = this._absorbIdentitySeed(manifest, body);
     } else if (kind === "project_seed") {
       receipt = this._absorbProjectSeed(manifest, body);
+    } else if (kind === "contact_update") {
+      receipt = this._absorbContactUpdate(manifest, body);
     } else if (kind === "offer" || kind === "enrolment") {
       receipt = {
         kind,
@@ -1666,6 +1807,74 @@ export class NodeRuntime {
       state: {
         kits: kitsMeta,
         kind: opts.full ? "full-keystore" : "readers-only",
+      },
+    };
+  }
+
+  /**
+   * Build the body + manifest extras for an `identity_seed` export.
+   *
+   * Byte-faithful port of Python's `_build_identity_seed_body`
+   * (`python/tn/export.py` ~398-473). The bundle is self-issued: the
+   * Ed25519 device key it carries IS the manifest signer (from_did ==
+   * to_did), so there's no enclosing ceremony — the caller stamps the
+   * `IDENTITY_SEED_CEREMONY_PLACEHOLDER` ceremony id.
+   *
+   * Body:
+   *   body/local.private  — 32-byte Ed25519 seed (this runtime's device).
+   *   body/local.public   — utf-8 `did:key:z...` (same convention as
+   *                         config._create_fresh, so a fresh-installed
+   *                         keystore is indistinguishable from `tn init`).
+   *   body/tn.yaml        — minimal stub naming the DID (+ optional
+   *                         nickname). Matches Python's stub text exactly.
+   *
+   * Extras carried into the manifest:
+   *   scope = "identity"
+   *   state.identity = {schema: "tn-identity-seed-v1", nickname, minted_at}
+   */
+  private _buildIdentitySeedBody(opts: { nickname?: string }): {
+    body: Record<string, Uint8Array>;
+    state: Record<string, unknown>;
+  } {
+    const device = this.keystore.device;
+    const privateBytes = device.seed;
+    if (privateBytes.length !== 32) {
+      throw new Error(
+        `identity_seed: device private seed must be 32 bytes (Ed25519); got ${privateBytes.length}`,
+      );
+    }
+    const did = String(device.did);
+    if (!did.startsWith("did:key:z")) {
+      throw new Error(`identity_seed: device.did must be a did:key:z... identifier; got ${did}`);
+    }
+    const nickname = opts.nickname;
+
+    // Stub yaml — byte-identical to Python's `_build_identity_seed_body`
+    // (note the trailing newline on each line, and JSON-encoded nickname).
+    let stubYaml =
+      "# Identity seed stub written by tn.export(kind='identity_seed').\n" +
+      "# Replace this file with a real ceremony tn.yaml when joining one.\n" +
+      "identity:\n" +
+      `  did: ${did}\n`;
+    if (nickname) {
+      stubYaml += `  nickname: ${JSON.stringify(nickname)}\n`;
+    }
+
+    const body: Record<string, Uint8Array> = {
+      "body/local.private": new Uint8Array(privateBytes),
+      "body/local.public": new TextEncoder().encode(did),
+      "body/tn.yaml": new TextEncoder().encode(stubYaml),
+    };
+
+    return {
+      body,
+      state: {
+        identity: {
+          schema: "tn-identity-seed-v1",
+          // Match Python: nickname is always present, null when unset.
+          nickname: nickname ?? null,
+          minted_at: nowIsoMillis(),
+        },
       },
     };
   }
@@ -2146,6 +2355,76 @@ export class NodeRuntime {
       derivedState: null,
       conflicts: [],
     };
+  }
+
+  /**
+   * Reduce a `contact_update` body into `contacts.yaml`. Mirrors Python's
+   * `_absorb_contact_update` (`python/tn/absorb.py` ~1131) +
+   * `_apply_contact_update` (`python/tn/contacts.py` ~146).
+   *
+   * Body shape (Session 8 plan / spec §4.6):
+   *   body/contact_update.json: {
+   *     account_id, label, package_did, x25519_pub_b64,
+   *     claimed_at, source_link_id
+   *   }
+   *
+   * contacts.yaml lives at `<yamlDir>/.tn/<stem>/contacts.yaml` (Python's
+   * per-stem `tn_dir`). The doc is `{contacts: [row, ...]}`; each row is
+   * projected to the canonical six-field shape. Idempotency key is
+   * `(account_id, package_did)` (D-25): a matching row is replaced in
+   * place, otherwise the row is appended.
+   *
+   * Malformed bodies surface as a rejected receipt (rejectedReason set),
+   * matching Python's `legacy_status="rejected"` path; a successful merge
+   * returns acceptedCount=1.
+   */
+  private _absorbContactUpdate(manifest: Manifest, body: Map<string, Uint8Array>): AbsorbReceipt {
+    const reject = (reason: string): AbsorbReceipt => ({
+      kind: manifest.kind,
+      acceptedCount: 0,
+      dedupedCount: 0,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+      rejectedReason: reason,
+    });
+
+    const pkgBytes = body.get("body/contact_update.json");
+    if (pkgBytes === undefined) {
+      return reject("contact_update body missing `body/contact_update.json`");
+    }
+    let doc: unknown;
+    try {
+      doc = JSON.parse(new TextDecoder("utf-8").decode(pkgBytes));
+    } catch (e) {
+      return reject(`contact_update body is not valid JSON: ${(e as Error).message}`);
+    }
+    const errors = _validateContactUpdateBody(doc);
+    if (errors.length > 0) {
+      return reject("contact_update body invalid: " + errors.join("; "));
+    }
+
+    _applyContactUpdate(this._contactsYamlPath(), doc as Record<string, unknown>);
+
+    return {
+      kind: manifest.kind,
+      acceptedCount: 1,
+      dedupedCount: 0,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+    };
+  }
+
+  /** Canonical contacts.yaml path for this ceremony. Mirrors Python's
+   *  `tn.contacts._contacts_yaml_path` -> `tn_dir(yaml_path)/contacts.yaml`,
+   *  i.e. `<yamlDir>/.tn/<stem>/contacts.yaml` where `<stem>` is the yaml
+   *  filename without its `.yaml`/`.yml` suffix. */
+  private _contactsYamlPath(): string {
+    const yamlPath = this.config.yamlPath;
+    const base = yamlPath.split(/[\\/]/).pop() ?? "tn.yaml";
+    const stem = base.replace(/\.ya?ml$/i, "");
+    return join(this.config.yamlDir, ".tn", stem, "contacts.yaml");
   }
 
   /**
@@ -2785,7 +3064,32 @@ export interface ExportPkgOptions {
   confirmIncludesSecrets?: boolean;
   groups?: string[];
   packageBody?: Uint8Array;
+  /** Optional human label baked into an `identity_seed` bundle's
+   *  `state.identity.nickname`. Mirrors Python's `export(nickname=...)`.
+   *  Ignored for other kinds. */
+  nickname?: string;
+  /** Required for `kind: "contact_update"`: the contact-record body that
+   *  becomes `body/contact_update.json`. Shape (Session 8 / spec §4.6):
+   *  `{account_id, label, package_did, x25519_pub_b64, claimed_at,
+   *  source_link_id}` — the three latter fields may be null. */
+  contactUpdate?: ContactUpdateBody;
 }
+
+/** Body of a `contact_update` tnpkg (mirrors Python's contacts.py shape).
+ *  `package_did` / `x25519_pub_b64` / `source_link_id` are nullable. */
+export interface ContactUpdateBody {
+  account_id: string;
+  label: string;
+  package_did: string | null;
+  x25519_pub_b64: string | null;
+  claimed_at: string;
+  source_link_id: string | null;
+}
+
+/** Placeholder ceremony id stamped into a self-issued `identity_seed`
+ *  manifest (it has no enclosing ceremony). Mirrors Python's
+ *  `export.IDENTITY_SEED_CEREMONY_PLACEHOLDER`. */
+const IDENTITY_SEED_CEREMONY_PLACEHOLDER = "_identity_seed";
 
 // ---------------------------------------------------------------------------
 // Local helpers for exportPkg / absorbPkg
@@ -2801,9 +3105,135 @@ function _defaultScope(kind: ManifestKind | string): string {
       return "full";
     case "project_seed":
       return "project";
+    case "identity_seed":
+      return "identity";
     default:
       return "admin";
   }
+}
+
+// ---------------------------------------------------------------------------
+// contact_update reducer — port of python/tn/contacts.py (Session 8).
+// ---------------------------------------------------------------------------
+
+/** Every contact_update body must carry these keys. The three nullable
+ *  ones are required-present-but-may-be-null per the plan. */
+const _CONTACT_REQUIRED_KEYS = [
+  "account_id",
+  "label",
+  "package_did",
+  "x25519_pub_b64",
+  "claimed_at",
+  "source_link_id",
+] as const;
+
+/** Subset that must be non-null, non-empty strings. */
+const _CONTACT_NON_NULL_STRING_KEYS = ["account_id", "label", "claimed_at"] as const;
+
+/** Validate a contact_update body. Returns a list of error strings; `[]`
+ *  means valid. Mirrors Python's `_validate_contact_update_body`. */
+function _validateContactUpdateBody(doc: unknown): string[] {
+  const errors: string[] = [];
+  if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+    return [`contact_update body must be a JSON object; got ${Array.isArray(doc) ? "array" : typeof doc}`];
+  }
+  const d = doc as Record<string, unknown>;
+  for (const key of _CONTACT_REQUIRED_KEYS) {
+    if (!(key in d)) errors.push(`missing required key '${key}'`);
+  }
+  for (const key of _CONTACT_NON_NULL_STRING_KEYS) {
+    const v = d[key];
+    if (v === null || v === undefined) {
+      errors.push(`required key '${key}' must not be null`);
+    } else if (typeof v !== "string" || v === "") {
+      errors.push(`required key '${key}' must be a non-empty string`);
+    }
+  }
+  for (const key of ["package_did", "x25519_pub_b64", "source_link_id"] as const) {
+    if (!(key in d)) continue; // missing handled above
+    const v = d[key];
+    if (v === null || v === undefined) continue;
+    if (typeof v !== "string") errors.push(`key '${key}' must be a string or null`);
+  }
+  return errors;
+}
+
+/** Serialize a validated contact_update body to canonical JSON: the six
+ *  fields in a fixed order, nullable fields explicit-null. Deterministic
+ *  so the on-the-wire `body/contact_update.json` is stable across runs.
+ *  Python consumes it with `json.loads`, so only the parsed values
+ *  matter to the reducer; the fixed order keeps OUR output reproducible. */
+function _canonicalContactUpdateJson(body: ContactUpdateBody): string {
+  const b = body as unknown as Record<string, unknown>;
+  const ordered: Record<string, unknown> = {
+    account_id: b["account_id"],
+    label: b["label"],
+    package_did: b["package_did"] ?? null,
+    x25519_pub_b64: b["x25519_pub_b64"] ?? null,
+    claimed_at: b["claimed_at"],
+    source_link_id: b["source_link_id"] ?? null,
+  };
+  return JSON.stringify(ordered);
+}
+
+/** Idempotency key per the plan (D-25): `(account_id, package_did)`,
+ *  treating null as a valid value. */
+function _contactRowMatches(existing: Record<string, unknown>, incoming: Record<string, unknown>): boolean {
+  return (
+    (existing["account_id"] ?? null) === (incoming["account_id"] ?? null) &&
+    (existing["package_did"] ?? null) === (incoming["package_did"] ?? null)
+  );
+}
+
+/** Merge a validated contact_update body into contacts.yaml at
+ *  `targetPath`. Mirrors Python's `_apply_contact_update`: project to the
+ *  canonical row shape, match on (account_id, package_did) -> replace in
+ *  place, else append. Writes `{contacts: [...]}`. */
+function _applyContactUpdate(targetPath: string, body: Record<string, unknown>): void {
+  // Canonical row shape (null for absent nullable fields), matching
+  // Python's projection so downstream readers get a stable schema.
+  const row: Record<string, unknown> = {
+    account_id: body["account_id"],
+    label: body["label"],
+    package_did: body["package_did"] ?? null,
+    x25519_pub_b64: body["x25519_pub_b64"] ?? null,
+    claimed_at: body["claimed_at"],
+    source_link_id: body["source_link_id"] ?? null,
+  };
+
+  // Load existing contacts.yaml (or an empty doc).
+  let doc: Record<string, unknown> = { contacts: [] };
+  if (existsSync(targetPath)) {
+    const raw = readFileSync(targetPath, "utf8");
+    if (raw.trim()) {
+      const parsed = parseYaml(raw) as unknown;
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        doc = parsed as Record<string, unknown>;
+      }
+    }
+  }
+  let contacts = doc["contacts"];
+  if (!Array.isArray(contacts)) {
+    contacts = [];
+    doc["contacts"] = contacts;
+  }
+  const list = contacts as Record<string, unknown>[];
+
+  let replaced = false;
+  for (let i = 0; i < list.length; i += 1) {
+    const existing = list[i];
+    if (existing === null || typeof existing !== "object") continue;
+    if (_contactRowMatches(existing, row)) {
+      list[i] = row;
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced) list.push(row);
+  doc["contacts"] = list;
+
+  mkdirSync(dirname(targetPath), { recursive: true });
+  writeFileSync(targetPath, stringifyYaml(doc), "utf8");
 }
 
 function _envelopeWellFormed(env: Record<string, unknown>): boolean {

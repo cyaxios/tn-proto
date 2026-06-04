@@ -28,6 +28,24 @@ const ALLOWLIST: Record<string, string> = {
     "(.venv_win); run it explicitly (node --import tsx --import " +
     "./test/_setup_wasm.mjs --test test/admin_state_interop.test.ts) or wire a " +
     "cross-impl CI job (follow-up) to auto-gate it.",
+  "test/vault_set_link_state_interop.test.ts":
+    "cross-impl round-trip test (spawns Python via .venv_win); proves " +
+    "vault.setLinkState <-> Python set_link_state agree on ceremony.mode + " +
+    "linked_vault both directions. Run manually or via a cross-impl CI job, " +
+    "not the node-only npm gate.",
+  "test/identity_seed_interop.test.ts":
+    "cross-impl round-trip test (spawns Python via .venv_win); proves " +
+    "identity_seed export/absorb round-trips Python<->TS (same device DID) both " +
+    "directions. Run manually or via a cross-impl CI job, not the node-only gate.",
+  "test/contact_update_interop.test.ts":
+    "cross-impl round-trip test (spawns Python via .venv_win); proves " +
+    "contact_update export/absorb round-trips Python<->TS (contacts.yaml) both " +
+    "directions. Run manually or via a cross-impl CI job, not the node-only gate.",
+  "test/project_seed_interop.test.ts":
+    "cross-impl round-trip test (spawns Python via .venv_win); proves " +
+    "project_seed backup/restore round-trips Python<->TS (DID + groups + " +
+    "emit/read) both directions. Run manually or via a cross-impl CI job, not " +
+    "the node-only gate.",
 };
 
 function runSet(): Set<string> {
