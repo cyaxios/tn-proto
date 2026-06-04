@@ -103,6 +103,30 @@ export {
 
 export type { JsStorageCallbacks } from "./runtime/storage_node.js";
 
+// ---------------------------------------------------------------------------
+// Decode / keystore utilities — works on any JS object, not just the
+// browser runtime's own localStorage. Use these to handle TN-formatted
+// data from any source: fetch response, SSE stream, vault API, etc.
+// ---------------------------------------------------------------------------
+
+export { Entry, VerifyError, type RawEntryInput } from "./Entry.js";
+
+export {
+  processEnvelope as decodeEntry,
+  extractGroupCts,
+  buildGroupKitsMap,
+} from "./local/envelope.js";
+
+export {
+  parseNdjson,
+} from "./local/ndjson.js";
+
+export {
+  type KeystoreHandle,
+  parseKeystore as keystoreFromJson,
+  keystoreFromBodyFiles,
+} from "./local/keystore.js";
+
 // Raw wasm primitives, for callers who want them.
 export * from "./raw.js";
 

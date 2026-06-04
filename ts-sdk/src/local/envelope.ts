@@ -50,7 +50,7 @@ export function buildGroupKitsMap(
  * Delegates decrypt to SDK's decryptAllGroups, construction to SDK's Entry.fromRaw. */
 export function processEnvelope(
   envelope: Record<string, unknown>,
-  keystore: KeystoreHandle | undefined,
+  keystore?: KeystoreHandle,
 ): Entry {
   let plaintext: Record<string, unknown> = {};
   if (keystore) {

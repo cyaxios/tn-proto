@@ -1,4 +1,5 @@
-import { fromBase64 } from "./_utils.js";
+import { fromBase64, bytesToHex } from "./_utils.js";
+import { btnKitPublisherId } from "../raw.js";
 
 export interface KeystoreHandle {
   kitsForPublisher(publisherIdHex: string): Uint8Array[];
@@ -37,6 +38,27 @@ export function parseKeystore(json: string): KeystoreHandle {
     else byPublisher.set(entry.publisher_id, kits);
   }
 
+  return {
+    kitsForPublisher(id) { return byPublisher.get(id) ?? []; },
+  };
+}
+
+/** Build a KeystoreHandle from a project body files Map as returned by
+ * `loadProject()` in tn-proto-web. Scans for `*.btn.mykit` entries and
+ * indexes them by publisher ID so they can decrypt incoming TN entries. */
+export function keystoreFromBodyFiles(files: Map<string, Uint8Array>): KeystoreHandle {
+  const byPublisher = new Map<string, Uint8Array[]>();
+  for (const [path, bytes] of files) {
+    if (!path.endsWith(".btn.mykit")) continue;
+    try {
+      const pubId = bytesToHex(btnKitPublisherId(bytes));
+      const existing = byPublisher.get(pubId);
+      if (existing) existing.push(bytes);
+      else byPublisher.set(pubId, [bytes]);
+    } catch {
+      // skip corrupt kit
+    }
+  }
   return {
     kitsForPublisher(id) { return byPublisher.get(id) ?? []; },
   };
