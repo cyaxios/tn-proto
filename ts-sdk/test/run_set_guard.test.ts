@@ -20,15 +20,14 @@ const ALLOWLIST: Record<string, string> = {
     "(see plans/2026-05-13-wasm-widen-and-fallback-deprecate.md); not worth " +
     "reviving its drifted read-shape assertions.",
   "test/admin_state_interop.test.ts":
-    "cross-impl golden spec for the adminState unification slice " +
-    "(docs/sdk-unification-plan.md). RED on purpose: it proves recipients() / " +
-    "state().recipients parity Python<->TS, and pins two open state() gaps - " +
-    "#1 state().groups (TS derives none; real gap) and #2 ceremony.created_at " +
-    "(Python fabricates a wall-clock, TS leaves null; fabrication-choice). It " +
-    "spawns Python (.venv_win), so it is run manually, not in the default gate: " +
-    "node --import tsx --import ./test/_setup_wasm.mjs --test " +
-    "test/admin_state_interop.test.ts. Move into the run set once the slice " +
-    "closes the gaps and it goes green.",
+    "cross-impl golden test for the adminState unification slice " +
+    "(docs/sdk-unification-plan.md). GREEN as of the adminState config-fallback " +
+    "fix (TS derives state().groups + ceremony.created_at from config to match " +
+    "Python). Proves Python<->TS tn.admin.state() / recipients() output parity. " +
+    "Allowlisted out of the node-only npm test gate because it spawns Python " +
+    "(.venv_win); run it explicitly (node --import tsx --import " +
+    "./test/_setup_wasm.mjs --test test/admin_state_interop.test.ts) or wire a " +
+    "cross-impl CI job (follow-up) to auto-gate it.",
 };
 
 function runSet(): Set<string> {

@@ -1044,19 +1044,36 @@ export class NodeRuntime {
    * matching TNClient.adminState's fallback behavior. */
   adminState(group?: string): AdminState {
     const raw = this.adminCache().state();
-    // Auto-derive ceremony from config when cache hasn't seen tn.ceremony.init.
-    const state: AdminState =
-      raw.ceremony === null
-        ? {
-            ...raw,
-            ceremony: {
-              ceremonyId: this.config.ceremonyId,
-              cipher: this.config.cipher,
-              deviceDid: this.config.device.device_identity,
-              createdAt: null,
-            },
-          }
-        : raw;
+    // Auto-derive ceremony + groups from config when the cache has not seen
+    // the attesting events. A btn ceremony records ceremony/group info in the
+    // yaml rather than the log, and the TS runtime (unlike Python's reconcile)
+    // does not write synthetic tn.ceremony.init / tn.group.added records; so
+    // without this fallback state() under-reports vs Python. Mirrors Python's
+    // admin.state config fallback so the two SDKs agree (see
+    // docs/sdk-unification-plan.md, adminState slice). No attesting event
+    // exists, so the derived timestamp uses the yaml mtime as a stable proxy.
+    let derivedAt: string;
+    try {
+      derivedAt = statSync(this.config.yamlPath).mtime.toISOString();
+    } catch {
+      derivedAt = new Date().toISOString();
+    }
+    const ceremony = raw.ceremony ?? {
+      ceremonyId: this.config.ceremonyId,
+      cipher: this.config.cipher,
+      deviceDid: this.config.device.device_identity,
+      createdAt: derivedAt,
+    };
+    const groups =
+      raw.groups.length > 0
+        ? raw.groups
+        : [...this.config.groups.keys()].map((name) => ({
+            group: name,
+            cipher: this.config.cipher,
+            publisherDid: this.config.device.device_identity,
+            addedAt: derivedAt,
+          }));
+    const state: AdminState = { ...raw, ceremony, groups };
     if (group === undefined) return state;
     return {
       ...state,
