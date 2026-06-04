@@ -43,9 +43,9 @@ Honesty about throw-stubs
 The browser admin/pkg/vault/agents/handlers tier in ``browser/tn.ts`` is
 entirely placeholders that ``throw new NotYetWiredForBrowserError(...)``; a
 handful of browser ``Tn`` statics/methods (``use`` / ``absorb`` /
-``ephemeral`` / ``listCeremonies`` / ``watch``) do the same, and the node
-``vault.setLinkState`` throws "not yet ported" too. A method/function whose
-body is essentially a single ``throw`` is NOT a real implementation. The tool
+``ephemeral`` / ``listCeremonies`` / ``watch``) do the same. A method/function
+body that is essentially a single ``throw`` is NOT a real implementation. The
+tool
 detects those bodies and records the verb as a *stub* on that surface
 (``present=False, stub=True``) rather than counting it as parity. The matrix
 prints ``~`` for a stub cell (vs ``x`` real / ``.`` absent) and the per-verb
@@ -215,11 +215,13 @@ _VERB_ALLOW: dict[str, Allow] = {
         "(tn.offer). Parity doc tn.pkg row.",
         side="ts",
     ),
-    # set-link-state: Python verb (top-level + tn.admin); TS routes it through
-    # tn.vault.setLinkState as a stub-throw (yaml mutation not yet ported).
+    # set-link-state: Python verb (top-level + tn.admin); TS implements the
+    # same intent as tn.vault.setLinkState (writes ceremony.mode to the
+    # authoritative yaml). One-sided by namespace, NOT a stub: Python keeps it
+    # under tn.admin, TS under tn.vault.
     "set_link_state": Allow(
         "Python top-level set_link_state mutates ceremony yaml; TS exposes "
-        "tn.vault.setLinkState (stub-throws). Parity doc tn.admin row.",
+        "tn.vault.setLinkState (real impl). Parity doc tn.admin row.",
         side="py",
     ),
     "admin.set_link_state": Allow(
@@ -228,8 +230,9 @@ _VERB_ALLOW: dict[str, Allow] = {
         side="py",
     ),
     "vault.set_link_state": Allow(
-        "TS tn.vault.setLinkState (stub-throws: yaml-write not yet ported); "
-        "Python's verb is tn.admin.set_link_state. Parity doc tn.admin row.",
+        "TS tn.vault.setLinkState writes ceremony.mode to the authoritative "
+        "yaml (real impl); Python's counterpart is tn.admin.set_link_state, so "
+        "the verb is one-sided ts-only by namespace. Parity doc tn.admin row.",
         side="ts",
     ),
     # init-upload: TS exposes a bare initUpload + Tn.initUpload; Python's
@@ -704,8 +707,8 @@ def _ts_class_body(text: str, class_re: str) -> str | None:
 # A method/function body is a "throw-stub" when, comment-stripped, the only
 # statement it contains is a single ``throw ...``. Covers the one-liner
 # ``throw new NotYetWiredForBrowserError("use");`` and the multi-line
-# ``throw new Error(\n  `...`,\n);`` shape used by vault.setLinkState. A body
-# that does any other work (a guard, a return, a second statement) is real.
+# ``throw new Error(\n  `...`,\n);`` shape. A body that does any other work
+# (a guard, a return, a second statement) is real.
 _THROW_WORD_RE = re.compile(r"^throw\b")
 
 
@@ -829,10 +832,9 @@ def ts_class_methods_split(path: Path, class_re: str) -> tuple[set[str], set[str
     """Public method names of the named class, split into (real, stub).
 
     ``real`` are methods with a genuine body; ``stub`` are methods whose body
-    is a single ``throw`` (e.g. ``NotYetWiredForBrowserError`` placeholders or
-    the node ``vault.setLinkState`` "not yet ported" throw). A name never
-    appears in both: a real overload of a stubbed name (none today) would land
-    in ``real``.
+    is a single ``throw`` (e.g. the browser ``NotYetWiredForBrowserError``
+    placeholders). A name never appears in both: a real overload of a stubbed
+    name (none today) would land in ``real``.
 
     Excludes private / protected / ``_``-prefixed / ``#``-prefixed members,
     the constructor, getters and setters (Python mirrors those as attributes,

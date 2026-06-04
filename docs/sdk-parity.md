@@ -159,7 +159,7 @@ truth today).
 | `tn.admin.revoked_count(group)` | `tn.admin.revokedCount(group)` | ✓ | Sync on both. Reads the revoked-leaf count off the Rust `tn-btn` publisher (`revoked_count` / `BtnPublisher.revokedCount()`). |
 | `tn.admin.rotate(group)` | `await tn.admin.rotate(group)` | ✓ (btn) / ⚠ (jwe) | Both languages bump `index_epoch`, regenerate the publisher's self-kit, rename old material `.revoked.<ts>`, and emit `tn.rotation.completed`. JWE rotation is Python-only today. |
 | `tn.admin.ensure_group(group, ...)` | `await tn.admin.ensureGroup(group, opts?)` | ⚠ | Python rewrites yaml on first call; TS only emits the attested event (no yaml-write). |
-| `tn.admin.set_link_state(state)` | `await tn.vault.setLinkState(state)` | ⊝ | TS: stub-throws ("yaml-write not yet ported"). Python mutates `ceremony.mode` in yaml. |
+| `tn.admin.set_link_state(state)` | `await tn.vault.setLinkState(state)` | ⚠ | Both write `ceremony.mode` to the authoritative yaml (TS via `NodeRuntime.setCeremonyMode`); cross-impl round-trip proven (`vault_set_link_state_interop`). Divergence is namespace only: `tn.admin` in Python, `tn.vault` in TS. |
 | `tn.admin.recipients(group)` | `tn.admin.recipients(group, opts?)` | ✓ | Sync on both. Active-first sort. |
 | `tn.admin.state(group?)` | `tn.admin.state(group?)` | ✓ | Sync. Both auto-derive `ceremony` from config when cache hasn't seen `tn.ceremony.init`. |
 | `tn.admin.cache()` | `tn.admin.cache()` | ✓ | Sync. Returns `AdminStateCache` instance. |

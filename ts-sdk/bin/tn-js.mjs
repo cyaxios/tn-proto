@@ -1168,8 +1168,9 @@ function _formatExpiresLocal(expiresIso) {
 
 // ── vault: link / unlink — emits the corresponding log events ──────────
 // Wraps tn.vault.link / tn.vault.unlink. These only emit log events
-// (tn.vault.linked / tn.vault.unlinked); the yaml ceremony.mode flip is
-// Python-only today (see VaultNamespace.setLinkState docstring).
+// (tn.vault.linked / tn.vault.unlinked); the yaml ceremony.mode flip is a
+// separate library call (tn.vault.setLinkState in TS, tn.admin.set_link_state
+// in Python), not wired as a CLI subcommand here.
 async function vaultCmd() {
   const sub = argv[3];
   const rest = argv.slice(4);

@@ -314,23 +314,26 @@ def test_browser_class_throw_stub_methods_are_stubs_not_real():
         assert name not in stub
 
 
-def test_node_vault_set_link_state_is_detected_as_throw_stub():
-    # Finding 2 (node side): ts-sdk/src/vault/index.ts setLinkState throws
-    # "not yet ported"; it must be a stub on ts_namespace, leaving the verb a
-    # stub gap (not a real TS implementation).
+def test_node_vault_set_link_state_is_implemented_not_a_stub():
+    # Gap #3 (docs/round-trip-gaps.md): ts-sdk/src/vault/index.ts setLinkState
+    # used to throw "not yet ported"; it now writes ceremony.mode to the
+    # authoritative yaml (NodeRuntime.setCeremonyMode), so it is a REAL TS impl,
+    # not a throw-stub. The verb is one-sided ts-only because Python keeps the
+    # same intent under tn.admin.set_link_state (the namespace asymmetry is
+    # carried by the allowlist + the parity-doc tn.admin row).
     real, stub = cp.ts_class_methods_split(
         cp.TS_NAMESPACE_CLASSES["vault"][0], cp.TS_NAMESPACE_CLASSES["vault"][1]
     )
-    assert "setLinkState" in stub
-    assert "setLinkState" not in real
+    assert "setLinkState" in real
+    assert "setLinkState" not in stub
     assert "link" in real and "unlink" in real
 
     _code, matrix, _documented, _allowlist, _drift = cp.run()
     row = matrix["vault.set_link_state"]
-    assert row.stub["ts_namespace"] is True
-    assert row.present["ts_namespace"] is False
-    assert row.ts_side is False
-    assert row.status == "stub"
+    assert row.present["ts_namespace"] is True
+    assert row.stub["ts_namespace"] is False
+    assert row.ts_side is True
+    assert row.status == "ts-only"
 
 
 def test_browser_stub_verbs_are_allowlisted_so_gate_passes():
@@ -462,9 +465,12 @@ def test_cli_default_summary_surfaces_browser_stub_and_ts_gaps():
     # Browser throw-stub reality is named.
     assert "browser surface is a throw-stub" in out
     assert "NotYetWiredForBrowserError" in out
-    # The node vault.setLinkState throw-stub is surfaced as a TS-stub-only gap.
+    # The browser stub-namespace placeholders (no real impl on ANY surface) are
+    # surfaced as TS-stub-only. vault.set_link_state is NO LONGER here: it is a
+    # real node impl now (see test_node_vault_set_link_state_is_implemented...).
     assert "TS exposes ONLY a throw-stub" in out
-    assert "vault.set_link_state" in out
+    for verb in ("admin.cached_admin_state", "agents.load_policy", "handlers.remove"):
+        assert verb in out, f"{verb} browser stub-only must be shown in the summary"
     # The genuine Python-only TS gaps are named with their specific reasons.
     assert "no TS port yet" in out
     for verb in ("wallet", "vault_client", "classifier", "is_keystore_diverged"):
@@ -496,8 +502,11 @@ def test_cli_matrix_shows_browser_stub_and_stub_rows():
     # A matched verb whose browser side is a throw-stub: status annotated.
     assert "match*browser-stub" in lines["admin.add_recipient"]
     assert "~" in lines["admin.add_recipient"]  # browser cell shows the stub glyph
-    # The node vault.setLinkState throw-stub row reads "stub", not "match".
-    assert lines["vault.set_link_state"].split()[-1] == "stub"
+    # A genuine browser stub-only placeholder row still reads "stub".
+    assert lines["admin.cached_admin_state"].split()[-1] == "stub"
+    # The node vault.setLinkState row now reads "ts-only" (real TS impl; Python
+    # keeps the verb under tn.admin), not "stub".
+    assert lines["vault.set_link_state"].split()[-1] == "ts-only"
 
 
 def test_cli_json_flag_emits_valid_matrix_json():
@@ -528,9 +537,18 @@ def test_cli_json_carries_stub_and_browser_stub_fields():
     assert ar["surfaces"]["ts_browser"] is False
     assert ar["status"] == "match*browser-stub"
 
-    # The node vault.setLinkState throw-stub gap.
+    # A genuine browser stub-only placeholder: throw-stub on ts_browser with no
+    # real impl on any surface.
+    cas = by_verb["admin.cached_admin_state"]
+    assert cas["matched"] is False
+    assert cas["stubs"]["ts_browser"] is True
+    assert cas["surfaces"]["ts_browser"] is False
+    assert cas["status"] == "stub"
+
+    # The node vault.setLinkState verb is now a REAL TS impl (one-sided ts-only;
+    # Python keeps it under tn.admin.set_link_state), no longer a throw-stub.
     vs = by_verb["vault.set_link_state"]
     assert vs["matched"] is False
-    assert vs["stubs"]["ts_namespace"] is True
-    assert vs["surfaces"]["ts_namespace"] is False
-    assert vs["status"] == "stub"
+    assert vs["stubs"]["ts_namespace"] is False
+    assert vs["surfaces"]["ts_namespace"] is True
+    assert vs["status"] == "ts-only"
