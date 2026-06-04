@@ -396,6 +396,7 @@
 <span class="fn">tn.debug</span>(<span class="str">"cache.miss"</span>, { key: <span class="str">"user:42:profile"</span> });</pre>
         <div class="run-bar">
           <button class="run" data-example="emit">Run</button>
+          <button id="emit-toggle" style="display:none">Show raw</button>
           <span class="status" id="emit-status"></span>
         </div>
         <div class="output" id="emit-output">Init first, then run.</div>
@@ -621,6 +622,20 @@
     if (entries.length > 0) populateDecodeBox(entries[0]);
   }
 
+  const emitState = { decrypted: [], raw: [] };
+
+  function fmtRawEntry(raw) {
+    const env = raw.envelope ?? raw;
+    const ts = new Date(env.timestamp).toISOString().slice(11, 23);
+    const lvl = String(env.level ?? "").toUpperCase().padEnd(7);
+    // find group ciphertext blocks — anything with a {ciphertext} value
+    const groups = Object.entries(env)
+      .filter(([, v]) => v && typeof v === "object" && "ciphertext" in v)
+      .map(([k, v]) => `${k}: <span class="sealed-pill">${String(v.ciphertext).slice(0, 16)}…</span>`)
+      .join("  ");
+    return `<span><span class="dim">${ts}</span>  <span class="${levelClass(env.level)}">${lvl}</span>  ${env.event_type}  ${groups || '<span class="dim">(no groups)</span>'}</span>`;
+  }
+
   async function runEmit() {
     setStatus("emit", "running...");
     try { tn.did(); } catch { await tn.init(); }
@@ -628,11 +643,28 @@
     tn.warning("rate.limit.approaching", { threshold: 0.92 });
     tn.error("auth.failed", { ip: "10.0.0.1", attempts: 3 });
     tn.debug("cache.miss", { key: "user:42:profile" });
-    const last4 = tn.read().slice(-4);
-    setOutput("emit", last4.map(fmtEntry).join("\n"));
-    setStatus("emit", `${last4.length} entries written`, "ok");
-    populateDecodeBox(last4[0]);
+    emitState.decrypted = tn.read().slice(-4);
+    emitState.raw = tn.readRaw().slice(-4);
+    setOutput("emit", emitState.decrypted.map(fmtEntry).join("\n"));
+    setStatus("emit", `${emitState.decrypted.length} entries written`, "ok");
+    document.getElementById("emit-toggle").style.display = "";
+    document.getElementById("emit-toggle").textContent = "Show raw";
+    populateDecodeBox(emitState.decrypted[0]);
   }
+
+  let emitShowingRaw = false;
+  document.getElementById("emit-toggle").addEventListener("click", () => {
+    emitShowingRaw = !emitShowingRaw;
+    if (emitShowingRaw) {
+      setOutput("emit", emitState.raw.map(fmtRawEntry).join("\n"));
+      document.getElementById("emit-toggle").textContent = "Show decrypted";
+      setStatus("emit", "raw — ciphertext on wire", "");
+    } else {
+      setOutput("emit", emitState.decrypted.map(fmtEntry).join("\n"));
+      document.getElementById("emit-toggle").textContent = "Show raw";
+      setStatus("emit", `${emitState.decrypted.length} entries written`, "ok");
+    }
+  });
 
   async function runRead() {
     setStatus("read", "running...");
