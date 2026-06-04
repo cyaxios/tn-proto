@@ -25,6 +25,30 @@ export interface LocalLogHandle {
   watch(opts?: WatchOpts): AsyncIterable<Entry>;
 }
 
+/** Minimal FSA handle surface this module needs. Structurally compatible with
+ * FileSystemFileHandle from the browser File System Access API. */
+interface FsaHandle {
+  readonly name: string;
+  getFile(): Promise<{
+    readonly size: number;
+    text(): Promise<string>;
+    slice(start?: number, end?: number): { text(): Promise<string> };
+  }>;
+}
+
+type FsaPicker = (opts?: Record<string, unknown>) => Promise<FsaHandle[]>;
+
+function requireFsa(api: string): FsaPicker {
+  const g = globalThis as Record<string, unknown>;
+  if (typeof g["showOpenFilePicker"] !== "function") {
+    throw new Error(
+      `${api} requires the File System Access API (Chromium 86+ / Edge 86+). ` +
+        `Use fromText() with <input type="file"> for Firefox/Safari.`,
+    );
+  }
+  return g["showOpenFilePicker"] as FsaPicker;
+}
+
 function makeHandle(fh: TnFileHandle): LocalLogHandle {
   return {
     get name() { return fh.name; },
@@ -33,37 +57,29 @@ function makeHandle(fh: TnFileHandle): LocalLogHandle {
   };
 }
 
-type FsaPicker = (opts?: Record<string, unknown>) => Promise<FileSystemFileHandle[]>;
-
-function requireFsa(api: string): FsaPicker {
-  if (typeof window === "undefined" || !("showOpenFilePicker" in window)) {
-    throw new Error(
-      `${api} requires the File System Access API (Chromium 86+ / Edge 86+). ` +
-        `Use fromText() with <input type="file"> for Firefox/Safari.`,
-    );
-  }
-  return (window as typeof window & { showOpenFilePicker: FsaPicker }).showOpenFilePicker;
-}
-
 export async function openLogFile(): Promise<LocalLogHandle> {
   const picker = requireFsa("openLogFile");
-  const [h] = await picker({
+  const handles = await picker({
     types: [{ description: "TN Log", accept: { "application/x-ndjson": [".log", ".ndjson"] } }],
     multiple: false,
   });
+  const h = handles[0];
+  if (!h) throw new Error("openLogFile: no file selected");
   return makeHandle(fromFileSystemHandle(h));
 }
 
-export function logFileFromHandle(handle: FileSystemFileHandle): LocalLogHandle {
+export function logFileFromHandle(handle: FsaHandle): LocalLogHandle {
   return makeHandle(fromFileSystemHandle(handle));
 }
 
 export async function openKeystore(): Promise<KeystoreHandle> {
   const picker = requireFsa("openKeystore");
-  const [h] = await picker({
+  const handles = await picker({
     types: [{ description: "TN Keystore", accept: { "application/json": [".json"] } }],
     multiple: false,
   });
+  const h = handles[0];
+  if (!h) throw new Error("openKeystore: no file selected");
   return parseKeystore(await (await h.getFile()).text());
 }
 

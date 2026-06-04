@@ -5,7 +5,19 @@ export interface TnFileHandle {
   readonly name: string;
 }
 
-export function fromFileSystemHandle(h: FileSystemFileHandle): TnFileHandle {
+/** Minimal structural subset of FileSystemFileHandle that this module uses.
+ * Keeps the tsconfig Node-only (no lib:dom) while remaining compatible with
+ * any real FileSystemFileHandle passed from browser code. */
+interface FsaHandle {
+  readonly name: string;
+  getFile(): Promise<{
+    readonly size: number;
+    text(): Promise<string>;
+    slice(start?: number, end?: number): { text(): Promise<string> };
+  }>;
+}
+
+export function fromFileSystemHandle(h: FsaHandle): TnFileHandle {
   return {
     name: h.name,
     async text() { return (await h.getFile()).text(); },
