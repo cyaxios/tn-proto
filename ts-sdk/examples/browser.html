@@ -293,6 +293,7 @@
     <a href="#context">Context</a>
     <a href="#decode">Decode</a>
     <a href="#chain">Chain</a>
+    <a href="#receive">Receive</a>
   </nav>
 
   <main>
@@ -413,6 +414,33 @@
           <span class="status" id="chain-status"></span>
         </div>
         <div class="output" id="chain-output">Emit some entries first.</div>
+      </div>
+    </section>
+
+    <!-- 7. Receive -->
+    <section id="receive">
+      <div class="card">
+        <div class="card-header">
+          <h2>Receive</h2>
+          <span class="badge">Database auth</span>
+          <p>A stream of entries sealed for your key. The encryption is the authorization.</p>
+        </div>
+<pre class="code"><span class="cm">// fetch any endpoint that returns NDJSON TN entries</span>
+<span class="kw">const</span> res = <span class="kw">await</span> <span class="fn">fetch</span>(url);
+<span class="kw">const</span> text = <span class="kw">await</span> res.<span class="fn">text</span>();
+
+<span class="kw">for</span> (<span class="kw">const</span> line <span class="kw">of</span> text.<span class="fn">split</span>(<span class="str">"\n"</span>).<span class="fn">filter</span>(Boolean)) {
+  <span class="kw">const</span> entry = <span class="fn">decodeEntry</span>(<span class="fn">JSON.parse</span>(line), keystore);
+  <span class="cm">// entry.hidden_groups.length > 0  →  sealed, no kit</span>
+  <span class="cm">// entry.fields.account_balance    →  decrypted with your kit</span>
+}</pre>
+        <div class="run-bar" style="flex-wrap:wrap;gap:8px;">
+          <button class="run" id="receive-connect">Connect</button>
+          <button id="receive-load-kit" style="display:none">Load demo kit</button>
+          <button id="receive-clear-kit" style="display:none">Clear kit</button>
+          <span class="status" id="receive-status">Generating demo data...</span>
+        </div>
+        <div class="output" id="receive-output" style="min-height:120px">Initialising...</div>
       </div>
     </section>
 
@@ -560,6 +588,137 @@
     order_id: "ord_999",
     total: 149.00,
   }, null, 2);
+
+  // ── Receive: demo data generated with real BTN encryption ────────────────
+
+  const demoState = { blobUrl: null, kit: null, keystore: null };
+
+  function b64(bytes) {
+    return btoa(String.fromCharCode(...bytes));
+  }
+
+  async function buildDemoStream() {
+    const { BtnPublisher, keystoreFromJson } = tn;
+
+    // Alice is the publisher — she encrypted these entries for the demo recipient
+    const pub = new BtnPublisher(null);
+    const kit = pub.mint(); // recipient's kit
+
+    const events = [
+      { event_type: "advisor.session.started",  level: "info",    pub: { client: "Hartwell, J.", session_id: "sess_8812" } },
+      { event_type: "advisor.recommendation",   level: "info",    pub: { ticker: "AAPL", action: "HOLD"       }, priv: { account_balance: 412500, risk_score: 0.28 } },
+      { event_type: "advisor.recommendation",   level: "info",    pub: { ticker: "NVDA", action: "BUY"        }, priv: { account_balance: 411200, risk_score: 0.31, limit_price: 890.00 } },
+      { event_type: "advisor.compliance.check", level: "warning", pub: { rule: "concentration_limit"          }, priv: { flagged_position: "NVDA", pct_of_portfolio: 0.38 } },
+      { event_type: "advisor.recommendation",   level: "info",    pub: { ticker: "BRK.B", action: "BUY"       }, priv: { account_balance: 409800, risk_score: 0.26 } },
+      { event_type: "advisor.session.closed",   level: "info",    pub: { duration_s: 214, actions_taken: 3    } },
+    ];
+
+    const lines = events.map((ev, i) => {
+      const envelope = {
+        event_type: ev.event_type,
+        level: ev.level,
+        timestamp: new Date(Date.now() + i * 800).toISOString(),
+        device_identity: "did:key:zAliceAdvisor1aBcDeFgHiJkLmNoPqRsTuVwXyZ",
+        sequence: i + 1,
+        event_id: `ev_${i + 1}`,
+        run_id: "run_demo_stream",
+        prev_hash: i === 0 ? "0".repeat(64) : `hash${i}`,
+        row_hash: `hash${i + 1}`,
+        signature: `sig${i + 1}`,
+        ...ev.pub,
+      };
+      if (ev.priv) {
+        const ct = pub.encrypt(new TextEncoder().encode(JSON.stringify(ev.priv)));
+        envelope["private"] = { ciphertext: b64(ct) };
+      }
+      return JSON.stringify(envelope);
+    });
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    demoState.blobUrl = URL.createObjectURL(blob);
+    demoState.kit = kit;
+
+    // Build a KeystoreHandle from the kit bytes
+    const pubIdBytes = tn.btnKitPublisherId(kit);
+    const pubIdHex = Array.from(pubIdBytes).map(b => b.toString(16).padStart(2, "0")).join("");
+    const ksJson = JSON.stringify({ keystores: [{ publisher_id: pubIdHex, kits: [b64(kit)] }] });
+    demoState.keystore = tn.keystoreFromJson(ksJson);
+
+    setStatus("receive", "ready — click Connect", "ok");
+    document.getElementById("receive-connect").disabled = false;
+    document.getElementById("receive-output").textContent = "Click Connect to fetch the stream.";
+  }
+
+  function fmtReceiveEntry(entry) {
+    const ts = new Date(entry.timestamp).toISOString().slice(11, 23);
+    const lvl = entry.level.toUpperCase().padEnd(7);
+    const pubFields = Object.keys(entry.fields ?? {}).length > 0
+      ? JSON.stringify(entry.fields) : "";
+    const sealed = entry.hidden_groups.length > 0
+      ? `  <span style="color:var(--warn)">[${entry.hidden_groups.join(", ")} sealed]</span>` : "";
+    return `<span><span class="dim">${ts}</span>  <span class="${levelClass(entry.level)}">${lvl}</span>  `
+      + `${entry.event_type}`
+      + (pubFields ? `  <span class="dim">${esc(pubFields)}</span>` : "")
+      + sealed
+      + `</span>`;
+  }
+
+  async function runConnect() {
+    if (!demoState.blobUrl) { setStatus("receive", "still generating...", "err"); return; }
+    setStatus("receive", "fetching...");
+
+    const res = await fetch(demoState.blobUrl);
+    const text = await res.text();
+    const ks = demoState.activeKeystore ?? null;
+
+    const lines = [];
+    let count = 0;
+    for (const line of text.split("\n").filter(Boolean)) {
+      try {
+        const entry = tn.decodeEntry(JSON.parse(line), ks);
+        lines.push(fmtReceiveEntry(entry));
+        count++;
+      } catch { /* skip */ }
+    }
+
+    const sealed = lines.filter(l => l.includes("sealed")).length;
+    document.getElementById("receive-output").innerHTML = lines.join("\n");
+    document.getElementById("receive-output").className = "output has-content";
+
+    if (sealed > 0 && !ks) {
+      setStatus("receive", `${count} entries — ${sealed} groups sealed`, "");
+      document.getElementById("receive-load-kit").style.display = "";
+    } else if (ks) {
+      setStatus("receive", `${count} entries — all decrypted`, "ok");
+      document.getElementById("receive-load-kit").style.display = "none";
+      document.getElementById("receive-clear-kit").style.display = "";
+    } else {
+      setStatus("receive", `${count} entries`, "ok");
+    }
+  }
+
+  document.getElementById("receive-connect").disabled = true;
+  document.getElementById("receive-connect").addEventListener("click", async () => {
+    document.getElementById("receive-connect").disabled = true;
+    try { await runConnect(); } catch (e) { setStatus("receive", String(e), "err"); }
+    finally { document.getElementById("receive-connect").disabled = false; }
+  });
+
+  document.getElementById("receive-load-kit").addEventListener("click", async () => {
+    demoState.activeKeystore = demoState.keystore;
+    document.getElementById("receive-load-kit").style.display = "none";
+    setStatus("receive", "kit loaded — reconnecting...", "ok");
+    await runConnect();
+  });
+
+  document.getElementById("receive-clear-kit").addEventListener("click", async () => {
+    demoState.activeKeystore = null;
+    document.getElementById("receive-clear-kit").style.display = "none";
+    setStatus("receive", "kit cleared");
+    await runConnect();
+  });
+
+  buildDemoStream();
 
   const runners = { init: runInit, emit: runEmit, read: runRead, context: runContext, decode: runDecode, chain: runChain };
 
