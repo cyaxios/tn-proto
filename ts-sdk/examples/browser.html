@@ -267,6 +267,71 @@
       flex-shrink: 0;
     }
 
+    /* ── Three-panel layout ──────────────────────────────── */
+    .three-up {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      border-top: 1px solid var(--hair);
+    }
+
+    .recipient-panel {
+      padding: 12px 16px;
+      border-right: 1px solid var(--hair);
+    }
+
+    .recipient-panel:last-child { border-right: none; }
+
+    .recipient-panel h3 {
+      font-family: var(--sans);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .kit-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--hair);
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+
+    .kit-dot.active { background: var(--good); }
+
+    .panel-output {
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.7;
+      color: var(--muted);
+      min-height: 120px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .panel-output.has-content { color: var(--ink-soft); }
+
+    .sealed-pill {
+      display: inline-block;
+      font-size: 10px;
+      padding: 0 5px;
+      border-radius: 3px;
+      background: #fff8ec;
+      color: var(--warn);
+      border: 1px solid #f0d9b0;
+    }
+
+    @media (max-width: 860px) {
+      .three-up { grid-template-columns: 1fr; }
+      .recipient-panel { border-right: none; border-bottom: 1px solid var(--hair); }
+      .recipient-panel:last-child { border-bottom: none; }
+    }
+
     @media (max-width: 680px) {
       .layout { flex-direction: column; padding: 0 16px; }
       nav { width: 100%; height: auto; position: static; padding: 12px 0; display: flex; flex-wrap: wrap; gap: 2px; }
@@ -294,6 +359,7 @@
     <a href="#decode">Decode</a>
     <a href="#chain">Chain</a>
     <a href="#receive">Receive</a>
+    <a href="#keys">Keys</a>
   </nav>
 
   <main>
@@ -441,6 +507,49 @@
           <span class="status" id="receive-status">Generating demo data...</span>
         </div>
         <div class="output" id="receive-output" style="min-height:120px">Initialising...</div>
+      </div>
+    </section>
+
+    <!-- 8. Keys -->
+    <section id="keys">
+      <div class="card">
+        <div class="card-header">
+          <h2>Keys</h2>
+          <span class="badge">Multi-recipient</span>
+          <p>Each group is sealed under a different publisher. Each kit only opens its own group.</p>
+        </div>
+<pre class="code"><span class="cm">// Publisher side — two groups, two recipients</span>
+<span class="kw">const</span> clientPub     = <span class="kw">new</span> <span class="fn">BtnPublisher</span>(<span class="kw">null</span>);
+<span class="kw">const</span> compliancePub = <span class="kw">new</span> <span class="fn">BtnPublisher</span>(<span class="kw">null</span>);
+
+<span class="kw">const</span> clientKit     = clientPub.<span class="fn">mint</span>();     <span class="cm">// issued to the client</span>
+<span class="kw">const</span> complianceKit = compliancePub.<span class="fn">mint</span>(); <span class="cm">// issued to compliance</span>
+
+<span class="cm">// Each entry carries two sealed groups</span>
+entry[<span class="str">"client"</span>]     = { ciphertext: <span class="fn">seal</span>(clientPub,     { balance, action }) };
+entry[<span class="str">"compliance"</span>] = { ciphertext: <span class="fn">seal</span>(compliancePub, { risk_score, flag }) };</pre>
+        <div class="run-bar">
+          <button class="run" id="keys-generate">Generate stream</button>
+          <span class="status" id="keys-status">Ready.</span>
+        </div>
+        <div class="three-up" id="keys-panels" style="display:none">
+          <div class="recipient-panel">
+            <h3><span class="kit-dot" id="dot-public"></span>No key</h3>
+            <div class="panel-output" id="panel-public">—</div>
+          </div>
+          <div class="recipient-panel">
+            <h3><span class="kit-dot" id="dot-client"></span>Client kit</h3>
+            <div class="panel-output" id="panel-client">—</div>
+            <br>
+            <button id="btn-client-kit" style="font-size:11px">Load client kit</button>
+          </div>
+          <div class="recipient-panel">
+            <h3><span class="kit-dot" id="dot-compliance"></span>Compliance kit</h3>
+            <div class="panel-output" id="panel-compliance">—</div>
+            <br>
+            <button id="btn-compliance-kit" style="font-size:11px">Load compliance kit</button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -719,6 +828,109 @@
   });
 
   buildDemoStream();
+
+  // ── Keys: multi-recipient demo ────────────────────────────────────────────
+
+  const keysState = { entries: [], clientKs: null, complianceKs: null, clientLoaded: false, complianceLoaded: false };
+
+  const ADVISOR_EVENTS = [
+    { event_type: "session.opened",        level: "info",    pub: { client: "Hartwell, J.", advisor: "Chen, M." } },
+    { event_type: "wealth.recommendation", level: "info",    pub: { ticker: "AAPL", action: "HOLD"  }, client: { account_balance: 412500, next_review: "2026-09-01" },     compliance: { risk_score: 0.28, concentration_ok: true } },
+    { event_type: "wealth.recommendation", level: "info",    pub: { ticker: "NVDA", action: "BUY"   }, client: { account_balance: 411200, limit_price: 890 },              compliance: { risk_score: 0.31, concentration_limit: "flagged" } },
+    { event_type: "wealth.recommendation", level: "info",    pub: { ticker: "BRK.B", action: "BUY"  }, client: { account_balance: 409800, next_review: "2026-09-01" },     compliance: { risk_score: 0.26, concentration_ok: true } },
+    { event_type: "compliance.alert",      level: "warning", pub: { rule: "concentration_limit" },     client: { message: "Portfolio rebalancing required" },              compliance: { flagged: "NVDA", pct: 0.38, threshold: 0.30 } },
+    { event_type: "session.closed",        level: "info",    pub: { duration_s: 318, actions: 3 } },
+  ];
+
+  function buildKeysStream() {
+    const { BtnPublisher } = tn;
+    const clientPub     = new BtnPublisher(null);
+    const compliancePub = new BtnPublisher(null);
+
+    const clientKit     = clientPub.mint();
+    const complianceKit = compliancePub.mint();
+
+    const makeKs = (kit) => {
+      const pubId = Array.from(tn.btnKitPublisherId(kit)).map(b => b.toString(16).padStart(2,"0")).join("");
+      return tn.keystoreFromJson(JSON.stringify({ keystores: [{ publisher_id: pubId, kits: [b64(kit)] }] }));
+    };
+
+    keysState.clientKs     = makeKs(clientKit);
+    keysState.complianceKs = makeKs(complianceKit);
+
+    return ADVISOR_EVENTS.map((ev, i) => {
+      const envelope = {
+        event_type: ev.event_type, level: ev.level,
+        timestamp: new Date(Date.now() + i * 900).toISOString(),
+        device_identity: "did:key:zAdvisorChenM1aBcDeFgHiJ",
+        sequence: i + 1, event_id: `ev_${i+1}`, run_id: "run_keys",
+        prev_hash: i === 0 ? "0".repeat(64) : `h${i}`, row_hash: `h${i+1}`, signature: `s${i+1}`,
+        ...ev.pub,
+      };
+      if (ev.client)     envelope["client"]     = { ciphertext: b64(clientPub.encrypt(new TextEncoder().encode(JSON.stringify(ev.client)))) };
+      if (ev.compliance) envelope["compliance"] = { ciphertext: b64(compliancePub.encrypt(new TextEncoder().encode(JSON.stringify(ev.compliance)))) };
+      return envelope;
+    });
+  }
+
+  function renderPanel(panelId, dotId, entries, keystore) {
+    const panel = document.getElementById(panelId);
+    const dot   = document.getElementById(dotId);
+    const lines = entries.map(envelope => {
+      const entry  = tn.decodeEntry(envelope, keystore ?? undefined);
+      const ts     = new Date(entry.timestamp).toISOString().slice(11, 23);
+      const fields = Object.keys(entry.fields ?? {}).length ? " " + JSON.stringify(entry.fields) : "";
+      const sealed = entry.hidden_groups.length
+        ? " " + entry.hidden_groups.map(g => `<span class="sealed-pill">${g}</span>`).join(" ")
+        : "";
+      return `<span class="dim">${ts}</span>  <span class="${levelClass(entry.level)}">${entry.level.toUpperCase().padEnd(7)}</span>  ${entry.event_type}<span class="dim">${esc(fields)}</span>${sealed}`;
+    });
+    panel.innerHTML = lines.join("\n");
+    panel.className = "panel-output has-content";
+    dot.className = "kit-dot" + (keystore ? " active" : "");
+  }
+
+  function renderAll() {
+    const entries = keysState.entries;
+    renderPanel("panel-public",     "dot-public",     entries, null);
+    renderPanel("panel-client",     "dot-client",     entries, keysState.clientLoaded     ? keysState.clientKs     : null);
+    renderPanel("panel-compliance", "dot-compliance", entries, keysState.complianceLoaded ? keysState.complianceKs : null);
+  }
+
+  document.getElementById("keys-generate").addEventListener("click", () => {
+    setStatus("keys", "generating...");
+    document.getElementById("keys-generate").disabled = true;
+    try {
+      keysState.entries = buildKeysStream();
+      keysState.clientLoaded = false;
+      keysState.complianceLoaded = false;
+      document.getElementById("keys-panels").style.display = "";
+      document.getElementById("btn-client-kit").textContent = "Load client kit";
+      document.getElementById("btn-compliance-kit").textContent = "Load compliance kit";
+      renderAll();
+      setStatus("keys", `${keysState.entries.length} entries — load a kit to unlock a group`, "");
+    } catch(e) {
+      setStatus("keys", String(e), "err");
+    } finally {
+      document.getElementById("keys-generate").disabled = false;
+    }
+  });
+
+  document.getElementById("btn-client-kit").addEventListener("click", () => {
+    keysState.clientLoaded = !keysState.clientLoaded;
+    document.getElementById("btn-client-kit").textContent = keysState.clientLoaded ? "Clear client kit" : "Load client kit";
+    renderAll();
+    const sealed = keysState.complianceLoaded ? 0 : keysState.entries.filter(e => e.compliance).length;
+    setStatus("keys", keysState.clientLoaded ? `client group open${sealed ? `, compliance still sealed` : ""}` : "client kit cleared", keysState.clientLoaded ? "ok" : "");
+  });
+
+  document.getElementById("btn-compliance-kit").addEventListener("click", () => {
+    keysState.complianceLoaded = !keysState.complianceLoaded;
+    document.getElementById("btn-compliance-kit").textContent = keysState.complianceLoaded ? "Clear compliance kit" : "Load compliance kit";
+    renderAll();
+    const sealed = keysState.clientLoaded ? 0 : keysState.entries.filter(e => e.client).length;
+    setStatus("keys", keysState.complianceLoaded ? `compliance group open${sealed ? `, client still sealed` : ""}` : "compliance kit cleared", keysState.complianceLoaded ? "ok" : "");
+  });
 
   const runners = { init: runInit, emit: runEmit, read: runRead, context: runContext, decode: runDecode, chain: runChain };
 
