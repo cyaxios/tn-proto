@@ -518,16 +518,25 @@
           <span class="badge">Multi-recipient</span>
           <p>Each group is sealed under a different publisher. Each kit only opens its own group.</p>
         </div>
-<pre class="code"><span class="cm">// Publisher side — two groups, two recipients</span>
-<span class="kw">const</span> clientPub     = <span class="kw">new</span> <span class="fn">BtnPublisher</span>(<span class="kw">null</span>);
-<span class="kw">const</span> compliancePub = <span class="kw">new</span> <span class="fn">BtnPublisher</span>(<span class="kw">null</span>);
+<pre class="code"><span class="cm"># tn.yaml — declare groups, assign fields, name recipients</span>
+<span class="id">groups</span>:
+  <span class="id">client</span>:
+    <span class="id">cipher</span>: <span class="str">btn</span>
+    <span class="id">fields</span>: [<span class="str">account_balance</span>, <span class="str">next_review</span>, <span class="str">limit_price</span>]
+    <span class="id">recipients</span>:
+      - <span class="id">recipient_identity</span>: <span class="str">did:key:zClient...</span>
+  <span class="id">compliance</span>:
+    <span class="id">cipher</span>: <span class="str">btn</span>
+    <span class="id">fields</span>: [<span class="str">risk_score</span>, <span class="str">concentration_limit</span>]
+    <span class="id">recipients</span>:
+      - <span class="id">recipient_identity</span>: <span class="str">did:key:zCompliance...</span>
 
-<span class="kw">const</span> clientKit     = clientPub.<span class="fn">mint</span>();     <span class="cm">// issued to the client</span>
-<span class="kw">const</span> complianceKit = compliancePub.<span class="fn">mint</span>(); <span class="cm">// issued to compliance</span>
-
-<span class="cm">// Each entry carries two sealed groups</span>
-entry[<span class="str">"client"</span>]     = { ciphertext: <span class="fn">seal</span>(clientPub,     { balance, action }) };
-entry[<span class="str">"compliance"</span>] = { ciphertext: <span class="fn">seal</span>(compliancePub, { risk_score, flag }) };</pre>
+<span class="cm">// Then emit normally — the SDK routes and encrypts each field</span>
+<span class="fn">tn.info</span>(<span class="str">"wealth.recommendation"</span>, {
+  ticker: <span class="str">"NVDA"</span>,             <span class="cm">// public — not in any group</span>
+  account_balance: <span class="num">411200</span>,  <span class="cm">// → client group (sealed)</span>
+  risk_score: <span class="num">0.31</span>,          <span class="cm">// → compliance group (sealed)</span>
+});</pre>
         <div class="run-bar">
           <button class="run" id="keys-generate">Generate stream</button>
           <span class="status" id="keys-status">Ready.</span>
