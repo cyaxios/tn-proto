@@ -685,18 +685,19 @@
 
   async function runChain() {
     setStatus("chain", "running...");
-    const entries = tn.read();
-    if (!entries.length) {
+    const raw = tn.readRaw();
+    if (!raw.length) {
       setOutput("chain", '<span class="dim">no entries — run Emit first</span>');
       setStatus("chain", "empty");
       return;
     }
-    const e = entries[0];
+    const env = raw[0].envelope ?? raw[0];
+    const sig = String(env.signature ?? "");
     setOutput("chain", [
-      `<span class="dim">seq       </span>${e.sequence}`,
-      `<span class="dim">row_hash  </span>${esc(e.row_hash)}`,
-      `<span class="dim">prev_hash </span>${esc(e.prev_hash)}`,
-      `<span class="dim">signature </span>${esc(e.signature.slice(0, 48))}...`,
+      `<span class="dim">seq       </span>${env.sequence}`,
+      `<span class="dim">row_hash  </span>${esc(String(env.row_hash ?? ""))}`,
+      `<span class="dim">prev_hash </span>${esc(String(env.prev_hash ?? ""))}`,
+      `<span class="dim">signature </span>${esc(sig.slice(0, 56))}...`,
     ].join("\n"));
     setStatus("chain", "ok", "ok");
   }
