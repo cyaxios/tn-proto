@@ -5,6 +5,20 @@ is there an UNIMPLEMENTED surface (missing verb, throw-stub, or a `.tnpkg`
 kind one side can produce but the other can't consume) that breaks it? Not
 "is it Rust-backed", not perf - just interop that works vs doesn't.
 
+## STATUS (updated, commit 1992093)
+
+- FIXED + cross-impl-proven both directions against real Python: #1
+  contact_update, #2 identity_seed (produce), #3 vault.setLinkState. Tests:
+  contact_update_interop / identity_seed_interop / vault_set_link_state_interop.
+- PROVEN already working (no code change needed): #5 project_seed
+  (backup/restore). Test: project_seed_interop.
+- REMAINING unproven: #4 full_keystore (no cross-impl round-trip test yet).
+- Out of scope: browser tier (throw-stubs), JWE (offer / enrolment /
+  recipient_invite).
+
+The detailed sections below are the original evidence trail; the status
+block above is current.
+
 Ground truth (verified against `ts-sdk/src/runtime/node_runtime.ts`):
 - TS **export** produces: `admin_log_snapshot`, `offer`/`enrolment`,
   `kit_bundle`/`full_keystore`, `project_seed` (`:1290-1315`). Does NOT
