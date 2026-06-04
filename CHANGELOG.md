@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1a2] - 2026-06-04 -- Python<->TypeScript round-trip closure
+
+Closes the remaining cross-language round-trip gaps so a package produced by
+one SDK is consumed by the other, finishes the first admin-state unification
+slice, and makes the TypeScript runtime surface report itself honestly.
+
+### Cross-language round-trip
+
+- TypeScript now both produces and consumes `contact_update`, so a Python or
+  vault-minted contact-roster update applies on the TS side and the reverse.
+- TypeScript can now produce `identity_seed` (it already consumed it), so a
+  TS-created identity can bootstrap a Python install.
+- `tn.vault.setLinkState` is implemented in TypeScript (it previously threw):
+  it writes `ceremony.mode` to the authoritative yaml, matching Python's
+  `tn.admin.set_link_state`. Namespaced under `tn.vault` in TS, `tn.admin`
+  in Python.
+- `project_seed` backup/restore is proven to round-trip both directions
+  (device identity, groups, and a fresh log read/write on the restored
+  ceremony). Each closed gap ships with a cross-implementation interop test.
+
+### SDK parity
+
+- `tn.admin.state()` in TypeScript derives `groups` and `ceremony.created_at`
+  from config when the cache has not seen `tn.ceremony.init`, matching
+  Python's output. Covered by a cross-implementation golden test.
+- `usingRust()` reports the actual wasm activation state instead of a static
+  value, and the TS module surface mirrors Python (`watch` / `scope` / `use`
+  / `listCeremonies` / `session` / `absorb` / `current_config` plus the
+  `admin` / `pkg` / `vault` / `agents` / `handlers` namespaces).
+- Config-derived yaml paths stay portable: no machine-local absolute path is
+  serialized into a yaml or `.tnpkg`.
+
+### tn-core
+
+- Honor Windows-absolute paths on wasm32 so the runtime no longer
+  double-joins a log path (the path-doubling bug on the browser/extension
+  wasm build).
+
+### CLI and kit bundles
+
+- `tn-js absorb` verb, at parity with Python `tn absorb`.
+- `compile` produces a canonical signed `kit_bundle` that absorbs cleanly;
+  `rotate` signs kits with the ceremony key; `tn bundle` no longer reads a
+  dead CLI attribute.
+
+### Tooling and docs
+
+- Parity-gate self-tests and allowlist reasons updated for the implemented
+  `setLinkState`, so no allowlist reason describes a shipped verb as a stub.
+- New docs: Python<->TypeScript round-trip gap analysis, an opinionated
+  adversarial audit playbook, and the SDK unification (Direction A) roadmap.
+
+### Packaging
+
+- `tn-protocol` / `tn-core` / `tn-btn` at `0.5.1a2`; `@tnproto/sdk` at
+  `0.5.1-alpha.2`. Wheels for macOS (arm64), Linux (manylinux x86_64), and
+  Windows (amd64), plus sdists.
+
 ## [0.5.1a1] - 2026-06-03 -- cross-language parity bar + vault link/sync fixes
 
 Puts Python, TypeScript, and the browser on one verified wire format and
