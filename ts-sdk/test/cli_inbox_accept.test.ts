@@ -79,6 +79,9 @@ function buildInviteZip(
     hash?: string | null;
     omitManifest?: boolean;
     omitKit?: boolean;
+    /** Inner kit entry name. Defaults to the legacy `kit.tnpkg`; pass
+     *  `<group>.btn.mykit` to mirror the real server's wrapper. */
+    kitEntry?: string;
   } = {},
 ): Uint8Array {
   const kit = opts.kit ?? new TextEncoder().encode("fake-kit-bytes-for-test");
@@ -98,7 +101,7 @@ function buildInviteZip(
     });
   }
   if (!opts.omitKit) {
-    entries.push({ name: "kit.tnpkg", data: kit });
+    entries.push({ name: opts.kitEntry ?? "kit.tnpkg", data: kit });
   }
   return packTnpkg(entries);
 }
@@ -173,6 +176,46 @@ test("accepting over an existing kit backs it up to .previous.<ts>", async () =>
     );
     const kitDest = join(c.keystorePath, "payments.btn.mykit");
     assert.deepEqual(new Uint8Array(readFileSync(kitDest)), second);
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+test("accepts the inner kit under the REAL server entry name <group>.btn.mykit (exit 0)", async () => {
+  // Bug-fix: the production invitation producer (tn_proto_web
+  // _make_invitation_zip / _kit_entry_name) names the inner kit
+  // `<group>.btn.mykit`, NOT the legacy `kit.tnpkg`. Before the fix, accept
+  // only looked up `kit.tnpkg` and raised "missing kit.tnpkg" on a genuine
+  // server-minted zip. Pack the kit under the real name and prove accept
+  // finds, hash-verifies, and installs it.
+  //
+  // This is a fixture-level bug-fix test, not a full round-trip. A faithful
+  // end-to-end round-trip (mint a real recipient-bound invite zip, then
+  // accept it) is BLOCKED inside tn_proto: there is no CLI/SDK invite-mint
+  // verb — only tn_proto_web mints the wrapper (see
+  // docs/cli-test-plans/inbox_accept.md). That test is intentionally left
+  // OUT rather than faked.
+  const c = await freshCeremony("ts-inbox-realname-");
+  // Non-default group so the ceremony's own `default` self-kit stays intact
+  // across re-inits; foreign-group bytes are never validated on init.
+  const kit = new TextEncoder().encode("server-minted-kit-bytes");
+  const zip = join(c.dir, "tn-invite-real.zip");
+  writeFileSync(
+    zip,
+    buildInviteZip({ kit, group: "payments", leaf: 4, kitEntry: "payments.btn.mykit" }),
+  );
+  const s = sinks();
+  try {
+    const code = await inboxAcceptCmd({
+      zipPath: zip,
+      yaml: c.yamlPath,
+      stdout: s.stdout,
+      stderr: s.stderr,
+    });
+    assert.equal(code, 0, `expected exit 0; stderr=${s.err}`);
+    assert.match(s.out, /Installed kit for group 'payments' \(leaf 4\)/);
+    const kitDest = join(c.keystorePath, "payments.btn.mykit");
+    assert.deepEqual(new Uint8Array(readFileSync(kitDest)), kit);
   } finally {
     rmSync(c.dir, { recursive: true, force: true });
   }

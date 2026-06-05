@@ -38,11 +38,21 @@ from tn.inbox import InboxError, accept, list_local
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
-def _make_zip(tmp: Path, kit_bytes: bytes, manifest: dict) -> Path:
-    """Write a valid invitation zip into tmp dir and return its path."""
+def _make_zip(
+    tmp: Path,
+    kit_bytes: bytes,
+    manifest: dict,
+    kit_entry: str = "kit.tnpkg",
+) -> Path:
+    """Write a valid invitation zip into tmp dir and return its path.
+
+    ``kit_entry`` is the inner kit filename. Defaults to the legacy
+    ``kit.tnpkg``; pass ``<group>.btn.mykit`` to mirror what the real
+    server (``tn_proto_web`` ``_make_invitation_zip``) actually produces.
+    """
     zip_path = tmp / "tn-invite-TEST.zip"
     with zipfile.ZipFile(str(zip_path), "w") as zf:
-        zf.writestr("kit.tnpkg", kit_bytes)
+        zf.writestr(kit_entry, kit_bytes)
         zf.writestr("manifest.json", json.dumps(manifest))
     return zip_path
 
@@ -167,6 +177,93 @@ def test_accept_happy_path(tmp_path):
 
     # Attestation emitted.
     assert any(ev == "tn.enrolment.absorbed" for ev, _ in captured_events)
+
+
+def test_accept_real_server_kit_entry_name(tmp_path):
+    """Bug-fix: accept the inner kit named with the REAL server entry name.
+
+    The production invitation producer (``tn_proto_web``
+    ``_make_invitation_zip`` / ``_kit_entry_name``) names the inner kit
+    ``<group>.btn.mykit``, NOT the legacy ``kit.tnpkg``. Before the fix,
+    ``accept`` only looked up ``kit.tnpkg`` and so raised "missing
+    kit.tnpkg" on a genuine server-minted zip. This test packs the kit
+    under the real name and proves ``accept`` finds, hash-verifies, and
+    installs it.
+
+    Note: this is a fixture-level bug-fix test, not a full round-trip.
+    A faithful end-to-end round-trip (mint a real recipient-bound invite
+    zip, then accept it) is BLOCKED inside ``tn_proto``: no CLI/SDK
+    invite-mint verb exists — only ``tn_proto_web`` mints the wrapper
+    (see docs/cli-test-plans/inbox_accept.md). That test is intentionally
+    left OUT rather than faked.
+    """
+    kit_bytes = b"\x12\x34\x56" * 16
+    sha = _sha256(kit_bytes)
+    manifest = {
+        "group_name": "payments",
+        "leaf_index": 9,
+        "from_email": "alice@demo.local",
+        "from_account_did": "did:vault:alice",
+        "kit_sha256": sha,
+    }
+    # REAL server entry name: <group>.btn.mykit, not kit.tnpkg.
+    zip_path = _make_zip(tmp_path, kit_bytes, manifest, kit_entry="payments.btn.mykit")
+    yaml_path = tmp_path / "tn.yaml"
+    _write_yaml(yaml_path, tmp_path / ".tn/tn/keys")
+
+    with (
+        mock.patch("tn.init"),
+        mock.patch("tn.info"),
+        mock.patch("tn.flush_and_close"),
+    ):
+        import tn.inbox as inbox_module
+
+        result = inbox_module.accept(zip_path, yaml_path=yaml_path)
+
+    kit_path = tmp_path / ".tn/tn/keys" / "payments.btn.mykit"
+    assert kit_path.exists()
+    assert kit_path.read_bytes() == kit_bytes
+    assert result["group_name"] == "payments"
+    assert result["leaf_index"] == 9
+    assert result["kit_path"] == str(kit_path)
+
+
+def test_accept_missing_kit_entry(tmp_path):
+    """InboxError raised when the zip has a manifest but no kit entry."""
+    zip_path = tmp_path / "tn-invite-TEST.zip"
+    with zipfile.ZipFile(str(zip_path), "w") as zf:
+        # Only a manifest; no kit.tnpkg / <group>.btn.mykit entry.
+        zf.writestr(
+            "manifest.json",
+            json.dumps({"group_name": "default", "leaf_index": 1}),
+        )
+    yaml_path = tmp_path / "tn.yaml"
+    _write_yaml(yaml_path, tmp_path / ".tn/tn/keys")
+
+    with pytest.raises(InboxError, match="missing kit"):
+        accept(zip_path, yaml_path=yaml_path)
+
+
+def test_accept_garbage_zip(tmp_path):
+    """InboxError raised for non-zip / garbage bytes."""
+    bad = tmp_path / "tn-invite-garbage.zip"
+    bad.write_bytes(b"this is not a zip at all")
+    yaml_path = tmp_path / "tn.yaml"
+    _write_yaml(yaml_path, tmp_path / ".tn/tn/keys")
+
+    with pytest.raises(InboxError, match="Invalid zip file"):
+        accept(bad, yaml_path=yaml_path)
+
+
+def test_accept_missing_yaml(tmp_path):
+    """InboxError raised when the tn.yaml does not exist."""
+    kit_bytes = b"\x00" * 32
+    manifest = {"group_name": "default", "leaf_index": 1, "kit_sha256": _sha256(kit_bytes)}
+    zip_path = _make_zip(tmp_path, kit_bytes, manifest)
+    missing_yaml = tmp_path / "does-not-exist.yaml"
+
+    with pytest.raises(InboxError, match="tn.yaml not found"):
+        accept(zip_path, yaml_path=missing_yaml)
 
 
 def test_accept_backs_up_existing_kit(tmp_path):

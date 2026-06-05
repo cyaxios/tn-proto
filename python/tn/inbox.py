@@ -20,7 +20,6 @@ import datetime
 import hashlib
 import json
 import sys
-import tempfile
 import zipfile
 from pathlib import Path
 
@@ -37,6 +36,31 @@ def _now_iso() -> str:
 
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _find_kit_entry(names: list[str], group_name: str) -> str | None:
+    """Locate the inner kit entry name inside an unpacked invitation zip.
+
+    The real server (`tn_proto_web` `_make_invitation_zip` /
+    `_kit_entry_name`) names the inner kit ``<group>.btn.mykit``; older
+    wrappers used the legacy name ``kit.tnpkg``. Accept either explicitly,
+    and as a final fallback any single ``*.tnpkg`` / ``*.btn.mykit`` entry
+    that is not the manifest. Returns ``None`` when no kit entry exists.
+    """
+    members = [n for n in names if n != "manifest.json"]
+    member_set = set(members)
+
+    # Preferred explicit names, in priority order.
+    for candidate in (f"{group_name}.btn.mykit", "kit.tnpkg"):
+        if candidate in member_set:
+            return candidate
+
+    # Fallback: a single kit-shaped entry.
+    kit_shaped = [n for n in members if n.endswith(".tnpkg") or n.endswith(".btn.mykit")]
+    if len(kit_shaped) == 1:
+        return kit_shaped[0]
+
+    return None
 
 
 def _verify_kit_hash(kit_bytes: bytes, manifest: dict) -> None:
@@ -85,20 +109,19 @@ def accept(zip_path: Path, yaml_path: Path | None = None) -> dict:
             "Run from a directory with a ceremony, or pass --yaml <path>."
         )
 
-    # 1. Unzip to a temp directory.
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        try:
-            with zipfile.ZipFile(str(zip_path), "r") as zf:
-                zf.extractall(str(tmp_dir))
-        except zipfile.BadZipFile as exc:
-            raise InboxError(f"Invalid zip file: {exc}") from exc
+    # 1. Open the outer invitation zip.
+    try:
+        zf = zipfile.ZipFile(str(zip_path), "r")
+    except zipfile.BadZipFile as exc:
+        raise InboxError(f"Invalid zip file: {exc}") from exc
+
+    with zf:
+        names = zf.namelist()
 
         # 2. Read manifest.
-        manifest_path = tmp_dir / "manifest.json"
-        if not manifest_path.exists():
+        if "manifest.json" not in names:
             raise InboxError("Invalid invitation zip: missing manifest.json")
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
 
         group_name = manifest.get("group_name", "default")
         leaf_index = manifest.get("leaf_index")
@@ -106,38 +129,40 @@ def accept(zip_path: Path, yaml_path: Path | None = None) -> dict:
         from_did = manifest.get("from_account_did", "")
         kit_sha256 = manifest.get("kit_sha256", "")
 
-        # 3. Read and verify kit bytes.
-        kit_source = tmp_dir / "kit.tnpkg"
-        if not kit_source.exists():
+        # 3. Read and verify kit bytes. The real server names the inner
+        #    kit ``<group>.btn.mykit``; the legacy name was ``kit.tnpkg``.
+        #    Accept either (and any single kit-shaped entry).
+        kit_entry = _find_kit_entry(names, group_name)
+        if kit_entry is None:
             raise InboxError("Invalid invitation zip: missing kit.tnpkg")
-        kit_bytes = kit_source.read_bytes()
-        _verify_kit_hash(kit_bytes, manifest)
+        kit_bytes = zf.read(kit_entry)
+    _verify_kit_hash(kit_bytes, manifest)
 
-        # 4. Locate Frank's keystore dir from tn.yaml.
-        # Honor the yaml's ``keystore.path``; the per-yaml-stem namespace
-        # default lives there now (FINDINGS #2). Fall back to the legacy
-        # ``./.tn/keys`` only when the yaml omits the field.
-        try:
-            import yaml as _yaml
+    # 4. Locate Frank's keystore dir from tn.yaml.
+    # Honor the yaml's ``keystore.path``; the per-yaml-stem namespace
+    # default lives there now (FINDINGS #2). Fall back to the legacy
+    # ``./.tn/keys`` only when the yaml omits the field.
+    try:
+        import yaml as _yaml
 
-            with open(yaml_path, encoding="utf-8") as f:
-                yaml_doc = _yaml.safe_load(f) or {}
-        except Exception as exc:
-            raise InboxError(f"Could not read tn.yaml: {exc}") from exc
+        with open(yaml_path, encoding="utf-8") as f:
+            yaml_doc = _yaml.safe_load(f) or {}
+    except Exception as exc:
+        raise InboxError(f"Could not read tn.yaml: {exc}") from exc
 
-        yaml_dir = yaml_path.parent
-        keystore_rel = (yaml_doc.get("keystore") or {}).get("path") or "./.tn/keys"
-        keystore_dir = (yaml_dir / keystore_rel).resolve()
-        keystore_dir.mkdir(parents=True, exist_ok=True)
+    yaml_dir = yaml_path.parent
+    keystore_rel = (yaml_doc.get("keystore") or {}).get("path") or "./.tn/keys"
+    keystore_dir = (yaml_dir / keystore_rel).resolve()
+    keystore_dir.mkdir(parents=True, exist_ok=True)
 
-        # 5. Install kit: rename existing to .previous.<timestamp>, then write.
-        kit_dest = keystore_dir / f"{group_name}.btn.mykit"
-        if kit_dest.exists():
-            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            previous = kit_dest.with_name(f"{group_name}.btn.mykit.previous.{ts}")
-            kit_dest.rename(previous)
-            print(f"  (Backed up existing kit to {previous.name})")
-        kit_dest.write_bytes(kit_bytes)
+    # 5. Install kit: rename existing to .previous.<timestamp>, then write.
+    kit_dest = keystore_dir / f"{group_name}.btn.mykit"
+    if kit_dest.exists():
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        previous = kit_dest.with_name(f"{group_name}.btn.mykit.previous.{ts}")
+        kit_dest.rename(previous)
+        print(f"  (Backed up existing kit to {previous.name})")
+    kit_dest.write_bytes(kit_bytes)
 
     # 6. Emit tn.enrolment.absorbed to Frank's local log.
     absorbed_at = _now_iso()

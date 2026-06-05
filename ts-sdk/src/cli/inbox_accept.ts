@@ -74,6 +74,26 @@ function backupStamp(): string {
   return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 }
 
+/** Locate the inner kit entry inside an unpacked invitation zip. The real
+ *  server (`tn_proto_web` `_make_invitation_zip` / `_kit_entry_name`) names
+ *  it `<group>.btn.mykit`; older wrappers used the legacy `kit.tnpkg`.
+ *  Accept either explicitly, then fall back to any single `*.tnpkg` /
+ *  `*.btn.mykit` entry. Returns `undefined` when no kit entry exists. Mirrors
+ *  `python/tn/inbox.py::_find_kit_entry`. */
+function findKitEntry(byName: Map<string, Uint8Array>, groupName: string): Uint8Array | undefined {
+  // Preferred explicit names, in priority order.
+  for (const candidate of [`${groupName}.btn.mykit`, "kit.tnpkg"]) {
+    const hit = byName.get(candidate);
+    if (hit !== undefined) return hit;
+  }
+  // Fallback: a single kit-shaped entry (excluding the manifest).
+  const kitShaped = [...byName.keys()].filter(
+    (n) => n !== "manifest.json" && (n.endsWith(".tnpkg") || n.endsWith(".btn.mykit")),
+  );
+  const only = kitShaped.length === 1 ? kitShaped[0] : undefined;
+  return only === undefined ? undefined : byName.get(only);
+}
+
 /** Verify `kitBytes` matches the sha256 recorded in the manifest. No-op when
  *  the manifest carries no `kit_sha256`. Mirrors `_verify_kit_hash`. */
 function verifyKitHash(kitBytes: Uint8Array, manifest: Record<string, unknown>): void {
@@ -150,8 +170,10 @@ export async function accept(
   const fromDid = String(manifest["from_account_did"] ?? "");
   const kitSha256 = String(manifest["kit_sha256"] ?? "");
 
-  // 3. Read and verify kit bytes.
-  const kitBytes = byName.get("kit.tnpkg");
+  // 3. Read and verify kit bytes. The real server names the inner kit
+  //    `<group>.btn.mykit`; the legacy name was `kit.tnpkg`. Accept either
+  //    (and any single kit-shaped entry).
+  const kitBytes = findKitEntry(byName, groupName);
   if (kitBytes === undefined) {
     throw new InboxError("Invalid invitation zip: missing kit.tnpkg");
   }
