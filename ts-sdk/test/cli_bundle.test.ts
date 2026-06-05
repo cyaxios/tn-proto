@@ -12,7 +12,7 @@
 
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -293,15 +293,16 @@ test("~/.tn/tn.yaml discovery branch (home fallback)", async () => {
   assert.equal(manifest.kind, "kit_bundle");
 });
 
-test("--seal-for-recipient is rejected (TS runtime gap) -> exit 1", async () => {
+test("--seal-for-recipient (real did:key) is rejected (TS runtime gap) -> exit 1, nothing written", async () => {
   const { dir, yamlPath, cleanup } = makeCeremony();
   cleanups.push(cleanup);
+  const out = join(dir, "sealed.tnpkg");
   const cap = captureConsole();
   let rc: number;
   try {
     rc = await bundleCmd({
-      recipientIdentity: RECIPIENT,
-      out: join(dir, "sealed.tnpkg"),
+      recipientIdentity: RECIPIENT, // a real did:key:z... shape
+      out,
       yaml: yamlPath,
       sealForRecipient: true,
     });
@@ -310,6 +311,10 @@ test("--seal-for-recipient is rejected (TS runtime gap) -> exit 1", async () => 
   }
   assert.equal(rc, 1);
   assert.ok(cap.err.some((l) => /seal-for-recipient is not supported/.test(l)));
+  // Safety: refusal must not write a (would-be unsealed) bundle to disk, and
+  // must not print a success "wrote" line.
+  assert.ok(!existsSync(out), "no .tnpkg should be written on seal refusal");
+  assert.ok(!cap.out.some((l) => /wrote/.test(l)), "no success line on refusal");
 });
 
 test("runtime init failure (malformed yaml) -> exit 1", async () => {

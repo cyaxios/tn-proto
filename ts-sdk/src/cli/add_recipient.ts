@@ -11,10 +11,20 @@
 // output filename is `./<safe-label>.tnpkg` in the cwd, matching the
 // student one-liner `tn add_recipient default professor`.
 //
-// Behaviour, flags, stdout, and exit codes mirror the Python verb:
+// Behaviour, flags, stdout, and exit codes mirror the Python verb, EXCEPT
+// for --seal-for-recipient: the TypeScript runtime has no producer path that
+// seals a bundle body for a recipient (the seal primitives in
+// core/recipient_seal.ts are wired into the consumer/absorb and browser
+// project_seed paths only — `bundleForRecipient` always writes a plaintext
+// body). So rather than silently shipping an UNSEALED bundle when the
+// operator asked for sealing, this verb refuses --seal-for-recipient in ALL
+// cases:
 //   - exit 0 on success (prints `wrote`, `group:`, `recipient:` lines)
-//   - exit 2 when `--seal-for-recipient` is combined with a label / synthetic
-//     DID that has no embedded base58 public key to wrap under.
+//   - exit 2 when --seal-for-recipient is combined with a label / synthetic
+//     placeholder DID that has no embedded base58 public key to wrap under.
+//   - exit 1 when --seal-for-recipient is requested for a real did:key (the
+//     TS runtime gap — Python would seal here; TS cannot, and must not write
+//     an unsealed bundle in its place). Matches `tn bundle`'s refusal.
 //
 // The mint + bundle itself is delegated to the existing SDK surface
 // (`Tn.init(...).pkg.bundleForRecipient`) — no crypto is re-implemented here.
@@ -69,23 +79,36 @@ export async function addRecipientCmd(opts: AddRecipientOpts): Promise<number> {
     outDefaultStem = safeStem(label) || "recipient";
   }
 
-  // --seal-for-recipient needs a real key-DID with an embedded base58 public
-  // key. A friendly label synthesizes a `did:key:zLabel-*` placeholder that
-  // has nothing to wrap under, so reject the combination with a clear message
-  // (matches Python's exit code 2).
-  if (
-    opts.sealForRecipient &&
-    (!label.startsWith("did:") || recipientDid.startsWith("did:key:zLabel-"))
-  ) {
+  if (opts.sealForRecipient) {
+    // Two refusal paths, both before any kit is written.
+    //
+    // 1) Label / synthetic placeholder DID: there is no embedded base58
+    //    public key to wrap under. Reject with exit 2 (mirrors Python).
+    if (!label.startsWith("did:") || recipientDid.startsWith("did:key:zLabel-")) {
+      err.write(
+        "[tn add_recipient] error: --seal-for-recipient requires a real " +
+          "key-DID for the recipient (one with an embedded base58 public " +
+          "key). Friendly labels synthesize a placeholder DID that has no " +
+          "public key, so the seal step has nothing to wrap under. Got " +
+          `${JSON.stringify(label)}. Pass the recipient's real did:key:z... instead, or ` +
+          "drop --seal-for-recipient to ship an unsealed kit bundle.\n",
+      );
+      return 2;
+    }
+
+    // 2) Real did:key: the seal primitives exist, but the TS runtime has no
+    //    PRODUCER path that seals a bundle body for a recipient
+    //    (bundleForRecipient always writes a plaintext body). Refuse rather
+    //    than silently writing an UNSEALED bundle when the operator asked for
+    //    sealing. Matches `tn bundle`'s refusal (exit 1).
     err.write(
-      "[tn add_recipient] error: --seal-for-recipient requires a real " +
-        "key-DID for the recipient (one with an embedded base58 public " +
-        "key). Friendly labels synthesize a placeholder DID that has no " +
-        "public key, so the seal step has nothing to wrap under. Got " +
-        `${JSON.stringify(label)}. Pass the recipient's real did:key:z... instead, or ` +
-        "drop --seal-for-recipient to ship an unsealed kit bundle.\n",
+      "[tn add_recipient] error: --seal-for-recipient is not supported by " +
+        "the TypeScript runtime yet; bundleForRecipient writes an unsealed " +
+        "body, so honoring the flag here would silently ship an UNSEALED " +
+        "bundle. Run this ceremony from Python to seal the bundle body, or " +
+        "drop --seal-for-recipient to knowingly ship an unsealed kit bundle.\n",
     );
-    return 2;
+    return 1;
   }
 
   const outPath = opts.out

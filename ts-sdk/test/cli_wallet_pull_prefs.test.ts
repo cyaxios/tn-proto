@@ -8,9 +8,11 @@
 
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Identity } from "../src/identity.js";
 import { walletPullPrefsCmd } from "../src/cli/wallet_pull_prefs.js";
@@ -206,6 +208,26 @@ test("wallet pull-prefs — preserves an existing prefs object's sibling keys", 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// Subprocess test: the bin wrapper must intercept `--help` and print usage
+// rather than dialing the vault (which throws an uncaught `fetch failed`
+// ECONNREFUSED when no host is reachable). This guards the regression where
+// `--help` fell through the arg parser straight into walletPullPrefsCmd.
+test("wallet pull-prefs --help — bin wrapper prints usage, exits clean, no stack trace", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const binPath = join(here, "..", "bin", "tn-js.mjs");
+
+  const res = spawnSync(process.execPath, [binPath, "wallet", "pull-prefs", "--help"], {
+    encoding: "utf8",
+  });
+
+  // Exited cleanly via process.exit, not via an uncaught throw.
+  assert.equal(res.status, 0, `expected exit 0, got ${res.status}; stderr:\n${res.stderr}`);
+  // No uncaught error / stack trace leaked to stderr.
+  assert.doesNotMatch(res.stderr, /fetch failed|ECONNREFUSED|at \w|TypeError|Node\.js v/);
+  // Usage line printed to stdout.
+  assert.match(res.stdout, /usage: tn wallet pull-prefs/);
 });
 
 test("wallet pull-prefs — default stdout/stderr sinks (smoke: no sink args)", async () => {

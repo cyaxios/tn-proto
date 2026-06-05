@@ -194,6 +194,35 @@ test("add_recipient --seal-for-recipient with a did:key:zLabel- placeholder is r
   }
 });
 
+test("add_recipient --seal-for-recipient with a REAL did:key is rejected (exit 1, nothing written)", async () => {
+  // The previously-silent-wrong case: a real did:key used to fall through the
+  // label guard and write an UNSEALED bundle while the operator asked for
+  // sealing. The TS runtime has no producer seal path, so this must now refuse
+  // (exit 1) and write nothing — never silently ship an unsealed bundle.
+  const { dir, yamlPath } = await freshCeremony();
+  const stdout = makeSink();
+  const stderr = makeSink();
+  const did = "did:key:z6MkRealReaderForSeal";
+  const outPath = join(dir, "sealed-real.tnpkg");
+  try {
+    const code = await addRecipientCmd({
+      group: "default",
+      recipient: did,
+      out: outPath,
+      yaml: yamlPath,
+      sealForRecipient: true,
+      stdout,
+      stderr,
+    });
+    assert.equal(code, 1, `expected exit 1; stderr=${stderr.text}`);
+    assert.match(stderr.text, /--seal-for-recipient is not supported/);
+    assert.equal(stdout.text, "", "no kit should be written on rejection");
+    assert.ok(!existsSync(outPath), "no .tnpkg should be written on rejection");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("add_recipient default stderr/stdout sinks are used when not supplied", async () => {
   // Exercises the `?? process.stdout` / `?? process.stderr` defaults by
   // omitting the sinks entirely. We just assert it succeeds and writes.

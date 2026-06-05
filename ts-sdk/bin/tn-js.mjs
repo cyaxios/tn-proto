@@ -112,7 +112,7 @@ async function sealCmd() {
     const dk = DeviceKey.fromSeed(seed);
 
     const rh = rowHash({
-      did: dk.did,
+      device_identity: dk.did,
       timestamp: inp.timestamp,
       eventId: inp.event_id,
       eventType: inp.event_type,
@@ -125,7 +125,7 @@ async function sealCmd() {
     const sigB64 = signatureB64(sig);
 
     const line = buildEnvelopeLine({
-      did: dk.did,
+      device_identity: dk.did,
       timestamp: inp.timestamp,
       eventId: inp.event_id,
       eventType: inp.event_type,
@@ -145,7 +145,7 @@ async function verifyCmd() {
     try {
       // Rebuild the row-hash input from public-only envelope fields.
       const {
-        did,
+        device_identity,
         timestamp,
         event_id,
         event_type,
@@ -158,7 +158,7 @@ async function verifyCmd() {
       } = env;
 
       for (const k of [
-        "did",
+        "device_identity",
         "timestamp",
         "event_id",
         "event_type",
@@ -192,7 +192,7 @@ async function verifyCmd() {
       }
 
       const recomputed = rowHash({
-        did: asDid(did),
+        device_identity: asDid(device_identity),
         timestamp,
         eventId: event_id,
         eventType: event_type,
@@ -214,7 +214,7 @@ async function verifyCmd() {
       }
 
       const sig = signatureFromB64(asSignatureB64(signature));
-      const sigOk = verify(asDid(did), new Uint8Array(Buffer.from(row_hash, "utf8")), sig);
+      const sigOk = verify(asDid(device_identity), new Uint8Array(Buffer.from(row_hash, "utf8")), sig);
       if (!sigOk) {
         return stdout.write(
           JSON.stringify({ ok: false, reason: "bad signature", event_id }) + "\n",
@@ -224,7 +224,7 @@ async function verifyCmd() {
       stdout.write(
         JSON.stringify({
           ok: true,
-          did,
+          did: device_identity,
           event_type,
           event_id,
           row_hash,
@@ -1197,6 +1197,28 @@ async function walletCmd() {
   // wallet pull-prefs: refresh the global identity's account prefs from the
   // vault. Wraps cli/wallet_pull_prefs.js. --vault overrides the cached url.
   if (sub === "pull-prefs") {
+    // `--help`/`-h` (and any bad flag) must print usage and exit cleanly,
+    // never fall through to walletPullPrefsCmd (which dials the vault and
+    // throws an uncaught fetch error when no host is reachable).
+    if (rest.includes("--help") || rest.includes("-h")) {
+      stdout.write("usage: tn wallet pull-prefs [--vault <url>]\n");
+      return;
+    }
+    // --vault is the only flag this subcommand accepts; reject anything else
+    // before we try to reach the vault so a typo fails fast and cleanly.
+    for (let i = 0; i < rest.length; i += 1) {
+      const a = rest[i];
+      if (a === "--vault") {
+        i += 1; // skip its value
+        continue;
+      }
+      if (a.startsWith("-")) {
+        die(
+          `wallet pull-prefs: unknown flag ${a}. ` +
+            `usage: tn wallet pull-prefs [--vault <url>]`,
+        );
+      }
+    }
     process.exitCode = await walletPullPrefsCmd(
       opts.vaultUrl ? { vault: opts.vaultUrl } : {},
     );
