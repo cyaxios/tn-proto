@@ -56,10 +56,10 @@ import {
 
 import { ensureCeremonyOnDisk } from "../dist/multi.js";
 import { resolveVaultUrl } from "../dist/vault/url.js";
-import { Identity } from "../dist/identity.js";
+import { Identity, defaultIdentityPath } from "../dist/identity.js";
 import { AccountConnectError, AccountNamespace } from "../dist/account/index.js";
 import { VaultClient, VaultError, vaultIdentityFromDeviceKey } from "../dist/vault/client.js";
-import { WalletNamespace } from "../dist/wallet/index.js";
+import { WalletNamespace, readLinkState, readSyncQueue } from "../dist/wallet/index.js";
 import { restoreViaLoopback } from "../dist/wallet/restore.js";
 import { loadKeystore } from "../dist/runtime/keystore.js";
 
@@ -1149,6 +1149,54 @@ async function walletCmd() {
     return;
   }
 
+  if (sub === "status") {
+    // `tn-js wallet status [<yaml>]`
+    // Positional yaml arg ends up in opts.vaultUrl (the generic positional slot);
+    // --yaml <path> is also accepted for script use.
+    const yamlArg = opts.yaml ?? opts.vaultUrl ?? null;
+    const identityPath = defaultIdentityPath();
+    if (!existsSync(identityPath)) {
+      stdout.write(`No identity at ${identityPath}. Run \`tn init <project>\` first.\n`);
+      return;
+    }
+    const identity = Identity.load(identityPath);
+    stdout.write(`Identity: ${identity.did}\n`);
+    stdout.write(`  file:    ${identity.path}\n`);
+    stdout.write(`  linked:  ${identity.linkedVault ?? "(not linked)"}\n`);
+    stdout.write(`  prefs:   default_new_ceremony_mode=${identity.prefs.defaultNewCeremonyMode}\n`);
+    stdout.write(`           prefs_version=${identity.prefsVersion}\n`);
+    if (yamlArg) {
+      const yamlPath = pathResolve(yamlArg);
+      if (!existsSync(yamlPath)) {
+        stdout.write(`Ceremony: (no yaml at ${yamlPath})\n`);
+        return;
+      }
+      const linkState = readLinkState(yamlPath);
+      const tn = await tnInit(yamlPath);
+      const cfg = /** @type {Record<string, unknown>} */ (tn.config() ?? {});
+      await tnClose();
+      /** @type {Map<string, unknown>} */
+      const groups = cfg.groups instanceof Map ? cfg.groups : new Map();
+      const pending = readSyncQueue(linkState.ceremonyId);
+      stdout.write(`Ceremony: ${linkState.ceremonyId}\n`);
+      stdout.write(`  yaml:            ${yamlPath}\n`);
+      stdout.write(`  mode:            ${linkState.mode}\n`);
+      stdout.write(`  cipher:          ${String(cfg.cipher ?? "btn")}\n`);
+      stdout.write(`  linked_vault:    ${linkState.linkedVault || "(none)"}\n`);
+      stdout.write(`  linked_project:  ${linkState.linkedProjectId || "(none)"}\n`);
+      stdout.write(`  groups:          ${JSON.stringify([...groups.keys()])}\n`);
+      if (pending.length > 0) {
+        stdout.write(`  pending_sync:    ${pending.length} queued failure(s)\n`);
+        const latest = pending[pending.length - 1];
+        stdout.write(`    latest:        ${String(latest?.["error"] ?? "(no message)")}\n`);
+        stdout.write(`    run:           tn wallet sync ${yamlArg} --drain-queue\n`);
+      } else {
+        stdout.write(`  pending_sync:    (queue empty)\n`);
+      }
+    }
+    return;
+  }
+
   if (sub === "unlink") {
     if (!opts.yaml) die("wallet unlink: --yaml <path> is required");
     WalletNamespace.unlink(opts.yaml);
@@ -1158,6 +1206,7 @@ async function walletCmd() {
   if (sub !== "link") {
     die(
       `wallet: unknown subcommand ${sub}. try: ` +
+        `wallet status [<yaml>] | ` +
         `wallet link <vault-url> [--yaml <path>] [--name <project>] | ` +
         `wallet unlink --yaml <path> | ` +
         `wallet restore --vault <url> --out <dir>`,
@@ -1330,6 +1379,8 @@ switch (cmd) {
     process.stderr.write(
       "tn-js <init|wallet|account|vault|show|seal|verify|canonical|info|read|watch|streams|validate|compile|admin>\n" +
         "  init       [<yaml-path>] — initialize / attach to a ceremony, print receipt JSON\n" +
+        "  wallet status [<yaml>]\n" +
+        "             print identity + optional ceremony details\n" +
         "  wallet link <vault-url> --yaml <path> [--name <project>]\n" +
         "             create vault project + flip ceremony.mode to linked\n" +
         "  wallet unlink --yaml <path>\n" +

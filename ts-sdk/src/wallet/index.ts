@@ -10,7 +10,9 @@
 // Pattern: methods take an already-authed VaultClient + the ceremony's
 // yamlPath. Returning a structured result mirrors Python's dataclasses.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir, platform } from "node:os";
+import { join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { VaultError, type VaultClient } from "../vault/client.js";
@@ -63,11 +65,43 @@ function setLinkStateInYaml(
   writeFileSync(yamlPath, stringifyYaml(doc), "utf-8");
 }
 
+/** Mirrors Python admin._sync_queue_path: $TN_STATE_DIR/sync_queue/<id>.jsonl */
+function syncQueuePath(ceremonyId: string): string {
+  const override = process.env["TN_STATE_DIR"];
+  if (override) return join(override, "sync_queue", `${ceremonyId}.jsonl`);
+  const xdg = process.env["XDG_STATE_HOME"];
+  if (xdg) return join(xdg, "tn", "sync_queue", `${ceremonyId}.jsonl`);
+  if (platform() === "win32") {
+    const appdata = process.env["APPDATA"] ?? join(homedir(), "AppData", "Roaming");
+    return join(appdata, "tn", "sync_queue", `${ceremonyId}.jsonl`);
+  }
+  return join(homedir(), ".local", "state", "tn", "sync_queue", `${ceremonyId}.jsonl`);
+}
+
+/**
+ * Read pending autosync failures for a ceremony.
+ * Mirrors Python `tn.wallet.read_sync_queue(ceremony_id)`.
+ * Returns an empty list when the queue file doesn't exist.
+ */
+export function readSyncQueue(ceremonyId: string): Array<Record<string, unknown>> {
+  const p = syncQueuePath(ceremonyId);
+  if (!existsSync(p)) return [];
+  const out: Array<Record<string, unknown>> = [];
+  for (const line of readFileSync(p, "utf-8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      out.push(JSON.parse(trimmed) as Record<string, unknown>);
+    } catch { /* skip malformed lines */ }
+  }
+  return out;
+}
+
 /**
  * Read just the ceremony.mode and linked_vault from a yaml without
  * loading the full config. Lets `link` decide whether work is needed.
  */
-function readLinkState(yamlPath: string): { mode: string; linkedVault: string; linkedProjectId: string; projectName: string; ceremonyId: string } {
+export function readLinkState(yamlPath: string): { mode: string; linkedVault: string; linkedProjectId: string; projectName: string; ceremonyId: string } {
   const raw = readFileSync(yamlPath, "utf-8");
   const doc = parseYaml(raw) as CeremonyYamlShape;
   const c = doc.ceremony ?? {};
@@ -178,4 +212,4 @@ export class WalletNamespace {
 }
 
 // Internal exports for tests that want to verify yaml mutation directly.
-export const _internals = { setLinkStateInYaml, readLinkState };
+export const _internals = { setLinkStateInYaml, syncQueuePath };
