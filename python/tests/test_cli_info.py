@@ -169,7 +169,14 @@ def test_cmd_info_standard_warning_level(tmp_path: Path) -> None:
 
 def test_cmd_info_nonstandard_level_routes_through_log(tmp_path: Path) -> None:
     """A non-standard ``--level`` (e.g. 'trace') goes through tn.log and
-    lands verbatim — exercising the else branch."""
+    lands verbatim — exercising the else branch.
+
+    Asserting both the level string AND a carried field reach the entry
+    proves the level routed to ``level=`` (not into ``_sign``) and that
+    ``**fields`` was forwarded intact. If the else-branch call mis-routed
+    the level string into the ``bool | None`` ``_sign`` param, the Rust
+    ``emit`` raises ``TypeError`` and this goes RED.
+    """
     yaml_path = _fresh_yaml(tmp_path)
     rc = cmd_info(
         _ns(yaml=yaml_path, event="evt.trace", level="trace", field=["k=v"])
@@ -180,3 +187,32 @@ def test_cmd_info_nonstandard_level_routes_through_log(tmp_path: Path) -> None:
     assert hits, "trace event not found"
     assert hits[0].level == "trace"
     assert hits[0].fields["k"] == "v"
+
+
+def test_cmd_info_field_named_sign_cannot_hijack_signing(tmp_path: Path) -> None:
+    """A user ``--field _sign=...`` must NOT be able to hijack ``tn.log``'s
+    keyword-only ``_sign`` control on the non-standard-level path.
+
+    The fix passes ``_sign=None`` explicitly in the ``tn.log`` call, so a
+    ``**fields`` dict carrying a ``_sign`` key collides with that explicit
+    argument and Python raises ``TypeError: got multiple values for
+    keyword argument '_sign'`` — a clean failure at the Python call
+    boundary, refusing a user field that would otherwise mis-route a
+    string into the ``bool | None`` signing override.
+
+    Mutation-check: drop the explicit ``_sign=None`` (the pre-fix call
+    ``tn.log(args.event, level=level, **fields)``) and the ``_sign`` field
+    flows straight into the signing param; the failure (if any) surfaces
+    deeper in the Rust ``emit`` with a different message, so this
+    specific ``multiple values.*_sign`` assertion goes RED.
+    """
+    yaml_path = _fresh_yaml(tmp_path)
+    with pytest.raises(TypeError, match="multiple values.*_sign"):
+        cmd_info(
+            _ns(
+                yaml=yaml_path,
+                event="evt.hijack",
+                level="trace",
+                field=["_sign=oops", "k=v"],
+            )
+        )

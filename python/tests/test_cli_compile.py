@@ -22,7 +22,7 @@ import pytest
 import tn
 from tn.cli_compile import cmd_compile
 from tn.config import load_or_create
-from tn.tnpkg import _read_manifest
+from tn.tnpkg import _read_manifest, _verify_manifest_signature
 
 
 def _bootstrap_btn_keystore(tmp_path: Path) -> Path:
@@ -70,6 +70,14 @@ def test_compile_happy_readers_only(tmp_path: Path, capsys):
     assert any(name.startswith("body/") and name.endswith(".btn.mykit") for name in body)
     # No private-key marker on the readers-only path.
     assert "body/WARNING_CONTAINS_PRIVATE_KEYS" not in body
+    # The label is PERSISTED in the manifest (state.label), not merely
+    # echoed in the JSON. A re-read of the archive recovers it, mirroring
+    # the TS legacy manifest's top-level `label` field.
+    assert manifest.state is not None
+    assert manifest.state.get("label") == "my-kit"
+    # The injected label rides inside the signature domain — the re-signed
+    # manifest must still verify against the publisher's device key.
+    assert _verify_manifest_signature(manifest) is True
 
 
 def test_compile_kit_selection(tmp_path: Path, capsys):
@@ -84,6 +92,53 @@ def test_compile_kit_selection(tmp_path: Path, capsys):
     assert payload["kind"] == "readers-only"
     # Every bundled kit belongs to the requested group.
     assert payload["kits"] == ["default.btn.mykit"]
+
+
+def test_compile_label_persisted_in_reread(tmp_path: Path, capsys):
+    """The label survives a full re-read of the produced ``.tnpkg`` and the
+    re-signed manifest still verifies. This is the regression for the
+    --label gap: the SDK producer dropped the label, so a re-read used to
+    show no label even though the JSON echoed one."""
+    keystore = _bootstrap_btn_keystore(tmp_path)
+    out = tmp_path / "labelled.tnpkg"
+
+    rc = cmd_compile(
+        _ns(keystore=str(keystore), out=str(out), label="quarterly-readers")
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["label"] == "quarterly-readers"
+
+    # Re-open the archive from disk (fresh read, no in-memory state) and
+    # confirm the label is actually stored under manifest.state.label.
+    manifest, _body = _read_manifest(out)
+    assert manifest.state is not None
+    assert manifest.state.get("label") == "quarterly-readers"
+    # The producer's kit metadata is still present alongside the label.
+    assert manifest.state.get("kind") == "readers-only"
+    assert manifest.state.get("kits")
+    # Signature still valid after the label injection + re-sign.
+    assert _verify_manifest_signature(manifest) is True
+
+
+def test_compile_no_label_omits_state_label(tmp_path: Path, capsys):
+    """When --label is not given, no spurious label key is written into the
+    manifest state, and the manifest is the producer's original signature
+    (we don't needlessly re-sign)."""
+    keystore = _bootstrap_btn_keystore(tmp_path)
+    out = tmp_path / "nolabel.tnpkg"
+
+    rc = cmd_compile(_ns(keystore=str(keystore), out=str(out)))
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["label"] is None
+
+    manifest, _body = _read_manifest(out)
+    # No label key at all when none was requested.
+    assert manifest.state is not None
+    assert "label" not in manifest.state
+    # Producer signature is intact regardless.
+    assert _verify_manifest_signature(manifest) is True
 
 
 def test_compile_full_bundles_private_keys(tmp_path: Path, capsys):

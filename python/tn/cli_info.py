@@ -89,7 +89,13 @@ def cmd_info(args: Any) -> int:
     if level in _STANDARD_VERBS:
         getattr(tn, level)(args.event, **fields)
     else:
-        tn.log(args.event, level=level, **fields)
+        # ``level`` is the keyword-only level param; pass ``_sign=None``
+        # explicitly so the user-controlled ``**fields`` dict can't be
+        # type-matched against the keyword-only ``_sign`` parameter (a
+        # stray ``_sign`` key would mis-route there). This keeps the level
+        # string flowing to ``level=`` verbatim, mirroring the TS
+        # ``rt.emit(args.level, ...)``.
+        tn.log(args.event, level=level, _sign=None, **fields)
 
     sys.stdout.write(
         f"info: emitted event_type={args.event!r} level={level!r} "
