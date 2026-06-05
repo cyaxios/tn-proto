@@ -1,0 +1,7 @@
+.venv/
+tn_cloud_demo/
+__pycache__/
+*.db
+*.db-shm
+*.db-wal
+.tn-cloud/

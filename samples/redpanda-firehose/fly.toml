@@ -1,0 +1,40 @@
+app = "tn-redpanda"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # RP_ADVERTISE_HOST is set via: fly secrets set RP_ADVERTISE_HOST=tn-redpanda.fly.dev
+  # (must match the app name above + .fly.dev)
+
+[[vm]]
+  memory   = "512mb"
+  cpu_kind = "shared"
+  cpus     = 1
+
+[mounts]
+  source      = "redpanda_data"
+  destination = "/var/lib/redpanda/data"
+
+# Raw TCP pass-through for Kafka clients on port 9092.
+# Requires a dedicated IPv4: fly ips allocate-v4 --shared
+[[services]]
+  protocol             = "tcp"
+  internal_port        = 9092
+  auto_stop_machines   = false
+  auto_start_machines  = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port     = 9092
+    handlers = []
+
+# HTTP Proxy (optional REST producer path)
+[[services]]
+  protocol      = "tcp"
+  internal_port = 8082
+
+  [[services.ports]]
+    port     = 8082
+    handlers = ["http"]

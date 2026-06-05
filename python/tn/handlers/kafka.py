@@ -7,6 +7,7 @@ the result is checked against Apache's topic-name rules before publish.
 
 from __future__ import annotations
 
+import atexit
 import os
 import re
 from pathlib import Path
@@ -97,6 +98,15 @@ class KafkaHandler(AsyncHandler):
             )
         conf.update(extra_config)
         self._producer = Producer(conf)
+        # Store the consumer config separately so reader() can reuse it.
+        # sasl.mechanisms → sasl_mechanism mapping differs between librdkafka
+        # (confluent-kafka) and kafka-python; reader() uses kafka-python so
+        # it translates below.
+        self._bootstrap = bootstrap
+        self._topic_fixed = topic  # may be a template; reader() only works for fixed topics
+        self._sasl = sasl
+        self._closed = False
+        atexit.register(self._close_on_exit)
 
     def _publish(self, envelope: dict[str, Any], raw_line: bytes) -> None:
         topic = _validate_topic(self._topic_tmpl.format(event_type=envelope["event_type"]))
@@ -118,6 +128,77 @@ class KafkaHandler(AsyncHandler):
         if err["v"] is not None:
             raise RuntimeError(f"kafka delivery: {err['v']}")
 
+    # ------------------------------------------------------------------
+    # Read-side contract
+    #
+    # INTENT (not yet wired into tn.read / tn.watch):
+    #   tn.read() should auto-select its source from the active session's
+    #   handler list, preferring a local file handler when one exists and
+    #   falling back to this reader otherwise.  The caller never specifies
+    #   a source; the session configuration decides.
+    #
+    #   When wired in:
+    #     - resolved_address() is the identity key (file path for file
+    #       handlers, kafka URI here) used by tn.read() to pick the source.
+    #     - reader() yields raw sealed-envelope bytes, identical in shape
+    #       to a line from the local .tn/logs/tn.ndjson file.  The decrypt
+    #       + verify + key-matching layer above it is source-agnostic and
+    #       unchanged.  Keys discovered via tn.absorb() automatically apply.
+    #
+    #   Same contract must land in the TS SDK (ts-sdk/src/handlers/kafka.ts)
+    #   before tn.read() can be made source-aware end-to-end.
+    # ------------------------------------------------------------------
+
+    def resolved_address(self) -> str:
+        return f"kafka://{self._bootstrap}/{self._topic_fixed}"
+
+    def reader(
+        self,
+        *,
+        group_id: str | None = None,
+        since: str = "earliest",
+    ):
+        # TODO: wire into tn.read() / tn.watch() via TNHandler.reader() base
+        # contract once base.py adds the method.  Until then, call directly
+        # from read_real.py or any consumer that needs the Kafka source.
+        try:
+            from kafka import KafkaConsumer
+        except ImportError as exc:
+            raise ImportError("reader() requires kafka-python — pip install kafka-python") from exc
+
+        kwargs: dict[str, Any] = dict(
+            bootstrap_servers=self._bootstrap,
+            group_id=group_id or f"tn-reader-{self.name}",
+            auto_offset_reset=since,
+            enable_auto_commit=False,
+            consumer_timeout_ms=10000,
+        )
+        if self._sasl:
+            # kafka-python uses sasl_mechanism (singular), not sasl.mechanisms
+            kwargs.update(
+                security_protocol="SASL_SSL",
+                sasl_mechanism=self._sasl.get("mechanism", "PLAIN"),
+                sasl_plain_username=_resolve(self._sasl.get("user", "")),
+                sasl_plain_password=_resolve(self._sasl.get("pass", "")),
+            )
+
+        consumer = KafkaConsumer(self._topic_fixed, **kwargs)
+        try:
+            for msg in consumer:
+                yield msg.value  # raw bytes — same shape as a line from tn.ndjson
+        finally:
+            consumer.close()
+
+    def _close_on_exit(self) -> None:
+        if not self._closed:
+            try:
+                self.close(timeout=30.0)
+            except Exception:
+                pass
+
     def close(self, *, timeout: float = 30.0) -> None:
+        if self._closed:
+            return
+        self._closed = True
         super().close(timeout=timeout)
         self._producer.flush(timeout=timeout)
