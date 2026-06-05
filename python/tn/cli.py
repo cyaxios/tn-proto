@@ -1392,7 +1392,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     try:
         groups = args.groups.split(",") if args.groups else None
         out = bundle_for_recipient(
-            args.recipient_did,
+            args.recipient_identity,
             args.out,
             groups=groups,
             seal_for_recipient=getattr(args, "seal_for_recipient", False),
@@ -1402,7 +1402,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         # tn.recipient.added event in the log. Print a one-line summary
         # the user can hand off alongside the .tnpkg.
         print(f"[tn bundle] wrote {out}")
-        print(f"[tn bundle]   recipient: {args.recipient_did}")
+        print(f"[tn bundle]   recipient: {args.recipient_identity}")
         print(f"[tn bundle]   ceremony:  {cfg.ceremony_id}  (cipher={cfg.cipher_name})")
         print(f"[tn bundle]   groups:    {groups or sorted(g for g in cfg.groups if g != 'tn.agents')}")
     finally:
