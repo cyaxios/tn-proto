@@ -43,9 +43,12 @@ def _ceremony_files(cfg: LoadedConfig) -> list[tuple[str, Path]]:
     Default stays option A — logs local-only.
     """
     out: list[tuple[str, Path]] = []
-    # Keystore files — any regular file directly under keys/
+    # Keystore files — any regular file directly under keys/, EXCEPT
+    # transient concurrency locks. A ``*.lock`` is a local btn-state mutex;
+    # backing it up is pointless and restoring one can wedge the restored
+    # ceremony. (Also avoids a vault 500 on re-PUT of a held lock file.)
     for p in sorted(cfg.keystore.iterdir()):
-        if p.is_file():
+        if p.is_file() and p.suffix != ".lock":
             out.append((p.name, p))
     # The yaml itself (stored at vault path "tn.yaml")
     out.append(("tn.yaml", cfg.yaml_path))

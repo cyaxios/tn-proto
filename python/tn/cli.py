@@ -584,88 +584,122 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
     if getattr(args, "pull", False):
         return _cmd_wallet_sync_pull(cfg, identity, yaml_path)
 
-    if not cfg.is_linked():
-        _die(f"ceremony {cfg.ceremony_id} is not linked; run `tn wallet link` first")
-
-    if cfg.linked_vault is None:
-        _die(f"ceremony {cfg.ceremony_id} reports linked but linked_vault is empty")
-    client = VaultClient.for_identity(identity, cfg.linked_vault)
+    push_only = getattr(args, "push_only", False)
+    drain_queue = getattr(args, "drain_queue", False)
     try:
-        if args.drain_queue:
-            pending_before = len(_wallet.read_sync_queue(cfg.ceremony_id))
-            result = _wallet.drain_sync_queue(cfg, client)
-            pending_after = len(_wallet.read_sync_queue(cfg.ceremony_id))
-            print(f"Drained sync queue for {cfg.ceremony_id}")
-            print(f"  pending before: {pending_before}, after: {pending_after}")
-            print(f"  uploaded {len(result.uploaded)} files")
-            if result.errors:
-                print(f"  WARN {len(result.errors)} still failing: {result.errors}")
-                return 1
-            return 0
+        # Step 1 (two-way sync): pull the account inbox and ABSORB it
+        # before pushing, so a revocation another device/publisher made
+        # is merged into local state first and an informed re-add is
+        # surfaced. Skipped for --push-only and for the drain-queue retry.
+        if not push_only and not drain_queue:
+            _pull_absorb_step(cfg, identity, yaml_path)
 
-        result = _wallet.sync_ceremony(cfg, client)
-        print(f"Synced {cfg.ceremony_id} -> {cfg.linked_vault}")
-        print(f"  uploaded {len(result.uploaded)} files: {result.uploaded}")
-        if result.errors:
-            print(f"  WARN {len(result.errors)} errors: {result.errors}")
-            return 1
+        # Step 2: push (backup keystore + yaml to the linked vault).
+        if not cfg.is_linked():
+            if push_only:
+                _die(f"ceremony {cfg.ceremony_id} is not linked; nothing to push")
+            from .sync_state import is_account_bound
+            if not is_account_bound(yaml_path):
+                _die(
+                    f"ceremony {cfg.ceremony_id} is not linked and not "
+                    f"account-bound; nothing to sync. Run `tn wallet link` "
+                    f"and/or `tn account connect <code>`.",
+                )
+            print(
+                "  (push skipped: ceremony not linked to a vault; "
+                "run `tn wallet link` to enable backup)"
+            )
+            return 0
+        if cfg.linked_vault is None:
+            _die(f"ceremony {cfg.ceremony_id} reports linked but linked_vault is empty")
+
+        client = VaultClient.for_identity(identity, cfg.linked_vault)
+        try:
+            if drain_queue:
+                pending_before = len(_wallet.read_sync_queue(cfg.ceremony_id))
+                result = _wallet.drain_sync_queue(cfg, client)
+                pending_after = len(_wallet.read_sync_queue(cfg.ceremony_id))
+                print(f"Drained sync queue for {cfg.ceremony_id}")
+                print(f"  pending before: {pending_before}, after: {pending_after}")
+                print(f"  uploaded {len(result.uploaded)} files")
+                if result.errors:
+                    print(f"  WARN {len(result.errors)} still failing: {result.errors}")
+                    return 1
+                return 0
+
+            result = _wallet.sync_ceremony(cfg, client)
+            print(f"Synced {cfg.ceremony_id} -> {cfg.linked_vault}")
+            print(f"  uploaded {len(result.uploaded)} files: {result.uploaded}")
+            if result.errors:
+                print(f"  WARN {len(result.errors)} errors: {result.errors}")
+                return 1
+        finally:
+            client.close()
     finally:
-        client.close()
         flush_and_close()
     return 0
 
 
-def _cmd_wallet_sync_pull(cfg: Any, identity: Identity, yaml_path: Path) -> int:
-    """Drain the vault's account-scoped inbox into the local inbox dir.
+def _stage_account_inbox(
+    cfg: Any, identity: Identity, yaml_path: Path
+) -> tuple[list[Path], int] | None:
+    """Pull the account-scoped inbox and STAGE new snapshots locally.
 
     Reuses the dashboard's account aggregator
-    (``GET /api/v1/account/inbox``) so a CLI operator sees the same
-    listing the browser does — every snapshot addressed to any DID in
-    ``accounts.minted_dids[]`` belonging to this account.
+    (``GET /api/v1/account/inbox``) — every snapshot addressed to any DID
+    in ``accounts.minted_dids[]`` for this account. Each lands at
+    ``<inbox_dir>/<from_did>/<ceremony_id>/<ts>.tnpkg`` (vault URL shape);
+    already-staged files are skipped (idempotent).
 
-    Per the receive-side parity brief: we intentionally do NOT call
-    ``tn.absorb`` here. The handler-resident ``pull_inbox`` does that
-    (it's the scheduled daemon path), but the CLI verb stops at staging
-    so the operator can inspect the file and run ``tn absorb`` as a
-    separate, observable step. This also keeps the verb usable for
-    `tn sync --pull && for f in ...; do tn absorb "$f"; done` shell
-    scripts without re-implementing absorb's manifest checks.
+    Returns ``(staged_paths, skipped_count)``, or ``None`` when this
+    ceremony can't pull (no linked vault AND no account binding, or the
+    vault doesn't resolve this DID to an account). Caller decides whether
+    None is fatal. Closes its own VaultClient; does NOT touch the tn
+    runtime lifecycle (so the caller can absorb the staged files after).
 
-    Each snapshot lands at
-    ``<conventions.inbox_dir(yaml_path)>/<from_did>/<ceremony_id>/<ts>.tnpkg``,
-    mirroring the vault's URL shape so the absorb step is just a file
-    path. Already-staged files are skipped (idempotent).
+    Note: the account-inbox endpoint resolves the account from the DID
+    (``require_account_id``), so a locally-stored account_id is NOT
+    required — ``tn init --link`` attaches the DID to the account
+    server-side without writing one. We only require a vault to talk to:
+    a linked ceremony has one; otherwise we fall back to an explicit
+    local binding so an offline ceremony never makes a surprise network
+    call.
     """
-    from . import flush_and_close
     from .conventions import inbox_dir
-    from .sync_state import get_account_id, is_account_bound
+    from .sync_state import is_account_bound
 
-    account_id = get_account_id(yaml_path)
-    if not is_account_bound(yaml_path) or not account_id:
-        flush_and_close()
-        _die(
-            "no account binding for this ceremony. Run "
-            "`tn account connect <code>` first to bind this DID to a "
-            "vault account.",
-            code=2,
-        )
+    _is_linked_fn = getattr(cfg, "is_linked", None)
+    ceremony_linked = (
+        bool(_is_linked_fn())
+        if callable(_is_linked_fn)
+        else bool(getattr(cfg, "linked_vault", None))
+    )
+    if not ceremony_linked and not is_account_bound(yaml_path):
+        return None
 
-    vault_url = identity.linked_vault or resolve_vault_url(None)
+    # Prefer the CEREMONY's linked vault (where the push goes) over the
+    # identity default — otherwise resolve_vault_url() can fall back to a
+    # local dev URL and the pull connect-refuses while the push succeeds.
+    vault_url = (
+        getattr(cfg, "linked_vault", None)
+        or identity.linked_vault
+        or resolve_vault_url(None)
+    )
     client = VaultClient.for_identity(identity, vault_url)
     staged: list[Path] = []
     skipped = 0
     try:
-        listing = _list_account_inbox(client)
+        resp = client._request("GET", "/api/v1/account/inbox")
+        if resp.status_code in (401, 403):
+            # The vault doesn't resolve this DID to an account.
+            return None
+        client._raise_for_status(resp)
+        listing = resp.json()
         items = listing.get("items") or []
-        if not items:
-            print(f"Pulled 0 snapshot(s) for account {account_id}.")
-            return 0
-
         target_root = inbox_dir(yaml_path)
         for item in items:
             if item.get("consumed_at"):
-                # Already absorbed by another device / the dashboard;
-                # don't re-stage.
+                # Already absorbed by another device / the dashboard.
                 continue
             from_did = item.get("publisher_identity")
             ceremony_id = item.get("ceremony_id")
@@ -691,17 +725,85 @@ def _cmd_wallet_sync_pull(cfg: Any, identity: Identity, yaml_path: Path) -> int:
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(body)
             staged.append(dest)
-
-            kind = item.get("kind") or "?"
-            size = item.get("byte_size") or len(body)
-            print(
-                f"staged {kind} from {from_did[:24]}... "
-                f"({size} bytes) -> {dest}"
-            )
     finally:
         client.close()
-        flush_and_close()
+    return staged, skipped
 
+
+def _pull_absorb_step(cfg: Any, identity: Identity, yaml_path: Path) -> int:
+    """Pull the account inbox, ABSORB each staged snapshot (the merge),
+    and surface any INFORMED leaf-reuse (equivocation) attempts.
+
+    Returns the number of informed equivocations detected (0 when none /
+    when the ceremony isn't account-bound). Absorb is idempotent (dedupe
+    by row_hash), and the absorb engine keeps revoked leaves revoked
+    regardless — a re-add the publisher KNEW was revoked is flagged here
+    so the operator sees it.
+    """
+    from .pkg import absorb as _absorb
+
+    staged_result = _stage_account_inbox(cfg, identity, yaml_path)
+    if staged_result is None:
+        print(
+            "  (pull/merge skipped: ceremony not bound to a vault account; "
+            "run `tn account connect <code>` to enable two-way sync)"
+        )
+        return 0
+
+    staged, skipped = staged_result
+    absorbed = 0
+    informed: list[Any] = []
+    for path in staged:
+        try:
+            receipt = _absorb(path)
+        except Exception as e:  # noqa: BLE001 — one bad file shouldn't abort the merge
+            print(f"  WARN absorb failed for {path.name}: {e}")
+            continue
+        absorbed += int(getattr(receipt, "accepted_count", 0) or 0)
+        for c in getattr(receipt, "conflicts", []) or []:
+            if getattr(c, "informed", False):
+                informed.append(c)
+
+    print(
+        f"  pulled+absorbed {len(staged)} snapshot(s), {absorbed} new event(s)"
+        + (f", {skipped} already local" if skipped else "")
+    )
+    if informed:
+        print(
+            f"  ALERT: {len(informed)} INFORMED leaf-reuse (equivocation) "
+            f"attempt(s) — a publisher re-added a leaf it knew was revoked:"
+        )
+        for c in informed:
+            rh = (getattr(c, "attempted_row_hash", "") or "")[:16]
+            print(
+                f"    group={getattr(c, 'group', '?')} "
+                f"leaf={getattr(c, 'leaf_index', '?')} attempted={rh}..."
+            )
+    return len(informed)
+
+
+def _cmd_wallet_sync_pull(cfg: Any, identity: Identity, yaml_path: Path) -> int:
+    """`tn wallet sync --pull`: stage the account inbox WITHOUT absorbing.
+
+    Back-compat escape hatch: the operator inspects the staged files and
+    runs ``tn absorb <path>`` separately. (Bare ``tn wallet sync`` now
+    absorbs for you — see :func:`_pull_absorb_step`.)
+    """
+    from . import flush_and_close
+
+    staged_result = _stage_account_inbox(cfg, identity, yaml_path)
+    if staged_result is None:
+        flush_and_close()
+        _die(
+            "no account binding for this ceremony. Run "
+            "`tn account connect <code>` first to bind this DID to a "
+            "vault account.",
+            code=2,
+        )
+    staged, skipped = staged_result
+    flush_and_close()
+    for p in staged:
+        print(f"staged -> {p}")
     print(
         f"Pulled {len(staged)} snapshot(s); run `tn absorb <path>` "
         f"on each to materialize."
@@ -723,13 +825,6 @@ def _safe_path_seg(seg: str) -> str:
     if cleaned in ("", ".", "..") or cleaned.startswith(".."):
         raise ValueError(f"unsafe path segment: {seg!r}")
     return cleaned
-
-
-def _list_account_inbox(client: VaultClient) -> dict:
-    """GET /api/v1/account/inbox using the client's existing bearer."""
-    resp = client._request("GET", "/api/v1/account/inbox")
-    client._raise_for_status(resp)
-    return resp.json()
 
 
 def _download_account_inbox_snapshot(
@@ -2967,10 +3062,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--pull",
         action="store_true",
         help=(
-            "Drain the vault's account inbox into the local inbox dir. "
-            "Requires `tn account connect` to have bound this DID to "
-            "an account. Does not auto-absorb: run `tn absorb <path>` "
-            "on each staged file."
+            "Stage the vault's account inbox into the local inbox dir "
+            "WITHOUT absorbing (back-compat escape hatch). Requires "
+            "`tn account connect`. Run `tn absorb <path>` on each staged "
+            "file. Bare `tn wallet sync` now pulls+absorbs+pushes for you."
+        ),
+    )
+    p_sync.add_argument(
+        "--push-only",
+        action="store_true",
+        help=(
+            "Skip the pull/absorb (merge) step and only upload this "
+            "ceremony's backup to the vault — the pre-two-way behavior."
         ),
     )
     p_sync.set_defaults(func=cmd_wallet_sync)

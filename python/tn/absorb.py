@@ -64,12 +64,21 @@ class LeafReuseAttempt:
     is already revoked / retired in local state. The envelope is still
     appended (append-only invariant) but excluded from the materialized
     AdminState. Surfaced in ``AbsorbReceipt.conflicts``.
+
+    ``informed`` distinguishes the two causal cases (Design A): when the
+    incoming snapshot's vector clock already COVERED the revoke, the
+    publisher knew the leaf was dead and re-added it anyway — an
+    equivocation (``informed=True``). When the clock did NOT cover it,
+    the reuse is a benign concurrent race (``informed=False``). Either
+    way the leaf stays revoked in derived state; the flag drives
+    alerting/audit, not state.
     """
 
     group: str
     leaf_index: int
     attempted_row_hash: str
     revoked_row_hash: str | None = None
+    informed: bool = False
 
 
 @dataclass
@@ -1201,18 +1210,62 @@ def _build_local_admin_clock(
     return clock
 
 
+_REVOKED_EVENT = "tn.recipient.revoked"
+
+
+@dataclass
+class _RevokedLeaf:
+    """The revoke event that retired a (group, leaf): its row_hash plus
+    the authoring ``(did, sequence)`` so a reuse attempt can be judged
+    against an incoming snapshot's vector clock (see
+    :func:`_reuse_is_informed`).
+    """
+
+    row_hash: str | None
+    did: str | None
+    sequence: int | None
+
+
+def _reuse_is_informed(
+    revoked_did: str | None,
+    revoked_seq: int | None,
+    manifest_clock: dict[str, dict[str, int]] | None,
+) -> bool:
+    """Did the publisher of a snapshot already KNOW about a revoke?
+
+    True iff the snapshot's vector clock covers the revoke event — i.e.
+    ``manifest_clock[revoked_did]['tn.recipient.revoked'] >=
+    revoked_seq``. That means the publisher had absorbed the revocation
+    before shipping the snapshot, so an ``added`` for that leaf in the
+    same snapshot is an informed equivocation, not a concurrent race.
+
+    Conservative by construction: a missing did/event_type/seq coordinate
+    counts as 0, and an unknown ``revoked_seq`` returns False — we never
+    accuse a publisher of equivocation we can't prove.
+    """
+    if not isinstance(revoked_did, str) or not isinstance(revoked_seq, int):
+        return False
+    if not isinstance(manifest_clock, dict):
+        return False
+    seen = manifest_clock.get(revoked_did, {})
+    if not isinstance(seen, dict):
+        return False
+    return int(seen.get(_REVOKED_EVENT, 0)) >= revoked_seq
+
+
 def _build_revoked_leaves(
     admin_log: Path,
-) -> dict[tuple[str, int], str | None]:
+) -> dict[tuple[str, int], _RevokedLeaf]:
     """Scan the local admin log for ``tn.recipient.revoked`` events
-    and return a ``{(group, leaf_index): row_hash}`` map.
+    and return a ``{(group, leaf_index): _RevokedLeaf}`` map.
 
     Used as the equivocation-detection set when absorbing an admin
     log snapshot: any inbound ``tn.recipient.added`` whose
     ``(group, leaf_index)`` collides with a previously-revoked leaf is
-    surfaced as a ``LeafReuseAttempt`` conflict.
+    surfaced as a ``LeafReuseAttempt`` conflict, classified informed vs
+    concurrent against the snapshot clock.
     """
-    revoked: dict[tuple[str, int], str | None] = {}
+    revoked: dict[tuple[str, int], _RevokedLeaf] = {}
     if not admin_log.exists():
         return revoked
     with admin_log.open("r", encoding="utf-8") as f:
@@ -1221,19 +1274,25 @@ def _build_revoked_leaves(
                 env = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
-            if env.get("event_type") != "tn.recipient.revoked":
+            if env.get("event_type") != _REVOKED_EVENT:
                 continue
             g = env.get("group")
             li = env.get("leaf_index")
             if isinstance(g, str) and isinstance(li, int):
-                revoked[(g, li)] = env.get("row_hash")
+                seq = env.get("sequence")
+                revoked[(g, li)] = _RevokedLeaf(
+                    row_hash=env.get("row_hash"),
+                    did=env.get("device_identity"),
+                    sequence=seq if isinstance(seq, int) else None,
+                )
     return revoked
 
 
 def _accept_admin_envelope(
     env: dict[str, Any],
     seen_row_hashes: set[str],
-    revoked_leaves: dict[tuple[str, int], str | None],
+    revoked_leaves: dict[tuple[str, int], _RevokedLeaf],
+    manifest_clock: dict[str, dict[str, int]] | None = None,
 ) -> tuple[str, LeafReuseAttempt | None]:
     """Decide what to do with one inbound admin envelope.
 
@@ -1242,7 +1301,9 @@ def _accept_admin_envelope(
     (already seen), or ``"accept"`` (append + update tracking).
 
     Mutates ``revoked_leaves`` in place when this envelope is itself
-    a revocation so a same-batch add-after-revoke is flagged.
+    a revocation so a same-batch add-after-revoke is flagged. A reuse of
+    a revoked leaf is classified informed vs concurrent against
+    ``manifest_clock`` (the snapshot publisher's causal view).
     """
     if not _envelope_well_formed(env):
         return "drop", None
@@ -1266,16 +1327,23 @@ def _accept_admin_envelope(
     if isinstance(g, str) and isinstance(li, int):
         key = (g, li)
         if et == "tn.recipient.added" and key in revoked_leaves:
+            rev = revoked_leaves[key]
             conflict = LeafReuseAttempt(
                 group=g,
                 leaf_index=li,
                 attempted_row_hash=rh,
-                revoked_row_hash=revoked_leaves[key],
+                revoked_row_hash=rev.row_hash,
+                informed=_reuse_is_informed(rev.did, rev.sequence, manifest_clock),
             )
-        elif et == "tn.recipient.revoked":
+        elif et == _REVOKED_EVENT:
             # Track newly-arrived revocations so a later add in the
             # same batch is correctly flagged.
-            revoked_leaves[key] = rh
+            seq = env.get("sequence")
+            revoked_leaves[key] = _RevokedLeaf(
+                row_hash=rh,
+                did=env.get("device_identity"),
+                sequence=seq if isinstance(seq, int) else None,
+            )
 
     return "accept", conflict
 
@@ -1322,7 +1390,7 @@ def _absorb_admin_log_snapshot(
             continue
 
         decision, conflict = _accept_admin_envelope(
-            env, seen_row_hashes, revoked_leaves,
+            env, seen_row_hashes, revoked_leaves, manifest.clock,
         )
         if decision == "drop":
             continue
