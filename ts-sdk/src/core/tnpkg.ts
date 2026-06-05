@@ -215,6 +215,32 @@ export function clockDominates(a: VectorClock, b: VectorClock): boolean {
   return true;
 }
 
+/**
+ * Did the publisher of a snapshot already KNOW about a revoke?
+ *
+ * True iff the snapshot's vector clock covers the revoke event —
+ * `manifestClock[revokedDid]['tn.recipient.revoked'] >= revokedSeq`. That
+ * means the publisher had absorbed the revocation before shipping, so an
+ * `added` for that leaf in the same snapshot is an informed equivocation,
+ * not a concurrent race.
+ *
+ * Conservative: a missing did/event_type/seq coordinate counts as 0, and
+ * an unknown `revokedSeq` returns false — we never accuse a publisher of
+ * equivocation we can't prove. Mirrors Python `tn/absorb.py`
+ * `_reuse_is_informed`.
+ */
+export function reuseIsInformed(
+  revokedDid: string | null,
+  revokedSeq: number | null,
+  manifestClock: VectorClock | null | undefined,
+): boolean {
+  if (typeof revokedDid !== "string" || typeof revokedSeq !== "number") return false;
+  if (!manifestClock) return false;
+  const seen = manifestClock[revokedDid];
+  if (!seen) return false;
+  return (seen["tn.recipient.revoked"] ?? 0) >= revokedSeq;
+}
+
 /** Pointwise max of two vector clocks. Pure. */
 export function clockMerge(a: VectorClock, b: VectorClock): VectorClock {
   const out: VectorClock = {};

@@ -39,6 +39,7 @@ import { loadPolicyFile, type PolicyDocument } from "../agents_policy.js";
 import {
   KNOWN_KINDS,
   clockDominates,
+  reuseIsInformed,
   isManifestSignatureValid,
   newManifest,
   signManifest,
@@ -293,18 +294,11 @@ export class NodeRuntime {
     rotateLogOnSessionStart(config.logPath, config.handlers);
     const rt = new NodeRuntime(config, keystore);
     // The wasm-side `WasmRuntime` companion (`rt.wasm`) is lazily
-    // instantiated on first use via `rt.attachWasm()`. Eager attachment
-    // is incompatible with the current TS implementation: `WasmRuntime.init`
-    // walks the yaml's admin log path and emits its own `tn.ceremony.init`
-    // bookkeeping, which would race the TS-side chain state and break
-    // tests that rely on a single deterministic event sequence
-    // (`admin.state rolls up ...`, `AdminStateCache flags fork ...`).
-    // The slim-down plan in
-    // `docs/superpowers/plans/2026-05-13-wasm-widen-and-fallback-deprecate.md`
-    // §2.5 routes emit/read through wasm once the TS implementation is
-    // deleted in the same change — keeping both eager today would
-    // double-write. For now the field stays `null` and the TS impl is
-    // authoritative.
+    // instantiated on first wasm-routed use via `rt.attachWasm()`.
+    // Eager attachment would let `WasmRuntime.init` emit its own
+    // bookkeeping before TS-side init/reconcile finishes, which can
+    // double-attest ceremony/admin events. Public emits attach lazily;
+    // read decoding and init reconciliation remain TS-owned here.
     // Reconcile yaml-declared recipients with attested events. Any
     // DID listed in the yaml but with no matching
     // tn.recipient.added / tn.recipient.revoked event gets a freshly
@@ -322,6 +316,15 @@ export class NodeRuntime {
 
   get did(): string {
     return this.keystore.device.did;
+  }
+
+  /**
+   * The default Node BTN runtime has no TS emit fallback: public emit
+   * verbs attach `WasmRuntime` lazily and then execute in Rust/WASM.
+   * Read decoding is still implemented in this wrapper.
+   */
+  usingRust(): boolean {
+    return true;
   }
 
   /** Append one log entry. Routes through `WasmRuntime.emit` so the
@@ -1688,7 +1691,20 @@ export class NodeRuntime {
       };
     }
 
-    const revokedLeaves = new Map<string, string | null>();
+    // Each revoked leaf carries the revoke's (did, sequence) so a reuse
+    // attempt can be classified informed vs concurrent against the
+    // snapshot clock (mirrors Python `_build_revoked_leaves`).
+    type RevokedLeaf = { rowHash: string | null; did: string | null; seq: number | null };
+    const revokedLeaves = new Map<string, RevokedLeaf>();
+    const _revokedFrom = (env: Record<string, unknown>, rh: unknown): RevokedLeaf => {
+      const did = env["device_identity"];
+      const seq = env["sequence"];
+      return {
+        rowHash: typeof rh === "string" ? rh : null,
+        did: typeof did === "string" ? did : null,
+        seq: typeof seq === "number" ? seq : null,
+      };
+    };
     if (existsSync(adminLog)) {
       for (const rawLine of readFileSync(adminLog, "utf8").split(/\r?\n/)) {
         const s = rawLine.trim();
@@ -1700,7 +1716,7 @@ export class NodeRuntime {
             const li = env["leaf_index"];
             const rh = env["row_hash"];
             if (typeof g === "string" && typeof li === "number") {
-              revokedLeaves.set(`${g} ${li}`, typeof rh === "string" ? rh : null);
+              revokedLeaves.set(`${g} ${li}`, _revokedFrom(env, rh));
             }
           }
         } catch {
@@ -1743,7 +1759,12 @@ export class NodeRuntime {
               group: g,
               leafIndex: li,
               attemptedRowHash: rh,
-              originallyRevokedAtRowHash: revokedLeaves.get(k) ?? null,
+              originallyRevokedAtRowHash: revokedLeaves.get(k)?.rowHash ?? null,
+              informed: reuseIsInformed(
+                revokedLeaves.get(k)?.did ?? null,
+                revokedLeaves.get(k)?.seq ?? null,
+                manifest.clock,
+              ),
             };
             conflicts.push(reuse);
           }
@@ -1753,7 +1774,7 @@ export class NodeRuntime {
         const g = env["group"];
         const li = env["leaf_index"];
         if (typeof g === "string" && typeof li === "number") {
-          revokedLeaves.set(`${g} ${li}`, rh);
+          revokedLeaves.set(`${g} ${li}`, _revokedFrom(env, rh));
         }
       }
       acceptedEnvs.push(env);
@@ -2690,7 +2711,53 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
   // Stem == basename without the trailing .yaml/.yml.
   const yamlBasename = yamlPath.split(/[\\/]/).pop() ?? "tn.yaml";
   const yamlStem = yamlBasename.replace(/\.ya?ml$/i, "");
-  const keysDir = opts.keystoreDir ?? join(yamlDir, ".tn", yamlStem, "keys");
+  const defaultKeystorePath = `./.tn/${yamlStem}/keys`;
+  const defaultLogPath = `./.tn/${yamlStem}/logs/tn.ndjson`;
+  const defaultAdminLogPath = `./.tn/${yamlStem}/admin/admin.ndjson`;
+
+  // Resolve path slots before writing so the on-disk files match the
+  // portable paths serialized into yaml. Unportable drive-letter
+  // results fall back to the stem-derived defaults instead of writing
+  // absolute Windows paths into the manifest.
+  function rel(absOrRel: string | undefined, fallback: string): string {
+    if (!absOrRel) return fallback;
+    const target = absOrRel;
+    const normalizedTarget = target.replace(/\\/g, "/");
+
+    const asPortableRelative = (candidate: string): string => {
+      const normalized = candidate.replace(/\\/g, "/");
+      const withPrefix = normalized.startsWith("./") ? normalized : `./${normalized}`;
+      if (
+        withPrefix.startsWith("/") ||
+        /(?:^|\/)[A-Za-z]:(?:\/|$)/.test(withPrefix)
+      ) {
+        return fallback;
+      }
+      return withPrefix;
+    };
+
+    // If already relative-looking, pass through after slash
+    // normalization and drive-segment validation.
+    if (!normalizedTarget.startsWith("/") && !/^[A-Za-z]:\//.test(normalizedTarget)) {
+      return asPortableRelative(normalizedTarget);
+    }
+
+    try {
+      const relativeTarget = relative(yamlDir, target).replace(/\\/g, "/");
+      return relativeTarget ? asPortableRelative(relativeTarget) : "./";
+    } catch {
+      return fallback;
+    }
+  }
+
+  function absFromYamlRel(yamlRel: string): string {
+    return pathResolve(yamlDir, yamlRel.replace(/^\.\//, ""));
+  }
+
+  const _keystorePathStr = rel(opts.keystoreDir, defaultKeystorePath);
+  const _logPathStr = rel(opts.logPath, defaultLogPath);
+  const _adminLogStr = rel(opts.adminLogPath, defaultAdminLogPath);
+  const keysDir = absFromYamlRel(_keystorePathStr);
   const privatePath = join(keysDir, "local.private");
 
   if (existsSync(privatePath)) {
@@ -2754,34 +2821,6 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
   writeFileSync(join(keysDir, "tn.agents.btn.state"), Buffer.from(agentsStateBytes));
   writeFileSync(join(keysDir, "tn.agents.btn.mykit"), Buffer.from(agentsSelfKit));
 
-  // Resolve all four path slots. When opts override the stem-
-  // derived defaults, write the override paths into the yaml as
-  // *relative* (rooted at yamlDir) so the on-disk record stays
-  // portable.
-  function rel(absOrRel: string, fallback: string): string {
-    if (!absOrRel) return fallback;
-    const target = absOrRel;
-    // If already relative-looking, pass through.
-    if (!target.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(target)) {
-      return target.startsWith("./") ? target : `./${target}`;
-    }
-    // Compute relative-from-yamlDir if possible; otherwise leave absolute.
-    try {
-      const rel = relative(yamlDir, target).replace(/\\/g, "/");
-      return rel ? `./${rel}` : "./";
-    } catch {
-      return target.replace(/\\/g, "/");
-    }
-  }
-  const _keystorePathStr = opts.keystoreDir
-    ? rel(opts.keystoreDir, `./.tn/${yamlStem}/keys`)
-    : `./.tn/${yamlStem}/keys`;
-  const _logPathStr = opts.logPath
-    ? rel(opts.logPath, `./.tn/${yamlStem}/logs/tn.ndjson`)
-    : `./.tn/${yamlStem}/logs/tn.ndjson`;
-  const _adminLogStr = opts.adminLogPath
-    ? rel(opts.adminLogPath, `./.tn/${yamlStem}/admin/admin.ndjson`)
-    : `./.tn/${yamlStem}/admin/admin.ndjson`;
   const _profileLine = opts.profile ? `\n  profile: ${opts.profile}` : "";
   const _projectNameLine = opts.projectName ? `\n  project_name: ${opts.projectName}` : "";
   // Derive the chain flag from the profile catalog so the Rust/wasm core
