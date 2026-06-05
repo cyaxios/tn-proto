@@ -1,0 +1,22 @@
+{
+  "passphrase": "correct horse battery staple",
+  "cred": {
+    "kdf": "pbkdf2-sha256",
+    "kdf_params": {
+      "salt_b64": "M8G9/O9f+xJ8COygh+1nsg==",
+      "iterations": 100000
+    },
+    "wrapped_account_key_b64": "U1mhHjuX1RseEkUjnW4qkFrs+GgAqgCmXu5qa85gNOXtqVEj5O67QB8NGx9LNBVs",
+    "wrap_nonce_b64": "OWDP4pwJE+oyMieB"
+  },
+  "wrapped_key": {
+    "wrapped_bek_b64": "BdGfp031b2rn1hMVgP1tY+FOiPFiuynYP96bOq6EbFDwktasertvbZWZKk4eJ9bt",
+    "wrap_nonce_b64": "CAMvZmxE2LdRhKi7"
+  },
+  "expected_bek_b64": "VqiUAWn+Ttoj1Vi77fSHwkhRtbwVvq1XnsynzneBx/o=",
+  "body_blob": {
+    "ciphertext_b64": "SU3nyesfi0h64e3POxN4zJ7XlRhn/fgXWhvocbUSxWwTNVji6UkAK61VO19yjRJKCn7IT5dsTlJ63aseWrrZpLOmsMvDZw015CmbJHoPRuCT3+PiUM+5jb3g2eICvnecSMd/RUfjDTBhGGKkRT8op4U3",
+    "nonce_b64": "tmsR65W28zr5oNar"
+  },
+  "expected_body_b64": "UEsDBCBmYWtlIHN0b3JlZC16aXAgcHJvamVjdCBib2R5IBMVASFkMnQhyC016EtsiNw5g4QmlrjGHQtQIH/KeuBC39jLfldpLUR41dKx04+BbFzqALO7KMH/28pDTd+EAwo="
+}

@@ -235,6 +235,123 @@ export class VaultClient {
     return (await resp.json()) as Record<string, unknown>;
   }
 
+  // ── AWK/BEK account surface (D-20 / D-22) ────────────────────────
+  // The supported whole-body model. All routes authenticate with the
+  // account JWT — and a DID-challenge token resolves to the bound
+  // account server-side (require_account_id), so the existing
+  // authenticate() flow is sufficient. Logic mirrors Python
+  // wallet_restore_passphrase.py (GETs) + the browser minter (PUTs).
+
+  /**
+   * Pull a credential row INCLUDING its wrapping material. Mirror of
+   * Python `_fetch_credential_with_wrap`. With no `credentialId`, returns
+   * the unique `is_primary` row (or the sole row), erroring on 0 / >1.
+   */
+  async getCredentialWrap(opts: { credentialId?: string } = {}): Promise<Record<string, unknown>> {
+    if (opts.credentialId === undefined) {
+      const resp = await this._request({
+        method: "GET",
+        path: "/api/v1/account/credentials?include=wrap",
+      });
+      const rows = (await resp.json()) as Record<string, unknown>[];
+      if (!Array.isArray(rows)) throw new VaultError("credentials list: expected array");
+      const primary = rows.filter((r) => r.is_primary);
+      const candidates = primary.length > 0 ? primary : rows;
+      if (candidates.length === 0) {
+        throw new VaultError(
+          "no credentials registered for this account — register one via the browser flow first",
+        );
+      }
+      if (candidates.length > 1) {
+        throw new VaultError(
+          `${candidates.length} primary credentials found; pass credentialId to choose one`,
+        );
+      }
+      return candidates[0]!;
+    }
+    const resp = await this._request({
+      method: "GET",
+      path: `/api/v1/account/credentials/${encodeURIComponent(opts.credentialId)}/wrap`,
+    });
+    return (await resp.json()) as Record<string, unknown>;
+  }
+
+  /** GET /api/v1/projects/{id}/wrapped-key. Mirror of Python `_fetch_wrapped_key`. */
+  async getWrappedKey(projectId: string): Promise<Record<string, unknown>> {
+    const resp = await this._request({
+      method: "GET",
+      path: `/api/v1/projects/${encodeURIComponent(projectId)}/wrapped-key`,
+    });
+    return (await resp.json()) as Record<string, unknown>;
+  }
+
+  /** PUT /api/v1/projects/{id}/wrapped-key — store the BEK wrapped under the AWK. */
+  async putWrappedKey(
+    projectId: string,
+    body: { wrapped_bek_b64: string; wrap_nonce_b64: string; cipher_suite?: string; label?: string; package_did?: string },
+  ): Promise<Record<string, unknown>> {
+    const resp = await this._request({
+      method: "PUT",
+      path: `/api/v1/projects/${encodeURIComponent(projectId)}/wrapped-key`,
+      jsonBody: { cipher_suite: "aes-256-gcm", ...body },
+    });
+    return (await resp.json()) as Record<string, unknown>;
+  }
+
+  /** GET /api/v1/projects/{id}/encrypted-blob — the BEK-encrypted body envelope. */
+  async getEncryptedBlob(projectId: string): Promise<Record<string, unknown>> {
+    const resp = await this._request({
+      method: "GET",
+      path: `/api/v1/projects/${encodeURIComponent(projectId)}/encrypted-blob`,
+    });
+    return (await resp.json()) as Record<string, unknown>;
+  }
+
+  /**
+   * PUT /api/v1/projects/{id}/encrypted-blob-account — write the
+   * BEK-encrypted body. `ifMatch` is the integer generation, or "*" for
+   * the first write (428 if omitted, 412 on mismatch).
+   */
+  async putEncryptedBlobAccount(
+    projectId: string,
+    body: Record<string, unknown>,
+    opts: { ifMatch: string | number },
+  ): Promise<Record<string, unknown>> {
+    const resp = await this._request({
+      method: "PUT",
+      path: `/api/v1/projects/${encodeURIComponent(projectId)}/encrypted-blob-account`,
+      jsonBody: body,
+      headers: { "If-Match": String(opts.ifMatch) },
+    });
+    return (await resp.json()) as Record<string, unknown>;
+  }
+
+  /** GET /api/v1/account/projects — restorable projects for this account. */
+  async listAccountProjects(): Promise<Record<string, unknown>[]> {
+    const resp = await this._request({ method: "GET", path: "/api/v1/account/projects" });
+    const raw = (await resp.json()) as unknown;
+    // The account-projects route returns either a bare list or {items:[...]}.
+    if (Array.isArray(raw)) return raw as Record<string, unknown>[];
+    const items = (raw as { items?: unknown }).items;
+    return Array.isArray(items) ? (items as Record<string, unknown>[]) : [];
+  }
+
+  /** GET /api/v1/account/inbox — every snapshot addressed to an owned DID. */
+  async listAccountInbox(): Promise<{ items: Record<string, unknown>[] }> {
+    const resp = await this._request({ method: "GET", path: "/api/v1/account/inbox" });
+    const raw = (await resp.json()) as { items?: Record<string, unknown>[] };
+    return { items: Array.isArray(raw.items) ? raw.items : [] };
+  }
+
+  /** GET a staged account-inbox snapshot's raw .tnpkg bytes. */
+  async downloadAccountInboxSnapshot(fromDid: string, ceremonyId: string, ts: string): Promise<Uint8Array> {
+    const path =
+      `/api/v1/account/inbox/${encodeURIComponent(fromDid)}` +
+      `/${encodeURIComponent(ceremonyId)}/${encodeURIComponent(ts)}.tnpkg`;
+    const resp = await this._request({ method: "GET", path });
+    return new Uint8Array(await resp.arrayBuffer());
+  }
+
   // ── Internals ────────────────────────────────────────────────────
 
   private _authHeaders(extra?: Record<string, string>): Record<string, string> {
