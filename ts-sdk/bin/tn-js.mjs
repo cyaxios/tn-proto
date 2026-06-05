@@ -63,6 +63,18 @@ import { WalletNamespace, readLinkState, readSyncQueue } from "../dist/wallet/in
 import { restoreViaLoopback } from "../dist/wallet/restore.js";
 import { loadKeystore } from "../dist/runtime/keystore.js";
 
+import { bundleCmd } from "../dist/cli/bundle.js";
+import { addRecipientCmd } from "../dist/cli/add_recipient.js";
+import { absorbCmd } from "../dist/cli/absorb.js";
+import { groupAddCmd } from "../dist/cli/group_add.js";
+import { showProfilesCmd } from "../dist/cli/show_profiles.js";
+import { walletPullPrefsCmd } from "../dist/cli/wallet_pull_prefs.js";
+import { walletExportMnemonicCmd } from "../dist/cli/wallet_export_mnemonic.js";
+import { firehoseCmd } from "../dist/cli/firehose.js";
+import { walletSyncCmd } from "../dist/cli/wallet_sync.js";
+import { inboxAcceptCmd } from "../dist/cli/inbox_accept.js";
+import { inboxListLocalCmd } from "../dist/cli/inbox_list_local.js";
+
 function die(msg) {
   process.stderr.write(`tn-js: ${msg}\n`);
   exit(2);
@@ -1049,12 +1061,24 @@ async function vaultCmd() {
 async function showCmd() {
   const sub = argv[3];
   const rest = argv.slice(4);
+
+  // show profiles: print the curated profile catalog. Wraps
+  // cli/show_profiles.js. --format human (default) | json.
+  if (sub === "profiles") {
+    let format = "human";
+    for (let i = 0; i < rest.length; i += 1) {
+      if (rest[i] === "--format") format = rest[++i];
+    }
+    process.exitCode = await showProfilesCmd({ format });
+    return;
+  }
+
   let yamlPath = null;
   for (let i = 0; i < rest.length; i += 1) {
     if (rest[i] === "--yaml") yamlPath = rest[++i];
   }
   if (sub !== "env") {
-    die(`show: unknown subcommand ${sub}. try: show env [--yaml <path>]`);
+    die(`show: unknown subcommand ${sub}. try: show env [--yaml <path>] | show profiles [--format human|json]`);
   }
   await tnInit(yamlPath ?? undefined);
   try {
@@ -1112,6 +1136,27 @@ async function walletCmd() {
     else if (!a.startsWith("-") && opts.vaultUrl === null) opts.vaultUrl = a;
   }
 
+  // wallet sync: PULL inbox -> ABSORB each -> PUSH body. Wraps
+  // cli/wallet_sync.js walletSyncCmd. Optional positional <yaml>; flags
+  // --pull (stage only), --push-only, --drain-queue, --passphrase <p>,
+  // --vault <url>. Mirrors Python `tn wallet sync`.
+  if (sub === "sync") {
+    const syncOpts = {};
+    for (let i = 0; i < rest.length; i += 1) {
+      const a = rest[i];
+      if (a === "--yaml") syncOpts.yaml = rest[++i];
+      else if (a === "--pull") syncOpts.pull = true;
+      else if (a === "--push-only") syncOpts.pushOnly = true;
+      else if (a === "--drain-queue") syncOpts.drainQueue = true;
+      else if (a === "--passphrase") syncOpts.passphrase = rest[++i];
+      else if (a === "--vault") syncOpts.vault = rest[++i];
+      else if (!a.startsWith("-") && syncOpts.yaml === undefined) syncOpts.yaml = a;
+      else die(`wallet sync: unknown arg ${a}`);
+    }
+    process.exitCode = await walletSyncCmd(syncOpts);
+    return;
+  }
+
   // wallet restore: multi-device restore via the browser loopback dance.
   // Prints a /restore URL; the operator opens it, the browser does the
   // passkey unwrap and POSTs the raw BEK back over loopback; we then fetch
@@ -1146,6 +1191,26 @@ async function walletCmd() {
     } catch (e) {
       die(`wallet restore: ${e?.message ?? e}`);
     }
+    return;
+  }
+
+  // wallet pull-prefs: refresh the global identity's account prefs from the
+  // vault. Wraps cli/wallet_pull_prefs.js. --vault overrides the cached url.
+  if (sub === "pull-prefs") {
+    process.exitCode = await walletPullPrefsCmd(
+      opts.vaultUrl ? { vault: opts.vaultUrl } : {},
+    );
+    return;
+  }
+
+  // wallet export-mnemonic: re-display the stored BIP-39 recovery phrase.
+  // Wraps cli/wallet_export_mnemonic.js. Requires --yes to show the phrase.
+  if (sub === "export-mnemonic") {
+    let yes = false;
+    for (const a of rest) {
+      if (a === "--yes") yes = true;
+    }
+    process.exitCode = await walletExportMnemonicCmd({ yes });
     return;
   }
 
@@ -1207,9 +1272,12 @@ async function walletCmd() {
     die(
       `wallet: unknown subcommand ${sub}. try: ` +
         `wallet status [<yaml>] | ` +
+        `wallet sync [<yaml>] [--pull] [--push-only] [--drain-queue] [--passphrase <p>] [--vault <url>] | ` +
         `wallet link <vault-url> [--yaml <path>] [--name <project>] | ` +
         `wallet unlink --yaml <path> | ` +
-        `wallet restore --vault <url> --out <dir>`,
+        `wallet restore --vault <url> --out <dir> | ` +
+        `wallet pull-prefs [--vault <url>] | ` +
+        `wallet export-mnemonic [--yes]`,
     );
   }
   if (!opts.vaultUrl) die("wallet link: <vault-url> positional is required");
@@ -1326,6 +1394,194 @@ async function accountCmd() {
   }
 }
 
+// ── bundle: mint a kit_bundle .tnpkg for one recipient ─────────────────
+// Wraps cli/bundle.js bundleCmd. Positionals: <recipient> <out>.
+//   tn-js bundle <recipient> <out> [--yaml <path>] [--groups a,b]
+//                [--seal-for-recipient]
+async function bundleCliCmd() {
+  const rest = argv.slice(3);
+  const opts = {
+    recipientIdentity: null,
+    out: null,
+    yaml: undefined,
+    groups: undefined,
+    sealForRecipient: false,
+  };
+  const positionals = [];
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i];
+    if (a === "--yaml") opts.yaml = rest[++i];
+    else if (a === "--groups") opts.groups = rest[++i];
+    else if (a === "--seal-for-recipient") opts.sealForRecipient = true;
+    else if (!a.startsWith("-")) positionals.push(a);
+    else die(`bundle: unknown arg ${a}`);
+  }
+  opts.recipientIdentity = positionals[0] ?? null;
+  opts.out = positionals[1] ?? null;
+  if (!opts.recipientIdentity || !opts.out) {
+    die("bundle: <recipient> and <out> positionals are required");
+  }
+  process.exitCode = await bundleCmd(opts);
+}
+
+// ── add_recipient: one-shot mint + bundle for a group/recipient ────────
+// Wraps cli/add_recipient.js addRecipientCmd. Positionals: <group> <recipient>.
+//   tn-js add_recipient <group> <recipient> [--out <path>] [--yaml <path>]
+//                       [--seal-for-recipient]
+async function addRecipientCliCmd() {
+  const rest = argv.slice(3);
+  const opts = {
+    group: null,
+    recipient: null,
+    out: undefined,
+    yaml: undefined,
+    sealForRecipient: false,
+  };
+  const positionals = [];
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i];
+    if (a === "--out") opts.out = rest[++i];
+    else if (a === "--yaml") opts.yaml = rest[++i];
+    else if (a === "--seal-for-recipient") opts.sealForRecipient = true;
+    else if (!a.startsWith("-")) positionals.push(a);
+    else die(`add_recipient: unknown arg ${a}`);
+  }
+  opts.group = positionals[0] ?? null;
+  opts.recipient = positionals[1] ?? null;
+  if (!opts.group || !opts.recipient) {
+    die("add_recipient: <group> and <recipient> positionals are required");
+  }
+  process.exitCode = await addRecipientCmd(opts);
+}
+
+// ── absorb: install a .tnpkg into the active ceremony ──────────────────
+// Wraps cli/absorb.js absorbCmd. Positional: <package>.
+//   tn-js absorb <package> [--yaml <path>] [--allow-self-absorb]
+async function absorbCliCmd() {
+  const rest = argv.slice(3);
+  const opts = { packagePath: null, yaml: undefined, allowSelfAbsorb: false };
+  const positionals = [];
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i];
+    if (a === "--yaml") opts.yaml = rest[++i];
+    else if (a === "--allow-self-absorb") opts.allowSelfAbsorb = true;
+    else if (!a.startsWith("-")) positionals.push(a);
+    else die(`absorb: unknown arg ${a}`);
+  }
+  opts.packagePath = positionals[0] ?? null;
+  if (!opts.packagePath) die("absorb: <package> positional is required");
+  process.exitCode = await absorbCmd(opts);
+}
+
+// ── group: post-init group management ──────────────────────────────────
+// Wraps cli/group_add.js groupAddCmd under the `add` subcommand.
+//   tn-js group add <name> [--fields a,b,c] [--cipher btn|jwe] [--yaml <path>]
+async function groupCmd() {
+  const sub = argv[3];
+  if (sub !== "add") {
+    die(`group: unknown subcommand ${sub}. try: group add <name> [--fields a,b] [--cipher btn|jwe] [--yaml <path>]`);
+  }
+  const rest = argv.slice(4);
+  const opts = { name: null, fields: undefined, cipher: undefined, yaml: undefined };
+  const positionals = [];
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i];
+    if (a === "--fields") opts.fields = rest[++i];
+    else if (a === "--cipher") opts.cipher = rest[++i];
+    else if (a === "--yaml") opts.yaml = rest[++i];
+    else if (!a.startsWith("-")) positionals.push(a);
+    else die(`group add: unknown arg ${a}`);
+  }
+  opts.name = positionals[0] ?? null;
+  if (!opts.name) die("group add: <name> positional is required");
+  process.exitCode = await groupAddCmd(opts);
+}
+
+// ── firehose: gated firehose-worker diagnostic probes ──────────────────
+// Wraps cli/firehose.js firehoseCmd (stats|list|get).
+//   tn-js firehose stats <tenant>
+//   tn-js firehose list  <tenant> [--did <did>]
+//   tn-js firehose get   <tenant> <ceremony> <name> [--did <did>] [--out <path>]
+async function firehoseCliCmd() {
+  const sub = argv[3];
+  if (sub !== "stats" && sub !== "list" && sub !== "get") {
+    die(`firehose: unknown subcommand ${sub}. try: firehose stats|list|get`);
+  }
+  const rest = argv.slice(4);
+  const opts = { did: undefined, out: undefined };
+  const positionals = [];
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i];
+    if (a === "--did") opts.did = rest[++i];
+    else if (a === "--out") opts.out = rest[++i];
+    else if (!a.startsWith("-")) positionals.push(a);
+    else die(`firehose ${sub}: unknown arg ${a}`);
+  }
+  if (sub === "stats") {
+    if (!positionals[0]) die("firehose stats: <tenant> positional is required");
+    opts.tenant = positionals[0];
+  } else if (sub === "list") {
+    if (!positionals[0]) die("firehose list: <tenant> positional is required");
+    opts.tenant = positionals[0];
+  } else {
+    if (!positionals[0] || !positionals[1] || !positionals[2]) {
+      die("firehose get: <tenant> <ceremony> <name> positionals are required");
+    }
+    opts.tenant = positionals[0];
+    opts.ceremony = positionals[1];
+    opts.name = positionals[2];
+  }
+  try {
+    process.exitCode = await firehoseCmd(sub, opts);
+  } catch (e) {
+    // firehoseCmd's _die throws a FirehoseExit carrying the exit code
+    // (the stderr message was already written by the handler).
+    if (e && typeof e.code === "number") {
+      process.exitCode = e.code;
+    } else {
+      throw e;
+    }
+  }
+}
+
+// ── inbox: local invitation handling (no vault contact) ────────────────
+// Wraps cli/inbox_accept.js inboxAcceptCmd and cli/inbox_list_local.js
+// inboxListLocalCmd under the `accept` / `list-local` subcommands.
+//   tn-js inbox accept <zip> [--yaml <path>]
+//   tn-js inbox list-local [--dir <path>]
+async function inboxCmd() {
+  const sub = argv[3];
+  const rest = argv.slice(4);
+  if (sub === "accept") {
+    const opts = { zipPath: null, yaml: undefined };
+    const positionals = [];
+    for (let i = 0; i < rest.length; i += 1) {
+      const a = rest[i];
+      if (a === "--yaml") opts.yaml = rest[++i];
+      else if (!a.startsWith("-")) positionals.push(a);
+      else die(`inbox accept: unknown arg ${a}`);
+    }
+    opts.zipPath = positionals[0] ?? null;
+    if (!opts.zipPath) die("inbox accept: <zip> positional is required");
+    process.exitCode = await inboxAcceptCmd(opts);
+    return;
+  }
+  if (sub === "list-local") {
+    const opts = { dir: undefined };
+    for (let i = 0; i < rest.length; i += 1) {
+      const a = rest[i];
+      if (a === "--dir") opts.dir = rest[++i];
+      else die(`inbox list-local: unknown arg ${a}`);
+    }
+    process.exitCode = await inboxListLocalCmd(opts);
+    return;
+  }
+  die(
+    `inbox: unknown subcommand ${sub}. try: ` +
+      `inbox accept <zip> [--yaml <path>] | inbox list-local [--dir <path>]`,
+  );
+}
+
 const cmd = argv[2];
 switch (cmd) {
   case "init":
@@ -1364,6 +1620,24 @@ switch (cmd) {
   case "compile":
     compileCmd();
     break;
+  case "bundle":
+    await bundleCliCmd();
+    break;
+  case "add_recipient":
+    await addRecipientCliCmd();
+    break;
+  case "absorb":
+    await absorbCliCmd();
+    break;
+  case "group":
+    await groupCmd();
+    break;
+  case "firehose":
+    await firehoseCliCmd();
+    break;
+  case "inbox":
+    await inboxCmd();
+    break;
   case "watch":
     await watchCmd();
     break;
@@ -1377,14 +1651,21 @@ switch (cmd) {
   case "--help":
   case "-h":
     process.stderr.write(
-      "tn-js <init|wallet|account|vault|show|seal|verify|canonical|info|read|watch|streams|validate|compile|admin>\n" +
+      "tn-js <init|wallet|account|vault|show|seal|verify|canonical|info|read|watch|streams|validate|compile|admin|bundle|add_recipient|absorb|group|firehose|inbox>\n" +
         "  init       [<yaml-path>] — initialize / attach to a ceremony, print receipt JSON\n" +
         "  wallet status [<yaml>]\n" +
         "             print identity + optional ceremony details\n" +
+        "  wallet sync [<yaml>] [--pull] [--push-only] [--drain-queue] [--passphrase <p>] [--vault <url>]\n" +
+        "             two-way sync: pull account inbox + absorb, then push the body backup\n" +
+        "             (--pull stages only; --push-only / --drain-queue skip the pull/absorb)\n" +
         "  wallet link <vault-url> --yaml <path> [--name <project>]\n" +
         "             create vault project + flip ceremony.mode to linked\n" +
         "  wallet unlink --yaml <path>\n" +
         "             flip ceremony.mode back to local (yaml-only; vault project untouched)\n" +
+        "  wallet pull-prefs [--vault <url>]\n" +
+        "             refresh the global identity's account prefs from the vault\n" +
+        "  wallet export-mnemonic [--yes]\n" +
+        "             re-display the stored BIP-39 recovery phrase (--yes to confirm)\n" +
         "  account connect <code> --yaml <path> [--vault <url>]\n" +
         "             redeem a vault connect code; binds device DID to the account\n" +
         "             and persists account_id into ceremony sync state\n" +
@@ -1393,6 +1674,7 @@ switch (cmd) {
         "  vault unlink <vault-did> <project-id> [--reason <text>] [--yaml <path>]\n" +
         "             emit tn.vault.unlinked event into the ceremony's log\n" +
         "  show env   [--yaml <path>] — print resolved ceremony config as JSON\n" +
+        "  show profiles [--format human|json] — print the curated profile catalog\n" +
         "  seal       stdin JSON -> ndjson envelope line on stdout\n" +
         "  verify     ndjson envelope line -> {ok, ...} on stdout\n" +
         "  canonical  stdin JSON -> canonical UTF-8 line on stdout\n" +
@@ -1424,7 +1706,23 @@ switch (cmd) {
         "             Package *.btn.mykit files into a .tnpkg (zip w/ manifest.json + kits) that the\n" +
         "             Chrome extension, Python SDK, and tn-js can all import.\n" +
         "             --kit filters to named groups; --full also writes publisher state + signing seed.\n" +
-        "             --yaml <path> may be used in place of --keystore to infer the keystore dir.\n",
+        "             --yaml <path> may be used in place of --keystore to infer the keystore dir.\n" +
+        "  bundle     <recipient> <out> [--yaml <path>] [--groups a,b] [--seal-for-recipient]\n" +
+        "             Mint a kit_bundle .tnpkg for one recipient DID.\n" +
+        "  add_recipient <group> <recipient> [--out <path>] [--yaml <path>] [--seal-for-recipient]\n" +
+        "             One-shot mint + bundle a reader kit for a group/recipient.\n" +
+        "  absorb     <package> [--yaml <path>] [--allow-self-absorb]\n" +
+        "             Install a .tnpkg (kit bundle, enrolment) into the active ceremony.\n" +
+        "  group add  <name> [--fields a,b,c] [--cipher btn|jwe] [--yaml <path>]\n" +
+        "             Add a group to an existing ceremony post-init.\n" +
+        "  firehose stats|list|get ...  (gated; needs TN_FIREHOSE_URL + token)\n" +
+        "             firehose stats <tenant>\n" +
+        "             firehose list  <tenant> [--did <did>]\n" +
+        "             firehose get   <tenant> <ceremony> <name> [--did <did>] [--out <path>]\n" +
+        "  inbox accept <zip> [--yaml <path>]\n" +
+        "             accept an invitation zip locally and install the kit it carries.\n" +
+        "  inbox list-local [--dir <path>]\n" +
+        "             list downloaded tn-invite-*.zip files (default ~/Downloads); no vault contact.\n",
     );
     exit(cmd ? 0 : 1);
     break;
