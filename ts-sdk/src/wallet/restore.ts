@@ -20,6 +20,13 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
 
+import {
+  deriveBekFromMaterial,
+  type CredentialWrap,
+  type WrappedKeyRow,
+} from "../vault/awk_bek.js";
+import type { VaultClient } from "../vault/client.js";
+
 const DEFAULT_HEADERS: Record<string, string> = {
   "User-Agent": "tnproto-sdk-ts/0.4.3",
   Accept: "application/json, application/octet-stream",
@@ -286,6 +293,52 @@ export async function restoreWithBek(opts: RestoreOptions): Promise<RestoreResul
     rawBlobPath,
     notes,
   };
+}
+
+/**
+ * Derive the project BEK from the account passphrase. Mirror of Python
+ * `wallet_restore_passphrase._derive_bek_via_passphrase`: GET the
+ * credential wrap + the project wrapped-key (via the VaultClient API),
+ * then run the PBKDF2 -> unwrap AWK -> unwrap BEK chain (awk_bek). The
+ * two wrap layers are AAD-pinned; the body that this BEK later decrypts
+ * is NOT (see decryptBlobWithBek).
+ */
+export async function _deriveBekViaPassphrase(
+  client: VaultClient,
+  projectId: string,
+  passphrase: string,
+  opts: { credentialId?: string } = {},
+): Promise<Uint8Array> {
+  const credOpts: { credentialId?: string } = {};
+  if (opts.credentialId !== undefined) credOpts.credentialId = opts.credentialId;
+  const cred = (await client.getCredentialWrap(credOpts)) as unknown as CredentialWrap;
+  const wrapped = (await client.getWrappedKey(projectId)) as unknown as WrappedKeyRow;
+  return deriveBekFromMaterial(passphrase, cred, wrapped);
+}
+
+/**
+ * Restore a project via the passphrase fallback (D-22). Mirror of the
+ * Python CLI's `_restore_via_passphrase`: derive the BEK from the
+ * passphrase, then fetch + decrypt + write through the existing
+ * `restoreWithBek` (frame, no AAD). Headless — no browser needed.
+ */
+export async function restoreViaPassphrase(
+  client: VaultClient,
+  opts: { projectId: string; passphrase: string; outDir: string; credentialId?: string },
+): Promise<RestoreResult> {
+  if (!client.token) {
+    throw new RestoreError("restoreViaPassphrase: client is not authenticated");
+  }
+  const deriveOpts: { credentialId?: string } = {};
+  if (opts.credentialId !== undefined) deriveOpts.credentialId = opts.credentialId;
+  const bek = await _deriveBekViaPassphrase(client, opts.projectId, opts.passphrase, deriveOpts);
+  return restoreWithBek({
+    vaultUrl: client.baseUrl,
+    projectId: opts.projectId,
+    bearer: client.token,
+    bek,
+    outDir: opts.outDir,
+  });
 }
 
 export interface RestoreViaLoopbackOptions {

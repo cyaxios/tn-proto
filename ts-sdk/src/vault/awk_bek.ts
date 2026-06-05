@@ -21,7 +21,6 @@ import {
   deriveEmkFromPassphrase,
   wrapBytes,
   unwrapBytes,
-  type WrappedBlob,
 } from "../core/emk.js";
 import { b64ToBytes } from "../core/encoding.js";
 
@@ -30,8 +29,12 @@ const _enc = new TextEncoder();
 export const AAD_AWK_WRAP = _enc.encode("tn-vault-awk-wrap-v1");
 /** AAD pinning the BEK wrap layer (BEK under AWK). */
 export const AAD_BEK_WRAP = _enc.encode("tn-vault-bek-wrap-v1");
-/** AAD pinning the project body (body under BEK). */
-export const AAD_BODY = _enc.encode("tn-vault-body-v1");
+// NOTE: the project BODY is encrypted under the BEK with NO AAD, as a
+// `nonce||ct` frame — that's what Python's `_decrypt_blob_with_bek`
+// expects and what `core/body_encryption.ts` produces. Only the two
+// WRAP layers above are AAD-pinned. (The newer browser binds an
+// AAD `tn-vault-body-v1` to the body, which diverges from Python; we
+// follow Python.)
 
 export class AwkBekError extends Error {
   constructor(message: string) {
@@ -120,18 +123,6 @@ export async function deriveBekFromMaterial(
   const awk = await deriveAwkFromMaterial(passphrase, cred);
   const awkKey = await importEmk(awk);
   return _unwrap32(awkKey, wrapped.wrapped_bek_b64, wrapped.wrap_nonce_b64, AAD_BEK_WRAP, "BEK");
-}
-
-/** Encrypt the project body (a STORED zip) under the BEK with AAD
- * `tn-vault-body-v1`. Returns the `{ciphertext_b64, nonce_b64}` envelope
- * the encrypted-blob route stores. */
-export async function encryptBody(bek: Uint8Array, body: Uint8Array): Promise<WrappedBlob> {
-  return wrapBytes(await importEmk(bek), body, AAD_BODY);
-}
-
-/** Decrypt a `{ciphertext_b64, nonce_b64}` body envelope under the BEK. */
-export async function decryptBody(bek: Uint8Array, blob: WrappedBlob): Promise<Uint8Array> {
-  return unwrapBytes(await importEmk(bek), blob, AAD_BODY);
 }
 
 /** Wrap a fresh BEK under the AWK (for the push/mint side). Returns the
