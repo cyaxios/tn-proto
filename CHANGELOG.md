@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5a1] - 2026-06-06 -- CLI parity (both directions) + day-1 vault sync + real seal-for-recipient
+
+A large CLI-parity and vault-sync release, all verified against a live dev vault.
+
+* **Full Python <-> TS CLI parity.** Every verb now exists and is callable on
+  both sides. Python gained `seal`, `verify`, `canonical`, `info`, `compile`,
+  `vault link/unlink`, and a new `invite` verb (mints a real `tn-invite-*.zip`).
+  TS gained `bundle`, `add_recipient`, `group add`, `absorb`, `wallet sync`,
+  `wallet status`, `wallet pull-prefs`, `wallet export-mnemonic`,
+  `show profiles`, `firehose stats/list/get`, and `inbox accept/list-local`.
+* **Day-1 single-user vault lifecycle (live-vault tested).** Backup -> restore
+  round-trips byte-for-byte (keystore + yaml + groups + log), the restored
+  ceremony reads its prior entries and writes new ones; negatives (wrong
+  passphrase, stale If-Match conflict) are enforced. Python `wallet sync` push
+  now rides the **AWK/BEK whole-body** model, replacing the deprecated per-file
+  `upload_file` path.
+* **Two-device group sync (both languages).** A group's key material now rides
+  the account-inbox merge path (sealed `full_keystore`/`scope=group_keys`
+  snapshot), so a group created on one device becomes usable on another;
+  concurrent group adds union with no clobber. (Concurrent main-log content
+  writes under a shared device key remain last-write-wins -- a separate,
+  documented limitation.)
+* **Real `--seal-for-recipient` in TS.** `bundle`/`add_recipient` now seal a
+  bundle to a recipient DID for real: the named recipient decrypts, a different
+  recipient cannot (mutation-proven cryptographic binding). Previously they
+  refused it; one path silently shipped an unsealed bundle.
+* **Bug fixes.** TS `seal`/`verify` were broken at HEAD (the device_identity
+  naming flip missed the CLI); `tn bundle` arg name; `inbox accept` kit entry
+  name (`<group>.btn.mykit`); `compile --label` persistence; `cli_info` `_sign`
+  type; `wallet pull-prefs --help` crash; `pushCeremonyBody` missing `nonce_b64`.
+* **Tests.** Real round-trip + tamper coverage: real `seal -> verify` chain,
+  `secure_read` forged-signature + chain-break rejection, `absorb` on-disk
+  install + recipient read-back, and a full multi-device account-sync capstone
+  (both languages + Python->TS cross-impl) -- all against a live dev vault.
+
 ## [0.4.3a2] - 2026-05-22 -- CLI receive-side parity + CF 1010 UA fix
 
 Three CLI/SDK additions to close the dashboard receive-side parity
