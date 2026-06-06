@@ -62,6 +62,35 @@ from tn.cli import main as cli_main
 RECIPIENT_DID = "did:key:z6MkfakefakefakefakefakefakefakefakefakefakeReadr"
 
 
+def _absorbed_events_from_admin_log(yaml_path: Path) -> list[dict]:
+    """Read `tn.enrolment.absorbed` envelopes from a ceremony's admin log.
+
+    Admin events route to the stem-namespaced dedicated admin log
+    (``ceremony.admin_log_location``, default ``./.tn/<stem>/admin/admin.ndjson``),
+    NOT the main ndjson log. Mirrors ``test_enrolment_events`` but resolves
+    the location from the recipient yaml so it works for any stem.
+    """
+    doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    loc = (doc.get("ceremony") or {}).get("admin_log_location")
+    if not loc or loc == "main_log":
+        loc = f"./.tn/{yaml_path.stem}/admin/admin.ndjson"
+    admin_log = Path(loc)
+    if not admin_log.is_absolute():
+        admin_log = (yaml_path.parent / admin_log).resolve()
+    if not admin_log.exists():
+        return []
+    out = []
+    with admin_log.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            env = json.loads(line)
+            if env.get("event_type") == "tn.enrolment.absorbed":
+                out.append(env)
+    return out
+
+
 @pytest.fixture(autouse=True)
 def _clean_tn():  # noqa: PT004
     """Flush the module-level runtime around each test so a stray failure
@@ -246,3 +275,62 @@ def test_invite_accept_tampered_kit_sha256_rejected(
 
     with pytest.raises(inbox.InboxError, match="hash mismatch"):
         inbox.accept(tampered, yaml_path=rec_yaml)
+
+
+def test_accept_records_absorbed_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a real accept(), the `tn.enrolment.absorbed` attestation must
+    genuinely land in the recipient's admin log — not be swallowed.
+
+    This is the property the mocked unit tests (test_inbox_accept.py) cannot
+    prove: they stub tn.init/tn.info, so a malformed emit (e.g. the wrong
+    catalog field name) passes silently. Here accept() drives the REAL
+    runtime, so the admin-catalog schema validation actually runs and the
+    event is signed + written. We assert all four catalog fields are present
+    and that `publisher_identity` is the publisher's device DID.
+    """
+    monkeypatch.setenv("TN_NO_STDOUT", "1")
+    monkeypatch.setenv("TN_AUTOINIT_QUIET", "1")
+
+    pub_dir = tmp_path / "publisher"
+    rec_dir = tmp_path / "recipient"
+    pub_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(pub_dir)
+    pub_yaml = _new_btn_ceremony(pub_dir, "publisher")
+
+    out_zip = tmp_path / "tn-invite-absorbed.zip"
+    rc = _mint_invite_zip(pub_yaml, RECIPIENT_DID, out_zip, group="default")
+    assert rc == 0
+    with zipfile.ZipFile(out_zip, "r") as zf:
+        manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+    publisher_did = manifest["from_account_did"]
+    expected_sha = manifest["kit_sha256"]
+    assert publisher_did.startswith("did:key:")
+    tn.flush_and_close()
+
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(rec_dir)
+    rec_yaml = _new_btn_ceremony(rec_dir, "recipient")
+
+    result = inbox.accept(out_zip, yaml_path=rec_yaml)
+    tn.flush_and_close()
+
+    events = _absorbed_events_from_admin_log(rec_yaml)
+    assert events, (
+        "tn.enrolment.absorbed must appear in the recipient's admin log "
+        "after accept() — the attestation was swallowed, not recorded"
+    )
+    e = events[0]
+    assert e["group"] == "default", f"group mismatch: {e.get('group')!r}"
+    assert e["publisher_identity"] == publisher_did, (
+        f"publisher_identity must be the publisher device DID "
+        f"{publisher_did!r}, got {e.get('publisher_identity')!r}"
+    )
+    assert e["package_sha256"] == expected_sha, (
+        f"package_sha256 must equal the manifest kit_sha256 {expected_sha!r}, "
+        f"got {e.get('package_sha256')!r}"
+    )
+    assert e["absorbed_at"] == result["absorbed_at"], (
+        "absorbed_at in the event must match the value accept() returned"
+    )

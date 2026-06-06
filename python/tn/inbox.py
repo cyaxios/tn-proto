@@ -173,10 +173,17 @@ def accept(zip_path: Path, yaml_path: Path | None = None) -> dict:
         log_rel = (yaml_doc.get("logs") or {}).get("path") or "./.tn/logs/tn.ndjson"
         log_abs = (yaml_dir / log_rel).resolve()
         tn.init(str(yaml_path), log_path=str(log_abs))
+        # Field names MUST match the admin-event catalog
+        # (crypto/tn-core admin_catalog.rs `tn.enrolment.absorbed`):
+        # group / publisher_identity / package_sha256 / absorbed_at. The
+        # publisher's device DID is the manifest `from_account_did`
+        # (cli_invite / routes_invite set it to cfg.device.device_identity).
+        # Mirrors absorb.py's emit. Passing it as `from_did` makes the
+        # catalog reject the envelope for a missing `publisher_identity`.
         tn.info(
             "tn.enrolment.absorbed",
             group=group_name,
-            from_did=from_did,
+            publisher_identity=from_did,
             package_sha256=kit_sha256,
             absorbed_at=absorbed_at,
         )
