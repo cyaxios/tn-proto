@@ -59,8 +59,13 @@ LOC = handler body (Py `cmd_*` / TS `*Cmd`).
 ## New finding (protocol reality, not a bug)
 - An unsealed `btn` kit_bundle is decryptable by ANY recipient (group read-key ships in clear; `recipient_identity` is attestation-only). Recipient *binding* requires `--seal-for-recipient`, which TS cannot do yet — so "wrong recipient can't decrypt" is NOT assertable for unsealed kits.
 
+## Done 2026-06-05 (commits e53588d, 4b799f2, ad1a890)
+- [DONE] `tn invite` verb mints real invitations → `inbox accept` SL recv is now a real round-trip (mint→accept→read; 2 tests).
+- [DONE] Live-vault round-trips against the dev vault on :34987 — `wallet sync` push→restore byte-MATCH, `wallet restore` fresh-dir byte-match, `account connect` real mint→redeem→bind (6 tests, run+pass; skip when vault down).
+- [DONE] 6 Python verbs wired → `seal verify canonical info compile vault` callable as `tn <verb>` (11 dispatch tests).
+- [DONE] Real `seal-for-recipient` in TS → `bundle`/`add_recipient` seal for real; named recipient decrypts, wrong recipient can't (mutation-proven binding).
+
 ## Still open
-- No CLI **invite-mint verb** → `inbox accept` full round-trip blocked.
-- No **live-vault CI harness** → `wallet sync`/`restore`/`account connect`/`pull-prefs` real round-trips.
-- 6 Python verbs **not wired** (`seal verify canonical info compile vault`) — still 🔌.
-- Real **seal-for-recipient** not implemented in TS (verbs refuse it safely).
+- **TS/Python restore parity** — TS restore writes body members flat (skips nested `body/...` paths); Python rebuilds the tree. Cross-impl restore divergence.
+- **Python live-vault tests** — the live round-trips are TS-only; Python `wallet sync` push still rides the deprecated `upload_file` path (no AWK/BEK body round-trip Python-side).
+- **`inbox accept` `<group>.btn.mykit` emit** — attestation `tn.enrolment.absorbed` still hits the non-fatal warn branch (schema-gated).
