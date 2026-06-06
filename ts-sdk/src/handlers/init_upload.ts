@@ -13,12 +13,13 @@
 // browser claim page's sessionStorage key (`static/claim/claim.js`).
 
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Buffer } from "node:buffer";
 
 import type { NodeRuntime } from "../runtime/node_runtime.js";
+import { statePath, updateSyncState } from "../sync_state.js";
 
 /** Result of {@link initUpload}. Mirrors Python's return dict. */
 export interface InitUploadResult {
@@ -127,5 +128,38 @@ export async function initUpload(
 
   // Fragment carries the BEK per D-5; the server never sees this value.
   const claimUrl = `${vaultBase}/claim/${vaultId}#k=${passwordB64}`;
+
+  // Surface the claim URL the same two ways Python `init_upload` does:
+  //
+  //  (a) Persist a `pending_claim` block into sync_state so a handler/CLI
+  //      restart reuses the link inside the TTL window — mirrors Python's
+  //      `set_pending_claim` (`update_sync_state(pending_claim={...})`).
+  //      Writes `<yamlDir>/.tn/sync/state.json`.
+  //  (b) Write a cat-friendly `claim_url.txt` next to it
+  //      (`<yamlDir>/.tn/sync/claim_url.txt`, contents = url + "\n") —
+  //      mirrors Python's `_write_claim_url_file`.
+  //
+  // Both writes are best-effort: a failure must not fail the upload (the
+  // claim URL is already valid on the vault), so each is swallowed.
+  try {
+    updateSyncState(rt.config.yamlPath, {
+      pending_claim: {
+        vault_id: vaultId,
+        expires_at: expiresAt,
+        claim_url: claimUrl,
+        password_b64: passwordB64,
+      },
+    });
+  } catch {
+    /* sync-state is best-effort; the on-vault claim is the source of truth */
+  }
+  try {
+    const syncDir = dirname(statePath(rt.config.yamlPath));
+    mkdirSync(syncDir, { recursive: true });
+    writeFileSync(join(syncDir, "claim_url.txt"), `${claimUrl}\n`, "utf8");
+  } catch {
+    /* claim_url.txt is a convenience surface; best-effort like Python's */
+  }
+
   return { vaultId, expiresAt, claimUrl, passwordB64 };
 }
