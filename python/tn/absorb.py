@@ -378,6 +378,11 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
         return _absorb_offer_kind(cfg, manifest, body)
     if kind == "enrolment":
         return _absorb_enrolment_kind(cfg, manifest, body)
+    if kind == "group_keys" or manifest.scope == "group_keys":
+        # group_keys rides the `full_keystore` wire kind (server-known)
+        # marked with scope=group_keys; route by the marker, not just the
+        # kind. Mirrors TS absorbPkg's group_keys branch.
+        return _absorb_group_keys(cfg, manifest, body)
     if kind in ("kit_bundle", "full_keystore"):
         return _absorb_kit_bundle(cfg, manifest, body)
     if kind == "contact_update":
@@ -890,6 +895,115 @@ def _absorb_kit_bundle(
         kind=manifest.kind,
         accepted_count=accepted,
         deduped_count=skipped,
+        legacy_status="enrolment_applied" if accepted else "no_op",
+        replaced_kit_paths=replaced,
+    )
+
+
+def _absorb_group_keys(
+    cfg: LoadedConfig, manifest: TnpkgManifest, body: dict[str, bytes]
+) -> AbsorbReceipt:
+    """Absorb a ``group_keys`` snapshot: INSTALL the group key files into the
+    keystore (content-addressed — identical bytes skip, different bytes back
+    up + replace) AND register each carried group in the receiver's
+    authoritative yaml ``groups:`` block (union — a group already present is
+    left untouched; a new group is added). After this, a fresh ``tn.init``
+    over the same yaml routes ``tn.info`` / read through the group (USABLE,
+    not merely known).
+
+    1:1 with the TS reference ``node_runtime._absorbGroupKeys``.
+
+    Idempotent: re-absorbing the same snapshot is a no-op. Two devices that
+    add DIFFERENT groups and cross-sync end with the UNION of both — no
+    clobber, because each ``.btn.state`` is keyed by its own group name and
+    the yaml merge skips groups already present.
+
+    Must be self-addressed (from_did == to_did) — group_keys only flows
+    within one account, never between counterparties.
+    """
+    if (
+        manifest.recipient_identity is not None
+        and manifest.publisher_identity != manifest.recipient_identity
+    ):
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason="group_keys must be self-addressed (from_did == to_did).",
+        )
+
+    keystore = cfg.keystore
+    keystore.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    # Step A: install key files (content-addressed).
+    accepted = 0
+    deduped = 0
+    replaced: list[Path] = []
+    for name, data in body.items():
+        if not name.startswith("body/keys/"):
+            continue
+        rel = name[len("body/keys/") :]
+        if not rel:
+            continue
+        if "/" in rel or "\\" in rel:  # flat only
+            continue
+        # Only group key material — never a device secret.
+        if not (rel.endswith(".btn.state") or rel.endswith(".btn.mykit")):
+            continue
+        dest = (keystore / rel).resolve()
+        if dest.exists():
+            if dest.read_bytes() == data:
+                deduped += 1
+                continue
+            try:
+                dest.rename(dest.with_name(f"{rel}.previous.{ts}"))
+            except OSError:
+                pass  # best effort
+            replaced.append(dest)
+        dest.write_bytes(data)
+        accepted += 1
+
+    # Step B: register each carried group in the authoritative yaml (union).
+    blocks = None
+    if isinstance(manifest.state, dict):
+        maybe = manifest.state.get("groups")
+        if isinstance(maybe, dict):
+            blocks = maybe
+    if blocks:
+        import yaml as _yaml
+
+        from .config import authoritative_yaml_for
+
+        target = authoritative_yaml_for(cfg.yaml_path, "groups")
+        doc: dict[str, Any] = {}
+        if target.exists():
+            try:
+                doc = _yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+            except Exception:  # noqa: BLE001 — best-effort yaml read
+                doc = {}
+        if not isinstance(doc, dict):
+            doc = {}
+        groups = doc.get("groups")
+        if not isinstance(groups, dict):
+            groups = {}
+        changed = False
+        for group, block in blocks.items():
+            if group == "tn.agents":
+                continue
+            if group in groups:
+                continue  # union: keep the local block, don't clobber
+            groups[group] = block
+            changed = True
+            accepted += 1
+        if changed:
+            doc["groups"] = groups
+            target.write_text(_yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+    return AbsorbReceipt(
+        kind=manifest.kind,
+        accepted_count=accepted,
+        deduped_count=deduped,
+        noop=False,
         legacy_status="enrolment_applied" if accepted else "no_op",
         replaced_kit_paths=replaced,
     )

@@ -640,9 +640,31 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
                     return 1
                 return 0
 
-            result = _wallet.sync_ceremony(cfg, client, passphrase=passphrase)
+            # Author the group-keys snapshot AS the identity the `client`
+            # authenticates as (DID challenge) — the vault's inbox POST
+            # requires manifest.publisher_identity == auth_did. Mirrors the
+            # TS `publishGroupKeys(client, identity, ...)` author key.
+            from .signing import DeviceKey as _DeviceKey
+
+            identity_signer = _DeviceKey.from_private_bytes(
+                identity.device_private_key_bytes()
+            )
+            result = _wallet.sync_ceremony(
+                cfg,
+                client,
+                passphrase=passphrase,
+                sign_with=identity_signer,
+                author_did=identity.did,
+            )
             print(f"Synced {cfg.ceremony_id} -> {cfg.linked_vault}")
             print(f"  uploaded {len(result.uploaded)} files: {result.uploaded}")
+            if result.published_groups:
+                print(
+                    "  published group keys to own inbox: "
+                    f"{result.published_groups}"
+                )
+            if result.publish_warning:
+                print(f"  WARN group-keys publish failed: {result.publish_warning}")
             if result.errors:
                 print(f"  WARN {len(result.errors)} errors: {result.errors}")
                 return 1

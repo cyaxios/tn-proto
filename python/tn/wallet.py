@@ -105,6 +105,14 @@ class SyncResult:
     skipped: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
     project_id: str | None = None
+    # Two-device group sync: group names whose KEY material was published to
+    # the OWN account inbox (append-only merge path) alongside the body push.
+    # Empty when the ceremony has no btn groups or publish was skipped.
+    published_groups: list[str] = field(default_factory=list)
+    # Soft warning if the (best-effort) group-keys publish failed. The body
+    # push already succeeded; a publish failure is non-fatal and is NOT added
+    # to ``errors`` (mirrors the TS reference's stderr WARN). None on success.
+    publish_warning: str | None = None
 
 
 # ---------------------------------------------------------------------
@@ -172,6 +180,92 @@ def link_ceremony(
 
 
 # ---------------------------------------------------------------------
+# publish_group_keys: append-only group-key snapshot to OWN account inbox
+# ---------------------------------------------------------------------
+
+
+def publish_group_keys(
+    cfg: LoadedConfig,
+    client: VaultClient,
+    *,
+    sign_with: Any | None = None,
+    author_did: str | None = None,
+    groups: list[str] | None = None,
+) -> list[str]:
+    """Publish the ceremony's group KEY material to the OWN account inbox so
+    a SECOND device on the same account ends up with the groups INSTALLED +
+    ROUTABLE after its next ``pull -> absorb``.
+
+    1:1 with the TS reference ``wallet_sync.publishGroupKeys``. This is the
+    merge-path companion to the last-write-wins body push: the body blob is
+    content (lost on overwrite), the group keys ride the append-only inbox
+    (union-merged).
+
+    Exports a ``group_keys`` ``.tnpkg`` (group ``.btn.state`` / ``.btn.mykit``
+    + the yaml ``groups.<name>`` blocks — NO device secret) and POSTs it to
+    this device's OWN inbox at
+    ``/api/v1/inbox/{did}/snapshots/{ceremony}/{ts}.tnpkg``.
+
+    The snapshot is authored AS the account-bound identity DID — the vault's
+    inbox POST requires ``manifest.publisher_identity == auth_did``. By
+    default this is ``cfg.device`` (the ceremony device key, which the CLI
+    authenticates the ``client`` as via DID challenge); pass ``sign_with`` /
+    ``author_did`` to author as a distinct identity device key.
+
+    Best-effort: a ceremony with no btn groups (only ``tn.agents``)
+    publishes nothing. Returns the published group names (empty when
+    nothing was sent). Raises on a genuine POST failure so the caller can
+    decide whether to swallow it (``sync_ceremony`` does, per the TS).
+    """
+    import tempfile
+    from datetime import datetime, timezone
+
+    from .export import export_group_keys
+    from .handlers.vault_push import _SnapshotPostingClient
+
+    # The DID the snapshot is authored as. Mirrors TS `authorKey.did`.
+    own_did = author_did or (
+        sign_with.did if sign_with is not None else cfg.device.device_identity
+    )
+
+    td = Path(tempfile.mkdtemp(prefix="tn-groupkeys-"))
+    pkg_path = td / "group_keys.tnpkg"
+    try:
+        try:
+            export_group_keys(
+                pkg_path,
+                cfg=cfg,
+                groups=groups,
+                sign_with=sign_with,
+                author_did=author_did,
+            )
+        except (RuntimeError, FileNotFoundError):
+            # No btn groups with key material — nothing to publish.
+            return []
+
+        names = sorted(g for g in cfg.groups if g != "tn.agents")
+        body = pkg_path.read_bytes()
+
+        # Inbox snapshot timestamp YYYYMMDDTHHMMSS<micros>Z — the shape the
+        # vault's _TS_RE accepts. Matches push_snapshot / TS inboxSnapshotTs.
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        url_path = (
+            f"/api/v1/inbox/{own_did}/snapshots/{cfg.ceremony_id}/{ts}.tnpkg"
+        )
+        # Reuse the existing adapter (lazy DID-challenge auth + 401 retry).
+        poster = _SnapshotPostingClient(client)
+        poster.post_inbox_snapshot(url_path, body)
+    finally:
+        import shutil
+
+        try:
+            shutil.rmtree(td, ignore_errors=True)
+        except OSError:
+            pass
+    return names
+
+
+# ---------------------------------------------------------------------
 # sync_ceremony: push current state up
 # ---------------------------------------------------------------------
 
@@ -217,7 +311,7 @@ def drain_sync_queue(
     """
     from . import admin as _admin
 
-    result = sync_ceremony(cfg, client, passphrase=passphrase)
+    result = sync_ceremony(cfg, client, passphrase=passphrase, publish_groups=False)
     if not result.errors:
         path = _admin._sync_queue_path(cfg.ceremony_id)
         if path.is_file():
@@ -234,6 +328,9 @@ def sync_ceremony(
     *,
     passphrase: str | None = None,
     if_match: str | None = None,
+    publish_groups: bool = True,
+    sign_with: Any | None = None,
+    author_did: str | None = None,
 ) -> SyncResult:
     """Push the current keystore + tn.yaml to this ceremony's linked project.
 
@@ -307,6 +404,26 @@ def sync_ceremony(
     # Mirror the prior per-file `uploaded` list: one entry per body member,
     # with the `body/` prefix stripped so the names read like file paths.
     result.uploaded = sorted(k[len("body/"):] for k in body)
+
+    # Two-device group sync: in ADDITION to the last-write-wins body blob,
+    # publish the ceremony's group KEY material to the OWN account inbox.
+    # The other device's pull -> absorb then INSTALLS + REGISTERS the groups
+    # (union-merged, idempotent) — so a group added becomes USABLE on the
+    # other device without depending on the body blob (overwritten on its
+    # next push). Best-effort: a publish failure must not fail the body sync
+    # (mirrors the TS reference). Skipped for the drain-queue retry.
+    if publish_groups:
+        try:
+            result.published_groups = publish_group_keys(
+                cfg,
+                client,
+                sign_with=sign_with,
+                author_did=author_did,
+            )
+        except Exception as e:  # noqa: BLE001 — publish must not fail body sync
+            # Soft warning only — the body push already succeeded. Mirrors the
+            # TS reference, which writes a stderr WARN and does NOT fail sync.
+            result.publish_warning = f"{type(e).__name__}: {e}"
     return result
 
 

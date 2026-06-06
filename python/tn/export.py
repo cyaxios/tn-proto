@@ -1051,6 +1051,131 @@ def decrypt_body_blob(blob: bytes, key: bytes) -> dict[str, bytes]:
     return out
 
 
+def export_group_keys(
+    out_path: Path | str,
+    *,
+    cfg: LoadedConfig,
+    groups: list[str] | None = None,
+    sign_with: Any | None = None,
+    author_did: str | None = None,
+) -> Path:
+    """Pack a ``group_keys`` ``.tnpkg`` carrying this ceremony's group KEY
+    material so a SECOND device on the same account can INSTALL + ROUTE the
+    groups after ``pull -> absorb``.
+
+    1:1 with the TS reference ``node_runtime.exportGroupKeys``.
+
+    Body  : ``body/keys/<group>.btn.state`` + ``body/keys/<group>.btn.mykit``
+            for every btn group (minus ``tn.agents``, which every ceremony
+            mints locally).
+    State : ``{"groups": {<name>: <yaml-block>}, "kind": "group-keys-v1"}`` —
+            the EXACT authoritative ``groups.<name>`` block so absorb
+            re-registers the group without re-deriving it.
+
+    Self-addressed (from_did == to_did == the author DID) — it rides the
+    OWN-account inbox. NO device secret (``local.private``) is carried; the
+    two devices keep distinct identities, only the shared group publisher
+    keys travel.
+
+    Wire kind: ``full_keystore`` with ``scope="group_keys"``. The vault's
+    inbox route accepts ``full_keystore`` (a known kind) and does NOT
+    enforce its body contents; the ``scope`` marker + ``state.groups`` block
+    tell the consumer to route this to the group-key installer
+    (``_absorb_group_keys``) rather than the blanket keystore overwrite — so
+    no new server-side kind is required.
+
+    ``sign_with`` / ``author_did`` let the caller author the snapshot AS the
+    account-bound IDENTITY device key (the vault's inbox POST requires
+    ``manifest.publisher_identity == auth_did``). When omitted, the
+    ceremony's own device key signs (self-contained / test path).
+
+    Raises ``RuntimeError`` when the ceremony has no btn group with key
+    material (e.g. only ``tn.agents``) — the caller treats this as
+    "nothing to publish".
+    """
+    keystore = Path(cfg.keystore).resolve()
+    if not keystore.is_dir():
+        raise FileNotFoundError(f"group_keys: keystore directory not found: {keystore}")
+
+    # Resolve the authoritative groups.<name> blocks once (head of the
+    # extends: chain — mirrors TS authoritativeYamlFor(..., "groups")).
+    import yaml as _yaml
+
+    from .config import authoritative_yaml_for
+
+    auth_yaml = authoritative_yaml_for(cfg.yaml_path, "groups")
+    auth_doc: dict[str, Any] = {}
+    if auth_yaml.exists():
+        try:
+            auth_doc = _yaml.safe_load(auth_yaml.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001 — best-effort yaml read
+            auth_doc = {}
+    auth_groups = auth_doc.get("groups") if isinstance(auth_doc, dict) else None
+    if not isinstance(auth_groups, dict):
+        auth_groups = {}
+
+    requested = set(groups) if groups else None
+
+    body: dict[str, bytes] = {}
+    blocks: dict[str, Any] = {}
+    carried: list[str] = []
+
+    for group, gcfg in cfg.groups.items():
+        if group == "tn.agents":  # minted locally on every ceremony
+            continue
+        cipher_name = getattr(getattr(gcfg, "cipher", None), "name", None)
+        if cipher_name is not None and cipher_name != "btn":
+            continue
+        if requested is not None and group not in requested:
+            continue
+        state_path = keystore / f"{group}.btn.state"
+        mykit_path = keystore / f"{group}.btn.mykit"
+        if not state_path.exists() or not mykit_path.exists():
+            continue
+        body[f"body/keys/{group}.btn.state"] = state_path.read_bytes()
+        body[f"body/keys/{group}.btn.mykit"] = mykit_path.read_bytes()
+        # Carry the authoritative yaml block if present, else a minimal one.
+        block = auth_groups.get(group)
+        if not isinstance(block, dict):
+            self_did = cfg.device.device_identity if cfg.device is not None else None
+            block = {
+                "policy": getattr(gcfg, "policy", None) or "private",
+                "cipher": "btn",
+                "recipients": (
+                    [{"recipient_identity": self_did}] if self_did else []
+                ),
+            }
+        blocks[group] = block
+        carried.append(group)
+
+    if not carried:
+        suffix = f" matching {sorted(requested)}" if requested else ""
+        raise RuntimeError(
+            f"group_keys: no btn groups with key material in {keystore}{suffix}"
+        )
+
+    if sign_with is not None:
+        signing_key = sign_with.signing_key()
+        signer_did = author_did or sign_with.did
+    else:
+        signing_key = cfg.device.signing_key()
+        signer_did = author_did or cfg.device.device_identity
+
+    manifest = TnpkgManifest(
+        # full_keystore is a server-known kind; the scope marker below routes
+        # the absorb to the group-key installer (no new wire kind needed).
+        kind="full_keystore",
+        publisher_identity=signer_did,
+        ceremony_id=cfg.ceremony_id,
+        as_of=_now_iso(),
+        scope="group_keys",
+        recipient_identity=signer_did,  # self-addressed (from_did == to_did)
+        state={"groups": blocks, "kind": "group-keys-v1"},
+    )
+    manifest.sign(signing_key)
+    return _write_tnpkg(Path(out_path), manifest, body)
+
+
 def _default_scope(kind: str) -> str:
     if kind == "admin_log_snapshot":
         return "admin"
@@ -1090,6 +1215,7 @@ __all__ = [
     "canonical_manifest_bytes",
     "decrypt_body_blob",
     "export",
+    "export_group_keys",
     "export_identity_seed",
     "package_from_body_bytes",
 ]
