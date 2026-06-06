@@ -36,7 +36,16 @@ export type ManifestKind =
   // Session 8 (plan 2026-04-29-contact-update-tnpkg.md, spec §4.6 / D-11):
   // vault-emitted notification that a counterparty claimed a share-link
   // or backup-link. Mirror only — TS absorb is not implemented yet.
-  | "contact_update";
+  | "contact_update"
+  // Two-device group sync (DAY-1): carries a ceremony's group KEY material
+  // (`<group>.btn.state` + `<group>.btn.mykit`) PLUS each group's yaml
+  // `groups.<name>` block, scoped to the OWN account so a second device that
+  // pulls + absorbs ends up with the group INSTALLED (keystore) and ROUTABLE
+  // (registered in its yaml). Unlike `full_keystore` it carries NO device
+  // secret (`local.private`), and unlike `kit_bundle` it carries the
+  // publisher `.btn.state` needed to ENCRYPT. Content-addressed + union-merge
+  // on absorb (idempotent; two devices adding different groups → clean union).
+  | "group_keys";
 
 export const KNOWN_KINDS: ReadonlySet<ManifestKind> = new Set<ManifestKind>([
   "admin_log_snapshot",
@@ -46,6 +55,7 @@ export const KNOWN_KINDS: ReadonlySet<ManifestKind> = new Set<ManifestKind>([
   "kit_bundle",
   "full_keystore",
   "contact_update",
+  "group_keys",
 ]);
 
 /** Vector clock keyed by `did → {event_type → max_seq}`. */

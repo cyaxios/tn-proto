@@ -38,8 +38,8 @@
 // minter (tn_proto_web/static/account/project_minter.js steps 5-6). When a
 // `wallet.pushCeremonyBody` SDK helper lands, this should delegate to it.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve as pathResolve } from "node:path";
 
 import { parse as parseYaml } from "yaml";
@@ -468,6 +468,12 @@ async function pushCeremonyBody(
     projectId,
     {
       ciphertext_b64: bytesToB64(frame),
+      // The server requires nonce_b64 alongside the frame (422 otherwise);
+      // the no-AAD frame is nonce||ct, so the nonce is its first 12 bytes.
+      // restore.ts reads ciphertext_b64 as the WHOLE frame, so this field is
+      // informational for the server's envelope schema — it must still be
+      // present. Mirrors wallet_sync_live.test.ts::pushBody.
+      nonce_b64: bytesToB64(frame.subarray(0, 12)),
       salt_b64: bytesToB64(salt),
       kdf: "pbkdf2-sha256",
       kdf_params: { iterations: 1 },
@@ -479,6 +485,79 @@ async function pushCeremonyBody(
 
   // Mirror Python's per-file `uploaded` list: one entry per body member.
   return [...body.keys()].map((k) => k.replace(/^body\//, "")).sort();
+}
+
+/**
+ * Publish the ceremony's group KEY material to the OWN account inbox so a
+ * SECOND device on the same account ends up with the groups INSTALLED +
+ * ROUTABLE after its next `pull -> absorb`. This is the merge-path companion
+ * to the last-write-wins body push: the body blob is content (lost on
+ * overwrite), the group keys ride the append-only inbox (union-merged).
+ *
+ * Exports a `group_keys` `.tnpkg` (group `.btn.state`/`.btn.mykit` + the yaml
+ * `groups.<name>` blocks — NO device secret) and POSTs it to this device's
+ * own inbox at `/api/v1/inbox/{did}/snapshots/{ceremony}/{ts}.tnpkg`.
+ *
+ * Best-effort: a ceremony with no btn groups (only `tn.agents`) publishes
+ * nothing. Returns the published group names (empty when nothing was sent).
+ */
+async function publishGroupKeys(
+  client: VaultClient,
+  identity: Identity,
+  yamlPath: string,
+  ceremonyId: string,
+): Promise<string[]> {
+  const authorKey = identity.deviceKey();
+  const ownDid = authorKey.did;
+  const td = mkdtempSync(join(tmpdir(), "tn-groupkeys-"));
+  const pkgPath = join(td, "group_keys.tnpkg");
+  const rt = NodeRuntime.init(yamlPath);
+  let names: string[];
+  try {
+    try {
+      // Author the snapshot AS the account-bound identity DID — the vault's
+      // inbox POST requires manifest.publisher_identity == auth_did.
+      rt.exportGroupKeys(pkgPath, { signWith: authorKey, authorDid: ownDid });
+    } catch {
+      // No btn groups with key material — nothing to publish.
+      return [];
+    }
+    names = listGroupNamesInYaml(yamlPath);
+    const body = new Uint8Array(readFileSync(pkgPath));
+    await client.postInboxSnapshot(ownDid, ceremonyId, `${inboxSnapshotTs()}.tnpkg`, body);
+  } finally {
+    rt.close();
+    try {
+      rmSync(td, { recursive: true, force: true });
+    } catch {
+      /* best-effort tempdir cleanup */
+    }
+  }
+  return names;
+}
+
+/** Inbox snapshot timestamp `YYYYMMDDTHHMMSS<micros>Z` — the exact shape the
+ *  vault's `_TS_RE` (`\d{8}T\d{6}\d{6}Z`) accepts. Mirrors Python's
+ *  `datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")`. JS Date has only
+ *  millisecond precision, so the micros are the ms padded to 6 digits. */
+function inboxSnapshotTs(): string {
+  const iso = new Date().toISOString(); // e.g. 2026-06-06T16:08:31.277Z
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/.exec(iso);
+  if (!m) return iso.replace(/[-:.]/g, "").replace(/Z$/, "000Z");
+  const [, y, mo, d, hh, mm, ss, ms] = m;
+  return `${y}${mo}${d}T${hh}${mm}${ss}${ms}000Z`;
+}
+
+/** Group names declared in the ceremony's authoritative yaml (sans
+ *  `tn.agents`). Used only for the push stdout line. */
+function listGroupNamesInYaml(yamlPath: string): string[] {
+  try {
+    const doc = parseYaml(readFileSync(yamlPath, "utf8")) as Record<string, unknown> | null;
+    const groups = (doc?.["groups"] ?? {}) as Record<string, unknown>;
+    return Object.keys(groups).filter((g) => g !== "tn.agents").sort();
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -576,6 +655,21 @@ export async function walletSyncCmd(opts: WalletSyncCmdOptions = {}): Promise<nu
     return die(err, `push failed for ${link.ceremonyId}: ${(e as Error).message}`);
   }
 
+  // Step 3 (two-device group sync): in ADDITION to the last-write-wins body
+  // blob, publish the ceremony's group KEY material to the OWN account inbox.
+  // The other device's pull -> absorb then INSTALLS + REGISTERS the groups
+  // (union-merged, idempotent) — so a group A added becomes USABLE on B
+  // without depending on the body blob (which is overwritten on B's next
+  // push). Best-effort: a publish failure must not fail the body sync.
+  let publishedGroups: string[] = [];
+  if (!drainQueue) {
+    try {
+      publishedGroups = await publishGroupKeys(client, identity, yamlPath, link.ceremonyId);
+    } catch (e) {
+      out.write(`  WARN group-keys publish failed: ${(e as Error).message}\n`);
+    }
+  }
+
   if (drainQueue) {
     out.write(`Drained sync queue for ${link.ceremonyId}\n`);
     out.write(`  uploaded ${uploaded.length} files\n`);
@@ -583,5 +677,8 @@ export async function walletSyncCmd(opts: WalletSyncCmdOptions = {}): Promise<nu
   }
   out.write(`Synced ${link.ceremonyId} -> ${link.linkedVault}\n`);
   out.write(`  uploaded ${uploaded.length} files: ${JSON.stringify(uploaded)}\n`);
+  if (publishedGroups.length > 0) {
+    out.write(`  published group keys to own inbox: ${JSON.stringify(publishedGroups)}\n`);
+  }
   return 0;
 }

@@ -1411,6 +1411,10 @@ export class NodeRuntime {
     let receipt: AbsorbReceipt;
     if (kind === "admin_log_snapshot") {
       receipt = this._absorbAdminLogSnapshot(manifest, body);
+    } else if (kind === "group_keys" || manifest.scope === "group_keys") {
+      // group_keys rides the `full_keystore` wire kind (server-known) marked
+      // with scope=group_keys; route by the marker, not just the kind.
+      receipt = this._absorbGroupKeys(manifest, body);
     } else if (kind === "kit_bundle" || kind === "full_keystore") {
       receipt = this._absorbKitBundle(manifest, body);
     } else if (kind === "identity_seed") {
@@ -2202,6 +2206,212 @@ export class NodeRuntime {
       kind: manifest.kind,
       acceptedCount: accepted,
       dedupedCount: skipped,
+      noop: false,
+      derivedState: null,
+      conflicts: [],
+      replacedKitPaths: replaced,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // group_keys — two-device group sync (DAY-1).
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Pack a `group_keys` `.tnpkg` carrying this ceremony's group KEY material
+   * so a second device on the SAME account can INSTALL + ROUTE the groups
+   * after `pull -> absorb`.
+   *
+   * Body  : `body/keys/<group>.btn.state` + `body/keys/<group>.btn.mykit`
+   *         for every btn group (minus `tn.agents`, which every ceremony
+   *         mints locally).
+   * State : `{ groups: { <name>: <yaml-block> } }` — the EXACT authoritative
+   *         `groups.<name>` block (policy/cipher/recipients/fields), so absorb
+   *         re-registers the group without re-deriving it.
+   *
+   * Self-addressed (fromDid === toDid === the author DID) — it rides the
+   * OWN-account inbox. Returns the path.
+   *
+   * NO device secret (`local.private`) is carried — the two devices keep
+   * their distinct identities; only the shared group publisher keys travel.
+   *
+   * Wire kind: `full_keystore` with `scope: "group_keys"`. The vault's inbox
+   * route accepts `full_keystore` (a known kind) and does NOT enforce its body
+   * contents; the `scope` marker + `state.groups` block tell the TS absorb to
+   * route this to the group-key installer (`_absorbGroupKeys`) rather than the
+   * blanket keystore overwrite — so no new server-side kind is required.
+   *
+   * `opts.signWith` / `opts.authorDid` let the caller author the snapshot AS
+   * the account-bound IDENTITY device key (the vault's inbox POST requires
+   * `manifest.publisher_identity == auth_did`). When omitted, the ceremony's
+   * own device key signs (self-contained / test path).
+   */
+  exportGroupKeys(
+    outPath: string,
+    opts: { groups?: string[]; signWith?: DeviceKey; authorDid?: string } = {},
+  ): string {
+    const keystore = this.config.keystorePath;
+    if (!existsSync(keystore) || !statSync(keystore).isDirectory()) {
+      throw new Error(`group_keys: keystore directory not found: ${keystore}`);
+    }
+
+    // Resolve the authoritative groups.<name> blocks once.
+    const authYaml = authoritativeYamlFor(this.config.yamlPath, "groups");
+    const authDoc = existsSync(authYaml)
+      ? ((parseYaml(readFileSync(authYaml, "utf8")) as Record<string, unknown>) ?? {})
+      : {};
+    const authGroups = (authDoc.groups ?? {}) as Record<string, Record<string, unknown>>;
+
+    const requested =
+      opts.groups && opts.groups.length > 0
+        ? new Set(opts.groups)
+        : null;
+
+    const body: Record<string, Uint8Array> = {};
+    const blocks: Record<string, Record<string, unknown>> = {};
+    const carried: string[] = [];
+
+    for (const [group] of this.config.groups) {
+      if (group === "tn.agents") continue; // minted locally on every ceremony
+      const gcfg = this.config.groups.get(group);
+      if (gcfg && gcfg.cipher !== "btn") continue;
+      if (requested && !requested.has(group)) continue;
+      const statePath = join(keystore, `${group}.btn.state`);
+      const mykitPath = join(keystore, `${group}.btn.mykit`);
+      if (!existsSync(statePath) || !existsSync(mykitPath)) continue;
+      body[`body/keys/${group}.btn.state`] = new Uint8Array(readFileSync(statePath));
+      body[`body/keys/${group}.btn.mykit`] = new Uint8Array(readFileSync(mykitPath));
+      // Carry the authoritative yaml block if present, else a minimal one.
+      blocks[group] =
+        authGroups[group] ??
+        {
+          policy: gcfg?.policy ?? "private",
+          cipher: "btn",
+          recipients: this.did ? [{ recipient_identity: this.did }] : [],
+        };
+      carried.push(group);
+    }
+
+    if (carried.length === 0) {
+      throw new Error(
+        `group_keys: no btn groups with key material in ${keystore}` +
+          (requested ? ` matching [${[...requested].sort().join(", ")}]` : ""),
+      );
+    }
+
+    const signKey = opts.signWith ?? this.keystore.device;
+    const authorDid = opts.authorDid ?? signKey.did;
+    const manifest = newManifest({
+      // full_keystore is a server-known kind; the scope marker below routes
+      // the absorb to the group-key installer (no new wire kind needed).
+      kind: "full_keystore",
+      fromDid: authorDid,
+      ceremonyId: this.config.ceremonyId,
+      scope: "group_keys",
+      toDid: authorDid,
+    });
+    manifest.state = { groups: blocks, kind: "group-keys-v1" };
+    signManifest(manifest, signKey);
+    return writeTnpkg(outPath, manifest, body);
+  }
+
+  /**
+   * Absorb a `group_keys` snapshot: INSTALL the group key files into the
+   * keystore (content-addressed — identical bytes skip, different bytes back
+   * up + replace) AND register each carried group in the receiver's
+   * authoritative yaml `groups:` block (union — a group already present is
+   * left untouched; a new group is added). After this, a fresh
+   * `NodeRuntime.init` over the same yaml routes `tn.info`/read through the
+   * group (USABLE, not merely known).
+   *
+   * Idempotent: re-absorbing the same snapshot is a no-op. Two devices that
+   * add DIFFERENT groups and cross-sync end with the UNION of both — no
+   * clobber, because each `.btn.state` is keyed by its own group name and the
+   * yaml merge skips groups already present.
+   *
+   * Must be self-addressed (fromDid === toDid) — group_keys only flows within
+   * one account, never between counterparties.
+   */
+  private _absorbGroupKeys(manifest: Manifest, body: Map<string, Uint8Array>): AbsorbReceipt {
+    if (manifest.toDid !== undefined && manifest.fromDid !== manifest.toDid) {
+      return {
+        kind: manifest.kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason: `group_keys must be self-addressed (fromDid === toDid).`,
+      };
+    }
+
+    const keystore = this.config.keystorePath;
+    if (!existsSync(keystore)) mkdirSync(keystore, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15) + "Z";
+
+    // Step A: install key files (content-addressed).
+    let accepted = 0;
+    let deduped = 0;
+    const replaced: string[] = [];
+    for (const [name, data] of body) {
+      if (!name.startsWith("body/keys/")) continue;
+      const rel = name.slice("body/keys/".length);
+      if (!rel) continue;
+      if (rel.includes("/") || rel.includes("\\")) continue; // flat only
+      // Only group key material — never a device secret.
+      if (!rel.endsWith(".btn.state") && !rel.endsWith(".btn.mykit")) continue;
+      const dest = pathResolve(keystore, rel);
+      if (existsSync(dest)) {
+        const existing = readFileSync(dest);
+        if (Buffer.from(existing).equals(Buffer.from(data))) {
+          deduped += 1;
+          continue;
+        }
+        try {
+          renameSync(dest, pathResolve(keystore, `${rel}.previous.${ts}`));
+        } catch {
+          /* best effort */
+        }
+        replaced.push(dest);
+      }
+      writeFileSync(dest, Buffer.from(data));
+      accepted += 1;
+    }
+
+    // Step B: register each carried group in the authoritative yaml (union).
+    const blocks =
+      manifest.state && typeof manifest.state === "object"
+        ? ((manifest.state as Record<string, unknown>).groups as
+            | Record<string, Record<string, unknown>>
+            | undefined)
+        : undefined;
+    if (blocks && Object.keys(blocks).length > 0) {
+      const target = authoritativeYamlFor(this.config.yamlPath, "groups");
+      const doc = existsSync(target)
+        ? ((parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {})
+        : {};
+      const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
+      let changed = false;
+      for (const [group, block] of Object.entries(blocks)) {
+        if (group === "tn.agents") continue;
+        if (groups[group]) continue; // union: keep the local block, don't clobber
+        groups[group] = block;
+        changed = true;
+        accepted += 1;
+      }
+      if (changed) {
+        doc.groups = groups;
+        writeFileSync(target, stringifyYaml(doc), "utf8");
+        // Drop the cached wasm runtime so a same-process re-read re-attaches
+        // off the freshly-written yaml + keystore and routes the new groups.
+        this._resetWasmAfterAdminWrite();
+      }
+    }
+
+    return {
+      kind: manifest.kind,
+      acceptedCount: accepted,
+      dedupedCount: deduped,
       noop: false,
       derivedState: null,
       conflicts: [],

@@ -352,6 +352,38 @@ export class VaultClient {
     return new Uint8Array(await resp.arrayBuffer());
   }
 
+  /**
+   * POST a `.tnpkg` snapshot to a DID's inbox — the steady-state authenticated
+   * publish that rides the account-inbox MERGE path. Mirrors Python's
+   * `VaultClient.post_inbox_snapshot` (python/tn/handlers/vault_push.py:762).
+   *
+   *   POST /api/v1/inbox/{did}/snapshots/{ceremony}/{name}.tnpkg
+   *
+   * `body` is the raw `.tnpkg` bytes (octet-stream). `params` (e.g.
+   * `head_row_hash`) ride as a query string for server-side idempotency.
+   */
+  async postInboxSnapshot(
+    did: string,
+    ceremonyId: string,
+    name: string,
+    body: Uint8Array,
+    opts: { params?: Record<string, string> } = {},
+  ): Promise<void> {
+    let path =
+      `/api/v1/inbox/${encodeURIComponent(did)}` +
+      `/snapshots/${encodeURIComponent(ceremonyId)}/${encodeURIComponent(name)}`;
+    if (opts.params && Object.keys(opts.params).length > 0) {
+      const qs = new URLSearchParams(opts.params).toString();
+      path = `${path}?${qs}`;
+    }
+    await this._request({
+      method: "POST",
+      path,
+      body,
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+  }
+
   // ── Internals ────────────────────────────────────────────────────
 
   private _authHeaders(extra?: Record<string, string>): Record<string, string> {
