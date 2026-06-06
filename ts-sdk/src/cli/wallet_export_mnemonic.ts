@@ -105,7 +105,7 @@ export async function walletExportMnemonicCmd(
   }
 
   // Python: if not identity.mnemonic_stored: _die(..., code=2)
-  const mnemonic = readStoredMnemonic(identity.path);
+  const mnemonic = readStoredMnemonic(identityPath);
   if (!mnemonic) {
     process.stderr.write(
       "tn: error: no mnemonic stored on this machine. identity.json was " +
