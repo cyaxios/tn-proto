@@ -593,6 +593,12 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
 
     push_only = getattr(args, "push_only", False)
     drain_queue = getattr(args, "drain_queue", False)
+    # Account passphrase: derives the AWK that wraps the project BEK for the
+    # AWK/BEK whole-body push (D-22). Accept it from --passphrase or the
+    # TN_ACCOUNT_PASSPHRASE env var so headless runs don't echo it on argv.
+    passphrase = getattr(args, "passphrase", None) or os.environ.get(
+        "TN_ACCOUNT_PASSPHRASE"
+    )
     try:
         # Step 1 (two-way sync): pull the account inbox and ABSORB it
         # before pushing, so a revocation another device/publisher made
@@ -624,7 +630,7 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
         try:
             if drain_queue:
                 pending_before = len(_wallet.read_sync_queue(cfg.ceremony_id))
-                result = _wallet.drain_sync_queue(cfg, client)
+                result = _wallet.drain_sync_queue(cfg, client, passphrase=passphrase)
                 pending_after = len(_wallet.read_sync_queue(cfg.ceremony_id))
                 print(f"Drained sync queue for {cfg.ceremony_id}")
                 print(f"  pending before: {pending_before}, after: {pending_after}")
@@ -634,7 +640,7 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
                     return 1
                 return 0
 
-            result = _wallet.sync_ceremony(cfg, client)
+            result = _wallet.sync_ceremony(cfg, client, passphrase=passphrase)
             print(f"Synced {cfg.ceremony_id} -> {cfg.linked_vault}")
             print(f"  uploaded {len(result.uploaded)} files: {result.uploaded}")
             if result.errors:
@@ -3081,6 +3087,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Skip the pull/absorb (merge) step and only upload this "
             "ceremony's backup to the vault — the pre-two-way behavior."
+        ),
+    )
+    p_sync.add_argument(
+        "--passphrase",
+        default=None,
+        help=(
+            "Account passphrase for the AWK/BEK whole-body push (derives "
+            "the account key that wraps the project BEK). Falls back to the "
+            "TN_ACCOUNT_PASSPHRASE env var when omitted."
         ),
     )
     p_sync.set_defaults(func=cmd_wallet_sync)

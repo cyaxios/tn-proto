@@ -34,6 +34,36 @@ from .vault_client import VaultClient, VaultError
 # ---------------------------------------------------------------------
 
 
+def _collect_body_members(cfg: LoadedConfig) -> dict[str, bytes]:
+    """Collect the ceremony body keyed ``body/<name>`` for the AWK/BEK push.
+
+    Every regular keystore file (minus transient ``*.lock`` mutexes) lands
+    at ``body/keys/<name>`` and the yaml at ``body/tn.yaml`` — the layout
+    the browser minter (project_minter.js) packs and the restore side
+    (``wallet_restore._write_restored_bytes``) unpacks. Mirrors the TS
+    ``collectBodyMembers`` (sans the opt-in log files).
+
+    Log files are included under ``body/logs/<name>`` IFF the ceremony
+    yaml sets ``ceremony.sync_logs: true`` (spec §9.4 option B); default
+    stays option A — logs local-only.
+    """
+    body: dict[str, bytes] = {}
+    for p in sorted(cfg.keystore.iterdir()):
+        if p.is_file() and p.suffix != ".lock":
+            body[f"body/keys/{p.name}"] = p.read_bytes()
+    body["body/tn.yaml"] = cfg.yaml_path.read_bytes()
+    if getattr(cfg, "sync_logs", False):
+        logs_dir = cfg.resolve_log_path().parent
+        if logs_dir.is_dir():
+            for p in sorted(logs_dir.iterdir()):
+                # Skip transient emit-lock mutexes (same rationale as the
+                # keystore *.lock skip): a held lock is local btn state, not
+                # worth backing up and harmful to restore.
+                if p.is_file() and p.suffix != ".lock":
+                    body[f"body/logs/{p.name}"] = p.read_bytes()
+    return body
+
+
 def _ceremony_files(cfg: LoadedConfig) -> list[tuple[str, Path]]:
     """Return [(file_name_on_vault, local_path), ...] for sync.
 
@@ -172,7 +202,12 @@ def read_sync_queue(ceremony_id: str) -> list[dict]:
     return out
 
 
-def drain_sync_queue(cfg: LoadedConfig, client: VaultClient) -> SyncResult:
+def drain_sync_queue(
+    cfg: LoadedConfig,
+    client: VaultClient,
+    *,
+    passphrase: str | None = None,
+) -> SyncResult:
     """Retry a pending autosync failure by running a fresh sync_ceremony.
 
     If the sync succeeds, the queue file is truncated (removed). If it
@@ -182,7 +217,7 @@ def drain_sync_queue(cfg: LoadedConfig, client: VaultClient) -> SyncResult:
     """
     from . import admin as _admin
 
-    result = sync_ceremony(cfg, client)
+    result = sync_ceremony(cfg, client, passphrase=passphrase)
     if not result.errors:
         path = _admin._sync_queue_path(cfg.ceremony_id)
         if path.is_file():
@@ -196,13 +231,29 @@ def drain_sync_queue(cfg: LoadedConfig, client: VaultClient) -> SyncResult:
 def sync_ceremony(
     cfg: LoadedConfig,
     client: VaultClient,
+    *,
+    passphrase: str | None = None,
+    if_match: str | None = None,
 ) -> SyncResult:
-    """Upload current keystore + tn.yaml to this ceremony's linked project.
+    """Push the current keystore + tn.yaml to this ceremony's linked project.
 
-    Each file is sealed under the client identity's vault_wrap_key with
-    AAD bound to (did, ceremony_id, file_name). Errors on individual
-    files do not abort the whole sync; they're collected in
-    SyncResult.errors.
+    Uses the SUPPORTED AWK/BEK whole-body model (D-20 / D-22), NOT the
+    deprecated per-file ``client.upload_file`` sealing: the ceremony body
+    (keystore files + ``tn.yaml``) is packed into a STORED zip, AES-256-GCM
+    encrypted as a no-AAD ``nonce||ct`` frame under the project BEK (minted
+    + wrapped under the account AWK on first push, else derived), and PUT
+    to ``encrypted-blob-account`` with ``If-Match``. This is the exact
+    inverse of ``tn wallet restore --passphrase`` — a body pushed here
+    round-trips through that verb. See :mod:`tn.wallet_push`.
+
+    The push needs the account ``passphrase`` (to derive the AWK that
+    wraps the project BEK) and a bearer JWT (taken from the authed
+    ``client.token``). When either is missing the failure is recorded in
+    ``SyncResult.errors`` rather than raised, preserving the
+    "errors don't abort" contract callers (autosync queue, warm-attach)
+    rely on.
+
+    ``if_match`` overrides the auto-resolved blob generation (tests).
     """
     if not cfg.is_linked():
         raise RuntimeError(
@@ -214,19 +265,48 @@ def sync_ceremony(
             f"linked_project_id; relink to repair",
         )
 
+    from . import wallet_push as _wallet_push
+
     result = SyncResult(project_id=cfg.linked_project_id)
-    for file_name, path in _ceremony_files(cfg):
+
+    bearer = client.token
+    if not bearer:
+        # Authenticate so the account routes resolve the bound account.
         try:
-            data = path.read_bytes()
-            client.upload_file(
-                cfg.linked_project_id,
-                file_name,
-                data,
-                ceremony_id=cfg.ceremony_id,
-            )
-            result.uploaded.append(file_name)
-        except Exception as e:  # noqa: BLE001 — preserve broad swallow; see body of handler
-            result.errors.append((file_name, f"{type(e).__name__}: {e}"))
+            bearer = client.authenticate()
+        except Exception as e:  # noqa: BLE001 — record, don't abort
+            result.errors.append(("<auth>", f"{type(e).__name__}: {e}"))
+            return result
+
+    if not passphrase:
+        result.errors.append(
+            (
+                "<passphrase>",
+                "account passphrase required to push the body backup "
+                "(derives the AWK that wraps the project BEK); pass "
+                "--passphrase",
+            ),
+        )
+        return result
+
+    body = _collect_body_members(cfg)
+    vault_url = cfg.linked_vault or client.base_url
+    try:
+        _wallet_push.push_ceremony_body(
+            vault_url=vault_url,
+            bearer=bearer,
+            project_id=cfg.linked_project_id,
+            passphrase=passphrase,
+            body=body,
+            if_match=if_match,
+        )
+    except Exception as e:  # noqa: BLE001 — preserve broad swallow; see body of handler
+        result.errors.append((cfg.ceremony_id, f"{type(e).__name__}: {e}"))
+        return result
+
+    # Mirror the prior per-file `uploaded` list: one entry per body member,
+    # with the `body/` prefix stripped so the names read like file paths.
+    result.uploaded = sorted(k[len("body/"):] for k in body)
     return result
 
 

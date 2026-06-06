@@ -549,12 +549,17 @@ class TN:
         from .wallet import link_ceremony as _link
         return _link(self.cfg, client, project_name=project_name)
 
-    def vault_sync(self, client: Any) -> Any:
+    def vault_sync(self, client: Any, *, passphrase: str | None = None) -> Any:
         """Push this ceremony's keystore + tn.yaml to its linked
-        vault project. See ``tn.wallet.sync_ceremony``."""
+        vault project via the AWK/BEK whole-body model. ``passphrase``
+        (the account passphrase) derives the AWK that wraps the project
+        BEK. See ``tn.wallet.sync_ceremony``."""
         self._activate()
         from .wallet import sync_ceremony as _sync
-        return _sync(self.cfg, client)
+        if passphrase is None:
+            # Keep the 2-arg call shape for back-compat stubs/tests.
+            return _sync(self.cfg, client)
+        return _sync(self.cfg, client, passphrase=passphrase)
 
     def vault_push_snapshot(self, client: Any, **kwargs: Any) -> Any:
         """Push an admin-log snapshot to the vault.
