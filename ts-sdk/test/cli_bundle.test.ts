@@ -20,6 +20,22 @@ import { afterEach, test } from "node:test";
 import { DeviceKey, NodeRuntime, readTnpkg } from "../src/index.js";
 import { BtnPublisher } from "../src/raw.js";
 import { bundleCmd } from "../src/cli/bundle.js";
+import { absorbSealedKitBundle } from "../src/core/seal_bundle_producer.js";
+import { readAsRecipient } from "../src/read_as_recipient.js";
+import { parseTnpkg, packTnpkg } from "../src/tnpkg_io.js";
+import { signManifest, toWireDict } from "../src/core/tnpkg.js";
+
+/** Sort object keys recursively in JSON.stringify (matches writeTnpkg). */
+function sortedKeysReplacer(_key: string, value: unknown): unknown {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const sorted: Record<string, unknown> = {};
+    for (const k of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[k] = (value as Record<string, unknown>)[k];
+    }
+    return sorted;
+  }
+  return value;
+}
 
 const RECIPIENT = "did:key:zRecipientReaderBundleTest";
 
@@ -293,7 +309,11 @@ test("~/.tn/tn.yaml discovery branch (home fallback)", async () => {
   assert.equal(manifest.kind, "kit_bundle");
 });
 
-test("--seal-for-recipient (real did:key) is rejected (TS runtime gap) -> exit 1, nothing written", async () => {
+test("--seal-for-recipient (unresolvable DID) is rejected -> exit 1, nothing written", async () => {
+  // RECIPIENT is a `did:key:z...`-SHAPED string but carries no embedded
+  // Ed25519 public key (its base58 body doesn't decode to the Ed25519
+  // multicodec). The seal step has nothing to wrap under, so the verb
+  // refuses rather than shipping an unsealed bundle.
   const { dir, yamlPath, cleanup } = makeCeremony();
   cleanups.push(cleanup);
   const out = join(dir, "sealed.tnpkg");
@@ -301,7 +321,7 @@ test("--seal-for-recipient (real did:key) is rejected (TS runtime gap) -> exit 1
   let rc: number;
   try {
     rc = await bundleCmd({
-      recipientIdentity: RECIPIENT, // a real did:key:z... shape
+      recipientIdentity: RECIPIENT, // shaped like a did:key but no real pubkey
       out,
       yaml: yamlPath,
       sealForRecipient: true,
@@ -310,7 +330,7 @@ test("--seal-for-recipient (real did:key) is rejected (TS runtime gap) -> exit 1
     cap.restore();
   }
   assert.equal(rc, 1);
-  assert.ok(cap.err.some((l) => /seal-for-recipient is not supported/.test(l)));
+  assert.ok(cap.err.some((l) => /embedded Ed25519 public key/.test(l)));
   // Safety: refusal must not write a (would-be unsealed) bundle to disk, and
   // must not print a success "wrote" line.
   assert.ok(!existsSync(out), "no .tnpkg should be written on seal refusal");
@@ -418,4 +438,186 @@ test("error inside bundle (unknown group) -> exit 1, runtime closed", async () =
   }
   assert.equal(rc, 1);
   assert.ok(cap.err.some((l) => /unknown groups/.test(l)));
+});
+
+// ---- REAL --seal-for-recipient binding ---------------------------------
+//
+// The load-bearing proof the unsealed path cannot give: a bundle sealed to
+// recipient R's REAL key-DID is absorbable + decryptable by R, and NOT by a
+// different recipient X. Plus a mutation check on the wrap (wrong-recipient
+// negative must hold because the binding is real, not because the bytes
+// happen to differ).
+
+/** A real key-DID (embedded Ed25519 pubkey) from a deterministic seed. */
+function realRecipient(fill: number): { seed: Uint8Array; did: string } {
+  const seed = new Uint8Array(32);
+  for (let i = 0; i < 32; i += 1) seed[i] = (i * 31 + fill) & 0xff;
+  return { seed, did: DeviceKey.fromSeed(seed).did };
+}
+
+test("seal binding: NAMED recipient absorbs + decrypts; DIFFERENT recipient cannot", async () => {
+  const { dir, yamlPath, cleanup } = makeCeremony();
+  cleanups.push(cleanup);
+
+  const R = realRecipient(3);
+  const X = realRecipient(200); // a DIFFERENT real recipient
+  assert.notEqual(R.did, X.did);
+
+  // Seal a bundle to R via the real CLI verb FIRST. (Minting recipient
+  // events can rotate P's log; doing the seal before P's user.action write
+  // keeps that entry in the current main log for the read-back below.)
+  const sealedOut = join(dir, "sealed-for-R.tnpkg");
+  const cap = captureConsole();
+  let rc: number;
+  try {
+    rc = await bundleCmd({
+      recipientIdentity: R.did,
+      out: sealedOut,
+      yaml: yamlPath,
+      groups: "default",
+      sealForRecipient: true,
+    });
+  } finally {
+    cap.restore();
+  }
+  assert.equal(rc, 0, `seal bundle failed: ${cap.err.join("\n")}`);
+  assert.ok(existsSync(sealedOut), "sealed .tnpkg should exist");
+
+  // P writes a default-group entry so R has something to decrypt.
+  const rt = NodeRuntime.init(yamlPath);
+  try {
+    rt.emit("info", "user.action", { shared_field: "hello-sealed", n: 1 });
+  } finally {
+    rt.close();
+  }
+  const pLogPath = join(dir, ".tn/logs/tn.ndjson");
+  assert.ok(existsSync(pLogPath), "P should have written a log");
+
+  // The body must be SEALED: a single encrypted.bin, no plaintext mykit,
+  // and a manifest declaring recipient_wraps.
+  const { manifest, body } = readTnpkg(sealedOut);
+  assert.equal(manifest.kind, "kit_bundle");
+  assert.equal(manifest.toDid, R.did);
+  assert.ok(body.has("body/encrypted.bin"), "sealed body should be encrypted.bin");
+  assert.ok(
+    ![...body.keys()].some((k) => k.endsWith(".btn.mykit")),
+    "no plaintext .btn.mykit should be present in a sealed bundle",
+  );
+  const be = (manifest.state as Record<string, unknown>)?.["body_encryption"] as
+    | Record<string, unknown>
+    | undefined;
+  assert.ok(be && Array.isArray(be["recipient_wraps"]), "manifest must carry recipient_wraps");
+
+  // R absorbs into its own keystore dir and the named recipient decrypts.
+  const rKeystore = mkdtempSync(join(tmpdir(), "tn-seal-R-ks-"));
+  cleanups.push(() => rmSync(rKeystore, { recursive: true, force: true }));
+  const rReceipt = await absorbSealedKitBundle(sealedOut, {
+    seed: R.seed,
+    keystoreDir: rKeystore,
+  });
+  assert.equal(rReceipt.rejectedReason, undefined, `R absorb rejected: ${rReceipt.rejectedReason}`);
+  assert.ok(rReceipt.acceptedCount >= 1, "R should install at least one kit file");
+  assert.ok(
+    existsSync(join(rKeystore, "default.btn.mykit")),
+    "default.btn.mykit should land in R's keystore",
+  );
+
+  // Read-back: R decrypts P's entry cleanly (the load-bearing proof).
+  const entries = Array.from(
+    readAsRecipient(pLogPath, rKeystore, { group: "default", verifySignatures: true }),
+  ).filter((e) => e.envelope["event_type"] === "user.action");
+  assert.equal(entries.length, 1, "R should see P's one user.action entry");
+  const pt = entries[0]!.plaintext["default"] as Record<string, unknown> | undefined;
+  assert.ok(pt !== undefined, "R should have decrypted plaintext for default group");
+  assert.ok(!("$no_read_key" in (pt ?? {})), "R must not get $no_read_key");
+  assert.ok(!("$decrypt_error" in (pt ?? {})), "R must not get $decrypt_error");
+  assert.equal(pt?.["shared_field"], "hello-sealed", "decrypted field must match what P wrote");
+
+  // Negative: a DIFFERENT recipient X cannot unwrap the BEK — the wrap is
+  // addressed to R, so X's absorb is rejected and nothing installs. This is
+  // the binding the unsealed path cannot give.
+  const xKeystore = mkdtempSync(join(tmpdir(), "tn-seal-X-ks-"));
+  cleanups.push(() => rmSync(xKeystore, { recursive: true, force: true }));
+  const xReceipt = await absorbSealedKitBundle(sealedOut, {
+    seed: X.seed,
+    keystoreDir: xKeystore,
+  });
+  assert.ok(xReceipt.rejectedReason, "X absorb MUST be rejected (wrap not addressed to X)");
+  assert.match(xReceipt.rejectedReason!, /not addressed to/);
+  assert.equal(xReceipt.acceptedCount, 0, "X must install nothing");
+  assert.ok(
+    !existsSync(join(xKeystore, "default.btn.mykit")),
+    "X must NOT receive a usable kit",
+  );
+});
+
+test("seal binding mutation-check: tampering the wrap makes the NAMED recipient fail too", async () => {
+  // Proves the wrong-recipient negative is a real cryptographic binding, not
+  // an accident of differing bytes: corrupt the wrapped BEK and even R (the
+  // named recipient) can no longer recover it.
+  const { dir, yamlPath, cleanup } = makeCeremony();
+  cleanups.push(cleanup);
+
+  const R = realRecipient(57);
+  const sealedOut = join(dir, "sealed-mutate.tnpkg");
+  const cap = captureConsole();
+  let rc: number;
+  try {
+    rc = await bundleCmd({
+      recipientIdentity: R.did,
+      out: sealedOut,
+      yaml: yamlPath,
+      groups: "default",
+      sealForRecipient: true,
+    });
+  } finally {
+    cap.restore();
+  }
+  assert.equal(rc, 0, `seal bundle failed: ${cap.err.join("\n")}`);
+
+  // Sanity: untampered, R unseals fine.
+  const okKs = mkdtempSync(join(tmpdir(), "tn-mut-ok-"));
+  cleanups.push(() => rmSync(okKs, { recursive: true, force: true }));
+  const okReceipt = await absorbSealedKitBundle(sealedOut, { seed: R.seed, keystoreDir: okKs });
+  assert.equal(okReceipt.rejectedReason, undefined, "baseline R absorb should succeed");
+
+  // Mutate the wrapped_bek_b64 in recipient_wraps[0], then RE-SIGN the
+  // manifest with P's key so the signature stays valid. This isolates the
+  // failure to the AEAD over the BEK (the cryptographic binding under test),
+  // not the manifest signature. Even R — the named recipient — can no longer
+  // recover the BEK once a single ciphertext byte is flipped.
+  const entries = parseTnpkg(new Uint8Array(readFileSync(sealedOut)));
+  const { manifest } = readTnpkg(sealedOut);
+  const be = (manifest.state as Record<string, unknown>)["body_encryption"] as Record<
+    string,
+    unknown
+  >;
+  const wraps = be["recipient_wraps"] as Array<Record<string, unknown>>;
+  const orig = wraps[0]!["wrapped_bek_b64"] as string;
+  wraps[0]!["wrapped_bek_b64"] = (orig[0] === "A" ? "B" : "A") + orig.slice(1);
+  // Re-sign with P's device key (the deterministic makeCeremony seed).
+  const pSeed = new Uint8Array(32);
+  for (let i = 0; i < 32; i += 1) pSeed[i] = (i * 13 + 17) & 0xff;
+  signManifest(manifest, DeviceKey.fromSeed(pSeed));
+  const newManifestDoc = toWireDict(manifest, true);
+  const newManifestBytes = new TextEncoder().encode(
+    JSON.stringify(newManifestDoc, sortedKeysReplacer, 2) + "\n",
+  );
+  const rezip = packTnpkg(
+    entries.map((e) =>
+      e.name === "manifest.json" ? { name: e.name, data: newManifestBytes } : { name: e.name, data: e.data },
+    ),
+  );
+  const mutatedPath = join(dir, "sealed-mutated.tnpkg");
+  writeFileSync(mutatedPath, Buffer.from(rezip));
+
+  const badKs = mkdtempSync(join(tmpdir(), "tn-mut-bad-"));
+  cleanups.push(() => rmSync(badKs, { recursive: true, force: true }));
+  const badReceipt = await absorbSealedKitBundle(mutatedPath, { seed: R.seed, keystoreDir: badKs });
+  assert.ok(badReceipt.rejectedReason, "tampered wrap MUST reject even for the named recipient");
+  assert.equal(badReceipt.acceptedCount, 0, "tampered wrap must install nothing");
+  assert.ok(
+    !existsSync(join(badKs, "default.btn.mykit")),
+    "no kit should install from a tampered wrap",
+  );
 });

@@ -29,8 +29,14 @@
 // The mint + bundle itself is delegated to the existing SDK surface
 // (`Tn.init(...).pkg.bundleForRecipient`) — no crypto is re-implemented here.
 
-import { resolve as pathResolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { join, resolve as pathResolve } from "node:path";
 import { Tn } from "../tn.js";
+import { DeviceKey } from "../core/signing.js";
+import {
+  mintAndSealBundle,
+  recipientKeyIsResolvable,
+} from "../core/seal_bundle_producer.js";
 
 export interface AddRecipientOpts {
   /** Group name to mint a kit for (e.g. "default"). */
@@ -79,36 +85,20 @@ export async function addRecipientCmd(opts: AddRecipientOpts): Promise<number> {
     outDefaultStem = safeStem(label) || "recipient";
   }
 
-  if (opts.sealForRecipient) {
-    // Two refusal paths, both before any kit is written.
-    //
-    // 1) Label / synthetic placeholder DID: there is no embedded base58
-    //    public key to wrap under. Reject with exit 2 (mirrors Python).
-    if (!label.startsWith("did:") || recipientDid.startsWith("did:key:zLabel-")) {
-      err.write(
-        "[tn add_recipient] error: --seal-for-recipient requires a real " +
-          "key-DID for the recipient (one with an embedded base58 public " +
-          "key). Friendly labels synthesize a placeholder DID that has no " +
-          "public key, so the seal step has nothing to wrap under. Got " +
-          `${JSON.stringify(label)}. Pass the recipient's real did:key:z... instead, or ` +
-          "drop --seal-for-recipient to ship an unsealed kit bundle.\n",
-      );
-      return 2;
-    }
-
-    // 2) Real did:key: the seal primitives exist, but the TS runtime has no
-    //    PRODUCER path that seals a bundle body for a recipient
-    //    (bundleForRecipient always writes a plaintext body). Refuse rather
-    //    than silently writing an UNSEALED bundle when the operator asked for
-    //    sealing. Matches `tn bundle`'s refusal (exit 1).
+  if (opts.sealForRecipient && !recipientKeyIsResolvable(recipientDid)) {
+    // Sealing has nothing to wrap under unless the recipient DID carries an
+    // embedded Ed25519 public key. Friendly labels synthesize a placeholder
+    // `did:key:zLabel-...` (no key), so refuse with exit 2 — the seal step
+    // cannot proceed. (A real did:key now seals for real, below.)
     err.write(
-      "[tn add_recipient] error: --seal-for-recipient is not supported by " +
-        "the TypeScript runtime yet; bundleForRecipient writes an unsealed " +
-        "body, so honoring the flag here would silently ship an UNSEALED " +
-        "bundle. Run this ceremony from Python to seal the bundle body, or " +
-        "drop --seal-for-recipient to knowingly ship an unsealed kit bundle.\n",
+      "[tn add_recipient] error: --seal-for-recipient requires a real " +
+        "key-DID for the recipient (one with an embedded base58 public " +
+        "key). Friendly labels synthesize a placeholder DID that has no " +
+        "public key, so the seal step has nothing to wrap under. Got " +
+        `${JSON.stringify(label)}. Pass the recipient's real did:key:z... instead, or ` +
+        "drop --seal-for-recipient to ship an unsealed kit bundle.\n",
     );
-    return 1;
+    return 2;
   }
 
   const outPath = opts.out
@@ -117,14 +107,41 @@ export async function addRecipientCmd(opts: AddRecipientOpts): Promise<number> {
 
   const tn = await Tn.init(opts.yaml);
   try {
-    const result = await tn.pkg.bundleForRecipient({
-      recipientDid,
-      outPath,
-      groups: [opts.group],
-    });
-    out.write(`[tn add_recipient] wrote ${result.bundlePath}\n`);
-    out.write(`[tn add_recipient]   group:     ${opts.group}\n`);
-    out.write(`[tn add_recipient]   recipient: ${recipientDid}\n`);
+    if (opts.sealForRecipient) {
+      // Real sealing: mint an unsealed kit_bundle to a temp path, then seal
+      // it under a fresh per-export BEK wrapped to the recipient DID. The
+      // body never reaches `outPath` in plaintext.
+      const cfg = tn.config() as { keystorePath: string };
+      const seed = new Uint8Array(
+        readFileSync(join(cfg.keystorePath, "local.private")),
+      );
+      const publisherKey = DeviceKey.fromSeed(seed);
+      const sealed = await mintAndSealBundle({
+        recipientDid,
+        publisherKey,
+        outPath,
+        mintUnsealed: async (tmpUnsealedPath: string) => {
+          const r = await tn.pkg.bundleForRecipient({
+            recipientDid,
+            outPath: tmpUnsealedPath,
+            groups: [opts.group],
+          });
+          return r.bundlePath;
+        },
+      });
+      out.write(`[tn add_recipient] wrote ${sealed.outPath} (sealed for recipient)\n`);
+      out.write(`[tn add_recipient]   group:     ${opts.group}\n`);
+      out.write(`[tn add_recipient]   recipient: ${recipientDid}\n`);
+    } else {
+      const result = await tn.pkg.bundleForRecipient({
+        recipientDid,
+        outPath,
+        groups: [opts.group],
+      });
+      out.write(`[tn add_recipient] wrote ${result.bundlePath}\n`);
+      out.write(`[tn add_recipient]   group:     ${opts.group}\n`);
+      out.write(`[tn add_recipient]   recipient: ${recipientDid}\n`);
+    }
   } finally {
     await tn.close();
   }

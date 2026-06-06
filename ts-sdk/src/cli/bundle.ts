@@ -15,6 +15,10 @@ import { homedir } from "node:os";
 import { resolve as pathResolve, join } from "node:path";
 
 import { NodeRuntime } from "../runtime/node_runtime.js";
+import {
+  mintAndSealBundle,
+  recipientKeyIsResolvable,
+} from "../core/seal_bundle_producer.js";
 
 /** Explicit, pre-parsed options for the `bundle` verb. The orchestrator
  * wires argv -> these fields before dispatch (mirrors argparse's
@@ -83,13 +87,16 @@ export async function bundleCmd(opts: BundleCmdOptions): Promise<number> {
     return 1;
   }
 
-  // The TS runtime's bundleForRecipient has no seal-for-recipient path;
-  // surface the gap loudly rather than silently shipping an unsealed
-  // bundle when the operator asked for sealing.
-  if (opts.sealForRecipient) {
+  // --seal-for-recipient now seals for real: a per-export BEK encrypts the
+  // bundle body and is wrapped to the recipient DID. It can only wrap under
+  // a recipient whose DID carries an embedded Ed25519 public key — refuse
+  // (keeping the old gap behaviour) only when no key is resolvable.
+  if (opts.sealForRecipient && !recipientKeyIsResolvable(opts.recipientIdentity)) {
     console.error(
-      "[tn bundle] --seal-for-recipient is not supported by the TypeScript " +
-        "runtime yet; run this ceremony from Python to seal the bundle body.",
+      "[tn bundle] --seal-for-recipient requires a recipient did:key:z... with an " +
+        "embedded Ed25519 public key to wrap the body key under; " +
+        `${JSON.stringify(opts.recipientIdentity)} has none. Pass the recipient's real ` +
+        "did:key, or drop --seal-for-recipient to ship an unsealed kit bundle.",
     );
     return 1;
   }
@@ -103,11 +110,31 @@ export async function bundleCmd(opts: BundleCmdOptions): Promise<number> {
   }
   try {
     const groups = opts.groups ? opts.groups.split(",") : undefined;
-    const out = rt.bundleForRecipient(
-      opts.recipientIdentity,
-      opts.out,
-      groups !== undefined ? { groups } : {},
-    );
+    let out: string;
+    if (opts.sealForRecipient) {
+      // Mint an unsealed kit_bundle to a temp path, then seal it under a
+      // fresh BEK wrapped to the recipient. Composes the existing seal
+      // primitives (encryptBodyBlob + buildRecipientWraps); no plaintext
+      // body ever reaches `opts.out`.
+      const sealed = await mintAndSealBundle({
+        recipientDid: opts.recipientIdentity,
+        publisherKey: rt.keystore.device,
+        outPath: opts.out,
+        mintUnsealed: (tmpUnsealedPath: string) =>
+          rt.bundleForRecipient(
+            opts.recipientIdentity,
+            tmpUnsealedPath,
+            groups !== undefined ? { groups } : {},
+          ),
+      });
+      out = sealed.outPath;
+    } else {
+      out = rt.bundleForRecipient(
+        opts.recipientIdentity,
+        opts.out,
+        groups !== undefined ? { groups } : {},
+      );
+    }
     const cfg = rt.config;
     // The bundle was just minted — every requested group has a fresh
     // tn.recipient.added event in the log. Print a one-line summary the

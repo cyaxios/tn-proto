@@ -17,8 +17,11 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve } from "node:path";
 import { Tn } from "../src/tn.js";
+import { DeviceKey } from "../src/core/signing.js";
 import { readTnpkg } from "../src/tnpkg_io.js";
 import { addRecipientCmd } from "../src/cli/add_recipient.js";
+import { absorbSealedKitBundle } from "../src/core/seal_bundle_producer.js";
+import { readAsRecipient } from "../src/read_as_recipient.js";
 
 interface Sink {
   text: string;
@@ -194,11 +197,12 @@ test("add_recipient --seal-for-recipient with a did:key:zLabel- placeholder is r
   }
 });
 
-test("add_recipient --seal-for-recipient with a REAL did:key is rejected (exit 1, nothing written)", async () => {
-  // The previously-silent-wrong case: a real did:key used to fall through the
-  // label guard and write an UNSEALED bundle while the operator asked for
-  // sealing. The TS runtime has no producer seal path, so this must now refuse
-  // (exit 1) and write nothing — never silently ship an unsealed bundle.
+test("add_recipient --seal-for-recipient with an UNRESOLVABLE did:key is rejected (exit 2, nothing written)", async () => {
+  // `did:key:z6MkRealReaderForSeal` is shaped like a key-DID but its base58
+  // body does not decode to a valid Ed25519 public key, so there is nothing
+  // to wrap the BEK under. The verb refuses (exit 2) and writes nothing —
+  // it never ships an unsealed bundle when sealing was asked for. (A genuine
+  // key-DID seals for real; see the binding test in cli_add_recipient_seal.)
   const { dir, yamlPath } = await freshCeremony();
   const stdout = makeSink();
   const stderr = makeSink();
@@ -214,11 +218,94 @@ test("add_recipient --seal-for-recipient with a REAL did:key is rejected (exit 1
       stdout,
       stderr,
     });
-    assert.equal(code, 1, `expected exit 1; stderr=${stderr.text}`);
-    assert.match(stderr.text, /--seal-for-recipient is not supported/);
+    assert.equal(code, 2, `expected exit 2; stderr=${stderr.text}`);
+    assert.match(stderr.text, /--seal-for-recipient requires a real/);
     assert.equal(stdout.text, "", "no kit should be written on rejection");
     assert.ok(!existsSync(outPath), "no .tnpkg should be written on rejection");
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("add_recipient --seal-for-recipient (REAL did:key) seals; named recipient decrypts, different recipient cannot", async () => {
+  // The load-bearing proof: a genuine key-DID now SEALS for real. The named
+  // recipient R recovers the BEK, installs the kit, and decrypts P's entry;
+  // a different recipient X cannot unwrap and installs nothing.
+  const { dir, yamlPath } = await freshCeremony();
+  const stdout = makeSink();
+  const stderr = makeSink();
+
+  const rSeed = new Uint8Array(32);
+  for (let i = 0; i < 32; i += 1) rSeed[i] = (i * 17 + 9) & 0xff;
+  const R = DeviceKey.fromSeed(rSeed);
+  const xSeed = new Uint8Array(32).fill(123);
+  const X = DeviceKey.fromSeed(xSeed);
+  assert.notEqual(R.did, X.did);
+
+  const outPath = join(dir, "sealed-addrec.tnpkg");
+  // Seal FIRST (recipient-event mint can rotate the log), then P writes.
+  const code = await addRecipientCmd({
+    group: "default",
+    recipient: R.did,
+    out: outPath,
+    yaml: yamlPath,
+    sealForRecipient: true,
+    stdout,
+    stderr,
+  });
+  assert.equal(code, 0, `expected exit 0; stderr=${stderr.text}`);
+  assert.equal(stderr.text, "");
+  assert.match(stdout.text, /sealed for recipient/);
+
+  // The bundle is sealed: encrypted body + recipient_wraps, no plaintext kit.
+  const { manifest, body } = readTnpkg(outPath);
+  assert.equal(manifest.kind, "kit_bundle");
+  assert.equal(manifest.toDid, R.did);
+  assert.ok(body.has("body/encrypted.bin"), "sealed body should be encrypted.bin");
+  assert.ok(
+    ![...body.keys()].some((k) => k.endsWith(".btn.mykit")),
+    "sealed bundle must not carry a plaintext .btn.mykit",
+  );
+
+  // P writes an entry to decrypt.
+  const tn = await Tn.init(yamlPath);
+  let pLogPath: string;
+  try {
+    pLogPath = tn.logPath;
+    tn.info("user.action", { shared_field: "addrec-sealed" });
+  } finally {
+    await tn.close();
+  }
+
+  // R absorbs into its own keystore and decrypts P's entry.
+  const rKeystore = mkdtempSync(join(tmpdir(), "tn-addrec-R-"));
+  try {
+    const rReceipt = await absorbSealedKitBundle(outPath, { seed: rSeed, keystoreDir: rKeystore });
+    assert.equal(rReceipt.rejectedReason, undefined, `R rejected: ${rReceipt.rejectedReason}`);
+    assert.ok(rReceipt.acceptedCount >= 1, "R should install at least one kit");
+    assert.ok(existsSync(join(rKeystore, "default.btn.mykit")), "R gets default.btn.mykit");
+
+    const entries = Array.from(
+      readAsRecipient(pLogPath, rKeystore, { group: "default", verifySignatures: true }),
+    ).filter((e) => e.envelope["event_type"] === "user.action");
+    assert.ok(entries.length >= 1, `R should see P's info entry; got ${entries.length}`);
+    const pt = entries[0]!.plaintext["default"] as Record<string, unknown> | undefined;
+    assert.ok(pt !== undefined, "R should decrypt the default group");
+    assert.ok(!("$no_read_key" in (pt ?? {})), "R must not get $no_read_key");
+    assert.equal(pt?.["shared_field"], "addrec-sealed");
+
+    // Different recipient X cannot unwrap: rejected, nothing installed.
+    const xKeystore = mkdtempSync(join(tmpdir(), "tn-addrec-X-"));
+    try {
+      const xReceipt = await absorbSealedKitBundle(outPath, { seed: xSeed, keystoreDir: xKeystore });
+      assert.ok(xReceipt.rejectedReason, "X MUST be rejected (wrap addressed to R)");
+      assert.equal(xReceipt.acceptedCount, 0, "X installs nothing");
+      assert.ok(!existsSync(join(xKeystore, "default.btn.mykit")), "X gets no usable kit");
+    } finally {
+      rmSync(xKeystore, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(rKeystore, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });
