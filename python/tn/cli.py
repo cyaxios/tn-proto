@@ -71,6 +71,13 @@ import httpx
 from . import admin as _admin
 from . import wallet as _wallet
 from . import wallet_restore as _wallet_restore
+from .cli_canonical import cmd_canonical
+from .cli_compile import cmd_compile
+from .cli_info import cmd_info
+from .cli_invite import add_invite_parser
+from .cli_seal import cmd_seal
+from .cli_vault import cmd_vault_link, cmd_vault_unlink
+from .cli_verify import cmd_verify
 from . import wallet_restore_loopback as _wallet_restore_loopback
 from . import wallet_restore_passphrase as _wallet_restore_passphrase
 from .identity import Identity, IdentityError, _default_identity_path
@@ -3230,6 +3237,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_add.set_defaults(func=cmd_add_recipient)
 
+    # --- tn invite <recipient> <out.zip> -----------------------
+    # CLI-side invite-mint: mints the inner kit (via the same
+    # admin.add_recipient(..., raw=True) the server uses) and wraps it in a
+    # tn-invite-<id>.zip with a manifest.json — the wrapper that previously
+    # only tn_proto_web produced. Enables a same-language mint -> inbox
+    # accept round-trip inside tn_proto. See cli_invite.py.
+    add_invite_parser(sub)
+
     # --- tn group add <name> -----------------------------------
     # Group-add was API-only (tn.ensure_group); this verb exposes it on
     # the CLI. Under the multi-ceremony layout the group lands in the
@@ -3424,6 +3439,126 @@ def build_parser() -> argparse.ArgumentParser:
         help="human (default) for the pretty table + descriptions; json for programmatic use.",
     )
     p_show_profiles.set_defaults(func=cmd_show_profiles)
+
+    # --- tn seal -----------------------------------------------
+    # Public-only attest path: reads seal-input JSON line(s) from stdin,
+    # emits envelope ndjson to stdout. No flags (pure stdin->stdout
+    # contract; see cli_seal.cmd_seal).
+    p_seal = sub.add_parser(
+        "seal",
+        help="Attest one envelope per stdin JSON line (public-only; emits ndjson).",
+    )
+    p_seal.set_defaults(func=cmd_seal)
+
+    # --- tn verify ---------------------------------------------
+    # Public-only verify path: reads envelope ndjson from stdin, writes
+    # one {"ok": ...} result line per input. No flags.
+    p_verify = sub.add_parser(
+        "verify",
+        help="Verify envelope ndjson read from stdin (public-only; one result line per input).",
+    )
+    p_verify.set_defaults(func=cmd_verify)
+
+    # --- tn canonical ------------------------------------------
+    # Diagnostic: echo the TN canonical bytes of each stdin JSON line.
+    # No flags.
+    p_canonical = sub.add_parser(
+        "canonical",
+        help="Echo the canonical UTF-8 bytes of each stdin JSON line (row_hash parity).",
+    )
+    p_canonical.set_defaults(func=cmd_canonical)
+
+    # --- tn info -----------------------------------------------
+    # Emit ONE attested entry from the CLI. Mirrors the TS `tn-js info`
+    # flag surface: --yaml / --event / --level / repeatable --field k=v
+    # (lands as args.field list; see cli_info.cmd_info).
+    p_info = sub.add_parser(
+        "info",
+        help="Emit one attested log entry: `tn info --yaml <path> --event <type> [--field k=v]...`.",
+    )
+    p_info.add_argument(
+        "--yaml", default=None, help="Path to the ceremony tn.yaml (required)."
+    )
+    p_info.add_argument(
+        "--event", default=None, help="Event type to emit (required)."
+    )
+    p_info.add_argument(
+        "--level", default="info",
+        help="Log level. The four standard levels route to tn.<level>; "
+             "any other string flows through tn.log verbatim. Default: info.",
+    )
+    p_info.add_argument(
+        "--field", action="append", default=None,
+        help="k=v field to carry on the entry. Repeatable.",
+    )
+    p_info.set_defaults(func=cmd_info)
+
+    # --- tn compile --------------------------------------------
+    # Package a keystore's btn reader kits into a .tnpkg. Mirrors the TS
+    # `tn-js compile` flag surface: --keystore / --out / repeatable
+    # --kit / --label / --full (see cli_compile.cmd_compile).
+    p_compile = sub.add_parser(
+        "compile",
+        help="Compile keystore reader kits into a .tnpkg: "
+             "`tn compile --keystore <dir> --out <file.tnpkg> [--kit <group>]...`.",
+    )
+    p_compile.add_argument(
+        "--keystore", default=None, help="Keystore directory holding *.btn.mykit files (required)."
+    )
+    p_compile.add_argument(
+        "--out", default=None, help="Destination .tnpkg path (required)."
+    )
+    p_compile.add_argument(
+        "--kit", action="append", default=None,
+        help="Group name to include. Repeatable. Default: every group.",
+    )
+    p_compile.add_argument(
+        "--label", default=None,
+        help="Human-readable label persisted into the manifest (state.label).",
+    )
+    p_compile.add_argument(
+        "--full", action="store_true", default=False,
+        help="Bundle private key material too (full_keystore kind).",
+    )
+    p_compile.set_defaults(func=cmd_compile)
+
+    # --- tn vault link / unlink --------------------------------
+    # Emit the attested tn.vault.linked / tn.vault.unlinked events to the
+    # ceremony admin log (NOT vault-project creation; that's `tn wallet
+    # link`). Positionals vault_did + project_id; --reason on unlink;
+    # --yaml on both (see cli_vault.cmd_vault_link / cmd_vault_unlink).
+    p_vault = sub.add_parser(
+        "vault",
+        help="Emit attested vault.link / vault.unlink events to the admin log.",
+    )
+    vsub = p_vault.add_subparsers(dest="vverb", required=True)
+
+    p_vault_link = vsub.add_parser(
+        "link",
+        help="Emit tn.vault.linked: `tn vault link <vault-did> <project-id> [--yaml <path>]`.",
+    )
+    p_vault_link.add_argument("vault_did", help="DID of the vault being linked.")
+    p_vault_link.add_argument("project_id", help="Project id linked at the vault.")
+    p_vault_link.add_argument(
+        "--yaml", default=None,
+        help="Path to your tn.yaml. Default: discover via the standard chain.",
+    )
+    p_vault_link.set_defaults(func=cmd_vault_link)
+
+    p_vault_unlink = vsub.add_parser(
+        "unlink",
+        help="Emit tn.vault.unlinked: `tn vault unlink <vault-did> <project-id> [--reason <r>] [--yaml <path>]`.",
+    )
+    p_vault_unlink.add_argument("vault_did", help="DID of the vault being unlinked.")
+    p_vault_unlink.add_argument("project_id", help="Project id unlinked at the vault.")
+    p_vault_unlink.add_argument(
+        "--reason", default=None, help="Optional reason recorded on the unlink event."
+    )
+    p_vault_unlink.add_argument(
+        "--yaml", default=None,
+        help="Path to your tn.yaml. Default: discover via the standard chain.",
+    )
+    p_vault_unlink.set_defaults(func=cmd_vault_unlink)
 
     # --- tn firehose (gated) -----------------------------------
     # Surface only when TN_FIREHOSE_ENABLED=1 at parser-construction
