@@ -58,6 +58,7 @@ import { ensureCeremonyOnDisk } from "../dist/multi.js";
 import { resolveVaultUrl } from "../dist/vault/url.js";
 import { Identity, defaultIdentityPath } from "../dist/identity.js";
 import { AccountConnectError, AccountNamespace } from "../dist/account/index.js";
+import { resolveSigningIdentity } from "../dist/account/signing_identity.js";
 import { VaultClient, VaultError, vaultIdentityFromDeviceKey } from "../dist/vault/client.js";
 import { WalletNamespace, readLinkState, readSyncQueue } from "../dist/wallet/index.js";
 import { restoreViaLoopback } from "../dist/wallet/restore.js";
@@ -1344,15 +1345,16 @@ async function walletCmd() {
 async function accountCmd() {
   const sub = argv[3];
   const rest = argv.slice(4);
-  const opts = { yaml: null, vaultUrl: null, code: null };
+  const opts = { yaml: null, vaultUrl: null, code: null, identity: null };
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
     if (a === "--yaml") opts.yaml = rest[++i];
     else if (a === "--vault" || a === "--vault-url") opts.vaultUrl = rest[++i];
+    else if (a === "--identity") opts.identity = rest[++i];
     else if (!a.startsWith("-") && opts.code === null) opts.code = a;
   }
   if (sub !== "connect") {
-    die(`account: unknown subcommand ${sub}. try: account connect <code> [--vault <url>] [--yaml <path>]`);
+    die(`account: unknown subcommand ${sub}. try: account connect <code> [--vault <url>] [--yaml <path>] [--identity <path>]`);
   }
   if (!opts.code) die("account connect: <code> positional is required");
   if (!opts.yaml) die("account connect: --yaml <path> is required");
@@ -1362,7 +1364,20 @@ async function accountCmd() {
   await tnClose();
   const keystorePath = typeof cfg.keystorePath === "string" ? cfg.keystorePath : null;
   if (!keystorePath) die(`account connect: ceremony at ${opts.yaml} has no keystorePath`);
-  const ks = loadKeystore(keystorePath);
+
+  // Signing-identity CASCADE (mirrors Python resolve_signing_identity):
+  //   tier 2 supplied (--identity) > tier 1 machine-global identity.json >
+  //   tier 3 per-ceremony keystore key. The chosen key's DID is what binds
+  //   as the account principal, so it MUST agree across CLIs on one machine.
+  let signer;
+  try {
+    signer = resolveSigningIdentity({
+      suppliedIdentityPath: opts.identity,
+      keystorePath,
+    });
+  } catch (e) {
+    die(e?.message ?? String(e));
+  }
 
   // Vault URL: explicit --vault > ceremony's linked_vault (from cfg) > error.
   let vaultUrl = opts.vaultUrl;
@@ -1376,7 +1391,7 @@ async function accountCmd() {
   }
 
   try {
-    const result = await AccountNamespace.connect(opts.code, vaultUrl, ks.device, { yamlPath: opts.yaml });
+    const result = await AccountNamespace.connect(opts.code, vaultUrl, signer.deviceKey, { yamlPath: opts.yaml });
 
     // Stamp the account binding onto the machine-global identity so future
     // `tn-js init <name>` runs warm-attach to this account automatically

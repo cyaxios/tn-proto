@@ -38,7 +38,16 @@ interface CliResult { stdout: string; stderr: string; code: number; }
 
 async function runCli(args: string[], cwd: string = process.cwd()): Promise<CliResult> {
   return new Promise<CliResult>((resolve, reject) => {
-    const proc = spawn("node", [TN_JS_BIN, ...args], { cwd });
+    // Isolate the machine-global identity per subprocess. Otherwise the
+    // account-connect signing-identity cascade (supplied > machine > ceremony)
+    // resolves to the developer's REAL identity.json, which may already be
+    // bound to another account → spurious 409s and cross-test coupling. An
+    // empty TN_IDENTITY_DIR forces tier-3 (the ceremony keystore), giving each
+    // seeded ceremony a fresh, unbound DID — what these tests assume.
+    const proc = spawn("node", [TN_JS_BIN, ...args], {
+      cwd,
+      env: { ...process.env, TN_IDENTITY_DIR: join(cwd, ".tn-identity") },
+    });
     let stdout = "";
     let stderr = "";
     proc.stdout.on("data", (d) => (stdout += d.toString()));

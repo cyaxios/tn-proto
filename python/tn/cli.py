@@ -895,23 +895,40 @@ def cmd_account_connect(args: argparse.Namespace) -> int:
     account's ``minted_dids[]`` and subsequent DID-challenge auth calls
     against ``/account/*`` routes work for this DID.
     """
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-        Ed25519PrivateKey,
+    from .sync_state import (
+        SigningIdentityError,
+        mark_account_bound,
+        resolve_signing_identity,
     )
-
-    from .sync_state import mark_account_bound
     from .vault_client import redeem_connect_code
-
-    identity_path = _default_identity_path()
-    identity = _load_identity_or_die(identity_path)
 
     yaml_path = _resolve_yaml_or_discover(args.yaml)
 
-    sk = Ed25519PrivateKey.from_private_bytes(identity.device_private_key_bytes())
-    base_url = args.vault or identity.linked_vault
+    # Signing-identity CASCADE (mirrors TS resolveSigningIdentity):
+    #   tier 2 supplied (--identity) > tier 1 machine-global identity.json >
+    #   tier 3 per-ceremony keystore key. The chosen key's DID is what binds
+    #   as the account principal, so it MUST agree across CLIs on one machine.
+    try:
+        signer = resolve_signing_identity(
+            yaml_path,
+            supplied_identity_path=getattr(args, "identity", None),
+        )
+    except SigningIdentityError as exc:
+        _die(str(exc))
+    sk = signer.private_key
+    bound_did = signer.did
+
+    # The machine-global identity (if any) still drives warm-attach
+    # (linked_account_id / linked_vault), independent of which tier signed.
+    identity_path = _default_identity_path()
+    identity = (
+        Identity.load(identity_path) if identity_path.is_file() else None
+    )
+
+    base_url = args.vault or (identity.linked_vault if identity else None)
 
     try:
-        resp = redeem_connect_code(args.code, identity.did, sk, base_url=base_url)
+        resp = redeem_connect_code(args.code, bound_did, sk, base_url=base_url)
     except VaultError as exc:
         _die(
             f"connect-code redeem failed (status={exc.status}): {exc.body or exc}",
@@ -932,8 +949,9 @@ def cmd_account_connect(args: argparse.Namespace) -> int:
 
     # Also remember the account globally in identity.json so a later
     # `tn init` of a *different* project can auto-attach to this same
-    # account (warm path) instead of minting a browser claim URL.
-    if identity.linked_account_id != account_id:
+    # account (warm path) instead of minting a browser claim URL. Only
+    # when a machine identity exists (headless tier-3 connects have none).
+    if identity is not None and identity.linked_account_id != account_id:
         identity.linked_account_id = account_id
         identity.ensure_written(identity_path)
 
@@ -944,7 +962,7 @@ def cmd_account_connect(args: argparse.Namespace) -> int:
         print(f"  project_id:   {project_id}")
     if project_name:
         print(f"  project_name: {project_name}")
-    print(f"  did:          {identity.did}")
+    print(f"  did:          {bound_did}")
     return 0
 
 
@@ -3213,6 +3231,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_connect.add_argument(
         "--vault", default=None,
         help="Vault URL. Default: identity.linked_vault, then $TN_VAULT_URL, then the hosted vault.",
+    )
+    p_connect.add_argument(
+        "--identity", default=None,
+        help=(
+            "Tier-2 override: explicit identity.json to sign the redeem with. "
+            "Default cascade: machine-global identity, then the ceremony keystore key."
+        ),
     )
     p_connect.set_defaults(func=cmd_account_connect)
 

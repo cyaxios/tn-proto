@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -240,9 +241,207 @@ def mark_account_bound(yaml_path: Path, account_id: str) -> None:
     save_sync_state(yaml_path, state)
 
 
+# ---------------------------------------------------------------------
+# Signing-identity cascade for `tn account connect`
+# ---------------------------------------------------------------------
+#
+# `account connect` signs sha256(code) and binds the SIGNER'S DID as an
+# account principal (it lands in accounts.minted_dids[]). Python and
+# TypeScript historically picked DIFFERENT signing keys for this, so the
+# same operator bound a different DID depending on which binary ran. The
+# resolver below is the single, language-mirrored decision of which key
+# signs the redeem. Its TS twin is
+# `tn-proto/ts-sdk/src/account/signing_identity.ts::resolveSigningIdentity`.
+#
+# Cascade — first available wins:
+#   tier 2  SUPPLIED   — an explicit identity path passed by the caller
+#                        (`--identity <path>`); the explicit override.
+#   tier 1  MACHINE    — the machine-global identity.json under
+#                        TN_IDENTITY_DIR / the platform default. This is
+#                        the DEFAULT when a machine identity exists, and
+#                        matches Python's historical behaviour.
+#   tier 3  CEREMONY   — the per-ceremony keystore key
+#                        (`<keystore>/local.private`). The FALLBACK for
+#                        the headless / CI case where no machine identity
+#                        has been minted (matches TS's historical
+#                        behaviour).
+
+
+class SigningIdentityError(Exception):
+    """No signing identity could be resolved through the cascade."""
+
+
+@dataclass(frozen=True)
+class ResolvedSigningIdentity:
+    """The key chosen by the cascade to sign an `account connect` redeem.
+
+    Attributes
+    ----------
+    did
+        The ``did:key:z...`` that will be bound as the account principal.
+    private_key
+        The Ed25519 private key matching ``did`` (used by
+        :func:`tn.vault_client.redeem_connect_code`).
+    tier
+        Which cascade tier produced this key: ``"supplied"`` (2),
+        ``"machine"`` (1) or ``"ceremony"`` (3).
+    source_path
+        The on-disk artefact the key was read from (identity.json for
+        tiers 1/2, ``local.private`` for tier 3). Diagnostic only.
+    """
+
+    did: str
+    private_key: Any  # Ed25519PrivateKey — typed Any to avoid a hard import here
+    tier: str
+    source_path: Path
+
+
+def resolve_signing_identity(
+    yaml_path: Path,
+    *,
+    supplied_identity_path: Path | str | None = None,
+    machine_identity_path: Path | None = None,
+) -> ResolvedSigningIdentity:
+    """Resolve which Ed25519 key signs an `account connect` redeem.
+
+    See the module-level cascade note. The TS twin is
+    ``resolveSigningIdentity`` in
+    ``ts-sdk/src/account/signing_identity.ts``; keep the two in lockstep.
+
+    Parameters
+    ----------
+    yaml_path
+        The ceremony yaml. Used to locate the per-ceremony keystore for
+        the tier-3 fallback.
+    supplied_identity_path
+        Tier 2 override: an explicit ``identity.json`` path (e.g. from a
+        ``--identity`` flag). When given and loadable, it wins outright.
+    machine_identity_path
+        Tier 1 path override (defaults to ``_default_identity_path()``).
+        Exposed for tests; production passes the default.
+
+    Raises
+    ------
+    SigningIdentityError
+        When the cascade exhausts without finding any usable key.
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+    )
+
+    from .identity import Identity, IdentityError, _default_identity_path
+
+    # --- tier 2: SUPPLIED override -----------------------------------
+    if supplied_identity_path is not None:
+        sup = Path(supplied_identity_path)
+        try:
+            identity = Identity.load(sup)
+        except IdentityError as exc:
+            raise SigningIdentityError(
+                f"--identity {sup} could not be loaded: {exc}",
+            ) from exc
+        sk = Ed25519PrivateKey.from_private_bytes(
+            identity.device_private_key_bytes()
+        )
+        return ResolvedSigningIdentity(
+            did=identity.did,
+            private_key=sk,
+            tier="supplied",
+            source_path=sup,
+        )
+
+    # --- tier 1: MACHINE-GLOBAL identity (the default) ---------------
+    machine_path = machine_identity_path or _default_identity_path()
+    if machine_path.is_file():
+        try:
+            identity = Identity.load(machine_path)
+        except IdentityError:
+            identity = None
+        if identity is not None:
+            sk = Ed25519PrivateKey.from_private_bytes(
+                identity.device_private_key_bytes()
+            )
+            return ResolvedSigningIdentity(
+                did=identity.did,
+                private_key=sk,
+                tier="machine",
+                source_path=machine_path,
+            )
+
+    # --- tier 3: PER-CEREMONY keystore key (the fallback) ------------
+    keystore_priv = _ceremony_keystore_private(yaml_path)
+    if keystore_priv is not None:
+        priv_path, seed = keystore_priv
+        sk = Ed25519PrivateKey.from_private_bytes(seed)
+        did = _did_key_from_ed25519_private(sk)
+        return ResolvedSigningIdentity(
+            did=did,
+            private_key=sk,
+            tier="ceremony",
+            source_path=priv_path,
+        )
+
+    raise SigningIdentityError(
+        "no signing identity for `account connect`: no machine identity at "
+        f"{machine_path} and no ceremony keystore key for {yaml_path}. "
+        "Run `tn init <project>` to create one, or pass --identity <path>.",
+    )
+
+
+def _ceremony_keystore_private(yaml_path: Path) -> tuple[Path, bytes] | None:
+    """Return ``(local.private path, 32-byte seed)`` for the ceremony at
+    ``yaml_path``, or ``None`` when the keystore key is absent.
+
+    Mirrors the keystore-path resolution in
+    ``tn.config._load_keystore_and_keys`` (``keystore.path`` in the yaml,
+    default ``./.tn/keys``) so the fallback signs with the exact key the
+    TS ``loadKeystore`` would pick.
+    """
+    try:
+        import yaml as _yaml
+
+        with Path(yaml_path).open("r", encoding="utf-8") as fh:
+            doc = _yaml.safe_load(fh) or {}
+    except Exception:  # noqa: BLE001 — any read/parse failure = no keystore
+        return None
+    keystore_section = doc.get("keystore") if isinstance(doc, dict) else None
+    raw_path = (
+        keystore_section.get("path")
+        if isinstance(keystore_section, dict)
+        else None
+    )
+    keystore_dir = (
+        (Path(yaml_path).parent / raw_path).resolve()
+        if raw_path
+        else (Path(yaml_path).parent / ".tn" / "keys").resolve()
+    )
+    priv_path = keystore_dir / "local.private"
+    if not priv_path.is_file():
+        return None
+    seed = priv_path.read_bytes()
+    if len(seed) != 32:
+        return None
+    return priv_path, seed
+
+
+def _did_key_from_ed25519_private(sk: Any) -> str:
+    """did:key for an Ed25519 private key (matches identity encoding)."""
+    from cryptography.hazmat.primitives import serialization
+
+    from .identity import _did_key_from_ed25519_pub
+
+    pub = sk.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return _did_key_from_ed25519_pub(pub)
+
+
 __all__ = [
     "STATE_FILE",
     "SYNC_DIR",
+    "ResolvedSigningIdentity",
+    "SigningIdentityError",
     "clear_pending_claim",
     "get_account_id",
     "get_last_pushed_admin_head",
@@ -250,6 +449,7 @@ __all__ = [
     "is_account_bound",
     "load_sync_state",
     "mark_account_bound",
+    "resolve_signing_identity",
     "save_sync_state",
     "set_last_pushed_admin_head",
     "set_pending_claim",

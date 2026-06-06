@@ -15,15 +15,24 @@ Repo: `C:\codex\tn\tn_proto`. Tag context: 0.4.3a1-era artifacts
 
 | Bucket   | Count |
 |----------|-------|
-| MATCH    | 7     |
-| DIVERGE  | 8     |
+| MATCH    | 9     |
+| DIVERGE  | 6     |
 | MISSING  | 2     |
 
-**Must-fix (P0):** the key-source asymmetry (D-1) binds a *different DID* to the
-account depending on which CLI runs — confirmed live, both DIDs landed in
-`accounts.minted_dids[]`. Everything else is contained blast-radius (stdout
-shape, exit code, `linked_vault` stamp) but D-1 is a genuine protocol-identity
-fork.
+**Must-fix (P0): RESOLVED 2026-06-06.** The key-source asymmetry (rows 1–2) is
+fixed with a shared **signing-identity cascade**: both CLIs now route
+`account connect` through one resolver that picks the same key in the same
+order — `supplied (--identity, tier 2) > machine-global identity.json (tier 1,
+default) > per-ceremony keystore (tier 3, headless fallback)`. Resolver:
+`python/tn/sync_state.py:299` (`resolve_signing_identity`) and
+`ts-sdk/src/account/signing_identity.ts:67` (`resolveSigningIdentity`); wired at
+`python/tn/cli.py:912` and `ts-sdk/bin/tn-js.mjs:1374`. Proven live: on a machine
+with a global identity, the Python wheel and the TS node CLI sharing one
+`TN_IDENTITY_DIR` both bound the **same** DID
+(`z6MkvUT6nSknzZuLnLZKcKsTM46pBxKh51nu1sEyWH2n8ti1`) — a single entry in
+`accounts.minted_dids[]`, not two. Headless (empty `TN_IDENTITY_DIR`) both fall
+back to their ceremony keystore DID. See §3 and §6. Everything else below is
+contained blast-radius (stdout shape, exit code, `linked_vault` stamp).
 
 ---
 
@@ -77,8 +86,8 @@ fork.
 
 | # | Python effect (file:line) | TS (file:line or MISSING) | Verdict | Severity | Detail |
 |---|---------------------------|---------------------------|---------|----------|--------|
-| 1 | **Signing key source = machine-global identity device key.** `identity.device_private_key_bytes()` `cli.py:910`, `identity.py:284` | **Ceremony keystore device key.** `loadKeystore(keystorePath).device` `tn-js.mjs:1365`, `keystore.ts:36-40` | **DIVERGE** | **P0** | Different private key → different `did` bound. Confirmed live: Python bound `z6MkvGam…` (identity), TS bound `z6Mkh2oa…` (keystore); both now in `minted_dids[]`. See §4. |
-| 2 | **`did` sent in POST body = identity DID** `cli.py:914` (`identity.did`) | **= keystore DID** `account/index.ts:150` (`deviceKey.did`) | **DIVERGE** | **P0** | Direct consequence of #1; this is the field the server `$addToSet`s into the account. |
+| 1 | **Signing key source = CASCADE** `resolve_signing_identity` `sync_state.py:299`, wired `cli.py:912` | **CASCADE** `resolveSigningIdentity` `signing_identity.ts:67`, wired `tn-js.mjs:1374` | **MATCH** ✅ | ~~P0~~ RESOLVED | Both resolve the SAME key via the same cascade `supplied>machine>ceremony`. Live: with a shared global identity both bound `z6MkvUT6…` (one `minted_dids[]` entry); headless both fall back to the ceremony keystore DID. Tier 2 = `--identity <path>` (added on both). See §3, §6. |
+| 2 | **`did` sent in POST body = resolved cascade DID** `signer.did` `cli.py:931` | **= resolved cascade DID** `signer.deviceKey.did` via `account/index.ts:150` `tn-js.mjs:1394` | **MATCH** ✅ | ~~P0~~ RESOLVED | Direct consequence of #1: the field the server `$addToSet`s now agrees across CLIs on one machine. |
 | 3 | signing message = `sha256(code.utf8())` `vault_client.py:125` | `sha256(code.utf8())` `account/index.ts:67,152` | MATCH | — | Single round-trip; no server nonce. Identical on both sides (subtlety confirmed: connect signs the code hash, not a challenge nonce). |
 | 4 | signature b64 = **standard** `base64.b64encode` `vault_client.py:127` | **standard** `Buffer.toString("base64")` `account/index.ts:62,154` | MATCH | — | Server uses `base64.b64decode` (standard alphabet). Both correct. |
 | 5 | POST route `/api/v1/account/connect-codes/redeem` `vault_client.py:133` | same `account/index.ts:156` | MATCH | — | Identical path. Unauthenticated (no bearer). |
@@ -137,6 +146,26 @@ as its *global identity*; the same device connected via TS authenticates as its
 distinct DIDs; via Python they would (re)bind the one identity DID. This is a
 protocol-identity decision that must be deliberately chosen, not left to
 language. → **P0 must-fix.**
+
+> **RESOLVED 2026-06-06 — signing-identity cascade.** The decision is now made
+> in one place per language and applied identically. `resolve_signing_identity`
+> (`python/tn/sync_state.py:299`) and `resolveSigningIdentity`
+> (`ts-sdk/src/account/signing_identity.ts:67`) implement a first-available-wins
+> cascade:
+> 1. **tier 2 — supplied:** an explicit `--identity <path>` override (added to
+>    both CLIs; `cli.py` `--identity`, `tn-js.mjs` `--identity`). Wins outright.
+> 2. **tier 1 — machine:** the machine-global `identity.json` under
+>    `TN_IDENTITY_DIR`/default. The DEFAULT when present — Python's historical
+>    behaviour, now also TS's.
+> 3. **tier 3 — ceremony:** the per-ceremony keystore (`<keystore>/local.private`).
+>    The headless/CI fallback — TS's historical behaviour, now also Python's.
+>
+> Python gains the ceremony fallback; TS gains the machine preference. The
+> chosen key's DID is what `redeem_connect_code` / `AccountNamespace.connect`
+> send as `did`, so the bound principal no longer forks by binary. Proven live
+> in §6 (same machine ⇒ same DID; headless ⇒ keystore DID), regression-tested in
+> `python/tests/test_account_connect_cascade.py` and
+> `ts-sdk/test/account_connect_cascade.test.ts`.
 
 ---
 
@@ -211,7 +240,7 @@ Confirms rows 1/2/17/20/22/23 directly.
 
 | Pri | Rows | Fix |
 |-----|------|-----|
-| **P0** | 1, 2 | Decide the single canonical bind key for `account connect` and make both CLIs use it. Either both sign with the **ceremony keystore** key (TS today) or both with the **global identity** key (Python today). As-is, the same operator binds different DIDs depending on the binary, fragmenting `minted_dids[]` and the auth principal. |
+| ~~P0~~ ✅ | 1, 2 | **DONE 2026-06-06.** Single canonical bind key via the `resolve_signing_identity` / `resolveSigningIdentity` cascade (`supplied > machine > ceremony`), wired through both `account connect` paths. Same operator on one machine now binds one DID. See §3, §6. |
 | **P1** | 17 | Align `linked_vault` stamping. Pick one: either both stamp it on connect (helps warm-attach) or neither does. TS currently primes warm-attach; Python doesn't. |
 | **P1** | 20 | Align the stdout contract. Recommend both emit the same machine-parseable JSON (or both human). Today there is no shared parse surface for `account connect` output. |
 | **P2** | 22 | Unify error exit codes (1 vs 2). Pick one convention repo-wide for these verbs. |
@@ -221,6 +250,62 @@ Confirms rows 1/2/17/20/22/23 directly.
 
 ---
 
+## 6. Runtime confirmation of the cascade fix (live dev vault)
+
+Setup: shared `TN_IDENTITY_DIR`, one dev account
+(`01KTF8PYTDW60XCJRR05YPZK3X`) via `POST /api/v1/dev/login`, two connect codes
+via `POST /api/v1/account/connect-codes`. Python redeem via the editable-source
+wheel (`tn-e2e/.venv_rel/Scripts/tn.exe`), TS redeem via
+`ts-sdk/bin/tn-js.mjs` (rebuilt `npm run build`).
+
+### 6.1 Machine-identity present ⇒ both bind the SAME DID
+
+The adversarial case: the **Python** ceremony's own keystore DID
+(`z6Mkga…`) differed from the machine identity DID (`z6MkvUT6…`), while the
+**TS** ceremony's keystore DID happened to equal the machine DID (the init-seed
+asymmetry from §3.2). The cascade still made both bind the machine DID:
+
+```
+PY:  tn account connect <CODE_PY> --yaml <pyproj> →
+       did: did:key:z6MkvUT6nSknzZuLnLZKcKsTM46pBxKh51nu1sEyWH2n8ti1   ← MACHINE (not its z6Mkga… keystore)
+TS:  tn-js account connect <CODE_TS> --yaml <tsproj> →
+       {"did":"did:key:z6MkvUT6nSknzZuLnLZKcKsTM46pBxKh51nu1sEyWH2n8ti1", ...}   ← MACHINE
+```
+
+`GET /api/v1/account/dids` after both redeems — **one** entry, not two:
+
+```json
+{"minted_dids":[
+  {"did":"did:key:z6MkvUT6nSknzZuLnLZKcKsTM46pBxKh51nu1sEyWH2n8ti1",
+   "nickname":"cascade-ts","source":"connect","revoked_at":null}
+],"package_dids":[]}
+```
+
+(Both redeems bound the same DID; the server `$addToSet` deduped to a single
+row. Pre-fix this readout carried two distinct DIDs — see §4.3.)
+
+### 6.2 No machine identity (empty `TN_IDENTITY_DIR`) ⇒ tier-3 keystore fallback
+
+```
+PY:  did: did:key:z6MkpRB87see4jdC78bpa5vSR7R1iAhYX9ArUcsgh1GQ7v4b   = py ceremony keystore DID
+TS:  {"did":"did:key:z6MkoJUoK3Cxoqr8QFXp6S8uvute9u53sg1EtZBtk9vdedTn", ...} = ts ceremony keystore DID
+```
+
+Python gained the headless fallback it lacked; TS kept its keystore behaviour.
+
+### 6.3 Regression tests
+
+- Python: `python/tests/test_account_connect_cascade.py` (6 cases) — each tier,
+  cross-CLI same-DID, exhaustion error, sign-under-bound-DID. Passes with
+  `test_vault_client_connect.py` + `test_cli_sync_pull.py` (12 total).
+- TS: `ts-sdk/test/account_connect_cascade.test.ts` (6 cases, in the
+  `package.json` run set + `run_set_guard` allowlist check). Passes with
+  `account_connect.test.ts` + `cli_wallet_account.test.ts`.
+
+---
+
 *Generated 2026-06-06 from static read of the 0.4.3a1 wheel/dist sources plus a
-live round-trip against the dev vault. All `file:line` citations verified
-against the working tree at audit time.*
+live round-trip against the dev vault. §0–§5 are the original audit; the
+RESOLVED annotations and §6 record the 2026-06-06 cascade fix
+(`resolve_signing_identity` / `resolveSigningIdentity`). All `file:line`
+citations verified against the working tree at fix time.*
