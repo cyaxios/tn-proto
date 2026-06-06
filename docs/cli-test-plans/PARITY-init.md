@@ -50,7 +50,7 @@ both sides but differs. **MISSING** = effect on Python with no TS counterpart.
 | 4d | build claim URL | `ts-sdk/src/handlers/init_upload.ts:130` |
 | 4e | `updateSyncState(pending_claim={...})` → `state.json` | `ts-sdk/src/handlers/init_upload.ts:144-155` → `ts-sdk/src/sync_state.ts:102` |
 | 4f | write `claim_url.txt` | `ts-sdk/src/handlers/init_upload.ts:156-162` |
-| 4g | emit claim-url admin event | **MISSING** |
+| 4g | emit claim-url admin event (`emitClaimUrlAdminEvent`) | `ts-sdk/src/handlers/init_upload.ts:251` (helper `:74`) — **RESOLVED** |
 | 5 | stdout block + final JSON line | `ts-sdk/bin/tn-js.mjs:912-941` |
 
 ---
@@ -62,7 +62,7 @@ One row per observable side-effect of the cold init-upload path.
 | # | Python effect (file:line) | TS counterpart (file:line or MISSING) | status | sev | detail |
 |---|---------------------------|---------------------------------------|--------|-----|--------|
 | 1 | Vault URL resolved: `--link` → `identity.linked_vault` → `TN_VAULT_URL` → hosted default — `cli.py:403` (`resolve_vault_url` `vault_client.py:68`) | `resolveVaultUrl(linkUrl)` — `tn-js.mjs:902` | DIVERGE | MED | TS resolution order omits `identity.linkedVault` (row 2). Env/default tiers match. |
-| 2 | Persist resolved vault into `identity.linked_vault` + rewrite identity.json when previously null — `cli.py:404-406` | MISSING | MISSING | HIGH | **Runtime-proven:** PY identity.json `linked_vault=http://localhost:38790`; TS `linkedVault=null`. Breaks future warm-attach + resolution tier #2. |
+| 2 | Persist resolved vault into `identity.linked_vault` + rewrite identity.json when previously null — `cli.py:404-406` | `identity.linkedVault = vaultBase; identity.save()` when previously null — `tn-js.mjs:909-915` | **RESOLVED** | HIGH | **Runtime-proven 2026-06-06:** after fix, TS identity.json `linked_vault=http://localhost:38790` (was null), matching PY. Restores resolution tier #2 + future warm-attach. |
 | 3 | Warm-attach gate signal = `TN_API_KEY` or `identity.linked_account_id` — `cli.py:415` | `TN_VAULT_API_KEY` \|\| `TN_API_KEY` \|\| `identity.linkedAccountId` — `tn-js.mjs:903` | DIVERGE | LOW | TS additionally honors `TN_VAULT_API_KEY`. Superset, not a regression. |
 | 4 | Cold path entered only when warm-attach not taken — `cli.py:419` | Cold path entered only when `!attached` — `tn-js.mjs:907` | MATCH | — | Both fall through to claim-URL on warm miss. |
 | 5 | TTL-reuse: if live `pending_claim` inside TTL, return it `reused=True`, **no** re-upload (C18) — `vault_push.py:316-334` | MISSING | MISSING | MED | TS `initUpload` always mints a fresh BEK + POSTs. CLI-masked (see §4) but the library API diverges. |
@@ -78,7 +78,7 @@ One row per observable side-effect of the cold init-upload path.
 | 15 | Build claim URL `{base.rstrip('/')}/claim/{vault_id}#k={password_b64}` — `vault_push.py:372` | `{base}/claim/{vaultId}#k={passwordB64}` (base already `replace(/\/+$/,'')`) — `init_upload.ts:63,130` | MATCH | — | Identical URL shape; runtime URLs identical in form. |
 | 16 | Write `state.json`: `pending_claim={vault_id,expires_at,claim_url,password_b64}` at `<yamlDir>/.tn/sync/state.json` — `vault_push.py:375-381`, `sync_state.py:205-222` | `updateSyncState(pending_claim={...})` same path — `init_upload.ts:144-155`, `sync_state.ts:102-116` | DIVERGE | MED | Field values match. **But** nested-object key order differs: PY `json.dumps(sort_keys=True)` sorts recursively (claim_url,expires_at,password_b64,vault_id); TS `saveSyncState` sorts **top-level only** (`sync_state.ts:86-88`), nested `pending_claim` stays insertion-order. Runtime-proven (see §3.2). Byte-divergent file; any cross-impl exact-content test fails. |
 | 17 | Write `claim_url.txt` = `claim_url + "\n"` at `<yamlDir>/.tn/sync/claim_url.txt` — `vault_push.py:257-270` | `writeFileSync(.../claim_url.txt, url+"\n")` — `init_upload.ts:156-162` | MATCH | — | Runtime-proven: both files present, `url\n`. |
-| 18 | Emit admin event `tn.vault.claim_url_issued` as JSON file in `<stem>/admin/outbox/claim_url_issued_<ts>_<vault_id>.json` (fields: claim_url, did, emitted_at, event_type, expires_at, vault_id; sorted, indent=2) — `vault_push.py:208-254` | MISSING | MISSING | HIGH | **Runtime-proven:** PY tree has the file; TS tree has no `admin/outbox/` at all. Auditor inspecting the outbox sees no issuance trail on TS. |
+| 18 | Emit admin event `tn.vault.claim_url_issued` as JSON file in `<stem>/admin/outbox/claim_url_issued_<ts>_<vault_id>.json` (fields: claim_url, did, emitted_at, event_type, expires_at, vault_id; sorted, indent=2) — `vault_push.py:208-254` | `emitClaimUrlAdminEvent` writes the same filename + sorted JSON at the same per-stem path — `ts-sdk/src/handlers/init_upload.ts:74-149` (call `:251`) | **RESOLVED** | HIGH | **Runtime-proven 2026-06-06:** after fix, TS tree has `.tn/a/.tn/tn/admin/outbox/claim_url_issued_<ts>_<vault_id>.json` byte-shape-identical to PY (same keys, order, indent, value formats). Issuance trail now present on TS. |
 | 19 | `set_pending_claim` returns; `reused` flag in return dict — `vault_push.py:392-398` | return `{vaultId,expiresAt,claimUrl,passwordB64}` — no `reused` — `init_upload.ts:164` | DIVERGE | LOW | TS result has no `reused`; CLI never prints "(reusing…)" line (row 23). Consequence of row 5. |
 | 20 | stdout `\n[tn init] Backed up to {vault_url}` + `vault_id:` + `expires:` (local-tz fmt) — `cli.py:427-430` | same three lines — `tn-js.mjs:912-914` | MATCH | — | Runtime-proven identical wording. |
 | 21 | `expires:` rendered via `_format_expires_local` (`%Z` long name, e.g. "Eastern Daylight Time") — `cli.py:146-160` | `_formatExpiresLocal` (Intl `short`, e.g. "EDT") — `tn-js.mjs:986-1008` | DIVERGE | LOW | Same instant; tz-label style differs (long vs short). Cosmetic. |
@@ -175,22 +175,27 @@ calling `init_upload` twice directly on a persisted ceremony.
 
 ## 4. Prioritized MUST-FIX list
 
-### HIGH
+### HIGH — both RESOLVED 2026-06-06
 
-1. **Row 18 — claim-url admin event MISSING on TS.** Python drops a
-   `tn.vault.claim_url_issued` JSON envelope into `<stem>/admin/outbox/`
-   (`vault_push.py:208-254`); TS emits nothing and has no `admin/outbox/`
-   dir. An auditor inspecting the outbox (live-consistency invariant C17)
-   sees no issuance trail on TS. **Fix:** port `_emit_claim_url_admin_event`
-   into `ts-sdk/src/handlers/init_upload.ts` writing the same filename
-   shape + sorted JSON fields.
+1. **Row 18 — claim-url admin event ~~MISSING~~ RESOLVED on TS.** Python
+   drops a `tn.vault.claim_url_issued` JSON envelope into
+   `<stem>/admin/outbox/` (`vault_push.py:208-254`). **Fixed:**
+   `emitClaimUrlAdminEvent` ported into
+   `ts-sdk/src/handlers/init_upload.ts:74-149` (called at `:251`), writing
+   the same `claim_url_issued_<ts>_<vault_id>.json` filename + sorted
+   (`JSON.stringify(...,2)`) fields at the same per-stem path
+   (`<yamlDir>/.tn/<stem>/admin/outbox/`). Best-effort (swallowed on write
+   failure). Runtime-proven: TS file byte-shape-identical to PY.
 
-2. **Row 2 — `identity.linked_vault` not persisted on TS.** Python writes
-   the resolved vault back into identity.json (`cli.py:404-406`); TS never
-   does. Runtime-proven (PY `linked_vault` set, TS null). Breaks the
-   resolution tier #2 (`identity.linkedVault`, row 1) and silently weakens
-   future warm-attach. **Fix:** in `initCmd` after `resolveVaultUrl`, set
-   `identity.linkedVault` and re-persist when previously null.
+2. **Row 2 — `identity.linked_vault` not persisted on TS ~~MISSING~~
+   RESOLVED.** Python writes the resolved vault back into identity.json
+   (`cli.py:404-406`). **Fixed:** in `tn-js.mjs` `initCmd`, after
+   `resolveVaultUrl`, set `identity.linkedVault = vaultBase` and
+   `identity.save()` when previously null (`tn-js.mjs:909-915`), using the
+   same public Identity API the account-connect cascade uses. Best-effort
+   (WARN, never fails init). Runtime-proven: TS identity.json now carries
+   `linked_vault=http://localhost:38790`, matching PY. Restores resolution
+   tier #2 (row 1) + future warm-attach.
 
 ### MED
 
@@ -230,12 +235,14 @@ calling `init_upload` twice directly on a persisted ceremony.
 - **Total effects audited:** 28
 - **MATCH (15):** rows 4, 6, 8, 9, 10, 11, 13, 14, 15, 17, 20, 22, 25, 26, 27
 - **DIVERGE (8):** rows 1, 7, 12, 16, 19, 21, 24, 28
-- **MISSING (4):** rows 2, 5, 18, 23
+- **RESOLVED (2):** rows 2, 18 (both HIGH; fixed 2026-06-06, runtime-proven)
+- **MISSING (2):** rows 5, 23 (both downstream of the MED TTL-reuse gap)
 
 (Reconciles: 15 + 8 + 4 = 27 across rows 1–28, with row 3 also a LOW
 DIVERGE — 9 DIVERGE if counted; listed under DIVERGE-low in §4. The 28th
 row is row 3.)
 
 **Must-fix (HIGH):** rows 18 (claim-url admin event) and 2 (linked_vault
-persistence). **Must-fix (MED):** rows 16 (state.json deep-sort), 5
-(TTL-reuse), 28 (admin.ndjson).
+persistence) — both **RESOLVED 2026-06-06** (TS file:line in §2). **Must-fix
+(MED) remaining:** rows 16 (state.json deep-sort), 5 (TTL-reuse), 28
+(admin.ndjson).

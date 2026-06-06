@@ -15,7 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { Buffer } from "node:buffer";
 
 import type { NodeRuntime } from "../runtime/node_runtime.js";
@@ -40,6 +40,89 @@ export interface InitUploadOptions {
   fetchImpl?: typeof fetch;
   /** Per-request timeout in ms. Default: 30_000. */
   timeoutMs?: number;
+}
+
+/**
+ * Per-yaml-stem admin outbox dir, mirroring Python
+ * `tn.conventions.admin_outbox_dir` (`_stem_dir(yaml) / "admin" / "outbox"`).
+ *
+ * For a yaml at `<dir>/tn.yaml` the stem is `tn`, so the outbox lands at
+ * `<dir>/.tn/tn/admin/outbox/` — byte-for-byte the same location Python
+ * writes the `claim_url_issued` event to.
+ */
+function adminOutboxDir(yamlPath: string): string {
+  const ext = extname(yamlPath).toLowerCase();
+  if (ext === ".yaml" || ext === ".yml") {
+    const stem = basename(yamlPath, extname(yamlPath));
+    return join(dirname(yamlPath), ".tn", stem, "admin", "outbox");
+  }
+  // Caller passed a directory (legacy): fall back to default-stem layout.
+  return join(yamlPath, ".tn", "tn", "admin", "outbox");
+}
+
+/**
+ * Drop a `tn.vault.claim_url_issued` admin event into the per-stem admin
+ * outbox, mirroring Python `_emit_claim_url_admin_event`
+ * (`vault_push.py:208-254`). Same filename shape
+ * (`claim_url_issued_<ts>_<vault_id>.json`), same field set, and same
+ * serialization (sorted keys, 2-space indent) so an auditor inspecting the
+ * outbox (live-consistency invariant C17) sees the issuance trail on TS too.
+ *
+ * Best-effort: a write failure is logged and swallowed — it must never fail
+ * the init (matches Python).
+ */
+function emitClaimUrlAdminEvent(
+  yamlPath: string,
+  did: string | null,
+  args: { claimUrl: string; vaultId: string; expiresAt: string },
+): string {
+  const outDir = adminOutboxDir(yamlPath);
+  try {
+    mkdirSync(outDir, { recursive: true });
+  } catch (e) {
+    console.warn(
+      `vault.push init-upload: cannot create admin outbox dir: ${(e as Error).message}`,
+    );
+    return join(outDir, `claim_url_issued_${args.vaultId}.json`);
+  }
+
+  // Timestamp shape mirrors Python's `%Y%m%dT%H%M%S%fZ`
+  // (e.g. 20260606T193028123456Z — 6-digit microseconds, ms*1000).
+  const now = new Date();
+  const pad = (n: number, w: number) => String(n).padStart(w, "0");
+  const ts =
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1, 2)}${pad(now.getUTCDate(), 2)}T` +
+    `${pad(now.getUTCHours(), 2)}${pad(now.getUTCMinutes(), 2)}${pad(now.getUTCSeconds(), 2)}` +
+    `${pad(now.getUTCMilliseconds(), 3)}000Z`;
+  const filename = `claim_url_issued_${ts}_${args.vaultId}.json`;
+  const path = join(outDir, filename);
+
+  // Match Python's `isoformat(timespec="milliseconds")` for emitted_at:
+  // `2026-06-06T19:30:28.123+00:00`.
+  const emittedAt = new Date().toISOString().replace(/\.(\d{3})Z$/, ".$1+00:00");
+
+  const envelope: Record<string, unknown> = {
+    event_type: "tn.vault.claim_url_issued",
+    did,
+    claim_url: args.claimUrl,
+    vault_id: args.vaultId,
+    expires_at: args.expiresAt,
+    emitted_at: emittedAt,
+  };
+
+  // Python writes `json.dumps(envelope, indent=2, sort_keys=True)`. Mirror
+  // the recursive key sort (flat object here, but sort top-level keys).
+  const sortedKeys = Object.keys(envelope).sort();
+  const sorted: Record<string, unknown> = {};
+  for (const k of sortedKeys) sorted[k] = envelope[k];
+  try {
+    writeFileSync(path, JSON.stringify(sorted, null, 2), "utf8");
+  } catch (e) {
+    console.warn(
+      `vault.push init-upload: cannot write claim_url event: ${(e as Error).message}`,
+    );
+  }
+  return path;
 }
 
 /**
@@ -159,6 +242,19 @@ export async function initUpload(
     writeFileSync(join(syncDir, "claim_url.txt"), `${claimUrl}\n`, "utf8");
   } catch {
     /* claim_url.txt is a convenience surface; best-effort like Python's */
+  }
+
+  //  (c) Drop a `tn.vault.claim_url_issued` admin event into the per-stem
+  //      admin outbox — mirrors Python's `_emit_claim_url_admin_event`
+  //      (`vault_push.py:385`). Best-effort: swallowed on failure.
+  try {
+    emitClaimUrlAdminEvent(rt.config.yamlPath, rt.config.device.device_identity ?? null, {
+      claimUrl,
+      vaultId,
+      expiresAt,
+    });
+  } catch {
+    /* admin event is an audit convenience; best-effort like Python's */
   }
 
   return { vaultId, expiresAt, claimUrl, passwordB64 };

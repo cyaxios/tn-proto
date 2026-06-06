@@ -901,6 +901,20 @@ async function initCmd() {
   let attached = false;
   if (flipMint && wasFresh && !noLink) {
     const vaultBase = resolveVaultUrl(linkUrl ?? undefined);
+
+    // Persist the resolved vault into the global identity.json when it was
+    // previously null — mirrors Python cmd_init (cli.py:404-406). This makes
+    // resolution tier #2 (identity.linkedVault) and future warm-attach work.
+    // Best-effort: a write failure must not fail the init.
+    if (identity.linkedVault === null) {
+      try {
+        identity.linkedVault = vaultBase;
+        identity.save();
+      } catch (e) {
+        stdout.write(`[tn init] WARN could not persist linked vault: ${e?.message ?? e}\n`);
+      }
+    }
+
     const warmSignal = process.env.TN_VAULT_API_KEY || process.env.TN_API_KEY || identity.linkedAccountId;
     if (warmSignal) {
       attached = await _tryWarmAttach(tn, resolvedYaml, identity, vaultBase);
