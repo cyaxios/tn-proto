@@ -522,6 +522,18 @@ test("seal binding: NAMED recipient absorbs + decrypts; DIFFERENT recipient cann
     "default.btn.mykit should land in R's keystore",
   );
 
+  // Re-absorb the identical bundle into the same keystore: every member is
+  // byte-identical, so the install loop dedup-skips all of them — nothing
+  // newly accepted and no `.previous.*` backups written.
+  const rReceipt2 = await absorbSealedKitBundle(sealedOut, {
+    seed: R.seed,
+    keystoreDir: rKeystore,
+  });
+  assert.equal(rReceipt2.rejectedReason, undefined, "re-absorb should not reject");
+  assert.equal(rReceipt2.acceptedCount, 0, "re-absorb installs nothing (byte-identical)");
+  assert.ok(rReceipt2.dedupedCount >= 1, "re-absorb dedups the identical members");
+  assert.deepEqual(rReceipt2.replacedKitPaths ?? [], [], "no backups on an identical re-absorb");
+
   // Read-back: R decrypts P's entry cleanly (the load-bearing proof).
   const entries = Array.from(
     readAsRecipient(pLogPath, rKeystore, { group: "default", verifySignatures: true }),

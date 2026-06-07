@@ -237,62 +237,29 @@ export interface SealedKitBundleReceipt {
  *
  * Never throws for expected failures — they surface as `rejectedReason`.
  */
-export async function absorbSealedKitBundle(
-  source: string | Uint8Array,
-  opts: { seed: Uint8Array; keystoreDir: string },
-): Promise<SealedKitBundleReceipt> {
-  let manifest: Manifest;
-  let body: Map<string, Uint8Array>;
-  try {
-    const parsed = readTnpkg(source);
-    manifest = parsed.manifest;
-    body = parsed.body;
-  } catch (err) {
-    return { kind: "", acceptedCount: 0, dedupedCount: 0, rejectedReason: (err as Error).message };
-  }
+// Uniform rejection receipt for the kit-bundle absorb path.
+function _kitReject(kind: string, rejectedReason: string): SealedKitBundleReceipt {
+  return { kind, acceptedCount: 0, dedupedCount: 0, rejectedReason };
+}
 
-  if (!isManifestSignatureValid(manifest)) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      rejectedReason:
-        `manifest signature does not verify against publisher_identity ` +
-        `${JSON.stringify(manifest.fromDid)}. The package is corrupt, truncated, or tampered.`,
-    };
-  }
-  if (opts.seed.length !== 32) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      rejectedReason: `absorbSealedKitBundle: seed must be 32 bytes, got ${opts.seed.length}`,
-    };
-  }
-
-  const ourDid = DeviceKey.fromSeed(opts.seed).did;
-
+// Pull `state.body_encryption` off the manifest as an object, or null.
+// (Permissive typeof check, as before: an array value would also pass.)
+function _kitBodyEncryption(manifest: Manifest): Record<string, unknown> | null {
   const state =
     manifest.state && typeof manifest.state === "object"
       ? (manifest.state as Record<string, unknown>)
       : null;
-  const bodyEnc =
-    state && typeof state["body_encryption"] === "object" && state["body_encryption"] !== null
-      ? (state["body_encryption"] as Record<string, unknown>)
-      : null;
-  const wrapsArray = bodyEnc?.["recipient_wraps"];
-  const wrapSingular = bodyEnc?.["recipient_wrap"];
-  if (bodyEnc === null || (wrapsArray === undefined && wrapSingular === undefined)) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      rejectedReason: "absorbSealedKitBundle: bundle is not recipient-sealed (no recipient_wrap[s]).",
-    };
-  }
+  if (!state) return null;
+  const be = state["body_encryption"];
+  return typeof be === "object" && be !== null ? (be as Record<string, unknown>) : null;
+}
 
-  // Candidate wraps addressed to us (plural wins when both present).
+// Recipient wraps addressed to `ourDid` (plural `recipient_wraps` wins over
+// singular `recipient_wrap` when both present).
+function _selectKitWraps(bodyEnc: Record<string, unknown>, ourDid: string): Record<string, unknown>[] {
   const candidates: Record<string, unknown>[] = [];
+  const wrapsArray = bodyEnc["recipient_wraps"];
+  const wrapSingular = bodyEnc["recipient_wrap"];
   if (Array.isArray(wrapsArray)) {
     for (const entry of wrapsArray) {
       if (entry && typeof entry === "object" && !Array.isArray(entry)) {
@@ -304,25 +271,20 @@ export async function absorbSealedKitBundle(
     const e = wrapSingular as Record<string, unknown>;
     if (e["recipient_identity"] === ourDid) candidates.push(e);
   }
-  if (candidates.length === 0) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      rejectedReason: `sealed-box wrap is not addressed to ${JSON.stringify(ourDid)}.`,
-    };
-  }
+  return candidates;
+}
 
-  // AAD over the WIRE manifest, signature + wraps stripped — must match
-  // what the producer bound against.
-  const aad = manifestAadForWrap(toWireDict(manifest, true) as Record<string, unknown>);
-
-  let bek: Uint8Array | null = null;
+// Try each candidate wrap; first successful unseal wins (UnsealError -> next,
+// other errors rethrow).
+async function _unsealFirstKit(
+  candidates: Record<string, unknown>[],
+  seed: Uint8Array,
+  aad: Parameters<typeof unsealBekFromWrap>[2],
+): Promise<{ bek: Uint8Array | null; lastErr: string }> {
   let lastErr = "";
   for (const cand of candidates) {
     try {
-      bek = await unsealBekFromWrap(cand, opts.seed, aad);
-      break;
+      return { bek: await unsealBekFromWrap(cand, seed, aad), lastErr };
     } catch (err) {
       if (err instanceof UnsealError) {
         lastErr = err.message;
@@ -331,41 +293,18 @@ export async function absorbSealedKitBundle(
       throw err;
     }
   }
-  if (bek === null) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      rejectedReason: `sealed-box unwrap failed: ${lastErr}`,
-    };
-  }
+  return { bek: null, lastErr };
+}
 
-  const encrypted = body.get("body/encrypted.bin");
-  if (encrypted === undefined) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      rejectedReason: "manifest declares body_encryption but body/encrypted.bin is missing.",
-    };
-  }
-
-  let decrypted: Map<string, Uint8Array>;
-  try {
-    decrypted = await decryptBodyBlob(encrypted, bek);
-  } catch (err) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      rejectedReason: `body decrypt with unwrapped BEK failed: ${(err as Error).message}`,
-    };
-  }
-
-  // Install the decrypted *.btn.mykit members. Mirror of
-  // NodeRuntime._absorbKitBundle's install loop (flat keystore writes,
-  // byte-identical dedup, previous-backup on overwrite).
-  const keystore = pathResolve(opts.keystoreDir);
+// Install the decrypted top-level `body/*` members into a flat keystore:
+// byte-identical members are dedup-skipped; a differing member backs up the
+// existing file to `<name>.previous.<ts>` before overwriting. Nested paths are
+// ignored (defence against zip-slip). Mirror of NodeRuntime._absorbKitBundle.
+function _installKitMembers(
+  decrypted: Map<string, Uint8Array>,
+  keystoreDir: string,
+): { accepted: number; skipped: number; replaced: string[] } {
+  const keystore = pathResolve(keystoreDir);
   if (!existsSync(keystore)) mkdirSync(keystore, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15) + "Z";
   let accepted = 0;
@@ -389,7 +328,79 @@ export async function absorbSealedKitBundle(
     writeFileSync(dest, Buffer.from(data));
     accepted += 1;
   }
+  return { accepted, skipped, replaced };
+}
 
+export async function absorbSealedKitBundle(
+  source: string | Uint8Array,
+  opts: { seed: Uint8Array; keystoreDir: string },
+): Promise<SealedKitBundleReceipt> {
+  let manifest: Manifest;
+  let body: Map<string, Uint8Array>;
+  try {
+    const parsed = readTnpkg(source);
+    manifest = parsed.manifest;
+    body = parsed.body;
+  } catch (err) {
+    return _kitReject("", (err as Error).message);
+  }
+
+  if (!isManifestSignatureValid(manifest)) {
+    return _kitReject(
+      manifest.kind,
+      `manifest signature does not verify against publisher_identity ` +
+        `${JSON.stringify(manifest.fromDid)}. The package is corrupt, truncated, or tampered.`,
+    );
+  }
+  if (opts.seed.length !== 32) {
+    return _kitReject(
+      manifest.kind,
+      `absorbSealedKitBundle: seed must be 32 bytes, got ${opts.seed.length}`,
+    );
+  }
+
+  const ourDid = DeviceKey.fromSeed(opts.seed).did;
+
+  const bodyEnc = _kitBodyEncryption(manifest);
+  if (
+    bodyEnc === null ||
+    (bodyEnc["recipient_wraps"] === undefined && bodyEnc["recipient_wrap"] === undefined)
+  ) {
+    return _kitReject(
+      manifest.kind,
+      "absorbSealedKitBundle: bundle is not recipient-sealed (no recipient_wrap[s]).",
+    );
+  }
+
+  const candidates = _selectKitWraps(bodyEnc, ourDid);
+  if (candidates.length === 0) {
+    return _kitReject(manifest.kind, `sealed-box wrap is not addressed to ${JSON.stringify(ourDid)}.`);
+  }
+
+  // AAD over the WIRE manifest, signature + wraps stripped — must match
+  // what the producer bound against.
+  const aad = manifestAadForWrap(toWireDict(manifest, true) as Record<string, unknown>);
+  const { bek, lastErr } = await _unsealFirstKit(candidates, opts.seed, aad);
+  if (bek === null) {
+    return _kitReject(manifest.kind, `sealed-box unwrap failed: ${lastErr}`);
+  }
+
+  const encrypted = body.get("body/encrypted.bin");
+  if (encrypted === undefined) {
+    return _kitReject(
+      manifest.kind,
+      "manifest declares body_encryption but body/encrypted.bin is missing.",
+    );
+  }
+
+  let decrypted: Map<string, Uint8Array>;
+  try {
+    decrypted = await decryptBodyBlob(encrypted, bek);
+  } catch (err) {
+    return _kitReject(manifest.kind, `body decrypt with unwrapped BEK failed: ${(err as Error).message}`);
+  }
+
+  const { accepted, skipped, replaced } = _installKitMembers(decrypted, opts.keystoreDir);
   return {
     kind: manifest.kind,
     acceptedCount: accepted,
