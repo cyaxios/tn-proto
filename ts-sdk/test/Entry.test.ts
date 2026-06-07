@@ -321,3 +321,72 @@ test("Entry.fromRaw constructor", () => {
   assert.equal(e.device_identity, "did:key:zABC123");
   assert.equal(e.row_hash, "sha256:111");
 });
+
+const TS = "2026-05-08T03:30:20.000000Z";
+function rawEnv(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { event_type: "x", timestamp: TS, level: "info", ...extra };
+}
+
+test("Entry.fromRaw: $decrypt_error group is hidden and not merged", () => {
+  const e = Entry.fromRaw({
+    envelope: rawEnv({ default: { ciphertext: "c", field_hashes: {} } }),
+    plaintext: { default: { $decrypt_error: true } },
+  });
+  assert.deepEqual(e.hidden_groups, ["default"]);
+  assert.deepEqual(e.fields, {});
+});
+
+test("Entry.fromRaw: $no_read_key group surfaces as hidden via the envelope scan", () => {
+  const e = Entry.fromRaw({
+    envelope: rawEnv({ secret: { ciphertext: "c", field_hashes: {} } }),
+    plaintext: { secret: { $no_read_key: true } },
+  });
+  assert.deepEqual(e.hidden_groups, ["secret"]);
+  assert.deepEqual(e.fields, {});
+});
+
+test("Entry.fromRaw: an envelope ciphertext block with no plaintext is hidden", () => {
+  const e = Entry.fromRaw({
+    envelope: rawEnv({ locked: { ciphertext: "c", field_hashes: {} } }),
+    plaintext: {},
+  });
+  assert.deepEqual(e.hidden_groups, ["locked"]);
+});
+
+test("Entry.fromRaw: multi-group plaintext merges alphabetically, last write wins", () => {
+  const e = Entry.fromRaw({
+    envelope: rawEnv(),
+    plaintext: {
+      bravo: { shared: "B", b_only: 2 },
+      alpha: { shared: "A", a_only: 1 },
+    },
+  });
+  // alpha then bravo (sorted): bravo's `shared` overwrites alpha's.
+  assert.deepEqual(e.fields, { shared: "B", a_only: 1, b_only: 2 });
+});
+
+test("Entry.fromRaw: message hoists from plaintext (string + null) and from envelope", () => {
+  const fromPlain = Entry.fromRaw({
+    envelope: rawEnv(),
+    plaintext: { default: { message: "hello" } },
+  });
+  assert.equal(fromPlain.message, "hello");
+  assert.ok(!("message" in fromPlain.fields));
+
+  const nullMsg = Entry.fromRaw({
+    envelope: rawEnv(),
+    plaintext: { default: { message: null } },
+  });
+  assert.equal(nullMsg.message, null);
+
+  const fromEnv = Entry.fromRaw({ envelope: rawEnv({ message: "envmsg" }), plaintext: {} });
+  assert.equal(fromEnv.message, "envmsg");
+});
+
+test("Entry.fromRaw: a non-group, non-basic envelope extra merges into fields", () => {
+  const e = Entry.fromRaw({
+    envelope: rawEnv({ handler_tag: "injected" }),
+    plaintext: {},
+  });
+  assert.equal(e.fields["handler_tag"], "injected");
+});
