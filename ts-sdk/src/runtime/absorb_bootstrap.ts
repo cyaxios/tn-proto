@@ -211,6 +211,86 @@ function _maybeUnsealBody(
   return { kind: "ok", body };
 }
 
+// Build a rejection receipt (the uniform "nothing accepted" shape) with the
+// given kind + human-readable reason. Replaces the repeated inline literals.
+function _rejectReceipt(kind: string, rejectedReason: string): AbsorbReceipt {
+  return {
+    kind,
+    acceptedCount: 0,
+    dedupedCount: 0,
+    noop: false,
+    derivedState: null,
+    conflicts: [],
+    rejectedReason,
+  };
+}
+
+// Pull `state.body_encryption` off the manifest as an object, or null when the
+// manifest has no state / no body_encryption object. (Mirrors the original
+// permissive typeof check: an array value would also pass, as before.)
+function _readBodyEncryption(manifest: Manifest): Record<string, unknown> | null {
+  const state =
+    manifest.state && typeof manifest.state === "object"
+      ? (manifest.state as Record<string, unknown>)
+      : null;
+  if (!state) return null;
+  const be = state["body_encryption"];
+  return typeof be === "object" && be !== null ? (be as Record<string, unknown>) : null;
+}
+
+interface WrapSelection {
+  /** Wraps whose `recipient_identity` matches our DID. */
+  candidates: Record<string, unknown>[];
+  /** Every addressee (for the "not addressed to us" rejection message). */
+  named: unknown[];
+}
+
+// Collect the recipient wraps addressed to `ourDid` plus the full addressee
+// list. Plural `recipient_wraps` wins over singular `recipient_wrap` (matches
+// python/tn/absorb.py:578).
+function _selectRecipientWraps(bodyEnc: Record<string, unknown>, ourDid: string): WrapSelection {
+  const candidates: Record<string, unknown>[] = [];
+  const named: unknown[] = [];
+  const consider = (e: Record<string, unknown>): void => {
+    named.push(e["recipient_identity"]);
+    if (e["recipient_identity"] === ourDid) candidates.push(e);
+  };
+  const wrapsArray = bodyEnc["recipient_wraps"];
+  const wrapSingular = bodyEnc["recipient_wrap"];
+  if (Array.isArray(wrapsArray)) {
+    for (const entry of wrapsArray) {
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        consider(entry as Record<string, unknown>);
+      }
+    }
+  } else if (wrapSingular && typeof wrapSingular === "object" && !Array.isArray(wrapSingular)) {
+    consider(wrapSingular as Record<string, unknown>);
+  }
+  return { candidates, named };
+}
+
+// Try each candidate wrap; the first successful unseal wins. An UnsealError
+// advances to the next candidate; any other error is unexpected and rethrown.
+async function _unsealFirst(
+  candidates: Record<string, unknown>[],
+  seed: Uint8Array,
+  aad: Parameters<typeof unsealBekFromWrap>[2],
+): Promise<{ bek: Uint8Array | null; lastErr: string }> {
+  let lastErr = "";
+  for (const cand of candidates) {
+    try {
+      return { bek: await unsealBekFromWrap(cand, seed, aad), lastErr };
+    } catch (err) {
+      if (err instanceof UnsealError) {
+        lastErr = err.message;
+        continue;
+      }
+      throw err;
+    }
+  }
+  return { bek: null, lastErr };
+}
+
 /**
  * Async sister of {@link absorbBootstrap} for recipient-sealed bundles.
  *
@@ -279,9 +359,8 @@ export async function absorbSealedBootstrap(
 ): Promise<AbsorbReceipt> {
   const cwd = pathResolve(opts.cwd ?? process.cwd());
   // readTnpkg throws on a malformed zip / missing manifest. Wrap so
-  // callers get a populated rejectedReason instead — they're already
-  // handling other rejection paths via the receipt, this keeps the
-  // contract uniform.
+  // callers get a populated rejectedReason instead — keeps the contract
+  // uniform with the other rejection paths.
   let manifest: Manifest;
   let body: Map<string, Uint8Array>;
   try {
@@ -289,164 +368,71 @@ export async function absorbSealedBootstrap(
     manifest = parsed.manifest;
     body = parsed.body;
   } catch (err) {
-    return {
-      kind: "",
-      acceptedCount: 0,
-      dedupedCount: 0,
-      noop: false,
-      derivedState: null,
-      conflicts: [],
-      rejectedReason: `absorbSealedBootstrap: ${(err as Error).message ?? String(err)}`,
-    };
+    return _rejectReceipt("", `absorbSealedBootstrap: ${(err as Error).message ?? String(err)}`);
   }
 
   if (!isManifestSignatureValid(manifest)) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      noop: false,
-      derivedState: null,
-      conflicts: [],
-      rejectedReason:
-        `manifest signature does not verify against publisher_identity ` +
+    return _rejectReceipt(
+      manifest.kind,
+      `manifest signature does not verify against publisher_identity ` +
         `${JSON.stringify(manifest.fromDid)}. The package is corrupt, truncated, or tampered.`,
-    };
+    );
   }
 
   if (opts.seed.length !== 32) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      noop: false,
-      derivedState: null,
-      conflicts: [],
-      rejectedReason: `absorbSealedBootstrap: seed must be 32 bytes, got ${opts.seed.length}`,
-    };
+    return _rejectReceipt(
+      manifest.kind,
+      `absorbSealedBootstrap: seed must be 32 bytes, got ${opts.seed.length}`,
+    );
   }
 
   const ourDid = DeviceKey.fromSeed(opts.seed).did;
 
-  // Inspect the manifest state for the wrap envelope. If absent, the
-  // bundle isn't recipient-sealed — fall through to the unsealed path
-  // by calling absorbBootstrap.
-  const state =
-    manifest.state && typeof manifest.state === "object" ? (manifest.state as Record<string, unknown>) : null;
-  const bodyEnc =
-    state && typeof state["body_encryption"] === "object" && state["body_encryption"] !== null
-      ? (state["body_encryption"] as Record<string, unknown>)
-      : null;
-  const wrapsArray = bodyEnc?.["recipient_wraps"];
-  const wrapSingular = bodyEnc?.["recipient_wrap"];
+  // Inspect the manifest state for the wrap envelope. If absent, the bundle
+  // isn't recipient-sealed — fall through to the plain path.
+  const bodyEnc = _readBodyEncryption(manifest);
   if (
     bodyEnc === null ||
-    (wrapsArray === undefined && wrapSingular === undefined)
+    (bodyEnc["recipient_wraps"] === undefined && bodyEnc["recipient_wrap"] === undefined)
   ) {
-    // Not a recipient-sealed bundle — delegate to the plain path.
     return absorbBootstrap(source, { cwd });
   }
 
-  // Build the candidate list. Plural wins when both are present
-  // (matches python/tn/absorb.py:578).
-  const candidates: Record<string, unknown>[] = [];
-  if (Array.isArray(wrapsArray)) {
-    for (const entry of wrapsArray) {
-      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-        const e = entry as Record<string, unknown>;
-        if (e["recipient_identity"] === ourDid) candidates.push(e);
-      }
-    }
-  } else if (wrapSingular && typeof wrapSingular === "object" && !Array.isArray(wrapSingular)) {
-    const e = wrapSingular as Record<string, unknown>;
-    if (e["recipient_identity"] === ourDid) candidates.push(e);
-  }
-
+  const { candidates, named } = _selectRecipientWraps(bodyEnc, ourDid);
   if (candidates.length === 0) {
-    // Wraps present but none names us. Not "tampered" — just "not for
-    // me." Mirror python's clear rejection reason at absorb.py:607.
-    const named: unknown[] = [];
-    if (Array.isArray(wrapsArray)) {
-      for (const e of wrapsArray) {
-        if (e && typeof e === "object" && !Array.isArray(e)) {
-          named.push((e as Record<string, unknown>)["recipient_identity"]);
-        }
-      }
-    } else if (wrapSingular && typeof wrapSingular === "object" && !Array.isArray(wrapSingular)) {
-      named.push((wrapSingular as Record<string, unknown>)["recipient_identity"]);
-    }
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      noop: false,
-      derivedState: null,
-      conflicts: [],
-      rejectedReason:
-        `sealed-box wrap is addressed to ${JSON.stringify(named)}; ` +
+    // Wraps present but none names us. Not "tampered" — just "not for me."
+    // Mirror python's clear rejection reason at absorb.py:607.
+    return _rejectReceipt(
+      manifest.kind,
+      `sealed-box wrap is addressed to ${JSON.stringify(named)}; ` +
         `this runtime is ${JSON.stringify(ourDid)}. Refusing to attempt unwrap.`,
-    };
+    );
   }
 
   // AAD is computed against the WIRE manifest (snake_case), not the TS
   // Manifest. toWireDict gives us the canonical wire view.
   const aad = manifestAadForWrap(toWireDict(manifest, true));
-
-  // Try each matching candidate. First successful unseal wins.
-  let bek: Uint8Array | null = null;
-  let lastErr = "";
-  for (const cand of candidates) {
-    try {
-      bek = await unsealBekFromWrap(cand, opts.seed, aad);
-      break;
-    } catch (err) {
-      if (err instanceof UnsealError) {
-        lastErr = err.message;
-        continue;
-      }
-      // Anything other than UnsealError is unexpected; surface.
-      throw err;
-    }
-  }
+  const { bek, lastErr } = await _unsealFirst(candidates, opts.seed, aad);
   if (bek === null) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      noop: false,
-      derivedState: null,
-      conflicts: [],
-      rejectedReason: `sealed-box unwrap failed: ${lastErr}`,
-    };
+    return _rejectReceipt(manifest.kind, `sealed-box unwrap failed: ${lastErr}`);
   }
 
   const encrypted = body.get("body/encrypted.bin");
   if (encrypted === undefined) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      noop: false,
-      derivedState: null,
-      conflicts: [],
-      rejectedReason:
-        "manifest declares body_encryption but body/encrypted.bin is missing from the zip.",
-    };
+    return _rejectReceipt(
+      manifest.kind,
+      "manifest declares body_encryption but body/encrypted.bin is missing from the zip.",
+    );
   }
 
   let decryptedBody: Map<string, Uint8Array>;
   try {
     decryptedBody = await decryptBodyBlob(encrypted, bek);
   } catch (err) {
-    return {
-      kind: manifest.kind,
-      acceptedCount: 0,
-      dedupedCount: 0,
-      noop: false,
-      derivedState: null,
-      conflicts: [],
-      rejectedReason: `body decrypt with unwrapped BEK failed: ${(err as Error).message ?? String(err)}`,
-    };
+    return _rejectReceipt(
+      manifest.kind,
+      `body decrypt with unwrapped BEK failed: ${(err as Error).message ?? String(err)}`,
+    );
   }
 
   // Dispatch with the decrypted body in hand.
@@ -456,17 +442,11 @@ export async function absorbSealedBootstrap(
   if (manifest.kind === "project_seed") {
     return _bootstrapProjectSeed(manifest, decryptedBody, cwd);
   }
-  return {
-    kind: manifest.kind,
-    acceptedCount: 0,
-    dedupedCount: 0,
-    noop: false,
-    derivedState: null,
-    conflicts: [],
-    rejectedReason:
-      `absorbSealedBootstrap: kind ${JSON.stringify(manifest.kind)} is not a bootstrap kind ` +
+  return _rejectReceipt(
+    manifest.kind,
+    `absorbSealedBootstrap: kind ${JSON.stringify(manifest.kind)} is not a bootstrap kind ` +
       `(only identity_seed and project_seed are supported without an active runtime).`,
-  };
+  );
 }
 
 function _bootstrapIdentitySeed(
