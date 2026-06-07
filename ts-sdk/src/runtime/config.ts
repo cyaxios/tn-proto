@@ -381,23 +381,11 @@ export function authoritativeYamlFor(yamlPath: string, key: string): string {
     : chain[chain.length - 1]!;
 }
 
-export function loadConfig(yamlPath: string): CeremonyConfig {
-  const resolved = resolve(yamlPath);
-  const rawText = readFileSync(resolved, "utf8");
-  const text = substituteEnvVars(rawText, resolved);
-  let doc = parseYaml(text) as Record<string, unknown>;
-  // Resolve ``extends:`` chain before validation. After this point the
-  // merged doc carries identity, groups, recipients, and other
-  // parent-owned blocks from the chain root; the child supplied only
-  // its own overrides.
-  doc = resolveExtends(resolved, doc);
-  const yamlDir = dirname(resolved);
-
-  // 0.4.3a1 identity-naming flip: yaml top-level block renamed from
-  // `me: {did: ...}` to `device: {device_identity: ...}` (Python phase B,
-  // commit d73b7f1; TS phase B is this batch). Reject the legacy block
-  // outright so the failure surfaces at init() not at first emit, matching
-  // python/tn/config.py:_validate_load_doc_structure.
+// 0.4.3a1 identity-naming flip: yaml top-level block renamed from
+// `me: {did: ...}` to `device: {device_identity: ...}` (Python phase B,
+// commit d73b7f1). Reject the legacy block outright so the failure surfaces
+// at init() not at first emit, matching python/tn/config.py.
+function _rejectLegacyMeBlock(doc: Record<string, unknown>, resolved: string): void {
   if (doc.me !== undefined && doc.device === undefined) {
     throw new Error(
       `${resolved}: legacy \`me:\` top-level block is no longer supported ` +
@@ -406,19 +394,12 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
         `docs/superpowers/specs/2026-05-20-identity-and-key-naming.md.`,
     );
   }
-  const ceremony = (doc.ceremony ?? {}) as Record<string, unknown>;
-  const device = (doc.device ?? {}) as Record<string, unknown>;
-  const logs = (doc.logs ?? {}) as Record<string, unknown>;
-  const keystore = (doc.keystore ?? {}) as Record<string, unknown>;
-  const fieldsMap = (doc.fields ?? {}) as Record<string, unknown>;
-  const groups = (doc.groups ?? {}) as Record<string, unknown>;
-  const publicFields = Array.isArray(doc.public_fields) ? (doc.public_fields as string[]) : [];
+}
 
-  // Reserved namespace check: `tn.*` group names are reserved for
-  // protocol-level conventions (per the 2026-04-25 read-ergonomics spec
-  // §2.2). The only allowed name in the reserved namespace is the
-  // auto-injected `tn.agents` group. Anything else is rejected at load
-  // time so the failure surfaces at `init()` not at first emit.
+// Reserved namespace check: `tn.*` group names are reserved for protocol-level
+// conventions (2026-04-25 read-ergonomics spec §2.2). Only the auto-injected
+// `tn.agents` group is allowed; anything else is rejected at load time.
+function _rejectReservedGroupNames(groups: Record<string, unknown>, resolved: string): void {
   for (const gname of Object.keys(groups)) {
     if (gname.startsWith("tn.") && gname !== "tn.agents") {
       throw new Error(
@@ -428,22 +409,33 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
       );
     }
   }
+}
 
+interface BuiltGroups {
+  groupMap: Map<string, GroupConfig>;
+  /** Per-group `fields:` declarations (canonical multi-group routing path). */
+  perGroupFields: Map<string, string[]>;
+  /** True when any group declared a `fields:` list (selects routing path). */
+  anyGroupDeclaresFields: boolean;
+}
+
+// Build the group map (and harvest per-group `fields:` declarations) from the
+// yaml `groups:` block, injecting a `default` group when none is declared.
+function _buildGroupMap(
+  groups: Record<string, unknown>,
+  ceremony: Record<string, unknown>,
+  device: Record<string, unknown>,
+  resolved: string,
+): BuiltGroups {
   const groupMap = new Map<string, GroupConfig>();
-  // Track per-group field declarations for the new canonical multi-group
-  // routing path (`groups[<name>].fields: [...]`). When any group declares
-  // its fields the inverted map is built from that; otherwise we fall
-  // back to the legacy flat `fields:` block (deprecated, warned below).
   const perGroupFields = new Map<string, string[]>();
   let anyGroupDeclaresFields = false;
   for (const [name, raw] of Object.entries(groups)) {
     const g = raw as Record<string, unknown>;
     // Read tolerant: accept either `recipient_identity` (post-0.4.3a1
-    // canonical role name, written by Python's create_fresh and the
-    // post-flip TS yaml template) or legacy `did` (older fixtures still
-    // floating around). Wasm Rust strictly requires `recipient_identity`
-    // — but this loader path is the TS-only consumer, so we keep the
-    // tolerant read.
+    // canonical role name) or legacy `did` (older fixtures still floating
+    // around). This loader path is the TS-only consumer, so the tolerant
+    // read is safe (wasm Rust strictly requires `recipient_identity`).
     const recipients = Array.isArray(g.recipients)
       ? (g.recipients as Array<Record<string, unknown>>).map((r) => ({
           did: String(r.recipient_identity ?? r.did ?? ""),
@@ -480,44 +472,63 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
         : [],
     });
   }
+  return { groupMap, perGroupFields, anyGroupDeclaresFields };
+}
 
+// Invert group->fields into the field->groups routing map. Prefers the
+// per-group `fields:` declarations; falls back to the deprecated flat
+// top-level `fields:` block (with a one-time deprecation warning).
+function _buildFieldToGroups(
+  built: BuiltGroups,
+  fieldsMap: Record<string, unknown>,
+  resolved: string,
+): Map<string, string[]> {
   const fieldToGroups = new Map<string, string[]>();
-  if (anyGroupDeclaresFields) {
-    for (const [gname, fnames] of perGroupFields) {
-      for (const fname of fnames) {
-        const list = fieldToGroups.get(fname) ?? [];
-        if (!list.includes(gname)) list.push(gname);
-        fieldToGroups.set(fname, list);
-      }
+  const add = (fname: string, gname: string): void => {
+    const list = fieldToGroups.get(fname) ?? [];
+    if (!list.includes(gname)) list.push(gname);
+    fieldToGroups.set(fname, list);
+  };
+  if (built.anyGroupDeclaresFields) {
+    for (const [gname, fnames] of built.perGroupFields) {
+      for (const fname of fnames) add(fname, gname);
     }
-  } else if (Object.keys(fieldsMap).length > 0) {
-    // Back-compat: legacy flat `fields:` block. Emit a deprecation warning
-    // so callers migrate to per-group declarations.
-    console.warn(
-      `${resolved}: the flat top-level \`fields:\` block is deprecated; ` +
-        "declare field membership inside each group as " +
-        "`groups[<name>].fields: [...]`. The flat form supports only one " +
-        "group per field and will be removed in a future release.",
-    );
-    for (const [fname, fspec] of Object.entries(fieldsMap)) {
-      let gname: string;
-      if (typeof fspec === "string") {
-        gname = fspec;
-      } else if (fspec && typeof fspec === "object" && "group" in fspec) {
-        gname = String((fspec as Record<string, unknown>).group ?? "default");
-      } else {
-        throw new Error(
-          `${resolved}: fields.${fname} must be a string group name or ` +
-            `{group: <name>} (got ${typeof fspec})`,
-        );
-      }
-      const list = fieldToGroups.get(fname) ?? [];
-      if (!list.includes(gname)) list.push(gname);
-      fieldToGroups.set(fname, list);
-    }
+    return fieldToGroups;
   }
+  if (Object.keys(fieldsMap).length === 0) return fieldToGroups;
+  // Back-compat: legacy flat `fields:` block. Warn so callers migrate.
+  console.warn(
+    `${resolved}: the flat top-level \`fields:\` block is deprecated; ` +
+      "declare field membership inside each group as " +
+      "`groups[<name>].fields: [...]`. The flat form supports only one " +
+      "group per field and will be removed in a future release.",
+  );
+  for (const [fname, fspec] of Object.entries(fieldsMap)) {
+    let gname: string;
+    if (typeof fspec === "string") {
+      gname = fspec;
+    } else if (fspec && typeof fspec === "object" && "group" in fspec) {
+      gname = String((fspec as Record<string, unknown>).group ?? "default");
+    } else {
+      throw new Error(
+        `${resolved}: fields.${fname} must be a string group name or ` +
+          `{group: <name>} (got ${typeof fspec})`,
+      );
+    }
+    add(fname, gname);
+  }
+  return fieldToGroups;
+}
 
-  // Validation: every routed group must exist.
+// Validate the routing map against the known groups and the public-field set,
+// then sort each field's group list deterministically (in place) so canonical
+// envelope encoding is stable across SDKs regardless of yaml key order.
+function _validateFieldRouting(
+  fieldToGroups: Map<string, string[]>,
+  groupMap: Map<string, GroupConfig>,
+  publicFields: string[],
+  resolved: string,
+): void {
   const knownGroups = new Set(groupMap.keys());
   for (const [fname, gnames] of fieldToGroups) {
     for (const gname of gnames) {
@@ -530,8 +541,6 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
       }
     }
   }
-
-  // Validation: a field cannot be both public and group-routed.
   const publicSet = new Set(publicFields);
   const overlap = [...fieldToGroups.keys()].filter((f) => publicSet.has(f)).sort();
   if (overlap.length > 0) {
@@ -542,13 +551,55 @@ export function loadConfig(yamlPath: string): CeremonyConfig {
         "more groups, never both.",
     );
   }
-
-  // Sort each group list deterministically (alphabetical) so canonical
-  // envelope encoding is stable across SDKs regardless of yaml key order.
   for (const [fname, gnames] of fieldToGroups) {
     fieldToGroups.set(fname, [...new Set(gnames)].sort());
   }
+}
 
+export function loadConfig(yamlPath: string): CeremonyConfig {
+  const resolved = resolve(yamlPath);
+  const rawText = readFileSync(resolved, "utf8");
+  const text = substituteEnvVars(rawText, resolved);
+  let doc = parseYaml(text) as Record<string, unknown>;
+  // Resolve ``extends:`` chain before validation. After this point the
+  // merged doc carries identity, groups, recipients, and other
+  // parent-owned blocks from the chain root; the child supplied only
+  // its own overrides.
+  doc = resolveExtends(resolved, doc);
+  const yamlDir = dirname(resolved);
+
+  _rejectLegacyMeBlock(doc, resolved);
+
+  const ceremony = (doc.ceremony ?? {}) as Record<string, unknown>;
+  const device = (doc.device ?? {}) as Record<string, unknown>;
+  const fieldsMap = (doc.fields ?? {}) as Record<string, unknown>;
+  const groups = (doc.groups ?? {}) as Record<string, unknown>;
+  const publicFields = Array.isArray(doc.public_fields) ? (doc.public_fields as string[]) : [];
+
+  _rejectReservedGroupNames(groups, resolved);
+
+  const built = _buildGroupMap(groups, ceremony, device, resolved);
+  const fieldToGroups = _buildFieldToGroups(built, fieldsMap, resolved);
+  _validateFieldRouting(fieldToGroups, built.groupMap, publicFields, resolved);
+
+  return _assembleConfig(doc, resolved, yamlDir, built.groupMap, fieldToGroups, publicFields);
+}
+
+// Map the validated, parsed yaml doc into the immutable CeremonyConfig the
+// runtime consumes. Pure data assembly (no branching beyond per-field
+// defaulting); the routing map and group map were already built/validated.
+function _assembleConfig(
+  doc: Record<string, unknown>,
+  resolved: string,
+  yamlDir: string,
+  groupMap: Map<string, GroupConfig>,
+  fieldToGroups: Map<string, string[]>,
+  publicFields: string[],
+): CeremonyConfig {
+  const ceremony = (doc.ceremony ?? {}) as Record<string, unknown>;
+  const device = (doc.device ?? {}) as Record<string, unknown>;
+  const logs = (doc.logs ?? {}) as Record<string, unknown>;
+  const keystore = (doc.keystore ?? {}) as Record<string, unknown>;
   const cfg: CeremonyConfig = {
     yamlPath: resolved,
     yamlDir,
