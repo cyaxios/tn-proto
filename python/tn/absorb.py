@@ -515,6 +515,59 @@ def _absorb_enrolment_kind(
     return _apply_enrolment(cfg, pkg)
 
 
+def _unseal_reject(manifest: TnpkgManifest, reason: str) -> AbsorbReceipt:
+    """A rejected sealed-box AbsorbReceipt carrying ``reason``."""
+    return AbsorbReceipt(kind=manifest.kind, legacy_status="rejected", legacy_reason=reason)
+
+
+def _select_unseal_candidates(
+    body_encryption: dict[str, Any], our_did: str
+) -> list[dict[str, Any]]:
+    """Recipient wraps addressed to ``our_did``. Plural ``recipient_wraps``
+    wins over singular ``recipient_wrap`` when both are present."""
+    wraps_array = body_encryption.get("recipient_wraps")
+    wrap_singular = body_encryption.get("recipient_wrap")
+    candidates: list[dict[str, Any]] = []
+    if isinstance(wraps_array, list):
+        for entry in wraps_array:
+            if isinstance(entry, dict) and entry.get("recipient_identity") == our_did:
+                candidates.append(entry)
+    elif isinstance(wrap_singular, dict):
+        if wrap_singular.get("recipient_identity") == our_did:
+            candidates.append(wrap_singular)
+    return candidates
+
+
+def _unseal_addressees(body_encryption: dict[str, Any]) -> list:
+    """The recipient DIDs a sealed wrap names (for the not-for-me message)."""
+    wraps_array = body_encryption.get("recipient_wraps")
+    wrap_singular = body_encryption.get("recipient_wrap")
+    if isinstance(wraps_array, list):
+        return [e.get("recipient_identity") for e in wraps_array if isinstance(e, dict)]
+    return [
+        wrap_singular.get("recipient_identity") if isinstance(wrap_singular, dict) else None
+    ]
+
+
+def _unseal_first_candidate(
+    candidates: list[dict[str, Any]],
+    device_priv: bytes | bytearray,
+    aad,
+    unseal_fn,
+    unseal_error_cls,
+) -> tuple[bytes | None, str]:
+    """Try each candidate wrap; first successful unseal wins. Returns
+    ``(bek, "")`` on success or ``(None, last_error_message)``."""
+    last_err = ""
+    for cand in candidates:
+        try:
+            return unseal_fn(cand, bytes(device_priv), aad), ""
+        except unseal_error_cls as exc:
+            last_err = str(exc)
+            continue
+    return None, last_err
+
+
 def _maybe_unseal_recipient_wrap(
     cfg: LoadedConfig,
     manifest: TnpkgManifest,
@@ -570,102 +623,50 @@ def _maybe_unseal_recipient_wrap(
     our_did = getattr(getattr(cfg, "device", None), "did", None)
     device_priv = getattr(cfg.device, "private_bytes", None)
     if not isinstance(our_did, str):
-        return body, AbsorbReceipt(
-            kind=manifest.kind,
-            legacy_status="rejected",
-            legacy_reason="cfg.device has no DID; cannot match a sealed-box wrap.",
+        return body, _unseal_reject(
+            manifest, "cfg.device has no DID; cannot match a sealed-box wrap."
         )
     if not isinstance(device_priv, (bytes, bytearray)) or len(device_priv) != 32:
-        return body, AbsorbReceipt(
-            kind=manifest.kind,
-            legacy_status="rejected",
-            legacy_reason=(
-                "cfg.device does not expose a 32-byte Ed25519 private seed; "
-                "cannot unwrap sealed-box body."
-            ),
+        return body, _unseal_reject(
+            manifest,
+            "cfg.device does not expose a 32-byte Ed25519 private seed; "
+            "cannot unwrap sealed-box body.",
         )
 
-    # Build the candidate-wrap list. Plural takes precedence if both
-    # are present. Plural items are dicts with a recipient_did field;
-    # we filter to entries that name this device.
-    candidates: list[dict[str, Any]] = []
-    if isinstance(wraps_array, list):
-        for entry in wraps_array:
-            if not isinstance(entry, dict):
-                continue
-            rdid = entry.get("recipient_identity")
-            if rdid == our_did:
-                candidates.append(entry)
-    elif isinstance(wrap_singular, dict):
-        rdid = wrap_singular.get("recipient_identity")
-        if rdid == our_did:
-            candidates.append(wrap_singular)
-
+    candidates = _select_unseal_candidates(body_encryption, our_did)
     if not candidates:
-        # Wire shape was present but no entry names us. The publisher
-        # didn't intend us as a recipient. We can't open the body — but
-        # this isn't a "tampered" rejection, just "not for me." Surface
-        # a clear reason.
-        if isinstance(wraps_array, list):
-            recipients = [
-                e.get("recipient_identity")
-                for e in wraps_array
-                if isinstance(e, dict)
-            ]
-        else:
-            recipients = [
-                wrap_singular.get("recipient_identity")
-                if isinstance(wrap_singular, dict)
-                else None
-            ]
-        return body, AbsorbReceipt(
-            kind=manifest.kind,
-            legacy_status="rejected",
-            legacy_reason=(
-                f"sealed-box wrap is addressed to {recipients!r}; this "
-                f"runtime is {our_did!r}. Refusing to attempt unwrap."
-            ),
+        # Wire shape was present but no entry names us. Not "tampered" —
+        # just "not for me." Surface a clear reason.
+        recipients = _unseal_addressees(body_encryption)
+        return body, _unseal_reject(
+            manifest,
+            f"sealed-box wrap is addressed to {recipients!r}; this "
+            f"runtime is {our_did!r}. Refusing to attempt unwrap.",
         )
 
+    # Try each matching candidate. First successful unwrap wins. With the AAD
+    # binding the manifest, an attacker can't usefully forge a wrap that names
+    # us — the AEAD will reject it.
     aad = manifest_aad_for_wrap(manifest.to_dict())
-
-    # Try each matching candidate. First successful unwrap wins. With
-    # the AAD binding the manifest, an attacker can't usefully forge a
-    # wrap that names us — the AEAD will reject it.
-    bek: bytes | None = None
-    last_err: str = ""
-    for cand in candidates:
-        try:
-            bek = unseal_bek_from_wrap(cand, bytes(device_priv), aad)
-            break
-        except UnsealError as exc:
-            last_err = str(exc)
-            continue
+    bek, last_err = _unseal_first_candidate(
+        candidates, device_priv, aad, unseal_bek_from_wrap, UnsealError
+    )
     if bek is None:
-        return body, AbsorbReceipt(
-            kind=manifest.kind,
-            legacy_status="rejected",
-            legacy_reason=f"sealed-box unwrap failed: {last_err}",
-        )
+        return body, _unseal_reject(manifest, f"sealed-box unwrap failed: {last_err}")
 
     encrypted = body.get("body/encrypted.bin")
     if encrypted is None:
-        return body, AbsorbReceipt(
-            kind=manifest.kind,
-            legacy_status="rejected",
-            legacy_reason=(
-                "manifest declares body_encryption but body/encrypted.bin is "
-                "missing from the zip."
-            ),
+        return body, _unseal_reject(
+            manifest,
+            "manifest declares body_encryption but body/encrypted.bin is "
+            "missing from the zip.",
         )
 
     try:
         decoded = decrypt_body_blob(encrypted, bek)
     except Exception as exc:  # noqa: BLE001 — wrap any decrypt error
-        return body, AbsorbReceipt(
-            kind=manifest.kind,
-            legacy_status="rejected",
-            legacy_reason=f"body decrypt with unwrapped BEK failed: {exc}",
+        return body, _unseal_reject(
+            manifest, f"body decrypt with unwrapped BEK failed: {exc}"
         )
 
     # Replace body with the decrypted member dict. Keys come back as
