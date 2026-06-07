@@ -43,8 +43,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .log import is_admin_event_type, resolve_admin_log_path
 from ..config import LoadedConfig
+from .log import is_admin_event_type, resolve_admin_log_path
 
 # Bump if the on-disk LKV layout changes incompatibly. Older files with a
 # lower version are ignored (the cache rebuilds from the log).

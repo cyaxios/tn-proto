@@ -97,6 +97,7 @@ class _Session:
 
     def __enter__(self) -> _SessionHandle:
         import tn
+
         from . import current_config, flush_and_close, init
         # Snapshot the prior runtime's yaml so we can re-init on exit.
         if tn._dispatch_rt is not None:

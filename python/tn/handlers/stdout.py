@@ -300,5 +300,5 @@ def _in_ipython_kernel() -> bool:
         return False
     try:
         return get_ipython() is not None
-    except Exception:
+    except Exception:  # noqa: BLE001 — defensive: IPython probe must not raise
         return False

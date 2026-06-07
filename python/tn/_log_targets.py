@@ -26,7 +26,6 @@ import re as _re
 from pathlib import Path
 from typing import Any
 
-
 _ADMIN_ALIAS = "admin"
 
 

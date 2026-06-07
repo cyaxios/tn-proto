@@ -479,7 +479,8 @@ def _build_export_body(
     empty zip.
     """
     if kind == "admin_log_snapshot":
-        assert cfg is not None  # guarded by _validate_export_args
+        if cfg is None:  # pragma: no cover - guarded by _validate_export_args
+            raise ValueError("export(kind='admin_log_snapshot') requires cfg=...")
         return _build_admin_log_snapshot_body(cfg)
     if kind == "offer":
         if package is None or package.package_kind != "offer":
@@ -509,7 +510,8 @@ def _build_export_body(
             confirm_includes_secrets=confirm_includes_secrets,
         )
     if kind == "identity_seed":
-        assert device is not None  # guarded by _validate_export_args
+        if device is None:  # pragma: no cover - guarded by _validate_export_args
+            raise ValueError("export(kind='identity_seed') requires device=...")
         return _build_identity_seed_body(device, nickname=nickname)
     if kind == "recipient_invite":
         raise NotImplementedError(
@@ -649,6 +651,8 @@ def _apply_seal_for_recipient(
 
     from .recipient_seal import (
         manifest_aad_for_wrap as _aad_for_wrap,
+    )
+    from .recipient_seal import (
         seal_bek_for_recipient as _seal_bek,
     )
 
@@ -1210,8 +1214,8 @@ def canonical_manifest_bytes(manifest: TnpkgManifest) -> bytes:
 
 
 __all__ = [
-    "ExportKind",
     "IDENTITY_SEED_CEREMONY_PLACEHOLDER",
+    "ExportKind",
     "canonical_manifest_bytes",
     "decrypt_body_blob",
     "export",

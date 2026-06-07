@@ -14,16 +14,13 @@ from __future__ import annotations
 
 import base64
 import json
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-from urllib.parse import urljoin
-
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import urljoin
 
 from .wallet_restore_loopback import TransferToken
-
 
 # ── Errors ────────────────────────────────────────────────────────────
 
@@ -57,7 +54,7 @@ def _b64decode_loose(value: str) -> bytes:
     s += "=" * pad
     try:
         return base64.b64decode(s, validate=False)
-    except Exception as e:  # noqa: BLE001 — cleanup the message for callers
+    except Exception as e:
         raise RestoreError(f"invalid base64: {e}") from e
 
 
@@ -81,7 +78,7 @@ def _http_request(
     req.add_header("Authorization", f"Bearer {bearer}")
     req.add_header("Accept", "application/json, application/octet-stream")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
             headers = {k.lower(): v for k, v in resp.headers.items()}
             return resp.getcode(), body, headers
@@ -172,7 +169,7 @@ def _decrypt_blob_with_bek(blob: bytes, bek: bytes) -> bytes:
     aesgcm = AESGCM(bytes(bek))
     try:
         return aesgcm.decrypt(nonce, ct, None)
-    except Exception as e:  # noqa: BLE001 — surface a clean failure
+    except Exception as e:
         raise RestoreError(
             "decryption failed (wrong BEK or corrupted blob): "
             f"{type(e).__name__}",

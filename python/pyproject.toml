@@ -149,6 +149,8 @@ ignore = [
 # condensed import groups as a matter of course. Opt out of those specific
 # nits there rather than fighting the pattern.
 "tests/**"     = ["B", "E402", "E702", "E701", "E741", "S101", "BLE001", "E722"]
+# In-package test suites (e.g. tn/mcp/tests, tn/lint/tests) — same test conventions.
+"**/tests/**"  = ["B", "E402", "E702", "E701", "E741", "S101", "E722", "I001"]
 "examples/**"  = ["B", "E402", "E702", "E701", "S101", "BLE001"]
 "scenarios/**" = ["B", "E402", "E702", "E701", "S101", "BLE001"]
 "bench/**"     = ["B", "E402", "E702", "E701", "S101", "BLE001"]

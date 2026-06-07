@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from tn.lint.config import ConfigError, load_config
 from tn.lint.engine import lint_paths

@@ -13,7 +13,7 @@ callers now use ``tn.init`` (the public entry) or ``tn._init_impl``
 """
 from __future__ import annotations
 
-from typing import Any  # noqa: F401 — used in `session(...)` annotation below
+from typing import Any
 
 
 def flush_and_close(*, timeout: float = 30.0) -> None:

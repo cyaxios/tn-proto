@@ -43,11 +43,11 @@ from typing import TYPE_CHECKING, Any
 from ._defaults import DEFAULT_CEREMONY_NAME
 
 if TYPE_CHECKING:
-    from typing import Iterator
+    from collections.abc import Iterator
 
 __all__ = [
-    "MultiCeremonyEmitNotImplemented",
     "TN",
+    "MultiCeremonyEmitNotImplemented",
     "_close_per_tn_runtimes",
 ]
 
@@ -75,7 +75,7 @@ def _close_per_tn_runtimes(*, timeout: float = 30.0) -> None:
         rt = _per_tn_runtimes.pop()
         try:
             rt.close(timeout=timeout)
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort runtime close
             pass
 
 
@@ -107,7 +107,7 @@ class TN:
     the registry can intern a single instance per (process, name).
     """
 
-    __slots__ = ("_name", "_yaml_path", "_directory", "_cfg", "_rt")
+    __slots__ = ("_cfg", "_directory", "_name", "_rt", "_yaml_path")
 
     def __init__(self, name: str, *, yaml_path: Path, directory: Path):
         self._name = name
@@ -233,15 +233,15 @@ class TN:
         and read no longer call this; they use ``_get_runtime`` for
         per-instance dispatch (Bug 1 fix).
         """
-        from . import current_config as _current_config
         from . import _init_impl as _legacy_init
+        from . import current_config as _current_config
 
         try:
             cfg = _current_config()
             existing = Path(getattr(cfg, "yaml_path", "")).resolve()
             if existing == self._yaml_path.resolve():
                 return
-        except Exception:
+        except Exception:  # noqa: BLE001 — defensive: fall through to legacy init on any config probe failure
             pass
         _legacy_init(str(self._yaml_path))
 
@@ -397,7 +397,7 @@ class TN:
             if not _profiles.is_known(profile_name):
                 return True
             return _profiles.get(profile_name).has_replay_surface()
-        except Exception:
+        except Exception:  # noqa: BLE001 — defensive: treat any probe failure as "has backlog"
             # Anything pathological — missing yaml, malformed yaml —
             # falls back to "treat as having a backlog" so the legacy
             # behavior of "raise on real read failure" still surfaces
@@ -440,7 +440,9 @@ class TN:
         """
         self._activate()
         from typing import cast
-        from .export import export as _raw_export, ExportKind
+
+        from .export import ExportKind
+        from .export import export as _raw_export
         return _raw_export(
             out_path, kind=cast(ExportKind, kind), cfg=self.cfg, **kwargs
         )

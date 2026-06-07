@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Iterable, Iterator
 
 from tn.lint.config import TN_METHODS, LintConfig
 from tn.lint.findings import Finding
 from tn.lint.rules import ALL_RULES, Rule, TNCall, TNKwarg
-
 
 # --------------------------------------------------------------------------- #
 # AST visitor

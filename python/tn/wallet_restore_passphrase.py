@@ -20,7 +20,6 @@ from urllib.parse import urljoin
 
 from .wallet_restore import RestoreError, _b64decode_loose
 
-
 # AAD strings used by the browser registration_flow / wrap_unwrap. They
 # MUST match the ones in tnproto-org/static/credentials/wrap_unwrap.js
 # or unwrapping fails.
@@ -33,7 +32,7 @@ def _bearer_get(url: str, bearer: str, timeout: float = 30.0) -> tuple[int, byte
     req.add_header("Authorization", f"Bearer {bearer}")
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.getcode(), resp.read()
     except urllib.error.HTTPError as e:
         return e.code, (e.read() if e.fp else b"")
@@ -86,7 +85,7 @@ def _aes_gcm_unwrap(
     aesgcm = AESGCM(key)
     try:
         return aesgcm.decrypt(nonce, ct, aad)
-    except Exception as e:  # noqa: BLE001 — surface a clean error
+    except Exception as e:
         raise RestoreError(
             f"unwrap failed (wrong passphrase or KDF mismatch): {type(e).__name__}",
         ) from e

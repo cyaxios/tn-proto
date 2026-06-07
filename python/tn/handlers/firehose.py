@@ -69,7 +69,7 @@ def _stub_bek(project_id: str, key_id: str | None) -> bytes:
     Phase B replaces this function with ``keystore.lookup_bek(key_id)``
     which returns bytes provisioned via the mint flow.
     """
-    seed = f"{project_id}:{key_id or 'stub-default'}".encode("utf-8")
+    seed = f"{project_id}:{key_id or 'stub-default'}".encode()
     return hashlib.sha256(b"phase-a-stub-bek-do-not-use-in-prod:" + seed).digest()
 
 # Strict UUID v4-shaped project id (matches the CF Worker's UUID_RE).
@@ -227,7 +227,7 @@ class TnFirehoseHandler(AsyncHandler):
         retry reopens the WS as needed.
         """
         event_type = str(envelope.get("event_type") or "")
-        aad = f"{self._project_id}|{self._key_id or 'stub'}|{event_type}".encode("utf-8")
+        aad = f"{self._project_id}|{self._key_id or 'stub'}|{event_type}".encode()
         nonce = os.urandom(12)
         try:
             ciphertext = self._aes.encrypt(nonce, raw_line, aad)

@@ -15,12 +15,12 @@ work in the README).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Protocol
+from typing import Protocol
 
-from tn.lint.config import LintConfig, RESERVED_KWARGS
+from tn.lint.config import RESERVED_KWARGS, LintConfig
 from tn.lint.findings import Finding
-
 
 # --------------------------------------------------------------------------- #
 # TNCall: what the engine hands to each rule.

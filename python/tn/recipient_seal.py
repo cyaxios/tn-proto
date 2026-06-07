@@ -47,16 +47,16 @@ import base64
 import json
 from typing import Any
 
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes, serialization
 
 from .canonical import _canonical_bytes
-from .signing import _b58decode, _ED25519_MULTICODEC
+from .signing import _ED25519_MULTICODEC, _b58decode
 
 WRAP_FRAME = "tn-sealed-box-v1"
 WRAP_HKDF_INFO = b"tn-kit-seal-v1"
@@ -375,7 +375,7 @@ def unseal_bek_from_wrap(
     # Convert recipient's Ed25519 priv seed to X25519 private bytes.
     try:
         x_priv_bytes = _ed25519_priv_to_x25519_priv(device_priv_seed)
-    except Exception as exc:  # noqa: BLE001 — wrap any libsodium / size issue
+    except Exception as exc:
         raise UnsealError(f"could not derive X25519 priv from device seed: {exc}") from exc
 
     # We also need the recipient's X25519 PUBLIC key to reconstruct the
@@ -386,7 +386,7 @@ def unseal_bek_from_wrap(
     try:
         recipient_ed_pub = _did_key_to_ed25519_pub(recipient_did)
         recipient_x_pub = _ed25519_pub_to_x25519_pub(recipient_ed_pub)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise UnsealError(f"could not derive recipient X25519 pub: {exc}") from exc
 
     x_priv = X25519PrivateKey.from_private_bytes(x_priv_bytes)
@@ -403,7 +403,7 @@ def unseal_bek_from_wrap(
     aesgcm = AESGCM(key)
     try:
         bek = aesgcm.decrypt(wrap_nonce, wrapped, aad)
-    except Exception as exc:  # noqa: BLE001 — InvalidTag etc.
+    except Exception as exc:
         raise UnsealError(f"sealed-box decrypt failed: {exc}") from exc
 
     if len(bek) != 32:
@@ -412,9 +412,9 @@ def unseal_bek_from_wrap(
 
 
 __all__ = [
-    "UnsealError",
     "WRAP_FRAME",
     "WRAP_HKDF_INFO",
+    "UnsealError",
     "manifest_aad_for_wrap",
     "seal_bek_for_recipient",
     "unseal_bek_from_wrap",

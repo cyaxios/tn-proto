@@ -82,11 +82,11 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 # per-file-handle (e.g. Windows' msvcrt.locking) rather than
 # per-file. On POSIX flock is already file-level so this lock is
 # strictly defensive there.
-_PROCESS_LOCKS: dict[str, "threading.Lock"] = {}
+_PROCESS_LOCKS: dict[str, threading.Lock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
 
 
-def _process_lock_for(path: Path) -> "threading.Lock":
+def _process_lock_for(path: Path) -> threading.Lock:
     """Return the singleton process-level lock for ``path``.
 
     Keyed on the resolved path string so two LocalFileKeystoreBackend
@@ -128,7 +128,7 @@ class _AdvisoryFileLock:
         self._proc_lock = _process_lock_for(self._path)
         self._proc_lock_held = False
 
-    def __enter__(self) -> "_AdvisoryFileLock":
+    def __enter__(self) -> _AdvisoryFileLock:
         import os as _os
 
         # In-process serialisation first. Released last on exit.

@@ -24,12 +24,12 @@ that's a config error and surfaces as exit code 2.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import yaml
-
 
 # --------------------------------------------------------------------------- #
 # Errors

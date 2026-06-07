@@ -155,7 +155,12 @@ class ZenohPullHandler(TNHandler):
         elif mint_client_factory is not None:
             self._mint_factory = mint_client_factory
         else:
-            assert mint_url is not None and jwt_provider is not None  # narrowed
+            # narrowed by the branch conditions above
+            if mint_url is None or jwt_provider is None:  # pragma: no cover
+                raise ValueError(
+                    "ZenohHandler: mint_url and jwt_provider are both required "
+                    "when mint_client_factory is not given"
+                )
             self._mint_factory = lambda: _MintClient(mint_url, jwt_provider)
 
         # Worker-thread state. Samples land in this queue; the worker

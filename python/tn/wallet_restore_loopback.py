@@ -70,7 +70,7 @@ class _Done(Exception):
 class _Handler(BaseHTTPRequestHandler):
     # Suppress the default request-line stderr logging; the CLI prints
     # its own progress messages and we don't want to spam the terminal.
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: Any) -> None:
         return
 
     # The owner LoopbackReceiver patches these as class-level attrs on a
@@ -125,7 +125,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         # Health probe path so users who hit the loopback URL with a
         # browser see a clean message instead of "method not allowed".
         if self.path == "/" or self.path.startswith("/cb"):
@@ -133,7 +133,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._reject(404, "not found")
 
-    def do_OPTIONS(self) -> None:  # noqa: N802
+    def do_OPTIONS(self) -> None:
         # CORS preflight. The browser sends this when the actual fetch
         # is mode:"cors" with a non-simple Content-Type (application/json
         # is non-simple). Reply 204 with the allow-list headers so the
@@ -148,7 +148,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         # Defense-in-depth check: bind already restricts to loopback,
         # but verify anyway in case the OS surprises us. (S2 — Session
         # 10 review: keep this even though we now bind exclusively to

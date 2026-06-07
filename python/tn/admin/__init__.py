@@ -1167,8 +1167,13 @@ def revoke_recipient(
                 "or recipient_did."
             )
         if leaf_index is None:
-            # recipient_did is not None here by the check above.
-            assert recipient_did is not None
+            # recipient_did is not None here by the check above; narrow for
+            # the type checker without a bare assert (stripped under -O).
+            if recipient_did is None:  # pragma: no cover - guarded above
+                raise ValueError(
+                    "tn.admin.revoke_recipient: btn group requires leaf_index "
+                    "or recipient_did."
+                )
             leaf_index = _resolve_btn_did_to_leaf(group, recipient_did)
         # Inline the btn-runtime revoke flow (was tn.admin_revoke_recipient
         # in pre-Stage-C; that flat alias is gone in 0.2.0).
@@ -1723,15 +1728,14 @@ def state(group: str | None = None) -> dict:
     If `group` is given, lists are filtered to that group; the ceremony
     dict is unchanged.
     """
-    from .. import _maybe_autoinit_load_only, _read_raw_admin_aware, _surface
-    from .. import current_config
+    from .. import _maybe_autoinit_load_only, _read_raw_admin_aware, _surface, current_config
 
     _surface.info("tn.admin.state(group=%r)", group)
     _maybe_autoinit_load_only()
     import warnings
 
     try:
-        import tn_core  # noqa: F401 — schema defaults still apply; full Python fallback isn't supported here
+        import tn_core
         have_rust_reducer = True
     except ImportError:
         have_rust_reducer = False
@@ -1812,8 +1816,8 @@ def add_agent_runtime(
     The runtime imports the bundle once via ``tn.pkg.absorb()``; from then on
     every ``tn.secure_read()`` call surfaces decrypted data + instructions.
     """
-    from .. import _logger, _maybe_autoinit_load_only, current_config
     from .. import _export_impl as export
+    from .. import _logger, _maybe_autoinit_load_only, current_config
 
     _maybe_autoinit_load_only()
 

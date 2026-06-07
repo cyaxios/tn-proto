@@ -401,8 +401,9 @@ class DispatchRuntime:
         Python and writes the merged doc to a sibling
         ``.resolved.yaml`` file, returning that path.
         """
-        from . import config as _config
         import yaml as _yaml
+
+        from . import config as _config
 
         try:
             doc = _config._read_yaml_doc(self._yaml)

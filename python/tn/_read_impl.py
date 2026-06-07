@@ -271,6 +271,7 @@ def _read_impl(
 ):
     """Iterate log entries. See ``tn.read`` for the full keyword contract."""
     import tn
+
     from . import current_config
     _surface.info(
         "tn.read() ENTER log_path=%r cfg=%s verify=%s raw=%s all_runs=%s "
@@ -384,6 +385,7 @@ def _read_raw_impl(log_path=None, cfg=None, *, all_runs: bool = False, where=Non
 def _read_raw_inner(log_path=None, cfg=None, *, all_runs: bool = False, where=None):
     """Internal implementation of read_raw without surface-log entry."""
     import tn
+
     from . import current_config
     tn._maybe_autoinit_load_only()
 
@@ -448,7 +450,7 @@ def _rotated_backup_paths(log_path: Path) -> list[str]:
 
 def _read_raw_admin_aware(cfg=None):
     """Iterate raw entries across the main log AND the admin log."""
-    import tn
+
     from . import current_config
     if cfg is None:
         cfg = current_config()
@@ -476,6 +478,7 @@ def _read_all_impl(log_path=None, cfg=None, *, all_runs: bool = False, where=Non
     """User-facing wrapper: load-only auto-init, then delegate to
     ``tn.reader.read_all``."""
     import tn
+
     from .reader import read_all as _raw_read_all
     tn._maybe_autoinit_load_only()
     for r in _raw_read_all(log_path, cfg):

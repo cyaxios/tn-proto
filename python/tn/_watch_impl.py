@@ -30,9 +30,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 
 @dataclass
@@ -215,7 +216,7 @@ def _emit_truncation_warning(
             "prior_offset": prior_offset,
             "new_size": new_size,
         })
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort: swallow if dispatch isn't ready
         pass
 
 

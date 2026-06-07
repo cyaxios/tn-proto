@@ -16,6 +16,6 @@ from __future__ import annotations
 __version__ = "0.2.0a1"
 
 # Re-export the entry point for `python -c "from tn.mcp import main; main()"`.
-from .server import main  # noqa: E402
+from .server import main
 
-__all__ = ["main", "__version__"]
+__all__ = ["__version__", "main"]

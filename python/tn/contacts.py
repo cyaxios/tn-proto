@@ -30,8 +30,14 @@ absorbs reduce predictably.
 
 from __future__ import annotations
 
+import re as _re
+import threading as _threading
+import time as _time
+from dataclasses import dataclass as _dataclass
+from dataclasses import field as _field
 from pathlib import Path
 from typing import Any
+from typing import Literal as _Literal
 
 import yaml as _yaml
 
@@ -200,13 +206,6 @@ def _apply_contact_update(yaml_path: Path, body: dict[str, Any]) -> dict[str, An
 # publishers within the cache window. Override via ``cache_ttl_s`` on
 # ``resolve()``.
 
-import re as _re
-import threading as _threading
-import time as _time
-from dataclasses import dataclass as _dataclass, field as _field
-from typing import Literal as _Literal
-
-
 AddressKind = _Literal["did", "handle", "email"]
 ResolveStatus = _Literal["found", "not_found"]
 
@@ -280,11 +279,11 @@ class ResolveResult:
 
 
 _CACHE_LOCK = _threading.Lock()
-_CACHE: dict[tuple[str, str], tuple[float, "ResolveResult"]] = {}
+_CACHE: dict[tuple[str, str], tuple[float, ResolveResult]] = {}
 _DEFAULT_TTL_S = 300.0
 
 
-def _cache_get(kind: str, value: str, *, ttl_s: float) -> "ResolveResult | None":
+def _cache_get(kind: str, value: str, *, ttl_s: float) -> ResolveResult | None:
     key = (kind, value)
     with _CACHE_LOCK:
         entry = _CACHE.get(key)
@@ -297,7 +296,7 @@ def _cache_get(kind: str, value: str, *, ttl_s: float) -> "ResolveResult | None"
         return result
 
 
-def _cache_put(kind: str, value: str, result: "ResolveResult") -> None:
+def _cache_put(kind: str, value: str, result: ResolveResult) -> None:
     key = (kind, value)
     with _CACHE_LOCK:
         _CACHE[key] = (_time.monotonic(), result)
@@ -312,15 +311,15 @@ def clear_cache() -> None:
 
 
 def resolve(
-    addresses: "list[str | AddressInput]",
+    addresses: list[str | AddressInput],
     *,
     vault_base: str,
     bearer_jwt: str,
     timeout_s: float = 5.0,
     cache_ttl_s: float = _DEFAULT_TTL_S,
     use_cache: bool = True,
-    http_client: "Any | None" = None,
-) -> "list[ResolveResult]":
+    http_client: Any | None = None,
+) -> list[ResolveResult]:
     """Resolve a list of mixed-kind addresses to their active-key sets.
 
     Each input may be a raw string (auto-classified via
@@ -374,7 +373,9 @@ def resolve(
         for row in doc.get("results", []):
             fetched.append(ResolveResult.from_dict(row))
         # Update cache for what came back.
-        for addr, result in zip(to_fetch, fetched):
+        # strict=False: server may return fewer results than requested;
+        # cache only what came back (pairs positionally, stops at shortest).
+        for addr, result in zip(to_fetch, fetched, strict=False):
             _cache_put(addr.kind, addr.value, result)
 
     out: list[ResolveResult] = []
@@ -399,7 +400,7 @@ def resolve(
     return out
 
 
-def flatten_active_dids(results: "list[ResolveResult]") -> list[str]:
+def flatten_active_dids(results: list[ResolveResult]) -> list[str]:
     """Convenience: union of every ``active_dids`` across results,
     deduped, preserving first-seen order. The natural input for
     ``tn.export(seal_for_recipient=True, to_dids=[...])``.

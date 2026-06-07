@@ -25,7 +25,6 @@ from typing import Any
 
 import tn
 
-
 # Canonical mapping. Values are JSON-RPC error codes. Keep the dict
 # explicit (no auto-derivation) so additions here force a code review.
 TN_ERROR_CODES: dict[str, int] = {
@@ -88,4 +87,4 @@ def map_exception(exc: BaseException) -> tuple[int, str, dict[str, Any]]:
     return code, message, data
 
 
-__all__ = ["map_exception", "TN_ERROR_CODES", "INTERNAL_ERROR_CODE"]
+__all__ = ["INTERNAL_ERROR_CODE", "TN_ERROR_CODES", "map_exception"]

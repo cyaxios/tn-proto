@@ -19,6 +19,7 @@ def _vault_link_impl(vault_did: str, project_id: str) -> None:
     vault.unlink() first to unlink before re-linking.
     """
     import tn
+
     from . import admin as _admin
     tn._maybe_autoinit_load_only()
     # Idempotency: skip if already linked to this (vault_did, project_id).

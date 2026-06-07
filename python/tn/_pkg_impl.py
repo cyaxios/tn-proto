@@ -230,7 +230,7 @@ def _is_bootstrap_kind_source(args: tuple, kwargs: dict) -> bool:
         return False
     try:
         return _try_bootstrap_cfg(source) is not None
-    except Exception:
+    except Exception:  # noqa: BLE001 — defensive: unparseable source is simply "not bootstrappable"
         return False
 
 

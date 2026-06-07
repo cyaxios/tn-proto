@@ -31,9 +31,18 @@ Ciphers: "jwe" (pure-Python static-ECDH + AES-KW + AES-GCM) and "btn"
 from __future__ import annotations
 
 import logging
+import os as _os_for_surface
+import tempfile as _tempfile_for_surface
 import threading
 from pathlib import Path
 from typing import Any
+
+# Re-export the Rust-bound runtime exception so callers can write a
+# stable `except tn.KeystoreConflictError` instead of dipping into the
+# private `tn_core._core` module. The class is shared across runtime
+# failures, so check the message string when distinguishing
+# divergence-retry from other faults: see `is_keystore_diverged()`.
+from tn_core._core import TnRuntimeError as KeystoreConflictError
 
 from . import (
     _agents_policy,
@@ -55,14 +64,29 @@ from ._dispatch import (  # should_use_rust re-exported for diagnostics
 )
 from ._entry import Entry, VerifyError
 from .absorb import AbsorbReceipt, AbsorbResult, LeafReuseAttempt
-from .absorb import absorb as _raw_absorb
-
-# Re-export the Rust-bound runtime exception so callers can write a
-# stable `except tn.KeystoreConflictError` instead of dipping into the
-# private `tn_core._core` module. The class is shared across runtime
-# failures, so check the message string when distinguishing
-# divergence-retry from other faults: see `is_keystore_diverged()`.
-from tn_core._core import TnRuntimeError as KeystoreConflictError
+from .admin import (
+    ensure_group,
+    set_link_state,
+)
+from .admin.cache import (
+    AdminStateCache,
+    ChainConflict,
+    RotationConflict,
+    SameCoordinateFork,
+)
+from .admin.cache import LeafReuseAttempt as CacheLeafReuseAttempt  # noqa: F401
+from .compile import compile_enrolment
+from .context import (
+    _context as _ctx_var,
+)
+from .context import (
+    clear_context,
+    get_context,
+    scope,
+    set_context,
+    update_context,
+)
+from .offer import offer
 
 
 def is_keystore_diverged(exc: BaseException) -> bool:
@@ -88,37 +112,6 @@ def is_keystore_diverged(exc: BaseException) -> bool:
         return False
     msg = str(exc)
     return "diverged" in msg
-from .admin import (
-    ensure_group,
-    set_link_state,
-)
-from .admin.cache import (
-    AdminStateCache,
-    ChainConflict,
-    RotationConflict,
-    SameCoordinateFork,
-)
-from .admin.cache import LeafReuseAttempt as CacheLeafReuseAttempt  # noqa: F401
-from .compile import compile_enrolment
-from .context import (
-    _context as _ctx_var,  # noqa: F401 — read by `_emit_via` hot path
-    clear_context,
-    get_context,
-    scope,
-    set_context,
-    update_context,
-)
-from .export import (
-    IDENTITY_SEED_CEREMONY_PLACEHOLDER,
-    export_identity_seed,
-)
-from .export import (
-    export as _raw_export,
-)
-from .offer import offer
-from .reader import read_all as _raw_read_all
-from .reader import read_as_recipient as _raw_read_as_recipient
-from .reconcile import _reconcile
 
 # --------------------------------------------------------------------------
 # Module-level dispatch runtime — set by tn.init(), cleared by flush_and_close()
@@ -140,9 +133,6 @@ _surface = logging.getLogger("tn.surface")
 # Default fallback: when the env var is unset we still tee to a process-
 # scoped file under TEMP so a developer running pytest casually sees the
 # trace. Path is printed to stderr at module import.
-import os as _os_for_surface
-import tempfile as _tempfile_for_surface
-
 _surface_log_path = (
     _os_for_surface.environ.get("TN_SURFACE_LOG")
     or str(_os_for_surface.path.join(
@@ -162,7 +152,7 @@ try:
         "=== tn module imported, surface log opened at %s (pid=%d) ===",
         _surface_log_path, _os_for_surface.getpid(),
     )
-except Exception:
+except Exception:  # noqa: BLE001 — best-effort: logging bootstrap must not break import
     # Best-effort: never let logging bootstrap failure break import.
     pass
 
@@ -209,8 +199,8 @@ def _init_impl(
     stdout: bool | None = None,
     link: bool | None = None,
     device_private_bytes: bytes | None = None,
-    keystore_dir: "str | Path | None" = None,
-    admin_log_path: "str | Path | None" = None,
+    keystore_dir: str | Path | None = None,
+    admin_log_path: str | Path | None = None,
 ) -> None:
     """Initialize TN for this process.
 
@@ -422,7 +412,7 @@ def _in_ipython() -> bool:
         return False
     try:
         return get_ipython() is not None
-    except Exception:
+    except Exception:  # noqa: BLE001 — defensive: IPython probe must not raise
         return False
 
 
@@ -455,7 +445,7 @@ def _display_claim_url(
                 '</div></div>'
             ))
             return
-        except Exception:
+        except Exception:  # noqa: BLE001 — fall through to plain print below
             pass  # fall through to plain print below
     print()
     print("[tn.init] Backed up to vault")
@@ -502,7 +492,7 @@ def _auto_link_after_init(*, yaml_path: Path, identity: Any | None) -> None:
         if identity_path.exists():
             try:
                 identity = Identity.load(identity_path)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — auto-link is best-effort; skip on load failure
                 _logger.warning(
                     "auto-link: failed to load identity at %s: %s; skipping.",
                     identity_path, e,
@@ -512,7 +502,7 @@ def _auto_link_after_init(*, yaml_path: Path, identity: Any | None) -> None:
             try:
                 identity = Identity.create_new(word_count=12)
                 identity.ensure_written(identity_path)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — auto-link is best-effort; skip on mint failure
                 _logger.warning(
                     "auto-link: failed to mint identity at %s: %s; skipping.",
                     identity_path, e,
@@ -543,7 +533,7 @@ def _auto_link_after_init(*, yaml_path: Path, identity: Any | None) -> None:
             reused=bool(result.get("reused", False)),
         )
         _link_done_this_process = True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — auto-link is best-effort; ceremony stays valid locally
         _logger.warning(
             "auto-link: vault upload failed: %s; ceremony is still valid "
             "locally. Retry with `tn wallet link %s --vault %s`.",
@@ -553,7 +543,7 @@ def _auto_link_after_init(*, yaml_path: Path, identity: Any | None) -> None:
         if client is not None:
             try:
                 client._vc.close()
-            except Exception:
+            except Exception:  # noqa: BLE001 — best-effort client close
                 pass
 
 
@@ -1032,6 +1022,7 @@ def __dir__() -> list[str]:
 # the helpers (_emit_with_splice, _resolve_sign) still live in this
 # package init; emit.py imports them back when called.
 # --------------------------------------------------------------------------
+from . import emit as _emit_module  # noqa: E402
 from ._handle import (  # noqa: E402
     TN,
     MultiCeremonyEmitNotImplemented,
@@ -1065,7 +1056,6 @@ from ._read_impl import (  # noqa: F401, E402
     _rotated_backup_paths,
 )
 from ._registry import TNNotFound  # noqa: E402
-from . import emit as _emit_module  # noqa: E402
 from .emit import debug, error, info, log, warning  # noqa: E402
 
 # 0.4.2a7 hot-path lift: bind ``_emit_with_splice`` / ``_resolve_sign``
@@ -1096,7 +1086,6 @@ from .read import (  # noqa: E402
     watch,
 )
 
-
 # atexit registration: tn.init() registers _atexit_flush once per
 # process so handlers drain on normal interpreter exit without the
 # caller needing to remember tn.flush_and_close(). The flag prevents
@@ -1113,7 +1102,7 @@ def _atexit_flush() -> None:
     try:
         if _dispatch_rt is not None:
             _flush_and_close_impl()
-    except Exception:
+    except Exception:  # noqa: BLE001 — atexit must never raise
         # atexit must never raise — leftover state will be cleaned up
         # by the OS when the process exits anyway.
         pass

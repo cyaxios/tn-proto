@@ -33,7 +33,6 @@ import yaml as _yaml
 from . import _profiles
 from ._defaults import (
     DEFAULT_CEREMONY_NAME,
-    safe_defaults_yaml,
 )
 from ._handle import TN
 from ._layout import (
@@ -47,9 +46,17 @@ from ._layout import (
 )
 from ._registry import (
     TNNotFound as _TNNotFound,
+)
+from ._registry import (
     get as _registry_get,
+)
+from ._registry import (
     list_names as _registry_list_names,
+)
+from ._registry import (
     register as _registry_register,
+)
+from ._registry import (
     unregister as _registry_unregister,
 )
 
@@ -155,7 +162,7 @@ def _ceremony_create_lock(project_dir: Path | None, name: str):
                     f"{lock_path}; another process appears stuck. If you "
                     f"are certain no other process is initialising this "
                     f"ceremony, delete {lock_path} and retry."
-                )
+                ) from None
             time.sleep(0.05)
     try:
         yield
@@ -347,7 +354,7 @@ def _create_default_ceremony(
             admin_log_path=admin_log_resolved,
             link=link,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise TNCreateFailed(
             f"could not create fresh ceremony at {yaml_path}: {exc}"
         ) from exc
@@ -457,7 +464,7 @@ def _create_stream_yaml(
         (ydir / sub).mkdir(parents=True, exist_ok=True)
 
     log_path = f"./logs/{name}.ndjson"
-    admin_path = f"./admin/admin.ndjson"
+    admin_path = "./admin/admin.ndjson"
 
     p = _profiles.get(profile)
 
@@ -621,7 +628,7 @@ def _device_did_for_create() -> str:
         did = getattr(cfg.device, "did", None)
         if isinstance(did, str) and did:
             return did
-    except Exception:
+    except Exception:  # noqa: BLE001 — defensive: no-init path falls through to placeholder DID
         # current_config raises when no init has happened yet; that's
         # the normal first-create path. Fall through to placeholder.
         pass
@@ -1313,7 +1320,7 @@ def init(
         if (project is not None and before[0] is None) or (
             version is not None and before[1] is None
         ):
-            from . import _init_impl as _legacy_init  # noqa: PLC0415
+            from . import _init_impl as _legacy_init
             _legacy_init(str(yaml_p), **legacy_kwargs)
         return handle
 
@@ -1465,7 +1472,7 @@ def _bind_default_singleton(yaml_p: Path, **legacy_kwargs: Any) -> None:
         existing_yaml = Path(getattr(cfg, "yaml_path", "")).resolve()
         if existing_yaml == yaml_p.resolve():
             return  # already bound to this yaml
-    except Exception:
+    except Exception:  # noqa: BLE001 — defensive: no active runtime falls through to init
         # No active runtime; fall through to init.
         pass
     _legacy_init(str(yaml_p), **legacy_kwargs)

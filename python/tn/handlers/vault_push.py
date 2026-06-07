@@ -259,7 +259,7 @@ def _write_claim_url_file(yaml_path: Path, claim_url: str) -> Path:
 
     Cite: plan §"Claim URL surfacing" (b). Best-effort.
     """
-    from ..sync_state import _state_dir as _sync_state_dir  # noqa: PLC2701
+    from ..sync_state import _state_dir as _sync_state_dir
 
     target = _sync_state_dir(yaml_path) / "claim_url.txt"
     try:

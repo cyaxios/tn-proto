@@ -98,7 +98,7 @@ class Entry(BaseModel):
     # ---------------------------------------------------------------
 
     @classmethod
-    def from_raw(cls, raw: dict[str, Any]) -> "Entry":
+    def from_raw(cls, raw: dict[str, Any]) -> Entry:
         """Build an Entry from a raw ``{envelope, plaintext, valid}`` triple
         as produced by the reader's parse path.
 
@@ -174,7 +174,7 @@ class Entry(BaseModel):
         )
 
     @classmethod
-    def from_flat(cls, d: dict[str, Any]) -> "Entry":
+    def from_flat(cls, d: dict[str, Any]) -> Entry:
         """Build an Entry from the legacy flat-dict shape produced by
         ``flatten_raw_entry``. Keys not in the envelope schema land in
         ``fields``; legacy underscore-prefixed metadata (``_decrypt_errors``,
