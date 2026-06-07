@@ -132,6 +132,36 @@ test("zip round-trip preserves manifest fields and body bytes", async () => {
   }
 });
 
+test("admin_log_snapshot absorb rejects when body/admin.ndjson is missing", async () => {
+  const b = makeCeremony();
+  try {
+    const consumer = await Tn.init(b.yamlPath);
+    const dk = DeviceKey.generate();
+    const cfg = consumer.config() as CeremonyConfig;
+    const m = newManifest({
+      kind: "admin_log_snapshot",
+      fromDid: dk.did,
+      ceremonyId: cfg.ceremonyId,
+      toDid: "did:key:zRecipient",
+    });
+    // Non-empty clock so a fresh consumer does NOT dominate it — we reach
+    // the body-presence check instead of the noop short-circuit.
+    m.clock = { [dk.did]: { "tn.recipient.added": 1 } };
+    signManifest(m, dk);
+
+    const out = join(b.tmpDir, "nobody.tnpkg");
+    writeTnpkg(out, m, {}); // pack the signed manifest with NO body member
+    const r = await consumer.pkg.absorb(out);
+    assert.equal(r.kind, "admin_log_snapshot");
+    assert.match(r.rejectedReason ?? "", /body missing `body\/admin\.ndjson`/);
+    assert.equal(r.acceptedCount, 0);
+    assert.equal(r.noop, false);
+    await consumer.close();
+  } finally {
+    b.cleanup();
+  }
+});
+
 // ---- export / absorb full round-trip ----------------------------------
 
 test("export(admin_log_snapshot) → absorb on a fresh peer applies envelopes", async () => {

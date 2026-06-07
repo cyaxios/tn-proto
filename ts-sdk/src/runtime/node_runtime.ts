@@ -1648,28 +1648,8 @@ export class NodeRuntime {
     body: Map<string, Uint8Array>,
   ): AbsorbReceipt {
     const adminLog = resolveAdminLogPath(this.config);
-    const localClock: VectorClock = {};
     const seenRowHashes = existingRowHashes(adminLog);
-    if (existsSync(adminLog)) {
-      for (const rawLine of readFileSync(adminLog, "utf8").split(/\r?\n/)) {
-        const s = rawLine.trim();
-        if (!s) continue;
-        try {
-          const env = JSON.parse(s) as Record<string, unknown>;
-          const did = env["device_identity"];
-          const et = env["event_type"];
-          const seq = env["sequence"];
-          if (typeof did === "string" && typeof et === "string" && typeof seq === "number") {
-            const slot = localClock[did] ?? {};
-            const cur = slot[et] ?? 0;
-            if (seq > cur) slot[et] = seq;
-            localClock[did] = slot;
-          }
-        } catch {
-          /* skip */
-        }
-      }
-    }
+    const localClock = _localClockFromAdminLog(adminLog);
 
     if (clockDominates(localClock, manifest.clock)) {
       return {
@@ -1695,95 +1675,13 @@ export class NodeRuntime {
       };
     }
 
-    // Each revoked leaf carries the revoke's (did, sequence) so a reuse
-    // attempt can be classified informed vs concurrent against the
-    // snapshot clock (mirrors Python `_build_revoked_leaves`).
-    type RevokedLeaf = { rowHash: string | null; did: string | null; seq: number | null };
-    const revokedLeaves = new Map<string, RevokedLeaf>();
-    const _revokedFrom = (env: Record<string, unknown>, rh: unknown): RevokedLeaf => {
-      const did = env["device_identity"];
-      const seq = env["sequence"];
-      return {
-        rowHash: typeof rh === "string" ? rh : null,
-        did: typeof did === "string" ? did : null,
-        seq: typeof seq === "number" ? seq : null,
-      };
-    };
-    if (existsSync(adminLog)) {
-      for (const rawLine of readFileSync(adminLog, "utf8").split(/\r?\n/)) {
-        const s = rawLine.trim();
-        if (!s) continue;
-        try {
-          const env = JSON.parse(s) as Record<string, unknown>;
-          if (env["event_type"] === "tn.recipient.revoked") {
-            const g = env["group"];
-            const li = env["leaf_index"];
-            const rh = env["row_hash"];
-            if (typeof g === "string" && typeof li === "number") {
-              revokedLeaves.set(`${g} ${li}`, _revokedFrom(env, rh));
-            }
-          }
-        } catch {
-          /* skip */
-        }
-      }
-    }
-
-    const acceptedEnvs: Record<string, unknown>[] = [];
-    const conflicts: ChainConflict[] = [];
-    let deduped = 0;
-    const text = new TextDecoder("utf-8").decode(raw);
-    for (const rawLine of text.split(/\r?\n/)) {
-      const s = rawLine.trim();
-      if (!s) continue;
-      let env: Record<string, unknown>;
-      try {
-        env = JSON.parse(s) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      if (!_envelopeWellFormed(env)) continue;
-      if (!_verifyEnvelopeSignature(env)) continue;
-
-      const rh = env["row_hash"];
-      if (typeof rh !== "string") continue;
-      if (seenRowHashes.has(rh)) {
-        deduped += 1;
-        continue;
-      }
-
-      if (env["event_type"] === "tn.recipient.added") {
-        const g = env["group"];
-        const li = env["leaf_index"];
-        if (typeof g === "string" && typeof li === "number") {
-          const k = `${g} ${li}`;
-          if (revokedLeaves.has(k)) {
-            const reuse: LeafReuseAttempt = {
-              type: "leaf_reuse_attempt",
-              group: g,
-              leafIndex: li,
-              attemptedRowHash: rh,
-              originallyRevokedAtRowHash: revokedLeaves.get(k)?.rowHash ?? null,
-              informed: reuseIsInformed(
-                revokedLeaves.get(k)?.did ?? null,
-                revokedLeaves.get(k)?.seq ?? null,
-                manifest.clock,
-              ),
-            };
-            conflicts.push(reuse);
-          }
-        }
-      }
-      if (env["event_type"] === "tn.recipient.revoked") {
-        const g = env["group"];
-        const li = env["leaf_index"];
-        if (typeof g === "string" && typeof li === "number") {
-          revokedLeaves.set(`${g} ${li}`, _revokedFrom(env, rh));
-        }
-      }
-      acceptedEnvs.push(env);
-      seenRowHashes.add(rh);
-    }
+    const revokedLeaves = _revokedLeavesFromAdminLog(adminLog);
+    const { acceptedEnvs, conflicts, deduped } = _ingestSnapshotEnvelopes(
+      raw,
+      seenRowHashes,
+      revokedLeaves,
+      manifest.clock,
+    );
 
     if (acceptedEnvs.length > 0) appendAdminEnvelopes(adminLog, acceptedEnvs);
 
@@ -2879,6 +2777,150 @@ function _verifyEnvelopeSignature(env: Record<string, unknown>): boolean {
   } catch {
     return false;
   }
+}
+
+// ---- admin-log-snapshot absorb helpers -----------------------------------
+// Each revoked leaf carries the revoke's (did, sequence) so a reuse attempt
+// can be classified informed-vs-concurrent against the snapshot clock
+// (mirrors Python `_build_revoked_leaves`).
+type RevokedLeaf = { rowHash: string | null; did: string | null; seq: number | null };
+
+function _revokedLeafFrom(env: Record<string, unknown>, rh: unknown): RevokedLeaf {
+  const did = env["device_identity"];
+  const seq = env["sequence"];
+  return {
+    rowHash: typeof rh === "string" ? rh : null,
+    did: typeof did === "string" ? did : null,
+    seq: typeof seq === "number" ? seq : null,
+  };
+}
+
+// Parse each non-empty ndjson line of an admin log on disk, invoking `fn` with
+// the decoded envelope. Bad JSON / a missing file are silently skipped.
+function _forEachAdminLogEnvelope(
+  adminLog: string,
+  fn: (env: Record<string, unknown>) => void,
+): void {
+  if (!existsSync(adminLog)) return;
+  for (const rawLine of readFileSync(adminLog, "utf8").split(/\r?\n/)) {
+    const s = rawLine.trim();
+    if (!s) continue;
+    let env: Record<string, unknown>;
+    try {
+      env = JSON.parse(s) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    fn(env);
+  }
+}
+
+// Build the local vector clock {did -> {event_type -> max_seq}} from the
+// admin log already on disk.
+function _localClockFromAdminLog(adminLog: string): VectorClock {
+  const localClock: VectorClock = {};
+  _forEachAdminLogEnvelope(adminLog, (env) => {
+    const did = env["device_identity"];
+    const et = env["event_type"];
+    const seq = env["sequence"];
+    if (typeof did === "string" && typeof et === "string" && typeof seq === "number") {
+      const slot = localClock[did] ?? {};
+      const cur = slot[et] ?? 0;
+      if (seq > cur) slot[et] = seq;
+      localClock[did] = slot;
+    }
+  });
+  return localClock;
+}
+
+// Build the revoked-leaf map {`group leaf` -> RevokedLeaf} from the admin log
+// already on disk (used to classify later reuse attempts).
+function _revokedLeavesFromAdminLog(adminLog: string): Map<string, RevokedLeaf> {
+  const revokedLeaves = new Map<string, RevokedLeaf>();
+  _forEachAdminLogEnvelope(adminLog, (env) => {
+    if (env["event_type"] !== "tn.recipient.revoked") return;
+    const g = env["group"];
+    const li = env["leaf_index"];
+    const rh = env["row_hash"];
+    if (typeof g === "string" && typeof li === "number") {
+      revokedLeaves.set(`${g} ${li}`, _revokedLeafFrom(env, rh));
+    }
+  });
+  return revokedLeaves;
+}
+
+interface SnapshotIngest {
+  acceptedEnvs: Record<string, unknown>[];
+  conflicts: ChainConflict[];
+  deduped: number;
+}
+
+// Ingest the snapshot's `body/admin.ndjson`: drop malformed/unsigned/duplicate
+// envelopes, flag leaf-reuse against `revokedLeaves` (mutated as revokes are
+// seen), and accumulate accepted envelopes. `seenRowHashes` is mutated to
+// track dedupe across the producer log + snapshot.
+function _ingestSnapshotEnvelopes(
+  raw: Uint8Array,
+  seenRowHashes: Set<string>,
+  revokedLeaves: Map<string, RevokedLeaf>,
+  manifestClock: VectorClock,
+): SnapshotIngest {
+  const acceptedEnvs: Record<string, unknown>[] = [];
+  const conflicts: ChainConflict[] = [];
+  let deduped = 0;
+  const text = new TextDecoder("utf-8").decode(raw);
+  for (const rawLine of text.split(/\r?\n/)) {
+    const s = rawLine.trim();
+    if (!s) continue;
+    let env: Record<string, unknown>;
+    try {
+      env = JSON.parse(s) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (!_envelopeWellFormed(env)) continue;
+    if (!_verifyEnvelopeSignature(env)) continue;
+
+    const rh = env["row_hash"];
+    if (typeof rh !== "string") continue;
+    if (seenRowHashes.has(rh)) {
+      deduped += 1;
+      continue;
+    }
+
+    if (env["event_type"] === "tn.recipient.added") {
+      const g = env["group"];
+      const li = env["leaf_index"];
+      if (typeof g === "string" && typeof li === "number") {
+        const k = `${g} ${li}`;
+        if (revokedLeaves.has(k)) {
+          const reuse: LeafReuseAttempt = {
+            type: "leaf_reuse_attempt",
+            group: g,
+            leafIndex: li,
+            attemptedRowHash: rh,
+            originallyRevokedAtRowHash: revokedLeaves.get(k)?.rowHash ?? null,
+            informed: reuseIsInformed(
+              revokedLeaves.get(k)?.did ?? null,
+              revokedLeaves.get(k)?.seq ?? null,
+              manifestClock,
+            ),
+          };
+          conflicts.push(reuse);
+        }
+      }
+    }
+    if (env["event_type"] === "tn.recipient.revoked") {
+      const g = env["group"];
+      const li = env["leaf_index"];
+      if (typeof g === "string" && typeof li === "number") {
+        revokedLeaves.set(`${g} ${li}`, _revokedLeafFrom(env, rh));
+      }
+    }
+    acceptedEnvs.push(env);
+    seenRowHashes.add(rh);
+  }
+  return { acceptedEnvs, conflicts, deduped };
 }
 
 /**
