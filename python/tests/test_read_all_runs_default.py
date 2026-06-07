@@ -87,3 +87,18 @@ def test_all_runs_false_restricts_to_current_run(tmp_path: Path):
     assert "run-A" not in markers, (
         f"all_runs=False must filter out previous runs, got {markers!r}"
     )
+
+
+def test_all_runs_with_where_filters_backup_entries(tmp_path: Path):
+    """all_runs=True + a where predicate: the where filter is applied to
+    entries replayed from previous runs' rotated backups, not just the
+    current log. Two prior runs (run-A, run-B) become backups; a where that
+    keeps only run-A must yield exactly run-A from the backup replay."""
+    _write_entry_in_subprocess(tmp_path, marker="run-A")
+    _write_entry_in_subprocess(tmp_path, marker="run-B")
+    markers = _read_in_subprocess(
+        tmp_path, "where=lambda e: e.fields.get('marker') == 'run-A'"
+    )
+    assert markers == ["run-A"], (
+        f"where must filter backup-replayed entries too, got {markers!r}"
+    )

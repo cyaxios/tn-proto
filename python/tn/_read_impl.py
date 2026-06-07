@@ -382,54 +382,82 @@ def _read_raw_impl(log_path=None, cfg=None, *, all_runs: bool = False, where=Non
     return _read_raw_inner(log_path, cfg, all_runs=all_runs, where=where)
 
 
+def _where_only(entries, where):
+    """Yield only the entries passing the optional ``where`` predicate."""
+    for r in entries:
+        if where is None or where(r):
+            yield r
+
+
+def _filtered_run_entries(entries, *, all_runs, where):
+    """Apply the current-run filter (unless ``all_runs``) and the optional
+    ``where`` predicate to a raw entry stream."""
+    for r in entries:
+        if not all_runs and not _entry_in_current_run_raw(r):
+            continue
+        if where is None or where(r):
+            yield r
+
+
+def _resolve_own_log(cfg, current_config):
+    """Resolve this runtime's own log path (the active config's
+    ``resolve_log_path()``), or None when no config is loaded / the path
+    can't be resolved. ``current_config`` is passed in so this stays free of
+    the lazy ``from . import current_config`` the caller owns."""
+    try:
+        active_cfg = cfg if cfg is not None else current_config()
+    except RuntimeError:
+        return None
+    if active_cfg is None:
+        return None
+    try:
+        return active_cfg.resolve_log_path()
+    except Exception:  # noqa: BLE001 — defensive on partially-loaded cfg
+        return None
+
+
+def _replay_rotated_backups(rt, target_path: Path, where):
+    """Yield ``where``-filtered entries from this log's rotation backups
+    (oldest first), best-effort skipping any unreadable backup. The current
+    run filter is intentionally NOT applied — backups are, by definition,
+    prior runs (the caller only reaches here under ``all_runs``)."""
+    for backup_path in _rotated_backup_paths(target_path):
+        try:
+            yield from _where_only(rt.read(backup_path), where)
+        except Exception:  # noqa: BLE001 — best-effort: skip unreadable backups
+            continue
+
+
 def _read_raw_inner(log_path=None, cfg=None, *, all_runs: bool = False, where=None):
     """Internal implementation of read_raw without surface-log entry."""
     import tn
 
     from . import current_config
     tn._maybe_autoinit_load_only()
+    rt = tn._dispatch_rt
 
-    if all_runs and tn._dispatch_rt is not None and tn._dispatch_rt.using_rust:
-        try:
-            active_cfg = cfg if cfg is not None else current_config()
-        except RuntimeError:
-            active_cfg = None
-        own_log = None
-        if active_cfg is not None:
-            try:
-                own_log = active_cfg.resolve_log_path()
-            except Exception:  # noqa: BLE001 — defensive on partially-loaded cfg
-                own_log = None
+    if all_runs and rt is not None and rt.using_rust:
+        own_log = _resolve_own_log(cfg, current_config)
         target_path = log_path if log_path is not None else own_log
-        if target_path is not None and own_log is not None and Path(target_path).resolve() == Path(own_log).resolve():
-            for backup_path in _rotated_backup_paths(Path(target_path)):
-                try:
-                    for r in tn._dispatch_rt.read(backup_path):
-                        if where is not None and not where(r):
-                            continue
-                        yield r
-                except Exception:  # noqa: BLE001 — best-effort: skip unreadable backups
-                    continue
+        if (
+            target_path is not None
+            and own_log is not None
+            and Path(target_path).resolve() == Path(own_log).resolve()
+        ):
+            yield from _replay_rotated_backups(rt, Path(target_path), where)
 
-    if tn._dispatch_rt is not None and tn._dispatch_rt.using_rust:
-        for r in tn._dispatch_rt.read(log_path):
-            if not all_runs and not _entry_in_current_run_raw(r):
-                continue
-            if where is not None and not where(r):
-                continue
-            yield r
+    if rt is not None and rt.using_rust:
+        yield from _filtered_run_entries(rt.read(log_path), all_runs=all_runs, where=where)
         return
+
     # Legacy reader path — pure-Python, unchanged behavior for JWE.
     from .reader import read as _legacy_read_fn
 
     if cfg is None:
         cfg = current_config()
-    for r in _legacy_read_fn(log_path, cfg):
-        if not all_runs and not _entry_in_current_run_raw(r):
-            continue
-        if where is not None and not where(r):
-            continue
-        yield r
+    yield from _filtered_run_entries(
+        _legacy_read_fn(log_path, cfg), all_runs=all_runs, where=where
+    )
 
 
 def _rotated_backup_paths(log_path: Path) -> list[str]:
