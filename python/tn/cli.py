@@ -71,6 +71,8 @@ import httpx
 from . import admin as _admin
 from . import wallet as _wallet
 from . import wallet_restore as _wallet_restore
+from . import wallet_restore_loopback as _wallet_restore_loopback
+from . import wallet_restore_passphrase as _wallet_restore_passphrase
 from .cli_canonical import cmd_canonical
 from .cli_compile import cmd_compile
 from .cli_info import cmd_info
@@ -78,8 +80,6 @@ from .cli_invite import add_invite_parser
 from .cli_seal import cmd_seal
 from .cli_vault import cmd_vault_link, cmd_vault_unlink
 from .cli_verify import cmd_verify
-from . import wallet_restore_loopback as _wallet_restore_loopback
-from . import wallet_restore_passphrase as _wallet_restore_passphrase
 from .identity import Identity, IdentityError, _default_identity_path
 from .vault_client import VaultClient, VaultError, resolve_vault_url
 
@@ -192,7 +192,7 @@ def _try_warm_attach(
         print(f"[tn init] WARN account attach failed ({e}); using claim URL instead")
         try:
             client.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort client close
             pass
         return False
 
@@ -212,7 +212,7 @@ def _try_warm_attach(
     finally:
         try:
             client.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort client close
             pass
         flush_and_close()
     return True
@@ -248,8 +248,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         args.skip_confirm = True
         args.keep_mnemonic = True
         # Suppress the mnemonic banner; it would land in CI logs.
-        global _print_mnemonic_banner  # noqa: PLW0603 — local override for non-TTY init
-        _print_mnemonic_banner = lambda _m: None  # type: ignore[assignment]
+        global _print_mnemonic_banner
+
+        def _silence_mnemonic_banner(_m: object) -> None:
+            return None
+
+        _print_mnemonic_banner = _silence_mnemonic_banner  # type: ignore[assignment]
         print(
             "[tn init] non-interactive mode: mnemonic will be persisted "
             "into identity.json (treat that file as a secret).",
@@ -261,8 +265,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     # <cwd>/<project>/.tn/default/.) `project` may be passed as a bare
     # name or a path; only the basename is used as the ceremony name.
     from ._layout import (
-        ceremony_yaml_path as _ceremony_yaml_path,
         is_valid_ceremony_name as _is_valid_ceremony_name,
+    )
+    from ._layout import (
         tn_root as _tn_root,
     )
 
@@ -418,7 +423,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
         client = None
         try:
-            from .handlers.vault_push import init_upload, _default_client_factory
+            from .handlers.vault_push import _default_client_factory, init_upload
             client = _default_client_factory(vault_url, identity)
             # Re-open cfg so init_upload reads the just-written ceremony.
             tn_init(yaml_path, cipher=args.cipher, identity=identity, link=False)
@@ -429,17 +434,17 @@ def cmd_init(args: argparse.Namespace) -> int:
             print(f"[tn init]   vault_id:   {result['vault_id']}")
             print(f"[tn init]   expires:    {_format_expires_local(result['expires_at'])}")
             if result.get("reused"):
-                print(f"[tn init]   (reusing live pending-claim within TTL)")
+                print("[tn init]   (reusing live pending-claim within TTL)")
             print()
             print("[tn init] CLAIM URL - open this in your browser to attach the project to your account:")
             print(f"  {result['claim_url']}")
             print()
             print("[tn init] Already have a vault account, or want to attach this project later?")
             print(f"[tn init]   1. Sign in at {vault_url}/account")
-            print(f"[tn init]   2. On the Projects tab, mint a connect code")
+            print("[tn init]   2. On the Projects tab, mint a connect code")
             print(f"[tn init]   3. Run:  tn account connect <code> --yaml {yaml_path}")
             print()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — vault backup is best-effort; ceremony stays valid
             print(f"[tn init] WARN backup to vault failed: {e}")
             print(f"[tn init]   The ceremony at {yaml_path} is still valid; retry with")
             print(f"[tn init]   ``tn wallet link {yaml_path} --vault {vault_url}``.")
@@ -448,7 +453,7 @@ def cmd_init(args: argparse.Namespace) -> int:
                 # _SnapshotPostingClient wraps a VaultClient; reach through.
                 try:
                     client._vc.close()
-                except Exception:
+                except Exception:  # noqa: BLE001 — best-effort client close
                     pass
             flush_and_close()
 
@@ -2267,7 +2272,7 @@ def _resolve_yaml_values() -> dict[str, str]:
     """
     out: dict[str, str] = {}
     try:
-        import os as _os
+
         from . import _autoinit
         from . import config as _config
 
@@ -2279,7 +2284,7 @@ def _resolve_yaml_values() -> dict[str, str]:
         # raises ValueError. Treat that as "yaml unavailable".
         try:
             cfg = _config.load(path)
-        except Exception:
+        except Exception:  # noqa: BLE001 — any config-load error => yaml unavailable
             return out
         out["ceremony_id"] = cfg.ceremony_id
         out["log_path"] = str(cfg.resolve_log_path())
@@ -2289,8 +2294,7 @@ def _resolve_yaml_values() -> dict[str, str]:
             out["linked_project_id"] = cfg.linked_project_id
         if cfg.linked_vault:
             out["linked_vault"] = cfg.linked_vault
-    except Exception:
-        # Defensive: any import / discovery error must not break the verb.
+    except Exception:  # noqa: BLE001 — defensive: discovery error must not break the verb
         return out
     return out
 
@@ -2596,7 +2600,7 @@ def _validate_resolve_keystore_pub(
     *,
     yaml_path: Path,
     yaml_doc: dict,
-    project_dir: Path,  # noqa: ARG001 — kept for symmetry / future absolute paths
+    project_dir: Path,
 ) -> Path | None:
     """Resolve the path to ``local.public`` for the ceremony at
     ``yaml_path``. Used by ``cmd_validate`` to compare
