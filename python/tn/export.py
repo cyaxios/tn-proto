@@ -48,11 +48,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from ._defaults import DEFAULT_CEREMONY_NAME
 from .config import LoadedConfig
 from .packaging import Package
 from .tnpkg import (
@@ -197,6 +199,80 @@ def _build_enrolment_body(pkg: Package) -> dict[str, bytes]:
     return {"body/package.json": _package_to_body_bytes(pkg)}
 
 
+# A keystore self-kit file: ``<group>.btn.mykit`` or a rotation backup
+# ``<group>.btn.mykit.revoked.<ts>``. group(1) is the group name.
+_KIT_RE = re.compile(r"^(.+?)\.btn\.(mykit|mykit\.revoked\.\d+)$")
+# Private/identity material packed only for a full_keystore export.
+_FULL_KEYSTORE_FILES = ("local.private", "local.public", "index_master.key")
+
+
+def _collect_kit_files(
+    keystore: Path, group_filter: set[str] | None, full: bool
+) -> tuple[dict[str, bytes], list[dict[str, Any]]]:
+    """Scan the keystore for self-kit files (and, for ``full``, the private
+    identity + per-group ``.btn.state`` material). Returns the body members
+    (keyed ``body/<name>``) and the per-kit metadata list."""
+    body: dict[str, bytes] = {}
+    kits_meta: list[dict[str, Any]] = []
+    for entry in sorted(keystore.iterdir()):
+        if not entry.is_file():
+            continue
+        m = _KIT_RE.match(entry.name)
+        if m:
+            group = m.group(1)
+            if group_filter is not None and group not in group_filter:
+                continue
+            data = entry.read_bytes()
+            # Kits live at the body root with their original filenames so
+            # downstream readers (Chrome extension, tn-js CLI) can scan the
+            # archive without learning about ``body/`` prefixes.
+            body[f"body/{entry.name}"] = data
+            kits_meta.append(
+                {
+                    "name": entry.name,
+                    "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+                    "bytes": len(data),
+                }
+            )
+        elif full:
+            if entry.name in _FULL_KEYSTORE_FILES:
+                body[f"body/{entry.name}"] = entry.read_bytes()
+            elif entry.name.endswith(".btn.state"):
+                group = entry.name[: -len(".btn.state")]
+                if group_filter is None or group in group_filter:
+                    body[f"body/{entry.name}"] = entry.read_bytes()
+    return body, kits_meta
+
+
+def _pack_stream_yamls(cfg: LoadedConfig) -> dict[str, bytes]:
+    """Pack the default yaml plus every named stream's yaml verbatim so absorb
+    can restore the same chain identities. Streams hold no key material of
+    their own (they extend default), so logs/ and admin/ are not recursed.
+
+    Project root depends on the on-disk layout:
+      * New (preferred): ``<root>/default/tn.yaml`` -> root is parent.parent
+      * Legacy:          ``<root>/tn.yaml``         -> root is parent
+    """
+    out: dict[str, bytes] = {"body/tn.yaml": cfg.yaml_path.read_bytes()}
+    default_dir = cfg.yaml_path.parent
+    if default_dir.name == DEFAULT_CEREMONY_NAME:
+        project_root = default_dir.parent
+        default_dir_name: str | None = default_dir.name
+    else:
+        project_root = default_dir
+        default_dir_name = None
+    if project_root.is_dir():
+        for entry in sorted(project_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            if default_dir_name is not None and entry.name == default_dir_name:
+                continue
+            stream_yaml = entry / "tn.yaml"
+            if stream_yaml.is_file():
+                out[f"body/streams/{entry.name}/tn.yaml"] = stream_yaml.read_bytes()
+    return out
+
+
 def _build_kit_bundle_body(
     cfg: LoadedConfig | None,
     keystore: Path,
@@ -213,45 +289,12 @@ def _build_kit_bundle_body(
     so the chrome extension / tn-js readers continue to work after the
     new manifest header is added.
     """
-    import re as _re
-
     keystore = Path(keystore).resolve()
     if not keystore.is_dir():
         raise FileNotFoundError(f"kit_bundle: keystore directory not found: {keystore}")
 
     group_filter = set(groups_filter) if groups_filter else None
-    kit_re = _re.compile(r"^(.+?)\.btn\.(mykit|mykit\.revoked\.\d+)$")
-
-    body: dict[str, bytes] = {}
-    kits_meta: list[dict[str, Any]] = []
-
-    for entry in sorted(keystore.iterdir()):
-        if not entry.is_file():
-            continue
-        m = kit_re.match(entry.name)
-        if m:
-            group = m.group(1)
-            if group_filter is not None and group not in group_filter:
-                continue
-            data = entry.read_bytes()
-            # Kits live at the body root with their original filenames so
-            # downstream readers (Chrome extension, tn-js CLI) can scan
-            # the archive without learning about ``body/`` prefixes.
-            body[f"body/{entry.name}"] = data
-            kits_meta.append(
-                {
-                    "name": entry.name,
-                    "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
-                    "bytes": len(data),
-                }
-            )
-        elif full:
-            if entry.name in ("local.private", "local.public", "index_master.key"):
-                body[f"body/{entry.name}"] = entry.read_bytes()
-            elif entry.name.endswith(".btn.state"):
-                group = entry.name[: -len(".btn.state")]
-                if group_filter is None or group in group_filter:
-                    body[f"body/{entry.name}"] = entry.read_bytes()
+    body, kits_meta = _collect_kit_files(keystore, group_filter, full)
 
     if not kits_meta:
         suffix = f" matching groups {sorted(group_filter)}" if group_filter else ""
@@ -261,43 +304,12 @@ def _build_kit_bundle_body(
         )
 
     if full and cfg is not None and cfg.yaml_path is not None and cfg.yaml_path.exists():
-        body["body/tn.yaml"] = cfg.yaml_path.read_bytes()
-        # Pack every named stream's yaml verbatim. Streams live in named
-        # sibling subdirectories of the project root, each with its own
-        # ``tn.yaml`` carrying the chain's ``ceremony.id``. We pack the
-        # yaml as-is so absorb can restore the same chain identity on
-        # the receiving node. Streams have no key material of their own
-        # (they extend default), so we don't recurse into logs/ or admin/.
-        #
-        # Project root location depends on the on-disk layout:
-        # * New (preferred): ``<root>/default/tn.yaml`` → root is parent.parent
-        # * Legacy: ``<root>/tn.yaml`` → root is parent
-        # We pick the root by walking up until we find subdirs with
-        # tn.yaml siblings (other than default's own dir).
-        from ._defaults import DEFAULT_CEREMONY_NAME
-
-        default_dir = cfg.yaml_path.parent
-        if default_dir.name == DEFAULT_CEREMONY_NAME:
-            project_root = default_dir.parent
-            default_dir_name: str | None = default_dir.name
-        else:
-            project_root = default_dir
-            default_dir_name = None
-        if project_root.is_dir():
-            for entry in sorted(project_root.iterdir()):
-                if not entry.is_dir():
-                    continue
-                if default_dir_name is not None and entry.name == default_dir_name:
-                    continue
-                stream_yaml = entry / "tn.yaml"
-                if stream_yaml.is_file():
-                    body[f"body/streams/{entry.name}/tn.yaml"] = stream_yaml.read_bytes()
+        body.update(_pack_stream_yamls(cfg))
 
     if full:
         # Loud zero-byte marker. Keeping it under ``body/`` matches the new
         # zip layout; chrome-ext / tn-js readers that look at the *root*
-        # for the marker will be updated when they migrate to the new
-        # layout. Until then, also keep a top-level marker for safety.
+        # for the marker will be updated when they migrate to the new layout.
         body["body/WARNING_CONTAINS_PRIVATE_KEYS"] = b""
 
     extras: dict[str, Any] = {

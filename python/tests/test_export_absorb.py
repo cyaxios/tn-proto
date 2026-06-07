@@ -22,7 +22,7 @@ import tn
 from tn import admin
 from tn.compile import compile_enrolment
 from tn.config import load_or_create
-from tn.export import export
+from tn.export import _build_kit_bundle_body, export
 from tn.offer import offer
 from tn.tnpkg import _read_manifest, _verify_manifest_signature
 
@@ -84,6 +84,45 @@ def test_export_kit_bundle_round_trip(tmp_path: Path):
     assert any(name.endswith(".btn.mykit") for name in body)
     # Marker should NOT be present for readers-only.
     assert "body/WARNING_CONTAINS_PRIVATE_KEYS" not in body
+
+
+def _mk_keystore(tmp_path: Path, *names: str) -> Path:
+    ks = tmp_path / "keys"
+    ks.mkdir()
+    for n in names:
+        (ks / n).write_bytes(b"kitdata-" + n.encode())
+    return ks
+
+
+def test_build_kit_bundle_body_groups_filter(tmp_path: Path):
+    """groups_filter restricts which group kits land in the body."""
+    ks = _mk_keystore(tmp_path, "default.btn.mykit", "payments.btn.mykit")
+    body, extras = _build_kit_bundle_body(
+        None, ks, full=False, groups_filter=["payments"], confirm_includes_secrets=False
+    )
+    assert "body/payments.btn.mykit" in body
+    assert "body/default.btn.mykit" not in body
+    assert len(extras["state"]["kits"]) == 1
+    assert extras["scope"] == "kit_bundle"
+
+
+def test_build_kit_bundle_body_all_kits_when_no_filter(tmp_path: Path):
+    ks = _mk_keystore(tmp_path, "default.btn.mykit", "payments.btn.mykit")
+    body, extras = _build_kit_bundle_body(
+        None, ks, full=False, groups_filter=None, confirm_includes_secrets=False
+    )
+    assert "body/default.btn.mykit" in body
+    assert "body/payments.btn.mykit" in body
+    assert len(extras["state"]["kits"]) == 2
+
+
+def test_build_kit_bundle_body_no_kits_raises(tmp_path: Path):
+    ks = tmp_path / "empty_keys"
+    ks.mkdir()
+    with pytest.raises(RuntimeError, match=r"no \*\.btn\.mykit"):
+        _build_kit_bundle_body(
+            None, ks, full=False, groups_filter=None, confirm_includes_secrets=False
+        )
 
 
 def test_export_full_keystore_requires_confirmation(tmp_path: Path):
