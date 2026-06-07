@@ -86,6 +86,23 @@ test("read({verify: true}) is equivalent to verify: 'raise'", async () => {
   }
 });
 
+test("read() throws on an invalid-JSON line, naming path:lineno", async () => {
+  const { client, close } = await ephemeralClient();
+  try {
+    client.info("evt.good", { x: 1 });
+    const path = client.logPath;
+    const text = readFileSync(path, "utf8");
+    // Append a structurally-broken ndjson line.
+    writeFileSync(path, text + "{ this is not valid json\n", "utf8");
+    assert.throws(
+      () => [...client.read({ allRuns: true })],
+      (e: unknown) => e instanceof Error && /invalid JSON/.test((e as Error).message),
+    );
+  } finally {
+    await close();
+  }
+});
+
 test("read with no verify option does not check integrity (default false)", async () => {
   const { client, close } = await ephemeralClient();
   try {

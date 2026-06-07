@@ -2383,8 +2383,39 @@ export class NodeRuntime {
    * reads where the caller chose the file).
    */
   *read(logPath?: string): Generator<ReadEntry, void, void> {
-    // Source lines (with origin path for error messages). Single-path
-    // when the caller specified one, otherwise main+admin merged.
+    const sources = this._collectReadSources(logPath);
+    const prevHashByType = new Map<string, RowHash>();
+    for (const src of sources) {
+      const { path, lineno, line: rawLine } = src;
+      let env: Record<string, unknown>;
+      try {
+        env = JSON.parse(rawLine) as Record<string, unknown>;
+      } catch (e) {
+        // Match Python reader.py: raise on invalid JSON so callers cannot
+        // silently skip tampered or truncated lines.
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`${path}:${lineno}: invalid JSON: ${msg}`, { cause: e });
+      }
+      const eventType = String(env["event_type"] ?? "");
+      const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH());
+      // Chain continuity check (per event_type, matches Python).
+      const lastHash = prevHashByType.get(eventType);
+      const chainOk = lastHash === undefined || envPrevHash === lastHash;
+      const entry = this._decodeReadEnvelope(env, chainOk);
+      prevHashByType.set(eventType, asRowHash(String(env["row_hash"] ?? "")));
+      yield entry;
+    }
+  }
+
+  // Collect the ndjson source lines to read (with origin path + extracted
+  // timestamp for stable cross-file ordering). A templated `log` glob-expands
+  // to every rendered file; an explicit path reads that one file; the default
+  // merges the main log with the admin log. Lines are sorted by timestamp;
+  // unparseable lines keep ts="" so they sort to the front and surface their
+  // JSON error in read()'s main loop with the correct path:lineno.
+  private _collectReadSources(
+    logPath?: string,
+  ): { path: string; lineno: number; line: string; ts: string }[] {
     type SourceLine = { path: string; lineno: number; line: string; ts: string };
     const sources: SourceLine[] = [];
     const collect = (path: string): void => {
@@ -2394,27 +2425,19 @@ export class NodeRuntime {
       for (const rawLine of text.split(/\r?\n/)) {
         lineno += 1;
         if (!rawLine) continue;
-        // Extract timestamp for stable cross-file ordering without
-        // re-parsing twice — JSON.parse below will re-validate.
         let ts = "";
         try {
           const env = JSON.parse(rawLine) as Record<string, unknown>;
           const t = env["timestamp"];
           if (typeof t === "string") ts = t;
         } catch {
-          // Leave ts = "" so the line sorts to the front and the main
-          // loop below surfaces the JSON parse error with the correct
-          // path:lineno (matches the prior single-file behavior).
+          // Leave ts = "" (see method doc).
         }
         sources.push({ path, lineno, line: rawLine, ts });
       }
     };
 
     if (logPath !== undefined) {
-      // A templated `log` (e.g. `./logs/{event_id}.ndjson`) glob-expands
-      // to every rendered file and merges them — symmetric with the
-      // write side that fanned them out. Non-templated paths collect
-      // the single file as before.
       if (hasTemplateTokens(logPath)) {
         const yamlDir = dirname(this.config.yamlPath);
         for (const f of expandTemplatedLogPath(logPath, yamlDir)) collect(f);
@@ -2427,112 +2450,76 @@ export class NodeRuntime {
       if (adminPath !== this.config.logPath) collect(adminPath);
     }
 
-    // Stable sort by timestamp. Lines from the same file retain their
-    // original order (so chain-continuity per event_type still walks
-    // forward).
     sources.sort((a, b) => a.ts.localeCompare(b.ts));
+    return sources;
+  }
 
-    const prevHashByType = new Map<string, RowHash>();
+  // Decode one parsed envelope into a ReadEntry: identify group ciphertexts,
+  // gather public fields, recompute the row_hash, verify the signature, and
+  // decrypt each group we hold kits for. `chainOk` is supplied by the caller
+  // (read tracks per-event-type chain continuity; a single line cannot).
+  private _decodeReadEnvelope(env: Record<string, unknown>, chainOk: boolean): ReadEntry {
+    const eventType = String(env["event_type"] ?? "");
+    const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH());
+    const envRowHash = String(env["row_hash"] ?? "");
+    const envSig = String(env["signature"] ?? "");
+    const envDid = String(env["device_identity"] ?? "");
+    const envTs = String(env["timestamp"] ?? "");
+    const envEventId = String(env["event_id"] ?? "");
+    const envLevel = String(env["level"] ?? "");
 
-    for (const src of sources) {
-      const { path, lineno, line: rawLine } = src;
-      let env: Record<string, unknown>;
-      try {
-        env = JSON.parse(rawLine) as Record<string, unknown>;
-      } catch (e) {
-        // Match Python reader.py: raise on invalid JSON so callers cannot
-        // silently skip tampered or truncated lines.
-        const msg = e instanceof Error ? e.message : String(e);
-        throw new Error(`${path}:${lineno}: invalid JSON: ${msg}`, { cause: e });
+    const groupRaw = _identifyGroupPayloads(env);
+
+    const publicFields: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(env)) {
+      if (!_ENVELOPE_RESERVED.has(k) && !groupRaw.has(k) && this.config.publicFields.has(k)) {
+        publicFields[k] = v;
       }
-
-      const eventType = String(env["event_type"] ?? "");
-      const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH());
-      const envRowHash = String(env["row_hash"] ?? "");
-      const envSig = String(env["signature"] ?? "");
-      const envDid = String(env["device_identity"] ?? "");
-      const envTs = String(env["timestamp"] ?? "");
-      const envEventId = String(env["event_id"] ?? "");
-      const envLevel = String(env["level"] ?? "");
-
-      // 1. Chain continuity check (per event_type, matches Python).
-      const lastHash = prevHashByType.get(eventType);
-      const chainOk = lastHash === undefined || envPrevHash === lastHash;
-
-      // 2. Identify group payloads in the envelope.
-      const groupRaw = new Map<string, { ct: Uint8Array; fieldHashes: Record<string, string> }>();
-      for (const [k, v] of Object.entries(env)) {
-        if (isGroupPayload(v)) {
-          const ct = new Uint8Array(Buffer.from(v.ciphertext, "base64"));
-          // Rust serialiser may write field_hashes (snake) or fieldHashes (camel).
-          const fh =
-            ((v as Record<string, unknown>)["field_hashes"] as
-              | Record<string, string>
-              | undefined) ??
-            ((v as Record<string, unknown>)["fieldHashes"] as Record<string, string> | undefined) ??
-            {};
-          groupRaw.set(k, { ct, fieldHashes: fh });
-        }
-      }
-
-      // 3. Public fields: in config.publicFields, not reserved, not a group key.
-      const publicFields: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(env)) {
-        if (!_ENVELOPE_RESERVED.has(k) && !groupRaw.has(k) && this.config.publicFields.has(k)) {
-          publicFields[k] = v;
-        }
-      }
-
-      // 4. Recompute row_hash (Python: compute_row_hash).
-      const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
-      for (const [gname, g] of groupRaw) {
-        groupsForHash[gname] = { ciphertext: g.ct, fieldHashes: g.fieldHashes };
-      }
-      let rowHashOk: boolean;
-      try {
-        const recomputed = rowHash({
-          device_identity: asDid(envDid),
-          timestamp: envTs,
-          eventId: envEventId,
-          eventType,
-          level: envLevel,
-          prevHash: asRowHash(envPrevHash),
-          publicFields,
-          groups: groupsForHash,
-        });
-        rowHashOk = recomputed === envRowHash;
-      } catch {
-        rowHashOk = false;
-      }
-
-      // 5. Signature verification (Python: DeviceKey.verify).
-      let sigOk: boolean;
-      try {
-        const sig = signatureFromB64(asSignatureB64(envSig));
-        sigOk = verify(asDid(envDid), new Uint8Array(Buffer.from(envRowHash, "utf8")), sig);
-      } catch {
-        sigOk = false;
-      }
-
-      // 6. Decrypt each group we hold kits for (Python: gcfg.cipher.decrypt).
-      const plaintext: Record<string, Record<string, unknown>> = {};
-      for (const [gname, g] of groupRaw) {
-        const gk = this.keystore.groups.get(gname);
-        const gcfg = this.config.groups.get(gname);
-        const cipherKind = (gcfg?.cipher ?? "btn") as "btn" | "jwe";
-        const kits: GroupKits = { cipher: cipherKind, kits: gk?.kits ?? [] };
-        plaintext[gname] = decryptGroup({ ct: g.ct }, kits) as Record<string, unknown>;
-      }
-
-      // 7. Advance chain state.
-      prevHashByType.set(eventType, asRowHash(envRowHash));
-
-      yield {
-        envelope: env,
-        plaintext,
-        valid: { signature: sigOk, rowHash: rowHashOk, chain: chainOk },
-      };
     }
+
+    const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
+    for (const [gname, g] of groupRaw) {
+      groupsForHash[gname] = { ciphertext: g.ct, fieldHashes: g.fieldHashes };
+    }
+    let rowHashOk: boolean;
+    try {
+      const recomputed = rowHash({
+        device_identity: asDid(envDid),
+        timestamp: envTs,
+        eventId: envEventId,
+        eventType,
+        level: envLevel,
+        prevHash: asRowHash(envPrevHash),
+        publicFields,
+        groups: groupsForHash,
+      });
+      rowHashOk = recomputed === envRowHash;
+    } catch {
+      rowHashOk = false;
+    }
+
+    let sigOk: boolean;
+    try {
+      const sig = signatureFromB64(asSignatureB64(envSig));
+      sigOk = verify(asDid(envDid), new Uint8Array(Buffer.from(envRowHash, "utf8")), sig);
+    } catch {
+      sigOk = false;
+    }
+
+    const plaintext: Record<string, Record<string, unknown>> = {};
+    for (const [gname, g] of groupRaw) {
+      const gk = this.keystore.groups.get(gname);
+      const gcfg = this.config.groups.get(gname);
+      const cipherKind = (gcfg?.cipher ?? "btn") as "btn" | "jwe";
+      const kits: GroupKits = { cipher: cipherKind, kits: gk?.kits ?? [] };
+      plaintext[gname] = decryptGroup({ ct: g.ct }, kits) as Record<string, unknown>;
+    }
+
+    return {
+      envelope: env,
+      plaintext,
+      valid: { signature: sigOk, rowHash: rowHashOk, chain: chainOk },
+    };
   }
 
   /**
@@ -2650,6 +2637,26 @@ function isGroupPayload(
     "ciphertext" in v &&
     typeof (v as Record<string, unknown>).ciphertext === "string"
   );
+}
+
+// Identify the group ciphertext payloads on an envelope, decoding each
+// ciphertext from base64 and reading its field hashes (Rust may write
+// `field_hashes` (snake) or `fieldHashes` (camel)).
+function _identifyGroupPayloads(
+  env: Record<string, unknown>,
+): Map<string, { ct: Uint8Array; fieldHashes: Record<string, string> }> {
+  const groupRaw = new Map<string, { ct: Uint8Array; fieldHashes: Record<string, string> }>();
+  for (const [k, v] of Object.entries(env)) {
+    if (isGroupPayload(v)) {
+      const ct = new Uint8Array(Buffer.from(v.ciphertext, "base64"));
+      const fh =
+        ((v as Record<string, unknown>)["field_hashes"] as Record<string, string> | undefined) ??
+        ((v as Record<string, unknown>)["fieldHashes"] as Record<string, string> | undefined) ??
+        {};
+      groupRaw.set(k, { ct, fieldHashes: fh });
+    }
+  }
+  return groupRaw;
 }
 
 function validateEventType(et: string): void {
