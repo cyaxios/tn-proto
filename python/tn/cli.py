@@ -62,7 +62,9 @@ import argparse
 import getpass
 import json
 import os
+import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -1637,6 +1639,82 @@ def cmd_absorb(args: argparse.Namespace) -> int:
     return 0 if accepted >= 0 else 1
 
 
+def _rotate_select_groups(args: argparse.Namespace, cfg) -> list[str]:
+    """Resolve the target group set (positional / --groups / all non-internal)
+    and reject a mutually-exclusive selection or any unknown group."""
+    if args.group is not None and args.groups is not None:
+        _die("pass either a positional <group> or --groups, not both.", code=2)
+    if args.group is not None:
+        target_groups = [args.group]
+    elif args.groups is not None:
+        target_groups = [g.strip() for g in args.groups.split(",") if g.strip()]
+    else:
+        target_groups = [g for g in cfg.groups if g != "tn.agents"]
+    unknown = [g for g in target_groups if g not in cfg.groups]
+    if unknown:
+        _die(
+            f"unknown group(s) {unknown!r}; ceremony declares "
+            f"{sorted(cfg.groups)}.",
+            code=2,
+        )
+    return target_groups
+
+
+def _rotate_snapshot_recipients(target_groups: list[str]) -> dict[str, list[str]]:
+    """Snapshot the surviving (non-revoked) recipients per group PRE-rotation,
+    inverted to ``{recipient_did: [group, ...]}``."""
+    recipient_groups: dict[str, list[str]] = {}
+    for g in target_groups:
+        for rec in _admin.recipients(g):
+            if rec.get("revoked"):
+                continue
+            rdid = rec.get("recipient_identity")
+            if not isinstance(rdid, str):
+                continue
+            recipient_groups.setdefault(rdid, []).append(g)
+    return recipient_groups
+
+
+def _rotate_resolve_output(out, recipient_count: int, ts: str) -> tuple[Path, Path | None]:
+    """Resolve (out_dir, single_file) from --out: absent -> ./rotated_<ts>/;
+    a .tnpkg path -> that single file (rejected for >1 recipient); else a
+    directory."""
+    out_arg = Path(out).resolve() if out else None
+    if out_arg is None:
+        return Path.cwd() / f"rotated_{ts}", None
+    if out_arg.suffix == ".tnpkg":
+        if recipient_count > 1:
+            _die(
+                f"--out {out_arg.name} is a single .tnpkg path but "
+                f"this rotation has {recipient_count} surviving "
+                "recipient(s). Pass a directory path (or omit --out) "
+                "to write one .tnpkg per recipient.",
+                code=2,
+            )
+        return out_arg.parent, out_arg
+    return out_arg, None
+
+
+def _rotate_emit_bundles(
+    recipient_groups: dict[str, list[str]],
+    out_dir: Path,
+    single_file: Path | None,
+    bundle_for_recipient,
+) -> list[Path]:
+    """Mint one kit_bundle .tnpkg per surviving recipient (post-rotation key
+    material), returning the written artifact paths."""
+    artifacts: list[Path] = []
+    for rdid, groups in recipient_groups.items():
+        if single_file is not None:
+            pkg_path = single_file
+        else:
+            safe = re.sub(r"[^A-Za-z0-9._-]", "_", rdid)
+            pkg_path = out_dir / f"{safe}.tnpkg"
+        written = bundle_for_recipient(rdid, pkg_path, groups=groups)
+        artifacts.append(Path(written))
+    return artifacts
+
+
 def cmd_rotate(args: argparse.Namespace) -> int:
     """Rotate group key material and emit per-recipient kit_bundle .tnpkg
     artifacts so the publisher can hand new kits to surviving recipients.
@@ -1683,9 +1761,6 @@ def cmd_rotate(args: argparse.Namespace) -> int:
                                        only; rejected if the rotation
                                        affected more than one recipient.
     """
-    import re
-    import time
-
     from . import current_config, flush_and_close
     from . import init as tn_init
     from .pkg import bundle_for_recipient
@@ -1701,40 +1776,12 @@ def cmd_rotate(args: argparse.Namespace) -> int:
                 code=2,
             )
 
-        if args.group is not None and args.groups is not None:
-            _die(
-                "pass either a positional <group> or --groups, not both.",
-                code=2,
-            )
-        if args.group is not None:
-            target_groups = [args.group]
-        elif args.groups is not None:
-            target_groups = [g.strip() for g in args.groups.split(",") if g.strip()]
-        else:
-            target_groups = [g for g in cfg.groups if g != "tn.agents"]
+        target_groups = _rotate_select_groups(args, cfg)
 
-        unknown = [g for g in target_groups if g not in cfg.groups]
-        if unknown:
-            _die(
-                f"unknown group(s) {unknown!r}; ceremony declares "
-                f"{sorted(cfg.groups)}.",
-                code=2,
-            )
-
-        # Snapshot surviving recipients PRE-rotation so we know who to
-        # mint new kits for. (Post-rotation the recipient list is
-        # unchanged for btn — recipients are still active in the new
-        # epoch — but reading the snapshot here makes the intent
-        # explicit and survives any future semantic change.)
-        recipient_groups: dict[str, list[str]] = {}
-        for g in target_groups:
-            for rec in _admin.recipients(g):
-                if rec.get("revoked"):
-                    continue
-                rdid = rec.get("recipient_identity")
-                if not isinstance(rdid, str):
-                    continue
-                recipient_groups.setdefault(rdid, []).append(g)
+        # Snapshot surviving recipients PRE-rotation so we know who to mint
+        # new kits for (the btn recipient set carries forward unchanged, but
+        # the explicit snapshot survives any future semantic change).
+        recipient_groups = _rotate_snapshot_recipients(target_groups)
 
         # Rotate each group. Each call also fires _maybe_autosync, so
         # vault-linked ceremonies push state as a side effect.
@@ -1756,39 +1803,16 @@ def cmd_rotate(args: argparse.Namespace) -> int:
             return 0
 
         ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        out_arg = Path(args.out).resolve() if args.out else None
-        if out_arg is None:
-            out_dir = Path.cwd() / f"rotated_{ts}"
-            single_file = None
-        elif out_arg.suffix == ".tnpkg":
-            if len(recipient_groups) > 1:
-                _die(
-                    f"--out {out_arg.name} is a single .tnpkg path but "
-                    f"this rotation has {len(recipient_groups)} surviving "
-                    "recipient(s). Pass a directory path (or omit --out) "
-                    "to write one .tnpkg per recipient.",
-                    code=2,
-                )
-            out_dir = out_arg.parent
-            single_file = out_arg
-        else:
-            out_dir = out_arg
-            single_file = None
+        out_dir, single_file = _rotate_resolve_output(args.out, len(recipient_groups), ts)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Bundle per recipient. bundle_for_recipient internally loops
         # admin.add_recipient (which mints fresh kits using the
         # post-rotation key material), so the artifact contains kits
         # the recipient can absorb to read post-rotation entries.
-        artifacts: list[Path] = []
-        for rdid, groups in recipient_groups.items():
-            if single_file is not None:
-                pkg_path = single_file
-            else:
-                safe = re.sub(r"[^A-Za-z0-9._-]", "_", rdid)
-                pkg_path = out_dir / f"{safe}.tnpkg"
-            written = bundle_for_recipient(rdid, pkg_path, groups=groups)
-            artifacts.append(Path(written))
+        artifacts = _rotate_emit_bundles(
+            recipient_groups, out_dir, single_file, bundle_for_recipient
+        )
 
         print(
             f"[tn rotate] rotated {len(rotated)} group(s); "
