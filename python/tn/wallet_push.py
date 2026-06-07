@@ -356,9 +356,17 @@ def push_ceremony_body(
             bearer=bearer,
             project_id=project_id,
         )
-    except RestoreError:
-        # No wrapped-key row yet (404 surfaces as RestoreError from the
-        # restore helper) -> mint path below.
+    except RestoreError as e:
+        # Only a genuine 404 (no wrapped-key row yet) means "mint a fresh BEK".
+        # Any OTHER non-200 (transient 5xx, 401/403, network) must NOT mint:
+        # minting overwrites the wrapped-key and ORPHANS the existing body
+        # backup (encrypted under the old, now-lost BEK). Abort instead.
+        if e.status_code != 404:
+            raise PushError(
+                f"wrapped-key fetch failed (HTTP {e.status_code}); refusing to mint a "
+                "fresh BEK — that would orphan the existing backup. Retry when the "
+                "vault is reachable.",
+            ) from e
         wrapped = None
 
     if wrapped and wrapped.get("wrapped_bek_b64"):

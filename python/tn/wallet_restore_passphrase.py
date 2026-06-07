@@ -150,10 +150,12 @@ def _fetch_wrapped_key(
     )
     code, body = _bearer_get(url, bearer)
     if code != 200:
-        raise RestoreError(
+        err = RestoreError(
             f"wrapped-key returned HTTP {code}: "
             f"{body[:200].decode('utf-8', errors='replace')}",
         )
+        err.status_code = code
+        raise err
     return json.loads(body.decode("utf-8"))
 
 

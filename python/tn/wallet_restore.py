@@ -28,6 +28,11 @@ from .wallet_restore_loopback import TransferToken
 class RestoreError(RuntimeError):
     """Raised on any failure during the account-bound restore flow."""
 
+    # HTTP status when the failure came from a vault response (e.g. the
+    # wrapped-key GET). Lets callers distinguish 404 (no row yet) from a
+    # transient 5xx/4xx. None when the error is not HTTP-derived.
+    status_code: int | None = None
+
 
 # ── Result ────────────────────────────────────────────────────────────
 
