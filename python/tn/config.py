@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -799,8 +800,6 @@ def _build_field_to_groups(doc: dict[str, Any], yaml_path: Path) -> dict[str, li
       * A field listed in both ``public_fields`` and a group is ambiguous
         and rejected.
     """
-    import warnings
-
     groups_block = doc.get("groups") or {}
     # public_fields override is ADDITIVE, not replacement: the 37 defaults
     # are always public; the yaml's `public_fields:` block adds to that
@@ -810,7 +809,22 @@ def _build_field_to_groups(doc: dict[str, Any], yaml_path: Path) -> dict[str, li
     # defaults plus my_field).
     public_fields = set(DEFAULT_PUBLIC_FIELDS) | set(doc.get("public_fields") or [])
 
-    # Walk per-group fields. New canonical shape.
+    per_group_fields, any_group_declares_fields = _harvest_per_group_fields(
+        groups_block, yaml_path
+    )
+    field_to_groups = _invert_field_routing(
+        doc, per_group_fields, any_group_declares_fields, yaml_path
+    )
+    _validate_and_sort_field_routing(field_to_groups, groups_block, public_fields, yaml_path)
+    return field_to_groups
+
+
+def _harvest_per_group_fields(
+    groups_block: dict[str, Any], yaml_path: Path
+) -> tuple[dict[str, list[str]], bool]:
+    """Collect each group's declared ``fields:`` list (the new canonical
+    shape), validating that they are lists of strings. Returns the per-group
+    map and whether ANY group declared fields (selects the routing path)."""
     per_group_fields: dict[str, list[str]] = {}
     any_group_declares_fields = False
     for gname, gspec in groups_block.items():
@@ -832,40 +846,65 @@ def _build_field_to_groups(doc: dict[str, Any], yaml_path: Path) -> dict[str, li
                     f"(got {type(fname).__name__})"
                 )
             per_group_fields.setdefault(gname, []).append(fname)
+    return per_group_fields, any_group_declares_fields
 
+
+def _invert_field_routing(
+    doc: dict[str, Any],
+    per_group_fields: dict[str, list[str]],
+    any_group_declares_fields: bool,
+    yaml_path: Path,
+) -> dict[str, list[str]]:
+    """Invert group->fields into field->[groups]. Prefers the per-group
+    declarations; falls back to the deprecated flat top-level ``fields:``
+    block (with a one-time DeprecationWarning)."""
     field_to_groups: dict[str, list[str]] = {}
-
     if any_group_declares_fields:
         # New canonical path. Build inverted map directly.
         for gname, fnames in per_group_fields.items():
             for fname in fnames:
                 field_to_groups.setdefault(fname, []).append(gname)
-    else:
-        # Back-compat: legacy flat `fields:` block. Each field → 1 group.
-        legacy = doc.get("fields") or {}
-        if legacy:
-            warnings.warn(
-                f"{yaml_path}: the flat top-level `fields:` block is "
-                "deprecated; declare field membership inside each group "
-                "as `groups[<name>].fields: [...]`. The flat form "
-                "supports only one group per field and will be removed "
-                "in a future release.",
-                DeprecationWarning,
-                stacklevel=4,
-            )
-        for fname, fspec in legacy.items():
-            if isinstance(fspec, dict):
-                gname = str(fspec.get("group", "default"))
-            elif isinstance(fspec, str):
-                gname = fspec
-            else:
-                raise ValueError(
-                    f"{yaml_path}: fields.{fname!r} must be a string group name "
-                    f"or {{group: <name>}} (got {type(fspec).__name__})"
-                )
-            field_to_groups.setdefault(fname, []).append(gname)
+        return field_to_groups
 
-    # Validate: every routed group must exist.
+    # Back-compat: legacy flat `fields:` block. Each field → 1 group.
+    legacy = doc.get("fields") or {}
+    if legacy:
+        warnings.warn(
+            f"{yaml_path}: the flat top-level `fields:` block is "
+            "deprecated; declare field membership inside each group "
+            "as `groups[<name>].fields: [...]`. The flat form "
+            "supports only one group per field and will be removed "
+            "in a future release.",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+    for fname, fspec in legacy.items():
+        if isinstance(fspec, dict):
+            gname = str(fspec.get("group", "default"))
+        elif isinstance(fspec, str):
+            gname = fspec
+        else:
+            raise ValueError(
+                f"{yaml_path}: fields.{fname!r} must be a string group name "
+                f"or {{group: <name>}} (got {type(fspec).__name__})"
+            )
+        field_to_groups.setdefault(fname, []).append(gname)
+    return field_to_groups
+
+
+def _validate_and_sort_field_routing(
+    field_to_groups: dict[str, list[str]],
+    groups_block: dict[str, Any],
+    public_fields: set[str],
+    yaml_path: Path,
+) -> None:
+    """Validate the routing map (every routed group exists; no field is both
+    public and group-routed) and sort each field's group list deterministically
+    in place, so canonical envelope encoding is stable across Python/TS/Rust.
+
+    A field that arrives at emit time in zero groups and not public is caught
+    at emit time, not here: yaml cannot list every field a publisher might emit.
+    """
     known_groups = set(groups_block.keys())
     for fname, gnames in field_to_groups.items():
         for gname in gnames:
@@ -875,7 +914,6 @@ def _build_field_to_groups(doc: dict[str, Any], yaml_path: Path) -> dict[str, li
                     f"{gname!r} (known groups: {sorted(known_groups)})"
                 )
 
-    # Validate: a field cannot be both public and group-routed.
     overlap = sorted(public_fields & set(field_to_groups))
     if overlap:
         raise ValueError(
@@ -885,20 +923,8 @@ def _build_field_to_groups(doc: dict[str, Any], yaml_path: Path) -> dict[str, li
             f"groups, never both."
         )
 
-    # Sort each list deterministically so canonical envelope encoding is
-    # stable across loaders (Python/TS/Rust must agree).
     for fname in field_to_groups:
         field_to_groups[fname] = sorted(set(field_to_groups[fname]))
-
-    # Validate: any field declared under groups[*].fields ends up routed.
-    # (Already true by construction; the loop above adds it.) The remaining
-    # error case — a field that arrives at emit time but is in zero groups
-    # and not public — is caught at emit time, not load time. Reason: yaml
-    # cannot list every possible field name a publisher might emit, so a
-    # field appearing in *zero groups* at load time is fine — it just means
-    # nothing has declared a route for it yet.
-
-    return field_to_groups
 
 
 def _read_yaml_doc(yaml_path: Path) -> dict[str, Any]:
