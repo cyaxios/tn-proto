@@ -66,6 +66,109 @@ function lkvPathFor(cfg: CeremonyConfig): string {
 // Separator used inside Map keys. Must match the SEP constant in core/admin_state.ts.
 const SEP = " ";
 
+// ---- LKV section parsers -------------------------------------------------
+// Each takes the raw JSON value for one section of the on-disk LKV doc and
+// returns the typed structure the reducer expects, tolerating absent or
+// malformed input (mirrors python/tn/admin_cache.py). Extracted from
+// _loadFromDisk so each section is independently readable and testable.
+
+function _parseState(stateRaw: unknown): AdminState {
+  const state = emptyState();
+  if (!stateRaw || typeof stateRaw !== "object" || Array.isArray(stateRaw)) return state;
+  const s = stateRaw as Record<string, unknown>;
+  if ("ceremony" in s) state.ceremony = (s["ceremony"] as AdminCeremonyState | null) ?? null;
+  if (Array.isArray(s["groups"])) state.groups = s["groups"] as AdminState["groups"];
+  if (Array.isArray(s["recipients"])) state.recipients = s["recipients"] as AdminState["recipients"];
+  if (Array.isArray(s["rotations"])) state.rotations = s["rotations"] as AdminState["rotations"];
+  if (Array.isArray(s["coupons"])) state.coupons = s["coupons"] as AdminState["coupons"];
+  if (Array.isArray(s["enrolments"])) state.enrolments = s["enrolments"] as AdminState["enrolments"];
+  if (Array.isArray(s["vaultLinks"])) state.vaultLinks = s["vaultLinks"] as AdminState["vaultLinks"];
+  return state;
+}
+
+function _parseClock(clockDoc: unknown): Map<string, number> {
+  const clock = new Map<string, number>();
+  if (!clockDoc || typeof clockDoc !== "object" || Array.isArray(clockDoc)) return clock;
+  for (const [did, etMap] of Object.entries(clockDoc as Record<string, unknown>)) {
+    if (!etMap || typeof etMap !== "object" || Array.isArray(etMap)) continue;
+    for (const [et, seq] of Object.entries(etMap as Record<string, unknown>)) {
+      const n = typeof seq === "number" ? seq : Number(seq);
+      if (Number.isFinite(n)) clock.set(`${did}${SEP}${et}`, Math.trunc(n));
+    }
+  }
+  return clock;
+}
+
+function _parseConflicts(conflictsRaw: unknown): ChainConflict[] {
+  const conflicts: ChainConflict[] = [];
+  if (!Array.isArray(conflictsRaw)) return conflicts;
+  for (const c of conflictsRaw) {
+    if (c && typeof c === "object" && (c as { type?: unknown }).type !== undefined) {
+      conflicts.push(c as ChainConflict);
+    }
+  }
+  return conflicts;
+}
+
+function _parseRowHashes(rhRaw: unknown): Set<string> {
+  const rowHashes = new Set<string>();
+  if (Array.isArray(rhRaw)) for (const rh of rhRaw) rowHashes.add(String(rh));
+  return rowHashes;
+}
+
+function _parseRevokedLeaves(revokedRaw: unknown): Map<string, string | null> {
+  const revokedLeaves = new Map<string, string | null>();
+  if (!Array.isArray(revokedRaw)) return revokedLeaves;
+  for (const e of revokedRaw) {
+    if (!e || typeof e !== "object") continue;
+    const r = e as Record<string, unknown>;
+    if (typeof r["group"] === "string" && typeof r["leaf_index"] === "number") {
+      revokedLeaves.set(
+        `${r["group"]}${SEP}${r["leaf_index"]}`,
+        typeof r["row_hash"] === "string" ? (r["row_hash"] as string) : null,
+      );
+    }
+  }
+  return revokedLeaves;
+}
+
+function _parseRotationsSeen(rotsRaw: unknown): Map<string, string> {
+  const rotationsSeen = new Map<string, string>();
+  if (!Array.isArray(rotsRaw)) return rotationsSeen;
+  for (const e of rotsRaw) {
+    if (!e || typeof e !== "object") continue;
+    const r = e as Record<string, unknown>;
+    if (typeof r["group"] === "string" && typeof r["generation"] === "number") {
+      rotationsSeen.set(
+        `${r["group"]}${SEP}${r["generation"]}`,
+        String(r["previous_kit_sha256"] ?? ""),
+      );
+    }
+  }
+  return rotationsSeen;
+}
+
+function _parseCoordToRowHash(coordsRaw: unknown): Map<string, string> {
+  const coordToRowHash = new Map<string, string>();
+  if (!Array.isArray(coordsRaw)) return coordToRowHash;
+  for (const e of coordsRaw) {
+    if (!e || typeof e !== "object") continue;
+    const r = e as Record<string, unknown>;
+    if (
+      typeof r["did"] === "string" &&
+      typeof r["event_type"] === "string" &&
+      typeof r["sequence"] === "number" &&
+      typeof r["row_hash"] === "string"
+    ) {
+      coordToRowHash.set(
+        `${r["did"]}${SEP}${r["event_type"]}${SEP}${r["sequence"]}`,
+        r["row_hash"] as string,
+      );
+    }
+  }
+  return coordToRowHash;
+}
+
 // ---------------------------------------------------------------------
 // AdminStateCache — Layer 2 (fs + log-tailing)
 // ---------------------------------------------------------------------
@@ -294,116 +397,19 @@ export class AdminStateCache {
     if (doc["version"] !== LKV_VERSION) return;
     if (doc["ceremony_id"] !== this.cfg.ceremonyId) return;
 
-    const state = emptyState();
-    const stateRaw = doc["state"];
-    if (stateRaw && typeof stateRaw === "object" && !Array.isArray(stateRaw)) {
-      const s = stateRaw as Record<string, unknown>;
-      if ("ceremony" in s) state.ceremony = (s["ceremony"] as AdminCeremonyState | null) ?? null;
-      if (Array.isArray(s["groups"])) state.groups = s["groups"] as AdminState["groups"];
-      if (Array.isArray(s["recipients"]))
-        state.recipients = s["recipients"] as AdminState["recipients"];
-      if (Array.isArray(s["rotations"]))
-        state.rotations = s["rotations"] as AdminState["rotations"];
-      if (Array.isArray(s["coupons"])) state.coupons = s["coupons"] as AdminState["coupons"];
-      if (Array.isArray(s["enrolments"]))
-        state.enrolments = s["enrolments"] as AdminState["enrolments"];
-      if (Array.isArray(s["vaultLinks"]))
-        state.vaultLinks = s["vaultLinks"] as AdminState["vaultLinks"];
-    }
-
-    const clock = new Map<string, number>();
-    const clockDoc = doc["clock"];
-    if (clockDoc && typeof clockDoc === "object" && !Array.isArray(clockDoc)) {
-      for (const [did, etMap] of Object.entries(clockDoc as Record<string, unknown>)) {
-        if (!etMap || typeof etMap !== "object" || Array.isArray(etMap)) continue;
-        for (const [et, seq] of Object.entries(etMap as Record<string, unknown>)) {
-          const n = typeof seq === "number" ? seq : Number(seq);
-          if (Number.isFinite(n)) clock.set(`${did}${SEP}${et}`, Math.trunc(n));
-        }
-      }
-    }
-
-    const headRowHash =
-      typeof doc["head_row_hash"] === "string" ? (doc["head_row_hash"] as string) : null;
     const offRaw = doc["at_offset"];
     this._atOffset = typeof offRaw === "number" ? offRaw : Number(offRaw) || 0;
 
-    const conflicts: ChainConflict[] = [];
-    const conflictsRaw = doc["head_conflicts"];
-    if (Array.isArray(conflictsRaw)) {
-      for (const c of conflictsRaw) {
-        if (c && typeof c === "object" && (c as { type?: unknown }).type !== undefined) {
-          conflicts.push(c as ChainConflict);
-        }
-      }
-    }
-
-    const rowHashes = new Set<string>();
-    const rhRaw = doc["_row_hashes"];
-    if (Array.isArray(rhRaw)) for (const rh of rhRaw) rowHashes.add(String(rh));
-
-    const revokedLeaves = new Map<string, string | null>();
-    const revokedRaw = doc["_revoked_leaves"];
-    if (Array.isArray(revokedRaw)) {
-      for (const e of revokedRaw) {
-        if (e && typeof e === "object") {
-          const r = e as Record<string, unknown>;
-          if (typeof r["group"] === "string" && typeof r["leaf_index"] === "number") {
-            revokedLeaves.set(
-              `${r["group"]}${SEP}${r["leaf_index"]}`,
-              typeof r["row_hash"] === "string" ? (r["row_hash"] as string) : null,
-            );
-          }
-        }
-      }
-    }
-
-    const rotationsSeen = new Map<string, string>();
-    const rotsRaw = doc["_rotations_seen"];
-    if (Array.isArray(rotsRaw)) {
-      for (const e of rotsRaw) {
-        if (e && typeof e === "object") {
-          const r = e as Record<string, unknown>;
-          if (typeof r["group"] === "string" && typeof r["generation"] === "number") {
-            rotationsSeen.set(
-              `${r["group"]}${SEP}${r["generation"]}`,
-              String(r["previous_kit_sha256"] ?? ""),
-            );
-          }
-        }
-      }
-    }
-
-    const coordToRowHash = new Map<string, string>();
-    const coordsRaw = doc["_coord_to_row_hash"];
-    if (Array.isArray(coordsRaw)) {
-      for (const e of coordsRaw) {
-        if (e && typeof e === "object") {
-          const r = e as Record<string, unknown>;
-          if (
-            typeof r["did"] === "string" &&
-            typeof r["event_type"] === "string" &&
-            typeof r["sequence"] === "number" &&
-            typeof r["row_hash"] === "string"
-          ) {
-            coordToRowHash.set(
-              `${r["did"]}${SEP}${r["event_type"]}${SEP}${r["sequence"]}`,
-              r["row_hash"] as string,
-            );
-          }
-        }
-      }
-    }
-
     this._reducer.reset({
-      state,
-      clock,
-      headRowHash,
-      conflicts,
-      rowHashes,
-      revokedLeaves,
-      rotationsSeen,
-      coordToRowHash,
+      state: _parseState(doc["state"]),
+      clock: _parseClock(doc["clock"]),
+      headRowHash:
+        typeof doc["head_row_hash"] === "string" ? (doc["head_row_hash"] as string) : null,
+      conflicts: _parseConflicts(doc["head_conflicts"]),
+      rowHashes: _parseRowHashes(doc["_row_hashes"]),
+      revokedLeaves: _parseRevokedLeaves(doc["_revoked_leaves"]),
+      rotationsSeen: _parseRotationsSeen(doc["_rotations_seen"]),
+      coordToRowHash: _parseCoordToRowHash(doc["_coord_to_row_hash"]),
     });
   }
 }
