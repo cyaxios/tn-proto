@@ -229,6 +229,71 @@ def _wrap_parse_errors(
 # ---------------------------------------------------------------------
 
 
+def _resolve_read_source() -> Any:
+    """Pick the session's read source. File wins when the ceremony's main
+    log exists on disk; otherwise the first handler that implements
+    ``reader()`` (e.g. Kafka). Returns ``None`` to use the default file
+    path — so existing file-backed ceremonies are entirely unaffected.
+    """
+    from pathlib import Path as _Path
+
+    from . import current_config
+    from .handlers.base import TNHandler
+
+    # File wins when a real main log exists — preserves all current behavior.
+    try:
+        lp = current_config().resolve_log_path()
+        if lp and _Path(lp).exists() and _Path(lp).stat().st_size > 0:
+            return None
+    except Exception:  # noqa: BLE001
+        pass
+
+    from .handlers.file import (
+        FileRotatingHandler,
+        FileTemplatedRotatingHandler,
+        FileTimedRotatingHandler,
+    )
+    _file_kinds = (
+        FileRotatingHandler,
+        FileTemplatedRotatingHandler,
+        FileTimedRotatingHandler,
+    )
+
+    import tn.logger as _lg
+    rt = getattr(_lg, "_runtime", None)
+    for h in list(getattr(rt, "handlers", []) or []):
+        # File handlers are the file path, already gated above by the
+        # log-exists check — skip them here. A NETWORK handler is a read
+        # source iff it overrides the base no-op reader().
+        if isinstance(h, _file_kinds):
+            continue
+        if type(h).reader is not TNHandler.reader:
+            return h
+    return None
+
+
+def _passes_selector_filter(
+    env: dict[str, Any],
+    selector: str | None,
+    filter: dict[str, Any] | None,
+) -> bool:
+    """Authoritative client-side gate. event_type is a public field; this
+    re-applies the selector + declarative filter regardless of whether the
+    source pushed them down."""
+    et = str(env.get("event_type", ""))
+    if selector is not None and et != selector:
+        return False
+    if filter:
+        lvl = str(env.get("level", ""))
+        if "event_type_in" in filter and et not in filter["event_type_in"]:
+            return False
+        if "event_type_prefix" in filter and not et.startswith(filter["event_type_prefix"]):
+            return False
+        if "level_in" in filter and lvl not in filter["level_in"]:
+            return False
+    return True
+
+
 @overload
 def read(
     *,
@@ -254,7 +319,10 @@ def read(
     on_skip: Callable[[dict[str, Any], str], None] | None = ...,
 ) -> _ReadIterator: ...
 def read(
+    selector: str | None = None,
     *,
+    filter: dict[str, Any] | None = None,
+    reader_options: dict[str, Any] | None = None,
     where: Callable[[Any], bool] | None = None,
     verify: bool | Literal["skip", "raise"] = False,
     raw: bool = False,
@@ -265,6 +333,20 @@ def read(
     on_skip: Callable[[dict[str, Any], str], None] | None = None,
 ) -> _ReadIterator:
     """Iterate attested log entries from the active ceremony.
+
+    ``selector`` is the primary, positional selector: an exact
+    ``event_type`` (no wildcards). ``None`` reads every event_type.
+
+    ``filter`` is a declarative selector dict (``event_type_in`` /
+    ``event_type_prefix`` / ``level_in``) applied as the authoritative
+    gate AND offered to the source handler as a pushdown hint.
+
+    ``reader_options`` is an opaque passthrough bag forwarded verbatim to
+    the underlying read source (e.g. a Kafka consumer's ``group_id`` /
+    ``offset`` / tuning). ``read`` never reads a key out of it. Ignored by
+    file sources. Source is auto-resolved from the session handlers:
+    a file source wins when present, else the first readable handler
+    (e.g. Kafka).
 
     Default mode yields :class:`Entry` instances — flat-shaped dicts
     with the six envelope basics (``timestamp``, ``event_type``,
@@ -450,6 +532,37 @@ def read(
                     verify_signatures=verify_sigs,
                 )
         triples = _triples_keybag()
+    elif log is None and _resolve_read_source() is not None:
+        # No explicit log, no file source available, but a readable network
+        # handler (e.g. Kafka) is configured. Pull sealed bytes from it and
+        # run them through the SAME keybag decrypt path as a file read.
+        from . import current_config
+        from .reader import _lines_with_keybag
+        src = _resolve_read_source()
+        try:
+            _ks = current_config().keystore
+        except RuntimeError:
+            _ks = None
+        verify_sigs = verify is not False
+
+        def _triples_handler() -> "Iterator[dict[str, Any]]":
+            lines = src.reader(reader_options, selection=selector, filter=filter)
+            if lines is None:
+                return
+            if _ks is None:
+                for _label, raw_line in lines:
+                    s = raw_line.strip()
+                    if not s:
+                        continue
+                    try:
+                        env = json.loads(s)
+                    except json.JSONDecodeError:
+                        continue
+                    yield {"envelope": env, "plaintext": {},
+                           "valid": {"signature": True, "chain": True}}
+                return
+            yield from _lines_with_keybag(lines, _ks, verify_signatures=verify_sigs)
+        triples = _triples_handler()
     else:
         from ._read_impl import _entry_in_current_run_raw, _read_raw_inner
         if log is None:
@@ -625,6 +738,10 @@ def read(
                             "continuing.",
                             exc_info=True,
                         )
+
+            # Authoritative selector + filter gate (public-field match).
+            if not _passes_selector_filter(r.get("envelope") or {}, selector, filter):
+                continue
 
             if raw:
                 envelope = r.get("envelope") or {}

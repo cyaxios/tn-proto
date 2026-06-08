@@ -152,29 +152,44 @@ class KafkaHandler(AsyncHandler):
     def resolved_address(self) -> str:
         return f"kafka://{self._bootstrap}/{self._topic_fixed}"
 
-    def reader(
-        self,
-        *,
-        group_id: str | None = None,
-        since: str = "earliest",
-    ):
-        # TODO: wire into tn.read() / tn.watch() via TNHandler.reader() base
-        # contract once base.py adds the method.  Until then, call directly
-        # from read_real.py or any consumer that needs the Kafka source.
+    # Kafka consumer keys forwarded verbatim from reader_options. Everything
+    # else in the bag is the user's raw kafka-python tuning — honest passthrough.
+    _CONSUMER_PASSTHROUGH = frozenset({
+        "group_id", "max_poll_records", "session_timeout_ms",
+        "fetch_min_bytes", "fetch_max_wait_ms", "consumer_timeout_ms",
+        "enable_auto_commit", "isolation_level",
+    })
+
+    def reader(self, options=None, *, selection=None, filter=None):
+        """Yield ``(label, line)`` pairs of sealed envelopes from the topic.
+
+        options    opaque passthrough bag -> the KafkaConsumer (group_id /
+                   offset / max_poll_records / …). Read verbatim; the only
+                   special key is ``offset`` -> ``auto_offset_reset``.
+        selection  exact event_type -> topic subscription (pushdown) when the
+                   topic is templated ``tn.{event_type}``.
+        filter     declarative hint; ``event_type_in`` narrows topics too.
+        """
         try:
             from kafka import KafkaConsumer
         except ImportError as exc:
             raise ImportError("reader() requires kafka-python — pip install kafka-python") from exc
 
+        opts = dict(options or {})
         kwargs: dict[str, Any] = dict(
             bootstrap_servers=self._bootstrap,
-            group_id=group_id or f"tn-reader-{self.name}",
-            auto_offset_reset=since,
-            enable_auto_commit=False,
-            consumer_timeout_ms=10000,
+            auto_offset_reset=opts.get("offset", "earliest"),
+            enable_auto_commit=bool(opts.get("group_id")),  # commit only when durable
+            consumer_timeout_ms=opts.get("consumer_timeout_ms", 10000),
         )
+        # group_id present -> durable resume; absent -> stateless replay.
+        if opts.get("group_id"):
+            kwargs["group_id"] = opts["group_id"]
+        # Forward the rest of the user's bag verbatim.
+        for k, v in opts.items():
+            if k in self._CONSUMER_PASSTHROUGH and k not in kwargs:
+                kwargs[k] = v
         if self._sasl:
-            # kafka-python uses sasl_mechanism (singular), not sasl.mechanisms
             kwargs.update(
                 security_protocol="SASL_SSL",
                 sasl_mechanism=self._sasl.get("mechanism", "PLAIN"),
@@ -182,12 +197,31 @@ class KafkaHandler(AsyncHandler):
                 sasl_plain_password=_resolve(self._sasl.get("pass", "")),
             )
 
-        consumer = KafkaConsumer(self._topic_fixed, **kwargs)
+        topics = self._topics_for(selection, filter or {})
+        consumer = KafkaConsumer(*topics, **kwargs)
         try:
             for msg in consumer:
-                yield msg.value  # raw bytes — same shape as a line from tn.ndjson
+                line = msg.value.decode("utf-8") if isinstance(msg.value, (bytes, bytearray)) else str(msg.value)
+                yield (f"kafka://{self._bootstrap}/{msg.topic}@{msg.offset}", line)
         finally:
             consumer.close()
+
+    def _topics_for(self, selection: str | None, filter: dict[str, Any]) -> list[str]:
+        """event_type selection -> concrete topic list (pushdown). No wildcards."""
+        tmpl = self._topic_fixed
+        if "{event_type}" not in tmpl:
+            return [tmpl]                                   # fixed firehose topic
+        if selection is not None:
+            return [tmpl.replace("{event_type}", selection)]
+        if filter.get("event_type_in"):
+            return [tmpl.replace("{event_type}", et) for et in filter["event_type_in"]]
+        # No selector and no membership filter: a templated topic needs SOME
+        # concrete name. Fall back to the literal template's prefix as a single
+        # topic is wrong — require the caller to name an event_type here.
+        raise ValueError(
+            "kafka reader: topic is templated 'tn.{event_type}' — pass a "
+            "selector (exact event_type) or filter={'event_type_in': [...]}"
+        )
 
     def _close_on_exit(self) -> None:
         if not self._closed:

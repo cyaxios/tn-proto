@@ -138,6 +138,18 @@ class FileRotatingHandler(SyncHandler):
         """File handlers dedup by resolved absolute path."""
         return str(self.path.resolve())
 
+    def reader(self, options=None, *, selection=None, filter=None):
+        """Yield ``(path:lineno, line)`` pairs from the log file. File is
+        the highest-priority read source. `options`/`selection`/`filter`
+        are accepted for the uniform contract but a file just streams the
+        whole log — `tn.read` applies selection/filter as the gate."""
+        path = self.path
+        if not path.exists():
+            return
+        with open(path, encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
+                yield (f"{path}:{lineno}", line)
+
 
 class FileTimedRotatingHandler(SyncHandler):
     """Time-based rotation. `when` follows stdlib conventions: 'midnight',

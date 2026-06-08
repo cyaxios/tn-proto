@@ -1,11 +1,12 @@
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
 
 import { DeviceKey, NodeRuntime } from "../src/index.js";
+import { createFreshCeremony } from "../src/runtime/node_runtime.js";
 import { BtnPublisher } from "../src/raw.js";
 
 function makeCeremony(): { yamlPath: string; cleanup: () => void } {
@@ -90,5 +91,28 @@ test("NodeRuntime seeds chain from existing log", () => {
     }
   } finally {
     cleanup();
+  }
+});
+
+test("createFreshCeremony does not serialize Windows drive paths into yaml", () => {
+  const dir = mkdtempSync(join(tmpdir(), "tn-portable-paths-"));
+  try {
+    const yamlPath = join(dir, "tn.yaml");
+    const yamlDrive = /^([A-Za-z]):/.exec(yamlPath)?.[1]?.toUpperCase();
+    const foreignDrive = yamlDrive === "C" ? "D" : "C";
+
+    createFreshCeremony(yamlPath, {
+      logPath: "C:/tn-portable/logs/tn.ndjson",
+      adminLogPath: `${foreignDrive}:/tn-portable/admin/admin.ndjson`,
+    });
+
+    const yaml = readFileSync(yamlPath, "utf8");
+    assert.doesNotMatch(yaml, /C:\//);
+    assert.doesNotMatch(yaml, /[A-Za-z]:\//);
+    assert.match(yaml, /admin_log_location: \.\/\.tn\/tn\/admin\/admin\.ndjson/);
+    assert.match(yaml, /logs:\n {2}path: \.\//);
+    assert.match(yaml, /handlers:\n- kind: file\.rotating[\s\S]*path: \.\//);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

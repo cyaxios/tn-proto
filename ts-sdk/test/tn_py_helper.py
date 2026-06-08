@@ -33,9 +33,13 @@ TN_SDK_PATH = HERE.parents[1] / "python"
 if str(TN_SDK_PATH) not in sys.path:
     sys.path.insert(0, str(TN_SDK_PATH))
 
-from tn.canonical import canonical_bytes  # noqa: E402
-from tn.chain import compute_row_hash  # noqa: E402
-from tn.signing import DeviceKey, signature_b64, signature_from_b64  # noqa: E402
+from tn.canonical import _canonical_bytes as canonical_bytes  # noqa: E402
+from tn.chain import _compute_row_hash as compute_row_hash  # noqa: E402
+from tn.signing import (  # noqa: E402
+    DeviceKey,
+    _signature_b64 as signature_b64,
+    _signature_from_b64 as signature_from_b64,
+)
 
 
 def seal() -> int:
@@ -47,7 +51,7 @@ def seal() -> int:
         seed = base64.b64decode(inp["seed_b64"])
         dk = DeviceKey.from_private_bytes(seed)
         rh = compute_row_hash(
-            did=dk.did,
+            device_identity=dk.did,
             timestamp=inp["timestamp"],
             event_id=inp["event_id"],
             event_type=inp["event_type"],
@@ -58,7 +62,7 @@ def seal() -> int:
         )
         sig = dk.sign(rh.encode("ascii"))
         env = {
-            "did": dk.did,
+            "device_identity": dk.did,
             "timestamp": inp["timestamp"],
             "event_id": inp["event_id"],
             "event_type": inp["event_type"],
@@ -81,7 +85,7 @@ def verify() -> int:
             continue
         env = json.loads(line)
         try:
-            required = ["did", "timestamp", "event_id", "event_type",
+            required = ["device_identity", "timestamp", "event_id", "event_type",
                         "level", "sequence", "prev_hash", "row_hash",
                         "signature"]
             for k in required:
@@ -97,7 +101,7 @@ def verify() -> int:
                 public_fields[k] = v
 
             recomputed = compute_row_hash(
-                did=env["did"],
+                device_identity=env["device_identity"],
                 timestamp=env["timestamp"],
                 event_id=env["event_id"],
                 event_type=env["event_type"],
@@ -110,12 +114,12 @@ def verify() -> int:
                 raise ValueError(f"row_hash mismatch: expected {recomputed}, got {env['row_hash']}")
 
             sig = signature_from_b64(env["signature"])
-            if not DeviceKey.verify(env["did"], env["row_hash"].encode("ascii"), sig):
+            if not DeviceKey.verify(env["device_identity"], env["row_hash"].encode("ascii"), sig):
                 raise ValueError("bad signature")
 
             out = {
                 "ok": True,
-                "did": env["did"],
+                "did": env["device_identity"],
                 "event_type": env["event_type"],
                 "event_id": env["event_id"],
                 "row_hash": env["row_hash"],

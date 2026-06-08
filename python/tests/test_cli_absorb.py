@@ -252,24 +252,66 @@ def test_re_absorb_is_idempotent(tmp_path: Path):
     assert "kind=kit_bundle accepted=0 skipped=1" in second.stdout, second.stdout
 
 
-def test_bundle_verb_mints_kit(tmp_path: Path):
-    """``tn bundle <did> <out>`` (``cmd_bundle``) mints a kit_bundle .tnpkg.
+def test_bundle_verb_round_trip_install_and_readback(tmp_path: Path):
+    """The headline round-trip again, but driven through ``tn bundle``.
 
     Was BROKEN: ``cmd_bundle`` read ``args.recipient_did`` but the argparse
     positional is registered as ``recipient_identity`` → AttributeError
-    before minting. Fixed to read ``args.recipient_identity``. The full
-    bundle->absorb->read round-trip is covered via ``add_recipient`` in
-    ``test_round_trip_install_and_readback``; this pins that the alternate
-    ``bundle`` shape mints at all.
+    before minting anything. Fixed to read ``args.recipient_identity``.
+
+    ``bundle <recipient> <out> --groups default`` is the alternate originate
+    shape (vs ``add_recipient <group> <recipient> --out``); both land on
+    ``bundle_for_recipient``. This mirrors
+    ``test_round_trip_install_and_readback`` end-to-end so the ``bundle``
+    verb is proven to mint a kit R can actually absorb and read back with —
+    not merely that a file appears on disk.
     """
     P = Party(tmp_path, "pub")
     R = Party(tmp_path, "rec")
+    assert P.did != R.did, "two isolated ceremonies must have distinct DIDs"
+
+    P.write_entry("payday", amount=4200)
+
+    # Negative complement: before R absorbs P's bundle it holds only its own
+    # group key, so the public event_type is visible but the field is not.
+    pre = R.cli("read", str(P.main_log), "--yaml", str(R.yaml))
+    assert pre.returncode == 0, pre.stderr
+    assert "payday" in pre.stdout, f"event_type should be visible:\n{pre.stdout}"
+    assert "amount=4200" not in pre.stdout, (
+        f"R must NOT decrypt P's payload before absorbing P's bundle:\n{pre.stdout}"
+    )
+
+    r_self_kit = R.keystore / "default.btn.mykit"
+    r_self_bytes = r_self_kit.read_bytes()
+
     kit = tmp_path / "bundle.tnpkg"
     res = P.cli(
         "bundle", R.did, str(kit), "--groups", "default", "--yaml", str(P.yaml)
     )
     assert res.returncode == 0, f"tn bundle failed:\n{res.stdout}\n{res.stderr}"
     assert kit.exists(), "bundle should have written the kit .tnpkg"
+    kit_bytes = _kit_blob_bytes(kit)
+
+    res = R.cli("absorb", str(kit), "--yaml", str(R.yaml))
+    assert res.returncode == 0, f"absorb failed:\n{res.stdout}\n{res.stderr}"
+    assert res.stderr == "", f"no stderr on the happy path:\n{res.stderr}"
+    m = re.search(r"\[tn absorb\] kind=kit_bundle accepted=(\d+) skipped=(\d+)", res.stdout)
+    assert m, f"receipt line missing:\n{res.stdout}"
+    assert int(m.group(1)) >= 1, f"expected accepted>=1:\n{res.stdout}"
+
+    # The bundle's group key really installed, with the kit's bytes.
+    assert r_self_kit.exists(), "default.btn.mykit missing after absorb"
+    assert r_self_kit.read_bytes() == kit_bytes, "installed kit != bundle blob bytes"
+    assert r_self_kit.read_bytes() != r_self_bytes, (
+        "absorb left R's own self-kit in place; the bundle's kit did not install"
+    )
+
+    # Load-bearing: R now decrypts P's entry.
+    post = R.cli("read", str(P.main_log), "--yaml", str(R.yaml))
+    assert post.returncode == 0, post.stderr
+    assert "amount=4200" in post.stdout, (
+        f"read-back failed: R should decrypt P's entry after bundle->absorb:\n{post.stdout}"
+    )
 
 
 def test_overwrite_with_backup_warn_block(tmp_path: Path):

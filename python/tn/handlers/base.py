@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from typing import Any
 
 from ..filters import Predicate, _compile_filter
@@ -56,6 +57,40 @@ class TNHandler(ABC):
         runtime treats it as having a unique address every time.
         Subclasses with a meaningful sink (file, stdout, etc.)
         should override and return a stable string."""
+        return None
+
+    def reader(
+        self,
+        options: dict[str, Any] | None = None,
+        *,
+        selection: str | None = None,
+        filter: dict[str, Any] | None = None,
+    ) -> "Iterator[tuple[str, str]] | None":
+        """Yield ``(source_label, raw_line)`` pairs of sealed envelopes
+        from this handler's sink, or ``None`` if it is write-only.
+
+        This is the read-side twin of ``emit`` — it lets ``tn.read()``
+        pull a ceremony's log back out of whatever sink wrote it, without
+        the read path knowing the handler type. ``tn.read`` picks a
+        readable handler (file > network), calls ``reader()``, and runs
+        the result through the same decrypt/verify pipeline as a file.
+
+        Parameters
+        ----------
+        options
+            Opaque passthrough bag — forwarded verbatim to the underlying
+            reader (e.g. a Kafka consumer's ``group_id`` / ``offset`` /
+            tuning). ``tn.read`` never reads a key out of it.
+        selection
+            Pushdown hint: the exact ``event_type`` the caller wants. A
+            handler MAY use it to narrow what it fetches (Kafka: topic
+            subscription). Advisory — ``tn.read`` re-applies it as the gate.
+        filter
+            Declarative pushdown hint (``event_type_in`` / ``level_in`` /
+            ``event_type_prefix``). Same advisory semantics as ``selection``.
+
+        Default: ``None`` — write-only handler, not a read source.
+        """
         return None
 
 

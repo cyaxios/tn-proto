@@ -827,9 +827,9 @@ export class Tn {
     return this._rt.config;
   }
 
-  /** Always false — Tn wraps NodeRuntime (pure-TS), not a Rust WASM runtime. */
+  /** True when this BTN runtime routes its public write path through Rust/WASM. */
   usingRust(): boolean {
-    return false;
+    return this._rt.usingRust();
   }
 
   /**

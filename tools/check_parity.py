@@ -4,22 +4,49 @@ CI runs:    python tools/check_parity.py
 Exit 0 if every public Python verb (from `tn.__all__` and tn.admin/pkg/vault
 sub-package __all__'s) and every TS export from `@tnproto/sdk`'s main entry
 have a row in the parity doc; non-zero with a list of unmatched names
-otherwise.
+otherwise. The check also audits the parseable TypeScript `Tn` class surface
+and the user-facing namespace classes (admin/pkg/vault/agents/handlers).
 
 Symbols intentionally absent from the parity table can be added to
 `KNOWN_OMISSIONS` below — typically internal helpers or pure types.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 PARITY_DOC = ROOT / "docs" / "sdk-parity.md"
 TS_INDEX = ROOT / "ts-sdk" / "src" / "index.ts"
+TS_TN = ROOT / "ts-sdk" / "src" / "tn.ts"
 PY_INIT = ROOT / "python" / "tn" / "__init__.py"
+TS_NAMESPACE_FILES = {
+    "admin": ROOT / "ts-sdk" / "src" / "admin" / "index.ts",
+    "pkg": ROOT / "ts-sdk" / "src" / "pkg" / "index.ts",
+    "vault": ROOT / "ts-sdk" / "src" / "vault" / "index.ts",
+    "agents": ROOT / "ts-sdk" / "src" / "agents" / "index.ts",
+    "handlers": ROOT / "ts-sdk" / "src" / "handlers" / "namespace.ts",
+}
+
+
+class SurfaceRow(NamedTuple):
+    surface: str
+    qualified: str
+    name: str
+    documented: bool
+    omitted: bool
+
+    @property
+    def status(self) -> str:
+        if self.documented:
+            return "ok"
+        if self.omitted:
+            return "omitted"
+        return "missing"
 
 # Symbols documented elsewhere or intentionally not requiring a parity row.
 # The parity doc focuses on user-facing verbs (tn.info, tn.admin.addRecipient,
@@ -148,6 +175,16 @@ KNOWN_OMISSIONS = {
     "absorbBootstrap", "isBootstrapKind",
 
     # ------------------------------------------------------------------
+    # TS-only class helpers/properties. These are public conveniences for
+    # tests, scratch runtimes, and inspecting a Tn handle, but they are
+    # not cross-language verbs. Keep them qualified so the parity gate
+    # still checks real module/namespace verbs with similar names.
+    # ------------------------------------------------------------------
+    "Tn.clearStrict", "Tn.isStrict",
+    "tn.handlers", "tn.isDefault", "tn.lastAbsorbReceipt",
+    "tn.logPath", "tn.name", "tn.yamlPath",
+
+    # ------------------------------------------------------------------
     # Sealed-bundle absorb (TS-only entry; parallels Python tn.absorb's
     # internal sealed-bundle path that runs inside the same verb). NEW
     # in 0.4.3a1 — second-release encrypted-kit-bundle work.
@@ -266,6 +303,88 @@ def ts_public_symbols() -> set[str]:
     return out
 
 
+def _strip_ts_comments(text: str) -> str:
+    """Remove TS comments while preserving line count for line-based parsing."""
+    text = re.sub(
+        r"/\*.*?\*/",
+        lambda m: "\n" * m.group(0).count("\n"),
+        text,
+        flags=re.DOTALL,
+    )
+    return re.sub(r"//.*?$", "", text, flags=re.MULTILINE)
+
+
+def _class_tail(path: Path, class_name: str) -> str:
+    text = _strip_ts_comments(path.read_text(encoding="utf-8"))
+    m = re.search(rf"\bclass\s+{re.escape(class_name)}\b", text)
+    if not m:
+        return ""
+    return text[m.end():]
+
+
+def _parse_ts_class_members(path: Path, class_name: str) -> dict[str, set[str]]:
+    """Parse public members declared directly on a TypeScript class.
+
+    This is intentionally line-based: the SDK's public class members are
+    declared at two-space indentation, while method bodies are indented
+    further. That avoids brittle brace matching in template strings and keeps
+    this parser focused on the surface shape we need for parity auditing.
+    """
+    static_methods: set[str] = set()
+    instance_methods: set[str] = set()
+    properties: set[str] = set()
+
+    for raw in _class_tail(path, class_name).splitlines():
+        if not raw.startswith("  ") or raw.startswith("    "):
+            continue
+        line = raw.strip()
+        if not line:
+            continue
+        if re.match(r"^(?:private|protected|constructor)\b", line):
+            continue
+
+        getter = re.match(r"^(?:(static)\s+)?get\s+([A-Za-z_]\w*)\s*[:(]", line)
+        if getter:
+            # Public getters are properties from the consumer's perspective.
+            properties.add(getter.group(2))
+            continue
+
+        method = re.match(
+            r"^(?:(static)\s+)?(?:async\s+)?(?:\*\s*)?"
+            r"([A-Za-z_]\w*)\s*(?:<[^({;]*>)?\(",
+            line,
+        )
+        if method:
+            target = static_methods if method.group(1) else instance_methods
+            target.add(method.group(2))
+            continue
+
+        prop = re.match(r"^(?:readonly\s+)?([A-Za-z_]\w*)[!?]?:\s*", line)
+        if prop:
+            properties.add(prop.group(1))
+
+    return {
+        "static_methods": static_methods,
+        "instance_methods": instance_methods,
+        "properties": properties,
+    }
+
+
+def ts_tn_class_members() -> dict[str, set[str]]:
+    return _parse_ts_class_members(TS_TN, "Tn")
+
+
+def ts_namespace_methods() -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for namespace, path in TS_NAMESPACE_FILES.items():
+        class_name = f"{namespace.capitalize()}Namespace"
+        if namespace == "pkg":
+            class_name = "PkgNamespace"
+        members = _parse_ts_class_members(path, class_name)
+        out[namespace] = members["instance_methods"]
+    return out
+
+
 def parity_doc_symbols() -> set[str]:
     """Pull every backtick-quoted token from the parity doc."""
     text = PARITY_DOC.read_text(encoding="utf-8")
@@ -284,18 +403,230 @@ def parity_doc_symbols() -> set[str]:
     return out
 
 
-def main() -> int:
+def parity_doc_surface_tokens() -> set[str]:
+    """Return qualified surface tokens from docs/sdk-parity.md.
+
+    `parity_doc_symbols()` keeps legacy broad matching by leaf token. The
+    matrix uses this stricter normalized set so `tn.admin.rotate` is not
+    treated as documented merely because some unrelated row contains `rotate`.
+    """
+    text = PARITY_DOC.read_text(encoding="utf-8")
+    out: set[str] = set()
+    for m in re.finditer(r"`([^`]+)`", text):
+        token = re.sub(r"^(?:await|async)\s+", "", m.group(1).strip())
+        for q in re.finditer(r"\b(?:tn|Tn)(?:\.[A-Za-z_]\w*)+\b", token):
+            out.add(q.group(0))
+        bare_call = re.match(r"^([A-Za-z_]\w*)\s*(?:\(|$)", token)
+        if bare_call:
+            out.add(bare_call.group(1))
+    return out
+
+
+SURFACE_ORDER = {
+    "python.module": 0,
+    "ts.module": 1,
+    "ts.Tn.static": 2,
+    "ts.Tn.instance": 3,
+    "ts.Tn.property": 4,
+    "ts.namespace.admin": 5,
+    "ts.namespace.pkg": 6,
+    "ts.namespace.vault": 7,
+    "ts.namespace.agents": 8,
+    "ts.namespace.handlers": 9,
+}
+
+
+def _surface_sort_key(row: SurfaceRow) -> tuple[int, str]:
+    return (SURFACE_ORDER.get(row.surface, 99), row.qualified)
+
+
+def _is_documented(
+    *,
+    surface: str,
+    qualified: str,
+    name: str,
+    documented: set[str],
+    legacy_documented: set[str],
+) -> bool:
+    if surface in {"python.module", "ts.module"}:
+        return qualified in documented or name in documented or name in legacy_documented
+    return qualified in documented
+
+
+def _surface_row(
+    surface: str,
+    qualified: str,
+    name: str,
+    *,
+    documented: set[str],
+    legacy_documented: set[str],
+    omissions: set[str],
+) -> SurfaceRow:
+    return SurfaceRow(
+        surface=surface,
+        qualified=qualified,
+        name=name,
+        documented=_is_documented(
+            surface=surface,
+            qualified=qualified,
+            name=name,
+            documented=documented,
+            legacy_documented=legacy_documented,
+        ),
+        omitted=name in omissions or qualified in omissions,
+    )
+
+
+def surface_matrix_rows(
+    *,
+    documented: set[str] | None = None,
+    legacy_documented: set[str] | None = None,
+    omissions: set[str] | None = None,
+) -> list[SurfaceRow]:
+    documented = documented if documented is not None else parity_doc_surface_tokens()
+    legacy_documented = legacy_documented if legacy_documented is not None else parity_doc_symbols()
+    omissions = omissions if omissions is not None else KNOWN_OMISSIONS
+
+    rows: list[SurfaceRow] = []
+    for name in sorted(python_public_symbols()):
+        rows.append(_surface_row(
+            "python.module",
+            f"tn.{name}",
+            name,
+            documented=documented,
+            legacy_documented=legacy_documented,
+            omissions=omissions,
+        ))
+    for name in sorted(ts_public_symbols()):
+        rows.append(_surface_row(
+            "ts.module",
+            name,
+            name,
+            documented=documented,
+            legacy_documented=legacy_documented,
+            omissions=omissions,
+        ))
+
+    tn_members = ts_tn_class_members()
+    for name in sorted(tn_members["static_methods"]):
+        rows.append(_surface_row(
+            "ts.Tn.static",
+            f"Tn.{name}",
+            name,
+            documented=documented,
+            legacy_documented=legacy_documented,
+            omissions=omissions,
+        ))
+    for name in sorted(tn_members["instance_methods"]):
+        rows.append(_surface_row(
+            "ts.Tn.instance",
+            f"tn.{name}",
+            name,
+            documented=documented,
+            legacy_documented=legacy_documented,
+            omissions=omissions,
+        ))
+    for name in sorted(tn_members["properties"]):
+        rows.append(_surface_row(
+            "ts.Tn.property",
+            f"tn.{name}",
+            name,
+            documented=documented,
+            legacy_documented=legacy_documented,
+            omissions=omissions,
+        ))
+    for namespace, methods in sorted(ts_namespace_methods().items()):
+        for name in sorted(methods):
+            rows.append(_surface_row(
+                f"ts.namespace.{namespace}",
+                f"tn.{namespace}.{name}",
+                name,
+                documented=documented,
+                legacy_documented=legacy_documented,
+                omissions=omissions,
+            ))
+    return sorted(rows, key=_surface_sort_key)
+
+
+def format_surface_matrix(rows: list[SurfaceRow]) -> str:
+    if not rows:
+        return "(no rows)"
+    headers = ("surface", "symbol", "documented", "omitted", "status")
+    data = [
+        (
+            row.surface,
+            row.qualified,
+            "yes" if row.documented else "no",
+            "yes" if row.omitted else "no",
+            row.status,
+        )
+        for row in rows
+    ]
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in data))
+        for i in range(len(headers))
+    ]
+    lines = [
+        "  ".join(headers[i].ljust(widths[i]) for i in range(len(headers))),
+        "  ".join("-" * widths[i] for i in range(len(headers))),
+    ]
+    lines.extend(
+        "  ".join(row[i].ljust(widths[i]) for i in range(len(headers)))
+        for row in data
+    )
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--matrix",
+        action="store_true",
+        help="print the full deterministic surface/documentation matrix",
+    )
+    args = parser.parse_args(argv)
+
     py = python_public_symbols()
     ts = ts_public_symbols()
-    documented = parity_doc_symbols() | KNOWN_OMISSIONS
+    doc_symbols = parity_doc_symbols()
+    documented = doc_symbols | KNOWN_OMISSIONS
 
     missing_py = sorted(py - documented)
     missing_ts = sorted(ts - documented)
+    rows = surface_matrix_rows(
+        documented=parity_doc_surface_tokens(),
+        legacy_documented=doc_symbols,
+        omissions=KNOWN_OMISSIONS,
+    )
+    missing_surface = [
+        row
+        for row in rows
+        if row.surface not in {"python.module", "ts.module"}
+        and not row.documented
+        and not row.omitted
+    ]
 
-    if not missing_py and not missing_ts:
+    if args.matrix:
+        print("Surface matrix:")
+        print(format_surface_matrix(rows))
+        print()
+
+    if not missing_py and not missing_ts and not missing_surface:
+        tn_members = ts_tn_class_members()
+        namespaces = ts_namespace_methods()
         print("parity: ok")
         print(f"  Python public symbols: {len(py)}")
         print(f"  TS public exports:     {len(ts)}")
+        print(
+            "  TS Tn class surface:   "
+            f"{len(tn_members['static_methods'])} static, "
+            f"{len(tn_members['instance_methods'])} instance, "
+            f"{len(tn_members['properties'])} properties"
+        )
+        print(
+            "  TS namespace methods:  "
+            f"{sum(len(v) for v in namespaces.values())}"
+        )
         print(f"  documented tokens:     {len(documented - KNOWN_OMISSIONS)} (+{len(KNOWN_OMISSIONS)} omissions)")
         return 0
 
@@ -307,9 +638,14 @@ def main() -> int:
         print(f"Missing TS exports in {PARITY_DOC.name}:")
         for n in missing_ts:
             print(f"  - {n}")
+    if missing_surface:
+        print(f"Missing TS class/namespace surfaces in {PARITY_DOC.name}:")
+        print(format_surface_matrix(missing_surface))
     print()
     print("Either add a row to docs/sdk-parity.md or, for genuinely-internal")
     print("symbols, add to KNOWN_OMISSIONS in tools/check_parity.py.")
+    if not args.matrix:
+        print("Run `python tools/check_parity.py --matrix` for the full surface matrix.")
     return 1
 
 

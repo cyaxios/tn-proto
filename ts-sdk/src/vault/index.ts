@@ -17,6 +17,9 @@ export class VaultNamespace {
   }
 
   async link(vaultDid: string, projectId: string): Promise<EmitReceipt> {
+    if (typeof this._rt.vaultLink === "function") {
+      return this._rt.vaultLink(vaultDid, projectId);
+    }
     return this._rt.emit("info", "tn.vault.linked", this._merge({
       vault_identity: vaultDid,
       project_id: projectId,
@@ -25,6 +28,9 @@ export class VaultNamespace {
   }
 
   async unlink(vaultDid: string, projectId: string, reason?: string): Promise<EmitReceipt> {
+    if (typeof this._rt.vaultUnlink === "function") {
+      return this._rt.vaultUnlink(vaultDid, projectId, reason);
+    }
     const fields: Record<string, unknown> = {
       vault_identity: vaultDid,
       project_id: projectId,

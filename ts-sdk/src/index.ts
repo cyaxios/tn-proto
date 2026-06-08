@@ -19,7 +19,7 @@ export * from "./core/chain.js";
 export * from "./core/envelope.js";
 export * from "./core/indexing.js";
 export * from "./core/signing.js";
-export * as admin from "./core/admin/catalog.js";
+export * as adminCatalog from "./core/admin/catalog.js";
 export * as primitives from "./core/primitives.js";
 export { NodeRuntime } from "./runtime/node_runtime.js";
 export type { ReadEntry } from "./runtime/node_runtime.js";
@@ -231,9 +231,30 @@ export {
 // changing the `Tn` class.
 // ---------------------------------------------------------------------------
 
-import type { EmitReceipt, Entry as _Entry, ReadOptions, TnInitOptions } from "./tn.js";
+import type {
+  EmitReceipt,
+  Entry as _Entry,
+  ReadOptions,
+  TnInitOptions,
+  WatchOptions,
+} from "./tn.js";
 
 let _defaultTn: _Tn | null = null;
+
+type DefaultNamespace = "admin" | "pkg" | "vault" | "agents" | "handlers";
+
+function _defaultNamespace<K extends DefaultNamespace>(name: K): _Tn[K] {
+  return new Proxy(Object.create(null), {
+    get(_target, prop) {
+      const namespace = _requireDefault(name)[name] as object;
+      const value = Reflect.get(namespace, prop, namespace);
+      return typeof value === "function" ? value.bind(namespace) : value;
+    },
+    has(_target, prop) {
+      return prop in (_requireDefault(name)[name] as object);
+    },
+  }) as _Tn[K];
+}
 
 /** Internal — for the regression suite and any future test that needs
  *  to detect "did `tn.init()` succeed yet" without touching the class. */
@@ -266,6 +287,27 @@ export async function init(yamlPath?: string, opts?: TnInitOptions): Promise<_Tn
   _defaultTn = await _Tn.init(yamlPath, opts);
   return _defaultTn;
 }
+
+/** Get-or-create a named ceremony handle. Mirrors Python `tn.use(name)`.
+ *  This returns the handle without rebinding the module-level default. */
+export function use(
+  name = "default",
+  opts?: TnInitOptions & { projectDir?: string; profile?: string },
+): Promise<_Tn> {
+  return _Tn.use(name, opts);
+}
+
+/** List ceremony names on disk for `projectDir` (default: cwd). */
+export const listCeremonies: typeof _Tn.listCeremonies = _Tn.listCeremonies.bind(_Tn);
+export const list_ceremonies = listCeremonies;
+
+/** Runtime default-ceremony namespaces. Low-level admin catalog helpers
+ *  remain available as `adminCatalog`. */
+export const admin = _defaultNamespace("admin");
+export const pkg = _defaultNamespace("pkg");
+export const vault = _defaultNamespace("vault");
+export const agents = _defaultNamespace("agents");
+export const handlers = _defaultNamespace("handlers");
 
 /** Severity-less attested event. Mirrors Python `tn.log(...)`. */
 export function log(
@@ -316,6 +358,11 @@ export function read(opts?: ReadOptions): IterableIterator<_Entry | Record<strin
   return _requireDefault("read").read(opts);
 }
 
+/** Tail entries from the default ceremony. Mirrors Python `tn.watch()`. */
+export function watch(opts?: WatchOptions): AsyncIterableIterator<_Entry | Record<string, unknown>> {
+  return _requireDefault("watch").watch(opts);
+}
+
 /** Flush handlers and release the default ceremony. Mirrors Python
  *  `tn.flush_and_close()`. Safe to call multiple times. */
 export async function close(): Promise<void> {
@@ -335,12 +382,14 @@ export const flush_and_close = close;
 export function usingRust(): boolean {
   return _requireDefault("usingRust").usingRust();
 }
+export const using_rust = usingRust;
 
 /** Return the default ceremony's resolved config. Mirrors Python
  *  `tn.current_config()`. */
 export function config(): ReturnType<_Tn["config"]> {
   return _requireDefault("config").config();
 }
+export const current_config = config;
 
 /** Default-ceremony context functions — mirror Python `tn.set_context`,
  *  etc. All no-op if init hasn't been called yet (rather than throwing)
@@ -349,17 +398,26 @@ export function setContext(fields: Record<string, unknown>): void {
   if (_defaultTn === null) return;
   _defaultTn.setContext(fields);
 }
+export const set_context = setContext;
 
 export function updateContext(fields: Record<string, unknown>): void {
   if (_defaultTn === null) return;
   _defaultTn.updateContext(fields);
 }
+export const update_context = updateContext;
 
 export function clearContext(): void {
   if (_defaultTn === null) return;
   _defaultTn.clearContext();
 }
+export const clear_context = clearContext;
 
 export function getContext(): Record<string, unknown> {
   return _defaultTn === null ? {} : _defaultTn.getContext();
+}
+export const get_context = getContext;
+
+/** Block-scoped default context. Mirrors Python `with tn.scope(...)`. */
+export function scope<T>(fields: Record<string, unknown>, body: () => T): T {
+  return _requireDefault("scope").scope(fields, body);
 }

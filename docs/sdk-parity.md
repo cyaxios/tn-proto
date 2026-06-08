@@ -20,6 +20,7 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 |--------|------|--------|-------|
 | `tn.init(yaml_path?, ...)` | `await Tn.init(yamlPath?, opts?)` | ✓ | TS is async to future-proof bootstrap; Python is sync. Same ceremony-discovery semantics on both. |
 | `tn.use(name?, profile?, ...)` | `await Tn.use(name, opts?)` | ✓ | Get-or-create a multi-ceremony handle by registry name. TS interns by `(projectDir, name)`; Python interns by name. NEW in 0.3.0a4. `Tn.openCeremony` is a deprecated alias on the TS side. |
+| `tn.session()` | `await Tn.ephemeral(opts?)` | ✓ | Temporary local ceremony for tests/scratch work. TS names this `ephemeral`; Python exposes it as `session`. |
 | `tn.list_ceremonies()` | `Tn.listCeremonies(projectDir?)` | ✓ | Return ceremony names registered/found under `.tn/<name>/`. Sync on both. NEW in 0.3.0a4. |
 | `tn.flush_and_close()` | `await tn.close()` | ✓ | TS async; Python sync. |
 | `tn.log(event_type, **fields)` | `tn.log(eventType, fields?)` | ✓ | Sync on both. |
@@ -69,6 +70,7 @@ Each row gives the Python form, the TS form, a status marker, and notes.
 | `tn.admin.ensure_group(group, ...)` | `await tn.admin.ensureGroup(group, opts?)` | ⚠ | Python rewrites yaml on first call; TS only emits the attested event (no yaml-write). |
 | `tn.admin.set_link_state(state)` | `await tn.vault.setLinkState(state)` | ⊝ | TS: stub-throws ("yaml-write not yet ported"). Python mutates `ceremony.mode` in yaml. |
 | `tn.admin.recipients(group)` | `tn.admin.recipients(group, opts?)` | ✓ | Sync on both. Active-first sort. |
+| `tn.admin.revoked_count(group)` | `tn.admin.revokedCount(group)` | ✓ | Sync on both. BTN revoked-recipient count for the group. |
 | `tn.admin.state(group?)` | `tn.admin.state(group?)` | ✓ | Sync. Both auto-derive `ceremony` from config when cache hasn't seen `tn.ceremony.init`. |
 | `tn.admin.cache()` | `tn.admin.cache()` | ✓ | Sync. Returns `AdminStateCache` instance. |
 

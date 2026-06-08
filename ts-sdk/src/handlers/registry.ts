@@ -10,8 +10,9 @@
 //   fs.scan             FsScanHandler
 //   file.rotating       FileHandler (size-based rotation; max_bytes + backup_count)
 //   otel                OpenTelemetryHandler (host injects OtelLogger via adapters)
+//   kafka               KafkaHandler (optional `kafkajs` dep; Kafka/Redpanda/Confluent)
 //
-// Not yet ported from Python: file.timed_rotating, kafka, delta, s3.
+// Not yet ported from Python: file.timed_rotating, delta, s3.
 // Tracked as follow-up work; use the corresponding Python handler in
 // the meantime, or add via `tn.handlers.add(new FileHandler(...))`
 // programmatically.
@@ -31,6 +32,7 @@ import {
 } from "./vault_pull.js";
 import { VaultPushHandler, type VaultPostClient } from "./vault_push.js";
 import { TnFirehoseHandler } from "./firehose.js";
+import { KafkaHandler, type KafkaSasl } from "./kafka.js";
 
 /** Adapters injected by the host so handlers can build / absorb / POST without
  * a hard dependency on TNClient (avoids a cyclic import). */
@@ -256,6 +258,35 @@ export function buildHandlers(
       };
       if (fhFilter !== undefined) fhOpts.filter = fhFilter;
       out.push(new TnFirehoseHandler(name, fhOpts));
+      continue;
+    }
+    if (kind === "kafka") {
+      // Kafka / Redpanda / Confluent fan-out. Optional `kafkajs` dep.
+      // Mirrors python/tn/handlers/kafka.py. Credentials resolve from
+      // env:NAME at construction (see KafkaSasl).
+      const bootstrap = requireStr(raw, "bootstrap", "kafka");
+      const topic = requireStr(raw, "topic", "kafka");
+      const kOutbox = join(yamlDir, ".tn", "outbox", `kafka_${name}`);
+      const kOpts: ConstructorParameters<typeof KafkaHandler>[1] = {
+        outboxDir: kOutbox,
+        bootstrap,
+        topic,
+      };
+      const saslRaw = raw["sasl"];
+      if (saslRaw != null && typeof saslRaw === "object" && !Array.isArray(saslRaw)) {
+        const s = saslRaw as Record<string, unknown>;
+        kOpts.sasl = {
+          mechanism: typeof s["mechanism"] === "string" ? s["mechanism"] : undefined,
+          user: typeof s["user"] === "string" ? s["user"] : undefined,
+          pass: typeof s["pass"] === "string" ? s["pass"] : undefined,
+        } as KafkaSasl;
+      }
+      if (typeof raw["client_id"] === "string") kOpts.clientId = raw["client_id"];
+      if (typeof raw["compression_type"] === "string") kOpts.compressionType = raw["compression_type"];
+      if (typeof raw["acks"] === "string") kOpts.acks = raw["acks"];
+      const kFilter = parseFilter(raw["filter"]);
+      if (kFilter !== undefined) kOpts.filter = kFilter;
+      out.push(new KafkaHandler(name, kOpts));
       continue;
     }
     if (kind === "fs.drop") {

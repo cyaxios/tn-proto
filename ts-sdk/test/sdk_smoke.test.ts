@@ -5,7 +5,7 @@ import { test } from "node:test";
 import {
   DeviceKey,
   ZERO_HASH,
-  admin,
+  adminCatalog as admin,
   asDid,
   buildEnvelopeLine,
   canonicalize,

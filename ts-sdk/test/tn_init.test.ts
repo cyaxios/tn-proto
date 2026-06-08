@@ -13,6 +13,17 @@ test("Tn.ephemeral returns a working instance", async () => {
   }
 });
 
+test("Tn.usingRust reports the wasm-backed emit path before and after lazy attach", async () => {
+  const tn = await Tn.ephemeral({ stdout: false });
+  try {
+    assert.equal(tn.usingRust(), true);
+    tn.info("using_rust.test", { ok: 1 });
+    assert.equal(tn.usingRust(), true);
+  } finally {
+    await tn.close();
+  }
+});
+
 test("Tn.setLevel filters emits below threshold", () => {
   Tn.setLevel("info");
   try {

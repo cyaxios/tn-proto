@@ -78,6 +78,32 @@ export class Identity {
     this._raw = args.raw;
   }
 
+  /** Path this identity was loaded from. Mirrors Python's identity_path. */
+  get path(): string { return this._path; }
+
+  /**
+   * Ceremony-mode preference. Mirrors Python Identity.prefs.default_new_ceremony_mode.
+   * Defaults to "local" if not present in the file.
+   */
+  get prefs(): { defaultNewCeremonyMode: string } {
+    const p = this._raw["prefs"] as Record<string, unknown> | undefined;
+    return {
+      defaultNewCeremonyMode:
+        typeof p?.["default_new_ceremony_mode"] === "string"
+          ? (p["default_new_ceremony_mode"] as string)
+          : "local",
+    };
+  }
+
+  /**
+   * Version counter for account-pulled prefs. Mirrors Python Identity.prefs_version.
+   * Defaults to 0 if not present.
+   */
+  get prefsVersion(): number {
+    const v = this._raw["prefs_version"];
+    return typeof v === "number" ? v : 0;
+  }
+
   /** Build a VaultIdentity-compatible DeviceKey from the device seed. */
   deviceKey(): DeviceKey {
     return DeviceKey.fromSeed(this.seed);

@@ -309,64 +309,88 @@ def read_with_keybag(
     "use only this kit" override (the ``as_recipient=`` kwarg on
     ``tn.read``).
     """
+    with open(log_path, encoding="utf-8") as f:
+        # `enumerate` lines so the source label in errors keeps the path.
+        def _labelled() -> Iterator[tuple[str, str]]:
+            for lineno, line in enumerate(f, 1):
+                yield (f"{log_path}:{lineno}", line)
+        yield from _lines_with_keybag(
+            _labelled(), keystore_dir, verify_signatures=verify_signatures
+        )
+
+
+def _lines_with_keybag(
+    lines: Iterator[tuple[str, str]],
+    keystore_dir: str | Path,
+    *,
+    verify_signatures: bool = True,
+) -> Iterator[dict[str, Any]]:
+    """Decrypt an iterator of ``(source_label, raw_line)`` pairs against the
+    key bag in ``keystore_dir``, yielding ``{envelope, plaintext, valid}``
+    triples — the exact per-line core of :func:`read_with_keybag`.
+
+    Source-agnostic: a file reader feeds ``(path:lineno, line)`` pairs; a
+    Kafka handler feeds ``(kafka://…@offset, line)`` pairs. The decrypt,
+    chain check, and signature verify are identical regardless of where the
+    bytes came from.
+    """
     keystore_path = Path(keystore_dir)
     bag = _discover_keybag_ciphers(keystore_path)
     prev_hash_by_event: dict[str, str] = {}
 
-    with open(log_path, encoding="utf-8") as f:
-        for lineno, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
+    for label, raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            env = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{label}: invalid JSON: {e}") from e
+
+        event_type = env["event_type"]
+        last = prev_hash_by_event.get(event_type)
+        chain_ok = (last is None) or (env["prev_hash"] == last)
+        prev_hash_by_event[event_type] = env["row_hash"]
+
+        # Walk every group block in the envelope; try the matching
+        # cipher from the bag. Groups we don't have a kit for stay
+        # silent (no $no_read_key entry — matches what an outside
+        # observer would see).
+        plaintext: dict[str, dict[str, Any]] = {}
+        for key, block in env.items():
+            if not isinstance(block, dict) or "ciphertext" not in block:
+                continue
+            cipher = bag.get(key)
+            if cipher is None:
                 continue
             try:
-                env = json.loads(line)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"{log_path}:{lineno}: invalid JSON: {e}") from e
+                ct_bytes = base64.b64decode(block["ciphertext"])
+                pt = cipher.decrypt(ct_bytes)
+                plaintext[key] = json.loads(pt.decode("utf-8"))
+            except _cipher.NotARecipientError:
+                plaintext[key] = {"$no_read_key": True}
+            except Exception:  # noqa: BLE001 — bad ciphertext doesn't abort the stream
+                plaintext[key] = {"$decrypt_error": True}
 
-            event_type = env["event_type"]
-            last = prev_hash_by_event.get(event_type)
-            chain_ok = (last is None) or (env["prev_hash"] == last)
-            prev_hash_by_event[event_type] = env["row_hash"]
+        sig_ok = True
+        if verify_signatures:
+            try:
+                sig_ok = DeviceKey.verify(
+                    env["device_identity"],
+                    env["row_hash"].encode("ascii"),
+                    _signature_from_b64(env["signature"]),
+                )
+            except Exception:  # noqa: BLE001
+                sig_ok = False
 
-            # Walk every group block in the envelope; try the matching
-            # cipher from the bag. Groups we don't have a kit for stay
-            # silent (no $no_read_key entry — matches what an outside
-            # observer would see).
-            plaintext: dict[str, dict[str, Any]] = {}
-            for key, block in env.items():
-                if not isinstance(block, dict) or "ciphertext" not in block:
-                    continue
-                cipher = bag.get(key)
-                if cipher is None:
-                    continue
-                try:
-                    ct_bytes = base64.b64decode(block["ciphertext"])
-                    pt = cipher.decrypt(ct_bytes)
-                    plaintext[key] = json.loads(pt.decode("utf-8"))
-                except _cipher.NotARecipientError:
-                    plaintext[key] = {"$no_read_key": True}
-                except Exception:  # noqa: BLE001 — bad ciphertext doesn't abort the stream
-                    plaintext[key] = {"$decrypt_error": True}
-
-            sig_ok = True
-            if verify_signatures:
-                try:
-                    sig_ok = DeviceKey.verify(
-                        env["device_identity"],
-                        env["row_hash"].encode("ascii"),
-                        _signature_from_b64(env["signature"]),
-                    )
-                except Exception:  # noqa: BLE001
-                    sig_ok = False
-
-            yield {
-                "envelope": env,
-                "plaintext": plaintext,
-                "valid": {
-                    "signature": sig_ok,
-                    "chain": chain_ok,
-                },
-            }
+        yield {
+            "envelope": env,
+            "plaintext": plaintext,
+            "valid": {
+                "signature": sig_ok,
+                "chain": chain_ok,
+            },
+        }
 
 
 def read_as_recipient(
