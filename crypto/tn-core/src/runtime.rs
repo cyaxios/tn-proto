@@ -1349,6 +1349,119 @@ impl Runtime {
         Ok((public_out, per_group))
     }
 
+    /// Build + write one envelope row: stages 5-8 (row_hash, sign, envelope
+    /// serialize, append+flush) for the resolved `(seq, prev_hash)`. Returns
+    /// `(row_hash, line)`. Extracted from the `build_and_write!` macro in
+    /// `emit_inner`; the macro existed only to park errors out of the
+    /// advisory-lock closure — as a `Result`-returning method, the chained/
+    /// unchained call sites use `?` directly and the lock site parks the Err.
+    #[allow(clippy::too_many_arguments)]
+    fn build_and_write(
+        &self,
+        seq: u64,
+        prev_hash: &str,
+        event_type: &str,
+        ts: &str,
+        eid: &str,
+        level_norm: &str,
+        sign: Option<bool>,
+        need_row_hash: bool,
+        pel_routed: bool,
+        public_out: &Map<String, Value>,
+        group_inputs: &BTreeMap<String, GroupInput>,
+        group_payloads: &BTreeMap<String, String>,
+    ) -> Result<(String, String)> {
+        // 5. Row hash — skipped when neither chain nor sign
+        //    consumes it (chain=F sign=F pure-log mode).
+        let _rh_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else { None };
+        let row_hash = if need_row_hash {
+            let public_bmap: BTreeMap<String, Value> =
+                public_out.clone().into_iter().collect();
+            compute_row_hash(&RowHashInput {
+                device_identity: self.device.did(),
+                timestamp: ts,
+                event_id: eid,
+                event_type,
+                level: level_norm,
+                prev_hash,
+                public_fields: &public_bmap,
+                groups: group_inputs,
+            })
+        } else {
+            // Pure-log mode (chain=F sign=F): no consumer.
+            // Envelope ships ``row_hash: ""`` as the
+            // documented unchained-and-unsigned sentinel,
+            // matching prev_hash="" and signature="".
+            String::new()
+        };
+        if let Some(t0) = _rh_t0 {
+            crate::perf::record_ns("emit:row_hash", t0.elapsed().as_nanos() as u64);
+        }
+
+        // 6. Sign: respects per-call override, then ceremony default.
+        let _sign_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else { None };
+        let should_sign = sign.unwrap_or(self.cfg.ceremony.sign);
+        let sig_b64 = if should_sign {
+            let sig = self.device.sign(row_hash.as_bytes());
+            signature_b64(&sig)
+        } else {
+            String::new()
+        };
+        if let Some(t0) = _sign_t0 {
+            crate::perf::record_ns("emit:sign", t0.elapsed().as_nanos() as u64);
+        }
+
+        // 7. Envelope serialize.
+        let _env_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else { None };
+        let line = build_envelope(EnvelopeInput {
+            device_identity: self.device.did(),
+            timestamp: ts,
+            event_id: eid,
+            event_type,
+            level: level_norm,
+            sequence: seq,
+            prev_hash,
+            row_hash: &row_hash,
+            signature_b64: &sig_b64,
+            public_fields: public_out.clone(),
+            group_payloads: group_payloads.clone(),
+        })?;
+        if let Some(t0) = _env_t0 {
+            crate::perf::record_ns("emit:envelope_build", t0.elapsed().as_nanos() as u64);
+        }
+
+        // 8. Append to log file (or the resolved pel for tn.* events).
+        let _wr_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else { None };
+        // Get-or-create the writer for this event_type's
+        // rendered path. PEL admin emits route through
+        // `pel_writer`; everything else through `log_writer`.
+        // Both fields are pinned-writer pools so the syscall
+        // floor matches whether we're writing to the main log
+        // or a split admin log.
+        let writers = if pel_routed {
+            &self.pel_writer
+        } else {
+            &self.log_writer
+        };
+        let writer_arc = writers.writer_for(event_type, eid)?;
+        let mut w = writer_arc.lock().expect("log writer mutex poisoned");
+        w.append_line(&line)?;
+        w.flush()?;
+        if let Some(t0) = _wr_t0 {
+            crate::perf::record_ns("emit:file_write", t0.elapsed().as_nanos() as u64);
+        }
+
+        Ok((row_hash, line))
+    }
+
     fn emit_inner(
         &self,
         level: &str,
@@ -1562,128 +1675,6 @@ impl Runtime {
         // `group_inputs_for_hash` when no consumer will read it.
         // Reuse the same value here for the row_hash skip below.
 
-        // Shared inline body for build + write — used twice below
-        // (under-lock for chain_enabled, direct for !chain_enabled).
-        // Kept as a macro to sidestep nested-FnMut borrow issues
-        // (`with_advisory_lock` takes an `FnMut`, and another
-        // captured closure inside it would double-borrow the
-        // shared `&mut deferred_err` / `&mut row_hash_out` /
-        // `&mut line_out` slots).
-        macro_rules! build_and_write {
-            ($seq:expr, $prev_hash:expr) => {{
-                let seq: u64 = $seq;
-                let prev_hash: &str = $prev_hash;
-
-                // 5. Row hash — skipped when neither chain nor sign
-                //    consumes it (chain=F sign=F pure-log mode).
-                let _rh_t0 = if crate::perf::enabled() {
-                    Some(std::time::Instant::now())
-                } else { None };
-                let row_hash = if need_row_hash {
-                    let public_bmap: BTreeMap<String, Value> =
-                        public_out_for_lock.clone().into_iter().collect();
-                    compute_row_hash(&RowHashInput {
-                        device_identity: self.device.did(),
-                        timestamp: &ts,
-                        event_id: &eid,
-                        event_type,
-                        level: &level_norm,
-                        prev_hash,
-                        public_fields: &public_bmap,
-                        groups: &group_inputs_for_lock,
-                    })
-                } else {
-                    // Pure-log mode (chain=F sign=F): no consumer.
-                    // Envelope ships ``row_hash: ""`` as the
-                    // documented unchained-and-unsigned sentinel,
-                    // matching prev_hash="" and signature="".
-                    String::new()
-                };
-                if let Some(t0) = _rh_t0 {
-                    crate::perf::record_ns("emit:row_hash", t0.elapsed().as_nanos() as u64);
-                }
-
-                // 6. Sign: respects per-call override, then ceremony default.
-                let _sign_t0 = if crate::perf::enabled() {
-                    Some(std::time::Instant::now())
-                } else { None };
-                let should_sign = sign.unwrap_or(self.cfg.ceremony.sign);
-                let sig_b64 = if should_sign {
-                    let sig = self.device.sign(row_hash.as_bytes());
-                    signature_b64(&sig)
-                } else {
-                    String::new()
-                };
-                if let Some(t0) = _sign_t0 {
-                    crate::perf::record_ns("emit:sign", t0.elapsed().as_nanos() as u64);
-                }
-
-                // 7. Envelope serialize.
-                let _env_t0 = if crate::perf::enabled() {
-                    Some(std::time::Instant::now())
-                } else { None };
-                let line = match build_envelope(EnvelopeInput {
-                    device_identity: self.device.did(),
-                    timestamp: &ts,
-                    event_id: &eid,
-                    event_type,
-                    level: &level_norm,
-                    sequence: seq,
-                    prev_hash,
-                    row_hash: &row_hash,
-                    signature_b64: &sig_b64,
-                    public_fields: public_out_for_lock.clone(),
-                    group_payloads: group_payloads_for_lock.clone(),
-                }) {
-                    Ok(line) => line,
-                    Err(e) => {
-                        deferred_err = Some(e);
-                        return Err(std::io::Error::other("build_envelope failed (deferred)"));
-                    }
-                };
-                if let Some(t0) = _env_t0 {
-                    crate::perf::record_ns("emit:envelope_build", t0.elapsed().as_nanos() as u64);
-                }
-
-                // 8. Append to log file (or the resolved pel for tn.* events).
-                let _wr_t0 = if crate::perf::enabled() {
-                    Some(std::time::Instant::now())
-                } else { None };
-                // Get-or-create the writer for this event_type's
-                // rendered path. PEL admin emits route through
-                // `pel_writer`; everything else through `log_writer`.
-                // Both fields are pinned-writer pools so the syscall
-                // floor matches whether we're writing to the main log
-                // or a split admin log.
-                let writers = if pel_routed {
-                    &self.pel_writer
-                } else {
-                    &self.log_writer
-                };
-                let writer_arc = match writers.writer_for(event_type, &eid) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        deferred_err = Some(e);
-                        return Err(std::io::Error::other("writer_for failed (deferred)"));
-                    }
-                };
-                let mut w = writer_arc.lock().expect("log writer mutex poisoned");
-                if let Err(e) = w.append_line(&line) {
-                    deferred_err = Some(e);
-                    return Err(std::io::Error::other("append_line failed (deferred)"));
-                }
-                if let Err(e) = w.flush() {
-                    deferred_err = Some(e);
-                    return Err(std::io::Error::other("flush failed (deferred)"));
-                }
-                if let Some(t0) = _wr_t0 {
-                    crate::perf::record_ns("emit:file_write", t0.elapsed().as_nanos() as u64);
-                }
-
-                (row_hash, line)
-            }};
-        }
-
         if chain_enabled && !per_event {
             let storage_for_lock = Arc::clone(&self.storage);
             let _lock_t0 = if crate::perf::enabled() {
@@ -1819,7 +1810,28 @@ impl Runtime {
                     );
                 }
 
-                let (row_hash, line) = build_and_write!(seq, &prev_hash);
+                let (row_hash, line) = match self.build_and_write(
+                    seq,
+                    &prev_hash,
+                    event_type,
+                    &ts,
+                    &eid,
+                    &level_norm,
+                    sign,
+                    need_row_hash,
+                    pel_routed,
+                    &public_out_for_lock,
+                    &group_inputs_for_lock,
+                    &group_payloads_for_lock,
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        deferred_err = Some(e);
+                        return Err(std::io::Error::other(
+                            "build_and_write failed (deferred)",
+                        ));
+                    }
+                };
 
                 // 9. Commit row_hash into the chain.
                 let _cm_t0 = if crate::perf::enabled() {
@@ -1849,14 +1861,23 @@ impl Runtime {
             // re-seeds it by globbing every rendered file across a
             // restart. So advance + write + commit without the lock.
             let (seq, prev_hash) = self.chain.advance(event_type);
-            let result: std::io::Result<()> = (|| {
-                let (row_hash, line) = build_and_write!(seq, &prev_hash);
-                self.chain.commit(event_type, &row_hash);
-                row_hash_out = Some(row_hash);
-                line_out = Some(line);
-                Ok(())
-            })();
-            result?;
+            let (row_hash, line) = self.build_and_write(
+                seq,
+                &prev_hash,
+                event_type,
+                &ts,
+                &eid,
+                &level_norm,
+                sign,
+                need_row_hash,
+                pel_routed,
+                &public_out_for_lock,
+                &group_inputs_for_lock,
+                &group_payloads_for_lock,
+            )?;
+            self.chain.commit(event_type, &row_hash);
+            row_hash_out = Some(row_hash);
+            line_out = Some(line);
         } else {
             // Lockless emit for unchained profiles. No advisory
             // lock means no `.emit.lock` artifact on disk, no
@@ -1876,13 +1897,22 @@ impl Runtime {
             // that need cross-restart sequence continuity should
             // pick `audit` or `transaction`.
             let (seq, _prev_unused) = self.chain.advance(event_type);
-            let result: std::io::Result<()> = (|| {
-                let (row_hash, line) = build_and_write!(seq, "");
-                row_hash_out = Some(row_hash);
-                line_out = Some(line);
-                Ok(())
-            })();
-            result?;
+            let (row_hash, line) = self.build_and_write(
+                seq,
+                "",
+                event_type,
+                &ts,
+                &eid,
+                &level_norm,
+                sign,
+                need_row_hash,
+                pel_routed,
+                &public_out_for_lock,
+                &group_inputs_for_lock,
+                &group_payloads_for_lock,
+            )?;
+            row_hash_out = Some(row_hash);
+            line_out = Some(line);
         }
 
         if let Some(e) = deferred_err {
