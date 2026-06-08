@@ -1133,193 +1133,16 @@ impl Runtime {
     // closure (under `with_advisory_lock`) builds on the same locals,
     // so it carries the same allow.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-    fn emit_inner(
+    /// Index-token + encrypt each per-group field set: build the equality
+    /// index tokens, canonicalize, encrypt under the group cipher, and render
+    /// the per-group JSON payloads. `group_inputs_for_hash` (which feeds
+    /// `compute_row_hash`) is only populated when `need_row_hash`. Extracted
+    /// from `emit_inner` (stages 2-3).
+    fn encrypt_groups(
         &self,
-        level: &str,
-        event_type: &str,
-        mut fields: Map<String, Value>,
-        timestamp: Option<&str>,
-        event_id: Option<&str>,
-        sign: Option<bool>,
-    ) -> Result<Option<String>> {
-        // Outer perf wrapper — measures total emit_inner time so we
-        // can confirm the per-stage breakdown sums correctly.
-        // `TN_PERF_TRACE` env var gates the instrumentation; when
-        // off this is one atomic-bool load per emit.
-        let _emit_total_start = if crate::perf::enabled() {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-
-        // Log-level filter (AVL J3.2). Drop emits whose level is below
-        // the active threshold before any work happens. Severity-less
-        // ("") always passes — it's an explicit "this is a fact"
-        // primitive whose semantics shouldn't depend on the filter.
-        if !level.is_empty() {
-            let lv = level_value(level);
-            if lv >= 0 && lv < LOG_LEVEL_THRESHOLD.load(Ordering::Relaxed) {
-                return Ok(None);
-            }
-        }
-
-        let _prelude_t0 = if crate::perf::enabled() {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        validate_event_type(event_type)?;
-
-        // Auto-inject run_id (FINDINGS.md #12). Caller can override by
-        // passing `run_id` explicitly in fields.
-        if !fields.contains_key("run_id") {
-            fields.insert("run_id".to_string(), Value::String(self.run_id.clone()));
-        }
-
-        // Splice the `tn.agents` policy text into `fields` for this
-        // event_type, if a template is loaded. setdefault semantics — the
-        // caller can override individual fields per-emit. Per 2026-04-25
-        // spec §2.6.
-        self.splice_agent_policy(event_type, &mut fields);
-
-        // Catalog check: any tn.* event that's in the catalog must pass schema
-        // validation before we sign it. This prevents the publisher from
-        // accidentally signing an envelope that the reducer would later reject.
-        // Unknown tn.* events (not in the catalog) pass through unchecked --
-        // forward-compat for event kinds added in newer publishers.
-        if event_type.starts_with("tn.") {
-            if let Some(_kind) = admin_catalog::kind_for(event_type) {
-                admin_catalog::validate_emit(event_type, &fields).map_err(|e| {
-                    Error::Malformed {
-                        kind: "admin event",
-                        reason: format!("admin event {event_type} failed schema: {e}"),
-                    }
-                })?;
-            }
-        }
-        if let Some(t0) = _prelude_t0 {
-            crate::perf::record_ns("emit:prelude", t0.elapsed().as_nanos() as u64);
-        }
-
-        let (ts, eid, level_norm) = crate::perf::time_stage("emit:header", || {
-            (
-                timestamp.map_or_else(current_timestamp, str::to_string),
-                // UUID v7 (0.4.2a7): time-sortable event_id with a
-                // 48-bit ms timestamp in the high bits. Sorting log
-                // entries by event_id now puts them in chronological
-                // order — drop-in friendly for DB indexes and binary
-                // tree scans. Older event_ids passed in via the
-                // ``event_id`` override (replay, deterministic test
-                // fixtures) still take precedence verbatim, so the
-                // change is transparent to callers who supply their
-                // own ids.
-                event_id.map_or_else(|| Uuid::now_v7().to_string(), str::to_string),
-                level.to_ascii_lowercase(),
-            )
-        });
-
-        // 1. Classify fields: public vs per-group.
-        //
-        // Multi-group routing: a field declared under N groups in yaml
-        // (`groups[<g>].fields: [...]`) is encrypted into all N groups'
-        // payloads. The `field_to_groups` table is precomputed at
-        // `Runtime::init` (0.4.2a7 — was rebuilt every emit) and
-        // sorted alphabetically per field at load time so envelope
-        // encoding stays canonical across SDK implementations.
-        let field_to_groups = &self.field_to_groups;
-        let public_set = &self.public_set;
-        let public_groups = &self.public_groups;
-        let (public_out, per_group) = {
-            let t0 = if crate::perf::enabled() {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            let mut public_out: Map<String, Value> = Map::new();
-            let mut per_group: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
-            // Inline routing logic. A field is destined for `public_out`
-            // when ANY of these are true: (a) explicitly listed in
-            // top-level `public_fields`, or (b) routed to a group whose
-            // policy is `"public"`. Everything else goes through the
-            // per-group encrypt path. Multi-group fan-out clones the
-            // field into each target.
-            for (k, v) in fields {
-                if public_set.contains(&k) {
-                    public_out.insert(k, v);
-                    continue;
-                }
-                if let Some(routed) = field_to_groups.get(&k) {
-                    if routed.len() == 1 {
-                        // Single-group: most common case. Avoid the
-                        // v.clone() that the multi-group path needs
-                        // on the last iteration.
-                        let gname = &routed[0];
-                        if public_groups.contains(gname) {
-                            public_out.insert(k, v);
-                        } else {
-                            per_group
-                                .entry(gname.clone())
-                                .or_default()
-                                .insert(k, v);
-                        }
-                    } else {
-                        for gname in routed {
-                            if public_groups.contains(gname) {
-                                public_out.insert(k.clone(), v.clone());
-                            } else {
-                                per_group
-                                    .entry(gname.clone())
-                                    .or_default()
-                                    .insert(k.clone(), v.clone());
-                            }
-                        }
-                    }
-                } else {
-                    // Field has no declared route. Try the legacy
-                    // classifier (returns a single name today,
-                    // "default" by stub). If that lands in a known
-                    // group, use it; otherwise fall back to the
-                    // "default" group when present. Last resort:
-                    // raise.
-                    let guess = classify(&self.cfg, &k);
-                    let target = if self.cfg.groups.contains_key(guess) {
-                        guess.to_string()
-                    } else if self.cfg.groups.contains_key("default") {
-                        "default".to_string()
-                    } else {
-                        return Err(Error::InvalidConfig(format!(
-                            "field {k:?} has no group route and is not in \
-                             public_fields. Add it to `groups[<g>].fields` in \
-                             tn.yaml, list it under public_fields, or define a \
-                             `default` group to absorb unknowns."
-                        )));
-                    };
-                    if public_groups.contains(&target) {
-                        public_out.insert(k, v);
-                    } else {
-                        per_group.entry(target).or_default().insert(k, v);
-                    }
-                }
-            }
-            if let Some(t0) = t0 {
-                crate::perf::record_ns("emit:field_classify", t0.elapsed().as_nanos() as u64);
-            }
-            (public_out, per_group)
-        };
-
-        // row_hash gating (0.4.2a7): hoisted up here from below so the
-        // per-group encrypt loop can skip building `group_inputs_for_hash`
-        // when no consumer will read it. The structure only feeds into
-        // `compute_row_hash`; when chain=F sign=F (pure-log mode), the
-        // row_hash compute is skipped and the structure is dead. The
-        // per-call sign override (`sign=true` passed explicitly) also
-        // pulls it back in since the signature is over row_hash bytes.
-        let chain_enabled_for_row_hash = self.cfg.ceremony.chain;
-        let need_row_hash = chain_enabled_for_row_hash
-            || self.cfg.ceremony.sign
-            || sign.unwrap_or(false);
-
-        // 2. Index tokens + 3. Encrypt per group.
+        per_group: BTreeMap<String, Map<String, Value>>,
+        need_row_hash: bool,
+    ) -> Result<(BTreeMap<String, GroupInput>, BTreeMap<String, String>)> {
         let mut group_inputs_for_hash: BTreeMap<String, GroupInput> = BTreeMap::new();
         // group_payloads (0.4.2a7): pre-rendered JSON snippets rather
         // than serde_json::Value trees. envelope_build splices the
@@ -1433,6 +1256,209 @@ impl Runtime {
         if let Some(t0) = _group_encrypt_t0 {
             crate::perf::record_ns("emit:group_encrypt", t0.elapsed().as_nanos() as u64);
         }
+        Ok((group_inputs_for_hash, group_payloads))
+    }
+
+    /// Classify each field into the public envelope vs per-group encrypt
+    /// buckets, following the precomputed routing tables (multi-group fields
+    /// fan out into every target). Extracted from `emit_inner` (stage 1).
+    fn classify_fields(
+        &self,
+        fields: Map<String, Value>,
+    ) -> Result<(Map<String, Value>, BTreeMap<String, Map<String, Value>>)> {
+        let field_to_groups = &self.field_to_groups;
+        let public_set = &self.public_set;
+        let public_groups = &self.public_groups;
+        let (public_out, per_group) = {
+            let t0 = if crate::perf::enabled() {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let mut public_out: Map<String, Value> = Map::new();
+            let mut per_group: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
+            // Inline routing logic. A field is destined for `public_out`
+            // when ANY of these are true: (a) explicitly listed in
+            // top-level `public_fields`, or (b) routed to a group whose
+            // policy is `"public"`. Everything else goes through the
+            // per-group encrypt path. Multi-group fan-out clones the
+            // field into each target.
+            for (k, v) in fields {
+                if public_set.contains(&k) {
+                    public_out.insert(k, v);
+                    continue;
+                }
+                if let Some(routed) = field_to_groups.get(&k) {
+                    if routed.len() == 1 {
+                        // Single-group: most common case. Avoid the
+                        // v.clone() that the multi-group path needs
+                        // on the last iteration.
+                        let gname = &routed[0];
+                        if public_groups.contains(gname) {
+                            public_out.insert(k, v);
+                        } else {
+                            per_group
+                                .entry(gname.clone())
+                                .or_default()
+                                .insert(k, v);
+                        }
+                    } else {
+                        for gname in routed {
+                            if public_groups.contains(gname) {
+                                public_out.insert(k.clone(), v.clone());
+                            } else {
+                                per_group
+                                    .entry(gname.clone())
+                                    .or_default()
+                                    .insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                } else {
+                    // Field has no declared route. Try the legacy
+                    // classifier (returns a single name today,
+                    // "default" by stub). If that lands in a known
+                    // group, use it; otherwise fall back to the
+                    // "default" group when present. Last resort:
+                    // raise.
+                    let guess = classify(&self.cfg, &k);
+                    let target = if self.cfg.groups.contains_key(guess) {
+                        guess.to_string()
+                    } else if self.cfg.groups.contains_key("default") {
+                        "default".to_string()
+                    } else {
+                        return Err(Error::InvalidConfig(format!(
+                            "field {k:?} has no group route and is not in \
+                             public_fields. Add it to `groups[<g>].fields` in \
+                             tn.yaml, list it under public_fields, or define a \
+                             `default` group to absorb unknowns."
+                        )));
+                    };
+                    if public_groups.contains(&target) {
+                        public_out.insert(k, v);
+                    } else {
+                        per_group.entry(target).or_default().insert(k, v);
+                    }
+                }
+            }
+            if let Some(t0) = t0 {
+                crate::perf::record_ns("emit:field_classify", t0.elapsed().as_nanos() as u64);
+            }
+            (public_out, per_group)
+        };
+        Ok((public_out, per_group))
+    }
+
+    fn emit_inner(
+        &self,
+        level: &str,
+        event_type: &str,
+        mut fields: Map<String, Value>,
+        timestamp: Option<&str>,
+        event_id: Option<&str>,
+        sign: Option<bool>,
+    ) -> Result<Option<String>> {
+        // Outer perf wrapper — measures total emit_inner time so we
+        // can confirm the per-stage breakdown sums correctly.
+        // `TN_PERF_TRACE` env var gates the instrumentation; when
+        // off this is one atomic-bool load per emit.
+        let _emit_total_start = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+
+        // Log-level filter (AVL J3.2). Drop emits whose level is below
+        // the active threshold before any work happens. Severity-less
+        // ("") always passes — it's an explicit "this is a fact"
+        // primitive whose semantics shouldn't depend on the filter.
+        if !level.is_empty() {
+            let lv = level_value(level);
+            if lv >= 0 && lv < LOG_LEVEL_THRESHOLD.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+        }
+
+        let _prelude_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        validate_event_type(event_type)?;
+
+        // Auto-inject run_id (FINDINGS.md #12). Caller can override by
+        // passing `run_id` explicitly in fields.
+        if !fields.contains_key("run_id") {
+            fields.insert("run_id".to_string(), Value::String(self.run_id.clone()));
+        }
+
+        // Splice the `tn.agents` policy text into `fields` for this
+        // event_type, if a template is loaded. setdefault semantics — the
+        // caller can override individual fields per-emit. Per 2026-04-25
+        // spec §2.6.
+        self.splice_agent_policy(event_type, &mut fields);
+
+        // Catalog check: any tn.* event that's in the catalog must pass schema
+        // validation before we sign it. This prevents the publisher from
+        // accidentally signing an envelope that the reducer would later reject.
+        // Unknown tn.* events (not in the catalog) pass through unchecked --
+        // forward-compat for event kinds added in newer publishers.
+        if event_type.starts_with("tn.") {
+            if let Some(_kind) = admin_catalog::kind_for(event_type) {
+                admin_catalog::validate_emit(event_type, &fields).map_err(|e| {
+                    Error::Malformed {
+                        kind: "admin event",
+                        reason: format!("admin event {event_type} failed schema: {e}"),
+                    }
+                })?;
+            }
+        }
+        if let Some(t0) = _prelude_t0 {
+            crate::perf::record_ns("emit:prelude", t0.elapsed().as_nanos() as u64);
+        }
+
+        let (ts, eid, level_norm) = crate::perf::time_stage("emit:header", || {
+            (
+                timestamp.map_or_else(current_timestamp, str::to_string),
+                // UUID v7 (0.4.2a7): time-sortable event_id with a
+                // 48-bit ms timestamp in the high bits. Sorting log
+                // entries by event_id now puts them in chronological
+                // order — drop-in friendly for DB indexes and binary
+                // tree scans. Older event_ids passed in via the
+                // ``event_id`` override (replay, deterministic test
+                // fixtures) still take precedence verbatim, so the
+                // change is transparent to callers who supply their
+                // own ids.
+                event_id.map_or_else(|| Uuid::now_v7().to_string(), str::to_string),
+                level.to_ascii_lowercase(),
+            )
+        });
+
+        // 1. Classify fields: public vs per-group.
+        //
+        // Multi-group routing: a field declared under N groups in yaml
+        // (`groups[<g>].fields: [...]`) is encrypted into all N groups'
+        // payloads. The `field_to_groups` table is precomputed at
+        // `Runtime::init` (0.4.2a7 — was rebuilt every emit) and
+        // sorted alphabetically per field at load time so envelope
+        // encoding stays canonical across SDK implementations.
+        let (public_out, per_group) = self.classify_fields(fields)?;
+
+        // row_hash gating (0.4.2a7): hoisted up here from below so the
+        // per-group encrypt loop can skip building `group_inputs_for_hash`
+        // when no consumer will read it. The structure only feeds into
+        // `compute_row_hash`; when chain=F sign=F (pure-log mode), the
+        // row_hash compute is skipped and the structure is dead. The
+        // per-call sign override (`sign=true` passed explicitly) also
+        // pulls it back in since the signature is over row_hash bytes.
+        let chain_enabled_for_row_hash = self.cfg.ceremony.chain;
+        let need_row_hash = chain_enabled_for_row_hash
+            || self.cfg.ceremony.sign
+            || sign.unwrap_or(false);
+
+        // 2. Index tokens + 3. Encrypt per group.
+        let (group_inputs_for_hash, group_payloads) =
+            self.encrypt_groups(per_group, need_row_hash)?;
 
         // DX review 0.4.2a3: cross-process emit serialization.
         //
