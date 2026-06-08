@@ -163,6 +163,36 @@ export {
   resolveDidEndpoint,
   isAutoLinkDisabled,
 } from "./vault/url.js";
+
+// Wallet module surface. `wallet` is the public `tn.wallet` namespace
+// (mirrors Python's `tn.wallet` module); the underlying impls remain
+// individually importable for callers that want them directly.
+export {
+  wallet,
+  type WalletStatus,
+  type WalletNamespaceSurface,
+} from "./wallet/namespace.js";
+export {
+  WalletNamespace,
+  readSyncQueue,
+  readLinkState,
+  type LinkResult,
+} from "./wallet/index.js";
+export {
+  restoreWithBek,
+  restoreViaPassphrase,
+  restoreViaLoopback,
+  decryptBlobWithBek,
+  tryUnpackExportFrame,
+  RestoreError,
+  type RestoreOptions,
+  type RestoreResult,
+  type RestoreViaLoopbackOptions,
+} from "./wallet/restore.js";
+export {
+  walletSyncCmd,
+  type WalletSyncCmdOptions,
+} from "./cli/wallet_sync.js";
 export {
   bootstrapFromApiKey,
   challengeVerify,
