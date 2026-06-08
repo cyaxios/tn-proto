@@ -677,3 +677,194 @@ impl Runtime {
         self.emit("info", "tn.vault.unlinked", fields)
     }
 }
+
+impl Runtime {
+    /// Mint a fresh kit for `recipient_did` across one or more groups
+    /// and bundle them into a single `.tnpkg` at `out_path`.
+    ///
+    /// Mirrors Python's `tn.bundle_for_recipient` and TS's
+    /// `client.bundleForRecipient` — closes the cross-binding parity
+    /// gap surfaced by the cash-register survey (Rust callers had no
+    /// equivalent ergonomic verb and faced the canonical-filename +
+    /// temp-dir + export dance by hand).
+    ///
+    /// `groups = None` defaults to every NON-internal group declared in
+    /// the active ceremony (excludes `tn.agents` — that group is for
+    /// LLM-runtime bundles via [`Runtime::admin_add_agent_runtime`]).
+    /// Passing an explicit slice scopes the bundle.
+    ///
+    /// Returns the absolute path to the written `.tnpkg`.
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidConfig` if no real groups are available, or a requested
+    ///   group is not declared in the yaml.
+    /// - Filesystem errors from minting kits or writing the bundle.
+    pub fn bundle_for_recipient(
+        &self,
+        recipient_did: &str,
+        out_path: &Path,
+        groups: Option<&[&str]>,
+    ) -> Result<PathBuf> {
+        let mut requested: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        match groups {
+            Some(list) => {
+                for g in list {
+                    let s = (*g).to_string();
+                    if seen.insert(s.clone()) {
+                        requested.push(s);
+                    }
+                }
+            }
+            None => {
+                // Default: every group except tn.agents (the internal
+                // LLM-policy channel doesn't make sense to ship to a
+                // human reader).
+                for k in self.cfg.groups.keys() {
+                    if k == "tn.agents" {
+                        continue;
+                    }
+                    requested.push(k.clone());
+                }
+            }
+        }
+
+        if requested.is_empty() {
+            return Err(Error::InvalidConfig(
+                "bundle_for_recipient: no groups to bundle. The ceremony \
+                 has only the internal tn.agents group; declare a \
+                 regular group first or pass an explicit groups slice."
+                    .to_string(),
+            ));
+        }
+
+        for g in &requested {
+            if !self.cfg.groups.contains_key(g) {
+                return Err(Error::InvalidConfig(format!(
+                    "bundle_for_recipient: unknown group {g:?}; this \
+                     ceremony declares {:?}",
+                    self.cfg.groups.keys().collect::<Vec<_>>()
+                )));
+            }
+        }
+
+        let td = tempfile::Builder::new()
+            .prefix("tn-bundle-")
+            .tempdir()
+            .map_err(Error::Io)?;
+        for gname in &requested {
+            let kit_path = td.path().join(format!("{gname}.btn.mykit"));
+            self.admin_add_recipient(gname, &kit_path, Some(recipient_did))?;
+        }
+
+        let opts = crate::runtime_export::ExportOptions {
+            kind: Some(crate::tnpkg::ManifestKind::KitBundle),
+            to_did: Some(recipient_did.to_string()),
+            scope: None,
+            confirm_includes_secrets: false,
+            groups: Some(requested.clone()),
+            package_body: None,
+        };
+        let out = self.export(out_path, opts)?;
+        drop(td);
+        Ok(out)
+    }
+
+    /// Mint kits for an LLM-runtime DID across all named groups + the
+    /// reserved `tn.agents` group, then export a `kit_bundle` `.tnpkg`
+    /// at `out_path`.
+    ///
+    /// Per the 2026-04-25 read-ergonomics spec §2.8. The `tn.agents`
+    /// group is always implicitly added (de-duplicated if the caller
+    /// passed it). `label` is written to a `.label` sidecar next to the
+    /// output `.tnpkg` for downstream identification — best-effort,
+    /// never fails the call.
+    ///
+    /// Returns the absolute `.tnpkg` path.
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidConfig` if a requested group is not declared in this
+    ///   ceremony's yaml.
+    /// - Filesystem errors from minting kits or writing the bundle.
+    pub fn admin_add_agent_runtime(
+        &self,
+        runtime_did: &str,
+        groups: &[&str],
+        out_path: &Path,
+        label: Option<&str>,
+    ) -> Result<PathBuf> {
+        // Dedup: tn.agents is always added; if the caller passed it,
+        // don't double-mint. Preserve order for the others.
+        let mut requested: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for g in groups {
+            if *g == "tn.agents" {
+                continue;
+            }
+            let s = (*g).to_string();
+            if seen.insert(s.clone()) {
+                requested.push(s);
+            }
+        }
+        requested.push("tn.agents".to_string());
+
+        for g in &requested {
+            if !self.cfg.groups.contains_key(g) {
+                return Err(Error::InvalidConfig(format!(
+                    "admin_add_agent_runtime: group {g:?} is not declared in this \
+                     ceremony's yaml (known: {:?})",
+                    self.cfg.groups.keys().collect::<Vec<_>>()
+                )));
+            }
+        }
+
+        // Mint kits into a temp directory using the canonical filename
+        // so export(kind='kit_bundle') picks them up.
+        let td = tempfile::Builder::new()
+            .prefix("tn-agent-bundle-")
+            .tempdir()
+            .map_err(Error::Io)?;
+        for gname in &requested {
+            let kit_path = td.path().join(format!("{gname}.btn.mykit"));
+            self.admin_add_recipient(gname, &kit_path, Some(runtime_did))?;
+        }
+
+        let opts = crate::runtime_export::ExportOptions {
+            kind: Some(crate::tnpkg::ManifestKind::KitBundle),
+            to_did: Some(runtime_did.to_string()),
+            scope: None,
+            confirm_includes_secrets: false,
+            groups: Some(requested.clone()),
+            package_body: None,
+        };
+        // `export` already drops the temp-dir kits into the bundle. We
+        // pass `keystore=None` because export reads from the runtime's
+        // own keystore — but the kits were minted into the temp dir.
+        // Workaround: copy them into the keystore (admin_add_recipient
+        // already wrote the actual tnpkg, but the *.mykit goes to the
+        // path we pass). The export reads from `self.keystore` so the
+        // mykit files for the requested groups are already there from
+        // the side-effects of admin_add_recipient.
+        let out = self.export(out_path, opts)?;
+
+        // Best-effort label sidecar. Routed through `self.storage` so
+        // wasm consumers satisfy the write via their JS callback set;
+        // failure is logged + swallowed either way.
+        if let Some(lbl) = label {
+            let mut sidecar_str = out.as_os_str().to_owned();
+            sidecar_str.push(".label");
+            let sidecar = PathBuf::from(sidecar_str);
+            if let Err(e) = self.storage.write_bytes(&sidecar, lbl.as_bytes()) {
+                log::warn!(
+                    "admin_add_agent_runtime: failed to write label sidecar: {e}"
+                );
+            }
+        }
+
+        // Keep tempdir alive until export completes.
+        drop(td);
+        Ok(out)
+    }
+}
