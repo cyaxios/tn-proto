@@ -203,7 +203,7 @@ PYTHONPATH=python python -m tn.cli wallet status .tn/demo/tn.yaml
 ```
 Identity: did:key:z6MksPsDhwFCy8Cho6xM83iE2b21oqutKef2KmBdWDAbnSQS
   file:    C:\Users\gilsa\AppData\Roaming\tn\identity.json
-  linked:  http://localhost:38790
+  linked:  https://vault.tn-proto.org
   prefs:   default_new_ceremony_mode=local
            prefs_version=0
 Ceremony: local_813e241b

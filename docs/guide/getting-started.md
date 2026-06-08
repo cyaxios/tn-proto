@@ -99,22 +99,24 @@ tn init mybackuptest
 
 [tn init] Attached to your vault account (no browser needed).
 [tn init]   project:  mybackuptest
-[tn init]   linked:   http://localhost:38790/projects/01KTMC5A5J3RQ17CK5230TV558
+[tn init]   linked:   https://vault.tn-proto.org/projects/01KTMC5A5J3RQ17CK5230TV558
 [tn init]   uploaded: 0 file(s)
 ```
 
-The `linked:` line is your project's URL in the vault for backup and
-recovery. (Output is from a development vault; the hosted vault prints a
-`https://vault.tn-proto.org/projects/...` link.)
+The `linked:` line is your project's page at the vault,
+`https://vault.tn-proto.org`.
 
 `tn init <name>` does two things. It creates one identity per machine (your
 Ed25519 keypair and DID, reused for every project after the first) and a
 project under `./.tn/<name>/`. You run it once per project.
 
-By default it also backs the project up to the backup vault and prints a link
-to it for recovery. The vault URL is `https://vault.tn-proto.org` unless you
-have linked another (it falls back to your saved `linked_vault`, then to
-`$TN_VAULT_URL`). Open the link to manage or restore the project later.
+By default it also backs that project up to your vault account, one entry per
+project. The backup is an encrypted copy of the project's keys and config:
+the vault is non-custodial and stores only ciphertext, so it cannot read your
+keys. You restore a project from it on another machine, or after losing the
+local `.tn/` directory, using your account passphrase or recovery phrase. The
+vault is `https://vault.tn-proto.org` unless you have linked another (it falls
+back to your saved `linked_vault`, then `$TN_VAULT_URL`).
 
 To stay fully offline with no vault contact and no backup, pass `--no-link`:
 

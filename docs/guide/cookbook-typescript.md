@@ -180,7 +180,7 @@ node bin/tn-js.mjs wallet status --yaml .tn/demo/tn.yaml
 ```text
 Identity: did:key:z6MksPsDhwFCy8Cho6xM83iE2b21oqutKef2KmBdWDAbnSQS
   file:    ...\tn\identity.json
-  linked:  http://localhost:38790
+  linked:  https://vault.tn-proto.org
   prefs:   default_new_ceremony_mode=local
            prefs_version=0
 Ceremony: local_1375be14
@@ -204,7 +204,7 @@ tn-js wallet sync [<yaml>] [--pull] [--push-only] [--drain-queue] [--passphrase 
 The pull stage runs against the live vault and stages snapshots for `tn absorb`:
 
 ```bash
-node bin/tn-js.mjs wallet sync .tn/demo/tn.yaml --pull --vault http://localhost:38790
+node bin/tn-js.mjs wallet sync .tn/demo/tn.yaml --pull --vault https://vault.tn-proto.org
 ```
 
 ```text
@@ -227,11 +227,11 @@ tn-js wallet link <vault-url> --yaml <path> [--name <project>]
 ```
 
 ```bash
-node bin/tn-js.mjs wallet link http://localhost:38790 --yaml .tn/demo/tn.yaml --name cookbook-demo
+node bin/tn-js.mjs wallet link https://vault.tn-proto.org --yaml .tn/demo/tn.yaml --name cookbook-demo
 ```
 
 ```json
-{"ok":true,"verb":"wallet.link","project_id":"01KTKXN7GWT21PPNVFS04695JJ","project_name":"cookbook-demo","vault_base_url":"http://localhost:38790","newly_linked":true}
+{"ok":true,"verb":"wallet.link","project_id":"01KTKXN7GWT21PPNVFS04695JJ","project_name":"cookbook-demo","vault_base_url":"https://vault.tn-proto.org","newly_linked":true}
 ```
 
 ### wallet unlink
@@ -257,11 +257,11 @@ tn-js wallet pull-prefs [--vault <url>]
 ```
 
 ```bash
-node bin/tn-js.mjs wallet pull-prefs --vault http://localhost:38790
+node bin/tn-js.mjs wallet pull-prefs --vault https://vault.tn-proto.org
 ```
 
 ```text
-Pulled prefs from http://localhost:38790:
+Pulled prefs from https://vault.tn-proto.org:
   default_new_ceremony_mode: local
   prefs_version: 0
 ```
@@ -301,7 +301,7 @@ Requires a vault-minted connect code. With a placeholder code the request
 reaches the live vault and is rejected as not found:
 
 ```bash
-node bin/tn-js.mjs account connect DEMO-CODE-0000 --yaml .tn/demo/tn.yaml --vault http://localhost:38790
+node bin/tn-js.mjs account connect DEMO-CODE-0000 --yaml .tn/demo/tn.yaml --vault https://vault.tn-proto.org
 ```
 
 ```text
