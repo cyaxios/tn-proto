@@ -165,48 +165,10 @@ fn collect_btn_kit_bytes_with_storage(
     Ok(kits)
 }
 
-/// Scan `keystore` for files of the form `<group>.btn.state.retired.<N>`
-/// (where N is a u32 — the epoch the state served as active). Returns
-/// each as `(epoch, bytes)`. Files whose suffix doesn't parse as u32
-/// are skipped silently. Used by the publisher-side init path to
-/// archive retired states alongside the active one, so historical
-/// keywalk decryption has the seed material available.
-///
-/// 0.4.3a1 only. Pre-rename keystores use `<group>.btn.state.revoked.<ts>`
-/// which intentionally is NOT picked up here — those entries archived
-/// the prior PublisherState (kind 0x03), not the new lightweight
-/// RetiredPublisherState (kind 0x04), so attempting to deserialize them
-/// as retired states would error.
-pub(crate) fn discover_retired_btn_states(
-    keystore: &Path,
-    group: &str,
-) -> std::io::Result<Vec<(u32, Vec<u8>)>> {
-    let prefix = format!("{group}.btn.state.retired.");
-    let mut out = Vec::new();
-    let entries = match std::fs::read_dir(keystore) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-        Err(e) => return Err(e),
-    };
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        let Some(rest) = name_str.strip_prefix(&prefix) else {
-            continue;
-        };
-        let Ok(epoch) = rest.parse::<u32>() else {
-            continue;
-        };
-        let bytes = std::fs::read(entry.path())?;
-        out.push((epoch, bytes));
-    }
-    Ok(out)
-}
+// NOTE: the retired-`PublisherState` archival reader (`discover_retired_btn_states`)
+// was removed here — it was the read-half of an unwired feature (no writer ever
+// emitted `<group>.btn.state.retired.<N>` files, and nothing called it). Intent
+// captured in cyaxios/tn-proto#118 for a deliberate rebuild.
 
 /// Collect all kit files for a group: the current `<group>.btn.mykit` first,
 /// followed by any `<group>.btn.mykit.revoked.<ts>` siblings sorted by

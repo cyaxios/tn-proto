@@ -120,7 +120,6 @@ impl Runtime {
                 name.clone(),
                 Arc::new(RwLock::new(GroupState {
                     cipher,
-                    index_key,
                     hmac_template,
                 })),
             );

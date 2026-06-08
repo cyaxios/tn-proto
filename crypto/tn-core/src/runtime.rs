@@ -323,8 +323,8 @@ pub struct AdminState {
 /// Per-group runtime state: cipher + derived index key.
 pub(crate) struct GroupState {
     pub(crate) cipher: Arc<dyn GroupCipher>,
-    pub(crate) index_key: [u8; 32],
-    /// Pre-initialized HMAC-SHA256 keyed by `index_key`. Each
+    /// Pre-initialized HMAC-SHA256 keyed by the group's derived index
+    /// key. Each
     /// per-emit `index_token` call clones this template and feeds
     /// the field bytes into the clone — skips the `Mac::new_from_slice`
     /// init cost (~2-3 µs per field) every emit. Built once at
