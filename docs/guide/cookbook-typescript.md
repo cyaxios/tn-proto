@@ -1,8 +1,6 @@
 # TN TypeScript SDK + CLI Cookbook
 
-Just-the-facts recipes for the TN protocol TypeScript SDK and its `tn-js` CLI.
-Every command and snippet below was run against the SDK in this repo; the output
-shown is the real output, not hand-written.
+Recipes for the TN protocol TypeScript SDK and its `tn-js` CLI.
 
 Two ways to drive TN from TypeScript:
 
@@ -65,7 +63,7 @@ for (const e of tn.read()) {
 await tn.close();
 ```
 
-Real output (the `LOG` / `INFO` lines come from the ceremony's configured stdout
+Output (the `LOG` / `INFO` lines come from the ceremony's configured stdout
 handler; the `->` lines are the script's own `console.log`):
 
 ```text
@@ -79,7 +77,7 @@ read   -> 1  order.placed {"qty":2,"sku":"A-100"}
 read   -> 1 info user.login {"user":"alice"}
 ```
 
-Notes on shapes (verified at runtime):
+Notes on shapes:
 
 - The receipt returned by `tn.log` / `tn.info` has `{ eventId, rowHash, sequence }`.
 - A typed `Entry` from `tn.read()` carries `event_type`, `timestamp`, `level`,
@@ -122,7 +120,7 @@ for (const e of tn.read()) {
 node bin/tn-js.mjs read --yaml .tn/demo/tn.yaml --compact
 ```
 
-Real output (one JSON line per entry; `--compact` collapses the pretty-print).
+Output (one JSON line per entry; `--compact` collapses the pretty-print).
 Each line carries the decoded per-group `plaintext` and the `valid` block proving
 signature, row-hash, and chain integrity:
 
@@ -489,7 +487,7 @@ tn-js read --yaml <path> [--log <path>] [--compact]
   --compact: one JSON line per entry instead of pretty-print.
 ```
 
-See "Read from the CLI" under Basics for real output. Code-API equivalent:
+See "Read from the CLI" under Basics for output. Code-API equivalent:
 `for (const e of tn.read()) { ... }`.
 
 ### watch

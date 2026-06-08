@@ -40,9 +40,9 @@ Ed25519 signature, the per-field equality-index tokens, and the group ciphertext
 is described in the sibling integrity/indexing doc; here we only document what
 those values look like in the record.
 
-### A real record
+### Example record
 
-The example below is a real envelope, not a hand-written one. It was produced by:
+The example below was produced by:
 
 ```
 tn init demoproto --no-link --skip-confirm
@@ -304,7 +304,7 @@ the per-field equality-index HMAC tokens are derived. The sibling
 shape; here we cover the cryptographic construction, citing the authoritative
 Rust core (`crypto/tn-core`).
 
-Every value shown below is real, not hand-written. It was produced by:
+The values below were produced by:
 
 ```
 tn init demoproj --no-link --skip-confirm --keep-mnemonic

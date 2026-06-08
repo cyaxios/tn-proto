@@ -16,10 +16,10 @@ The file is parsed with standard YAML. Before parsing, every loader runs
 Compose-style environment-variable substitution over the raw text (see
 [Environment variables](#environment-variables)).
 
-## A real, annotated tn.yaml
+## Example tn.yaml
 
 The block below is the exact file produced by `tn init demoproj --no-link`
-(offline ceremony, btn cipher), annotated. Comments are not part of the
+(offline ceremony, btn cipher). Comments are not part of the
 emitted file; the real one carries no comments.
 
 ```yaml

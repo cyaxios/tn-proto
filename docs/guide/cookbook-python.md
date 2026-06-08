@@ -1,8 +1,6 @@
 # TN Python SDK + CLI cookbook
 
-Just-the-facts recipes for the TN protocol Python SDK and the `tn` CLI.
-Every command and snippet below was executed; the output blocks are the
-real output, not hand-authored.
+Recipes for the TN protocol Python SDK and the `tn` CLI.
 
 Two ways in:
 
@@ -141,7 +139,7 @@ PYTHONPATH=python python -m tn.cli read --yaml .tn/demo/tn.yaml
 
 ## CLI command reference
 
-Each subsection shows the `--help` synopsis, a real invocation with its
+Each subsection shows the `--help` synopsis, an invocation with its
 output, and the code-level equivalent where one exists.
 
 ### tn init
@@ -390,7 +388,7 @@ PYTHONPATH=python python -m tn.cli add_recipient default alice \
 ```
 
 A friendly label (`alice`) is auto-prefixed into a placeholder DID
-(`did:key:zLabel-alice`); pass a real `did:key:z...` to target a known
+(`did:key:zLabel-alice`); pass a `did:key:z...` to target a known
 device.
 
 **Code equivalent:** `tn.admin.add_recipient("default", recipient_did="did:key:zLabel-alice")`.
@@ -403,7 +401,7 @@ tn.admin.recipients("default")   # -> [{'recipient_identity': 'did:key:zLabel-al
 
 ### tn invite
 
-Mint a real `tn-invite-<id>.zip` (kit + manifest) for one recipient.
+Mint a `tn-invite-<id>.zip` (kit + manifest) for one recipient.
 
 ```bash
 usage: tn invite [-h] [--group GROUP] [--yaml YAML] [--from-email FROM_EMAIL]
