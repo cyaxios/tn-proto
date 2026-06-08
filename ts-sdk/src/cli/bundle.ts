@@ -18,7 +18,7 @@ import { NodeRuntime } from "../runtime/node_runtime.js";
 import {
   mintAndSealBundle,
   recipientKeyIsResolvable,
-} from "../core/seal_bundle_producer.js";
+} from "../seal_bundle_producer.js";
 
 /** Explicit, pre-parsed options for the `bundle` verb. The orchestrator
  * wires argv -> these fields before dispatch (mirrors argparse's

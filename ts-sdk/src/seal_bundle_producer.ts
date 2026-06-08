@@ -35,8 +35,9 @@
 // order (wrap, then sign) is correct.
 //
 // Layer note: this module touches the Node-only `writeTnpkg` / `readTnpkg`
-// I/O wrappers, so it lives under src/core but is Node-flavored (same as
-// the runtime). The crypto it composes is browser-safe.
+// I/O wrappers (and node:fs for the keystore install), so it lives at the
+// `src/` root rather than under `src/core/` — Layer 1 (src/core) must stay
+// browser-safe. The crypto it composes is itself browser-safe.
 
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,7 +45,7 @@ import { join, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
-import { DeviceKey } from "./signing.js";
+import { DeviceKey } from "./core/signing.js";
 import {
   type Manifest,
   newManifest,
@@ -52,16 +53,16 @@ import {
   toWireDict,
   fromWireDict,
   isManifestSignatureValid,
-} from "./tnpkg.js";
-import { readTnpkg, writeTnpkg } from "../tnpkg_io.js";
-import { encryptBodyBlob, decryptBodyBlob, BODY_CIPHER_SUITE, BODY_FRAME } from "./body_encryption.js";
+} from "./core/tnpkg.js";
+import { readTnpkg, writeTnpkg } from "./tnpkg_io.js";
+import { encryptBodyBlob, decryptBodyBlob, BODY_CIPHER_SUITE, BODY_FRAME } from "./core/body_encryption.js";
 import {
   buildRecipientWraps,
   manifestAadForWrap,
   unsealBekFromWrap,
   didKeyToEd25519Pub,
   UnsealError,
-} from "./recipient_seal.js";
+} from "./core/recipient_seal.js";
 
 /** Inputs to {@link sealBundleForRecipient}. */
 export interface SealBundleInput {

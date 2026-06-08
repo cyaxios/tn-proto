@@ -36,7 +36,7 @@ import { DeviceKey } from "../core/signing.js";
 import {
   mintAndSealBundle,
   recipientKeyIsResolvable,
-} from "../core/seal_bundle_producer.js";
+} from "../seal_bundle_producer.js";
 
 export interface AddRecipientOpts {
   /** Group name to mint a kit for (e.g. "default"). */

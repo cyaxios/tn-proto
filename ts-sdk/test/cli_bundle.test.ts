@@ -20,7 +20,7 @@ import { afterEach, test } from "node:test";
 import { DeviceKey, NodeRuntime, readTnpkg } from "../src/index.js";
 import { BtnPublisher } from "../src/raw.js";
 import { bundleCmd } from "../src/cli/bundle.js";
-import { absorbSealedKitBundle } from "../src/core/seal_bundle_producer.js";
+import { absorbSealedKitBundle } from "../src/seal_bundle_producer.js";
 import { readAsRecipient } from "../src/read_as_recipient.js";
 import { parseTnpkg, packTnpkg } from "../src/tnpkg_io.js";
 import { signManifest, toWireDict } from "../src/core/tnpkg.js";

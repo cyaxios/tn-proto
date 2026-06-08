@@ -20,7 +20,7 @@ import { Tn } from "../src/tn.js";
 import { DeviceKey } from "../src/core/signing.js";
 import { readTnpkg } from "../src/tnpkg_io.js";
 import { addRecipientCmd } from "../src/cli/add_recipient.js";
-import { absorbSealedKitBundle } from "../src/core/seal_bundle_producer.js";
+import { absorbSealedKitBundle } from "../src/seal_bundle_producer.js";
 import { readAsRecipient } from "../src/read_as_recipient.js";
 
 interface Sink {
