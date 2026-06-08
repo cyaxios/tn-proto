@@ -25,7 +25,7 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Read version from manifest
         id: version
@@ -47,7 +47,7 @@ jobs:
           fi
 
       - name: Setup Node (for ts-sdk build)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
 

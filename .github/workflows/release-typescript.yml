@@ -44,12 +44,12 @@ jobs:
     name: build + pack tn-proto
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
           registry-url: https://registry.npmjs.org/
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       # Build the wasm bundle the SDK consumes (the published package
@@ -75,7 +75,7 @@ jobs:
           npm pack
           ls -la *.tgz
       - name: Upload tarball artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: tnproto-sdk-tarball
           path: ts-sdk/tnproto-sdk-*.tgz

@@ -44,9 +44,9 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -63,7 +63,7 @@ jobs:
           # Linux gets a manylinux-compatible wheel via the default container.
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: wheels-${{ matrix.package }}-${{ matrix.os }}
           path: crypto/${{ matrix.package }}/dist/*.whl
@@ -80,9 +80,9 @@ jobs:
         package: [tn-btn-py, tn-core-py]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -94,7 +94,7 @@ jobs:
           args: --out dist
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: sdist-${{ matrix.package }}
           path: crypto/${{ matrix.package }}/dist/*.tar.gz
@@ -108,9 +108,9 @@ jobs:
     name: Build tn-proto wheel + sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -122,7 +122,7 @@ jobs:
         run: python -m build
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: dist-tn-proto
           path: python/dist/*
@@ -139,7 +139,7 @@ jobs:
       name: ${{ github.event.inputs.target == 'pypi' && 'pypi' || 'testpypi' }}
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
@@ -176,10 +176,10 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true

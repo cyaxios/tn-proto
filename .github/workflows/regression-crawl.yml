@@ -40,8 +40,8 @@ jobs:
     name: regression / c1 (python module log)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install tn-protocol + deps
@@ -56,7 +56,7 @@ jobs:
           pip install pytest pyyaml
       - name: Run silo
         run: make -C regression c1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: silo-c1-report
@@ -66,8 +66,8 @@ jobs:
     name: regression / c2 (python object log)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install tn-protocol + deps
@@ -80,7 +80,7 @@ jobs:
           pip install pytest pyyaml
       - name: Run silo (no-op until C2 lands)
         run: make -C regression c2 || echo "c2 not yet implemented — placeholder pass"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: silo-c2-report
@@ -90,8 +90,8 @@ jobs:
     name: regression / c5 (groups + recipients in-process)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install tn-protocol + deps
@@ -104,7 +104,7 @@ jobs:
           pip install pytest pyyaml
       - name: Run silo (no-op until C5 lands)
         run: make -C regression c5 || echo "c5 not yet implemented — placeholder pass"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: silo-c5-report
@@ -114,8 +114,8 @@ jobs:
     name: regression / c6 (CLI verbs)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install tn-protocol + deps
@@ -128,7 +128,7 @@ jobs:
           pip install pytest pyyaml
       - name: Run silo (no-op until C6 lands)
         run: make -C regression c6 || echo "c6 not yet implemented — placeholder pass"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: silo-c6-report
@@ -142,8 +142,8 @@ jobs:
         image: mongo:7
         ports: ["27017:27017"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install tn-protocol + deps
@@ -156,7 +156,7 @@ jobs:
           pip install pytest pyyaml httpx
       - name: Run silo (no-op until C7 lands)
         run: make -C regression c7 || echo "c7 not yet implemented — placeholder pass"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: silo-c7-report
@@ -170,8 +170,8 @@ jobs:
         image: mongo:7
         ports: ["27017:27017"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install tn-protocol + deps
@@ -184,7 +184,7 @@ jobs:
           pip install pytest pyyaml httpx
       - name: Run silo (no-op until C8 lands)
         run: make -C regression c8 || echo "c8 not yet implemented — placeholder pass"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: silo-c8-report
@@ -198,11 +198,11 @@ jobs:
     name: regression / c3 (TS module log)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install rust + wasm-pack
@@ -219,7 +219,7 @@ jobs:
         run: npm ci || npm install
       - name: Run silo
         run: make -C regression c3
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: silo-c3-report
@@ -229,11 +229,11 @@ jobs:
     name: regression / c4 (TS object log)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install rust + wasm-pack
@@ -250,7 +250,7 @@ jobs:
         run: npm ci || npm install
       - name: Run silo (no-op until C4 lands)
         run: make -C regression c4 || echo "c4 not yet implemented — placeholder pass"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: silo-c4-report
@@ -264,11 +264,11 @@ jobs:
     name: regression / c9 (Chrome ext inline decrypt)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install playwright
@@ -277,7 +277,7 @@ jobs:
           playwright install chromium --with-deps
       - name: Run silo (no-op until C9 lands)
         run: make -C regression c9 || echo "c9 not yet implemented — placeholder pass"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: silo-c9-report
