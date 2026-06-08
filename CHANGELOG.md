@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6a1] - 2026-06-07 -- Internal refactor: tn-core module splits
+
+Maintenance release. No API or wire-format changes — the Rust core was
+reorganized for readability and the build is byte-identical to 0.5.5a1
+(the full Rust golden/interop suite passes unchanged at 311 tests).
+
+* **`runtime.rs` split.** The 1,935-line `runtime.rs` was decomposed into
+  focused submodules (`cipher_build`, `chain_seed`, `log_session`,
+  `entry_shape`, `helpers`, alongside the earlier `emit`/`admin`/`init`/
+  `read`), leaving the parent at ~735 lines of structs + `impl Runtime`.
+* **`admin_cache.rs` split.** Per-event-type envelope handlers and LKV
+  snapshot save/load moved into `admin_cache/handlers.rs` and
+  `admin_cache/persist.rs`; the parent drops from 1,273 to ~491 lines.
+* **Dead code cleared.** Removed the vestigial `GroupState.index_key`
+  field and the unwired `discover_retired_btn_states` reader (intent
+  tracked in #118); `tn-core` now builds warning-free.
+
 ## [0.5.5a1] - 2026-06-06 -- CLI parity (both directions) + day-1 vault sync + real seal-for-recipient
 
 A large CLI-parity and vault-sync release, all verified against a live dev vault.
