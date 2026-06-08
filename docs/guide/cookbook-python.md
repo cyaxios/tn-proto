@@ -26,17 +26,19 @@ is shown alongside it.
 
 ### tn.init() in code
 
-`tn.init(yaml_path)` loads or creates a ceremony and opens its log. With
-no argument it walks a discovery chain (`$TN_YAML`, `./tn.yaml`,
-`./.tn/default/tn.yaml`, `$TN_HOME/tn.yaml`) and mints a fresh ceremony
-if nothing is found. Pass an explicit path to bind a specific ceremony.
+`tn.init("demo")` creates or opens a project named `demo` under
+`./.tn/demo/` and opens its log. `tn.init()` with no argument discovers an
+existing project (`$TN_YAML`, `./tn.yaml`, `./.tn/default/tn.yaml`,
+`$TN_HOME/tn.yaml`) and mints a fresh default one if nothing is found. An
+explicit yaml path, `tn.init("./.tn/demo/tn.yaml")`, is an advanced form for
+binding a project at a path you choose.
 
 ```python
 import os, tempfile, tn
 
 work = tempfile.mkdtemp(prefix="tn_basics_")
 os.chdir(work)
-tn.init("./.tn/demo/tn.yaml")
+tn.init("demo")
 
 cfg = tn.current_config()
 print("ceremony_id:", cfg.ceremony_id)
@@ -45,12 +47,12 @@ print("groups:", list(cfg.groups.keys()))
 ```
 
 ```
-ceremony_id: local_4afece54
+ceremony_id: stream_demo_2030ef
 cipher: btn
 groups: ['default', 'tn.agents']
 ```
 
-A fresh ceremony is created with the `btn` cipher and two groups: the
+A fresh project is created with the `btn` cipher and two groups: the
 `default` user group and the internal `tn.agents` policy group.
 
 ### Logging: tn.log and tn.info with fields
@@ -64,7 +66,7 @@ import os, tempfile, tn
 
 work = tempfile.mkdtemp(prefix="tn_full_")
 os.chdir(work)
-tn.init("./.tn/demo/tn.yaml")
+tn.init("demo")
 
 tn.log("app.started", component="api")
 tn.info("order.created", order_id="o_123", amount=4999, currency="USD")
@@ -97,7 +99,7 @@ import os, tempfile, tn
 
 work = tempfile.mkdtemp(prefix="tn_entry_")
 os.chdir(work)
-tn.init("./.tn/demo/tn.yaml")
+tn.init("demo")
 tn.info("order.created", order_id="o_123", amount=4999, currency="USD")
 
 e = list(tn.read())[0]
@@ -167,13 +169,16 @@ PYTHONPATH=python python -m tn.cli init demo --no-link --skip-confirm
 [tn init]   keystore: C:\codex\tn\tn_proto_doctmp\cli_demo\.tn\demo\keys
 ```
 
-`--no-link` produces an offline-only ceremony (no vault contact).
-`--cipher` chooses `btn` (default) or `jwe`. `--keep-mnemonic` stores the
-recovery phrase in `identity.json` so `tn wallet export-mnemonic` can
-re-display it. The ceremony is created at `./.tn/<project>/`.
+By default `tn init <name>` backs the project up to the vault and prints a
+link to it (default `https://vault.tn-proto.org`, falling back to your saved
+`linked_vault`, then `$TN_VAULT_URL`). `--no-link` opts out for an
+offline-only project with no vault contact, as shown above. `--cipher`
+chooses `btn` (default) or `jwe`. `--keep-mnemonic` stores the recovery
+phrase in `identity.json` so `tn wallet export-mnemonic` can re-display it.
+The project is created at `./.tn/<name>/`.
 
-**Code equivalent:** `tn.init("./.tn/<project>/tn.yaml")`. See the Basics
-section above.
+**Code equivalent:** `tn.init("<name>")`, or `tn.init()` for the default
+project. See the Basics section above.
 
 ### tn wallet
 

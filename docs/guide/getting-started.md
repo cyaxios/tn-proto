@@ -33,7 +33,8 @@ of this repository: `pip install -e python/`, and `npm install` in `ts-sdk/`.
 import tn
 
 # Create or open a project and make it the default logger.
-tn.init("./.tn/demo/tn.yaml")
+# tn.init() uses or mints a default project; tn.init("demo") names one.
+tn.init("demo")
 
 # Log entries. Keyword arguments become encrypted fields.
 tn.log("app.started", component="api")
@@ -85,16 +86,55 @@ full loop.
 Create an identity and a project. Run this in an empty folder:
 
 ```bash
-tn init myproject
+tn init mybackuptest
 ```
 
 ```
-DID: did:key:z6MksPsDhwFCy8Cho6xM83iE2b21oqutKef2KmBdWDAbnSQS
-Ceremony local_bb78e996 created at ./.tn/myproject/tn.yaml
+[tn init] Reusing identity at /home/you/.config/tn/identity.json
+[tn init]   DID: did:key:z6MksPsDhwFCy8Cho6xM83iE2b21oqutKef2KmBdWDAbnSQS
+[tn init] Ceremony local_861a3532 created at ./.tn/mybackuptest/tn.yaml
+[tn init]   project: mybackuptest
+[tn init]   cipher: btn
+[tn init]   keystore: ./.tn/mybackuptest/keys
+
+[tn init] Attached to your vault account (no browser needed).
+[tn init]   project:  mybackuptest
+[tn init]   linked:   http://localhost:38790/projects/01KTMC5A5J3RQ17CK5230TV558
+[tn init]   uploaded: 0 file(s)
 ```
 
-This prints your DID and creates `./.tn/myproject/`. You do this once per
-project.
+The `linked:` line is your project's URL in the vault for backup and
+recovery. (Output is from a development vault; the hosted vault prints a
+`https://vault.tn-proto.org/projects/...` link.)
+
+`tn init <name>` does two things. It creates one identity per machine (your
+Ed25519 keypair and DID, reused for every project after the first) and a
+project under `./.tn/<name>/`. You run it once per project.
+
+By default it also backs the project up to the backup vault and prints a link
+to it for recovery. The vault URL is `https://vault.tn-proto.org` unless you
+have linked another (it falls back to your saved `linked_vault`, then to
+`$TN_VAULT_URL`). Open the link to manage or restore the project later.
+
+To stay fully offline with no vault contact and no backup, pass `--no-link`:
+
+```bash
+tn init myproject --no-link
+```
+
+```
+[tn init] Reusing identity at /home/you/.config/tn/identity.json
+[tn init]   DID: did:key:z6MksPsDhwFCy8Cho6xM83iE2b21oqutKef2KmBdWDAbnSQS
+[tn init] Ceremony local_5c55a621 created at ./.tn/myproject/tn.yaml
+[tn init]   project: myproject
+[tn init]   cipher: btn
+[tn init]   keystore: ./.tn/myproject/keys
+```
+
+In code, `tn.init("myproject")` creates the same project on disk. A plain
+script stays local; the vault backup runs automatically only inside a
+notebook. Pass `link=True` to force the backup from a script, or `link=False`
+to keep it offline.
 
 Write a log entry. `--event` names it; each `--field k=v` adds one encrypted
 field:
@@ -120,6 +160,10 @@ tn read --yaml ./.tn/myproject/tn.yaml
 Every command takes `--yaml <path>` to choose which project to act on. Leave
 it off and `tn` looks for `./tn.yaml` or `./.tn/default/tn.yaml`. Run any
 command with `--help` to see its options, for example `tn info --help`.
+
+As an advanced option, `tn.init` in code also accepts an explicit yaml path,
+`tn.init("./.tn/demo/tn.yaml")`, to bind a project at a path of your choosing
+rather than under `./.tn/<name>/`.
 
 ## What a DID is
 
@@ -196,7 +240,7 @@ function each verb calls.
 
 | Command | Python CLI | TypeScript CLI | Description | Python code | TypeScript code |
 |---|---|---|---|---|---|
-| init | `tn init <project>` | `tn-js init [<yaml>]` | Create identity + project at `./.tn/<project>/`. | `tn.init("./.tn/demo/tn.yaml")` | `await tn.use("demo")` |
+| init | `tn init <project>` | `tn-js init [<yaml>]` | Create identity + project at `./.tn/<project>/`; back it up to the vault unless `--no-link`. | `tn.init("demo")` / `tn.init()` | `await tn.use("demo")` |
 | info / log | `tn info --event <t> --field k=v` | `tn-js info --event <t> --field k=v` | Append one attested entry. | `tn.info("evt", k=v)` / `tn.log("evt", k=v)` | `tn.info("evt", {k:v})` / `tn.log("evt", {k:v})` |
 | read | `tn read [--all-runs]` | `tn-js read [--compact]` | Print the log, decrypted. | `for e in tn.read(): ...` | `for (const e of tn.read()) ...` |
 | watch | `python -m tn.watch <yaml> [--once --since]` | `tn-js watch [--since --verify --poll --once]` | Tail the log, one entry per line. | `tn.watch(since=...)` | `tn.watch({ since })` |
@@ -219,12 +263,12 @@ function each verb calls.
 | seal | `tn seal` | `tn-js seal` | Sign one public-only envelope from stdin. | (crypto primitives) | (crypto primitives) |
 | verify | `tn verify` | `tn-js verify` | Recompute the row hash and check the signature. | (crypto primitives) | (crypto primitives) |
 | canonical | `tn canonical` | `tn-js canonical` | Emit the canonical bytes of each stdin line. | `tn.canonical._canonical_bytes(v)` | `canonicalize(v)` |
-| wallet status | `tn wallet status` | `tn-js wallet status` | Print identity + project status. | `Identity.load(...)` | (CLI) |
-| wallet link | `tn wallet link --vault <url>` | `tn-js wallet link <url>` | Create a vault project, mark the project linked. | `tn.wallet.link_ceremony(cfg, client)` | (CLI) |
-| wallet unlink | `tn wallet unlink` | `tn-js wallet unlink` | Mark the project local again. | `tn.admin.set_link_state(cfg, mode="local")` | (CLI) |
-| wallet sync | `tn wallet sync [--pull --push-only]` | `tn-js wallet sync` | Two-way vault sync: pull, absorb, push. | `tn.wallet.sync_ceremony(...)` | (CLI) |
+| wallet status | `tn wallet status` | `tn-js wallet status` | Print identity + project status. | `Identity.load(...)` | `tn.wallet.status(yamlPath)` |
+| wallet link | `tn wallet link --vault <url>` | `tn-js wallet link <url>` | Create a vault project, mark the project linked. | `tn.wallet.link_ceremony(cfg, client)` | `tn.wallet.link(client, yamlPath)` |
+| wallet unlink | `tn wallet unlink` | `tn-js wallet unlink` | Mark the project local again. | `tn.admin.set_link_state(cfg, mode="local")` | `tn.wallet.unlink(yamlPath)` |
+| wallet sync | `tn wallet sync [--pull --push-only]` | `tn-js wallet sync` | Two-way vault sync: pull, absorb, push. | `tn.wallet.sync_ceremony(...)` | `tn.wallet.sync(opts)` |
 | wallet pull-prefs | `tn wallet pull-prefs` | `tn-js wallet pull-prefs` | Refresh account prefs from the vault. | `VaultClient.get_prefs()` | (CLI) |
-| wallet restore | `tn wallet restore [--mnemonic]` | `tn-js wallet restore` | Restore projects from the vault. | `tn.wallet.restore_ceremony(...)` | (CLI) |
+| wallet restore | `tn wallet restore [--mnemonic]` | `tn-js wallet restore` | Restore projects from the vault. | `tn.wallet.restore_ceremony(...)` | `tn.wallet.restore(client, opts)` |
 | wallet export-mnemonic | `tn wallet export-mnemonic` | `tn-js wallet export-mnemonic` | Re-display the recovery phrase. | `Identity.mnemonic_stored` | (CLI) |
 | account connect | `tn account connect <code>` | `tn-js account connect <code>` | Bind this device to a vault account. | `vault_client.redeem_connect_code(...)` | (CLI) |
 | vault link (event) | `tn vault link <vault-did> <project-id>` | `tn-js vault link <vault-did> <project-id>` | Append a `tn.vault.linked` entry to the log. | `tn.vault.link(vault_did, project_id)` | `tn.vault.link(vaultDid, projectId)` |
