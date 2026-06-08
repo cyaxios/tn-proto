@@ -4,14 +4,14 @@
 context_keys, field_count). Each cell records its own metrics +
 per-cell yaml snapshot. Not full cartesian — shape coverage.
 
-Handlers dimension deferred to alice/s05_handlers_fanout (requires
-per-cell ceremony rebuild, covered there).
+The handlers dimension is out of scope for this matrix (it needs a
+per-cell ceremony rebuild).
 
 CONCERN: n_recips is cosmetic — tn.ensure_group() creates the group
 with just the publisher as recipient. The intended recipient count is
-recorded in metrics so the CSV reflects the cell's design intent, but
-true multi-recipient JWE encryption per cell is deferred (same as
-Bob/Carol/Dana personas which exercise the low-level JWEGroupCipher
+recorded in metrics so the CSV reflects the cell's design intent;
+true multi-recipient JWE encryption per cell is out of this scenario's
+scope (the Bob/Carol/Dana personas exercise the low-level JWEGroupCipher
 path).
 """
 

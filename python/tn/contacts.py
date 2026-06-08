@@ -23,9 +23,8 @@ pair (treating ``None`` as a valid value — i.e. an OAuth-only account
 with no package yet matches another OAuth-only entry for the same
 account). Match → replace in place. No match → append. **D-25**.
 
-The richer per-local-label grouping in spec §4.10 is a derived view
-deferred to a later session; we keep this file flat so concurrent
-absorbs reduce predictably.
+This file keeps contacts flat so concurrent absorbs reduce predictably;
+the richer per-local-label grouping (spec §4.10) is a derived view on top.
 """
 
 from __future__ import annotations

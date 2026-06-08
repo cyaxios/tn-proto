@@ -1,9 +1,9 @@
 //! BGW cipher stub (feature-gated).
 //!
 //! BGW uses the existing C library at `tn-protocol/crypto/src/bgw.cpp` via
-//! FFI. Wiring that FFI is deferred; for now, any BGW operation from tn-core
-//! returns `NotImplemented`. Enable the `bgw` feature to compile this module
-//! at all.
+//! FFI, which is not wired in tn-core: any BGW operation here returns
+//! `NotImplemented` (BGW groups run through the Python runtime instead).
+//! Enable the `bgw` feature to compile this module at all.
 
 use crate::{Error, Result};
 

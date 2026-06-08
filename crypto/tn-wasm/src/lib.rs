@@ -223,8 +223,8 @@ pub fn sign_message_js(seed: &[u8], message: &[u8]) -> Result<Vec<u8>, JsError> 
 
 /// Verify a signature against an Ed25519 `did:key:z…` identity.
 ///
-/// Returns `false` for non-Ed25519 DIDs (secp256k1 verify deferred to
-/// match the Rust core policy), `true` only if the signature is valid.
+/// Returns `false` for non-Ed25519 DIDs (Ed25519 verify only, matching the
+/// Rust core policy), `true` only if the signature is valid.
 #[wasm_bindgen(js_name = "verifyDid")]
 pub fn verify_did_js(did: &str, message: &[u8], signature: &[u8]) -> Result<bool, JsError> {
     DeviceKey::verify_did(did, message, signature).map_err(|e| JsError::new(&format!("{e}")))

@@ -2,8 +2,8 @@
 //!
 //! Matches `tn/signing.py` for Ed25519 (the curve TN signs with). The Python
 //! verify path additionally accepts secp256k1 DIDs for ATProto interop; this
-//! Rust port defers that branch — secp256k1 DIDs return `Ok(false)` from
-//! `verify_did` without erroring. Will be added when a fixture requires it.
+//! Rust port verifies Ed25519 only — secp256k1 DIDs return `Ok(false)` from
+//! `verify_did` without erroring.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -87,7 +87,7 @@ impl DeviceKey {
 
     /// Verify a signature against an Ed25519 `did:key:z…` identity.
     ///
-    /// Returns `Ok(false)` for non-Ed25519 DIDs (secp256k1 verify deferred).
+    /// Returns `Ok(false)` for non-Ed25519 DIDs (Ed25519 verify only).
     pub fn verify_did(did: &str, message: &[u8], signature: &[u8]) -> Result<bool> {
         let Some(rest) = did.strip_prefix("did:key:z") else {
             return Ok(false);

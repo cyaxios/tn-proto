@@ -12,11 +12,9 @@ own native tests that cover the same fixture shape:
 * Rust:       ``tn-protocol/crypto/tn-core/tests/config_env_vars.rs``
   (``mixed_substitutions_yaml`` and ``default_used_when_var_absent``)
 
-Spawning all three SDKs in one harness is deferred — wiring the
-existing ``test/interop_driver.sh`` to drive a yaml-config-loading
-case is a small follow-up. For now this Python-only test plus the
-pinned syntax ensures parity by construction (each SDK has a
-near-identical test against the same syntax).
+This Python-only test plus the pinned syntax ensures parity by
+construction — each SDK runs a near-identical test against the same
+fixture shape.
 """
 
 from __future__ import annotations

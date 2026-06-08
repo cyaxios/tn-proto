@@ -9,8 +9,8 @@ Steps of `_emit` (PRD §6.3):
   6. Sign row_hash with the device Ed25519 key.
   7. Append the JSON envelope to the log file.
 
-Step 8 ("publish firehose") from the PRD is deferred — requires wallet
-+ Kafka integration that is out of scope for the MVP wrapper.
+Firehose publishing is not an inline `_emit` step; it ships as a separate
+fan-out handler (``tn.firehose`` — see ``tn/handlers/firehose.py``).
 """
 
 from __future__ import annotations

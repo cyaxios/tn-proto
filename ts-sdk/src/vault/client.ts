@@ -1,13 +1,9 @@
 // Port of tn_proto/python/tn/vault_client.py — VaultClient + VaultError.
 //
-// PHASE 1 (this file): the unsealed surface — auth (challenge/verify),
-// projects (create/list/get/delete), restore_manifest, and the raw
-// request plumbing. These are the methods needed for `wallet.link`.
-//
-// PHASE 2 (deferred): the sealed surface — upload_file / download_file /
-// upload_sealed / download_sealed. Those need the wrap-key + AAD bind
-// (identity.vault_wrap_key in Python). Required for wallet.sync /
-// wallet.restore. Tracked separately so this PR stays reviewable.
+// Covers the unsealed surface — auth (challenge/verify), projects
+// (create/list/get/delete), restore_manifest, and the raw request plumbing —
+// plus the AWK/BEK whole-body routes (wrapped-key + encrypted-blob) that the
+// `wallet.link` and body-sync paths build on.
 //
 // Python parity is the contract: when in doubt, do it the way
 // vault_client.py does. Tests interop the two clients against the same

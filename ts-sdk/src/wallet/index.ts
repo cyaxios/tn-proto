@@ -1,11 +1,7 @@
 // Port of tn_proto/python/tn/wallet.py — WalletNamespace.
 //
-// PHASE 1 (this file): link_ceremony — uses VaultClient.createProject +
-// inline yaml mutation to flip ceremony.mode local -> linked.
-//
-// PHASE 2 (deferred): sync_ceremony, restore_ceremony — those need the
-// sealed file-upload surface on VaultClient (Phase 2 of vault/client.ts)
-// AND the identity.vault_wrap_key (not yet ported from Python).
+// link_ceremony — uses VaultClient.createProject + inline yaml mutation to
+// flip ceremony.mode local -> linked.
 //
 // Pattern: methods take an already-authed VaultClient + the ceremony's
 // yamlPath. Returning a structured result mirrors Python's dataclasses.

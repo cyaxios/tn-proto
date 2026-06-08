@@ -4336,7 +4336,7 @@ fn build_cipher_with_admin(
             "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
         )),
         "bgw" => Err(Error::NotImplemented(
-            "BGW groups run through the Python runtime; FFI port deferred",
+            "BGW groups run through the Python runtime; FFI not wired in tn-core",
         )),
         other => Err(Error::InvalidConfig(format!("unknown cipher {other:?}"))),
     }
@@ -4368,7 +4368,7 @@ fn build_cipher_with_admin_with_storage(
             "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
         )),
         "bgw" => Err(Error::NotImplemented(
-            "BGW groups run through the Python runtime; FFI port deferred",
+            "BGW groups run through the Python runtime; FFI not wired in tn-core",
         )),
         other => Err(Error::InvalidConfig(format!("unknown cipher {other:?}"))),
     }

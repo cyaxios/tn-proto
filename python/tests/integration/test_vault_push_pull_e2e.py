@@ -754,30 +754,6 @@ def test_alice_to_frank_round_trip(tmp_path: Path, _shared_loop) -> None:
     assert "Replication" in fields["use_for"]
 
 
-# ── Phase B: Playwright UI wrapper -- DEFERRED ────────────────────────
-#
-# The plan's Phase B is an optional Playwright-driven test that drives
-# the vault dashboard's invite flow before handing off to the SDK
-# orchestration done above. We're deferring it pending dashboard auth
-# scaffolding -- the existing dashboard.html doesn't yet ship an
-# end-to-end "invite reader" wizard the way creator_platform's admin
-# studio does, so the UI portion would either stub the navigation or
-# wait for the invite UX to land.
-#
-# Structural sketch for the next session:
-#
-#   tnproto-org/tests/e2e/test_alice_frank_invite_flow.py
-#     - Pytest fixture spawning uvicorn against ``src.app:app`` on a
-#       free port, waiting for /healthz to return 200.
-#     - Use ``pytest-playwright`` (sync or async API) to drive
-#       http://localhost:<port>/dashboard.html.
-#     - Alice's session: log in (or inject a JWT directly via
-#       localStorage), open the project, click "Invite Reader",
-#       receive the kit URL.
-#     - Frank's session: paste the URL, accept, land in his panel.
-#     - Then drop into the SDK orchestration above
-#       (VaultPushHandler / VaultPullHandler / secure_read) to verify
-#       the round-trip succeeded against the actual UI-issued kit.
-#
-# Once landed, the e2e/ directory should follow the same pattern as
-# creator_platform/tests/e2e/test_ai_studio_admin_e2e.py.
+# Phase A (the SDK push/pull orchestration) is covered above. An optional
+# Playwright UI wrapper over the vault dashboard invite flow is tracked
+# separately and is not implemented here.
