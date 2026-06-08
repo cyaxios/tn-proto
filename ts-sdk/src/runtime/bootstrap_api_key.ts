@@ -103,7 +103,7 @@ export interface ParsedBearer {
  *
  * @example
  * ```ts
- * import { parseBearer } from "@tnproto/sdk";
+ * import { parseBearer } from "tn-proto";
  *
  * const parsed = parseBearer(process.env.TN_API_KEY ?? "");
  * if (parsed === null) {
@@ -227,8 +227,8 @@ async function _httpGet(
  *
  * @example
  * ```ts
- * import { challengeVerify, resolveDidEndpoint, parseBearer } from "@tnproto/sdk";
- * import { DeviceKey } from "@tnproto/sdk";
+ * import { challengeVerify, resolveDidEndpoint, parseBearer } from "tn-proto";
+ * import { DeviceKey } from "tn-proto";
  *
  * const parsed = parseBearer(process.env.TN_API_KEY!);
  * if (!parsed) throw new Error("bad bearer");
@@ -421,7 +421,7 @@ export class UnsealNotWiredError extends Error {
  *
  * @example
  * ```ts
- * import { bootstrapFromApiKey } from "@tnproto/sdk";
+ * import { bootstrapFromApiKey } from "tn-proto";
  *
  * const result = await bootstrapFromApiKey({
  *   vaultDid: "did:web:vault.example.com",

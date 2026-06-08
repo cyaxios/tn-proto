@@ -62,7 +62,7 @@ export const ENV_VAULT_DEFAULT_BASE = "TN_VAULT_DEFAULT_BASE";
  *
  * @example
  * ```ts
- * import { resolveVaultUrl } from "@tnproto/sdk";
+ * import { resolveVaultUrl } from "tn-proto";
  *
  * // No arg, no env: returns DEFAULT_VAULT_URL.
  * resolveVaultUrl();                        // "https://vault.tn-proto.org"
@@ -132,7 +132,7 @@ const _didEndpointCache: Map<string, string> = new Map();
  *
  * @example
  * ```ts
- * import { resolveDidEndpoint } from "@tnproto/sdk";
+ * import { resolveDidEndpoint } from "tn-proto";
  *
  * // did:key — uses TN_VAULT_DEFAULT_BASE (or DEFAULT_VAULT_URL).
  * const base1 = await resolveDidEndpoint("did:key:z6MkfakeDidKeyForTest");
@@ -214,7 +214,7 @@ export async function resolveDidEndpoint(didStr: string): Promise<string> {
  *
  * @example
  * ```ts
- * import { _resetDidEndpointCacheForTests, resolveDidEndpoint } from "@tnproto/sdk";
+ * import { _resetDidEndpointCacheForTests, resolveDidEndpoint } from "tn-proto";
  *
  * afterEach(() => _resetDidEndpointCacheForTests());
  * ```
@@ -245,7 +245,7 @@ export const ENV_NO_LINK = "TN_NO_LINK";
  *
  * @example
  * ```ts
- * import { isAutoLinkDisabled } from "@tnproto/sdk";
+ * import { isAutoLinkDisabled } from "tn-proto";
  *
  * // TN_NO_LINK=1 in env
  * isAutoLinkDisabled();   // true

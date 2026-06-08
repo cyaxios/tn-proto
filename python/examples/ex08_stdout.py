@@ -2,7 +2,7 @@
 
 Story
 -----
-Jamie just installed `tn-protocol` and wants to actually SEE what's
+Jamie just installed `tn-proto` and wants to actually SEE what's
 landing in the log without `tail -f`-ing a file. They open a Python
 REPL or run a one-shot script and call `tn.info()` a few times. Out of
 the box, every event lands as a JSON line on stdout — same shape as

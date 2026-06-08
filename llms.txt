@@ -4,7 +4,7 @@
 > per business event. Every action, a TransactioN. Python and
 > TypeScript bindings share a byte-identical wire format.
 
-Install: `pip install tn-protocol`. Source:
+Install: `pip install tn-proto`. Source:
 `https://github.com/cyaxios/tn-proto`.
 
 ## Mental model
@@ -156,8 +156,8 @@ enables prompts where useful.
 
 | binding         | install                    | use case                       |
 |-----------------|----------------------------|--------------------------------|
-| Python          | `pip install tn-protocol`  | reference, CLI, services       |
-| TypeScript/Node | `@tn/sdk` (npm)            | Node services, build tools     |
+| Python          | `pip install tn-proto`  | reference, CLI, services       |
+| TypeScript/Node | `tn-proto` (npm)            | Node services, build tools     |
 | Browser (WASM)  | bundled via `tn-proto-web` | in-browser verify and decrypt  |
 
 Every binding reads byte-identical envelopes. Cross-language parity

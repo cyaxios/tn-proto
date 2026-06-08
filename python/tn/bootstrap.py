@@ -56,11 +56,11 @@ _HTTP_TIMEOUT_SEC = 15.0
 def _tn_user_agent() -> str:
     """Self-identifying User-Agent string for every outbound HTTP call.
 
-    Defaults to ``tn-protocol/<installed-version>`` so Cloudflare's
+    Defaults to ``tn-proto/<installed-version>`` so Cloudflare's
     Browser Integrity Check stops 403'ing us with ``error code: 1010``
     (the default ``Python-urllib/3.x`` UA gets blocked at the CF edge
     before requests reach the vault application). Falls back to
-    ``tn-protocol/dev`` when the package metadata is unreachable
+    ``tn-proto/dev`` when the package metadata is unreachable
     (editable install from a fresh checkout without ``pip install -e``).
 
     UA is NOT an auth boundary; the real boundary stays at the DID
@@ -72,11 +72,11 @@ def _tn_user_agent() -> str:
         from importlib.metadata import PackageNotFoundError, version
 
         try:
-            return f"tn-protocol/{version('tn-protocol')}"
+            return f"tn-proto/{version('tn-proto')}"
         except PackageNotFoundError:
-            return "tn-protocol/dev"
+            return "tn-proto/dev"
     except Exception:  # noqa: BLE001 - never block startup on UA resolution
-        return "tn-protocol/dev"
+        return "tn-proto/dev"
 
 
 _DEFAULT_HEADERS = {"User-Agent": _tn_user_agent()}

@@ -10,7 +10,7 @@ This is environmental, not a behavior change — production / dev / interactive
 use still gets the default-on stdout that ``tn.init()`` provides.
 
 We also prepend ``python/`` to ``sys.path`` so the in-repo ``tn`` package
-resolves before any pip-installed ``tn-protocol`` in the active venv.
+resolves before any pip-installed ``tn-proto`` in the active venv.
 Without this, the first test to ``import tn`` (whichever pytest collects
 first) might pull the published wheel from site-packages and shadow the
 working tree we're actually testing.
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 # Ensure the in-repo ``tn`` package (python/tn/) wins over any installed
-# tn-protocol wheel. Insert at index 0 so it precedes site-packages.
+# tn-proto wheel. Insert at index 0 so it precedes site-packages.
 _PY_DIR = Path(__file__).resolve().parent.parent
 _PY_DIR_STR = str(_PY_DIR)
 if _PY_DIR_STR in sys.path:

@@ -130,7 +130,7 @@ export interface BrowserRuntimeFromSeedOptions extends CreateFromSeedOptions {
  *
  * @example
  * ```ts
- * import { BrowserRuntime } from "@tnproto/sdk/browser";
+ * import { BrowserRuntime } from "tn-proto/browser";
  *
  * const rt = BrowserRuntime.init();   // mints fresh ceremony on first call
  * rt.info("hello.world", { who: "alice" });
@@ -190,7 +190,7 @@ export class BrowserRuntime {
    *
    * @example
    * ```ts
-   * import { BrowserRuntime } from "@tnproto/sdk/browser";
+   * import { BrowserRuntime } from "tn-proto/browser";
    *
    * // Default: localStorage adapter, console-on, no HTTP.
    * const rt = BrowserRuntime.init();
@@ -248,7 +248,7 @@ export class BrowserRuntime {
    *
    * @example
    * ```ts
-   * import { BrowserRuntime } from "@tnproto/sdk/browser";
+   * import { BrowserRuntime } from "tn-proto/browser";
    *
    * const rt = BrowserRuntime.initFromSeed({
    *   seed: b64decode(PUBLISHER_SEED_B64),

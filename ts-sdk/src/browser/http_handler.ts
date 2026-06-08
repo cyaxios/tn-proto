@@ -156,7 +156,7 @@ export interface HttpHandlerInstance extends WasmHandlerCallbacks {
  *
  * @example
  * ```ts
- * import { Tn, httpHandler } from "@tnproto/sdk/browser";
+ * import { Tn, httpHandler } from "tn-proto/browser";
  *
  * // URL-only shorthand via Tn.init.
  * await Tn.init({ http: "https://ingest.example.com/intake" });
@@ -179,7 +179,7 @@ export interface HttpHandlerInstance extends WasmHandlerCallbacks {
  * @example
  * ```ts
  * // Immediate-ship mode (no queue, one fetch per emit).
- * import { httpHandler } from "@tnproto/sdk/browser";
+ * import { httpHandler } from "tn-proto/browser";
  *
  * const h = httpHandler({
  *   url: INGEST_URL,

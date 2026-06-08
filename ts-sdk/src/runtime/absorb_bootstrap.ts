@@ -323,7 +323,7 @@ async function _unsealFirst(
  *
  * @example
  * ```ts
- * import { absorbSealedBootstrap } from "@tnproto/sdk";
+ * import { absorbSealedBootstrap } from "tn-proto";
  *
  * const receipt = await absorbSealedBootstrap(sealedBytes, {
  *   seed: bearerSeed,             // 32-byte Ed25519 seed

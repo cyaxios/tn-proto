@@ -1,11 +1,11 @@
 /**
- * Public entry point for the `@tnproto/sdk` browser bundle.
+ * Public entry point for the `tn-proto` browser bundle.
  *
  * Mirrors the Python module-level call surface so the simplest browser
  * usage reads exactly like Python:
  *
  * ```ts
- * import * as tn from "@tnproto/sdk/browser";  // or via the prebuilt browser.mjs
+ * import * as tn from "tn-proto/browser";  // or via the prebuilt browser.mjs
  * await tn.init();
  * tn.info("hello.world", { who: "alice" });
  * for (const e of tn.read()) console.log(e);
@@ -16,7 +16,7 @@
  * {@link Tn} class directly:
  *
  * ```ts
- * import { Tn } from "@tnproto/sdk/browser";
+ * import { Tn } from "tn-proto/browser";
  * const tn = await Tn.init();
  * ```
  *
@@ -191,7 +191,7 @@ function _requireDefault(verb: string): _Tn {
  *
  * @example
  * ```ts
- * import * as tn from "@tnproto/sdk/browser";
+ * import * as tn from "tn-proto/browser";
  *
  * await tn.init();
  * tn.info("hello.world", { who: "alice" });
@@ -231,7 +231,7 @@ export async function init(opts?: _TnInitOptions): Promise<_Tn> {
  *
  * @example
  * ```ts
- * import * as tn from "@tnproto/sdk/browser";
+ * import * as tn from "tn-proto/browser";
  *
  * await tn.initFromSeed({
  *   seed: b64decode(PUBLISHER_SEED_B64),
@@ -269,7 +269,7 @@ export async function initFromSeed(opts: _TnInitFromSeedOptions): Promise<_Tn> {
  *
  * @example
  * ```ts
- * import { init, log } from "@tnproto/sdk/browser";
+ * import { init, log } from "tn-proto/browser";
  *
  * await init();
  * log("schema.migrated", { from: "v1", to: "v2" });
@@ -306,7 +306,7 @@ export function debug(
  *
  * @example
  * ```ts
- * import { init, info } from "@tnproto/sdk/browser";
+ * import { init, info } from "tn-proto/browser";
  *
  * await init();
  * info("user.signed_in", { user_id: "u_123" });
@@ -360,7 +360,7 @@ export function error(
  *
  * @example
  * ```ts
- * import { init, info, read } from "@tnproto/sdk/browser";
+ * import { init, info, read } from "tn-proto/browser";
  *
  * await init();
  * info("test.event", { ok: true });

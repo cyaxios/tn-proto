@@ -1,4 +1,4 @@
-# @tnproto/sdk
+# tn-proto
 
 TypeScript SDK for the [TN protocol](https://github.com/cyaxios/tn-proto)
 — attested logging with broadcast encryption.
@@ -26,10 +26,10 @@ paths or the `Tn.init` surface.
 ## Consuming this SDK
 
 Node ≥ 20. The package ships a Node entry plus a browser-safe
-`@tnproto/sdk/core` subpath for use in MV3 extensions and other
+`tn-proto/core` subpath for use in MV3 extensions and other
 no-fs environments.
 
-**`@tnproto/sdk` is not yet on the npm registry.** Until it is, downstream
+**`tn-proto` is not yet on the npm registry.** Until it is, downstream
 projects pull it in one of two ways. Pick the one that matches your
 project's deployment model.
 
@@ -45,7 +45,7 @@ your-org/
   tn_proto/                 <- this repo, sibling
   your-project/             <- consumer
     scripts/build_sdk_bundle.mjs
-    static/vendor/tnproto-sdk-core.mjs    <- esbuild output, committed
+    static/vendor/tn-proto-core.mjs    <- esbuild output, committed
 ```
 
 The proto-vault script that does this lives at
@@ -71,9 +71,9 @@ Grab the tarball:
 # From the most recent tag run:
 gh run download \
   --repo cyaxios/tn-proto \
-  --name tnproto-sdk-tarball \
+  --name tn-proto-tarball \
   --dir ./vendor
-# -> ./vendor/tnproto-sdk-0.4.3-alpha.2.tgz
+# -> ./vendor/tn-proto-0.4.3-alpha.2.tgz
 ```
 
 Reference it from your consumer's `package.json`:
@@ -81,13 +81,13 @@ Reference it from your consumer's `package.json`:
 ```json
 {
   "dependencies": {
-    "@tnproto/sdk": "file:./vendor/tnproto-sdk-0.4.3-alpha.2.tgz"
+    "tn-proto": "file:./vendor/tn-proto-0.4.3-alpha.2.tgz"
   }
 }
 ```
 
 `npm install` resolves `file:` URLs by copying the tarball contents into
-`node_modules/@tnproto/sdk/`, exactly as if it had been pulled from the
+`node_modules/tn-proto/`, exactly as if it had been pulled from the
 registry. Pin the version in the filename so a stale tarball can't
 silently downgrade you.
 
@@ -97,24 +97,24 @@ checkout:
 ```bash
 cd tn_proto/ts-sdk
 npm run build
-npm pack          # writes tnproto-sdk-<version>.tgz to ts-sdk/
+npm pack          # writes tn-proto-<version>.tgz to ts-sdk/
 ```
 
-Then point your consumer at `file:../tn_proto/ts-sdk/tnproto-sdk-<version>.tgz`.
+Then point your consumer at `file:../tn_proto/ts-sdk/tn-proto-<version>.tgz`.
 
 ### Mode C — npm registry (future)
 
-When `@tnproto/sdk` is published the install becomes:
+When `tn-proto` is published the install becomes:
 
 ```bash
-npm install @tnproto/sdk
+npm install tn-proto
 ```
 
 That path is gated on adding an `NPM_TOKEN` secret and a
 `PUBLISH_TO_NPM=true` repo variable to `tn-proto`. The workflow already
 publishes under the `alpha` dist-tag, so consumers using the bare name
 keep resolving to the most recent stable once one ships; alpha consumers
-opt in with `npm install @tnproto/sdk@alpha`. See the header of
+opt in with `npm install tn-proto@alpha`. See the header of
 [`release-typescript.yml`](../.github/workflows/release-typescript.yml)
 for the enable steps.
 
@@ -122,15 +122,15 @@ for the enable steps.
 
 | Repo                            | Mode | Where the SDK lands |
 |---------------------------------|------|--------------------------------------------------|
-| `tn-proto-org/tn_proto_web`     | A    | `static/dashboard/vendor/tnproto-sdk-core.mjs`   |
-| `cyaxios/witness` (future)      | B    | `./vendor/tnproto-sdk-<version>.tgz` via `gh run download` |
+| `tn-proto-org/tn_proto_web`     | A    | `static/dashboard/vendor/tn-proto-core.mjs`   |
+| `cyaxios/witness` (future)      | B    | `./vendor/tn-proto-<version>.tgz` via `gh run download` |
 | anything else needing browser   | A    | use the proto-vault template script              |
 | anything else needing Node-side | B    | tarball + `file:` reference                      |
 
 ## Quickstart
 
 ```ts
-import { Tn } from "@tnproto/sdk";
+import { Tn } from "tn-proto";
 
 const tn = await Tn.init("./tn.yaml");          // mints a fresh ceremony if absent
 tn.info("order.created", { order_id: "A100", amount: 4999 });
@@ -149,7 +149,7 @@ that touch disk or the network are `Promise<T>`.
 ## Surface
 
 ```ts
-import { Tn } from "@tnproto/sdk";
+import { Tn } from "tn-proto";
 
 // Hot path — sync.
 tn.log / tn.debug / tn.info / tn.warning / tn.error
@@ -168,7 +168,7 @@ tn.agents.{addRuntime, policy, reloadPolicy}
 tn.handlers.{add, list, flush}
 
 // Process-global toggles — also exported as bare functions.
-import { setLevel, setSigning, setStrict } from "@tnproto/sdk";
+import { setLevel, setSigning, setStrict } from "tn-proto";
 setLevel("info");
 setSigning(false);     // hot-loop tracing — turn off Ed25519 entirely
 ```
@@ -219,11 +219,11 @@ tn-js watch --yaml ./tn.yaml | humanlog
 ## Browser / extension use
 
 ```ts
-import { decryptGroup, flattenRawEntry, AdminStateReducer } from "@tnproto/sdk/core";
-import { importEmk, wrapKeystoreSecret } from "@tnproto/sdk/core";
+import { decryptGroup, flattenRawEntry, AdminStateReducer } from "tn-proto/core";
+import { importEmk, wrapKeystoreSecret } from "tn-proto/core";
 ```
 
-`@tnproto/sdk/core` (Layer 1) has no `node:*` imports — verified by
+`tn-proto/core` (Layer 1) has no `node:*` imports — verified by
 ESLint at build time and by a runtime smoke test. Use this entry from
 MV3 extensions, browser bundles, or any non-Node host. The Layer 1
 surface includes:
@@ -283,7 +283,7 @@ for the table; new verbs MUST add a row before the SDK can publish
 All thrown errors are real `Error` subclasses you can `instanceof` route:
 
 ```ts
-import { VerificationError, ChainConflictError } from "@tnproto/sdk";
+import { VerificationError, ChainConflictError } from "tn-proto";
 
 try {
   for (const entry of tn.secureRead({ onInvalid: "raise" })) { ... }

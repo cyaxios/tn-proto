@@ -109,7 +109,7 @@ class DeltaTableHandler(AsyncHandler):
         except ImportError as e:
             raise ImportError(
                 "DeltaTableHandler requires databricks-sql-connector. "
-                "Install via `pip install 'tn-protocol[delta]'`."
+                "Install via `pip install 'tn-proto[delta]'`."
             ) from e
 
         self._sql_module = sql

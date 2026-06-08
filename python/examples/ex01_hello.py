@@ -4,7 +4,7 @@ Story
 -----
 Jamie runs a small SaaS. Last Tuesday at 3 a.m. it went down; customers
 complained by 8 a.m. and Jamie had no idea what had happened. Jamie
-installs `tn-protocol` and adds three lines to the order handler.
+installs `tn-proto` and adds three lines to the order handler.
 Next time something breaks, there are signed logs.
 
 What this shows

@@ -185,7 +185,7 @@ class TnFirehoseHandler(AsyncHandler):
             except ImportError as e:
                 raise ImportError(
                     "tn.firehose requires the `websocket-client` package. "
-                    "Install via `pip install 'tn-protocol[firehose]'`."
+                    "Install via `pip install 'tn-proto[firehose]'`."
                 ) from e
             ws = websocket.create_connection(
                 self._ws_url(),

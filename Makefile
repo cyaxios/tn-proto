@@ -3,7 +3,7 @@
 # Standard tooling, repeatable across machines:
 #
 #   - ``maturin``  builds the Rust+PyO3 wheels (tn-core, tn-btn).
-#   - ``python -m build``  builds the pure-Python wheel + sdist (tn-protocol).
+#   - ``python -m build``  builds the pure-Python wheel + sdist (tn-proto).
 #   - ``twine check``  validates wheel metadata before upload.
 #   - ``twine upload``  publishes to TestPyPI / PyPI.
 #
@@ -57,17 +57,17 @@ help:
 	@echo "tn-proto Makefile — standard build/publish workflow"
 	@echo ""
 	@echo "Targets:"
-	@echo "  build           Build all wheels (tn-core + tn-btn + tn-protocol) into ./dist"
+	@echo "  build           Build all wheels (tn-core + tn-btn + tn-proto) into ./dist"
 	@echo "  build-core      Build only the tn-core wheel"
 	@echo "  build-btn       Build only the tn-btn wheel"
-	@echo "  build-protocol  Build only the tn-protocol wheel + sdist"
+	@echo "  build-protocol  Build only the tn-proto wheel + sdist"
 	@echo "  clean           Remove ./dist and ./target/wheels"
 	@echo "  check           Run 'twine check' over every wheel in ./dist"
 	@echo "  test-install    Fresh venv + pip install + import smoke test"
 	@echo "  publish-test    Upload ./dist to TestPyPI (prompts for token)"
 	@echo "  publish         Upload ./dist to PyPI (prompts twice; require confirmation)"
 	@echo "  tools           Install maturin + build + twine into the active interpreter"
-	@echo "  verify-version  Check tn-protocol version isn't already on TestPyPI"
+	@echo "  verify-version  Check tn-proto version isn't already on TestPyPI"
 	@echo ""
 	@echo "Override Python: make PYTHON=/path/to/python build"
 
@@ -93,7 +93,7 @@ build-btn: $(DIST)
 	cd $(TN_BTN_DIR) && $(PYTHON) -m maturin build --release --out ../../$(DIST)
 
 build-protocol: $(DIST)
-	@echo "==> Building tn-protocol (pure Python via build)"
+	@echo "==> Building tn-proto (pure Python via build)"
 	cd $(PY_DIR) && $(PYTHON) -m build --outdir ../$(DIST)
 
 # ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ test-install: build
 	@echo "==> Installing wheels"
 	. .venv-test/bin/activate 2>/dev/null || .venv-test/Scripts/activate; \
 	  pip install --upgrade pip --quiet && \
-	  pip install --find-links $(DIST) tn-protocol --quiet && \
+	  pip install --find-links $(DIST) tn-proto --quiet && \
 	  python -c "import tn, tn_core, tn_btn; print('smoke OK:', tn.__name__, '+', tn_core.__name__, '+', tn_btn.__name__)"
 	@echo "==> Cleaning up"
 	rm -rf .venv-test
@@ -131,10 +131,10 @@ test-install: build
 # Bumps to existing versions get rejected by PyPI; this catches the
 # common "forgot to bump" case before tagging.
 verify-version:
-	@echo "==> Checking tn-protocol version is fresh on TestPyPI"
+	@echo "==> Checking tn-proto version is fresh on TestPyPI"
 	@v=$$($(PYTHON) -c "import tomllib, sys; print(tomllib.load(open('python/pyproject.toml','rb'))['project']['version'])"); \
 	  echo "    Local version: $$v"; \
-	  if curl -sf "https://test.pypi.org/pypi/tn-protocol/$$v/json" >/dev/null; then \
+	  if curl -sf "https://test.pypi.org/pypi/tn-proto/$$v/json" >/dev/null; then \
 	    echo "    !! Version $$v already on TestPyPI. Bump python/pyproject.toml before publishing."; \
 	    exit 1; \
 	  else \

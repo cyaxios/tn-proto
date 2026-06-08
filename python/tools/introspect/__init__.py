@@ -1,7 +1,7 @@
-"""tn-protocol introspection toolchain.
+"""tn-proto introspection toolchain.
 
 Vendored from `creator_platform/backend/introspect/` and adapted for the
-tn-protocol Python SDK. Produces:
+tn-proto Python SDK. Produces:
 
   - symbol inventory (every function/class with signature + decorators)
   - import dependency graph

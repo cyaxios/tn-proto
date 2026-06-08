@@ -75,7 +75,7 @@ def write_symbols_html(cfg: IntrospectConfig) -> Path:
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
     )
     out = cfg.output_dir / "surface_inventory.html"
-    out.write_text(_page("tn-protocol surface inventory", body), encoding="utf-8")
+    out.write_text(_page("tn-proto surface inventory", body), encoding="utf-8")
     return out
 
 
@@ -109,7 +109,7 @@ def write_extension_points_html(cfg: IntrospectConfig) -> Path:
         )
     body = "".join(sections) if sections else "<p>No emit() or tn.log() events found.</p>"
     out = cfg.output_dir / "extension_points.html"
-    out.write_text(_page("tn-protocol extension points", body), encoding="utf-8")
+    out.write_text(_page("tn-proto extension points", body), encoding="utf-8")
     return out
 
 
@@ -139,7 +139,7 @@ def write_env_vars_html(cfg: IntrospectConfig) -> Path:
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
     )
     out = cfg.output_dir / "env_vars.html"
-    out.write_text(_page("tn-protocol environment variables", body), encoding="utf-8")
+    out.write_text(_page("tn-proto environment variables", body), encoding="utf-8")
     return out
 
 
@@ -168,5 +168,5 @@ def write_flag_inventory_html(cfg: IntrospectConfig) -> Path:
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
     )
     out = cfg.output_dir / "flag_inventory.html"
-    out.write_text(_page("tn-protocol flag inventory", body), encoding="utf-8")
+    out.write_text(_page("tn-proto flag inventory", body), encoding="utf-8")
     return out

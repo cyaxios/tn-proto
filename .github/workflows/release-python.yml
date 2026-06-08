@@ -1,7 +1,7 @@
 name: release-python
 
 # Triggered on tag push (e.g. v0.2.0a1). Builds wheels for the three
-# Python packages (tn-btn, tn-core, tn-protocol) across Linux/macOS/Windows
+# Python packages (tn-btn, tn-core, tn-proto) across Linux/macOS/Windows
 # and Python 3.10+, then uploads them to TestPyPI by default. Promote to
 # real PyPI by editing the `repository_url` step below.
 #
@@ -100,12 +100,12 @@ jobs:
           path: crypto/${{ matrix.package }}/dist/*.tar.gz
 
   # ---------------------------------------------------------------------------
-  # Pure-Python tn-protocol wheel — single wheel works on any platform with
+  # Pure-Python tn-proto wheel — single wheel works on any platform with
   # Python 3.10+. No native deps in this package; just imports tn-btn and
   # tn-core at runtime.
   # ---------------------------------------------------------------------------
-  build-tn-protocol:
-    name: Build tn-protocol wheel + sdist
+  build-tn-proto:
+    name: Build tn-proto wheel + sdist
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -124,7 +124,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dist-tn-protocol
+          name: dist-tn-proto
           path: python/dist/*
 
   # ---------------------------------------------------------------------------
@@ -132,7 +132,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish:
     name: Publish to ${{ github.event.inputs.target || 'testpypi' }}
-    needs: [build-pyo3-wheels, build-pyo3-sdists, build-tn-protocol]
+    needs: [build-pyo3-wheels, build-pyo3-sdists, build-tn-proto]
     runs-on: ubuntu-latest
     if: github.event.inputs.target != 'none'
     environment:
@@ -207,6 +207,6 @@ jobs:
           fi
           gh release create "$TAG" \
             $PRE_FLAG \
-            --title "tn-protocol $TAG" \
+            --title "tn-proto $TAG" \
             --notes "$NOTES" \
             dist/*

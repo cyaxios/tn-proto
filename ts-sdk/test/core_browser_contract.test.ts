@@ -1,4 +1,4 @@
-// Browser-contract smoke test for @tnproto/sdk/core (Layer 1).
+// Browser-contract smoke test for tn-proto/core (Layer 1).
 //
 // This test imports from the Layer 1 entry point and exercises the
 // surface the Chrome extension at extensions/tn-decrypt/ depends on.

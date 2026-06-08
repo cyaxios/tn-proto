@@ -63,7 +63,7 @@ BOOTSTRAP = _req("CP_TN_REDPANDA_BOOTSTRAP") or _req("CP_TN_KAFKA_BOOTSTRAP")
 USERNAME = _req("CP_TN_KAFKA_SASL_USERNAME")
 PASSWORD = _req("CP_TN_KAFKA_SASL_PASSWORD")
 MECHANISM = _req("CP_TN_KAFKA_SASL_MECHANISM") or "PLAIN"
-CLIENT_ID = _req("CP_TN_KAFKA_CLIENT_ID") or "tn-protocol-live-test"
+CLIENT_ID = _req("CP_TN_KAFKA_CLIENT_ID") or "tn-proto-live-test"
 
 
 def _have_creds() -> bool:
@@ -87,7 +87,7 @@ def main() -> int:
         print(f"SKIP: Kafka credentials not found in .env (looked in {_ENV_FILE})")
         return 0
     if not _have_kafka_lib():
-        print("SKIP: confluent-kafka not installed (pip install 'tn-protocol[kafka]')")
+        print("SKIP: confluent-kafka not installed (pip install 'tn-proto[kafka]')")
         return 0
 
     from confluent_kafka import Consumer
@@ -172,7 +172,7 @@ handlers:
     # --- 5. Consume them back ---------------------------------------------
     consumer_conf = {
         **auth_conf,
-        "group.id": f"tn-protocol-test-{run_id}",
+        "group.id": f"tn-proto-test-{run_id}",
         "auto.offset.reset": "earliest",
         "enable.auto.commit": False,
     }

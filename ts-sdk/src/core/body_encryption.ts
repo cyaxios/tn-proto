@@ -65,7 +65,7 @@ const TAG_BYTES = 16;
  *
  * @example
  * ```ts
- * import { encryptBodyBlob } from "@tnproto/sdk";
+ * import { encryptBodyBlob } from "tn-proto";
  *
  * const bek = crypto.getRandomValues(new Uint8Array(32));
  * const body = new Map([
@@ -164,7 +164,7 @@ export async function encryptBodyBlob(
  *
  * @example
  * ```ts
- * import { decryptBodyBlob, unsealBekFromWrap, manifestAadForWrap } from "@tnproto/sdk";
+ * import { decryptBodyBlob, unsealBekFromWrap, manifestAadForWrap } from "tn-proto";
  *
  * // 1. Recover BEK from a recipient wrap using our seed.
  * const aad = manifestAadForWrap(manifest);

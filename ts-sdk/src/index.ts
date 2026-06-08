@@ -1,6 +1,6 @@
-// Public entry point for @tnproto/sdk. All crypto is delegated to tn-wasm,
+// Public entry point for tn-proto. All crypto is delegated to tn-wasm,
 // which is compiled from the tn-core Rust crate. If you need a primitive
-// not re-exported here, pull from `@tnproto/sdk/raw`.
+// not re-exported here, pull from `tn-proto/raw`.
 
 // Wasm init note: wasm-pack's `--target nodejs` glue auto-instantiates
 // the .wasm at module load time (see the bottom of pkg/tn_wasm.js —
@@ -55,7 +55,7 @@ export type {
 
 // 0.3.0 surface — Tn is the public class. Bare-function exports of the
 // process-global toggles let callers do `import { setLevel } from
-// "@tnproto/sdk"` without needing the class.
+// "tn-proto"` without needing the class.
 export { Tn } from "./tn.js";
 export type {
   TnInitOptions,
@@ -213,7 +213,7 @@ export {
 // `tn.init(...)`, etc. so the simplest TS usage is the same shape as
 // Python:
 //
-//     import * as tn from "@tnproto/sdk";
+//     import * as tn from "tn-proto";
 //     await tn.init(yamlPath);
 //     tn.info("event.type", { a: 1 });
 //     for (const entry of tn.read()) { ... }

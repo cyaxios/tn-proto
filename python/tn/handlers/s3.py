@@ -71,7 +71,7 @@ class S3Handler(AsyncHandler):
             import boto3
         except ImportError as e:
             raise ImportError(
-                "S3Handler requires boto3. Install via `pip install 'tn-protocol[s3]'`."
+                "S3Handler requires boto3. Install via `pip install 'tn-proto[s3]'`."
             ) from e
 
         self._client = boto3.client(

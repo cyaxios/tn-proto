@@ -1,4 +1,4 @@
-"""Introspect configuration for tn-protocol.
+"""Introspect configuration for tn-proto.
 
 Repo layout this targets:
 
@@ -45,9 +45,9 @@ class IntrospectConfig:
             ".venv", "venv", "__pycache__", "node_modules", ".git",
             ".pytest_cache", ".mypy_cache", ".ruff_cache",
             "dist", "build", "target", "egg-info",
-            # tn-protocol-specific runtime dirs:
+            # tn-proto-specific runtime dirs:
             ".tn_admin", ".tn_logs", "vault_blobs", "logs",
-            "tn_protocol.egg-info", "stage-personas-workspace",
+            "tn_proto.egg-info", "stage-personas-workspace",
             # Don't scan our own output dir:
             "audit-baseline",
             # Don't scan vendored tooling that isn't part of the surface:

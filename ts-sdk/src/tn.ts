@@ -1,4 +1,4 @@
-// @tnproto/sdk — main Layer 2 class, the 0.3.0 replacement for TNClient.
+// tn-proto — main Layer 2 class, the 0.3.0 replacement for TNClient.
 //
 // Lifecycle (the four-line dirt-easy summary):
 //

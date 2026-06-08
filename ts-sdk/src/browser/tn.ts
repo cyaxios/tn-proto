@@ -1,5 +1,5 @@
 /**
- * `@tnproto/sdk` — browser-native `Tn` class.
+ * `tn-proto` — browser-native `Tn` class.
  *
  * Same verb surface as the Node `Tn` class (`src/tn.ts`), same names,
  * same call shapes. Only the runtime differs: this version wraps a
@@ -66,7 +66,7 @@ const _LOG_LEVELS = {
  *
  * @example
  * ```ts
- * import { LOG_LEVELS, Tn } from "@tnproto/sdk/browser";
+ * import { LOG_LEVELS, Tn } from "tn-proto/browser";
  *
  * Tn.setLevel("warning");   // string form (idiomatic)
  * if (LOG_LEVELS.warning <= myThreshold) emit();   // int form (Python parity)
@@ -106,7 +106,7 @@ let _strictMode = false;
  *
  * @example
  * ```ts
- * import { Tn, NotYetWiredForBrowserError } from "@tnproto/sdk/browser";
+ * import { Tn, NotYetWiredForBrowserError } from "tn-proto/browser";
  *
  * const tn = await Tn.init();
  * try {
@@ -130,7 +130,7 @@ export class NotYetWiredForBrowserError extends Error {
     super(
       `Tn.${verb} is not yet wired up for the browser. ` +
         `The Python/Node surface is the reference — see src/tn.ts. ` +
-        `Track progress in the @tnproto/sdk browser-surface plan.`,
+        `Track progress in the tn-proto browser-surface plan.`,
     );
     this.name = "NotYetWiredForBrowserError";
     this.verb = verb;
@@ -192,7 +192,7 @@ export type TnInitFromSeedOptions = BrowserRuntimeFromSeedOptions;
  *
  * @example
  * ```ts
- * import { Tn } from "@tnproto/sdk/browser";
+ * import { Tn } from "tn-proto/browser";
  *
  * // Standard usage: mint or load from localStorage.
  * const tn = await Tn.init();
@@ -210,7 +210,7 @@ export type TnInitFromSeedOptions = BrowserRuntimeFromSeedOptions;
  * @example
  * ```ts
  * // Witness-style: server provisions credentials, ship to ingest URL.
- * import { Tn } from "@tnproto/sdk/browser";
+ * import { Tn } from "tn-proto/browser";
  *
  * const tn = await Tn.initFromSeed({
  *   seed: b64decode(PUBLISHER_SEED_B64),
@@ -314,7 +314,7 @@ export class Tn {
    *
    * @example
    * ```ts
-   * import { Tn } from "@tnproto/sdk/browser";
+   * import { Tn } from "tn-proto/browser";
    *
    * // Default: localStorage adapter, console-on.
    * const tn = await Tn.init();
@@ -372,7 +372,7 @@ export class Tn {
    *
    * @example
    * ```ts
-   * import { Tn } from "@tnproto/sdk/browser";
+   * import { Tn } from "tn-proto/browser";
    *
    * // Witness-style: server provisions seed + state, ships to ingest.
    * const tn = await Tn.initFromSeed({

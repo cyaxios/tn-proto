@@ -55,11 +55,11 @@ def _tn_user_agent() -> str:
         from importlib.metadata import PackageNotFoundError, version
 
         try:
-            return f"tn-protocol/{version('tn-protocol')}"
+            return f"tn-proto/{version('tn-proto')}"
         except PackageNotFoundError:
-            return "tn-protocol/dev"
+            return "tn-proto/dev"
     except Exception:  # noqa: BLE001
-        return "tn-protocol/dev"
+        return "tn-proto/dev"
 
 
 _DEFAULT_HEADERS = {"User-Agent": _tn_user_agent()}

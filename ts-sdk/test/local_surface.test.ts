@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-test("@tnproto/sdk/local exports expected symbols", async () => {
+test("tn-proto/local exports expected symbols", async () => {
   const mod = await import("../src/local/index.js");
   for (const sym of [
     "openLogFile", "logFileFromHandle",

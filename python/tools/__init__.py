@@ -1,4 +1,4 @@
-"""Developer tools for the tn-protocol Python SDK.
+"""Developer tools for the tn-proto Python SDK.
 
 Subpackages:
 - introspect: AST-based code inventory + dependency graphs + diagrams.

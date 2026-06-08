@@ -12,7 +12,7 @@ read-and-forward sink.
 
 Install the optional extra::
 
-    pip install 'tn-protocol[otel]'
+    pip install 'tn-proto[otel]'
     # or directly:
     pip install opentelemetry-api opentelemetry-sdk
 
@@ -26,7 +26,7 @@ Usage::
     provider = LoggerProvider()
     exporter = InMemoryLogExporter()
     provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
-    otel_logger = provider.get_logger("tn-protocol")
+    otel_logger = provider.get_logger("tn-proto")
 
     import tn
     tn.init("tn.yaml", extra_handlers=[OpenTelemetryHandler("otel", otel_logger)])
@@ -164,7 +164,7 @@ class OpenTelemetryHandler(SyncHandler):
         Handler name (for logging and filter registration).
     otel_logger
         Any object with ``emit(record)`` — typically obtained from
-        ``LoggerProvider.get_logger("tn-protocol")``.  Pass ``None`` or omit
+        ``LoggerProvider.get_logger("tn-proto")``.  Pass ``None`` or omit
         to use the :class:`NullOtelLogger` no-op.
     filter_spec
         Optional RFC §3.2 filter dict (same shape as other handlers).

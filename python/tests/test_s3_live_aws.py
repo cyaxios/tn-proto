@@ -26,7 +26,7 @@ def main() -> int:
         import boto3
         from botocore.exceptions import ClientError, NoCredentialsError
     except ImportError:
-        print("SKIP: boto3 not installed (pip install 'tn-protocol[s3]')")
+        print("SKIP: boto3 not installed (pip install 'tn-proto[s3]')")
         return 0
 
     try:

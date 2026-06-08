@@ -53,7 +53,7 @@ def main() -> int:
     except ImportError:
         print(
             "SKIP: databricks-sql-connector / databricks-sdk not installed "
-            "(pip install 'tn-protocol[delta]')"
+            "(pip install 'tn-proto[delta]')"
         )
         return 0
 

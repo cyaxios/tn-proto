@@ -12,8 +12,8 @@ fixed reader sets.
 
 | | Install | Latest |
 |---|---|---|
-| Python | `pip install -i https://test.pypi.org/simple/ tn-protocol` | 0.4.2a1 |
-| TypeScript | `npm install @tnproto/sdk` | 0.4.2-alpha.1 (in tree; npm pending) |
+| Python | `pip install -i https://test.pypi.org/simple/ tn-proto` | 0.4.2a1 |
+| TypeScript | `npm install tn-proto` | 0.4.2-alpha.1 (in tree; npm pending) |
 | Chrome extension | [`tn-decrypt-0.4.0.zip`](https://github.com/cyaxios/tn-proto/releases/tag/ext-v0.4.0) | 0.4.0 (manual install) |
 
 ## Hello, log
@@ -35,7 +35,7 @@ for entry in tn.read():
 The TypeScript shape is the same.
 
 ```ts
-import * as tn from "@tnproto/sdk";
+import * as tn from "tn-proto";
 
 await tn.init();
 tn.info("app.hello", { a: 1, b: "two" });
@@ -304,7 +304,7 @@ Copy-Item $tmp/tn_core-*.dist-info <site-packages>/ -Recurse -Force
 Releases are automated by
 [`.github/workflows/release-python.yml`](.github/workflows/release-python.yml).
 It builds all three Python packages — `tn-btn`, `tn-core` (Rust wheels
-via maturin, across Linux/macOS/Windows), and `tn-protocol` (pure-Python
+via maturin, across Linux/macOS/Windows), and `tn-proto` (pure-Python
 wheel + sdist) — collects every artifact, and uploads them with
 `pypa/gh-action-pypi-publish` (`skip-existing: true`, so re-runs are
 idempotent). TestPyPI is the default target; real PyPI is opt-in.
@@ -344,15 +344,15 @@ dependencies, so point `--extra-index-url` at real PyPI for those:
 pip install \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
-  tn-protocol
+  tn-proto
 ```
 
 ## Layout
 
 ```
-python/                  Python SDK (PyPI: tn-protocol)
+python/                  Python SDK (PyPI: tn-proto)
 crypto/                  Rust core, btn cipher, wasm build, pyo3 bindings
-ts-sdk/                  @tnproto/sdk + tn-js CLI
+ts-sdk/                  tn-proto + tn-js CLI
 extensions/tn-decrypt/   Chrome MV3 extension
 regression/              Cross-language regression suite
 docs/sdk-parity.md       Verb parity table (CI gate)

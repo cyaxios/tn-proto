@@ -47,7 +47,7 @@ let _processRunId: string | null = null;
  *
  * @example
  * ```ts
- * import { ensureProcessRunId } from "@tnproto/sdk/_run_id";
+ * import { ensureProcessRunId } from "tn-proto/_run_id";
  *
  * const runId = ensureProcessRunId();
  * // process.env.TN_RUN_ID is now set; the wasm runtime will pick it up.
@@ -89,7 +89,7 @@ export function ensureProcessRunId(): string {
  *
  * @example
  * ```ts
- * import { _resetProcessRunIdForTests, ensureProcessRunId } from "@tnproto/sdk/_run_id";
+ * import { _resetProcessRunIdForTests, ensureProcessRunId } from "tn-proto/_run_id";
  *
  * beforeEach(() => {
  *   _resetProcessRunIdForTests();

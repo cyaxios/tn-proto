@@ -273,7 +273,7 @@ export async function inboxAcceptCmd(opts: InboxAcceptCmdOptions): Promise<numbe
   out(`Absorbed at:    ${result.absorbedAt}\n`);
   out("\nReady to read. Try:\n");
   out(
-    "  node -e \"import('@tnproto/sdk').then(async (m) => { const tn = await m.Tn.init('./tn.yaml'); for (const e of tn.read('../alice/.tn/logs/tn.ndjson')) console.log(String(e)); })\"\n",
+    "  node -e \"import('tn-proto').then(async (m) => { const tn = await m.Tn.init('./tn.yaml'); for (const e of tn.read('../alice/.tn/logs/tn.ndjson')) console.log(String(e)); })\"\n",
   );
   return 0;
 }

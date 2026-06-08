@@ -151,7 +151,7 @@ function _writeUtf8(storage: JsStorageCallbacks, path: string, text: string): vo
  *
  * @example
  * ```ts
- * import { createFromSeed, memoryStorageAdapter } from "@tnproto/sdk/browser";
+ * import { createFromSeed, memoryStorageAdapter } from "tn-proto/browser";
  *
  * // Server-delivered credentials (e.g. from the witness's delivery template).
  * const storage = memoryStorageAdapter();

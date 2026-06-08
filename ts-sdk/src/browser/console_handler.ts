@@ -55,7 +55,7 @@ interface ConsoleLike {
  *
  * @example
  * ```ts
- * import { Tn, type ConsoleHandler } from "@tnproto/sdk/browser";
+ * import { Tn, type ConsoleHandler } from "tn-proto/browser";
  *
  * const captured: Array<[string, string, Record<string, unknown>]> = [];
  * const fake: ConsoleHandler = {
@@ -103,7 +103,7 @@ export interface ConsoleHandler {
  *
  * @example
  * ```ts
- * import { Tn, consoleHandler } from "@tnproto/sdk/browser";
+ * import { Tn, consoleHandler } from "tn-proto/browser";
  *
  * // Default: console-on at the global object.
  * await Tn.init();   // -> uses consoleHandler() implicitly

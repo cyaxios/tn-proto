@@ -3,9 +3,9 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name            = "tn-protocol"
+name            = "tn-proto"
 version         = "0.5.6a1"
-description     = "TestigoNodo protocol: attested logging with JWE + btn ciphers"
+description     = "TN protocol: attested logging with JWE + btn ciphers"
 readme          = "README.md"
 requires-python = ">=3.10"
 license         = { text = "Apache-2.0" }
@@ -57,7 +57,7 @@ dependencies = [
     #   - cross-process emit lock (0.4.2a3)
     #   - per-row parse resilience + Rust stdout admin filter (0.4.2a4)
     #   - pinned-writer pool + PEL admin path + templated chain seed
-    #     (0.4.2a8) — required because tn-protocol uses the new
+    #     (0.4.2a8) — required because tn-proto uses the new
     #     LogWriters dispatcher via PyO3
     "tn-btn>=0.5.0a2,<0.6",
     "tn-core>=0.5.0a2,<0.6",
@@ -101,7 +101,7 @@ tn-mcp-server = "tn.mcp:main"
 # tn_core) are their own maturin-built wheels shipped separately; see
 # ../crypto/btn-py/pyproject.toml and ../crypto/tn-core-py/pyproject.toml.
 # Workstream G (2026-04-24) consolidated distribution to this three-wheel
-# model so consumers get `pip install tn-protocol` and the install pulls
+# model so consumers get `pip install tn-proto` and the install pulls
 # all three pieces without any C toolchain / OpenSSL / vcpkg setup.
 # ---------------------------------------------------------------------------
 
@@ -205,7 +205,7 @@ module = [
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
-# Coverage — Workstream B4 (tn-protocol/docs/sdk-parity.md).
+# Coverage — Workstream B4 (tn-proto/docs/sdk-parity.md).
 # Tiered thresholds: crypto-adjacent code has the highest bar; the rollout
 # floor (70%) is below the per-module targets so CI doesn't block on
 # pre-existing gaps. Raise module-by-module as B1/B2/B3 land.

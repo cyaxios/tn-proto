@@ -1,4 +1,4 @@
-// @tnproto/sdk/core — Layer 1 of the SDK.
+// tn-proto/core — Layer 1 of the SDK.
 //
 // Browser-safe by construction: this directory and its descendants MUST NOT
 // import from `node:*`, `fs`, `path`, `os`, `child_process`, or Node's

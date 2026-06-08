@@ -168,7 +168,7 @@ def build_handlers(
                     bootstrap=raw["bootstrap"],
                     topic=raw["topic"],
                     sasl=raw.get("sasl"),
-                    client_id=raw.get("client_id", "tn-protocol"),
+                    client_id=raw.get("client_id", "tn-proto"),
                     compression_type=raw.get("compression_type", "zstd"),
                     acks=raw.get("acks", "all"),
                     filter_spec=filter_spec,

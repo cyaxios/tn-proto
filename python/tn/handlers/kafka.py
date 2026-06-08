@@ -1,6 +1,6 @@
 """Kafka handler via confluent-kafka.
 
-Gated behind the `tn-protocol[kafka]` extra so the base wheel stays lean.
+Gated behind the `tn-proto[kafka]` extra so the base wheel stays lean.
 Topic names are templated on `event_type` (already sanitized upstream) and
 the result is checked against Apache's topic-name rules before publish.
 """
@@ -50,7 +50,7 @@ class KafkaHandler(AsyncHandler):
           user: env:CONFLUENT_KEY
           pass: env:CONFLUENT_SECRET
         # optional extras
-        client_id: tn-protocol-sdk
+        client_id: tn-proto-sdk
         compression_type: zstd
         acks: all
     """
@@ -63,7 +63,7 @@ class KafkaHandler(AsyncHandler):
         bootstrap: str,
         topic: str,
         sasl: dict[str, Any] | None = None,
-        client_id: str = "tn-protocol",
+        client_id: str = "tn-proto",
         compression_type: str = "zstd",
         acks: str = "all",
         filter_spec: dict[str, Any] | None = None,
@@ -74,7 +74,7 @@ class KafkaHandler(AsyncHandler):
         except ImportError as e:
             raise ImportError(
                 "KafkaHandler requires confluent-kafka. "
-                "Install via `pip install 'tn-protocol[kafka]'`."
+                "Install via `pip install 'tn-proto[kafka]'`."
             ) from e
 
         super().__init__(name, outbox_path, filter_spec=filter_spec)

@@ -142,7 +142,7 @@ function _writeUtf8(storage: JsStorageCallbacks, path: string, text: string): vo
  *
  * @example
  * ```ts
- * import { createFreshCeremony, memoryStorageAdapter } from "@tnproto/sdk/browser";
+ * import { createFreshCeremony, memoryStorageAdapter } from "tn-proto/browser";
  *
  * const storage = memoryStorageAdapter();
  * const { yamlPath, did, ceremonyId } = createFreshCeremony(storage);
@@ -152,7 +152,7 @@ function _writeUtf8(storage: JsStorageCallbacks, path: string, text: string): vo
  * @example
  * ```ts
  * // Bind the ceremony to a pre-existing 32-byte seed (identity_seed bootstrap).
- * import { createFreshCeremony } from "@tnproto/sdk/browser";
+ * import { createFreshCeremony } from "tn-proto/browser";
  *
  * const result = createFreshCeremony(storage, {
  *   devicePrivateBytes: importedSeed,   // 32-byte Ed25519 seed

@@ -1,4 +1,4 @@
-# @tnproto/sdk/core
+# tn-proto/core
 
 Layer 1 of the TN TypeScript SDK. Pure functions over wasm-backed crypto.
 Browser-safe — no `node:*` imports allowed (enforced by ESLint and a
@@ -6,7 +6,7 @@ runtime test in `test/core_no_node_imports.test.ts`).
 
 ## Consumers
 
-- `@tnproto/sdk` (Layer 2; Node entry) wraps this.
+- `tn-proto` (Layer 2; Node entry) wraps this.
 - `extensions/tn-decrypt/` (Chrome MV3) is the canonical browser consumer
   and the reason this layer exists. Anything the extension needs to
   decrypt or render envelopes lives here.

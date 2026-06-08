@@ -1,4 +1,4 @@
-# tn-protocol
+# tn-proto
 
 **TN. The agent transaction protocol.**
 
@@ -11,7 +11,7 @@ an NNL subset-difference broadcast tree, and `jwe`, per-recipient
 envelope) speak the same on-disk format.
 
 ```bash
-pip install tn-protocol
+pip install tn-proto
 ```
 
 A `tn` CLI is included. Native acceleration via the Rust `tn_core`
@@ -553,8 +553,8 @@ on exit.
 
 | binding | install | use case |
 |---|---|---|
-| Python | `pip install tn-protocol` | reference, CLI, services |
-| TypeScript / Node | `@tn/sdk` (npm) | Node services, build tools |
+| Python | `pip install tn-proto` | reference, CLI, services |
+| TypeScript / Node | `tn-proto` (npm) | Node services, build tools |
 | Browser (WASM) | bundled via `tn-proto-web` | in-browser verify and decrypt |
 
 Every binding reads byte-identical envelopes. A row written by

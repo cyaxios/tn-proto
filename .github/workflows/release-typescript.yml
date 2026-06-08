@@ -1,6 +1,6 @@
 name: release-typescript
 
-# On tag push (mirroring release-python.yml), build @tnproto/sdk, run
+# On tag push (mirroring release-python.yml), build tn-proto, run
 # typecheck + bundle, and produce a real `.tgz` tarball attached as a
 # workflow artifact. The tarball name matches package.json's version,
 # so for tag v0.4.3a2 the artifact is tnproto-sdk-0.4.3-alpha.2.tgz.
@@ -22,7 +22,7 @@ name: release-typescript
 #   3. Add `PUBLISH_TO_NPM = true` as a repo *variable* (not a secret):
 #      https://github.com/cyaxios/tn-proto/settings/variables/actions
 #   4. Push the next tag. The workflow will publish under the `alpha`
-#      dist-tag (so default `npm install @tnproto/sdk` keeps resolving
+#      dist-tag (so default `npm install tn-proto` keeps resolving
 #      to the most recent stable, not whatever alpha just shipped).
 
 on:
@@ -41,7 +41,7 @@ permissions:
 
 jobs:
   publish:
-    name: build + pack @tnproto/sdk
+    name: build + pack tn-proto
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -101,7 +101,7 @@ jobs:
           # --provenance attaches a transparency record (npm 9.5+);
           # --access public is required for scoped packages on a free npm account;
           # --tag alpha publishes under the alpha dist-tag so consumers using the
-          # bare name (`npm i @tnproto/sdk`) keep resolving to the latest stable,
+          # bare name (`npm i tn-proto`) keep resolving to the latest stable,
           # not to whichever prerelease shipped most recently.
           npm publish --access public --provenance --tag alpha
       - name: Publish gate notice (default path)

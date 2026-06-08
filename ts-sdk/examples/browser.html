@@ -371,7 +371,7 @@
           <h2>Init</h2>
           <p>Create a ceremony. Your device gets a unique attested identity.</p>
         </div>
-<pre class="code"><span class="kw">import</span> * as tn <span class="kw">from</span> <span class="str">"@tnproto/sdk/browser"</span>;
+<pre class="code"><span class="kw">import</span> * as tn <span class="kw">from</span> <span class="str">"tn-proto/browser"</span>;
 
 <span class="kw">await</span> <span class="fn">tn.init</span>();
 <span class="fn">console.log</span>(<span class="fn">tn.did</span>()); <span class="cm">// did:key:z...</span></pre>
@@ -449,7 +449,7 @@
           <span class="badge">Any source</span>
           <p>Turn any TN-formatted JSON into a typed Entry — fetch, SSE, vault API, anywhere.</p>
         </div>
-<pre class="code"><span class="kw">import</span> { decodeEntry } <span class="kw">from</span> <span class="str">"@tnproto/sdk/browser"</span>;
+<pre class="code"><span class="kw">import</span> { decodeEntry } <span class="kw">from</span> <span class="str">"tn-proto/browser"</span>;
 
 <span class="kw">const</span> entry = <span class="fn">decodeEntry</span>(envelope); <span class="cm">// any JS object</span>
 <span class="fn">console.log</span>(entry.event_type, entry.fields);</pre>

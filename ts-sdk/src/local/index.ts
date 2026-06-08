@@ -1,4 +1,4 @@
-// Public API for @tnproto/sdk/local — browser-local TN log reader.
+// Public API for tn-proto/local — browser-local TN log reader.
 //
 // openLogFile / openKeystore require File System Access API (Chromium 86+, Edge 86+).
 // Firefox / Safari: read the file via <input type="file">, pass contents to

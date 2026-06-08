@@ -1,4 +1,4 @@
-"""tn-protocol: TN protocol Python SDK.
+"""tn-proto: TN protocol Python SDK.
 
 Lifecycle (the four-line dirt-easy summary):
 

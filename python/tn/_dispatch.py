@@ -24,8 +24,8 @@ except ImportError:
 
     warnings.warn(
         "tn_core extension not found. The pure-Python runtime fallback is "
-        "deprecated and will be removed in tn-protocol 0.5.0. "
-        "Install tn-core: pip install tn-core (or `pip install tn-protocol` "
+        "deprecated and will be removed in tn-proto 0.5.0. "
+        "Install tn-core: pip install tn-core (or `pip install tn-proto` "
         "which now requires it).",
         DeprecationWarning,
         stacklevel=2,
@@ -100,7 +100,7 @@ def should_use_rust(yaml_path: Path) -> bool:
         warnings.warn(
             f"Ceremony {yaml_path}: falling back to pure-Python runtime "
             "because tn_core is not installed. This fallback is deprecated; "
-            "install tn_core to remove this warning. See tn-protocol 0.5.0 "
+            "install tn_core to remove this warning. See tn-proto 0.5.0 "
             "release notes for details.",
             DeprecationWarning,
             stacklevel=3,

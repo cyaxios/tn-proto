@@ -1,6 +1,6 @@
 // Result types for the Tn class's namespaced verbs. Layer 1 — pure data
 // shapes, browser-safe. The Tn class methods produce these; consumers
-// import them via `@tnproto/sdk` (or via `@tnproto/sdk/core` if they only
+// import them via `tn-proto` (or via `tn-proto/core` if they only
 // need the type).
 //
 // Field names: camelCase (these are SDK-owned types, not wire envelope

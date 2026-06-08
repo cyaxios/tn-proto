@@ -24,7 +24,7 @@ Common workflows::
   nox -s clean          # rm ./dist and ./target/wheels
   nox -s check          # twine check on every wheel in ./dist
   nox -s test_install   # fresh venv + pip install + smoke import
-  nox -s verify_version # check tn-protocol version isn't already on TestPyPI
+  nox -s verify_version # check tn-proto version isn't already on TestPyPI
   nox -s publish_test   # upload to TestPyPI
   nox -s publish        # upload to real PyPI (prompts for confirmation)
   nox -s tools          # install maturin + build + twine into the active env
@@ -115,9 +115,9 @@ def build_btn(session: nox.Session) -> None:
 
 @nox.session
 def build_protocol(session: nox.Session) -> None:
-    """Build the tn-protocol pure-Python wheel + sdist into ./dist."""
+    """Build the tn-proto pure-Python wheel + sdist into ./dist."""
     _ensure_dist()
-    session.log("Building tn-protocol (pure Python via build)")
+    session.log("Building tn-proto (pure Python via build)")
     session.chdir(PY_DIR)
     session.run(
         sys.executable, "-m", "build", "--outdir", str(DIST), external=True
@@ -126,7 +126,7 @@ def build_protocol(session: nox.Session) -> None:
 
 @nox.session
 def build(session: nox.Session) -> None:
-    """Build all three wheels (tn-core, tn-btn, tn-protocol)."""
+    """Build all three wheels (tn-core, tn-btn, tn-proto)."""
     session.notify("build_core")
     session.notify("build_btn")
     session.notify("build_protocol")
@@ -198,7 +198,7 @@ def test_install(session: nox.Session) -> None:
         "install",
         "--find-links",
         str(DIST),
-        "tn-protocol",
+        "tn-proto",
         "--quiet",
         external=True,
     )
@@ -222,7 +222,7 @@ def test_install(session: nox.Session) -> None:
 
 
 def _local_protocol_version() -> str:
-    """Read tn-protocol's version from ``python/pyproject.toml``."""
+    """Read tn-proto's version from ``python/pyproject.toml``."""
     try:
         import tomllib  # py3.11+
     except ImportError:  # pragma: no cover
@@ -234,14 +234,14 @@ def _local_protocol_version() -> str:
 
 @nox.session
 def verify_version(session: nox.Session) -> None:
-    """Pre-flight: ensure tn-protocol's local version isn't already on TestPyPI.
+    """Pre-flight: ensure tn-proto's local version isn't already on TestPyPI.
 
     Bumps to existing versions get rejected by PyPI; this catches
     the common "forgot to bump" case before tagging or uploading.
     """
     version = _local_protocol_version()
-    session.log(f"Local tn-protocol version: {version}")
-    url = f"https://test.pypi.org/pypi/tn-protocol/{version}/json"
+    session.log(f"Local tn-proto version: {version}")
+    url = f"https://test.pypi.org/pypi/tn-proto/{version}/json"
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             if resp.status == 200:

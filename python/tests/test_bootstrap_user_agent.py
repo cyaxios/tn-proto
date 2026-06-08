@@ -2,7 +2,7 @@
 
 Regression guard for the CF 1010 block on the default ``Python-urllib/3.x``
 User-Agent. Both _http_post / _http_get in tn.bootstrap and the
-httpx.Client in tn.vault_client must send ``tn-protocol/<version>``
+httpx.Client in tn.vault_client must send ``tn-proto/<version>``
 instead of the urllib / httpx default, so requests reach the vault
 application instead of being 403'd at the Cloudflare edge with
 ``error code: 1010``.
@@ -23,21 +23,21 @@ from tn import vault_client as vault_client_mod
 
 
 def test_bootstrap_module_pins_user_agent_header():
-    """``_DEFAULT_HEADERS`` carries a tn-protocol User-Agent."""
+    """``_DEFAULT_HEADERS`` carries a tn-proto User-Agent."""
     ua = bootstrap_mod._DEFAULT_HEADERS.get("User-Agent")
     assert ua, "bootstrap._DEFAULT_HEADERS missing User-Agent"
-    assert ua.startswith("tn-protocol/"), (
-        f"bootstrap UA must start with 'tn-protocol/' to avoid CF 1010 "
+    assert ua.startswith("tn-proto/"), (
+        f"bootstrap UA must start with 'tn-proto/' to avoid CF 1010 "
         f"(got {ua!r})"
     )
 
 
 def test_vault_client_module_pins_user_agent_header():
-    """``_DEFAULT_HEADERS`` carries a tn-protocol User-Agent."""
+    """``_DEFAULT_HEADERS`` carries a tn-proto User-Agent."""
     ua = vault_client_mod._DEFAULT_HEADERS.get("User-Agent")
     assert ua, "vault_client._DEFAULT_HEADERS missing User-Agent"
-    assert ua.startswith("tn-protocol/"), (
-        f"vault_client UA must start with 'tn-protocol/' to avoid CF 1010 "
+    assert ua.startswith("tn-proto/"), (
+        f"vault_client UA must start with 'tn-proto/' to avoid CF 1010 "
         f"(got {ua!r})"
     )
 
@@ -75,7 +75,7 @@ def test_bootstrap_http_post_sets_user_agent_on_request():
     ua_keys = {k for k in captured["headers"] if k.lower() == "user-agent"}
     assert ua_keys, f"no User-Agent header on request (saw {list(captured['headers'])})"
     ua = captured["headers"][next(iter(ua_keys))]
-    assert ua.startswith("tn-protocol/")
+    assert ua.startswith("tn-proto/")
 
 
 def test_bootstrap_http_get_sets_user_agent_on_request():
@@ -107,7 +107,7 @@ def test_bootstrap_http_get_sets_user_agent_on_request():
     ua_keys = {k for k in captured["headers"] if k.lower() == "user-agent"}
     assert ua_keys, f"no User-Agent header on request (saw {list(captured['headers'])})"
     ua = captured["headers"][next(iter(ua_keys))]
-    assert ua.startswith("tn-protocol/")
+    assert ua.startswith("tn-proto/")
 
 
 def test_vault_client_http_uses_tn_user_agent_via_mocktransport():
@@ -136,6 +136,6 @@ def test_vault_client_http_uses_tn_user_agent_via_mocktransport():
 
     assert seen_headers, "MockTransport handler never ran"
     ua = seen_headers[0].get("user-agent", "")
-    assert ua.startswith("tn-protocol/"), (
+    assert ua.startswith("tn-proto/"), (
         f"httpx.Client did not send our UA (saw {ua!r})"
     )

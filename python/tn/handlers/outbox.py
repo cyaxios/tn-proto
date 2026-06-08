@@ -21,7 +21,7 @@ try:
 except ImportError as e:
     raise ImportError(
         "persist-queue is required for async handlers. "
-        "Install via `pip install tn-protocol` (the base install includes it)."
+        "Install via `pip install tn-proto` (the base install includes it)."
     ) from e
 
 _log = logging.getLogger("tn.handlers.outbox")
