@@ -316,11 +316,32 @@ path- and line-prefixed error.
 
 ## Path templates
 
-`ceremony.admin_log_location` and `logs.path` may contain template tokens,
-rendered per-envelope by the runtime. Recognized tokens (Python
-`_KNOWN_PEL_TOKENS`): `{event_type}`, `{event_class}`, `{event_id}`,
-`{date}`, `{yaml_dir}`, `{ceremony_id}`, `{did}`. An unknown token, or a
-template that resolves outside the ceremony directory, is rejected at load.
-The literal `main_log` (only valid for `admin_log_location`) is an escape
-hatch that folds admin events back into the main log instead of a separate
+`logs.path` and `ceremony.admin_log_location` may contain template tokens that
+the runtime fills in for each entry, so one log can split into many files. For
+example:
+
+```yaml
+logs:
+  path: ./logs/{event_type}.ndjson
+```
+
+writes each entry to a file named after its event type: `order.created`
+entries go to `./logs/order.created.ndjson`, `auth.failed` to
+`./logs/auth.failed.ndjson`.
+
+The tokens are:
+
+| token | resolves to |
+|-------|-------------|
+| `{event_type}` | the entry's event type, e.g. `order.created` |
+| `{event_class}` | the first dotted segment of the event type, e.g. `order` |
+| `{event_id}` | the entry's unique id |
+| `{date}` | the UTC date, `YYYY-MM-DD` |
+| `{yaml_dir}` | the directory holding `tn.yaml` |
+| `{ceremony_id}` | the project's ceremony id |
+| `{did}` | the device DID |
+
+An unknown token, or a template that resolves outside the project directory,
+is rejected at load. For `admin_log_location` only, the literal value
+`main_log` folds the admin events back into the main log instead of a separate
 file.

@@ -167,6 +167,28 @@ As an advanced option, `tn.init` in code also accepts an explicit yaml path,
 `tn.init("./.tn/demo/tn.yaml")`, to bind a project at a path of your choosing
 rather than under `./.tn/<name>/`.
 
+## Log levels
+
+`tn.log` records an entry with no severity. The severity verbs set one:
+
+```python
+tn.debug("cache.miss", key="k")
+tn.info("order.created", id="o_1")
+tn.warning("quota.near", used=0.92)
+tn.error("charge.failed", txn="t_42")
+```
+
+The levels, lowest to highest, are `debug`, `info`, `warning`, `error`. A
+threshold drops anything below it: set it with `tn.set_level("info")` in code
+or `ceremony.log_level` in the yaml, and `debug` entries are then not written.
+`tn.log` has no level and is always written.
+
+From the CLI, `tn info` writes at `info`; pass `--level` to choose another:
+
+```bash
+tn info --yaml ./.tn/myproject/tn.yaml --event quota.near --level warning --field used=0.92
+```
+
 ## What a DID is
 
 A DID (Decentralized Identifier) is a name for an identity that needs no
