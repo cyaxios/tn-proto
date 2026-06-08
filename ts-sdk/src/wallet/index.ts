@@ -208,4 +208,4 @@ export class WalletNamespace {
 }
 
 // Internal exports for tests that want to verify yaml mutation directly.
-export const _internals = { setLinkStateInYaml, syncQueuePath };
+export const _internals = { setLinkStateInYaml, readLinkState, syncQueuePath };

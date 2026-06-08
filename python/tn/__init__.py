@@ -1283,6 +1283,14 @@ def _get_or_create_cache() -> AdminStateCache:
 
 from ._pkg_impl import _absorb_impl, _export_impl  # noqa: E402
 
+# Eager-import the `export` submodule so the import machinery binds
+# `tn.export` to the module here, BEFORE we point `tn.export` at the callable
+# below. Otherwise the lazy `from .export import export` inside `_export_impl`
+# (tn/_pkg_impl.py) imports the submodule on the first `tn.export(...)` call
+# and overwrites the callable with the module object — so the *second*
+# `tn.export(...)` failed with "'module' object is not callable".
+from . import export as _export_submodule  # noqa: F401, E402
+
 absorb = _absorb_impl
 export = _export_impl
 
