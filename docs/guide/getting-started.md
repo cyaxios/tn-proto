@@ -219,19 +219,24 @@ tn.absorb("out.tnpkg")
 
 ### Removing access
 
-To drop a recipient, revoke them and then rotate the group:
+To drop a recipient, revoke them. That is all it takes:
 
 ```python
 tn.admin.revoke_recipient("default", recipient_did="did:key:z6MkOther...")
-tn.admin.rotate("default")
 ```
 
-`revoke_recipient` marks the recipient revoked. `rotate` then mints a new key
-epoch and issues fresh kits to the remaining recipients only. After the
-rotation, the revoked recipient's old kit cannot read entries written under
-the new epoch. Entries written before the rotation stay readable by the kits
-that were valid then. Rotating without revoking first re-keys everyone,
-including the person you meant to remove, so revoke first.
+Revocation moves that recipient's leaf into the group's revoked set. From then
+on, every entry is encrypted to a cover that excludes them, so their kit can no
+longer read new entries. This is the point of the broadcast cipher: the other
+recipients are unaffected and keep the kits they already have. There is no
+re-key and nothing to redistribute. Revocation is forward-only; entries written
+before it stay readable by whoever could read them then.
+
+Rotation (`tn.admin.rotate("default")`) is a separate, heavier operation. It
+mints a fresh publisher seed for the group, which you would do to reset the
+group's keys after a suspected compromise of the publisher state. It re-keys
+everyone, so surviving recipients receive new kits. You do not need it to
+remove a recipient.
 
 ## CLI reference
 
