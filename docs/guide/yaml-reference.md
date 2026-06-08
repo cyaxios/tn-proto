@@ -174,8 +174,8 @@ Notes:
 
 ### device
 
-Renamed from `me:` in 0.4.3a1. The legacy `me:` block is **rejected** — see
-[Rejected and dead keys](#rejected-and-dead-keys).
+Renamed from `me:` in 0.4.3a1. The legacy `me:` block is rejected at load;
+use `device:`.
 
 | path | type | required | default | description |
 |------|------|----------|---------|-------------|
@@ -205,8 +205,8 @@ Defaulting differs across loaders, and this is intentional:
 
 The `DEFAULT_PUBLIC_FIELDS` catalog includes the string `project_id`, but
 that is a **payload field name** kept public so the vault reducer can read
-it without a reader kit. It is unrelated to the dead top-level `project_id`
-key (see [Rejected and dead keys](#rejected-and-dead-keys)).
+it without a reader kit. It is unrelated to the top-level `project_id` key,
+which no loader reads.
 
 ### groups
 
@@ -352,16 +352,6 @@ template that resolves outside the ceremony directory, is rejected at load.
 The literal `main_log` (only valid for `admin_log_location`) is an escape
 hatch that folds admin events back into the main log instead of a separate
 file.
-
-## Rejected and dead keys
-
-| key | status | notes |
-|-----|--------|-------|
-| `me:` (top-level) | **rejected** | Renamed to `device:` in 0.4.3a1. A yaml with `me:` and no `device:` fails at load in all three loaders with a message pointing to `device: {device_identity: ...}`. |
-| `project_id` (top-level) | **dead / ignored** | Never read by any loader. It is not a field of the Rust `Config` struct, and `python/tn/config.py::load` never accesses `doc["project_id"]`. serde/`dict` parsing ignores it silently. Do not add it. The vault-side project id lives at `ceremony.linked_project_id`; the human label lives at `ceremony.project_name`. (The same token `project_id` also appears as a *payload* field name in `public_fields` — unrelated to this top-level key.) |
-| `groups.<name>.did` (recipient) | deprecated alias | Pre-0.4.3a1 recipient key. The TS loader still reads it tolerantly; the Rust parser requires `recipient_identity`. Use `recipient_identity`. |
-| `ceremony.protocol_events_location` | deprecated alias | Use `ceremony.admin_log_location`. Still accepted (Rust serde alias; Python deprecation warning). |
-| `fields:` (flat top-level) | deprecated | Use each group's own `fields:` list. Ignored entirely when any group declares `fields:`. |
 
 ## Loader divergences worth knowing
 
