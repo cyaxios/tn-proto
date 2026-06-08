@@ -311,7 +311,7 @@ files.
 
 | Path | What it is |
 |---|---|
-| `tn.yaml` | The project config: groups, field routing, handlers, cipher, link state. Fields in [yaml-reference.md](yaml-reference.md). |
+| `tn.yaml` | The project config: groups, field routing, handlers, cipher, link state. Generated and kept in sync by the CLI and SDK; hand-editable. Fields in [yaml-reference.md](yaml-reference.md). |
 | `keys/local.private` | Your Ed25519 device private seed. This file is your identity. Never share it. |
 | `keys/local.public` | Your Ed25519 device public key, the basis of your DID. |
 | `keys/index_master.key` | Master key. Per-group search-index keys derive from it. |

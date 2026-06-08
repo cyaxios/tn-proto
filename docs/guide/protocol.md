@@ -782,9 +782,7 @@ post-rotation records both read transparently
 (`crypto/tn-core/src/cipher/btn.rs:30-39`,
 `crypto/tn-core/src/runtime/cipher_build.rs:108-166`). The canonical archive
 name for a rotation-preserved kit is `<group>.btn.mykit.retired.<epoch>`
-(0.4.3a1+, epoch-indexed); the legacy `<group>.btn.mykit.revoked.<unix_ts>` shape
-from 0.4.2-line keystores is still loaded for backward compatibility
-(`crypto/tn-core/src/runtime/cipher_build.rs:132-163`). Each family is sorted by
+(epoch-indexed). Each family is sorted by
 its index descending so newer kits are tried first.
 
 Open gap: retired-PublisherState archival writer (cyaxios/tn-proto#118).
