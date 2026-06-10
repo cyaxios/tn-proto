@@ -1,6 +1,34 @@
 //! # tn-core — TN protocol Rust runtime
 //!
-//! Re-implements the TN Python hot path with byte-for-byte wire compatibility.
+//! Re-implements the TN Python hot path with byte-for-byte wire
+//! compatibility. tn-core is the shared substrate the language SDKs wrap
+//! (Python via PyO3, TS/browser via WASM); the user-facing surface is the
+//! `tn.*` SDK verbs and the `tn` CLI, which call into the types below.
+//!
+//! ## Where to start (primary interfaces)
+//!
+//! Reach for these; most other modules are internal primitives these
+//! compose.
+//!
+//! - [`Runtime`] — the front door: open or create a ceremony, write
+//!   attested events (the write family, behind `tn.info()` / `tn log`),
+//!   read them back (behind `tn.read()` / `tn read`), and run admin verbs
+//!   (behind `tn.admin.*` / `tn rotate`). Configured by
+//!   [`RuntimeInitOptions`]; reads yield [`ReadEntry`] / [`SecureEntry`] /
+//!   [`FlatEntry`]; admin state is [`AdminState`].
+//! - [`Manifest`] / [`ManifestKind`] — the `.tnpkg` package manifest
+//!   (canonical bytes, sign/verify, kind catalog), behind `tn export` /
+//!   `tn absorb`; see [`ExportOptions`] and [`AbsorbReceipt`].
+//! - [`DeviceKey`] — the Ed25519 device identity (`did:key:z…`), behind
+//!   `tn init`.
+//! - [`Error`] / [`Result`] — the error taxonomy every fallible API returns.
+//! - Pluggable extension points (traits): the [`cipher`], [`handlers`], and
+//!   [`storage`] modules.
+//!
+//! Everything else (canonical bytes, chain hashing, indexing, envelope
+//! assembly, log files, and so on) is an internal primitive. If you find
+//! yourself reaching for one directly, first check whether [`Runtime`]
+//! already does what you need.
 //!
 //! ## Feature flags
 //!
@@ -32,6 +60,7 @@
 pub mod admin_catalog;
 pub mod admin_reduce;
 pub mod agents_policy;
+pub mod body_encryption;
 pub mod canonical;
 pub mod chain;
 pub mod cipher;
@@ -42,6 +71,7 @@ pub mod error;
 pub mod indexing;
 pub mod panic_guard;
 pub mod path_template;
+pub(crate) mod pathutil;
 pub mod perf;
 pub mod signing;
 pub mod storage;
@@ -73,9 +103,8 @@ pub use admin_cache::{AdminStateCache, ChainConflict, LKV_VERSION};
 #[cfg(feature = "fs")]
 pub use runtime::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
-    AdminRotation, AdminState, AdminVaultLink, FlatEntry, Instructions, OnInvalid,
-    ReadEntry, RecipientEntry, Runtime, RuntimeInitOptions, SecureEntry, SecureReadOptions,
-    ValidFlags,
+    AdminRotation, AdminState, AdminVaultLink, FlatEntry, Instructions, OnInvalid, ReadEntry,
+    RecipientEntry, Runtime, RuntimeInitOptions, SecureEntry, SecureReadOptions, ValidFlags,
 };
 #[cfg(feature = "fs")]
 pub use runtime_export::{AbsorbReceipt, AbsorbSource, ExportOptions};

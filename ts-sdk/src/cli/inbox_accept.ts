@@ -152,6 +152,11 @@ export async function accept(
     const msg = exc instanceof Error ? exc.message : String(exc);
     throw new InboxError(`Invalid zip file: ${msg}`);
   }
+  // parseTnpkg's streaming reader yields zero entries for non-zip bytes
+  // instead of throwing; surface that as the invalid-zip refusal too.
+  if (entries.length === 0) {
+    throw new InboxError("Invalid zip file: no zip entries found");
+  }
   const byName = new Map(entries.map((e) => [e.name, e.data]));
 
   // 2. Read manifest.

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import * as tn from "../src/index.js";
+import { Tn } from "../src/tn.js";
 import type { TNHandler } from "../src/handlers/index.js";
 
 function makeProject(): string {
@@ -17,7 +18,12 @@ test("module-level use and listCeremonies delegate to Tn static ceremony helpers
     const payments = await tn.use("payments", { projectDir: project, stdout: false });
     try {
       assert.equal(payments.name, "payments");
-      assert.deepEqual(tn.listCeremonies(project), ["default", "payments"]);
+      // Module-level use delegates to the interned Tn.use registry: a
+      // second call for the same (projectDir, name) returns the same handle.
+      const again = await tn.use("payments", { projectDir: project, stdout: false });
+      assert.equal(again, payments);
+      // Module-level listCeremonies delegates to the Tn static helper.
+      assert.deepEqual(tn.listCeremonies(project), Tn.listCeremonies(project));
     } finally {
       await payments.close();
     }

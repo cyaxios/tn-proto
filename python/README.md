@@ -1,27 +1,23 @@
 # tn-proto
 
-**TN. The agent transaction protocol.**
+Signed, encrypted, append-only logging — one entry per event.
 
-*Every action, a TransactioN.*
+## Install (from TestPyPI)
 
-A library that lets a process write a signed, encrypted, append-only
-log entry per business event, and lets the right readers verify,
-decrypt, or be cut off from it later. Two cryptographic modes (`btn`,
-an NNL subset-difference broadcast tree, and `jwe`, per-recipient
-envelope) speak the same on-disk format.
+The packages publish to TestPyPI. Install them from TestPyPI while letting pip pull their ordinary dependencies from regular PyPI:
 
 ```bash
-pip install tn-proto
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ tn-proto tn-core tn-btn
 ```
 
-A `tn` CLI is included. Native acceleration via the Rust `tn_core`
-extension is automatic when available, with the same Python surface
-either way.
+- `-i https://test.pypi.org/simple/` — get the TN packages from TestPyPI.
+- `--extra-index-url https://pypi.org/simple/` — get everything else (PyYAML, cryptography, httpx, …) from PyPI.
 
-## Hello, TN
+`tn-proto` is the SDK; `tn-core` and `tn-btn` are the Rust-backed wheels that provide native acceleration and the default `btn` cipher. Pure-Python install (`tn-proto` alone) works too, on the `jwe` cipher.
 
-The smallest useful program. The first run mints a ceremony at
-`./.tn/default/`. Nothing to configure.
+## Getting started
+
+The first run mints a ceremony at `./.tn/default/` — nothing to configure.
 
 ```python
 import tn
@@ -34,34 +30,20 @@ for entry in tn.read():
     print(entry.level, entry.event_type, entry.fields)
 ```
 
-Output:
-
 ```
-22:45:56 INFO     seq=1  tn.ceremony.init
-22:45:56 INFO     seq=1  tn.group.added
-22:45:56 INFO     seq=2  tn.group.added
-22:45:56 INFO     seq=1  order.created
-22:45:56 WARNING  seq=1  order.flagged
 info order.created {'amount': 4999, 'order_id': 'A100'}
 warning order.flagged {'order_id': 'A100', 'reason': 'hold'}
 ```
 
-The first five lines are the default stdout handler echoing every
-emit. The last two come from `tn.read`. The three `tn.*` lines are
-protocol admin events (ceremony lifecycle); they go to a separate
-admin log and are filtered out of `tn.read` by default.
+A `tn` CLI ships with the package. Set `TN_NO_STDOUT=1` to silence the stdout echo. There's no explicit flush — the SDK drains on interpreter exit.
 
-Set `TN_NO_STDOUT=1` to silence the stdout handler.
-
-No explicit flush. The SDK drains on interpreter exit.
-
-## The five verbs
+### The verbs
 
 | verb | what it does |
 |---|---|
 | `tn.init(...)` | resolve or create a ceremony, bind the runtime |
-| `tn.info / .warning / .error / .debug` | one signed, encrypted envelope per call at that level; short-circuits below the active threshold |
-| `tn.log(event_type, *, level="", **fields)` | severity-less emit (default `level=""`). Pass `level=` to stamp a custom level (`"trace"`, `"audit"`, foreign-logger spellings). Always emits regardless of threshold. Distinct from the four named verbs — not an alias. |
+| `tn.info / .warning / .error / .debug` | one signed, encrypted entry per call at that level |
+| `tn.log(event_type, *, level="", **fields)` | severity-less entry; pass `level=` for a custom level |
 | `tn.read(...)` | iterate decoded entries |
 | `tn.watch(...)` | tail the log live (async iterator) |
 | `tn.absorb / tn.export` | install or produce a `.tnpkg` bundle |

@@ -30,6 +30,7 @@ export interface CeremonyConfig {
    * Mirrors Python's ``LoadedConfig.project_name``.
    */
   projectName?: string;
+  vault: VaultConfig;
   logPath: string;
   keystorePath: string;
   device: { device_identity: string };
@@ -72,6 +73,14 @@ export interface CeremonyConfig {
    * with Python).
    */
   handlers: Array<Record<string, unknown>>;
+}
+
+export interface VaultConfig {
+  enabled: boolean;
+  url?: string;
+  linkedProjectId?: string;
+  autosync: boolean;
+  syncIntervalSeconds: number;
 }
 
 function pathFromYaml(yamlDir: string, raw: string): string {
@@ -118,16 +127,19 @@ export function substituteEnvVars(text: string, sourcePath: string): string {
     }
   }
 
-  const substituted = text.replace(ENV_VAR_RE, (match, name: string, def: string | undefined, offset: number) => {
-    const env = process.env[name];
-    if (env !== undefined) return env;
-    if (def !== undefined) return def;
-    throw new Error(
-      `${sourcePath}:${lineOf(offset)}: ` +
-        `required environment variable \${${name}} is not set ` +
-        `(use \${${name}:-default} to provide a fallback)`,
-    );
-  });
+  const substituted = text.replace(
+    ENV_VAR_RE,
+    (match, name: string, def: string | undefined, offset: number) => {
+      const env = process.env[name];
+      if (env !== undefined) return env;
+      if (def !== undefined) return def;
+      throw new Error(
+        `${sourcePath}:${lineOf(offset)}: ` +
+          `required environment variable \${${name}} is not set ` +
+          `(use \${${name}:-default} to provide a fallback)`,
+      );
+    },
+  );
 
   // Collapse `$$` to `$` last so escaped tokens survive the substitution.
   return substituted.replace(/\$\$/g, "$");
@@ -147,7 +159,7 @@ export function substituteEnvVars(text: string, sourcePath: string): string {
 //   - parent-owned keys (device, keystore, groups, fields, public_fields,
 //     default_policy, llm_classifier): parent wins; child override warns.
 //   - ``ceremony``: shallow-merged per subfield, child wins.
-//   - ``handlers``: additive, deduped by handler name. Child first wins.
+//   - ``handlers``: child replaces parent when declared, including [].
 //   - ``logs``: child wins outright if set.
 //   - other top-level keys: child wins if set, else parent's.
 //
@@ -240,17 +252,14 @@ function resolveExtends(
 
   if (seen.has(yamlPath)) {
     throw new Error(
-      `${yamlPath}: extends cycle detected. ` +
-        "extends: chains cannot loop back on themselves.",
+      `${yamlPath}: extends cycle detected. ` + "extends: chains cannot loop back on themselves.",
     );
   }
   const newSeen = new Set(seen);
   newSeen.add(yamlPath);
 
   if (typeof extendsField !== "string") {
-    throw new Error(
-      `${yamlPath}: extends must be a string path, got ${typeof extendsField}`,
-    );
+    throw new Error(`${yamlPath}: extends must be a string path, got ${typeof extendsField}`);
   }
   const parentPath = resolve(dirname(yamlPath), extendsField);
 
@@ -296,19 +305,7 @@ function resolveExtends(
     }
 
     if (key === "handlers") {
-      const baseH = (parentResolved.handlers as unknown[]) ?? [];
-      const childH = Array.isArray(childVal) ? childVal : [];
-      const seenNames = new Set<string>();
-      const out: unknown[] = [];
-      for (const h of [...childH, ...baseH]) {
-        if (!h || typeof h !== "object") continue;
-        const hr = h as Record<string, unknown>;
-        const nm = String(hr.name ?? hr.kind ?? "");
-        if (!nm || seenNames.has(nm)) continue;
-        seenNames.add(nm);
-        out.push(hr);
-      }
-      merged.handlers = out;
+      merged.handlers = Array.isArray(childVal) ? [...childVal] : [];
       continue;
     }
 
@@ -363,9 +360,7 @@ export function authoritativeYamlFor(yamlPath: string, key: string): string {
     const extendsField = doc.extends;
     if (!extendsField) break;
     if (typeof extendsField !== "string") {
-      throw new Error(
-        `${cur}: extends must be a string path, got ${typeof extendsField}`,
-      );
+      throw new Error(`${cur}: extends must be a string path, got ${typeof extendsField}`);
     }
     const parent = resolve(dirname(cur), extendsField);
     if (!existsSync(parent)) {
@@ -376,9 +371,7 @@ export function authoritativeYamlFor(yamlPath: string, key: string): string {
   // `declarers` is in leaf->root order; the entry closest to the root is the
   // one the merge keeps (parent wins). Fall back to the chain root when
   // nothing declares the key yet so a first-time write lands authoritatively.
-  return declarers.length > 0
-    ? declarers[declarers.length - 1]!
-    : chain[chain.length - 1]!;
+  return declarers.length > 0 ? declarers[declarers.length - 1]! : chain[chain.length - 1]!;
 }
 
 // 0.4.3a1 identity-naming flip: yaml top-level block renamed from
@@ -453,8 +446,7 @@ function _buildGroupMap(
       for (const f of g.fields) {
         if (typeof f !== "string") {
           throw new Error(
-            `${resolved}: groups.${name}.fields entries must be strings ` +
-              `(got ${typeof f})`,
+            `${resolved}: groups.${name}.fields entries must be strings ` + `(got ${typeof f})`,
           );
         }
         list.push(f);
@@ -467,9 +459,7 @@ function _buildGroupMap(
       name: "default",
       policy: "private",
       cipher: String(ceremony.cipher ?? "btn"),
-      recipients: device.device_identity
-        ? [{ did: String(device.device_identity) }]
-        : [],
+      recipients: device.device_identity ? [{ did: String(device.device_identity) }] : [],
     });
   }
   return { groupMap, perGroupFields, anyGroupDeclaresFields };
@@ -600,6 +590,8 @@ function _assembleConfig(
   const device = (doc.device ?? {}) as Record<string, unknown>;
   const logs = (doc.logs ?? {}) as Record<string, unknown>;
   const keystore = (doc.keystore ?? {}) as Record<string, unknown>;
+  const vaultRaw = (doc.vault ?? null) as Record<string, unknown> | null;
+  const vault = normalizeVaultConfig(resolved, vaultRaw, ceremony);
   const cfg: CeremonyConfig = {
     yamlPath: resolved,
     yamlDir,
@@ -609,6 +601,7 @@ function _assembleConfig(
     ...(ceremony.project_name != null && String(ceremony.project_name) !== ""
       ? { projectName: String(ceremony.project_name) }
       : {}),
+    vault,
     logPath: pathFromYaml(yamlDir, String(logs.path ?? "./.tn/logs/tn.ndjson")),
     keystorePath: pathFromYaml(yamlDir, String(keystore.path ?? "./.tn/keys")),
     device: { device_identity: String(device.device_identity ?? "") },
@@ -628,8 +621,7 @@ function _assembleConfig(
     // for any emit (admin or user).
     handlers: Array.isArray(doc.handlers)
       ? (doc.handlers as Array<unknown>).filter(
-          (h): h is Record<string, unknown> =>
-            !!h && typeof h === "object" && !Array.isArray(h),
+          (h): h is Record<string, unknown> => !!h && typeof h === "object" && !Array.isArray(h),
         )
       : [],
   };
@@ -637,4 +629,51 @@ function _assembleConfig(
     cfg.logLevel = ceremony.log_level;
   }
   return cfg;
+}
+
+function nonEmptyString(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
+}
+
+// Exported for the cross-language vault-normalization contract test
+// (ts-sdk/test/vault_normalize_contract.test.ts). Internal primitive,
+// not part of the public SDK surface.
+export function normalizeVaultConfig(
+  yamlPath: string,
+  vault: Record<string, unknown> | null,
+  ceremony: Record<string, unknown>,
+): VaultConfig {
+  const legacyUrl = nonEmptyString(ceremony.linked_vault);
+  const legacyProjectId = nonEmptyString(ceremony.linked_project_id);
+  if (vault === null) {
+    return {
+      enabled: legacyUrl !== undefined,
+      ...(legacyUrl !== undefined ? { url: legacyUrl } : {}),
+      ...(legacyProjectId !== undefined ? { linkedProjectId: legacyProjectId } : {}),
+      autosync: legacyUrl !== undefined,
+      syncIntervalSeconds: 600,
+    };
+  }
+  if (typeof vault !== "object" || Array.isArray(vault)) {
+    throw new Error(`${yamlPath}: vault must be an object when present`);
+  }
+  const enabled = (vault.enabled as boolean | undefined) ?? true;
+  const url = nonEmptyString(vault.url);
+  const linkedProjectId = nonEmptyString(vault.linked_project_id);
+  const autosync = (vault.autosync as boolean | undefined) ?? enabled;
+  const intervalRaw = vault.sync_interval_seconds ?? 600;
+  const syncIntervalSeconds = Number(intervalRaw);
+  if (!Number.isInteger(syncIntervalSeconds) || syncIntervalSeconds <= 0) {
+    throw new Error(`${yamlPath}: vault.sync_interval_seconds must be a positive integer`);
+  }
+  if (enabled && url === undefined) {
+    throw new Error(`${yamlPath}: vault.enabled=true requires vault.url`);
+  }
+  return {
+    enabled,
+    ...(enabled && url !== undefined ? { url } : {}),
+    ...(enabled && linkedProjectId !== undefined ? { linkedProjectId } : {}),
+    autosync: enabled ? autosync : false,
+    syncIntervalSeconds,
+  };
 }

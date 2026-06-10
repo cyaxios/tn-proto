@@ -73,7 +73,7 @@ gh run download \
   --repo cyaxios/tn-proto \
   --name tn-proto-tarball \
   --dir ./vendor
-# -> ./vendor/tn-proto-0.4.3-alpha.2.tgz
+# -> ./vendor/tn-proto-0.5.6-alpha.1.tgz
 ```
 
 Reference it from your consumer's `package.json`:
@@ -81,7 +81,7 @@ Reference it from your consumer's `package.json`:
 ```json
 {
   "dependencies": {
-    "tn-proto": "file:./vendor/tn-proto-0.4.3-alpha.2.tgz"
+    "tn-proto": "file:./vendor/tn-proto-0.5.6-alpha.1.tgz"
   }
 }
 ```

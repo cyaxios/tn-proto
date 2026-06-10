@@ -1,16 +1,21 @@
-//! Admin-state cache persistence: last-known-value snapshot save/load.
+//! LKV persistence for [`AdminStateCache`]: atomic save + rehydrate.
 //!
-//! Split out of `admin_cache.rs` (file-size refactor). A further
-//! `impl AdminStateCache` block; `use super::*` re-imports the parent's
-//! types, and the struct's private fields are visible to this child.
+//! `save_to_disk` writes the materialized state and the internal recovery
+//! fields to `<yaml_dir>/.tn/admin/admin.lkv.json` via a temp-file + rename so
+//! a crash never leaves a half-written cache. `load_from_disk` is the inverse:
+//! a thin orchestrator that validates the stored doc then delegates each
+//! field's deserialisation to a small helper.
 
-use super::*;
+use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write;
+
+use serde_json::{Map, Value};
+
+use super::{empty_state, file_name_or, AdminStateCache, ChainConflict, LKV_VERSION};
+use crate::Result;
 
 impl AdminStateCache {
-    // ------------------------------------------------------------------
-    // Persistence (atomic temp+rename)
-    // ------------------------------------------------------------------
-
     pub(super) fn save_to_disk(&self) -> Result<()> {
         if let Some(parent) = self.lkv_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -37,8 +42,7 @@ impl AdminStateCache {
             o.insert("leaf_index".into(), Value::Number((*li).into()));
             o.insert(
                 "row_hash".into(),
-                rh.clone()
-                    .map_or(Value::Null, Value::String),
+                rh.clone().map_or(Value::Null, Value::String),
             );
             revoked_arr.push(Value::Object(o));
         }
@@ -47,10 +51,7 @@ impl AdminStateCache {
             let mut o = Map::new();
             o.insert("group".into(), Value::String(g.clone()));
             o.insert("generation".into(), Value::Number((*gen).into()));
-            o.insert(
-                "previous_kit_sha256".into(),
-                Value::String(prev.clone()),
-            );
+            o.insert("previous_kit_sha256".into(), Value::String(prev.clone()));
             rotations_arr.push(Value::Object(o));
         }
         let mut coord_arr = Vec::new();
@@ -94,9 +95,10 @@ impl AdminStateCache {
         doc.insert("_coord_to_row_hash".into(), Value::Array(coord_arr));
 
         let serialized = serde_json::to_string_pretty(&Value::Object(doc))?;
-        let tmp = self
-            .lkv_path
-            .with_file_name(format!("{}.tmp", file_name_or(&self.lkv_path, "admin.lkv.json")));
+        let tmp = self.lkv_path.with_file_name(format!(
+            "{}.tmp",
+            file_name_or(&self.lkv_path, "admin.lkv.json")
+        ));
         {
             let mut f = OpenOptions::new()
                 .write(true)
@@ -161,10 +163,9 @@ impl AdminStateCache {
     /// ceremony mismatch means the file is stale; the caller drops
     /// it and rebuilds.
     fn lkv_doc_is_current(&self, m: &Map<String, Value>) -> bool {
-        let version_ok =
-            m.get("version").and_then(Value::as_u64) == Some(u64::from(LKV_VERSION));
-        let ceremony_ok = m.get("ceremony_id").and_then(Value::as_str)
-            == Some(self.cfg.ceremony.id.as_str());
+        let version_ok = m.get("version").and_then(Value::as_u64) == Some(u64::from(LKV_VERSION));
+        let ceremony_ok =
+            m.get("ceremony_id").and_then(Value::as_str) == Some(self.cfg.ceremony.id.as_str());
         version_ok && ceremony_ok
     }
 

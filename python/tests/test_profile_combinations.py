@@ -234,8 +234,9 @@ class TestPythonExampleFlow:
     def test_two_streams_in_one_project(self, tmp_path):
         # Set up: an audit-grade stream for payments, a fast
         # telemetry stream for traces. Both share project identity.
-        payments = tn.init("payments", profile="transaction", project_dir=tmp_path)
-        traces = tn.init("traces", profile="telemetry", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        payments = tn.use("payments", profile="transaction", project_dir=tmp_path)
+        traces = tn.use("traces", profile="telemetry", project_dir=tmp_path)
 
         # Same project DID across both streams.
         assert payments.cfg.device.device_identity == traces.cfg.device.device_identity
@@ -243,9 +244,9 @@ class TestPythonExampleFlow:
         # Distinct ceremony_ids = independent chains.
         assert payments.cfg.ceremony_id != traces.cfg.ceremony_id
 
-        # Each stream lives under its own .tn/<name>/ directory.
-        assert payments.directory.name == "payments"
-        assert traces.directory.name == "traces"
+        # Each stream lives under the Project's streams/ directory.
+        assert payments.yaml_path.name == "payments.yaml"
+        assert traces.yaml_path.name == "traces.yaml"
 
         # Listing surfaces both, plus the project default.
         names = tn.list_ceremonies()
@@ -255,7 +256,7 @@ class TestPythonExampleFlow:
         # tnpkg roundtrip works between the two ceremonies (kit
         # bundle from payments, absorb into traces — though traces
         # is telemetry-shaped and won't read it back anyway).
-        consumer = tn.init("consumer", project_dir=tmp_path)
+        consumer = tn.use("consumer", project_dir=tmp_path)
         out = tmp_path / "for-consumer.tnpkg"
         payments.bundle_for_recipient(
             recipient_did=consumer.cfg.device.device_identity,
@@ -271,8 +272,8 @@ class TestPythonExampleFlow:
         # up with BOTH handlers — its own AND default's, additive.
         # That's the "stdout backbone" property: every stream's effective
         # handler set includes the project's default.
-        tn.init("default", project_dir=tmp_path)  # ensure default exists
-        h = tn.init("payments", profile="transaction", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)  # ensure Project exists
+        h = tn.use("payments", profile="transaction", project_dir=tmp_path)
 
         with h.yaml_path.open("r", encoding="utf-8") as fh:
             doc = _yaml.safe_load(fh)
@@ -290,8 +291,8 @@ class TestPythonExampleFlow:
         # If the parent has a uniquely-named handler the child doesn't,
         # the child's effective list includes it. If they share a name,
         # the child's wins (declared first).
-        tn.init("default", project_dir=tmp_path)
-        h = tn.init("payments", profile="transaction", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        h = tn.use("payments", profile="transaction", project_dir=tmp_path)
 
         # Verify the merged list never has two handlers with the same
         # name, regardless of how messy the inheritance chain is.
@@ -303,12 +304,13 @@ class TestPythonExampleFlow:
         )
 
     def test_streams_share_keystore_directory(self, tmp_path):
-        tn.init("a", profile="transaction", project_dir=tmp_path)
-        tn.init("b", profile="audit", project_dir=tmp_path)
-        tn.init("c", profile="telemetry", project_dir=tmp_path)
-        # All three streams share one keystore at .tn/default/keys/.
+        tn.init(project_dir=tmp_path)
+        tn.use("a", profile="transaction", project_dir=tmp_path)
+        tn.use("b", profile="audit", project_dir=tmp_path)
+        tn.use("c", profile="telemetry", project_dir=tmp_path)
+        # All three streams share one keystore at .tn/<project>/keys/.
         # No per-stream key files.
-        keys = tmp_path / ".tn" / "default" / "keys"
+        keys = tmp_path / ".tn" / tmp_path.name / "keys"
         assert keys.is_dir()
         for name in ("a", "b", "c"):
-            assert not (tmp_path / ".tn" / name / "keys").exists()
+            assert not (tmp_path / ".tn" / tmp_path.name / "streams" / "keys").exists()

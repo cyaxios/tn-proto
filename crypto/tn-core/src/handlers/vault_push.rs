@@ -1,4 +1,7 @@
-//! `vault.push` handler — POST `.tnpkg` admin snapshots to a TN vault.
+//! `vault.push` handler — POST `.tnpkg` admin snapshots to a TN vault. A
+//! handler implementation; the handler interface + [`crate::Runtime`] fan-out
+//! is the entry point (behind `tn.info()` / `tn log`). Internal primitive —
+//! reach here directly only to configure or inspect this push sink.
 //!
 //! Mirrors `python/tn/handlers/vault_push.py`. Builds an admin-log
 //! snapshot via [`crate::Runtime::export`] and POSTs it to:
@@ -33,9 +36,8 @@ use super::TnHandler;
 
 const DEFAULT_POLL_INTERVAL_SEC: f64 = 60.0;
 
-const TS_FMT: &[FormatItem<'_>] = format_description!(
-    "[year][month][day]T[hour][minute][second][subsecond digits:6]Z"
-);
+const TS_FMT: &[FormatItem<'_>] =
+    format_description!("[year][month][day]T[hour][minute][second][subsecond digits:6]Z");
 
 /// HTTP transport surface for [`VaultPushHandler`]. One method —
 /// `post_snapshot` — receives the raw `.tnpkg` body plus the URL path
@@ -319,12 +321,7 @@ impl TnHandler for VaultPushHandler {
         self.stop.store(true, Ordering::SeqCst);
         let (_, cv) = &*self.cv;
         cv.notify_all();
-        if let Some(h) = self
-            .join
-            .lock()
-            .expect("vault.push close join lock")
-            .take()
-        {
+        if let Some(h) = self.join.lock().expect("vault.push close join lock").take() {
             let _ = h.join();
         }
         // Best-effort final flush.
@@ -340,12 +337,7 @@ impl Drop for VaultPushHandler {
             self.stop.store(true, Ordering::SeqCst);
             let (_, cv) = &*self.cv;
             cv.notify_all();
-            if let Some(h) = self
-                .join
-                .lock()
-                .expect("vault.push drop join lock")
-                .take()
-            {
+            if let Some(h) = self.join.lock().expect("vault.push drop join lock").take() {
                 let _ = h.join();
             }
         }

@@ -1,10 +1,11 @@
 //! Output handlers for TN runtime events (admin-log §5.2).
 //!
 //! Mirrors the Python `tn.handlers` package and the TS `@tn/sdk` handlers
-//! sub-tree. Defines the [`TnHandler`] trait — anything that wants to react
-//! to attested envelopes (or push admin snapshots out of process)
-//! implements it. The registry [`build_handlers`] consumes the YAML
-//! `handlers:` block and produces a list of trait objects.
+//! sub-tree. Defines the [`TnHandler`] trait — the extension point for anything
+//! that wants to react to attested envelopes as the runtime writes them (or
+//! push admin snapshots out of process). The registry [`build_handlers`]
+//! consumes the YAML `handlers:` block and produces a list of trait objects the
+//! runtime fans out to.
 //!
 //! ## Supported kinds
 //!
@@ -20,16 +21,16 @@
 //! the four push/pull handlers landed in commit 78f5617). Adding them later
 //! follows the same trait + registry pattern.
 //!
-//! Handlers attached via [`crate::Runtime::add_handler`] receive every
-//! emitted envelope through the `Runtime::emit` fan-out — matching
-//! Python's `Logger.handlers` loop (`python/tn/logger.py:343`) and TS's
-//! `NodeRuntime` fan-out (`ts-sdk/src/runtime/node_runtime.ts:376`).
-//! Each handler's `accepts()` filter is consulted per-envelope; failing
-//! handlers are logged + swallowed so a downstream issue never aborts a
-//! publish. The vault/fs handlers in this module also drive their own
-//! scheduler threads off `&Runtime` for snapshot building
-//! (`Runtime::export`) and absorb (`Runtime::absorb`), so push/pull
-//! patterns work whether or not the host wires emit-time fan-out.
+//! Handlers attached via [`crate::Runtime::add_handler`] are fanned out to for
+//! every envelope the runtime writes — matching Python's `Logger.handlers` loop
+//! (`python/tn/logger.py:343`) and TS's `NodeRuntime` fan-out
+//! (`ts-sdk/src/runtime/node_runtime.ts:376`). Each handler's
+//! [`accepts`](TnHandler::accepts) filter is consulted per-envelope; a handler
+//! that fails is logged and swallowed so a downstream issue never aborts a
+//! publish. The vault/fs handlers in this module also drive their own scheduler
+//! threads off `&Runtime` for snapshot building ([`crate::Runtime::export`])
+//! and absorb ([`crate::Runtime::absorb`]), so push/pull patterns work whether
+//! or not the host wires write-time fan-out.
 //!
 //! ## Filter spec
 //!
@@ -54,9 +55,9 @@
 // link.
 #![allow(clippy::must_use_candidate)]
 
-pub mod spec;
 pub mod fs_drop;
 pub mod fs_scan;
+pub mod spec;
 pub mod stdout;
 pub mod vault_pull;
 pub mod vault_push;
@@ -74,47 +75,73 @@ pub use stdout::{StdoutFormat, StdoutHandler};
 pub use vault_pull::{VaultInboxClient, VaultInboxItem, VaultPullHandler};
 pub use vault_push::{VaultPostClient, VaultPushHandler};
 
-/// A TN output handler. Mirrors `tn.handlers.base.TNHandler` (Python) and
-/// `TNHandler` (TS).
+/// A TN output handler — the trait downstream sinks implement to receive
+/// attested events.
 ///
-/// Handlers are sync on the caller's thread for [`emit`](Self::emit). The
-/// vault/fs handlers in this module spawn their own background scheduler
-/// threads when applicable; emit/close is the synchronous control surface.
+/// The runtime calls [`accepts`](Self::accepts) then
+/// [`emit`](Self::emit) for each envelope it writes, synchronously on the
+/// writing thread. Implementations must therefore be cheap and non-blocking in
+/// `emit`: the vault/fs handlers in this module hand work to their own
+/// background scheduler threads rather than doing I/O inline. `emit` and
+/// [`close`](Self::close) are the synchronous control surface; any heavy lifting
+/// happens off-thread. Must be `Send + Sync` to live behind the
+/// `Arc<dyn TnHandler>` the runtime fans out to. Mirrors
+/// `tn.handlers.base.TNHandler` (Python) and `TNHandler` (TS).
 pub trait TnHandler: Send + Sync {
-    /// Stable handler name (used in logs / outbox paths).
+    /// Return this handler's stable name.
+    ///
+    /// Used in diagnostic logs and to derive outbox paths; should be stable for
+    /// the handler's lifetime.
     fn name(&self) -> &str;
 
-    /// Whether this envelope should reach the handler. Defaults to the
-    /// handler's compiled filter; implementations may add their own
-    /// allowlist on top (e.g. [`FsDropHandler`] additionally requires
-    /// `event_type` to start with `tn.`).
+    /// Decide whether `envelope` should reach this handler.
+    ///
+    /// Consulted by the runtime before [`emit`](Self::emit); returning `false`
+    /// skips the envelope for this handler only. Implementations typically
+    /// delegate to their compiled `filter:` and may add an allowlist on top —
+    /// e.g. [`FsDropHandler`] additionally requires `event_type` to start with
+    /// `tn.`. Must not mutate handler state (the runtime may call it for
+    /// handlers that are ultimately skipped).
     fn accepts(&self, envelope: &Value) -> bool;
 
-    /// Process one accepted envelope. The `raw_line` is the bytes the
-    /// runtime would have written to disk (newline-terminated NDJSON).
-    /// Push-style handlers produce a snapshot from `Runtime` state in
-    /// background; the envelope is purely a trigger for them.
+    /// Hand one accepted envelope to this handler.
+    ///
+    /// Called only after [`accepts`](Self::accepts) returns `true`. `envelope`
+    /// is the parsed JSON record and `raw_line` is the exact newline-terminated
+    /// NDJSON bytes the runtime writes to disk — file-style sinks can append
+    /// `raw_line` verbatim. Push-style handlers (vault/fs) treat the call as a
+    /// trigger and build a snapshot from [`crate::Runtime`] state on their
+    /// scheduler thread rather than shipping the envelope itself. Errors are the
+    /// handler's to absorb: this returns `()`, and the runtime logs-and-swallows
+    /// any panic so one sink never aborts a publish. Must not block the caller.
     fn emit(&self, envelope: &Value, raw_line: &[u8]);
 
-    /// Best-effort shutdown — drains in-flight work, joins scheduler
-    /// threads, persists cursors. Idempotent.
+    /// Shut the handler down, best-effort.
+    ///
+    /// Drains in-flight work, joins any scheduler threads, and persists cursors
+    /// so a later run resumes cleanly. Idempotent — calling it more than once is
+    /// safe and a no-op after the first.
     fn close(&self);
 }
 
-/// Heap-allocated handler list used by hosts and tests.
+/// A list of reference-counted handlers, as held by a host or the runtime.
+///
+/// The shape [`build_handlers`] returns and [`crate::Runtime::add_handler`]
+/// feeds from; `Arc` so a handler can be shared between the runtime's fan-out
+/// and its own scheduler thread.
 pub type HandlerList = Vec<Arc<dyn TnHandler>>;
 
-/// Build a handler list from the YAML `handlers:` block. The
-/// `runtime` is shared across all push handlers; pull/scan handlers
-/// hold their own `Arc<Runtime>` so they can drive `export` / `absorb`
-/// from their scheduler thread.
+/// Build a handler list from the YAML `handlers:` block.
 ///
-/// `yaml_dir` resolves relative paths in the spec. `default_log_dir`
-/// is reserved for the `file.*` kinds when those land in Rust.
+/// Parses each spec and constructs the matching handler. The shared `runtime`
+/// backs push handlers; pull/scan handlers capture their own `Arc<Runtime>` so
+/// they can drive [`crate::Runtime::export`] / [`crate::Runtime::absorb`] from
+/// their scheduler thread. `yaml_dir` resolves relative paths in the spec. This
+/// is how a ceremony's configured outputs come to life at runtime init.
 ///
 /// # Errors
-/// Returns `Error::InvalidConfig` for unknown / malformed handler
-/// specs, mirroring the Python `ValueError`.
+/// Returns [`crate::Error::InvalidConfig`] for an unknown handler kind or a
+/// malformed spec, mirroring the Python `ValueError`.
 pub fn build_handlers(
     specs: &[serde_yml::Value],
     runtime: Arc<crate::Runtime>,

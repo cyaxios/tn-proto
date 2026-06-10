@@ -67,10 +67,12 @@ lives in wallet.py (link_ceremony / sync_ceremony), handlers/vault_push.py
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from . import wallet as _wallet
 from . import wallet_pull as _wallet_pull
@@ -116,13 +118,38 @@ class AttachOutcome:
     warnings: list[str] = field(default_factory=list)
 
 
+def _warm_attach_signal(identity: Identity, vault_url: str) -> str | None:
+    """Pick the credential for the warm (no-browser) attach, or None to
+    fall through to the claim-URL flow.
+
+    ``TN_API_KEY`` is an explicit, operator-supplied key for this run and
+    always wins. The remembered ``identity.linked_account_id`` only
+    applies when the target ``vault_url`` is the vault that account
+    actually lives on (``identity.linked_vault``): re-pointing a device at
+    a different vault (e.g. ``tn init --link <other>``) must NOT reuse the
+    old account, or the project would be registered on the wrong vault
+    under the bare device DID instead of being claimed under the user's
+    account there.
+
+    Lives HERE (not in the CLI) so it gates BOTH ``attach_or_sync``
+    callers: ``cli.cmd_init`` and the library ``tn.__init__
+    ._auto_link_after_init`` path.
+    """
+    api_key = os.environ.get("TN_API_KEY")
+    if api_key:
+        return api_key
+    if identity.linked_account_id and identity.linked_vault == vault_url:
+        return identity.linked_account_id
+    return None
+
+
 def attach_or_sync(
-    cfg: "LoadedConfig",
-    identity: "Identity",
+    cfg: LoadedConfig,
+    identity: Identity,
     vault_url: str,
     *,
     store: CredentialStore | None = None,
-    pull_absorb: "Callable[[Any, Identity, Path], int] | None" = None,
+    pull_absorb: Callable[[Any, Identity, Path], int] | None = None,
 ) -> AttachOutcome:
     """Decide and execute the init-time vault interaction per the module
     CONTRACT above. Pure orchestration; NEVER raises (the containment law).
@@ -155,8 +182,10 @@ def attach_or_sync(
         failures; the call itself never raises.
     """
     account_id = identity.linked_account_id
-    if not account_id:
-        # MODE CLAIM_URL — no logged-in account → anonymous pending-claim.
+    if not _warm_attach_signal(identity, vault_url):
+        # MODE CLAIM_URL — no logged-in account usable for THIS vault
+        # (never connected, or the remembered account lives on a different
+        # vault and must not be reused) → anonymous pending-claim.
         try:
             client = _default_client_factory(vault_url, identity)
             result = init_upload(cfg, client, vault_base=vault_url)
@@ -225,7 +254,7 @@ def attach_or_sync(
         return AttachOutcome(
             mode=mode,
             project_id=getattr(cfg, "linked_project_id", None),
-            warnings=warnings + [f"attach failed: {type(e).__name__}: {e}"],
+            warnings=[*warnings, f"attach failed: {type(e).__name__}: {e}"],
         )
     finally:
         try:
@@ -235,7 +264,7 @@ def attach_or_sync(
 
 
 def cache_account_awk(
-    identity: "Identity",
+    identity: Identity,
     vault_url: str,
     passphrase: str,
     account_id: str,

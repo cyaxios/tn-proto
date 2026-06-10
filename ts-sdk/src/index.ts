@@ -19,6 +19,10 @@ export * from "./core/chain.js";
 export * from "./core/envelope.js";
 export * from "./core/indexing.js";
 export * from "./core/signing.js";
+// The static admin-event catalog (reduce / catalogKinds / validateEmit).
+// Exported as `adminCatalog` so the module-level `admin` name is free for
+// the RUNTIME admin namespace (tn.admin.addRecipient(...)) further down,
+// matching Python's `import tn; tn.admin.*`.
 export * as adminCatalog from "./core/admin/catalog.js";
 export * as primitives from "./core/primitives.js";
 export { NodeRuntime } from "./runtime/node_runtime.js";
@@ -141,6 +145,7 @@ export {
 export {
   encryptBodyBlob,
   decryptBodyBlob,
+  packBodyPlaintextZip,
   BODY_CIPHER_SUITE,
   BODY_FRAME,
 } from "./core/body_encryption.js";
@@ -221,7 +226,7 @@ export {
   compileKitBundle,
   compileKitBundleToFile,
   type CompileKitBundleOptions,
-  type CompiledManifest,
+  type CompiledKitMeta,
   type CompiledPackage,
 } from "./compile.js";
 export {
@@ -271,21 +276,6 @@ import type {
 
 let _defaultTn: _Tn | null = null;
 
-type DefaultNamespace = "admin" | "pkg" | "vault" | "agents" | "handlers";
-
-function _defaultNamespace<K extends DefaultNamespace>(name: K): _Tn[K] {
-  return new Proxy(Object.create(null), {
-    get(_target, prop) {
-      const namespace = _requireDefault(name)[name] as object;
-      const value = Reflect.get(namespace, prop, namespace);
-      return typeof value === "function" ? value.bind(namespace) : value;
-    },
-    has(_target, prop) {
-      return prop in (_requireDefault(name)[name] as object);
-    },
-  }) as _Tn[K];
-}
-
 /** Internal — for the regression suite and any future test that needs
  *  to detect "did `tn.init()` succeed yet" without touching the class. */
 function _requireDefault(verb: string): _Tn {
@@ -317,27 +307,6 @@ export async function init(yamlPath?: string, opts?: TnInitOptions): Promise<_Tn
   _defaultTn = await _Tn.init(yamlPath, opts);
   return _defaultTn;
 }
-
-/** Get-or-create a named ceremony handle. Mirrors Python `tn.use(name)`.
- *  This returns the handle without rebinding the module-level default. */
-export function use(
-  name = "default",
-  opts?: TnInitOptions & { projectDir?: string; profile?: string },
-): Promise<_Tn> {
-  return _Tn.use(name, opts);
-}
-
-/** List ceremony names on disk for `projectDir` (default: cwd). */
-export const listCeremonies: typeof _Tn.listCeremonies = _Tn.listCeremonies.bind(_Tn);
-export const list_ceremonies = listCeremonies;
-
-/** Runtime default-ceremony namespaces. Low-level admin catalog helpers
- *  remain available as `adminCatalog`. */
-export const admin = _defaultNamespace("admin");
-export const pkg = _defaultNamespace("pkg");
-export const vault = _defaultNamespace("vault");
-export const agents = _defaultNamespace("agents");
-export const handlers = _defaultNamespace("handlers");
 
 /** Severity-less attested event. Mirrors Python `tn.log(...)`. */
 export function log(
@@ -388,10 +357,23 @@ export function read(opts?: ReadOptions): IterableIterator<_Entry | Record<strin
   return _requireDefault("read").read(opts);
 }
 
-/** Tail entries from the default ceremony. Mirrors Python `tn.watch()`. */
-export function watch(opts?: WatchOptions): AsyncIterableIterator<_Entry | Record<string, unknown>> {
+/** Tail the default ceremony's log live. Mirrors Python `tn.watch()`.
+ *  Async generator; yields `Entry` by default, `Record<string, unknown>`
+ *  when `opts.raw === true`. Throws if called before `tn.init()`. */
+export function watch(
+  opts?: WatchOptions,
+): AsyncIterableIterator<_Entry | Record<string, unknown>> {
   return _requireDefault("watch").watch(opts);
 }
+
+/** Block-scoped context overlay on the default ceremony. Mirrors Python
+ *  `with tn.scope(**fields):`. Runs `body` with `fields` layered on top
+ *  of the current context, restoring the prior context on return (even
+ *  if `body` throws). Throws if called before `tn.init()`. */
+export function scope<T>(fields: Record<string, unknown>, body: () => T): T {
+  return _requireDefault("scope").scope(fields, body);
+}
+
 
 /** Flush handlers and release the default ceremony. Mirrors Python
  *  `tn.flush_and_close()`. Safe to call multiple times. */
@@ -406,9 +388,10 @@ export async function close(): Promise<void> {
  *  for Python parity (`tn.flush_and_close()`). */
 export const flush_and_close = close;
 
-/** True iff the default ceremony's runtime is using the Rust path
- *  (always true on TS — wasm is the only backend). Provided for
- *  Python parity. */
+/** True iff the default ceremony's emit path is currently serviced by
+ *  the attached Rust/WASM core. False before the first emit (wasm
+ *  attaches lazily) and after an admin-driven runtime reset. Throws if
+ *  called before `tn.init()`. Mirrors Python's `tn.using_rust`. */
 export function usingRust(): boolean {
   return _requireDefault("usingRust").usingRust();
 }
@@ -419,6 +402,8 @@ export const using_rust = usingRust;
 export function config(): ReturnType<_Tn["config"]> {
   return _requireDefault("config").config();
 }
+/** Snake_case alias of {@link config} for Python parity
+ *  (`tn.current_config()`). */
 export const current_config = config;
 
 /** Default-ceremony context functions — mirror Python `tn.set_context`,
@@ -447,7 +432,109 @@ export function getContext(): Record<string, unknown> {
 }
 export const get_context = getContext;
 
-/** Block-scoped default context. Mirrors Python `with tn.scope(...)`. */
-export function scope<T>(fields: Record<string, unknown>, body: () => T): T {
-  return _requireDefault("scope").scope(fields, body);
+// ---------------------------------------------------------------------------
+// Static-backed module verbs — these don't touch the default singleton;
+// they forward straight to the `Tn` static factories. `tn.use(...)` and
+// `tn.session(...)` mint *additional* ceremonies (the caller owns the
+// returned handle); only `tn.absorb(...)` rebinds the module default,
+// matching its role as a bootstrap entry point.
+// ---------------------------------------------------------------------------
+
+/** Get-or-create a named stream. Mirrors Python `tn.use(name)`. Returns
+ *  a fresh `Tn` handle (interned per project+name like the class method);
+ *  does NOT rebind the module-level default. */
+export function use(
+  name: string,
+  opts?: TnInitOptions & { projectDir?: string; profile?: string; project?: string },
+): Promise<_Tn> {
+  return _Tn.use(name, opts);
 }
+
+/** List ceremony names found on disk under `.tn/` for `projectDir`
+ *  (default: cwd). Mirrors Python `tn.list_ceremonies()`. */
+export function listCeremonies(projectDir?: string): string[] {
+  return _Tn.listCeremonies(projectDir);
+}
+
+/** Snake_case alias of {@link listCeremonies} for Python parity
+ *  (`tn.list_ceremonies()`). */
+export const list_ceremonies = listCeremonies;
+
+/** Build a throwaway ceremony in a private tempdir, removed on its
+ *  `close()`. Mirrors Python `tn.session()`. Returns a fresh `Tn`
+ *  handle; does NOT rebind the module-level default. */
+export function session(opts?: TnInitOptions): Promise<_Tn> {
+  return _Tn.ephemeral(opts);
+}
+
+/** Absorb a self-contained bootstrap bundle and rebind the module-level
+ *  default to the freshly-absorbed ceremony. Mirrors Python `tn.absorb()`
+ *  followed by the module default tracking that ceremony. Any prior
+ *  default is closed first (best-effort), matching {@link init}. */
+export async function absorb(
+  source: string | Uint8Array,
+  opts?: { cwd?: string } & TnInitOptions,
+): Promise<_Tn> {
+  const tn = await _Tn.absorb(source, opts ?? {});
+  if (_defaultTn !== null && _defaultTn !== tn) {
+    try {
+      await _defaultTn.close();
+    } catch {
+      // Best-effort close; never let a stale singleton block the rebind.
+    }
+  }
+  _defaultTn = tn;
+  return tn;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime namespaces at module level — so `tn.admin.addRecipient(...)`,
+// `tn.pkg.*`, `tn.vault.*` (and `tn.agents.*`, `tn.handlers.*`) work and
+// resolve to the live default ceremony's RUNTIME namespaces, NOT the
+// static `adminCatalog` re-export above. Each is a lazy proxy: property
+// access forwards to the namespace on the current default instance, so
+// the binding always tracks the latest `tn.init()` / `tn.absorb()`.
+// Accessing any member before init throws via `_requireDefault`.
+// ---------------------------------------------------------------------------
+
+function _makeNamespaceProxy<K extends "admin" | "pkg" | "vault" | "agents" | "handlers">(
+  verb: K,
+): _Tn[K] {
+  // The target is an inert object; every read is intercepted and routed
+  // to the live namespace. Cast to the namespace instance type so callers
+  // get full member typings (e.g. `tn.admin.addRecipient`).
+  return new Proxy({} as _Tn[K], {
+    get(_target, prop, receiver) {
+      const ns = _requireDefault(verb)[verb] as object;
+      const value = Reflect.get(ns, prop, receiver) as unknown;
+      // Re-bind `this` for methods so they execute against the namespace
+      // instance rather than the proxy.
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(ns) : value;
+    },
+    has(_target, prop) {
+      const ns = _requireDefault(verb)[verb] as object;
+      return Reflect.has(ns, prop);
+    },
+  });
+}
+
+/** Runtime ceremony-admin namespace on the default instance. Mirrors
+ *  Python `tn.admin.*` (e.g. `tn.admin.addRecipient(...)`). This is the
+ *  RUNTIME namespace, not the static `adminCatalog` event catalog. */
+export const admin: _Tn["admin"] = _makeNamespaceProxy("admin");
+
+/** Runtime package (tnpkg) namespace on the default instance. Mirrors
+ *  Python `tn.pkg.*`. */
+export const pkg: _Tn["pkg"] = _makeNamespaceProxy("pkg");
+
+/** Runtime vault namespace on the default instance. Mirrors Python
+ *  `tn.vault.*`. */
+export const vault: _Tn["vault"] = _makeNamespaceProxy("vault");
+
+/** Runtime agents-policy namespace on the default instance. Mirrors
+ *  Python `tn.agents.*`. */
+export const agents: _Tn["agents"] = _makeNamespaceProxy("agents");
+
+/** Runtime handlers namespace on the default instance. Mirrors Python
+ *  `tn.handlers.*`. */
+export const handlers: _Tn["handlers"] = _makeNamespaceProxy("handlers");

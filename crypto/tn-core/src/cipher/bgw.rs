@@ -1,4 +1,7 @@
-//! BGW cipher stub (feature-gated).
+//! BGW cipher stub (feature-gated). A concrete cipher backing
+//! [`crate::Runtime`]; selected by group cipher policy. Internal primitive —
+//! most readers want the high-level API instead (`tn.info()` / `tn read`);
+//! reach here directly only to inspect the Rust-side BGW stub.
 //!
 //! BGW uses the existing C library at `tn-protocol/crypto/src/bgw.cpp` via
 //! FFI, which is not wired in tn-core: any BGW operation here returns

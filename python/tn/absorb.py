@@ -24,6 +24,7 @@ existing tests don't break.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib as _hashlib
 import json
 import logging as _logging
@@ -1226,8 +1227,10 @@ def _restore_stream_yamls(
     default_dir = cfg.yaml_path.parent
     if default_dir.name == DEFAULT_CEREMONY_NAME:
         project_root = default_dir.parent
+        streams_dir: Path | None = None
     else:
         project_root = default_dir
+        streams_dir = project_root / "streams"
 
     for name, data in body.items():
         if not name.startswith("body/streams/"):
@@ -1241,12 +1244,18 @@ def _restore_stream_yamls(
         stream_name = parts[0]
         if not is_valid_ceremony_name(stream_name):
             continue
-        stream_dir = project_root / stream_name
-        stream_dir.mkdir(parents=True, exist_ok=True)
-        # Structural contract from _create_stream_yaml
-        (stream_dir / "logs").mkdir(exist_ok=True)
-        (stream_dir / "admin").mkdir(exist_ok=True)
-        dest = stream_dir / "tn.yaml"
+        if streams_dir is not None:
+            streams_dir.mkdir(parents=True, exist_ok=True)
+            (project_root / "logs").mkdir(exist_ok=True)
+            (project_root / "admin").mkdir(exist_ok=True)
+            dest = streams_dir / f"{stream_name}.yaml"
+        else:
+            stream_dir = project_root / stream_name
+            stream_dir.mkdir(parents=True, exist_ok=True)
+            # Structural contract from _create_stream_yaml
+            (stream_dir / "logs").mkdir(exist_ok=True)
+            (stream_dir / "admin").mkdir(exist_ok=True)
+            dest = stream_dir / "tn.yaml"
         if dest.exists():
             existing = dest.read_bytes()
             if existing == data:
@@ -1798,6 +1807,85 @@ def _user_event_count(cfg: LoadedConfig) -> int:
     return count
 
 
+def _nonempty_str(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _project_seed_vault_yaml_patch(
+    existing_yaml: bytes,
+    incoming_yaml: bytes,
+) -> tuple[bytes | None, bool]:
+    """Return an additive vault-metadata YAML patch, or vault-only equality.
+
+    ``project_seed`` is root-authoritative project control state, but absorb
+    is additive. If the local YAML already has a ``vault:`` block, an incoming
+    project seed may fill empty ``url`` / ``linked_project_id`` values; it must
+    not overwrite non-empty local values. When the only remaining difference is
+    non-adoptable vault metadata, report ``vault_only=True`` so callers can
+    treat the YAML as deduped instead of rejecting the whole package.
+    """
+    try:
+        import yaml as _yaml
+
+        existing_doc = _yaml.safe_load(existing_yaml.decode("utf-8")) or {}
+        incoming_doc = _yaml.safe_load(incoming_yaml.decode("utf-8")) or {}
+    except Exception:  # noqa: BLE001 - malformed YAML falls back to normal path
+        return None, False
+
+    if not isinstance(existing_doc, dict) or not isinstance(incoming_doc, dict):
+        return None, False
+    existing_vault = existing_doc.get("vault")
+    incoming_vault = incoming_doc.get("vault")
+    if not isinstance(existing_vault, dict) or not isinstance(incoming_vault, dict):
+        return None, False
+    if existing_vault.get("enabled") is False:
+        return None, False
+
+    patched_doc = copy.deepcopy(existing_doc)
+    patched_vault = patched_doc.setdefault("vault", {})
+    changed = False
+    for field_name in ("url", "linked_project_id"):
+        if not _nonempty_str(patched_vault.get(field_name)):
+            incoming_value = _nonempty_str(incoming_vault.get(field_name))
+            if incoming_value:
+                patched_vault[field_name] = incoming_value
+                changed = True
+    if changed:
+        patched_vault["enabled"] = True
+        patched_vault.setdefault("autosync", True)
+        patched_vault.setdefault(
+            "sync_interval_seconds",
+            incoming_vault.get("sync_interval_seconds", 600),
+        )
+        ceremony = patched_doc.get("ceremony")
+        incoming_ceremony = incoming_doc.get("ceremony")
+        if isinstance(ceremony, dict) and isinstance(incoming_ceremony, dict):
+            if not _nonempty_str(ceremony.get("linked_vault")):
+                incoming_url = _nonempty_str(incoming_ceremony.get("linked_vault"))
+                if incoming_url:
+                    ceremony["linked_vault"] = incoming_url
+            if not _nonempty_str(ceremony.get("linked_project_id")):
+                incoming_pid = _nonempty_str(incoming_ceremony.get("linked_project_id"))
+                if incoming_pid:
+                    ceremony["linked_project_id"] = incoming_pid
+        encoded = _yaml.safe_dump(patched_doc, sort_keys=False).encode("utf-8")
+        return encoded if encoded != existing_yaml else None, True
+
+    def _blank_project_seed_vault_metadata(doc: dict[str, Any]) -> dict[str, Any]:
+        clone = copy.deepcopy(doc)
+        vault = clone.get("vault")
+        if isinstance(vault, dict):
+            vault["url"] = ""
+            vault["linked_project_id"] = ""
+        ceremony = clone.get("ceremony")
+        if isinstance(ceremony, dict):
+            ceremony["linked_vault"] = ""
+            ceremony["linked_project_id"] = ""
+        return clone
+
+    return None, _blank_project_seed_vault_metadata(existing_doc) == _blank_project_seed_vault_metadata(incoming_doc)
+
+
 def _absorb_project_seed(
     cfg: LoadedConfig, manifest: TnpkgManifest, body: dict[str, bytes]
 ) -> AbsorbReceipt:
@@ -1910,25 +1998,37 @@ def _absorb_project_seed(
         existing_yaml = yaml_target.read_bytes()
         if existing_yaml == yaml_bytes:
             deduped += 1
-        elif _user_event_count(cfg) == 0:
-            backup = yaml_target.with_name(f"{yaml_target.name}.previous.{ts}")
-            _preserve_before_overwrite(yaml_target, backup)
-            replaced.append(yaml_target)
-            yaml_target.parent.mkdir(parents=True, exist_ok=True)
-            yaml_target.write_bytes(yaml_bytes)
-            accepted += 1
-            yaml_action = "replaced"
         else:
-            return AbsorbReceipt(
-                kind=manifest.kind,
-                legacy_status="rejected",
-                legacy_reason=(
-                    f"refusing to overwrite existing tn.yaml at {yaml_target}: "
-                    f"contents differ from the project_seed bundle and the local "
-                    f"log already contains user-emitted entries. Delete the "
-                    f"directory or absorb in a fresh location."
-                ),
+            patched_yaml, vault_only = _project_seed_vault_yaml_patch(
+                existing_yaml,
+                yaml_bytes,
             )
+            if patched_yaml is not None:
+                yaml_target.write_bytes(patched_yaml)
+                accepted += 1
+                yaml_action = "vault_metadata_adopted"
+            elif vault_only:
+                deduped += 1
+                yaml_action = "vault_metadata_ignored"
+            elif _user_event_count(cfg) == 0:
+                backup = yaml_target.with_name(f"{yaml_target.name}.previous.{ts}")
+                _preserve_before_overwrite(yaml_target, backup)
+                replaced.append(yaml_target)
+                yaml_target.parent.mkdir(parents=True, exist_ok=True)
+                yaml_target.write_bytes(yaml_bytes)
+                accepted += 1
+                yaml_action = "replaced"
+            else:
+                return AbsorbReceipt(
+                    kind=manifest.kind,
+                    legacy_status="rejected",
+                    legacy_reason=(
+                        f"refusing to overwrite existing tn.yaml at {yaml_target}: "
+                        f"contents differ from the project_seed bundle and the local "
+                        f"log already contains user-emitted entries. Delete the "
+                        f"directory or absorb in a fresh location."
+                    ),
+                )
     else:
         yaml_target.parent.mkdir(parents=True, exist_ok=True)
         yaml_target.write_bytes(yaml_bytes)
@@ -2004,5 +2104,3 @@ __all__ = [
     "LeafReuseAttempt",
     "absorb",
 ]
-
-

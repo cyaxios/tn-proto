@@ -51,6 +51,10 @@ def _run_validate(cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _project_root(cwd: Path) -> Path:
+    return cwd / ".tn" / cwd.name
+
+
 def test_validate_passes_on_clean_ceremony(tmp_path: Path):
     """Sanity: an untouched freshly-inited ceremony validates clean."""
     _init_default(tmp_path)
@@ -62,7 +66,7 @@ def test_validate_passes_on_clean_ceremony(tmp_path: Path):
 def test_validate_catches_yaml_did_keystore_mismatch(tmp_path: Path):
     """Mutate yaml.me.did to a fake did:key and confirm validate fails."""
     _init_default(tmp_path)
-    yaml_path = tmp_path / ".tn" / "default" / "tn.yaml"
+    yaml_path = _project_root(tmp_path) / "tn.yaml"
     doc = pyyaml.safe_load(yaml_path.read_text())
     real_did = doc["device"]["device_identity"]
     fake_did = "did:key:z6MkfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKE"
@@ -82,7 +86,7 @@ def test_validate_catches_yaml_did_keystore_mismatch(tmp_path: Path):
     assert fake_did in combined
     # The real keystore did:key must also appear so operators can see
     # both sides of the divergence at a glance.
-    pub_path = tmp_path / ".tn" / "default" / "keys" / "local.public"
+    pub_path = _project_root(tmp_path) / "keys" / "local.public"
     keystore_did = pub_path.read_text(encoding="ascii").strip()
     assert keystore_did in combined
 
@@ -91,7 +95,7 @@ def test_validate_catches_keystore_drift_after_swap(tmp_path: Path):
     """Replace keys/local.public with a different did:key; validator
     should still flag (symmetric to the yaml-side mutation test)."""
     _init_default(tmp_path)
-    pub_path = tmp_path / ".tn" / "default" / "keys" / "local.public"
+    pub_path = _project_root(tmp_path) / "keys" / "local.public"
     pub_path.write_text(
         "did:key:z6MkfakeFAKEfakeFAKEfakeFAKEfakeFAKEfakeFAKE",
         encoding="ascii",

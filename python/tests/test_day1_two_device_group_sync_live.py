@@ -167,12 +167,21 @@ def _fresh_runtime():
 
 
 def _stamp_ceremony_yaml(yaml_path: Path, *, project_id: str) -> None:
-    """Link this ceremony to ``project_id`` on the dev vault."""
+    """Link this ceremony to ``project_id`` on the dev vault.
+
+    The project-level ``vault:`` block is authoritative when present
+    (a fresh init writes one), so stamp it alongside the legacy
+    ``ceremony.linked_*`` fields.
+    """
     doc = _yaml.safe_load(yaml_path.read_text()) or {}
     ceremony = doc.setdefault("ceremony", {})
     ceremony["mode"] = "linked"
     ceremony["linked_vault"] = VAULT_URL
     ceremony["linked_project_id"] = project_id
+    vault = doc.setdefault("vault", {})
+    vault["enabled"] = True
+    vault["url"] = VAULT_URL
+    vault["linked_project_id"] = project_id
     yaml_path.write_text(_yaml.safe_dump(doc, sort_keys=False))
 
 

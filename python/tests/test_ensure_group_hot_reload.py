@@ -56,8 +56,9 @@ def test_ensure_group_makes_new_routing_visible_same_process(tmp_path: Path):
         tn.info("order.created", amount=4999, currency="USD", notes="x")
         tn.flush_and_close()
 
+        project = pathlib.Path.cwd().name
         last = json.loads(
-            pathlib.Path("./.tn/default/logs/tn.ndjson")
+            (pathlib.Path("./.tn") / project / "logs" / "default.ndjson")
                 .read_text().splitlines()[-1]
         )
         groups = [
@@ -98,8 +99,9 @@ def test_ensure_group_persists_across_process_boundary(tmp_path: Path):
         tn.init()
         tn.info("order.created", amount=4999)
         tn.flush_and_close()
+        project = pathlib.Path.cwd().name
         last = json.loads(
-            pathlib.Path("./.tn/default/logs/tn.ndjson")
+            (pathlib.Path("./.tn") / project / "logs" / "default.ndjson")
                 .read_text().splitlines()[-1]
         )
         groups = [

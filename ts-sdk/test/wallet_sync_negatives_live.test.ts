@@ -88,8 +88,8 @@ test(
 
     const { projectId, bek } = await mintProject(client, dev.passphrase);
     const body = new Map<string, Uint8Array>([
-      ["tn.yaml", new TextEncoder().encode("ceremony:\n  id: neg\n")],
-      ["local.private", randomBytes(32)],
+      ["body/tn.yaml", new TextEncoder().encode("ceremony:\n  id: neg\n")],
+      ["body/local.private", randomBytes(32)],
     ]);
     const frame = await encryptBodyBlob(body, bek);
     await client.putEncryptedBlobAccount(projectId, blobBody(frame), { ifMatch: "*" });
@@ -132,7 +132,7 @@ test(
     // First push -> generation 1.
     const r1 = await client.putEncryptedBlobAccount(
       projectId,
-      blobBody(await encryptBodyBlob(new Map([["v", new Uint8Array([1])]]), bek)),
+      blobBody(await encryptBodyBlob(new Map([["body/v", new Uint8Array([1])]]), bek)),
       { ifMatch: "*" },
     );
     assert.equal(r1["generation"], 1, "first push should land generation 1");
@@ -140,7 +140,7 @@ test(
     // A correct second push at If-Match: 1 advances -> generation 2.
     const r2 = await client.putEncryptedBlobAccount(
       projectId,
-      blobBody(await encryptBodyBlob(new Map([["v", new Uint8Array([2])]]), bek)),
+      blobBody(await encryptBodyBlob(new Map([["body/v", new Uint8Array([2])]]), bek)),
       { ifMatch: "1" },
     );
     assert.equal(r2["generation"], 2, "correct-generation push should advance to 2");
@@ -152,7 +152,7 @@ test(
     try {
       await client.putEncryptedBlobAccount(
         projectId,
-        blobBody(await encryptBodyBlob(new Map([["v", new Uint8Array([3])]]), bek)),
+        blobBody(await encryptBodyBlob(new Map([["body/v", new Uint8Array([3])]]), bek)),
         { ifMatch: "1" },
       );
     } catch (e) {

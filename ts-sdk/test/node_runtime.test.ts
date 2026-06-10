@@ -101,17 +101,36 @@ test("createFreshCeremony does not serialize Windows drive paths into yaml", () 
     const yamlDrive = /^([A-Za-z]):/.exec(yamlPath)?.[1]?.toUpperCase();
     const foreignDrive = yamlDrive === "C" ? "D" : "C";
 
-    createFreshCeremony(yamlPath, {
-      logPath: "C:/tn-portable/logs/tn.ndjson",
-      adminLogPath: `${foreignDrive}:/tn-portable/admin/admin.ndjson`,
-    });
+    // Cross-drive paths cannot be expressed portably relative to the
+    // ceremony dir: createFreshCeremony REFUSES rather than leaking a
+    // machine-local drive path into the yaml (see yaml_path_portability).
+    assert.throws(
+      () =>
+        createFreshCeremony(yamlPath, {
+          adminLogPath: `${foreignDrive}:/tn-portable/admin/admin.ndjson`,
+        }),
+      /different drive or volume/,
+    );
 
-    const yaml = readFileSync(yamlPath, "utf8");
-    assert.doesNotMatch(yaml, /C:\//);
-    assert.doesNotMatch(yaml, /[A-Za-z]:\//);
-    assert.match(yaml, /admin_log_location: \.\/\.tn\/tn\/admin\/admin\.ndjson/);
-    assert.match(yaml, /logs:\n {2}path: \.\//);
-    assert.match(yaml, /handlers:\n- kind: file\.rotating[\s\S]*path: \.\//);
+    // Same-drive absolute paths relativize to ./-anchored yaml entries;
+    // nothing drive-absolute is ever serialized.
+    const okDir = mkdtempSync(join(tmpdir(), "tn-portable-ok-"));
+    try {
+      const okYaml = join(okDir, "tn.yaml");
+      createFreshCeremony(okYaml, {
+        logPath: join(okDir, "logs", "tn.ndjson"),
+        adminLogPath: join(okDir, "admin", "admin.ndjson"),
+      });
+      const yaml = readFileSync(okYaml, "utf8");
+      // No drive-absolute path tokens after whitespace (the vault url's
+      // "https://" is the only legitimate ":/", and it is not drive-shaped).
+      assert.doesNotMatch(yaml, /(?:^|\s)[A-Za-z]:[\\/]/m);
+      assert.match(yaml, /admin_log_location: \.\/admin\/admin\.ndjson/);
+      assert.match(yaml, /logs:\n {2}path: \.\//);
+      assert.match(yaml, /handlers:\n- kind: file\.rotating[\s\S]*path: \.\//);
+    } finally {
+      rmSync(okDir, { recursive: true, force: true });
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

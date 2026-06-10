@@ -86,8 +86,10 @@ def pull_inbox(
         The active ``LoadedConfig``. Caller is responsible for resolving
         it (e.g. via ``tn.current_config()``).
     client
-        An object exposing ``list_incoming(did, *, since)`` and
-        ``download(path) -> bytes``. Caller owns the lifecycle.
+        An authenticated ``VaultClient`` (wrapped in the inbox adapter
+        automatically), or any object already exposing
+        ``list_incoming(did, *, since)`` and ``download(path) -> bytes``.
+        Caller owns the lifecycle.
     since_cursor
         Opaque cursor value to pass as ``since`` on ``list_incoming``.
         The handler loads this from ``vault_pull.cursor.json``; CLI
@@ -108,6 +110,14 @@ def pull_inbox(
         raise ValueError(
             f"vault.pull: on_absorb_error must be 'log' or 'raise', got {on_absorb_error!r}"
         )
+
+    # Accept a raw VaultClient — the object callers naturally pass to
+    # ``tn.vault_pull_inbox`` / a future ``tn sync`` verb — by wrapping it
+    # in the inbox adapter that speaks list_incoming/download. An object
+    # already speaking the inbox protocol (the handler's own adapter, or a
+    # test mock) is used as-is.
+    if not hasattr(client, "list_incoming"):
+        client = _SnapshotInboxClient(client)
 
     my_did = cfg.device.device_identity
     try:

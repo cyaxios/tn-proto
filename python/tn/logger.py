@@ -406,6 +406,7 @@ def build_runtime(
     identity=None,  # tn.identity.Identity or None
     extra_handlers: list[TNHandler] | None = None,  # for tests / programmatic
     stdout: bool | None = None,  # None = default-on unless TN_NO_STDOUT=1
+    link: bool | None = None,  # None/True keep legacy linked default; False = mode:local
     device_private_bytes: bytes | None = None,
     keystore_dir: str | os.PathLike[str] | None = None,
     admin_log_path: str | os.PathLike[str] | None = None,
@@ -487,6 +488,12 @@ def build_runtime(
         # accepts it so the yaml gets the right path written.
         if log_path is not None:
             create_kwargs["log_path"] = log_path
+        if link is not None:
+            # Thread link=False through to create_fresh so a fresh ceremony
+            # is minted unlinked (mode: local, empty linked_vault). This was
+            # previously dropped here, so tn.init(link=False) silently
+            # produced a linked ceremony (yaml-identity-ironout §8.2).
+            create_kwargs["link"] = link
         cfg = load_or_create(yaml_path, **create_kwargs)
 
         # --- auto-absorb inbox + _reconcile (unified-read Plan 1) ---

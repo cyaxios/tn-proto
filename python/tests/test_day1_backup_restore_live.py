@@ -129,6 +129,12 @@ def _stamp_ceremony_yaml(yaml_path: Path, *, project_id: str) -> None:
     ceremony["linked_vault"] = VAULT_URL
     ceremony["linked_project_id"] = project_id
     ceremony["sync_logs"] = True
+    # The project-level ``vault:`` block is authoritative when present (a
+    # fresh init writes one), so stamp it alongside the legacy fields.
+    vault = doc.setdefault("vault", {})
+    vault["enabled"] = True
+    vault["url"] = VAULT_URL
+    vault["linked_project_id"] = project_id
     yaml_path.write_text(_yaml.safe_dump(doc, sort_keys=False))
 
 

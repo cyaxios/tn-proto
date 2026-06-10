@@ -26,6 +26,10 @@ use tn_core::chain;
 use tn_core::envelope;
 use tn_core::indexing;
 use tn_core::signing::{self, DeviceKey};
+use tn_core::tnpkg::{
+    self, read_tnpkg, verify_manifest, write_tnpkg_bytes, BodyContents, Manifest, ManifestKind,
+    TnpkgSource,
+};
 
 use tn_btn::{
     Ciphertext as BtnCiphertext, Config as BtnConfig, LeafIndex,
@@ -151,6 +155,205 @@ fn field_type_str(t: admin_catalog::FieldType) -> &'static str {
         FieldType::OptionalInt => "optional_int",
         FieldType::Iso8601 => "iso8601",
     }
+}
+
+// ---------------------------------------------------------------------------
+// Manifest / .tnpkg wire helpers
+// ---------------------------------------------------------------------------
+
+/// List the manifest kinds recognized by the Rust core.
+#[wasm_bindgen(js_name = "manifestKnownKinds")]
+pub fn manifest_known_kinds_js() -> Result<JsValue, JsError> {
+    let kinds = [
+        ManifestKind::AdminLogSnapshot,
+        ManifestKind::Offer,
+        ManifestKind::Enrolment,
+        ManifestKind::RecipientInvite,
+        ManifestKind::KitBundle,
+        ManifestKind::FullKeystore,
+        ManifestKind::ContactUpdate,
+        ManifestKind::IdentitySeed,
+        ManifestKind::ProjectSeed,
+        ManifestKind::GroupKeys,
+    ];
+    let out = Value::Array(
+        kinds
+            .into_iter()
+            .map(|kind| Value::String(kind.as_str().into()))
+            .collect(),
+    );
+    json_to_js(&out)
+}
+
+/// Normalize a manifest wire dictionary through the Rust manifest parser.
+#[wasm_bindgen(js_name = "manifestToWireDict")]
+pub fn manifest_to_wire_dict_js(manifest_doc: JsValue) -> Result<JsValue, JsError> {
+    let manifest = manifest_from_js(manifest_doc)?;
+    json_to_js(&manifest.to_json())
+}
+
+/// Canonical signing bytes for a manifest, with `manifest_signature_b64`
+/// stripped by the Rust core.
+#[wasm_bindgen(js_name = "manifestSigningBytes")]
+pub fn manifest_signing_bytes_js(manifest_doc: JsValue) -> Result<Vec<u8>, JsError> {
+    let manifest = manifest_from_js(manifest_doc)?;
+    manifest
+        .signing_bytes()
+        .map_err(|e| JsError::new(&format!("{e}")))
+}
+
+/// Return true iff the manifest signature verifies against
+/// `publisher_identity`.
+#[wasm_bindgen(js_name = "manifestVerifySignature")]
+pub fn manifest_verify_signature_js(manifest_doc: JsValue) -> Result<bool, JsError> {
+    let manifest = manifest_from_js(manifest_doc)?;
+    Ok(verify_manifest(&manifest).is_ok())
+}
+
+/// Read a `.tnpkg` archive from bytes.
+///
+/// Returns `{ manifest, body }`, where `body` is an array of
+/// `{ name, data: Uint8Array }` entries. Signature verification is a separate
+/// manifest operation, matching Rust/Python.
+#[wasm_bindgen(js_name = "tnpkgReadBytes")]
+pub fn tnpkg_read_bytes_js(bytes: &[u8]) -> Result<JsValue, JsError> {
+    let (manifest, body) =
+        read_tnpkg(TnpkgSource::Bytes(bytes)).map_err(|e| JsError::new(&format!("{e}")))?;
+    let out = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &out,
+        &JsValue::from_str("manifest"),
+        &json_to_js(&manifest.to_json())?,
+    )
+    .map_err(|e| JsError::new(&format!("set manifest: {e:?}")))?;
+    js_sys::Reflect::set(
+        &out,
+        &JsValue::from_str("body"),
+        &body_to_js_entries(&body)?,
+    )
+    .map_err(|e| JsError::new(&format!("set body: {e:?}")))?;
+    Ok(out.into())
+}
+
+/// Write a `.tnpkg` archive to bytes from a manifest wire dictionary and
+/// body entries (`[{ name, data: Uint8Array }, ...]`).
+#[wasm_bindgen(js_name = "tnpkgWriteBytes")]
+pub fn tnpkg_write_bytes_js(manifest_doc: JsValue, entries: JsValue) -> Result<Vec<u8>, JsError> {
+    let manifest = manifest_from_js(manifest_doc)?;
+    let body = body_from_js_entries(entries)?;
+    write_tnpkg_bytes(&manifest, &body).map_err(|e| JsError::new(&format!("{e}")))
+}
+
+/// True iff vector clock `a` dominates `b` on every `(did, event_type)`
+/// coordinate.
+#[wasm_bindgen(js_name = "manifestClockDominates")]
+pub fn manifest_clock_dominates_js(a: JsValue, b: JsValue) -> Result<bool, JsError> {
+    let ma = Manifest {
+        kind: ManifestKind::AdminLogSnapshot,
+        version: tnpkg::MANIFEST_VERSION,
+        publisher_identity: "did:key:z6MkiDummy111111111111111111111111111111111111".into(),
+        recipient_identity: None,
+        ceremony_id: "_clock".into(),
+        as_of: "1970-01-01T00:00:00.000+00:00".into(),
+        scope: "admin".into(),
+        clock: clock_from_js(a)?,
+        event_count: 0,
+        head_row_hash: None,
+        state: None,
+        manifest_signature_b64: None,
+    };
+    let mb = Manifest {
+        clock: clock_from_js(b)?,
+        ..ma.clone()
+    };
+    Ok(tnpkg::clock_dominates(&ma.clock, &mb.clock))
+}
+
+/// Pointwise max of two vector clocks.
+#[wasm_bindgen(js_name = "manifestClockMerge")]
+pub fn manifest_clock_merge_js(a: JsValue, b: JsValue) -> Result<JsValue, JsError> {
+    let merged = tnpkg::clock_merge(&clock_from_js(a)?, &clock_from_js(b)?);
+    let manifest = Manifest {
+        kind: ManifestKind::AdminLogSnapshot,
+        version: tnpkg::MANIFEST_VERSION,
+        publisher_identity: "did:key:z6MkiDummy111111111111111111111111111111111111".into(),
+        recipient_identity: None,
+        ceremony_id: "_clock".into(),
+        as_of: "1970-01-01T00:00:00.000+00:00".into(),
+        scope: "admin".into(),
+        clock: merged,
+        event_count: 0,
+        head_row_hash: None,
+        state: None,
+        manifest_signature_b64: None,
+    };
+    let Value::Object(mut obj) = manifest.to_json() else {
+        unreachable!("manifest JSON is always an object");
+    };
+    json_to_js(
+        &obj.remove("clock")
+            .unwrap_or_else(|| Value::Object(Map::new())),
+    )
+}
+
+fn manifest_from_js(manifest_doc: JsValue) -> Result<Manifest, JsError> {
+    let value = js_to_json(manifest_doc)?;
+    Manifest::from_json(&value).map_err(|e| JsError::new(&format!("{e}")))
+}
+
+fn clock_from_js(value: JsValue) -> Result<tnpkg::VectorClock, JsError> {
+    let mut doc = Map::new();
+    doc.insert("kind".into(), Value::String("admin_log_snapshot".into()));
+    doc.insert(
+        "version".into(),
+        Value::Number(tnpkg::MANIFEST_VERSION.into()),
+    );
+    doc.insert(
+        "publisher_identity".into(),
+        Value::String("did:key:z6MkiDummy111111111111111111111111111111111111".into()),
+    );
+    doc.insert("ceremony_id".into(), Value::String("_clock".into()));
+    doc.insert(
+        "as_of".into(),
+        Value::String("1970-01-01T00:00:00.000+00:00".into()),
+    );
+    doc.insert("clock".into(), js_to_json(value)?);
+    Manifest::from_json(&Value::Object(doc))
+        .map(|m| m.clock)
+        .map_err(|e| JsError::new(&format!("{e}")))
+}
+
+fn body_to_js_entries(body: &BodyContents) -> Result<JsValue, JsError> {
+    let arr = js_sys::Array::new();
+    for (name, data) in body {
+        let entry = js_sys::Object::new();
+        js_sys::Reflect::set(&entry, &JsValue::from_str("name"), &JsValue::from_str(name))
+            .map_err(|e| JsError::new(&format!("set entry.name: {e:?}")))?;
+        js_sys::Reflect::set(
+            &entry,
+            &JsValue::from_str("data"),
+            &js_sys::Uint8Array::from(data.as_slice()),
+        )
+        .map_err(|e| JsError::new(&format!("set entry.data: {e:?}")))?;
+        arr.push(&entry);
+    }
+    Ok(arr.into())
+}
+
+fn body_from_js_entries(entries: JsValue) -> Result<BodyContents, JsError> {
+    let arr = js_sys::Array::from(&entries);
+    let mut body = BodyContents::new();
+    for entry in arr.iter() {
+        let name = js_sys::Reflect::get(&entry, &JsValue::from_str("name"))
+            .map_err(|e| JsError::new(&format!("entry.name: {e:?}")))?
+            .as_string()
+            .ok_or_else(|| JsError::new("body entry name must be a string"))?;
+        let data = js_sys::Reflect::get(&entry, &JsValue::from_str("data"))
+            .map_err(|e| JsError::new(&format!("entry.data: {e:?}")))?;
+        let bytes = js_sys::Uint8Array::new(&data).to_vec();
+        body.insert(name, bytes);
+    }
+    Ok(body)
 }
 
 // ---------------------------------------------------------------------------

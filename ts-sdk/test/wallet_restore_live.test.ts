@@ -66,7 +66,7 @@ function collectFullBody(
   const layout: Record<string, string> = {};
   let n = 0;
   const add = (absPath: string): void => {
-    const token = `m${n}_${ulidish().slice(0, 6)}`;
+    const token = `body/m${n}_${ulidish().slice(0, 6)}`;
     n += 1;
     body.set(token, new Uint8Array(readFileSync(absPath)));
     layout[token] = relative(dir, absPath).split("\\").join("/");

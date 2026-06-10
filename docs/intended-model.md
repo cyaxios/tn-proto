@@ -253,6 +253,10 @@ tn.use("api", project="payroll")
 Create/open stream `api` in Project `payroll`, without necessarily changing
 the current Project.
 
+Python and TS now expose this as the first public transition path:
+`tn.use("api", project="payroll")` and
+`Tn.use("api", { project: "payroll" })`.
+
 ## Profiles
 
 Profile controls behavior such as signing, chaining, and default sink.

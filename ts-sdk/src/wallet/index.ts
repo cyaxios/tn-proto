@@ -33,6 +33,14 @@ interface CeremonyYamlShape {
     project_name?: string;
     [k: string]: unknown;
   };
+  vault?: {
+    enabled?: boolean;
+    url?: string;
+    linked_project_id?: string;
+    autosync?: boolean;
+    sync_interval_seconds?: number;
+    [k: string]: unknown;
+  };
   [k: string]: unknown;
 }
 
@@ -48,15 +56,30 @@ function setLinkStateInYaml(
   const raw = readFileSync(yamlPath, "utf-8");
   const doc = parseYaml(raw) as CeremonyYamlShape;
   const ceremony = doc.ceremony ?? (doc.ceremony = {});
+  const vault = doc.vault ?? (doc.vault = {});
   ceremony.mode = fields.mode;
   if (fields.linkedVault !== undefined) ceremony.linked_vault = fields.linkedVault;
   if (fields.linkedProjectId !== undefined) ceremony.linked_project_id = fields.linkedProjectId;
+  if (fields.mode === "linked") {
+    vault.enabled = true;
+    if (fields.linkedVault !== undefined) vault.url = fields.linkedVault;
+    if (fields.linkedProjectId !== undefined && !vault.linked_project_id) {
+      vault.linked_project_id = fields.linkedProjectId;
+    }
+    vault.autosync = vault.autosync ?? true;
+    vault.sync_interval_seconds = vault.sync_interval_seconds ?? 600;
+  }
   // For mode=local, clear the linked fields so the on-disk shape mirrors
   // a freshly-initialized local ceremony (Python's set_link_state does
   // the same).
   if (fields.mode === "local") {
     ceremony.linked_vault = "";
     ceremony.linked_project_id = "";
+    vault.enabled = false;
+    vault.url = "";
+    vault.linked_project_id = "";
+    vault.autosync = false;
+    vault.sync_interval_seconds = vault.sync_interval_seconds ?? 600;
   }
   writeFileSync(yamlPath, stringifyYaml(doc), "utf-8");
 }
@@ -97,14 +120,38 @@ export function readSyncQueue(ceremonyId: string): Array<Record<string, unknown>
  * Read just the ceremony.mode and linked_vault from a yaml without
  * loading the full config. Lets `link` decide whether work is needed.
  */
-export function readLinkState(yamlPath: string): { mode: string; linkedVault: string; linkedProjectId: string; projectName: string; ceremonyId: string } {
+export function readLinkState(yamlPath: string): {
+  mode: string;
+  linkedVault: string;
+  linkedProjectId: string;
+  projectName: string;
+  ceremonyId: string;
+} {
   const raw = readFileSync(yamlPath, "utf-8");
   const doc = parseYaml(raw) as CeremonyYamlShape;
   const c = doc.ceremony ?? {};
+  const vaultPresent = doc.vault !== undefined;
+  const v = doc.vault ?? {};
+  const vaultEnabled = v.enabled !== false;
+  const linkedVault =
+    vaultPresent && vaultEnabled && typeof v.url === "string" && v.url.length > 0
+      ? v.url
+      : !vaultPresent && typeof c.linked_vault === "string"
+        ? c.linked_vault
+        : "";
+  const linkedProjectId =
+    vaultPresent &&
+    vaultEnabled &&
+    typeof v.linked_project_id === "string" &&
+    v.linked_project_id.length > 0
+      ? v.linked_project_id
+      : !vaultPresent && typeof c.linked_project_id === "string"
+        ? c.linked_project_id
+        : "";
   return {
     mode: typeof c.mode === "string" ? c.mode : "local",
-    linkedVault: typeof c.linked_vault === "string" ? c.linked_vault : "",
-    linkedProjectId: typeof c.linked_project_id === "string" ? c.linked_project_id : "",
+    linkedVault,
+    linkedProjectId,
     projectName: typeof c.project_name === "string" ? c.project_name : "",
     ceremonyId: typeof c.id === "string" ? c.id : "",
   };

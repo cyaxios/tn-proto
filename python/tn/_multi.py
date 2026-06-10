@@ -1,17 +1,19 @@
-"""Multi-ceremony module-level verbs: ``init``, ``use``, ``list_ceremonies``.
+"""Project/stream module-level verbs: ``init``, ``use``, ``list_ceremonies``.
 
-These are the public entry points for the multi-ceremony work. The
+These are the public entry points for the project/stream work. The
 single-ceremony ``tn.init(yaml_path)`` form is preserved unchanged in
 ``tn.lifecycle`` for backwards compatibility; this module adds the
-named-ceremony form on top.
+named Project and stream forms on top.
 
-Design rules (see ``docs/directory-layout.md``):
+Design rules (see ``docs/intended-model.md``):
 
-- ``init(name, ...)`` carries setup intent. Conflict-on-mismatch with
-  on-disk YAML.
-- ``use(name)`` carries usage intent. Get or create with safe defaults.
-  Friendly: never raises ``TNNotFound`` for valid names.
-- ``init()`` == ``init("default")``. ``use()`` == ``use("default")``.
+- ``init(name, ...)`` selects a Project. Conflict-on-mismatch with
+  on-disk YAML still applies.
+- ``use(name)`` selects a stream in the current or explicit Project.
+  Get or create with safe defaults. Friendly: never raises
+  ``TNNotFound`` for valid names.
+- ``init()`` creates/opens the cwd-named Project. ``use()`` opens the
+  ``default`` stream.
 - ``list_ceremonies()`` returns the in-process registry names.
 
 The ``TN`` class itself lives in ``tn._handle``; the registry in
@@ -39,9 +41,12 @@ from ._layout import (
     TNInvalidName,
     ceremony_dir,
     ceremony_yaml_path,
+    default_project_name,
     is_valid_ceremony_name,
     list_ceremonies_on_disk,
     migrate_legacy_layout,
+    project_layout,
+    stream_layout,
     tn_root,
 )
 from ._registry import (
@@ -66,6 +71,8 @@ __all__ = [
     "TNInvalidName",
     "init",
     "list_ceremonies",
+    "ensure_project_layout_on_disk",
+    "ensure_project_stream_on_disk",
     "use",
 ]
 
@@ -90,7 +97,12 @@ class TNCreateFailed(RuntimeError):
 
 
 @contextlib.contextmanager
-def _ceremony_create_lock(project_dir: Path | None, name: str):
+def _ceremony_create_lock(
+    project_dir: Path | None,
+    name: str,
+    *,
+    target_yaml: Path | None = None,
+):
     """Cross-process lock around ceremony creation.
 
     Mints a sentinel lock file at ``<project>/.tn/.init.<name>.lock``
@@ -121,7 +133,11 @@ def _ceremony_create_lock(project_dir: Path | None, name: str):
             f"could not create .tn/ for lock at {lock_dir}: {exc}"
         ) from exc
     lock_path = lock_dir / f".init.{name}.lock"
-    yaml_path = ceremony_yaml_path(name, project_dir=project_dir)
+    yaml_path = (
+        target_yaml
+        if target_yaml is not None
+        else ceremony_yaml_path(name, project_dir=project_dir)
+    )
     deadline = time.monotonic() + 30.0
     holding = False
     while True:
@@ -406,8 +422,11 @@ def _create_stream_yaml(
     project_dir: Path | None,
     profile: str,
 ) -> Path:
-    """Write a minimal per-stream yaml that references the default
-    ceremony via ``extends:``.
+    """Write a legacy minimal per-stream yaml via ``extends:``.
+
+    New project-root streams are created by ``ensure_project_stream_on_disk``
+    under ``.tn/<project>/streams/<stream>.yaml``. This helper remains for
+    legacy sibling stream layouts while compatibility code is still present.
 
     NOTE: Stream-yaml structure is also packed into ``full_keystore``
     (and vault-minted ``project_seed``) manifests by ``tn.export`` and
@@ -515,32 +534,159 @@ def _create_stream_yaml(
     return yaml_path
 
 
-def _merge_handlers_additive(
-    declared: list[dict[str, Any]],
-    inherited: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Strict-additive merge of handler lists.
+def ensure_project_layout_on_disk(
+    project: str | None = None,
+    *,
+    project_dir: Path | str | None = None,
+    cipher: str = "btn",
+    profile: str | None = None,
+    device_private_bytes: bytes | None = None,
+    link: bool | None = None,
+) -> Path:
+    """Create the intended ``.tn/<project>/`` root layout if absent.
 
-    The stream's declared handlers come first; inherited handlers
-    from the parent are appended unless their ``name`` (or, if
-    name is missing, their ``kind``) collides with one already
-    present. Strict-additive means no override: if the stream
-    declared a ``stdout`` handler and the parent also has one,
-    the stream's wins (it was declared first; the parent's is
-    skipped at merge time, not subtracted from the parent's view
-    of the world).
-
-    Returns a fresh list; neither input is mutated.
+    This is the target 0.5 project-root creator. It is intentionally
+    separate from public ``tn.init`` while the old ceremony layout is being
+    migrated and tested path by path.
     """
-    out: list[dict[str, Any]] = list(declared)
-    seen = {(h.get("name") or h.get("kind")) for h in out}
-    for h in inherited:
-        key = h.get("name") or h.get("kind")
-        if key in seen:
-            continue
-        out.append(dict(h))
-        seen.add(key)
-    return out
+    chosen_profile = profile or _profiles.DEFAULT_PROFILE
+    if not _profiles.is_known(chosen_profile):
+        raise TNCreateFailed(
+            f"unknown profile {chosen_profile!r}; catalog: "
+            f"{list(_profiles.all_profile_names())}"
+        )
+
+    layout = project_layout(project, project_dir=project_dir)
+    if layout.project_yaml.is_file():
+        return layout.project_yaml
+
+    with _ceremony_create_lock(
+        layout.workspace,
+        layout.project,
+        target_yaml=layout.project_yaml,
+    ):
+        if layout.project_yaml.is_file():
+            return layout.project_yaml
+
+        for d in (
+            layout.project_dir,
+            layout.keys_dir,
+            layout.streams_dir,
+            layout.logs_dir,
+            layout.admin_dir,
+            layout.vault_dir,
+        ):
+            d.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from . import config as _config
+
+            _config.create_fresh(
+                layout.project_yaml,
+                cipher=cipher,
+                device_private_bytes=device_private_bytes,
+                keystore_dir=layout.keys_dir,
+                log_path=layout.logs_dir / f"{DEFAULT_CEREMONY_NAME}.ndjson",
+                admin_log_path=layout.admin_dir / f"{DEFAULT_CEREMONY_NAME}.ndjson",
+                link=link,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise TNCreateFailed(
+                f"could not create fresh project at {layout.project_yaml}: {exc}"
+            ) from exc
+
+    try:
+        doc = _load_yaml_dict(layout.project_yaml)
+        ceremony = doc.setdefault("ceremony", {})
+        ceremony["project_name"] = layout.project
+        ceremony["profile"] = chosen_profile
+        p = _profiles.get(chosen_profile)
+        ceremony["sign"] = p.signs
+        ceremony["chain"] = p.chains
+        if p.default_sink == "stdout":
+            doc["handlers"] = [
+                h for h in (doc.get("handlers") or [])
+                if not (
+                    isinstance(h, dict)
+                    and h.get("kind") in ("file.rotating", "file")
+                )
+            ]
+        with layout.project_yaml.open("w", encoding="utf-8") as fh:
+            _yaml.safe_dump(doc, fh, sort_keys=False)
+    except OSError as exc:
+        raise TNCreateFailed(
+            f"could not stamp project profile into {layout.project_yaml}: {exc}"
+        ) from exc
+
+    default_overlay = layout.streams_dir / f"{DEFAULT_CEREMONY_NAME}.yaml"
+    if not default_overlay.exists():
+        default_overlay.write_text("extends: ../tn.yaml\n", encoding="utf-8")
+    return layout.project_yaml
+
+
+def ensure_project_stream_on_disk(
+    stream: str = DEFAULT_CEREMONY_NAME,
+    *,
+    project: str | None = None,
+    project_dir: Path | str | None = None,
+    profile: str | None = None,
+) -> Path:
+    """Create a stream overlay in the intended project-root layout."""
+    chosen_profile = profile or _profiles.DEFAULT_PROFILE
+    if not _profiles.is_known(chosen_profile):
+        raise TNCreateFailed(
+            f"unknown profile {chosen_profile!r}; catalog: "
+            f"{list(_profiles.all_profile_names())}"
+        )
+
+    ensure_project_layout_on_disk(
+        project,
+        project_dir=project_dir,
+        profile=_profiles.DEFAULT_PROFILE,
+    )
+    layout = stream_layout(stream, project=project, project_dir=project_dir)
+    if layout.stream_yaml.is_file():
+        return layout.stream_yaml
+    layout.project.streams_dir.mkdir(parents=True, exist_ok=True)
+    layout.project.logs_dir.mkdir(parents=True, exist_ok=True)
+    layout.project.admin_dir.mkdir(parents=True, exist_ok=True)
+
+    if stream == DEFAULT_CEREMONY_NAME:
+        layout.stream_yaml.write_text("extends: ../tn.yaml\n", encoding="utf-8")
+        return layout.stream_yaml
+
+    p = _profiles.get(chosen_profile)
+    log_path = f"../logs/{stream}.ndjson"
+    admin_path = f"../admin/{stream}.ndjson"
+    handlers: list[dict[str, Any]] = []
+    if p.default_sink == "file_rotating":
+        handlers.append(
+            {
+                "kind": "file.rotating",
+                "name": "main",
+                "path": log_path,
+                "max_bytes": 5 * 1024 * 1024,
+                "backup_count": 5,
+                "rotate_on_init": False,
+            }
+        )
+    handlers.append({"kind": "stdout", "name": "stdout"})
+    doc = {
+        "extends": layout.extends_relpath,
+        "ceremony": {
+            "id": _mint_stream_ceremony_id(stream),
+            "sign": p.signs,
+            "chain": p.chains,
+            "profile": chosen_profile,
+            "admin_log_location": admin_path,
+            "log_level": "debug",
+        },
+        "logs": {"path": log_path},
+        "handlers": handlers,
+    }
+    with layout.stream_yaml.open("w", encoding="utf-8") as fh:
+        _yaml.safe_dump(doc, fh, sort_keys=False)
+    return layout.stream_yaml
 
 
 def _mint_stream_ceremony_id(name: str) -> str:
@@ -664,7 +810,7 @@ def _format_not_found(name: str, project_dir: Path | None) -> str:
     """Compose the friendly message body for a registry miss. Used
     when a strict lookup needs to fail loud (rare; ``use`` itself
     auto-creates instead)."""
-    registered = _registry_list_names()
+    registered = _registry_list_names(project_dir=project_dir)
     on_disk = list_ceremonies_on_disk(project_dir)
     suggestions = difflib.get_close_matches(name, registered + on_disk, n=2, cutoff=0.6)
     bits = [
@@ -743,6 +889,28 @@ def _store_project_tag(project: str | None) -> None:
         return
     import tn as _tn_pkg
     _tn_pkg._current_project = project
+
+
+def _store_current_project(project: str, workspace: Path) -> None:
+    import tn as _tn_pkg
+
+    _tn_pkg._current_project = project
+    _tn_pkg._current_project_dir = str(workspace.resolve())
+
+
+def _current_project_for_workspace(workspace: Path) -> str | None:
+    try:
+        import tn as _tn_pkg
+
+        current = getattr(_tn_pkg, "_current_project", None)
+        current_dir = getattr(_tn_pkg, "_current_project_dir", None)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(current, str) or not current:
+        return None
+    if current_dir != str(workspace.resolve()):
+        return None
+    return current
 
 
 def _stamp_project_labels(
@@ -912,15 +1080,50 @@ def _init_via_discovery(
             _check_no_conflict(existing, profile=profile)
             return _init_via_yaml_path(str(existing), legacy_kwargs)
 
-    # Nothing on disk yet (or project_dir is set) — mint the default
-    # ceremony under the right project root.
-    return _init_named_ceremony(
-        name=DEFAULT_CEREMONY_NAME,
+    # Nothing on disk yet (or project_dir is set) — mint the Project root
+    # named after the workspace.
+    return _init_project_root(
+        project=default_project_name(project_path),
         project_path=project_path,
-        yaml_path=None,
         profile=profile,
         legacy_kwargs=legacy_kwargs,
     )
+
+
+def _init_project_root(
+    *,
+    project: str,
+    project_path: Path | None,
+    profile: str | None,
+    legacy_kwargs: dict[str, Any],
+) -> TN:
+    _maybe_migrate(project_path)
+    layout = project_layout(project, project_dir=project_path)
+    _check_no_conflict(layout.project_yaml, profile=profile)
+    yaml_p = ensure_project_layout_on_disk(
+        project,
+        project_dir=project_path,
+        cipher=legacy_kwargs.get("cipher", "btn"),
+        profile=profile,
+        device_private_bytes=legacy_kwargs.get("device_private_bytes"),
+        link=legacy_kwargs.get("link"),
+    )
+    _store_current_project(layout.project, layout.workspace)
+    try:
+        existing = _registry_get(layout.project, project_dir=layout.workspace)
+    except _TNNotFound:
+        existing = None
+    if existing is not None:
+        _bind_default_singleton(yaml_p, **legacy_kwargs)
+        return existing
+    handle = TN(
+        name=layout.project,
+        yaml_path=yaml_p,
+        directory=layout.project_dir,
+    )
+    _registry_register(layout.project, handle, project_dir=layout.workspace)
+    _bind_default_singleton(yaml_p, **legacy_kwargs)
+    return handle
 
 
 def _init_named_ceremony(
@@ -953,7 +1156,7 @@ def _init_named_ceremony(
     _maybe_migrate(project_path)
 
     try:
-        existing = _registry_get(name)
+        existing = _registry_get(name, project_dir=project_path)
     except _TNNotFound:
         existing = None
 
@@ -1008,7 +1211,7 @@ def _init_named_with_explicit_yaml(
         yaml_path=explicit_yaml,
         directory=explicit_yaml.parent,
     )
-    _registry_register(name, handle)
+    _registry_register(name, handle, project_dir=explicit_yaml.parent)
     if bind:
         # Last `tn.init(...)` call wins for module-level state.
         # Callers that want to keep an explicit handle to a non-
@@ -1072,7 +1275,7 @@ def _init_named_default_layout(
         )
 
     handle = _new_handle(name, project_dir=project_path)
-    _registry_register(name, handle)
+    _registry_register(name, handle, project_dir=project_path)
     if bind:
         _bind_default_singleton(yaml_p, **legacy_kwargs)
     return handle
@@ -1118,21 +1321,15 @@ def init(
     -------------
     ``tn.init()``
         Walk the discovery chain (``$TN_YAML`` → ``./tn.yaml`` →
-        ``./.tn/default/tn.yaml`` → ``$TN_HOME/tn.yaml``) and attach
+        legacy ``./.tn/default/tn.yaml`` → exactly one project-root
+        ``./.tn/<project>/tn.yaml`` → ``$TN_HOME/tn.yaml``) and attach
         to whatever's found. If nothing is found, mint a fresh
-        ``.tn/default/`` ceremony at the appropriate root.
+        cwd-named Project at ``.tn/<cwd-name>/tn.yaml``.
 
     ``tn.init("payments")``
-        Attach to the named ceremony at ``.tn/payments/``, minting
-        if absent. **Side effect (DX review #14):** if no project
-        default exists yet, this call ALSO mints
-        ``.tn/default/`` to anchor the project identity. Named
-        ceremonies are *streams* that share the project DID via
-        ``extends: ../default/tn.yaml`` — they cannot exist
-        without a default. See the "Project identity and named
-        streams" section of the README for the architecture, and
-        ``tn.init(yaml_path=...)`` if you want a truly
-        self-contained ceremony at a custom location.
+        Create/open the local Project named ``payments`` at
+        ``.tn/payments/tn.yaml``. Streams are opened with
+        ``tn.use("stream")`` or the ``stream=`` keyword.
 
     ``tn.init("./tn.yaml")`` / ``tn.init(load="./tn.yaml")``
         Attach to the explicit yaml file (or mint it there).
@@ -1144,7 +1341,7 @@ def init(
     Parameters
     ----------
     name :
-        Ceremony name (e.g. ``"payments"``) OR a yaml path (``Path``
+        Project name (e.g. ``"payments"``) OR a yaml path (``Path``
         object, or a string ending in ``.yaml`` / ``.yml``). The
         only positional argument; everything else is keyword-only.
         See also ``ceremony=`` and ``load=`` for explicit keyword
@@ -1335,6 +1532,18 @@ def init(
         )
 
     if name is None:
+        if project is not None and yaml_path is None:
+            project_handle = _stamp_after_dispatch(
+                _init_project_root(
+                    project=project,
+                    project_path=project_path,
+                    profile=profile,
+                    legacy_kwargs=legacy_kwargs,
+                )
+            )
+            if stream is not None:
+                return use(stream, profile=profile, project_dir=project_path, project=project)
+            return project_handle
         # No-args / discovery chain — find an existing yaml or mint default.
         # An explicit yaml_path= (or load=) overrides discovery.
         return _apply_stream(
@@ -1349,36 +1558,19 @@ def init(
             stream,
         )
 
-    # Named ceremony — ``tn.init("payments")`` or ``tn.init(name="x")``.
-    #
-    # DX review #14: the named-ceremony path ALSO mints ``.tn/default/``
-    # if it doesn't exist yet. This is by design — named ceremonies
-    # are *streams* that share the project's identity. The stream's
-    # yaml carries ``extends: ../default/tn.yaml`` and the loader
-    # pulls the device DID + signing key + groups + recipients from
-    # default at config-load time. Removing the auto-create would
-    # leave the stream unable to encrypt anything.
-    #
-    # If you want a truly self-contained ceremony with its own DID
-    # (no shared identity, no .tn/default/), use the explicit
-    # yaml_path= form instead:
-    #
-    #     tn.init(yaml_path="./standalone.yaml", cipher="btn")
-    #
-    # See the "Project identity and named streams" section of the
-    # README for the architecture.
-    return _apply_stream(
-        _stamp_after_dispatch(
-            _init_named_ceremony(
-                name=name,
-                project_path=project_path,
-                yaml_path=yaml_path,
-                profile=profile,
-                legacy_kwargs=legacy_kwargs,
-            ),
-        ),
-        stream,
+    # Named Project — ``tn.init("payments")`` or ``tn.init(name="x")``.
+    # Streams are opened with ``tn.use(stream)`` or ``stream=...``.
+    project_handle = _stamp_after_dispatch(
+        _init_project_root(
+            project=name,
+            project_path=project_path,
+            profile=profile,
+            legacy_kwargs=legacy_kwargs,
+        )
     )
+    if stream is not None:
+        return use(stream, profile=profile, project_dir=project_path, project=name)
+    return project_handle
 
 
 
@@ -1387,6 +1579,7 @@ def use(
     *,
     profile: str | None = None,
     project_dir: str | Path | None = None,
+    project: str | None = None,
 ) -> TN:
     """Get or create a TN handle by registry name.
 
@@ -1416,14 +1609,56 @@ def use(
             "[a-zA-Z0-9_][a-zA-Z0-9_-]* and is not 'tn' (reserved)."
         )
 
+    if project is not None:
+        workspace = Path(project_dir).resolve() if project_dir is not None else Path.cwd().resolve()
+        layout = stream_layout(name, project=project, project_dir=workspace)
+        try:
+            return _registry_get(name, project_dir=layout.project.project_dir)
+        except _TNNotFound:
+            pass
+        _check_no_conflict(layout.stream_yaml, profile=profile)
+        ensure_project_stream_on_disk(
+            name,
+            project=project,
+            project_dir=workspace,
+            profile=profile,
+        )
+        handle = TN(
+            name=name,
+            yaml_path=layout.stream_yaml,
+            directory=layout.project.project_dir,
+        )
+        _registry_register(name, handle, project_dir=layout.project.project_dir)
+        return handle
+
+    workspace = Path(project_dir).resolve() if project_dir is not None else Path.cwd().resolve()
+    current_project = _current_project_for_workspace(workspace)
+    if current_project is not None and name != current_project:
+        return use(name, profile=profile, project_dir=workspace, project=current_project)
+
     # Registry hit: nothing else to do. A code-supplied profile here
     # would have no effect (the handle is already bound), so we don't
     # surface a warning — common pattern is "use everywhere, pin the
     # profile once at the first call site or via the yaml."
     try:
-        return _registry_get(name)
+        project_path = Path(project_dir).resolve() if project_dir is not None else None
+        return _registry_get(name, project_dir=project_path)
     except _TNNotFound:
         pass
+
+    legacy_yaml = ceremony_yaml_path(name, project_dir=workspace)
+    legacy_default_yaml = ceremony_yaml_path(DEFAULT_CEREMONY_NAME, project_dir=workspace)
+    if (
+        name != DEFAULT_CEREMONY_NAME
+        and not legacy_yaml.is_file()
+        and not legacy_default_yaml.is_file()
+    ):
+        return use(
+            name,
+            profile=profile,
+            project_dir=workspace,
+            project=default_project_name(workspace),
+        )
 
     # Registry miss: defer to the same disk-attach-or-create code path
     # as ``init`` but with ``bind=False``. ``tn.use`` is the lazy
@@ -1494,17 +1729,17 @@ def _ensure_default_handle_for_legacy_init(*, yaml_path_arg: str) -> TN:
     """
     yp = Path(yaml_path_arg).resolve()
     try:
-        existing = _registry_get(DEFAULT_CEREMONY_NAME)
+        existing = _registry_get(DEFAULT_CEREMONY_NAME, project_dir=yp.parent)
     except _TNNotFound:
         existing = None
     if existing is not None and existing.yaml_path == yp:
         return existing
     if existing is not None:
-        _registry_unregister(DEFAULT_CEREMONY_NAME)
+        _registry_unregister(DEFAULT_CEREMONY_NAME, project_dir=yp.parent)
     handle = TN(
         name=DEFAULT_CEREMONY_NAME,
         yaml_path=yp,
         directory=yp.parent,
     )
-    _registry_register(DEFAULT_CEREMONY_NAME, handle)
+    _registry_register(DEFAULT_CEREMONY_NAME, handle, project_dir=yp.parent)
     return handle

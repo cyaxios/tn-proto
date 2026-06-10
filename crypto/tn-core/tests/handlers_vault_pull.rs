@@ -10,9 +10,7 @@ mod common;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use tn_core::handlers::vault_pull::{
-    VaultInboxClient, VaultInboxItem, VaultPullHandler,
-};
+use tn_core::handlers::vault_pull::{VaultInboxClient, VaultInboxItem, VaultPullHandler};
 use tn_core::runtime_export::ExportOptions;
 use tn_core::tnpkg::ManifestKind;
 
@@ -171,5 +169,8 @@ fn empty_inbox_returns_zero_no_cursor() {
         cursor_path.clone(),
     );
     assert_eq!(h.tick_once().unwrap(), 0);
-    assert!(!cursor_path.exists(), "cursor should not be created on empty");
+    assert!(
+        !cursor_path.exists(),
+        "cursor should not be created on empty"
+    );
 }

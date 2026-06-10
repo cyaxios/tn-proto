@@ -1,37 +1,104 @@
-//! Emit path: the public `emit` API plus `emit_inner` and its stages
-//! (`classify_fields`, `encrypt_groups`, `build_and_write`) and handler
-//! fan-out. Split out of `runtime.rs`; this is one of `Runtime`'s impl
-//! blocks (see `super` for the struct + shared helpers).
+//! The write path: build, seal, sign, chain, and append an attested
+//! event, then fan it out to handlers.
+//!
+//! Holds the public write family ([`Runtime::log`] / [`Runtime::info`] /
+//! [`Runtime::warning`] / [`Runtime::error`] / [`Runtime::debug`] and the
+//! lower-level `emit*` variants), the single canonical
+//! `emit_inner` builder, handler registration / fan-out, the `tn.agents`
+//! policy splice, and the protocol-event-location resolver. The read-back
+//! side lives in the `read` submodule.
 
-// All names (struct fields, free helpers, and re-imported crate items like
-// `build_envelope` / `compute_row_hash` / `Map`) come through the parent
-// module's glob — this file is purely another `impl Runtime` block.
-use super::*;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use serde_json::{Map, Value};
+use uuid::Uuid;
+
+use crate::{
+    admin_catalog,
+    canonical::canonical_bytes,
+    chain::{chain_tip_from_log_tail_reverse, compute_row_hash, GroupInput, RowHashInput},
+    classifier::classify,
+    envelope::{build_envelope, EnvelopeInput, GroupPayload},
+    indexing::index_token_with_template,
+    signing::signature_b64,
+    Error, Result,
+};
+
+use super::util::{current_timestamp, validate_event_type};
+use super::{level_value, Runtime, LOG_LEVEL_THRESHOLD};
+
+/// Borrowed inputs [`Runtime::build_and_write`] needs to hash, sign,
+/// serialize, and append one row. Bundles the per-emit locals so the three
+/// write branches in `emit_inner` (locked / chained-per-event / unchained)
+/// each pass a single reference instead of a long argument list.
+struct EmitWriteCtx<'a> {
+    ts: &'a str,
+    eid: &'a str,
+    event_type: &'a str,
+    level_norm: &'a str,
+    need_row_hash: bool,
+    sign: Option<bool>,
+    pel_routed: bool,
+    public_out: &'a Map<String, Value>,
+    group_inputs: &'a BTreeMap<String, GroupInput>,
+    group_payloads: &'a BTreeMap<String, String>,
+}
 
 impl Runtime {
-    /// Emit an event with current timestamp and fresh UUID.
+    /// Write one attested event at `level` with the current timestamp
+    /// and a fresh time-sortable event_id.
     ///
-    /// Signing follows the ceremony's `sign` config flag; use
-    /// [`Runtime::emit_override_sign`] to override on a per-call basis.
+    /// This is the general write primitive behind the level shortcuts
+    /// ([`Runtime::info`], [`Runtime::warning`], …). `level` is one of
+    /// `"debug"` / `"info"` / `"warning"` / `"error"` (case-insensitive)
+    /// or `""` for a severity-less fact; an event whose level is below
+    /// the active [`Runtime::set_level`] threshold is dropped (and `Ok`
+    /// is returned). `fields` are classified per the yaml: each routes to
+    /// its group's encrypted block or to the public envelope; a
+    /// per-runtime `run_id` is auto-injected so [`Runtime::read`] can
+    /// default-filter to the current run.
+    ///
+    /// The entry is sealed, hash-chained, optionally signed (per the
+    /// ceremony's `sign` flag — override with
+    /// [`Runtime::emit_override_sign`]), appended to the log, and fanned
+    /// out to every attached handler.
     ///
     /// Returns `Result<()>` for cross-language parity (Python `tn.log`
     /// returns `None`, TS `tn.log` returns `void`). Internal callers that
     /// need the row_hash / event_id / sequence drop down to `emit_inner`.
-    pub fn emit(
-        &self,
-        level: &str,
-        event_type: &str,
-        fields: Map<String, Value>,
-    ) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`](crate::Error::InvalidConfig) if
+    /// `event_type` is empty or has illegal characters, or a field has no
+    /// group route and no `default` group to absorb it.
+    /// [`Error::Malformed`](crate::Error::Malformed) if a known `tn.*`
+    /// admin event fails its catalog schema. [`Error::Io`](crate::Error::Io)
+    /// if the log can't be written, plus cipher / JSON errors from
+    /// sealing the payload. Handler fan-out failures are logged and
+    /// swallowed, never returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal log-writer or group-state lock is poisoned.
+    pub fn emit(&self, level: &str, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit_inner(level, event_type, fields, None, None, None)
             .map(|_| ())
     }
 
-    /// Emit with explicit timestamp and event_id; used by deterministic tests.
+    /// Write an attested event with an explicit `timestamp` and
+    /// `event_id`; used by deterministic tests and replay.
     ///
     /// Signing follows the ceremony's `sign` config flag. Use
     /// [`Runtime::emit_override_sign`] or [`Runtime::emit_with_override_sign`]
     /// when the caller wants to flip signing for one entry.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     ///
     /// # Panics
     ///
@@ -48,10 +115,15 @@ impl Runtime {
             .map(|_| ())
     }
 
-    /// Emit with an explicit `sign` override and current timestamp / fresh UUID.
+    /// Write an attested event with an explicit `sign` override, current
+    /// timestamp, and a fresh event_id.
     ///
     /// `Some(true)` forces a signature regardless of yaml config;
     /// `Some(false)` skips the signature; `None` uses the ceremony default.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn emit_override_sign(
         &self,
         level: &str,
@@ -63,10 +135,15 @@ impl Runtime {
             .map(|_| ())
     }
 
-    /// Full-control emit: explicit timestamp, event_id, and sign override.
+    /// Write an attested event with full control: explicit timestamp,
+    /// event_id, and sign override.
     ///
     /// `sign=None` uses the ceremony default; `Some(true)` forces signing;
     /// `Some(false)` skips signing.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn emit_with_override_sign(
         &self,
         level: &str,
@@ -91,6 +168,10 @@ impl Runtime {
     /// out to its own native handlers (file, stdout). Mirrors what TS does
     /// natively in-process — Python pays the JSON-parse cost once on the
     /// returned line rather than re-encrypting + re-signing in pure Python.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn emit_with_override_sign_returning_line(
         &self,
         level: &str,
@@ -103,46 +184,196 @@ impl Runtime {
         self.emit_inner(level, event_type, fields, timestamp, event_id, sign)
     }
 
-    /// Severity-less attested event. Matches Python `tn.log(event_type, **fields)`.
+    /// Write a severity-less attested event. Backs `tn.log()`.
     ///
-    /// Use when the event isn't fundamentally debug/info/warning/error — it's a
-    /// fact to attest. The emitted envelope carries `level: ""`.
+    /// Use when the event isn't fundamentally debug/info/warning/error —
+    /// it's a fact to attest. The envelope carries `level: ""`, which
+    /// always passes the [`Runtime::set_level`] threshold (a fact's
+    /// semantics shouldn't depend on the filter).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn log(&self, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit("", event_type, fields)
     }
 
-    /// DEBUG-level attested event. Matches Python `tn.debug(event_type, **fields)`.
+    /// Write a DEBUG-level attested event. Backs `tn.debug()`.
+    ///
+    /// Dropped when the active threshold is above DEBUG — see
+    /// [`Runtime::set_level`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn debug(&self, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit("debug", event_type, fields)
     }
 
-    /// INFO-level attested event. Matches Python `tn.info(event_type, **fields)`.
+    /// Write an INFO-level attested event. Backs `tn.info()`.
+    ///
+    /// Dropped when the active threshold is above INFO — see
+    /// [`Runtime::set_level`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tn_core::Runtime;
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::ephemeral()?;
+    /// let mut fields = serde_json::Map::new();
+    /// fields.insert("order_id".into(), serde_json::json!("ord_123"));
+    /// rt.info("order.placed", fields)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn info(&self, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit("info", event_type, fields)
     }
 
-    /// WARNING-level attested event. Matches Python `tn.warning(event_type, **fields)`.
+    /// Write a WARNING-level attested event. Backs `tn.warning()`.
+    ///
+    /// Dropped when the active threshold is above WARNING — see
+    /// [`Runtime::set_level`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn warning(&self, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit("warning", event_type, fields)
     }
 
-    /// ERROR-level attested event. Matches Python `tn.error(event_type, **fields)`.
+    /// Write an ERROR-level attested event. Backs `tn.error()`.
+    ///
+    /// The highest standard level — always passes any standard threshold.
+    /// See [`Runtime::set_level`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn error(&self, event_type: &str, fields: Map<String, Value>) -> Result<()> {
         self.emit("error", event_type, fields)
     }
 
-    /// Index-token + encrypt each per-group field set: build the equality
-    /// index tokens, canonicalize, encrypt under the group cipher, and render
-    /// the per-group JSON payloads. `group_inputs_for_hash` (which feeds
-    /// `compute_row_hash`) is only populated when `need_row_hash`. Extracted
-    /// from `emit_inner` (stages 2-3).
-    //
-    // A split stage of the cohesive emit path (see `emit_inner`). Both the
-    // length and the 16/15 cognitive score come from the per-substage perf
-    // timers woven through the group loop (sort / index_token /
-    // canonical_bytes / cipher / payload_build), not from branching logic —
-    // the encrypt itself is one straight-line pass.
-    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+    /// Route each field to the public envelope or to its encrypted
+    /// group(s). Step 1 of [`Runtime::emit`]'s pipeline.
+    ///
+    /// Multi-group routing: a field declared under N groups in yaml
+    /// (`groups[<g>].fields: [...]`) is encrypted into all N groups'
+    /// payloads. The `field_to_groups` table is precomputed at
+    /// `Runtime::init` (0.4.2a7 — was rebuilt every emit) and sorted
+    /// alphabetically per field at load time so envelope encoding stays
+    /// canonical across SDK implementations.
+    ///
+    /// A field lands in the public map when ANY of these hold: it is
+    /// listed in top-level `public_fields`, or it routes to a group whose
+    /// policy is `"public"`. Everything else goes through the per-group
+    /// encrypt path. Multi-group fan-out clones the field into each target.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`](crate::Error::InvalidConfig) when a field
+    /// has no declared route, the classifier guess is not a known group,
+    /// and there is no `default` group to absorb it.
+    fn classify_fields(
+        &self,
+        fields: Map<String, Value>,
+    ) -> Result<(Map<String, Value>, BTreeMap<String, Map<String, Value>>)> {
+        let field_to_groups = &self.field_to_groups;
+        let public_set = &self.public_set;
+        let public_groups = &self.public_groups;
+        let t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let mut public_out: Map<String, Value> = Map::new();
+        let mut per_group: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
+        for (k, v) in fields {
+            if public_set.contains(&k) {
+                public_out.insert(k, v);
+                continue;
+            }
+            if let Some(routed) = field_to_groups.get(&k) {
+                if routed.len() == 1 {
+                    // Single-group: most common case. Avoid the
+                    // v.clone() that the multi-group path needs
+                    // on the last iteration.
+                    let gname = &routed[0];
+                    if public_groups.contains(gname) {
+                        public_out.insert(k, v);
+                    } else {
+                        per_group.entry(gname.clone()).or_default().insert(k, v);
+                    }
+                } else {
+                    for gname in routed {
+                        if public_groups.contains(gname) {
+                            public_out.insert(k.clone(), v.clone());
+                        } else {
+                            per_group
+                                .entry(gname.clone())
+                                .or_default()
+                                .insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            } else {
+                // Field has no declared route. Try the legacy
+                // classifier (returns a single name today,
+                // "default" by stub). If that lands in a known
+                // group, use it; otherwise fall back to the
+                // "default" group when present. Last resort:
+                // raise.
+                let guess = classify(&self.cfg, &k);
+                let target = if self.cfg.groups.contains_key(guess) {
+                    guess.to_string()
+                } else if self.cfg.groups.contains_key("default") {
+                    "default".to_string()
+                } else {
+                    return Err(Error::InvalidConfig(format!(
+                        "field {k:?} has no group route and is not in \
+                         public_fields. Add it to `groups[<g>].fields` in \
+                         tn.yaml, list it under public_fields, or define a \
+                         `default` group to absorb unknowns."
+                    )));
+                };
+                if public_groups.contains(&target) {
+                    public_out.insert(k, v);
+                } else {
+                    per_group.entry(target).or_default().insert(k, v);
+                }
+            }
+        }
+        if let Some(t0) = t0 {
+            crate::perf::record_ns("emit:field_classify", t0.elapsed().as_nanos() as u64);
+        }
+        Ok((public_out, per_group))
+    }
+
+    /// Index, canonicalize, and encrypt each per-group field set into the
+    /// `(group_inputs_for_hash, group_payloads)` the envelope build
+    /// consumes. Steps 2–3 of [`Runtime::emit`]'s pipeline.
+    ///
+    /// `group_inputs_for_hash` is only built when `need_row_hash` is true
+    /// (chain or sign consumes it); in pure-log mode (chain=F sign=F) the
+    /// clones are skipped. `group_payloads` carries the pre-rendered JSON
+    /// snippet per group so `build_envelope` splices it verbatim. A field
+    /// routed to a group this runtime can't publish into is skipped, matching
+    /// Python's fall-through.
+    ///
+    /// # Errors
+    ///
+    /// Cipher / index-token / canonical-bytes / JSON errors from sealing a
+    /// group's payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal group-state `RwLock` is poisoned.
     fn encrypt_groups(
         &self,
         per_group: BTreeMap<String, Map<String, Value>>,
@@ -168,231 +399,293 @@ impl Runtime {
                 continue;
             };
             let gstate = gstate_arc.read().expect("group state RwLock poisoned");
-
-            // Sub-stage timing inside group_encrypt. emit:group_encrypt
-            // (outer) is still the total; these four sum to it.
-            let _sort_t0 = if crate::perf::enabled() {
-                Some(std::time::Instant::now())
-            } else { None };
-            let sorted: BTreeMap<String, Value> = plain.into_iter().collect();
-            if let Some(t0) = _sort_t0 {
-                crate::perf::record_ns(
-                    "emit:group_encrypt.sort",
-                    t0.elapsed().as_nanos() as u64,
-                );
-            }
-
-            let _idx_t0 = if crate::perf::enabled() {
-                Some(std::time::Instant::now())
-            } else { None };
-            let mut field_hashes: BTreeMap<String, String> = BTreeMap::new();
-            for (k, v) in &sorted {
-                field_hashes.insert(
-                    k.clone(),
-                    index_token_with_template(&gstate.hmac_template, k, v)?,
-                );
-            }
-            if let Some(t0) = _idx_t0 {
-                crate::perf::record_ns(
-                    "emit:group_encrypt.index_token",
-                    t0.elapsed().as_nanos() as u64,
-                );
-            }
-
-            let _canon_t0 = if crate::perf::enabled() {
-                Some(std::time::Instant::now())
-            } else { None };
-            let plaintext_bytes =
-                canonical_bytes(&Value::Object(sorted.into_iter().collect()))?;
-            if let Some(t0) = _canon_t0 {
-                crate::perf::record_ns(
-                    "emit:group_encrypt.canonical_bytes",
-                    t0.elapsed().as_nanos() as u64,
-                );
-            }
-
-            let _enc_t0 = if crate::perf::enabled() {
-                Some(std::time::Instant::now())
-            } else { None };
-            let ct = match gstate.cipher.encrypt(&plaintext_bytes) {
-                Ok(ct) => ct,
-                Err(Error::NotAPublisher { .. }) => continue,
-                Err(e) => return Err(e),
+            // A group this runtime can't publish into (NotAPublisher)
+            // yields None and is skipped, matching Python's fall-through.
+            let Some((maybe_input, payload_json)) =
+                Self::seal_one_group(&gstate, plain, need_row_hash)?
+            else {
+                continue;
             };
-            if let Some(t0) = _enc_t0 {
-                crate::perf::record_ns(
-                    "emit:group_encrypt.cipher",
-                    t0.elapsed().as_nanos() as u64,
-                );
+            if let Some(input) = maybe_input {
+                group_inputs_for_hash.insert(gname.clone(), input);
             }
-
-            let _build_t0 = if crate::perf::enabled() {
-                Some(std::time::Instant::now())
-            } else { None };
-            // group_inputs_for_hash only feeds compute_row_hash; skip
-            // the clones when no row_hash will be computed (chain=F
-            // sign=F pure-log mode).
-            if need_row_hash {
-                group_inputs_for_hash.insert(
-                    gname.clone(),
-                    GroupInput {
-                        ciphertext: ct.clone(),
-                        field_hashes: field_hashes.clone(),
-                    },
-                );
-            }
-            // Render GroupPayload to a JSON snippet directly via
-            // serde_json::to_string. Skips the prior `to_value`
-            // intermediate that envelope_build then had to re-walk.
-            let payload = GroupPayload {
-                ciphertext: ct,
-                field_hashes,
-            };
-            let payload_json = serde_json::to_string(&payload)?;
             group_payloads.insert(gname, payload_json);
-            if let Some(t0) = _build_t0 {
-                crate::perf::record_ns(
-                    "emit:group_encrypt.payload_build",
-                    t0.elapsed().as_nanos() as u64,
-                );
-            }
         }
 
         if let Some(t0) = _group_encrypt_t0 {
             crate::perf::record_ns("emit:group_encrypt", t0.elapsed().as_nanos() as u64);
         }
+
         Ok((group_inputs_for_hash, group_payloads))
     }
 
-    /// Classify each field into the public envelope vs per-group encrypt
-    /// buckets, following the precomputed routing tables (multi-group fields
-    /// fan out into every target). Extracted from `emit_inner` (stage 1).
-    fn classify_fields(
-        &self,
-        fields: Map<String, Value>,
-    ) -> Result<(Map<String, Value>, BTreeMap<String, Map<String, Value>>)> {
-        let field_to_groups = &self.field_to_groups;
-        let public_set = &self.public_set;
-        let public_groups = &self.public_groups;
-        let (public_out, per_group) = {
-            let t0 = if crate::perf::enabled() {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            let mut public_out: Map<String, Value> = Map::new();
-            let mut per_group: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
-            // Inline routing logic. A field is destined for `public_out`
-            // when ANY of these are true: (a) explicitly listed in
-            // top-level `public_fields`, or (b) routed to a group whose
-            // policy is `"public"`. Everything else goes through the
-            // per-group encrypt path. Multi-group fan-out clones the
-            // field into each target.
-            for (k, v) in fields {
-                if public_set.contains(&k) {
-                    public_out.insert(k, v);
-                    continue;
-                }
-                if let Some(routed) = field_to_groups.get(&k) {
-                    if routed.len() == 1 {
-                        // Single-group: most common case. Avoid the
-                        // v.clone() that the multi-group path needs
-                        // on the last iteration.
-                        let gname = &routed[0];
-                        if public_groups.contains(gname) {
-                            public_out.insert(k, v);
-                        } else {
-                            per_group
-                                .entry(gname.clone())
-                                .or_default()
-                                .insert(k, v);
-                        }
-                    } else {
-                        for gname in routed {
-                            if public_groups.contains(gname) {
-                                public_out.insert(k.clone(), v.clone());
-                            } else {
-                                per_group
-                                    .entry(gname.clone())
-                                    .or_default()
-                                    .insert(k.clone(), v.clone());
-                            }
-                        }
-                    }
-                } else {
-                    // Field has no declared route. Try the legacy
-                    // classifier (returns a single name today,
-                    // "default" by stub). If that lands in a known
-                    // group, use it; otherwise fall back to the
-                    // "default" group when present. Last resort:
-                    // raise.
-                    let guess = classify(&self.cfg, &k);
-                    let target = if self.cfg.groups.contains_key(guess) {
-                        guess.to_string()
-                    } else if self.cfg.groups.contains_key("default") {
-                        "default".to_string()
-                    } else {
-                        return Err(Error::InvalidConfig(format!(
-                            "field {k:?} has no group route and is not in \
-                             public_fields. Add it to `groups[<g>].fields` in \
-                             tn.yaml, list it under public_fields, or define a \
-                             `default` group to absorb unknowns."
-                        )));
-                    };
-                    if public_groups.contains(&target) {
-                        public_out.insert(k, v);
-                    } else {
-                        per_group.entry(target).or_default().insert(k, v);
-                    }
-                }
-            }
-            if let Some(t0) = t0 {
-                crate::perf::record_ns("emit:field_classify", t0.elapsed().as_nanos() as u64);
-            }
-            (public_out, per_group)
+    /// Index, canonicalize, encrypt, and render one group's field set.
+    /// The per-group body of [`Runtime::encrypt_groups`].
+    ///
+    /// Returns `Ok(None)` when the group's cipher reports
+    /// [`NotAPublisher`](crate::Error::NotAPublisher) (this runtime can't
+    /// publish into it). Otherwise returns the rendered payload JSON plus,
+    /// when `need_row_hash` is set, the `GroupInput` the row-hash compute
+    /// consumes (skipped in pure-log mode to avoid the clones).
+    ///
+    /// # Errors
+    ///
+    /// Index-token, canonical-bytes, cipher, or JSON-render errors.
+    fn seal_one_group(
+        gstate: &super::GroupState,
+        plain: Map<String, Value>,
+        need_row_hash: bool,
+    ) -> Result<Option<(Option<GroupInput>, String)>> {
+        // Sub-stage timing inside group_encrypt. emit:group_encrypt
+        // (outer) is still the total; these four sum to it.
+        let _sort_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
         };
-        Ok((public_out, per_group))
+        let sorted: BTreeMap<String, Value> = plain.into_iter().collect();
+        if let Some(t0) = _sort_t0 {
+            crate::perf::record_ns("emit:group_encrypt.sort", t0.elapsed().as_nanos() as u64);
+        }
+
+        let _idx_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let mut field_hashes: BTreeMap<String, String> = BTreeMap::new();
+        for (k, v) in &sorted {
+            field_hashes.insert(
+                k.clone(),
+                index_token_with_template(&gstate.hmac_template, k, v)?,
+            );
+        }
+        if let Some(t0) = _idx_t0 {
+            crate::perf::record_ns(
+                "emit:group_encrypt.index_token",
+                t0.elapsed().as_nanos() as u64,
+            );
+        }
+
+        let _canon_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let plaintext_bytes = canonical_bytes(&Value::Object(sorted.into_iter().collect()))?;
+        if let Some(t0) = _canon_t0 {
+            crate::perf::record_ns(
+                "emit:group_encrypt.canonical_bytes",
+                t0.elapsed().as_nanos() as u64,
+            );
+        }
+
+        let _enc_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let ct = match gstate.cipher.encrypt(&plaintext_bytes) {
+            Ok(ct) => ct,
+            Err(Error::NotAPublisher { .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if let Some(t0) = _enc_t0 {
+            crate::perf::record_ns("emit:group_encrypt.cipher", t0.elapsed().as_nanos() as u64);
+        }
+
+        let _build_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        // group_inputs_for_hash only feeds compute_row_hash; skip
+        // the clones when no row_hash will be computed (chain=F
+        // sign=F pure-log mode).
+        let maybe_input = if need_row_hash {
+            Some(GroupInput {
+                ciphertext: ct.clone(),
+                field_hashes: field_hashes.clone(),
+            })
+        } else {
+            None
+        };
+        // Render GroupPayload to a JSON snippet directly via
+        // serde_json::to_string. Skips the prior `to_value`
+        // intermediate that envelope_build then had to re-walk.
+        let payload = GroupPayload {
+            ciphertext: ct,
+            field_hashes,
+        };
+        let payload_json = serde_json::to_string(&payload)?;
+        if let Some(t0) = _build_t0 {
+            crate::perf::record_ns(
+                "emit:group_encrypt.payload_build",
+                t0.elapsed().as_nanos() as u64,
+            );
+        }
+        Ok(Some((maybe_input, payload_json)))
     }
 
-    /// Build + write one envelope row: stages 5-8 (row_hash, sign, envelope
-    /// serialize, append+flush) for the resolved `(seq, prev_hash)`. Returns
-    /// `(row_hash, line)`. Extracted from the `build_and_write!` macro in
-    /// `emit_inner`; the macro existed only to park errors out of the
-    /// advisory-lock closure — as a `Result`-returning method, the chained/
-    /// unchained call sites use `?` directly and the lock site parks the Err.
-    #[allow(clippy::too_many_arguments)]
+    /// Refresh the in-memory chain tip for `event_type` from on-disk truth
+    /// while the cross-process advisory lock is held. The tail-scan body of
+    /// [`Runtime::emit`]'s chained write path.
+    ///
+    /// If another process appended rows since our last emit, this is where
+    /// we discover the latest `(seq, prev_hash)` for our event_type and
+    /// overwrite the local `ChainState` entry. A writer-pool failure is
+    /// parked in `deferred_err` and surfaced as an io error so the caller
+    /// re-raises the original error after releasing the lock; a read-tail
+    /// failure maps straight to an io error.
+    ///
+    /// Reverse-scans only the tail window (0.4.2a7 perf fix): we care about
+    /// one event_type's tip, not the full tips map, so stopping at the
+    /// first matching row keeps the hot path O(scan-window) rather than the
+    /// prior O(filesize) forward scan. See
+    /// `chain.rs::chain_tip_from_log_tail_reverse` and the S11 stress
+    /// regression that surfaced the issue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the log-writer mutex is poisoned.
+    fn refresh_chain_tip_under_lock(
+        &self,
+        pel_routed: bool,
+        event_type: &str,
+        eid: &str,
+        deferred_err: &mut Option<Error>,
+    ) -> std::io::Result<()> {
+        let _tip_t0 = if crate::perf::enabled() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        // Tail-byte windowing (0.4.2a7 perf fix). The chain
+        // tip is always near the end of the log — the row we
+        // just emitted last time is right before whatever
+        // someone else may have appended since. Reading the
+        // whole file every emit (which the prior version
+        // did) cost ~10 ms on a 1 MB log; reading 64 KB of
+        // tail through a PINNED read handle costs ~50 µs.
+        //
+        // The pinned read handle (`log_writer.read_tail`) is
+        // what makes this fast on Windows: opening a fresh
+        // read handle while our own writer holds an append
+        // handle to the same file costs ~9 ms on NTFS
+        // (share-mode reconciliation / AV scan). The pinned
+        // handle skips that cost — `seek + read` on an
+        // already-open file is ~50 µs.
+        //
+        // For chain=T emits targeting a PEL admin path (rare:
+        // only fires when admin events are chained AND the
+        // PEL is not "main_log"), we fall back to
+        // `storage.read_bytes_tail` which opens a fresh
+        // handle. That path pays the ~9 ms once per
+        // admin emit but admin emits are rare so the
+        // amortized cost is negligible.
+        //
+        // Cold path (no match in window): the in-memory
+        // chain state is already seeded from a whole-file
+        // scan at `Runtime::init`, so missing the tip in the
+        // tail just leaves the existing in-memory tip in
+        // place. Documented as a known trade-off in
+        // docs/superpowers/specs/2026-05-19-commit-envelopes-and-rotation.md.
+        const TIP_REFRESH_TAIL_WINDOW: usize = 64 * 1024;
+        // Pinned-read fast path with single-writer skip
+        // (0.4.2a7). `read_tail_if_grown` returns None when
+        // the file's current size matches what we wrote
+        // ourselves — no other process appended,
+        // in-memory chain tip is current, no read needed.
+        // In multi-writer setups this falls through to a
+        // full tail read.
+        //
+        // PEL admin emits use the same pinned-writer pool
+        // (0.4.2a8 PEL pinned-writer fix), so the tip
+        // refresh for `pel_routed=true` consults
+        // `pel_writer` and gets the same machinery.
+        //
+        // The file-not-yet-created case (very first emit
+        // before any append) yields NotFound from the lazy
+        // reader open; treat as "no prior rows, leave
+        // in-memory tip alone".
+        let writers = if pel_routed {
+            &self.pel_writer
+        } else {
+            &self.log_writer
+        };
+        let writer_arc = match writers.writer_for(event_type, eid) {
+            Ok(a) => a,
+            Err(e) => {
+                *deferred_err = Some(e);
+                return Err(std::io::Error::other("writer_for failed (deferred)"));
+            }
+        };
+        let bytes_opt: Option<Vec<u8>> = {
+            let w = writer_arc.lock().expect("log writer mutex poisoned");
+            match w.read_tail_if_grown(TIP_REFRESH_TAIL_WINDOW) {
+                Ok(opt) => opt,
+                Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    return Err(e).map_err(|err| std::io::Error::other(format!("read_tail: {err}")))
+                }
+            }
+        };
+        if let Some(bytes) = bytes_opt {
+            if let Some((tip_seq, tip_hash)) = chain_tip_from_log_tail_reverse(&bytes, event_type) {
+                let mut single: HashMap<String, (u64, String)> = HashMap::new();
+                single.insert(event_type.to_string(), (tip_seq, tip_hash));
+                self.chain.seed(single);
+            }
+        }
+        if let Some(t0) = _tip_t0 {
+            crate::perf::record_ns("emit:tip_refresh", t0.elapsed().as_nanos() as u64);
+        }
+        Ok(())
+    }
+
+    /// Hash, sign, serialize, and append one row, returning
+    /// `(row_hash, line)`. Steps 5–8 of [`Runtime::emit`]'s pipeline,
+    /// shared by all three write branches in `emit_inner` (locked,
+    /// chained-per-event, unchained).
+    ///
+    /// The caller supplies `seq` + `prev_hash` (the chain-advance output)
+    /// and the borrowed [`EmitWriteCtx`]; on error the caller parks the
+    /// returned [`Error`] in its `deferred_err` slot and re-raises it after
+    /// releasing the advisory lock. Pure-log mode (chain=F sign=F) ships
+    /// the empty `row_hash` / `signature` sentinels.
+    ///
+    /// # Errors
+    ///
+    /// Envelope-build, writer-pool, append, or flush failures.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the log-writer mutex is poisoned.
     fn build_and_write(
         &self,
         seq: u64,
         prev_hash: &str,
-        event_type: &str,
-        ts: &str,
-        eid: &str,
-        level_norm: &str,
-        sign: Option<bool>,
-        need_row_hash: bool,
-        pel_routed: bool,
-        public_out: &Map<String, Value>,
-        group_inputs: &BTreeMap<String, GroupInput>,
-        group_payloads: &BTreeMap<String, String>,
+        ctx: &EmitWriteCtx<'_>,
     ) -> Result<(String, String)> {
         // 5. Row hash — skipped when neither chain nor sign
         //    consumes it (chain=F sign=F pure-log mode).
         let _rh_t0 = if crate::perf::enabled() {
             Some(std::time::Instant::now())
-        } else { None };
-        let row_hash = if need_row_hash {
+        } else {
+            None
+        };
+        let row_hash = if ctx.need_row_hash {
             let public_bmap: BTreeMap<String, Value> =
-                public_out.clone().into_iter().collect();
+                ctx.public_out.clone().into_iter().collect();
             compute_row_hash(&RowHashInput {
                 device_identity: self.device.did(),
-                timestamp: ts,
-                event_id: eid,
-                event_type,
-                level: level_norm,
+                timestamp: ctx.ts,
+                event_id: ctx.eid,
+                event_type: ctx.event_type,
+                level: ctx.level_norm,
                 prev_hash,
                 public_fields: &public_bmap,
-                groups: group_inputs,
+                groups: ctx.group_inputs,
             })
         } else {
             // Pure-log mode (chain=F sign=F): no consumer.
@@ -408,8 +701,10 @@ impl Runtime {
         // 6. Sign: respects per-call override, then ceremony default.
         let _sign_t0 = if crate::perf::enabled() {
             Some(std::time::Instant::now())
-        } else { None };
-        let should_sign = sign.unwrap_or(self.cfg.ceremony.sign);
+        } else {
+            None
+        };
+        let should_sign = ctx.sign.unwrap_or(self.cfg.ceremony.sign);
         let sig_b64 = if should_sign {
             let sig = self.device.sign(row_hash.as_bytes());
             signature_b64(&sig)
@@ -423,19 +718,21 @@ impl Runtime {
         // 7. Envelope serialize.
         let _env_t0 = if crate::perf::enabled() {
             Some(std::time::Instant::now())
-        } else { None };
+        } else {
+            None
+        };
         let line = build_envelope(EnvelopeInput {
             device_identity: self.device.did(),
-            timestamp: ts,
-            event_id: eid,
-            event_type,
-            level: level_norm,
+            timestamp: ctx.ts,
+            event_id: ctx.eid,
+            event_type: ctx.event_type,
+            level: ctx.level_norm,
             sequence: seq,
             prev_hash,
             row_hash: &row_hash,
             signature_b64: &sig_b64,
-            public_fields: public_out.clone(),
-            group_payloads: group_payloads.clone(),
+            public_fields: ctx.public_out.clone(),
+            group_payloads: ctx.group_payloads.clone(),
         })?;
         if let Some(t0) = _env_t0 {
             crate::perf::record_ns("emit:envelope_build", t0.elapsed().as_nanos() as u64);
@@ -444,19 +741,21 @@ impl Runtime {
         // 8. Append to log file (or the resolved pel for tn.* events).
         let _wr_t0 = if crate::perf::enabled() {
             Some(std::time::Instant::now())
-        } else { None };
+        } else {
+            None
+        };
         // Get-or-create the writer for this event_type's
         // rendered path. PEL admin emits route through
         // `pel_writer`; everything else through `log_writer`.
         // Both fields are pinned-writer pools so the syscall
         // floor matches whether we're writing to the main log
         // or a split admin log.
-        let writers = if pel_routed {
+        let writers = if ctx.pel_routed {
             &self.pel_writer
         } else {
             &self.log_writer
         };
-        let writer_arc = writers.writer_for(event_type, eid)?;
+        let writer_arc = writers.writer_for(ctx.event_type, ctx.eid)?;
         let mut w = writer_arc.lock().expect("log writer mutex poisoned");
         w.append_line(&line)?;
         w.flush()?;
@@ -467,14 +766,190 @@ impl Runtime {
         Ok((row_hash, line))
     }
 
+    /// Advance the per-event_type chain, build + write the row, and commit
+    /// the row_hash back into the chain — returning `(row_hash, line)`.
+    /// Steps 4–9 of [`Runtime::emit`]'s pipeline, with the cross-process
+    /// serialization that steps 4–9 require.
+    ///
+    /// Three branches:
+    /// - **chained + shared file** (the default audit profile): bookend
+    ///   advance → write → commit with an advisory file lock, refreshing
+    ///   the chain tip from disk truth under the lock so concurrent
+    ///   publishers don't branch the chain. A non-io error is parked in a
+    ///   local `deferred_err` and re-raised after the lock releases.
+    /// - **chained + `{event_id}` per-event file**: one unique file per
+    ///   emit, so there is nothing to coordinate cross-process — advance →
+    ///   write → commit without the lock.
+    /// - **unchained** (`ceremony.chain: false`): no lock, no commit; the
+    ///   append-only syscall is the only ordering primitive.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the [`build_and_write`](Self::build_and_write) /
+    /// chain-tip-refresh error set, plus an advisory-lock acquisition
+    /// failure.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock helper returns `Ok` without populating the row
+    /// outputs (an internal invariant violation).
+    fn advance_and_write(
+        &self,
+        per_event: bool,
+        lock_path: &Path,
+        ctx: &EmitWriteCtx<'_>,
+    ) -> Result<(String, String)> {
+        let event_type = ctx.event_type;
+        let pel_routed = ctx.pel_routed;
+
+        // Capture the row's outputs from inside the closure so the
+        // outer scope can return them. The lock helper returns
+        // io::Result<()>; non-io errors get parked here and re-raised
+        // after the lock releases.
+        let mut row_hash_out: Option<String> = None;
+        let mut line_out: Option<String> = None;
+        let mut deferred_err: Option<Error> = None;
+
+        // Chain gating (0.4.2a7): `ceremony.chain: false` skips the
+        // cross-process advisory lock and the per-emit tail-scan.
+        // Used by the `telemetry` and `secure_log` profiles where
+        // per-row prev_hash linkage isn't part of the audit story
+        // and the per-emit lock cost would dominate hot paths.
+        //
+        // 0.4.2a9: the unchained path still increments a per-
+        // event_type `sequence` counter (no lock, in-memory only —
+        // resets to 1 on restart). `prev_hash` stays empty as the
+        // "no linkage claim" sentinel. Readers that check chain
+        // integrity see `ceremony.chain == false` and skip the
+        // per-row prev_hash compare; sequence remains useful for
+        // ordering inside a single run.
+        let chain_enabled = self.cfg.ceremony.chain;
+
+        if chain_enabled && !per_event {
+            let storage_for_lock = Arc::clone(&self.storage);
+            let _lock_t0 = if crate::perf::enabled() {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            storage_for_lock.with_advisory_lock(lock_path, &mut || {
+                if let Some(t0) = _lock_t0 {
+                    crate::perf::record_ns("emit:lock_acquire", t0.elapsed().as_nanos() as u64);
+                }
+                // Under the lock: refresh in-memory chain tip from
+                // disk truth before advancing. Factored into
+                // `refresh_chain_tip_under_lock`; a writer-pool failure is
+                // parked in `deferred_err` and re-raised after the lock
+                // releases.
+                self.refresh_chain_tip_under_lock(pel_routed, event_type, ctx.eid, &mut deferred_err)?;
+
+                // 4. Chain advance (now reflects disk truth).
+                let _adv_t0 = if crate::perf::enabled() {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                let (seq, prev_hash) = self.chain.advance(event_type);
+                if let Some(t0) = _adv_t0 {
+                    crate::perf::record_ns("emit:chain_advance", t0.elapsed().as_nanos() as u64);
+                }
+
+                let (row_hash, line) = match self.build_and_write(seq, &prev_hash, ctx) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        deferred_err = Some(e);
+                        return Err(std::io::Error::other("build_and_write failed (deferred)"));
+                    }
+                };
+
+                // 9. Commit row_hash into the chain.
+                let _cm_t0 = if crate::perf::enabled() {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                self.chain.commit(event_type, &row_hash);
+                if let Some(t0) = _cm_t0 {
+                    crate::perf::record_ns("emit:chain_commit", t0.elapsed().as_nanos() as u64);
+                }
+
+                row_hash_out = Some(row_hash);
+                line_out = Some(line);
+                Ok(())
+            })?;
+        } else if chain_enabled {
+            // Chained `{event_id}` template: one unique file per emit,
+            // so there is no shared file to coordinate and no point
+            // acquiring the advisory lock or tail-scanning the
+            // just-created (empty) file. The in-memory ChainState is
+            // the authoritative tip within this process — it already
+            // carries the previous emit's row_hash — and `Runtime::init`
+            // re-seeds it by globbing every rendered file across a
+            // restart. So advance + write + commit without the lock.
+            let (seq, prev_hash) = self.chain.advance(event_type);
+            let result: std::io::Result<()> = (|| {
+                let (row_hash, line) = match self.build_and_write(seq, &prev_hash, ctx) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        deferred_err = Some(e);
+                        return Err(std::io::Error::other("build_and_write failed (deferred)"));
+                    }
+                };
+                self.chain.commit(event_type, &row_hash);
+                row_hash_out = Some(row_hash);
+                line_out = Some(line);
+                Ok(())
+            })();
+            result?;
+        } else {
+            // Lockless emit for unchained profiles. No advisory
+            // lock means no `.emit.lock` artifact on disk, no
+            // tail-scan, no chain prev_hash linkage. The append-only
+            // syscall is the only ordering primitive — interleaving
+            // across processes is acceptable because there's no
+            // chain to break.
+            //
+            // 0.4.2a9: even unchained profiles increment a per-
+            // event_type sequence counter. `prev_hash` stays empty
+            // (sentinel pattern; the verifier knows to skip the
+            // linkage check when `ceremony.chain == false`), but
+            // `sequence` grows monotonically within a single
+            // process. Across restart the counter resets to 1 —
+            // there's no seed scan for unchained profiles, by
+            // design (would defeat the perf-first promise). Users
+            // that need cross-restart sequence continuity should
+            // pick `audit` or `transaction`.
+            let (seq, _prev_unused) = self.chain.advance(event_type);
+            let result: std::io::Result<()> = (|| {
+                let (row_hash, line) = match self.build_and_write(seq, "", ctx) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        deferred_err = Some(e);
+                        return Err(std::io::Error::other("build_and_write failed (deferred)"));
+                    }
+                };
+                row_hash_out = Some(row_hash);
+                line_out = Some(line);
+                Ok(())
+            })();
+            result?;
+        }
+
+        if let Some(e) = deferred_err {
+            return Err(e);
+        }
+        let row_hash = row_hash_out.expect("with_advisory_lock returned Ok but row_hash unset");
+        let line = line_out.expect("with_advisory_lock returned Ok but line unset");
+        Ok((row_hash, line))
+    }
+
     // emit_inner is the single canonical path for building + signing an
-    // envelope; splitting it further would fragment the invariants enforced
-    // across the sealing/signing/writing phases. The chain-enabled closure
-    // (under `with_advisory_lock`) builds on the same locals, so it carries
-    // the same allow. Under clippy 1.95's cognitive-complexity scoring this
-    // reads as 18/15; it was under threshold on the toolchain at the last
-    // release tag, so the allow keeps the gate version-independent.
-    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+    // envelope: prelude (level filter, run_id, policy splice, catalog
+    // check), then field classification (`classify_fields`), per-group
+    // encryption (`encrypt_groups`), and the chain-advance/write/commit
+    // core (`advance_and_write`). The orchestration is still long enough to
+    // warrant the line-count allow.
+    #[allow(clippy::too_many_lines)]
     fn emit_inner(
         &self,
         level: &str,
@@ -561,13 +1036,6 @@ impl Runtime {
         });
 
         // 1. Classify fields: public vs per-group.
-        //
-        // Multi-group routing: a field declared under N groups in yaml
-        // (`groups[<g>].fields: [...]`) is encrypted into all N groups'
-        // payloads. The `field_to_groups` table is precomputed at
-        // `Runtime::init` (0.4.2a7 — was rebuilt every emit) and
-        // sorted alphabetically per field at load time so envelope
-        // encoding stays canonical across SDK implementations.
         let (public_out, per_group) = self.classify_fields(fields)?;
 
         // row_hash gating (0.4.2a7): hoisted up here from below so the
@@ -578,9 +1046,8 @@ impl Runtime {
         // per-call sign override (`sign=true` passed explicitly) also
         // pulls it back in since the signature is over row_hash bytes.
         let chain_enabled_for_row_hash = self.cfg.ceremony.chain;
-        let need_row_hash = chain_enabled_for_row_hash
-            || self.cfg.ceremony.sign
-            || sign.unwrap_or(false);
+        let need_row_hash =
+            chain_enabled_for_row_hash || self.cfg.ceremony.sign || sign.unwrap_or(false);
 
         // 2. Index tokens + 3. Encrypt per group.
         let (group_inputs_for_hash, group_payloads) =
@@ -612,8 +1079,7 @@ impl Runtime {
             None
         };
         let is_protocol = event_type.starts_with("tn.");
-        let pel_routed =
-            is_protocol && self.cfg.ceremony.protocol_events_location != "main_log";
+        let pel_routed = is_protocol && self.cfg.ceremony.protocol_events_location != "main_log";
         // Derive the on-disk path from the writer pool's template so
         // the advisory-lock file always sits next to the file we're
         // actually appending to. Going through `pel_writer.path_for`
@@ -654,287 +1120,29 @@ impl Runtime {
             crate::perf::record_ns("emit:path_setup", t0.elapsed().as_nanos() as u64);
         }
 
-        // Capture the row's outputs from inside the closure so the
-        // outer scope can return them. The lock helper returns
-        // io::Result<()>; non-io errors get parked here and re-raised
-        // after the lock releases.
-        let mut row_hash_out: Option<String> = None;
-        let mut line_out: Option<String> = None;
-        let mut deferred_err: Option<Error> = None;
-
-        // Pre-clone the inputs the closure consumes by reference so
-        // the borrow checker is happy with the FnMut signature.
+        // Pre-clone the inputs the write branches consume by reference so
+        // the borrow checker is happy with the `with_advisory_lock` FnMut
+        // signature; bundle them into the shared `EmitWriteCtx`.
         let public_out_for_lock = public_out;
         let group_inputs_for_lock = group_inputs_for_hash;
         let group_payloads_for_lock = group_payloads;
+        let ctx = EmitWriteCtx {
+            ts: &ts,
+            eid: &eid,
+            event_type,
+            level_norm: &level_norm,
+            need_row_hash,
+            sign,
+            pel_routed,
+            public_out: &public_out_for_lock,
+            group_inputs: &group_inputs_for_lock,
+            group_payloads: &group_payloads_for_lock,
+        };
 
-        // Chain gating (0.4.2a7): `ceremony.chain: false` skips the
-        // cross-process advisory lock and the per-emit tail-scan.
-        // Used by the `telemetry` and `secure_log` profiles where
-        // per-row prev_hash linkage isn't part of the audit story
-        // and the per-emit lock cost would dominate hot paths.
-        //
-        // 0.4.2a9: the unchained path still increments a per-
-        // event_type `sequence` counter (no lock, in-memory only —
-        // resets to 1 on restart). `prev_hash` stays empty as the
-        // "no linkage claim" sentinel. Readers that check chain
-        // integrity see `ceremony.chain == false` and skip the
-        // per-row prev_hash compare; sequence remains useful for
-        // ordering inside a single run.
-        let chain_enabled = self.cfg.ceremony.chain;
-
-        // `need_row_hash` was computed earlier (just before the
-        // group-encrypt loop) so the loop could skip building
-        // `group_inputs_for_hash` when no consumer will read it.
-        // Reuse the same value here for the row_hash skip below.
-
-        if chain_enabled && !per_event {
-            let storage_for_lock = Arc::clone(&self.storage);
-            let _lock_t0 = if crate::perf::enabled() {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            storage_for_lock.with_advisory_lock(&lock_path, &mut || {
-                if let Some(t0) = _lock_t0 {
-                    crate::perf::record_ns(
-                        "emit:lock_acquire",
-                        t0.elapsed().as_nanos() as u64,
-                    );
-                }
-                // Under the lock: refresh in-memory chain tip from
-                // disk truth. If another process appended rows since
-                // our last emit, this is where we discover the
-                // latest (seq, prev_hash) for our event_type —
-                // overwriting the local ChainState entry.
-                //
-                // Reverse-scan from the file tail (0.4.2a7 perf
-                // fix): we only care about ONE event_type's tip,
-                // not the full tips map; stopping at the first
-                // matching row keeps the hot path O(scan-window)
-                // instead of the prior O(filesize) forward scan.
-                // See chain.rs::chain_tip_from_log_tail_reverse
-                // and the S11 stress regression that surfaced the
-                // issue.
-                let _tip_t0 = if crate::perf::enabled() {
-                    Some(std::time::Instant::now())
-                } else {
-                    None
-                };
-                // Tail-byte windowing (0.4.2a7 perf fix). The chain
-                // tip is always near the end of the log — the row we
-                // just emitted last time is right before whatever
-                // someone else may have appended since. Reading the
-                // whole file every emit (which the prior version
-                // did) cost ~10 ms on a 1 MB log; reading 64 KB of
-                // tail through a PINNED read handle costs ~50 µs.
-                //
-                // The pinned read handle (`log_writer.read_tail`) is
-                // what makes this fast on Windows: opening a fresh
-                // read handle while our own writer holds an append
-                // handle to the same file costs ~9 ms on NTFS
-                // (share-mode reconciliation / AV scan). The pinned
-                // handle skips that cost — `seek + read` on an
-                // already-open file is ~50 µs.
-                //
-                // For chain=T emits targeting a PEL admin path (rare:
-                // only fires when admin events are chained AND the
-                // PEL is not "main_log"), we fall back to
-                // `storage.read_bytes_tail` which opens a fresh
-                // handle. That path pays the ~9 ms once per
-                // admin emit but admin emits are rare so the
-                // amortized cost is negligible.
-                //
-                // Cold path (no match in window): the in-memory
-                // chain state is already seeded from a whole-file
-                // scan at `Runtime::init`, so missing the tip in the
-                // tail just leaves the existing in-memory tip in
-                // place. Documented as a known trade-off in
-                // docs/superpowers/specs/2026-05-19-commit-envelopes-and-rotation.md.
-                const TIP_REFRESH_TAIL_WINDOW: usize = 64 * 1024;
-                // Pinned-read fast path with single-writer skip
-                // (0.4.2a7). `read_tail_if_grown` returns None when
-                // the file's current size matches what we wrote
-                // ourselves — no other process appended,
-                // in-memory chain tip is current, no read needed.
-                // In multi-writer setups this falls through to a
-                // full tail read.
-                //
-                // PEL admin emits use the same pinned-writer pool
-                // (0.4.2a8 PEL pinned-writer fix), so the tip
-                // refresh for `pel_routed=true` consults
-                // `pel_writer` and gets the same machinery.
-                //
-                // The file-not-yet-created case (very first emit
-                // before any append) yields NotFound from the lazy
-                // reader open; treat as "no prior rows, leave
-                // in-memory tip alone".
-                let writers = if pel_routed {
-                    &self.pel_writer
-                } else {
-                    &self.log_writer
-                };
-                let writer_arc = match writers.writer_for(event_type, &eid) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        deferred_err = Some(e);
-                        return Err(std::io::Error::other(
-                            "writer_for failed (deferred)",
-                        ));
-                    }
-                };
-                let bytes_opt: Option<Vec<u8>> = {
-                    let w = writer_arc.lock().expect("log writer mutex poisoned");
-                    match w.read_tail_if_grown(TIP_REFRESH_TAIL_WINDOW) {
-                        Ok(opt) => opt,
-                        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(e) => return Err(e).map_err(|err| {
-                            std::io::Error::other(format!("read_tail: {err}"))
-                        }),
-                    }
-                };
-                if let Some(bytes) = bytes_opt {
-                    if let Some((tip_seq, tip_hash)) =
-                        chain_tip_from_log_tail_reverse(&bytes, event_type)
-                    {
-                        let mut single: HashMap<String, (u64, String)> = HashMap::new();
-                        single.insert(event_type.to_string(), (tip_seq, tip_hash));
-                        self.chain.seed(single);
-                    }
-                }
-                if let Some(t0) = _tip_t0 {
-                    crate::perf::record_ns(
-                        "emit:tip_refresh",
-                        t0.elapsed().as_nanos() as u64,
-                    );
-                }
-
-                // 4. Chain advance (now reflects disk truth).
-                let _adv_t0 = if crate::perf::enabled() {
-                    Some(std::time::Instant::now())
-                } else {
-                    None
-                };
-                let (seq, prev_hash) = self.chain.advance(event_type);
-                if let Some(t0) = _adv_t0 {
-                    crate::perf::record_ns(
-                        "emit:chain_advance",
-                        t0.elapsed().as_nanos() as u64,
-                    );
-                }
-
-                let (row_hash, line) = match self.build_and_write(
-                    seq,
-                    &prev_hash,
-                    event_type,
-                    &ts,
-                    &eid,
-                    &level_norm,
-                    sign,
-                    need_row_hash,
-                    pel_routed,
-                    &public_out_for_lock,
-                    &group_inputs_for_lock,
-                    &group_payloads_for_lock,
-                ) {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        deferred_err = Some(e);
-                        return Err(std::io::Error::other(
-                            "build_and_write failed (deferred)",
-                        ));
-                    }
-                };
-
-                // 9. Commit row_hash into the chain.
-                let _cm_t0 = if crate::perf::enabled() {
-                    Some(std::time::Instant::now())
-                } else {
-                    None
-                };
-                self.chain.commit(event_type, &row_hash);
-                if let Some(t0) = _cm_t0 {
-                    crate::perf::record_ns(
-                        "emit:chain_commit",
-                        t0.elapsed().as_nanos() as u64,
-                    );
-                }
-
-                row_hash_out = Some(row_hash);
-                line_out = Some(line);
-                Ok(())
-            })?;
-        } else if chain_enabled {
-            // Chained `{event_id}` template: one unique file per emit,
-            // so there is no shared file to coordinate and no point
-            // acquiring the advisory lock or tail-scanning the
-            // just-created (empty) file. The in-memory ChainState is
-            // the authoritative tip within this process — it already
-            // carries the previous emit's row_hash — and `Runtime::init`
-            // re-seeds it by globbing every rendered file across a
-            // restart. So advance + write + commit without the lock.
-            let (seq, prev_hash) = self.chain.advance(event_type);
-            let (row_hash, line) = self.build_and_write(
-                seq,
-                &prev_hash,
-                event_type,
-                &ts,
-                &eid,
-                &level_norm,
-                sign,
-                need_row_hash,
-                pel_routed,
-                &public_out_for_lock,
-                &group_inputs_for_lock,
-                &group_payloads_for_lock,
-            )?;
-            self.chain.commit(event_type, &row_hash);
-            row_hash_out = Some(row_hash);
-            line_out = Some(line);
-        } else {
-            // Lockless emit for unchained profiles. No advisory
-            // lock means no `.emit.lock` artifact on disk, no
-            // tail-scan, no chain prev_hash linkage. The append-only
-            // syscall is the only ordering primitive — interleaving
-            // across processes is acceptable because there's no
-            // chain to break.
-            //
-            // 0.4.2a9: even unchained profiles increment a per-
-            // event_type sequence counter. `prev_hash` stays empty
-            // (sentinel pattern; the verifier knows to skip the
-            // linkage check when `ceremony.chain == false`), but
-            // `sequence` grows monotonically within a single
-            // process. Across restart the counter resets to 1 —
-            // there's no seed scan for unchained profiles, by
-            // design (would defeat the perf-first promise). Users
-            // that need cross-restart sequence continuity should
-            // pick `audit` or `transaction`.
-            let (seq, _prev_unused) = self.chain.advance(event_type);
-            let (row_hash, line) = self.build_and_write(
-                seq,
-                "",
-                event_type,
-                &ts,
-                &eid,
-                &level_norm,
-                sign,
-                need_row_hash,
-                pel_routed,
-                &public_out_for_lock,
-                &group_inputs_for_lock,
-                &group_payloads_for_lock,
-            )?;
-            row_hash_out = Some(row_hash);
-            line_out = Some(line);
-        }
-
-        if let Some(e) = deferred_err {
-            return Err(e);
-        }
-        let row_hash =
-            row_hash_out.expect("with_advisory_lock returned Ok but row_hash unset");
-        let line =
-            line_out.expect("with_advisory_lock returned Ok but line unset");
+        // 4–9. Chain advance + build + write + commit. The cross-process
+        // serialization (advisory lock for chained, shared-file ceremonies)
+        // lives in `advance_and_write`.
+        let (row_hash, line) = self.advance_and_write(per_event, &lock_path, &ctx)?;
 
         // 10. Fan out to handlers. Mirrors Python `tn/logger.py:343` and
         //     TS `node_runtime.ts:376`. A handler whose filter rejects
@@ -992,10 +1200,7 @@ impl Runtime {
     /// # Panics
     /// Panics if the internal handlers mutex is poisoned.
     pub fn handler_count(&self) -> usize {
-        self.handlers
-            .lock()
-            .expect("handlers mutex poisoned")
-            .len()
+        self.handlers.lock().expect("handlers mutex poisoned").len()
     }
 
     fn fan_out_to_handlers(&self, raw_line: &[u8], event_type: &str, event_id: &str) {

@@ -12,6 +12,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Buffer } from "node:buffer";
+import { zipSync, type Zippable } from "fflate";
 
 import {
   RestoreError,
@@ -51,70 +52,12 @@ function buildLegacyFrame(members: [string, Uint8Array][]): Uint8Array {
   return new Uint8Array(Buffer.concat(chunks));
 }
 
-/** Build a minimal STORED-only zip (no central directory needed for our
- *  unpacker — Python's zipfile reads the central dir, our impl scans
- *  local headers because tn.export's output is local-header sequential).
- *  Includes a stub EOCD so real consumers don't choke. */
 function buildStoredZip(members: [string, Uint8Array][]): Uint8Array {
-  const parts: Buffer[] = [];
-  const centralDir: Buffer[] = [];
-  let offset = 0;
+  const files: Zippable = {};
   for (const [name, data] of members) {
-    const nameBuf = Buffer.from(name, "utf-8");
-    // Local file header: 30 bytes + name + extra (0) + data.
-    const lfh = Buffer.alloc(30);
-    lfh.writeUInt32LE(0x04034b50, 0); // signature
-    lfh.writeUInt16LE(20, 4);          // version
-    lfh.writeUInt16LE(0, 6);           // gp flag
-    lfh.writeUInt16LE(0, 8);           // compression: STORED
-    lfh.writeUInt16LE(0, 10);          // mod time
-    lfh.writeUInt16LE(0, 12);          // mod date
-    lfh.writeUInt32LE(0, 14);          // crc32 (skip)
-    lfh.writeUInt32LE(data.length, 18); // comp size
-    lfh.writeUInt32LE(data.length, 22); // uncomp size
-    lfh.writeUInt16LE(nameBuf.length, 26);
-    lfh.writeUInt16LE(0, 28);          // extra len
-    parts.push(lfh, nameBuf, Buffer.from(data));
-    offset += 30 + nameBuf.length + data.length;
-
-    // Central directory entry (46-byte fixed header + name).
-    const cdh = Buffer.alloc(46);
-    cdh.writeUInt32LE(0x02014b50, 0);
-    cdh.writeUInt16LE(20, 4);
-    cdh.writeUInt16LE(20, 6);
-    cdh.writeUInt16LE(0, 8);
-    cdh.writeUInt16LE(0, 10);
-    cdh.writeUInt16LE(0, 12);
-    cdh.writeUInt16LE(0, 14);
-    cdh.writeUInt32LE(0, 16);
-    cdh.writeUInt32LE(data.length, 20);
-    cdh.writeUInt32LE(data.length, 24);
-    cdh.writeUInt16LE(nameBuf.length, 28);
-    cdh.writeUInt16LE(0, 30); // extra
-    cdh.writeUInt16LE(0, 32); // comment
-    cdh.writeUInt16LE(0, 34); // disk no
-    cdh.writeUInt16LE(0, 36); // internal attr
-    cdh.writeUInt32LE(0, 38); // external attr
-    cdh.writeUInt32LE(offset - (30 + nameBuf.length + data.length), 42); // local header offset
-    centralDir.push(cdh, nameBuf);
+    files[name] = [data, { level: 0 }];
   }
-  const cdStart = offset;
-  const cdBytes = Buffer.concat(centralDir);
-  parts.push(...centralDir);
-
-  // EOCD
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(0, 4);
-  eocd.writeUInt16LE(0, 6);
-  eocd.writeUInt16LE(members.length, 8);
-  eocd.writeUInt16LE(members.length, 10);
-  eocd.writeUInt32LE(cdBytes.length, 12);
-  eocd.writeUInt32LE(cdStart, 16);
-  eocd.writeUInt16LE(0, 20);
-  parts.push(eocd);
-
-  return new Uint8Array(Buffer.concat(parts));
+  return zipSync(files, { level: 0 });
 }
 
 // ── b64 helpers ─────────────────────────────────────────────────────

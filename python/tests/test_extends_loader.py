@@ -193,7 +193,8 @@ class TestExtendsResolutionMechanics:
 class TestStreamYamlIsMinimal:
     def test_stream_yaml_contains_only_overrides(self, tmp_path):
         import tn
-        h = tn.init("payments", profile="transaction", project_dir=tmp_path)
+        tn.init(project="default", project_dir=tmp_path)
+        h = tn.use("payments", profile="transaction", project_dir=tmp_path)
         with h.yaml_path.open("r", encoding="utf-8") as fh:
             doc = _yaml.safe_load(fh)
         # Has extends pointing at default.
@@ -209,7 +210,8 @@ class TestStreamYamlIsMinimal:
 
     def test_stream_loaded_cfg_is_complete(self, tmp_path):
         import tn
-        h = tn.init("payments", profile="transaction", project_dir=tmp_path)
+        tn.init(project="default", project_dir=tmp_path)
+        h = tn.use("payments", profile="transaction", project_dir=tmp_path)
         cfg = _config.load(h.yaml_path)
         # Loader resolved extends — cfg has full identity + groups.
         assert cfg.device.device_identity.startswith("did:key:z")
@@ -217,9 +219,10 @@ class TestStreamYamlIsMinimal:
 
     def test_three_streams_share_identity(self, tmp_path):
         import tn
-        a = tn.init("a", project_dir=tmp_path)
-        b = tn.init("b", profile="audit", project_dir=tmp_path)
-        c = tn.init("c", profile="telemetry", project_dir=tmp_path)
+        tn.init(project="default", project_dir=tmp_path)
+        a = tn.use("a", project_dir=tmp_path)
+        b = tn.use("b", profile="audit", project_dir=tmp_path)
+        c = tn.use("c", profile="telemetry", project_dir=tmp_path)
         # Same DID across all three.
         assert a.cfg.device.device_identity == b.cfg.device.device_identity == c.cfg.device.device_identity
         # Same keystore path.
@@ -238,8 +241,8 @@ class TestNoDriftFromDefault:
     def test_default_yaml_is_source_of_truth(self, tmp_path):
         import tn
         # Create default + a stream.
-        tn.init("default", project_dir=tmp_path)
-        tn.init("payments", profile="transaction", project_dir=tmp_path)
+        tn.init(project="default", project_dir=tmp_path)
+        payments = tn.use("payments", profile="transaction", project_dir=tmp_path)
 
         default_yaml = tmp_path / ".tn" / "default" / "tn.yaml"
         with default_yaml.open("r", encoding="utf-8") as fh:
@@ -249,7 +252,7 @@ class TestNoDriftFromDefault:
         assert "groups" in doc
         assert "keystore" in doc
 
-        stream_yaml = tmp_path / ".tn" / "payments" / "tn.yaml"
+        stream_yaml = payments.yaml_path
         with stream_yaml.open("r", encoding="utf-8") as fh:
             sdoc = _yaml.safe_load(fh)
         # Stream is minimal.

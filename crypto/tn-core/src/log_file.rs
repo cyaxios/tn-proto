@@ -1,4 +1,8 @@
-//! Append-only ndjson file + line iterator.
+//! Append-only ndjson file writer and line iterator — the on-disk
+//! attestation log. Internal primitive: most readers want the high-level API
+//! instead — see [`crate::Runtime`], which writes and reads these files for
+//! you (behind `tn.info()` / `tn read`). Reach here directly only for raw
+//! line-level file I/O.
 //!
 //! Both reader and writer route every byte through an
 //! [`Arc<dyn Storage>`](crate::storage::Storage) handle rather than
@@ -147,10 +151,7 @@ impl LogFileWriter {
     /// walker) tolerates that.
     pub fn read_tail(&self, max_bytes: usize) -> Result<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
-        let mut guard = self
-            .reader
-            .lock()
-            .expect("log_file reader mutex poisoned");
+        let mut guard = self.reader.lock().expect("log_file reader mutex poisoned");
         if guard.is_none() {
             // Lazy open. Errors propagate; if the file doesn't
             // exist yet, NotFound is the right return.
@@ -167,7 +168,7 @@ impl LogFileWriter {
         Ok(buf)
     }
 
-    /// Like [`read_tail`] but returns `Ok(None)` when the file size
+    /// Like [`Self::read_tail`] but returns `Ok(None)` when the file size
     /// matches what we've written ourselves — i.e. no other process
     /// has appended since our last write, and the caller's
     /// in-memory chain state is already current.
@@ -190,15 +191,13 @@ impl LogFileWriter {
         // reads, route every subsequent call through
         // `storage.read_bytes_tail` so the chain-tip refresh still
         // works — just without the FsStorage Windows-AV bypass.
-        if self.pinned_read_unavailable
+        if self
+            .pinned_read_unavailable
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             return self.read_tail_via_storage(max_bytes);
         }
-        let mut guard = self
-            .reader
-            .lock()
-            .expect("log_file reader mutex poisoned");
+        let mut guard = self.reader.lock().expect("log_file reader mutex poisoned");
         if guard.is_none() {
             match std::fs::OpenOptions::new().read(true).open(&self.path) {
                 Ok(f) => *guard = Some(f),
@@ -248,7 +247,9 @@ impl LogFileWriter {
     /// the same file size we've written, no refresh needed.
     fn read_tail_via_storage(&self, max_bytes: usize) -> Result<Option<Vec<u8>>> {
         if !self.storage.exists(&self.path) {
-            return Err(Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound)));
+            return Err(Error::Io(std::io::Error::from(
+                std::io::ErrorKind::NotFound,
+            )));
         }
         // No cheap metadata() through the trait; just read the
         // tail every time and let the caller's reverse-scan
@@ -400,9 +401,7 @@ impl LogWriters {
                     let w = LogFileWriter::open(&path, storage.clone())?;
                     return Ok(Arc::new(Mutex::new(w)));
                 }
-                let mut pool = writers
-                    .lock()
-                    .expect("log writers pool mutex poisoned");
+                let mut pool = writers.lock().expect("log writers pool mutex poisoned");
                 if let Some(existing) = pool.get(&path) {
                     return Ok(existing.clone());
                 }

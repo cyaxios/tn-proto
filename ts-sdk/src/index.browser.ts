@@ -410,7 +410,9 @@ export function did(): string {
   return _requireDefault("did").did();
 }
 
-/** Always true on the browser path — the wasm runtime is the only backend. */
+/** Always true on the browser path: the browser runtime is genuinely
+ *  wasm-only (no pure-TS fallback exists), so the Rust/WASM core always
+ *  services the emit path. Mirrors Python's `tn.using_rust`. */
 export function usingRust(): boolean {
   return true;
 }
@@ -439,9 +441,77 @@ export function scope<T>(fields: Record<string, unknown>, body: () => T): T {
   return _requireDefault("scope").scope(fields, body);
 }
 
+/**
+ * Tail the singleton's log live. Delegates to {@link Tn.watch}.
+ *
+ * @throws Error - when called before {@link init} / {@link initFromSeed}.
+ * @throws NotYetWiredForBrowserError - live watch is still a placeholder
+ *   on the browser runtime; the verb exists to keep the API shape in
+ *   parity with the Node entry.
+ * @public
+ */
+export function watch(opts?: unknown): AsyncIterable<Record<string, unknown>> {
+  return _requireDefault("watch").watch(opts);
+}
+
 // Process-wide level toggles. Bound to the class so callers can do
 // `tn.setLevel("info")` without grabbing the class.
 export const setLevel: typeof _Tn.setLevel = _Tn.setLevel.bind(_Tn);
 export const getLevel: typeof _Tn.getLevel = _Tn.getLevel.bind(_Tn);
 export const isEnabledFor: typeof _Tn.isEnabledFor = _Tn.isEnabledFor.bind(_Tn);
 export const setStrict: typeof _Tn.setStrict = _Tn.setStrict.bind(_Tn);
+
+// ---------------------------------------------------------------------------
+// Runtime namespaces at module level — mirror of the Node entry so
+// `tn.admin.*`, `tn.pkg.*`, `tn.vault.*`, `tn.agents.*`, `tn.handlers.*`
+// resolve to the live default instance's namespaces. On the browser these
+// are placeholder namespaces today: the property shape matches Node, but
+// each method throws `NotYetWiredForBrowserError` until the underlying
+// module goes browser-pure. Each is a lazy proxy whose member access
+// forwards to the current default instance, so it tracks the latest
+// `tn.init()` / `tn.initFromSeed()`. Accessing any member before init
+// throws via `_requireDefault`.
+//
+// Verbs the browser `Tn` lacks entirely (no property at all) are NOT
+// re-exported here. Module-level `use` / `absorb` / `session` /
+// `listCeremonies` are deliberately omitted: the browser `Tn` only has
+// throwing static placeholders for them, and there is no browser default
+// to rebind on `absorb` the way the Node entry does. They light up when
+// the multi-ceremony layout goes browser-pure.
+// ---------------------------------------------------------------------------
+
+function _makeNamespaceProxy<K extends "admin" | "pkg" | "vault" | "agents" | "handlers">(
+  verb: K,
+): _Tn[K] {
+  return new Proxy({} as _Tn[K], {
+    get(_target, prop, receiver) {
+      const ns = _requireDefault(verb)[verb] as object;
+      const value = Reflect.get(ns, prop, receiver) as unknown;
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(ns) : value;
+    },
+    has(_target, prop) {
+      const ns = _requireDefault(verb)[verb] as object;
+      return Reflect.has(ns, prop);
+    },
+  });
+}
+
+/** Runtime ceremony-admin namespace on the default instance. Browser
+ *  placeholder (methods throw until wired). Mirrors Node `tn.admin.*`. */
+export const admin: _Tn["admin"] = _makeNamespaceProxy("admin");
+
+/** Runtime package (tnpkg) namespace on the default instance. Browser
+ *  placeholder. Mirrors Node `tn.pkg.*`. */
+export const pkg: _Tn["pkg"] = _makeNamespaceProxy("pkg");
+
+/** Runtime vault namespace on the default instance. Browser placeholder.
+ *  Mirrors Node `tn.vault.*`. */
+export const vault: _Tn["vault"] = _makeNamespaceProxy("vault");
+
+/** Runtime agents-policy namespace on the default instance. Browser
+ *  placeholder. Mirrors Node `tn.agents.*`. */
+export const agents: _Tn["agents"] = _makeNamespaceProxy("agents");
+
+/** Runtime handlers namespace on the default instance. Browser
+ *  placeholder. Mirrors Node `tn.handlers.*`. */
+export const handlers: _Tn["handlers"] = _makeNamespaceProxy("handlers");

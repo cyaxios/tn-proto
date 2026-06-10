@@ -32,13 +32,22 @@
 import { createInterface } from "node:readline";
 import { Buffer } from "node:buffer";
 import { stdin, stdout, argv, exit } from "node:process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve as pathResolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve as pathResolve } from "node:path";
 
 import {
   DeviceKey,
   NodeRuntime,
+  absorbBootstrap,
   asDid,
   asRowHash,
   asSignatureB64,
@@ -49,10 +58,15 @@ import {
   config as tnConfig,
   init as tnInit,
   rowHash,
+  signManifest,
   signatureB64,
   signatureFromB64,
   verify,
+  writeTnpkg,
 } from "../dist/index.js";
+// newManifest is loaded dynamically inside exportCmd: the dist core module
+// is CJS-interop and its named exports aren't statically resolvable via a
+// top-level `import { newManifest }` (crashes every command at load).
 
 import { ensureCeremonyOnDisk } from "../dist/multi.js";
 import { resolveVaultUrl } from "../dist/vault/url.js";
@@ -320,6 +334,122 @@ function readCmd() {
   }
 }
 
+async function exportCmd() {
+  // tn-js export --kind project_seed --out <file> [--yaml <path>] --include-secrets
+  const rest = argv.slice(3);
+  let yamlPath = null;
+  let outPath = null;
+  let kind = "project_seed";
+  let includeSecrets = false;
+  for (let i = 0; i < rest.length; i += 1) {
+    if (rest[i] === "--yaml") yamlPath = rest[++i];
+    else if (rest[i] === "--out") outPath = rest[++i];
+    else if (rest[i] === "--kind") kind = rest[++i];
+    else if (rest[i] === "--include-secrets") includeSecrets = true;
+  }
+  if (!yamlPath) die("export: --yaml <path> is required");
+  if (!outPath) die("export: --out <file> is required");
+  if (kind !== "project_seed") die(`export: unsupported kind ${JSON.stringify(kind)} (only project_seed)`);
+  if (!includeSecrets) {
+    die(
+      "export --kind project_seed writes the device's raw private keys into " +
+        "the bundle. Pass --include-secrets to acknowledge.",
+    );
+  }
+
+  // Resolve identity/keystore straight from disk (no runtime init needed):
+  // the keystore's local.public is the authoritative DID, and absorb only
+  // cares about the body files + manifest, not a live runtime.
+  const { parse: parseYaml } = await import("yaml");
+  const yamlAbs = pathResolve(yamlPath);
+  const doc = parseYaml(readFileSync(yamlAbs, "utf8")) || {};
+  const ceremonyId = doc?.ceremony?.id ?? "";
+  const ksPath = doc?.keystore?.path || "./.tn/keys";
+  const yamlDir = dirname(yamlAbs);
+  const keysDir = isAbsolute(ksPath) ? ksPath : pathResolve(yamlDir, ksPath);
+  if (!existsSync(keysDir)) die(`export: keystore dir not found: ${keysDir}`);
+  const did = readFileSync(join(keysDir, "local.public"), "utf8").trim();
+
+  // Body: canonical tn.yaml + every key file nested under body/keys/.
+  const body = {
+    "body/tn.yaml": new Uint8Array(readFileSync(pathResolve(yamlPath))),
+  };
+  for (const name of readdirSync(keysDir)) {
+    const p = join(keysDir, name);
+    if (!statSync(p).isFile()) continue;
+    body[`body/keys/${name}`] = new Uint8Array(readFileSync(p));
+  }
+
+  // Self-addressed manifest (fromDid === toDid === device DID), signed
+  // by the device key loaded from the keystore. newManifest is loaded
+  // dynamically (CJS-interop named export; see import note at top).
+  const { newManifest } = await import("../dist/core/tnpkg.js");
+  const manifest = newManifest({
+    kind: "project_seed",
+    fromDid: did,
+    ceremonyId,
+    scope: "project",
+    toDid: did,
+  });
+  const device = DeviceKey.fromSeed(new Uint8Array(readFileSync(join(keysDir, "local.private"))));
+  const signed = signManifest(manifest, device);
+  mkdirSync(dirname(pathResolve(outPath)), { recursive: true });
+  const outResolved = writeTnpkg(pathResolve(outPath), signed, body);
+  const bytes = statSync(outResolved).size;
+  stdout.write(
+    JSON.stringify({
+      ok: true,
+      kind: "project_seed",
+      out: outResolved,
+      bytes,
+      device_identity: did,
+      restore: `tn-js import ${basename(outPath)}`,
+    }) + "\n",
+  );
+}
+
+function importCmd() {
+  // tn-js import <package> [--cwd <dir>] — restore a project_seed backup.
+  const rest = argv.slice(3);
+  let pkg = null;
+  let cwd = process.cwd();
+  for (let i = 0; i < rest.length; i += 1) {
+    if (rest[i] === "--cwd") cwd = rest[++i];
+    else if (!rest[i].startsWith("--")) pkg = rest[i];
+  }
+  if (!pkg) die("import: <package> path is required");
+  const pkgPath = pathResolve(pkg);
+  if (!existsSync(pkgPath) || statSync(pkgPath).size === 0) {
+    die(`import: package not found or empty: ${pkgPath}`);
+  }
+  const cwdAbs = pathResolve(cwd);
+  const receipt = absorbBootstrap(pkgPath, { cwd: cwdAbs });
+  if (receipt.rejectedReason) {
+    die(`import rejected: ${receipt.rejectedReason}`);
+  }
+  // The receipt's derivedState doesn't carry the restored DID; read it
+  // back from the installed keystore so the output is verifiable.
+  let restoredDid = null;
+  const stack = [cwdAbs];
+  while (stack.length) {
+    const dir = stack.pop();
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) stack.push(p);
+      else if (name === "local.public") restoredDid = readFileSync(p, "utf8").trim();
+    }
+    if (restoredDid) break;
+  }
+  stdout.write(
+    JSON.stringify({
+      ok: true,
+      kind: receipt.kind,
+      accepted: receipt.acceptedCount,
+      device_identity: restoredDid,
+    }) + "\n",
+  );
+}
+
 async function watchCmd() {
   // Args after the subcommand: --yaml <path>, --since <start|now|<seq>|<iso-ts>>,
   // --verify, --poll <ms>, --once.
@@ -578,7 +708,7 @@ function compileCmd() {
         out: result.outPath,
         kits: result.kits,
         kind: result.manifest.kind,
-        label: result.manifest.label,
+        label: opts.label ?? null,
       }) + "\n",
     );
   } catch (e) {
@@ -762,6 +892,7 @@ async function adminCmd() {
           }
           const result = compileKitBundleToFile({
             keystoreDir: tmpDir,
+            yamlPath: opts.yaml,
             outPath: pkgPath,
             groups: groupList,
             label: `rotation@${tsStamp}`,
@@ -1060,8 +1191,9 @@ function _formatExpiresLocal(expiresIso) {
 
 // ── vault: link / unlink — emits the corresponding log events ──────────
 // Wraps tn.vault.link / tn.vault.unlink. These only emit log events
-// (tn.vault.linked / tn.vault.unlinked); the yaml ceremony.mode flip is
-// Python-only today (see VaultNamespace.setLinkState docstring).
+// (tn.vault.linked / tn.vault.unlinked); the yaml ceremony.mode flip is a
+// separate library call (tn.vault.setLinkState in TS, tn.admin.set_link_state
+// in Python), not wired as a CLI subcommand here.
 async function vaultCmd() {
   const sub = argv[3];
   const rest = argv.slice(4);
@@ -1752,11 +1884,17 @@ switch (cmd) {
   case "validate":
     await validateCmd();
     break;
+  case "export":
+    await exportCmd();
+    break;
+  case "import":
+    importCmd();
+    break;
   case undefined:
   case "--help":
   case "-h":
     process.stderr.write(
-      "tn-js <init|wallet|account|vault|show|seal|verify|canonical|info|read|watch|streams|validate|compile|admin|bundle|add_recipient|absorb|group|firehose|inbox>\n" +
+      "tn-js <init|wallet|account|vault|show|seal|verify|canonical|info|read|watch|streams|validate|compile|admin|bundle|add_recipient|absorb|export|import|group|firehose|inbox>\n" +
         "  init       [<yaml-path>] — initialize / attach to a ceremony, print receipt JSON\n" +
         "  wallet status [<yaml>]\n" +
         "             print identity + optional ceremony details\n" +
@@ -1818,7 +1956,16 @@ switch (cmd) {
         "  add_recipient <group> <recipient> [--out <path>] [--yaml <path>] [--seal-for-recipient]\n" +
         "             One-shot mint + bundle a reader kit for a group/recipient.\n" +
         "  absorb     <package> [--yaml <path>] [--allow-self-absorb]\n" +
-        "             Install a .tnpkg (kit bundle, enrolment) into the active ceremony.\n" +
+        "             Install a received .tnpkg (kit bundle, enrolment) INTO the\n" +
+        "             existing ceremony at --yaml. To START a ceremony from a\n" +
+        "             downloaded seed, use `import` instead.\n" +
+        "  export     --kind project_seed --out <file> --include-secrets [--yaml <path>]\n" +
+        "             Mint a project_seed .tnpkg (tn.yaml + raw keystore) to carry to\n" +
+        "             another device. Restore it there with `tn-js import`.\n" +
+        "  import     <package> [--cwd <dir>]\n" +
+        "             Bootstrap a ceremony from a downloaded project_seed .tnpkg: writes\n" +
+        "             tn.yaml + keystore into the cwd and makes it live. The 'carry a\n" +
+        "             seed to a new device' entry point.\n" +
         "  group add  <name> [--fields a,b,c] [--cipher btn|jwe] [--yaml <path>]\n" +
         "             Add a group to an existing ceremony post-init.\n" +
         "  firehose stats|list|get ...  (gated; needs TN_FIREHOSE_URL + token)\n" +

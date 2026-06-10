@@ -16,7 +16,9 @@ test("Tn.ephemeral returns a working instance", async () => {
 test("Tn.usingRust reports the wasm-backed emit path before and after lazy attach", async () => {
   const tn = await Tn.ephemeral({ stdout: false });
   try {
-    assert.equal(tn.usingRust(), true);
+    // The wasm core attaches lazily on the first emit, so usingRust is
+    // truthfully false until then (mirrors Python's using_rust).
+    assert.equal(tn.usingRust(), false);
     tn.info("using_rust.test", { ok: 1 });
     assert.equal(tn.usingRust(), true);
   } finally {

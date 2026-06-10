@@ -88,9 +88,7 @@ fn read_raw_returns_audit_shape() {
     }));
     let order = raw
         .iter()
-        .find(|e| {
-            e.envelope.get("event_type").and_then(Value::as_str) == Some("order.created")
-        })
+        .find(|e| e.envelope.get("event_type").and_then(Value::as_str) == Some("order.created"))
         .unwrap();
     assert_eq!(order.plaintext_per_group["default"]["amount"], 7);
     // The audit shape carries crypto plumbing on the envelope.

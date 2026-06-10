@@ -380,6 +380,10 @@ test("admin.state marks recipients revoked after revoke", async () => {
       const leaf = res.leafIndex;
       await tn.admin.revokeRecipient("default", { leafIndex: leaf });
 
+      // Force the admin-state cache to reload from the durable log before we
+      // read it, so the just-revoked recipient is reflected (de-flakes a
+      // write-then-read race that surfaced intermittently in CI).
+      tn.admin.cache().refresh();
       const state = tn.admin.state();
       const rec = state.recipients.find((r) => r.leafIndex === leaf);
       assert.ok(rec, "revoked recipient must still appear in adminState");

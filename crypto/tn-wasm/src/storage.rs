@@ -76,7 +76,9 @@ impl JsStorageAdapter {
     /// of the required callbacks is missing / not callable.
     pub fn from_js(js_obj: JsValue) -> Result<Arc<dyn Storage>, JsError> {
         if !js_obj.is_object() {
-            return Err(JsError::new("storage: expected a JS object with callback methods"));
+            return Err(JsError::new(
+                "storage: expected a JS object with callback methods",
+            ));
         }
 
         let get_fn = |name: &str| -> Result<Function, JsError> {
@@ -173,10 +175,7 @@ impl Storage for JsStorageAdapter {
         // higher-resolution answer isn't available; callers that
         // need to distinguish "absent" from "errored" use `read`
         // and check `io::Error::kind`.
-        match self
-            .exists_fn
-            .call1(&JsValue::NULL, &path_to_js(path))
-        {
+        match self.exists_fn.call1(&JsValue::NULL, &path_to_js(path)) {
             Ok(v) => v.as_bool().unwrap_or(false),
             Err(_) => false,
         }

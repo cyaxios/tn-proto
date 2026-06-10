@@ -7,10 +7,11 @@ Lifecycle (the four-line dirt-easy summary):
     3. for e in tn.read(): print(e)           # iterate + decrypt
     4. tn.flush_and_close()                   # drain handlers (optional)
 
-Step 1 is optional once a ceremony is on disk; ``tn.info`` will discover
-``./tn.yaml`` (legacy) or ``./.tn/default/tn.yaml`` (multi-ceremony) on
-first use. Step 4 is optional in short scripts but recommended in
-long-running processes.
+Step 1 is optional once a Project is on disk; ``tn.info`` will discover
+``./tn.yaml`` (legacy), legacy ``./.tn/default/tn.yaml``, or an existing
+project-root ``./.tn/<project>/tn.yaml`` on first use. Fresh auto-init
+creates ``./.tn/<cwd-name>/tn.yaml``. Step 4 is optional in short scripts
+but recommended in long-running processes.
 
 Public API:
     tn.init(yaml_path)          # load or create ceremony + open log file
@@ -204,9 +205,11 @@ def _init_impl(
 
       1. ``$TN_YAML`` env var
       2. ``./tn.yaml`` in the current working directory (legacy layout)
-      3. ``./.tn/default/tn.yaml`` (multi-ceremony layout)
-      4. ``$TN_HOME/tn.yaml`` (default ``~/.tn/tn.yaml``)
-      5. None of the above → mint a fresh ceremony at ``./.tn/default/``
+      3. ``./.tn/default/tn.yaml`` (legacy multi-ceremony layout)
+      4. exactly one ``./.tn/<project>/tn.yaml`` project-root layout
+      5. ``$TN_HOME/tn.yaml`` (default ``~/.tn/tn.yaml``)
+      6. None of the above → mint a fresh Project at
+         ``./.tn/<cwd-name>/tn.yaml``
 
     With an explicit path, that path is used verbatim and the discovery
     chain is skipped. ``TN_STRICT=1`` blocks the no-arg form (raises
@@ -287,6 +290,7 @@ def _init_impl(
             identity=identity,
             extra_handlers=extra_handlers,
             stdout=stdout,
+            link=link,
             device_private_bytes=device_private_bytes,
             keystore_dir=keystore_dir,
             admin_log_path=admin_log_path,
@@ -523,7 +527,7 @@ def _auto_link_after_init(*, yaml_path: Path, identity: Any | None) -> None:
 
         try:
             attach_or_sync(_current_config_impl(), identity, vault_url)
-        except Exception:  # noqa: BLE001 — auto-link is best-effort; stay local
+        except Exception:
             _logger.exception(
                 "auto-link warm-attach failed; ceremony is still valid locally"
             )
@@ -1292,8 +1296,6 @@ def _get_or_create_cache() -> AdminStateCache:
     return _cached_admin_state
 
 
-from ._pkg_impl import _absorb_impl, _export_impl  # noqa: E402
-
 # Eager-import the `export` submodule so the import machinery binds
 # `tn.export` to the module here, BEFORE we point `tn.export` at the callable
 # below. Otherwise the lazy `from .export import export` inside `_export_impl`
@@ -1301,6 +1303,7 @@ from ._pkg_impl import _absorb_impl, _export_impl  # noqa: E402
 # and overwrites the callable with the module object — so the *second*
 # `tn.export(...)` failed with "'module' object is not callable".
 from . import export as _export_submodule  # noqa: F401, E402
+from ._pkg_impl import _absorb_impl, _export_impl  # noqa: E402
 
 absorb = _absorb_impl
 export = _export_impl

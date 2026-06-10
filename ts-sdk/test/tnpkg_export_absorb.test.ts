@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
 
 import {
   DeviceKey,
@@ -175,14 +176,14 @@ test("export(admin_log_snapshot) → absorb on a fresh peer applies envelopes", 
 
     const kitsDir = mkdtempSync(join(tmpdir(), "tnpkg-kits-"));
     try {
-      await producer.admin.addRecipient(
-        "default",
-        { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zAlice" },
-      );
-      await producer.admin.addRecipient(
-        "default",
-        { outKitPath: join(kitsDir, "default_bob.btn.mykit"), recipientDid: "did:key:zBob" },
-      );
+      await producer.admin.addRecipient("default", {
+        outKitPath: join(kitsDir, "default.btn.mykit"),
+        recipientDid: "did:key:zAlice",
+      });
+      await producer.admin.addRecipient("default", {
+        outKitPath: join(kitsDir, "default_bob.btn.mykit"),
+        recipientDid: "did:key:zBob",
+      });
 
       const pkgPath = join(a.tmpDir, "snapshot.tnpkg");
       await producer.pkg.export({ adminLogSnapshot: { outPath: pkgPath } }, pkgPath);
@@ -221,12 +222,15 @@ test("absorb surfaces leaf reuse when add(L) → revoke(L) → add(L)", async ()
 
     const kitsDir = mkdtempSync(join(tmpdir(), "tnpkg-equiv-"));
     try {
-      const resA = await producer.admin.addRecipient(
-        "default",
-        { outKitPath: join(kitsDir, "default.btn.mykit"), recipientDid: "did:key:zAlice" },
-      );
+      const resA = await producer.admin.addRecipient("default", {
+        outKitPath: join(kitsDir, "default.btn.mykit"),
+        recipientDid: "did:key:zAlice",
+      });
       const leaf = resA.leafIndex;
-      await producer.admin.revokeRecipient("default", { leafIndex: leaf, recipientDid: "did:key:zAlice" });
+      await producer.admin.revokeRecipient("default", {
+        leafIndex: leaf,
+        recipientDid: "did:key:zAlice",
+      });
 
       // Forge a third "added" for the same (group, leaf) by appending
       // directly to the producer's main log. We sign with the producer's
@@ -303,10 +307,21 @@ test("export(full_keystore) without confirmIncludesSecrets throws", async () => 
     // NodeRuntime.exportPkg enforces the secrets guard directly.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rt = (tn as any)._rt;
-    assert.throws(
-      () => rt.exportPkg({ kind: "full_keystore" }, out),
-      /confirmIncludesSecrets/,
-    );
+    assert.throws(() => rt.exportPkg({ kind: "full_keystore" }, out), /confirmIncludesSecrets/);
+    await tn.close();
+  } finally {
+    a.cleanup();
+  }
+});
+
+test("export(project_seed) without confirmIncludesSecrets throws", async () => {
+  const a = makeCeremony();
+  try {
+    const tn = await Tn.init(a.yamlPath);
+    const out = join(a.tmpDir, "project.tnpkg");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rt = (tn as any)._rt;
+    assert.throws(() => rt.exportPkg({ kind: "project_seed" }, out), /confirmIncludesSecrets/);
     await tn.close();
   } finally {
     a.cleanup();
@@ -324,6 +339,109 @@ test("export(full_keystore, confirmIncludesSecrets=true) bundles private materia
     assert.ok(body.has("body/local.private"), "private seed must be bundled");
     assert.ok(body.has("body/index_master.key"));
     assert.ok(body.has("body/WARNING_CONTAINS_PRIVATE_KEYS"));
+    await tn.close();
+  } finally {
+    a.cleanup();
+  }
+});
+
+test("export(project_seed) nests project control state and excludes application logs", async () => {
+  const a = makeCeremony();
+  try {
+    writeFileSync(join(a.tmpDir, ".tn/logs/tn.ndjson"), '{"event_type":"app.secret"}\n');
+    writeFileSync(join(a.tmpDir, ".tn/logs/tn.ndjson.1"), '{"event_type":"rotated.secret"}\n');
+
+    const tn = await Tn.init(a.yamlPath);
+    const out = join(a.tmpDir, "project.tnpkg");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (tn as any)._rt.exportPkg({ kind: "project_seed", confirmIncludesSecrets: true }, out);
+
+    const { manifest, body } = readTnpkg(out);
+    assert.equal(manifest.kind, "project_seed");
+    assert.equal(manifest.toDid, manifest.fromDid);
+    assert.equal(manifest.scope, "project");
+    assert.ok(isManifestSignatureValid(manifest));
+    assert.ok(body.has("body/tn.yaml"));
+    assert.ok(body.has("body/keys/local.private"));
+    assert.ok(body.has("body/keys/local.public"));
+    assert.ok(body.has("body/keys/default.btn.state"));
+    assert.ok(body.has("body/keys/default.btn.mykit"));
+    assert.ok(body.has("body/WARNING_CONTAINS_PRIVATE_KEYS"));
+    for (const name of body.keys()) {
+      assert.ok(!name.includes("/logs/"), `project_seed must not include app log member ${name}`);
+      assert.ok(!name.endsWith(".ndjson"), `project_seed must not include app log member ${name}`);
+    }
+    await tn.close();
+  } finally {
+    a.cleanup();
+  }
+});
+
+test("absorb(project_seed) adopts empty vault project id without overwriting", async () => {
+  const a = makeCeremony();
+  try {
+    const emptyYaml = readFileSync(a.yamlPath, "utf8").replace(
+      "  mode: local\n  cipher: btn\n",
+      [
+        "  mode: linked",
+        "  cipher: btn",
+        "  linked_vault: https://vault.example",
+        "  linked_project_id: ''",
+        "vault:",
+        "  enabled: true",
+        "  url: https://vault.example",
+        "  linked_project_id: ''",
+        "  autosync: true",
+        "  sync_interval_seconds: 600",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(a.yamlPath, emptyYaml, "utf8");
+
+    const tn = await Tn.init(a.yamlPath);
+    const basePkg = join(a.tmpDir, "project-empty.tnpkg");
+    const linkedPkg = join(a.tmpDir, "project-linked.tnpkg");
+    const otherPkg = join(a.tmpDir, "project-other.tnpkg");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (tn as any)._rt.exportPkg({ kind: "project_seed", confirmIncludesSecrets: true }, basePkg);
+
+    const { manifest, body } = readTnpkg(basePkg);
+    const linkedBody = new Map(body);
+    linkedBody.set(
+      "body/tn.yaml",
+      new TextEncoder().encode(
+        emptyYaml.replaceAll("linked_project_id: ''", "linked_project_id: proj_remote"),
+      ),
+    );
+    writeTnpkg(linkedPkg, manifest, Object.fromEntries(linkedBody));
+    const otherBody = new Map(body);
+    otherBody.set(
+      "body/tn.yaml",
+      new TextEncoder().encode(
+        emptyYaml.replaceAll("linked_project_id: ''", "linked_project_id: proj_other"),
+      ),
+    );
+    writeTnpkg(otherPkg, manifest, Object.fromEntries(otherBody));
+
+    writeFileSync(join(a.tmpDir, ".tn/logs/tn.ndjson"), '{"event_type":"app.event"}\n');
+
+    const adopted = await tn.pkg.absorb(linkedPkg);
+    assert.equal(adopted.rejectedReason, undefined);
+    let doc = parseYaml(readFileSync(a.yamlPath, "utf8")) as {
+      ceremony: Record<string, unknown>;
+      vault: Record<string, unknown>;
+    };
+    assert.equal(doc.vault.linked_project_id, "proj_remote");
+    assert.equal(doc.ceremony.linked_project_id, "proj_remote");
+
+    const ignored = await tn.pkg.absorb(otherPkg);
+    assert.equal(ignored.rejectedReason, undefined);
+    doc = parseYaml(readFileSync(a.yamlPath, "utf8")) as {
+      ceremony: Record<string, unknown>;
+      vault: Record<string, unknown>;
+    };
+    assert.equal(doc.vault.linked_project_id, "proj_remote");
+    assert.equal(doc.ceremony.linked_project_id, "proj_remote");
     await tn.close();
   } finally {
     a.cleanup();

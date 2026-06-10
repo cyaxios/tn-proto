@@ -189,6 +189,8 @@ def _did_client(device: DeviceKey) -> VaultClient:
 
 
 def _stamp_ceremony_yaml(yaml_path: Path, *, project_id: str, sync_logs: bool) -> None:
+    # The project-level ``vault:`` block is authoritative when present (a
+    # fresh init writes one), so stamp it alongside the legacy fields.
     doc = _yaml.safe_load(yaml_path.read_text()) or {}
     ceremony = doc.setdefault("ceremony", {})
     ceremony["mode"] = "linked"
@@ -196,6 +198,10 @@ def _stamp_ceremony_yaml(yaml_path: Path, *, project_id: str, sync_logs: bool) -
     ceremony["linked_project_id"] = project_id
     if sync_logs:
         ceremony["sync_logs"] = True
+    vault = doc.setdefault("vault", {})
+    vault["enabled"] = True
+    vault["url"] = VAULT_URL
+    vault["linked_project_id"] = project_id
     yaml_path.write_text(_yaml.safe_dump(doc, sort_keys=False))
 
 

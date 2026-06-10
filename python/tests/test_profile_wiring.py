@@ -27,8 +27,9 @@ SCRIPT_TEMPLATE = textwrap.dedent("""
     import tn
     tn.init(profile={profile!r})
     tn.info("evt.test", x=1)
+    cfg = tn.current_config()
     tn.flush_and_close()
-    log = pathlib.Path("./.tn/default/logs/tn.ndjson")
+    log = pathlib.Path(cfg.resolve_log_path())
     last_line = log.read_text().splitlines()[-1]
     last = json.loads(last_line)
     sig = last.get("signature")
@@ -63,7 +64,7 @@ def _run_profile_init(tmp_path: Path, profile: str) -> dict:
 def _yaml_sign_value(tmp_path: Path) -> bool:
     """Return ceremony.sign from the on-disk yaml."""
     doc = pyyaml.safe_load(
-        (tmp_path / ".tn" / "default" / "tn.yaml").read_text()
+        (tmp_path / ".tn" / tmp_path.name / "tn.yaml").read_text()
     )
     return doc["ceremony"]["sign"]
 
@@ -109,8 +110,9 @@ def test_default_profile_signs(tmp_path: Path):
         os.environ["TN_NO_STDOUT"] = "1"
         import tn
         tn.init()  # no profile kwarg
+        cfg = tn.current_config()
         tn.info("evt", x=1); tn.flush_and_close()
-        log = pathlib.Path("./.tn/default/logs/tn.ndjson")
+        log = pathlib.Path(cfg.resolve_log_path())
         last = json.loads(log.read_text().splitlines()[-1])
         print(json.dumps({"signature_present": bool(last.get("signature"))}))
     """).strip())

@@ -9,15 +9,16 @@ Discovery order (cwd-scoped; no implicit user-home attach):
 
     1. ``$TN_YAML``                       (env var, absolute or relative)
     2. ``./tn.yaml``                      (cwd, single-ceremony layout)
-    3. ``./.tn/default/tn.yaml``          (cwd, multi-ceremony layout)
-    4. CREATE FRESH at ``./.tn/default/tn.yaml`` and emit a loud notice.
+    3. ``./.tn/default/tn.yaml``          (cwd, legacy multi-ceremony layout)
+    4. exactly one ``./.tn/<project>/tn.yaml`` project-root layout
+    5. CREATE FRESH at ``./.tn/<cwd-name>/tn.yaml`` and emit a loud notice.
 
 ``$TN_HOME/tn.yaml`` is intentionally NOT in the chain: a project's tn
 calls must scope to that project. To opt in to a user-home ceremony
 explicitly, set ``TN_YAML=$TN_HOME/tn.yaml`` or call ``tn.init(<that
 path>)`` directly.
 
-Strict mode disables steps 2-3: ``TN_STRICT=1`` (env) or
+Strict mode disables steps 2-5: ``TN_STRICT=1`` (env) or
 ``tn.set_strict(True)`` (Python). When strict is on and no explicit init
 has happened, ``tn.log()`` raises ``RuntimeError`` exactly like today.
 
@@ -269,12 +270,12 @@ def _resolve_discovery_yaml() -> tuple[Path, bool] | None:
     if cwd_yaml.exists():
         return (cwd_yaml, False)
 
-    # Step 4: ./.tn/default/tn.yaml (multi-ceremony layout).
+    # Step 4: ./.tn/default/tn.yaml (legacy multi-ceremony layout).
     multi_yaml = (Path.cwd() / ".tn" / "default" / "tn.yaml").resolve()
     if multi_yaml.exists():
         return (multi_yaml, False)
 
-    # Step 4b (0.5.0a2): project-named ceremony `.tn/<project>/tn.yaml`
+    # Step 4b (0.5.0a2): project-root ceremony `.tn/<project>/tn.yaml`
     # when there's no `default` and exactly one project ceremony exists.
     project_yaml = _resolve_project_ceremony_yaml()
     if project_yaml is not None:
@@ -288,10 +289,13 @@ def _resolve_discovery_yaml() -> tuple[Path, bool] | None:
     # ceremony explicitly, set TN_YAML=$TN_HOME/tn.yaml or call
     # tn.init(<that path>) directly.
 
-    # Step 5: create fresh at ./.tn/default/tn.yaml — the multi-ceremony
-    # layout is the new default for fresh projects.
-    multi_yaml.parent.mkdir(parents=True, exist_ok=True)
-    return (multi_yaml, True)
+    # Step 5: create fresh at ./.tn/<cwd-name>/tn.yaml — the Project-root
+    # layout is the default for fresh projects.
+    from ._layout import project_layout
+
+    project_yaml = project_layout(project_dir=Path.cwd()).project_yaml.resolve()
+    project_yaml.parent.mkdir(parents=True, exist_ok=True)
+    return (project_yaml, True)
 
 
 def maybe_autoinit_load_only() -> None:
@@ -351,29 +355,13 @@ def maybe_autoinit() -> None:
     # Hand off to the regular init() so all the absorb/_reconcile/handler
     # plumbing fires exactly as it does for explicit init.
     #
-    # Bug fix (0.4.2a6): when we're auto-creating a fresh ceremony at
-    # the canonical multi-ceremony location ``<cwd>/.tn/default/tn.yaml``,
-    # dispatch through ``tn.init()`` (no positional yaml path) rather
-    # than ``tn.init(<path>)``. The no-arg form routes via
-    # ``_init_named_default_layout`` → ``_create_default_ceremony``,
-    # which passes ``keystore_dir=<.tn/default>/keys`` explicitly and
-    # produces the flat ``.tn/default/{admin,keys,logs,vault}/`` layout
-    # that matches explicit-init. The yaml-path form falls through to
-    # ``config.create_fresh`` with no override, which uses the legacy
-    # ``<yaml_dir>/.tn/<yaml_stem>/keys/`` rule — for our canonical
-    # yaml at ``.tn/default/tn.yaml`` (stem "tn") that's
-    # ``.tn/default/.tn/tn/keys`` — nested, surprising, and a mismatch
-    # with explicit-init.
-    #
-    # We only flip when:
-    #   (a) the path was created in this call (was_created=True), AND
-    #   (b) the path is the canonical multi-ceremony location.
-    # Existing yamls (was_created=False) are honoured at whatever
-    # location they live; explicit ``TN_YAML`` overrides similarly
-    # keep their literal path. Only the auto-create-fresh case is
-    # affected.
-    cwd_canonical = (Path.cwd() / ".tn" / "default" / "tn.yaml").resolve()
-    if was_created and yaml_path == cwd_canonical:
+    # Fresh auto-create must route through no-arg init so explicit init and
+    # auto-init produce the same Project-root layout. Existing YAMLs and
+    # explicit TN_YAML paths are still honored literally.
+    from ._layout import project_layout
+
+    cwd_project_yaml = project_layout(project_dir=Path.cwd()).project_yaml.resolve()
+    if was_created and yaml_path == cwd_project_yaml:
         _tn.init()
     else:
         _tn.init(yaml_path)

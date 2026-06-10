@@ -16,11 +16,16 @@
 // Body shape varies by `kind`. Producer / consumer dispatch lives in the
 // TNClient `export` / `absorb` methods.
 
-import { canonicalize } from "./canonical.js";
-import { bytesToB64, b64ToBytes } from "./encoding.js";
+import {
+  manifestClockDominates as rawClockDominates,
+  manifestClockMerge as rawClockMerge,
+  manifestKnownKinds,
+  manifestSigningBytes as rawManifestSigningBytes,
+  manifestToWireDict,
+  manifestVerifySignature,
+} from "../raw.js";
+import { bytesToB64 } from "./encoding.js";
 import type { DeviceKey } from "./signing.js";
-import { verify as verifySig } from "./signing.js";
-import { asDid } from "./types.js";
 
 /** Manifest schema version. Bump if required fields change incompatibly. */
 export const MANIFEST_VERSION = 1;
@@ -45,18 +50,13 @@ export type ManifestKind =
   // secret (`local.private`), and unlike `kit_bundle` it carries the
   // publisher `.btn.state` needed to ENCRYPT. Content-addressed + union-merge
   // on absorb (idempotent; two devices adding different groups → clean union).
-  | "group_keys";
+  | "group_keys"
+  | "identity_seed"
+  | "project_seed";
 
-export const KNOWN_KINDS: ReadonlySet<ManifestKind> = new Set<ManifestKind>([
-  "admin_log_snapshot",
-  "offer",
-  "enrolment",
-  "recipient_invite",
-  "kit_bundle",
-  "full_keystore",
-  "contact_update",
-  "group_keys",
-]);
+export const KNOWN_KINDS: ReadonlySet<ManifestKind> = new Set<ManifestKind>(
+  (manifestKnownKinds() as string[]) as ManifestKind[],
+);
 
 /** Vector clock keyed by `did → {event_type → max_seq}`. */
 export type VectorClock = Record<string, Record<string, number>>;
@@ -86,7 +86,7 @@ export type BodyContents = Record<string, Uint8Array>;
 
 /** Build the snake-case wire dict from a TS Manifest. Optional fields are
  * omitted when null/undefined so the canonical form stays stable. */
-function toWireDict(m: Manifest, includeSignature: boolean): Record<string, unknown> {
+function manifestToCandidateWireDict(m: Manifest, includeSignature: boolean): Record<string, unknown> {
   const out: Record<string, unknown> = {
     kind: m.kind,
     version: m.version,
@@ -108,6 +108,13 @@ function toWireDict(m: Manifest, includeSignature: boolean): Record<string, unkn
   return out;
 }
 
+function toWireDict(m: Manifest, includeSignature: boolean): Record<string, unknown> {
+  return manifestToWireDict(manifestToCandidateWireDict(m, includeSignature)) as Record<
+    string,
+    unknown
+  >;
+}
+
 /** Parse a snake-case JSON dict into a TS Manifest. Throws on missing
  * required fields. */
 function fromWireDict(doc: unknown): Manifest {
@@ -120,8 +127,16 @@ function fromWireDict(doc: unknown): Manifest {
   if (missing.length > 0) {
     throw new Error(`manifest missing required keys: ${JSON.stringify(missing)}`);
   }
+  let normalized: Record<string, unknown>;
+  try {
+    normalized = manifestToWireDict(d) as Record<string, unknown>;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(msg, { cause: e });
+  }
+
   const clock: VectorClock = {};
-  const rawClock = d["clock"];
+  const rawClock = normalized["clock"];
   if (rawClock && typeof rawClock === "object" && !Array.isArray(rawClock)) {
     for (const [did, etMap] of Object.entries(rawClock as Record<string, unknown>)) {
       if (!etMap || typeof etMap !== "object" || Array.isArray(etMap)) continue;
@@ -135,25 +150,29 @@ function fromWireDict(doc: unknown): Manifest {
   }
 
   const m: Manifest = {
-    kind: String(d["kind"]),
-    version: Math.trunc(Number(d["version"])),
-    fromDid: String(d["publisher_identity"]),
-    ceremonyId: String(d["ceremony_id"]),
-    asOf: String(d["as_of"]),
-    scope: typeof d["scope"] === "string" ? (d["scope"] as string) : "admin",
+    kind: String(normalized["kind"]),
+    version: Math.trunc(Number(normalized["version"])),
+    fromDid: String(normalized["publisher_identity"]),
+    ceremonyId: String(normalized["ceremony_id"]),
+    asOf: String(normalized["as_of"]),
+    scope: typeof normalized["scope"] === "string" ? (normalized["scope"] as string) : "admin",
     clock,
     eventCount:
-      typeof d["event_count"] === "number"
-        ? (d["event_count"] as number)
-        : Number(d["event_count"] ?? 0) || 0,
+      typeof normalized["event_count"] === "number"
+        ? (normalized["event_count"] as number)
+        : Number(normalized["event_count"] ?? 0) || 0,
   };
-  if (typeof d["recipient_identity"] === "string") m.toDid = d["recipient_identity"] as string;
-  if (typeof d["head_row_hash"] === "string") m.headRowHash = d["head_row_hash"] as string;
-  if (d["state"] !== undefined && d["state"] !== null) {
-    m.state = d["state"] as Record<string, unknown>;
+  if (typeof normalized["recipient_identity"] === "string") {
+    m.toDid = normalized["recipient_identity"] as string;
   }
-  if (typeof d["manifest_signature_b64"] === "string") {
-    m.manifestSignatureB64 = d["manifest_signature_b64"] as string;
+  if (typeof normalized["head_row_hash"] === "string") {
+    m.headRowHash = normalized["head_row_hash"] as string;
+  }
+  if (normalized["state"] !== undefined && normalized["state"] !== null) {
+    m.state = normalized["state"] as Record<string, unknown>;
+  }
+  if (typeof normalized["manifest_signature_b64"] === "string") {
+    m.manifestSignatureB64 = normalized["manifest_signature_b64"] as string;
   }
   return m;
 }
@@ -166,7 +185,7 @@ function fromWireDict(doc: unknown): Manifest {
  * excluded — the exact domain over which the producer signs. Matches
  * Python `TnpkgManifest.signing_bytes`. */
 export function manifestSigningBytes(m: Manifest): Uint8Array {
-  return canonicalize(toWireDict(m, false));
+  return rawManifestSigningBytes(manifestToCandidateWireDict(m, false));
 }
 
 /** Sign a manifest in place. Returns the same object with
@@ -183,16 +202,7 @@ export function verifyManifest(m: Manifest): void {
   if (!m.manifestSignatureB64) {
     throw new Error("verifyManifest: manifest is unsigned (manifest_signature_b64 missing)");
   }
-  let sigBytes: Uint8Array;
-  try {
-    // Python uses standard base64; our internal helper accepts both
-    // standard and URL-safe by normalizing through b64ToBytes.
-    sigBytes = b64ToBytes(m.manifestSignatureB64);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`verifyManifest: signature is not valid base64: ${msg}`, { cause: e });
-  }
-  const ok = verifySig(asDid(m.fromDid), manifestSigningBytes(m), sigBytes);
+  const ok = manifestVerifySignature(toWireDict(m, true));
   if (!ok) {
     throw new Error(
       `verifyManifest: signature does not verify against publisher_identity ${JSON.stringify(m.fromDid)}`,
@@ -216,13 +226,7 @@ export function isManifestSignatureValid(m: Manifest): boolean {
 
 /** True iff vector clock `a` >= `b` on every (did, event_type) coord. */
 export function clockDominates(a: VectorClock, b: VectorClock): boolean {
-  for (const [did, etMap] of Object.entries(b)) {
-    const aMap = a[did] ?? {};
-    for (const [et, seq] of Object.entries(etMap)) {
-      if ((aMap[et] ?? 0) < seq) return false;
-    }
-  }
-  return true;
+  return rawClockDominates(a, b);
 }
 
 /**
@@ -253,18 +257,7 @@ export function reuseIsInformed(
 
 /** Pointwise max of two vector clocks. Pure. */
 export function clockMerge(a: VectorClock, b: VectorClock): VectorClock {
-  const out: VectorClock = {};
-  for (const src of [a, b]) {
-    for (const [did, etMap] of Object.entries(src)) {
-      const slot = out[did] ?? {};
-      for (const [et, seq] of Object.entries(etMap)) {
-        const cur = slot[et] ?? 0;
-        if (seq > cur) slot[et] = seq;
-      }
-      out[did] = slot;
-    }
-  }
-  return out;
+  return rawClockMerge(a, b) as VectorClock;
 }
 
 /** Build a zero-clock empty manifest with the required fields populated.

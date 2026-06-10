@@ -29,9 +29,22 @@ no interactive prompts unless a TTY is detected):
                              Vault-linked ceremonies push state to the
                              vault as a side effect (autosync hook).
 
-    tn absorb <package>      Install a .tnpkg into the active ceremony.
-                             Bootstrap kinds (project_seed, identity_seed)
-                             auto-bind the runtime when no init is bound.
+    tn absorb <package>      Install a .tnpkg into the ceremony already
+                             active here (run from a project dir or pass
+                             --yaml). It does NOT create a ceremony; to
+                             start one from a downloaded seed, use
+                             `tn import`.
+
+    tn import <package>      Bootstrap a ceremony from a downloaded
+                             project_seed .tnpkg: writes tn.yaml + the
+                             keystore into the current directory and binds
+                             the runtime. The "carry a seed to a new
+                             device" entry point.
+
+    tn export --kind         Mint a project_seed .tnpkg (tn.yaml + raw
+        project_seed         keystore) from the active ceremony to carry
+        --include-secrets    to another device, where `tn import` restores
+        --out <path>         it.
 
     tn read [<log>]          Print a log in flat decoded form.
 
@@ -77,6 +90,7 @@ from . import wallet as _wallet
 from . import wallet_restore as _wallet_restore
 from . import wallet_restore_loopback as _wallet_restore_loopback
 from . import wallet_restore_passphrase as _wallet_restore_passphrase
+from ._init_attach import _warm_attach_signal
 from .cli_canonical import cmd_canonical
 from .cli_compile import cmd_compile
 from .cli_info import cmd_info
@@ -412,9 +426,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         # challenge-issued JWT — no browser claim needed. The warm signal
         # is TN_API_KEY in the environment (wins) or, as a fallback, the
         # account remembered in identity.json from a prior
-        # `tn account connect`. Falls through to the claim-URL flow if
-        # the authenticated attach can't be completed.
-        warm_signal = os.environ.get("TN_API_KEY") or identity.linked_account_id
+        # `tn account connect` — the latter only when the target vault is
+        # that account's vault (see _warm_attach_signal). Falls through to
+        # the claim-URL flow if the authenticated attach can't be completed.
+        warm_signal = _warm_attach_signal(identity, vault_url)
         if warm_signal and _try_warm_attach(yaml_path, identity, vault_url, args.cipher):
             return 0
 
@@ -601,6 +616,10 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
     passphrase = getattr(args, "passphrase", None) or os.environ.get(
         "TN_ACCOUNT_PASSPHRASE"
     )
+    # Normalized vault coordinates: the project-level ``vault:`` block is
+    # authoritative (a declared-but-disabled vault means NO push), with the
+    # legacy ``ceremony.linked_*`` fields as fallback.
+    link = _wallet.vault_link_info(cfg)
     try:
         # Step 1 (two-way sync): pull the account inbox and ABSORB it
         # before pushing, so a revocation another device/publisher made
@@ -609,8 +628,10 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
         if not push_only and not drain_queue:
             _pull_absorb_step(cfg, identity, yaml_path)
 
-        # Step 2: push (backup keystore + yaml to the linked vault).
-        if not cfg.is_linked():
+        # Step 2: push (backup keystore + yaml to the linked vault). The
+        # normalized ``link`` view gates the push: vault sync disabled or
+        # URL-less means nothing to push (main's guard semantics).
+        if not link.enabled or not link.url:
             if push_only:
                 _die(f"ceremony {cfg.ceremony_id} is not linked; nothing to push")
             from .sync_state import is_account_bound
@@ -625,10 +646,8 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
                 "run `tn wallet link` to enable backup)"
             )
             return 0
-        if cfg.linked_vault is None:
-            _die(f"ceremony {cfg.ceremony_id} reports linked but linked_vault is empty")
 
-        client = VaultClient.for_identity(identity, cfg.linked_vault)
+        client = VaultClient.for_identity(identity, link.url)
         try:
             if drain_queue:
                 pending_before = len(_wallet.read_sync_queue(cfg.ceremony_id))
@@ -658,7 +677,7 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
                 sign_with=identity_signer,
                 author_did=identity.did,
             )
-            print(f"Synced {cfg.ceremony_id} -> {cfg.linked_vault}")
+            print(f"Synced {cfg.ceremony_id} -> {link.url}")
             print(f"  uploaded {len(result.uploaded)} files: {result.uploaded}")
             if result.published_groups:
                 print(
@@ -1298,9 +1317,12 @@ def _resolve_yaml_or_discover(arg: str | None) -> Path:
             f"multiple ceremony yamls in cwd ({names}). Pass --yaml to disambiguate."
         )
     _die(
-        "no yaml found. Looked at $TN_YAML, ./tn.yaml, ~/.tn/tn.yaml, and "
-        "any *.yaml in the cwd with a ceremony: block. Pass --yaml or `cd` "
-        "into a project directory."
+        "no ceremony found here. Looked at $TN_YAML, ./tn.yaml, "
+        "~/.tn/tn.yaml, and any *.yaml in the cwd with a ceremony: block.\n"
+        "  - Restoring a downloaded seed (.tnpkg)?  run: tn import <seed.tnpkg>\n"
+        "  - Starting a brand-new project?          run: tn init <name>\n"
+        "  - Ceremony lives elsewhere?              pass --yaml <path>, or cd "
+        "into its directory."
     )
 
 
@@ -1314,7 +1336,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     try:
         groups = args.groups.split(",") if args.groups else None
         out = bundle_for_recipient(
-            args.recipient_identity,
+            args.recipient,
             args.out,
             groups=groups,
             seal_for_recipient=getattr(args, "seal_for_recipient", False),
@@ -1324,7 +1346,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         # tn.recipient.added event in the log. Print a one-line summary
         # the user can hand off alongside the .tnpkg.
         print(f"[tn bundle] wrote {out}")
-        print(f"[tn bundle]   recipient: {args.recipient_identity}")
+        print(f"[tn bundle]   recipient: {args.recipient}")
         print(f"[tn bundle]   ceremony:  {cfg.ceremony_id}  (cipher={cfg.cipher_name})")
         print(f"[tn bundle]   groups:    {groups or sorted(g for g in cfg.groups if g != 'tn.agents')}")
     finally:
@@ -1573,6 +1595,98 @@ def _rotate_emit_bundles(
         written = bundle_for_recipient(rdid, pkg_path, groups=groups)
         artifacts.append(Path(written))
     return artifacts
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """Restore a project_seed backup (keys + config) into this directory.
+
+    ``tn import`` is the user-facing restore verb. Unlike ``tn absorb``
+    (which binds an existing ceremony first), import drives the
+    bootstrap-aware absorb path so a ``project_seed`` lands into a FRESH
+    directory with no prior ``tn init``. ``absorb`` remains for kit
+    bundles / enrolments into an already-initialized ceremony.
+    """
+    from .pkg import absorb
+
+    package = Path(args.package).resolve()
+    if not package.exists() or package.stat().st_size == 0:
+        _die(f"package not found or empty: {package}")
+
+    try:
+        receipt = absorb(package)
+    except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+        _die(f"import failed: {exc}", code=1)
+        return 1  # unreachable; _die raises
+
+    if getattr(receipt, "legacy_status", None) == "rejected":
+        _die(
+            f"[tn import] rejected: {getattr(receipt, 'legacy_reason', 'unknown')}",
+            code=1,
+        )
+
+    kind = getattr(receipt, "kind", "?")
+    accepted = getattr(receipt, "accepted_count", 0)
+    restored_did = ""
+    try:
+        from . import current_config, flush_and_close
+        restored_did = current_config().device.device_identity
+        flush_and_close()
+    except Exception:  # noqa: BLE001 — DID display is best-effort
+        pass
+
+    print(f"[tn import] restored kind={kind} files={accepted}")
+    if restored_did:
+        print(f"[tn import]   device:  {restored_did}")
+    print("[tn import] ceremony is live here; run `tn read` or `tn info <event_type>`.")
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Mint a .tnpkg backup from the active ceremony.
+
+    Currently supports ``--kind project_seed`` — the complete
+    identity+config backup (raw private keys + canonical ``tn.yaml``)
+    that ``tn import`` restores on a fresh device. Requires
+    ``--include-secrets`` because the bundle carries private keys.
+    """
+    from . import current_config, flush_and_close
+    from . import init as tn_init
+    from .pkg import export as pkg_export
+
+    yaml_path = _resolve_yaml_or_discover(args.yaml)
+    out_path = Path(args.out).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    tn_init(yaml_path)
+    written = None
+    did = ""
+    try:
+        cfg = current_config()
+        did = cfg.device.device_identity
+        if args.kind == "project_seed":
+            if not args.include_secrets:
+                _die(
+                    "tn export --kind project_seed writes the device's raw "
+                    "private keys into the bundle. Pass --include-secrets to "
+                    "acknowledge.",
+                    code=2,
+                )
+            written = pkg_export(
+                out_path,
+                kind="project_seed",
+                cfg=cfg,
+                confirm_includes_secrets=True,
+            )
+        else:
+            _die(f"unsupported export kind for the CLI: {args.kind!r}", code=2)
+    finally:
+        flush_and_close()
+
+    print(f"[tn export] wrote {written}")
+    print(f"[tn export]   kind:    {args.kind}")
+    print(f"[tn export]   device:  {did}")
+    print(f"[tn export]   restore: tn import {Path(written).name}")
+    return 0
 
 
 def cmd_rotate(args: argparse.Namespace) -> int:
@@ -3155,7 +3269,7 @@ def build_parser() -> argparse.ArgumentParser:
         "bundle",
         help="Mint a kit_bundle .tnpkg for one recipient (FINDINGS #5 footgun-free).",
     )
-    p_bundle.add_argument("recipient_identity", help="DID of the recipient receiving the kit.")
+    p_bundle.add_argument("recipient", help="DID of the recipient receiving the kit.")
     p_bundle.add_argument("out", help="Destination .tnpkg path.")
     p_bundle.add_argument(
         "--yaml", default=None,
@@ -3248,7 +3362,11 @@ def build_parser() -> argparse.ArgumentParser:
     # --- tn absorb <package> -----------------------------------
     p_absorb = sub.add_parser(
         "absorb",
-        help="Absorb a .tnpkg (kit bundle, enrolment, etc.) into the active ceremony.",
+        help=(
+            "Absorb a .tnpkg (kit bundle, enrolment, etc.) into the ceremony "
+            "already active here. It does not create a ceremony; to start one "
+            "from a downloaded seed, use `tn import` instead."
+        ),
     )
     p_absorb.add_argument("package", help="Path to the .tnpkg to absorb.")
     p_absorb.add_argument(
@@ -3265,6 +3383,36 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_absorb.set_defaults(func=cmd_absorb)
+
+    # --- tn import <package> (user-facing restore verb) ---------
+    p_import = sub.add_parser(
+        "import",
+        help="Restore a project_seed backup (keys + config) into this directory.",
+    )
+    p_import.add_argument("package", help="Path to the .tnpkg backup to restore.")
+    p_import.set_defaults(func=cmd_import)
+
+    # --- tn export --kind project_seed --out <file> --include-secrets
+    p_export_pkg = sub.add_parser(
+        "export",
+        help="Mint a .tnpkg backup (--kind project_seed) from the active ceremony.",
+    )
+    p_export_pkg.add_argument(
+        "--kind", default="project_seed", choices=["project_seed"],
+        help="Bundle kind to mint. Default: project_seed.",
+    )
+    p_export_pkg.add_argument(
+        "--out", required=True, help="Destination .tnpkg path.",
+    )
+    p_export_pkg.add_argument(
+        "--include-secrets", action="store_true",
+        help="Required for project_seed: acknowledges the bundle carries raw private keys.",
+    )
+    p_export_pkg.add_argument(
+        "--yaml", default=None,
+        help="Path to your tn.yaml. Default: discover via the standard chain.",
+    )
+    p_export_pkg.set_defaults(func=cmd_export)
 
     # --- tn rotate [<group>] [--groups a,b,c] [--out path] -----
     # The deploy-shaped verb: rotate one or more groups and emit

@@ -39,7 +39,7 @@ def _setup_unsigned_ceremony(tmp_path: Path, sign_value: bool) -> Path:
         timeout=60,
     )
     assert rc.returncode == 0, rc.stderr
-    yaml_path = tmp_path / ".tn" / "default" / "tn.yaml"
+    yaml_path = tmp_path / ".tn" / tmp_path.name / "tn.yaml"
     import yaml as pyyaml
     doc = pyyaml.safe_load(yaml_path.read_text())
     doc["ceremony"]["sign"] = sign_value

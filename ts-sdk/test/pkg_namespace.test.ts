@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isManifestSignatureValid, readTnpkg } from "../src/index.js";
 import { Tn } from "../src/tn.js";
 
 test("tn.pkg.export adminLogSnapshot writes a tnpkg and returns its path", async () => {
@@ -49,6 +50,21 @@ test("tn.pkg.compileEnrolment writes a tnpkg and returns CompiledPackage", async
     assert.equal(result.outPath, outPath);
     assert.ok(typeof result.manifestSha256 === "string" && result.manifestSha256.length === 64);
     assert.ok(statSync(outPath).size > 0, "compiled enrolment file should be non-empty");
+
+    // The compiled artifact must be a CANONICAL, signed kit_bundle (not the
+    // legacy "tnpkg-v1" manifest) so `absorb` accepts it: canonical kind,
+    // a verifying signature, readers-only state, and kits packed under body/.
+    const { manifest, body } = readTnpkg(outPath);
+    assert.equal(manifest.kind, "kit_bundle");
+    assert.equal(manifest.version, 1);
+    assert.equal(isManifestSignatureValid(manifest), true);
+    assert.equal((manifest.state as { kind?: string }).kind, "readers-only");
+    const stateKits = (manifest.state as { kits?: Array<{ name: string }> }).kits ?? [];
+    assert.ok(stateKits.length >= 1, "state.kits should list at least one kit");
+    assert.ok(
+      [...body.keys()].some((k) => k.startsWith("body/") && k.endsWith(".btn.mykit")),
+      "reader kits must be packed under body/<group>.btn.mykit",
+    );
   } finally {
     await tn.close();
     rmSync(tmp, { recursive: true, force: true });

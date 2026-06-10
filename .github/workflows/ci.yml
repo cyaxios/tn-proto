@@ -58,7 +58,8 @@ jobs:
         working-directory: python
         shell: bash
         # Excluded:
-        #  - integration/ + test_scenarios.py + test_vault_* + test_browser_wasm_interop.py
+        #  - integration/ + test_scenarios.py + test_vault_*_handler.py
+        #    + test_browser_wasm_interop.py
         #    — depend on the tn-proto-org vault server (separate repo)
         #  - test_rust_runtime_interop.py — depends on a tn-core-cli binary
         #  - test_protocol_events_location.py + test_reader_ergonomics.py
@@ -72,7 +73,6 @@ jobs:
             --ignore=tests/test_browser_wasm_interop.py \
             --ignore=tests/test_vault_pull_handler.py \
             --ignore=tests/test_vault_push_handler.py \
-            --ignore=tests/test_vault_push_pull_pure_functions.py \
             --ignore=tests/test_vault_sync_handler.py \
             --ignore=tests/test_protocol_events_location.py \
             --ignore=tests/test_reader_ergonomics.py \
@@ -100,10 +100,11 @@ jobs:
       - name: cargo clippy (cognitive complexity gate)
         # Mirrors the Python radon complexity gate. clippy.toml at the
         # workspace root sets cognitive-complexity-threshold = 15.
-        # New functions above the threshold must either be split, or
-        # earn an explicit #[allow(clippy::cognitive_complexity)] with
-        # a justifying comment (five exist today in tn-core; each
-        # documents why its cohesion is intentional).
+        # tn-core currently carries zero
+        # #[allow(clippy::cognitive_complexity)]: high-complexity
+        # functions were decomposed rather than grandfathered. A new
+        # function over the threshold must either land below it or earn
+        # an explicit allow with a justifying comment.
         run: cargo clippy --workspace --manifest-path Cargo.toml -- -D clippy::cognitive_complexity
 
       - name: cargo test

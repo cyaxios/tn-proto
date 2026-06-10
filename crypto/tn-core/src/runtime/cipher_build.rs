@@ -1,16 +1,99 @@
-//! Group-cipher construction helpers (standard + BTN, admin variants).
+//! Per-group cipher construction from keystore material, plus the
+//! fresh-ceremony minting used by [`Runtime::ephemeral`](super::Runtime::ephemeral).
 //!
-//! Split out of `runtime.rs` (file-size refactor). Behavior unchanged;
-//! `use super::*` re-imports everything these helpers need from the parent.
+//! [`Runtime::init`](super::Runtime::init) calls these once per declared
+//! group to turn the on-disk `<group>.btn.state` / `<group>.btn.mykit`
+//! files (current + rotation-archived) into a live [`GroupCipher`], and
+//! the admin verbs reuse [`rebuild_btn_cipher`] after mutating publisher
+//! state. The storage-aware variants route their reads through the
+//! injected [`Storage`](crate::storage::Storage) handle; the bare
+//! `std::fs` reference impls are retained for parity.
+//!
+//! [`GroupCipher`]: crate::cipher::GroupCipher
 
-use super::*;
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex, RwLock};
+
+use uuid::Uuid;
+
+use crate::cipher::{
+    btn::{BtnPublisherCipher, BtnReaderCipher},
+    GroupCipher,
+};
+use crate::config::{Config, GroupSpec};
+use crate::{Error, Result};
+
+use super::GroupState;
 
 /// Return value of `build_cipher_with_admin`: (cipher, optional pub cipher for admin, optional mykit bytes).
-pub(crate) type BuildCipherResult = (
+type BuildCipherResult = (
     Arc<dyn GroupCipher>,
     Option<BtnPublisherCipher>,
     Option<Vec<u8>>,
 );
+
+/// The per-group tables [`Runtime::init`](super::Runtime) holds: the live
+/// [`GroupState`] map (cipher + index key + HMAC template), the btn admin
+/// side-table, and the remembered mykit bytes per group.
+type GroupTables = (
+    BTreeMap<String, Arc<RwLock<GroupState>>>,
+    BTreeMap<String, Arc<Mutex<BtnPublisherCipher>>>,
+    BTreeMap<String, Option<Vec<u8>>>,
+);
+
+/// Build the per-group state tables for every declared group: derive each
+/// group's index key, construct its cipher from keystore material, and
+/// pre-initialize the HMAC template. The group-construction loop lifted
+/// out of [`Runtime::init`](super::Runtime).
+///
+/// Returns `(groups, btn_admin, btn_mykit)`: the live [`GroupState`] map,
+/// the typed btn-publisher side-table admin verbs mutate, and the
+/// remembered current mykit bytes per group (for rebuilding the cipher
+/// after an admin mutation).
+///
+/// # Errors
+///
+/// Propagates index-key derivation, HMAC-template, and cipher-construction
+/// errors (see [`build_cipher_with_admin_with_storage`]).
+pub(crate) fn build_group_states(
+    cfg: &Config,
+    master_index_key: &[u8; 32],
+    keystore: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<GroupTables> {
+    let mut groups: BTreeMap<String, Arc<RwLock<GroupState>>> = BTreeMap::new();
+    let mut btn_admin: BTreeMap<String, Arc<Mutex<BtnPublisherCipher>>> = BTreeMap::new();
+    let mut btn_mykit: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
+
+    for (name, spec) in &cfg.groups {
+        let index_key = crate::indexing::derive_group_index_key(
+            master_index_key,
+            &cfg.ceremony.id,
+            name,
+            spec.index_epoch,
+        )?;
+        // Call site 4: cipher construction reads `<group>.btn.state`
+        // and `<group>.btn.mykit` through storage.
+        let (cipher, maybe_pub_cipher, mykit_bytes) =
+            build_cipher_with_admin_with_storage(spec, keystore, name, storage)?;
+        let hmac_template = crate::indexing::build_hmac_template(&index_key)?;
+        groups.insert(
+            name.clone(),
+            Arc::new(RwLock::new(GroupState {
+                cipher,
+                index_key,
+                hmac_template,
+            })),
+        );
+        if let Some(pub_cipher) = maybe_pub_cipher {
+            btn_admin.insert(name.clone(), Arc::new(Mutex::new(pub_cipher)));
+        }
+        btn_mykit.insert(name.clone(), mykit_bytes);
+    }
+
+    Ok((groups, btn_admin, btn_mykit))
+}
 
 /// Returns `(cipher, Option<BtnPublisherCipher for admin>, Option<mykit_bytes>)`.
 ///
@@ -29,7 +112,7 @@ pub(crate) fn build_cipher_with_admin(
             "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
         )),
         "bgw" => Err(Error::NotImplemented(
-            "BGW groups run through the Python runtime; FFI not wired in tn-core",
+            "BGW groups run through the Python runtime; FFI port deferred",
         )),
         other => Err(Error::InvalidConfig(format!("unknown cipher {other:?}"))),
     }
@@ -61,7 +144,7 @@ pub(crate) fn build_cipher_with_admin_with_storage(
             "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
         )),
         "bgw" => Err(Error::NotImplemented(
-            "BGW groups run through the Python runtime; FFI not wired in tn-core",
+            "BGW groups run through the Python runtime; FFI port deferred",
         )),
         other => Err(Error::InvalidConfig(format!("unknown cipher {other:?}"))),
     }
@@ -71,7 +154,7 @@ pub(crate) fn build_cipher_with_admin_with_storage(
 /// `<group>.btn.mykit` through `storage`; `*.btn.mykit.revoked.<ts>`
 /// rotation siblings are still discovered via `std::fs::read_dir`
 /// pending Phase 7 follow-up on the directory-listing call sites.
-fn build_btn_cipher_with_admin_with_storage(
+pub(crate) fn build_btn_cipher_with_admin_with_storage(
     keystore: &Path,
     group: &str,
     storage: &Arc<dyn crate::storage::Storage>,
@@ -111,7 +194,7 @@ fn build_btn_cipher_with_admin_with_storage(
 /// `std::fs::read_dir` because directory listing through storage is
 /// part of the trait but not yet wired into all of init's helpers
 /// (Phase 7 follow-up).
-fn collect_btn_kit_bytes_with_storage(
+pub(crate) fn collect_btn_kit_bytes_with_storage(
     keystore: &Path,
     group: &str,
     storage: &Arc<dyn crate::storage::Storage>,
@@ -165,10 +248,51 @@ fn collect_btn_kit_bytes_with_storage(
     Ok(kits)
 }
 
-// NOTE: the retired-`PublisherState` archival reader (`discover_retired_btn_states`)
-// was removed here — it was the read-half of an unwired feature (no writer ever
-// emitted `<group>.btn.state.retired.<N>` files, and nothing called it). Intent
-// captured in cyaxios/tn-proto#118 for a deliberate rebuild.
+/// Internal: feeds [`Runtime`]'s historical-decrypt path on the read
+/// side (surfaced as `tn.read()` / `tn read`).
+///
+/// Scan `keystore` for files of the form `<group>.btn.state.retired.<N>`
+/// (where N is a u32 — the epoch the state served as active). Returns
+/// each as `(epoch, bytes)`. Files whose suffix doesn't parse as u32
+/// are skipped silently. Used by the publisher-side init path to
+/// archive retired states alongside the active one, so historical
+/// keywalk decryption has the seed material available.
+///
+/// 0.4.3a1 only. Pre-rename keystores use `<group>.btn.state.revoked.<ts>`
+/// which intentionally is NOT picked up here — those entries archived
+/// the prior PublisherState (kind 0x03), not the new lightweight
+/// RetiredPublisherState (kind 0x04), so attempting to deserialize them
+/// as retired states would error.
+pub(crate) fn discover_retired_btn_states(
+    keystore: &Path,
+    group: &str,
+) -> std::io::Result<Vec<(u32, Vec<u8>)>> {
+    let prefix = format!("{group}.btn.state.retired.");
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(keystore) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e),
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name_str.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Ok(epoch) = rest.parse::<u32>() else {
+            continue;
+        };
+        let bytes = std::fs::read(entry.path())?;
+        out.push((epoch, bytes));
+    }
+    Ok(out)
+}
 
 /// Collect all kit files for a group: the current `<group>.btn.mykit` first,
 /// followed by any `<group>.btn.mykit.revoked.<ts>` siblings sorted by
@@ -179,7 +303,7 @@ fn collect_btn_kit_bytes_with_storage(
 /// entries stay readable. `BtnReaderCipher` tries each kit in order and
 /// the first successful decrypt wins.
 #[allow(dead_code)] // retained as the non-storage reference impl; init now goes through *_with_storage.
-fn collect_btn_kit_bytes(keystore: &Path, group: &str) -> Result<Vec<Vec<u8>>> {
+pub(crate) fn collect_btn_kit_bytes(keystore: &Path, group: &str) -> Result<Vec<Vec<u8>>> {
     let mut kits: Vec<Vec<u8>> = Vec::new();
 
     let current = keystore.join(format!("{group}.btn.mykit"));
@@ -227,7 +351,7 @@ fn collect_btn_kit_bytes(keystore: &Path, group: &str) -> Result<Vec<Vec<u8>>> {
 }
 
 #[allow(dead_code)] // retained as the non-storage reference impl; init now goes through *_with_storage.
-fn build_btn_cipher_with_admin(keystore: &Path, group: &str) -> Result<BuildCipherResult> {
+pub(crate) fn build_btn_cipher_with_admin(keystore: &Path, group: &str) -> Result<BuildCipherResult> {
     // Filenames verified against tn/cipher.py::BtnGroupCipher:
     //   <keystore>/<group>.btn.state                  - serialized PublisherState (SECRET)
     //   <keystore>/<group>.btn.mykit                  - current self-kit (for decrypt)
@@ -282,3 +406,104 @@ pub(crate) fn rebuild_btn_cipher(
     Ok(cipher)
 }
 
+/// Mint a fresh btn ceremony at `root`. Layout matches the test helper
+/// in `tests/common/mod.rs::setup_minimal_btn_ceremony`:
+///
+/// ```text
+/// <root>/
+///   .tn/
+///     keys/
+///       local.private        — 32-byte Ed25519 seed
+///       index_master.key     — 32 random bytes
+///       default.btn.state    — serialized PublisherState
+///       default.btn.mykit    — minted ReaderKit
+///       tn.agents.btn.state  — serialized PublisherState (reserved policy group)
+///       tn.agents.btn.mykit  — minted ReaderKit (reserved policy group)
+///   tn.yaml
+/// ```
+///
+/// Used by [`Runtime::ephemeral`]. Lives in the public crate so
+/// downstream tests + benches don't have to duplicate it.
+///
+/// Auto-injects the reserved `tn.agents` group per the 2026-04-25
+/// read-ergonomics spec §2.3. Pure-logging users pay nothing — the
+/// group's plaintext stays empty when no policy file exists.
+pub(crate) fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
+    use crate::keystore_backend::atomic_write_bytes;
+    use rand_core::{OsRng, RngCore};
+
+    let keystore = root.join(".tn").join("keys");
+    std::fs::create_dir_all(&keystore)?;
+
+    // Every write below uses atomic_write_bytes (tmp + fsync +
+    // rename) so a crash mid-mint never leaves a half-formed
+    // keystore on disk — partial state files would fail to parse on
+    // next load and burn the ceremony silently. No CAS here because
+    // this is fresh-ceremony init: by construction nobody else is
+    // writing to this keystore yet.
+
+    // Device key — 32-byte Ed25519 seed.
+    let dk = crate::DeviceKey::generate();
+    atomic_write_bytes(&keystore.join("local.private"), &dk.private_bytes())?;
+
+    // Master index key — 32 random bytes from the OS.
+    let mut master = [0u8; 32];
+    OsRng.fill_bytes(&mut master);
+    atomic_write_bytes(&keystore.join("index_master.key"), &master)?;
+
+    // default group: btn publisher state + self-reader kit.
+    let mut seed = [0u8; 32];
+    OsRng.fill_bytes(&mut seed);
+    let mut pub_state = tn_btn::PublisherState::setup_with_seed(tn_btn::Config, seed)
+        .map_err(|e| std::io::Error::other(format!("btn setup failed: {e:?}")))?;
+    let kit = pub_state
+        .mint()
+        .map_err(|e| std::io::Error::other(format!("btn mint failed: {e:?}")))?;
+    atomic_write_bytes(&keystore.join("default.btn.state"), &pub_state.to_bytes())?;
+    atomic_write_bytes(&keystore.join("default.btn.mykit"), &kit.to_bytes())?;
+
+    // tn.agents reserved group: btn publisher state + self-reader kit.
+    let mut agents_seed = [0u8; 32];
+    OsRng.fill_bytes(&mut agents_seed);
+    let mut agents_state = tn_btn::PublisherState::setup_with_seed(tn_btn::Config, agents_seed)
+        .map_err(|e| std::io::Error::other(format!("btn setup (tn.agents) failed: {e:?}")))?;
+    let agents_kit = agents_state
+        .mint()
+        .map_err(|e| std::io::Error::other(format!("btn mint (tn.agents) failed: {e:?}")))?;
+    atomic_write_bytes(
+        &keystore.join("tn.agents.btn.state"),
+        &agents_state.to_bytes(),
+    )?;
+    atomic_write_bytes(
+        &keystore.join("tn.agents.btn.mykit"),
+        &agents_kit.to_bytes(),
+    )?;
+
+    let did = dk.did().to_string();
+    let id = format!("cer_eph_{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let yaml = format!(
+        "ceremony: {{id: {id}, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
+         keystore: {{path: ./.tn/keys}}\n\
+         device: {{device_identity: \"{did}\"}}\n\
+         public_fields: []\n\
+         default_policy: private\n\
+         groups:\n\
+         \x20 default:\n\
+         \x20   policy: private\n\
+         \x20   cipher: btn\n\
+         \x20   recipients:\n\
+         \x20     - {{recipient_identity: \"{did}\"}}\n\
+         \x20   index_epoch: 0\n\
+         \x20 \"tn.agents\":\n\
+         \x20   policy: private\n\
+         \x20   cipher: btn\n\
+         \x20   recipients:\n\
+         \x20     - {{recipient_identity: \"{did}\"}}\n\
+         \x20   index_epoch: 0\n\
+         \x20   fields: [instruction, use_for, do_not_use_for, consequences, on_violation_or_error, policy]\n\
+         fields: {{}}\n\
+         llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
+    );
+    crate::keystore_backend::atomic_write_bytes(&root.join("tn.yaml"), yaml.as_bytes())?;
+    Ok(())
+}

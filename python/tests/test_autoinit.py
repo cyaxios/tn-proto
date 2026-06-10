@@ -1,14 +1,15 @@
 """Tests for tn._autoinit — discovery chain, loud notice, strict mode.
 
 Coverage:
-  * Step 6 (auto-create) fires when no env var, no ./tn.yaml, no
-    ./.tn/default/tn.yaml, no $TN_HOME yaml exist; loud notice prints
-    once; subsequent emits reuse the same runtime. New ceremonies are
-    minted at ``./.tn/default/tn.yaml`` (the multi-ceremony layout).
+  * Step 6 (auto-create) fires when no env var, no ./tn.yaml, no legacy
+    ./.tn/default/tn.yaml, no project-root yaml, and no $TN_HOME yaml
+    exist; loud notice prints once; subsequent emits reuse the same
+    runtime. New Projects are minted at ``./.tn/<cwd-name>/tn.yaml``.
   * Step 2 ($TN_YAML) loads an existing ceremony; no notice.
   * Step 3 (./tn.yaml) loads an existing ceremony; no notice.
-  * Step 4 (./.tn/default/tn.yaml) loads an existing ceremony; no notice.
-  * Step 5 ($TN_HOME yaml) loads an existing ceremony; no notice.
+  * Step 4 (./.tn/default/tn.yaml) loads an existing legacy ceremony; no notice.
+  * Step 5 (exactly one ./.tn/<project>/tn.yaml) loads an existing Project; no notice.
+  * Step 6 ($TN_HOME yaml) loads an existing ceremony; no notice.
   * Strict mode (TN_STRICT=1 env var or tn.set_strict(True)) raises the
     standard "tn.init must be called" error and skips auto-init.
   * The loud notice fires exactly once per process even across multiple
@@ -58,8 +59,8 @@ def _reset_runtime_and_autoinit_state(monkeypatch):
 
 
 def test_autoinit_creates_fresh_ceremony_when_nothing_found(tmp_path, monkeypatch, capsys):
-    """No env var, no cwd yaml, no ./.tn/default/, no $TN_HOME yaml →
-    step 6 auto-creates at ./.tn/default/tn.yaml."""
+    """No env var, no cwd yaml, no existing .tn project, no $TN_HOME yaml →
+    auto-create at ./.tn/<cwd-name>/tn.yaml."""
     cwd = tmp_path / "project"
     cwd.mkdir()
     home = tmp_path / "tnhome"
@@ -75,9 +76,10 @@ def test_autoinit_creates_fresh_ceremony_when_nothing_found(tmp_path, monkeypatc
     # tn.info returns None (REPL-friendly); verify init worked via state.
     assert tn._dispatch_rt is not None
 
-    # The yaml should now exist at ./.tn/default/tn.yaml (multi-ceremony layout).
-    minted = cwd / ".tn" / "default" / "tn.yaml"
+    # The yaml should now exist at ./.tn/<cwd-name>/tn.yaml.
+    minted = cwd / ".tn" / "project" / "tn.yaml"
     assert minted.exists()
+    assert not (cwd / ".tn" / "default" / "tn.yaml").exists()
     # Legacy locations are NOT touched on a fresh project.
     assert not (cwd / "tn.yaml").exists()
     assert not (home / "tn.yaml").exists()

@@ -1,4 +1,6 @@
-//! Stage-level perf instrumentation for the emit hot path.
+//! Internal stage-timing instrumentation (`TN_PERF_TRACE`) for the write hot
+//! path; not a protocol surface. See [`crate::Runtime`] for the actual
+//! event API. Reach here directly only to read or reset stage timings.
 //!
 //! Enabled when the `TN_PERF_TRACE` env var is set at process start.
 //! Each named stage accumulates `count` and `total_ns` into a static
@@ -100,8 +102,7 @@ fn record(stage: &'static str, ns: u64) {
 /// expensive stages appear first.
 pub fn snapshot() -> Vec<(&'static str, StageStats)> {
     let g = counters().lock().expect("perf counters mutex poisoned");
-    let mut out: Vec<(&'static str, StageStats)> =
-        g.iter().map(|(k, v)| (*k, *v)).collect();
+    let mut out: Vec<(&'static str, StageStats)> = g.iter().map(|(k, v)| (*k, *v)).collect();
     out.sort_by(|a, b| b.1.total_ns.cmp(&a.1.total_ns));
     out
 }

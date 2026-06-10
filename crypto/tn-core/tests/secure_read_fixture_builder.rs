@@ -85,9 +85,7 @@ fn build_rust_secure_read_fixtures() {
         .expect("write admin_events_canonical.json");
     eprintln!(
         "wrote {} ({} bytes)",
-        fixtures_dir()
-            .join("admin_events_canonical.json")
-            .display(),
+        fixtures_dir().join("admin_events_canonical.json").display(),
         n
     );
 }

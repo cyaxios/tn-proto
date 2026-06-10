@@ -233,7 +233,7 @@ function collectFullBody(
   const layout: Record<string, string> = {};
   let n = 0;
   const add = (absPath: string): void => {
-    const token = `m${n}_${ulidish().slice(0, 6)}`;
+    const token = `body/m${n}_${ulidish().slice(0, 6)}`;
     n += 1;
     body.set(token, new Uint8Array(readFileSync(absPath)));
     layout[token] = relative(dir, absPath).split("\\").join("/");
@@ -484,7 +484,7 @@ test(
         // First push lands a generation; a correct gen-matched push advances
         // it; a writer still holding the STALE generation is rejected with 412.
         const negProject = ulidish();
-        const negBody = new Map<string, Uint8Array>([["v", new Uint8Array([1])]]);
+        const negBody = new Map<string, Uint8Array>([["body/v", new Uint8Array([1])]]);
         const first = await pushBody(clientNeg, passphrase, negProject, negBody, "*");
         assert.ok(first.generation >= 1, `first push should land a generation; got ${first.generation}`);
 
@@ -492,7 +492,7 @@ test(
           clientNeg,
           passphrase,
           negProject,
-          new Map([["v", new Uint8Array([2])]]),
+          new Map([["body/v", new Uint8Array([2])]]),
           String(first.generation),
         );
         assert.equal(
@@ -507,7 +507,7 @@ test(
             clientNeg,
             passphrase,
             negProject,
-            new Map([["v", new Uint8Array([3])]]),
+            new Map([["body/v", new Uint8Array([3])]]),
             String(first.generation), // STALE
           );
         } catch (e) {

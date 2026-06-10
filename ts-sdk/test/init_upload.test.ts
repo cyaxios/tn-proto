@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 
 import { Tn } from "../src/tn.js";
 import { readTnpkg } from "../src/tnpkg_io.js";
-import { decryptBodyBlob } from "../src/core/body_encryption.js";
+import { BODY_CIPHER_SUITE, BODY_FRAME, decryptBodyBlob } from "../src/core/body_encryption.js";
 
 // Stage 2 interop: `tn.initUpload` must produce exactly the artefact the
 // browser claim page (`static/claim/claim.js::decryptBody`) consumes —
@@ -29,7 +30,10 @@ test("initUpload produces a claim URL whose body decrypts with the fragment BEK"
       const b = init?.body as Uint8Array;
       capturedBody = new Uint8Array(b);
       return new Response(
-        JSON.stringify({ vault_id: "01TESTVAULTID0000000000000", expires_at: "2026-05-29T21:00:00Z" }),
+        JSON.stringify({
+          vault_id: "01TESTVAULTID0000000000000",
+          expires_at: "2026-05-29T21:00:00Z",
+        }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }) as unknown as typeof fetch;
@@ -46,10 +50,7 @@ test("initUpload produces a claim URL whose body decrypts with the fragment BEK"
     );
 
     // 2. Claim URL shape: {base}/claim/{vault_id}#k={passwordB64}.
-    assert.equal(
-      res.claimUrl,
-      `http://localhost:38790/claim/${res.vaultId}#k=${res.passwordB64}`,
-    );
+    assert.equal(res.claimUrl, `http://localhost:38790/claim/${res.vaultId}#k=${res.passwordB64}`);
     assert.equal(res.vaultId, "01TESTVAULTID0000000000000");
 
     // 3. Recover the BEK from the fragment and decrypt — the browser path.
@@ -58,6 +59,7 @@ test("initUpload produces a claim URL whose body decrypts with the fragment BEK"
     assert.equal(bek.length, 32, "BEK must be 32 bytes");
 
     const { body } = readTnpkg(capturedBody!);
+    assert.deepEqual([...body.keys()].sort(), ["body/encrypted.bin"]);
     const blob = body.get("body/encrypted.bin");
     assert.ok(blob, "tnpkg must carry body/encrypted.bin");
 
@@ -72,6 +74,45 @@ test("initUpload produces a claim URL whose body decrypts with the fragment BEK"
       names.some((n) => n.endsWith("tn.yaml")),
       `decrypted body should include tn.yaml; saw ${JSON.stringify(names)}`,
     );
+  } finally {
+    await tn.close();
+  }
+});
+
+test("initUpload package manifest binds the single encrypted body member", async () => {
+  const tn = await Tn.ephemeral({ stdout: false });
+  try {
+    let capturedBody: Uint8Array | null = null;
+    const mockFetch = (async (_url: string | URL, init?: RequestInit) => {
+      capturedBody = new Uint8Array(init?.body as Uint8Array);
+      return new Response(
+        JSON.stringify({
+          vault_id: "01TESTVAULTID0000000000000",
+          expires_at: "2026-05-29T21:00:00Z",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    await tn.initUpload({ vaultBase: "http://localhost:38790/", fetchImpl: mockFetch });
+
+    assert.ok(capturedBody, "POST body should have been captured");
+    const { manifest, body } = readTnpkg(capturedBody!);
+    assert.equal(manifest.kind, "full_keystore");
+    assert.deepEqual([...body.keys()].sort(), ["body/encrypted.bin"]);
+
+    const blob = body.get("body/encrypted.bin");
+    assert.ok(blob, "tnpkg must carry body/encrypted.bin");
+    const ciphertextSha256 =
+      "sha256:" + createHash("sha256").update(Buffer.from(blob)).digest("hex");
+
+    const bodyEncryption = manifest.state?.["body_encryption"] as Record<string, unknown>;
+    assert.equal(bodyEncryption["cipher_suite"], BODY_CIPHER_SUITE);
+    assert.equal(bodyEncryption["frame"], BODY_FRAME);
+    assert.equal(bodyEncryption["nonce_bytes"], 12);
+    assert.equal(bodyEncryption["ciphertext_sha256"], ciphertextSha256);
+    assert.equal(bodyEncryption["recipient_wrap"], undefined);
+    assert.equal(bodyEncryption["recipient_wraps"], undefined);
   } finally {
     await tn.close();
   }
@@ -94,7 +135,10 @@ test("initUpload sends X-Project-Name when the ceremony carries a project_name",
     const mockFetch = (async (_url: string | URL, init?: RequestInit) => {
       captured = (init?.headers as Record<string, string>) ?? {};
       return new Response(
-        JSON.stringify({ vault_id: "01TESTVAULTID0000000000000", expires_at: "2026-05-29T21:00:00Z" }),
+        JSON.stringify({
+          vault_id: "01TESTVAULTID0000000000000",
+          expires_at: "2026-05-29T21:00:00Z",
+        }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }) as unknown as typeof fetch;

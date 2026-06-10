@@ -65,12 +65,13 @@ class TestLiveEmitOnNonDefaultStream:
     def test_payments_info_writes_to_payments_log(self, tmp_path):
         import tn
 
-        h = tn.init("payments", profile="transaction", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        h = tn.use("payments", profile="transaction", project_dir=tmp_path)
         h.info("payment.charged", amount=4999, order_id="A100")
         tn.flush_and_close()
 
         # Payments' log file should exist and contain the event.
-        log_path = tmp_path / ".tn" / "payments" / "logs" / "payments.ndjson"
+        log_path = tmp_path / ".tn" / tmp_path.name / "logs" / "payments.ndjson"
         assert log_path.is_file(), f"expected log at {log_path}"
         contents = log_path.read_text(encoding="utf-8").splitlines()
         events = [json.loads(line) for line in contents if line.strip()]
@@ -80,7 +81,8 @@ class TestLiveEmitOnNonDefaultStream:
     def test_emit_does_not_raise(self, tmp_path):
         import tn
 
-        h = tn.init("audit_stream", profile="audit", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        h = tn.use("audit_stream", profile="audit", project_dir=tmp_path)
         # Multiple verbs all work without raising.
         h.log("evt.a")
         h.debug("evt.b", k=1)
@@ -92,15 +94,17 @@ class TestLiveEmitOnNonDefaultStream:
     def test_two_streams_emit_independently(self, tmp_path):
         import tn
 
-        a = tn.init("a", profile="transaction", project_dir=tmp_path)
-        b = tn.init("b", profile="audit", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        a = tn.use("a", profile="transaction", project_dir=tmp_path)
+        b = tn.use("b", profile="audit", project_dir=tmp_path)
 
         a.info("a.event", value=1)
         b.info("b.event", value=2)
         tn.flush_and_close()
 
-        a_log = tmp_path / ".tn" / "a" / "logs" / "a.ndjson"
-        b_log = tmp_path / ".tn" / "b" / "logs" / "b.ndjson"
+        project = tmp_path.name
+        a_log = tmp_path / ".tn" / project / "logs" / "a.ndjson"
+        b_log = tmp_path / ".tn" / project / "logs" / "b.ndjson"
 
         a_events = [
             json.loads(l) for l in a_log.read_text(encoding="utf-8").splitlines() if l.strip()
@@ -128,14 +132,16 @@ class TestEmitReadRoundtrip:
     def test_emit_then_read_returns_entries(self, tmp_path):
         import tn
 
-        h = tn.init("orders", profile="transaction", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        h = tn.use("orders", profile="transaction", project_dir=tmp_path)
         h.info("order.created", order_id="A100", amount=1000)
         h.info("order.created", order_id="A101", amount=2000)
         tn.flush_and_close()
 
         # Re-open and read.
         _registry_clear_again(tn)
-        h2 = tn.init("orders", profile="transaction", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        h2 = tn.use("orders", profile="transaction", project_dir=tmp_path)
         entries = list(h2.read())
         types = [e.event_type for e in entries]
         # At least the two we wrote.
@@ -174,28 +180,28 @@ class TestPerInstanceDispatch:
 
         assert tn._dispatch_rt is None
 
-        d = tn.init("default", project_dir=tmp_path)
+        d = tn.init(project="default", project_dir=tmp_path)
         d.info("evt.default", k=1)
         default_yaml = _P(tn.current_config().yaml_path).resolve()
         assert default_yaml == d.yaml_path.resolve()
 
-        # tn.init(name=...) rebinds the singleton onto the named
-        # ceremony so subsequent module-level tn.info / tn.read /
-        # tn.current_config calls operate against it.
-        b = tn.init("b", profile="audit", project_dir=tmp_path)
+        # tn.use(stream) returns a stream handle without rebinding the
+        # module-level Project singleton.
+        b = tn.use("b", profile="audit", project_dir=tmp_path, project="default")
         b.info("evt.b", k=1)
 
         assert (
             _P(tn.current_config().yaml_path).resolve()
-            == b.yaml_path.resolve()
-        ), "tn.init(name=...) must rebind the module-level singleton"
+            == d.yaml_path.resolve()
+        ), "tn.use(stream) must not rebind the module-level singleton"
         tn.flush_and_close()
 
     def test_named_streams_have_independent_runtimes(self, tmp_path):
         import tn
 
-        a = tn.init("a", profile="transaction", project_dir=tmp_path)
-        b = tn.init("b", profile="audit", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        a = tn.use("a", profile="transaction", project_dir=tmp_path)
+        b = tn.use("b", profile="audit", project_dir=tmp_path)
 
         a.info("evt.a", k=1)
         b.info("evt.b", k=1)
@@ -203,8 +209,9 @@ class TestPerInstanceDispatch:
 
         # Each stream's events landed in its own log — no
         # cross-contamination via singleton rebinding.
-        a_log = tmp_path / ".tn" / "a" / "logs" / "a.ndjson"
-        b_log = tmp_path / ".tn" / "b" / "logs" / "b.ndjson"
+        project = tmp_path.name
+        a_log = tmp_path / ".tn" / project / "logs" / "a.ndjson"
+        b_log = tmp_path / ".tn" / project / "logs" / "b.ndjson"
         assert a_log.is_file()
         assert b_log.is_file()
         a_text = a_log.read_text(encoding="utf-8")
@@ -227,12 +234,13 @@ class TestProfileEndToEnd:
     def test_file_replay_surface_profiles_persist(self, tmp_path, profile):
         import tn
 
-        h = tn.init("s", profile=profile, project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        h = tn.use("s", profile=profile, project_dir=tmp_path)
         h.info("evt.persisted", k=1)
         tn.flush_and_close()
 
         # Stream's log file exists with our event.
-        log_path = tmp_path / ".tn" / "s" / "logs" / "s.ndjson"
+        log_path = tmp_path / ".tn" / tmp_path.name / "logs" / "s.ndjson"
         assert log_path.is_file()
         text = log_path.read_text(encoding="utf-8")
         assert "evt.persisted" in text
@@ -245,12 +253,13 @@ class TestProfileEndToEnd:
         ``stdout`` profile."""
         import tn
 
-        h = tn.init("traces", profile="telemetry", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        h = tn.use("traces", profile="telemetry", project_dir=tmp_path)
         h.info("evt.fast", k=1)
         tn.flush_and_close()
 
         # Telemetry writes its own file under .tn/<name>/logs/.
-        log_path = tmp_path / ".tn" / "traces" / "logs" / "traces.ndjson"
+        log_path = tmp_path / ".tn" / tmp_path.name / "logs" / "traces.ndjson"
         assert log_path.is_file(), (
             "telemetry must persist to its own log file"
         )
@@ -277,13 +286,13 @@ class TestBareModuleApiStillWorks:
     def test_module_level_info_works(self, tmp_path):
         import tn
 
-        # ``tn.init()`` (no args) creates the default ceremony.
+        # ``tn.init()`` (no args) creates the workspace-named Project.
         tn.init(project_dir=tmp_path)
         # ``tn.info(...)`` writes to default's log.
         tn.info("module.evt", k=1)
         tn.flush_and_close()
 
-        log_path = tmp_path / ".tn" / "default" / "logs" / "tn.ndjson"
+        log_path = tmp_path / ".tn" / tmp_path.name / "logs" / "default.ndjson"
         assert log_path.is_file()
         text = log_path.read_text(encoding="utf-8")
         assert "module.evt" in text
@@ -292,5 +301,5 @@ class TestBareModuleApiStillWorks:
         import tn
 
         d = tn.init(project_dir=tmp_path)
-        # tn.use("default") returns the same handle.
-        assert tn.use("default", project_dir=tmp_path) is d
+        # The returned Project handle is the module-level singleton.
+        assert tn.current_config().yaml_path == d.yaml_path

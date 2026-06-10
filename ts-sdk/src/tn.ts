@@ -8,9 +8,10 @@
 //   4. await tn.close();
 //
 // Step 1 is optional once a ceremony is on disk; ``Tn.init()`` will
-// discover ``./tn.yaml`` (legacy) or ``./.tn/default/tn.yaml`` (multi-
-// ceremony) on first call. Step 4 is best-practice in long-running
-// processes; ephemeral ceremonies need it to clean their tempdir.
+// discover ``./tn.yaml`` (legacy), ``./.tn/default/tn.yaml`` (legacy
+// multi-ceremony), or create/open ``./.tn/<cwd-name>/tn.yaml`` on first
+// call. Step 4 is best-practice in long-running processes; ephemeral
+// ceremonies need it to clean their tempdir.
 //
 // Splits into namespaced sub-objects (tn.admin, tn.pkg, tn.vault,
 // tn.agents, tn.handlers). I/O verbs are async; emit/read stay sync.
@@ -359,14 +360,14 @@ export class Tn {
    * When `yamlPath` is omitted the discovery chain is consulted:
    *   1. `TN_YAML` env var
    *   2. `./tn.yaml`
-   *   3. `./.tn/default/tn.yaml`  (multi-ceremony layout, see
-   *      docs/directory-layout.md)
-   *   4. `$TN_HOME/tn.yaml`
+   *   3. `./.tn/default/tn.yaml`  (legacy multi-ceremony layout)
+   *   4. exactly one `./.tn/<project>/tn.yaml` project-root layout
    * If strict mode is active (`Tn.setStrict(true)`) and no file is found,
-   * an error is thrown. Otherwise a fresh ephemeral ceremony is minted.
+   * an error is thrown. Otherwise a fresh project-root ceremony is minted
+   * at `./.tn/<cwd-name>/tn.yaml`.
    *
-   * For named multi-ceremony projects, prefer `Tn.openCeremony(name)`
-   * which resolves directly against `.tn/<name>/tn.yaml`.
+   * Use `Tn.use(stream, { project })` for per-stream handles. Fresh
+   * project roots keep stream overlays at `.tn/<project>/streams/<stream>.yaml`.
    */
   static async init(yamlPath?: string, opts?: TnInitOptions): Promise<Tn> {
     let resolvedPath = yamlPath;
@@ -392,10 +393,17 @@ export class Tn {
         if (existsSync(candidate)) resolvedPath = candidate;
       }
 
-      // 4. $TN_HOME/tn.yaml
-      if (resolvedPath === undefined && process.env["TN_HOME"]) {
-        const candidate = join(process.env["TN_HOME"], "tn.yaml");
-        if (existsSync(candidate)) resolvedPath = candidate;
+      // 4. Existing project-root layout: exactly one .tn/<project>/tn.yaml,
+      // excluding the legacy default name handled above.
+      if (resolvedPath === undefined) {
+        const root = join(process.cwd(), ".tn");
+        if (existsSync(root)) {
+          const candidates = readdirSync(root)
+            .filter((name) => name !== "default" && _isValidCeremonyName(name))
+            .map((name) => join(root, name, "tn.yaml"))
+            .filter((path) => existsSync(path));
+          if (candidates.length === 1) resolvedPath = candidates[0];
+        }
       }
 
       if (resolvedPath === undefined) {
@@ -403,12 +411,15 @@ export class Tn {
           throw new Error(
             "Tn.init: no yaml path provided and strict mode is on. " +
               "Set TN_YAML env var, create ./tn.yaml, set TN_HOME, " +
-              "or pass a path explicitly to Tn.init(). " +
+              "or pass a path explicitly to Tn.init(). To start from a " +
+              "downloaded seed, run `tn-js import <seed.tnpkg>`. " +
               "(Strict mode is on via Tn.setStrict(true) or TN_STRICT=1.)",
           );
         }
-        // Fall back to ephemeral.
-        return Tn.ephemeral(opts);
+        const { ensureProjectLayoutOnDisk, defaultProjectName } = await import("./multi.js");
+        resolvedPath = ensureProjectLayoutOnDisk(defaultProjectName(process.cwd()), {
+          projectDir: process.cwd(),
+        });
       }
     }
 
@@ -477,18 +488,18 @@ export class Tn {
   }
 
   /**
-   * Get-or-create a named TN ceremony at ``.tn/<name>/tn.yaml``.
+   * Get-or-create a named stream inside a Project.
    *
    * Mirrors Python's ``tn.use(name)``. Same semantics, same
    * verb. ``Tn.openCeremony`` is kept as a deprecated alias.
    *
-   * The reserved name ``"default"`` resolves the default ceremony.
-   * Any other valid name resolves under ``.tn/<name>/``. If the
-   * directory does not exist on disk, it is auto-created — for the
-   * default ceremony, a fresh identity + keystore + full yaml are
-   * minted; for named streams, a lightweight extends-based yaml is
-   * written and identity is inherited from default (which is created
-   * first if absent).
+   * Fresh project-root streams live at
+   * ``.tn/<project>/streams/<stream>.yaml`` and write application
+   * entries to ``.tn/<project>/logs/<stream>.ndjson``. The Project root
+   * owns identity, groups, recipients, keystore, admin state, and vault
+   * control state. When ``project`` is omitted, the current Project is
+   * used if one is bound; otherwise the cwd name is inferred unless a
+   * legacy ``.tn/default/tn.yaml`` exists.
    *
    * **Handle interning.** Per-(projectDir, name), this call returns
    * the same ``Tn`` instance across repeated invocations within the
@@ -499,10 +510,17 @@ export class Tn {
    */
   static async use(
     name: string,
-    opts?: TnInitOptions & { projectDir?: string; profile?: string },
+    opts?: TnInitOptions & { projectDir?: string; profile?: string; project?: string },
   ): Promise<Tn> {
-    const { ensureCeremonyOnDisk, ceremonyYamlPath, checkProfileConflict, migrateLegacyLayout } =
-      await import("./multi.js");
+    const {
+      ensureCeremonyOnDisk,
+      ensureProjectStreamOnDisk,
+      ceremonyYamlPath,
+      defaultProjectName,
+      streamLayout,
+      checkProfileConflict,
+      migrateLegacyLayout,
+    } = await import("./multi.js");
     if (!_isValidCeremonyName(name)) {
       throw new Error(
         `Tn.use: invalid ceremony name ${JSON.stringify(name)}; ` +
@@ -510,6 +528,22 @@ export class Tn {
       );
     }
     const projectDir = opts?.projectDir ?? process.cwd();
+
+    if (opts?.project !== undefined) {
+      const layout = streamLayout(name, { project: opts.project, projectDir });
+      const cacheKey = `${layout.project.projectDir}::${name}`;
+      const cached = _registry.get(cacheKey);
+      if (cached !== undefined) return cached;
+      checkProfileConflict(layout.streamYaml, opts.profile);
+      ensureProjectStreamOnDisk(name, {
+        project: opts.project,
+        projectDir,
+        ...(opts.profile !== undefined ? { profile: opts.profile } : {}),
+      });
+      const tn = await Tn.init(layout.streamYaml, opts);
+      _registry.set(cacheKey, tn);
+      return tn;
+    }
 
     // Handle interning — Bug 8 fix. Cache by (resolved projectDir,
     // name). If we've already minted a Tn for this pair in this
@@ -529,6 +563,14 @@ export class Tn {
     }
 
     const yamlPath = ceremonyYamlPath(name, projectDir);
+    const defaultYamlPath = ceremonyYamlPath("default", projectDir);
+    if (name !== "default" && !existsSync(yamlPath) && !existsSync(defaultYamlPath)) {
+      return Tn.use(name, {
+        ...opts,
+        project: defaultProjectName(projectDir),
+        projectDir,
+      });
+    }
     checkProfileConflict(yamlPath, opts?.profile);
     const ensureOpts: { projectDir?: string; profile?: string } = { projectDir };
     if (opts?.profile !== undefined) ensureOpts.profile = opts.profile;
@@ -536,8 +578,7 @@ export class Tn {
     // Will the default ceremony get auto-minted as a side effect?
     // Bug 2 fix: surface a loud, one-time notice so the operator
     // sees that a fresh project DID was just created.
-    const defaultYamlBefore = ceremonyYamlPath("default", projectDir);
-    const willMintDefault = !existsSync(defaultYamlBefore);
+    const willMintDefault = !existsSync(defaultYamlPath);
 
     ensureCeremonyOnDisk(name, ensureOpts);
 
@@ -557,7 +598,7 @@ export class Tn {
    */
   static async openCeremony(
     name: string,
-    opts?: TnInitOptions & { projectDir?: string; profile?: string },
+    opts?: TnInitOptions & { projectDir?: string; profile?: string; project?: string },
   ): Promise<Tn> {
     return Tn.use(name, opts);
   }
@@ -813,8 +854,12 @@ export class Tn {
     const m = yp.match(/[/\\]\.tn[/\\]([^/\\]+)[/\\]tn\.yaml$/);
     // Under tsc's noUncheckedIndexedAccess (or strict regex-result
     // typing), m[1] is `string | undefined` even when the match
-    // succeeded. Fall back to "default" for safety.
-    return m?.[1] ?? "default";
+    // succeeded. Fall back to the project-stream layout for safety.
+    if (m?.[1]) return m[1];
+    // Project-stream layout: `.tn/<project>/streams/<name>.yaml`
+    // (see multi.ts streamLayout). The stream name is the ceremony name.
+    const s = yp.match(/[/\\]\.tn[/\\][^/\\]+[/\\]streams[/\\]([^/\\]+)\.ya?ml$/);
+    return s?.[1] ?? "default";
   }
 
   /** True iff this is the default ceremony. */
@@ -827,9 +872,12 @@ export class Tn {
     return this._rt.config;
   }
 
-  /** True when this BTN runtime routes its public write path through Rust/WASM. */
+  /** True iff this ceremony's runtime has an attached Rust/WASM core
+   *  servicing the emit path. False before the first emit (wasm attaches
+   *  lazily) and after an admin-driven runtime reset. Mirrors Python's
+   *  `using_rust`. The read path remains pure-TS today. */
   usingRust(): boolean {
-    return this._rt.usingRust();
+    return this._rt.isWasmActive();
   }
 
   /**

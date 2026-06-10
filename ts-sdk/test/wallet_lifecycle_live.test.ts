@@ -80,7 +80,7 @@ function collectFullBody(
   const layout: Record<string, string> = {};
   let n = 0;
   const add = (absPath: string): void => {
-    const token = `m${n}_${ulidish().slice(0, 6)}`;
+    const token = `body/m${n}_${ulidish().slice(0, 6)}`;
     n += 1;
     body.set(token, new Uint8Array(readFileSync(absPath)));
     layout[token] = relative(dir, absPath).split("\\").join("/");
@@ -295,22 +295,19 @@ test(
       )}`,
     );
 
-    // FINDING (documented, not faked): the log-derived admin cache
-    // (`admin.state().groups`) comes back EMPTY on a fresh-dir passphrase
-    // restore — the reducer's LKV cache is not rebuilt from the restored log
-    // on first `admin.state()` access. The group is nonetheless genuinely
-    // ROUTABLE (the btn key round-tripped — proven by the decrypt below), and
-    // the yaml declaration survives (asserted above). So this is a cache-warm
-    // gap, not a key/routing loss. We assert the gap rather than pretend the
-    // cache is warm.
+    // The gap this test used to pin (admin.state().groups EMPTY after a
+    // fresh-dir restore) is CLOSED: adminState now derives state().groups
+    // from the restored config when the LKV cache is cold, so every
+    // yaml-declared group (including the restored `auditors`) surfaces.
     const restored = await Tn.init(destYaml);
     try {
       assert.deepEqual(
-        restored.admin.state().groups.map((g) => g.group),
-        [],
-        "EXPECTED-GAP: admin.state().groups is empty after a fresh-dir restore " +
-          "(LKV cache not rebuilt from the restored log); update this assertion " +
-          "if restore starts warming the admin cache",
+        restored.admin
+          .state()
+          .groups.map((g) => g.group)
+          .sort(),
+        ["auditors", "default", "tn.agents"],
+        "admin.state().groups must surface every restored yaml group (config-fallback adminState)",
       );
 
       // (2) ROUTABLE: a FRESH G-routed write decrypts on read-back. If the

@@ -1,5 +1,8 @@
-//! Pure reducer: given an attested TN envelope, produce a typed
-//! `StateDelta` describing the administrative state change. No I/O.
+//! Internal admin-log machinery behind [`crate::Runtime`]'s admin verbs
+//! (`tn.admin.*` / `tn rotate`); see [`crate::AdminState`]. Pure reducer:
+//! given an attested TN envelope, produces a typed `StateDelta` describing
+//! the administrative state change. No I/O. Reach here directly only to fold
+//! admin envelopes by hand.
 //!
 //! Used on the publisher side to drive `tn.recipients()` / `tn.admin_state()`
 //! and on the vault side to dispatch to Mongo writes (`routes_sync.py`).

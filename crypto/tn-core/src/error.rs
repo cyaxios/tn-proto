@@ -1,13 +1,55 @@
 //! Public error taxonomy.
+//!
+//! [`enum@Error`] is the single error type returned across the tn-core public
+//! API — the [`crate::Runtime`] admin/emit/read verbs, [`crate::Manifest`]
+//! parse/verify, and cipher/config loading all surface it — and [`Result`]
+//! is the crate-wide `Result<T, Error>` alias they return. These map up to
+//! the user-facing `tn.*` SDK verbs and the `tn` CLI: an error a user sees
+//! (say a keystore conflict on `tn rotate`) is one of these variants
+//! crossing the language boundary.
+//!
+//! Most variants are terminal. The one routinely worth catching is
+//! [`Error::KeystoreConflict`] — recoverable by re-reading state and
+//! retrying the admin verb:
+//!
+//! ```
+//! use tn_core::Error;
+//!
+//! fn rotate_group() -> Result<(), Error> {
+//!     // An admin verb that lost a compare-and-swap race on the keystore.
+//!     Err(Error::KeystoreConflict { group: "default".into() })
+//! }
+//!
+//! match rotate_group() {
+//!     Ok(()) => {}
+//!     Err(Error::KeystoreConflict { group }) => {
+//!         // Stale in-memory state: re-read the keystore for `group`,
+//!         // re-apply, and retry. Surfaced to users on `tn rotate` /
+//!         // `tn.admin.rotate(...)`.
+//!         assert_eq!(group, "default");
+//!     }
+//!     Err(_) => panic!("unexpected error variant"),
+//! }
+//! ```
 
 use std::path::PathBuf;
 
 use thiserror::Error;
 
-/// Convenience alias for `Result<T, Error>`.
+/// The crate-wide result type: `Result<T, Error>`.
+///
+/// Returned by every fallible tn-core API so callers can `?`-propagate
+/// against a single error type. See [`enum@Error`] for the variant taxonomy.
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// All errors produced by tn-core.
+///
+/// Returned (via [`Result`]) across the crate's public API — the
+/// [`crate::Runtime`] admin/emit/read verbs, [`crate::Manifest`]
+/// parse/verify, and cipher/config loading. Variants are grouped by
+/// failure domain and each documents when it fires. The only routinely
+/// recoverable variant is [`Error::KeystoreConflict`] (re-read state and
+/// retry) — see the module docs for the pattern.
 #[derive(Debug, Error)]
 pub enum Error {
     /// Configuration value is missing or invalid.
@@ -110,7 +152,9 @@ pub enum Error {
     /// Raised by `keystore_backend::LocalKeystore::write_state` and
     /// surfaced on the runtime admin verbs so the operator sees a
     /// recoverable, named failure rather than silent data loss.
-    #[error("keystore state for group {group:?} has diverged on disk; re-read and retry the admin verb")]
+    #[error(
+        "keystore state for group {group:?} has diverged on disk; re-read and retry the admin verb"
+    )]
     KeystoreConflict {
         /// Group whose state file diverged.
         group: String,

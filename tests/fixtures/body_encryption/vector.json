@@ -1,0 +1,13 @@
+{
+  "frame": "tn-encrypted-body-v2-zip",
+  "cipher_suite": "aes-256-gcm",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "nonce_hex": "a0a1a2a3a4a5a6a7a8a9aaab",
+  "plaintext_sha256": "sha256:ce2c7590e140dcaa310fc2cf94d7513476e5b6a3ab511f95af65ba551238f1fb",
+  "sealed_blob_sha256": "sha256:8b11ec9c6620f6e3e8fc36d54cfb009c2b14c1184bd11360fba4e3492673824a",
+  "body_utf8": {
+    "body/README.txt": "TN sealed body fixture\n",
+    "body/keys/local.public": "did:key:z6Mkfixture",
+    "body/tn.yaml": "ceremony:\n  id: fixture\nkeystore:\n  path: ./.tn/fixture/keys\n"
+  }
+}

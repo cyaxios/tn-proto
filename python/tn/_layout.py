@@ -11,18 +11,24 @@ See ``docs/directory-layout.md`` for the contract this implements.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from ._defaults import DEFAULT_CEREMONY_NAME, LEGACY_DEFAULT_DIRNAME
 
 __all__ = [
+    "ProjectLayout",
+    "StreamLayout",
     "TN_ROOT_DIRNAME",
     "TNInvalidName",
     "ceremony_dir",
     "ceremony_yaml_path",
+    "default_project_name",
     "is_valid_ceremony_name",
     "list_ceremonies_on_disk",
     "migrate_legacy_layout",
+    "project_layout",
+    "stream_layout",
     "tn_root",
 ]
 
@@ -42,6 +48,33 @@ _VALID_NAME = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$")
 
 class TNInvalidName(ValueError):
     """Raised when a registry name fails ``is_valid_ceremony_name``."""
+
+
+@dataclass(frozen=True)
+class ProjectLayout:
+    """Intended 0.5 project-root layout under ``<workspace>/.tn/<project>/``."""
+
+    workspace: Path
+    project: str
+    project_dir: Path
+    project_yaml: Path
+    keys_dir: Path
+    streams_dir: Path
+    logs_dir: Path
+    admin_dir: Path
+    vault_dir: Path
+
+
+@dataclass(frozen=True)
+class StreamLayout:
+    """Intended stream overlay/log/admin paths for a project."""
+
+    project: ProjectLayout
+    stream: str
+    stream_yaml: Path
+    log_path: Path
+    admin_log_path: Path
+    extends_relpath: str
 
 
 def is_valid_ceremony_name(name: str) -> bool:
@@ -78,6 +111,60 @@ def tn_root(project_dir: Path | str | None = None) -> Path:
     """
     base = Path(project_dir) if project_dir is not None else Path.cwd()
     return base.resolve() / TN_ROOT_DIRNAME
+
+
+def default_project_name(project_dir: Path | str | None = None) -> str:
+    """Return the project name implied by the workspace directory name."""
+    base = Path(project_dir) if project_dir is not None else Path.cwd()
+    name = base.resolve().name
+    _require_valid_name(name)
+    return name
+
+
+def project_layout(
+    project: str | None = None,
+    *,
+    project_dir: Path | str | None = None,
+) -> ProjectLayout:
+    """Plan the intended project-root layout without touching the filesystem.
+
+    ``project_dir`` is the workspace root. When ``project`` is omitted, the
+    workspace directory name is used as the project name.
+    """
+    name = project if project is not None else default_project_name(project_dir)
+    _require_valid_name(name)
+    workspace = (Path(project_dir) if project_dir is not None else Path.cwd()).resolve()
+    pdir = workspace / TN_ROOT_DIRNAME / name
+    return ProjectLayout(
+        workspace=workspace,
+        project=name,
+        project_dir=pdir,
+        project_yaml=pdir / "tn.yaml",
+        keys_dir=pdir / "keys",
+        streams_dir=pdir / "streams",
+        logs_dir=pdir / "logs",
+        admin_dir=pdir / "admin",
+        vault_dir=pdir / "vault",
+    )
+
+
+def stream_layout(
+    stream: str = DEFAULT_CEREMONY_NAME,
+    *,
+    project: str | None = None,
+    project_dir: Path | str | None = None,
+) -> StreamLayout:
+    """Plan the intended per-stream paths for ``tn.use(stream)``."""
+    _require_valid_name(stream)
+    pl = project_layout(project, project_dir=project_dir)
+    return StreamLayout(
+        project=pl,
+        stream=stream,
+        stream_yaml=pl.streams_dir / f"{stream}.yaml",
+        log_path=pl.logs_dir / f"{stream}.ndjson",
+        admin_log_path=pl.admin_dir / f"{stream}.ndjson",
+        extends_relpath="../tn.yaml",
+    )
 
 
 def ceremony_dir(name: str, *, project_dir: Path | str | None = None) -> Path:

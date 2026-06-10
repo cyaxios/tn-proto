@@ -1,10 +1,236 @@
-//! Admin verbs: cipher-agnostic recipient management (add/revoke/count,
-//! recipients listing, admin_state projection) plus vault link/unlink.
-//! Split out of `runtime.rs`; this is one of `Runtime`'s impl blocks.
+//! Admin / governance verbs: recipient management, state replay, kit
+//! bundling, and vault linkage.
+//!
+//! Holds the cipher-agnostic recipient verbs ([`Runtime::admin_add_recipient`]
+//! / [`Runtime::admin_revoke_recipient`] / [`Runtime::admin_revoked_count`]),
+//! the log-replay views ([`Runtime::recipients`] / [`Runtime::admin_state`]),
+//! the ergonomic bundling paths ([`Runtime::bundle_for_recipient`] /
+//! [`Runtime::admin_add_agent_runtime`]), and the vault-link attestations
+//! ([`Runtime::vault_link`] / [`Runtime::vault_unlink`]). The export /
+//! absorb verbs they lean on live in the sibling `runtime_export` module.
 
-use super::*;
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde_json::{Map, Value};
+
+use crate::admin_reduce::{reduce as admin_reduce_envelope, StateDelta};
+use crate::cipher::GroupCipher;
+use crate::{Error, Result};
+
+use super::cipher_build::rebuild_btn_cipher;
+use super::read::{apply_schema_defaults, merge_envelope};
+use super::util::{current_timestamp_rfc3339, sha2_256};
+use super::{
+    AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
+    AdminRotation, AdminState, AdminVaultLink, RecipientEntry, Runtime,
+};
 
 impl Runtime {
+    /// Mint a fresh kit for `recipient_did` across one or more groups
+    /// and bundle them into a single `.tnpkg` at `out_path`. Backs
+    /// `tn.bundle_for_recipient()`.
+    ///
+    /// The ergonomic one-call path for handing a recipient their reader
+    /// kits: it mints (via [`Runtime::admin_add_recipient`], so each mint
+    /// also writes a `tn.recipient.added` attestation), names the kit
+    /// files canonically, and exports the bundle. Mirrors Python's
+    /// `tn.bundle_for_recipient` and TS's `client.bundleForRecipient` —
+    /// closes the cross-binding parity gap surfaced by the cash-register
+    /// survey (Rust callers had no equivalent ergonomic verb and faced the
+    /// canonical-filename + temp-dir + export dance by hand).
+    ///
+    /// `groups = None` defaults to every NON-internal group declared in
+    /// the active ceremony (excludes `tn.agents` — that group is for
+    /// LLM-runtime bundles via [`Runtime::admin_add_agent_runtime`]).
+    /// Passing an explicit slice scopes the bundle.
+    ///
+    /// Returns the absolute path to the written `.tnpkg`.
+    ///
+    /// # Errors
+    ///
+    /// - [`InvalidConfig`](crate::Error::InvalidConfig) if no real groups
+    ///   are available, or a requested group is not declared in the yaml.
+    /// - Filesystem errors from minting kits or writing the bundle, plus
+    ///   any error propagated from [`Runtime::admin_add_recipient`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal admin lock is poisoned (see
+    /// [`Runtime::admin_add_recipient`]).
+    pub fn bundle_for_recipient(
+        &self,
+        recipient_did: &str,
+        out_path: &Path,
+        groups: Option<&[&str]>,
+    ) -> Result<PathBuf> {
+        let mut requested: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        match groups {
+            Some(list) => {
+                for g in list {
+                    let s = (*g).to_string();
+                    if seen.insert(s.clone()) {
+                        requested.push(s);
+                    }
+                }
+            }
+            None => {
+                // Default: every group except tn.agents (the internal
+                // LLM-policy channel doesn't make sense to ship to a
+                // human reader).
+                for k in self.cfg.groups.keys() {
+                    if k == "tn.agents" {
+                        continue;
+                    }
+                    requested.push(k.clone());
+                }
+            }
+        }
+
+        if requested.is_empty() {
+            return Err(Error::InvalidConfig(
+                "bundle_for_recipient: no groups to bundle. The ceremony \
+                 has only the internal tn.agents group; declare a \
+                 regular group first or pass an explicit groups slice."
+                    .to_string(),
+            ));
+        }
+
+        for g in &requested {
+            if !self.cfg.groups.contains_key(g) {
+                return Err(Error::InvalidConfig(format!(
+                    "bundle_for_recipient: unknown group {g:?}; this \
+                     ceremony declares {:?}",
+                    self.cfg.groups.keys().collect::<Vec<_>>()
+                )));
+            }
+        }
+
+        let td = tempfile::Builder::new()
+            .prefix("tn-bundle-")
+            .tempdir()
+            .map_err(Error::Io)?;
+        for gname in &requested {
+            let kit_path = td.path().join(format!("{gname}.btn.mykit"));
+            self.admin_add_recipient(gname, &kit_path, Some(recipient_did))?;
+        }
+
+        let opts = crate::runtime_export::ExportOptions {
+            kind: Some(crate::tnpkg::ManifestKind::KitBundle),
+            to_did: Some(recipient_did.to_string()),
+            scope: None,
+            confirm_includes_secrets: false,
+            groups: Some(requested.clone()),
+            package_body: None,
+        };
+        let out = self.export(out_path, opts)?;
+        drop(td);
+        Ok(out)
+    }
+
+    /// Mint kits for an LLM-runtime DID across all named groups + the
+    /// reserved `tn.agents` group, then export a `kit_bundle` `.tnpkg`
+    /// at `out_path`.
+    ///
+    /// Per the 2026-04-25 read-ergonomics spec §2.8. The `tn.agents`
+    /// group is always implicitly added (de-duplicated if the caller
+    /// passed it). `label` is written to a `.label` sidecar next to the
+    /// output `.tnpkg` for downstream identification — best-effort,
+    /// never fails the call.
+    ///
+    /// Returns the absolute `.tnpkg` path.
+    ///
+    /// # Errors
+    ///
+    /// - [`InvalidConfig`](crate::Error::InvalidConfig) if a requested
+    ///   group is not declared in this ceremony's yaml.
+    /// - Filesystem errors from minting kits or writing the bundle, plus
+    ///   any error propagated from [`Runtime::admin_add_recipient`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal admin lock is poisoned (see
+    /// [`Runtime::admin_add_recipient`]).
+    pub fn admin_add_agent_runtime(
+        &self,
+        runtime_did: &str,
+        groups: &[&str],
+        out_path: &Path,
+        label: Option<&str>,
+    ) -> Result<PathBuf> {
+        // Dedup: tn.agents is always added; if the caller passed it,
+        // don't double-mint. Preserve order for the others.
+        let mut requested: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for g in groups {
+            if *g == "tn.agents" {
+                continue;
+            }
+            let s = (*g).to_string();
+            if seen.insert(s.clone()) {
+                requested.push(s);
+            }
+        }
+        requested.push("tn.agents".to_string());
+
+        for g in &requested {
+            if !self.cfg.groups.contains_key(g) {
+                return Err(Error::InvalidConfig(format!(
+                    "admin_add_agent_runtime: group {g:?} is not declared in this \
+                     ceremony's yaml (known: {:?})",
+                    self.cfg.groups.keys().collect::<Vec<_>>()
+                )));
+            }
+        }
+
+        // Mint kits into a temp directory using the canonical filename
+        // so export(kind='kit_bundle') picks them up.
+        let td = tempfile::Builder::new()
+            .prefix("tn-agent-bundle-")
+            .tempdir()
+            .map_err(Error::Io)?;
+        for gname in &requested {
+            let kit_path = td.path().join(format!("{gname}.btn.mykit"));
+            self.admin_add_recipient(gname, &kit_path, Some(runtime_did))?;
+        }
+
+        let opts = crate::runtime_export::ExportOptions {
+            kind: Some(crate::tnpkg::ManifestKind::KitBundle),
+            to_did: Some(runtime_did.to_string()),
+            scope: None,
+            confirm_includes_secrets: false,
+            groups: Some(requested.clone()),
+            package_body: None,
+        };
+        // `export` already drops the temp-dir kits into the bundle. We
+        // pass `keystore=None` because export reads from the runtime's
+        // own keystore — but the kits were minted into the temp dir.
+        // Workaround: copy them into the keystore (admin_add_recipient
+        // already wrote the actual tnpkg, but the *.mykit goes to the
+        // path we pass). The export reads from `self.keystore` so the
+        // mykit files for the requested groups are already there from
+        // the side-effects of admin_add_recipient.
+        let out = self.export(out_path, opts)?;
+
+        // Best-effort label sidecar. Routed through `self.storage` so
+        // wasm consumers satisfy the write via their JS callback set;
+        // failure is logged + swallowed either way.
+        if let Some(lbl) = label {
+            let mut sidecar_str = out.as_os_str().to_owned();
+            sidecar_str.push(".label");
+            let sidecar = PathBuf::from(sidecar_str);
+            if let Err(e) = self.storage.write_bytes(&sidecar, lbl.as_bytes()) {
+                log::warn!("admin_add_agent_runtime: failed to write label sidecar: {e}");
+            }
+        }
+
+        // Keep tempdir alive until export completes.
+        drop(td);
+        Ok(out)
+    }
+
     // ------------------------------------------------------------------
     // Admin verbs: cipher-agnostic recipient management.
     //
@@ -14,27 +240,65 @@ impl Runtime {
     // second cipher and reuses these same public names.
     // ------------------------------------------------------------------
 
-    /// Mint a new reader kit for `group`, write it to `out_kit_path`, persist
-    /// the updated publisher state, and return the recipient identifier (leaf
-    /// index for btn).
+    /// Mint a new reader kit for `group`, write it to `out_kit_path`,
+    /// persist the updated publisher state, and return the recipient
+    /// identifier (the btn leaf index). Backs `tn.admin_add_recipient()`.
+    ///
+    /// `out_kit_path`'s basename MUST end with `.btn.mykit` (e.g.
+    /// `default.btn.mykit`) — the bundle exporter's regex requires it, and
+    /// a mismatched name would silently ship the publisher's own self-kit
+    /// in its place. For per-recipient bundling use
+    /// [`Runtime::bundle_for_recipient`], which handles minting + the
+    /// canonical filename + export in one call.
+    ///
+    /// The publisher state write is atomic and compare-and-swap guarded:
+    /// state is persisted before the kit file, and a concurrent writer
+    /// that moved the on-disk state out from under us surfaces as
+    /// [`Error::KeystoreConflict`](crate::Error::KeystoreConflict) (re-read
+    /// and retry). After the swap, subsequent writes encrypt to the
+    /// enlarged recipient set.
     ///
     /// When `recipient_did` is `Some`, a `tn.recipient.added` event is
-    /// appended to the log carrying the leaf index + recipient DID + kit SHA.
-    /// Readers can replay these events to reconstruct the recipient map
-    /// without any sidecar state file; the attested log is the source of truth.
+    /// appended to the log carrying the leaf index + recipient DID + kit
+    /// SHA. Readers can replay these events to reconstruct the recipient
+    /// map without any sidecar state file; the attested log is the source
+    /// of truth. (The attestation is best-effort: a write failure is
+    /// logged, not returned — the kit is already minted and persisted.)
     ///
     /// Matches Python `tn.admin_add_recipient(group, out_path, recipient_did)`.
     ///
     /// # Errors
-    /// - `InvalidConfig` if `group` is not a btn group in this runtime.
-    /// - `Io` if the state or kit file cannot be written.
-    /// - `Btn` if the tree is exhausted or minting fails.
+    /// - [`InvalidConfig`](crate::Error::InvalidConfig) if `out_kit_path`
+    ///   lacks the `.btn.mykit` suffix or `group` is not a btn publisher
+    ///   group in this runtime.
+    /// - [`KeystoreConflict`](crate::Error::KeystoreConflict) if another
+    ///   writer raced the state CAS — re-read and retry.
+    /// - [`Io`](crate::Error::Io) if the state or kit file cannot be written.
+    /// - [`Btn`](crate::Error::Btn) if the tree is exhausted or minting fails.
     ///
     /// # Panics
     ///
     /// Panics if the group's `PublisherState` mutex is poisoned by a prior panic
     /// while holding it. The runtime treats a poisoned admin mutex as an
     /// unrecoverable invariant violation.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tn_core::Runtime;
+    /// use std::path::Path;
+    ///
+    /// # fn main() -> tn_core::Result<()> {
+    /// let rt = Runtime::init(Path::new("tn.yaml"))?;
+    /// let leaf = rt.admin_add_recipient(
+    ///     "default",
+    ///     Path::new("default.btn.mykit"),
+    ///     Some("did:key:zRecipient"),
+    /// )?;
+    /// println!("minted leaf {leaf}");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn admin_add_recipient(
         &self,
         group: &str,
@@ -160,18 +424,26 @@ impl Runtime {
         Ok(leaf_index)
     }
 
-    /// Revoke the reader identified by `leaf_index` in `group`.
+    /// Revoke the reader identified by `leaf_index` in `group`. Backs
+    /// `tn.admin_revoke_recipient()`.
     ///
-    /// Persists the updated publisher state to disk and swaps the cipher so
-    /// subsequent `emit` calls exclude the revoked leaf. Emits a
-    /// `tn.recipient.revoked` attested event.
+    /// Persists the updated publisher state to disk under the same atomic
+    /// CAS guard as [`Runtime::admin_add_recipient`], swaps the cipher so
+    /// subsequent writes exclude the revoked leaf, and writes a
+    /// `tn.recipient.revoked` attested event (best-effort — a failed
+    /// attestation is logged, not returned, since the state is already
+    /// persisted). Revocation does not re-key existing readers; only a
+    /// rotation retires the generation.
     ///
     /// Matches Python `tn.admin_revoke_recipient(group, leaf_index)`.
     ///
     /// # Errors
-    /// - `InvalidConfig` if `group` is not a btn publisher group.
-    /// - `Io` if the state file cannot be written.
-    /// - `Btn` if `leaf_index` is out of range.
+    /// - [`InvalidConfig`](crate::Error::InvalidConfig) if `group` is not
+    ///   a btn publisher group.
+    /// - [`KeystoreConflict`](crate::Error::KeystoreConflict) if another
+    ///   writer raced the state CAS — re-read and retry.
+    /// - [`Io`](crate::Error::Io) if the state file cannot be written.
+    /// - [`Btn`](crate::Error::Btn) if `leaf_index` is out of range.
     ///
     /// # Panics
     ///
@@ -255,16 +527,25 @@ impl Runtime {
         Ok(pub_cipher.state().revoked_count())
     }
 
-    /// Return the current recipient roster for `group` by replaying the log
-    /// through the admin reducer. Mirrors Python `tn.recipients(group, …)`
-    /// and TypeScript `client.recipients(group, …)`.
+    /// Return the current recipient roster for `group` by replaying the
+    /// log through the admin reducer. Backs `tn.recipients()`; mirrors
+    /// Python `tn.recipients(group, …)` and TypeScript
+    /// `client.recipients(group, …)`.
     ///
-    /// Active recipients are returned sorted by `leaf_index`; when
-    /// `include_revoked` is true, revoked entries are appended after the
-    /// active ones (also sorted by leaf_index).
+    /// Each [`RecipientEntry`] compresses the lifecycle into a single
+    /// `revoked` boolean (use [`Runtime::admin_state`] for the full
+    /// active/revoked/retired status). Active recipients are returned
+    /// sorted by `leaf_index`; when `include_revoked` is true, revoked
+    /// entries are appended after the active ones (also sorted by
+    /// leaf_index).
     ///
     /// Reducer errors on a single envelope are warn-logged and skipped — a
     /// single corrupt admin event does not abort the whole replay.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::read`] (this replays the log to build the
+    /// roster).
     ///
     /// **Divergence from Python/TS:** Rust's `read()` does not currently
     /// produce per-event signature/row_hash/chain validity flags, so
@@ -273,11 +554,7 @@ impl Runtime {
     /// carries validity flags, this function trusts whatever `read()`
     /// returned. Tampered envelopes that still parse and pass schema will
     /// be reflected in the roster.
-    pub fn recipients(
-        &self,
-        group: &str,
-        include_revoked: bool,
-    ) -> Result<Vec<RecipientEntry>> {
+    pub fn recipients(&self, group: &str, include_revoked: bool) -> Result<Vec<RecipientEntry>> {
         let mut active: BTreeMap<u64, RecipientEntry> = BTreeMap::new();
         let mut revoked: BTreeMap<u64, RecipientEntry> = BTreeMap::new();
 
@@ -359,8 +636,9 @@ impl Runtime {
         Ok(out)
     }
 
-    /// Return the full local admin state by replaying the log through the
-    /// admin reducer. Mirrors Python `tn.admin_state(group=…)`.
+    /// Return the full local [`AdminState`] by replaying the log through
+    /// the admin reducer. Backs `tn.admin_state()`; mirrors Python
+    /// `tn.admin_state(group=…)`.
     ///
     /// When `group` is `Some`, the `groups`, `recipients`, `rotations`,
     /// `coupons`, and `enrolments` lists are filtered to that group.
@@ -370,6 +648,14 @@ impl Runtime {
     /// btn ceremonies — the publisher state lives on disk, not the
     /// attested log), the ceremony record is reconstructed from the
     /// active config with `created_at == None`.
+    ///
+    /// A single admin event that fails to reduce is warn-logged and
+    /// skipped rather than aborting the replay.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::read`] (this replays the log to build the
+    /// state).
     #[allow(clippy::too_many_lines)] // single replay loop; splitting fragments invariants
     pub fn admin_state(&self, group: Option<&str>) -> Result<AdminState> {
         let mut state = AdminState::default();
@@ -620,6 +906,11 @@ impl Runtime {
     /// `vault_did` (i.e. an entry whose `unlinked_at` is `None`), this is a
     /// no-op. Mirrors Python `tn.vault_link(vault_did, project_id)`,
     /// which returns `None`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`]. (The idempotency pre-check tolerates a
+    /// failed `admin_state` read and proceeds to the write.)
     pub fn vault_link(&self, vault_did: &str, project_id: &str) -> Result<()> {
         // Idempotency check — match Python: an active link to the same
         // vault_did short-circuits. admin_state failures do NOT block the
@@ -636,7 +927,10 @@ impl Runtime {
         }
 
         let mut fields = Map::new();
-        fields.insert("vault_identity".into(), Value::String(vault_did.to_string()));
+        fields.insert(
+            "vault_identity".into(),
+            Value::String(vault_did.to_string()),
+        );
         fields.insert("project_id".into(), Value::String(project_id.to_string()));
         fields.insert(
             "linked_at".into(),
@@ -652,6 +946,10 @@ impl Runtime {
     /// `reason` is an optional free-form string forwarded into the event.
     ///
     /// Mirrors Python `tn.vault_unlink(vault_did, project_id, reason)`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
     pub fn vault_unlink(
         &self,
         vault_did: &str,
@@ -659,7 +957,10 @@ impl Runtime {
         reason: Option<&str>,
     ) -> Result<()> {
         let mut fields = Map::new();
-        fields.insert("vault_identity".into(), Value::String(vault_did.to_string()));
+        fields.insert(
+            "vault_identity".into(),
+            Value::String(vault_did.to_string()),
+        );
         fields.insert("project_id".into(), Value::String(project_id.to_string()));
         fields.insert(
             "unlinked_at".into(),
@@ -675,196 +976,5 @@ impl Runtime {
             None => fields.insert("reason".into(), Value::Null),
         };
         self.emit("info", "tn.vault.unlinked", fields)
-    }
-}
-
-impl Runtime {
-    /// Mint a fresh kit for `recipient_did` across one or more groups
-    /// and bundle them into a single `.tnpkg` at `out_path`.
-    ///
-    /// Mirrors Python's `tn.bundle_for_recipient` and TS's
-    /// `client.bundleForRecipient` — closes the cross-binding parity
-    /// gap surfaced by the cash-register survey (Rust callers had no
-    /// equivalent ergonomic verb and faced the canonical-filename +
-    /// temp-dir + export dance by hand).
-    ///
-    /// `groups = None` defaults to every NON-internal group declared in
-    /// the active ceremony (excludes `tn.agents` — that group is for
-    /// LLM-runtime bundles via [`Runtime::admin_add_agent_runtime`]).
-    /// Passing an explicit slice scopes the bundle.
-    ///
-    /// Returns the absolute path to the written `.tnpkg`.
-    ///
-    /// # Errors
-    ///
-    /// - `InvalidConfig` if no real groups are available, or a requested
-    ///   group is not declared in the yaml.
-    /// - Filesystem errors from minting kits or writing the bundle.
-    pub fn bundle_for_recipient(
-        &self,
-        recipient_did: &str,
-        out_path: &Path,
-        groups: Option<&[&str]>,
-    ) -> Result<PathBuf> {
-        let mut requested: Vec<String> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        match groups {
-            Some(list) => {
-                for g in list {
-                    let s = (*g).to_string();
-                    if seen.insert(s.clone()) {
-                        requested.push(s);
-                    }
-                }
-            }
-            None => {
-                // Default: every group except tn.agents (the internal
-                // LLM-policy channel doesn't make sense to ship to a
-                // human reader).
-                for k in self.cfg.groups.keys() {
-                    if k == "tn.agents" {
-                        continue;
-                    }
-                    requested.push(k.clone());
-                }
-            }
-        }
-
-        if requested.is_empty() {
-            return Err(Error::InvalidConfig(
-                "bundle_for_recipient: no groups to bundle. The ceremony \
-                 has only the internal tn.agents group; declare a \
-                 regular group first or pass an explicit groups slice."
-                    .to_string(),
-            ));
-        }
-
-        for g in &requested {
-            if !self.cfg.groups.contains_key(g) {
-                return Err(Error::InvalidConfig(format!(
-                    "bundle_for_recipient: unknown group {g:?}; this \
-                     ceremony declares {:?}",
-                    self.cfg.groups.keys().collect::<Vec<_>>()
-                )));
-            }
-        }
-
-        let td = tempfile::Builder::new()
-            .prefix("tn-bundle-")
-            .tempdir()
-            .map_err(Error::Io)?;
-        for gname in &requested {
-            let kit_path = td.path().join(format!("{gname}.btn.mykit"));
-            self.admin_add_recipient(gname, &kit_path, Some(recipient_did))?;
-        }
-
-        let opts = crate::runtime_export::ExportOptions {
-            kind: Some(crate::tnpkg::ManifestKind::KitBundle),
-            to_did: Some(recipient_did.to_string()),
-            scope: None,
-            confirm_includes_secrets: false,
-            groups: Some(requested.clone()),
-            package_body: None,
-        };
-        let out = self.export(out_path, opts)?;
-        drop(td);
-        Ok(out)
-    }
-
-    /// Mint kits for an LLM-runtime DID across all named groups + the
-    /// reserved `tn.agents` group, then export a `kit_bundle` `.tnpkg`
-    /// at `out_path`.
-    ///
-    /// Per the 2026-04-25 read-ergonomics spec §2.8. The `tn.agents`
-    /// group is always implicitly added (de-duplicated if the caller
-    /// passed it). `label` is written to a `.label` sidecar next to the
-    /// output `.tnpkg` for downstream identification — best-effort,
-    /// never fails the call.
-    ///
-    /// Returns the absolute `.tnpkg` path.
-    ///
-    /// # Errors
-    ///
-    /// - `InvalidConfig` if a requested group is not declared in this
-    ///   ceremony's yaml.
-    /// - Filesystem errors from minting kits or writing the bundle.
-    pub fn admin_add_agent_runtime(
-        &self,
-        runtime_did: &str,
-        groups: &[&str],
-        out_path: &Path,
-        label: Option<&str>,
-    ) -> Result<PathBuf> {
-        // Dedup: tn.agents is always added; if the caller passed it,
-        // don't double-mint. Preserve order for the others.
-        let mut requested: Vec<String> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        for g in groups {
-            if *g == "tn.agents" {
-                continue;
-            }
-            let s = (*g).to_string();
-            if seen.insert(s.clone()) {
-                requested.push(s);
-            }
-        }
-        requested.push("tn.agents".to_string());
-
-        for g in &requested {
-            if !self.cfg.groups.contains_key(g) {
-                return Err(Error::InvalidConfig(format!(
-                    "admin_add_agent_runtime: group {g:?} is not declared in this \
-                     ceremony's yaml (known: {:?})",
-                    self.cfg.groups.keys().collect::<Vec<_>>()
-                )));
-            }
-        }
-
-        // Mint kits into a temp directory using the canonical filename
-        // so export(kind='kit_bundle') picks them up.
-        let td = tempfile::Builder::new()
-            .prefix("tn-agent-bundle-")
-            .tempdir()
-            .map_err(Error::Io)?;
-        for gname in &requested {
-            let kit_path = td.path().join(format!("{gname}.btn.mykit"));
-            self.admin_add_recipient(gname, &kit_path, Some(runtime_did))?;
-        }
-
-        let opts = crate::runtime_export::ExportOptions {
-            kind: Some(crate::tnpkg::ManifestKind::KitBundle),
-            to_did: Some(runtime_did.to_string()),
-            scope: None,
-            confirm_includes_secrets: false,
-            groups: Some(requested.clone()),
-            package_body: None,
-        };
-        // `export` already drops the temp-dir kits into the bundle. We
-        // pass `keystore=None` because export reads from the runtime's
-        // own keystore — but the kits were minted into the temp dir.
-        // Workaround: copy them into the keystore (admin_add_recipient
-        // already wrote the actual tnpkg, but the *.mykit goes to the
-        // path we pass). The export reads from `self.keystore` so the
-        // mykit files for the requested groups are already there from
-        // the side-effects of admin_add_recipient.
-        let out = self.export(out_path, opts)?;
-
-        // Best-effort label sidecar. Routed through `self.storage` so
-        // wasm consumers satisfy the write via their JS callback set;
-        // failure is logged + swallowed either way.
-        if let Some(lbl) = label {
-            let mut sidecar_str = out.as_os_str().to_owned();
-            sidecar_str.push(".label");
-            let sidecar = PathBuf::from(sidecar_str);
-            if let Err(e) = self.storage.write_bytes(&sidecar, lbl.as_bytes()) {
-                log::warn!(
-                    "admin_add_agent_runtime: failed to write label sidecar: {e}"
-                );
-            }
-        }
-
-        // Keep tempdir alive until export completes.
-        drop(td);
-        Ok(out)
     }
 }

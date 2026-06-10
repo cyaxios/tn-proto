@@ -97,10 +97,7 @@ fn policy_file_splice_populates_tn_agents_fields() {
     let raw = rt.read_raw().unwrap();
     let payment = raw
         .iter()
-        .find(|e| {
-            e.envelope.get("event_type").and_then(Value::as_str)
-                == Some("payment.completed")
-        })
+        .find(|e| e.envelope.get("event_type").and_then(Value::as_str) == Some("payment.completed"))
         .expect("payment.completed entry");
     let agents_pt = &payment.plaintext_per_group["tn.agents"];
     assert_eq!(
@@ -160,8 +157,7 @@ POST https://merchant.example.com/controls/escalate
     let added = raw
         .iter()
         .find(|e| {
-            e.envelope.get("event_type").and_then(Value::as_str)
-                == Some("tn.recipient.added")
+            e.envelope.get("event_type").and_then(Value::as_str) == Some("tn.recipient.added")
         })
         .expect("tn.recipient.added entry");
 
@@ -197,10 +193,7 @@ fn no_policy_file_means_tn_agents_stays_empty() {
     let raw = rt.read_raw().unwrap();
     let payment = raw
         .iter()
-        .find(|e| {
-            e.envelope.get("event_type").and_then(Value::as_str)
-                == Some("payment.completed")
-        })
+        .find(|e| e.envelope.get("event_type").and_then(Value::as_str) == Some("payment.completed"))
         .expect("payment.completed entry");
     // No splice: tn.agents has no fields routed into it for this event,
     // so the envelope has no tn.agents group payload (no plaintext entry).
@@ -212,7 +205,11 @@ fn policy_published_event_emitted_on_init_when_policy_present() {
     let td = tempfile::tempdir().unwrap();
     let cer = setup_minimal_btn_ceremony_with_agents(td.path());
     std::fs::create_dir_all(td.path().join(".tn").join("config")).unwrap();
-    std::fs::write(td.path().join(".tn").join("config").join("agents.md"), POLICY).unwrap();
+    std::fs::write(
+        td.path().join(".tn").join("config").join("agents.md"),
+        POLICY,
+    )
+    .unwrap();
 
     let rt = Runtime::init(&cer.yaml_path).unwrap();
     let raw = rt.read_raw().unwrap();
@@ -303,4 +300,3 @@ fn setup_minimal_btn_ceremony_with_agents(root: &std::path::Path) -> common::Btn
         device_identity: did,
     }
 }
-

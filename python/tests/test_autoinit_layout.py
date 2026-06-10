@@ -10,11 +10,11 @@ Root cause: the auto-init helper dispatched through
 ``tn.init(<yaml_path>)`` (legacy single-yaml path), which routes
 ``config.create_fresh`` without a keystore_dir override and falls
 back to the legacy ``<yaml_dir>/.tn/<stem>/...`` layout. Explicit
-``tn.init()`` (no args) routes via the multi-ceremony path
-(``_create_default_ceremony``) which passes the flat layout.
+``tn.init()`` (no args) now routes via the project-root path, which
+passes the intended flat Project layout.
 
-Fix: when auto-init creates a fresh ceremony at the canonical
-``<cwd>/.tn/default/tn.yaml`` location, dispatch through the
+Fix: when auto-init creates a fresh Project at the canonical
+``<cwd>/.tn/<cwd-name>/tn.yaml`` location, dispatch through the
 no-arg ``tn.init()`` so both paths converge on the same layout.
 """
 from __future__ import annotations
@@ -33,6 +33,15 @@ def _layout_dirs(tn_root: Path) -> list[str]:
         str(p.relative_to(tn_root)).replace("\\", "/")
         for p in tn_root.rglob("*")
         if p.is_dir()
+    )
+
+
+def _normalize_project_dir(entries: list[str], project_name: str) -> list[str]:
+    return sorted(
+        "PROJECT" + item[len(project_name):]
+        if item == project_name or item.startswith(project_name + "/")
+        else item
+        for item in entries
     )
 
 
@@ -75,8 +84,8 @@ def test_autoinit_layout_matches_explicit(tmp_path: Path):
     )
     assert rc_explicit.returncode == 0, rc_explicit.stderr
 
-    auto_layout = _layout_dirs(autoinit_dir / ".tn")
-    explicit_layout = _layout_dirs(explicit_dir / ".tn")
+    auto_layout = _normalize_project_dir(_layout_dirs(autoinit_dir / ".tn"), "auto")
+    explicit_layout = _normalize_project_dir(_layout_dirs(explicit_dir / ".tn"), "explicit")
     assert auto_layout == explicit_layout, (
         f"autoinit layout diverged from explicit:\n"
         f"  auto:     {auto_layout!r}\n"
@@ -86,12 +95,13 @@ def test_autoinit_layout_matches_explicit(tmp_path: Path):
     # Pin the specific shape the canonical layout produces so a
     # future refactor can't silently flip both paths together.
     assert auto_layout == [
-        "default",
-        "default/admin",
-        "default/keys",
-        "default/logs",
-        "default/vault",
-    ], f"expected canonical .tn/default/{{admin,keys,logs,vault}} layout; got {auto_layout!r}"
+        "PROJECT",
+        "PROJECT/admin",
+        "PROJECT/keys",
+        "PROJECT/logs",
+        "PROJECT/streams",
+        "PROJECT/vault",
+    ], f"expected canonical .tn/<project>/{{admin,keys,logs,streams,vault}} layout; got {auto_layout!r}"
 
 
 def test_autoinit_does_not_nest_under_yaml_stem(tmp_path: Path):
@@ -113,8 +123,8 @@ def test_autoinit_does_not_nest_under_yaml_stem(tmp_path: Path):
     )
     assert rc.returncode == 0, rc.stderr
 
-    nested = tmp_path / ".tn" / "default" / ".tn"
+    nested = tmp_path / ".tn" / tmp_path.name / ".tn"
     assert not nested.exists(), (
         f"nested layout {nested} regressed; layout should be flat at "
-        f".tn/default/{{admin,keys,logs,vault}}/"
+        f".tn/<project>/{{admin,keys,logs,streams,vault}}/"
     )

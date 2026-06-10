@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 
 import pytest  # type: ignore[import-not-found]
+import yaml
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
@@ -43,6 +44,7 @@ from tn import (
     TNNotFound,
 )
 from tn import _autoinit, _defaults, _layout, _registry
+from tn import config as _config
 
 
 # Anything that triggers the legacy ``create_fresh`` path (i.e. binds
@@ -293,14 +295,14 @@ class TestInitUseList:
         # Stream yamls are minimal: an ``extends:`` pointing at
         # default plus only the per-stream overrides (ceremony.id,
         # ceremony.profile, logs.path, handlers).
-        handle = tn.init("payments", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        handle = tn.use("payments", project_dir=tmp_path)
         import yaml
         with handle.yaml_path.open("r", encoding="utf-8") as fh:
             doc = yaml.safe_load(fh)
         # The stream yaml carries extends pointing at default.
         assert "extends" in doc
-        assert doc["extends"].endswith("default/tn.yaml") or \
-               doc["extends"].endswith("default\\tn.yaml")
+        assert doc["extends"] == "../tn.yaml"
         # Stream-specific fields present.
         assert (doc.get("ceremony") or {}).get("profile") == "transaction"
         assert (doc.get("ceremony") or {}).get("id", "").startswith("stream_payments_")
@@ -314,12 +316,45 @@ class TestInitUseList:
         # The loader resolves extends and the resulting cfg has
         # identity/keystore/groups merged in from default.
         from tn import config as _config
-        h = tn.init("payments", project_dir=tmp_path)
+        tn.init(project_dir=tmp_path)
+        h = tn.use("payments", project_dir=tmp_path)
         cfg = _config.load(h.yaml_path)
         # Merged cfg has the project DID + groups even though the
         # on-disk stream yaml is minimal.
         assert cfg.device.device_identity.startswith("did:key:z")
         assert "default" in cfg.groups
+
+    def test_unlink_named_stream_reaches_default_root(self, tmp_path, monkeypatch):
+        """Unlinking a named stream clears the link at the extends-chain
+        root (the default ceremony), not just the stream's own yaml.
+
+        Regression: ``admin.set_link_state`` wrote ``cfg.yaml_path``, so
+        for a stream that inherits its vault/link state from default the
+        unlink landed a stream-local override and left the project's link
+        on the default intact. Link state is project-scoped — it must
+        reach the root.
+        """
+        monkeypatch.delenv("TN_NO_LINK", raising=False)
+        monkeypatch.delenv("TN_VAULT_URL", raising=False)
+
+        default_handle = tn.init(project_dir=tmp_path, cipher="jwe")
+        default_yaml = default_handle.yaml_path
+        default_doc = yaml.safe_load(default_yaml.read_text(encoding="utf-8"))
+        assert default_doc["ceremony"]["mode"] == "linked"
+
+        h = tn.use("payments", project_dir=tmp_path)
+        stream_cfg = _config.load(h.yaml_path)
+        # The stream inherits linked state from default via extends.
+        assert stream_cfg.mode == "linked"
+        assert stream_cfg.yaml_path != default_yaml
+
+        tn.set_link_state(stream_cfg, mode="local")
+
+        # The link is cleared at the ROOT (default) — the whole project
+        # unlinks, not just this one stream's view.
+        default_doc = yaml.safe_load(default_yaml.read_text(encoding="utf-8"))
+        assert default_doc["ceremony"]["mode"] == "local"
+        assert default_doc["vault"]["enabled"] is False
 
     def test_init_named_ceremony_registers(self, tmp_path):
         tn.init("payments", project_dir=tmp_path)
@@ -344,6 +379,23 @@ class TestInitUseList:
         h1 = tn.init("payments", project_dir=tmp_path)
         h2 = tn.use("payments", project_dir=tmp_path)
         assert h1 is h2
+
+    def test_use_cache_is_scoped_by_project_dir(self, tmp_path):
+        project_a = tmp_path / "project_a"
+        project_b = tmp_path / "project_b"
+        project_a.mkdir()
+        project_b.mkdir()
+
+        a1 = tn.use("api", project_dir=project_a)
+        a2 = tn.use("api", project_dir=project_a)
+        b1 = tn.use("api", project_dir=project_b)
+        b2 = tn.use("api", project_dir=project_b)
+
+        assert a1 is a2
+        assert b1 is b2
+        assert a1 is not b1
+        assert a1.yaml_path == project_a / ".tn" / "project_a" / "streams" / "api.yaml"
+        assert b1.yaml_path == project_b / ".tn" / "project_b" / "streams" / "api.yaml"
 
     def test_use_attaches_to_disk_only_ceremony(self, tmp_path):
         # Pre-create a real ceremony on disk (init does the minting),

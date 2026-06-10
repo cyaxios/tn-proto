@@ -1,4 +1,7 @@
-//! Shared parsing for handler YAML specs.
+//! Shared parsing for handler YAML specs. Internal primitive supporting the
+//! handler implementations; the handler interface + [`crate::Runtime`]
+//! fan-out is the entry point (behind `tn.info()` / `tn log`). Reach here
+//! directly only to parse a handler spec by hand.
 //!
 //! The Python registry parses each handler kind ad-hoc (see
 //! `python/tn/handlers/registry.py`). The Rust side normalizes specs
@@ -10,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value as JsonValue;
 
+use crate::pathutil::resolve;
 use crate::{Error, Result};
 
 /// Compiled filter — mirror of Python `tn.filters.compile_filter` and
@@ -99,7 +103,6 @@ fn yaml_to_json(v: &serde_yml::Value) -> Result<JsonValue> {
         .map_err(|e| Error::InvalidConfig(format!("handler spec yaml->json parse: {e}")))
 }
 
-
 /// Lower-cased string field lookup with fallback.
 pub fn str_field<'a>(v: &'a JsonValue, key: &str) -> Option<&'a str> {
     v.get(key).and_then(JsonValue::as_str)
@@ -108,7 +111,11 @@ pub fn str_field<'a>(v: &'a JsonValue, key: &str) -> Option<&'a str> {
 /// Required string field — returns InvalidConfig when missing or non-string.
 pub fn require_str(v: &JsonValue, key: &str, ctx: &str) -> Result<String> {
     str_field(v, key).map_or_else(
-        || Err(Error::InvalidConfig(format!("{ctx}: missing required string field {key:?}"))),
+        || {
+            Err(Error::InvalidConfig(format!(
+                "{ctx}: missing required string field {key:?}"
+            )))
+        },
         |s| Ok(s.to_string()),
     )
 }
@@ -217,20 +224,19 @@ pub fn parse_duration(v: &JsonValue, default_secs: f64) -> Result<f64> {
     )))
 }
 
-/// Resolve a path relative to `yaml_dir` if not absolute.
+/// Resolve a path relative to `yaml_dir` if not absolute. Uses the
+/// cross-platform absolute-path check so a ceremony's Windows `C:\…`
+/// handler path is honored on wasm32 hosts (where `Path::is_absolute()`
+/// follows Unix rules) instead of being double-joined onto `yaml_dir`.
 pub fn resolve_path(p: &str, yaml_dir: &Path) -> PathBuf {
-    let candidate = Path::new(p);
-    if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        yaml_dir.join(candidate)
-    }
+    resolve(yaml_dir, Path::new(p))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn duration_string_seconds() {
@@ -256,9 +262,7 @@ mod tests {
 
     #[test]
     fn duration_number() {
-        assert!(
-            (parse_duration(&json!(45), 1.0).expect("45 parses") - 45.0).abs() < f64::EPSILON
-        );
+        assert!((parse_duration(&json!(45), 1.0).expect("45 parses") - 45.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -269,5 +273,20 @@ mod tests {
         };
         assert!(f.matches(&json!({"event_type": "tn.recipient.added"})));
         assert!(!f.matches(&json!({"event_type": "user.signup"})));
+    }
+
+    #[test]
+    fn resolve_path_honors_windows_absolute() {
+        // Regression guard: `C:\…` is absolute even though
+        // `Path::is_absolute()` says otherwise on Unix + wasm32, so it
+        // must not be joined onto `yaml_dir`.
+        assert_eq!(
+            resolve_path("logs/drop.ndjson", Path::new("/cer")),
+            PathBuf::from("/cer/logs/drop.ndjson"),
+        );
+        assert_eq!(
+            resolve_path("C:\\data\\drop", Path::new("/cer")),
+            PathBuf::from("C:\\data\\drop"),
+        );
     }
 }

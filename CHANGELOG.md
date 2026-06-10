@@ -57,6 +57,116 @@ A large CLI-parity and vault-sync release, all verified against a live dev vault
   install + recipient read-back, and a full multi-device account-sync capstone
   (both languages + Python->TS cross-impl) -- all against a live dev vault.
 
+## [0.5.1a2] - 2026-06-04 -- Python<->TypeScript round-trip closure
+
+Closes the remaining cross-language round-trip gaps so a package produced by
+one SDK is consumed by the other, finishes the first admin-state unification
+slice, and makes the TypeScript runtime surface report itself honestly.
+
+### Cross-language round-trip
+
+- TypeScript now both produces and consumes `contact_update`, so a Python or
+  vault-minted contact-roster update applies on the TS side and the reverse.
+- TypeScript can now produce `identity_seed` (it already consumed it), so a
+  TS-created identity can bootstrap a Python install.
+- `tn.vault.setLinkState` is implemented in TypeScript (it previously threw):
+  it writes `ceremony.mode` to the authoritative yaml, matching Python's
+  `tn.admin.set_link_state`. Namespaced under `tn.vault` in TS, `tn.admin`
+  in Python.
+- `project_seed` backup/restore is proven to round-trip both directions
+  (device identity, groups, and a fresh log read/write on the restored
+  ceremony). Each closed gap ships with a cross-implementation interop test.
+
+### SDK parity
+
+- `tn.admin.state()` in TypeScript derives `groups` and `ceremony.created_at`
+  from config when the cache has not seen `tn.ceremony.init`, matching
+  Python's output. Covered by a cross-implementation golden test.
+- `usingRust()` reports the actual wasm activation state instead of a static
+  value, and the TS module surface mirrors Python (`watch` / `scope` / `use`
+  / `listCeremonies` / `session` / `absorb` / `current_config` plus the
+  `admin` / `pkg` / `vault` / `agents` / `handlers` namespaces).
+- Config-derived yaml paths stay portable: no machine-local absolute path is
+  serialized into a yaml or `.tnpkg`.
+
+### tn-core
+
+- Honor Windows-absolute paths on wasm32 so the runtime no longer
+  double-joins a log path (the path-doubling bug on the browser/extension
+  wasm build).
+
+### CLI and kit bundles
+
+- `tn-js absorb` verb, at parity with Python `tn absorb`.
+- `compile` produces a canonical signed `kit_bundle` that absorbs cleanly;
+  `rotate` signs kits with the ceremony key; `tn bundle` no longer reads a
+  dead CLI attribute.
+
+### Tooling and docs
+
+- Parity-gate self-tests and allowlist reasons updated for the implemented
+  `setLinkState`, so no allowlist reason describes a shipped verb as a stub.
+- New docs: Python<->TypeScript round-trip gap analysis, an opinionated
+  adversarial audit playbook, and the SDK unification (Direction A) roadmap.
+
+### Packaging
+
+- `tn-protocol` / `tn-core` / `tn-btn` at `0.5.1a2`; `@tnproto/sdk` at
+  `0.5.1-alpha.2`. Wheels for macOS (arm64), Linux (manylinux x86_64), and
+  Windows (amd64), plus sdists.
+
+## [0.5.1a1] - 2026-06-03 -- cross-language parity bar + vault link/sync fixes
+
+Puts Python, TypeScript, and the browser on one verified wire format and
+lands a cluster of vault link/sync fixes. The three implementations share
+the same manifest, tnpkg, body-encryption, and btn-wire formats, proven by
+shared golden vectors that run as contract tests in both SDKs.
+
+### Cross-language parity
+
+- spec-next contracts for manifest, tnpkg, and body encryption, aligned
+  across tn-core, the Python SDK, the TS SDK, and the extension wasm.
+- Shared cross-language golden vectors (recipient wraps, absorb
+  vault-metadata adoption, btn wire decode, vault-block normalization)
+  wired as contract tests so Python and TypeScript cannot drift silently.
+- Profile-immutability conflict policy pinned in TypeScript to match Python.
+- SDK parity for layout, config, tnpkg, absorb, export, wallet, and
+  multi-ceremony across both SDKs.
+
+### Vault link/sync (7-bug cluster)
+
+- `create_fresh` honors `TN_NO_LINK` and `TN_VAULT_URL`.
+- `set_link_state` writes link state to the extends-chain root, so named
+  streams inherit it.
+- vault pull uses the real account-inbox API.
+- `linked_project_id` persists across named streams.
+- warm-attach requires `identity.linked_vault == vault_url`; an explicit
+  `TN_API_KEY` stays exempt.
+- restore decrypts cross-implementation backups (zip-body and
+  separate-nonce blob formats, with the body AAD applied).
+
+### tn-core
+
+- rustdoc completeness pass across the crate.
+- Split the four 1000+ line files (`runtime`, `admin_cache`, `tnpkg`,
+  `runtime_export`) into focused submodules; behavior preserved.
+
+### Packaging
+
+- `tn-protocol` / `tn-core` / `tn-btn` at `0.5.1a1`; `@tnproto/sdk` at
+  `0.5.1-alpha.1`. Wheels for macOS (arm64), Linux (manylinux x86_64), and
+  Windows (amd64), plus sdists.
+- README trimmed to the TestPyPI install and a getting-started section.
+
+### CI
+
+- pytest matrix hardened for Windows: skip the backslash tnpkg-member case
+  where zipfile rewrites `os.sep`, and drive the CLI tests through
+  `python -m tn.cli` so they resolve in non-venv installs.
+- TS revoke test de-flaked via `admin.cache().refresh()` before the state
+  read.
+- `check_parity` KNOWN_OMISSIONS gains `packBodyPlaintextZip`.
+
 ## [0.4.3a2] - 2026-05-22 -- CLI receive-side parity + CF 1010 UA fix
 
 Three CLI/SDK additions to close the dashboard receive-side parity

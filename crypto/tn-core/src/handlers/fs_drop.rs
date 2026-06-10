@@ -1,6 +1,9 @@
-//! `fs.drop` handler — write `.tnpkg` admin snapshots to a watched dir.
+//! `fs.drop` handler — write `.tnpkg` admin snapshots to a watched dir. A
+//! handler implementation; the handler interface + [`crate::Runtime`] fan-out
+//! is the entry point (behind `tn.info()` / `tn log`). Internal primitive —
+//! reach here directly only to configure or inspect this drop sink.
 //!
-//! Mirrors `python/tn/handlers/fs_drop.py`. On each accepted emit (an
+//! Mirrors `python/tn/handlers/fs_drop.py`. On each accepted write (an
 //! envelope whose `event_type` starts with `tn.`), build an admin-log
 //! snapshot via [`crate::Runtime::export`] and place it in `out_dir`.
 //! A peer's [`super::FsScanHandler`] (or any other process) consumes
@@ -55,11 +58,7 @@ impl FsDropHandler {
     /// # Errors
     /// `Error::InvalidConfig` when `trigger` is unsupported (only
     /// `on_emit` is implemented today, mirroring Python).
-    pub fn from_spec(
-        spec: &HandlerSpec,
-        runtime: Arc<Runtime>,
-        yaml_dir: &Path,
-    ) -> Result<Self> {
+    pub fn from_spec(spec: &HandlerSpec, runtime: Arc<Runtime>, yaml_dir: &Path) -> Result<Self> {
         let trigger = spec::str_field(&spec.raw, "trigger").unwrap_or("on_emit");
         if trigger != "on_emit" {
             return Err(Error::InvalidConfig(format!(
@@ -74,16 +73,12 @@ impl FsDropHandler {
         let filename_template = spec::str_field(&spec.raw, "filename_template")
             .unwrap_or(DEFAULT_FILENAME_TEMPLATE)
             .to_string();
-        let on_types = spec
-            .raw
-            .get("on")
-            .and_then(JsonValue::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(JsonValue::as_str)
-                    .map(str::to_string)
-                    .collect::<HashSet<_>>()
-            });
+        let on_types = spec.raw.get("on").and_then(JsonValue::as_array).map(|arr| {
+            arr.iter()
+                .filter_map(JsonValue::as_str)
+                .map(str::to_string)
+                .collect::<HashSet<_>>()
+        });
         Ok(Self {
             name: spec.name.clone(),
             out_dir,
@@ -128,7 +123,9 @@ impl FsDropHandler {
         let tmp_stamp = now
             .format(TMP_FMT)
             .map_err(|e| Error::InvalidConfig(format!("fs.drop: tmp filename format: {e}")))?;
-        let tmp_path = self.out_dir.join(format!("snapshot_inflight_{tmp_stamp}.tnpkg"));
+        let tmp_path = self
+            .out_dir
+            .join(format!("snapshot_inflight_{tmp_stamp}.tnpkg"));
 
         let opts = ExportOptions {
             kind: Some(ManifestKind::AdminLogSnapshot),
@@ -298,11 +295,9 @@ mod tests {
             "did:key:zABC",
         );
         assert!(name.starts_with("snap_cer1_deadbeefcafe"), "{name}");
-        assert!(
-            std::path::Path::new(&name)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("tnpkg"))
-        );
+        assert!(std::path::Path::new(&name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("tnpkg")));
     }
 
     #[test]

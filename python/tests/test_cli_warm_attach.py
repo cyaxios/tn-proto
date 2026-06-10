@@ -9,6 +9,7 @@ outcome → banner/bool mapping with ``attach_or_sync`` mocked.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -87,3 +88,75 @@ def test_contained_warnings_still_attached(
     )
     assert ok is True
     assert "WARN" in capsys.readouterr().out
+
+
+# --- warm-attach signal: which credential to use, or fall through -----
+#
+# The guard now lives INSIDE the shared engine (tn._init_attach) so it
+# gates BOTH attach_or_sync callers: cli.cmd_init AND the library
+# tn.__init__._auto_link_after_init path. TN_API_KEY (explicit operator
+# key) always wins; the remembered account in identity.json only applies
+# when the target vault is the one that account actually lives on.
+
+
+def _signal_identity(*, account_id, linked_vault):
+    return SimpleNamespace(linked_account_id=account_id, linked_vault=linked_vault)
+
+
+def test_warm_signal_uses_account_when_vault_matches(monkeypatch):
+    monkeypatch.delenv("TN_API_KEY", raising=False)
+    identity = _signal_identity(account_id="acct_1", linked_vault="https://vault.local")
+    assert _ia._warm_attach_signal(identity, "https://vault.local") == "acct_1"
+
+
+def test_warm_signal_skips_account_when_vault_differs(monkeypatch):
+    # Regression #6: a device whose account lives on vault A must NOT warm-
+    # attach to vault B (e.g. `tn init --link B`); fall through to claim URL.
+    monkeypatch.delenv("TN_API_KEY", raising=False)
+    identity = _signal_identity(account_id="acct_1", linked_vault="https://vault.A")
+    assert _ia._warm_attach_signal(identity, "https://vault.B") is None
+
+
+def test_warm_signal_api_key_wins_regardless_of_vault(monkeypatch):
+    # Explicit TN_API_KEY is the operator's deliberate choice for this run;
+    # it is honored even when the remembered vault differs from the target.
+    monkeypatch.setenv("TN_API_KEY", "key_xyz")
+    identity = _signal_identity(account_id="acct_1", linked_vault="https://vault.A")
+    assert _ia._warm_attach_signal(identity, "https://vault.B") == "key_xyz"
+
+
+def test_warm_signal_none_when_no_credentials(monkeypatch):
+    monkeypatch.delenv("TN_API_KEY", raising=False)
+    identity = _signal_identity(account_id=None, linked_vault=None)
+    assert _ia._warm_attach_signal(identity, "https://vault.local") is None
+
+
+def test_cli_reexports_warm_signal():
+    # cli._warm_attach_signal must stay importable (it is the same function
+    # object as the engine's — a re-export, not a divergent copy).
+    assert cli._warm_attach_signal is _ia._warm_attach_signal
+
+
+def test_engine_gates_warm_attach_on_vault_mismatch(monkeypatch):
+    # Regression #6, engine level: attach_or_sync itself must fall back to
+    # CLAIM_URL when the remembered account lives on a DIFFERENT vault, so
+    # the library tn.init() path (which calls the engine directly, without
+    # the CLI's pre-gate) cannot warm-attach vault A's account against B.
+    monkeypatch.delenv("TN_API_KEY", raising=False)
+    identity = _signal_identity(account_id="acct_1", linked_vault="https://vault.A")
+    cfg = SimpleNamespace(linked_project_id="pr_1", yaml_path=Path("tn.yaml"))
+    claim_calls: list[str] = []
+
+    monkeypatch.setattr(_ia, "_default_client_factory", lambda url, ident: mock.Mock())
+    monkeypatch.setattr(
+        _ia,
+        "init_upload",
+        lambda cfg, client, vault_base: claim_calls.append(vault_base)
+        or {"claim_url": f"{vault_base}/claim/xyz"},
+    )
+
+    out = _ia.attach_or_sync(cfg, identity, "https://vault.B")
+
+    assert out.mode is AttachMode.CLAIM_URL
+    assert claim_calls == ["https://vault.B"]
+    assert out.claim_url == "https://vault.B/claim/xyz"

@@ -101,9 +101,9 @@ test(
     const keyPriv = randomBytes(32);
     const keyPub = new TextEncoder().encode("PUB:" + ulidish());
     const body = new Map<string, Uint8Array>([
-      ["tn.yaml", yamlBytes],
-      ["local.private", keyPriv],
-      ["local.public", keyPub],
+      ["body/tn.yaml", yamlBytes],
+      ["body/local.private", keyPriv],
+      ["body/local.public", keyPub],
     ]);
 
     const { projectId } = await pushBody(client, dev.passphrase, body);
@@ -119,13 +119,13 @@ test(
     // Every body member round-trips byte-for-byte (the MATCH bar).
     assert.ok(result.filesWritten.length >= 3, `expected >=3 files; got ${result.filesWritten.length}`);
 
-    const restoredYaml = readFileSync(join(outDir, "tn.yaml"));
+    const restoredYaml = readFileSync(join(outDir, "body", "tn.yaml"));
     assert.ok(Buffer.from(restoredYaml).equals(Buffer.from(yamlBytes)), "tn.yaml bytes must MATCH");
 
-    const restoredPriv = readFileSync(join(outDir, "local.private"));
+    const restoredPriv = readFileSync(join(outDir, "body", "local.private"));
     assert.ok(Buffer.from(restoredPriv).equals(Buffer.from(keyPriv)), "local.private bytes must MATCH");
 
-    const restoredPub = readFileSync(join(outDir, "local.public"));
+    const restoredPub = readFileSync(join(outDir, "body", "local.public"));
     assert.ok(Buffer.from(restoredPub).equals(Buffer.from(keyPub)), "local.public bytes must MATCH");
   },
 );
@@ -139,8 +139,8 @@ test(
     const client = devClient(dev.token);
 
     const body = new Map<string, Uint8Array>([
-      ["tn.yaml", new TextEncoder().encode("ceremony:\n  id: live_bad\n")],
-      ["local.private", randomBytes(32)],
+      ["body/tn.yaml", new TextEncoder().encode("ceremony:\n  id: live_bad\n")],
+      ["body/local.private", randomBytes(32)],
     ]);
     const { projectId } = await pushBody(client, dev.passphrase, body);
 

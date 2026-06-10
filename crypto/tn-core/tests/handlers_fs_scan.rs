@@ -62,8 +62,7 @@ fn absorbs_dropped_snapshot_and_archives() {
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.path().extension().and_then(|s| s.to_str()) == Some("tnpkg")
-                && e.path().is_file()
+            e.path().extension().and_then(|s| s.to_str()) == Some("tnpkg") && e.path().is_file()
         })
         .count();
     assert_eq!(still_inbox, 0, "archived file should have moved");

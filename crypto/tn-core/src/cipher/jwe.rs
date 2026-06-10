@@ -1,4 +1,7 @@
-//! JWE cipher — Python-owned in this plan.
+//! JWE cipher — Python-owned in this plan. A concrete cipher backing
+//! [`crate::Runtime`]; selected by group cipher policy. Internal primitive —
+//! most readers want the high-level API instead (`tn.info()` / `tn read`);
+//! reach here directly only to inspect the Rust-side JWE stub.
 //!
 //! JWE is standard crypto (X25519 + HKDF + AES-KW + AES-GCM). The btn-first
 //! plan keeps JWE groups running through `tn/cipher.py::JWEGroupCipher`; this
