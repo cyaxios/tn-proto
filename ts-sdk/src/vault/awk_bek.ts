@@ -115,14 +115,25 @@ export async function deriveAwkFromMaterial(
   );
 }
 
+/** Unwrap the project BEK using an already-derived/cached AWK — skips the
+ * passphrase→AWK step (the cached-credential push/sync path). Mirror of the
+ * second half of {@link deriveBekFromMaterial} / Python's `_aes_gcm_unwrap`
+ * under `AAD_BEK_WRAP`. */
+export async function bekFromAwk(
+  awk: Uint8Array,
+  wrapped: WrappedKeyRow,
+): Promise<Uint8Array> {
+  const awkKey = await importEmk(awk);
+  return _unwrap32(awkKey, wrapped.wrapped_bek_b64, wrapped.wrap_nonce_b64, AAD_BEK_WRAP, "BEK");
+}
+
 export async function deriveBekFromMaterial(
   passphrase: string,
   cred: CredentialWrap,
   wrapped: WrappedKeyRow,
 ): Promise<Uint8Array> {
   const awk = await deriveAwkFromMaterial(passphrase, cred);
-  const awkKey = await importEmk(awk);
-  return _unwrap32(awkKey, wrapped.wrapped_bek_b64, wrapped.wrap_nonce_b64, AAD_BEK_WRAP, "BEK");
+  return bekFromAwk(awk, wrapped);
 }
 
 /** Wrap a fresh BEK under the AWK (for the push/mint side). Returns the

@@ -60,6 +60,7 @@ import { Identity, defaultIdentityPath } from "../dist/identity.js";
 import { AccountConnectError, AccountNamespace } from "../dist/account/index.js";
 import { resolveSigningIdentity } from "../dist/account/signing_identity.js";
 import { VaultClient, VaultError, vaultIdentityFromDeviceKey } from "../dist/vault/client.js";
+import { cacheAccountAwk, loadCachedAwk } from "../dist/vault/awk_cache.js";
 import { WalletNamespace, readLinkState, readSyncQueue } from "../dist/wallet/index.js";
 import { restoreViaLoopback } from "../dist/wallet/restore.js";
 import { loadKeystore } from "../dist/runtime/keystore.js";
@@ -899,8 +900,10 @@ async function initCmd() {
   // Failures warn but never fail init — the on-disk ceremony is still valid.
   let claimUrl = null;
   let attached = false;
+  let warmVaultBase = null; // hoisted: the body backup below runs after tnClose
   if (flipMint && wasFresh && !noLink) {
     const vaultBase = resolveVaultUrl(linkUrl ?? undefined);
+    warmVaultBase = vaultBase;
 
     // Persist the resolved vault into the global identity.json when it was
     // previously null — mirrors Python cmd_init (cli.py:404-406). This makes
@@ -944,6 +947,39 @@ async function initCmd() {
     }
   }
 
+  // Close the init runtime BEFORE any body backup: walletSyncCmd opens its own
+  // short-lived runtime (which rotates the log on init), so running it while
+  // this one is open would double-init. Mirrors Python flush_and_close() ahead
+  // of the cached-AWK body push.
+  await tnClose();
+
+  // Warm body backup: with a cached AWK (from `account connect --passphrase`),
+  // push the freshly-minted ceremony body non-interactively now that the
+  // credential-free link has registered the project. This is the body leg
+  // Python attach_or_sync runs with the cached AWK during cmd_init; no cached
+  // AWK -> a one-line hint, never an error (the on-disk ceremony stays valid).
+  if (attached && warmVaultBase && identity.linkedAccountId) {
+    const awk = loadCachedAwk(identity.linkedAccountId);
+    if (awk) {
+      try {
+        await walletSyncCmd({
+          yaml: resolvedYaml,
+          vault: warmVaultBase,
+          awk,
+          pushOnly: true,
+          stdout,
+        });
+      } catch (e) {
+        stdout.write(`[tn init] WARN body backup failed: ${e?.message ?? e}\n`);
+      }
+    } else {
+      stdout.write(
+        "[tn init]   (body backup skipped: run " +
+          "`tn-js account connect <code> --passphrase` to cache your account credential)\n",
+      );
+    }
+  }
+
   stdout.write(
     JSON.stringify({
       ok: true,
@@ -954,7 +990,6 @@ async function initCmd() {
       ...(attached ? { attached: true } : {}),
     }) + "\n",
   );
-  await tnClose();
 }
 
 // Warm-attach: authenticate to the vault with the global device identity
@@ -1359,16 +1394,17 @@ async function walletCmd() {
 async function accountCmd() {
   const sub = argv[3];
   const rest = argv.slice(4);
-  const opts = { yaml: null, vaultUrl: null, code: null, identity: null };
+  const opts = { yaml: null, vaultUrl: null, code: null, identity: null, passphrase: null };
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
     if (a === "--yaml") opts.yaml = rest[++i];
     else if (a === "--vault" || a === "--vault-url") opts.vaultUrl = rest[++i];
     else if (a === "--identity") opts.identity = rest[++i];
+    else if (a === "--passphrase") opts.passphrase = rest[++i];
     else if (!a.startsWith("-") && opts.code === null) opts.code = a;
   }
   if (sub !== "connect") {
-    die(`account: unknown subcommand ${sub}. try: account connect <code> [--vault <url>] [--yaml <path>] [--identity <path>]`);
+    die(`account: unknown subcommand ${sub}. try: account connect <code> [--vault <url>] [--yaml <path>] [--identity <path>] [--passphrase <p>]`);
   }
   if (!opts.code) die("account connect: <code> positional is required");
   if (!opts.yaml) die("account connect: --yaml <path> is required");
@@ -1426,6 +1462,23 @@ async function accountCmd() {
       stdout.write(`[account connect] WARN could not stamp global identity: ${e?.message ?? e}\n`);
     }
 
+    // With --passphrase, derive + cache the account AWK ("token, not
+    // password") so warm-attach / `wallet sync` push the body backup
+    // non-interactively. Best-effort: a derivation failure (e.g. wrong
+    // passphrase) must not undo the successful bind. Mirrors Python
+    // cmd_account_connect's cache_account_awk call.
+    let awkCached = false;
+    if (opts.passphrase) {
+      try {
+        await cacheAccountAwk(signer.deviceKey, vaultUrl, opts.passphrase, result.accountId);
+        awkCached = true;
+      } catch (e) {
+        stdout.write(
+          `[account connect] WARN could not cache account credential: ${e?.message ?? e}\n`,
+        );
+      }
+    }
+
     stdout.write(
       JSON.stringify({
         ok: true,
@@ -1435,6 +1488,7 @@ async function accountCmd() {
         project_id: result.projectId ?? null,
         project_name: result.projectName ?? null,
         global_identity_stamped: globalStamped,
+        awk_cached: awkCached,
       }) + "\n",
     );
   } catch (e) {
@@ -1717,9 +1771,10 @@ switch (cmd) {
         "             refresh the global identity's account prefs from the vault\n" +
         "  wallet export-mnemonic [--yes]\n" +
         "             re-display the stored BIP-39 recovery phrase (--yes to confirm)\n" +
-        "  account connect <code> --yaml <path> [--vault <url>]\n" +
+        "  account connect <code> --yaml <path> [--vault <url>] [--passphrase <p>]\n" +
         "             redeem a vault connect code; binds device DID to the account\n" +
-        "             and persists account_id into ceremony sync state\n" +
+        "             and persists account_id into ceremony sync state. --passphrase\n" +
+        "             caches the account AWK so future inits back up the body unattended\n" +
         "  vault link <vault-did> <project-id> [--yaml <path>]\n" +
         "             emit tn.vault.linked event into the ceremony's log\n" +
         "  vault unlink <vault-did> <project-id> [--reason <text>] [--yaml <path>]\n" +

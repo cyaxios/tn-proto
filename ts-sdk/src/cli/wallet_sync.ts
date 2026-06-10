@@ -1,8 +1,7 @@
 // Top-level `tn wallet sync` CLI verb — TypeScript parity port of Python's
-// `cmd_wallet_sync` (python/tn/cli.py ~568-640) plus its helpers
-// `_pull_absorb_step` (~733-782), `_stage_account_inbox` (~643-730), and
-// `_cmd_wallet_sync_pull` (~785-842). Behaviour, flags, stdout, and exit
-// codes mirror the Python verb.
+// `cmd_wallet_sync` plus its helpers `_pull_absorb_step`,
+// `_stage_account_inbox`, and `_cmd_wallet_sync_pull`. Behaviour, flags,
+// stdout, and exit codes mirror the Python verb.
 //
 //   tn wallet sync                # PULL inbox -> ABSORB each -> PUSH body
 //   tn wallet sync --pull         # STAGE the account inbox only (no absorb)
@@ -27,16 +26,12 @@
 // `WalletSyncCmdOptions` shape — and is dependency-injectable (fetch +
 // stdout/stderr sinks) so it unit-tests in-process with no live vault.
 //
-// SDK GAP (flagged, not faked): the supported AWK/BEK push had no headless
-// producer anywhere in the SDK — the TS `restore.ts` covers only the
-// pull/restore (GET) direction, and Python's `sync_ceremony`/`wallet.py`
-// still use the DEPRECATED per-file `client.upload_file` sealing the task
-// forbids. The mint-or-derive-BEK + encrypt-body + PUT-encrypted-blob-account
-// push below is therefore assembled inline from the committed primitives
-// (`wrapBekUnderAwk` / `deriveAwkFromMaterial` / `deriveBekFromMaterial` /
-// `encryptBodyBlob` + the VaultClient account routes), mirroring the browser
-// minter (tn_proto_web/static/account/project_minter.js steps 5-6). When a
-// `wallet.pushCeremonyBody` SDK helper lands, this should delegate to it.
+// The whole-body push (mint-or-derive BEK -> wrap under AWK -> encrypt body ->
+// PUT encrypted-blob-account) is assembled from the committed primitives
+// (wrapBekUnderAwk / deriveAwkFromMaterial / bekFromAwk / encryptBodyBlob + the
+// VaultClient account routes), mirroring the browser minter
+// (tn_proto_web/static/account/project_minter.js steps 5-6) and the Python
+// wallet_push.push_ceremony_body.
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -48,6 +43,7 @@ import { Identity, defaultIdentityPath } from "../identity.js";
 import { NodeRuntime } from "../runtime/node_runtime.js";
 import { VaultClient, vaultIdentityFromDeviceKey } from "../vault/client.js";
 import {
+  bekFromAwk,
   deriveAwkFromMaterial,
   deriveBekFromMaterial,
   wrapBekUnderAwk,
@@ -72,8 +68,12 @@ export interface WalletSyncCmdOptions {
   /** `--drain-queue`: skip pull/absorb, retry the push (queue-drain). */
   drainQueue?: boolean | undefined;
   /** Account passphrase — derives the AWK to mint/derive the project BEK
-   *  for the push. Required for the push leg (PBKDF2 credential, D-22). */
+   *  for the push. Required for the push leg UNLESS a cached `awk` is given. */
   passphrase?: string | undefined;
+  /** Cached account AWK (the warm/init path — already unwrapped at connect
+   *  time, see vault/credential_store.ts). Takes precedence over
+   *  `passphrase`; lets the body backup run with no passphrase prompt. */
+  awk?: Uint8Array | undefined;
   /** Vault URL override. Falls back to the ceremony's linked_vault, then
    *  the identity's cached linked_vault. */
   vault?: string | undefined;
@@ -408,10 +408,13 @@ async function pushCeremonyBody(
   client: VaultClient,
   projectId: string,
   body: Map<string, Uint8Array>,
-  passphrase: string,
+  passphrase: string | null,
+  awk: Uint8Array | null,
   fetchImpl: typeof fetch,
 ): Promise<string[]> {
-  // 1. Derive or mint the BEK.
+  // 1. Derive or mint the BEK. The AWK comes one of two ways: a cached AWK
+  //    (the warm/init path — already unwrapped at connect time) or derived
+  //    here from the passphrase. A cached AWK takes precedence.
   let bek: Uint8Array;
   let wrappedKeyExists = false;
   let wrapped: WrappedKeyRow | null = null;
@@ -423,17 +426,20 @@ async function pushCeremonyBody(
     if (status !== 404) throw e;
   }
 
-  const cred = (await client.getCredentialWrap()) as unknown as CredentialWrap;
+  // The credential wrap is only needed to derive the AWK from a passphrase.
+  const cred = awk ? null : ((await client.getCredentialWrap()) as unknown as CredentialWrap);
   if (wrappedKeyExists && wrapped) {
-    bek = await deriveBekFromMaterial(passphrase, cred, wrapped);
+    bek = awk
+      ? await bekFromAwk(awk, wrapped)
+      : await deriveBekFromMaterial(passphrase as string, cred as CredentialWrap, wrapped);
   } else {
     // Mint a fresh BEK and register the project under the account by PUTting
     // the wrapped-key first (the encrypted-blob PUT checks ownership against
     // project_wrapped_keys — order matters, per project_minter.js step 5).
     bek = new Uint8Array(32);
     globalThis.crypto.getRandomValues(bek);
-    const awk = await deriveAwkFromMaterial(passphrase, cred);
-    const wrap = await wrapBekUnderAwk(awk, bek);
+    const useAwk = awk ?? (await deriveAwkFromMaterial(passphrase as string, cred as CredentialWrap));
+    const wrap = await wrapBekUnderAwk(useAwk, bek);
     await client.putWrappedKey(projectId, {
       wrapped_bek_b64: wrap.wrapped_bek_b64,
       wrap_nonce_b64: wrap.wrap_nonce_b64,
@@ -624,11 +630,11 @@ export async function walletSyncCmd(opts: WalletSyncCmdOptions = {}): Promise<nu
   if (!link.linkedProjectId) {
     return die(err, `ceremony ${link.ceremonyId} claims linked but has no linked_project_id; relink to repair`);
   }
-  if (!opts.passphrase) {
+  if (!opts.passphrase && !opts.awk) {
     return die(
       err,
-      "--passphrase required to push the body backup (derives your account " +
-        "key to wrap the project BEK).",
+      "account credential required to push the body backup: a cached AWK " +
+        "(run `tn account connect --passphrase`) or `--passphrase`.",
     );
   }
 
@@ -650,7 +656,14 @@ export async function walletSyncCmd(opts: WalletSyncCmdOptions = {}): Promise<nu
 
   let uploaded: string[];
   try {
-    uploaded = await pushCeremonyBody(client, link.linkedProjectId, body, opts.passphrase, fetchImpl);
+    uploaded = await pushCeremonyBody(
+      client,
+      link.linkedProjectId,
+      body,
+      opts.passphrase ?? null,
+      opts.awk ?? null,
+      fetchImpl,
+    );
   } catch (e) {
     return die(err, `push failed for ${link.ceremonyId}: ${(e as Error).message}`);
   }

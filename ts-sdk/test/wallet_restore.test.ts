@@ -237,6 +237,47 @@ test("restoreWithBek — full path: fetch -> decrypt -> unpack zip -> write file
   }
 });
 
+test("restoreWithBek — NESTED body members land at subpaths (cross-impl body restore)", async () => {
+  // Both push sides (Python wallet.py + TS wallet_sync.ts) nest members as
+  // body/keys/<name> and body/tn.yaml. The TS restore used to skip any name
+  // with "/", dropping the entire keystore (Python→TS body restore broken).
+  // This pins the fix: nested members are written at their subpaths.
+  const bek = randomBytes(32);
+  const zipBytes = buildStoredZip([
+    ["body/keys/local.private", new TextEncoder().encode("PRIVKEY-BYTES")],
+    ["body/keys/default.btn.mykit", new TextEncoder().encode("KIT-BYTES")],
+    ["body/tn.yaml", new TextEncoder().encode("ceremony: {}")],
+  ]);
+  const blobB64 = Buffer.from(sealWithBek(zipBytes, bek)).toString("base64");
+  const mockFetch = async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+    if (String(_url).includes("/encrypted-blob")) {
+      return new Response(JSON.stringify({ ciphertext_b64: blobB64 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  const tmp = mkdtempSync(join(tmpdir(), "wallet-restore-nested-"));
+  try {
+    const result = await restoreWithBek({
+      vaultUrl: "http://vault.test",
+      projectId: "proj-nested-001",
+      bearer: "fake-bearer",
+      bek: new Uint8Array(bek),
+      outDir: tmp,
+      fetchImpl: mockFetch,
+    });
+    assert.equal(result.filesWritten.length, 3, "all 3 nested members written");
+    assert.equal(readFileSync(join(tmp, "body", "keys", "local.private"), "utf-8"), "PRIVKEY-BYTES");
+    assert.equal(readFileSync(join(tmp, "body", "keys", "default.btn.mykit"), "utf-8"), "KIT-BYTES");
+    assert.equal(readFileSync(join(tmp, "body", "tn.yaml"), "utf-8"), "ceremony: {}");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("restoreWithBek — opaque plaintext writes <project>.tnpkg + note", async () => {
   const bek = randomBytes(32);
   const opaque = new TextEncoder().encode("raw tnpkg bytes not a zip");

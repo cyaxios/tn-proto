@@ -131,12 +131,22 @@ def link_ceremony(
     Idempotent: if the ceremony is already linked to the same vault,
     returns cfg unchanged. If linked to a different vault, raises.
     """
-    if cfg.is_linked() and cfg.linked_vault == client.base_url:
+    # "Already linked" for idempotency means a real project EXISTS. A fresh
+    # mode:linked ceremony that carries no linked_project_id yet (the default
+    # mint shape, even under link=False) is NOT yet linked and must proceed to
+    # create — this is the warm-attach create path. Keying the guards on
+    # linked_project_id (not mode/vault alone) is what makes that work.
+    if cfg.linked_project_id and cfg.linked_vault == client.base_url:
         return cfg
-    if cfg.mode == "linked" and cfg.linked_vault and cfg.linked_vault != client.base_url:
+    if (
+        cfg.linked_project_id
+        and cfg.linked_vault
+        and cfg.linked_vault != client.base_url
+    ):
         raise RuntimeError(
             f"ceremony {cfg.ceremony_id} is already linked to "
-            f"{cfg.linked_vault}; unlink first before re-linking",
+            f"{cfg.linked_vault} (project {cfg.linked_project_id}); unlink "
+            f"first before re-linking",
         )
 
     # 0.4.2a9: prefer the operator-chosen project_name stamped into
@@ -305,9 +315,8 @@ def drain_sync_queue(
     """Retry a pending autosync failure by running a fresh sync_ceremony.
 
     If the sync succeeds, the queue file is truncated (removed). If it
-    fails again, the existing queue entries remain and a new one is
-    appended via the autosync hook... no wait, drain is explicit so
-    errors bubble up to the caller.
+    fails again, the existing queue entries remain and the error bubbles
+    up to the caller — drain is explicit, never auto-retried.
     """
     from . import admin as _admin
 
@@ -327,6 +336,7 @@ def sync_ceremony(
     client: VaultClient,
     *,
     passphrase: str | None = None,
+    awk: bytes | None = None,
     if_match: str | None = None,
     publish_groups: bool = True,
     sign_with: Any | None = None,
@@ -375,13 +385,13 @@ def sync_ceremony(
             result.errors.append(("<auth>", f"{type(e).__name__}: {e}"))
             return result
 
-    if not passphrase:
+    if awk is None and not passphrase:
         result.errors.append(
             (
                 "<passphrase>",
-                "account passphrase required to push the body backup "
-                "(derives the AWK that wraps the project BEK); pass "
-                "--passphrase",
+                "account credential required to push the body backup: pass a "
+                "cached AWK (run `tn account connect --passphrase`) or a passphrase "
+                "(`--passphrase`). The credential-free legs still ran.",
             ),
         )
         return result
@@ -394,6 +404,7 @@ def sync_ceremony(
             bearer=bearer,
             project_id=cfg.linked_project_id,
             passphrase=passphrase,
+            awk=awk,
             body=body,
             if_match=if_match,
         )
@@ -488,17 +499,7 @@ def restore_ceremony(
         # We don't know the expected ceremony_id yet, so we trust the AAD
         # embedded in the blob. The remaining files we'll verify with the
         # extracted ceremony_id.
-        yaml_bytes = (
-            _unseal(
-                blob,
-                wrap_key=client.identity.vault_wrap_key(),
-                expected_did=client.identity.did,
-                expected_ceremony_id=None,
-                expected_file_name=None,
-            )
-            if False
-            else _unseal_trust_aad(blob, client.identity)
-        )
+        yaml_bytes = _unseal_trust_aad(blob, client.identity)
         (target_dir / "tn.yaml").write_bytes(yaml_bytes)
         result.files_restored.append("tn.yaml")
         # parse tn.yaml to read ceremony id

@@ -130,8 +130,12 @@ export class WalletNamespace {
   ): Promise<LinkResult> {
     const state = readLinkState(yamlPath);
 
-    // Idempotent shortcut: already linked to the same vault.
-    if (state.mode === "linked" && state.linkedVault === client.baseUrl) {
+    // Idempotent shortcut: "already linked" means a real project EXISTS.
+    // A fresh mode:linked ceremony with no linkedProjectId yet (the default
+    // mint shape) is NOT yet linked and must proceed to create — keying the
+    // guards on linkedProjectId (not mode/vault alone) is what makes the
+    // warm-attach create path work. (Mirrors the Python link_ceremony fix.)
+    if (state.linkedProjectId && state.linkedVault === client.baseUrl) {
       return {
         projectId: state.linkedProjectId,
         vaultBaseUrl: state.linkedVault,
@@ -139,10 +143,11 @@ export class WalletNamespace {
         projectName: state.projectName || state.ceremonyId,
       };
     }
-    if (state.mode === "linked" && state.linkedVault && state.linkedVault !== client.baseUrl) {
+    if (state.linkedProjectId && state.linkedVault && state.linkedVault !== client.baseUrl) {
       throw new VaultError(
-        `ceremony ${state.ceremonyId} is already linked to ${state.linkedVault}; ` +
-          `unlink first before re-linking to ${client.baseUrl}`,
+        `ceremony ${state.ceremonyId} is already linked to ${state.linkedVault} ` +
+          `(project ${state.linkedProjectId}); unlink first before re-linking ` +
+          `to ${client.baseUrl}`,
       );
     }
 

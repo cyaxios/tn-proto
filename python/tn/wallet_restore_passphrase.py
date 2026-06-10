@@ -159,18 +159,23 @@ def _fetch_wrapped_key(
     return json.loads(body.decode("utf-8"))
 
 
-def _derive_bek_via_passphrase(
+def derive_account_awk(
     *,
     vault_url: str,
     bearer: str,
-    project_id: str,
     passphrase: str,
     credential_id: str | None = None,
 ) -> bytes:
-    """Full passphrase-only derivation chain.
+    """Derive the account **AWK** from the passphrase — the cacheable
+    credential (see :mod:`tn.credential_store`).
 
-    Returns the raw 32-byte BEK so the caller can hand it to
-    :func:`tn.wallet_restore._decrypt_blob_with_bek`.
+    Stops at the AWK; the per-project BEK is derived from it later
+    (:func:`_derive_bek_via_passphrase`). Caching the AWK rather than the
+    passphrase is the "token, not password" choice: the master passphrase is
+    never persisted, only the account-scoped wrapping key.
+
+    Returns the raw 32-byte AWK. Raises :class:`RestoreError` on a missing /
+    unsupported credential or a wrong passphrase (AEAD auth failure).
     """
     cred = _fetch_credential_with_wrap(
         vault_url=vault_url,
@@ -194,7 +199,6 @@ def _derive_bek_via_passphrase(
         salt_b64=salt,
         iterations=int(iters),
     )
-
     awk = _aes_gcm_unwrap(
         key=cred_key,
         wrapped_b64=cred["wrapped_account_key_b64"],
@@ -203,7 +207,28 @@ def _derive_bek_via_passphrase(
     )
     if len(awk) != 32:
         raise RestoreError(f"unwrapped AWK has wrong length ({len(awk)})")
+    return awk
 
+
+def _derive_bek_via_passphrase(
+    *,
+    vault_url: str,
+    bearer: str,
+    project_id: str,
+    passphrase: str,
+    credential_id: str | None = None,
+) -> bytes:
+    """Full passphrase-only derivation chain (AWK then BEK).
+
+    Returns the raw 32-byte BEK so the caller can hand it to
+    :func:`tn.wallet_restore._decrypt_blob_with_bek`.
+    """
+    awk = derive_account_awk(
+        vault_url=vault_url,
+        bearer=bearer,
+        passphrase=passphrase,
+        credential_id=credential_id,
+    )
     wrapped = _fetch_wrapped_key(
         vault_url=vault_url,
         bearer=bearer,
@@ -226,4 +251,5 @@ __all__ = [
     "_derive_credential_key_pbkdf2",
     "_fetch_credential_with_wrap",
     "_fetch_wrapped_key",
+    "derive_account_awk",
 ]

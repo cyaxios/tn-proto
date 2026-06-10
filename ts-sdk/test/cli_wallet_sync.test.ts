@@ -482,7 +482,9 @@ test("linked sync without --passphrase dies", async () => {
       vault: "https://vault.example", identityPath, fetchImpl, stdout: sink(), stderr: err,
     });
     assert.equal(code, 1);
-    assert.match(err.text(), /--passphrase required/);
+    // No cached AWK and no passphrase → the push leg refuses (new contract:
+    // a cached AWK OR --passphrase is accepted).
+    assert.match(err.text(), /account credential required.*--passphrase/s);
   } finally {
     rmSync(acct.dir, { recursive: true, force: true });
   }

@@ -221,7 +221,7 @@ def _sync_push(yaml_path: Path, device: DeviceKey, passphrase: str) -> _wallet.S
 def _sync_pull_absorb(yaml_path: Path, device: DeviceKey) -> list:
     """Pull the account inbox for ``device`` and absorb each staged snapshot.
 
-    Mirrors the CLI ``_stage_account_inbox`` + ``_pull_absorb_step`` merge,
+    Mirrors ``tn.wallet_pull.stage_account_inbox`` + ``pull_and_absorb``,
     but inline here so the test owns the account-auth client lifecycle.
     Returns the list of absorb receipts (one per pulled snapshot).
     """
@@ -249,7 +249,7 @@ def _sync_pull_absorb(yaml_path: Path, device: DeviceKey) -> list:
             )
             client._raise_for_status(dl)
             body = dl.content
-            # Stage to a temp file and absorb (mirrors _pull_absorb_step).
+            # Stage to a temp file and absorb (mirrors wallet_pull.pull_and_absorb).
             staged = yaml_path.parent / ".tn" / "inbox_pull"
             staged.mkdir(parents=True, exist_ok=True)
             dest = staged / f"{from_did.replace(':', '_')}_{ts}.tnpkg"

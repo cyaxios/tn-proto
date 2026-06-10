@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import logging
 import os as _os_for_surface
-import tempfile as _tempfile_for_surface
 import threading
 from pathlib import Path
 from typing import Any
@@ -130,31 +129,27 @@ _surface = logging.getLogger("tn.surface")
 # config. Useful for diagnosing test-ordering bugs in the bulk pytest
 # run where stdout/stderr are captured per test.
 #
-# Default fallback: when the env var is unset we still tee to a process-
-# scoped file under TEMP so a developer running pytest casually sees the
-# trace. Path is printed to stderr at module import.
-_surface_log_path = (
-    _os_for_surface.environ.get("TN_SURFACE_LOG")
-    or str(_os_for_surface.path.join(
-        _tempfile_for_surface.gettempdir(),
-        f"tn_surface_pid{_os_for_surface.getpid()}.log",
-    ))
-)
-try:
-    _surface_fh = logging.FileHandler(_surface_log_path, encoding="utf-8", delay=False)
-    _surface_fh.setFormatter(
-        logging.Formatter("%(asctime)s [pid=%(process)d] %(name)s | %(message)s")
-    )
-    _surface.addHandler(_surface_fh)
-    _surface.setLevel(logging.INFO)
-    _surface.propagate = False  # don't double-emit through root
-    _surface.info(
-        "=== tn module imported, surface log opened at %s (pid=%d) ===",
-        _surface_log_path, _os_for_surface.getpid(),
-    )
-except Exception:  # noqa: BLE001 — best-effort: logging bootstrap must not break import
-    # Best-effort: never let logging bootstrap failure break import.
-    pass
+# Off by default: a cryptography package must not silently create files on
+# disk just from `import tn`. When the env var is unset (or empty) no file
+# sink is attached and the import creates zero files. Set it to an explicit
+# path to opt in.
+_surface_log_path = _os_for_surface.environ.get("TN_SURFACE_LOG") or None
+if _surface_log_path:
+    try:
+        _surface_fh = logging.FileHandler(_surface_log_path, encoding="utf-8", delay=False)
+        _surface_fh.setFormatter(
+            logging.Formatter("%(asctime)s [pid=%(process)d] %(name)s | %(message)s")
+        )
+        _surface.addHandler(_surface_fh)
+        _surface.setLevel(logging.INFO)
+        _surface.propagate = False  # don't double-emit through root
+        _surface.info(
+            "=== tn module imported, surface log opened at %s (pid=%d) ===",
+            _surface_log_path, _os_for_surface.getpid(),
+        )
+    except Exception:  # noqa: BLE001 — best-effort: logging bootstrap must not break import
+        # Best-effort: never let logging bootstrap failure break import.
+        pass
 
 _dispatch_rt: DispatchRuntime | None = None
 
@@ -518,6 +513,22 @@ def _auto_link_after_init(*, yaml_path: Path, identity: Any | None) -> None:
             _logger.exception(
                 "auto-link: failed to persist linked_vault; continuing"
             )
+
+    # Logged-in account → warm attach/sync via the shared engine (the same
+    # WARM_CREATE / WARM_SYNC decision the CLI runs, reading the cached AWK).
+    # Contained; never raises. The library path runs push-only sync (no
+    # pull_absorb injected) — that helper lives in the CLI layer for now.
+    if identity.linked_account_id:
+        from ._init_attach import attach_or_sync
+
+        try:
+            attach_or_sync(_current_config_impl(), identity, vault_url)
+        except Exception:  # noqa: BLE001 — auto-link is best-effort; stay local
+            _logger.exception(
+                "auto-link warm-attach failed; ceremony is still valid locally"
+            )
+        _link_done_this_process = True
+        return
 
     client = None
     try:

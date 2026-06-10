@@ -1,130 +1,89 @@
-"""`tn init` warm-attach path — when the device already belongs to a
-vault account, a new init attaches the project over the device DID's
-challenge-issued JWT (link_ceremony + sync_ceremony) instead of minting
-a browser claim URL.
+"""`tn init` warm-attach path.
 
-These tests exercise the `_try_warm_attach` helper in isolation, mocking
-the authenticated vault path so no network is required. The gating in
-cmd_init (``warm_signal and _try_warm_attach(...)``) is a thin wrapper
-over this helper.
+``_try_warm_attach`` drives the shared ``attach_or_sync`` engine and renders
+its ``AttachOutcome`` into the CLI banner + a True/False fall-back signal.
+The engine itself (WARM_CREATE / WARM_SYNC against a real vault) is proven in
+``test_init_attach_live.py``; here we pin the thin CLI wrapper's
+outcome → banner/bool mapping with ``attach_or_sync`` mocked.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 import tn
+import tn._init_attach as _ia
 from tn import cli
+from tn._init_attach import AttachMode, AttachOutcome
 
 
-def _fake_cfg() -> SimpleNamespace:
-    return SimpleNamespace(
-        project_name="MyProject",
-        ceremony_id="local_abc123",
-        linked_project_id="proj_xyz",
-    )
-
-
-def _patch_wallet(uploaded=("default.btn.mykit",), errors=()):
-    fake_wallet = mock.Mock()
-    fake_wallet.link_ceremony.return_value = None
-    fake_wallet.sync_ceremony.return_value = SimpleNamespace(
-        uploaded=list(uploaded), errors=list(errors)
-    )
-    return fake_wallet
-
-
-def test_warm_attach_success(tmp_path: Path, capsys, monkeypatch):
-    """Auth + link + sync all succeed -> returns True, prints the attach
-    banner, and never mentions a claim URL."""
-    yaml_path = tmp_path / ".tn" / "MyProject" / "tn.yaml"
-    identity = mock.Mock()
-
-    fake_client = mock.Mock()
-    fake_wallet = _patch_wallet()
-
-    monkeypatch.setattr(cli.VaultClient, "for_identity", lambda *a, **k: fake_client)
-    monkeypatch.setattr(cli, "_wallet", fake_wallet)
+def _patch(monkeypatch: pytest.MonkeyPatch, outcome: AttachOutcome) -> None:
+    """Stub the cycle-broken inline imports + the engine to return ``outcome``."""
     monkeypatch.setattr(tn, "init", lambda *a, **k: None)
-    monkeypatch.setattr(tn, "current_config", _fake_cfg)
+    monkeypatch.setattr(tn, "current_config", lambda: mock.Mock())
     monkeypatch.setattr(tn, "flush_and_close", lambda: None)
+    monkeypatch.setattr(_ia, "attach_or_sync", lambda *a, **k: outcome)
 
-    ok = cli._try_warm_attach(yaml_path, identity, "https://vault.local", "btn")
 
+def test_warm_create_attaches(tmp_path: Path, capsys, monkeypatch) -> None:
+    _patch(
+        monkeypatch,
+        AttachOutcome(
+            mode=AttachMode.WARM_CREATE, project_id="pr_1", uploaded=["a.mykit"]
+        ),
+    )
+    ok = cli._try_warm_attach(
+        tmp_path / "tn.yaml", mock.Mock(), "https://vault.local", "btn"
+    )
     assert ok is True
-    fake_wallet.link_ceremony.assert_called_once()
-    fake_wallet.sync_ceremony.assert_called_once()
-    fake_client.close.assert_called_once()
     out = capsys.readouterr().out
     assert "Attached to your vault account" in out
     assert "claim" not in out.lower()
+    assert "pr_1" in out
 
 
-def test_warm_attach_auth_failure_falls_back(tmp_path: Path, capsys, monkeypatch):
-    """If DID-challenge auth fails, the helper returns False so the
-    caller can mint a claim URL instead. link/sync are never reached."""
-    yaml_path = tmp_path / ".tn" / "MyProject" / "tn.yaml"
-    identity = mock.Mock()
-    fake_wallet = _patch_wallet()
-
-    def _boom(*a, **k):
-        raise RuntimeError("challenge rejected")
-
-    monkeypatch.setattr(cli.VaultClient, "for_identity", _boom)
-    monkeypatch.setattr(cli, "_wallet", fake_wallet)
-
-    ok = cli._try_warm_attach(yaml_path, identity, "https://vault.local", "btn")
-
-    assert ok is False
-    fake_wallet.link_ceremony.assert_not_called()
-    fake_wallet.sync_ceremony.assert_not_called()
-    assert "claim URL instead" in capsys.readouterr().out
-
-
-def test_warm_attach_link_failure_falls_back(tmp_path: Path, capsys, monkeypatch):
-    """If link_ceremony fails (pre-binding), return False -> cold fallback.
-    sync_ceremony must not run (no project row was created)."""
-    yaml_path = tmp_path / ".tn" / "MyProject" / "tn.yaml"
-    identity = mock.Mock()
-
-    fake_client = mock.Mock()
-    fake_wallet = _patch_wallet()
-    fake_wallet.link_ceremony.side_effect = RuntimeError("project create 500")
-
-    monkeypatch.setattr(cli.VaultClient, "for_identity", lambda *a, **k: fake_client)
-    monkeypatch.setattr(cli, "_wallet", fake_wallet)
-    monkeypatch.setattr(tn, "init", lambda *a, **k: None)
-    monkeypatch.setattr(tn, "current_config", _fake_cfg)
-    monkeypatch.setattr(tn, "flush_and_close", lambda: None)
-
-    ok = cli._try_warm_attach(yaml_path, identity, "https://vault.local", "btn")
-
-    assert ok is False
-    fake_wallet.sync_ceremony.assert_not_called()
-    fake_client.close.assert_called_once()
-    assert "claim URL instead" in capsys.readouterr().out
-
-
-def test_warm_attach_sync_errors_still_attached(tmp_path: Path, capsys, monkeypatch):
-    """Once link_ceremony succeeds we're committed to the warm path:
-    upload errors are reported but the helper still returns True (we
-    must not double-register via the claim-URL fallback)."""
-    yaml_path = tmp_path / ".tn" / "MyProject" / "tn.yaml"
-    identity = mock.Mock()
-
-    fake_client = mock.Mock()
-    fake_wallet = _patch_wallet(uploaded=(), errors=("default.btn.mykit: 503",))
-
-    monkeypatch.setattr(cli.VaultClient, "for_identity", lambda *a, **k: fake_client)
-    monkeypatch.setattr(cli, "_wallet", fake_wallet)
-    monkeypatch.setattr(tn, "init", lambda *a, **k: None)
-    monkeypatch.setattr(tn, "current_config", _fake_cfg)
-    monkeypatch.setattr(tn, "flush_and_close", lambda: None)
-
-    ok = cli._try_warm_attach(yaml_path, identity, "https://vault.local", "btn")
-
+def test_warm_sync_attaches(tmp_path: Path, capsys, monkeypatch) -> None:
+    _patch(
+        monkeypatch,
+        AttachOutcome(
+            mode=AttachMode.WARM_SYNC, project_id="pr_1", uploaded=["a.mykit"]
+        ),
+    )
+    ok = cli._try_warm_attach(
+        tmp_path / "tn.yaml", mock.Mock(), "https://vault.local", "btn"
+    )
     assert ok is True
-    out = capsys.readouterr().out
-    assert "Attached to your vault account" in out
-    assert "upload error" in out
+    assert "synced" in capsys.readouterr().out.lower()
+
+
+def test_no_account_falls_back_to_claim_url(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    # CLAIM_URL outcome (no logged-in account) → caller mints a claim URL.
+    _patch(monkeypatch, AttachOutcome(mode=AttachMode.CLAIM_URL))
+    ok = cli._try_warm_attach(
+        tmp_path / "tn.yaml", mock.Mock(), "https://vault.local", "btn"
+    )
+    assert ok is False
+
+
+def test_contained_warnings_still_attached(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    # A contained failure (e.g. no cached credential) does NOT revert to the
+    # claim URL — the project is attached; the warning is surfaced.
+    _patch(
+        monkeypatch,
+        AttachOutcome(
+            mode=AttachMode.WARM_CREATE,
+            project_id="pr_1",
+            warnings=["<passphrase>: account credential required"],
+        ),
+    )
+    ok = cli._try_warm_attach(
+        tmp_path / "tn.yaml", mock.Mock(), "https://vault.local", "btn"
+    )
+    assert ok is True
+    assert "WARN" in capsys.readouterr().out

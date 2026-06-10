@@ -50,12 +50,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .wallet_restore import RestoreError
 from .wallet_restore_passphrase import (
-    AAD_AWK_WRAP,
     AAD_BEK_WRAP,
     _aes_gcm_unwrap,
-    _derive_credential_key_pbkdf2,
-    _fetch_credential_with_wrap,
     _fetch_wrapped_key,
+    derive_account_awk,
 )
 
 
@@ -115,44 +113,20 @@ def _derive_awk_via_passphrase(
 ) -> bytes:
     """Derive the 32-byte Account Wrapping Key from the passphrase.
 
-    The first half of :func:`wallet_restore_passphrase._derive_bek_via_passphrase`
-    (credential key -> AWK), factored out so the push can mint+wrap a
-    fresh BEK under the SAME AWK the restore side will later recover.
+    Delegates to the canonical
+    :func:`wallet_restore_passphrase.derive_account_awk` (the unwrap leg is
+    genuinely shared with restore — one copy), translating ``RestoreError``
+    to ``PushError`` to preserve the push-side error contract.
     """
-    cred = _fetch_credential_with_wrap(
-        vault_url=vault_url,
-        bearer=bearer,
-        credential_id=credential_id,
-    )
-    kdf = cred.get("kdf")
-    if kdf != "pbkdf2-sha256":
-        raise PushError(
-            f"credential KDF {kdf!r} not supported in CLI; use the "
-            "browser flow to push",
-        )
-    params = cred.get("kdf_params") or {}
-    salt = params.get("salt_b64")
-    iters = params.get("iterations") or params.get("iter") or 300_000
-    if not salt:
-        raise PushError("credential row missing kdf_params.salt_b64")
-
-    cred_key = _derive_credential_key_pbkdf2(
-        passphrase=passphrase,
-        salt_b64=salt,
-        iterations=int(iters),
-    )
     try:
-        awk = _aes_gcm_unwrap(
-            key=cred_key,
-            wrapped_b64=cred["wrapped_account_key_b64"],
-            nonce_b64=cred["wrap_nonce_b64"],
-            aad=AAD_AWK_WRAP,
+        return derive_account_awk(
+            vault_url=vault_url,
+            bearer=bearer,
+            passphrase=passphrase,
+            credential_id=credential_id,
         )
     except RestoreError as e:
         raise PushError(str(e)) from e
-    if len(awk) != 32:
-        raise PushError(f"unwrapped AWK has wrong length ({len(awk)})")
-    return awk
 
 
 def _wrap_bek_under_awk(awk: bytes, bek: bytes) -> tuple[str, str]:
@@ -323,7 +297,8 @@ def push_ceremony_body(
     vault_url: str,
     bearer: str,
     project_id: str,
-    passphrase: str,
+    passphrase: str | None = None,
+    awk: bytes | None = None,
     body: dict[str, bytes],
     credential_id: str | None = None,
     if_match: str | None = None,
@@ -333,6 +308,11 @@ def push_ceremony_body(
     The full inverse of the passphrase restore chain. ``body`` maps
     ``body/<name>`` keys to raw file bytes (keystore files + ``tn.yaml``).
 
+    The AWK is sourced one of two ways: pass a cached ``awk`` (the warm/init
+    path — already unwrapped at connect time, see :mod:`tn.credential_store`)
+    or a ``passphrase`` to derive it here (the legacy ``--passphrase`` path).
+    A cached ``awk`` takes precedence; at least one is required.
+
     Returns the parsed ``encrypted-blob-account`` PUT response
     (``{project_id, generation, size_bytes, stored_at}``). Raises
     :class:`PushError` on any failure (so the caller can record it per the
@@ -341,13 +321,21 @@ def push_ceremony_body(
     ``if_match`` overrides the auto-resolved generation (used by the
     concurrent-conflict test to force a stale precondition).
     """
-    # 1. Derive the AWK, then derive-or-mint the BEK.
-    awk = _derive_awk_via_passphrase(
-        vault_url=vault_url,
-        bearer=bearer,
-        passphrase=passphrase,
-        credential_id=credential_id,
-    )
+    # 1. Get the AWK — a cached AWK (the warm path) wins; else derive from the
+    #    passphrase. Then derive-or-mint the BEK.
+    if awk is None:
+        if not passphrase:
+            raise PushError(
+                "push_ceremony_body needs a cached awk or a passphrase",
+            )
+        awk = _derive_awk_via_passphrase(
+            vault_url=vault_url,
+            bearer=bearer,
+            passphrase=passphrase,
+            credential_id=credential_id,
+        )
+    elif len(awk) != 32:
+        raise PushError(f"cached AWK must be 32 bytes (got {len(awk)})")
 
     wrapped = None
     try:

@@ -17,7 +17,7 @@
 
 import { createDecipheriv } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { resolve as pathResolve } from "node:path";
+import { dirname, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
 
 import {
@@ -249,12 +249,18 @@ function writeRestoredBytes(args: {
   const members = tryUnpackExportFrame(args.plaintext);
   if (members !== null) {
     for (const [name, data] of [...members.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-      // Block path traversal escapes.
-      if (name.includes("..") || name.includes("/") || name.includes("\\")) {
-        notes.push(`skipped member with unsafe name: ${name}`);
+      // Sanitize against `..` traversal but PRESERVE subpaths — both push
+      // sides nest members as `body/keys/<name>` / `body/tn.yaml`, so a
+      // flat-only guard (rejecting "/") drops the entire keystore and breaks
+      // the Python→TS body restore. Mirror Python's `_write_restored_bytes`:
+      // strip `..`, leading slashes, normalize `\`, then mkdir -p the parent.
+      const safe = name.replaceAll("..", "").replace(/^\/+/, "").replaceAll("\\", "/");
+      if (!safe) {
+        notes.push(`skipped member with empty name: ${name}`);
         continue;
       }
-      const path = pathResolve(args.outDir, name);
+      const path = pathResolve(args.outDir, safe);
+      mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, data);
       filesWritten.push(path);
     }

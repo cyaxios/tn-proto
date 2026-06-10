@@ -86,6 +86,7 @@ from .cli_vault import cmd_vault_link, cmd_vault_unlink
 from .cli_verify import cmd_verify
 from .identity import Identity, IdentityError, _default_identity_path
 from .vault_client import VaultClient, VaultError, resolve_vault_url
+from .wallet_pull import pull_and_absorb, stage_account_inbox
 
 # ---------------------------------------------------------------------
 # Helpers
@@ -181,44 +182,36 @@ def _try_warm_attach(
     """
     from . import current_config, flush_and_close
     from . import init as tn_init
-
-    try:
-        client = VaultClient.for_identity(identity, vault_url)
-    except Exception as e:  # noqa: BLE001 — auth failure must not break init
-        print(f"[tn init] WARN account auth failed ({e}); using claim URL instead")
-        return False
+    from ._init_attach import AttachMode, attach_or_sync
 
     try:
         tn_init(yaml_path, cipher=cipher or "btn", identity=identity, link=False)
         cfg = current_config()
-        _wallet.link_ceremony(cfg, client)
-    except Exception as e:  # noqa: BLE001 — pre-binding failure -> cold fallback
-        print(f"[tn init] WARN account attach failed ({e}); using claim URL instead")
-        try:
-            client.close()
-        except Exception:  # noqa: BLE001 — best-effort client close
-            pass
+    except Exception as e:  # noqa: BLE001 — load failure -> cold fallback
+        print(f"[tn init] WARN ceremony load failed ({e}); using claim URL instead")
         return False
 
-    # Past link_ceremony the project row exists; we are committed to the
-    # warm path. sync errors are reported but don't revert to claim URL
-    # (that would double-register the project).
-    try:
-        result = _wallet.sync_ceremony(cfg, client)
-        print()
-        print("[tn init] Attached to your vault account (no browser needed).")
-        print(f"[tn init]   project:  {cfg.project_name or cfg.ceremony_id}")
-        print(f"[tn init]   linked:   {vault_url}/projects/{cfg.linked_project_id}")
-        print(f"[tn init]   uploaded: {len(result.uploaded)} file(s)")
-        if result.errors:
-            print(f"[tn init]   WARN {len(result.errors)} upload error(s): {result.errors}")
-        print()
-    finally:
-        try:
-            client.close()
-        except Exception:  # noqa: BLE001 — best-effort client close
-            pass
-        flush_and_close()
+    # The shared engine: WARM_CREATE (new project → link + push) or WARM_SYNC
+    # (existing project → pull/merge + push), using the cached AWK for the
+    # body backup. Never raises; contained failures come back as warnings.
+    out = attach_or_sync(
+        cfg, identity, vault_url, pull_absorb=_pull_absorb_step
+    )
+    flush_and_close()
+
+    if out.mode is AttachMode.CLAIM_URL:
+        # No logged-in account after all — fall back to the claim-URL flow.
+        return False
+
+    verb = "Created" if out.mode is AttachMode.WARM_CREATE else "Synced"
+    print()
+    print("[tn init] Attached to your vault account (no browser needed).")
+    if out.project_id:
+        print(f"[tn init]   {verb.lower()}:  {vault_url}/projects/{out.project_id}")
+    print(f"[tn init]   uploaded: {len(out.uploaded)} file(s)")
+    for w in out.warnings:
+        print(f"[tn init]   WARN {w}")
+    print()
     return True
 
 
@@ -684,146 +677,16 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
     return 0
 
 
-def _stage_account_inbox(
-    cfg: Any, identity: Identity, yaml_path: Path
-) -> tuple[list[Path], int] | None:
-    """Pull the account-scoped inbox and STAGE new snapshots locally.
-
-    Reuses the dashboard's account aggregator
-    (``GET /api/v1/account/inbox``) — every snapshot addressed to any DID
-    in ``accounts.minted_dids[]`` for this account. Each lands at
-    ``<inbox_dir>/<from_did>/<ceremony_id>/<ts>.tnpkg`` (vault URL shape);
-    already-staged files are skipped (idempotent).
-
-    Returns ``(staged_paths, skipped_count)``, or ``None`` when this
-    ceremony can't pull (no linked vault AND no account binding, or the
-    vault doesn't resolve this DID to an account). Caller decides whether
-    None is fatal. Closes its own VaultClient; does NOT touch the tn
-    runtime lifecycle (so the caller can absorb the staged files after).
-
-    Note: the account-inbox endpoint resolves the account from the DID
-    (``require_account_id``), so a locally-stored account_id is NOT
-    required — ``tn init --link`` attaches the DID to the account
-    server-side without writing one. We only require a vault to talk to:
-    a linked ceremony has one; otherwise we fall back to an explicit
-    local binding so an offline ceremony never makes a surprise network
-    call.
-    """
-    from .conventions import inbox_dir
-    from .sync_state import is_account_bound
-
-    _is_linked_fn = getattr(cfg, "is_linked", None)
-    ceremony_linked = (
-        bool(_is_linked_fn())
-        if callable(_is_linked_fn)
-        else bool(getattr(cfg, "linked_vault", None))
-    )
-    if not ceremony_linked and not is_account_bound(yaml_path):
-        return None
-
-    # Prefer the CEREMONY's linked vault (where the push goes) over the
-    # identity default — otherwise resolve_vault_url() can fall back to a
-    # local dev URL and the pull connect-refuses while the push succeeds.
-    vault_url = (
-        getattr(cfg, "linked_vault", None)
-        or identity.linked_vault
-        or resolve_vault_url(None)
-    )
-    client = VaultClient.for_identity(identity, vault_url)
-    staged: list[Path] = []
-    skipped = 0
-    try:
-        resp = client._request("GET", "/api/v1/account/inbox")
-        if resp.status_code in (401, 403):
-            # The vault doesn't resolve this DID to an account.
-            return None
-        client._raise_for_status(resp)
-        listing = resp.json()
-        items = listing.get("items") or []
-        target_root = inbox_dir(yaml_path)
-        for item in items:
-            if item.get("consumed_at"):
-                # Already absorbed by another device / the dashboard.
-                continue
-            from_did = item.get("publisher_identity")
-            ceremony_id = item.get("ceremony_id")
-            ts = item.get("ts")
-            if not (
-                isinstance(from_did, str)
-                and isinstance(ceremony_id, str)
-                and isinstance(ts, str)
-            ):
-                continue
-
-            dest_dir = target_root / _safe_path_seg(from_did) / _safe_path_seg(
-                ceremony_id
-            )
-            dest = dest_dir / f"{ts}.tnpkg"
-            if dest.exists():
-                skipped += 1
-                continue
-
-            body = _download_account_inbox_snapshot(
-                client, from_did=from_did, ceremony_id=ceremony_id, ts=ts
-            )
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(body)
-            staged.append(dest)
-    finally:
-        client.close()
-    return staged, skipped
-
-
 def _pull_absorb_step(cfg: Any, identity: Identity, yaml_path: Path) -> int:
-    """Pull the account inbox, ABSORB each staged snapshot (the merge),
-    and surface any INFORMED leaf-reuse (equivocation) attempts.
+    """`tn wallet sync` pull+absorb leg — pull the account inbox, ABSORB
+    each staged snapshot (the merge), and surface INFORMED leaf-reuse.
 
-    Returns the number of informed equivocations detected (0 when none /
-    when the ceremony isn't account-bound). Absorb is idempotent (dedupe
-    by row_hash), and the absorb engine keeps revoked leaves revoked
-    regardless — a re-add the publisher KNEW was revoked is flagged here
-    so the operator sees it.
+    Thin CLI wrapper over :func:`tn.wallet_pull.pull_and_absorb`, passing
+    ``print`` so progress is narrated. The engine is shared with the
+    library init path (``_init_attach.attach_or_sync``) so the CLI and the
+    notebook ``tn.init()`` reconcile identically.
     """
-    from .pkg import absorb as _absorb
-
-    staged_result = _stage_account_inbox(cfg, identity, yaml_path)
-    if staged_result is None:
-        print(
-            "  (pull/merge skipped: ceremony not bound to a vault account; "
-            "run `tn account connect <code>` to enable two-way sync)"
-        )
-        return 0
-
-    staged, skipped = staged_result
-    absorbed = 0
-    informed: list[Any] = []
-    for path in staged:
-        try:
-            receipt = _absorb(path)
-        except Exception as e:  # noqa: BLE001 — one bad file shouldn't abort the merge
-            print(f"  WARN absorb failed for {path.name}: {e}")
-            continue
-        absorbed += int(getattr(receipt, "accepted_count", 0) or 0)
-        for c in getattr(receipt, "conflicts", []) or []:
-            if getattr(c, "informed", False):
-                informed.append(c)
-
-    print(
-        f"  pulled+absorbed {len(staged)} snapshot(s), {absorbed} new event(s)"
-        + (f", {skipped} already local" if skipped else "")
-    )
-    if informed:
-        print(
-            f"  ALERT: {len(informed)} INFORMED leaf-reuse (equivocation) "
-            f"attempt(s) — a publisher re-added a leaf it knew was revoked:"
-        )
-        for c in informed:
-            rh = (getattr(c, "attempted_row_hash", "") or "")[:16]
-            print(
-                f"    group={getattr(c, 'group', '?')} "
-                f"leaf={getattr(c, 'leaf_index', '?')} attempted={rh}..."
-            )
-    return len(informed)
+    return pull_and_absorb(cfg, identity, yaml_path, report=print)
 
 
 def _cmd_wallet_sync_pull(cfg: Any, identity: Identity, yaml_path: Path) -> int:
@@ -835,7 +698,7 @@ def _cmd_wallet_sync_pull(cfg: Any, identity: Identity, yaml_path: Path) -> int:
     """
     from . import flush_and_close
 
-    staged_result = _stage_account_inbox(cfg, identity, yaml_path)
+    staged_result = stage_account_inbox(cfg, identity, yaml_path)
     if staged_result is None:
         flush_and_close()
         _die(
@@ -855,30 +718,6 @@ def _cmd_wallet_sync_pull(cfg: Any, identity: Identity, yaml_path: Path) -> int:
     if skipped:
         print(f"  ({skipped} already staged locally and skipped)")
     return 0
-
-
-def _safe_path_seg(seg: str) -> str:
-    """Path-sanitize a DID / ceremony_id / ts segment.
-
-    DIDs contain ':' which is illegal in Windows path components, and
-    we don't want a malicious server-supplied value to escape the inbox
-    root via '/' or '..'. Replace path-reserved chars with '_' and
-    reject anything that walks above the inbox root.
-    """
-    cleaned = seg.replace(":", "_").replace("/", "_").replace("\\", "_")
-    if cleaned in ("", ".", "..") or cleaned.startswith(".."):
-        raise ValueError(f"unsafe path segment: {seg!r}")
-    return cleaned
-
-
-def _download_account_inbox_snapshot(
-    client: VaultClient, *, from_did: str, ceremony_id: str, ts: str
-) -> bytes:
-    """Download the raw .tnpkg body via the account-auth route."""
-    path = f"/api/v1/account/inbox/{from_did}/{ceremony_id}/{ts}.tnpkg"
-    resp = client._request("GET", path)
-    client._raise_for_status(resp)
-    return resp.content
 
 
 # ---------------------------------------------------------------------
@@ -965,6 +804,21 @@ def cmd_account_connect(args: argparse.Namespace) -> int:
         identity.ensure_written(identity_path)
 
     print(f"Connected to vault account {account_id}")
+
+    # Cache the account AWK so warm-attach / sync can back up the body
+    # non-interactively from here on (connect once, logged in for good). The
+    # passphrase is presented once; only the derived AWK is persisted.
+    passphrase = getattr(args, "passphrase", None)
+    cache_vault = base_url or (identity.linked_vault if identity else None)
+    if passphrase and identity is not None and cache_vault:
+        from ._init_attach import cache_account_awk
+
+        try:
+            cache_account_awk(identity, cache_vault, passphrase, account_id)
+            print("  cached account credential (body backup runs unattended)")
+        except Exception as e:  # noqa: BLE001 — caching is best-effort
+            print(f"  WARN could not cache account credential: {e}")
+
     project_id = resp.get("project_id")
     project_name = resp.get("project_name")
     if project_id:
@@ -1308,9 +1162,15 @@ def _restore_via_passphrase(
             _die("--project-id is required in non-TTY contexts", code=2)
         choice = input("Pick a project index: ").strip()
         try:
-            project_id = rows[int(choice)]["project_id"]
+            picked = rows[int(choice)].get("project_id")
         except (ValueError, IndexError):
             _die("invalid project pick", code=2)
+        # project_id is the vault-side project identity — without it there is
+        # no wrapped-key / blob to fetch. Enforce it rather than letting a
+        # None slip into the BEK derivation (which builds /projects/<id>/...).
+        if not picked:
+            _die("selected project has no project_id", code=2)
+        project_id = str(picked)
 
     if not _is_tty():
         _die("passphrase prompt requires a TTY", code=2)
@@ -3278,6 +3138,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Tier-2 override: explicit identity.json to sign the redeem with. "
             "Default cascade: machine-global identity, then the ceremony keystore key."
+        ),
+    )
+    p_connect.add_argument(
+        "--passphrase", default=None,
+        help=(
+            "Account passphrase, presented ONCE to cache the account key (AWK) "
+            "so a later `tn init` can back up the body unattended. Only the "
+            "derived key is stored locally, never the passphrase itself."
         ),
     )
     p_connect.set_defaults(func=cmd_account_connect)
