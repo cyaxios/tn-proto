@@ -2724,8 +2724,15 @@ export class NodeRuntime {
           deduped += 1;
           continue;
         }
+        // SECURITY/parity: archive the superseded state/kit as a LOADABLE
+        // `.revoked.<ts>` (the same scheme rotateGroup uses, which the
+        // reader spans), NOT `.previous.<ts>` which the cipher ignores.
+        // Otherwise a PRIOR member that catches up to a rotation through a
+        // group_keys sync silently loses read access to everything from
+        // before it. The single `ts` keeps the state+kit a matched pair.
+        // Mirrors the Python _absorb_group_keys retired-archive fix.
         try {
-          renameSync(dest, pathResolve(keystore, `${rel}.previous.${ts}`));
+          renameSync(dest, pathResolve(keystore, `${rel}.revoked.${ts}`));
         } catch {
           /* best effort */
         }
