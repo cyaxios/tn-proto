@@ -35,11 +35,14 @@ from datetime import timezone as _tz
 from pathlib import Path
 from typing import Any, overload
 
+import tn_btn as _btn
+
 from .admin.log import (
     append_admin_envelopes,
     existing_row_hashes,
     resolve_admin_log_path,
 )
+from .btn_keystore import BtnKeystore
 from .config import LoadedConfig
 from .conventions import pending_offers_dir
 from .packaging import Package, verify
@@ -973,29 +976,104 @@ def _absorb_group_keys(
     keystore.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    # Step A: install key files (content-addressed).
-    accepted = 0
-    deduped = 0
-    replaced: list[Path] = []
+    # Step A: install group key material (state + kit), PAIRED per group.
+    #
+    # When a group's active state/kit is replaced by a NEWER epoch (a rotation
+    # arriving via sync rather than performed locally), the superseded pair
+    # must be archived as a LOADABLE ``.retired.<old_epoch>`` - NOT a
+    # ``.previous.<ts>`` the cipher's retired-loader ignores - so a PRIOR
+    # member keeps read access to everything from before the rotation it just
+    # received. A first-time joiner has no prior pair to archive (forward-only,
+    # which is correct: an invite does not confer access to past epochs).
+    incoming: dict[str, dict[str, bytes]] = {}
     for name, data in body.items():
         if not name.startswith("body/keys/"):
             continue
         rel = name[len("body/keys/") :]
-        if not rel:
-            continue
-        if "/" in rel or "\\" in rel:  # flat only
+        if not rel or "/" in rel or "\\" in rel:  # flat only
             continue
         # Only group key material — never a device secret.
-        if not (rel.endswith(".btn.state") or rel.endswith(".btn.mykit")):
+        if rel.endswith(".btn.state"):
+            incoming.setdefault(rel[: -len(".btn.state")], {})["state"] = data
+        elif rel.endswith(".btn.mykit"):
+            incoming.setdefault(rel[: -len(".btn.mykit")], {})["kit"] = data
+
+    bk = BtnKeystore(keystore)
+    accepted = 0
+    deduped = 0
+    replaced: list[Path] = []
+    for group, pair in incoming.items():
+        new_state = pair.get("state")
+        new_kit = pair.get("kit")
+        state_path = keystore / f"{group}.btn.state"
+        kit_path = keystore / f"{group}.btn.mykit"
+
+        # Half a pair (only one side shipped) - keep the legacy per-file,
+        # content-addressed install with a .previous backup; a lone file
+        # cannot form a retired pair anyway.
+        if new_state is None or new_kit is None:
+            for rel, data in (
+                (f"{group}.btn.state", new_state),
+                (f"{group}.btn.mykit", new_kit),
+            ):
+                if data is None:
+                    continue
+                dest = keystore / rel
+                if dest.exists():
+                    if dest.read_bytes() == data:
+                        deduped += 1
+                        continue
+                    _preserve_before_overwrite(
+                        dest, dest.with_name(f"{rel}.previous.{ts}")
+                    )
+                    replaced.append(dest)
+                dest.write_bytes(data)
+                accepted += 1
             continue
-        dest = (keystore / rel).resolve()
-        if dest.exists():
-            if dest.read_bytes() == data:
-                deduped += 1
-                continue
-            _preserve_before_overwrite(dest, dest.with_name(f"{rel}.previous.{ts}"))
-            replaced.append(dest)
-        dest.write_bytes(data)
+
+        # Full pair. Dedup an identical re-absorb.
+        if (
+            state_path.exists()
+            and kit_path.exists()
+            and state_path.read_bytes() == new_state
+            and kit_path.read_bytes() == new_kit
+        ):
+            deduped += 1
+            continue
+
+        # Replacing an existing active pair: archive the OLD one at its own
+        # epoch so its messages stay readable. Fall back to .previous only
+        # when it is not a forward rotation or the epoch is unreadable (so
+        # nothing is ever destroyed, even if not loadable).
+        if state_path.exists() and kit_path.exists():
+            old_state = state_path.read_bytes()
+            old_kit = kit_path.read_bytes()
+            archived = False
+            try:
+                old_epoch = _btn.PublisherState.from_bytes(old_state).epoch
+                new_epoch = _btn.PublisherState.from_bytes(new_state).epoch
+                if new_epoch > old_epoch:
+                    bk.write_retired_pair(
+                        group,
+                        epoch=old_epoch,
+                        state_bytes=old_state,
+                        self_kit=old_kit,
+                    )
+                    archived = True
+            except Exception:  # noqa: BLE001 — unreadable epoch -> safe fallback
+                archived = False
+            if not archived:
+                _preserve_before_overwrite(
+                    state_path,
+                    state_path.with_name(f"{group}.btn.state.previous.{ts}"),
+                )
+                _preserve_before_overwrite(
+                    kit_path,
+                    kit_path.with_name(f"{group}.btn.mykit.previous.{ts}"),
+                )
+            replaced.append(state_path)
+
+        bk.write_active(group, state_bytes=new_state, self_kit=new_kit)
         accepted += 1
 
     # Step B: register each carried group in the authoritative yaml (union).

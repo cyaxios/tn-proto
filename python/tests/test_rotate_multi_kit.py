@@ -23,6 +23,9 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
 import tn
+from tn.absorb import _absorb_group_keys
+from tn.config import load_or_create
+from tn.tnpkg import TnpkgManifest
 
 
 @pytest.fixture(autouse=True)
@@ -126,4 +129,71 @@ def test_multiple_rotations_accumulate_preserved_kits(tmp_path):
     eras_seen = {e.event_type for e in entries if e.event_type.startswith("era.")}
     assert eras_seen == {"era.one", "era.two", "era.three"}, (
         f"expected all three eras readable, saw {eras_seen}"
+    )
+
+
+def test_prior_member_keeps_old_access_through_a_synced_rotation(tmp_path):
+    """A PRIOR group member must not lose pre-rotation read access when it
+    catches up to a rotation through a group_keys SYNC (vs rotating itself).
+
+    _absorb_group_keys must archive the superseded epoch as a LOADABLE
+    ``.retired.<N>``, not a ``.previous.<ts>`` the cipher ignores - otherwise
+    the member silently loses the ability to read everything from before the
+    rotation it received. ("Invited to the meeting" forward-only is a separate
+    case; this is a member who already had access.)
+    """
+    yaml = tmp_path / "tn.yaml"
+    keystore = tmp_path / ".tn/tn/keys"
+
+    tn.init(yaml, cipher="btn")
+    tn.info("order.created", order_id="OLD")
+    did = tn.current_config().device.device_identity
+    # The epoch-1 reader material (the prior-member view).
+    s1 = (keystore / "default.btn.state").read_bytes()
+    k1 = (keystore / "default.btn.mykit").read_bytes()
+    # Rotate to mint epoch-2 material (what a peer device would publish).
+    tn.admin.rotate("default")
+    s2 = (keystore / "default.btn.state").read_bytes()
+    k2 = (keystore / "default.btn.mykit").read_bytes()
+    tn.flush_and_close()
+
+    # Reset the keystore to a prior member still at epoch 1: active = epoch 1,
+    # and NO local .retired (they never rotated themselves - they only RECEIVE
+    # the rotation, below, via the sync).
+    (keystore / "default.btn.state").write_bytes(s1)
+    (keystore / "default.btn.mykit").write_bytes(k1)
+    for r in keystore.glob("default.btn.*.retired.*"):
+        r.unlink()
+
+    # Baseline: as an epoch-1 member, the old message reads.
+    tn.init(yaml)
+    base = [e for e in tn.read(all_runs=True) if e.event_type == "order.created"]
+    assert any(e.fields.get("order_id") == "OLD" for e in base), (
+        "baseline broken: a prior member should read its own old message"
+    )
+    tn.flush_and_close()
+
+    # RECEIVE the rotation via a group_keys absorb (the epoch-2 state + kit).
+    cfg = load_or_create(yaml, cipher="btn")
+    _absorb_group_keys(
+        cfg,
+        TnpkgManifest(
+            kind="group_keys",
+            publisher_identity=did,
+            recipient_identity=did,  # self-addressed (required by group_keys)
+            ceremony_id="sync",
+            as_of="2026-06-10T00:00:00Z",
+        ),
+        {
+            "body/keys/default.btn.state": s2,
+            "body/keys/default.btn.mykit": k2,
+        },
+    )
+
+    # The rule: the prior member STILL reads the pre-rotation message.
+    tn.init(yaml)
+    after = [e for e in tn.read(all_runs=True) if e.event_type == "order.created"]
+    assert any(e.fields.get("order_id") == "OLD" for e in after), (
+        "prior member LOST pre-rotation read access after a synced rotation: "
+        "the superseded epoch was stranded in .previous instead of .retired"
     )
