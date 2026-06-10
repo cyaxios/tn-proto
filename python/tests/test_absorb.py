@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
 
-from tn.absorb import absorb
+from tn.absorb import _absorb_kit_bundle, absorb
 from tn.config import load_or_create
 from tn.conventions import outbox_dir, pending_offers_dir
 from tn.offer import offer
+from tn.signing import DeviceKey
+from tn.tnpkg import TnpkgManifest
 
 
 def test_absorb_offer_lands_in_pending_offers(tmp_path: Path):
@@ -276,3 +278,42 @@ def test_absorb_normal_package_still_absorbs_after_limits(tmp_path: Path):
     alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
     result = absorb(alice_cfg, pkg_path)
     assert result.status == "offer_stashed", f"reason: {result.reason}"
+
+
+def test_kit_bundle_cannot_overwrite_device_identity_from_counterparty(tmp_path: Path):
+    """SECURITY: a counterparty kit_bundle/full_keystore (self-signed under
+    the attacker's OWN DID) must never install body/local.private over the
+    recipient's device key. Installing a device secret is legitimate only for
+    a self-addressed restore of one's own backup; identity_seed handles the
+    minted-key case. Without the guard this is a silent identity takeover."""
+    victim = DeviceKey.generate()
+    cfg = load_or_create(
+        tmp_path / "victim" / "tn.yaml",
+        cipher="btn",
+        device_private_bytes=victim.private_bytes,
+    )
+    victim_priv = (cfg.keystore / "local.private").read_bytes()
+    assert victim_priv == victim.private_bytes  # baseline
+
+    attacker = DeviceKey.generate()
+    body = {
+        "body/local.private": bytes(attacker.private_bytes),
+        "body/local.public": attacker.did.encode("utf-8"),
+        "body/legit.kit": b"ordinary kit material",
+    }
+    # publisher != recipient: addressed AT the victim, not self-addressed.
+    manifest = TnpkgManifest(
+        kind="full_keystore",
+        publisher_identity=attacker.did,
+        recipient_identity=victim.did,
+        ceremony_id="attack",
+        as_of="2026-06-10T00:00:00Z",
+    )
+
+    _absorb_kit_bundle(cfg, manifest, body)
+
+    # The device identity must be UNTOUCHED.
+    assert (cfg.keystore / "local.private").read_bytes() == victim_priv
+    assert (cfg.keystore / "local.public").read_text(encoding="utf-8").strip() == victim.did
+    # ...and the ordinary kit file still installs (the guard is surgical).
+    assert (cfg.keystore / "legit.kit").read_bytes() == b"ordinary kit material"

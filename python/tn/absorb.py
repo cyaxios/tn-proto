@@ -865,6 +865,18 @@ def _absorb_kit_bundle(
     skipped = 0
     replaced: list[Path] = []
     ts = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+    # SECURITY: a kit_bundle / full_keystore from a COUNTERPARTY must never
+    # install the recipient's device identity secret. local.private is the
+    # 32-byte Ed25519 seed; a malicious self-signed package (signed under the
+    # attacker's OWN DID) could otherwise write body/local.private straight
+    # over the recipient's key - a silent identity takeover. Installing a
+    # device secret is legitimate ONLY in a self-addressed restore of one's
+    # own backup (from_did == to_did); the minted-key case goes through
+    # _absorb_identity_seed, which carries its own DID-match guard.
+    self_addressed = (
+        manifest.recipient_identity is not None
+        and manifest.publisher_identity == manifest.recipient_identity
+    )
     for name, data in body.items():
         if not name.startswith("body/"):
             continue
@@ -878,6 +890,18 @@ def _absorb_kit_bundle(
         # We only honor a flat layout (no nested directories) for kit
         # bundles. Skip anything that smuggles in a path separator.
         if "/" in rel or "\\" in rel:
+            continue
+        if rel in ("local.private", "local.public") and not self_addressed:
+            _logging.getLogger("tn.absorb").warning(
+                "refusing to install device secret %r from a non-self-addressed "
+                "%s package (from=%s to=%s); the device identity is "
+                "restore-self only",
+                rel,
+                manifest.kind,
+                (manifest.publisher_identity or "?")[:24],
+                (manifest.recipient_identity or "?")[:24],
+            )
+            skipped += 1
             continue
         dest = keystore / rel
         if dest.exists() and dest.read_bytes() == data:
