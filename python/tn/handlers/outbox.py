@@ -96,8 +96,17 @@ class OutboxWorker:
                 item = self._outbox.get(block=True, timeout=0.5)
             except PQEmpty:
                 continue
-            except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
-                _log.exception("[%s] outbox.get failed", self._name)
+            except Exception as exc:  # noqa: BLE001 — preserve broad swallow; see body of handler
+                # Reading the durable queue failed (e.g. SQLite lock/IO
+                # error or a corrupt row). Name the type so it's not just
+                # an opaque "get failed". Stay broad so a transient read
+                # error never kills the worker; back off and retry.
+                _log.exception(
+                    "[%s] outbox.get failed (%s) — could not read the next "
+                    "item from the durable queue; backing off and retrying",
+                    self._name,
+                    type(exc).__name__,
+                )
                 time.sleep(self._backoff_init)
                 continue
             # Note: persist-queue passes the stored payload straight back.

@@ -266,8 +266,17 @@ class ZenohPullHandler(TNHandler):
             return
         try:
             self._last_seen_key = str(sample.key_expr)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 — last-seen-key is diagnostic only
+            # Don't drop the sample over a failed key read — only the
+            # last-seen-key diagnostic is affected. Surface it so the
+            # operator knows that field may be stale, then continue to
+            # enqueue the payload below.
+            _log.warning(
+                "[%s] zenoh.pull: could not read sample key_expr (%s); "
+                "last_seen_key may be stale, proceeding with absorb",
+                self.name,
+                type(exc).__name__,
+            )
         try:
             self._queue.put(payload, timeout=2.0)
         except Exception as exc:  # noqa: BLE001 — queue full / shutdown

@@ -43,6 +43,7 @@ Watch-only kwargs:
 from __future__ import annotations
 
 import json
+import logging as _logging
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -591,8 +592,17 @@ def read(
     try:
         from . import current_config
         _verify_skip_signature = current_config().sign is False
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — fail safe (keep verifying), but surface
+        # Couldn't read the active ceremony's sign setting. Default to NOT
+        # skipping signature checks (fail safe: keep verifying). Surface the
+        # reason so an operator can tell why an unsigned-by-design ceremony
+        # might suddenly raise VerifyError: signature on every entry.
         _verify_skip_signature = False
+        _logging.getLogger("tn.read").debug(
+            "could not read ceremony sign config (%s); keeping signature "
+            "verification on",
+            exc,
+        )
 
     # DX review #11: build the public ReadStats accumulator (always
     # present on the returned iterator; cheap to maintain even when

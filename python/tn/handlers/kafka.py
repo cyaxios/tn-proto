@@ -8,12 +8,15 @@ the result is checked against Apache's topic-name rules before publish.
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
 
 from .base import AsyncHandler
+
+_log = logging.getLogger("tn.handlers.kafka")
 
 # Apache Kafka topic rules: [a-zA-Z0-9._-], max 249, not "." or "..".
 _TOPIC_RE = re.compile(r"^[A-Za-z0-9._-]{1,249}$")
@@ -227,8 +230,15 @@ class KafkaHandler(AsyncHandler):
         if not self._closed:
             try:
                 self.close(timeout=30.0)
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - preserve broad swallow; see body of handler
+                # atexit teardown: stay best-effort and do not propagate,
+                # but make the failure visible. A swallowed close can leak
+                # producer/consumer resources.
+                _log.warning(
+                    "kafka handler atexit close failed; producer/consumer "
+                    "resources may not have been released cleanly",
+                    exc_info=True,
+                )
 
     def close(self, *, timeout: float = 30.0) -> None:
         if self._closed:

@@ -206,9 +206,26 @@ def parse_policy_text(text: str, path: str) -> PolicyDocument:
         fields = _split_field_sections(section_body)
         missing = [f for f in REQUIRED_FIELDS if f not in fields or not fields[f]]
         if missing:
+            missing_headings = "".join(
+                f"\n### {f}\n<required — add your text here>\n" for f in missing
+            )
+            all_headings = "".join(
+                f"\n### {f}\n<your text here>\n" for f in REQUIRED_FIELDS
+            )
             raise ValueError(
-                f"{path}: agents policy section ## {event_type} is missing "
-                f"required subsection(s): {missing!r}"
+                f"{path}: policy section '## {event_type}' is missing "
+                f"{len(missing)} required subsection(s): "
+                + ", ".join(f"'### {f}'" for f in missing)
+                + f"\n\n"
+                f"Each '## <event_type>' block must contain all five '### <field>' "
+                f"subsections. Add the missing subsection(s) under "
+                f"'## {event_type}':\n"
+                f"{missing_headings}\n"
+                f"Minimal valid structure for a single event type:\n\n"
+                f"## {event_type}"
+                f"{all_headings}\n"
+                f"To disable policy enforcement entirely, remove the file "
+                f"'{POLICY_RELATIVE_PATH}'."
             )
 
         per_event_for_hash[event_type] = {f: fields[f] for f in REQUIRED_FIELDS}

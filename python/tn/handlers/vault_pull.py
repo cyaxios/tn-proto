@@ -112,8 +112,18 @@ def pull_inbox(
     my_did = cfg.device.device_identity
     try:
         items = client.list_incoming(my_did, since=since_cursor)
-    except Exception:
-        _log.exception("vault.pull: list_incoming failed")
+    except Exception as exc:
+        # Could be auth (expired/invalid token), transport (DNS, refused,
+        # TLS), or a slow vault timing out. We can't tell which from here,
+        # so surface the exception TYPE — that's what distinguishes them
+        # for an operator. Best-effort: the inbox stays un-listed this
+        # tick and the cursor does not advance, so the next poll retries.
+        _log.exception(
+            "vault.pull: list_incoming failed (%s) — could not reach the "
+            "vault inbox; no snapshots fetched this cycle, will retry next "
+            "poll",
+            type(exc).__name__,
+        )
         if on_absorb_error == "raise":
             raise
         return {"absorbed": 0, "new_cursor": since_cursor}
@@ -139,8 +149,19 @@ def pull_inbox(
             continue
         try:
             blob = client.download(path)
-        except Exception:
-            _log.exception("vault.pull: download %s failed", path)
+        except Exception as exc:
+            # Same ambiguity as list_incoming: auth vs transport vs
+            # timeout fetching this one snapshot. Log the exception TYPE
+            # so the failure mode is legible. Best-effort: we stop the
+            # batch here and leave the cursor short of this item so the
+            # next call re-fetches it (absorb is idempotent).
+            _log.exception(
+                "vault.pull: download of %s failed (%s) — could not "
+                "retrieve this snapshot; stopping this batch, cursor held "
+                "so it re-fetches next poll",
+                path,
+                type(exc).__name__,
+            )
             if on_absorb_error == "raise":
                 raise
             # Don't advance the cursor past a failed item — a retry on

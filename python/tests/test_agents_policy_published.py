@@ -15,6 +15,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
 import tn
+from tn._agents_policy import POLICY_RELATIVE_PATH, REQUIRED_FIELDS, parse_policy_text
 
 _POLICY_V1 = """\
 ## payment.completed
@@ -129,3 +130,51 @@ def test_init_with_changed_policy_emits_new_event(tmp_path):
     events = _published_events()
     assert len(events) == 2
     assert events[1].fields["content_hash"] != h1
+
+
+# ---------------------------------------------------------------------------
+# Malformed-policy error message quality
+# ---------------------------------------------------------------------------
+
+_POLICY_MISSING_TWO = """\
+## order.created
+
+### instruction
+Do not leak PII.
+
+### use_for
+Recording order events.
+"""
+
+_POLICY_MISSING_ALL = """\
+## payment.failed
+
+This section has no subsections at all.
+"""
+
+
+def test_malformed_policy_error_names_missing_subsections():
+    """ValueError must name every missing '### <field>' subsection."""
+    with pytest.raises(ValueError) as exc_info:
+        parse_policy_text(_POLICY_MISSING_TWO, POLICY_RELATIVE_PATH)
+    msg = str(exc_info.value)
+    # Names the event type.
+    assert "order.created" in msg
+    # Names each missing field.
+    for field in ("do_not_use_for", "consequences", "on_violation_or_error"):
+        assert field in msg
+    # Does NOT claim the present fields are missing.
+    assert "'### instruction'" not in msg or "instruction" not in msg.split("missing")[1].split("\n")[0]
+
+
+def test_malformed_policy_error_includes_template_and_escape_hatch():
+    """ValueError must include a copy-paste template and the remove-file hint."""
+    with pytest.raises(ValueError) as exc_info:
+        parse_policy_text(_POLICY_MISSING_ALL, POLICY_RELATIVE_PATH)
+    msg = str(exc_info.value)
+    # Template block: all five required fields must appear as ### headings.
+    for field in REQUIRED_FIELDS:
+        assert f"### {field}" in msg
+    # Escape hatch hint.
+    assert "remove the file" in msg.lower() or "remove" in msg
+    assert POLICY_RELATIVE_PATH in msg

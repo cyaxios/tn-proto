@@ -34,6 +34,7 @@ import yaml
 from . import cipher as _cipher
 from . import classifier as _classifier
 from . import indexing as _indexing
+from ._keystore_backend import atomic_write_bytes
 from .signing import DeviceKey
 
 _KNOWN_PEL_TOKENS = frozenset(
@@ -445,9 +446,11 @@ class LoadedConfig:
 
 
 def _write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(data)
+    # Secret keystore material (Ed25519 seed in local.private, the index
+    # master key). Route through the hardened keystore primitive so the
+    # file is owner-only (POSIX 0600) and written atomically (same-dir tmp
+    # + os.replace) instead of landing with the default umask.
+    atomic_write_bytes(path, data)
 
 
 def _read_bytes(path: Path) -> bytes:

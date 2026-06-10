@@ -287,6 +287,120 @@ def _verify_manifest_signature(manifest: TnpkgManifest) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Resource limits — bound a malicious / malformed `.tnpkg` (P0-5)
+# --------------------------------------------------------------------------
+#
+# A `.tnpkg` is just a zip. An attacker (or a corrupt producer) can craft one
+# that, when fully read into memory, exhausts the host: a zip bomb (tiny
+# compressed size that inflates to gigabytes), one enormous entry, or tens of
+# thousands of small entries. The reader MUST bound the archive using zip
+# CENTRAL-DIRECTORY METADATA (``ZipInfo.file_size`` / ``ZipInfo.compress_size``,
+# both available WITHOUT decompressing) BEFORE any entry's bytes are read, and
+# the manifest signature MUST be verified before any body member is read on the
+# absorb path. The limits below are deliberately generous relative to real
+# packages — a full_keystore backup is a handful of small key files plus a
+# manifest, and on-disk fixtures top out around 15 KiB with 2 entries — so they
+# stop bombs without rejecting any legitimate bundle. Raise them if a real
+# fixture ever exceeds one; the point is to cap blast radius, not to be tight.
+
+# Max number of zip entries. A real `.tnpkg` has a manifest plus a small
+# handful of body members; thousands of entries is an attack, not a backup.
+MAX_PKG_ENTRY_COUNT = 2000
+
+# Max uncompressed size of ``manifest.json``. Real manifests are a few KiB even
+# with a per-recipient ``recipient_wraps`` array; 2 MiB is far past any honest
+# manifest while still cheap to parse.
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024  # 2 MiB
+
+# Max uncompressed size of any single entry. Bounds the largest single
+# allocation a body read can trigger.
+MAX_PKG_ENTRY_BYTES = 128 * 1024 * 1024  # 128 MiB
+
+# Max total uncompressed size across all entries. Bounds the aggregate memory a
+# full read of the archive can consume.
+MAX_PKG_TOTAL_BYTES = 512 * 1024 * 1024  # 512 MiB
+
+# Max per-entry compression ratio (uncompressed / compressed). `.tnpkg` is
+# written ZIP_STORED, so legitimate packages have a ratio of ~1.0. A high ratio
+# is the signature of a zip bomb: a few KiB on disk inflating to gigabytes.
+MAX_PKG_COMPRESSION_RATIO = 200
+
+
+class PackageError(ValueError):
+    """A `.tnpkg` archive breached a structural / resource limit, or is
+    otherwise unreadable as a package.
+
+    Subclasses :class:`ValueError` so existing call sites that already
+    treat a malformed `.tnpkg` as a ``ValueError`` (e.g. the absorb
+    dispatcher's legacy-JSON fallback, ``_try_bootstrap_cfg``) keep
+    working unchanged. The message names the limit that was hit and the
+    offending value so an operator can tell a bomb from a genuine large
+    backup.
+    """
+
+
+class ManifestSignatureError(PackageError):
+    """The manifest signature did not verify. Raised by
+    :func:`_read_manifest` only when ``verify_signature=True`` — so the
+    absorb path can refuse to read body members into memory until the
+    manifest is proven authentic.
+    """
+
+
+def _enforce_zip_limits(zf: zipfile.ZipFile) -> None:
+    """Bound a `.tnpkg` using zip central-directory metadata ONLY.
+
+    Reads no entry bytes — every check is against ``ZipInfo.file_size``
+    (uncompressed) and ``ZipInfo.compress_size`` (on-disk), both of
+    which the stdlib populates from the central directory without
+    decompressing. Raises :class:`PackageError` naming the breached
+    limit and the offending value on the first violation. Returns
+    normally for a within-bounds archive.
+
+    This is the cheap pre-flight that stops zip bombs / huge entries /
+    entry floods before any read allocates memory.
+    """
+    infos = zf.infolist()
+    if len(infos) > MAX_PKG_ENTRY_COUNT:
+        raise PackageError(
+            f"`.tnpkg` has {len(infos)} entries, exceeding the limit of "
+            f"{MAX_PKG_ENTRY_COUNT}. Refusing to read a package with this "
+            f"many members (possible zip bomb / malformed archive)."
+        )
+    total = 0
+    for info in infos:
+        size = info.file_size
+        if size > MAX_PKG_ENTRY_BYTES:
+            raise PackageError(
+                f"`.tnpkg` entry {info.filename!r} declares an uncompressed "
+                f"size of {size} bytes, exceeding the per-entry limit of "
+                f"{MAX_PKG_ENTRY_BYTES} bytes ({MAX_PKG_ENTRY_BYTES // (1024 * 1024)} "
+                f"MiB). Refusing to read it (possible zip bomb)."
+            )
+        # Compression-ratio guard. file_size / max(compress_size, 1) catches a
+        # tiny compressed blob that inflates to a huge buffer — the classic
+        # zip-bomb shape. Legitimate `.tnpkg` files are STORED (ratio ~1).
+        ratio = size / max(info.compress_size, 1)
+        if ratio > MAX_PKG_COMPRESSION_RATIO:
+            raise PackageError(
+                f"`.tnpkg` entry {info.filename!r} has a compression ratio of "
+                f"{ratio:.1f}x ({size} bytes uncompressed from "
+                f"{info.compress_size} bytes), exceeding the limit of "
+                f"{MAX_PKG_COMPRESSION_RATIO}x. Refusing to inflate it "
+                f"(possible zip bomb)."
+            )
+        total += size
+        if total > MAX_PKG_TOTAL_BYTES:
+            raise PackageError(
+                f"`.tnpkg` total uncompressed size exceeds the limit of "
+                f"{MAX_PKG_TOTAL_BYTES} bytes "
+                f"({MAX_PKG_TOTAL_BYTES // (1024 * 1024)} MiB) at entry "
+                f"{info.filename!r}. Refusing to read the remaining members "
+                f"(possible zip bomb)."
+            )
+
+
+# --------------------------------------------------------------------------
 # Zip writer / reader
 # --------------------------------------------------------------------------
 
@@ -339,22 +453,73 @@ def _open_zip(source: Path | str | bytes | bytearray) -> zipfile.ZipFile:
         raise ValueError(f"absorb: {p} is not a valid `.tnpkg` zip: {exc}") from exc
 
 
-def _read_manifest(source: Path | str | bytes | bytearray) -> tuple[TnpkgManifest, dict[str, bytes]]:
+def _read_manifest(
+    source: Path | str | bytes | bytearray,
+    *,
+    verify_signature: bool = False,
+) -> tuple[TnpkgManifest, dict[str, bytes]]:
     """Open a `.tnpkg` and return ``(manifest, body_files)``.
 
     ``body_files`` maps every non-manifest entry name to its raw bytes.
-    Does not verify the signature — the caller is expected to.
+
+    Read order (so a malicious / malformed package can't exhaust memory —
+    P0-5):
+
+    1. Enforce :func:`_enforce_zip_limits` on the archive using zip
+       metadata ONLY — no entry bytes are read yet. A zip bomb / huge
+       entry / entry flood is rejected here with a :class:`PackageError`.
+    2. Read and parse ``manifest.json`` (its own size is capped at
+       :data:`MAX_MANIFEST_BYTES` via the zip metadata before the read).
+    3. If ``verify_signature`` is set, verify the manifest signature
+       BEFORE any body member is read. On failure raise
+       :class:`ManifestSignatureError` and read no body. This is the
+       absorb-path guarantee: do not pull untrusted body bytes into
+       memory until the manifest is proven authentic.
+    4. Only then read the body members into memory.
+
+    ``verify_signature`` defaults to False to preserve the long-standing
+    contract for callers that legitimately unwrap self-produced or
+    already-trusted packages (``tn.packaging.Package.from_tnpkg``, the
+    fs-drop / vault-push handlers, the cli_compile inspector). The absorb
+    dispatcher passes ``verify_signature=True``.
     """
     with _open_zip(source) as zf:
+        # (1) Metadata-only resource guard — must run before any read.
+        _enforce_zip_limits(zf)
+
         names = zf.namelist()
         if "manifest.json" not in names:
-            raise ValueError(
+            raise PackageError(
                 "absorb: zip is missing `manifest.json`. The `.tnpkg` format "
                 "requires a top-level signed manifest; this archive does not "
                 "have one. Was it produced by an old / external tool?"
             )
+
+        # (2) Manifest first. Its uncompressed size is bounded separately
+        # (and more tightly) than a body member — a multi-MiB "manifest"
+        # is an attack, not an honest index.
+        manifest_info = zf.getinfo("manifest.json")
+        if manifest_info.file_size > MAX_MANIFEST_BYTES:
+            raise PackageError(
+                f"`.tnpkg` manifest.json declares an uncompressed size of "
+                f"{manifest_info.file_size} bytes, exceeding the manifest limit "
+                f"of {MAX_MANIFEST_BYTES} bytes "
+                f"({MAX_MANIFEST_BYTES // (1024 * 1024)} MiB). Refusing to parse "
+                f"it (possible zip bomb / malformed archive)."
+            )
         manifest_doc = json.loads(zf.read("manifest.json").decode("utf-8"))
         manifest = TnpkgManifest.from_dict(manifest_doc)
+
+        # (3) Verify the manifest signature BEFORE reading any body member.
+        if verify_signature and not _verify_manifest_signature(manifest):
+            raise ManifestSignatureError(
+                f"manifest signature does not verify against from_did "
+                f"{manifest.publisher_identity!r}. The package is corrupt, "
+                f"truncated, or tampered with. Ask the sender to re-export and "
+                f"re-send."
+            )
+
+        # (4) Bodies last — only now do we pull entry bytes into memory.
         body: dict[str, bytes] = {}
         for name in names:
             if name == "manifest.json":

@@ -147,16 +147,30 @@ class FsDropHandler(TNHandler):
         # Use a temp filename first; rename only after we know head_row_hash.
         tmp_name = f"snapshot_inflight_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')}.tnpkg"
         tmp_path = self._out_dir / tmp_name
+        # Two distinct operations kept in separate try/except blocks so the
+        # operator can tell WHICH one failed: composing the .tnpkg vs
+        # reading its manifest back. Each names the operation and the
+        # exception type; both re-raise into emit() (caught + logged there).
         try:
             export(tmp_path, kind="admin_log_snapshot", cfg=cfg, scope=self._scope)
-        except Exception:
-            _log.exception("[%s] fs.drop: export failed", self.name)
+        except Exception as exc:
+            _log.exception(
+                "[%s] fs.drop: export failed (%s) — could not compose the "
+                "snapshot package; nothing was written",
+                self.name,
+                type(exc).__name__,
+            )
             raise
 
         try:
             manifest, _body = _read_manifest(tmp_path)
-        except Exception:
-            _log.exception("[%s] fs.drop: failed to read back manifest", self.name)
+        except Exception as exc:
+            _log.exception(
+                "[%s] fs.drop: failed to read back manifest (%s) — the "
+                "snapshot was written but is unreadable; discarding it",
+                self.name,
+                type(exc).__name__,
+            )
             tmp_path.unlink(missing_ok=True)
             raise
 

@@ -55,10 +55,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from ._keystore_backend import secure_write_text
 
 _log = logging.getLogger("tn.sync_state")
 
@@ -102,12 +103,17 @@ def load_sync_state(yaml_path: Path) -> dict[str, Any]:
 
 
 def save_sync_state(yaml_path: Path, state: dict[str, Any]) -> None:
-    """Atomic-via-rename write of the sync state.
+    """Owner-only atomic write of the sync state.
 
-    Creates the directory on demand. Rename is atomic on POSIX and
-    "best-effort atomic" on Windows (Python's ``os.replace`` uses
-    ``MoveFileExW`` with ``MOVEFILE_REPLACE_EXISTING``, which is
-    atomic on the same volume).
+    Creates the directory on demand and routes the write through
+    :func:`secure_write_text` (same-dir tmp created ``0600`` + fsync +
+    ``os.replace``). The state file holds the pending_claim record,
+    which includes the BEK (``password_b64``) and the full claim URL, so
+    it must be owner-only at rest (POSIX 0600; on Windows the
+    user-profile ACL is the protection). The rename is atomic on POSIX
+    and on Windows for same-volume moves (``MoveFileExW`` with
+    ``MOVEFILE_REPLACE_EXISTING``); the tmp file is a sibling so this
+    holds.
 
     Logs and swallows write errors; sync state is best-effort and
     should not bring down the caller. A failed save means the next
@@ -117,9 +123,7 @@ def save_sync_state(yaml_path: Path, state: dict[str, Any]) -> None:
     path = state_path(yaml_path)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        secure_write_text(path, json.dumps(state, indent=2, sort_keys=True))
     except OSError as e:
         _log.warning("sync_state: failed to save %s: %s", path, e)
 

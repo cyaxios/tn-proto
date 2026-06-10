@@ -44,10 +44,11 @@ from .conventions import pending_offers_dir
 from .packaging import Package, verify
 from .signing import DeviceKey, _signature_from_b64
 from .tnpkg import (
+    ManifestSignatureError,
+    PackageError,
     TnpkgManifest,
     _clock_dominates,
     _read_manifest,
-    _verify_manifest_signature,
 )
 
 _DID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
@@ -336,8 +337,33 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
     a zip — the codebase still has a few callers that pass an unwrapped
     ``Package``-shaped JSON file.
     """
+    # Read the manifest and VERIFY ITS SIGNATURE before any body member is
+    # pulled into memory (P0-5). ``_read_manifest`` also enforces the zip
+    # resource limits (entry count / sizes / compression ratio) on archive
+    # metadata before reading a single entry, so a malicious or malformed
+    # package can't exhaust memory via this path (CLI absorb or a watched
+    # fs.scan inbox).
     try:
-        manifest, body = _read_manifest(source)
+        manifest, body = _read_manifest(source, verify_signature=True)
+    except ManifestSignatureError as exc:
+        # Bad manifest signature — a corrupt / tampered package, NOT a
+        # legacy JSON one. Surface it directly; do not fall through to the
+        # JSON path. ``exc`` already carries the from_did + re-export hint.
+        return AbsorbReceipt(
+            kind="unknown",
+            legacy_status="rejected",
+            legacy_reason=str(exc),
+        )
+    except PackageError as exc:
+        # A resource-limit breach (zip bomb / oversized / entry flood) or a
+        # missing manifest. The message names the limit and offending value.
+        # This is a real `.tnpkg` that we refuse to fully read — not a legacy
+        # JSON package — so don't attempt the JSON fallback.
+        return AbsorbReceipt(
+            kind="unknown",
+            legacy_status="rejected",
+            legacy_reason=str(exc),
+        )
     except (ValueError, FileNotFoundError) as exc:
         # Legacy fallback: the old ``dump_tnpkg`` produced a flat JSON
         # ``Package`` (no zip header). Honor it when we can; otherwise
@@ -349,17 +375,6 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
             kind="unknown",
             legacy_status="rejected",
             legacy_reason=f"absorb: not a `.tnpkg` zip and not a legacy JSON Package: {exc}",
-        )
-
-    if not _verify_manifest_signature(manifest):
-        return AbsorbReceipt(
-            kind=manifest.kind,
-            legacy_status="rejected",
-            legacy_reason=(
-                f"manifest signature does not verify against from_did "
-                f"{manifest.publisher_identity!r}. The package is corrupt, truncated, or "
-                f"tampered with. Ask the sender to re-export and re-send."
-            ),
         )
 
     # Recipient-direction sealed-box unwrap. If the manifest carries
@@ -790,15 +805,13 @@ def _absorb_identity_seed(
             # Best-effort: rename the prior keys aside so a confused operator
             # can recover. We don't bother with a backup if the rename fails.
             ts = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
-            try:
-                priv_path.rename(priv_path.with_name(f"local.private.previous.{ts}"))
-            except OSError:
-                pass
-            try:
-                if pub_path.exists():
-                    pub_path.rename(pub_path.with_name(f"local.public.previous.{ts}"))
-            except OSError:
-                pass
+            _preserve_before_overwrite(
+                priv_path, priv_path.with_name(f"local.private.previous.{ts}")
+            )
+            if pub_path.exists():
+                _preserve_before_overwrite(
+                    pub_path, pub_path.with_name(f"local.public.previous.{ts}")
+                )
         else:
             return AbsorbReceipt(
                 kind=manifest.kind,
@@ -825,10 +838,9 @@ def _absorb_identity_seed(
         yaml_target.write_bytes(yaml_bytes)
     elif _user_event_count(cfg) == 0 and yaml_target.read_bytes() != yaml_bytes:
         ts = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
-        try:
-            yaml_target.rename(yaml_target.with_name(f"{yaml_target.name}.previous.{ts}"))
-        except OSError:
-            pass
+        _preserve_before_overwrite(
+            yaml_target, yaml_target.with_name(f"{yaml_target.name}.previous.{ts}")
+        )
         yaml_target.parent.mkdir(parents=True, exist_ok=True)
         yaml_target.write_bytes(yaml_bytes)
 
@@ -956,10 +968,7 @@ def _absorb_group_keys(
             if dest.read_bytes() == data:
                 deduped += 1
                 continue
-            try:
-                dest.rename(dest.with_name(f"{rel}.previous.{ts}"))
-            except OSError:
-                pass  # best effort
+            _preserve_before_overwrite(dest, dest.with_name(f"{rel}.previous.{ts}"))
             replaced.append(dest)
         dest.write_bytes(data)
         accepted += 1
@@ -1053,8 +1062,12 @@ def _maybe_post_received_kit(
     _log = logging.getLogger("tn.absorb.received_kits")
     try:
         from .sync_state import get_account_id, is_account_bound
-    except ImportError:
-        return  # extremely defensive: shouldn't happen in-tree
+    except ImportError as exc:
+        _log.debug(
+            "sync_state import failed; skipping account-bound kit forwarding: %s",
+            exc,
+        )
+        return
 
     try:
         if not is_account_bound(cfg.yaml_path):
@@ -1099,7 +1112,10 @@ def _maybe_post_received_kit(
 
     try:
         from .vault_client import VaultClient, resolve_vault_url
-    except ImportError:
+    except ImportError as exc:
+        _logging.getLogger("tn.absorb").debug(
+            "vault_client import failed; skipping vault notify: %s", exc
+        )
         return
 
     publisher_did = manifest.publisher_identity
@@ -1236,10 +1252,7 @@ def _restore_stream_yamls(
             if existing == data:
                 continue
             backup = dest.with_name(f"tn.yaml.previous.{ts}")
-            try:
-                dest.rename(backup)
-            except OSError:
-                pass
+            _preserve_before_overwrite(dest, backup)
         dest.write_bytes(data)
 
 
@@ -1554,6 +1567,22 @@ def _envelope_well_formed(env: dict[str, Any]) -> bool:
     )
 
 
+def _preserve_before_overwrite(target: Path, backup: Path) -> None:
+    """Rename ``target`` to ``backup`` so an overwrite doesn't destroy the
+    prior file. Best-effort: if the rename fails (cross-device, locked, gone),
+    LOG a clear warning and let the caller overwrite anyway — but never fail
+    silently, so an operator knows the prior copy was NOT preserved.
+    """
+    try:
+        target.rename(backup)
+    except OSError as exc:
+        _logging.getLogger("tn.absorb").warning(
+            "could not preserve prior %s before overwrite: %s (overwriting anyway)",
+            target.name,
+            exc,
+        )
+
+
 def _verify_envelope_signature(env: dict[str, Any]) -> bool:
     try:
         return DeviceKey.verify(
@@ -1561,7 +1590,19 @@ def _verify_envelope_signature(env: dict[str, Any]) -> bool:
             env["row_hash"].encode("ascii"),
             _signature_from_b64(env["signature"]),
         )
-    except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
+    except Exception as exc:  # noqa: BLE001 — fail closed, but never silently
+        # A THROW here (vs a clean False from verify) means the signature, key,
+        # or row_hash is malformed, not merely wrong. Fail closed (treat as
+        # unverified) but surface WHY, so an operator can distinguish a tampered
+        # or garbled row from a genuine signature mismatch, not a silent drop.
+        _logging.getLogger("tn.absorb").warning(
+            "signature verification could not run for event %s from %s: %s: %s "
+            "(treating as unverified)",
+            env.get("event_id", "<no-id>"),
+            (env.get("device_identity") or "<no-did>")[:24],
+            type(exc).__name__,
+            exc,
+        )
         return False
 
 
@@ -1871,10 +1912,7 @@ def _absorb_project_seed(
             deduped += 1
         elif _user_event_count(cfg) == 0:
             backup = yaml_target.with_name(f"{yaml_target.name}.previous.{ts}")
-            try:
-                yaml_target.rename(backup)
-            except OSError:
-                pass
+            _preserve_before_overwrite(yaml_target, backup)
             replaced.append(yaml_target)
             yaml_target.parent.mkdir(parents=True, exist_ok=True)
             yaml_target.write_bytes(yaml_bytes)
@@ -1940,10 +1978,7 @@ def _absorb_project_seed(
             continue
         if dest.exists():
             backup = dest.with_name(f"{rel}.previous.{ts}")
-            try:
-                dest.rename(backup)
-            except OSError:
-                pass
+            _preserve_before_overwrite(dest, backup)
             replaced.append(dest)
         dest.write_bytes(data)
         accepted += 1

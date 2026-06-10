@@ -149,3 +149,130 @@ def test_absorb_accepts_bytes_input(tmp_path: Path):
     assert result.status == "offer_stashed", f"reason: {result.reason}"
     safe = bob_cfg.device.device_identity.replace(":", "_")
     assert (pending_offers_dir(alice_dir) / f"{safe}.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# P0-5: resource-bounded package reads. A malicious / malformed `.tnpkg`
+# (zip bomb, oversized entry, entry flood, bloated manifest) must be rejected
+# from zip METADATA before any body member is read into memory, and the
+# manifest signature must be verified before any body read on the absorb path.
+# ---------------------------------------------------------------------------
+
+
+def _make_valid_offer_tnpkg(tmp_path: Path) -> Path:
+    """Produce a real, signed offer `.tnpkg` that absorbs cleanly."""
+    bob_dir = tmp_path / "bob_src"
+    bob_dir.mkdir()
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
+    offer(bob_cfg, publisher_did="did:key:z6MkAlice")
+    return next(outbox_dir(bob_dir).glob("*.tnpkg"))
+
+
+def test_read_manifest_rejects_zip_bomb_entry_before_reading_body(tmp_path: Path):
+    """An entry whose declared uncompressed size dwarfs its on-disk size is a
+    zip bomb. ``_read_manifest`` must reject it from ZipInfo metadata — the
+    PackageError proves no body bytes were inflated, because the guard runs on
+    metadata only, before any ``zf.read`` of a body member."""
+    import zipfile
+
+    from tn.tnpkg import (
+        MAX_PKG_ENTRY_BYTES,
+        PackageError,
+        _read_manifest,
+    )
+
+    # A tiny on-disk DEFLATE entry that inflates well past the per-entry cap.
+    # 200 MiB of zeros compresses to a few hundred bytes — file_size is what
+    # the central directory reports, so the guard sees the bomb without us
+    # ever allocating 200 MiB.
+    huge = b"\x00" * (MAX_PKG_ENTRY_BYTES + 1)
+    bomb = tmp_path / "bomb.tnpkg"
+    with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", b"{}")
+        zf.writestr("body/huge.bin", huge)
+
+    # Confirm the on-disk file is small (the body was NOT stored expanded).
+    assert bomb.stat().st_size < 1 * 1024 * 1024
+
+    try:
+        _read_manifest(bomb, verify_signature=False)
+    except PackageError as exc:
+        msg = str(exc)
+        assert "body/huge.bin" in msg
+        assert "per-entry" in msg or "compression ratio" in msg
+    else:
+        raise AssertionError("expected PackageError for an oversized entry")
+
+
+def test_absorb_rejects_zip_bomb(tmp_path: Path):
+    """End-to-end: absorb() refuses a zip-bomb `.tnpkg` with a typed rejection
+    naming the limit, instead of inflating the entry into memory."""
+    import zipfile
+
+    from tn.tnpkg import MAX_PKG_ENTRY_BYTES
+
+    huge = b"\x00" * (MAX_PKG_ENTRY_BYTES + 1)
+    bomb = tmp_path / "bomb.tnpkg"
+    with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", b"{}")
+        zf.writestr("body/huge.bin", huge)
+
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
+    result = absorb(cfg, bomb)
+    assert result.status == "rejected"
+    assert "body/huge.bin" in result.reason
+    assert "zip bomb" in result.reason.lower()
+
+
+def test_absorb_rejects_entry_flood(tmp_path: Path):
+    """Thousands of entries is an attack, not a backup. Rejected from the
+    entry-count limit before any entry is read."""
+    import zipfile
+
+    from tn.tnpkg import MAX_PKG_ENTRY_COUNT
+
+    flood = tmp_path / "flood.tnpkg"
+    with zipfile.ZipFile(flood, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("manifest.json", b"{}")
+        for i in range(MAX_PKG_ENTRY_COUNT + 5):
+            zf.writestr(f"body/e{i}", b"x")
+
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
+    result = absorb(cfg, flood)
+    assert result.status == "rejected"
+    assert str(MAX_PKG_ENTRY_COUNT) in result.reason
+    assert "entries" in result.reason.lower()
+
+
+def test_absorb_rejects_oversized_manifest(tmp_path: Path):
+    """A multi-MiB manifest is malformed / hostile. Rejected from the manifest
+    size limit before the manifest JSON is parsed."""
+    import zipfile
+
+    from tn.tnpkg import MAX_MANIFEST_BYTES
+
+    # Oversized manifest written STORED so it clears the per-entry / ratio
+    # guards (ratio ~1, well under 128 MiB) and trips ONLY the dedicated
+    # manifest-size check. ~2 MiB on disk — cheap for a test.
+    big_manifest = b" " * (MAX_MANIFEST_BYTES + 1)
+    pkg = tmp_path / "bigmanifest.tnpkg"
+    with zipfile.ZipFile(pkg, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("manifest.json", big_manifest)
+
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
+    result = absorb(cfg, pkg)
+    assert result.status == "rejected"
+    assert "manifest.json" in result.reason
+    assert "manifest limit" in result.reason
+
+
+def test_absorb_normal_package_still_absorbs_after_limits(tmp_path: Path):
+    """The limit guard must NOT reject a legitimate package. A real signed
+    offer `.tnpkg` (well within every bound) absorbs cleanly."""
+    pkg_path = _make_valid_offer_tnpkg(tmp_path)
+
+    alice_dir = tmp_path / "alice"
+    alice_dir.mkdir()
+    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
+    result = absorb(alice_cfg, pkg_path)
+    assert result.status == "offer_stashed", f"reason: {result.reason}"

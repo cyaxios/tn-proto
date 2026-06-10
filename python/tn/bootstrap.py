@@ -76,6 +76,11 @@ def _tn_user_agent() -> str:
         except PackageNotFoundError:
             return "tn-proto/dev"
     except Exception:  # noqa: BLE001 - never block startup on UA resolution
+        _log.debug(
+            "package-version lookup failed for User-Agent; falling back to "
+            "tn-proto/dev",
+            exc_info=True,
+        )
         return "tn-proto/dev"
 
 

@@ -9,10 +9,13 @@ See ``docs/superpowers/specs/2026-05-12-runtime-correctness-design.md``.
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from pathlib import Path
 from typing import Protocol
+
+_log = logging.getLogger("tn.keystore")
 
 
 class KeystoreConflictError(Exception):
@@ -45,13 +48,23 @@ class KeystoreBackend(Protocol):
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
-    """Write ``data`` to ``path`` atomically: tmp file + fsync + replace.
+    """Write ``data`` to ``path`` atomically and owner-only: tmp file
+    (created ``0600``) + fsync + replace.
 
     Guarantees:
       * On success, ``path`` contains exactly ``data``.
       * On failure mid-write (including OSError from fsync/replace),
         the *existing* contents of ``path`` (if any) are untouched.
       * No ``.<name>.tmp.<pid>`` siblings remain after either outcome.
+      * POSIX permissions are ``0600`` (owner read/write only) from
+        creation, not after a chmod race: the tmp file is opened with
+        ``os.open(..., O_CREAT | O_WRONLY | O_TRUNC, 0o600)`` and the
+        atomic ``os.replace`` carries those bits onto ``path``. This
+        matters because every caller writes secret key material (Ed25519
+        seeds, index master keys, btn state/kits). On Windows the mode
+        argument is a no-op (POSIX bits don't apply); the protection
+        there is the user-profile ACL, the same posture the credential
+        store already takes.
 
     Uses ``os.replace``, which is atomic on POSIX and Windows when the
     source and destination share a filesystem (the keystore tmp file is
@@ -62,18 +75,47 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     parent.mkdir(parents=True, exist_ok=True)
     tmp = parent / f".{path.name}.tmp.{os.getpid()}"
     try:
-        with open(tmp, "wb") as fh:
+        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with open(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
     except BaseException:
+        # The keystore holds secret key material. A failed durable write
+        # must surface, never be hidden: log which path/op failed, run a
+        # best-effort temp cleanup, then re-raise the original failure.
+        _log.error(
+            "keystore atomic write failed for %s (tmp=%s); secret state was "
+            "NOT persisted",
+            path,
+            tmp,
+        )
         try:
             if tmp.exists():
                 tmp.unlink()
         except OSError:
-            pass
+            _log.warning(
+                "keystore temp cleanup failed for %s; a stale temp file may "
+                "remain (does not affect the existing keystore contents)",
+                tmp,
+            )
         raise
+
+
+def secure_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Owner-only atomic text write — the str twin of :func:`atomic_write_bytes`.
+
+    Encodes ``text`` and hands off to :func:`atomic_write_bytes`, so it
+    inherits the same guarantees: same-dir tmp file created ``0600``,
+    fsync, atomic ``os.replace``, tmp cleanup on failure, and log+reraise
+    on a torn write. Use this for secret-bearing text files (sync state
+    JSON carrying the BEK, the claim-URL file whose fragment is the BEK)
+    that previously went through ``Path.write_text`` with the default
+    umask. On Windows the POSIX mode is a no-op; the user-profile ACL is
+    the protection, same as the keystore/credential-store posture.
+    """
+    atomic_write_bytes(Path(path), text.encode(encoding))
 
 
 # Per-path in-process locks. Stops two threads in THIS process from

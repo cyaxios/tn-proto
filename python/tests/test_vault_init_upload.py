@@ -237,7 +237,13 @@ class TestInitUploadMode:
         envelope = json.loads(events[0].read_text(encoding="utf-8"))
         assert envelope["event_type"] == "tn.vault.claim_url_issued"
         assert envelope["vault_id"] == captured.next_vault_id
-        assert envelope["claim_url"] == pc["claim_url"]
+        # SECURITY: the admin event must NOT carry the BEK. It stores a
+        # redacted URL only, and the password/BEK appears nowhere in it.
+        assert "claim_url" not in envelope
+        red = envelope["claim_url_redacted"]
+        assert red.startswith("https://mock.vault.local/claim/")
+        assert red.endswith("#k=<redacted>")
+        assert pc["password_b64"] not in json.dumps(envelope)
 
     def test_ciphertext_decrypts_under_persisted_password(self, tmp_path: Path):
         """The password persisted in sync_state must decrypt the bytes

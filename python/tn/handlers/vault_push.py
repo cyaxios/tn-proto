@@ -83,6 +83,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+from .._keystore_backend import secure_write_text
 from .base import TNHandler
 
 _log = logging.getLogger("tn.handlers.vault_push")
@@ -205,6 +206,19 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
+def _redact_claim_url(claim_url: str) -> str:
+    """Strip the BEK from a claim URL so it is safe to LOG.
+
+    The fragment (``#k=<bek>``) is the decryption key for the uploaded
+    full-keystore backup; it must never be written to an admin event,
+    outbox file, or any other on-disk log. Keep the identifying prefix
+    (vault host + ``/claim/<vault_id>``) and replace the key with a
+    redaction marker so the audit trail still shows a URL was issued.
+    """
+    base, sep, _frag = claim_url.partition("#")
+    return f"{base}#k=<redacted>" if sep else base
+
+
 def _emit_claim_url_admin_event(
     cfg: Any,
     *,
@@ -242,7 +256,9 @@ def _emit_claim_url_admin_event(
     envelope = {
         "event_type": "tn.vault.claim_url_issued",
         "did": getattr(getattr(cfg, "device", None), "did", None),
-        "claim_url": claim_url,
+        # SECURITY: never persist the BEK-bearing fragment to an on-disk log.
+        # Store a redacted URL only (vault host + vault_id, no key).
+        "claim_url_redacted": _redact_claim_url(claim_url),
         "vault_id": vault_id,
         "expires_at": expires_at,
         "emitted_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
@@ -258,13 +274,18 @@ def _write_claim_url_file(yaml_path: Path, claim_url: str) -> Path:
     """Write the cat-friendly claim URL to ``<yaml_dir>/.tn/sync/claim_url.txt``.
 
     Cite: plan §"Claim URL surfacing" (b). Best-effort.
+
+    The URL fragment carries the BEK that decrypts the uploaded
+    full-keystore backup, so this file is secret at rest: it is written
+    owner-only (POSIX 0600) and atomically via :func:`secure_write_text`
+    (on Windows the user-profile ACL is the protection).
     """
     from ..sync_state import _state_dir as _sync_state_dir
 
     target = _sync_state_dir(yaml_path) / "claim_url.txt"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(claim_url + "\n", encoding="utf-8")
+        secure_write_text(target, claim_url + "\n")
     except OSError as e:
         _log.warning("vault.push init-upload: cannot write claim_url.txt: %s", e)
     return target

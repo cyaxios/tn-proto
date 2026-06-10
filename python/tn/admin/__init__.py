@@ -11,6 +11,7 @@ legacy `bgw` cipher was removed in Workstream G.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,8 @@ from ..config import (
     LoadedConfig,
     _create_group,
 )
+
+_log = logging.getLogger("tn.admin")
 
 
 def _add_field_route(cfg: LoadedConfig, field_name: str, group: str) -> None:
@@ -302,8 +305,16 @@ def _rotate_impl(
             try:
                 prev_kit_sha = "sha256:" + _hashlib.sha256(_candidate.read_bytes()).hexdigest()
             except OSError:
-                # File raced with rename or read permission denied; keep "unknown".
-                pass
+                # File raced with rename or read permission denied; keep
+                # "unknown" so rotation proceeds, but surface why the prior
+                # kit hash could not be captured.
+                _log.warning(
+                    "could not read prior kit %s to capture its hash "
+                    "(raced rename or permission denied); recording "
+                    "prev_kit_sha as 'unknown' for group=%s",
+                    _candidate,
+                    group,
+                )
             break
 
     if cfg.cipher_name == "btn":
@@ -684,7 +695,16 @@ def _append_sync_queue(ceremony_id: str, err_msg: str) -> None:
                 + "\n"
             )
     except OSError:
-        pass  # last-resort swallow — telemetry isn't critical
+        # last-resort swallow — telemetry isn't critical, but the original
+        # error being recorded is lost here, so surface that the failure
+        # record could not be written.
+        _log.warning(
+            "could not write sync-failure record for ceremony=%s (the "
+            "underlying error was: %s); sync telemetry for this ceremony is "
+            "incomplete",
+            ceremony_id,
+            err_msg,
+        )
 
 
 # --------------------------------------------------------------------
