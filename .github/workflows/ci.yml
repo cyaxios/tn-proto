@@ -102,7 +102,7 @@ jobs:
         # workspace root sets cognitive-complexity-threshold = 15.
         # New functions above the threshold must either be split, or
         # earn an explicit #[allow(clippy::cognitive_complexity)] with
-        # a justifying comment (three exist today in tn-core; each
+        # a justifying comment (five exist today in tn-core; each
         # documents why its cohesion is intentional).
         run: cargo clippy --workspace --manifest-path Cargo.toml -- -D clippy::cognitive_complexity
 

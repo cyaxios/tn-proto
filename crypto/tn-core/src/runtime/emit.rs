@@ -131,17 +131,18 @@ impl Runtime {
         self.emit("error", event_type, fields)
     }
 
-    // emit_inner is the single canonical path for building + signing an
-    // envelope; splitting it further would fragment the invariants enforced
-    // across the sealing/signing/writing phases. The chain-enabled
-    // closure (under `with_advisory_lock`) builds on the same locals,
-    // so it carries the same allow.
-    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     /// Index-token + encrypt each per-group field set: build the equality
     /// index tokens, canonicalize, encrypt under the group cipher, and render
     /// the per-group JSON payloads. `group_inputs_for_hash` (which feeds
     /// `compute_row_hash`) is only populated when `need_row_hash`. Extracted
     /// from `emit_inner` (stages 2-3).
+    //
+    // A split stage of the cohesive emit path (see `emit_inner`). Both the
+    // length and the 16/15 cognitive score come from the per-substage perf
+    // timers woven through the group loop (sort / index_token /
+    // canonical_bytes / cipher / payload_build), not from branching logic —
+    // the encrypt itself is one straight-line pass.
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     fn encrypt_groups(
         &self,
         per_group: BTreeMap<String, Map<String, Value>>,
@@ -466,6 +467,14 @@ impl Runtime {
         Ok((row_hash, line))
     }
 
+    // emit_inner is the single canonical path for building + signing an
+    // envelope; splitting it further would fragment the invariants enforced
+    // across the sealing/signing/writing phases. The chain-enabled closure
+    // (under `with_advisory_lock`) builds on the same locals, so it carries
+    // the same allow. Under clippy 1.95's cognitive-complexity scoring this
+    // reads as 18/15; it was under threshold on the toolchain at the last
+    // release tag, so the allow keeps the gate version-independent.
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     fn emit_inner(
         &self,
         level: &str,
