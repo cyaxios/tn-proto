@@ -80,3 +80,39 @@ def test_btn_ceremony_with_explicit_log_path_keeps_rust(tmp_path):
         assert kit_path.exists() and kit_path.stat().st_size > 0
     finally:
         tn.flush_and_close()
+
+
+def test_close_drains_python_handlers_on_rust_path():
+    """On the btn+rust path, close() must flush+close the PYTHON runtime too.
+
+    The Rust runtime owns the log, but the user's Python handlers (S3, Delta,
+    kafka, firehose) live on self._py_rt and receive entries via the fan-out.
+    Closing only the Rust runtime left those handlers un-drained, silently
+    dropping their buffered batches despite the documented flush_and_close
+    drain contract.
+    """
+    from tn._dispatch import DispatchRuntime
+
+    class _SpyPy:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def flush_and_close(self, *, timeout: float = 30.0) -> None:
+            self.closed = True
+
+    class _SpyRust:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    rt = DispatchRuntime.__new__(DispatchRuntime)
+    rt._use_rust = True
+    rt._rt = _SpyRust()
+    rt._py_rt = _SpyPy()
+
+    rt.close()
+
+    assert rt._py_rt.closed, "Python handlers were not drained on the rust path"
+    assert rt._rt.closed, "Rust runtime was not closed"

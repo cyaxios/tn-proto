@@ -555,20 +555,26 @@ class DispatchRuntime:
         yield from _legacy_read(log_path, cfg)
 
     def close(self, *, timeout: float = 30.0) -> None:
+        # Drain the Python runtime FIRST, on every path. On the btn+rust path
+        # the Rust runtime owns the log, but the user's Python handlers (S3,
+        # Delta, kafka, firehose, ...) live on self._py_rt and receive entries
+        # through the fan-out. Closing only the Rust runtime left those
+        # handlers un-drained, silently dropping their buffered batches despite
+        # the documented flush_and_close drain contract. Close _py_rt whenever
+        # it exists; also close the Rust runtime when it owns the log.
+        if self._py_rt is not None:
+            close_fn = getattr(self._py_rt, "flush_and_close", None) or getattr(
+                self._py_rt, "close", None
+            )
+            if callable(close_fn):
+                try:
+                    close_fn(timeout=timeout)
+                except TypeError:
+                    close_fn()
         if self._use_rust:
             if self._rt is None:
                 raise RuntimeError("DispatchRuntime: Rust runtime not initialized")
             self._rt.close()
-        else:
-            if self._py_rt is not None:
-                close_fn = getattr(self._py_rt, "flush_and_close", None) or getattr(
-                    self._py_rt, "close", None
-                )
-                if callable(close_fn):
-                    try:
-                        close_fn(timeout=timeout)
-                    except TypeError:
-                        close_fn()
 
     # ------------------------------------------------------------------
     # Admin verbs (Task 39): btn recipient management via Rust path
