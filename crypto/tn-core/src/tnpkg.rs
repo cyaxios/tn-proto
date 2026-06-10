@@ -34,6 +34,41 @@ const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
 /// backwards-incompatible way.
 pub const MANIFEST_VERSION: u32 = 1;
 
+// --------------------------------------------------------------------------
+// `.tnpkg` resource limits
+//
+// An untrusted `.tnpkg` reaches [`read_tnpkg`] through watched `fs.scan`
+// inboxes, the vault-push path, and the Python `absorb` wheel, so a malicious
+// archive must not be able to exhaust memory before its manifest signature is
+// even checked. These caps mirror `_enforce_zip_limits` in `tn/tnpkg.py`
+// one-for-one; keep the two in lockstep. They are deliberately generous
+// relative to real packages (a full_keystore backup is a manifest plus a
+// handful of small key files) — the point is to bound blast radius, not to be
+// tight.
+// --------------------------------------------------------------------------
+
+/// Max number of zip entries. A real `.tnpkg` is a manifest plus a small
+/// handful of body members; thousands of entries is an attack, not a backup.
+pub const MAX_PKG_ENTRY_COUNT: usize = 2000;
+
+/// Max uncompressed size of `manifest.json`. Real manifests are a few KiB even
+/// with a per-recipient `recipient_wraps` array; 2 MiB is far past any honest
+/// manifest while still cheap to parse.
+pub const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Max uncompressed size of any single entry. Bounds the largest single
+/// allocation a body read can trigger.
+pub const MAX_PKG_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Max total uncompressed size across all entries. Bounds the aggregate memory
+/// a full read of the archive can consume.
+pub const MAX_PKG_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Max per-entry compression ratio (uncompressed / compressed). `.tnpkg` is
+/// written `Stored`, so legitimate packages have a ratio of ~1.0. A high ratio
+/// is the signature of a zip bomb: a few KiB on disk inflating to gigabytes.
+pub const MAX_PKG_COMPRESSION_RATIO: u64 = 200;
+
 /// Vector clock keyed by `did -> {event_type -> max sequence}`.
 ///
 /// `BTreeMap` for deterministic JSON serialization (sorted keys), matching
@@ -465,19 +500,102 @@ pub fn read_tnpkg(source: TnpkgSource<'_>) -> Result<(Manifest, BTreeMap<String,
     }
 }
 
+/// Bound a `.tnpkg` using zip central-directory metadata **only** — reads no
+/// entry bytes. Every check is against the uncompressed/compressed sizes the
+/// `zip` crate exposes from the central directory without inflating anything,
+/// so this is the cheap pre-flight that stops zip bombs, oversized entries, and
+/// entry floods before any read allocates memory. Mirrors `_enforce_zip_limits`
+/// in `tn/tnpkg.py`; keep the two in lockstep.
+fn enforce_zip_limits<R: Read + Seek>(zip_r: &mut zip::ZipArchive<R>) -> Result<()> {
+    let count = zip_r.len();
+    if count > MAX_PKG_ENTRY_COUNT {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: format!(
+                "`.tnpkg` has {count} entries, exceeding the limit of \
+                 {MAX_PKG_ENTRY_COUNT} (possible zip bomb / malformed archive)"
+            ),
+        });
+    }
+    let mut total: u64 = 0;
+    for i in 0..count {
+        let entry = zip_r.by_index(i).map_err(|e| Error::Malformed {
+            kind: "tnpkg zip",
+            reason: e.to_string(),
+        })?;
+        let size = entry.size();
+        let compressed = entry.compressed_size();
+        if entry.name() == "manifest.json" && size > MAX_MANIFEST_BYTES {
+            return Err(Error::Malformed {
+                kind: "tnpkg zip",
+                reason: format!(
+                    "`.tnpkg` manifest.json declares an uncompressed size of \
+                     {size} bytes, exceeding the manifest size limit of \
+                     {MAX_MANIFEST_BYTES} bytes"
+                ),
+            });
+        }
+        if size > MAX_PKG_ENTRY_BYTES {
+            return Err(Error::Malformed {
+                kind: "tnpkg zip",
+                reason: format!(
+                    "`.tnpkg` entry {:?} declares an uncompressed size of {size} \
+                     bytes, exceeding the per-entry limit of {MAX_PKG_ENTRY_BYTES} \
+                     bytes (possible zip bomb)",
+                    entry.name()
+                ),
+            });
+        }
+        // Compression-ratio guard: a tiny compressed blob inflating to a huge
+        // buffer is the classic zip-bomb shape. Legitimate `.tnpkg` files are
+        // Stored (ratio ~1).
+        let ratio = size / compressed.max(1);
+        if ratio > MAX_PKG_COMPRESSION_RATIO {
+            return Err(Error::Malformed {
+                kind: "tnpkg zip",
+                reason: format!(
+                    "`.tnpkg` entry {:?} has a compression ratio of {ratio}x \
+                     ({size} bytes from {compressed}), exceeding the limit of \
+                     {MAX_PKG_COMPRESSION_RATIO}x (possible zip bomb)",
+                    entry.name()
+                ),
+            });
+        }
+        total = total.saturating_add(size);
+        if total > MAX_PKG_TOTAL_BYTES {
+            return Err(Error::Malformed {
+                kind: "tnpkg zip",
+                reason: format!(
+                    "`.tnpkg` total uncompressed size exceeds the limit of \
+                     {MAX_PKG_TOTAL_BYTES} bytes at entry {:?} (possible zip bomb)",
+                    entry.name()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn read_tnpkg_inner<R: Read + Seek>(reader: R) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
     let mut zip_r = zip::ZipArchive::new(reader).map_err(|e| Error::Malformed {
         kind: "tnpkg zip",
         reason: e.to_string(),
     })?;
-    // Pull manifest first.
+
+    // Cheap metadata-only pre-flight: reject bombs / floods before any read.
+    enforce_zip_limits(&mut zip_r)?;
+
+    // Pull manifest first. The `.take` is belt-and-suspenders beyond the
+    // metadata sweep: if a malicious central directory under-declares a size,
+    // the read still cannot allocate past the cap (it truncates, and the parse
+    // / signature check downstream then fails).
     let manifest_doc: Value = {
-        let mut mf = zip_r.by_name("manifest.json").map_err(|_| Error::Malformed {
+        let mf = zip_r.by_name("manifest.json").map_err(|_| Error::Malformed {
             kind: "tnpkg zip",
             reason: "missing manifest.json".into(),
         })?;
         let mut buf = Vec::new();
-        mf.read_to_end(&mut buf)?;
+        mf.take(MAX_MANIFEST_BYTES).read_to_end(&mut buf)?;
         serde_json::from_slice(&buf)?
     };
     let manifest = Manifest::from_json(&manifest_doc)?;
@@ -491,12 +609,12 @@ fn read_tnpkg_inner<R: Read + Seek>(reader: R) -> Result<(Manifest, BTreeMap<Str
         if name == "manifest.json" {
             continue;
         }
-        let mut entry = zip_r.by_name(&name).map_err(|e| Error::Malformed {
+        let entry = zip_r.by_name(&name).map_err(|e| Error::Malformed {
             kind: "tnpkg zip",
             reason: e.to_string(),
         })?;
         let mut buf = Vec::new();
-        entry.read_to_end(&mut buf)?;
+        entry.take(MAX_PKG_ENTRY_BYTES).read_to_end(&mut buf)?;
         body.insert(name, buf);
     }
     Ok((manifest, body))

@@ -1,26 +1,23 @@
 //! PyO3 wrapper for tn_core::Runtime.
 
-// pyo3 0.22 macros expand to code that references a non-existent `gil-refs`
-// cargo feature and insert `.into()` conversions that clippy flags as
-// useless. Both are pyo3-side artifacts — suppressed here until we bump to
-// pyo3 0.23+ (tracked in the remediation plan).
-#![allow(unexpected_cfgs)]
-#![allow(clippy::useless_conversion)]
+// Migrated to the pyo3 0.24 bound API: the 0.21-era `*_bound` constructors and
+// the `IntoPy`/`ToPyObject` conversions are gone in favor of the plain
+// `Bound`-returning constructors and the fallible `IntoPyObject` trait. (The
+// 0.24 bump itself cleared RUSTSEC-2025-0020, the PyString::from_object buffer
+// overflow.)
 
 mod admin;
 
 use pyo3::exceptions::{PyException, PyIOError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
-use pyo3::{create_exception, intern, wrap_pyfunction};
+use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::{create_exception, intern, wrap_pyfunction, IntoPyObjectExt};
 use std::path::Path;
 use std::sync::Arc;
 
 use ::tn_core::admin_cache::ChainConflict;
 use ::tn_core::tnpkg::ManifestKind;
-use ::tn_core::{
-    AbsorbSource, AdminStateCache, Error as TnError, ExportOptions, Runtime,
-};
+use ::tn_core::{AbsorbSource, AdminStateCache, Error as TnError, ExportOptions, Runtime};
 
 create_exception!(_core, TnRuntimeError, PyException);
 create_exception!(_core, NotEntitled, PyException);
@@ -48,6 +45,22 @@ fn err_to_py(e: TnError) -> PyErr {
     }
 }
 
+/// Run a binding entry point, converting any Rust panic escaping the core into
+/// a catchable `TnRuntimeError` instead of letting it cross the FFI boundary as
+/// a pyo3 `PanicException` (which subclasses `BaseException` and so slips past
+/// an ordinary `except Exception:`). Normal `Err(PyErr)` results pass through
+/// unchanged; only an actual panic is remapped. The SDK must never surface an
+/// exception the caller did not request — a panic is a last-resort bug signal,
+/// so it is contained here and re-raised as a TN-typed, catchable error.
+pub(crate) fn guard<T>(f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
+    match ::tn_core::catch_panic(f) {
+        Ok(result) => result,
+        Err(msg) => Err(TnRuntimeError::new_err(format!(
+            "internal error (panic): {msg}"
+        ))),
+    }
+}
+
 #[pyclass(module = "tn_core._core", name = "Runtime")]
 pub struct PyRuntime {
     inner: Arc<Runtime>,
@@ -57,9 +70,11 @@ pub struct PyRuntime {
 impl PyRuntime {
     #[staticmethod]
     fn init(yaml_path: &str) -> PyResult<Self> {
-        let rt = Runtime::init(Path::new(yaml_path)).map_err(err_to_py)?;
-        Ok(Self {
-            inner: Arc::new(rt),
+        guard(|| {
+            let rt = Runtime::init(Path::new(yaml_path)).map_err(err_to_py)?;
+            Ok(Self {
+                inner: Arc::new(rt),
+            })
         })
     }
 
@@ -98,49 +113,45 @@ impl PyRuntime {
         event_id: Option<&str>,
         sign: Option<bool>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-        // PyO3-layer perf hooks. Same env-gating as the in-runtime
-        // markers — one AtomicBool::load(Relaxed) per stage on the
-        // disabled path. Together with emit:_TOTAL we get the full
-        // Python→Rust crossing accounted for.
-        let _py_t0 = if tn_core::perf::enabled() {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        let fields_json = pydict_to_json(fields)?;
-        if let Some(t0) = _py_t0 {
-            tn_core::perf::record_ns(
-                "emit:py_dict_marshal",
-                t0.elapsed().as_nanos() as u64,
-            );
-        }
-        let _wrap_t0 = if tn_core::perf::enabled() {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        let line = self
-            .inner
-            .emit_with_override_sign_returning_line(
-                level,
-                event_type,
-                fields_json,
-                timestamp,
-                event_id,
-                sign,
-            )
-            .map_err(err_to_py)?;
-        let result = Ok(line.map(|s| PyBytes::new_bound(py, s.as_bytes())));
-        if let Some(t0) = _wrap_t0 {
-            // Includes both Runtime::emit_inner (which has its own
-            // emit:_TOTAL marker) AND the return-wrap into PyBytes.
-            // Subtract emit:_TOTAL to isolate the wrap-back cost.
-            tn_core::perf::record_ns(
-                "emit:py_call_and_wrap",
-                t0.elapsed().as_nanos() as u64,
-            );
-        }
-        result
+        guard(|| {
+            // PyO3-layer perf hooks. Same env-gating as the in-runtime
+            // markers — one AtomicBool::load(Relaxed) per stage on the
+            // disabled path. Together with emit:_TOTAL we get the full
+            // Python→Rust crossing accounted for.
+            let _py_t0 = if tn_core::perf::enabled() {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let fields_json = pydict_to_json(fields)?;
+            if let Some(t0) = _py_t0 {
+                tn_core::perf::record_ns("emit:py_dict_marshal", t0.elapsed().as_nanos() as u64);
+            }
+            let _wrap_t0 = if tn_core::perf::enabled() {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let line = self
+                .inner
+                .emit_with_override_sign_returning_line(
+                    level,
+                    event_type,
+                    fields_json,
+                    timestamp,
+                    event_id,
+                    sign,
+                )
+                .map_err(err_to_py)?;
+            let result = Ok(line.map(|s| PyBytes::new(py, s.as_bytes())));
+            if let Some(t0) = _wrap_t0 {
+                // Includes both Runtime::emit_inner (which has its own
+                // emit:_TOTAL marker) AND the return-wrap into PyBytes.
+                // Subtract emit:_TOTAL to isolate the wrap-back cost.
+                tn_core::perf::record_ns("emit:py_call_and_wrap", t0.elapsed().as_nanos() as u64);
+            }
+            result
+        })
     }
 
     /// Read all entries as flat dicts (the default 2026-04-25 shape).
@@ -151,19 +162,21 @@ impl PyRuntime {
     /// `_decrypt_errors` markers surface only when non-empty.
     #[pyo3(signature = (log_path=None))]
     fn read<'py>(&self, py: Python<'py>, log_path: Option<&str>) -> PyResult<Bound<'py, PyList>> {
-        let raw = match log_path {
-            Some(p) => self
-                .inner
-                .read_from(std::path::Path::new(p))
-                .map_err(err_to_py)?,
-            None => self.inner.read_raw().map_err(err_to_py)?,
-        };
-        let list = PyList::empty_bound(py);
-        for r in &raw {
-            let flat = ::tn_core::runtime::flatten_raw_entry(r, false);
-            list.append(json_to_py(py, &serde_json::Value::Object(flat))?)?;
-        }
-        Ok(list)
+        guard(|| {
+            let raw = match log_path {
+                Some(p) => self
+                    .inner
+                    .read_from(std::path::Path::new(p))
+                    .map_err(err_to_py)?,
+                None => self.inner.read_raw().map_err(err_to_py)?,
+            };
+            let list = PyList::empty(py);
+            for r in &raw {
+                let flat = ::tn_core::runtime::flatten_raw_entry(r, false);
+                list.append(json_to_py(py, &serde_json::Value::Object(flat))?)?;
+            }
+            Ok(list)
+        })
     }
 
     /// Read all entries as flat dicts plus a `_valid: {signature,
@@ -178,25 +191,27 @@ impl PyRuntime {
         py: Python<'py>,
         log_path: Option<&str>,
     ) -> PyResult<Bound<'py, PyList>> {
-        use serde_json::{Map, Value};
-        let raw_with_valid = match log_path {
-            Some(p) => self
-                .inner
-                .read_from_with_validity(std::path::Path::new(p))
-                .map_err(err_to_py)?,
-            None => self.inner.read_raw_with_validity().map_err(err_to_py)?,
-        };
-        let list = PyList::empty_bound(py);
-        for (entry, valid) in raw_with_valid {
-            let mut flat = ::tn_core::runtime::flatten_raw_entry(&entry, false);
-            let mut v = Map::new();
-            v.insert("signature".into(), Value::Bool(valid.signature));
-            v.insert("row_hash".into(), Value::Bool(valid.row_hash));
-            v.insert("chain".into(), Value::Bool(valid.chain));
-            flat.insert("_valid".into(), Value::Object(v));
-            list.append(json_to_py(py, &Value::Object(flat))?)?;
-        }
-        Ok(list)
+        guard(|| {
+            use serde_json::{Map, Value};
+            let raw_with_valid = match log_path {
+                Some(p) => self
+                    .inner
+                    .read_from_with_validity(std::path::Path::new(p))
+                    .map_err(err_to_py)?,
+                None => self.inner.read_raw_with_validity().map_err(err_to_py)?,
+            };
+            let list = PyList::empty(py);
+            for (entry, valid) in raw_with_valid {
+                let mut flat = ::tn_core::runtime::flatten_raw_entry(&entry, false);
+                let mut v = Map::new();
+                v.insert("signature".into(), Value::Bool(valid.signature));
+                v.insert("row_hash".into(), Value::Bool(valid.row_hash));
+                v.insert("chain".into(), Value::Bool(valid.chain));
+                flat.insert("_valid".into(), Value::Object(v));
+                list.append(json_to_py(py, &Value::Object(flat))?)?;
+            }
+            Ok(list)
+        })
     }
 
     /// Read all entries as the audit-grade `{envelope, plaintext}`
@@ -207,25 +222,27 @@ impl PyRuntime {
         py: Python<'py>,
         log_path: Option<&str>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let entries = match log_path {
-            Some(p) => self
-                .inner
-                .read_from(std::path::Path::new(p))
-                .map_err(err_to_py)?,
-            None => self.inner.read_raw().map_err(err_to_py)?,
-        };
-        let list = PyList::empty_bound(py);
-        for e in entries {
-            let d = PyDict::new_bound(py);
-            d.set_item(intern!(py, "envelope"), json_to_py(py, &e.envelope)?)?;
-            let pt = PyDict::new_bound(py);
-            for (g, v) in e.plaintext_per_group {
-                pt.set_item(g, json_to_py(py, &v)?)?;
+        guard(|| {
+            let entries = match log_path {
+                Some(p) => self
+                    .inner
+                    .read_from(std::path::Path::new(p))
+                    .map_err(err_to_py)?,
+                None => self.inner.read_raw().map_err(err_to_py)?,
+            };
+            let list = PyList::empty(py);
+            for e in entries {
+                let d = PyDict::new(py);
+                d.set_item(intern!(py, "envelope"), json_to_py(py, &e.envelope)?)?;
+                let pt = PyDict::new(py);
+                for (g, v) in e.plaintext_per_group {
+                    pt.set_item(g, json_to_py(py, &v)?)?;
+                }
+                d.set_item(intern!(py, "plaintext"), pt)?;
+                list.append(d)?;
             }
-            d.set_item(intern!(py, "plaintext"), pt)?;
-            list.append(d)?;
-        }
-        Ok(list)
+            Ok(list)
+        })
     }
 
     /// Iterate verified entries (sig + row_hash + chain). Returns flat
@@ -234,13 +251,10 @@ impl PyRuntime {
     ///
     /// `on_invalid` is one of "skip" (default), "raise", "forensic".
     #[pyo3(signature = (on_invalid="skip"))]
-    fn secure_read<'py>(
-        &self,
-        py: Python<'py>,
-        on_invalid: &str,
-    ) -> PyResult<Bound<'py, PyList>> {
-        use ::tn_core::OnInvalid;
-        let mode = match on_invalid {
+    fn secure_read<'py>(&self, py: Python<'py>, on_invalid: &str) -> PyResult<Bound<'py, PyList>> {
+        guard(|| {
+            use ::tn_core::OnInvalid;
+            let mode = match on_invalid {
             "skip" => OnInvalid::Skip,
             "raise" => OnInvalid::Raise,
             "forensic" => OnInvalid::Forensic,
@@ -250,48 +264,49 @@ impl PyRuntime {
                 )))
             }
         };
-        let opts = ::tn_core::SecureReadOptions {
-            on_invalid: mode,
-            log_path: None,
-        };
-        let entries = self.inner.secure_read(opts).map_err(err_to_py)?;
-        let list = PyList::empty_bound(py);
-        for entry in entries {
-            // Build the flat dict. Then attach `instructions` when present.
-            let dict = json_to_py(py, &serde_json::Value::Object(entry.fields))?;
-            let dict_obj: Bound<'_, PyDict> = dict.downcast_into::<PyDict>()?;
-            if let Some(instr) = entry.instructions {
-                let id = PyDict::new_bound(py);
-                id.set_item(intern!(py, "instruction"), instr.instruction)?;
-                id.set_item(intern!(py, "use_for"), instr.use_for)?;
-                id.set_item(intern!(py, "do_not_use_for"), instr.do_not_use_for)?;
-                id.set_item(intern!(py, "consequences"), instr.consequences)?;
-                id.set_item(
-                    intern!(py, "on_violation_or_error"),
-                    instr.on_violation_or_error,
-                )?;
-                id.set_item(intern!(py, "policy"), instr.policy)?;
-                dict_obj.set_item(intern!(py, "instructions"), id)?;
-            }
-            // hidden_groups / decrypt_errors (rebuild — flatten removed them
-            // when attach_instructions was called).
-            if !entry.hidden_groups.is_empty() {
-                let arr = PyList::empty_bound(py);
-                for g in entry.hidden_groups {
-                    arr.append(g)?;
+            let opts = ::tn_core::SecureReadOptions {
+                on_invalid: mode,
+                log_path: None,
+            };
+            let entries = self.inner.secure_read(opts).map_err(err_to_py)?;
+            let list = PyList::empty(py);
+            for entry in entries {
+                // Build the flat dict. Then attach `instructions` when present.
+                let dict = json_to_py(py, &serde_json::Value::Object(entry.fields))?;
+                let dict_obj: Bound<'_, PyDict> = dict.downcast_into::<PyDict>()?;
+                if let Some(instr) = entry.instructions {
+                    let id = PyDict::new(py);
+                    id.set_item(intern!(py, "instruction"), instr.instruction)?;
+                    id.set_item(intern!(py, "use_for"), instr.use_for)?;
+                    id.set_item(intern!(py, "do_not_use_for"), instr.do_not_use_for)?;
+                    id.set_item(intern!(py, "consequences"), instr.consequences)?;
+                    id.set_item(
+                        intern!(py, "on_violation_or_error"),
+                        instr.on_violation_or_error,
+                    )?;
+                    id.set_item(intern!(py, "policy"), instr.policy)?;
+                    dict_obj.set_item(intern!(py, "instructions"), id)?;
                 }
-                dict_obj.set_item(intern!(py, "_hidden_groups"), arr)?;
-            }
-            if !entry.decrypt_errors.is_empty() {
-                let arr = PyList::empty_bound(py);
-                for g in entry.decrypt_errors {
-                    arr.append(g)?;
+                // hidden_groups / decrypt_errors (rebuild — flatten removed them
+                // when attach_instructions was called).
+                if !entry.hidden_groups.is_empty() {
+                    let arr = PyList::empty(py);
+                    for g in entry.hidden_groups {
+                        arr.append(g)?;
+                    }
+                    dict_obj.set_item(intern!(py, "_hidden_groups"), arr)?;
                 }
-                dict_obj.set_item(intern!(py, "_decrypt_errors"), arr)?;
+                if !entry.decrypt_errors.is_empty() {
+                    let arr = PyList::empty(py);
+                    for g in entry.decrypt_errors {
+                        arr.append(g)?;
+                    }
+                    dict_obj.set_item(intern!(py, "_decrypt_errors"), arr)?;
+                }
+                list.append(dict_obj)?;
             }
-            list.append(dict_obj)?;
-        }
-        Ok(list)
+            Ok(list)
+        })
     }
 
     /// Mint kits for `runtime_did` across all named groups + tn.agents,
@@ -304,17 +319,21 @@ impl PyRuntime {
         out_path: &str,
         label: Option<&str>,
     ) -> PyResult<String> {
-        let group_refs: Vec<&str> = groups.iter().map(String::as_str).collect();
-        let p = self
-            .inner
-            .admin_add_agent_runtime(runtime_did, &group_refs, Path::new(out_path), label)
-            .map_err(err_to_py)?;
-        Ok(p.display().to_string())
+        guard(|| {
+            let group_refs: Vec<&str> = groups.iter().map(String::as_str).collect();
+            let p = self
+                .inner
+                .admin_add_agent_runtime(runtime_did, &group_refs, Path::new(out_path), label)
+                .map_err(err_to_py)?;
+            Ok(p.display().to_string())
+        })
     }
 
     fn close(&self) -> PyResult<()> {
-        // Arc<Runtime> — dropping PyRuntime decrements refcount; close is implicit.
-        Ok(())
+        guard(|| {
+            // Arc<Runtime> — dropping PyRuntime decrements refcount; close is implicit.
+            Ok(())
+        })
     }
 
     // ------------------------------------------------------------------
@@ -335,21 +354,25 @@ impl PyRuntime {
         out_path: &str,
         recipient_did: Option<&str>,
     ) -> PyResult<u64> {
-        self.inner
-            .admin_add_recipient(group, Path::new(out_path), recipient_did)
-            .map_err(err_to_py)
+        guard(|| {
+            self.inner
+                .admin_add_recipient(group, Path::new(out_path), recipient_did)
+                .map_err(err_to_py)
+        })
     }
 
     /// Revoke the btn reader at `leaf_index` in `group`.
     fn revoke_recipient(&self, group: &str, leaf_index: u64) -> PyResult<()> {
-        self.inner
-            .admin_revoke_recipient(group, leaf_index)
-            .map_err(err_to_py)
+        guard(|| {
+            self.inner
+                .admin_revoke_recipient(group, leaf_index)
+                .map_err(err_to_py)
+        })
     }
 
     /// Return how many recipients are currently revoked in `group`'s btn state.
     fn revoked_count(&self, group: &str) -> PyResult<usize> {
-        self.inner.admin_revoked_count(group).map_err(err_to_py)
+        guard(|| self.inner.admin_revoked_count(group).map_err(err_to_py))
     }
 
     /// Return the current recipient roster for `group` by replaying the log.
@@ -364,35 +387,24 @@ impl PyRuntime {
         group: &str,
         include_revoked: bool,
     ) -> PyResult<Bound<'py, PyList>> {
-        let entries = self
-            .inner
-            .recipients(group, include_revoked)
-            .map_err(err_to_py)?;
-        let list = PyList::empty_bound(py);
-        for r in entries {
-            let d = PyDict::new_bound(py);
-            d.set_item(intern!(py, "leaf_index"), r.leaf_index)?;
-            d.set_item(
-                intern!(py, "recipient_identity"),
-                r.recipient_identity
-                    .map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            d.set_item(
-                intern!(py, "minted_at"),
-                r.minted_at.map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            d.set_item(
-                intern!(py, "kit_sha256"),
-                r.kit_sha256.map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            d.set_item(intern!(py, "revoked"), r.revoked)?;
-            d.set_item(
-                intern!(py, "revoked_at"),
-                r.revoked_at.map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            list.append(d)?;
-        }
-        Ok(list)
+        guard(|| {
+            let entries = self
+                .inner
+                .recipients(group, include_revoked)
+                .map_err(err_to_py)?;
+            let list = PyList::empty(py);
+            for r in entries {
+                let d = PyDict::new(py);
+                d.set_item(intern!(py, "leaf_index"), r.leaf_index)?;
+                d.set_item(intern!(py, "recipient_identity"), r.recipient_identity)?;
+                d.set_item(intern!(py, "minted_at"), r.minted_at)?;
+                d.set_item(intern!(py, "kit_sha256"), r.kit_sha256)?;
+                d.set_item(intern!(py, "revoked"), r.revoked)?;
+                d.set_item(intern!(py, "revoked_at"), r.revoked_at)?;
+                list.append(d)?;
+            }
+            Ok(list)
+        })
     }
 
     /// Return the full local admin state by replaying the log.
@@ -405,140 +417,116 @@ impl PyRuntime {
         py: Python<'py>,
         group: Option<&str>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let state = self.inner.admin_state(group).map_err(err_to_py)?;
-        let out = PyDict::new_bound(py);
+        guard(|| {
+            let state = self.inner.admin_state(group).map_err(err_to_py)?;
+            let out = PyDict::new(py);
 
-        // ceremony
-        let ceremony_v: Bound<'py, PyAny> = match state.ceremony {
-            Some(c) => {
-                let d = PyDict::new_bound(py);
-                d.set_item(intern!(py, "ceremony_id"), c.ceremony_id)?;
-                d.set_item(intern!(py, "cipher"), c.cipher)?;
-                d.set_item(intern!(py, "device_identity"), c.device_identity)?;
-                d.set_item(
-                    intern!(py, "created_at"),
-                    c.created_at.map_or_else(|| py.None(), |s| s.into_py(py)),
-                )?;
-                d.into_any()
+            // ceremony
+            let ceremony_v: Bound<'py, PyAny> = match state.ceremony {
+                Some(c) => {
+                    let d = PyDict::new(py);
+                    d.set_item(intern!(py, "ceremony_id"), c.ceremony_id)?;
+                    d.set_item(intern!(py, "cipher"), c.cipher)?;
+                    d.set_item(intern!(py, "device_identity"), c.device_identity)?;
+                    d.set_item(intern!(py, "created_at"), c.created_at)?;
+                    d.into_any()
+                }
+                None => py.None().into_bound(py),
+            };
+            out.set_item(intern!(py, "ceremony"), ceremony_v)?;
+
+            // groups
+            let groups = PyList::empty(py);
+            for g in state.groups {
+                let d = PyDict::new(py);
+                d.set_item(intern!(py, "group"), g.group)?;
+                d.set_item(intern!(py, "cipher"), g.cipher)?;
+                d.set_item(intern!(py, "publisher_identity"), g.publisher_identity)?;
+                d.set_item(intern!(py, "added_at"), g.added_at)?;
+                groups.append(d)?;
             }
-            None => py.None().into_bound(py),
-        };
-        out.set_item(intern!(py, "ceremony"), ceremony_v)?;
+            out.set_item(intern!(py, "groups"), groups)?;
 
-        // groups
-        let groups = PyList::empty_bound(py);
-        for g in state.groups {
-            let d = PyDict::new_bound(py);
-            d.set_item(intern!(py, "group"), g.group)?;
-            d.set_item(intern!(py, "cipher"), g.cipher)?;
-            d.set_item(intern!(py, "publisher_identity"), g.publisher_identity)?;
-            d.set_item(intern!(py, "added_at"), g.added_at)?;
-            groups.append(d)?;
-        }
-        out.set_item(intern!(py, "groups"), groups)?;
+            // recipients
+            let recipients = PyList::empty(py);
+            for r in state.recipients {
+                let d = PyDict::new(py);
+                d.set_item(intern!(py, "group"), r.group)?;
+                d.set_item(intern!(py, "leaf_index"), r.leaf_index)?;
+                d.set_item(intern!(py, "recipient_identity"), r.recipient_identity)?;
+                d.set_item(intern!(py, "kit_sha256"), r.kit_sha256)?;
+                d.set_item(intern!(py, "minted_at"), r.minted_at)?;
+                d.set_item(intern!(py, "active_status"), r.active_status)?;
+                d.set_item(intern!(py, "revoked_at"), r.revoked_at)?;
+                d.set_item(intern!(py, "retired_at"), r.retired_at)?;
+                recipients.append(d)?;
+            }
+            out.set_item(intern!(py, "recipients"), recipients)?;
 
-        // recipients
-        let recipients = PyList::empty_bound(py);
-        for r in state.recipients {
-            let d = PyDict::new_bound(py);
-            d.set_item(intern!(py, "group"), r.group)?;
-            d.set_item(intern!(py, "leaf_index"), r.leaf_index)?;
-            d.set_item(
-                intern!(py, "recipient_identity"),
-                r.recipient_identity
-                    .map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            d.set_item(intern!(py, "kit_sha256"), r.kit_sha256)?;
-            d.set_item(
-                intern!(py, "minted_at"),
-                r.minted_at.map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            d.set_item(intern!(py, "active_status"), r.active_status)?;
-            d.set_item(
-                intern!(py, "revoked_at"),
-                r.revoked_at.map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            d.set_item(
-                intern!(py, "retired_at"),
-                r.retired_at.map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            recipients.append(d)?;
-        }
-        out.set_item(intern!(py, "recipients"), recipients)?;
+            // rotations
+            let rotations = PyList::empty(py);
+            for r in state.rotations {
+                let d = PyDict::new(py);
+                d.set_item(intern!(py, "group"), r.group)?;
+                d.set_item(intern!(py, "cipher"), r.cipher)?;
+                d.set_item(intern!(py, "generation"), r.generation)?;
+                d.set_item(intern!(py, "previous_kit_sha256"), r.previous_kit_sha256)?;
+                d.set_item(intern!(py, "rotated_at"), r.rotated_at)?;
+                rotations.append(d)?;
+            }
+            out.set_item(intern!(py, "rotations"), rotations)?;
 
-        // rotations
-        let rotations = PyList::empty_bound(py);
-        for r in state.rotations {
-            let d = PyDict::new_bound(py);
-            d.set_item(intern!(py, "group"), r.group)?;
-            d.set_item(intern!(py, "cipher"), r.cipher)?;
-            d.set_item(intern!(py, "generation"), r.generation)?;
-            d.set_item(intern!(py, "previous_kit_sha256"), r.previous_kit_sha256)?;
-            d.set_item(intern!(py, "rotated_at"), r.rotated_at)?;
-            rotations.append(d)?;
-        }
-        out.set_item(intern!(py, "rotations"), rotations)?;
+            // coupons
+            let coupons = PyList::empty(py);
+            for c in state.coupons {
+                let d = PyDict::new(py);
+                d.set_item(intern!(py, "group"), c.group)?;
+                d.set_item(intern!(py, "slot"), c.slot)?;
+                d.set_item(intern!(py, "recipient_identity"), c.recipient_identity)?;
+                d.set_item(intern!(py, "issued_to"), c.issued_to)?;
+                d.set_item(intern!(py, "issued_at"), c.issued_at)?;
+                coupons.append(d)?;
+            }
+            out.set_item(intern!(py, "coupons"), coupons)?;
 
-        // coupons
-        let coupons = PyList::empty_bound(py);
-        for c in state.coupons {
-            let d = PyDict::new_bound(py);
-            d.set_item(intern!(py, "group"), c.group)?;
-            d.set_item(intern!(py, "slot"), c.slot)?;
-            d.set_item(intern!(py, "recipient_identity"), c.recipient_identity)?;
-            d.set_item(intern!(py, "issued_to"), c.issued_to)?;
-            d.set_item(
-                intern!(py, "issued_at"),
-                c.issued_at.map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            coupons.append(d)?;
-        }
-        out.set_item(intern!(py, "coupons"), coupons)?;
+            // enrolments
+            let enrolments = PyList::empty(py);
+            for e in state.enrolments {
+                let d = PyDict::new(py);
+                d.set_item(intern!(py, "group"), e.group)?;
+                d.set_item(intern!(py, "peer_identity"), e.peer_identity)?;
+                d.set_item(intern!(py, "package_sha256"), e.package_sha256)?;
+                d.set_item(intern!(py, "status"), e.status)?;
+                d.set_item(intern!(py, "compiled_at"), e.compiled_at)?;
+                d.set_item(intern!(py, "absorbed_at"), e.absorbed_at)?;
+                enrolments.append(d)?;
+            }
+            out.set_item(intern!(py, "enrolments"), enrolments)?;
 
-        // enrolments
-        let enrolments = PyList::empty_bound(py);
-        for e in state.enrolments {
-            let d = PyDict::new_bound(py);
-            d.set_item(intern!(py, "group"), e.group)?;
-            d.set_item(intern!(py, "peer_identity"), e.peer_identity)?;
-            d.set_item(intern!(py, "package_sha256"), e.package_sha256)?;
-            d.set_item(intern!(py, "status"), e.status)?;
-            d.set_item(
-                intern!(py, "compiled_at"),
-                e.compiled_at.map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            d.set_item(
-                intern!(py, "absorbed_at"),
-                e.absorbed_at.map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            enrolments.append(d)?;
-        }
-        out.set_item(intern!(py, "enrolments"), enrolments)?;
+            // vault_links
+            let vault_links = PyList::empty(py);
+            for v in state.vault_links {
+                let d = PyDict::new(py);
+                d.set_item(intern!(py, "vault_identity"), v.vault_identity)?;
+                d.set_item(intern!(py, "project_id"), v.project_id)?;
+                d.set_item(intern!(py, "linked_at"), v.linked_at)?;
+                d.set_item(intern!(py, "unlinked_at"), v.unlinked_at)?;
+                vault_links.append(d)?;
+            }
+            out.set_item(intern!(py, "vault_links"), vault_links)?;
 
-        // vault_links
-        let vault_links = PyList::empty_bound(py);
-        for v in state.vault_links {
-            let d = PyDict::new_bound(py);
-            d.set_item(intern!(py, "vault_identity"), v.vault_identity)?;
-            d.set_item(intern!(py, "project_id"), v.project_id)?;
-            d.set_item(intern!(py, "linked_at"), v.linked_at)?;
-            d.set_item(
-                intern!(py, "unlinked_at"),
-                v.unlinked_at.map_or_else(|| py.None(), |s| s.into_py(py)),
-            )?;
-            vault_links.append(d)?;
-        }
-        out.set_item(intern!(py, "vault_links"), vault_links)?;
-
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// Emit a signed `tn.vault.linked` event. Idempotent: returns `None`
     /// either way (matches Python `tn.vault_link`).
     fn vault_link(&self, vault_did: &str, project_id: &str) -> PyResult<()> {
-        self.inner
-            .vault_link(vault_did, project_id)
-            .map_err(err_to_py)
+        guard(|| {
+            self.inner
+                .vault_link(vault_did, project_id)
+                .map_err(err_to_py)
+        })
     }
 
     /// Emit a signed `tn.vault.unlinked` event. Returns `None`
@@ -550,9 +538,11 @@ impl PyRuntime {
         project_id: &str,
         reason: Option<&str>,
     ) -> PyResult<()> {
-        self.inner
-            .vault_unlink(vault_did, project_id, reason)
-            .map_err(err_to_py)
+        guard(|| {
+            self.inner
+                .vault_unlink(vault_did, project_id, reason)
+                .map_err(err_to_py)
+        })
     }
 
     // ------------------------------------------------------------------
@@ -580,21 +570,23 @@ impl PyRuntime {
         groups: Option<Vec<String>>,
         package_body: Option<Vec<u8>>,
     ) -> PyResult<String> {
-        let mk = ManifestKind::from_wire(kind)
-            .ok_or_else(|| PyValueError::new_err(format!("unknown manifest kind: {kind:?}")))?;
-        let opts = ExportOptions {
-            kind: Some(mk),
-            to_did,
-            scope,
-            confirm_includes_secrets,
-            groups,
-            package_body,
-        };
-        let p = self
-            .inner
-            .export(Path::new(out_path), opts)
-            .map_err(err_to_py)?;
-        Ok(p.display().to_string())
+        guard(|| {
+            let mk = ManifestKind::from_wire(kind)
+                .ok_or_else(|| PyValueError::new_err(format!("unknown manifest kind: {kind:?}")))?;
+            let opts = ExportOptions {
+                kind: Some(mk),
+                to_did,
+                scope,
+                confirm_includes_secrets,
+                groups,
+                package_body,
+            };
+            let p = self
+                .inner
+                .export(Path::new(out_path), opts)
+                .map_err(err_to_py)?;
+            Ok(p.display().to_string())
+        })
     }
 
     /// Apply a `.tnpkg` to local state. `source` may be a path string or bytes.
@@ -603,50 +595,53 @@ impl PyRuntime {
         py: Python<'py>,
         source: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let receipt = if let Ok(b) = source.extract::<Vec<u8>>() {
-            self.inner
-                .absorb(AbsorbSource::Bytes(&b))
-                .map_err(err_to_py)?
-        } else if let Ok(s) = source.extract::<String>() {
-            self.inner
-                .absorb(AbsorbSource::Path(Path::new(&s)))
-                .map_err(err_to_py)?
-        } else {
-            return Err(PyValueError::new_err(
-                "absorb: source must be bytes or a path string",
-            ));
-        };
-        let d = PyDict::new_bound(py);
-        d.set_item(intern!(py, "kind"), receipt.kind)?;
-        d.set_item(intern!(py, "accepted_count"), receipt.accepted_count)?;
-        d.set_item(intern!(py, "deduped_count"), receipt.deduped_count)?;
-        d.set_item(intern!(py, "noop"), receipt.noop)?;
-        d.set_item(
-            intern!(py, "derived_state"),
-            receipt
-                .derived_state
-                .map_or_else(|| py.None(), |s| {
-                    serde_json::to_value(s)
-                        .ok()
-                        .and_then(|v| json_to_py(py, &v).ok().map(|b| b.unbind()))
-                        .map_or_else(|| py.None(), |o| o.into_py(py))
-                }),
-        )?;
-        let conflicts = PyList::empty_bound(py);
-        for c in &receipt.conflicts {
-            conflicts.append(conflict_to_py(py, c)?)?;
-        }
-        d.set_item(intern!(py, "conflicts"), conflicts)?;
-        d.set_item(intern!(py, "legacy_status"), receipt.legacy_status)?;
-        d.set_item(intern!(py, "legacy_reason"), receipt.legacy_reason)?;
-        Ok(d)
+        guard(|| {
+            let receipt = if let Ok(b) = source.extract::<Vec<u8>>() {
+                self.inner
+                    .absorb(AbsorbSource::Bytes(&b))
+                    .map_err(err_to_py)?
+            } else if let Ok(s) = source.extract::<String>() {
+                self.inner
+                    .absorb(AbsorbSource::Path(Path::new(&s)))
+                    .map_err(err_to_py)?
+            } else {
+                return Err(PyValueError::new_err(
+                    "absorb: source must be bytes or a path string",
+                ));
+            };
+            let d = PyDict::new(py);
+            d.set_item(intern!(py, "kind"), receipt.kind)?;
+            d.set_item(intern!(py, "accepted_count"), receipt.accepted_count)?;
+            d.set_item(intern!(py, "deduped_count"), receipt.deduped_count)?;
+            d.set_item(intern!(py, "noop"), receipt.noop)?;
+            let derived_state: Bound<'py, PyAny> = match receipt.derived_state {
+                Some(s) => {
+                    let v = serde_json::to_value(s).map_err(|e| {
+                        PyValueError::new_err(format!("absorb: derived_state -> json: {e}"))
+                    })?;
+                    json_to_py(py, &v)?
+                }
+                None => py.None().into_bound(py),
+            };
+            d.set_item(intern!(py, "derived_state"), derived_state)?;
+            let conflicts = PyList::empty(py);
+            for c in &receipt.conflicts {
+                conflicts.append(conflict_to_py(py, c)?)?;
+            }
+            d.set_item(intern!(py, "conflicts"), conflicts)?;
+            d.set_item(intern!(py, "legacy_status"), receipt.legacy_status)?;
+            d.set_item(intern!(py, "legacy_reason"), receipt.legacy_reason)?;
+            Ok(d)
+        })
     }
 
     /// Construct an `AdminStateCache` backed by this runtime.
     fn admin_cache(&self) -> PyResult<PyAdminStateCache> {
-        let cache = AdminStateCache::from_runtime_arc(&self.inner).map_err(err_to_py)?;
-        Ok(PyAdminStateCache {
-            inner: std::sync::Mutex::new(cache),
+        guard(|| {
+            let cache = AdminStateCache::from_runtime_arc(&self.inner).map_err(err_to_py)?;
+            Ok(PyAdminStateCache {
+                inner: std::sync::Mutex::new(cache),
+            })
         })
     }
 }
@@ -677,12 +672,14 @@ impl PyAdminStateCache {
 
     #[getter]
     fn head_conflicts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let g = self.inner.lock().expect("AdminStateCache mutex poisoned");
-        let list = PyList::empty_bound(py);
-        for c in g.head_conflicts() {
-            list.append(conflict_to_py(py, c)?)?;
-        }
-        Ok(list)
+        guard(|| {
+            let g = self.inner.lock().expect("AdminStateCache mutex poisoned");
+            let list = PyList::empty(py);
+            for c in g.head_conflicts() {
+                list.append(conflict_to_py(py, c)?)?;
+            }
+            Ok(list)
+        })
     }
 
     fn diverged(&self) -> bool {
@@ -693,14 +690,18 @@ impl PyAdminStateCache {
     }
 
     fn refresh(&self) -> PyResult<usize> {
-        let mut g = self.inner.lock().expect("AdminStateCache mutex poisoned");
-        g.refresh().map_err(err_to_py)
+        guard(|| {
+            let mut g = self.inner.lock().expect("AdminStateCache mutex poisoned");
+            g.refresh().map_err(err_to_py)
+        })
     }
 
     fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let mut g = self.inner.lock().expect("AdminStateCache mutex poisoned");
-        let v = g.state().map_err(err_to_py)?.clone();
-        json_to_py(py, &v)
+        guard(|| {
+            let mut g = self.inner.lock().expect("AdminStateCache mutex poisoned");
+            let v = g.state().map_err(err_to_py)?.clone();
+            json_to_py(py, &v)
+        })
     }
 
     #[pyo3(signature = (group, include_revoked=false))]
@@ -710,18 +711,20 @@ impl PyAdminStateCache {
         group: &str,
         include_revoked: bool,
     ) -> PyResult<Bound<'py, PyList>> {
-        let mut g = self.inner.lock().expect("AdminStateCache mutex poisoned");
-        let recs = g.recipients(group, include_revoked).map_err(err_to_py)?;
-        let list = PyList::empty_bound(py);
-        for r in &recs {
-            list.append(json_to_py(py, r)?)?;
-        }
-        Ok(list)
+        guard(|| {
+            let mut g = self.inner.lock().expect("AdminStateCache mutex poisoned");
+            let recs = g.recipients(group, include_revoked).map_err(err_to_py)?;
+            let list = PyList::empty(py);
+            for r in &recs {
+                list.append(json_to_py(py, r)?)?;
+            }
+            Ok(list)
+        })
     }
 }
 
 fn conflict_to_py<'py>(py: Python<'py>, c: &ChainConflict) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
+    let d = PyDict::new(py);
     match c {
         ChainConflict::LeafReuseAttempt {
             group,
@@ -735,9 +738,7 @@ fn conflict_to_py<'py>(py: Python<'py>, c: &ChainConflict) -> PyResult<Bound<'py
             d.set_item(intern!(py, "attempted_row_hash"), attempted_row_hash)?;
             d.set_item(
                 intern!(py, "originally_revoked_at_row_hash"),
-                originally_revoked_at_row_hash
-                    .as_ref()
-                    .map_or_else(|| py.None(), |s| s.clone().into_py(py)),
+                originally_revoked_at_row_hash.as_deref(),
             )?;
         }
         ChainConflict::SameCoordinateFork {
@@ -838,26 +839,26 @@ pub(crate) fn json_to_py<'py>(
     use serde_json::Value;
     Ok(match v {
         Value::Null => py.None().into_bound(py),
-        Value::Bool(b) => b.into_py(py).into_bound(py),
+        Value::Bool(b) => (*b).into_bound_py_any(py)?,
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                i.into_py(py).into_bound(py)
+                i.into_bound_py_any(py)?
             } else if let Some(f) = n.as_f64() {
-                f.into_py(py).into_bound(py)
+                f.into_bound_py_any(py)?
             } else {
-                n.to_string().into_py(py).into_bound(py)
+                n.to_string().into_bound_py_any(py)?
             }
         }
-        Value::String(s) => s.clone().into_py(py).into_bound(py),
+        Value::String(s) => s.as_str().into_bound_py_any(py)?,
         Value::Array(xs) => {
-            let list = PyList::empty_bound(py);
+            let list = PyList::empty(py);
             for x in xs {
                 list.append(json_to_py(py, x)?)?;
             }
             list.into_any()
         }
         Value::Object(m) => {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             for (k, vv) in m {
                 d.set_item(k, json_to_py(py, vv)?)?;
             }
@@ -872,17 +873,15 @@ pub(crate) fn json_to_py<'py>(
 /// `Runtime.init` to enable.
 #[pyfunction]
 fn perf_snapshot(py: Python<'_>) -> PyResult<PyObject> {
-    let snap = tn_core::perf::snapshot();
-    let list = PyList::empty_bound(py);
-    for (stage, stats) in snap {
-        let tup = PyTuple::new_bound(py, &[
-            stage.to_object(py),
-            stats.count.to_object(py),
-            stats.total_ns.to_object(py),
-        ]);
-        list.append(tup)?;
-    }
-    Ok(list.into())
+    guard(|| {
+        let snap = tn_core::perf::snapshot();
+        let list = PyList::empty(py);
+        for (stage, stats) in snap {
+            let tup = (stage, stats.count, stats.total_ns).into_pyobject(py)?;
+            list.append(tup)?;
+        }
+        Ok(list.into())
+    })
 }
 
 /// Reset all perf counters to zero. Use to drop warmup costs before
@@ -897,9 +896,9 @@ fn perf_reset() {
 fn tn_core_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRuntime>()?;
     m.add_class::<PyAdminStateCache>()?;
-    m.add("TnRuntimeError", py.get_type_bound::<TnRuntimeError>())?;
-    m.add("NotEntitled", py.get_type_bound::<NotEntitled>())?;
-    m.add("NotAPublisher", py.get_type_bound::<NotAPublisher>())?;
+    m.add("TnRuntimeError", py.get_type::<TnRuntimeError>())?;
+    m.add("NotEntitled", py.get_type::<NotEntitled>())?;
+    m.add("NotAPublisher", py.get_type::<NotAPublisher>())?;
     m.add_function(wrap_pyfunction!(perf_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(perf_reset, m)?)?;
     crate::admin::register(m)?;
@@ -909,7 +908,7 @@ fn tn_core_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // and explicit imports fail with ModuleNotFoundError.
     let admin_mod = m.getattr("admin")?;
     let py = m.py();
-    py.import_bound("sys")?
+    py.import("sys")?
         .getattr("modules")?
         .set_item("tn_core._core.admin", &admin_mod)?;
     Ok(())

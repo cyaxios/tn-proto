@@ -27,12 +27,9 @@
 //! btn.decrypt(bob_kit, ct2)                       # raises btn.NotEntitled
 //! ```
 
-// pyo3 0.22 macros expand to code that references a non-existent `gil-refs`
-// cargo feature and insert `.into()` conversions that clippy flags as
-// useless. Both are pyo3-side artifacts — suppressed here until we bump to
-// pyo3 0.23+ (tracked in the remediation plan).
-#![allow(unexpected_cfgs)]
-#![allow(clippy::useless_conversion)]
+// On pyo3 0.24 (bumped to clear RUSTSEC-2025-0020, the PyString::from_object
+// buffer overflow). The 0.21-era bound-API names (`*_bound`) have been
+// migrated to the plain `Bound`-returning constructors.
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
@@ -133,7 +130,7 @@ impl PyPublisherState {
     #[getter]
     fn publisher_id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let inner = self.require_inner()?;
-        Ok(PyBytes::new_bound(py, &inner.publisher_id()))
+        Ok(PyBytes::new(py, &inner.publisher_id()))
     }
 
     /// Current epoch counter. Starts at 0; increments on every
@@ -171,7 +168,7 @@ impl PyPublisherState {
     fn mint<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let inner = self.require_inner_mut()?;
         let kit = inner.mint().map_err(err_to_py)?;
-        Ok(PyBytes::new_bound(py, &kit.to_bytes()))
+        Ok(PyBytes::new(py, &kit.to_bytes()))
     }
 
     /// Revoke a reader by their kit bytes. Idempotent.
@@ -192,13 +189,13 @@ impl PyPublisherState {
     fn encrypt<'py>(&self, py: Python<'py>, plaintext: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         let inner = self.require_inner()?;
         let ct = inner.encrypt(plaintext).map_err(err_to_py)?;
-        Ok(PyBytes::new_bound(py, &ct.to_bytes()))
+        Ok(PyBytes::new(py, &ct.to_bytes()))
     }
 
     /// Serialize this publisher state for persistence. Treat as secret.
     fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let inner = self.require_inner()?;
-        Ok(PyBytes::new_bound(py, &inner.to_bytes()))
+        Ok(PyBytes::new(py, &inner.to_bytes()))
     }
 
     /// Restore a publisher state from bytes previously produced by
@@ -261,7 +258,7 @@ impl PyRetiredPublisherState {
     /// 32-byte publisher_id this state served under.
     #[getter]
     fn publisher_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.publisher_id())
+        PyBytes::new(py, &self.inner.publisher_id())
     }
 
     /// Epoch this state was active under (0, 1, 2, ...).
@@ -278,7 +275,7 @@ impl PyRetiredPublisherState {
 
     /// Serialize for on-disk persistence. Treat as secret.
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.to_bytes())
+        PyBytes::new(py, &self.inner.to_bytes())
     }
 
     /// Restore from bytes previously produced by `to_bytes()`.
@@ -358,7 +355,7 @@ fn decrypt<'py>(
     let kit = ReaderKit::from_bytes(kit_bytes).map_err(err_to_py)?;
     let ct = Ciphertext::from_bytes(ct_bytes).map_err(err_to_py)?;
     let pt = kit.decrypt(&ct).map_err(err_to_py)?;
-    Ok(PyBytes::new_bound(py, &pt))
+    Ok(PyBytes::new(py, &pt))
 }
 
 /// Extract the 32-byte publisher_id from a ciphertext without
@@ -366,14 +363,14 @@ fn decrypt<'py>(
 #[pyfunction]
 fn ciphertext_publisher_id<'py>(py: Python<'py>, ct_bytes: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let ct = Ciphertext::from_bytes(ct_bytes).map_err(err_to_py)?;
-    Ok(PyBytes::new_bound(py, &ct.publisher_id))
+    Ok(PyBytes::new(py, &ct.publisher_id))
 }
 
 /// Extract the 32-byte publisher_id from a reader kit.
 #[pyfunction]
 fn kit_publisher_id<'py>(py: Python<'py>, kit_bytes: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let kit = ReaderKit::from_bytes(kit_bytes).map_err(err_to_py)?;
-    Ok(PyBytes::new_bound(py, &kit.publisher_id()))
+    Ok(PyBytes::new(py, &kit.publisher_id()))
 }
 
 /// Extract the leaf index (u64) from a reader kit.
@@ -408,10 +405,7 @@ fn btn_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tree_height, m)?)?;
     m.add_function(wrap_pyfunction!(max_leaves, m)?)?;
     m.add_function(wrap_pyfunction!(pipeline::build_envelope_line, m)?)?;
-    m.add("NotEntitled", m.py().get_type_bound::<NotEntitled>())?;
-    m.add(
-        "BtnRuntimeError",
-        m.py().get_type_bound::<BtnRuntimeError>(),
-    )?;
+    m.add("NotEntitled", m.py().get_type::<NotEntitled>())?;
+    m.add("BtnRuntimeError", m.py().get_type::<BtnRuntimeError>())?;
     Ok(())
 }

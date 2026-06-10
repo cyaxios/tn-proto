@@ -12,23 +12,25 @@ use tn_core::admin_reduce;
 
 #[pyfunction]
 fn kinds(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
-    let list = PyList::empty_bound(py);
-    for k in admin_catalog::CATALOG {
-        let d = PyDict::new_bound(py);
-        d.set_item("event_type", k.event_type)?;
-        d.set_item("sign", k.sign)?;
-        d.set_item("sync", k.sync)?;
-        let schema = PyList::empty_bound(py);
-        for (name, ftype) in k.schema {
-            let pair = PyList::empty_bound(py);
-            pair.append(*name)?;
-            pair.append(field_type_str(*ftype))?;
-            schema.append(pair)?;
+    crate::guard(|| {
+        let list = PyList::empty(py);
+        for k in admin_catalog::CATALOG {
+            let d = PyDict::new(py);
+            d.set_item("event_type", k.event_type)?;
+            d.set_item("sign", k.sign)?;
+            d.set_item("sync", k.sync)?;
+            let schema = PyList::empty(py);
+            for (name, ftype) in k.schema {
+                let pair = PyList::empty(py);
+                pair.append(*name)?;
+                pair.append(field_type_str(*ftype))?;
+                schema.append(pair)?;
+            }
+            d.set_item("schema", schema)?;
+            list.append(d)?;
         }
-        d.set_item("schema", schema)?;
-        list.append(d)?;
-    }
-    Ok(list)
+        Ok(list)
+    })
 }
 
 fn field_type_str(t: FieldType) -> &'static str {
@@ -43,24 +45,29 @@ fn field_type_str(t: FieldType) -> &'static str {
 
 #[pyfunction]
 fn reduce(py: Python<'_>, envelope: &Bound<'_, PyDict>) -> PyResult<PyObject> {
-    let json_map = crate::pydict_to_json(envelope)?;
-    let value = Value::Object(json_map);
-    let delta = admin_reduce::reduce(&value).map_err(|e| PyValueError::new_err(format!("{e}")))?;
-    let delta_value = serde_json::to_value(&delta)
-        .map_err(|e| PyValueError::new_err(format!("delta -> json: {e}")))?;
-    let out = crate::json_to_py(py, &delta_value)?;
-    Ok(out.into())
+    crate::guard(|| {
+        let json_map = crate::pydict_to_json(envelope)?;
+        let value = Value::Object(json_map);
+        let delta =
+            admin_reduce::reduce(&value).map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        let delta_value = serde_json::to_value(&delta)
+            .map_err(|e| PyValueError::new_err(format!("delta -> json: {e}")))?;
+        let out = crate::json_to_py(py, &delta_value)?;
+        Ok(out.into())
+    })
 }
 
 #[pyfunction]
 fn validate_emit(event_type: &str, fields: &Bound<'_, PyDict>) -> PyResult<()> {
-    let json_map = crate::pydict_to_json(fields)?;
-    admin_catalog::validate_emit(event_type, &json_map)
-        .map_err(|e| PyValueError::new_err(format!("{e}")))
+    crate::guard(|| {
+        let json_map = crate::pydict_to_json(fields)?;
+        admin_catalog::validate_emit(event_type, &json_map)
+            .map_err(|e| PyValueError::new_err(format!("{e}")))
+    })
 }
 
 pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
-    let m = PyModule::new_bound(parent.py(), "admin")?;
+    let m = PyModule::new(parent.py(), "admin")?;
     m.add_function(wrap_pyfunction!(kinds, &m)?)?;
     m.add_function(wrap_pyfunction!(reduce, &m)?)?;
     m.add_function(wrap_pyfunction!(validate_emit, &m)?)?;

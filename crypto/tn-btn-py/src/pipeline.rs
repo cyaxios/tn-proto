@@ -251,5 +251,5 @@ pub fn build_envelope_line<'py>(
     let mut line = serde_json::to_vec(&Value::Object(envelope)).expect("envelope serialize");
     line.push(b'\n');
 
-    Ok((PyBytes::new_bound(py, &line), row_hash))
+    Ok((PyBytes::new(py, &line), row_hash))
 }

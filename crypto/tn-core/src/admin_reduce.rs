@@ -140,8 +140,9 @@ pub fn reduce(envelope: &Value) -> Result<StateDelta, ReduceError> {
     Ok(build_delta(event_type, obj))
 }
 
-/// Build the typed delta once schema validation has passed. Panics only if
-/// validate_emit is buggy (it guarantees every `get()` below succeeds).
+/// Build the typed delta once schema validation has passed. Never panics: an
+/// `event_type` that `kind_for` recognizes but no arm here handles (catalog/
+/// reducer drift) falls through to [`StateDelta::Unknown`].
 fn build_delta(event_type: &str, obj: &Map<String, Value>) -> StateDelta {
     match event_type {
         "tn.ceremony.init" => StateDelta::CeremonyInit {
@@ -206,15 +207,21 @@ fn build_delta(event_type: &str, obj: &Map<String, Value>) -> StateDelta {
             reason: opt_s(obj, "reason"),
             unlinked_at: s(obj, "unlinked_at"),
         },
-        // Per the 2026-04-25 read-ergonomics spec these two are catalog-
-        // valid (so the publisher can sign + the reducer can validate
-        // shape) but carry no admin-state mutation. They show up as
-        // `Unknown` so existing reducers ignore them; the dedicated
-        // policy / tampered-row consumers walk the log directly.
-        "tn.agents.policy_published" | "tn.read.tampered_row_skipped" => StateDelta::Unknown {
+        // Everything else recognized by `kind_for` maps to `Unknown`:
+        //  - `tn.agents.policy_published` / `tn.read.tampered_row_skipped` are
+        //    catalog-valid (the publisher can sign, the reducer validates
+        //    shape) but carry no admin-state mutation per the 2026-04-25
+        //    read-ergonomics spec; existing reducers ignore them and the
+        //    dedicated policy / tampered-row consumers walk the log directly.
+        //  - any future `kind_for` entry without a matching arm above
+        //    (catalog/reducer drift) also lands here rather than panicking.
+        //    `build_delta` is reached from the wasm `adminReduce` export and
+        //    the Python admin path, so a panic would trap the wasm instance /
+        //    raise a pyo3 PanicException in user space — which the SDK must
+        //    never do.
+        _ => StateDelta::Unknown {
             event_type: event_type.to_string(),
         },
-        _ => unreachable!("kind_for returned Some but no build_delta arm matches"),
     }
 }
 
@@ -232,4 +239,30 @@ fn u(obj: &Map<String, Value>, k: &str) -> u64 {
 }
 fn opt_u(obj: &Map<String, Value>, k: &str) -> Option<u64> {
     obj.get(k).and_then(serde_json::Value::as_u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_delta_falls_through_to_unknown_on_catalog_drift() {
+        // `build_delta` is reached from `reduce` only after `kind_for`
+        // recognizes the event_type. If a future catalog entry is added
+        // without a matching `build_delta` arm, this path must yield
+        // `Unknown`, never panic: it is FFI-reachable via the wasm
+        // `adminReduce` export and the Python admin path, where a panic
+        // becomes a wasm trap / pyo3 PanicException in user space.
+        let obj = json!({ "event_type": "tn.future.uncatalogued" })
+            .as_object()
+            .unwrap()
+            .clone();
+        match build_delta("tn.future.uncatalogued", &obj) {
+            StateDelta::Unknown { event_type } => {
+                assert_eq!(event_type, "tn.future.uncatalogued");
+            }
+            other => panic!("expected Unknown fallthrough, got {other:?}"),
+        }
+    }
 }
