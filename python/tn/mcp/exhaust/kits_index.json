@@ -1,0 +1,13 @@
+[
+  {"id": "oauth-oidc", "name": "OAuth 2.0 / OpenID Connect Claims", "version": "0.1.0", "spec_name": "OpenID Connect Core 1.0 + RFC 7519 (JWT)", "spec_url": "https://openid.net/specs/openid-connect-core-1_0.html"},
+  {"id": "pci-cardholder", "name": "PCI DSS Cardholder Data", "version": "0.1.0", "spec_name": "PCI DSS v4.0", "spec_url": "https://www.pcisecuritystandards.org/"},
+  {"id": "ecommerce-orders", "name": "E-commerce Orders", "version": "0.1.0", "spec_name": "Schema.org Order", "spec_url": "https://schema.org/Order"},
+  {"id": "fhir-clinical", "name": "HL7 FHIR R4 Clinical Resources", "version": "0.1.0", "spec_name": "HL7 FHIR R4", "spec_url": "https://www.hl7.org/fhir/R4/"},
+  {"id": "crm-objects", "name": "CRM Standard Objects", "version": "0.1.0", "spec_name": "Salesforce Object Reference", "spec_url": "https://developer.salesforce.com/docs/atlas.en-us.object_reference.meta/object_reference/"},
+  {"id": "cloud-audit", "name": "Cloud Audit Logs (CloudTrail-shaped)", "version": "0.1.0", "spec_name": "AWS CloudTrail Event Reference (Record Contents)", "spec_url": "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-record-contents.html"},
+  {"id": "email-rfc5322", "name": "Email Headers and Envelope (RFC 5322 / RFC 5321)", "version": "0.1.0", "spec_name": "RFC 5322 - Internet Message Format", "spec_url": "https://www.rfc-editor.org/rfc/rfc5322"},
+  {"id": "fix-trading", "name": "FIX Protocol Trading Messages", "version": "0.1.0", "spec_name": "FIX 4.4 / FIX 5.0 SP2", "spec_url": "https://www.fixtrading.org/standards/"},
+  {"id": "iot-geolocation", "name": "IoT Devices and Geolocation", "version": "0.1.0", "spec_name": "NMEA 0183 + OGC SensorThings API 1.1", "spec_url": "https://www.ogc.org/standards/sensorthings"},
+  {"id": "oneroster-edu", "name": "K-12 SIS Roster Data (OneRoster 1.2)", "version": "0.1.0", "spec_name": "1EdTech OneRoster 1.2", "spec_url": "https://www.imsglobal.org/spec/oneroster/v1p2"},
+  {"id": "custody-positions", "name": "Custody and Portfolio Positions (ISO 20022 semt)", "version": "0.1.0", "spec_name": "ISO 20022 Securities Messages - semt.002 Statement of Holdings", "spec_url": "https://www.iso20022.org/"}
+]

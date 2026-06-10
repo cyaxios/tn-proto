@@ -40,6 +40,7 @@ dependencies = [
     "mnemonic>=0.21",           # BIP-39 recovery phrase
     "httpx>=0.27",              # vault_client HTTP
     "mcp>=1.0",                 # Model Context Protocol SDK (tn-mcp-server)
+    "drain3>=0.9",              # template mining for the exhaust tools (tn.mcp.exhaust)
     "base58>=2.1",              # did:key / base58 encoding
     # libsodium bindings used for the Ed25519 -> X25519 key derivation in
     # tn.recipient_seal (sealed-box recipient wrap on encrypted
@@ -110,6 +111,9 @@ tn-mcp-server = "tn.mcp:main"
 where   = ["."]
 include = ["tn*"]
 exclude = ["tests*", "tools*", "scenarios*", "examples*", "bench*", "docs*"]
+
+[tool.setuptools.package-data]
+tn = ["py.typed", "mcp/exhaust/kits_index.json"]
 
 # ---------------------------------------------------------------------------
 # Lint / format / type-check config.

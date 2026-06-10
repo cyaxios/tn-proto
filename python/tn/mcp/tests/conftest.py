@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import tn
+
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -19,10 +21,14 @@ def jwe_ceremony(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     cookbook's discovery chain naturally.
     """
     src = FIXTURES_DIR / "jwe_two_recipients"
-    if not src.exists():
+    # Probe the keystore tree, not just the dir: a checkout where the
+    # gitignore negation hasn't landed has the tracked tn.yaml but no
+    # .tn/ payload, and that must skip with the build instruction
+    # instead of failing mid-assert.
+    if not (src / ".tn").is_dir():
         pytest.skip(
             f"Fixture not built. Run: python scripts/build_test_ceremony.py "
-            f"(missing: {src})"
+            f"(missing: {src / '.tn'})"
         )
 
     dst = tmp_path / "jwe_two_recipients"
@@ -33,7 +39,6 @@ def jwe_ceremony(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     # Force a fresh tn module state so a previous test's tn.init() doesn't
     # bleed into this one. The cookbook holds a process-global runtime.
-    import tn
     try:
         tn.flush_and_close()
     except Exception:  # noqa: BLE001
@@ -52,5 +57,4 @@ def fresh_tn_module(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("TN_STRICT", "0")
     monkeypatch.setenv("TN_NO_STDOUT", "1")
     monkeypatch.setenv("TN_FORCE_PYTHON", "1")
-    import tn
     return tn
