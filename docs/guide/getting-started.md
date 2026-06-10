@@ -22,8 +22,28 @@ import * as tn from "tn-proto";
 ```
 
 The Python import name is `tn`; the npm package and its import specifier are
-both `tn-proto`. Until the beta is published, install from a source checkout
-of this repository: `pip install -e python/`, and `npm install` in `ts-sdk/`.
+both `tn-proto`. The two commands above are the beta install paths and are not
+live on the public registries yet. Until the beta is published, install from a
+source checkout of this repository:
+
+```bash
+git clone https://github.com/cyaxios/tn-proto.git
+cd tn-proto
+
+# Python. The SDK installs from source; its Rust crypto wheels (tn-core,
+# tn-btn) are prerelease and resolve from TestPyPI:
+pip install -e ./python --extra-index-url https://test.pypi.org/simple/
+
+# TypeScript. Build the Rust core to WebAssembly once (needs a Rust
+# toolchain and wasm-pack), then build the SDK:
+cd crypto/tn-wasm
+wasm-pack build --target nodejs --release
+wasm-pack build --target web --release --out-dir pkg-web
+cd ../../ts-sdk
+npm install
+npm run build
+node bin/tn-js.mjs --help    # the CLI, runnable in place
+```
 
 ## Quickstart in code
 
