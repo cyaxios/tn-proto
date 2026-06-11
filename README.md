@@ -1,163 +1,77 @@
 # tn-proto
 
-Signed, encrypted, append-only logging — one entry per event, with identical byte-for-byte wire formats in Python, TypeScript, and the browser.
+The agent transaction protocol. Signed, encrypted, append-only logging where every action is a verifiable transaction, with byte-for-byte identical wire formats across Python, TypeScript, and the browser.
 
 ---
 
-**Python Support:** `3.10` to `3.14` | **TypeScript Support:** `Node` / `Browser` / `WASM` | **Release:** `v0.6.0a1` | **License:** `MIT` / `Apache-2.0` | **Key Escrow:** `Non-Custodial Vault`
+**Release:** `v0.6.0a2` · **Python:** `3.10`–`3.14` · **TypeScript:** Node / Browser / WASM · **License:** `MIT` / `Apache-2.0`
 
-`tn-proto` is a secure logging library. It lets you write structured logs that are cryptographically signed, chained, and private-by-default. Under the hood, a shared Rust engine guarantees that both the Python and TypeScript SDKs produce identical log records.
+`tn-proto` lets you write ordinary structured logs that are cryptographically signed, hash-chained (tamper-evident), and encrypted so only the readers you choose can decrypt them. A single Rust engine produces the records, so every language binding agrees on the wire down to the byte.
 
----
+What makes a TN record more than a log line:
 
-## Table of Contents
-1. [Installation](#installation)
-2. [Quickstart](#quickstart)
-3. [How Log Sharing & Cryptographic Groups Work](#how-log-sharing--cryptographic-groups-work)
-4. [Non-Custodial Vault Backups](#non-custodial-vault-backups)
-5. [Default File Locations](#default-file-locations)
-6. [Data Governance with `tn-agt`](#data-governance-with-tn-agt)
+- **Content-bound.** The signature covers the entry's contents, not just a timestamp.
+- **Multi-recipient.** One sealed record can be read by several named recipients, each with their own key, and readers can be revoked without redistributing keys.
+- **Identity-anchored.** Every entry is signed by a device DID; anyone can verify authorship and integrity offline.
 
 ---
 
-## Installation
+## Repository layout
 
-### Python SDK
-Install the stable release directly from PyPI:
+```text
+python/        The Python SDK + `tn` CLI  (pip install tn-proto)   -> python/README.md
+ts-sdk/        The TypeScript / Node / browser SDK
+crypto/        The Rust workspace (the shared engine)              -> crypto/*/README.md
+  tn-core/       runtime: canonical JSON, hash chain, signing, envelopes, cipher dispatch, log I/O
+  tn-btn/        broadcast-transaction encryption (group keys, reader kits, rotation, revocation)
+  tn-core-py/    PyO3 bindings for tn-core      (internal rlib)
+  tn-btn-py/     PyO3 bindings for tn-btn       (internal rlib)
+  tn-py/         umbrella crate -> the `tn._native` extension in the wheel
+  tn-wasm/       wasm-bindgen build for Node + browser
+extensions/    Browser extension (tn-decrypt)
+docs/          Guides, cookbooks, and the protocol spec
+```
+
+The Python wheel bundles `tn-core` + `tn-btn` into one `tn._native` extension, so `pip install tn-proto` carries the whole engine with no separate packages and no C toolchain.
+
+---
+
+## Quickstart (Python)
 
 ```bash
 pip install tn-proto
 ```
 
-### TypeScript SDK
-Install the npm package:
-
-```bash
-npm install tn-proto
-```
-
----
-
-## Quickstart
-
-### Python
-
 ```python
 import tn
 
-# Initialize the default logger (names a project "demo")
 tn.init("demo")
-
-# Log structured events. Fields are automatically encrypted.
 tn.info("order.created", order_id="o_100", amount=4999)
 
-# Read the log back (automatically decrypts records you have access to)
 for entry in tn.read():
-    print(f"[{entry.level.upper()}] {entry.event_type}: {entry.fields}")
+    print(f"[{entry.level or '-'}] {entry.event_type}: {entry.fields}")
 
 tn.flush_and_close()
 ```
 
-### TypeScript
-
-```typescript
-import * as tn from "tn-proto";
-import type { Entry } from "tn-proto";
-
-// Load project configurations
-const project = await tn.use("demo");
-await tn.init(project.config().yamlPath);
-
-// Log events
-tn.info("order.created", { order_id: "o_100", amount: 4999 });
-
-// Read logs
-for (const e of tn.read()) {
-  const entry = e as Entry;
-  console.log(`[${entry.level.toUpperCase()}] ${entry.event_type}:`, JSON.stringify(entry.fields));
-}
-
-await tn.close();
-```
+Full package docs, the vault account flow, sharing, and the CLI: **[python/README.md](python/README.md)**.
 
 ---
 
-## How Log Sharing & Cryptographic Groups Work
+## Keys and the vault
 
-One of `tn-proto`'s biggest advantages is how it handles access control. Instead of sharing a single master password or database credential, you use **cryptographic groups** and **decentralized identities (DIDs)**.
-
-### 🔑 The Access Model:
-1. **Decentralized Identities (DIDs):** Every device running `tn-proto` generates its own local identity represented by a public DID (e.g., `did:key:z6Mk...`).
-2. **Encrypted Groups:** Logs are organized into named groups (the default is called `default`). All fields written to a group are encrypted on disk.
-3. **No Key Sharing:** You **never** share your private keys.
-4. **Reader Kits:** To allow another user (e.g., an auditor or a developer) to read a group's logs:
-   - You mint a **Reader Kit** addressed to their public DID.
-   - You send them the kit as a `.tnpkg` file.
-   - They absorb the kit into their local setup. They can now decrypt and read the logs in that group, but nothing else.
-5. **Tamper-Evident Signatures:** Every log line is signed with your device's Ed25519 key. When a reader opens the log, they can instantly verify that the logs are authentic, came from you, and have not been altered or deleted.
-
-### 🚫 Revoking Access:
-If a recipient leaves the team or no longer needs access:
-* You simply revoke their DID from the group.
-* Future log entries will be encrypted using a key cover that excludes them.
-* They can no longer read any new log entries, while all other active readers continue reading without any interruption or key redistribution.
+Your private keys live only on your machine. The optional non-custodial vault at `https://vault.tn-proto.org` backs up your **keys and config only** (never your logs), holds ciphertext it cannot decrypt, and recovers via your mnemonic. Create an account at <https://vault.tn-proto.org/account>, skip it with `tn init <name> --no-link` (offline), or point elsewhere with `TN_VAULT_URL`. Details in [python/README.md](python/README.md#vault-backup-and-recovery-optional).
 
 ---
 
-## Non-Custodial Vault Backups
+## Documentation
 
-By default, initializing a project sets up a secure, automatic backup of your keys to **`vault.tn-proto.org`**.
-
-* **Keys & Configuration Only:** The vault only backs up your project settings (`tn.yaml`) and encrypted group ciphers/keys.
-* **Logs Stay Local:** Your actual application logs (the log files where your telemetry and business records reside) are **never** sent to the vault. They remain strictly on your machine.
-* **Zero-Knowledge Recovery:** The vault cannot decrypt your keys. If you lose your computer, you can restore your keys on a new machine using your mnemonic recovery phrase:
-  ```bash
-  tn wallet restore --mnemonic
-  ```
-* **Offline Mode:** If you do not want vault backups or online connectivity:
-  ```bash
-  tn init myproject --no-link
-  ```
-
----
-
-## Default File Locations
-
-All config, identity keys, and log entries live under a hidden `.tn/` directory in your workspace:
-
-```text
-.tn/
-  <project-name>/
-    tn.yaml          # Config (groups, routes, ciphers)
-    keys/
-      local.public   # Your public identity (DID)
-      local.private  # Your private device seed (keep secret!)
-    logs/
-      default.ndjson # Local application logs
-    admin/
-      default.ndjson # Protocol and key audit logs
-```
-
----
-
-## Data Governance with `tn-agt`
-
-For AI agent systems, `tn-proto` integrates with `tn-agt`—the TN evidence layer for the **Microsoft Agent Governance Toolkit** (AGT).
-
-> **"AGT decides. TN proves."**
-
-Under this model, **messages carry their own governance**, derived from a compile-time association of context. By utilizing cryptographic ciphers, we can secure and verify actions regardless of whether the messages flow internally, cross organizational boundaries, or operate in multi-party environments.
-
-* **Bound Context:** Policies, constraints, and intent are cryptographically bound directly to the message payload, creating a self-attesting record.
-* **Sealed Proofs:** When an AI agent makes a tool call, `tn-agt` intercepts AGT's evaluation decision and seals it into a signed, multi-recipient TN receipt.
-* **Cross-Boundary Audits:** Because the governance metadata is embedded in the message itself, anyone can verify the compliance trail offline without relying on central databases or local logging configurations:
-  ```bash
-  # Verify the AGT logs against the sealed TN ledger
-  tn-agt verify <agt-log.jsonl>
-  ```
+- [Getting started](docs/guide/getting-started.md)
+- [Python cookbook](docs/guide/cookbook-python.md) / [TypeScript cookbook](docs/guide/cookbook-typescript.md)
+- [Protocol guide](docs/guide/protocol.md) and [YAML reference](docs/guide/yaml-reference.md)
 
 ---
 
 ## License
 
-Dual-licensed under the MIT License or Apache License (Version 2.0).
+Dual-licensed under the MIT License or the Apache License, Version 2.0.
