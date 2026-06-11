@@ -7,7 +7,7 @@ Signed, encrypted, append-only logging — one entry per event, with the same wi
 The packages publish to TestPyPI. Install them from TestPyPI while letting pip pull their ordinary dependencies from regular PyPI:
 
 ```bash
-pip install --pre -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ tn-proto tn-core tn-btn
+pip install --pre -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ tn-proto==0.6.0a1
 ```
 
 - `-i https://test.pypi.org/simple/` — get the TN packages from TestPyPI.

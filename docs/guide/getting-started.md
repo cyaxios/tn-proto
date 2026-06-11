@@ -10,7 +10,7 @@ TypeScript SDK with the `tn-js` command.
 
 ```bash
 # Python SDK + the tn command (alphas publish to TestPyPI)
-pip install --pre -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ tn-proto
+pip install --pre -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ tn-proto==0.6.0a1
 
 # TypeScript SDK + the tn-js command (in tree; npm publish pending)
 npm install <path-to-repo>/ts-sdk
