@@ -770,7 +770,7 @@ console.log("[ext] service worker booting (D-22 unlock + D-21 per-keystore + Ses
 // ---------------------------------------------------------------------------
 const EXT_PAIR_ALLOWED_ORIGINS = [
   "http://localhost:8790",
-  "https://tnproto.org",
+  "https://vault.tn-proto.org",
 ];
 
 function senderOriginOk(sender) {

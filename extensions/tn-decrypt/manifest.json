@@ -29,7 +29,7 @@
     }
   ],
   "externally_connectable": {
-    "matches": ["http://localhost:8790/*", "https://tnproto.org/*"]
+    "matches": ["http://localhost:8790/*", "https://vault.tn-proto.org/*"]
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

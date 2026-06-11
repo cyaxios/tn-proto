@@ -158,12 +158,15 @@ async function refresh() {
 // receiver.
 // ---------------------------------------------------------------------------
 
-// Where to open the pair flow. Localhost first (current setup); a
-// future production deploy at https://tnproto.org/ is an additional
-// item in this list. The popup tries the entries in order.
+// Where to open the pair flow. Production vault first (vault.tn-proto.org
+// is the deployed Worker that serves /extension-pair); localhost:8790 is
+// the local dev vault, kept as a fallback. openPairTab uses the first
+// entry. Both origins are also in the extension's externally_connectable
+// + EXT_PAIR_ALLOWED_ORIGINS allowlists, so a kit posted from either is
+// accepted.
 const VAULT_PAIR_BASE_URLS = [
+  "https://vault.tn-proto.org",
   "http://localhost:8790",
-  "https://tnproto.org",
 ];
 
 function pairedKits(s) {
@@ -197,8 +200,8 @@ async function openPairTab() {
   if (!/^[a-p]{32}$/.test(extId)) {
     console.error(`[ext:vault-pair] suspicious extension id ${extId}`);
   }
-  // Use the first base URL — until we ship a way to choose, localhost
-  // is the only deploy. Multi-deploy support is a wider product call.
+  // Use the first base URL (production vault). Picking between prod and
+  // a local dev vault is a wider product call we haven't shipped.
   const base = VAULT_PAIR_BASE_URLS[0];
   const url = `${base}/extension-pair?ext_id=${encodeURIComponent(extId)}`;
   console.log(`[ext:vault-pair] opening pair tab ${url}`);
@@ -212,7 +215,7 @@ function renderVaultPair(s) {
   if (!summary || summary.length === 0) {
     host.innerHTML = `
       <h2>Sign in with vault</h2>
-      <p>Pull every project's kits down from your tnproto.org vault account in one tap. Coexists with kits imported from disk.</p>
+      <p>Pull every project's kits down from your tn-proto.org vault account in one tap. Coexists with kits imported from disk.</p>
       <div class="row">
         <button id="btn-vault-pair">Sign in with vault</button>
       </div>

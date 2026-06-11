@@ -108,7 +108,7 @@ async function fileToBundle(file) {
     try { parsed = JSON.parse(new TextDecoder().decode(buf)); }
     catch { throw new Error("File is not valid JSON."); }
     if (parsed.ciphertext_b64 && !parsed.files) {
-      throw new Error("This is an encrypted blob, not a plaintext bundle. Decrypt it via tnproto-org's 'Coming from another device?' step first.");
+      throw new Error("This is an encrypted blob, not a plaintext bundle. Decrypt it via the vault's 'Coming from another device?' step first.");
     }
     if (!parsed.files || typeof parsed.files !== "object") {
       throw new Error("That JSON is not a keystore bundle (no 'files' map).");
