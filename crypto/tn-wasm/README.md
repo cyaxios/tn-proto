@@ -1,58 +1,58 @@
 # tn-wasm
 
-WebAssembly bindings for `tn-core`. Sibling crate to `tn-py` (PyO3).
-One Rust core, many bindings: Python gets `tn_core`, JS/TS gets `tn_wasm`.
+WebAssembly bindings for `tn-core`, for Node and the browser. Sibling to
+the PyO3 path: one Rust core, many bindings. Python gets `tn._native`,
+JavaScript and TypeScript get `tn_wasm`. The TypeScript SDK consumes the
+output of this crate.
 
-## Phase A surface
+## What it exposes
 
-Minimal: `adminReduce`, `adminCatalogKinds`, `adminValidateEmit`. Enough
-to prove byte-identical behavior with Python before expanding.
+The bindings cover canonical JSON, the row-hash chain, indexing, Ed25519
+signing and verification, envelope build and verify, the admin catalog
+and reducer, btn encrypt and decrypt, and `.tnpkg` read and write. With
+the `runtime` feature (on by default) it also exports `WasmRuntime`,
+which surfaces the tn-core `Runtime` to JS over an injected
+`JsStorageAdapter` rather than touching the filesystem directly. The
+Rust reducer is the source of truth: every JSON output must match what
+the PyO3 path produces, byte for byte.
 
-Later phases add `canonicalJson`, `computeRowHash`, `buildEnvelope`,
-`verifyEnvelope`, `signMessage`, `btnEncrypt`, `btnDecrypt`.
+Every export uses a camelCase `js_name` so the generated `.d.ts` reads
+like idiomatic TypeScript; internal Rust names stay snake_case.
 
 ## Build
 
 ```
-cd tn_proto/crypto/tn-wasm
 wasm-pack build --target nodejs --release
 ```
 
-Output lands in `pkg/`. Gitignored. Regenerate whenever Rust changes.
-
-For browser targets:
+Output lands in `pkg/` (gitignored; regenerate whenever the Rust
+changes). For browser targets:
 
 ```
 wasm-pack build --target web --release --out-dir pkg-web
 ```
 
-Serve the crate root over HTTP and open `test/browser-smoke.html` to run
-the same admin catalog, canonical JSON, and Ed25519 sign-verify checks
-entirely in the browser. A launch config named `tn-wasm-browser` is
-wired into `.claude/launch.json` so agents can preview it on port
-8765.
+To build the minimal crypto-only surface without `WasmRuntime`, opt out:
+`wasm-pack build --no-default-features`.
+
+## Notes
+
+tn-core is pulled in with `default-features = false` (no `fs-locking`,
+since `fs4 -> rustix -> errno` will not compile for
+`wasm32-unknown-unknown`; single-process wasm has no writer to race).
+
+JS values round-trip through `JSON.stringify` / `JSON.parse` rather than
+the `serde-wasm-bindgen` default, which maps `Option::None` to
+`undefined` and would drop keys like `recipient_did: null`. New bindings
+should use the `js_to_json` / `json_to_js` helpers in `lib.rs`.
 
 ## Interop test
 
 ```
-node tn_proto/crypto/tn-wasm/test/node_smoke.mjs
-.venv/Scripts/python.exe tn_proto/crypto/tn-wasm/test/py_cross_check.py
+node test/node_smoke.mjs
+.venv/Scripts/python.exe test/py_cross_check.py
 ```
 
-Or both:
-
-```
-bash tn_proto/crypto/tn-wasm/test/run_interop.sh
-```
-
-Node exercises the WASM surface. Python runs the same fixtures through
-`tn_core.admin.reduce` (the PyO3 binding) and diffs the JSON outputs
-key by key, sorted, so whitespace and ordering cannot hide drift.
-
-## Null handling (subtle but important)
-
-`serde-wasm-bindgen` defaults serialize `Option::None` as `undefined`,
-which drops keys like `recipient_did: null` on the way out. We go
-through `JSON.stringify` and `JSON.parse` instead so null is preserved
-end to end. If you add new bindings, use `js_to_json` and `json_to_js`
-from `lib.rs`.
+Node exercises the WASM surface; Python runs the same fixtures through
+the PyO3 binding and diffs the JSON key by key, sorted, so whitespace and
+ordering cannot hide drift. `test/run_interop.sh` runs both.
