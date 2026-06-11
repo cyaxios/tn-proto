@@ -223,6 +223,21 @@ impl PyPublisherState {
         Ok(convert_outcome(outcome))
     }
 
+    /// Snapshot this state as a RetiredPublisherState WITHOUT rotating.
+    ///
+    /// Use when a newer epoch arrives via group-key sync (the new active
+    /// state is installed separately): converts this superseded
+    /// PublisherState into the archival `RetiredPublisherState` wire form
+    /// the keystore's `.retired.<epoch>` slot expects, stamped with
+    /// `retired_at_unix_secs`. Unlike `rotate()`, this does NOT consume the
+    /// state — it borrows `&self`.
+    fn retire(&self, retired_at_unix_secs: u64) -> PyResult<PyRetiredPublisherState> {
+        let inner = self.require_inner()?;
+        Ok(PyRetiredPublisherState {
+            inner: inner.retire(retired_at_unix_secs),
+        })
+    }
+
     fn __repr__(&self) -> String {
         match self.inner.as_ref() {
             None => "PublisherState(<consumed by rotate()>)".to_string(),

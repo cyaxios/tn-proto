@@ -1050,13 +1050,20 @@ def _absorb_group_keys(
             old_kit = kit_path.read_bytes()
             archived = False
             try:
-                old_epoch = _btn.PublisherState.from_bytes(old_state).epoch
+                old_ps = _btn.PublisherState.from_bytes(old_state)
+                old_epoch = old_ps.epoch
                 new_epoch = _btn.PublisherState.from_bytes(new_state).epoch
                 if new_epoch > old_epoch:
+                    # The retired slot is read back as a RetiredPublisherState
+                    # (cipher.py: BtnGroupCipher.load), NOT a PublisherState —
+                    # so archive the SNAPSHOT wire form, not the raw active
+                    # state. retire() mints that 79-byte form without rotating;
+                    # we received this rotation now, so stamp retired_at = now.
+                    retired = old_ps.retire(int(datetime.now(_tz.utc).timestamp()))
                     bk.write_retired_pair(
                         group,
                         epoch=old_epoch,
-                        state_bytes=old_state,
+                        state_bytes=retired.to_bytes(),
                         self_kit=old_kit,
                     )
                     archived = True

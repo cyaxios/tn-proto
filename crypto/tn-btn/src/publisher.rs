@@ -191,6 +191,25 @@ impl PublisherState {
         Ok(crate::rotate::RotationOutcome { active, retired })
     }
 
+    /// Snapshot this state as a [`RetiredPublisherState`] WITHOUT rotating.
+    ///
+    /// Used when this state is superseded by a newer epoch that arrived
+    /// out-of-band — a rotation absorbed through a group-key sync rather
+    /// than performed locally with [`Self::rotate`]. The caller installs
+    /// the newer active state separately; this borrows `&self` to mint the
+    /// archival snapshot (master_seed + publisher_id + epoch) stamped with
+    /// the supplied retirement time, matching what [`Self::rotate`] deposits
+    /// in [`crate::rotate::RotationOutcome::retired`].
+    #[must_use]
+    pub fn retire(&self, retired_at_unix_secs: u64) -> crate::rotate::RetiredPublisherState {
+        crate::rotate::RetiredPublisherState {
+            master_seed: self.master_seed.clone(),
+            publisher_id: self.publisher_id,
+            epoch: self.epoch,
+            retired_at_unix_secs,
+        }
+    }
+
     /// How many reader kits have been minted.
     #[inline]
     #[must_use]
@@ -606,6 +625,24 @@ mod tests {
         let a = PublisherState::setup_with_seed(Config, [1u8; 32]).unwrap();
         let b = PublisherState::setup_with_seed(Config, [2u8; 32]).unwrap();
         assert_ne!(a.publisher_id(), b.publisher_id());
+    }
+
+    #[test]
+    fn retire_snapshots_without_consuming_and_round_trips() {
+        use crate::rotate::RetiredPublisherState;
+        let s = PublisherState::setup_with_seed(Config, [7u8; 32]).unwrap();
+        let retired = s.retire(1_700_000_000);
+        // Carries the prior identity + epoch + the supplied timestamp.
+        assert_eq!(retired.publisher_id(), s.publisher_id());
+        assert_eq!(retired.epoch(), s.epoch());
+        assert_eq!(retired.retired_at_unix_secs(), 1_700_000_000);
+        // &self snapshot: the source state is still usable afterwards.
+        assert_eq!(s.epoch(), 0);
+        // Serializes to the canonical retired wire form (not a PublisherState).
+        let decoded = RetiredPublisherState::from_bytes(&retired.to_bytes()).unwrap();
+        assert_eq!(decoded.publisher_id(), s.publisher_id());
+        assert_eq!(decoded.epoch(), 0);
+        assert_eq!(decoded.retired_at_unix_secs(), 1_700_000_000);
     }
 
     #[test]

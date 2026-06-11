@@ -26,6 +26,7 @@ import base64
 import json
 import os
 import secrets
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -575,17 +576,32 @@ class BtnGroupCipher:
         # decrypt path; cipher.py only owns the state side.
         retired_states: dict[int, Any] = {}
         try:
-            for epoch, files in ks.load_retired_states(group_name).items():
-                retired_states[epoch] = _btn.RetiredPublisherState.from_bytes(
-                    files.state_bytes
-                )
+            retired_cls = _btn.RetiredPublisherState
         except AttributeError:
             # tn_btn wheel older than 0.4.3a1 doesn't expose
             # RetiredPublisherState. Fail-soft: cipher loads but the
             # historical-mint surface is unavailable until the wheel is
             # rebuilt. Matches the rest of the soft-fallback pattern in
             # this module.
-            pass
+            retired_cls = None
+        if retired_cls is not None:
+            for epoch, files in ks.load_retired_states(group_name).items():
+                try:
+                    retired_states[epoch] = retired_cls.from_bytes(files.state_bytes)
+                except (_btn.BtnRuntimeError, ValueError) as exc:
+                    # Backward-compat: a keystore written by a pre-fix
+                    # synced-rotation path archived the wrong wire form (a
+                    # raw PublisherState) into this .retired.<epoch> slot.
+                    # That archive only powers the historical-mint surface;
+                    # reads still work via the retired *kit*. Skip the
+                    # unreadable epoch with a warning rather than failing the
+                    # whole config load (SDK must not crash on legacy data).
+                    warnings.warn(
+                        f"btn group {group_name!r}: skipping unreadable retired "
+                        f"state for epoch {epoch} ({exc}). Historical re-mint for "
+                        f"that epoch is unavailable; reads are unaffected.",
+                        stacklevel=2,
+                    )
 
         return cls(
             _state=state,
