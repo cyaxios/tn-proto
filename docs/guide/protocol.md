@@ -11,7 +11,7 @@ hash-chained to the record before it and signed by the writer's device key.
 Reading a record back means verifying that chain and signature, then
 decrypting the groups for which you hold a reader kit.
 
-This reference has three parts:
+This reference has four parts:
 
 1. **The record** - the exact JSON shape of one log line: header fields,
    per-group ciphertext blocks, and the equality-search token block.
@@ -20,6 +20,9 @@ This reference has three parts:
    tokens.
 3. **BTN** - the broadcast cipher that lets one encrypted block be read by
    many recipients, plus rotation and revocation.
+4. **The `tn.agents` policy group** - the one reserved group whose field set
+   the protocol defines: the publisher's governance declaration, sealed and
+   signed onto every record of an event type.
 
 ---
 
@@ -815,4 +818,174 @@ Two related single-byte tags encode the subset label inside a ciphertext's cover
 entries: `0x00 = SUBSET_FULLTREE`, `0x01 = SUBSET_DIFFERENCE`
 (`crypto/tn-btn/src/wire.rs:56-59`). These are not top-level artifact kinds; they
 appear only within a `Ciphertext` body.
+
+
+---
+
+## 4. The `tn.agents` policy group
+
+`tn.agents` is a reserved group whose field set the protocol defines. It
+carries the publisher's governance declaration for an event type - what the
+data is, what it is for, what it must not be used for, what it is authoritative
+for, and what to do on violation or error - sealed and signed onto every record
+of that type, so a reader gets the rules from the same record as the data.
+
+Two properties shape it. First, it **declares; it does not enforce.** The core
+only splices the fields onto the record and seals them; acting on the
+declaration is the job of a consuming policy engine. Second, a record carries
+**exactly one** `tn.agents` block - the governance of the data is the governance
+of the data, addressed to every entitled reader alike. Reader-specific content
+is an ordinary group, not a second policy.
+
+### The reserved name
+
+`tn.agents` is the only name allowed in the `tn.*` group namespace; any other
+`tn.*` group name is rejected at config load
+(`crypto/tn-core/src/config.rs:567`, `Error::ReservedGroupName`). The namespace
+is protocol-owned so a reader can trust the meaning of the block without
+consulting the operator's config. It is otherwise an ordinary encryption group:
+it has a cipher, a recipient set, and a key, and is sealed exactly like
+`default` (§1, §3). A reader who does not hold the `tn.agents` key cannot read
+the rules - itself a signal to a consumer that rules exist but are sealed to
+another audience.
+
+### The fields
+
+A `tn.agents` block carries six canonically-named fields: five authored
+(free-text prose, written by the publisher) and one computed. The five authored
+names and their order are a protocol constant, identical across the Rust core
+and both SDKs (`crypto/tn-core/src/agents_policy.rs:24`, `REQUIRED_FIELDS`):
+
+| Field | Kind | Meaning |
+|---|---|---|
+| `instruction` | authored | What this record is; how to regard it (a fact to attest, not an action to re-run). |
+| `use_for` | authored | The permitted uses of the data. |
+| `do_not_use_for` | authored | The prohibited uses. |
+| `consequences` | authored | What the record is authoritative for downstream, and the cost of getting it wrong. |
+| `on_violation_or_error` | authored | What a consuming agent should do on violation or error (see below). |
+| `policy` | computed | A content-addressed reference to the exact policy in force; the runtime fills it in, never the author. |
+
+The values are free-text strings: human- and LLM-readable, carrying canonical
+*meaning* but no machine-checkable structure. There is no executable callback
+field. `on_violation_or_error` is the actionable directive, and it is
+deliberately prose: **capability lives with the agent, not the message.** The
+publisher names an action in words - "alert compliance by calling an alert
+tool", "revoke the grant", "stop and surface to a human" - and a tool-equipped
+consumer maps it to a tool it already holds. The record carries intent; the
+tools stay with the agent. Reliability comes from the directive being sealed and
+signed, not from a schema.
+
+### The `policy` reference and content hash
+
+The computed `policy` field is built at emit time as
+(`crypto/tn-core/src/runtime/init.rs:686`):
+
+```
+<path>#<event_type>@<version>#<content_hash>
+```
+
+for example `.tn/config/agents.md#payment.completed@1#sha256:79e0aefe...`. The
+`content_hash` is `sha256:` plus lowercase hex over the canonical JSON of
+`{version, schema, events}`, where `events` maps each event type to its five
+authored fields. Every template in one file shares this hash - it is the file's
+signature. A reader pins the exact rules in force by it; a record whose `policy`
+hash does not resolve to the policy the reader knows is treated as advisory.
+
+### The splice
+
+On every emit the runtime looks up the policy template for the record's
+`event_type` and, if one exists, inserts the fields into the record's
+`tn.agents` group (`crypto/tn-core/src/runtime/emit.rs:1000` calls
+`splice_agent_policy`, `crypto/tn-core/src/runtime/init.rs:664`). Two rules: the
+splice happens only when a matching `## <event_type>` section exists (no
+section, no splice, empty block), and it uses set-default semantics - a value
+passed explicitly on the emit call wins, and the template fills only what the
+caller left unset. The spliced fields are then sealed into the group with the
+rest of the record.
+
+### On the wire
+
+`tn.agents` appears as a top-level group-payload key, a sibling of the header
+fields and every other group, in group-name order (§1). It has the standard
+group shape:
+
+```json
+"tn.agents": {
+  "ciphertext": "twEB...",
+  "field_hashes": {
+    "instruction":           "hmac-sha256:v1:...",
+    "use_for":               "hmac-sha256:v1:...",
+    "do_not_use_for":        "hmac-sha256:v1:...",
+    "consequences":          "hmac-sha256:v1:...",
+    "on_violation_or_error": "hmac-sha256:v1:...",
+    "policy":                "hmac-sha256:v1:..."
+  }
+}
+```
+
+The six field values are canonicalized and sealed under the group cipher
+(readable only by a holder of the `tn.agents` key), and each is indexed as an
+equality-search token in `field_hashes` exactly like any group (§2). Because the
+block is sealed, the rules are confidential and audience-scoped; because
+`row_hash` commits the group payloads and is signed (§2), the rules cannot be
+altered or stripped without invalidating the signature.
+
+### The source file
+
+The authored policy lives in one markdown file, `.tn/config/agents.md`, parsed
+at init (`crypto/tn-core/src/agents_policy.rs:279`, `parse_policy_text`):
+
+```markdown
+---
+version: 1
+schema: tn-agents-policy@v1
+---
+
+## payment.completed
+
+### instruction
+This row records a captured payment. Treat it as a fact-record; never re-run
+the charge it describes.
+
+### use_for
+Reconciliation, revenue reporting, a customer's payment history.
+
+### do_not_use_for
+Marketing or outreach; fraud scoring; profiling.
+
+### consequences
+Downstream systems treat this row as authoritative for "this payment was
+captured."
+
+### on_violation_or_error
+If two rows disagree on amount for one payment_id, alert compliance by calling
+an alert tool, then stop and surface to a human.
+```
+
+Frontmatter carries `version` (default `1`) and `schema` (default
+`tn-agents-policy@v1`). Each `## <event_type>` section must contain all five
+`### <field>` subsections; a missing one raises at init
+(`crypto/tn-core/src/agents_policy.rs:300-315`, `Error::Malformed`), so a
+published policy is never half-written.
+
+### The `tn.agents.policy_published` event
+
+When a runtime initializes and the policy's `content_hash` differs from the most
+recently published one (or none exists), it emits a signed, synced admin event
+recording the new policy (`crypto/tn-core/src/runtime/init.rs:566`; hash-change
+detection at `init.rs:702`). The emitted payload:
+
+| Field | Type | |
+|---|---|---|
+| `policy_uri` | string | the `.tn/config/agents.md` path |
+| `version` | string | policy version |
+| `content_hash` | string | `sha256:...` |
+| `event_types_covered` | array of string | the governed event types |
+| `policy_text` | string | the raw markdown body, for auditor replay |
+
+The catalog (`crypto/tn-core/src/admin_catalog.rs:213`) validates the four
+scalar fields; `event_types_covered` is emitted but intentionally not listed,
+because the catalog does not type-check array-shaped fields. The published
+history of this event is the version history of the policy: every change to the
+rules is itself an attested, sealed record on the chain.
 
