@@ -50,7 +50,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, relative } from "node:path";
-import { Buffer } from "node:buffer";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { Tn } from "../src/tn.js";
@@ -264,7 +263,7 @@ async function pushBody(
   const awk = await deriveAwkFromMaterial(passphrase, cred);
 
   let bek: Uint8Array;
-  let existing: Record<string, unknown> | null = null;
+  let existing: Record<string, unknown> | null;
   try {
     existing = await client.getWrappedKey(projectId);
   } catch {

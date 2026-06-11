@@ -104,7 +104,7 @@ async function pushBody(
   // Reuse the project's existing wrapped BEK if present (second device /
   // second push), else mint one.
   let bek: Uint8Array;
-  let existing: Record<string, unknown> | null = null;
+  let existing: Record<string, unknown> | null;
   try {
     existing = await client.getWrappedKey(projectId);
   } catch {
@@ -190,7 +190,7 @@ test(
     const bYaml = await restoreAndReassemble(clientB, projectId, devB.passphrase, aCollect.layout);
 
     // B sees A's group G in the restored config (declaration round-tripped).
-    const bDoc = parseYaml(readFileSync(bYaml, "utf8")) as Record<string, any>;
+    const bDoc = parseYaml(readFileSync(bYaml, "utf8")) as Record<string, Record<string, unknown>>;
     assert.ok(
       bDoc.groups && "partners" in bDoc.groups,
       "device B did not receive group G from A's pushed body",

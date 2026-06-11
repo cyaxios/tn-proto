@@ -546,7 +546,7 @@ test("a non-absorbable staged snapshot is tolerated; the merge still completes",
     // An empty STORED zip — parseable as a zip but carries no manifest body.
     const emptyZip = new Uint8Array([0x50, 0x4b, 0x05, 0x06, ...new Array(18).fill(0)]);
 
-    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const fetchImpl = (async (url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
       const u = String(url);
       if (u.endsWith("/api/v1/auth/challenge")) return new Response(JSON.stringify({ nonce: "n" }), { status: 200 });
       if (u.endsWith("/api/v1/auth/verify")) return new Response(JSON.stringify({ token: "t" }), { status: 200 });

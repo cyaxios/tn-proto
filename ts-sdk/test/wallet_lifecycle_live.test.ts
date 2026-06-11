@@ -287,7 +287,7 @@ test(
     // (1) Group present in the restored CONFIG (yaml `groups:` block). This
     // is the authoritative declaration that survives the backup — read it
     // straight off the restored tn.yaml, the artefact `group add` persists.
-    const restoredDoc = parseYaml(readFileSync(destYaml, "utf8")) as Record<string, any>;
+    const restoredDoc = parseYaml(readFileSync(destYaml, "utf8")) as Record<string, Record<string, unknown>>;
     assert.ok(
       restoredDoc.groups && "auditors" in restoredDoc.groups,
       `restored tn.yaml missing group 'auditors'; groups: ${JSON.stringify(

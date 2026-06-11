@@ -13,6 +13,7 @@
 // import resolves.
 import "tn-wasm";
 
+/* global Response */
 import {
   Tn,
   parseBearer,
@@ -20,7 +21,6 @@ import {
   resolveDidEndpoint,
   isAutoLinkDisabled,
   bootstrapFromApiKey,
-  UnsealNotWiredError,
   DEFAULT_VAULT_URL,
 } from "../dist/index.js";
 

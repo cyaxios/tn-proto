@@ -30,7 +30,6 @@ export async function* localWatch(
   let offset: number;
 
   if (opts.since === "start") {
-    offset = 0;
     for (const envelope of parseNdjson(await handle.text())) {
       const entry = processEnvelope(envelope, opts.keystore);
       if (!opts.where || opts.where(entry)) yield entry;

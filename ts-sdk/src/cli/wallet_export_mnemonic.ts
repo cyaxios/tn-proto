@@ -90,10 +90,10 @@ export async function walletExportMnemonicCmd(
   // Python: identity_path = _default_identity_path()
   const identityPath = opts.identityPath ?? defaultIdentityPath();
 
-  // Python: identity = _load_identity_or_die(identity_path)
-  let identity: Identity;
+  // Python: identity = _load_identity_or_die(identity_path). The load is
+  // the die-on-missing check; only identityPath is needed afterwards.
   try {
-    identity = Identity.load(identityPath);
+    Identity.load(identityPath);
   } catch (e) {
     // Mirror Python's `_load_identity_or_die`: print the error + the
     // `tn init` / `tn wallet restore` hint to stderr and exit non-zero.

@@ -37,6 +37,7 @@ import argparse
 import hashlib
 import json
 import tempfile
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from io import BytesIO
@@ -91,8 +92,6 @@ def cmd_invite(args: argparse.Namespace) -> int:
     4. Assemble the ``manifest.json`` and zip it next to the kit via
        :func:`make_invitation_zip`.
     """
-    from ulid import ULID
-
     from . import admin, current_config, flush_and_close
     from . import init as tn_init
     from .cli import _resolve_yaml_or_discover
@@ -141,7 +140,9 @@ def cmd_invite(args: argparse.Namespace) -> int:
         # 4. Manifest + wrapper zip. Field set mirrors the server manifest
         #    (routes_invite.invite_reader): the keys inbox.accept reads are
         #    group_name, leaf_index, from_email, from_account_did, kit_sha256.
-        invitation_id = str(ULID())
+        # Opaque unique id; the server treats it as a plain string
+        # (routes_invite declares `invitation_id: str`, no format check).
+        invitation_id = str(uuid.uuid4())
         from_did = cfg.device.device_identity
         manifest = {
             "invitation_id": invitation_id,

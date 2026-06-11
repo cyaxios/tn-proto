@@ -17,7 +17,8 @@
 // fetching the bundle from the vault, so we don't need a real vault
 // to prove the unseal+install bridge works.
 
-import { readFileSync, existsSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
+/* global crypto */
+import { readFileSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 

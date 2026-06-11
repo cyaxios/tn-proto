@@ -65,7 +65,7 @@ test("add_recipient with explicit DID writes a kit_bundle .tnpkg", async () => {
 
     // stdout mirrors Python's three lines.
     assert.match(stdout.text, /\[tn add_recipient\] wrote /);
-    assert.match(stdout.text, /group:     default/);
+    assert.match(stdout.text, /group: {5}default/);
     assert.match(stdout.text, new RegExp(`recipient: ${did}`));
 
     // Behaviour assertion: the .tnpkg matches Python add_recipient output —

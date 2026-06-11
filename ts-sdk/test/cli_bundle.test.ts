@@ -368,7 +368,6 @@ test("init throws a non-Error value -> String(e) arm, exit 1", async () => {
   const origInit = NodeRuntime.init;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (NodeRuntime as any).init = () => {
-    // eslint-disable-next-line @typescript-eslint/no-throw-literal
     throw "boom-not-an-error";
   };
   cleanups.push(() => {
@@ -400,7 +399,6 @@ test("bundle throws a non-Error value -> String(e) arm, exit 1", async () => {
   };
   const origBundle = proto.bundleForRecipient;
   proto.bundleForRecipient = () => {
-    // eslint-disable-next-line @typescript-eslint/no-throw-literal
     throw "bundle-boom-not-an-error";
   };
   cleanups.push(() => {

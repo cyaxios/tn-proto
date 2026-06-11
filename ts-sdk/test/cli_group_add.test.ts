@@ -51,8 +51,10 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
   return chunks.join("");
 }
 
-function readRootDoc(yamlPath: string): Record<string, any> {
-  return parseYaml(readFileSync(yamlPath, "utf8")) as Record<string, any>;
+type YamlDoc = Record<string, Record<string, unknown>>;
+
+function readRootDoc(yamlPath: string): YamlDoc {
+  return parseYaml(readFileSync(yamlPath, "utf8")) as YamlDoc;
 }
 
 test("group add (no fields, no cipher) — exits 0, prints two lines, lands the group", async () => {
@@ -76,7 +78,7 @@ test("group add (no fields, no cipher) — exits 0, prints two lines, lands the 
     // No --fields → the fields line is omitted, cipher defaults to the
     // ceremony cipher (btn for a freshly-initialised default ceremony).
     assert.doesNotMatch(out, /fields:/);
-    assert.match(out, /\[tn group add\]   cipher: btn\n/);
+    assert.match(out, /\[tn group add\] {3}cipher: btn\n/);
 
     // The group must persist in the authoritative root yaml + be routable
     // (btn key material minted in the keystore) — the same contract Python's
@@ -109,8 +111,8 @@ test("group add --fields a,b,c — prints the fields line and writes canonical +
 
     assert.equal(code, 0);
     assert.match(out, /\[tn group add\] added group 'partners'\n/);
-    assert.match(out, /\[tn group add\]   fields: salary, ssn, dob\n/);
-    assert.match(out, /\[tn group add\]   cipher: btn\n/);
+    assert.match(out, /\[tn group add\] {3}fields: salary, ssn, dob\n/);
+    assert.match(out, /\[tn group add\] {3}cipher: btn\n/);
 
     const doc = readRootDoc(yamlPath);
     // Canonical multi-group routing: groups[<g>].fields
@@ -140,7 +142,7 @@ test("group add --cipher btn — honours the explicit cipher flag (opts.cipher b
 
     assert.equal(code, 0);
     // cipher line is sourced from opts.cipher, not the ceremony default.
-    assert.match(out, /\[tn group add\]   cipher: btn\n/);
+    assert.match(out, /\[tn group add\] {3}cipher: btn\n/);
 
     const doc = readRootDoc(yamlPath);
     assert.ok("auditors" in doc.groups);
@@ -171,7 +173,7 @@ test("group add --fields merges + de-dupes against a pre-existing array list", a
     });
 
     assert.equal(code, 0);
-    assert.match(out, /\[tn group add\]   fields: salary, ssn, salary\n/);
+    assert.match(out, /\[tn group add\] {3}fields: salary, ssn, salary\n/);
 
     const doc = readRootDoc(yamlPath);
     assert.deepEqual(

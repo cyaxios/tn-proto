@@ -410,7 +410,7 @@ async function pushCeremonyBody(
   body: Map<string, Uint8Array>,
   passphrase: string | null,
   awk: Uint8Array | null,
-  fetchImpl: typeof fetch,
+  _fetchImpl: typeof fetch,
 ): Promise<string[]> {
   // 1. Derive or mint the BEK. The AWK comes one of two ways: a cached AWK
   //    (the warm/init path — already unwrapped at connect time) or derived
