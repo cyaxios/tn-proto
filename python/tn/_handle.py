@@ -268,7 +268,7 @@ class TN:
         event_type: str,
         args: tuple,
         fields: dict[str, Any],
-    ) -> None:
+    ) -> dict[str, Any] | None:
         from . import (
             _emit_via,
             _resolve_sign,
@@ -295,8 +295,8 @@ class TN:
             )
         if level in thresholds:
             if thresholds[level] < _session._log_level_threshold:
-                return
-        _emit_via(self._get_runtime(), level, event_type, fields, _resolve_sign(None))
+                return None
+        return _emit_via(self._get_runtime(), level, event_type, fields, _resolve_sign(None))
 
     def log(
         self,
@@ -304,7 +304,7 @@ class TN:
         *args: Any,
         level: str = "",
         **fields: Any,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Emit an entry on this stream with a caller-chosen level.
 
         Default level is ``""`` (severity-less). DX review #13: the
@@ -314,9 +314,17 @@ class TN:
         shape. For the common four levels, use ``.info`` / ``.warning``
         / ``.error`` / ``.debug`` — those short-circuit below the
         active threshold; ``.log`` always emits.
-        """
-        self._emit(level, event_type, args, fields)
 
+        Returns the signed on-wire envelope ``dict`` that was written
+        (JSON-ready for forwarding, e.g. ``requests.post(url,
+        json=stream.log(...))``), or ``None`` if filtered. The levelled
+        verbs above are fire-and-forget and return ``None``.
+        """
+        return self._emit(level, event_type, args, fields)
+
+    # The levelled verbs are fire-and-forget (return None). Only ``.log``
+    # returns the written envelope — for forwarding downstream — mirroring
+    # the module-level ``tn.log`` vs ``tn.info`` split.
     def debug(self, event_type: str, *args: Any, **fields: Any) -> None:
         self._emit("debug", event_type, args, fields)
 

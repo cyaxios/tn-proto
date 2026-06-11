@@ -32,9 +32,11 @@ class _SessionHandle:
         from . import current_config
         return current_config().device.did
 
-    def log(self, event_type: str, *args: Any, **fields: Any) -> None:
+    def log(self, event_type: str, *args: Any, **fields: Any) -> dict[str, Any] | None:
+        # ``log`` returns the written envelope (for forwarding downstream);
+        # the levelled verbs below are fire-and-forget and return None.
         from . import log
-        log(event_type, *args, **fields)
+        return log(event_type, *args, **fields)
 
     def debug(self, event_type: str, *args: Any, **fields: Any) -> None:
         from . import debug

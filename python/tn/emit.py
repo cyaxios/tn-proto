@@ -236,22 +236,26 @@ def _make_levelled_verb(name: str, level_int: int, *, surface_first: bool = Fals
             if _surface_enabled(_INFO):
                 _surface_diag(name, event_type, fields)
             if level_int < _session._log_level_threshold:
-                return
+                return None
             if _tn_module._dispatch_rt is None:
                 _maybe_autoinit()
             sign = _sign if _sign is not None else _session._sign_override
+            # Fire-and-forget: dispatch the emit and discard the envelope.
+            # Only ``tn.log`` returns the written record (for forwarding).
             _emit_with_splice(name, event_type, fields, sign)
     else:
         def verb(event_type: str, *args: Any, _sign: bool | None = None, **fields: Any) -> None:
             if args:
                 _raise_extra_positionals(name, args)
             if level_int < _session._log_level_threshold:
-                return
+                return None
             if _surface_enabled(_INFO):
                 _surface_diag(name, event_type, fields)
             if _tn_module._dispatch_rt is None:
                 _maybe_autoinit()
             sign = _sign if _sign is not None else _session._sign_override
+            # Fire-and-forget: dispatch the emit and discard the envelope.
+            # Only ``tn.log`` returns the written record (for forwarding).
             _emit_with_splice(name, event_type, fields, sign)
     verb.__name__ = name
     verb.__qualname__ = name
@@ -271,7 +275,7 @@ def log(
     level: str = "",
     _sign: bool | None = None,
     **fields: Any,
-) -> None:
+) -> dict[str, Any] | None:
     """Emit an attested event with a caller-chosen level (default: severity-less).
 
     ``tn.log`` is **not** an alias of ``tn.info`` — it emits with
@@ -298,6 +302,21 @@ def log(
             TN sentinels (bytes -> ``$b64``, Decimal -> string,
             datetime -> ISO-8601 UTC).
 
+    Returns:
+        The signed on-wire envelope that was written — the parsed
+        canonical record (``device_identity``, ``event_type``,
+        ``sequence``, ``prev_hash``, ``row_hash``, ``signature``, the
+        encrypted per-group blocks, and the equality-index tokens) as a
+        JSON-ready ``dict`` — or ``None`` if the emit was filtered. Because
+        it's the verbatim attested record, you can forward it downstream
+        directly, e.g.
+        ``requests.post(url, json=tn.log("audit.checkpoint", row=42))``.
+
+        ``tn.log`` is the ONLY verb that returns the record. The
+        threshold-aware verbs (:func:`tn.info`, :func:`tn.warning`,
+        :func:`tn.debug`, :func:`tn.error`) are fire-and-forget and
+        return ``None``.
+
     Raises:
         TypeError: If positional args other than ``event_type`` are
             supplied.
@@ -309,7 +328,9 @@ def log(
         >>> tn.init()
         >>> tn.log("system.boot")              # severity-less
         >>> tn.log("scan.start", level="trace")  # custom level
-        >>> tn.log("audit.checkpoint", level="audit", row=42)
+        >>> envelope = tn.log("audit.checkpoint", level="audit", row=42)
+        >>> # forward the attested record to a downstream collector
+        >>> # requests.post("https://collector.example/ingest", json=envelope)
 
     See Also:
         :func:`tn.info`: Threshold-aware INFO emit.
@@ -324,4 +345,4 @@ def log(
     if _tn_module._dispatch_rt is None:
         _maybe_autoinit()
     sign = _sign if _sign is not None else _session._sign_override
-    _emit_with_splice(level, event_type, fields, sign)
+    return _emit_with_splice(level, event_type, fields, sign)

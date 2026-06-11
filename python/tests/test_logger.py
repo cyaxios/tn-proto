@@ -59,13 +59,17 @@ def _read_user_envelopes(log_path: Path) -> list[dict]:
 def test_log_bare_emits_with_empty_level(tmp_path):
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
-    tn.log("evt.bare", n=1)
+    envelope = tn.log("evt.bare", n=1)
+    assert isinstance(envelope, dict)
+    assert envelope["event_type"] == "evt.bare"
+    assert envelope["level"] == ""
     tn.flush_and_close()
 
     entries = _read_user_envelopes(tmp_path / ".tn/tn/logs" / "tn.ndjson")
     assert len(entries) == 1
     assert entries[0]["level"] == ""
     assert entries[0]["event_type"] == "evt.bare"
+    assert entries[0]["event_id"] == envelope["event_id"]
 
 
 @pytest.mark.parametrize(
@@ -80,12 +84,28 @@ def test_log_bare_emits_with_empty_level(tmp_path):
 def test_level_wrappers_propagate_to_envelope(tmp_path, wrapper_name, expected_level):
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher="btn")
-    getattr(tn, wrapper_name)(f"evt.{wrapper_name}", k=1)
+    # The levelled verbs are fire-and-forget: they return None (only tn.log
+    # returns the written envelope). The chosen level still lands on the
+    # written record — verify propagation by reading the log back.
+    assert getattr(tn, wrapper_name)(f"evt.{wrapper_name}", k=1) is None
     tn.flush_and_close()
 
     entries = _read_user_envelopes(tmp_path / ".tn/tn/logs" / "tn.ndjson")
     assert len(entries) == 1
     assert entries[0]["level"] == expected_level
+    assert entries[0]["event_type"] == f"evt.{wrapper_name}"
+
+
+def test_sub_threshold_wrappers_return_none(tmp_path):
+    yaml = tmp_path / "tn.yaml"
+    tn.init(yaml, cipher="btn")
+    tn.set_level("info")
+    try:
+        envelope = tn.debug("evt.ignored", k=1)
+        assert envelope is None
+    finally:
+        tn.set_level("debug")
+        tn.flush_and_close()
 
 
 # ---------------------------------------------------------------------------

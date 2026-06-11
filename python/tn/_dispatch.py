@@ -430,7 +430,7 @@ class DispatchRuntime:
         fields: dict[str, Any],
         *,
         sign: bool | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         if self._use_rust:
             if self._rt is None:
                 raise RuntimeError("DispatchRuntime: Rust runtime not initialized")
@@ -441,8 +441,11 @@ class DispatchRuntime:
             # Fast-path: when the effective handler list is empty (default
             # for vanilla ``tn.init()`` profiles where Rust already covers
             # every declared handler), skip the fan-out call entirely.
-            if raw_line is not None and not self._cached_skip_fan_out:
-                self._fan_out_python_handlers(raw_line)
+            if raw_line is not None:
+                envelope = json.loads(raw_line)
+                if not self._cached_skip_fan_out:
+                    self._fan_out_python_handlers(raw_line)
+                return envelope
             return None
         if self._py_rt is None:
             raise RuntimeError("DispatchRuntime: Python runtime not set")

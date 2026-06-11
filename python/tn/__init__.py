@@ -908,7 +908,7 @@ def _emit_via(
     event_type: str,
     fields: dict[str, Any],
     sign: bool | None,
-) -> None:
+) -> dict[str, Any] | None:
     """Build the merged-fields dict, splice tn.agents policy text if a
     template applies, then dispatch the emit through the supplied
     runtime.
@@ -951,7 +951,7 @@ def _emit_via(
     return rt.emit(level, event_type, merged, sign=sign)
 
 
-def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign: bool | None) -> None:
+def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign: bool | None) -> dict[str, Any] | None:
     """Module-level emit: routes through the singleton dispatch runtime.
 
     Used by the bare ``tn.info(...)`` / ``tn.log(...)`` API which is
