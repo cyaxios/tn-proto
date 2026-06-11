@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0a3] - 2026-06-11 -- Documentation pass + PyPI polish
+
+Docs and packaging only; no runtime changes versus 0.6.0a2.
+
+* **New guides** in `docs/guide/`: running in containers and CI (the
+  `TN_API_KEY` bootstrap, disk-wins-over-env, identity paths),
+  groups/readers/bundles/rotation, and advanced usage (reading modes,
+  `tn.session`, templated log paths, cross-language parity). Short
+  per-crate READMEs under `crypto/`; expanded `python/examples` README.
+* **Root + package READMEs rewritten**; PyPI page refreshed (alpha status,
+  live version badge, the vault account-creation + offline/self-host flow).
+* **Repo cleanup**: dropped scratch and dev-only dirs from the tree.
+
+## [0.6.0a2] - 2026-06-11 -- Single package + crash-safe synced rotation
+
+* **One wheel.** `tn-core` + `tn-btn` are bundled into the `tn` package as
+  the `tn._native` extension (abi3, Python 3.10-3.14). `pip install
+  tn-proto` now carries the whole engine; the separate `tn-core` /
+  `tn-btn` PyPI packages are gone.
+* **`tn.log` returns the written envelope** (JSON-ready) so the attested
+  record can be forwarded downstream; the threshold verbs (`info`,
+  `warning`, `debug`, `error`) are fire-and-forget and return `None`.
+* **Synced-rotation fix.** New `PublisherState.retire()` mints a proper
+  `RetiredPublisherState` when a rotation arrives via group-key sync, so a
+  prior member keeps pre-rotation read access. The cipher loader now
+  degrades gracefully on a legacy wrong-type retired-state blob instead of
+  failing config load.
+* **CI cost control**: the routine pytest matrix runs on Linux only;
+  the macOS/Windows sweep moved to a manual `workflow_dispatch` job.
+
 ## [0.6.0a1] - 2026-06-11 -- Unified line: name flip completed, wallet sync, crash-safe rotation
 
 First release on the unified post-merge line: the `tn-protocol` ->

@@ -378,3 +378,6 @@ log.
 - [cookbook-python.md](cookbook-python.md) — every Python verb and command.
 - [cookbook-typescript.md](cookbook-typescript.md) — the same for TypeScript.
 - [protocol.md](protocol.md) — the on-the-wire record format and the BTN cipher.
+- [groups-readers-rotation.md](groups-readers-rotation.md) — encrypted groups, granting/revoking readers, `.tnpkg` bundles, and key rotation.
+- [deploy-containers.md](deploy-containers.md) — the `TN_API_KEY` bootstrap for containers/CI, disk-wins-over-env, and identity paths.
+- [advanced-usage.md](advanced-usage.md) — reading modes (`all_runs`), scoped lifecycles (`tn.session`), templated log paths, and the cross-language guarantee.

@@ -1,16 +1,24 @@
+<div align="center">
+
 # tn-proto
 
-Signed, encrypted, append-only logging — one entry per event, with identical byte-for-byte wire formats in Python, TypeScript, and the browser.
+### Every action, a TransactioN.
+
+Signed, encrypted, append-only logging. One entry per event, with byte-for-byte identical wire formats across Python, TypeScript, and the browser.
+
+[![PyPI version](https://img.shields.io/pypi/v/tn-proto?style=flat-square&color=orange&label=pypi)](https://pypi.org/project/tn-proto/)
+[![Python versions](https://img.shields.io/pypi/pyversions/tn-proto?style=flat-square)](https://pypi.org/project/tn-proto/)
+[![Status: alpha](https://img.shields.io/badge/status-alpha-yellow?style=flat-square)](https://pypi.org/project/tn-proto/)
+[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](#license)
+[![Keys: non-custodial vault](https://img.shields.io/badge/keys-non--custodial%20vault-brightgreen.svg?style=flat-square)](#non-custodial-vault-backups)
+
+</div>
 
 ---
 
-[![Python Support](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg?style=flat-square)](https://pypi.org/project/tn-proto/)
-[![TypeScript Support](https://img.shields.io/badge/typescript-Node%20%7C%20Browser%20%7C%20WASM-blue.svg?style=flat-square)](https://www.npmjs.com/package/tn-proto)
-[![Version](https://img.shields.io/badge/release-v0.6.0a2-orange.svg?style=flat-square)](https://pypi.org/project/tn-proto/)
-[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](#license)
-[![Security](https://img.shields.io/badge/keys-non--custodial%20vault-brightgreen.svg?style=flat-square)](#non-custodial-vault-backups)
+> **Alpha release — `0.6.0a3`.** This is an early alpha. The API and on-the-wire format may still change between alpha releases; pin an exact version for anything you depend on. Install: `pip install tn-proto`.
 
-`tn-proto` is a secure logging library. It lets you write structured logs that are cryptographically signed, chained, and private-by-default. Under the hood, a shared Rust engine guarantees that both the Python and TypeScript SDKs produce identical log records.
+`tn-proto` is a secure logging library. You write ordinary structured logs; it signs each entry with your device key, chains it to the previous one (tamper-evident), and encrypts the fields so only the readers you choose can decrypt them. A shared Rust engine, bundled into the wheel as the `tn._native` extension, guarantees the Python and TypeScript SDKs produce identical records on the wire. One `pip install tn-proto` carries the whole engine, no separate packages and no C toolchain.
 
 ---
 
@@ -208,6 +216,19 @@ Under this model, **messages carry their own governance**, derived from a compil
   # Verify the AGT logs against the sealed TN ledger
   tn-agt verify <agt-log.jsonl>
   ```
+
+---
+
+## Documentation
+
+Full guides live in [`docs/guide/`](https://github.com/cyaxios/tn-proto/tree/main/docs/guide):
+
+- [Getting started](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/getting-started.md) and the [Python cookbook](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/cookbook-python.md) — every verb and command, with runnable examples.
+- [Profiles](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/profiles.md) — pick the evidence and performance trade-off (transaction, audit, secure_log, telemetry, stdout).
+- [Groups, readers, bundles, rotation](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/groups-readers-rotation.md) — encrypted groups, granting and revoking readers, `.tnpkg` bundles, key rotation.
+- [Running in containers and CI](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/deploy-containers.md) — the `TN_API_KEY` bootstrap (hand one secret to your platform), disk-wins-over-env, identity paths.
+- [Advanced usage](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/advanced-usage.md) — reading modes (`all_runs`), scoped lifecycles (`tn.session`), templated log paths, cross-language parity.
+- [Protocol](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/protocol.md) and [YAML reference](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/yaml-reference.md) — the wire format and every config field.
 
 ---
 
