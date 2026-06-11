@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 try:
-    import tn_btn  # type: ignore[import-not-found]  # noqa: F401
+    from tn._native import btn as tn_btn  # type: ignore[import-not-found]  # noqa: F401
 
     _HAS_BTN = True
 except ImportError:

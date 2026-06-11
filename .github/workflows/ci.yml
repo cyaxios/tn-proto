@@ -29,27 +29,12 @@ jobs:
       - name: Install build tools
         run: python -m pip install --upgrade pip maturin
 
-      - name: Build tn-btn wheel
-        working-directory: crypto/tn-btn-py
-        shell: bash
-        run: |
-          maturin build --release --out ../../dist
-          ls ../../dist
-
-      - name: Build tn-core wheel
-        working-directory: crypto/tn-core-py
-        shell: bash
-        run: |
-          maturin build --release --out ../../dist
-          ls ../../dist
-
-      - name: Install tn-btn + tn-core wheels
-        shell: bash
-        run: |
-          python -m pip install dist/*.whl
-
       - name: Install tn-proto + test deps
         working-directory: python
+        # The editable install drives the maturin backend, which compiles
+        # the combined `tn._native` extension (former tn-btn + tn-core) from
+        # the umbrella crate at crypto/tn-py. One step now covers what used
+        # to be three (build tn-btn wheel, build tn-core wheel, install both).
         run: |
           python -m pip install -e .
           python -m pip install pytest pytest-asyncio cryptography

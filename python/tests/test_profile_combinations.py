@@ -35,7 +35,7 @@ from tn import _autoinit, _profiles, _registry
 
 
 try:
-    import tn_btn as _tn_btn  # type: ignore[import-not-found]  # noqa: F401
+    from tn._native import btn as _tn_btn  # type: ignore[import-not-found]  # noqa: F401
     _HAS_BTN = True
 except ImportError:
     _HAS_BTN = False

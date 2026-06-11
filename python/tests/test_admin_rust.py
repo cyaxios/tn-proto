@@ -109,7 +109,7 @@ def test_revoke_then_decrypt_fails_for_revoked_reader(tmp_path):
     env_after = orders[1]  # the post-revoke order.created
 
     # Reader A (revoked) cannot decrypt the post-revoke envelope.
-    import tn_btn  # PyO3 extension built via maturin develop
+    from tn._native import btn as tn_btn  # PyO3 extension built via maturin develop
 
     ct_b64 = env_after["default"]["ciphertext"]
     ct_bytes = base64.standard_b64decode(ct_b64)

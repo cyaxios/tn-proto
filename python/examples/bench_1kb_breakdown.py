@@ -19,7 +19,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-from tn_core import Runtime as _RustRuntime  # type: ignore[import-not-found]
+from tn._native.core import Runtime as _RustRuntime  # type: ignore[import-not-found]
 
 import tn  # type: ignore[import-not-found]
 

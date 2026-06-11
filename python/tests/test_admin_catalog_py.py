@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest  # type: ignore[import-not-found]
-import tn_core  # type: ignore[import-not-found]
+from tn._native import core as tn_core  # type: ignore[import-not-found]
 
 
 def test_kinds_returns_full_catalog():

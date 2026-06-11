@@ -11,6 +11,11 @@ module-name = "tn._native"
 python-source = "."
 manifest-path = "../crypto/tn-py/Cargo.toml"
 include = ["tn/py.typed", "tn/mcp/exhaust/kits_index.json"]
+# Keep docs out of the runtime wheel: markdown that lives inside the
+# package tree (e.g. tn/lint/README.md) is developer documentation, not
+# shipped code. The project README is still embedded as wheel METADATA
+# via [project].readme — this only drops in-package .md files.
+exclude = ["tn/**/*.md"]
 
 [project]
 name            = "tn-proto"
@@ -198,14 +203,13 @@ module = [
     "mnemonic.*",
     "base58.*",
     "persist_queue.*",
-    # PyO3 native extensions — built by maturin from crypto/tn-btn-py/ and
-    # crypto/tn-core-py/. Typing them properly means adding py.typed or
+    # PyO3 native extension — built by maturin from crypto/tn-py/ (the
+    # combined tn-core + tn-btn bindings, exposed as tn._native.core /
+    # tn._native.btn). Typing it properly means adding py.typed or
     # hand-written stubs, tracked in Workstream B/F. Until then mypy treats
-    # them as Any at the import boundary.
-    "tn_btn",
-    "tn_btn.*",
-    "tn_core",
-    "tn_core.*",
+    # it as Any at the import boundary.
+    "tn._native",
+    "tn._native.*",
     "opentelemetry.*",
 ]
 ignore_missing_imports = true

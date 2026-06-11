@@ -253,7 +253,7 @@ def test_stdout_fires_on_btn_rust_path(tmp_path, capfd, monkeypatch):
     Skipped if the Rust extension isn't built (single-source SDK works
     via Python; the Rust gap only matters when Rust path is live)."""
     try:
-        import tn_core  # noqa: F401
+        from tn._native import core as tn_core  # noqa: F401
     except ImportError:
         pytest.skip("tn_core extension not built; this test exercises the Rust path")
 

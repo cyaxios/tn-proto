@@ -30,7 +30,7 @@ from pathlib import Path
 os.environ["TN_PERF_TRACE"] = "1"  # must be set before Runtime.init
 
 import tn  # noqa: E402
-from tn_core import _core as core  # noqa: E402
+from tn._native import core as core  # noqa: E402
 
 N = int(os.environ.get("PERF_N", "500"))
 WARMUP = 25

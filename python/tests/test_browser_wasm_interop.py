@@ -110,7 +110,7 @@ def test_python_decrypts_browser_wasm_ciphertext():
     for p in (kit_path, ct_path, pt_path):
         assert p.exists(), f"missing wasm artifact: {p}"
 
-    import tn_btn
+    from tn._native import btn as tn_btn
 
     kit = kit_path.read_bytes()
     ct = ct_path.read_bytes()
@@ -179,7 +179,7 @@ def test_python_can_decrypt_kit_from_browser_built_tnpkg():
     kit_from_pkg = body.get("body/default.btn.mykit")
     assert kit_from_pkg is not None, "kit not present in browser-built tnpkg"
 
-    import tn_btn
+    from tn._native import btn as tn_btn
 
     decrypted = tn_btn.decrypt(kit_from_pkg, ct_path.read_bytes())
     assert decrypted == pt_path.read_bytes()

@@ -45,7 +45,7 @@ def main() -> int:
 
     # tn_btn ships alongside tn-core when the Rust path is built.
     try:
-        import tn_btn
+        from tn._native import btn as tn_btn
     except ImportError:
         print("SKIP: tn_btn extension not built. Run "
               "tools/rebuild_pyo3.sh tn-btn, then retry.")

@@ -53,7 +53,7 @@ from tn import config as _config
 # does the cipher bootstrap. Dev environments without the wheel skip
 # those tests; everything else still runs.
 try:
-    import tn_btn as _tn_btn  # type: ignore[import-not-found]  # noqa: F401
+    from tn._native import btn as _tn_btn  # type: ignore[import-not-found]  # noqa: F401
     _HAS_BTN = True
 except ImportError:
     _HAS_BTN = False
@@ -576,7 +576,7 @@ class TestNonDefaultEmit:
 
     def test_named_ceremony_info_works(self, tmp_path):
         try:
-            import tn_btn  # noqa: F401
+            from tn._native import btn as tn_btn  # noqa: F401
         except ImportError:
             pytest.skip("tn_btn extension not available")
         h = tn.init("payments", project_dir=tmp_path)
@@ -586,7 +586,7 @@ class TestNonDefaultEmit:
     @pytest.mark.parametrize("verb", ["log", "debug", "info", "warning", "error"])
     def test_named_ceremony_each_verb_works(self, tmp_path, verb):
         try:
-            import tn_btn  # noqa: F401
+            from tn._native import btn as tn_btn  # noqa: F401
         except ImportError:
             pytest.skip("tn_btn extension not available")
         h = tn.init("payments", project_dir=tmp_path)

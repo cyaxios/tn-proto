@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import tn_btn
+from tn._native import btn as tn_btn
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "crypto" / "tn-core" / "tests" / "fixtures" / "btn_vectors.json"
