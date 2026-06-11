@@ -25,13 +25,14 @@ def _clean_tn():
 def _rotation_events(yaml_path):
     """Read tn.rotation.completed envelopes from the dedicated admin log.
 
-    Post-2026-04-24 admin events route to ``<yaml_dir>/.tn/admin/admin.ndjson``
-    by default rather than the main log. This helper reads that file
-    directly and returns the matching raw envelope dicts.
+    Admin events route to the dedicated per-stream admin log
+    (``.tn/tn/admin/default.ndjson`` for an explicit-yaml mint) rather
+    than the main log. This helper reads that file directly and returns
+    the matching raw envelope dicts.
     """
     import json as _json
 
-    admin_log = yaml_path.parent / ".tn/tn/admin" / "admin.ndjson"
+    admin_log = yaml_path.parent / ".tn/tn/admin" / "default.ndjson"
     if not admin_log.exists():
         return []
     out = []
@@ -102,7 +103,7 @@ def test_no_legacy_tn_key_rotation_emitted(tmp_path):
     # neither the main log nor the admin log should contain it.
     import json as _json
 
-    admin_log = yaml.parent / ".tn/tn/admin" / "admin.ndjson"
+    admin_log = yaml.parent / ".tn/tn/admin" / "default.ndjson"
     legacy = []
     if admin_log.exists():
         with admin_log.open(encoding="utf-8") as f:
@@ -129,8 +130,8 @@ def test_rotation_completed_catalog_fields_present(tmp_path):
     # btn ceremonies route the catalog fields through the encrypted
     # ``default`` payload; reload the entry through tn.read so the
     # plaintext is decoded into Entry.fields for us. Admin events live
-    # in the dedicated admin log post-2026-04-24.
-    admin_log = yaml.parent / ".tn/tn/admin" / "admin.ndjson"
+    # in the dedicated admin log; tn.read(log="admin") would also work.
+    admin_log = yaml.parent / ".tn/tn/admin" / "default.ndjson"
     entry = next(
         e for e in tn.read(log=admin_log, all_runs=True)
         if e.event_type == "tn.rotation.completed"

@@ -333,8 +333,8 @@ def _create_default_ceremony(
 
     ``keystore_dir_override`` and ``admin_log_path_override`` let
     callers redirect those paths away from the default
-    ``.tn/<name>/keys`` and ``.tn/<name>/admin/admin.ndjson``
-    locations. Useful for shared volumes or encrypted filesystems.
+    ``.tn/<name>/keys`` and ``.tn/<name>/admin/`` locations. Useful
+    for shared volumes or encrypted filesystems.
     """
     ydir = ceremony_dir(name, project_dir=project_dir)
     try:
@@ -355,7 +355,7 @@ def _create_default_ceremony(
     admin_log_resolved = (
         admin_log_path_override
         if admin_log_path_override is not None
-        else ydir / "admin" / "admin.ndjson"
+        else ydir / "admin" / f"{DEFAULT_CEREMONY_NAME}.ndjson"
     )
 
     try:
@@ -483,7 +483,7 @@ def _create_stream_yaml(
         (ydir / sub).mkdir(parents=True, exist_ok=True)
 
     log_path = f"./logs/{name}.ndjson"
-    admin_path = "./admin/admin.ndjson"
+    admin_path = f"./admin/{name}.ndjson"
 
     p = _profiles.get(profile)
 
@@ -1423,10 +1423,11 @@ def init(
         loading.
 
     admin_log_path :
-        Explicit admin log file location at fresh-mint time.
-        Defaults to ``<yaml_dir>/.tn/<stem>/admin/admin.ndjson``.
-        Override when admin events need to ship to a custom location
-        (e.g., a shared audit volume). Ignored when loading.
+        Explicit admin log file location at fresh-mint time. When
+        omitted, init picks the layout default and records it in the
+        yaml as ``ceremony.admin_log_location``. Override when admin
+        events need to ship to a custom location (e.g., a shared
+        audit volume). Ignored when loading.
 
     project :
         Vault project tag. Currently stored as informational metadata

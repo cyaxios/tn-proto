@@ -199,7 +199,7 @@ export function createFromSeed(
   const yamlPath = `${root}/tn.yaml`;
   const keysDir = `${root}/.tn/${stem}/keys`;
   const logRel = `./.tn/${stem}/logs/tn.ndjson`;
-  const adminRel = `./.tn/${stem}/admin/admin.ndjson`;
+  const adminRel = `./.tn/${stem}/admin/default.ndjson`;
   const keystoreRel = `./.tn/${stem}/keys`;
 
   const privatePath = `${keysDir}/local.private`;

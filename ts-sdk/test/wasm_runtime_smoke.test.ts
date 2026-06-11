@@ -349,7 +349,7 @@ test("WasmRuntime: Phase 4 admin verbs round-trip", () => {
 
   // Patch the yaml to route tn.* admin events to the main log. The
   // default NodeRuntime mint uses a dedicated admin log
-  // (`admin_log_location: ./.tn/tn/admin/admin.ndjson`), but
+  // (`admin_log_location: ./.tn/tn/admin/default.ndjson`), but
   // `Runtime::recipients()` / `Runtime::admin_state()` both replay only
   // the main log via `read_raw()` — admin events on a separate file are
   // invisible to those replay paths today. The native admin-replay

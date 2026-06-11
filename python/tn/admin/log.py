@@ -3,12 +3,13 @@
 Per the 2026-04-24 admin log architecture plan, admin events
 (``tn.ceremony.*``, ``tn.group.*``, ``tn.recipient.*``,
 ``tn.rotation.*``, ``tn.coupon.*``, ``tn.enrolment.*``, ``tn.vault.*``)
-are routed to ``<yaml_dir>/.tn/admin/admin.ndjson`` by default rather
-than mixed into the main log.
+are routed to the ceremony's admin log (``cfg.admin_log_location``,
+written into the yaml at init) rather than mixed into the main log.
+The read surface is ``tn.read(log="admin")``.
 
 This module owns:
 
-* the default-path resolution (``resolve_admin_log_path``)
+* the path resolution (``resolve_admin_log_path``)
 * the "is this an admin event" predicate (``is_admin_event_type``)
 * a small append helper (``append_admin_envelope``)
 * idempotent dedupe by ``row_hash``
@@ -16,8 +17,7 @@ This module owns:
 The actual emit-side write happens in ``tn.logger`` — when
 ``cfg.protocol_events_location != "main_log"`` it routes admin events
 through ``cfg.resolve_protocol_events_path``. This module's
-``resolve_admin_log_path`` returns the same answer for the new default
-``./.tn/admin/admin.ndjson`` path.
+``resolve_admin_log_path`` returns the same answer.
 """
 
 from __future__ import annotations
@@ -66,8 +66,9 @@ def resolve_admin_log_path(cfg: LoadedConfig) -> Path:
 
     If the yaml's ``protocol_events_location`` (or the new
     ``admin_log_location``) is set to a single-file path (no template
-    tokens) we honor that. Otherwise we use the new default
-    ``<yaml_dir>/.tn/admin/admin.ndjson``.
+    tokens) we honor that — this is the normal case; ``tn init`` always
+    writes the field. Yamls that omit it fall back to the legacy
+    ``DEFAULT_ADMIN_LOG_LOCATION``.
 
     The dedicated `.tn/admin/` directory is created lazily by callers
     on first emit; this function does not create directories.

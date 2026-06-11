@@ -45,6 +45,23 @@ def fresh_runtime():
     tn.flush_and_close()
 
 
+def test_fresh_mint_admin_log_is_per_stream(tmp_path):
+    """An explicit-yaml mint records the per-stream admin filename
+    (``admin/default.ndjson``), matching the project layout's naming.
+    The early-era ``admin.ndjson`` filename must not be minted anywhere;
+    the read surface is ``tn.read(log="admin")`` either way.
+    """
+    yaml_path = tmp_path / "tn.yaml"
+    tn.init(yaml_path, cipher="btn")
+    cfg = tn.current_config()
+    assert cfg.admin_log_location == "./.tn/tn/admin/default.ndjson"
+    types = [e.event_type for e in tn.read(log="admin")]
+    assert "tn.ceremony.init" in types, types
+    tn.flush_and_close()
+    assert (tmp_path / ".tn/tn/admin/default.ndjson").exists()
+    assert not (tmp_path / ".tn/tn/admin/admin.ndjson").exists()
+
+
 def _make_admin_log(yaml_dir: Path) -> Path:
     """Create a btn ceremony with a non-empty admin log and return the
     yaml path. Adds two recipients so we have ``tn.recipient.added``
@@ -210,7 +227,7 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
     cfg = load_or_create(yaml_path)
 
     # The Rust runtime currently writes admin events to the main log,
-    # not the dedicated `.tn/tn/admin/admin.ndjson`. Read whichever exists
+    # not the dedicated per-stream admin log. Read whichever exists
     # so the test works regardless of which path is in use.
     candidate_paths = [resolve_admin_log_path(cfg), cfg.resolve_log_path()]
     source_log = next((p for p in candidate_paths if p.exists() and p.stat().st_size > 0), None)

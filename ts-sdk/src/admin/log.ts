@@ -1,7 +1,9 @@
 // Dedicated admin log routing.
 //
-// Mirrors python/tn/admin_log.py — the prefix predicate + default path
-// resolution + dedupe / append helpers for `<yamlDir>/.tn/admin/admin.ndjson`.
+// Mirrors python/tn/admin/log.py — the prefix predicate + path resolution
+// + dedupe / append helpers for the ceremony's admin log. The yaml's
+// `ceremony.admin_log_location` (mapped to cfg.protocolEventsLocation at
+// load) names the file; never hardcode an admin-log filename.
 
 import {
   appendFileSync,
@@ -40,8 +42,10 @@ export function isAdminEventType(eventType: unknown): boolean {
 }
 
 /** Resolve the absolute admin log path for `cfg`. Mirrors Python's
- * `resolve_admin_log_path`: respects a single-file `protocol_events_location`
- * override, else falls back to `<yamlDir>/.tn/admin/admin.ndjson`. */
+ * `resolve_admin_log_path`: honors the yaml-declared admin log address
+ * (`ceremony.admin_log_location`, mapped to cfg.protocolEventsLocation at
+ * config load) — the normal case, since init always writes it. Yamls that
+ * omit the field fall back to the legacy `DEFAULT_ADMIN_LOG_LOCATION`. */
 export function resolveAdminLogPath(cfg: CeremonyConfig): string {
   const yamlDir = cfg.yamlDir;
   const pel = cfg.protocolEventsLocation;

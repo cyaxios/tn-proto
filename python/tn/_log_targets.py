@@ -115,7 +115,7 @@ def resolve_log_target(target: Any, cfg: Any) -> list[Path]:
     #      other Python file-API).
     #    * Relative path that doesn't exist under CWD but DOES under
     #      yaml_dir: use the yaml_dir form (so config-supplied paths
-    #      like ``cfg.admin_log_location == "./admin/admin.ndjson"``
+    #      like ``cfg.admin_log_location == "./admin/default.ndjson"``
     #      keep working when fed back to ``tn.read(log=...)``).
     #    * Neither exists: return the CWD form so the downstream
     #      ``FileNotFoundError`` points the operator at the path

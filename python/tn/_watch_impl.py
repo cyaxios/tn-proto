@@ -9,9 +9,9 @@ tamper-class admin event (``tn.watch.truncation_observed``).
 By default ``tn.watch`` tails **only the main user log**. Admin events
 (``tn.*``) live in a separate log and must be addressed explicitly:
 
-    tn.watch(log="admin")                       # sugar
-    tn.watch(log=cfg.admin_log_location)        # explicit
-    tn.watch(log="./.tn/admin/admin.ndjson")    # literal path
+    tn.watch(log="admin")                       # sugar (use this)
+    tn.watch(log=cfg.admin_log_location)        # explicit config address
+    tn.watch(log="./logs/payments.ndjson")      # literal path to any log
 
 This is intentionally symmetric with ``tn.read`` — the two verbs share
 the resolver in ``tn._log_targets`` so any addressing form works
@@ -62,9 +62,8 @@ def _resolve_watch_sources(
     default watch surface was a regression-period workaround. Callers
     that actually want to see admin events in their tail say so:
 
-        tn.watch(log="admin")                       # sugar
-        tn.watch(log=cfg.admin_log_location)        # explicit
-        tn.watch(log="./.tn/admin/admin.ndjson")    # literal path
+        tn.watch(log="admin")                       # sugar (use this)
+        tn.watch(log=cfg.admin_log_location)        # explicit config address
     """
     if log_path is None:
         return [cfg.resolve_log_path()]

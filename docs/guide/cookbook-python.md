@@ -840,3 +840,26 @@ PYTHONPATH=python python -m tn.cli vault unlink \
 ```
 
 **Code equivalent:** `tn.vault.unlink(...)`.
+
+#### Reading vault events back
+
+Vault link state lives in the admin log. Read it with `tn.read(log="admin")`;
+the alias resolves the ceremony's configured admin-log path, so it works in
+every layout. Do not hardcode an admin-log filename.
+
+```python
+import tn
+
+tn.init("demo")
+tn.vault.link("did:web:vault.example.org", "proj_demo123")
+tn.vault.unlink("did:web:vault.example.org", "proj_demo123")
+
+for entry in tn.read(log="admin"):
+    if entry.event_type.startswith("tn.vault."):
+        print(entry.event_type, entry.fields.get("vault_identity"), entry.fields.get("project_id"))
+```
+
+```text
+tn.vault.linked did:web:vault.example.org proj_demo123
+tn.vault.unlinked did:web:vault.example.org proj_demo123
+```

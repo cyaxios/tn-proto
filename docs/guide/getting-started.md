@@ -359,13 +359,14 @@ files.
 | `keys/index_master.key` | Master key. Per-group search-index keys derive from it. |
 | `keys/<group>.btn.state` | Publisher state for a group: the secret used to mint kits and encrypt that group. |
 | `keys/<group>.btn.mykit` | Your own reader kit for a group, so you can read what you wrote. |
-| `logs/tn.ndjson` | The main data log. Your non-`tn.` events land here; this is what `tn.read()` returns. |
-| `admin/admin.ndjson` | The admin log. Protocol events (`tn.ceremony.init`, `tn.recipient.added`, `tn.rotation.completed`, ...) land here. |
+| `logs/<stream>.ndjson` | The main data log for a stream (`logs/default.ndjson` unless you named one with `tn.use`). Your events land here; this is what `tn.read()` returns. |
+| `admin/<stream>.ndjson` | The admin log. Protocol events (`tn.ceremony.init`, `tn.recipient.added`, `tn.rotation.completed`, ...) land here. Read it with `tn.read(log="admin")`; the exact filename is recorded in the yaml, so never hardcode it. |
+| `streams/<stream>.yaml` | Per-stream overlay config, minted by `tn.use(stream)`. |
 | `vault/` | Sync state, used only when the project is linked to a vault. |
 
 Event types that start with `tn.` are reserved protocol events and route to
-the admin log. Use any other name for your own events, or they will be
-written to the admin log instead of the main log.
+the admin log; name your own events anything else and they land in the main
+log.
 
 ## See also
 

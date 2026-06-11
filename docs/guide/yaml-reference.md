@@ -26,14 +26,14 @@ ceremony:
   sync_logs: false               # also sync ndjson logs to the vault
   cipher: btn                    # btn | jwe  (ceremony-wide cipher)
   sign: true                     # Ed25519-sign every row_hash
-  admin_log_location: ./admin/admin.ndjson   # where tn.* admin events land
+  admin_log_location: ./admin/default.ndjson # where tn.* admin events land; read with tn.read(log="admin")
   log_level: debug               # debug | info | warning | error
   profile: transaction           # evidence profile (see profiles.md)
   chain: true                    # maintain per-event_type hash chain
   project_name: demoproj         # human label; sent as X-Project-Name on vault push
 
 logs:
-  path: ./logs/tn.ndjson         # main user-log ndjson destination
+  path: ./logs/default.ndjson    # main user-log ndjson destination (per stream)
 
 keystore:
   path: ./keys                   # directory holding local.private, *.btn.state, etc.
@@ -44,7 +44,7 @@ device:
 handlers:                        # output sinks; replaces the implicit default sink
 - kind: file.rotating
   name: main
-  path: ./logs/tn.ndjson
+  path: ./logs/default.ndjson
   max_bytes: 5242880
   backup_count: 5
   rotate_on_init: false
@@ -145,7 +145,7 @@ any is missing.
 | `ceremony.sync_logs` | bool | no | `false` | Whether wallet-linked ceremonies also sync ndjson logs. |
 | `ceremony.sign` | bool | no | `true` | Sign each row's `row_hash` with the device Ed25519 key. `false` = chain-only (still `prev_hash`/`row_hash` tamper-evidence, no identity attestation). |
 | `ceremony.chain` | bool | no | `true` | Maintain a per-`event_type` hash chain (sequence + prev_hash + cross-process tip refresh). `false` emits `sequence: 1`, `prev_hash: ""`, and skips the per-emit advisory lock. |
-| `ceremony.admin_log_location` | string | no | `./.tn/admin/admin.ndjson` | Where `tn.*` admin envelopes are written. Literal `main_log` folds them into the main log. Otherwise a path template (see [path templates](#path-templates)). |
+| `ceremony.admin_log_location` | string | no | written by `tn init` | Where `tn.*` admin envelopes are written. `tn init` records an explicit per-stream path (`./admin/<stream>.ndjson` in the project layout); a hand-written yaml that omits the field falls back to the legacy `./.tn/admin/admin.ndjson`. Literal `main_log` folds them into the main log. Otherwise a path template (see [path templates](#path-templates)). Read the admin log with `tn.read(log="admin")` rather than hardcoding any filename. |
 | `ceremony.log_level` | string | no | `debug` | Active log-level threshold: `debug` / `info` / `warning` / `error`. |
 | `ceremony.project_name` | string | no | `null` | Operator-chosen human label. Sent as the `X-Project-Name` header on vault push so the vault shows a name instead of the random `ceremony_id`. |
 | `ceremony.version_name` | string | no | `null` | Per-instance nickname inside the project (e.g. `laptop-dev`, `ci`, `prod`). Falls back to `project_name` when unset. |
@@ -167,7 +167,7 @@ any is missing.
 
 | path | type | required | default | description |
 |------|------|----------|---------|-------------|
-| `logs.path` | string | no | `./.tn/logs/tn.ndjson` | Main user-log ndjson destination. Single path. May contain path-template tokens (validated to resolve under the ceremony directory). For event-type splitting use `handlers:` or `admin_log_location`. |
+| `logs.path` | string | no | written by `tn init` | Main user-log ndjson destination. `tn init` records an explicit per-stream path (`./logs/<stream>.ndjson` in the project layout). Single path. May contain path-template tokens (validated to resolve under the ceremony directory). For event-type splitting use `handlers:` or `admin_log_location`. |
 
 ### public_fields
 

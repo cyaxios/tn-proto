@@ -47,7 +47,7 @@ _EXPECTATIONS: list[tuple[str, list[str]]] = [
             # 0.4.0a1: per-row sig/chain/row_hash flags are gone; ex02
             # uses tn.read(verify=True) for an integrity sweep instead.
             # Row count matches the user emits (the multi-ceremony layout
-            # writes admin events to a separate admin.ndjson, not the main log).
+            # writes admin events to a separate per-stream admin log, not the main log).
             "all 4 rows pass: signature, row_hash, chain",
             "verify   = True",
         ],

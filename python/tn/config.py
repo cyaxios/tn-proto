@@ -315,10 +315,13 @@ class LoadedConfig:
     # ``admin_log_location``; ``protocol_events_location`` is kept as a
     # read-only property (below) for callers that haven't migrated yet.
     #
-    # Default: ``./.tn/admin/admin.ndjson`` — every admin event lands in a
-    # single dedicated file under the yaml directory. Override paths can
-    # still be a path template (with ``{event_type}``, etc.) or the legacy
-    # literal ``"main_log"`` to fold admin events back into the main log.
+    # ``tn init`` always writes an explicit value into the yaml (per-stream
+    # in the project layout), so this dataclass default only fires for
+    # hand-written yamls that omit the field. Values can also be a path
+    # template (with ``{event_type}``, etc.) or the legacy literal
+    # ``"main_log"`` to fold admin events back into the main log. Readers
+    # should address the file via ``tn.read(log="admin")``, never a
+    # hardcoded filename.
     admin_log_location: str = "./.tn/admin/admin.ndjson"
     # Main log path. Relative paths resolve against yaml_path.parent.
     # Default matches historical implicit behavior.
@@ -330,8 +333,8 @@ class LoadedConfig:
 
         Pre-2026-04-24 the field was named ``protocol_events_location`` and
         defaulted to ``"main_log"``. The default flipped to a dedicated
-        ``./.tn/admin/admin.ndjson`` file as part of the admin-log
-        architecture work; new code should read ``admin_log_location``.
+        admin log file as part of the admin-log architecture work; new
+        code should read ``admin_log_location``.
         This property is kept so downstream callers (reader.py, logger.py,
         admin_log.py, the various test fixtures) keep working without a
         coordinated rename.
@@ -580,7 +583,7 @@ def create_fresh(
         except ValueError:
             _admin_log_default = str(_admin_log_resolved)
     else:
-        _admin_log_default = f"./.tn/{yaml_stem}/admin/admin.ndjson"
+        _admin_log_default = f"./.tn/{yaml_stem}/admin/default.ndjson"
     if keystore_dir is not None:
         try:
             _keystore_path_str = "./" + str(
@@ -1427,10 +1430,12 @@ def _resolve_admin_log_location(yaml_path: Path, ceremony_block: dict[str, Any])
 
     Precedence (per 2026-04-24-tn-admin-log-architecture.md §1.2):
 
-    1. ``ceremony.admin_log_location`` — canonical key.
+    1. ``ceremony.admin_log_location`` — canonical key. ``tn init``
+       always writes it, so this is the normal case.
     2. ``ceremony.protocol_events_location`` — legacy alias; emits a
        ``DeprecationWarning`` and will be dropped next release.
-    3. Default: ``./.tn/admin/admin.ndjson`` under the yaml dir.
+    3. Legacy fallback for hand-written yamls that omit both:
+       ``./.tn/admin/admin.ndjson`` under the yaml dir.
 
     The literal ``"main_log"`` is preserved as an escape hatch that
     folds admin events back into the main log. Anything else is

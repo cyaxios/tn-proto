@@ -107,7 +107,7 @@ def test_slice1_scan_covers_main_and_pel() -> None:
 
         # Step 2: override admin_log_location with a {event_type} template
         # so tn.* events route to per-event files. The default yaml minted
-        # by step 1 already sets ``admin_log_location: ./admin/admin.ndjson``,
+        # by step 1 already sets ``admin_log_location`` (per-stream filename),
         # so we replace that line in place rather than inject a duplicate
         # (which Rust's serde rejects).
         import re as _re

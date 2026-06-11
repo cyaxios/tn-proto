@@ -66,14 +66,15 @@ def _absorbed_events_from_admin_log(yaml_path: Path) -> list[dict]:
     """Read `tn.enrolment.absorbed` envelopes from a ceremony's admin log.
 
     Admin events route to the stem-namespaced dedicated admin log
-    (``ceremony.admin_log_location``, default ``./.tn/<stem>/admin/admin.ndjson``),
-    NOT the main ndjson log. Mirrors ``test_enrolment_events`` but resolves
+    (``ceremony.admin_log_location``, which every mint writes explicitly;
+    ``./.tn/<stem>/admin/default.ndjson`` for an explicit-yaml mint), NOT
+    the main ndjson log. Mirrors ``test_enrolment_events`` but resolves
     the location from the recipient yaml so it works for any stem.
     """
     doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
     loc = (doc.get("ceremony") or {}).get("admin_log_location")
     if not loc or loc == "main_log":
-        loc = f"./.tn/{yaml_path.stem}/admin/admin.ndjson"
+        loc = f"./.tn/{yaml_path.stem}/admin/default.ndjson"
     admin_log = Path(loc)
     if not admin_log.is_absolute():
         admin_log = (yaml_path.parent / admin_log).resolve()

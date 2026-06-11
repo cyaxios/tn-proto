@@ -30,7 +30,7 @@ def test_ensure_group_emits_tn_group_added(tmp_path):
     tn.flush_and_close()
 
     tn.init(yaml)
-    # Post-2026-04-24 admin events route to `.tn/tn/admin/admin.ndjson` by
+    # Post-2026-04-24 admin events route to `.tn/tn/admin/default.ndjson` by
     # default. Use the reducer-derived state, which scans both files.
     state = tn.admin.state()
     pii_groups = [g for g in state["groups"] if g["group"] == "pii"]
@@ -62,7 +62,7 @@ def test_ensure_group_idempotent_no_duplicate_emit(tmp_path):
     # publisher) events into a single record so we count raw lines instead.
     import json as _json
 
-    admin_log = yaml.parent / ".tn/tn/admin" / "admin.ndjson"
+    admin_log = yaml.parent / ".tn/tn/admin" / "default.ndjson"
     added = []
     if admin_log.exists():
         with admin_log.open(encoding="utf-8") as f:

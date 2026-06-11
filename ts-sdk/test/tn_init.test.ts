@@ -1,6 +1,37 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Tn } from "../src/tn.js";
+
+test("fresh mint records the per-stream admin filename (parity with Python)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ts-mint-admin-"));
+  const yamlPath = join(dir, "tn.yaml");
+  try {
+    const tn = await Tn.init(yamlPath);
+    // An admin event so the admin log materializes on disk (a bare TS
+    // init does not write one, unlike Python's tn.ceremony.init row).
+    await tn.vault.link("did:web:vault.example.org", "proj_x");
+    await tn.close();
+    const yaml = readFileSync(yamlPath, "utf8");
+    assert.match(
+      yaml,
+      /admin_log_location: \.\/\.tn\/tn\/admin\/default\.ndjson/,
+      `minted yaml should use the per-stream admin filename; got:\n${yaml}`,
+    );
+    assert.ok(
+      existsSync(join(dir, ".tn", "tn", "admin", "default.ndjson")),
+      "admin events should land in admin/default.ndjson",
+    );
+    assert.ok(
+      !existsSync(join(dir, ".tn", "tn", "admin", "admin.ndjson")),
+      "the early-era admin.ndjson filename must not be minted",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("Tn.ephemeral returns a working instance", async () => {
   const tn = await Tn.ephemeral({ stdout: false });

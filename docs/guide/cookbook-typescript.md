@@ -341,6 +341,32 @@ node bin/tn-js.mjs vault unlink did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAn
 {"ok":true,"verb":"vault.unlink","event_id":"019ea7da-459f-7b63-8ca6-8a173ed10833","row_hash":"sha256:dd9a62ef1bf3bbee4f0b1ed5d80ed12ae480781bc8485f537292e27d66df4152","vault_did":"did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH","project_id":"proj_demo"}
 ```
 
+#### Reading vault events back
+
+Vault link state lives in the admin log, and `tn.read()` includes admin
+events by default, so no extra option is needed. Do not hardcode an
+admin-log filename; the path is recorded in the yaml.
+
+```typescript
+import { Tn } from "tn-proto";
+
+const tn = await Tn.init("./tn.yaml");
+await tn.vault.link("did:web:vault.example.org", "proj_demo123");
+await tn.vault.unlink("did:web:vault.example.org", "proj_demo123");
+
+for (const entry of tn.read()) {
+  if (entry.event_type.startsWith("tn.vault.")) {
+    console.log(entry.event_type, entry.fields.vault_identity, entry.fields.project_id);
+  }
+}
+await tn.close();
+```
+
+```text
+tn.vault.linked did:web:vault.example.org proj_demo123
+tn.vault.unlinked did:web:vault.example.org proj_demo123
+```
+
 ### show env
 
 ```text

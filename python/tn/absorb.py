@@ -4,8 +4,8 @@ This is the unified consumer side. It accepts the universal `.tnpkg`
 wrapper (zip with signed manifest + body) and dispatches on
 ``manifest.kind``::
 
-    admin_log_snapshot   -> append envelopes to <yaml_dir>/.tn/admin/admin.ndjson
-                            (idempotent dedupe by row_hash)
+    admin_log_snapshot   -> append envelopes to the ceremony's admin log
+                            (cfg.admin_log_location; idempotent dedupe by row_hash)
     offer                -> pending_offers/<signer_did>.json (legacy behavior)
     enrolment            -> wire publisher pub into local yaml + jwe state
     kit_bundle           -> install kit files into <keystore>/
@@ -281,7 +281,7 @@ def _try_bootstrap_cfg(source: Path | str | bytes | bytearray) -> LoadedConfig |
     # to the create_fresh-style ``./.tn/tn/keys``).
     keystore_rel = "./.tn/tn/keys"
     log_rel = "./.tn/tn/logs/tn.ndjson"
-    admin_rel = "./.tn/tn/admin/admin.ndjson"
+    admin_rel = "./.tn/tn/admin/default.ndjson"
 
     yaml_blob = body.get("body/tn.yaml")
     if yaml_blob is not None:
@@ -1870,7 +1870,7 @@ def _user_event_count(cfg: LoadedConfig) -> int:
     than refusing because ``local.private`` exists.
 
     Reads cfg.resolve_log_path() — the main log file. Admin (``tn.*``)
-    events live in a separate ``./.tn/admin/admin.ndjson`` by default,
+    events live in a separate admin log (``cfg.admin_log_location``),
     so the main log already excludes them; the explicit
     ``startswith("tn.")`` filter is belt-and-braces for the legacy
     ``protocol_events_location: main_log`` ceremony shape.

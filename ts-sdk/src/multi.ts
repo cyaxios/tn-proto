@@ -411,7 +411,7 @@ function _createDefaultCeremony(
     } = {
       keystoreDir: join(ydir, "keys"),
       logPath: join(ydir, "logs", "tn.ndjson"),
-      adminLogPath: join(ydir, "admin", "admin.ndjson"),
+      adminLogPath: join(ydir, "admin", `${DEFAULT_CEREMONY_NAME}.ndjson`),
       profile,
     };
     if (projectName !== undefined) freshOpts.projectName = projectName;
@@ -455,7 +455,7 @@ function _createStreamYaml(
   }
 
   const logPath = `./logs/${name}.ndjson`;
-  const adminPath = `./admin/admin.ndjson`;
+  const adminPath = `./admin/${name}.ndjson`;
   const cid = _mintStreamCeremonyId(name);
   const p = getProfile(profile);
 

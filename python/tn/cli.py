@@ -2107,7 +2107,7 @@ _ENV_SCHEMA: tuple[dict[str, Any], ...] = (
         "category": "logging",
         "purpose": "Override admin.log path (admin / state ndjson).",
         "read_today": None,
-        "default": "./.tn/admin/admin.ndjson",
+        "default": "./.tn/<stem>/admin/default.ndjson",
         "secret": False,
         "precedence": "env > yaml > default",
         "yaml_field": "admin_log_location",

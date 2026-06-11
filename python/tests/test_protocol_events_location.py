@@ -73,7 +73,7 @@ def _set_pel(yaml_path: Path, pel: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: absent key → dedicated `.tn/tn/admin/admin.ndjson` (new default,
+# Test 1: absent key → dedicated `.tn/tn/admin/default.ndjson` (mint default,
 # 2026-04-24). Admin events do NOT land in the main log; they land in the
 # dedicated file under the yaml directory.
 # ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ def test_default_is_admin_log(tmp_path):
     main_rot = [e for e in main_entries if e.event_type == "tn.rotation.completed"]
     assert len(main_rot) == 0, "rotation.completed leaked into main log"
     # Admin log: rotation event lives there.
-    admin_log = tmp_path / ".tn/tn/admin" / "admin.ndjson"
+    admin_log = tmp_path / ".tn/tn/admin" / "default.ndjson"
     assert admin_log.exists(), f"expected admin log at {admin_log}"
     admin_entries = list(tn.read(log=admin_log))
     rotation_entries = [e for e in admin_entries if e.event_type == "tn.rotation.completed"]
@@ -346,7 +346,7 @@ def test_mid_stream_switch(tmp_path):
 
 def test_fresh_ceremony_writes_recipient_added_to_admin_log_not_main(tmp_path):
     """A fresh ceremony with no PEL override must route ``tn.recipient.added``
-    to ``<yaml_dir>/.tn/admin/admin.ndjson``, not the main log."""
+    to the dedicated per-stream admin log, not the main log."""
     _init_jwe(tmp_path)  # no PEL key — exercises the new default
     # Add a recipient so the runtime emits tn.recipient.added.
     recipient_pub = _fresh_x25519_pub()
@@ -357,7 +357,7 @@ def test_fresh_ceremony_writes_recipient_added_to_admin_log_not_main(tmp_path):
     )
     tn.flush_and_close()
 
-    admin_log = tmp_path / ".tn/tn/admin" / "admin.ndjson"
+    admin_log = tmp_path / ".tn/tn/admin" / "default.ndjson"
     main_log = tmp_path / ".tn/logs" / "tn.ndjson"
 
     assert admin_log.exists(), (
@@ -425,7 +425,7 @@ def test_legacy_main_log_yaml_still_routes_admin_to_main(tmp_path, recwarn):
     tn.flush_and_close()
 
     main_log = tmp_path / ".tn/tn/logs" / "tn.ndjson"
-    admin_log = tmp_path / ".tn/tn/admin" / "admin.ndjson"
+    admin_log = tmp_path / ".tn/tn/admin" / "default.ndjson"
 
     assert main_log.exists(), "main log must exist when admin events route to it"
     import json as _json

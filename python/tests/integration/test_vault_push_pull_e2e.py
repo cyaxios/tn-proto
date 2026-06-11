@@ -10,7 +10,7 @@ the full vertical:
        stores the snapshot in the per-recipient inbox.
     4. Frank's ``vault.pull`` handler lists his incoming, downloads the
        blob, and calls ``tn.pkg.absorb()`` which appends Alice's envelopes
-       into Frank's local ``.tn/tn/admin/admin.ndjson``.
+       into Frank's local admin log (``.tn/tn/admin/default.ndjson``).
     5. Frank calls ``tn.secure_read()`` over the absorbed admin log and
        sees Alice's events. Signatures verify. With Alice's
        ``tn.agents`` kit installed, Frank also sees the ``instructions``
@@ -435,8 +435,9 @@ def _read_local_priv(keystore: Path) -> bytes:
 def _force_admin_log_yaml(yaml_path: Path) -> None:
     """Pin admin events to ``./.tn/admin/admin.ndjson``.
 
-    A fresh-write yaml from ``tn.init`` doesn't inline the
-    ``admin_log_location`` key (the loader infers the default), but the
+    A fresh-write yaml from ``tn.init`` inlines a per-stream
+    ``admin_log_location``; this test pins a single fixed path so both
+    parties' helpers can address it uniformly. Additionally, the
     Rust runtime today writes admin events to the main log unless the
     yaml explicitly opts in. Replicates the helper used by
     test_vault_push_handler / test_vault_pull_handler.
@@ -656,7 +657,7 @@ def test_alice_to_frank_round_trip(tmp_path: Path, _shared_loop) -> None:
     _install_alice_kits_into_franks_keystore(alice["kits_dir"], frank["keystore"])
 
     # Re-bind to Frank's runtime so his ceremony is the active one and
-    # absorb writes to HIS .tn/tn/admin/admin.ndjson.
+    # absorb writes to HIS admin log (.tn/tn/admin/default.ndjson).
     tn.flush_and_close()
     tn.init(frank["yaml"], cipher="btn")
     frank_cfg = tn.current_config()

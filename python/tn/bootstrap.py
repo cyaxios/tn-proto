@@ -351,7 +351,7 @@ def bootstrap_from_api_key(
             groups={},
             field_to_groups={},
             handler_specs=None,
-            admin_log_location="./.tn/tn/admin/admin.ndjson",
+            admin_log_location="./.tn/tn/admin/default.ndjson",
             log_path="./.tn/tn/logs/tn.ndjson",
         )
 

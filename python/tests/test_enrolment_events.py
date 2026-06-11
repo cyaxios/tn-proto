@@ -31,14 +31,15 @@ def _clean_tn():
 def _enrolments_from_admin_log(yaml_path, *, event_type="tn.enrolment.compiled"):
     """Load raw enrolment envelopes from the dedicated admin log.
 
-    Post-2026-04-24 admin events route to ``<yaml_dir>/.tn/admin/admin.ndjson``
-    by default. ``tn.admin.state()['enrolments']`` is the higher-level
-    reducer view, but tests that inspect raw event envelopes (e.g. to
-    verify catalog field presence) read the file directly.
+    Admin events route to the dedicated per-stream admin log
+    (``.tn/tn/admin/default.ndjson`` for an explicit-yaml mint).
+    ``tn.admin.state()['enrolments']`` is the higher-level reducer view,
+    but tests that inspect raw event envelopes (e.g. to verify catalog
+    field presence) read the file directly.
     """
     import json as _json
 
-    admin_log = yaml_path.parent / ".tn/tn/admin" / "admin.ndjson"
+    admin_log = yaml_path.parent / ".tn/tn/admin" / "default.ndjson"
     if not admin_log.exists():
         return []
     out = []
@@ -184,7 +185,7 @@ def test_absorb_emits_event(tmp_path):
     tn.flush_and_close()
 
     # Read Bob's admin log directly and look for tn.enrolment.absorbed.
-    # (Post-2026-04-24, admin events route to .tn/tn/admin/admin.ndjson by
+    # (Post-2026-04-24, admin events route to .tn/tn/admin/default.ndjson by
     # default rather than the main log.)
     tn.init(str(bob_cfg.yaml_path))
     events = _enrolments_from_admin_log(
