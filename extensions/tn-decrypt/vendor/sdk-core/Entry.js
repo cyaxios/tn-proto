@@ -70,6 +70,66 @@ function _coerceTimestamp(v) {
         return new Date(v);
     return new Date(NaN);
 }
+// ---- Entry.fromRaw helpers ----------------------------------------------
+// Merge each group's decrypted plaintext into a flat field map, in
+// alphabetical group order (last-write-wins). A group flagged $decrypt_error
+// is recorded as hidden; a $no_read_key group is skipped here (the envelope
+// scan surfaces it as hidden via its ciphertext block).
+function _mergeGroupPlaintexts(plaintext) {
+    const fields = {};
+    const hidden = [];
+    for (const gname of Object.keys(plaintext).sort()) {
+        const body = plaintext[gname];
+        if (body === null || typeof body !== "object" || Array.isArray(body))
+            continue;
+        const b = body;
+        if (b["$decrypt_error"] === true) {
+            hidden.push(gname);
+            continue;
+        }
+        if (b["$no_read_key"] === true)
+            continue;
+        for (const [k, v] of Object.entries(b))
+            fields[k] = v;
+    }
+    return { fields, hidden };
+}
+// Scan the public envelope: non-basic keys that are group ciphertext blocks we
+// couldn't decrypt are pushed to `hidden`; other extras merge into `fields`.
+// Mutates `fields` and `hidden` in place.
+function _scanEnvelopeExtras(env, plaintext, fields, hidden) {
+    for (const [k, v] of Object.entries(env)) {
+        if (ENVELOPE_BASICS.has(k))
+            continue;
+        if (v !== null &&
+            typeof v === "object" &&
+            !Array.isArray(v) &&
+            "ciphertext" in v) {
+            // Group block. Surface as hidden if we couldn't decrypt it.
+            const pt = plaintext[k];
+            const hadKey = pt !== undefined &&
+                (typeof pt !== "object" ||
+                    pt === null ||
+                    !(pt["$no_read_key"] === true));
+            if (!hadKey)
+                hidden.push(k);
+            continue;
+        }
+        // Non-group public envelope extra (e.g. handler-injected).
+        fields[k] = v;
+    }
+}
+// Hoist a plaintext-payload slot (run_id / message) out of `fields` into a
+// typed envelope value, falling back to the envelope's own value. Mutates
+// `fields` (deletes the hoisted key). `coerce` maps the raw value to the slot.
+function _hoistSlot(fields, env, key, coerce) {
+    if (key in fields) {
+        const v = fields[key];
+        delete fields[key];
+        return coerce(v);
+    }
+    return coerce(env[key]);
+}
 function _formatHHMMSSmmm(ts) {
     // Python: timestamp.astimezone(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
     // Format as UTC with millisecond precision.
@@ -153,70 +213,14 @@ export class Entry {
     static fromRaw(raw) {
         const env = raw.envelope;
         const plaintext = (raw.plaintext ?? {});
-        const fields = {};
-        const hidden = [];
-        // Merge group plaintexts in alphabetical order (last-write-wins).
-        const groupNames = Object.keys(plaintext).sort();
-        for (const gname of groupNames) {
-            const body = plaintext[gname];
-            if (body === null || typeof body !== "object" || Array.isArray(body))
-                continue;
-            const b = body;
-            if (b["$decrypt_error"] === true) {
-                hidden.push(gname);
-                continue;
-            }
-            if (b["$no_read_key"] === true) {
-                // Caller has no kit for this group — surface via hidden_groups
-                // (skipped here; will be picked up by envelope scan below).
-                continue;
-            }
-            for (const [k, v] of Object.entries(b)) {
-                fields[k] = v;
-            }
-        }
-        // Public envelope extras + group ciphertext bookkeeping for hidden_groups.
-        for (const [k, v] of Object.entries(env)) {
-            if (ENVELOPE_BASICS.has(k))
-                continue;
-            if (v !== null &&
-                typeof v === "object" &&
-                !Array.isArray(v) &&
-                "ciphertext" in v) {
-                // Group block. Surface as hidden if we couldn't decrypt it.
-                const pt = plaintext[k];
-                const hadKey = pt !== undefined &&
-                    (typeof pt !== "object" ||
-                        pt === null ||
-                        !(pt["$no_read_key"] === true));
-                if (!hadKey)
-                    hidden.push(k);
-                continue;
-            }
-            // Non-group public envelope extra (e.g. handler-injected).
-            fields[k] = v;
-        }
-        // run_id and message are plaintext-payload but hoisted to typed
-        // envelope slots so callers use `e.run_id` / `e.message` rather
-        // than reaching into `e.fields`.
-        let runId;
-        if ("run_id" in fields) {
-            runId = String(fields["run_id"] ?? "");
-            delete fields["run_id"];
-        }
-        else {
-            runId = String(env["run_id"] ?? "");
-        }
-        let message;
-        if ("message" in fields) {
-            const v = fields["message"];
-            message = v === null || v === undefined ? null : String(v);
-            delete fields["message"];
-        }
-        else {
-            const ev = env["message"];
-            message = ev === undefined || ev === null ? null : String(ev);
-        }
+        // Merge group plaintexts (alphabetical, last-write-wins), then fold in the
+        // public envelope extras + hidden-group bookkeeping.
+        const { fields, hidden } = _mergeGroupPlaintexts(plaintext);
+        _scanEnvelopeExtras(env, plaintext, fields, hidden);
+        // run_id and message are plaintext-payload but hoisted to typed envelope
+        // slots so callers use `e.run_id` / `e.message` rather than `e.fields`.
+        const runId = _hoistSlot(fields, env, "run_id", (v) => String(v ?? ""));
+        const message = _hoistSlot(fields, env, "message", (v) => v === null || v === undefined ? null : String(v));
         return new Entry({
             event_type: String(env["event_type"] ?? ""),
             timestamp: _coerceTimestamp(env["timestamp"]),
