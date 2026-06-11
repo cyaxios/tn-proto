@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>tn-wasm browser smoke</title>
+    <style>
+      body { font: 14px/1.4 system-ui, sans-serif; margin: 2rem; }
+      pre { background: #f4f4f6; padding: 0.75rem; border-radius: 6px; }
+      .ok { color: #007a3d; }
+      .fail { color: #b30000; }
+    </style>
+  </head>
+  <body>
+    <h1>tn-wasm browser smoke</h1>
+    <p>Loads the web-target build of <code>tn-wasm</code> and exercises
+    the admin catalog + Ed25519 + canonical JSON surfaces entirely in
+    the browser. No server round-trip, no crypto code in JS.</p>
+    <pre id="out">loading...</pre>
+
+    <script type="module">
+      import init, {
+        adminReduce,
+        adminCatalogKinds,
+        canonicalJson,
+        deviceKeyFromSeed,
+        signMessage,
+        verifyDid,
+      } from "../pkg-web/tn_wasm.js";
+
+      const out = document.getElementById("out");
+      const lines = [];
+      function log(ok, msg) {
+        lines.push(`[${ok ? "ok  " : "fail"}] ${msg}`);
+        out.textContent = lines.join("\n");
+        out.className = lines.some((l) => l.startsWith("[fail")) ? "fail" : "ok";
+      }
+
+      try {
+        await init();
+
+        const delta = adminReduce({
+          event_type: "tn.recipient.added",
+          did: "did:key:z6Mktest",
+          timestamp: "2026-04-23T12:00:00Z",
+          group: "default",
+          leaf_index: 3,
+          recipient_did: "did:key:z6Mkbob",
+          kit_sha256: "a".repeat(64),
+          cipher: "btn",
+        });
+        log(delta.kind === "recipient_added", `adminReduce kind=${delta.kind}`);
+
+        const kinds = adminCatalogKinds();
+        log(kinds.length >= 10, `adminCatalogKinds count=${kinds.length}`);
+
+        const canon = canonicalJson({ b: 2, a: 1 });
+        log(canon === '{"a":1,"b":2}', `canonicalJson=${canon}`);
+
+        const seed = new Uint8Array(32);
+        const dk = deviceKeyFromSeed(seed);
+        log(dk.did.startsWith("did:key:z"), `did=${dk.did.slice(0, 30)}...`);
+
+        const msg = new TextEncoder().encode("hello browser");
+        const sig = signMessage(seed, msg);
+        const okSig = verifyDid(dk.did, msg, sig);
+        log(okSig && sig.length === 64, `sign+verify len=${sig.length}`);
+
+        const bad = new TextEncoder().encode("tampered");
+        const okBad = verifyDid(dk.did, bad, sig);
+        log(okBad === false, "verify rejects tampered message");
+      } catch (err) {
+        log(false, `exception: ${err?.message ?? err}`);
+      }
+    </script>
+  </body>
+</html>

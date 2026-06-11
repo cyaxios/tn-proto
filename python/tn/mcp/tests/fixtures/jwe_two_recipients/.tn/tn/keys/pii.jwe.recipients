@@ -1,0 +1,14 @@
+[
+  {
+    "recipient_identity": "self",
+    "pub_b64": "Gw1MevoXYyK4QBPVzUGyF2e4x/bRqv2W+gXooYqo8Q0="
+  },
+  {
+    "recipient_identity": "did:key:z6MkFrank",
+    "pub_b64": "dQrcIpD/Y9El7vaMcVTA6DT60gSaJxLAimbyV/uzgmU="
+  },
+  {
+    "recipient_identity": "did:key:z6MkAcme",
+    "pub_b64": "buRmg7dy0/V8edJ3JnNmFnTmp2CFU0zkm/SCY2SZ8BU="
+  }
+]

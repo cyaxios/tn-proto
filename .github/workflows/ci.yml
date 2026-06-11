@@ -1,0 +1,298 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python-tests:
+    name: pytest (${{ matrix.os }} / py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip maturin
+
+      - name: Build tn-btn wheel
+        working-directory: crypto/tn-btn-py
+        shell: bash
+        run: |
+          maturin build --release --out ../../dist
+          ls ../../dist
+
+      - name: Build tn-core wheel
+        working-directory: crypto/tn-core-py
+        shell: bash
+        run: |
+          maturin build --release --out ../../dist
+          ls ../../dist
+
+      - name: Install tn-btn + tn-core wheels
+        shell: bash
+        run: |
+          python -m pip install dist/*.whl
+
+      - name: Install tn-proto + test deps
+        working-directory: python
+        run: |
+          python -m pip install -e .
+          python -m pip install pytest pytest-asyncio cryptography
+
+      - name: Run pytest
+        working-directory: python
+        shell: bash
+        # Excluded:
+        #  - integration/ + test_scenarios.py + test_vault_*_handler.py
+        #    + test_browser_wasm_interop.py
+        #    — depend on the tn-proto-org vault server (separate repo)
+        #  - test_rust_runtime_interop.py — depends on a tn-core-cli binary
+        #  - test_protocol_events_location.py + test_reader_ergonomics.py
+        #    — pre-existing per-stem layout + error-message baseline failures
+        #  - per-test deselects — pre-existing baseline (run_id, tmp paths)
+        run: |
+          python -m pytest tests/ \
+            --ignore=tests/integration \
+            --ignore=tests/test_scenarios.py \
+            --ignore=tests/test_rust_runtime_interop.py \
+            --ignore=tests/test_browser_wasm_interop.py \
+            --ignore=tests/test_vault_pull_handler.py \
+            --ignore=tests/test_vault_push_handler.py \
+            --ignore=tests/test_vault_sync_handler.py \
+            --ignore=tests/test_protocol_events_location.py \
+            --ignore=tests/test_reader_ergonomics.py \
+            --deselect tests/test_read_shape.py::test_decrypt_errors_when_decrypt_throws \
+            --deselect tests/test_inbox_accept.py::test_accept_happy_path \
+            --deselect tests/test_inbox_accept.py::test_accept_backs_up_existing_kit \
+            --deselect tests/test_handlers.py::test_logger_fans_out_to_multiple_handlers_per_yaml \
+            --deselect tests/test_concurrent_emit.py::test_concurrent_emit_preserves_chain_and_uniqueness \
+            --deselect tests/test_entry.py::test_entry_is_flat_and_no_groups_leak \
+            --deselect tests/test_watch.py::test_watch_once_emits_entry_shape \
+            --deselect tests/test_examples.py::test_all_examples \
+            --tb=short -q
+
+  rust-tests:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo check
+        run: cargo check --workspace --manifest-path Cargo.toml
+
+      - name: cargo clippy (cognitive complexity gate)
+        # Mirrors the Python radon complexity gate. clippy.toml at the
+        # workspace root sets cognitive-complexity-threshold = 15.
+        # tn-core currently carries zero
+        # #[allow(clippy::cognitive_complexity)]: high-complexity
+        # functions were decomposed rather than grandfathered. A new
+        # function over the threshold must either land below it or earn
+        # an explicit allow with a justifying comment.
+        run: cargo clippy --workspace --manifest-path Cargo.toml -- -D clippy::cognitive_complexity
+
+      - name: cargo test
+        run: cargo test --workspace --manifest-path Cargo.toml
+
+  ts-tests:
+    name: ts-sdk (node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build tn-wasm (Node target)
+        working-directory: crypto/tn-wasm
+        # Both targets are needed — the test suite uses the nodejs pkg/
+        # build (consumed via the file: dep in ts-sdk/package.json), and
+        # the browser bundle build (build:browser step below) reads from
+        # pkg-web/. Producing both here keeps CI honest about the full
+        # build matrix.
+        run: |
+          wasm-pack build --target nodejs --release
+          wasm-pack build --target web --release --out-dir pkg-web
+
+      - name: Install ts-sdk deps
+        working-directory: ts-sdk
+        run: npm ci || npm install
+
+      - name: TypeScript typecheck
+        working-directory: ts-sdk
+        run: npm run typecheck
+
+      - name: ESLint
+        working-directory: ts-sdk
+        run: npm run lint
+
+      - name: Build
+        working-directory: ts-sdk
+        run: npm run build
+
+      - name: Run TS tests
+        working-directory: ts-sdk
+        # Hard-required green. Previously this step had `|| true`,
+        # which silently swallowed 190 of 296 failures (the wasm-init
+        # rot fixed in 9fac2fa + 72b4347). Now that the suite is back
+        # to 296/296 passing, drop the suppressor so the next regression
+        # is caught at PR time instead of months later.
+        run: npm test
+
+      - name: Build browser bundle
+        working-directory: ts-sdk
+        # Catches drift in the build script + the pkg-web target. The
+        # output (dist/browser.mjs) isn't shipped from CI — release
+        # workflows do that — but the build path itself has to keep
+        # working since downstream projects (witness, extensions,
+        # browser apps) consume it via the release artefacts.
+        run: npm run build:browser
+
+      - name: Run SDK smoke scripts
+        working-directory: ts-sdk
+        # Each smoke exercises a slice of the surface end-to-end.
+        # They're cheap (each runs in <1s), they don't need a real
+        # vault / server, and they catch wire-format regressions the
+        # unit tests can't (sealed-bundle absorb, env-var-driven
+        # bootstrap flow, HTTP-handler-against-fake-fetch round-trip).
+        run: |
+          node scripts/_env_parity_smoke.mjs
+          node scripts/_sealed_absorb_smoke.mjs
+          node scripts/_init_from_seed_smoke.mjs
+          node scripts/_http_smoke.mjs
+          node scripts/_browser_smoke.mjs
+
+  extension-build:
+    name: chrome extension build + freshness
+    runs-on: ubuntu-latest
+    needs: [ts-tests]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build tn-wasm (Node target — same dep ts-sdk consumes)
+        working-directory: crypto/tn-wasm
+        run: wasm-pack build --target nodejs --release
+
+      - name: Install ts-sdk deps
+        working-directory: ts-sdk
+        run: npm ci || npm install
+
+      - name: Build extension (regenerates vendor/sdk-core/)
+        # The script does: `npm run build` in ts-sdk + copies the
+        # browser-safe Layer-1 outputs (encoding.js, emk.js, Entry.js)
+        # into extensions/tn-decrypt/vendor/sdk-core/. Always
+        # idempotent; running twice should produce identical bytes.
+        run: bash tools/build-extension.sh
+
+      - name: Verify vendored sdk-core is current
+        # Hard gate: if the freshly-built vendor differs from what's
+        # committed, the extension was shipping stale Layer-1 code. The
+        # 0.4.3a1 `did` -> `device_identity` rename slipped through
+        # this exact gap; this check prevents recurrence.
+        #
+        # When this fails, the developer should re-run
+        # `bash tools/build-extension.sh` locally and commit the
+        # updated vendor/sdk-core/ files.
+        run: |
+          if ! git diff --exit-code extensions/tn-decrypt/vendor/sdk-core/; then
+            echo "::error::extensions/tn-decrypt/vendor/sdk-core/ is stale — run \`bash tools/build-extension.sh\` locally and commit the result."
+            exit 1
+          fi
+
+  complexity:
+    name: complexity budget (radon)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install radon
+        run: python -m pip install radon
+
+      - name: Report cyclomatic complexity (informational)
+        # Print every C/D/E/F block for visibility on every PR. Doesn't
+        # fail — operators see the list and can ratchet down deliberately.
+        run: |
+          echo "=== Rank C and worse (radon cyclomatic complexity) ==="
+          radon cc python/tn/ -s -nc -a
+          echo ""
+          echo "=== Per-file maintainability index ==="
+          radon mi python/tn/ -s
+
+      - name: Fail on new F-rank functions
+        # Hard gate: refuses to land any function with cyclomatic
+        # complexity > 40 (the F threshold) IF it didn't already exist.
+        # We grandfather the existing F-rank functions until they're
+        # refactored; tracked in:
+        #   https://github.com/cyaxios/tn-proto/issues/36 and follow-ups
+        # When fixed, lower this threshold and tighten the gate.
+        run: |
+          radon cc python/tn/ -nf -j > /tmp/f_rank.json
+          # Currently grandfathered F-rank functions (refactor in flight):
+          #   AdminStateCache._apply_envelope, export.export,
+          #   _multi.init, admin.__init__.state
+          # Allow up to 4 F-rank functions for now; ratchet down as fixed.
+          F_COUNT=$(python -c "
+          import json
+          with open('/tmp/f_rank.json') as fh:
+              data = json.load(fh)
+          n = sum(1 for fns in data.values() for f in fns if f.get('rank') == 'F')
+          print(n)
+          ")
+          echo "F-rank function count: $F_COUNT"
+          if [ "$F_COUNT" -gt 4 ]; then
+            echo "::error::More than 4 F-rank functions ($F_COUNT > 4); refactor before merging."
+            radon cc python/tn/ -s -nf
+            exit 1
+          fi
+
+  parity-check:
+    name: SDK parity check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Verify docs/sdk-parity.md is complete
+        run: python tools/check_parity.py

@@ -1,0 +1,212 @@
+"""Tests for tn.watch — the async-iterable library verb and CLI.
+
+Note: pytest-asyncio is not currently installed in this project.
+The async tests below wrap asyncio.run() in sync test functions so they
+run without any asyncio pytest plugin. If pytest-asyncio is added in the
+future, the functions can be converted to `async def` with
+`@pytest.mark.asyncio`.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent))
+
+import tn
+
+
+@pytest.fixture(autouse=True)
+def _clean_tn():
+    yield
+    try:
+        tn.flush_and_close()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Library verb: tn.watch()
+# ---------------------------------------------------------------------------
+
+
+def test_watch_yields_new_appends(tmp_path):
+    """tn.watch() yields entries appended after the watcher starts."""
+    yaml_path = tmp_path / "tn.yaml"
+    tn.init(yaml_path)
+
+    seen: list[str] = []
+
+    async def reader():
+        async for entry in tn.watch(poll_interval=0.05):
+            seen.append(entry.event_type)
+            if len(seen) >= 2:
+                break
+
+    async def run():
+        task = asyncio.create_task(reader())
+        await asyncio.sleep(0.1)
+        tn.info("a")
+        tn.info("b")
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(run())
+    assert "a" in seen
+    assert "b" in seen
+
+
+def test_watch_default_main_log_only(tmp_path):
+    """Default ``tn.watch()`` tails the main log only.
+
+    Admin events (``tn.*``) live in a separate log since the
+    runtime-correctness work split them off. They must be addressed
+    explicitly via ``log="admin"`` (or an equivalent path) — the
+    default surface does NOT merge them in. This regression-guards
+    against re-introducing the previous "admin visible by default"
+    behavior.
+    """
+    yaml_path = tmp_path / "tn.yaml"
+    tn.init(yaml_path)
+
+    seen: list[str] = []
+
+    async def reader():
+        async for entry in tn.watch(poll_interval=0.05):
+            seen.append(entry.event_type)
+            if "user.thing" in seen:
+                # Give one more tick to confirm the admin event does
+                # NOT arrive on the default surface, then stop.
+                await asyncio.sleep(0.3)
+                return
+
+    async def run():
+        task = asyncio.create_task(reader())
+        await asyncio.sleep(0.1)
+        tn.log("tn.test.admin_default", level="info", marker="alpha")
+        tn.info("user.thing", marker="beta")
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(run())
+    assert "user.thing" in seen, f"user event missing; saw {seen}"
+    assert "tn.test.admin_default" not in seen, (
+        f"admin event leaked into default tn.watch(); saw {seen}"
+    )
+
+
+def test_watch_admin_alias_addresses_admin_log(tmp_path):
+    """``tn.watch(log='admin')`` tails the admin log explicitly.
+
+    Confirms the symmetric-by-explicit-address design: admin events
+    are reachable via the ``"admin"`` alias on either verb, and
+    main-log user events are NOT merged into that admin surface.
+    """
+    yaml_path = tmp_path / "tn.yaml"
+    tn.init(yaml_path)
+
+    seen: list[str] = []
+
+    async def reader():
+        async for entry in tn.watch(log="admin", poll_interval=0.05):
+            seen.append(entry.event_type)
+            if any(t.startswith("tn.test.") for t in seen):
+                return
+
+    async def run():
+        task = asyncio.create_task(reader())
+        await asyncio.sleep(0.1)
+        tn.info("user.thing", marker="ignored")
+        tn.log("tn.test.admin_alias", level="info", marker="seen")
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(run())
+    assert "tn.test.admin_alias" in seen, (
+        f"admin event missing via log='admin'; saw {seen}"
+    )
+    assert "user.thing" not in seen, (
+        f"main-log event leaked into log='admin' tail; saw {seen}"
+    )
+
+
+def test_watch_since_start_replays_existing(tmp_path):
+    """tn.watch(since='start') replays entries written before the watcher started."""
+    yaml_path = tmp_path / "tn.yaml"
+    tn.init(yaml_path)
+    tn.info("pre.1")
+    tn.info("pre.2")
+
+    seen: list[str] = []
+
+    async def reader():
+        # Break when we've seen both pre-events. tn.init() emits admin
+        # envelopes (tn.ceremony.init / tn.group.added) into the same
+        # log, so a fixed counter would race those — assert on
+        # observation, not position.
+        async for entry in tn.watch(since="start", poll_interval=0.05):
+            seen.append(entry.event_type)
+            if "pre.1" in seen and "pre.2" in seen:
+                break
+
+    async def run():
+        task = asyncio.create_task(reader())
+        await asyncio.sleep(0.1)
+        tn.info("post.1")
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(run())
+    assert "pre.1" in seen
+    assert "pre.2" in seen
+
+
+# ---------------------------------------------------------------------------
+# CLI compatibility: existing --once test preserved
+# ---------------------------------------------------------------------------
+
+
+def test_watch_once_emits_entry_shape(tmp_path):
+    yaml = tmp_path / "tn.yaml"
+    tn.init(yaml, cipher="btn")
+    tn.info("order.created", amount=100, order_id="A100")
+    tn.flush_and_close()
+
+    # Run `python -m tn.watch --once --since start` and parse each line.
+    result = subprocess.run(
+        [sys.executable, "-m", "tn.watch", str(yaml), "--once", "--since", "start"],
+        cwd=str(_HERE.parent),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = [l for l in result.stdout.splitlines() if l.strip()]
+    assert lines, f"no output from tn.watch: stderr={result.stderr}"
+
+    # Find the order.created line (ceremony.init may also appear; that's OK).
+    order_lines = [l for l in lines if '"order.created"' in l]
+    assert order_lines, f"no order.created in output: {lines!r}"
+
+    parsed = json.loads(order_lines[0])
+    # Shape: Entry.model_dump_json keys present.
+    assert "timestamp" in parsed
+    assert "level" in parsed
+    assert "event_type" in parsed
+    assert "fields" in parsed
+    assert "did" in parsed
+    assert "row_hash" in parsed
+    assert "signature" in parsed
+    assert parsed["event_type"] == "order.created"
+    assert parsed["fields"]["amount"] == 100
+    assert parsed["fields"]["order_id"] == "A100"
+    # Crypto plumbing is preserved on Entry.model_dump_json so chain
+    # tools / forensics keep working. (The previous shape stripped it;
+    # 0.4.0a1 surfaces it as typed Entry attributes.)
+    assert parsed["signature"]
+    assert parsed["row_hash"].startswith("sha256:")
+    assert parsed["prev_hash"].startswith("sha256:")
+    # The on-disk ciphertext block stays out of the dump — only raw=True
+    # surfaces that.
+    assert "ciphertext" not in json.dumps(parsed)

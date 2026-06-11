@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TN Browser SDK</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=PT+Serif:ital,wght@0,400;0,700;1,400&family=Raleway:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #f6f7f9;
+      --surface:     #ffffff;
+      --ink:         #2a3333;
+      --ink-soft:    #4d4d4d;
+      --ink-mid:     #666666;
+      --muted:       #9aa2ab;
+      --hair:        #e6e8ec;
+      --hair-soft:   #f0f1f4;
+      --accent:      #2a3333;
+      --accent-soft: #eef1f3;
+      --good:        #3d8b5a;
+      --warn:        #a0783d;
+      --danger:      #b6475d;
+      --shadow:      0 0 6px rgba(168, 178, 209, 0.35);
+      --shadow-lg:   0 8px 28px rgba(168, 178, 209, 0.28);
+      --serif:       "PT Serif", Georgia, serif;
+      --sans:        "Raleway", system-ui, sans-serif;
+      --mono:        "SF Mono", "Fira Code", Consolas, monospace;
+      --radius:      4px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.6;
+      font-weight: 400;
+    }
+
+    /* ── Header ──────────────────────────────────────────── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--hair);
+      padding: 40px 40px 32px;
+    }
+
+    .wordmark {
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    header h1 {
+      font-family: var(--serif);
+      font-size: 30px;
+      font-weight: 400;
+      color: var(--ink);
+      margin-bottom: 6px;
+    }
+
+    header p {
+      color: var(--ink-mid);
+      font-size: 14px;
+      font-weight: 300;
+    }
+
+    /* ── Layout ──────────────────────────────────────────── */
+    .layout {
+      display: flex;
+      max-width: 1060px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    nav {
+      width: 172px;
+      flex-shrink: 0;
+      padding: 28px 0;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+    }
+
+    .nav-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding: 4px 12px 6px;
+    }
+
+    nav a {
+      display: block;
+      padding: 5px 12px;
+      color: var(--ink-mid);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 400;
+      border-radius: var(--radius);
+      transition: color 0.12s, background 0.12s;
+    }
+
+    nav a:hover { color: var(--ink); background: var(--hair-soft); }
+    nav a.active { color: var(--ink); font-weight: 500; background: var(--accent-soft); }
+
+    main {
+      flex: 1;
+      padding: 28px 0 80px 36px;
+      min-width: 0;
+    }
+
+    /* ── Cards ───────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--hair);
+      border-radius: var(--radius);
+      margin-bottom: 20px;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+
+    .card-header {
+      padding: 14px 20px 12px;
+      border-bottom: 1px solid var(--hair-soft);
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .card-header h2 {
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--ink);
+    }
+
+    .card-header p {
+      font-size: 13px;
+      color: var(--ink-mid);
+      font-weight: 300;
+    }
+
+    /* ── Code blocks ─────────────────────────────────────── */
+    pre.code {
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.75;
+      padding: 14px 20px;
+      overflow-x: auto;
+      color: var(--ink-soft);
+      background: var(--bg);
+      border-bottom: 1px solid var(--hair);
+    }
+
+    .kw  { color: #b36b00; }
+    .fn  { color: #116688; }
+    .str { color: #338855; }
+    .cm  { color: var(--muted); font-style: italic; }
+    .num { color: #b36b00; }
+
+    /* ── Run bar ─────────────────────────────────────────── */
+    .run-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 20px;
+      border-bottom: 1px solid var(--hair-soft);
+      background: var(--surface);
+    }
+
+    button {
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--hair);
+      background: var(--surface);
+      color: var(--ink-soft);
+      cursor: pointer;
+      transition: border-color 0.12s, color 0.12s, box-shadow 0.12s;
+    }
+
+    button:hover { border-color: var(--ink-mid); color: var(--ink); }
+
+    button.run {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    button.run:hover { background: #1f2828; box-shadow: var(--shadow); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .status {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .status.ok  { color: var(--good); }
+    .status.err { color: var(--danger); }
+
+    /* ── Output panel ────────────────────────────────────── */
+    .output {
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.7;
+      padding: 12px 20px;
+      min-height: 52px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: var(--muted);
+      background: var(--surface);
+    }
+
+    .output.has-content { color: var(--ink-soft); }
+
+    .lvl-info    { color: var(--good); }
+    .lvl-warning { color: var(--warn); }
+    .lvl-error   { color: var(--danger); }
+    .lvl-debug   { color: var(--muted); }
+    .dim         { color: var(--muted); }
+    .did-box     { color: var(--accent); word-break: break-all; }
+
+    /* ── Decode textarea ─────────────────────────────────── */
+    textarea {
+      width: 100%;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.7;
+      padding: 12px 20px;
+      background: var(--bg);
+      color: var(--ink-soft);
+      border: none;
+      border-bottom: 1px solid var(--hair);
+      resize: vertical;
+      min-height: 140px;
+      outline: none;
+    }
+
+    /* ── Badge ───────────────────────────────────────────── */
+    .badge {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid var(--hair);
+      flex-shrink: 0;
+    }
+
+    /* ── Three-panel layout ──────────────────────────────── */
+    .three-up {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      border-top: 1px solid var(--hair);
+    }
+
+    .recipient-panel {
+      padding: 12px 16px;
+      border-right: 1px solid var(--hair);
+    }
+
+    .recipient-panel:last-child { border-right: none; }
+
+    .recipient-panel h3 {
+      font-family: var(--sans);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .kit-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--hair);
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+
+    .kit-dot.active { background: var(--good); }
+
+    .panel-output {
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.7;
+      color: var(--muted);
+      min-height: 120px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .panel-output.has-content { color: var(--ink-soft); }
+
+    .sealed-pill {
+      display: inline-block;
+      font-size: 10px;
+      padding: 0 5px;
+      border-radius: 3px;
+      background: #fff8ec;
+      color: var(--warn);
+      border: 1px solid #f0d9b0;
+    }
+
+    @media (max-width: 860px) {
+      .three-up { grid-template-columns: 1fr; }
+      .recipient-panel { border-right: none; border-bottom: 1px solid var(--hair); }
+      .recipient-panel:last-child { border-bottom: none; }
+    }
+
+    @media (max-width: 680px) {
+      .layout { flex-direction: column; padding: 0 16px; }
+      nav { width: 100%; height: auto; position: static; padding: 12px 0; display: flex; flex-wrap: wrap; gap: 2px; }
+      .nav-label { display: none; }
+      main { padding: 16px 0 48px; }
+      header { padding: 28px 16px 20px; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="wordmark">TN Protocol</div>
+  <h1>Browser SDK</h1>
+  <p>Every action, a transaction. Run these examples live in the browser.</p>
+</header>
+
+<div class="layout">
+  <nav>
+    <div class="nav-label">Examples</div>
+    <a href="#init">Init</a>
+    <a href="#emit">Emit</a>
+    <a href="#read">Read</a>
+    <a href="#context">Context</a>
+    <a href="#decode">Decode</a>
+    <a href="#chain">Chain</a>
+    <a href="#receive">Receive</a>
+    <a href="#keys">Keys</a>
+  </nav>
+
+  <main>
+
+    <!-- 1. Init -->
+    <section id="init">
+      <div class="card">
+        <div class="card-header">
+          <h2>Init</h2>
+          <p>Create a ceremony. Your device gets a unique attested identity.</p>
+        </div>
+<pre class="code"><span class="kw">import</span> * as tn <span class="kw">from</span> <span class="str">"tn-proto/browser"</span>;
+
+<span class="kw">await</span> <span class="fn">tn.init</span>();
+<span class="fn">console.log</span>(<span class="fn">tn.did</span>()); <span class="cm">// did:key:z...</span></pre>
+        <div class="run-bar">
+          <button class="run" data-example="init">Run</button>
+          <span class="status" id="init-status"></span>
+        </div>
+        <div class="output" id="init-output">Click Run to initialize a TN session.</div>
+      </div>
+    </section>
+
+    <!-- 2. Emit -->
+    <section id="emit">
+      <div class="card">
+        <div class="card-header">
+          <h2>Emit</h2>
+          <p>Write attested log entries at any severity. Every call is signed and chained.</p>
+        </div>
+<pre class="code"><span class="fn">tn.info</span>(<span class="str">"payment.processed"</span>, { amount: <span class="num">99.00</span>, currency: <span class="str">"USD"</span> });
+<span class="fn">tn.warning</span>(<span class="str">"rate.limit.approaching"</span>, { threshold: <span class="num">0.92</span> });
+<span class="fn">tn.error</span>(<span class="str">"auth.failed"</span>, { ip: <span class="str">"10.0.0.1"</span>, attempts: <span class="num">3</span> });
+<span class="fn">tn.debug</span>(<span class="str">"cache.miss"</span>, { key: <span class="str">"user:42:profile"</span> });</pre>
+        <div class="run-bar">
+          <button class="run" data-example="emit">Run</button>
+          <span class="status" id="emit-status"></span>
+        </div>
+        <textarea id="emit-output" readonly rows="6" style="font-size:11px;color:var(--ink-soft);background:var(--bg);border:none;border-top:1px solid var(--hair);padding:12px 20px;width:100%;resize:none;outline:none;font-family:var(--mono);line-height:1.65">Init first, then run.</textarea>
+      </div>
+    </section>
+
+    <!-- 3. Read -->
+    <section id="read">
+      <div class="card">
+        <div class="card-header">
+          <h2>Read</h2>
+          <p>Read back typed Entry objects from the session log.</p>
+        </div>
+<pre class="code"><span class="kw">for</span> (<span class="kw">const</span> entry <span class="kw">of</span> <span class="fn">tn.read</span>()) {
+  <span class="fn">console.log</span>(entry.level, entry.event_type, entry.sequence, entry.fields);
+}</pre>
+        <div class="run-bar">
+          <button class="run" data-example="read">Run</button>
+          <span class="status" id="read-status"></span>
+        </div>
+        <div class="output" id="read-output">Emit some entries first.</div>
+      </div>
+    </section>
+
+    <!-- 4. Context -->
+    <section id="context">
+      <div class="card">
+        <div class="card-header">
+          <h2>Context</h2>
+          <p>Scope fields across a group of events without repeating them.</p>
+        </div>
+<pre class="code"><span class="fn">tn.setContext</span>({ session_id: <span class="str">"sess_abc"</span>, user_id: <span class="str">"u_123"</span> });
+
+<span class="fn">tn.info</span>(<span class="str">"page.view"</span>, { path: <span class="str">"/dashboard"</span> });
+<span class="fn">tn.info</span>(<span class="str">"action.click"</span>, { element: <span class="str">"export_button"</span> });
+
+<span class="fn">tn.clearContext</span>(); <span class="cm">// stop attaching session fields</span></pre>
+        <div class="run-bar">
+          <button class="run" data-example="context">Run</button>
+          <span class="status" id="context-status"></span>
+        </div>
+        <div class="output" id="context-output">Init first, then run.</div>
+      </div>
+    </section>
+
+    <!-- 5. Decode -->
+    <section id="decode">
+      <div class="card">
+        <div class="card-header">
+          <h2>Decode</h2>
+          <span class="badge">Any source</span>
+          <p>Turn any TN-formatted JSON into a typed Entry — fetch, SSE, vault API, anywhere.</p>
+        </div>
+<pre class="code"><span class="kw">import</span> { decodeEntry } <span class="kw">from</span> <span class="str">"tn-proto/browser"</span>;
+
+<span class="kw">const</span> entry = <span class="fn">decodeEntry</span>(envelope); <span class="cm">// any JS object</span>
+<span class="fn">console.log</span>(entry.event_type, entry.fields);</pre>
+        <textarea id="decode-input" spellcheck="false"></textarea>
+        <div class="run-bar">
+          <button class="run" data-example="decode">Decode</button>
+          <span class="status" id="decode-status"></span>
+        </div>
+        <div class="output" id="decode-output">Edit the envelope above, then click Decode.</div>
+      </div>
+    </section>
+
+    <!-- 6. Chain -->
+    <section id="chain">
+      <div class="card">
+        <div class="card-header">
+          <h2>Chain</h2>
+          <p>Every entry carries a hash chain and Ed25519 signature.</p>
+        </div>
+<pre class="code"><span class="kw">const</span> [e] = <span class="fn">tn.read</span>();
+
+<span class="fn">console.log</span>(<span class="str">"seq      "</span>, e.sequence);
+<span class="fn">console.log</span>(<span class="str">"row_hash "</span>, e.row_hash);
+<span class="fn">console.log</span>(<span class="str">"prev_hash"</span>, e.prev_hash);
+<span class="fn">console.log</span>(<span class="str">"signature"</span>, e.signature);</pre>
+        <div class="run-bar">
+          <button class="run" data-example="chain">Run</button>
+          <span class="status" id="chain-status"></span>
+        </div>
+        <div class="output" id="chain-output">Emit some entries first.</div>
+      </div>
+    </section>
+
+    <!-- 7. Receive -->
+    <section id="receive">
+      <div class="card">
+        <div class="card-header">
+          <h2>Receive</h2>
+          <span class="badge">Database auth</span>
+          <p>A stream of entries sealed for your key. The encryption is the authorization.</p>
+        </div>
+<pre class="code"><span class="cm">// fetch any endpoint that returns NDJSON TN entries</span>
+<span class="kw">const</span> res = <span class="kw">await</span> <span class="fn">fetch</span>(url);
+<span class="kw">const</span> text = <span class="kw">await</span> res.<span class="fn">text</span>();
+
+<span class="kw">for</span> (<span class="kw">const</span> line <span class="kw">of</span> text.<span class="fn">split</span>(<span class="str">"\n"</span>).<span class="fn">filter</span>(Boolean)) {
+  <span class="kw">const</span> entry = <span class="fn">decodeEntry</span>(<span class="fn">JSON.parse</span>(line), keystore);
+  <span class="cm">// entry.hidden_groups.length > 0  →  sealed, no kit</span>
+  <span class="cm">// entry.fields.account_balance    →  decrypted with your kit</span>
+}</pre>
+        <div class="run-bar" style="flex-wrap:wrap;gap:8px;">
+          <button class="run" id="receive-connect">Connect</button>
+          <button id="receive-load-kit" style="display:none">Load demo kit</button>
+          <button id="receive-clear-kit" style="display:none">Clear kit</button>
+          <span class="status" id="receive-status">Generating demo data...</span>
+        </div>
+        <div class="output" id="receive-output" style="min-height:120px">Initialising...</div>
+      </div>
+    </section>
+
+    <!-- 8. Keys -->
+    <section id="keys">
+      <div class="card">
+        <div class="card-header">
+          <h2>Keys</h2>
+          <span class="badge">Multi-recipient</span>
+          <p>Each group is sealed under a different publisher. Each kit only opens its own group.</p>
+        </div>
+<pre class="code"><span class="cm"># tn.yaml — declare groups, assign fields, name recipients</span>
+<span class="id">groups</span>:
+  <span class="id">client</span>:
+    <span class="id">cipher</span>: <span class="str">btn</span>
+    <span class="id">fields</span>: [<span class="str">account_balance</span>, <span class="str">next_review</span>, <span class="str">limit_price</span>]
+    <span class="id">recipients</span>:
+      - <span class="id">recipient_identity</span>: <span class="str">did:key:zClient...</span>
+  <span class="id">compliance</span>:
+    <span class="id">cipher</span>: <span class="str">btn</span>
+    <span class="id">fields</span>: [<span class="str">risk_score</span>, <span class="str">concentration_limit</span>]
+    <span class="id">recipients</span>:
+      - <span class="id">recipient_identity</span>: <span class="str">did:key:zCompliance...</span>
+
+<span class="cm">// Then emit normally — the SDK routes and encrypts each field</span>
+<span class="fn">tn.info</span>(<span class="str">"wealth.recommendation"</span>, {
+  ticker: <span class="str">"NVDA"</span>,             <span class="cm">// public — not in any group</span>
+  account_balance: <span class="num">411200</span>,  <span class="cm">// → client group (sealed)</span>
+  risk_score: <span class="num">0.31</span>,          <span class="cm">// → compliance group (sealed)</span>
+});</pre>
+        <div class="run-bar">
+          <button class="run" id="keys-generate">Generate stream</button>
+          <span class="status" id="keys-status">Ready.</span>
+        </div>
+        <div class="three-up" id="keys-panels" style="display:none">
+          <div class="recipient-panel">
+            <h3><span class="kit-dot" id="dot-public"></span>No key</h3>
+            <div class="panel-output" id="panel-public">—</div>
+          </div>
+          <div class="recipient-panel">
+            <h3><span class="kit-dot" id="dot-client"></span>Client kit</h3>
+            <div class="panel-output" id="panel-client">—</div>
+            <br>
+            <button id="btn-client-kit" style="font-size:11px">Load client kit</button>
+          </div>
+          <div class="recipient-panel">
+            <h3><span class="kit-dot" id="dot-compliance"></span>Compliance kit</h3>
+            <div class="panel-output" id="panel-compliance">—</div>
+            <br>
+            <button id="btn-compliance-kit" style="font-size:11px">Load compliance kit</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script type="module">
+  import * as tn from "../dist/browser.mjs";
+  const { decodeEntry } = tn;
+
+  function setStatus(id, msg, kind = "") {
+    const el = document.getElementById(id + "-status");
+    el.textContent = msg;
+    el.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function setOutput(id, html) {
+    const el = document.getElementById(id + "-output");
+    el.innerHTML = html;
+    el.className = "output has-content";
+  }
+
+  function levelClass(lvl) {
+    return { info: "lvl-info", warning: "lvl-warning", error: "lvl-error", debug: "lvl-debug" }[lvl] ?? "";
+  }
+
+  // Known envelope keys that are never user fields
+  const _ENV = new Set(["event_type","timestamp","level","message","device_identity",
+    "event_id","sequence","run_id","prev_hash","row_hash","signature"]);
+
+  function getFields(entry) {
+    // typed Entry (from decodeEntry) has .fields; flat dict (from tn.read()) has user
+    // fields at the top level — filter out the envelope keys to recover them
+    if (entry.fields !== undefined) return entry.fields;
+    return Object.fromEntries(
+      Object.entries(entry).filter(([k]) => !_ENV.has(k) && !k.startsWith("_"))
+    );
+  }
+
+  function fmtEntry(entry) {
+    const ts = (entry.timestamp instanceof Date ? entry.timestamp : new Date(entry.timestamp))
+      .toISOString().slice(11, 23);
+    const lvl = String(entry.level).toUpperCase().padEnd(7);
+    const fields = getFields(entry);
+    const fieldsStr = Object.keys(fields).length > 0 ? "  " + JSON.stringify(fields) : "";
+    return `<span><span class="dim">${ts}</span>  <span class="${levelClass(entry.level)}">${lvl}</span>  ${entry.event_type}<span class="dim">${esc(fieldsStr)}</span></span>`;
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  async function runInit() {
+    setStatus("init", "running...");
+    await tn.init();
+    const d = tn.did();
+    setOutput("init", `<span class="dim">did  </span><span class="did-box">${esc(d)}</span>\n<span class="dim">ready to emit</span>`);
+    setStatus("init", "ok", "ok");
+    const entries = tn.read();
+    if (entries.length > 0) populateDecodeBox(entries[0]);
+  }
+
+  async function runEmit() {
+    setStatus("emit", "running...");
+    try { tn.did(); } catch { await tn.init(); }
+    tn.info("payment.processed", { amount: 99.00, currency: "USD" });
+    tn.warning("rate.limit.approaching", { threshold: 0.92 });
+    tn.error("auth.failed", { ip: "10.0.0.1", attempts: 3 });
+    tn.debug("cache.miss", { key: "user:42:profile" });
+    // Show the raw NDJSON lines exactly as they land in the log
+    const raw = tn.readRaw().slice(-4).map(r => JSON.stringify(r.envelope ?? r));
+    document.getElementById("emit-output").value = raw.join("\n");
+    setStatus("emit", `${raw.length} entries written`, "ok");
+    populateDecodeBox(tn.read().slice(-4)[0]);
+  }
+
+  async function runRead() {
+    setStatus("read", "running...");
+    const entries = tn.read();
+    if (!entries.length) {
+      setOutput("read", '<span class="dim">no entries — run Emit first</span>');
+      setStatus("read", "empty");
+      return;
+    }
+    setOutput("read", entries.map(fmtEntry).join("\n"));
+    setStatus("read", `${entries.length} entries`, "ok");
+  }
+
+  async function runContext() {
+    setStatus("context", "running...");
+    try { tn.did(); } catch { await tn.init(); }
+    tn.setContext({ session_id: "sess_abc", user_id: "u_123" });
+    tn.info("page.view", { path: "/dashboard" });
+    tn.info("action.click", { element: "export_button" });
+    tn.clearContext();
+    const last2 = tn.read().slice(-2);
+    setOutput("context",
+      last2.map(fmtEntry).join("\n") +
+      `\n<span class="dim">\nsession_id + user_id on both entries</span>`);
+    setStatus("context", "ok", "ok");
+  }
+
+  async function runDecode() {
+    setStatus("decode", "running...");
+    const raw = document.getElementById("decode-input").value.trim();
+    if (!raw) { setStatus("decode", "paste an envelope first", "err"); return; }
+    let obj;
+    try { obj = JSON.parse(raw); } catch { setStatus("decode", "invalid JSON", "err"); return; }
+    try {
+      const entry = decodeEntry(obj);
+      setOutput("decode", [
+        `<span class="dim">event_type  </span>${esc(entry.event_type)}`,
+        `<span class="dim">level       </span><span class="${levelClass(entry.level)}">${esc(entry.level)}</span>`,
+        `<span class="dim">sequence    </span>${entry.sequence}`,
+        `<span class="dim">device_id   </span>${esc(entry.device_identity.slice(0, 36))}...`,
+        `<span class="dim">fields      </span>${esc(JSON.stringify(entry.fields))}`,
+        entry.hidden_groups.length
+          ? `<span class="dim">hidden      </span><span class="lvl-warning">${esc(entry.hidden_groups.join(", "))}</span>`
+          : `<span class="dim">hidden      </span><span class="dim">none</span>`,
+      ].join("\n"));
+      setStatus("decode", "ok", "ok");
+    } catch (err) { setStatus("decode", String(err), "err"); }
+  }
+
+  async function runChain() {
+    setStatus("chain", "running...");
+    const raw = tn.readRaw();
+    if (!raw.length) {
+      setOutput("chain", '<span class="dim">no entries — run Emit first</span>');
+      setStatus("chain", "empty");
+      return;
+    }
+    const env = raw[0].envelope ?? raw[0];
+    const sig = String(env.signature ?? "");
+    setOutput("chain", [
+      `<span class="dim">seq       </span>${env.sequence}`,
+      `<span class="dim">row_hash  </span>${esc(String(env.row_hash ?? ""))}`,
+      `<span class="dim">prev_hash </span>${esc(String(env.prev_hash ?? ""))}`,
+      `<span class="dim">signature </span>${esc(sig.slice(0, 56))}...`,
+    ].join("\n"));
+    setStatus("chain", "ok", "ok");
+  }
+
+  function populateDecodeBox(entry) {
+    if (!entry) return;
+    document.getElementById("decode-input").value = JSON.stringify(entry, null, 2);
+  }
+
+  document.getElementById("decode-input").value = JSON.stringify({
+    event_type: "order.placed",
+    timestamp: new Date().toISOString(),
+    level: "info",
+    device_identity: "did:key:zQ3shPyVjnMgKiGTfRv8xJLnBMzP4eXaKkBNkFmDe",
+    sequence: 1,
+    event_id: "ev_01J0000000",
+    run_id: "run_demo",
+    prev_hash: "0000000000000000000000000000000000000000000000000000000000000000",
+    row_hash: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    signature: "abc123",
+    order_id: "ord_999",
+    total: 149.00,
+  }, null, 2);
+
+  // ── Receive: demo data generated with real BTN encryption ────────────────
+
+  const demoState = { blobUrl: null, kit: null, keystore: null };
+
+  function b64(bytes) {
+    return btoa(String.fromCharCode(...bytes));
+  }
+
+  async function buildDemoStream() {
+    const { BtnPublisher, keystoreFromJson } = tn;
+
+    // Alice is the publisher — she encrypted these entries for the demo recipient
+    const pub = new BtnPublisher(null);
+    const kit = pub.mint(); // recipient's kit
+
+    const events = [
+      { event_type: "advisor.session.started",  level: "info",    pub: { client: "Hartwell, J.", session_id: "sess_8812" } },
+      { event_type: "advisor.recommendation",   level: "info",    pub: { ticker: "AAPL", action: "HOLD"       }, priv: { account_balance: 412500, risk_score: 0.28 } },
+      { event_type: "advisor.recommendation",   level: "info",    pub: { ticker: "NVDA", action: "BUY"        }, priv: { account_balance: 411200, risk_score: 0.31, limit_price: 890.00 } },
+      { event_type: "advisor.compliance.check", level: "warning", pub: { rule: "concentration_limit"          }, priv: { flagged_position: "NVDA", pct_of_portfolio: 0.38 } },
+      { event_type: "advisor.recommendation",   level: "info",    pub: { ticker: "BRK.B", action: "BUY"       }, priv: { account_balance: 409800, risk_score: 0.26 } },
+      { event_type: "advisor.session.closed",   level: "info",    pub: { duration_s: 214, actions_taken: 3    } },
+    ];
+
+    const lines = events.map((ev, i) => {
+      const envelope = {
+        event_type: ev.event_type,
+        level: ev.level,
+        timestamp: new Date(Date.now() + i * 800).toISOString(),
+        device_identity: "did:key:zAliceAdvisor1aBcDeFgHiJkLmNoPqRsTuVwXyZ",
+        sequence: i + 1,
+        event_id: `ev_${i + 1}`,
+        run_id: "run_demo_stream",
+        prev_hash: i === 0 ? "0".repeat(64) : `hash${i}`,
+        row_hash: `hash${i + 1}`,
+        signature: `sig${i + 1}`,
+        ...ev.pub,
+      };
+      if (ev.priv) {
+        const ct = pub.encrypt(new TextEncoder().encode(JSON.stringify(ev.priv)));
+        envelope["private"] = { ciphertext: b64(ct) };
+      }
+      return JSON.stringify(envelope);
+    });
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    demoState.blobUrl = URL.createObjectURL(blob);
+    demoState.kit = kit;
+
+    // Build a KeystoreHandle from the kit bytes
+    const pubIdBytes = tn.btnKitPublisherId(kit);
+    const pubIdHex = Array.from(pubIdBytes).map(b => b.toString(16).padStart(2, "0")).join("");
+    const ksJson = JSON.stringify({ keystores: [{ publisher_id: pubIdHex, kits: [b64(kit)] }] });
+    demoState.keystore = tn.keystoreFromJson(ksJson);
+
+    setStatus("receive", "ready — click Connect", "ok");
+    document.getElementById("receive-connect").disabled = false;
+    document.getElementById("receive-output").textContent = "Click Connect to fetch the stream.";
+  }
+
+  function fmtReceiveEntry(entry) {
+    const ts = new Date(entry.timestamp).toISOString().slice(11, 23);
+    const lvl = entry.level.toUpperCase().padEnd(7);
+    const pubFields = Object.keys(entry.fields ?? {}).length > 0
+      ? JSON.stringify(entry.fields) : "";
+    const sealed = entry.hidden_groups.length > 0
+      ? `  <span style="color:var(--warn)">[${entry.hidden_groups.join(", ")} sealed]</span>` : "";
+    return `<span><span class="dim">${ts}</span>  <span class="${levelClass(entry.level)}">${lvl}</span>  `
+      + `${entry.event_type}`
+      + (pubFields ? `  <span class="dim">${esc(pubFields)}</span>` : "")
+      + sealed
+      + `</span>`;
+  }
+
+  async function runConnect() {
+    if (!demoState.blobUrl) { setStatus("receive", "still generating...", "err"); return; }
+    setStatus("receive", "fetching...");
+
+    const res = await fetch(demoState.blobUrl);
+    const text = await res.text();
+    const ks = demoState.activeKeystore ?? null;
+
+    const lines = [];
+    let count = 0;
+    for (const line of text.split("\n").filter(Boolean)) {
+      try {
+        const entry = tn.decodeEntry(JSON.parse(line), ks);
+        lines.push(fmtReceiveEntry(entry));
+        count++;
+      } catch { /* skip */ }
+    }
+
+    const sealed = lines.filter(l => l.includes("sealed")).length;
+    document.getElementById("receive-output").innerHTML = lines.join("\n");
+    document.getElementById("receive-output").className = "output has-content";
+
+    if (sealed > 0 && !ks) {
+      setStatus("receive", `${count} entries — ${sealed} groups sealed`, "");
+      document.getElementById("receive-load-kit").style.display = "";
+    } else if (ks) {
+      setStatus("receive", `${count} entries — all decrypted`, "ok");
+      document.getElementById("receive-load-kit").style.display = "none";
+      document.getElementById("receive-clear-kit").style.display = "";
+    } else {
+      setStatus("receive", `${count} entries`, "ok");
+    }
+  }
+
+  document.getElementById("receive-connect").disabled = true;
+  document.getElementById("receive-connect").addEventListener("click", async () => {
+    document.getElementById("receive-connect").disabled = true;
+    try { await runConnect(); } catch (e) { setStatus("receive", String(e), "err"); }
+    finally { document.getElementById("receive-connect").disabled = false; }
+  });
+
+  document.getElementById("receive-load-kit").addEventListener("click", async () => {
+    demoState.activeKeystore = demoState.keystore;
+    document.getElementById("receive-load-kit").style.display = "none";
+    setStatus("receive", "kit loaded — reconnecting...", "ok");
+    await runConnect();
+  });
+
+  document.getElementById("receive-clear-kit").addEventListener("click", async () => {
+    demoState.activeKeystore = null;
+    document.getElementById("receive-clear-kit").style.display = "none";
+    setStatus("receive", "kit cleared");
+    await runConnect();
+  });
+
+  buildDemoStream();
+
+  // ── Keys: multi-recipient demo ────────────────────────────────────────────
+
+  const keysState = { entries: [], clientKs: null, complianceKs: null, clientLoaded: false, complianceLoaded: false };
+
+  const ADVISOR_EVENTS = [
+    { event_type: "session.opened",        level: "info",    pub: { client: "Hartwell, J.", advisor: "Chen, M." } },
+    { event_type: "wealth.recommendation", level: "info",    pub: { ticker: "AAPL", action: "HOLD"  }, client: { account_balance: 412500, next_review: "2026-09-01" },     compliance: { risk_score: 0.28, concentration_ok: true } },
+    { event_type: "wealth.recommendation", level: "info",    pub: { ticker: "NVDA", action: "BUY"   }, client: { account_balance: 411200, limit_price: 890 },              compliance: { risk_score: 0.31, concentration_limit: "flagged" } },
+    { event_type: "wealth.recommendation", level: "info",    pub: { ticker: "BRK.B", action: "BUY"  }, client: { account_balance: 409800, next_review: "2026-09-01" },     compliance: { risk_score: 0.26, concentration_ok: true } },
+    { event_type: "compliance.alert",      level: "warning", pub: { rule: "concentration_limit" },     client: { message: "Portfolio rebalancing required" },              compliance: { flagged: "NVDA", pct: 0.38, threshold: 0.30 } },
+    { event_type: "session.closed",        level: "info",    pub: { duration_s: 318, actions: 3 } },
+  ];
+
+  function buildKeysStream() {
+    const { BtnPublisher } = tn;
+    const clientPub     = new BtnPublisher(null);
+    const compliancePub = new BtnPublisher(null);
+
+    const clientKit     = clientPub.mint();
+    const complianceKit = compliancePub.mint();
+
+    const makeKs = (kit) => {
+      const pubId = Array.from(tn.btnKitPublisherId(kit)).map(b => b.toString(16).padStart(2,"0")).join("");
+      return tn.keystoreFromJson(JSON.stringify({ keystores: [{ publisher_id: pubId, kits: [b64(kit)] }] }));
+    };
+
+    keysState.clientKs     = makeKs(clientKit);
+    keysState.complianceKs = makeKs(complianceKit);
+
+    return ADVISOR_EVENTS.map((ev, i) => {
+      const envelope = {
+        event_type: ev.event_type, level: ev.level,
+        timestamp: new Date(Date.now() + i * 900).toISOString(),
+        device_identity: "did:key:zAdvisorChenM1aBcDeFgHiJ",
+        sequence: i + 1, event_id: `ev_${i+1}`, run_id: "run_keys",
+        prev_hash: i === 0 ? "0".repeat(64) : `h${i}`, row_hash: `h${i+1}`, signature: `s${i+1}`,
+        ...ev.pub,
+      };
+      if (ev.client)     envelope["client"]     = { ciphertext: b64(clientPub.encrypt(new TextEncoder().encode(JSON.stringify(ev.client)))) };
+      if (ev.compliance) envelope["compliance"] = { ciphertext: b64(compliancePub.encrypt(new TextEncoder().encode(JSON.stringify(ev.compliance)))) };
+      return envelope;
+    });
+  }
+
+  function renderPanel(panelId, dotId, entries, keystore) {
+    const panel = document.getElementById(panelId);
+    const dot   = document.getElementById(dotId);
+    const lines = entries.map(envelope => {
+      const entry  = tn.decodeEntry(envelope, keystore ?? undefined);
+      const ts     = new Date(entry.timestamp).toISOString().slice(11, 23);
+      const fields = Object.keys(entry.fields ?? {}).length ? " " + JSON.stringify(entry.fields) : "";
+      const sealed = entry.hidden_groups.length
+        ? " " + entry.hidden_groups.map(g => `<span class="sealed-pill">${g}</span>`).join(" ")
+        : "";
+      return `<span class="dim">${ts}</span>  <span class="${levelClass(entry.level)}">${entry.level.toUpperCase().padEnd(7)}</span>  ${entry.event_type}<span class="dim">${esc(fields)}</span>${sealed}`;
+    });
+    panel.innerHTML = lines.join("\n");
+    panel.className = "panel-output has-content";
+    dot.className = "kit-dot" + (keystore ? " active" : "");
+  }
+
+  function renderAll() {
+    const entries = keysState.entries;
+    renderPanel("panel-public",     "dot-public",     entries, null);
+    renderPanel("panel-client",     "dot-client",     entries, keysState.clientLoaded     ? keysState.clientKs     : null);
+    renderPanel("panel-compliance", "dot-compliance", entries, keysState.complianceLoaded ? keysState.complianceKs : null);
+  }
+
+  document.getElementById("keys-generate").addEventListener("click", () => {
+    setStatus("keys", "generating...");
+    document.getElementById("keys-generate").disabled = true;
+    try {
+      keysState.entries = buildKeysStream();
+      keysState.clientLoaded = false;
+      keysState.complianceLoaded = false;
+      document.getElementById("keys-panels").style.display = "";
+      document.getElementById("btn-client-kit").textContent = "Load client kit";
+      document.getElementById("btn-compliance-kit").textContent = "Load compliance kit";
+      renderAll();
+      setStatus("keys", `${keysState.entries.length} entries — load a kit to unlock a group`, "");
+    } catch(e) {
+      setStatus("keys", String(e), "err");
+    } finally {
+      document.getElementById("keys-generate").disabled = false;
+    }
+  });
+
+  document.getElementById("btn-client-kit").addEventListener("click", () => {
+    keysState.clientLoaded = !keysState.clientLoaded;
+    document.getElementById("btn-client-kit").textContent = keysState.clientLoaded ? "Clear client kit" : "Load client kit";
+    renderAll();
+    const sealed = keysState.complianceLoaded ? 0 : keysState.entries.filter(e => e.compliance).length;
+    setStatus("keys", keysState.clientLoaded ? `client group open${sealed ? `, compliance still sealed` : ""}` : "client kit cleared", keysState.clientLoaded ? "ok" : "");
+  });
+
+  document.getElementById("btn-compliance-kit").addEventListener("click", () => {
+    keysState.complianceLoaded = !keysState.complianceLoaded;
+    document.getElementById("btn-compliance-kit").textContent = keysState.complianceLoaded ? "Clear compliance kit" : "Load compliance kit";
+    renderAll();
+    const sealed = keysState.clientLoaded ? 0 : keysState.entries.filter(e => e.client).length;
+    setStatus("keys", keysState.complianceLoaded ? `compliance group open${sealed ? `, client still sealed` : ""}` : "compliance kit cleared", keysState.complianceLoaded ? "ok" : "");
+  });
+
+  const runners = { init: runInit, emit: runEmit, read: runRead, context: runContext, decode: runDecode, chain: runChain };
+
+  document.querySelectorAll("button[data-example]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try { await runners[btn.dataset.example](); }
+      catch (err) { setStatus(btn.dataset.example, String(err).replace("Error: ", ""), "err"); }
+      finally { btn.disabled = false; }
+    });
+  });
+
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting)
+        document.querySelectorAll("nav a").forEach(a =>
+          a.classList.toggle("active", a.getAttribute("href") === "#" + e.target.id));
+    });
+  }, { threshold: 0.4 });
+
+  document.querySelectorAll("section[id]").forEach(s => observer.observe(s));
+</script>
+</body>
+</html>

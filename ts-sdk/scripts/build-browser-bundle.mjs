@@ -1,0 +1,142 @@
+#!/usr/bin/env node
+// Build ts-sdk/dist/browser.mjs — a single self-contained ESM file
+// downstream HTML can <script type="module" src="..."> directly.
+//
+// What it contains:
+//   * The tn-proto browser surface — `Tn`, `init`, `info`, `read`,
+//     `close`, plus all helpers from dist/index.browser.js.
+//   * @noble/hashes and fflate inlined (resolved from ts-sdk/node_modules).
+//   * tn-wasm aliased to crypto/tn-wasm/pkg-web (fetch/initSync, no node:*).
+//   * The tn_wasm_bg.wasm binary inlined as a Uint8Array via esbuild's
+//     "binary" loader, then initSync()'d at module load. No second URL,
+//     no fetch at runtime.
+//
+// Top-level await runs the initSync before any export is callable, so
+// consumer code (canonicalize, rowHash, ...) can use the SDK as soon
+// as the static import resolves.
+//
+// Usage:
+//   npm run build:browser
+// Output:
+//   ts-sdk/dist/browser.mjs   (single-file, ~500 KB)
+
+import { build } from "esbuild";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const SDK_ROOT = resolve(HERE, "..");
+const REPO_ROOT = resolve(SDK_ROOT, "..");
+
+const SDK_DIST_BROWSER = resolve(SDK_ROOT, "dist", "index.browser.js");
+const WASM_WEB_JS   = resolve(REPO_ROOT, "crypto", "tn-wasm", "pkg-web", "tn_wasm.js");
+const WASM_BG       = resolve(REPO_ROOT, "crypto", "tn-wasm", "pkg-web", "tn_wasm_bg.wasm");
+const SDK_NODE_MODULES = resolve(SDK_ROOT, "node_modules");
+
+const OUT_DIR = resolve(SDK_ROOT, "dist");
+const OUT = resolve(OUT_DIR, "browser.mjs");
+
+for (const [label, p] of [
+  ["SDK dist/index.browser", SDK_DIST_BROWSER],
+  ["tn-wasm pkg-web JS",     WASM_WEB_JS],
+  ["tn-wasm .wasm",          WASM_BG],
+  ["SDK node_modules",       SDK_NODE_MODULES],
+]) {
+  if (!existsSync(p)) {
+    console.error(`error: ${label} not found at ${p}`);
+    if (label.includes("index.browser")) {
+      console.error("hint: run 'npm run build' in ts-sdk/ first.");
+    } else if (label.includes("tn-wasm")) {
+      console.error(
+        "hint: run 'wasm-pack build --target web --release --out-dir pkg-web' " +
+        "in crypto/tn-wasm/ first."
+      );
+    }
+    process.exit(2);
+  }
+}
+
+// Build entry — a tiny ESM file that:
+//   1. Imports wasm bytes from the .wasm file (esbuild's binary loader
+//      turns this into a Uint8Array constant inlined into the bundle).
+//   2. Calls initSync on the pkg-web glue with those bytes.
+//   3. Re-exports the entire tn-proto/browser surface (Tn class,
+//      module-level singleton fns, storage adapters, types).
+//
+// We write the entry to disk because esbuild's stdin plugin can't
+// pick up the same node-modules resolution + plugin pipeline that
+// file entries get.
+const ENTRY_PATH = resolve(SDK_ROOT, "scripts", "_browser_entry.mjs");
+writeFileSync(
+  ENTRY_PATH,
+  [
+    '// Auto-generated entry for scripts/build-browser-bundle.mjs.',
+    '// Do not edit; do not check in. (.gitignore covers _browser_entry.mjs.)',
+    '',
+    '// esbuild "binary" loader inlines this as a Uint8Array literal.',
+    'import WASM_BYTES from "tn-wasm-binary";',
+    '',
+    '// pkg-web glue. The default export is an async init() that accepts',
+    '// bytes; initSync() is the synchronous twin we use here so the',
+    '// top-level await runs before any consumer code touches the wasm.',
+    'import init, { initSync } from "tn-wasm";',
+    '',
+    'initSync({ module: WASM_BYTES });',
+    '',
+    '// Re-export every public symbol the browser entry exposes.',
+    'export * from "tn-proto-browser-entry";',
+    '',
+  ].join("\n")
+);
+
+const tnWasmAlias = {
+  name: "tn-wasm-alias",
+  setup(b) {
+    // Bare "tn-wasm" -> browser-targeted pkg-web glue.
+    b.onResolve({ filter: /^tn-wasm$/ }, () => ({ path: WASM_WEB_JS }));
+
+    // Synthetic "tn-wasm-binary" specifier -> the actual .wasm file.
+    // Combined with the "binary" loader for .wasm below, this becomes
+    // a Uint8Array constant in the output bundle.
+    b.onResolve({ filter: /^tn-wasm-binary$/ }, () => ({
+      path: WASM_BG,
+    }));
+
+    // "tn-proto-browser-entry" -> the SDK's dist/index.browser.js.
+    // We use a synthetic name (instead of importing dist/index.browser.js
+    // by relative path) so the entry file doesn't bake in a path that
+    // breaks when this script runs from a worktree.
+    b.onResolve({ filter: /^tn-proto-browser-entry$/ }, () => ({
+      path: SDK_DIST_BROWSER,
+    }));
+  },
+};
+
+mkdirSync(OUT_DIR, { recursive: true });
+
+await build({
+  entryPoints: [ENTRY_PATH],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  platform: "browser",
+  outfile: OUT,
+  minify: true,
+  sourcemap: false,
+  nodePaths: [SDK_NODE_MODULES],
+  plugins: [tnWasmAlias],
+  loader: {
+    ".wasm": "binary",
+  },
+  banner: {
+    js: [
+      "// tn-proto — self-contained browser bundle.",
+      "// Built from ts-sdk/dist/core + crypto/tn-wasm/pkg-web.",
+      "// Wasm is inlined and initSync'd at module load.",
+      "// Generated by ts-sdk/scripts/build-browser-bundle.mjs.",
+    ].join("\n"),
+  },
+});
+
+console.log(`built ${OUT}`);

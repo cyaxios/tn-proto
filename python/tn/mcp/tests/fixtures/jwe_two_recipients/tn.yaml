@@ -1,0 +1,114 @@
+ceremony:
+  id: local_10878621
+  mode: linked
+  linked_vault: https://vault.tn-proto.org
+  linked_project_id: ''
+  sync_logs: false
+  cipher: jwe
+  sign: true
+  admin_log_location: ./.tn/tn/admin/admin.ndjson
+  log_level: debug
+logs:
+  path: ./.tn/tn/logs/tn.ndjson
+keystore:
+  path: ./.tn/tn/keys
+device:
+  device_identity: did:key:z6MkezhbxkbqTCGqqzB6ENQ4sd33hRWKBPx54nprfmeHehFU
+handlers:
+- kind: file.rotating
+  name: main
+  path: ./.tn/tn/logs/tn.ndjson
+  max_bytes: 5242880
+  backup_count: 5
+  rotate_on_init: false
+- kind: stdout
+public_fields:
+- timestamp
+- event_id
+- event_type
+- level
+- server_did
+- user_did
+- request_id
+- method
+- path
+- ceremony_id
+- cipher
+- device_identity
+- created_at
+- group
+- publisher_identity
+- added_at
+- leaf_index
+- recipient_identity
+- kit_sha256
+- slot
+- issued_to
+- generation
+- previous_kit_sha256
+- old_pool_size
+- new_pool_size
+- rotated_at
+- peer_identity
+- package_sha256
+- compiled_at
+- absorbed_at
+- vault_identity
+- project_id
+- linked_at
+- reason
+- unlinked_at
+- policy_uri
+- content_hash
+- event_types_covered
+- policy_text
+- envelope_event_id
+- envelope_device_identity
+- envelope_event_type
+- envelope_sequence
+- invalid_reasons
+default_policy: private
+groups:
+  default:
+    policy: private
+    cipher: jwe
+    recipients:
+    - recipient_identity: did:key:z6MkezhbxkbqTCGqqzB6ENQ4sd33hRWKBPx54nprfmeHehFU
+  tn.agents:
+    policy: private
+    cipher: btn
+    recipients:
+    - recipient_identity: did:key:z6MkezhbxkbqTCGqqzB6ENQ4sd33hRWKBPx54nprfmeHehFU
+    fields:
+    - instruction
+    - use_for
+    - do_not_use_for
+    - consequences
+    - on_violation_or_error
+    - policy
+    auto_populated_by_policy: true
+  pii:
+    policy: private
+    pool_size: 4
+    cipher: jwe
+    recipients:
+    - recipient_identity: did:key:z6MkezhbxkbqTCGqqzB6ENQ4sd33hRWKBPx54nprfmeHehFU
+    - recipient_identity: did:key:z6MkFrank
+      pub_b64: dQrcIpD/Y9El7vaMcVTA6DT60gSaJxLAimbyV/uzgmU=
+    - recipient_identity: did:key:z6MkAcme
+      pub_b64: buRmg7dy0/V8edJ3JnNmFnTmp2CFU0zkm/SCY2SZ8BU=
+    fields:
+    - email
+    - ip
+    - user_agent
+fields:
+  email:
+    group: pii
+  ip:
+    group: pii
+  user_agent:
+    group: pii
+llm_classifier:
+  enabled: false
+  provider: ''
+  model: ''

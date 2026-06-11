@@ -1,0 +1,115 @@
+# Golden canonical tn.yaml — Phase 0 baseline for the yaml-identity-ironout.
+#
+# Derived empirically from `tn init` (python/tn/_multi.create_fresh via
+# python/tn/cli.cmd_init) on 2026-05-29, then normalised to mode: local
+# (self-contained / offline) and stable placeholder identities.
+#
+# IDENTITY PLACEHOLDERS (NOT real keys — substitute at load time):
+#   did:key:z6GOLDENdevicexxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# The device key and every group recipient_identity point at this one
+# self-kit DID (a fresh single-device ceremony names itself as its only
+# recipient). The loader does NOT parse these DID strings into crypto —
+# real key material is read from the keystore dir (keystore.path) — so
+# these are informational/authoritative-source metadata only.
+# See tests/golden/load_check_canonical.py for the load proof.
+#
+# This file is the canonical SHAPE every producer (Python SDK, ts-sdk
+# core, tn-js CLI, browser JS) must converge on. Spec:
+# docs/specs/2026-05-29-tn-yaml-canonical-schema-and-restore-contract.md
+ceremony:
+  id: local_90lde9a1
+  mode: local
+  linked_vault: ''
+  linked_project_id: ''
+  sync_logs: false
+  cipher: btn
+  sign: true
+  admin_log_location: ./.tn/tn/admin/admin.ndjson
+  log_level: debug
+  profile: transaction
+  chain: true
+  project_name: GoldenProj
+logs:
+  path: ./.tn/tn/logs/tn.ndjson
+keystore:
+  path: ./.tn/tn/keys
+device:
+  device_identity: did:key:z6GOLDENdevicexxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+handlers:
+- kind: file.rotating
+  name: main
+  path: ./.tn/tn/logs/tn.ndjson
+  max_bytes: 5242880
+  backup_count: 5
+  rotate_on_init: false
+- kind: stdout
+public_fields:
+- timestamp
+- event_id
+- event_type
+- level
+- server_did
+- user_did
+- request_id
+- method
+- path
+- ceremony_id
+- cipher
+- device_identity
+- created_at
+- group
+- publisher_identity
+- added_at
+- leaf_index
+- recipient_identity
+- kit_sha256
+- slot
+- issued_to
+- generation
+- previous_kit_sha256
+- old_pool_size
+- new_pool_size
+- rotated_at
+- peer_identity
+- package_sha256
+- compiled_at
+- absorbed_at
+- vault_identity
+- project_id
+- linked_at
+- reason
+- unlinked_at
+- policy_uri
+- content_hash
+- event_types_covered
+- policy_text
+- envelope_event_id
+- envelope_device_identity
+- envelope_event_type
+- envelope_sequence
+- invalid_reasons
+default_policy: private
+groups:
+  default:
+    policy: private
+    cipher: btn
+    recipients:
+    - recipient_identity: did:key:z6GOLDENdevicexxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  tn.agents:
+    policy: private
+    cipher: btn
+    recipients:
+    - recipient_identity: did:key:z6GOLDENdevicexxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    fields:
+    - instruction
+    - use_for
+    - do_not_use_for
+    - consequences
+    - on_violation_or_error
+    - policy
+    auto_populated_by_policy: true
+fields: {}
+llm_classifier:
+  enabled: false
+  provider: ''
+  model: ''

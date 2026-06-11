@@ -1,0 +1,11 @@
+# Maturin build output
+target/
+*.pyd
+*.so
+*.dylib
+python/btn/__pycache__/
+python/btn/_core.*
+tests/__pycache__/
+.pytest_cache/
+dist/
+*.egg-info/

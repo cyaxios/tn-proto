@@ -1,0 +1,32 @@
+ceremony:
+  id: lint_test
+  mode: local
+  cipher: jwe
+
+keystore:
+  path: ./keys
+
+me:
+  did: did:key:z6MkTestFixtureDoNotUseInProduction0000000000000000
+
+extends:
+  - pci-cardholder
+
+public_fields:
+  - timestamp
+  - event_id
+  - level
+
+default_policy: private
+
+groups:
+  default:
+    policy: private
+    pool_size: 4
+    recipients:
+      - did: did:key:z6MkTestFixtureDoNotUseInProduction0000000000000000
+
+fields:
+  order_id:    { group: default }
+  amount:      { group: default }
+  customer_id: { group: default }

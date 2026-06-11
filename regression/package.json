@@ -1,0 +1,13 @@
+{
+  "name": "tn-regression",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TN regression test platform — TS dependencies for the _shared/ utilities. Not published.",
+  "type": "module",
+  "dependencies": {
+    "yaml": "^2.6.0"
+  },
+  "scripts": {
+    "_": "This package.json exists ONLY so node module resolution can find `yaml` for regression/_shared/log_query.ts. All test execution still goes through the Makefile (make c1..c9). Do not add test scripts here — the silo runners live in ../Makefile."
+  }
+}

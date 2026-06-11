@@ -1,0 +1,51 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.3.6
+    command:
+      - redpanda
+      - start
+      - --mode dev-container
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://localhost:9092
+      - --pandaproxy-addr http://0.0.0.0:8082
+      - --advertise-pandaproxy-addr http://localhost:8082
+      - --schema-registry-addr http://0.0.0.0:8081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+    ports:
+      - "9092:9092"    # Kafka (producer/consumer)
+      - "8081:8081"    # Schema Registry
+      - "8082:8082"    # HTTP Proxy
+      - "9644:9644"    # Admin API
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health 2>&1 | grep -c healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    entrypoint: /bin/sh
+    command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml && /app/console --config.filepath /tmp/config.yml"
+    environment:
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda:9092"]
+        schemaRegistry:
+          enabled: true
+          urls: ["http://redpanda:8081"]
+        redpanda:
+          adminApi:
+            enabled: true
+            urls: ["http://redpanda:9644"]
+    ports:
+      - "8080:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+volumes:
+  redpanda_data:

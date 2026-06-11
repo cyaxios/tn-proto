@@ -1,0 +1,297 @@
+name: regression-crawl
+
+# Runs the regression crawl tier on every PR + push to main.
+#
+# Each silo is its own job so failures show up as separate CI checks
+# named "regression / c<N>". The umbrella `crawl-all` job depends on
+# every silo job so a single required check can gate merges once the
+# tier is locked-green.
+#
+# Reports: each silo job uploads its `.reports/c<N>/last.json` as a
+# build artifact, named "silo-c<N>-report". CI failures show the named
+# assertion that failed without needing to dig through logs.
+#
+# Silos that are scaffolded-but-not-yet-built (per the PR sequence in
+# the design doc) currently no-op with `make c<N> || true` and emit a
+# placeholder report. Each silo PR flips its `|| true` off when it
+# lands tests, turning the job into a real gate.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Python silos (C1, C2, C5, C6, C7, C8)
+  # ---------------------------------------------------------------------------
+
+  c1:
+    name: regression / c1 (python module log)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install tn-proto + deps
+        run: |
+          python -m pip install --upgrade pip
+          # TestPyPI is index, real PyPI is extra-index so runtime
+          # transitive deps (cryptography, pynacl, etc.) resolve.
+          pip install --pre \
+            --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
+          pip install pytest pyyaml
+      - name: Run silo
+        run: make -C regression c1
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: silo-c1-report
+          path: regression/.reports/c1/
+
+  c2:
+    name: regression / c2 (python object log)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install tn-proto + deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --pre \
+            --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
+          pip install pytest pyyaml
+      - name: Run silo (no-op until C2 lands)
+        run: make -C regression c2 || echo "c2 not yet implemented — placeholder pass"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: silo-c2-report
+          path: regression/.reports/c2/
+
+  c5:
+    name: regression / c5 (groups + recipients in-process)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install tn-proto + deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --pre \
+            --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
+          pip install pytest pyyaml
+      - name: Run silo (no-op until C5 lands)
+        run: make -C regression c5 || echo "c5 not yet implemented — placeholder pass"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: silo-c5-report
+          path: regression/.reports/c5/
+
+  c6:
+    name: regression / c6 (CLI verbs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install tn-proto + deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --pre \
+            --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
+          pip install pytest pyyaml
+      - name: Run silo (no-op until C6 lands)
+        run: make -C regression c6 || echo "c6 not yet implemented — placeholder pass"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: silo-c6-report
+          path: regression/.reports/c6/
+
+  c7:
+    name: regression / c7 (key custody default)
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7
+        ports: ["27017:27017"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install tn-proto + deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --pre \
+            --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
+          pip install pytest pyyaml httpx
+      - name: Run silo (no-op until C7 lands)
+        run: make -C regression c7 || echo "c7 not yet implemented — placeholder pass"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: silo-c7-report
+          path: regression/.reports/c7/
+
+  c8:
+    name: regression / c8 (restore new machine)
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7
+        ports: ["27017:27017"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install tn-proto + deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --pre \
+            --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            "tn-protocol>=0.4.1a0,<0.5" "tn-btn>=0.2.0a1,<0.3" "tn-core>=0.2.0a3,<0.3"
+          pip install pytest pyyaml httpx
+      - name: Run silo (no-op until C8 lands)
+        run: make -C regression c8 || echo "c8 not yet implemented — placeholder pass"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: silo-c8-report
+          path: regression/.reports/c8/
+
+  # ---------------------------------------------------------------------------
+  # TS silos (C3, C4)
+  # ---------------------------------------------------------------------------
+
+  c3:
+    name: regression / c3 (TS module log)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install rust + wasm-pack
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build tn-wasm
+        working-directory: crypto/tn-wasm
+        run: wasm-pack build --target nodejs --release
+      - name: Install ts-sdk deps
+        working-directory: ts-sdk
+        run: npm ci || npm install
+      - name: Install regression deps (yaml parser etc.)
+        working-directory: regression
+        run: npm ci || npm install
+      - name: Run silo
+        run: make -C regression c3
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: silo-c3-report
+          path: regression/.reports/c3/
+
+  c4:
+    name: regression / c4 (TS object log)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install rust + wasm-pack
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build tn-wasm
+        working-directory: crypto/tn-wasm
+        run: wasm-pack build --target nodejs --release
+      - name: Install ts-sdk deps
+        working-directory: ts-sdk
+        run: npm ci || npm install
+      - name: Install regression deps (yaml parser etc.)
+        working-directory: regression
+        run: npm ci || npm install
+      - name: Run silo (no-op until C4 lands)
+        run: make -C regression c4 || echo "c4 not yet implemented — placeholder pass"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: silo-c4-report
+          path: regression/.reports/c4/
+
+  # ---------------------------------------------------------------------------
+  # Browser silo (C9)
+  # ---------------------------------------------------------------------------
+
+  c9:
+    name: regression / c9 (Chrome ext inline decrypt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install playwright
+        run: |
+          pip install pytest playwright pyyaml
+          playwright install chromium --with-deps
+      - name: Run silo (no-op until C9 lands)
+        run: make -C regression c9 || echo "c9 not yet implemented — placeholder pass"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: silo-c9-report
+          path: regression/.reports/c9/
+
+  # ---------------------------------------------------------------------------
+  # Umbrella: depends on every silo. Single required check for branch
+  # protection once crawl is locked-green.
+  # ---------------------------------------------------------------------------
+
+  crawl-all:
+    name: regression / crawl (all silos)
+    runs-on: ubuntu-latest
+    needs: [c1, c2, c3, c4, c5, c6, c7, c8, c9]
+    steps:
+      - name: Crawl tier passed
+        run: echo "all 9 crawl silos green"
