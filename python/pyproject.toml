@@ -110,7 +110,7 @@ tn-mcp-server = "tn.mcp:main"
 [tool.setuptools.packages.find]
 where   = ["."]
 include = ["tn*"]
-exclude = ["tests*", "tools*", "scenarios*", "examples*", "bench*", "docs*"]
+exclude = ["tests*", "tools*", "scenarios*", "examples*", "bench*", "docs*", "tn.*.tests", "tn.*.tests.*"]
 
 [tool.setuptools.package-data]
 tn = ["py.typed", "mcp/exhaust/kits_index.json"]

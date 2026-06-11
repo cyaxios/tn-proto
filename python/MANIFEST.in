@@ -1,0 +1,20 @@
+# Lean sdist: ship only the runtime package plus build metadata.
+# The wheel is package-only via [tool.setuptools.packages.find] (which
+# also excludes the in-package tn.*.tests); this trims the sdist to match
+# (no top-level or in-package tests / fixtures / tools / docs).
+graft tn
+include pyproject.toml
+include README.md
+prune tests
+prune tn/lint/tests
+prune tn/mcp/tests
+prune tools
+prune bench
+prune scenarios
+prune examples
+prune docs
+prune vault_blobs
+prune build
+prune dist
+global-exclude __pycache__
+global-exclude *.py[cod]
