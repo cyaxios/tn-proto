@@ -18,7 +18,7 @@ from tn.chain import _compute_row_hash, verify_chain_link
 from tn.signing import DeviceKey, _signature_from_b64
 
 try:
-    from tn_core import Runtime as _RustRuntime  # PyO3 extension
+    from tn._native.core import Runtime as _RustRuntime  # PyO3 extension
 
     _RUST_OK = True
 except ImportError:

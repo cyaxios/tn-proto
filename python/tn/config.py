@@ -1340,7 +1340,7 @@ def _rust_config_summary(yaml_path: Path) -> dict[str, Any]:
     but the YAML grammar, extends merge, reserved-name rule, field routing, and
     normalized vault view are validated by Rust first.
     """
-    from tn_core import _core as _tn_core
+    from tn._native import core as _tn_core
 
     return dict(_tn_core.config_load_summary(str(yaml_path)))
 

@@ -489,7 +489,7 @@ class BtnGroupCipher:
         keystore backend so the write picks up its OS-level lock and
         atomic-rename guarantees.
         """
-        import tn_btn as _btn
+        from tn._native import btn as _btn
 
         from ._keystore_backend import LocalFileKeystoreBackend, atomic_write_bytes
 
@@ -523,7 +523,7 @@ class BtnGroupCipher:
         prior rotation crash is rolled forward (or back) into a
         consistent, writable state rather than leaving stale `.pending`
         files — or, worse, deleting the only surviving copy."""
-        import tn_btn as _btn
+        from tn._native import btn as _btn
 
         from .btn_keystore import BtnKeystore
 
@@ -602,7 +602,7 @@ class BtnGroupCipher:
         return self._state.encrypt(plaintext)
 
     def decrypt(self, ciphertext: bytes) -> bytes:
-        import tn_btn as _btn
+        from tn._native import btn as _btn
 
         if not self._self_kit:
             raise NotARecipientError("btn: no self-kit in this keystore")

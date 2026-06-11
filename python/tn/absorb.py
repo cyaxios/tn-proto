@@ -35,7 +35,7 @@ from datetime import timezone as _tz
 from pathlib import Path
 from typing import Any, overload
 
-import tn_btn as _btn
+from tn._native import btn as _btn
 
 from .admin.log import (
     append_admin_envelopes,

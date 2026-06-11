@@ -1786,7 +1786,7 @@ def state(group: str | None = None) -> dict:
     import warnings
 
     try:
-        import tn_core
+        from tn._native import core as tn_core
         have_rust_reducer = True
     except ImportError:
         have_rust_reducer = False
@@ -1794,7 +1794,7 @@ def state(group: str | None = None) -> dict:
     builder = _AdminStateBuilder()
 
     if have_rust_reducer:
-        import tn_core
+        from tn._native import core as tn_core
         for raw in _read_raw_admin_aware():
             env = raw["envelope"]
             event_type = env.get("event_type", "")

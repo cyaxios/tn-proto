@@ -60,7 +60,7 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
 )
-from tn_core import _core as _tn_core
+from tn._native import core as _tn_core
 
 from .signing import DeviceKey, _b58decode
 

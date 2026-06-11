@@ -1639,6 +1639,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tn-proto-native"
+version = "0.0.1"
+dependencies = [
+ "pyo3",
+ "tn-btn-py",
+ "tn-core-py",
+]
+
+[[package]]
 name = "tn-wasm"
 version = "0.0.1"
 dependencies = [

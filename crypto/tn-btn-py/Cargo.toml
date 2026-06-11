@@ -8,11 +8,14 @@ license.workspace = true
 
 [lib]
 name = "tn_btn"
-crate-type = ["cdylib"]
+# rlib: this is now a library consumed by the umbrella `tn-proto-native`
+# crate (one combined extension). The extension-module feature is supplied
+# by the final cdylib and unifies across the graph.
+crate-type = ["rlib"]
 
 [dependencies]
 tn-btn = { path = "../tn-btn" }
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.24", features = ["abi3-py39"] }
 ed25519-dalek = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }

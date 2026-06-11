@@ -392,9 +392,9 @@ fn max_leaves() -> u64 {
     btn_lib::config::MAX_LEAVES
 }
 
-#[pymodule]
-#[pyo3(name = "_core")]
-fn btn_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+/// Register all tn-btn classes/functions into `m`. Shared entry point for
+/// the merged `tn._native.btn` submodule (the one-package tn-proto wheel).
+pub fn populate(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPublisherState>()?;
     m.add_class::<PyRetiredPublisherState>()?;
     m.add_class::<PyRotationOutcome>()?;

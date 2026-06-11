@@ -42,7 +42,7 @@ from typing import Any
 # private `tn_core._core` module. The class is shared across runtime
 # failures, so check the message string when distinguishing
 # divergence-retry from other faults: see `is_keystore_diverged()`.
-from tn_core._core import TnRuntimeError as KeystoreConflictError
+from tn._native.core import TnRuntimeError as KeystoreConflictError
 
 from . import (
     _agents_policy,

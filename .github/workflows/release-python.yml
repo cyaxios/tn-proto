@@ -1,15 +1,17 @@
 name: release-python
 
-# Triggered on tag push (e.g. v0.2.0a1). Builds wheels for the three
-# Python packages (tn-btn, tn-core, tn-proto) across Linux/macOS/Windows
-# and Python 3.10+, then uploads them to TestPyPI by default. Promote to
-# real PyPI by editing the `repository_url` step below.
+# Triggered on tag push (e.g. v0.6.0a2) or manual dispatch. Builds the
+# SINGLE tn-proto wheel — the pure-Python `tn` package plus the bundled
+# `tn._native` Rust extension (former tn-core + tn-btn, abi3-py39) — for
+# Linux/macOS/Windows via maturin, then uploads to TestPyPI by default
+# (or real PyPI on a manual run with target=pypi).
 #
 # Required repo secrets:
-#   TESTPYPI_API_TOKEN  — generated at https://test.pypi.org/manage/account/token/
-#   PYPI_API_TOKEN      — only needed when promoting to real PyPI
+#   TESTPYPI_API_TOKEN  — https://test.pypi.org/manage/account/token/
+#   PYPI_API_TOKEN      — only for target=pypi
 #
-# Manual trigger: workflow_dispatch, useful to dry-run without tagging.
+# Manual trigger: workflow_dispatch, useful to dry-run (target=none) or to
+# rehearse on TestPyPI before a permanent PyPI push.
 
 on:
   push:
@@ -32,15 +34,16 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Rust-backed wheels (tn-btn, tn-core) — maturin handles the cross-compile.
-  # abi3-py39 means ONE wheel per OS/arch covers Python 3.9+.
+  # One combined wheel per OS. maturin builds the `tn` package + the
+  # `tn._native` extension (umbrella crate at crypto/tn-py, referenced via
+  # pyproject [tool.maturin] manifest-path). abi3-py39 => one wheel per
+  # OS/arch covers Python 3.9+.
   # ---------------------------------------------------------------------------
-  build-pyo3-wheels:
-    name: Build ${{ matrix.package }} wheel (${{ matrix.os }})
+  build-wheels:
+    name: Build tn-proto wheel (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        package: [tn-btn-py, tn-core-py]
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
@@ -53,86 +56,28 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build wheels with maturin
+      - name: Build wheel with maturin
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: crypto/${{ matrix.package }}
-          # abi3 means we don't need a per-Python matrix on the maturin side;
-          # one wheel per OS works across 3.9+.
+          # Run from python/, where pyproject's [tool.maturin] points at the
+          # umbrella crate (../crypto/tn-py). The full repo is checked out so
+          # the workspace path-deps resolve.
+          working-directory: python
           args: --release --out dist
-          # Linux gets a manylinux-compatible wheel via the default container.
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
-          name: wheels-${{ matrix.package }}-${{ matrix.os }}
-          path: crypto/${{ matrix.package }}/dist/*.whl
+          name: wheels-${{ matrix.os }}
+          path: python/dist/*.whl
 
   # ---------------------------------------------------------------------------
-  # Source distribution for the pyo3 packages — lets `pip install` from
-  # a system that has Rust installed (covers exotic platforms not in our wheel
-  # matrix).
-  # ---------------------------------------------------------------------------
-  build-pyo3-sdists:
-    name: sdist for ${{ matrix.package }}
-    strategy:
-      matrix:
-        package: [tn-btn-py, tn-core-py]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          working-directory: crypto/${{ matrix.package }}
-          command: sdist
-          args: --out dist
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: sdist-${{ matrix.package }}
-          path: crypto/${{ matrix.package }}/dist/*.tar.gz
-
-  # ---------------------------------------------------------------------------
-  # Pure-Python tn-proto wheel — single wheel works on any platform with
-  # Python 3.10+. No native deps in this package; just imports tn-btn and
-  # tn-core at runtime.
-  # ---------------------------------------------------------------------------
-  build-tn-proto:
-    name: Build tn-proto wheel + sdist
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Install build tools
-        run: python -m pip install --upgrade build
-
-      - name: Build wheel + sdist
-        working-directory: python
-        run: python -m build
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: dist-tn-proto
-          path: python/dist/*
-
-  # ---------------------------------------------------------------------------
-  # Collect every artifact and upload to TestPyPI (or PyPI on a manual run).
+  # Collect the wheels and upload to TestPyPI (default) or real PyPI
+  # (manual run with target=pypi).
   # ---------------------------------------------------------------------------
   publish:
     name: Publish to ${{ github.event.inputs.target || 'testpypi' }}
-    needs: [build-pyo3-wheels, build-pyo3-sdists, build-tn-proto]
+    needs: [build-wheels]
     runs-on: ubuntu-latest
     if: github.event.inputs.target != 'none'
     environment:
@@ -165,10 +110,8 @@ jobs:
           skip-existing: true
 
   # ---------------------------------------------------------------------------
-  # Create a GitHub Release for the tag so the repo's "Releases" widget
-  # reflects the latest published version. Tag-push only — manual dispatch
-  # without a tag has no ref to release against. Auto-flags alpha/beta/rc
-  # as prerelease.
+  # GitHub Release for the tag. Tag-push only; auto-flags alpha/beta/rc as
+  # prerelease.
   # ---------------------------------------------------------------------------
   github-release:
     name: Create GitHub Release
@@ -189,18 +132,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          # Detect prerelease from PEP 440 segments in the tag.
           if [[ "$TAG" =~ (a|b|rc)[0-9]+ ]]; then
             PRE_FLAG="--prerelease"
           else
             PRE_FLAG="--latest"
           fi
-          # Use the tag's annotation/commit subject + body as release notes.
           NOTES=$(git tag -l --format='%(contents)' "$TAG")
           if [[ -z "$NOTES" ]]; then
             NOTES=$(git log -1 --format=%B "$TAG")
           fi
-          # Idempotent: skip if a release already exists for this tag.
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists; skipping creation."
             exit 0

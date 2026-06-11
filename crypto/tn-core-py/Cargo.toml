@@ -8,10 +8,13 @@ description = "Python bindings for tn-core: btn-backed TN runtime."
 
 [lib]
 name = "tn_core"
-crate-type = ["cdylib"]
+# rlib: now a library consumed by the umbrella `tn-proto-native` crate
+# (one combined extension). The extension-module feature is supplied by
+# the final cdylib and unifies across the graph.
+crate-type = ["rlib"]
 
 [dependencies]
 tn-core = { path = "../tn-core" }
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.24", features = ["abi3-py39"] }
 serde_json = { workspace = true }
 base64 = { workspace = true }

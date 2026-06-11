@@ -1070,9 +1070,13 @@ fn manifest_from_pydict(d: &Bound<'_, PyDict>) -> PyResult<Manifest> {
     Manifest::from_json(&value).map_err(err_to_py)
 }
 
-#[pymodule]
-#[pyo3(name = "_core")]
-fn tn_core_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+/// Register all tn-core classes/functions (including the `admin`
+/// submodule) into `m`. Shared entry point for the merged
+/// `tn._native.core` submodule (the one-package tn-proto wheel). The
+/// caller registers the `admin` submodule in sys.modules under its final
+/// dotted path — PyO3 only wires attribute access, so explicit
+/// `import ....admin` needs the sys.modules entry.
+pub fn populate(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRuntime>()?;
     m.add_class::<PyAdminStateCache>()?;
     m.add("TnRuntimeError", py.get_type::<TnRuntimeError>())?;
@@ -1088,14 +1092,5 @@ fn tn_core_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tnpkg_write, m)?)?;
     m.add_function(wrap_pyfunction!(config_load_summary, m)?)?;
     crate::admin::register(m)?;
-    // Make `import tn_core._core.admin` (and thus `from tn_core.admin import …`)
-    // work. PyO3 submodules are not automatically registered in sys.modules;
-    // without this only attribute access (tn_core._core.admin.kinds()) works,
-    // and explicit imports fail with ModuleNotFoundError.
-    let admin_mod = m.getattr("admin")?;
-    let py = m.py();
-    py.import("sys")?
-        .getattr("modules")?
-        .set_item("tn_core._core.admin", &admin_mod)?;
     Ok(())
 }

@@ -1,10 +1,20 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+# One combined wheel: the pure-Python `tn` package (python-source ".") plus
+# the `tn._native` extension built from the umbrella crate at
+# crypto/tn-py, which links the former tn-core + tn-btn bindings as the
+# `core` and `btn` submodules. abi3-py39, so one wheel per platform.
+module-name = "tn._native"
+python-source = "."
+manifest-path = "../crypto/tn-py/Cargo.toml"
+include = ["tn/py.typed", "tn/mcp/exhaust/kits_index.json"]
 
 [project]
 name            = "tn-proto"
-version         = "0.6.0a1"
+version         = "0.6.0a2"
 description     = "TN protocol: attested logging with JWE + btn ciphers"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -51,18 +61,9 @@ dependencies = [
     # transitively via mcp; declare explicitly so the install works in
     # any environment, including when mcp moves to an extra in tn-proto.
     "pydantic>=2",
-    # Rust-backed ciphers. Built with maturin from ../crypto/tn-btn-py/
-    # and ../crypto/tn-core-py/; published as separate wheels. All
-    # three packages move on the same version axis (re-affirmed for
-    # 0.6.0a1) to avoid skew across the Rust/Python boundary.
-    # The lower bound carries:
-    #   - cross-process emit lock (0.4.2a3)
-    #   - per-row parse resilience + Rust stdout admin filter (0.4.2a4)
-    #   - pinned-writer pool + PEL admin path + templated chain seed
-    #     (0.4.2a8) — required because tn-proto uses the new
-    #     LogWriters dispatcher via PyO3
-    "tn-btn>=0.6.0a1,<0.7",
-    "tn-core>=0.6.0a1,<0.7",
+    # The Rust runtime (former tn-core + tn-btn wheels) is now compiled
+    # directly into this wheel as the `tn._native` extension — no separate
+    # tn-core / tn-btn PyPI dependencies. See [tool.maturin] below.
 ]
 
 [project.optional-dependencies]
