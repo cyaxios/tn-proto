@@ -104,13 +104,25 @@ test("createFreshCeremony does not serialize Windows drive paths into yaml", () 
     // Cross-drive paths cannot be expressed portably relative to the
     // ceremony dir: createFreshCeremony REFUSES rather than leaking a
     // machine-local drive path into the yaml (see yaml_path_portability).
-    assert.throws(
-      () =>
-        createFreshCeremony(yamlPath, {
-          adminLogPath: `${foreignDrive}:/tn-portable/admin/admin.ndjson`,
-        }),
-      /different drive or volume/,
-    );
+    // The throw is a WINDOWS guarantee: on POSIX a "C:/..." string is not
+    // drive-absolute (it parses as one relative segment), so the guard
+    // cannot fire; there we assert the weaker invariant that nothing
+    // drive-absolute lands in the yaml.
+    if (process.platform === "win32") {
+      assert.throws(
+        () =>
+          createFreshCeremony(yamlPath, {
+            adminLogPath: `${foreignDrive}:/tn-portable/admin/admin.ndjson`,
+          }),
+        /different drive or volume/,
+      );
+    } else {
+      createFreshCeremony(yamlPath, {
+        adminLogPath: `${foreignDrive}:/tn-portable/admin/admin.ndjson`,
+      });
+      const yaml = readFileSync(yamlPath, "utf8");
+      assert.doesNotMatch(yaml, /(?:^|\s)[A-Za-z]:[\\/]/m);
+    }
 
     // Same-drive absolute paths relativize to ./-anchored yaml entries;
     // nothing drive-absolute is ever serialized.
