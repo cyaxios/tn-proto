@@ -120,21 +120,63 @@ def test_promote_pending_refuses_missing_pending(tmp_path: Path):
         ks.promote_pending("default", retiring_epoch=0)
 
 
-def test_cleanup_orphan_pending_removes_pending(tmp_path: Path):
+def test_recover_rolls_back_orphan_pending_when_active_intact(tmp_path: Path):
+    """Crashed BEFORE the promote started (active pair intact, pending orphaned):
+    roll back by discarding the not-yet-promoted pending pair."""
     ks = BtnKeystore(tmp_path)
     ks.write_active("default", state_bytes=b"a", self_kit=b"k")
     ks.write_pending("default", state_bytes=b"orphan", self_kit=b"orphan")
-    assert ks.cleanup_orphan_pending("default") is True
+    assert ks.recover_interrupted_promote("default") is True
     assert not (tmp_path / "default.btn.state.pending").exists()
     assert not (tmp_path / "default.btn.mykit.pending").exists()
     # Active untouched.
     assert (tmp_path / "default.btn.state").read_bytes() == b"a"
 
 
-def test_cleanup_orphan_pending_noop_when_clean(tmp_path: Path):
+def test_recover_noop_when_clean(tmp_path: Path):
     ks = BtnKeystore(tmp_path)
     ks.write_active("default", state_bytes=b"a", self_kit=b"k")
-    assert ks.cleanup_orphan_pending("default") is False
+    assert ks.recover_interrupted_promote("default") is False
+
+
+def test_recover_rolls_forward_when_active_missing(tmp_path: Path):
+    """Crashed MID-promote (active removed, pending not yet renamed): roll
+    FORWARD by completing the swap, not discarding the only surviving copy.
+
+    This is the crash-safety fix: the prior code deleted the pending pair
+    unconditionally, so a crash in promote_pending's unlink->rename window
+    stranded the publisher with no writable active state (the .retired.<N>
+    archive is a read-only snapshot, not a usable publisher state)."""
+    ks = BtnKeystore(tmp_path)
+    ks.write_active("default", state_bytes=b"old_s", self_kit=b"old_k")
+    ks.write_pending("default", state_bytes=b"new_s", self_kit=b"new_k")
+    ks.write_retired_pair("default", epoch=0, state_bytes=b"ret", self_kit=b"retk")
+    # Simulate the crash window: active unlinked, pending not yet renamed.
+    (tmp_path / "default.btn.state").unlink()
+    (tmp_path / "default.btn.mykit").unlink()
+
+    assert ks.recover_interrupted_promote("default") is True
+    # Pending was rolled FORWARD into active, not deleted.
+    assert (tmp_path / "default.btn.state").read_bytes() == b"new_s"
+    assert (tmp_path / "default.btn.mykit").read_bytes() == b"new_k"
+    assert not (tmp_path / "default.btn.state.pending").exists()
+    assert not (tmp_path / "default.btn.mykit.pending").exists()
+
+
+def test_recover_rolls_forward_partial_state_renamed(tmp_path: Path):
+    """Crash AFTER the state rename but BEFORE the kit rename: active state is
+    the new epoch, active kit is gone, pending kit survives. Recovery must land
+    the surviving pending kit, not delete it (which would strand the kit)."""
+    ks = BtnKeystore(tmp_path)
+    ks.write_active("default", state_bytes=b"new_s", self_kit=b"old_k")
+    # Active kit gone; only the pending kit remains for this half.
+    (tmp_path / "default.btn.mykit").unlink()
+    (tmp_path / "default.btn.mykit.pending").write_bytes(b"new_k")
+
+    assert ks.recover_interrupted_promote("default") is True
+    assert (tmp_path / "default.btn.state").read_bytes() == b"new_s"
+    assert (tmp_path / "default.btn.mykit").read_bytes() == b"new_k"
+    assert not (tmp_path / "default.btn.mykit.pending").exists()
 
 
 def test_load_legacy_revoked(tmp_path: Path):

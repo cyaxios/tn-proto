@@ -24,6 +24,7 @@ sys.path.insert(0, str(_HERE.parent))
 
 import tn
 from tn.absorb import _absorb_group_keys
+from tn.btn_keystore import BtnKeystore
 from tn.config import load_or_create
 from tn.tnpkg import TnpkgManifest
 
@@ -130,6 +131,63 @@ def test_multiple_rotations_accumulate_preserved_kits(tmp_path):
     assert eras_seen == {"era.one", "era.two", "era.three"}, (
         f"expected all three eras readable, saw {eras_seen}"
     )
+
+
+def test_rotate_crash_midpromote_leaves_publisher_writable(tmp_path, monkeypatch):
+    """A rotation that crashes DURING the promote dance (active files removed,
+    pending not yet renamed) must recover into a WRITABLE publisher on the next
+    init - not a stranded one.
+
+    Before the fix, the next init's cleanup deleted the surviving pending pair,
+    so the publisher lost its active state (the .retired.<N> archive is a
+    read-only snapshot) and the next emit raised NotAPublisherError.
+    """
+    yaml = tmp_path / "tn.yaml"
+    keystore = tmp_path / ".tn/tn/keys"
+
+    tn.init(yaml, cipher="btn")
+    tn.info("order.created", order_id="A1")
+    tn.flush_and_close()
+
+    # Patch promote_pending to run its REAL unlink half, then "crash" before
+    # the pending->active rename - the exact documented crash window.
+    real_state_path = BtnKeystore._state_path
+    real_kit_path = BtnKeystore._kit_path
+
+    def crashing_promote(self, group, *, retiring_epoch):
+        real_state_path(self, group).unlink(missing_ok=True)
+        real_kit_path(self, group).unlink(missing_ok=True)
+        raise RuntimeError("simulated crash mid-promote")
+
+    monkeypatch.setattr(BtnKeystore, "promote_pending", crashing_promote)
+
+    tn.init(yaml)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        tn.admin.rotate("default")
+    tn.flush_and_close()
+
+    # Crash state on disk: active gone, pending + retired present.
+    assert not (keystore / "default.btn.state").exists()
+    assert (keystore / "default.btn.state.pending").exists()
+    monkeypatch.undo()
+
+    # Next init must roll the pending pair forward to active, restoring a
+    # writable publisher. This emit MUST NOT raise NotAPublisherError.
+    tn.init(yaml)
+    tn.info("order.created", order_id="A2")
+    tn.flush_and_close()
+
+    # The recovered active pair is on disk; the post-recovery write landed.
+    assert (keystore / "default.btn.state").exists()
+    assert not (keystore / "default.btn.state.pending").exists()
+    tn.init(yaml)
+    ids = {
+        e.fields.get("order_id")
+        for e in tn.read(all_runs=True)
+        if e.event_type == "order.created"
+    }
+    tn.flush_and_close()
+    assert "A2" in ids, f"post-recovery write should be readable; saw {ids}"
 
 
 def test_prior_member_keeps_old_access_through_a_synced_rotation(tmp_path):

@@ -67,11 +67,11 @@ function readKitLeaf(kitBytes: Uint8Array): bigint {
   return btnKitLeaf(kitBytes);
 }
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { ZERO_HASH, rowHash } from "../core/chain.js";
+import { ZERO_HASH, rowHash, verifyChainLink } from "../core/chain.js";
 import { signatureFromB64, verify } from "../core/signing.js";
-import { asDid, asRowHash, asSignatureB64, type RowHash } from "../core/types.js";
+import { asDid, asRowHash, asSignatureB64 } from "../core/types.js";
 import { authoritativeYamlFor, loadConfig, type CeremonyConfig, type GroupConfig } from "./config.js";
-import { loadKeystore, type LoadedKeystore } from "./keystore.js";
+import { commitGroupKeys, loadKeystore, type LoadedKeystore } from "./keystore.js";
 import { scanAttestedEventRecords, yamlRecipientDids } from "./reconcile.js";
 import { WasmRuntime } from "tn-wasm";
 import { nodeStorageAdapter } from "./storage_node.js";
@@ -538,7 +538,6 @@ export class NodeRuntime {
     }
 
     const ks = this.config.keystorePath;
-    const statePath = join(ks, `${group}.btn.state`);
     const mykitPath = join(ks, `${group}.btn.mykit`);
 
     // Hash the previous self-kit before renaming. If it's missing for
@@ -555,33 +554,24 @@ export class NodeRuntime {
       }
     }
 
-    // Rename old key material out of the way. UTC timestamp matches
-    // the Python convention so cross-language ceremonies show
-    // identical .revoked.<ts> filenames in the keystore.
+    // Mint a fresh publisher + self-kit. UTC timestamp matches the Python
+    // convention so cross-language ceremonies show identical .revoked.<ts>
+    // filenames in the keystore.
     const ts = Math.floor(Date.now() / 1000);
-    const renameIfExists = (src: string): void => {
-      if (!existsSync(src)) return;
-      try {
-        renameSync(src, `${src}.revoked.${ts}`);
-      } catch {
-        // Best-effort: a Windows-side AV lock or open handle shouldn't
-        // block the rotation. The new write below will overwrite
-        // in place and the audit trail is preserved on the
-        // tn.rotation.completed envelope.
-      }
-    };
-    renameIfExists(statePath);
-    renameIfExists(mykitPath);
-
-    // Mint a fresh publisher + self-kit and write at the canonical
-    // paths. The old publisher's bytes are released after the new
-    // one is wired up so a transient failure here doesn't leave the
-    // runtime with a dangling state.
     const newPub = new BtnPublisher(null);
     const newSelfKit = newPub.mint();
     const newStateBytes = newPub.toBytes();
-    writeFileSync(statePath, Buffer.from(newStateBytes));
-    writeFileSync(mykitPath, Buffer.from(newSelfKit));
+
+    // Crash-safe commit: stage the new state+kit to `.pending`, archive the
+    // old pair as loadable `.revoked.<ts>`, then promote pending -> active. A
+    // crash mid-rotation is repaired on the next loadKeystore - the publisher
+    // is never left with no writable state. (Was an in-place overwrite that
+    // could destroy the only copy if it crashed between the rename and write.)
+    commitGroupKeys(ks, group, {
+      stateBytes: new Uint8Array(newStateBytes),
+      selfKit: new Uint8Array(newSelfKit),
+      archiveTs: String(ts),
+    });
 
     // Swap the in-memory handle. The runtime keeps a single
     // BtnPublisher per group and addRecipient / encrypt use it
@@ -2706,40 +2696,48 @@ export class NodeRuntime {
     if (!existsSync(keystore)) mkdirSync(keystore, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15) + "Z";
 
-    // Step A: install key files (content-addressed).
+    // Step A: install key material crash-safely, per group. The carried
+    // state+kit for a group are committed as a matched PAIR through the same
+    // pending->archive->promote dance rotateGroup uses (commitGroupKeys), so a
+    // crash mid-absorb is repaired on the next loadKeystore rather than
+    // stranding the member. The superseded files are archived as LOADABLE
+    // `.revoked.<ts>` (NOT `.previous.<ts>` which the cipher ignores) so a
+    // PRIOR member catching up to a rotation through this sync keeps read
+    // access to everything from before it. Mirrors Python _absorb_group_keys.
     let accepted = 0;
     let deduped = 0;
     const replaced: string[] = [];
+    const byGroup = new Map<string, { stateBytes?: Uint8Array; selfKit?: Uint8Array }>();
     for (const [name, data] of body) {
       if (!name.startsWith("body/keys/")) continue;
       const rel = name.slice("body/keys/".length);
       if (!rel) continue;
       if (rel.includes("/") || rel.includes("\\")) continue; // flat only
       // Only group key material — never a device secret.
-      if (!rel.endsWith(".btn.state") && !rel.endsWith(".btn.mykit")) continue;
-      const dest = pathResolve(keystore, rel);
-      if (existsSync(dest)) {
-        const existing = readFileSync(dest);
-        if (Buffer.from(existing).equals(Buffer.from(data))) {
-          deduped += 1;
-          continue;
-        }
-        // SECURITY/parity: archive the superseded state/kit as a LOADABLE
-        // `.revoked.<ts>` (the same scheme rotateGroup uses, which the
-        // reader spans), NOT `.previous.<ts>` which the cipher ignores.
-        // Otherwise a PRIOR member that catches up to a rotation through a
-        // group_keys sync silently loses read access to everything from
-        // before it. The single `ts` keeps the state+kit a matched pair.
-        // Mirrors the Python _absorb_group_keys retired-archive fix.
-        try {
-          renameSync(dest, pathResolve(keystore, `${rel}.revoked.${ts}`));
-        } catch {
-          /* best effort */
-        }
-        replaced.push(dest);
+      let group: string | undefined;
+      let slot: "stateBytes" | "selfKit" | undefined;
+      if (rel.endsWith(".btn.state")) {
+        group = rel.slice(0, -".btn.state".length);
+        slot = "stateBytes";
+      } else if (rel.endsWith(".btn.mykit")) {
+        group = rel.slice(0, -".btn.mykit".length);
+        slot = "selfKit";
+      } else {
+        continue;
       }
-      writeFileSync(dest, Buffer.from(data));
+      const dest = pathResolve(keystore, rel);
+      if (existsSync(dest) && Buffer.from(readFileSync(dest)).equals(Buffer.from(data))) {
+        deduped += 1;
+        continue; // byte-identical: nothing to install
+      }
+      if (existsSync(dest)) replaced.push(dest);
+      const entry = byGroup.get(group) ?? {};
+      entry[slot] = new Uint8Array(data);
+      byGroup.set(group, entry);
       accepted += 1;
+    }
+    for (const [group, keys] of byGroup) {
+      commitGroupKeys(keystore, group, { ...keys, archiveTs: ts });
     }
 
     // Step B: register each carried group in the authoritative yaml (union).
@@ -2848,9 +2846,9 @@ export class NodeRuntime {
    * (preserves the existing `read(path)` contract for cross-publisher
    * reads where the caller chose the file).
    */
-  *read(logPath?: string): Generator<ReadEntry, void, void> {
+  *read(logPath?: string, expectGenesis = false): Generator<ReadEntry, void, void> {
     const sources = this._collectReadSources(logPath);
-    const prevHashByType = new Map<string, RowHash>();
+    const prevHashByType = new Map<string, string>();
     for (const src of sources) {
       const { path, lineno, line: rawLine } = src;
       let env: Record<string, unknown>;
@@ -2864,11 +2862,16 @@ export class NodeRuntime {
       }
       const eventType = String(env["event_type"] ?? "");
       const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH());
-      // Chain continuity check (per event_type, matches Python).
-      const lastHash = prevHashByType.get(eventType);
-      const chainOk = lastHash === undefined || envPrevHash === lastHash;
+      // Chain continuity check (per event_type, matches Python). The
+      // off-by-default genesis anchor lives in verifyChainLink.
+      const chainOk = verifyChainLink(
+        prevHashByType,
+        eventType,
+        envPrevHash,
+        String(env["row_hash"] ?? ""),
+        expectGenesis,
+      );
       const entry = this._decodeReadEnvelope(env, chainOk);
-      prevHashByType.set(eventType, asRowHash(String(env["row_hash"] ?? "")));
       yield entry;
     }
   }
@@ -3689,8 +3692,8 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
     ? rel(opts.logPath, `./.tn/${yamlStem}/logs/tn.ndjson`)
     : `./.tn/${yamlStem}/logs/tn.ndjson`;
   const _adminLogStr = opts.adminLogPath
-    ? rel(opts.adminLogPath, `./.tn/${yamlStem}/admin/admin.ndjson`)
-    : `./.tn/${yamlStem}/admin/admin.ndjson`;
+    ? rel(opts.adminLogPath, `./.tn/${yamlStem}/admin/default.ndjson`)
+    : `./.tn/${yamlStem}/admin/default.ndjson`;
   const _profileLine = opts.profile ? `\n  profile: ${opts.profile}` : "";
   const _projectNameLine = opts.projectName ? `\n  project_name: ${opts.projectName}` : "";
   // Derive the chain flag from the profile catalog so the Rust/wasm core

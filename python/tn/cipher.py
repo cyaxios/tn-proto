@@ -519,18 +519,20 @@ class BtnGroupCipher:
 
         0.4.3a1: also picks up the retired-state archive
         (`<group>.btn.state.retired.<epoch>` siblings written by a
-        prior `rotate()`) and runs `cleanup_orphan_pending()` so a
-        prior rotation crash doesn't leave stale `.pending` files
-        sitting around."""
+        prior `rotate()`) and runs `recover_interrupted_promote()` so a
+        prior rotation crash is rolled forward (or back) into a
+        consistent, writable state rather than leaving stale `.pending`
+        files — or, worse, deleting the only surviving copy."""
         import tn_btn as _btn
 
         from .btn_keystore import BtnKeystore
 
         ks = BtnKeystore(keystore)
-        # Crash recovery: a prior rotation may have crashed between
-        # write_pending and promote_pending. Clean up the pending pair
-        # so the next rotation starts from a consistent point.
-        ks.cleanup_orphan_pending(group_name)
+        # Crash recovery: a prior rotation may have crashed during the
+        # promote dance. Roll the surviving pending pair forward to active
+        # (or discard it if the active pair is still intact) so the next
+        # rotation starts from a consistent, writable point.
+        ks.recover_interrupted_promote(group_name)
 
         state_path = keystore / f"{group_name}.btn.state"
         kit_path = keystore / f"{group_name}.btn.mykit"

@@ -10,7 +10,7 @@
 // through this module will still read the keystore parts that exist
 // but cannot emit or read.
 
-import { readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { DeviceKey } from "../core/signing.js";
@@ -29,6 +29,110 @@ export interface GroupKeystore {
   kits: Uint8Array[]; // index 0 is the current self-kit
 }
 
+/** Atomically write bytes: write to `<path>.tmp`, then rename over the target.
+ * The rename is the commit point — a crash leaves either the old file or the
+ * new one, never a torn/partial write. (libuv's rename replaces an existing
+ * target on POSIX and Windows alike.) */
+export function atomicWriteSync(path: string, data: Uint8Array): void {
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, data);
+  renameSync(tmp, path);
+}
+
+/**
+ * Crash-safe commit of a group's btn key material (state and/or self-kit),
+ * mirroring Python's `BtnKeystore` promote dance. The new generation is staged
+ * to `.pending` (durable) BEFORE the active files are touched, the superseded
+ * active file(s) are archived as loadable `.revoked.<ts>` (so historical reads
+ * still span the rotation), and finally `.pending` is promoted to active. A
+ * crash anywhere is repaired by {@link recoverInterruptedPromotes} on the next
+ * load — the new bytes survive in `.pending` until the swap commits, so the
+ * publisher can never be left with no writable state.
+ */
+export function commitGroupKeys(
+  keystorePath: string,
+  group: string,
+  opts: { stateBytes?: Uint8Array; selfKit?: Uint8Array; archiveTs: string },
+): void {
+  const items: { active: string; pending: string; data: Uint8Array }[] = [];
+  if (opts.stateBytes !== undefined) {
+    const active = join(keystorePath, `${group}.btn.state`);
+    items.push({ active, pending: `${active}.pending`, data: opts.stateBytes });
+  }
+  if (opts.selfKit !== undefined) {
+    const active = join(keystorePath, `${group}.btn.mykit`);
+    items.push({ active, pending: `${active}.pending`, data: opts.selfKit });
+  }
+  // 1. Stage the new bytes to `.pending` (durable before we disturb active).
+  for (const it of items) atomicWriteSync(it.pending, it.data);
+  // 2. Archive each superseded active file as `.revoked.<ts>` (best-effort: a
+  //    lock or open handle must not block the rotation, and the new generation
+  //    is already safe in `.pending`).
+  for (const it of items) {
+    if (existsSync(it.active)) {
+      try {
+        renameSync(it.active, `${it.active}.revoked.${opts.archiveTs}`);
+      } catch {
+        /* best-effort archive */
+      }
+    }
+  }
+  // 3. Promote `.pending` -> active.
+  for (const it of items) {
+    rmSync(it.active, { force: true });
+    renameSync(it.pending, it.active);
+  }
+}
+
+/** Recover one group's interrupted promote (see {@link recoverInterruptedPromotes}). */
+function recoverGroupPromote(keystorePath: string, group: string): boolean {
+  const stateActive = join(keystorePath, `${group}.btn.state`);
+  const kitActive = join(keystorePath, `${group}.btn.mykit`);
+  const statePending = `${stateActive}.pending`;
+  const kitPending = `${kitActive}.pending`;
+  const pendState = existsSync(statePending);
+  const pendKit = existsSync(kitPending);
+  if (!pendState && !pendKit) return false; // no interrupted promote
+
+  // Roll back ONLY when the active pair is fully intact — the one state that
+  // proves the promote never began replacing it.
+  if (existsSync(stateActive) && existsSync(kitActive)) {
+    if (pendState) rmSync(statePending, { force: true });
+    if (pendKit) rmSync(kitPending, { force: true });
+    return true;
+  }
+
+  // Otherwise a promote was interrupted mid-swap: land each surviving pending
+  // file onto its active path (roll forward). Deleting it would strand the
+  // publisher with no writable state.
+  if (pendState) {
+    rmSync(stateActive, { force: true });
+    renameSync(statePending, stateActive);
+  }
+  if (pendKit) {
+    rmSync(kitActive, { force: true });
+    renameSync(kitPending, kitActive);
+  }
+  return true;
+}
+
+/**
+ * Repair any rotation that crashed during {@link commitGroupKeys}'s promote
+ * dance. Scans the keystore for `<group>.btn.state[.pending]` to find every
+ * group (a mid-promote crash may have left only `.pending` on disk, with no
+ * active state to discover), then rolls each interrupted promote forward or
+ * back. Idempotent; safe to call on every load.
+ */
+export function recoverInterruptedPromotes(keystorePath: string): void {
+  if (!existsSync(keystorePath)) return;
+  const groups = new Set<string>();
+  for (const entry of readdirSync(keystorePath)) {
+    const m = entry.match(/^(.+)\.btn\.state(?:\.pending)?$/);
+    if (m && m[1]) groups.add(m[1]);
+  }
+  for (const g of groups) recoverGroupPromote(keystorePath, g);
+}
+
 export function loadKeystore(keystorePath: string): LoadedKeystore {
   const privatePath = join(keystorePath, "local.private");
   const indexPath = join(keystorePath, "index_master.key");
@@ -43,6 +147,10 @@ export function loadKeystore(keystorePath: string): LoadedKeystore {
   if (indexMaster.length !== 32) {
     throw new Error(`index_master.key must be 32 bytes, got ${indexMaster.length}`);
   }
+
+  // Repair any rotation that crashed mid-promote BEFORE discovering groups —
+  // a crash can leave a group with only `.pending` files and no active state.
+  recoverInterruptedPromotes(keystorePath);
 
   const groups = new Map<string, GroupKeystore>();
   const groupNames = new Set<string>();

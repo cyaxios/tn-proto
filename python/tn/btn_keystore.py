@@ -206,8 +206,9 @@ class BtnKeystore:
         These are NOT visible to the cipher's active load path. They
         sit on disk until :meth:`promote_pending` atomically swaps them
         in. If a crash interrupts the sequence between this call and
-        the promote, :meth:`cleanup_orphan_pending` clears the pending
-        files so the next init starts from a consistent state."""
+        the promote, :meth:`recover_interrupted_promote` rolls the
+        pending pair forward or back so the next init starts from a
+        consistent state."""
         atomic_write_bytes(self._pending_state_path(group), state_bytes)
         atomic_write_bytes(self._pending_kit_path(group), self_kit)
 
@@ -227,7 +228,8 @@ class BtnKeystore:
              active files and renames pending → active. Two atomic
              POSIX renames; the file removals are best-effort idempotent
              (a crash between them is recoverable by the next init's
-             cleanup_orphan_pending + re-rotate cycle).
+             recover_interrupted_promote, which rolls the surviving
+             pending pair forward to active).
 
         Refuses if the retired pair is NOT present on disk at the
         expected epoch — that means write_retired_pair didn't run and
@@ -267,16 +269,57 @@ class BtnKeystore:
         state_pending.rename(state_active)
         kit_pending.rename(kit_active)
 
-    def cleanup_orphan_pending(self, group: str) -> bool:
-        """Remove ``.pending`` files that have no corresponding active swap.
+    def recover_interrupted_promote(self, group: str) -> bool:
+        """Recover from a rotation that crashed during the promote dance.
 
-        Called on init to recover from crashes BEFORE the promote
-        dance's rename sequence committed. Returns True if anything
-        was cleaned up — the caller may want to log it as a recovery
-        event."""
-        cleaned = False
-        for p in (self._pending_state_path(group), self._pending_kit_path(group)):
-            if p.exists():
-                p.unlink()
-                cleaned = True
-        return cleaned
+        Called on init. ``promote_pending`` removes the active pair and
+        then renames the ``.pending`` pair onto it; a crash anywhere in
+        that window leaves a ``.pending`` pair on disk. The recovery
+        DIRECTION depends on whether the active pair is still intact:
+
+        * **Active pair intact** (both ``<group>.btn.state`` and
+          ``.mykit`` present) → the promote never started removing the
+          active files, so the ``.pending`` pair is a not-yet-promoted
+          new generation. **Roll back**: discard the pending pair; the
+          active (old) generation is still valid and a re-rotate can run.
+        * **Active pair incomplete** (either active file missing) while a
+          ``.pending`` file survives → a promote was interrupted
+          mid-swap. **Roll forward**: land each surviving pending file as
+          its active counterpart. Deleting it instead would strand the
+          publisher with no writable state — the ``.retired.<N>`` archive
+          is a read-only snapshot, not a usable publisher state.
+
+        Returns True if any recovery action was taken. Each file is moved
+        independently (the promote renames state before kit), so a crash
+        between the two renames still recovers the surviving half.
+        """
+        state_active = self._state_path(group)
+        kit_active = self._kit_path(group)
+        state_pending = self._pending_state_path(group)
+        kit_pending = self._pending_kit_path(group)
+
+        pend_state = state_pending.exists()
+        pend_kit = kit_pending.exists()
+        if not pend_state and not pend_kit:
+            return False  # no interrupted promote to recover
+
+        # Roll back only when the active pair is fully intact — that is the
+        # one state proving the promote hadn't begun replacing it.
+        if state_active.exists() and kit_active.exists():
+            if pend_state:
+                state_pending.unlink()
+            if pend_kit:
+                kit_pending.unlink()
+            return True
+
+        # Otherwise a promote was interrupted mid-swap: complete it by landing
+        # whichever pending files survived onto their active paths. unlink the
+        # stale/partial active first so the rename lands cross-platform
+        # (Windows rename refuses an existing target).
+        if pend_state:
+            state_active.unlink(missing_ok=True)
+            state_pending.rename(state_active)
+        if pend_kit:
+            kit_active.unlink(missing_ok=True)
+            kit_pending.rename(kit_active)
+        return True
