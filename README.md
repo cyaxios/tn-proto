@@ -145,6 +145,33 @@ By default, initializing a project sets up a secure, automatic backup of your ke
   tn init myproject --no-link
   ```
 
+### 👤 Creating an Account on vault.tn-proto.org
+
+The backup is tied to your device identity from the first `tn init`. To own it, manage it from a browser, and recover it anywhere, claim it under an account:
+
+1. **Sign in.** Open <https://vault.tn-proto.org/account> and sign in (Google or passkey) to create your account.
+2. **Initialize locally.** `tn init myproject` mints your device identity and pushes the encrypted keys + config. The CLI prints your account sign-in URL and the project it created.
+3. **Link the project to your account** so it appears in your dashboard and is recoverable under your login:
+   ```bash
+   tn wallet link ./myproject/tn.yaml --vault https://vault.tn-proto.org
+   ```
+4. **Recover anywhere** with `tn wallet restore --mnemonic`.
+
+### 🛠️ Using Your Own Vault (or None)
+
+You are never tied to `vault.tn-proto.org`:
+
+```bash
+# Point at a different vault for one run...
+tn init myproject --link https://vault.example.internal
+
+# ...or set it once as a machine-wide default (system parameter):
+export TN_VAULT_URL="https://vault.example.internal"
+tn init myproject
+```
+
+Resolution order: explicit `--link`, then the `TN_VAULT_URL` environment variable, then the built-in default. `--no-link` opts out entirely.
+
 ---
 
 ## Default File Locations
