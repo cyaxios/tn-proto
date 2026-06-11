@@ -16,12 +16,12 @@ use pyo3::types::PyModule;
 fn native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // core submodule = former tn_core._core
     let core = PyModule::new(py, "core")?;
-    tn_core::populate(py, &core)?;
+    tn_core_py::populate(py, &core)?;
     m.add_submodule(&core)?;
 
     // btn submodule = former tn_btn._core
     let btn = PyModule::new(py, "btn")?;
-    tn_btn::populate(&btn)?;
+    tn_btn_py::populate(&btn)?;
     m.add_submodule(&btn)?;
 
     // PyO3 only wires attribute access for submodules; register them (and
