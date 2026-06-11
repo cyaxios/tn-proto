@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from . import cipher as _cipher
-from .chain import _compute_row_hash
+from .chain import _compute_row_hash, verify_chain_link
 from .config import LoadedConfig
 from .signing import DeviceKey, _signature_from_b64
 
@@ -291,6 +291,7 @@ def read_with_keybag(
     keystore_dir: str | Path,
     *,
     verify_signatures: bool = True,
+    expect_genesis: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Read a log decrypting every group whose kit lives in
     ``keystore_dir``.
@@ -315,7 +316,10 @@ def read_with_keybag(
             for lineno, line in enumerate(f, 1):
                 yield (f"{log_path}:{lineno}", line)
         yield from _lines_with_keybag(
-            _labelled(), keystore_dir, verify_signatures=verify_signatures
+            _labelled(),
+            keystore_dir,
+            verify_signatures=verify_signatures,
+            expect_genesis=expect_genesis,
         )
 
 
@@ -324,6 +328,7 @@ def _lines_with_keybag(
     keystore_dir: str | Path,
     *,
     verify_signatures: bool = True,
+    expect_genesis: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Decrypt an iterator of ``(source_label, raw_line)`` pairs against the
     key bag in ``keystore_dir``, yielding ``{envelope, plaintext, valid}``
@@ -333,6 +338,12 @@ def _lines_with_keybag(
     Kafka handler feeds ``(kafka://…@offset, line)`` pairs. The decrypt,
     chain check, and signature verify are identical regardless of where the
     bytes came from.
+
+    ``expect_genesis`` (default ``False``) is the opt-in genesis anchor:
+    when ``True``, the first entry of each ``event_type`` chain must anchor
+    at :data:`~tn.chain.ZERO_HASH`, so a front-truncated log is flagged.
+    Leave it off for ordinary logging and partial/tailed reads — see
+    :func:`tn.chain.verify_chain_link`.
     """
     keystore_path = Path(keystore_dir)
     bag = _discover_keybag_ciphers(keystore_path)
@@ -348,9 +359,13 @@ def _lines_with_keybag(
             raise ValueError(f"{label}: invalid JSON: {e}") from e
 
         event_type = env["event_type"]
-        last = prev_hash_by_event.get(event_type)
-        chain_ok = (last is None) or (env["prev_hash"] == last)
-        prev_hash_by_event[event_type] = env["row_hash"]
+        chain_ok = verify_chain_link(
+            prev_hash_by_event,
+            event_type,
+            env["prev_hash"],
+            env["row_hash"],
+            expect_genesis=expect_genesis,
+        )
 
         # Walk every group block in the envelope; try the matching
         # cipher from the bag. Groups we don't have a kit for stay
@@ -461,9 +476,9 @@ def read_as_recipient(
                 raise ValueError(f"{log_path}:{lineno}: invalid JSON: {e}") from e
 
             event_type = env["event_type"]
-            last = prev_hash_by_event.get(event_type)
-            chain_ok = (last is None) or (env["prev_hash"] == last)
-            prev_hash_by_event[event_type] = env["row_hash"]
+            chain_ok = verify_chain_link(
+                prev_hash_by_event, event_type, env["prev_hash"], env["row_hash"]
+            )
 
             plaintext: dict[str, dict[str, Any]] = {}
             g_block = env.get(group)
@@ -529,11 +544,15 @@ def parse_envelope_line(
 
     event_type = env.get("event_type", "")
 
-    # Chain integrity.
+    # Chain integrity. Without a carried `prev_hash_by_event` there is no
+    # state to chain against, so chain is reported unverified (False).
     if prev_hash_by_event is not None:
-        last = prev_hash_by_event.get(event_type)
-        chain_ok: bool = (last is None) or (env.get("prev_hash") == last)
-        prev_hash_by_event[event_type] = env.get("row_hash", "")
+        chain_ok: bool = verify_chain_link(
+            prev_hash_by_event,
+            event_type,
+            env.get("prev_hash", ""),
+            env.get("row_hash", ""),
+        )
     else:
         chain_ok = False
 
@@ -616,7 +635,7 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
 
     Returns an empty iterator if ``log_path`` does not exist. With the
     2026-04-24 admin-log default flip, a fresh ceremony that emits only
-    ``tn.*`` admin events lands them in ``.tn/admin/admin.ndjson`` and
+    ``tn.*`` admin events lands them in the admin log and
     leaves the main log uncreated; ``tn.read()`` should not raise on a
     bare ceremony.
     """
@@ -639,9 +658,9 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
             event_type = env["event_type"]
 
             # chain integrity: compare prev_hash against last row_hash
-            last = prev_hash_by_event.get(event_type)
-            chain_ok = (last is None) or (env["prev_hash"] == last)
-            prev_hash_by_event[event_type] = env["row_hash"]
+            chain_ok = verify_chain_link(
+                prev_hash_by_event, event_type, env["prev_hash"], env["row_hash"]
+            )
 
             # row_hash recomputation
             groups_from_env: dict[str, dict[str, Any]] = {}

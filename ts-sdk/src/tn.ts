@@ -266,6 +266,14 @@ export interface ReadOptions {
   group?: string;
   /** Scan across all runs in the file. Default: false (current run only). */
   allRuns?: boolean;
+  /**
+   * Require the first entry of each event_type chain to anchor at the genesis
+   * ZERO_HASH, flagging a front-truncated log (`valid.chain=false` on the new
+   * first entry). Off by default — ordinary, resumed, rotated, and partial
+   * reads legitimately start mid-chain. Opt in only when reading a COMPLETE
+   * log from its true start (an audit). See `verifyChainLink`.
+   */
+  expectGenesis?: boolean;
 }
 
 export interface WatchOptions {
@@ -1139,6 +1147,7 @@ export class Tn {
     const asRecipient = opts.asRecipient;
     const group = opts.group ?? "default";
     const allRuns = opts.allRuns ?? true;
+    const expectGenesis = opts.expectGenesis ?? false;
     const where = opts.where;
     const rt = this._rt;
     const runId = this._runId;
@@ -1153,6 +1162,7 @@ export class Tn {
       const foreignIter = readAsRecipient(path, keystorePath, {
         group,
         verifySignatures: verify !== false,
+        expectGenesis,
       });
       triples = (function* () {
         for (const entry of foreignIter) {
@@ -1169,7 +1179,7 @@ export class Tn {
         }
       })();
     } else {
-      triples = rt.read(logPath);
+      triples = rt.read(logPath, expectGenesis);
     }
 
     // Helper: per-row run-id filter (only applies to local reads).

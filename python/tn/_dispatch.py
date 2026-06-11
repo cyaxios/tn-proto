@@ -6,12 +6,16 @@ to the pure-Python implementation (current behavior unchanged).
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+from tn.chain import _compute_row_hash, verify_chain_link
+from tn.signing import DeviceKey, _signature_from_b64
 
 try:
     from tn_core import Runtime as _RustRuntime  # PyO3 extension
@@ -130,11 +134,6 @@ def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str
       row_hash  : recompute SHA-256 over envelope fields and compare
       chain     : prev_hash matches previous entry's row_hash (per event_type)
     """
-    import base64
-
-    from tn.chain import _compute_row_hash
-    from tn.signing import DeviceKey, _signature_from_b64
-
     _reserved = {
         "device_identity",
         "timestamp",
@@ -182,9 +181,7 @@ def _rust_entries_with_valid(entries: list[dict[str, Any]]) -> Iterator[dict[str
             # ceremony's rows mixed in, that pass should start fresh.
             chain_ok = True
         else:
-            last = prev_hash_by_event.get(event_type)
-            chain_ok = (last is None) or (prev_hash == last)
-            prev_hash_by_event[event_type] = row_hash
+            chain_ok = verify_chain_link(prev_hash_by_event, event_type, prev_hash, row_hash)
 
         # Row hash recompute ------------------------------------------
         public_fields: dict[str, Any] = {}
@@ -524,9 +521,9 @@ class DispatchRuntime:
             if self._rt is None:
                 raise RuntimeError("DispatchRuntime: Rust runtime not initialized")
             # If the resolved log path doesn't exist (e.g. a fresh
-            # ceremony emitted only admin events that landed in the
-            # `.tn/admin/admin.ndjson` file under the new default), the
-            # Rust runtime would raise. Short-circuit on the Python side.
+            # ceremony emitted only admin events, which land in the
+            # separate admin log), the Rust runtime would raise.
+            # Short-circuit on the Python side.
             if log_path is None:
                 resolved = Path(self._rt.log_path()) if hasattr(self._rt, "log_path") else None
                 if resolved is not None and not resolved.exists():

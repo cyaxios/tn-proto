@@ -78,6 +78,57 @@ class ChainState:
                 self._chains[event_type] = _EventChain(seq=seq, prev_hash=row_hash)
 
 
+def verify_chain_link(
+    prev_hash_by_event: dict[str, str],
+    event_type: str,
+    prev_hash: str,
+    row_hash: str,
+    *,
+    expect_genesis: bool = False,
+) -> bool:
+    """Check one entry's chain linkage and advance per-event_type state.
+
+    The single source of truth for the reader-side chain check. Every read
+    path (keybag reader, foreign-recipient reader, dispatch verify, line
+    tailer) funnels its per-entry comparison through here so the rule lives
+    in one place.
+
+    Returns whether ``prev_hash`` links to the last ``row_hash`` seen for
+    this ``event_type``. The FIRST entry seen for an event_type is the only
+    interesting case:
+
+    * ``expect_genesis=False`` (default): the first-seen entry is trusted
+      (``chain_ok=True``). A reader is routinely handed an incomplete slice
+      of a chain — it resumed mid-log with ``since=``, it read a rotated log
+      whose oldest entries already rolled off, or it received a partial
+      foreign export. None of those carry the chain's true first row, so a
+      first-seen entry cannot be required to anchor at :data:`ZERO_HASH`
+      without false-positiving on every legitimate partial read. This keeps
+      ordinary logging working unchanged.
+    * ``expect_genesis=True`` (opt-in): the first-seen entry is REQUIRED to
+      anchor at :data:`ZERO_HASH`. Use only when the caller knows it holds a
+      COMPLETE chain from its true start — an audit reading a whole file from
+      byte zero, not a tail and not a rotated stream. A front-truncation
+      attack (lopping rows off the chain's head) is then caught: the new
+      first entry's ``prev_hash`` points at a row that is gone, so it will
+      not equal :data:`ZERO_HASH`.
+
+    Distinguishing attacker-truncation from a legitimate rotation/resume
+    needs an out-of-band checkpoint (the publisher's last-known head); that
+    is deliberately out of scope here and left for callers that maintain one.
+
+    Side effect: sets ``prev_hash_by_event[event_type] = row_hash`` so
+    successive calls chain correctly.
+    """
+    last = prev_hash_by_event.get(event_type)
+    if last is None:
+        chain_ok = (prev_hash == ZERO_HASH) if expect_genesis else True
+    else:
+        chain_ok = prev_hash == last
+    prev_hash_by_event[event_type] = row_hash
+    return chain_ok
+
+
 def _compute_row_hash(
     *,
     device_identity: str,

@@ -19,6 +19,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { join } from "node:path";
 
+import { verifyChainLink } from "./core/chain.js";
 import { decryptGroup } from "./core/decrypt.js";
 import { signatureFromB64, verify } from "./core/signing.js";
 import { asDid, asSignatureB64 } from "./core/types.js";
@@ -28,6 +29,13 @@ export interface ReadAsRecipientOptions {
   group?: string;
   /** Verify per-row signatures (slower but catches forgery). Default: true. */
   verifySignatures?: boolean;
+  /**
+   * Require the first entry of each event_type chain to anchor at ZERO_HASH,
+   * catching a front-truncation. Off by default — a foreign read is often a
+   * partial slice that legitimately starts mid-chain. See
+   * {@link verifyChainLink}.
+   */
+  expectGenesis?: boolean;
 }
 
 export interface ForeignReadEntry {
@@ -58,6 +66,7 @@ export function* readAsRecipient(
 ): Generator<ForeignReadEntry, void, void> {
   const group = opts.group ?? "default";
   const verifySigs = opts.verifySignatures ?? true;
+  const expectGenesis = opts.expectGenesis ?? false;
 
   const btnKitPath = join(keystorePath, `${group}.btn.mykit`);
   const jweKeyPath = join(keystorePath, `${group}.jwe.mykey`);
@@ -97,11 +106,15 @@ export function* readAsRecipient(
 
     // Per-event-type chain check: each event_type maintains its own
     // prev_hash continuity. Mirrors Python's reader.read_as_recipient.
-    const last = prevHashByType.get(eventType);
     const envPrev = env["prev_hash"];
     const envRow = env["row_hash"];
-    const chainOk = (last === undefined) || (typeof envPrev === "string" && envPrev === last);
-    if (typeof envRow === "string") prevHashByType.set(eventType, envRow);
+    const chainOk = verifyChainLink(
+      prevHashByType,
+      eventType,
+      typeof envPrev === "string" ? envPrev : "",
+      typeof envRow === "string" ? envRow : "",
+      expectGenesis,
+    );
 
     // Decrypt the requested group, if its ciphertext is present.
     const plaintext: Record<string, Record<string, unknown>> = {};
