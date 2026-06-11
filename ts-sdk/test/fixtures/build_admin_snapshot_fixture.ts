@@ -11,7 +11,7 @@
 //
 // Run with:
 //
-//     cd tn-protocol/ts-sdk
+//     cd tn_proto/ts-sdk
 //     node --import tsx test/fixtures/build_admin_snapshot_fixture.ts
 //
 // Re-running overwrites the fixture. Cross-consume tests verify that the

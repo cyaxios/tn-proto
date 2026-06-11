@@ -19,7 +19,7 @@
 //       mechanism: SCRAM-SHA-256
 //       user: env:RP_USERNAME             # env:NAME resolves at construction
 //       pass: env:RP_PASSWORD
-//     client_id: tn-protocol-sdk          # optional
+//     client_id: tn-proto-sdk             # optional
 //     compression_type: gzip              # optional (gzip|none; lz4/snappy/zstd need kafkajs plugins)
 //     acks: all                           # optional
 //
@@ -137,7 +137,7 @@ export class KafkaHandler extends AsyncTNHandler {
     this._bootstrap = opts.bootstrap;
     this._topicTmpl = opts.topic;
     this._sasl = opts.sasl;
-    this._clientId = opts.clientId ?? "tn-protocol";
+    this._clientId = opts.clientId ?? "tn-proto";
     this._compression = (opts.compressionType ?? "gzip").toLowerCase();
     this._acks = opts.acks ?? "all";
   }

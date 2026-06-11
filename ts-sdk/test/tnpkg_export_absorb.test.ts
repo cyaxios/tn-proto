@@ -1,7 +1,7 @@
 // Tests for `tnpkg`, `NodeRuntime.exportPkg`, and `NodeRuntime.absorbPkg`.
 //
 // Mirrors the Python coverage in
-// `tn-protocol/python/tests/test_export_absorb.py` and the parts of
+// `tn_proto/python/tests/test_export_absorb.py` and the parts of
 // `tnpkg.py` that round-trip the manifest.
 
 import { strict as assert } from "node:assert";

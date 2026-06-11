@@ -15,7 +15,7 @@ group.added (auto from ``tn.init``) plus the 4 events above.
 Run with the project venv:
 
     .venv/Scripts/python.exe \
-        tn-protocol/python/tests/fixtures/build_admin_snapshot_fixture.py
+        tn_proto/python/tests/fixtures/build_admin_snapshot_fixture.py
 
 Re-running overwrites the file. The byte-compare consumers verify that
 the signed manifest parses and the AdminState matches this scenario;

@@ -7,9 +7,9 @@ Python, TypeScript, and Rust loaders.
 The Python side runs end-to-end here. The TS and Rust sides have their
 own native tests that cover the same fixture shape:
 
-* TypeScript: ``tn-protocol/ts-sdk/test/config_env_vars.test.ts``
+* TypeScript: ``tn_proto/ts-sdk/test/config_env_vars.test.ts``
   ("loadConfig propagates env-var substitution end-to-end")
-* Rust:       ``tn-protocol/crypto/tn-core/tests/config_env_vars.rs``
+* Rust:       ``tn_proto/crypto/tn-core/tests/config_env_vars.rs``
   (``mixed_substitutions_yaml`` and ``default_used_when_var_absent``)
 
 This Python-only test plus the pinned syntax ensures parity by

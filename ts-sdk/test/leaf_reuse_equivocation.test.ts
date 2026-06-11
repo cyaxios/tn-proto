@@ -1,5 +1,5 @@
 // Absorb-time equivocation classification — TS parity with Python
-// `tn-protocol/python/tests/test_absorb_equivocation.py`.
+// `tn_proto/python/tests/test_absorb_equivocation.py`.
 //
 // A `tn.recipient.added` reusing a revoked (group, leaf) is always
 // excluded from derived state (revocation is terminal). `reuseIsInformed`

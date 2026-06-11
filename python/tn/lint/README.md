@@ -73,7 +73,7 @@ correlation_id, request_id, event_id, level, timestamp, event_type
 ## Tests
 
 ```bash
-.venv/Scripts/python.exe -m pytest tn-protocol/python/tn/lint/tests/
+.venv/Scripts/python.exe -m pytest tn_proto/python/tn/lint/tests/
 ```
 
 The fixtures under `tests/fixtures/` cover one violation per active rule plus a clean baseline. The fixture `tn.yaml` extends the real `pci-cardholder` pack from the repo, so R3 exercises the actual `forbidden_post_auth` set.

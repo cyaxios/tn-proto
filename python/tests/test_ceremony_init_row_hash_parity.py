@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))  # tn-protocol/python on sys.path
+sys.path.insert(0, str(HERE.parent))  # tn_proto/python on sys.path
 
 
 def _admin_log_path(cfg) -> Path:

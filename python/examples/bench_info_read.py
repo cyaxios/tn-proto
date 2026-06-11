@@ -8,10 +8,10 @@ from Python, across a sweep of message sizes and under both runtime paths:
 
 Run (overnight capture):
 
-    .venv/Scripts/python.exe tn-protocol/python/examples/bench_info_read.py
+    .venv/Scripts/python.exe tn_proto/python/examples/bench_info_read.py
 
 Writes a markdown summary to
-tn-protocol/python/examples/bench_info_read.results.md and prints it to
+tn_proto/python/examples/bench_info_read.results.md and prints it to
 stdout. Prefer running the Rust-path build with `maturin develop --release`
 first so the tn_core extension is optimised.
 """
@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))  # tn-protocol/python on sys.path
+sys.path.insert(0, str(HERE.parent))  # tn_proto/python on sys.path
 
 MSG_SIZES = [64, 256, 1_024, 4_096, 16_384, 65_536]
 EMIT_ITERS = 200

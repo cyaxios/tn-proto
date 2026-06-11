@@ -31,8 +31,8 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Repo layout: tn-protocol/ts-sdk/test/secure_read_interop.test.ts
-// Repo root for fixtures = tn-protocol/.
+// Repo layout: tn_proto/ts-sdk/test/secure_read_interop.test.ts
+// Repo root for fixtures = tn_proto/.
 const PROTO_ROOT = resolve(__dirname, "..", "..");
 
 const SECURE_READ_NAME = "secure_read_canonical.json";

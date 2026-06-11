@@ -139,7 +139,7 @@ def write_summary(artifacts_dir: Path) -> Path:
     lines.append("## Re-running")
     lines.append("")
     lines.append("```bash")
-    lines.append("cd tn-protocol/python")
+    lines.append("cd tn_proto/python")
     lines.append("../../.venv/Scripts/python.exe -m tools.introspect run-all")
     lines.append("```")
     lines.append("")

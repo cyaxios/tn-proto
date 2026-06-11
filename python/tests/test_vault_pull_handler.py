@@ -6,7 +6,7 @@ cursor persists across handler instances, and bad-signature snapshots
 are rejected without losing the cursor.
 
 Run:
-    .venv/Scripts/python.exe -m pytest tn-protocol/python/tests/test_vault_pull_handler.py -v
+    .venv/Scripts/python.exe -m pytest tn_proto/python/tests/test_vault_pull_handler.py -v
 """
 
 from __future__ import annotations

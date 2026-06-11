@@ -341,7 +341,7 @@ is identified at the call site.
 The TS SDK gets two additive entry points for multi-ceremony work:
 
 ```ts
-import { Tn } from "@tnproto/sdk";
+import { Tn } from "tn-proto";
 
 // Open a ceremony at .tn/<name>/tn.yaml. Reserved name "default"
 // resolves the multi-ceremony default. The yaml must already

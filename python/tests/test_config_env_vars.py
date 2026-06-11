@@ -2,8 +2,8 @@
 
 Covers ``${VAR}`` and ``${VAR:-default}`` semantics, plus the
 `$${literal}` escape. Mirrors the TS test in
-``tn-protocol/ts-sdk/test/config_env_vars.test.ts`` and the Rust test
-in ``tn-protocol/crypto/tn-core/tests/config_env_vars.rs`` for
+``tn_proto/ts-sdk/test/config_env_vars.test.ts`` and the Rust test
+in ``tn_proto/crypto/tn-core/tests/config_env_vars.rs`` for
 cross-language parity.
 """
 

@@ -9,7 +9,7 @@ line-appended JSON, and to put the current (BGW) SDK against the older
 Variants (same hot loop, same event dicts, same output discipline):
   plaintext       json.dumps(event) + write line   (no crypto at all)
   plaintext+sign  plaintext + Ed25519 sign per entry (integrity only)
-  tn_envelope     tn.info() from the NEW SDK at tn-protocol/python/tn —
+  tn_envelope     tn.info() from the NEW SDK at tn_proto/python/tn —
                   BGW broadcast encrypt + AES-GCM body + signed
                   row_hash + per-event-type chain + HMAC index tokens
   old_sdk_ndjson  TNClient.log() from the OLD SDK at python/tn with
@@ -21,7 +21,7 @@ Payload sizes (bytes, measured as the serialized event dict):
   ~256 B, ~1 KB, ~4 KB, ~16 KB, ~64 KB
 
 Run (WSL; requires libtncrypto.so):
-    cd tn-protocol/python
+    cd tn_proto/python
     TNCRYPTO_LIB=$(pwd)/../crypto/build/libtncrypto.so \\
         /usr/bin/python bench/bench_envelope_vs_plaintext.py
 """

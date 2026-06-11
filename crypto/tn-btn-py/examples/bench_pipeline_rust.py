@@ -16,7 +16,7 @@ sign + envelope JSON + base64) via two implementations:
 Both bench-paths produce byte-compatible envelope lines for the same
 inputs — we cross-check on a single event at startup to confirm.
 
-Run from `tn-protocol/python/`:
+Run from `tn_proto/python/`:
     /c/codex/content_platform/.venv/Scripts/python.exe \\
         ../crypto/btn-py/examples/bench_pipeline_rust.py
 """

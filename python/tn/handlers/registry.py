@@ -10,7 +10,7 @@ Kind                                       Notes
 ``kafka``                                  Confluent / self-hosted Kafka
 ``s3`` / ``aws.s3``                        AWS S3 (or compatible)
 ``delta`` / ``delta_table`` / ``databricks`` Databricks Delta tables
-``vault.sync``                             tnproto-org cloud vault (RFC §4)
+``vault.sync``                             tn-proto.org cloud vault (RFC §4)
 ``vault.push``                             admin snapshot push (plan §5.2)
 ``vault.pull``                             admin snapshot pull (plan §5.2)
 ``fs.drop``                                local outbox drop (plan §5.2)

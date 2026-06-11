@@ -88,8 +88,8 @@ function pathFromYaml(yamlDir: string, raw: string): string {
 }
 
 // Compose-style env-var substitution. Mirrors `_substitute_env_vars` in
-// `tn-protocol/python/tn/config.py` and the Rust helper in
-// `tn-protocol/crypto/tn-core/src/config.rs`. Applied to the raw yaml
+// `tn_proto/python/tn/config.py` and the Rust helper in
+// `tn_proto/crypto/tn-core/src/config.rs`. Applied to the raw yaml
 // *string* before yaml parsing so the substitution model matches
 // docker-compose's: simple textual replacement with no awareness of
 // yaml types. Recognized syntax:

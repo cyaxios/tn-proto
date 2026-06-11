@@ -18,7 +18,7 @@
 //   }
 //
 // Spec ref: §4.9 (Persisted sync state) and §10 deferred workstream
-// item 5. Mirrors `tn-protocol/python/tn/sync_state.py` byte-for-byte
+// item 5. Mirrors `tn_proto/python/tn/sync_state.py` byte-for-byte
 // at the file format level so Python and TS handlers operating on
 // the same ceremony agree on persisted state.
 

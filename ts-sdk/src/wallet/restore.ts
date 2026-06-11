@@ -27,9 +27,10 @@ import {
   type WrappedKeyRow,
 } from "../vault/awk_bek.js";
 import type { VaultClient } from "../vault/client.js";
+import { USER_AGENT } from "../version.js";
 
 const DEFAULT_HEADERS: Record<string, string> = {
-  "User-Agent": "tnproto-sdk-ts/0.4.3",
+  "User-Agent": USER_AGENT,
   Accept: "application/json, application/octet-stream",
 };
 

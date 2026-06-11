@@ -1,6 +1,6 @@
 """Build the deterministic jwe_two_recipients fixture ceremony.
 
-Run from tn-protocol/python/:
+Run from tn_proto/python/:
 
     ../../.venv/Scripts/python.exe scripts/build_test_ceremony.py
 

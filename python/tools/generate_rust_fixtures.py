@@ -1,9 +1,9 @@
 """Generate cross-implementation golden fixtures for tn-core.
 
 Run from repo root:
-    .venv/Scripts/python.exe tn-protocol/python/tools/generate_rust_fixtures.py
+    .venv/Scripts/python.exe tn_proto/python/tools/generate_rust_fixtures.py
 
-Outputs to tn-protocol/crypto/tn-core/tests/fixtures/*.json
+Outputs to tn_proto/crypto/tn-core/tests/fixtures/*.json
 
 Never hand-edit the output files. If an output changes, regenerate and commit
 both the script change and the new fixtures in the same commit, with a commit
@@ -17,9 +17,9 @@ import json
 import sys
 from pathlib import Path
 
-# Allow imports from tn-protocol/python without install
+# Allow imports from tn_proto/python without install
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent  # tn-protocol/python
+ROOT = HERE.parent  # tn_proto/python
 sys.path.insert(0, str(ROOT))
 
 from tn.canonical import canonical_bytes
@@ -380,7 +380,7 @@ def gen_btn() -> None:
                 {
                     "_skipped": (
                         "btn-py not importable in this environment; "
-                        "build with `maturin develop` inside tn-protocol/crypto/btn-py "
+                        "build with `maturin develop` inside tn_proto/crypto/btn-py "
                         "then re-run this script. See Task 37."
                     )
                 },

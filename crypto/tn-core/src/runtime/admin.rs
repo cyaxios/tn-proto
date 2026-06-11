@@ -234,7 +234,7 @@ impl Runtime {
     // ------------------------------------------------------------------
     // Admin verbs: cipher-agnostic recipient management.
     //
-    // Public names follow the SDK parity matrix (tn-protocol/docs/sdk-parity.md):
+    // Public names follow the SDK parity matrix (tn_proto/docs/sdk-parity.md):
     // `admin_add_recipient`, `admin_revoke_recipient`, `admin_revoked_count`.
     // Today only btn ceremonies are supported; JWE support lands alongside the
     // second cipher and reuses these same public names.

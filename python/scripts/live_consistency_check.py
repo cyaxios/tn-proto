@@ -36,7 +36,7 @@ Tested invariants (numbered for traceback):
        non-expired).
 
 Run:
-    .venv/Scripts/python.exe tn-protocol/python/scripts/live_consistency_check.py
+    .venv/Scripts/python.exe tn_proto/python/scripts/live_consistency_check.py
 
 Requires tnproto-org running (http://localhost:8790). Returns 0 on
 all-pass, prints per-check status. NOT a CI test — a smoke driver

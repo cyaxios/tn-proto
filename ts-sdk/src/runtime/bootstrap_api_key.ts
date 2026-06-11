@@ -34,6 +34,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import { USER_AGENT } from "../version.js";
 
 import { DeviceKey } from "../core/signing.js";
 import { resolveDidEndpoint } from "../vault/url.js";
@@ -49,11 +50,9 @@ const _HTTP_TIMEOUT_MS = 15_000;
  *  UA is NOT an auth boundary — the real boundary stays at the DID
  *  signature on /auth/verify. */
 function _tnUserAgent(): string {
-  // Use the SDK package name as a stable, public-API identifier. We
-  // could read the version from package.json but the file's location
-  // varies (installed vs editable); the bare name is enough for the
-  // edge's UA filter.
-  return "tn-protocol-ts/dev";
+  // Shared SDK identifier (src/version.ts) — `tn-proto-ts/<version>`,
+  // matching Python's dynamic `tn-proto/<version>`.
+  return USER_AGENT;
 }
 
 const _DEFAULT_HEADERS: Record<string, string> = {
@@ -242,8 +241,8 @@ async function _httpGet(
  *   uses this internally.
  *
  * @remarks
- * Mirrors `python/tn/bootstrap.py::_challenge_verify`. Uses a
- * self-identifying `tn-protocol-ts/dev` User-Agent so the Cloudflare
+ * Mirrors `python/tn/bootstrap.py::_challenge_verify`. Uses the
+ * self-identifying `tn-proto-ts/<version>` User-Agent so the Cloudflare
  * edge doesn't 1010-block the request.
  *
  * @public

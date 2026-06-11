@@ -4,7 +4,7 @@
  * Every emit in a TN process carries the same `run_id` so
  * `tn.read()` can default-filter to "entries written by this run."
  * The Rust wasm runtime reads `$TN_RUN_ID` at its own init
- * ({@link https://github.com/cyaxios/tn-protocol/blob/main/crypto/tn-core/src/runtime.rs#L860 | tn-core/src/runtime.rs:860}),
+ * ({@link https://github.com/cyaxios/tn-proto/blob/main/crypto/tn-core/src/runtime.rs#L860 | tn-core/src/runtime.rs:860}),
  * so the JS side stamps the env *before* constructing a `WasmRuntime` —
  * otherwise wasm mints its own UUID and the two sides emit mismatched
  * `run_id`s, which makes the read filter silently drop every entry

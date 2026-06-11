@@ -20,11 +20,11 @@ corresponding primitive must reproduce the expected output byte-for-byte.
 Run from the repo root:
 
 ```
-.venv/Scripts/python.exe tn-protocol/python/tools/generate_rust_fixtures.py
+.venv/Scripts/python.exe tn_proto/python/tools/generate_rust_fixtures.py
 ```
 
 Requires the Python venv at `C:\codex\content_platform\.venv` with the `btn`
-extension built (`maturin develop` inside `tn-protocol/crypto/btn-py`).
+extension built (`maturin develop` inside `tn_proto/crypto/btn-py`).
 
 Never hand-edit these files. If an output changes, regenerate and commit
 both the script change and the new fixtures in the same commit, with a

@@ -25,7 +25,7 @@
 //
 // Run with:
 //
-//     cd tn-protocol/ts-sdk
+//     cd tn_proto/ts-sdk
 //     node --import tsx test/fixtures/build_secure_read_fixtures.ts
 //
 // Re-running overwrites the fixtures.

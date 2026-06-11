@@ -1,6 +1,6 @@
 """Carol s02 — revocation through the vault, end-to-end.
 
-Extends s01: the full flow goes through the tnproto-org vault
+Extends s01: the full flow goes through the tn_proto_web vault
 subprocess, so we're proving revocation works when the ceremony
 state travels over HTTP:
 

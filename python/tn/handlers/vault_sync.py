@@ -1,6 +1,6 @@
 """``vault.sync`` handler (RFC §4).
 
-Ships attested envelopes to a tnproto-org cloud vault, addressed by DID,
+Ships attested envelopes to a tn-proto.org cloud vault, addressed by DID,
 authenticated by the same Ed25519 challenge-response that the vault already
 implements in ``routes_auth.py``.
 
@@ -47,7 +47,7 @@ _DEFAULT_BATCH_MAX_EVENTS = 100
 
 
 class VaultSyncHandler(AsyncHandler):
-    """Ship attested envelopes to a tnproto-org vault over HTTPS.
+    """Ship attested envelopes to a tn-proto.org vault over HTTPS.
 
     Batches envelopes in memory and flushes on a timer or size threshold.
     Authentication is a DID challenge-response that issues a short-lived

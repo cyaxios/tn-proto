@@ -39,8 +39,8 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Repo layout: tn-protocol/ts-sdk/test/tnpkg_interop.test.ts
-// Repo root for fixtures = tn-protocol/.
+// Repo layout: tn_proto/ts-sdk/test/tnpkg_interop.test.ts
+// Repo root for fixtures = tn_proto/.
 const PROTO_ROOT = resolve(__dirname, "..", "..");
 const PYTHON_FIXTURE = resolve(
   PROTO_ROOT,

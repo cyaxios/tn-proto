@@ -75,7 +75,7 @@ def _line_no(text: str, pos: int) -> int:
 def _crate_for(path: Path, cfg: IntrospectConfig) -> str:
     """Determine which crate the file belongs to."""
     parts = path.relative_to(cfg.repo_root).as_posix().split("/")
-    # tn-protocol/crypto/<crate>/src/<file>
+    # tn_proto/crypto/<crate>/src/<file>
     if len(parts) >= 3 and parts[0] == "crypto":
         return parts[1]
     return parts[1] if len(parts) > 1 else "?"

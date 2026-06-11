@@ -4,8 +4,8 @@
 Demonstrates add/revoke through the Python skin on the Rust runtime.
 
 Usage:
-    .venv/Scripts/python.exe tn-protocol/python/examples/demo_revocation.py
-    .venv/Scripts/python.exe tn-protocol/python/examples/demo_revocation.py --legacy
+    .venv/Scripts/python.exe tn_proto/python/examples/demo_revocation.py
+    .venv/Scripts/python.exe tn_proto/python/examples/demo_revocation.py --legacy
 """
 
 from __future__ import annotations

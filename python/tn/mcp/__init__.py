@@ -24,7 +24,7 @@ security posture.
 """
 from __future__ import annotations
 
-__version__ = "0.5.6a1"  # keep aligned with pyproject.toml [project] version
+__version__ = "0.6.0a1"  # keep aligned with pyproject.toml [project] version
 
 # Re-export the entry point for `python -c "from tn.mcp import main; main()"`.
 from .server import main

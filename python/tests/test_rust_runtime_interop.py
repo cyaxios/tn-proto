@@ -20,13 +20,13 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))  # tn-protocol/python on sys.path
+sys.path.insert(0, str(HERE.parent))  # tn_proto/python on sys.path
 
 # Path layout:
-#   HERE           = tn-protocol/python/tests/
-#   HERE.parents[1] = tn-protocol/    (workspace Cargo.toml, where cargo build runs)
+#   HERE           = tn_proto/python/tests/
+#   HERE.parents[1] = tn_proto/    (workspace Cargo.toml, where cargo build runs)
 #   HERE.parents[2] = content_platform/  (repo root)
-TN_PROTO = HERE.parents[1]  # tn-protocol/
+TN_PROTO = HERE.parents[1]  # tn_proto/
 RUST_BIN_NAME = "tn-core-cli.exe" if os.name == "nt" else "tn-core-cli"
 RUST_BIN_DEBUG = TN_PROTO / "target" / "debug" / RUST_BIN_NAME
 RUST_BIN_RELEASE = TN_PROTO / "target" / "release" / RUST_BIN_NAME

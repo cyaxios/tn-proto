@@ -1,6 +1,6 @@
 // Init-time reconciliation helpers for NodeRuntime.
 //
-// Mirrors tn-protocol/python/tn/__init__.py's _scan_attested_events and
+// Mirrors tn_proto/python/tn/__init__.py's _scan_attested_events and
 // _emit_missing_recipients so Python and TS agree on idempotence and
 // yaml-driven recipient provisioning.
 //

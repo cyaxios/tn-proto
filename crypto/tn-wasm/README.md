@@ -14,7 +14,7 @@ Later phases add `canonicalJson`, `computeRowHash`, `buildEnvelope`,
 ## Build
 
 ```
-cd tn-protocol/crypto/tn-wasm
+cd tn_proto/crypto/tn-wasm
 wasm-pack build --target nodejs --release
 ```
 
@@ -35,14 +35,14 @@ wired into `.claude/launch.json` so agents can preview it on port
 ## Interop test
 
 ```
-node tn-protocol/crypto/tn-wasm/test/node_smoke.mjs
-.venv/Scripts/python.exe tn-protocol/crypto/tn-wasm/test/py_cross_check.py
+node tn_proto/crypto/tn-wasm/test/node_smoke.mjs
+.venv/Scripts/python.exe tn_proto/crypto/tn-wasm/test/py_cross_check.py
 ```
 
 Or both:
 
 ```
-bash tn-protocol/crypto/tn-wasm/test/run_interop.sh
+bash tn_proto/crypto/tn-wasm/test/run_interop.sh
 ```
 
 Node exercises the WASM surface. Python runs the same fixtures through

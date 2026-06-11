@@ -172,7 +172,7 @@ fields: {}
       "-c",
       `
 import sys, json, importlib.util
-sys.path.insert(0, r'${repoRoot.replace(/\\/g, "/")}/tn-protocol/python')
+sys.path.insert(0, r'${repoRoot.replace(/\\/g, "/")}/tn_proto/python')
 from tn_core.admin import reduce as R
 env = json.loads(${JSON.stringify(addedLine)})
 print(json.dumps(R(env), sort_keys=True))

@@ -8,7 +8,7 @@ These tests import the pure functions directly and exercise them with
 mock clients. If they pass, the one-shot path works for the CLI.
 
 Run:
-    .venv/Scripts/python.exe -m pytest tn-protocol/python/tests/test_vault_push_pull_pure_functions.py -v
+    .venv/Scripts/python.exe -m pytest tn_proto/python/tests/test_vault_push_pull_pure_functions.py -v
 """
 
 from __future__ import annotations

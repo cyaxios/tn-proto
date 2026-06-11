@@ -7,7 +7,7 @@ exactly where per-event time goes, for one cipher at a time.
 The structure mirrors TNRuntime.emit() in tn/logger.py (Apr 2026
 HEAD). If that changes, re-derive this from the current emit().
 
-Run from `tn-protocol/python/`:
+Run from `tn_proto/python/`:
     /c/codex/content_platform/.venv/Scripts/python.exe \\
         ../crypto/btn-py/examples/bench_instrument.py --cipher=btn
 """

@@ -42,7 +42,7 @@ from tn.tnpkg import (
     _verify_manifest_signature,
 )
 
-REPO = PYDIR.parent  # tn-protocol/
+REPO = PYDIR.parent  # tn_proto/
 RUST_FIXTURE = REPO / "crypto" / "tn-core" / "tests" / "fixtures" / "rust_admin_snapshot.tnpkg"
 TS_FIXTURE = REPO / "ts-sdk" / "test" / "fixtures" / "ts_admin_snapshot.tnpkg"
 

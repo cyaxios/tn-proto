@@ -10,7 +10,7 @@ Tests:
   - Tampered response (bad JSON) causes a loud error, not a silent drop.
 
 Run:
-    .venv/Scripts/python.exe -m pytest tn-protocol/python/tests/test_vault_sync_handler.py -v
+    .venv/Scripts/python.exe -m pytest tn_proto/python/tests/test_vault_sync_handler.py -v
 """
 
 from __future__ import annotations

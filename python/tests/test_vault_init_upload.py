@@ -19,7 +19,7 @@ Covers:
 Run::
 
     .venv/Scripts/python.exe -m pytest \\
-        tn-protocol/python/tests/test_vault_init_upload.py -x -v
+        tn_proto/python/tests/test_vault_init_upload.py -x -v
 """
 
 from __future__ import annotations

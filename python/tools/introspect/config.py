@@ -2,7 +2,7 @@
 
 Repo layout this targets:
 
-    tn-protocol/
+    tn_proto/
         python/
             tn/                 <- SDK (primary scan target)
             tools/              <- helpers (scanned, but tools/introspect/ is excluded)
@@ -24,7 +24,7 @@ from pathlib import Path
 class IntrospectConfig:
     """Configuration for an introspection run."""
 
-    # Repo root (the tn-protocol/ directory).
+    # Repo root (the tn_proto/ directory).
     repo_root: Path
 
     # Python source directories to walk.
@@ -62,18 +62,18 @@ class IntrospectConfig:
 
 
 def _detect_repo_root() -> Path:
-    """Find the tn-protocol/ directory containing this tools package.
+    """Find the tn_proto/ directory containing this tools package.
 
-    `tools/introspect/config.py` -> tools/introspect -> tools -> python -> tn-protocol
+    `tools/introspect/config.py` -> tools/introspect -> tools -> python -> tn_proto
     """
     here = Path(__file__).resolve()
-    # parents[0]=introspect, [1]=tools, [2]=python, [3]=tn-protocol
+    # parents[0]=introspect, [1]=tools, [2]=python, [3]=tn_proto
     return here.parents[3]
 
 
 def default_config() -> IntrospectConfig:
-    """Default config: scans tn-protocol/python/tn + tools + scripts;
-    Rust crates under tn-protocol/crypto; outputs to docs/audit-baseline/.
+    """Default config: scans tn_proto/python/tn + tools + scripts;
+    Rust crates under tn_proto/crypto; outputs to docs/audit-baseline/.
     """
     root = _detect_repo_root()
     py = root / "python"

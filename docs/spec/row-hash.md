@@ -59,7 +59,7 @@ Implementations expose this as a constant:
 
 - Python: `tn.chain.ZERO_HASH`
 - Rust: `tn_core::chain::ZERO_HASH` / wasm export `zeroHash`
-- TS: `ZERO_HASH` exported from `@tnproto/sdk`
+- TS: `ZERO_HASH` exported from `tn-proto`
 
 ## Properties
 

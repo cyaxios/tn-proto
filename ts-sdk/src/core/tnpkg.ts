@@ -1,6 +1,6 @@
 // Universal `.tnpkg` wrapper — signed manifest + kind-specific body.
 //
-// Mirrors `tn-protocol/python/tn/tnpkg.py` byte-for-byte on the wire.
+// Mirrors `tn_proto/python/tn/tnpkg.py` byte-for-byte on the wire.
 // Every `.tnpkg` is a zip archive:
 //
 //     foo.tnpkg/

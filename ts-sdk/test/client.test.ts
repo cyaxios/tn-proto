@@ -1,6 +1,6 @@
 // Tn acceptance test — parity target for SDK matrix.
 //
-// Mirrors tn-protocol/crypto/tn-core/tests/runtime_emit.rs::
+// Mirrors tn_proto/crypto/tn-core/tests/runtime_emit.rs::
 //   log_level_wrappers_emit_with_expected_level
 // and python/tests/test_logger.py's level-wrapper assertions.
 

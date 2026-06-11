@@ -18,12 +18,12 @@ echo "== ts-sdk unit tests =="
 
 echo ""
 echo "== wasm admin + crypto interop =="
-node "${REPO_ROOT}/tn-protocol/crypto/tn-wasm/test/node_smoke.mjs"
-"${PYTHON}" "${REPO_ROOT}/tn-protocol/crypto/tn-wasm/test/py_cross_check.py"
+node "${REPO_ROOT}/tn_proto/crypto/tn-wasm/test/node_smoke.mjs"
+"${PYTHON}" "${REPO_ROOT}/tn_proto/crypto/tn-wasm/test/py_cross_check.py"
 
 echo ""
 echo "== btn interop =="
-bash "${REPO_ROOT}/tn-protocol/crypto/tn-wasm/test/run_btn_interop.sh"
+bash "${REPO_ROOT}/tn_proto/crypto/tn-wasm/test/run_btn_interop.sh"
 
 echo ""
 echo "== public-only CLI interop =="

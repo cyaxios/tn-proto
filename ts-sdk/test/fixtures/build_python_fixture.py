@@ -18,8 +18,8 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[4]
-PYDIR = REPO / "tn-protocol" / "python"
+REPO = HERE.parents[2]  # ts-sdk/test/fixtures -> repo root
+PYDIR = REPO / "python"
 sys.path.insert(0, str(PYDIR))
 
 import tn  # noqa: E402

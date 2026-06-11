@@ -17,7 +17,7 @@
 //
 // This is the exact cross-SDK shape of the user repro: Python writes the
 // ceremony, TS reads + verifies it. Requires a local Python with
-// tn-protocol installed; skips otherwise (CI runs the full matrix).
+// tn-proto installed; skips otherwise (CI runs the full matrix).
 
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
@@ -68,7 +68,7 @@ test(
   {
     skip:
       pickPython() === null
-        ? "Python tn-protocol not available locally; runs in CI"
+        ? "Python tn-proto not available locally; runs in CI"
         : false,
   },
   async () => {

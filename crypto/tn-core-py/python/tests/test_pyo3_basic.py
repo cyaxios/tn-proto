@@ -7,15 +7,14 @@ import sys
 import pytest  # type: ignore[import-not-found]  # test-only dep, available via venv
 
 # Make the repo's Python tn package available (for ceremony setup).
-# File: tn-protocol/crypto/tn-core-py/python/tests/test_pyo3_basic.py
+# File: crypto/tn-core-py/python/tests/test_pyo3_basic.py
 #   parents[0] = .../python/tests
 #   parents[1] = .../python
 #   parents[2] = .../tn-core-py
 #   parents[3] = .../crypto
-#   parents[4] = .../tn-protocol
-#   parents[5] = content_platform (repo root)
-REPO = pathlib.Path(__file__).resolve().parents[5]
-sys.path.insert(0, str(REPO / "tn-protocol" / "python"))
+#   parents[4] = tn_proto (repo root)
+REPO = pathlib.Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(REPO / "python"))
 
 from tn_core import Runtime  # type: ignore[import-not-found]  # PyO3 extension, maturin-built
 

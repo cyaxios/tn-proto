@@ -5,7 +5,7 @@ scenario: restart of a push handler picks up the persisted
 last_pushed_admin_head and skips re-pushing the same snapshot.
 
 Run:
-    .venv/Scripts/python.exe -m pytest tn-protocol/python/tests/test_sync_state.py -v
+    .venv/Scripts/python.exe -m pytest tn_proto/python/tests/test_sync_state.py -v
 """
 
 from __future__ import annotations

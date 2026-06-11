@@ -4,7 +4,7 @@ Mocks the vault HTTP endpoint with a captured-request shim and verifies
 that admin events trigger a `.tnpkg` POST with a valid manifest.
 
 Run:
-    .venv/Scripts/python.exe -m pytest tn-protocol/python/tests/test_vault_push_handler.py -v
+    .venv/Scripts/python.exe -m pytest tn_proto/python/tests/test_vault_push_handler.py -v
 """
 
 from __future__ import annotations

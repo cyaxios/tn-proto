@@ -9,7 +9,7 @@ extension wasm bundle and asserts it can decrypt them.
 That direction is the one users see: a service generating btn ciphertext
 in Python, the user's browser extension reading it. The forward path
 (JS -> Python) is already covered by tnproto-org/static/dashboard/test/
-wasm_e2e.test.mjs + tn-protocol/python/tests/test_browser_wasm_interop.py.
+wasm_e2e.test.mjs + tn_proto/python/tests/test_browser_wasm_interop.py.
 
 Refs:
   - D-26 (atomic CAS — informs determinism: same plaintext always works)

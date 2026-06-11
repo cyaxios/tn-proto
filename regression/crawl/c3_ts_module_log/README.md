@@ -8,7 +8,7 @@ The simplest possible TN-protocol round-trip on the Node-TS side, using
 the top-level module verbs:
 
 ```typescript
-import * as tn from "@tnproto/sdk";
+import * as tn from "tn-proto";
 
 await tn.init(yamlPath);
 tn.info("app.hello", { a: 1 });

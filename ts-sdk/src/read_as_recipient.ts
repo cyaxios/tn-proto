@@ -74,7 +74,7 @@ export function* readAsRecipient(
     if (existsSync(jweKeyPath)) {
       throw new Error(
         `readAsRecipient: cipher=jwe is not implemented in the TS SDK. ` +
-          `For JWE foreign reads, use the Python tn-protocol package or ` +
+          `For JWE foreign reads, use the Python tn-proto package or ` +
           `wait for the upcoming TS JWE port.`,
       );
     }

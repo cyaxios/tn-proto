@@ -22,7 +22,7 @@ for arg in "$@"; do
     case "$arg" in
         tn_core|core)        TARGETS+=("build-core") ;;
         tn_btn|btn)          TARGETS+=("build-btn") ;;
-        tn_protocol|python)  TARGETS+=("build-protocol") ;;
+        tn_proto|python)     TARGETS+=("build-protocol") ;;
         clean)               TARGETS+=("clean") ;;
         check)               TARGETS+=("check") ;;
         publish-test)        TARGETS+=("publish-test") ;;

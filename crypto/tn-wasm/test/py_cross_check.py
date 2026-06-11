@@ -4,7 +4,7 @@ Python `tn` module for canonical / chain / signing / indexing /
 envelope). Compare byte for byte.
 
 Run with the project venv:
-    .venv/Scripts/python.exe tn-protocol/crypto/tn-wasm/test/py_cross_check.py
+    .venv/Scripts/python.exe tn_proto/crypto/tn-wasm/test/py_cross_check.py
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-# Point sys.path at the tn-protocol SDK (not the `python/tn` module which
+# Point sys.path at the tn-proto SDK (not the `python/tn` module which
 # belongs to the separate auth/relay package).
 TN_SDK_PATH = HERE.parents[2] / "python"
 if str(TN_SDK_PATH) not in sys.path:
@@ -48,7 +48,7 @@ def main() -> int:
         from tn_core.admin import reduce as admin_reduce
     except Exception as exc:
         print(f"[fail] could not import tn_core.admin: {exc}")
-        print("       run  cd tn-protocol/crypto/tn-py && maturin develop  first")
+        print("       run  cd tn_proto/crypto/tn-py && maturin develop  first")
         return 2
     try:
         from tn.canonical import canonical_bytes

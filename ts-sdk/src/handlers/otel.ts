@@ -11,7 +11,7 @@
 //
 // Usage:
 //   import { logs } from "@opentelemetry/api-logs";
-//   const logger = logs.getLogger("tn-protocol");
+//   const logger = logs.getLogger("tn-proto");
 //   rt.addHandler(new OpenTelemetryHandler("otel", logger));
 //
 // @opentelemetry/api-logs is a peer dependency — install it separately.

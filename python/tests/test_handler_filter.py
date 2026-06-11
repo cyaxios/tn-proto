@@ -4,7 +4,7 @@ Every predicate, composition, and the default-sync-true behaviour are
 exercised here. No network, no disk IO.
 
 Run:
-    .venv/Scripts/python.exe -m pytest tn-protocol/python/tests/test_handler_filter.py -v
+    .venv/Scripts/python.exe -m pytest tn_proto/python/tests/test_handler_filter.py -v
 """
 
 from __future__ import annotations

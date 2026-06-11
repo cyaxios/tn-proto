@@ -25,7 +25,7 @@
 //
 // If the file is missing, `loadPolicyFile()` returns `null` — absence is
 // not an error (no policy → no splice → `tn.agents` group stays empty for
-// every event). Mirrors `tn-protocol/python/tn/_agents_policy.py`.
+// every event). Mirrors `tn_proto/python/tn/_agents_policy.py`.
 //
 // Layer 1 — browser-safe: no node:* imports.
 

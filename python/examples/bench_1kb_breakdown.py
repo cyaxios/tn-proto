@@ -6,7 +6,7 @@ actually made of.
 
 Run:
 
-    .venv/Scripts/python.exe tn-protocol/python/examples/bench_1kb_breakdown.py
+    .venv/Scripts/python.exe tn_proto/python/examples/bench_1kb_breakdown.py
 """
 
 from __future__ import annotations

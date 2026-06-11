@@ -33,8 +33,8 @@ const ADMIN_NAME: &str = "admin_events_canonical.json";
 
 fn fixture_path(rel: &[&str]) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    // `manifest_dir` is `tn-protocol/crypto/tn-core/`. Walk up to
-    // `tn-protocol/` and join the rel path.
+    // `manifest_dir` is `tn_proto/crypto/tn-core/`. Walk up to
+    // `tn_proto/` and join the rel path.
     let mut p = PathBuf::from(manifest_dir);
     p.pop();
     p.pop();

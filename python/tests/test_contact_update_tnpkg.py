@@ -17,7 +17,7 @@ Three tracks:
 Run::
 
     .venv/Scripts/python.exe -m pytest \\
-        tn-protocol/python/tests/test_contact_update_tnpkg.py -x -v
+        tn_proto/python/tests/test_contact_update_tnpkg.py -x -v
 """
 
 from __future__ import annotations

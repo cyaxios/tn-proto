@@ -36,12 +36,12 @@ from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-# Support both standalone use (no tn-protocol installed) and full SDK use.
+# Support both standalone use (no tn-proto installed) and full SDK use.
 try:
     from tn.handlers.base import AsyncHandler as _AsyncHandler
 except ImportError:
     # Minimal shim so the module can be imported in environments where
-    # tn-protocol isn't installed (e.g. a standalone consumer script).
+    # tn-proto isn't installed (e.g. a standalone consumer script).
     class _AsyncHandler:  # type: ignore[no-redef]
         def __init__(self, name: str, outbox_path: Any, *, filter_spec: Any = None, **_: Any) -> None:
             self.name = name

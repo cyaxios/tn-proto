@@ -131,7 +131,7 @@ def emit_to_outbox(cfg: LoadedConfig, pkg: Package) -> Path:
 # compile_kit_bundle: package a keystore's btn reader kits into a .tnpkg
 # (a zip archive) that the Chrome extension, the tn-js CLI, and Python's
 # own inbox accepter can all consume. Cross-language parity with
-# tn-protocol/ts-sdk/src/compile.ts::compileKitBundle.
+# tn_proto/ts-sdk/src/compile.ts::compileKitBundle.
 # --------------------------------------------------------------------------
 
 

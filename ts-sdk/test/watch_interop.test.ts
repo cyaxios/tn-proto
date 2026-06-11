@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Tn } from "../src/tn.js";
 
 /**
- * Detect whether a Python interpreter with tn-protocol installed is available.
+ * Detect whether a Python interpreter with tn-proto installed is available.
  * Returns the python binary path on success, null otherwise.
  */
 function pickPython(): string | null {
@@ -38,7 +38,7 @@ test(
   {
     skip:
       pickPython() === null
-        ? "Python tn-protocol not available locally; runs in CI"
+        ? "Python tn-proto not available locally; runs in CI"
         : false,
   },
   async () => {

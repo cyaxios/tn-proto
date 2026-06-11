@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0a1] - 2026-06-11 -- Unified line: name flip completed, wallet sync, crash-safe rotation
+
+First release on the unified post-merge line: the `tn-protocol` ->
+`tn-proto` rename is complete across packages, workflows, docs, and
+runtime strings, and the Rust/Python/TS cores ship from one history.
+`tn-btn` and `tn-core` join the same 0.6.0a1 version axis.
+
+* **Two-way wallet sync + equivocation detection.** `tn wallet sync` is
+  pull -> absorb -> push; absorbing a revoked-leaf reuse distinguishes
+  concurrent from informed conflicts via the snapshot vector clock.
+  Warm init attach: `tn.init` syncs an existing wallet ceremony and
+  caches the AWK credential (gh/claude-style credential store).
+* **Crash-safe btn rotation (py+ts).** A crash inside the rotation
+  promote dance can no longer strand a publisher: recovery rolls the
+  surviving pending key material forward instead of deleting it, and
+  the TS side gains the same staged pending/archive/promote commit for
+  rotation and group-keys absorb.
+* **Genesis-anchor opt-in.** `tn.read(..., expect_genesis=True)` (TS:
+  `expectGenesis`) requires each event-type chain to anchor at
+  ZERO_HASH, catching front-truncated logs; default reads are unchanged.
+* **Per-stream admin log everywhere.** Every mint now records
+  `admin/<stream>.ndjson` in the yaml; the early `admin/admin.ndjson`
+  filename is retired from minters, docs, and examples. Read the admin
+  log with `tn.read(log="admin")` - never a hardcoded filename.
+* **tn-mcp-server.** One MCP server (23 tools) folding the KYE exhaust
+  registry/decrypt surface into the shipped package.
+* **Security hardening.** `.tnpkg` zip-bomb limits (manifest-first size
+  caps), an FFI panic firewall on the PyO3 boundary, secret-file 0600
+  permissions, claim-URL redaction in vault-push envelopes, and
+  counterparty packages can no longer overwrite the local device
+  identity on absorb.
+* **TS SDK.** `tn.wallet` namespace (status/restore/sync), shared
+  `tn-proto-ts/<version>` User-Agent, kafka clientId default flipped to
+  `tn-proto`, firehose checkpoint handler, CI on Node 24 + Python
+  3.13/3.14.
+
 ## [0.5.6a1] - 2026-06-07 -- Internal refactor: tn-core module splits
 
 Maintenance release. No API or wire-format changes — the Rust core was

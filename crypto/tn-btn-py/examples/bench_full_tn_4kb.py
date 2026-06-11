@@ -20,7 +20,7 @@ Pipeline for each variant (identical except the cipher):
     → verify Ed25519 signature
     → verify chain linkage
 
-Run from `tn-protocol/python/`:
+Run from `tn_proto/python/`:
     /c/codex/content_platform/.venv/Scripts/python.exe \\
         ../crypto/btn-py/examples/bench_full_tn_4kb.py
 """

@@ -14,7 +14,7 @@ tn-proto Python SDK. Produces:
   - admin module coupling visualization
   - coverage manifest (proof every file was visited)
 
-Artifacts land in `tn-protocol/docs/audit-baseline/` and are committed.
+Artifacts land in `tn_proto/docs/audit-baseline/` and are committed.
 
 Run:
     python -m tools.introspect run-all

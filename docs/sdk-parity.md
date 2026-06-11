@@ -236,10 +236,10 @@ No compat shims — the deletions are hard. The branch is the alpha-track.
 
 | Python | TS | Status | Notes |
 |--------|------|--------|-------|
-| `tn.identity` | (parts of `@tnproto/sdk/core`) | ⚠ | TS exposes via Layer 1 module surface; not a 1:1 module mirror. |
+| `tn.identity` | (parts of `tn-proto/core`) | ⚠ | TS exposes via Layer 1 module surface; not a 1:1 module mirror. |
 | `tn.identity.Identity` / `_default_identity_path()` | `Identity` / `defaultIdentityPath()` / `defaultIdentityDir()` | ✓ | NEW 0.5.0a2. Machine-global device identity at `$XDG_DATA_HOME/tn/identity.json` (Python-compatible schema). `tn-js init` seeds every ceremony from it so they share one DID; `account connect` stamps `linked_account_id` for warm-attach. |
 | `tn.handlers.vault_push.init_upload(cfg, client, vault_base=...)` | `initUpload(rt, opts)` / `await tn.initUpload(opts)` | ✓ | NEW 0.5.0a2. Mints a BEK, exports an AES-GCM-encrypted `full_keystore` tnpkg, POSTs it unauthenticated to `/api/v1/pending-claims`, returns the claim URL. Browser-redeem verified end-to-end. |
-| `tn.sealing` | (parts of `@tnproto/sdk/core`) | ⚠ | |
+| `tn.sealing` | (parts of `tn-proto/core`) | ⚠ | |
 | `tn.wallet` | `wallet` (the `tn.wallet` namespace) | ✓ | Two-way wallet sync + account-bound restore on both sides (`walletStatus` / `walletSyncCmd` / restore machinery). |
 | `tn.vault_client` | (not yet) | ⊝ | TS gap; future work. |
 | `tn.classifier` | (not yet) | ⊝ | TS gap; future work. |
@@ -248,7 +248,7 @@ No compat shims — the deletions are hard. The branch is the alpha-track.
 
 | TS | Notes |
 |------|-------|
-| `@tnproto/sdk/core` | Layer 1: pure functions over wasm-backed crypto. No `node:*`. ESLint-enforced. |
+| `tn-proto/core` | Layer 1: pure functions over wasm-backed crypto. No `node:*`. ESLint-enforced. |
 | `decryptGroup` / `decryptAllGroups` | Cipher-aware envelope decrypt. btn today; jwe-ready dispatch in place. |
 | `AdminStateReducer` | Pure event-fold over admin envelopes. |
 | `parseTnpkg` / `packTnpkg` | Browser-safe zip pack/parse via `fflate`. |
@@ -292,7 +292,7 @@ each side is.
 
 ## CI parity gate
 
-`tools/check_parity.py` walks the public symbols of `tn` (Python) and `@tnproto/sdk` (TS) and fails if a row is missing from this document. New verbs MUST add a row before the SDK can publish.
+`tools/check_parity.py` walks the public symbols of `tn` (Python) and `tn-proto` (TS) and fails if a row is missing from this document. New verbs MUST add a row before the SDK can publish.
 
 To re-run locally:
 

@@ -11,7 +11,7 @@ Covers:
 
 Run with:
   cd C:\\codex\\content_platform
-  PYTHONPATH=tn-protocol/python .venv/Scripts/python.exe -m pytest tn-protocol/python/tests/test_inbox_accept.py -v
+  PYTHONPATH=tn_proto/python .venv/Scripts/python.exe -m pytest tn_proto/python/tests/test_inbox_accept.py -v
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-# Add tn-protocol/python to sys.path so 'tn' is importable.
+# Add tn_proto/python to sys.path so 'tn' is importable.
 import sys
 import tempfile
 import zipfile

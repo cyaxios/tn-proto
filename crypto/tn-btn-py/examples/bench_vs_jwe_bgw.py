@@ -12,14 +12,14 @@ signature over row_hash + AES-GCM body + cipher seal + ndjson write).
 For an apples-to-apples primitive-level number we strip all of that
 away here and call only the cipher verbs directly.
 
-Run from `tn-protocol/python/`::
+Run from `tn_proto/python/`::
 
-    cd tn-protocol/python
+    cd tn_proto/python
     /c/codex/content_platform/.venv/Scripts/python.exe \\
         ../crypto/btn-py/examples/bench_vs_jwe_bgw.py
 
 Requires:
-  - `tn` Python package importable (run from tn-protocol/python)
+  - `tn` Python package importable (run from tn_proto/python)
   - `btn` Python extension installed via `maturin develop --release`
   - `libtncrypto` native library built (already in this env)
 """
@@ -32,10 +32,10 @@ import time
 from pathlib import Path
 from typing import Callable, Tuple
 
-# This script typically lives in tn-protocol/crypto/btn-py/examples/ and
-# imports `tn.cipher` from tn-protocol/python/. Python prepends the
+# This script typically lives in tn_proto/crypto/btn-py/examples/ and
+# imports `tn.cipher` from tn_proto/python/. Python prepends the
 # script's OWN directory to sys.path, not cwd, so we explicitly add
-# tn-protocol/python/ so `import tn.cipher` resolves.
+# tn_proto/python/ so `import tn.cipher` resolves.
 _TN_PY = Path(__file__).resolve().parents[3] / "python"
 if str(_TN_PY) not in sys.path:
     sys.path.insert(0, str(_TN_PY))

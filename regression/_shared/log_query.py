@@ -293,7 +293,7 @@ def _resolve_ceremony_logs(yaml_path: Path) -> list[Path]:
 
     Convention: read just enough yaml to find `logs.path` and
     optionally `ceremony.admin_log_location`. PyYAML is a hard dep
-    of tn-protocol so it's always available.
+    of tn-proto so it's always available.
     """
     import yaml
 

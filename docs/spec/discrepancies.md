@@ -151,7 +151,7 @@ the design docs), but it's a frequent source of producer bugs.
 
 **Spec preference**: tooling SHOULD provide separate
 `signatureB64` / `manifestSignatureB64` helpers so callers don't
-mix them up. The TS SDK does (`signatureB64` from `@tnproto/sdk`
+mix them up. The TS SDK does (`signatureB64` from `tn-proto`
 vs `manifest.manifest_signature_b64` set by `signManifest`); the
 Python SDK uses `_signature_b64` and `tnpkg.sign_manifest` —
 distinct enough.

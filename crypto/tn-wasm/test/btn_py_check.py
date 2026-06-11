@@ -7,7 +7,7 @@ ciphertext batch back into the fixture so the Node side can decrypt
 those with --verify-py.
 
 Run with the project venv:
-    .venv/Scripts/python.exe tn-protocol/crypto/tn-wasm/test/btn_py_check.py
+    .venv/Scripts/python.exe tn_proto/crypto/tn-wasm/test/btn_py_check.py
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def main() -> int:
         from btn import PublisherState, decrypt as btn_decrypt, ciphertext_publisher_id, kit_publisher_id, kit_leaf
     except Exception as exc:
         print(f"[fail] could not import btn: {exc}")
-        print("       run  cd tn-protocol/crypto/btn-py && maturin develop  first")
+        print("       run  cd tn_proto/crypto/btn-py && maturin develop  first")
         return 2
 
     fx_path = HERE / "btn_fixture.json"

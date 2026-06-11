@@ -12,5 +12,5 @@ TN protocol runtime (Rust). See [the plan](../../../docs/superpowers/plans/2026-
 Regenerate fixtures with:
 
 ```bash
-.venv/Scripts/python.exe tn-protocol/python/tools/generate_rust_fixtures.py
+.venv/Scripts/python.exe tn_proto/python/tools/generate_rust_fixtures.py
 ```

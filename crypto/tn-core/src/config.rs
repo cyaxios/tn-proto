@@ -11,8 +11,8 @@ use crate::{Error, Result};
 /// Compose-style env-var substitution applied to the raw yaml *string*
 /// before the yaml parser runs.
 ///
-/// Mirrors `_substitute_env_vars` in `tn-protocol/python/tn/config.py`
-/// and `substituteEnvVars` in `tn-protocol/ts-sdk/src/runtime/config.ts`.
+/// Mirrors `_substitute_env_vars` in `tn_proto/python/tn/config.py`
+/// and `substituteEnvVars` in `tn_proto/ts-sdk/src/runtime/config.ts`.
 /// Recognized syntax:
 ///
 /// * `${NAME}` — required; returns `Err(Error::ConfigEnvVarMissing)` when unset.

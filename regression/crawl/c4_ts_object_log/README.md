@@ -5,7 +5,7 @@
 `Tn` class instance round-trip on the TS side:
 
 ```typescript
-import { Tn } from "@tnproto/sdk";
+import { Tn } from "tn-proto";
 
 const t = await Tn.use("payments");        // class-level use
 t.info("payments.charge", { amount: 1000 });

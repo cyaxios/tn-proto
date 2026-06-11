@@ -29,7 +29,7 @@ to end without spinning up uvicorn.
 Run::
 
     /c/codex/content_platform/.venv/Scripts/python.exe -m pytest \
-        tn-protocol/python/tests/integration/test_vault_push_pull_e2e.py -v
+        tn_proto/python/tests/integration/test_vault_push_pull_e2e.py -v
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ import pytest
 import yaml as _yaml
 
 # ── Path bootstrap ────────────────────────────────────────────────────
-# Make both the protocol-side SDK and the tnproto-org vault src
+# Make both the protocol-side SDK and the tn_proto_web vault src
 # importable. Must precede the ``tn`` and ``src`` imports below.
 
 _HERE = Path(__file__).resolve().parent
@@ -747,7 +747,7 @@ def test_alice_to_frank_round_trip(tmp_path: Path, _shared_loop) -> None:
         "populated the tn.agents group on every admin event. If this "
         "assertion fires the splice has regressed — see "
         "``test_admin_events_splice_tn_agents`` in "
-        "``tn-protocol/crypto/tn-core/tests/agents_group.rs`` for the "
+        "``tn_proto/crypto/tn-core/tests/agents_group.rs`` for the "
         "minimal repro."
     )
     fields = with_instruction[0].fields

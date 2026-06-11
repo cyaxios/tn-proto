@@ -107,7 +107,7 @@ pub fn read_as_recipient(
         if jwe_key_path.exists() {
             return Err(Error::InvalidConfig(format!(
                 "read_as_recipient: cipher=jwe is not implemented in tn-core. \
-                 For JWE foreign reads, use the Python tn-protocol package or \
+                 For JWE foreign reads, use the Python tn-proto package or \
                  wait for the upcoming Rust JWE port. (group={group:?})"
             )));
         }

@@ -44,7 +44,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install tn-protocol + deps
+      - name: Install tn-proto + deps
         run: |
           python -m pip install --upgrade pip
           # TestPyPI is index, real PyPI is extra-index so runtime
@@ -70,7 +70,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install tn-protocol + deps
+      - name: Install tn-proto + deps
         run: |
           python -m pip install --upgrade pip
           pip install --pre \
@@ -94,7 +94,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install tn-protocol + deps
+      - name: Install tn-proto + deps
         run: |
           python -m pip install --upgrade pip
           pip install --pre \
@@ -118,7 +118,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install tn-protocol + deps
+      - name: Install tn-proto + deps
         run: |
           python -m pip install --upgrade pip
           pip install --pre \
@@ -146,7 +146,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install tn-protocol + deps
+      - name: Install tn-proto + deps
         run: |
           python -m pip install --upgrade pip
           pip install --pre \
@@ -174,7 +174,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install tn-protocol + deps
+      - name: Install tn-proto + deps
         run: |
           python -m pip install --upgrade pip
           pip install --pre \

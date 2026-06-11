@@ -11,10 +11,11 @@
 
 import type { DeviceKey } from "../core/signing.js";
 import { signatureB64 } from "../core/signing.js";
+import { USER_AGENT } from "../version.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_HEADERS: Record<string, string> = {
-  "User-Agent": "tnproto-sdk-ts/0.4.3",
+  "User-Agent": USER_AGENT,
   Accept: "application/json",
 };
 

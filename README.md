@@ -7,7 +7,7 @@ Signed, encrypted, append-only logging — one entry per event, with the same wi
 The packages publish to TestPyPI. Install them from TestPyPI while letting pip pull their ordinary dependencies from regular PyPI:
 
 ```bash
-pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ tn-proto tn-core tn-btn
+pip install --pre -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ tn-proto tn-core tn-btn
 ```
 
 - `-i https://test.pypi.org/simple/` — get the TN packages from TestPyPI.
@@ -15,7 +15,7 @@ pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/
 
 `tn-proto` is the SDK; `tn-core` and `tn-btn` are the Rust-backed wheels that provide native acceleration and the default `btn` cipher. Pure-Python install (`tn-proto` alone) works too, on the `jwe` cipher.
 
-The current alpha is `v0.5.6a1`. See the [changelog](CHANGELOG.md) for what changed, or the [releases page](https://github.com/cyaxios/tn-proto/releases) for the wheels and sdists.
+The current alpha is `v0.6.0a1`. See the [changelog](CHANGELOG.md) for what changed, or the [releases page](https://github.com/cyaxios/tn-proto/releases) for the wheels and sdists.
 
 ## Getting started
 

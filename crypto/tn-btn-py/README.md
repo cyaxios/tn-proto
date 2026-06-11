@@ -3,11 +3,11 @@
 Python bindings for the `tn-btn` broadcast encryption crate (NNL
 subset-difference, O(log n) revocation). Built with PyO3 + maturin.
 
-Imported by the `tn-protocol` SDK; you usually don't install this
+Imported by the `tn-proto` SDK; you usually don't install this
 package directly.
 
 ```bash
-pip install tn-btn   # pulled in automatically by `pip install tn-protocol`
+pip install tn-btn   # pulled in automatically by `pip install tn-proto`
 ```
 
 Source: https://github.com/cyaxios/tn-proto

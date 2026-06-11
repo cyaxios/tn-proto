@@ -85,7 +85,7 @@ fi
 # ---------------------------------------------------------------------
 overall_ok=1
 for crate in "${TARGETS[@]}"; do
-    crate_dir="${REPO_ROOT}/tn-protocol/crypto/${crate}"
+    crate_dir="${REPO_ROOT}/crypto/${crate}"
     if [[ ! -d "$crate_dir" ]]; then
         echo "SKIP: ${crate_dir} does not exist"
         continue

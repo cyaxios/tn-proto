@@ -7,11 +7,11 @@ Runs the same tn.info loop three ways across a sweep of message sizes:
   2. unsigned   (tn.set_signing(False) at session level)
   3. per-call   (_sign=False kwarg; identical to #2, sanity check)
 
-Writes to tn-protocol/python/examples/bench_signing_cost.results.md.
+Writes to tn_proto/python/examples/bench_signing_cost.results.md.
 
 Run:
 
-    .venv/Scripts/python.exe tn-protocol/python/examples/bench_signing_cost.py
+    .venv/Scripts/python.exe tn_proto/python/examples/bench_signing_cost.py
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
 //! most readers want the high-level API instead (`tn.info()` / `tn read`);
 //! reach here directly only to inspect the Rust-side BGW stub.
 //!
-//! BGW uses the existing C library at `tn-protocol/crypto/src/bgw.cpp` via
+//! BGW uses the existing C library at `tn_proto/crypto/src/bgw.cpp` via
 //! FFI, which is not wired in tn-core: any BGW operation here returns
 //! `NotImplemented` (BGW groups run through the Python runtime instead).
 //! Enable the `bgw` feature to compile this module at all.

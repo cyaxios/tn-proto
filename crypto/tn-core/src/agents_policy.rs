@@ -4,7 +4,7 @@
 //! write path (behind `tn.info()` / `tn log`). Reach here directly only to
 //! parse an `agents.md` file on its own.
 //!
-//! Mirrors `tn-protocol/python/tn/_agents_policy.py` byte-for-byte. Each
+//! Mirrors `tn_proto/python/tn/_agents_policy.py` byte-for-byte. Each
 //! event type is a `## <event_type>` section; each section MUST have all
 //! five required `### <field>` subsections (`instruction`, `use_for`,
 //! `do_not_use_for`, `consequences`, `on_violation_or_error`).

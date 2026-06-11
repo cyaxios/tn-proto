@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "tn-proto"
-version         = "0.5.6a1"
+version         = "0.6.0a1"
 description     = "TN protocol: attested logging with JWE + btn ciphers"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -52,17 +52,17 @@ dependencies = [
     # any environment, including when mcp moves to an extra in tn-proto.
     "pydantic>=2",
     # Rust-backed ciphers. Built with maturin from ../crypto/tn-btn-py/
-    # and ../crypto/tn-core-py/; published as separate wheels. As of
-    # 0.4.2a8 all three packages move on the same version axis to
-    # avoid skew across the Rust/Python boundary on every release.
+    # and ../crypto/tn-core-py/; published as separate wheels. All
+    # three packages move on the same version axis (re-affirmed for
+    # 0.6.0a1) to avoid skew across the Rust/Python boundary.
     # The lower bound carries:
     #   - cross-process emit lock (0.4.2a3)
     #   - per-row parse resilience + Rust stdout admin filter (0.4.2a4)
     #   - pinned-writer pool + PEL admin path + templated chain seed
     #     (0.4.2a8) — required because tn-proto uses the new
     #     LogWriters dispatcher via PyO3
-    "tn-btn>=0.5.0a2,<0.6",
-    "tn-core>=0.5.0a2,<0.6",
+    "tn-btn>=0.6.0a1,<0.7",
+    "tn-core>=0.6.0a1,<0.7",
 ]
 
 [project.optional-dependencies]

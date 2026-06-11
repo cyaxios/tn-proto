@@ -21,10 +21,10 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-# HERE = .../tn-protocol/python/bench ; repo root is 3 up (bench, python, tn-protocol).
+# HERE = .../tn_proto/python/bench ; repo root is 3 up (bench, python, tn_proto).
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO))  # for `benchmarks.jwe_vs_tn.*`
-sys.path.insert(0, str(HERE.parents[0]))  # for our `tn` package (tn-protocol/python)
+sys.path.insert(0, str(HERE.parents[0]))  # for our `tn` package (tn_proto/python)
 
 from benchmarks.jwe_vs_tn.workload import materialize
 

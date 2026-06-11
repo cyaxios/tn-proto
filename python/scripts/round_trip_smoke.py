@@ -11,7 +11,7 @@ Exercises the wire end-to-end without mocks:
      (when emitted) or received_at (fallback) per spec §4.1.
 
 Run:
-    .venv/Scripts/python.exe tn-protocol/python/scripts/round_trip_smoke.py
+    .venv/Scripts/python.exe tn_proto/python/scripts/round_trip_smoke.py
 
 Vault URL defaults to TN_VAULT_URL or http://localhost:8790. Boot
 tnproto-org first:

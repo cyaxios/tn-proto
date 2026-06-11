@@ -48,7 +48,7 @@ jobs:
         run: |
           python -m pip install dist/*.whl
 
-      - name: Install tn-protocol + test deps
+      - name: Install tn-proto + test deps
         working-directory: python
         run: |
           python -m pip install -e .
