@@ -29,14 +29,14 @@ Here is a summary of the accomplishments and key elements designed for this docu
 ### 5. File Layout Transparency (Default Locations)
 * Simplified directory structure layout under `.tn/` showing the locations of configuration files, keys, and event logs.
 
-### 6. Data Governance (`tn-agt`)
-* Explores how messages carry their own compile-time governance context, allowing verification across internal, external, and multi-party boundaries, and shows how AGT decisions are sealed into signed TN receipts.
+### 6. AI Coding Agents (`tn-skills`)
+* Covers the `tn-skills` plugin, which teaches an AI coding agent to route PII into the right group, avoid logging secrets, and cite the matching regulation when writing TN logs.
 
 ---
 
 ## 🛠️ Verification Done
 * Verified all Markdown syntax, formatting headers, code block highlights, and structural layout tags are clean.
-* Verified absolute paths to code snippets match the APIs exposed in `docs/guide/getting-started.md` and the `tn-agt` README file.
+* Verified absolute paths to code snippets match the APIs exposed in `docs/guide/getting-started.md`.
 * **Verified Live PyPI Installation (`v0.6.0a2`):**
   * Created an isolated virtual environment under `c:\codex\tn\_tmp_install_test`.
   * Installed `tn-proto==0.6.0a2` from the live PyPI index.
@@ -45,5 +45,5 @@ Here is a summary of the accomplishments and key elements designed for this docu
   * Documented the core scenario and the Quasar/NiceGUI dashboard.
   * Detailed the three cryptographic Vantages (Advisor, Copilot Agent, and Compliance Officer).
   * Outlined how compile-time governance context is bound to records and flows across boundaries.
-  * Created a step-by-step breakdown of the Microsoft AGT integration loop (Tool Request -> Governance Unseal -> Policy Decision -> Allowed Projection Constraint -> LLM Execution -> Signed Receipt).
+  * Created a step-by-step breakdown of the governance loop (Tool Request -> Governance Unseal -> Policy Decision -> Allowed Projection Constraint -> LLM Execution -> Signed Receipt).
   * Provided simple setup and launch instructions for the NiceGUI demo.
