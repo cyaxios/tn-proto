@@ -9,18 +9,18 @@ dict-compatible so `requests.post(url, json=tn.log(...))` keeps working.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
 
 
 @pytest.fixture()
-def fresh_ceremony(tmp_path: Path):
-    cwd = os.getcwd()
-    os.chdir(tmp_path)
-    os.environ["TN_NO_STDOUT"] = "1"
-    os.environ["TN_NO_LINK"] = "1"
+def fresh_ceremony(tmp_path: Path, monkeypatch):
+    # monkeypatch auto-restores cwd + env after the test, so TN_NO_LINK does
+    # not leak into the shared pytest process and break later link tests.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TN_NO_STDOUT", "1")
+    monkeypatch.setenv("TN_NO_LINK", "1")
     import tn
 
     try:
@@ -32,7 +32,6 @@ def fresh_ceremony(tmp_path: Path):
         yield tn
     finally:
         tn.flush_and_close()
-        os.chdir(cwd)
 
 
 def test_log_record_str_is_valid_json(fresh_ceremony):

@@ -6,14 +6,10 @@ the tn.agents field splice), or None when no agents.md is present.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import tn
 from tn._agents_policy import PolicyDocument
-
-os.environ.setdefault("TN_NO_LINK", "1")
-os.environ.setdefault("TN_NO_STDOUT", "1")
 
 _POLICY = """\
 ## payment.completed
@@ -41,7 +37,9 @@ def _write_policy(yaml_dir: Path) -> None:
     p.write_text(_POLICY, encoding="utf-8")
 
 
-def test_agents_policy_is_none_without_file(tmp_path):
+def test_agents_policy_is_none_without_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("TN_NO_LINK", "1")
+    monkeypatch.setenv("TN_NO_STDOUT", "1")
     yaml = tmp_path / "tn.yaml"
     try:
         tn.init(yaml, cipher="btn")
@@ -50,7 +48,9 @@ def test_agents_policy_is_none_without_file(tmp_path):
         tn.flush_and_close()
 
 
-def test_agents_policy_returns_document(tmp_path):
+def test_agents_policy_returns_document(tmp_path, monkeypatch):
+    monkeypatch.setenv("TN_NO_LINK", "1")
+    monkeypatch.setenv("TN_NO_STDOUT", "1")
     yaml = tmp_path / "tn.yaml"
     _write_policy(tmp_path)
     try:
