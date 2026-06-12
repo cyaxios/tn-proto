@@ -107,14 +107,14 @@ Then point your consumer at `file:../tn_proto/ts-sdk/tn-proto-<version>.tgz`.
 When `tn-proto` is published the install becomes:
 
 ```bash
-npm install tn-proto
+npm install @cyaxios/tn-proto
 ```
 
 That path is gated on adding an `NPM_TOKEN` secret and a
 `PUBLISH_TO_NPM=true` repo variable to `tn-proto`. The workflow already
 publishes under the `alpha` dist-tag, so consumers using the bare name
 keep resolving to the most recent stable once one ships; alpha consumers
-opt in with `npm install tn-proto@alpha`. See the header of
+opt in with `npm install @cyaxios/tn-proto@alpha`. See the header of
 [`release-typescript.yml`](../.github/workflows/release-typescript.yml)
 for the enable steps.
 
@@ -130,7 +130,7 @@ for the enable steps.
 ## Quickstart
 
 ```ts
-import { Tn } from "tn-proto";
+import { Tn } from "@cyaxios/tn-proto";
 
 const tn = await Tn.init("./tn.yaml");          // mints a fresh ceremony if absent
 tn.info("order.created", { order_id: "A100", amount: 4999 });
@@ -149,7 +149,7 @@ that touch disk or the network are `Promise<T>`.
 ## Surface
 
 ```ts
-import { Tn } from "tn-proto";
+import { Tn } from "@cyaxios/tn-proto";
 
 // Hot path — sync.
 tn.log / tn.debug / tn.info / tn.warning / tn.error
@@ -168,7 +168,7 @@ tn.agents.{addRuntime, policy, reloadPolicy}
 tn.handlers.{add, list, flush}
 
 // Process-global toggles — also exported as bare functions.
-import { setLevel, setSigning, setStrict } from "tn-proto";
+import { setLevel, setSigning, setStrict } from "@cyaxios/tn-proto";
 setLevel("info");
 setSigning(false);     // hot-loop tracing — turn off Ed25519 entirely
 ```
@@ -283,7 +283,7 @@ for the table; new verbs MUST add a row before the SDK can publish
 All thrown errors are real `Error` subclasses you can `instanceof` route:
 
 ```ts
-import { VerificationError, ChainConflictError } from "tn-proto";
+import { VerificationError, ChainConflictError } from "@cyaxios/tn-proto";
 
 try {
   for (const entry of tn.secureRead({ onInvalid: "raise" })) { ... }

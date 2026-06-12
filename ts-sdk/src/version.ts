@@ -5,7 +5,7 @@
 // Kept as a literal (not a package.json read) so browser bundles and
 // node paths share one import with no fs dependency.
 
-export const SDK_VERSION = "0.6.0-alpha.1";
+export const SDK_VERSION = "0.6.0-alpha.3";
 
 /** User-Agent for every outbound HTTP call the SDK makes (vault, account,
  * wallet, bootstrap). Mirrors Python's dynamic `tn-proto/<version>`. */

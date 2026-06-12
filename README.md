@@ -5,7 +5,7 @@ Signed, encrypted, append-only logging — one entry per event, with identical b
 ---
 
 [![Python Support](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg?style=flat-square)](https://pypi.org/project/tn-proto/)
-[![TypeScript Support](https://img.shields.io/badge/typescript-Node%20%7C%20Browser%20%7C%20WASM-blue.svg?style=flat-square)](https://www.npmjs.com/package/tn-proto)
+[![TypeScript Support](https://img.shields.io/badge/typescript-Node%20%7C%20Browser%20%7C%20WASM-blue.svg?style=flat-square)](https://www.npmjs.com/package/@cyaxios/tn-proto)
 [![Version](https://img.shields.io/badge/release-v0.6.0a2-orange.svg?style=flat-square)](https://pypi.org/project/tn-proto/)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](#license)
 [![Security](https://img.shields.io/badge/keys-non--custodial%20vault-brightgreen.svg?style=flat-square)](#non-custodial-vault-backups)
@@ -37,7 +37,7 @@ pip install tn-proto
 Install the npm package:
 
 ```bash
-npm install tn-proto
+npm install @cyaxios/tn-proto
 ```
 
 ---
@@ -65,8 +65,8 @@ tn.flush_and_close()
 ### TypeScript
 
 ```typescript
-import * as tn from "tn-proto";
-import type { Entry } from "tn-proto";
+import * as tn from "@cyaxios/tn-proto";
+import type { Entry } from "@cyaxios/tn-proto";
 
 // Load project configurations
 const project = await tn.use("demo");

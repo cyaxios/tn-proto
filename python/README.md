@@ -45,7 +45,7 @@ pip install tn-proto
 Install the npm package:
 
 ```bash
-npm install tn-proto
+npm install @cyaxios/tn-proto
 ```
 
 ---
@@ -73,8 +73,8 @@ tn.flush_and_close()
 ### TypeScript
 
 ```typescript
-import * as tn from "tn-proto";
-import type { Entry } from "tn-proto";
+import * as tn from "@cyaxios/tn-proto";
+import type { Entry } from "@cyaxios/tn-proto";
 
 // Load project configurations
 const project = await tn.use("demo");
