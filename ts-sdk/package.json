@@ -1,6 +1,6 @@
 {
   "name": "@cyaxios/tn-proto",
-  "version": "0.6.0-alpha.3",
+  "version": "0.6.0-alpha.4",
   "description": "TN protocol SDK for TypeScript \u00e2\u20ac\u201d attested logging with broadcast encryption. Wraps tn-wasm (Rust) with idiomatic types.",
   "type": "module",
   "engines": {
