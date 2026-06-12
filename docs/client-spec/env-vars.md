@@ -3,9 +3,8 @@
 Runtime configuration knobs. **Python honors all of them; TS honors a
 documented subset; Rust honors only `TN_RUN_ID` and `TN_FORCE_PYTHON`.**
 
-Truthiness conventions are inconsistent across the Python codebase —
-see [discrepancies.md#env-truthiness](./discrepancies.md#env-truthiness).
-This page calls out the convention each variable uses.
+Truthiness conventions vary by variable; this page calls out the
+convention each variable uses.
 
 ## Identity / bootstrap
 
@@ -241,8 +240,6 @@ TN_* set:
 New env vars SHOULD use the strict-mode convention
 (`{"1","true","yes","on"}` lowercased). Existing variables are kept
 on their original conventions for back-compat.
-
-See [discrepancies.md#env-truthiness](./discrepancies.md#env-truthiness).
 
 ## Source pointers
 

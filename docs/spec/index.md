@@ -1,78 +1,58 @@
-# TN protocol spec
+# TN wire protocol
 
-This directory is the **single source of truth** for the TN wire
-protocol. Libraries are conformant implementations; when a library
-and the spec disagree, the spec wins.
+This directory is the authoritative specification of the TN wire
+protocol: the bytes that producers emit and verifiers validate.
+Implementations conform to this specification; where an implementation
+and the spec disagree, the spec governs.
 
-Today there are three implementations:
+The format is defined in language-neutral terms. It is exercised by
+implementations in Rust (`crypto/tn-core/`, with a wasm build for the
+browser and TypeScript), Python, and the TypeScript SDK.
 
-| Side | Language | Source |
-|---|---|---|
-| Python | `python/tn/` | The original; widest verb surface |
-| Rust core | `crypto/tn-core/` | Performance-critical primitives |
-| Rust wasm | `crypto/tn-wasm/` | Browser + TS-via-pkg consumption |
-| TS SDK (Node) | `ts-sdk/src/` | Node consumers, wraps tn-wasm |
-| TS SDK (browser) | `ts-sdk/src/browser/` | Browser bundle |
-
-Where they agree, this spec records the agreement. Where they
-disagree, see [`discrepancies.md`](./discrepancies.md) — every known
-drift is named, with file:line evidence, so spec-faithful new
-implementations don't pick the wrong side by accident.
+Wire format: **wire/1 (draft)**.
 
 ## Reading order
 
-For new implementers, top-to-bottom:
-
-1. [**Canonical bytes**](./canonical-bytes.md) — the JSON encoding rule everything else stands on.
-2. [**Signing**](./signing.md) — Ed25519, `did:key:z…`, the two base64 conventions.
-3. [**Envelope**](./envelope.md) — the wire shape of an attested event.
-4. [**row_hash**](./row-hash.md) — the chain-link hash inside each envelope.
-5. [**Manifest**](./manifest.md) — `.tnpkg` archive metadata + signature.
-6. [**Body encryption**](./body-encryption.md) — AES-256-GCM sealed bodies.
-7. [**Recipient wraps**](./recipient-wraps.md) — ECDH + HKDF + AES-GCM BEK seal.
-8. [**Vault HTTP**](./vault-http.md) — the REST endpoints clients talk to.
-9. [**Env vars**](./env-vars.md) — `TN_*` runtime configuration knobs.
-10. [**Discrepancies**](./discrepancies.md) — known implementation drift; read before writing a new port.
+1. [**Conformance**](./conformance.md) — what it means to conform: the
+   requirement keywords, the conformance classes, and the
+   conformance-vector contract. Read this first.
+2. [**Canonical bytes**](./canonical-bytes.md) — the JSON encoding rule
+   everything else stands on.
+3. [**Signing**](./signing.md) — Ed25519, `did:key:z…`, the base64
+   conventions.
+4. [**Envelope**](./envelope.md) — the wire shape of an attested event.
+5. [**row_hash**](./row-hash.md) — the chain-link hash inside each
+   envelope.
+6. [**Indexing**](./indexing.md) — equality tokens over encrypted
+   fields.
+7. [**Manifest**](./manifest.md) — `.tnpkg` archive metadata and
+   signature.
+8. [**Body encryption**](./body-encryption.md) — AES-256-GCM sealed
+   bodies.
+9. [**Recipient wraps**](./recipient-wraps.md) — ECDH + HKDF + AES-GCM
+   BEK seal.
 
 ## Conventions
 
-Throughout this spec:
+The requirement keywords (MUST, SHOULD, MAY, …) are defined in
+[conformance.md](./conformance.md#requirement-keywords) and interpreted
+per RFC 2119.
 
-- **MUST / MUST NOT** — required for conformance. A claim that an
-  implementation is "TN-conformant" implies it follows every MUST.
-- **SHOULD / SHOULD NOT** — strongly recommended; deviations are
-  legal but the implementation must document them prominently.
-- **MAY** — explicitly allowed variation.
+Field names are **wire names** — snake_case as they appear in JSON. An
+implementation that uses a different internal casing (for example
+camelCase in TypeScript) MUST map to and from these wire names at its
+serialization boundary.
 
-Field names are **wire names** (snake_case for JSON, matches Python).
-TS uses camelCase internally; when this spec says `device_identity`,
-TS code reads it via `manifest.fromDid` after the
-`fromWireDict`/`toWireDict` rename layer.
+## Versioning
 
-## Golden vectors
+The wire format carries an independent version, `wire/N`, defined in
+[conformance.md](./conformance.md#versioning). It is decoupled from any
+implementation package version and bumps only when the bytes on the
+wire change. It is currently `wire/1 (draft)`.
 
-Canonical-bytes correctness is anchored by
-`crypto/tn-core/tests/fixtures/canonical_vectors.json` — every
-implementation MUST produce identical bytes for every vector. The
-Rust test `crypto/tn-core/tests/canonical_golden.rs` runs the vectors;
-the Python+TS implementations exercise them via
-`crypto/tn-wasm/test/py_cross_check.py` and
-`ts-sdk/test/tn_py_helper.py`.
+## What this spec is not
 
-When a new section of this spec lands a behavioral claim, the test
-fixtures get extended in lockstep.
-
-## What this spec is NOT
-
-- **Not a tutorial.** See `ts-sdk/docs/api-quick-reference.md` for
-  the SDK how-tos and the README files in each implementation for
-  worked examples.
-- **Not version-locked.** When the protocol changes, this spec
-  changes; consumers MUST read the spec version (top of each section)
-  before assuming compatibility.
-- **Not an API reference.** TSDoc on each public symbol + Python
-  docstrings cover the language-level surfaces. This spec defines
-  what's on the wire.
-
-Spec version: **0.4.3a3** (covers the wire format as of
-`js-browser-tn` branch / PRs #78 #79 #80).
+- **Not a tutorial.** SDK how-tos live in each implementation's own
+  documentation.
+- **Not an API reference.** This spec defines what is on the wire, not
+  the language-level surface of any SDK.

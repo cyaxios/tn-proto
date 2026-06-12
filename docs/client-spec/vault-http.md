@@ -24,7 +24,7 @@ Resolution order, with `resolveVaultUrl` (TS) / `resolve_vault_url`
 
 For DID-resolved vault endpoints (when a yaml's `ceremony.linked_vault`
 is a `did:web:` instead of a literal URL), see
-`resolveDidEndpoint` and [signing.md#did-format](./signing.md#did-format).
+`resolveDidEndpoint` and [signing.md#did-format](../spec/signing.md#did-format).
 
 ## Auth handshake
 
@@ -128,8 +128,8 @@ the bearer's embedded seed). Returns:
 
 The bundle is a recipient-sealed `.tnpkg` whose wrap is addressed
 to the bearer's DID. The client unseals via
-[recipient-wraps.md](./recipient-wraps.md), decrypts the body via
-[body-encryption.md](./body-encryption.md), and installs the
+[recipient-wraps.md](../spec/recipient-wraps.md), decrypts the body via
+[body-encryption.md](../spec/body-encryption.md), and installs the
 project_seed.
 
 Response codes:

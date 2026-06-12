@@ -1,101 +1,81 @@
 # Canonical bytes
 
-The serialization rule that turns a JSON-shaped value into a byte
+The serialization rule that turns a JSON-shaped value into the byte
 sequence everything else in the protocol hashes, signs, and compares.
+A one-byte deviation here invalidates every signature downstream, so
+this is the most conformance-critical surface in the spec.
 
-Implementations: `python/tn/canonical.py::_canonical_bytes` is the
-reference. `crypto/tn-core/src/canonical.rs::canonical_bytes` claims
-byte-for-byte match. The TS SDK delegates to wasm via
-`ts-sdk/src/core/canonical.ts`.
+Requirement keywords are normative per [conformance.md](./conformance.md).
 
-Golden vectors at
-`crypto/tn-core/tests/fixtures/canonical_vectors.json`.
+Wire format: **wire/1 (draft)**.
 
 ## Algorithm
 
-For any JSON-shaped value `v`:
+For any JSON-shaped value `v`, the canonical bytes are produced as
+follows.
 
-1. **Objects** — emit `{`, then key-value pairs in **sorted-key
-   order** (lexicographic on the UTF-8 byte representation of the
-   key), separated by `,`. Each pair is the canonical-bytes of the
-   key (a JSON string) + `:` + the canonical-bytes of the value. End
-   with `}`. Sort is **recursive** — every nested object also has
+1. **Objects.** Emit `{`, then key/value pairs in **sorted-key order**,
+   separated by `,`, then `}`. Keys MUST be sorted lexicographically on
+   the UTF-8 byte representation of the key. Each pair is the canonical
+   bytes of the key (a JSON string) + `:` + the canonical bytes of the
+   value. The sort MUST be recursive: every nested object also has
    sorted keys.
-2. **Arrays** — emit `[`, then elements in input order separated by
-   `,`, then `]`. Arrays MUST NOT be sorted; order is semantic.
-3. **Strings** — emit a JSON string. Non-ASCII characters are
-   preserved verbatim (no `\uXXXX` escaping for BMP code points).
-   Mandatory escapes are `\"`, `\\`, `\n`, `\r`, `\t`, and `\u00XX`
-   for control characters below 0x20.
-4. **Numbers** — integers emit without leading zeros, no `+` sign,
-   no trailing `.0`. Floats use shortest-round-trip decimal
-   representation. `NaN`, `+Infinity`, `-Infinity` MUST be rejected
-   at encode time — there is no canonical encoding for them.
-5. **Booleans** — emit `true` / `false`.
-6. **Null** — emit `null`.
-7. **No whitespace anywhere.** Between keys, between elements,
-   around `:`, around brackets — none. The output is one
-   contiguous byte string.
-8. **Encoding** — UTF-8. The output is `bytes`, not a `str`.
+2. **Arrays.** Emit `[`, then elements in input order separated by `,`,
+   then `]`. Arrays MUST NOT be reordered; element order is semantic.
+3. **Strings.** Emit a JSON string. Non-ASCII characters MUST be
+   preserved verbatim — implementations MUST NOT `\uXXXX`-escape BMP
+   code points. The only mandatory escapes are `\"`, `\\`, `\n`, `\r`,
+   `\t`, and `\u00XX` for control characters below `0x20`.
+4. **Numbers.** Integers MUST emit with no leading zeros, no `+` sign,
+   and no trailing `.0`. Floats MUST use the shortest round-trip
+   decimal representation. `NaN`, `+Infinity`, and `-Infinity` MUST be
+   rejected at encode time — there is no canonical encoding for them
+   (see [Forbidden inputs](#forbidden-inputs)).
+5. **Booleans.** Emit `true` / `false`.
+6. **Null.** Emit `null`.
+7. **Whitespace.** The output MUST contain no whitespace anywhere —
+   not between keys, between elements, around `:`, or around brackets.
+   The result is one contiguous byte string.
+8. **Encoding.** The output MUST be UTF-8 `bytes`, not a decoded
+   string.
 
 ## Sentinel wrappers
 
-Two TN-specific extensions to plain JSON:
+Two TN-specific extensions to plain JSON.
 
-- **Raw bytes** — a `bytes` value MUST be wrapped as
-  `{"$b64": "<standard-base64>"}` before canonicalization (standard
-  base64 with `=` padding). The receiver recognises the sentinel and
-  decodes back to bytes. Reference: `canonical.py:48` / `canonical.rs:93`.
-- **Decimal (Python only)** — `decimal.Decimal` MUST emit as a JSON
-  string (e.g. `"1.500"` for `Decimal("1.500")`), preserving trailing
-  zeros. Rust + TS do not yet support this; consumers SHOULD avoid
-  Decimal in cross-language payloads. See
-  [`discrepancies.md#decimal`](./discrepancies.md#decimal).
+- **Raw bytes.** A `bytes` value MUST be wrapped as
+  `{"$b64": "<standard-base64>"}` (standard base64, `=` padding) before
+  canonicalization. A verifier MUST recognize the sentinel and decode
+  it back to bytes.
+- **Decimal.** A decimal value, where supported, MUST emit as a JSON
+  string preserving trailing zeros (e.g. `"1.500"` for a decimal
+  `1.500`). Decimal support is OPTIONAL; producers SHOULD avoid
+  decimals in cross-language payloads.
 
 ## Forbidden inputs
 
-The canonicalizer MUST reject:
+The canonicalizer MUST reject, at encode time:
 
-- `NaN`, `+Infinity`, `-Infinity` (Python: `canonical.py:34`; TS:
-  `canonical.ts:9` `assertFinite`; Rust: `canonical.rs:32`).
-- Object keys that are not strings (Python: `TypeError`).
+- `NaN`, `+Infinity`, `-Infinity`.
+- Object keys that are not strings.
 - Cyclic references.
 
-## Implementation tests
+Rejection MUST surface as a contained error to the caller; it MUST NOT
+silently coerce the value (e.g. `NaN` → `null`) and MUST NOT crash the
+host program.
 
-Every implementation MUST pass the vectors at
-`crypto/tn-core/tests/fixtures/canonical_vectors.json`. To verify a
-new implementation:
+## Test-vector conformance
 
-```bash
-cargo test -p tn-core canonical_golden        # Rust + Python via FFI
-python -m pytest python/tests/test_canonical_golden.py
-node ts-sdk/scripts/_canonical_golden.mjs     # (TODO — does not exist yet)
-```
-
-The TS golden runner is missing. If you're porting to a new language,
-extending `canonical_vectors.json` and adding a runner is the price
-of entry.
+Every implementation claiming producer or verifier conformance MUST
+pass `canonical_vectors.json`. Extending the vector set and adding a
+runner is the price of entry for a new language port.
 
 ## Why this matters
 
-Every higher-level operation in the protocol depends on this:
+Every higher-level operation depends on this surface:
 
 - [Row hashes](./row-hash.md) hash canonical bytes.
 - [Manifest signatures](./manifest.md#signing) sign canonical bytes.
 - [Recipient-wrap AAD](./recipient-wraps.md#aad) is canonical bytes.
-- [Envelope signatures](./envelope.md#signature) sign the row_hash
-  (which is over canonical bytes).
-
-A one-byte deviation here invalidates every signature downstream.
-That's why golden vectors exist.
-
-## Source pointers
-
-| Implementation | File:line |
-|---|---|
-| Python (reference) | `python/tn/canonical.py:60` |
-| Rust core | `crypto/tn-core/src/canonical.rs:19` |
-| TS SDK | `ts-sdk/src/core/canonical.ts:24` |
-| Golden vectors | `crypto/tn-core/tests/fixtures/canonical_vectors.json` |
-| Cross-check | `crypto/tn-wasm/test/py_cross_check.py` |
+- [Envelope signatures](./envelope.md#signature) sign the `row_hash`,
+  which is itself computed over canonical bytes.

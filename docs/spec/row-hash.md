@@ -1,94 +1,107 @@
 # row_hash
 
-The chain-link hash inside each [envelope](./envelope.md). Commits
-to every field in the envelope EXCEPT `sequence` (which is metadata,
-not content) and `row_hash` / `signature` themselves (chicken-and-egg).
+The chain-link hash inside each [envelope](./envelope.md). It commits
+to every field in the envelope **except** `sequence` (metadata, not
+content) and `row_hash` / `signature` themselves. The
+[signature](./signing.md) signs this hash, so the signature
+transitively commits to the whole record.
 
-Implementations: `python/tn/chain.py::_compute_row_hash` is the
-reference. `crypto/tn-core/src/chain.rs::compute_row_hash` claims
-byte-for-byte match. TS delegates to wasm.
+Requirement keywords are normative per [conformance.md](./conformance.md).
+
+Wire format: **wire/1 (draft)**.
 
 ## Algorithm
 
 ```text
 row_hash = "sha256:" + hex(SHA256(
-    device_identity || \x00
-    timestamp       || \x00
-    event_id        || \x00
-    event_type      || \x00
-    level           || \x00
-    prev_hash       || \x00
-    sorted_public_fields(public_fields) || \x00
-    sorted_groups(groups)
+    device_identity  || 0x00
+    timestamp        || 0x00
+    event_id         || 0x00
+    event_type       || 0x00
+    level            || 0x00
+    prev_hash        || 0x00
+    render_public_fields(public_fields)
+    render_groups(groups)
 ))
 ```
 
 Where:
 
-- `||` is byte concatenation.
-- `\x00` is a single zero byte (record separator).
-- All string-typed scalars are UTF-8 byte-encoded.
-- `sorted_public_fields(d)` emits each `(name, value)` pair, sorted
-  by name, as `name + "=" + str(value) + "\x00"`. The value is
-  Python `str(v)` for non-bytes values; raw bytes verbatim if it
-  IS bytes (see [discrepancies.md](./discrepancies.md#row-hash-bytes)).
-- `sorted_groups(d)` emits each `(group_name, group_payload)` pair,
-  sorted by group name, as:
-  - `"group:" + group_name + "\x00"`
-  - `"ct:" + ciphertext_bytes + "\x00"` (raw ciphertext bytes, not
-    base64-encoded — the hash sees pre-encoding bytes)
-  - `sorted_field_hashes(field_hashes)` — each `(field, token)`
-    pair, sorted by field name, as `field + "=" + token + "\x00"`
+- `||` is byte concatenation and `0x00` is a single zero byte used as a
+  record separator.
+- `hex(...)` is lower-case hexadecimal; the output is always
+  `"sha256:"` followed by exactly 64 hex characters.
+- The six leading scalars are UTF-8 byte-encoded, each followed by one
+  `0x00` byte, in the exact order shown. This order is normative.
 
-Reference: `python/tn/chain.py:80-110`, `crypto/tn-core/src/chain.rs:50-130`.
+### render_public_fields
+
+Public fields MUST be emitted **sorted by field name** (lexicographic
+on the UTF-8 bytes of the name). Each field emits:
+
+```text
+name + "=" + render_value(value) + 0x00
+```
+
+`render_value` is defined per JSON type:
+
+| Value type | Rendering |
+|---|---|
+| string | the raw UTF-8 bytes, unquoted |
+| boolean | `True` or `False` (capitalized) |
+| null | `None` |
+| number | its decimal string form |
+
+These four scalar types are the **only** defined public-field value
+types in `wire/1`. A producer MUST NOT use an array or object as a
+public-field value: its rendering is not defined by this version of the
+wire format and is not guaranteed to be identical across
+implementations. A producer SHOULD reject composite public-field values
+at encode time.
+
+### render_groups
+
+Groups MUST be emitted **sorted by group name**. Each group emits:
+
+```text
+"group:" + group_name           + 0x00
+"ct:"    + ciphertext_bytes      + 0x00
+```
+
+followed by its field hashes, **sorted by field name**, each as:
+
+```text
+field_name + "=" + token + 0x00
+```
+
+`ciphertext_bytes` are the raw pre-encoding bytes of the group
+ciphertext — not the base64 text that appears in the envelope. The
+hash sees the bytes before base64 encoding. `token` is the
+[index token](./indexing.md) string verbatim.
 
 ## Zero hash
 
-The `prev_hash` for the first row in any (publisher, event_type)
-chain is the **zero hash**:
+The `prev_hash` of the first row in a given (publisher, event_type)
+chain MUST be the **zero hash**:
 
 ```text
-"sha256:" + "0" * 64
+"sha256:" + "0" repeated 64 times
 ```
-
-i.e. `"sha256:0000000000000000000000000000000000000000000000000000000000000000"`.
-
-Reference: `python/tn/chain.py:15`, `crypto/tn-core/src/chain.rs:13`.
-
-Implementations expose this as a constant:
-
-- Python: `tn.chain.ZERO_HASH`
-- Rust: `tn_core::chain::ZERO_HASH` / wasm export `zeroHash`
-- TS: `ZERO_HASH` exported from `tn-proto`
 
 ## Properties
 
-The hash:
-
-- **Commits to content, not metadata.** `sequence` is excluded
-  because it can be inferred from the chain. `signature` is excluded
-  because it signs the hash. `row_hash` itself is obviously excluded.
-- **Is deterministic across implementations.** Same inputs → same
-  64-hex output, byte-identical.
-- **Is order-stable for fields.** Public fields and groups are sorted
-  alphabetically inside the hash input, so the producer's insertion
-  order doesn't affect the hash. (Insertion order DOES affect the
-  envelope's JSON wire shape, but the hash strips that.)
+- **Commits to content, not metadata.** `sequence` is excluded because
+  it is recoverable from the chain. `signature` is excluded because it
+  signs the hash. `row_hash` excludes itself.
+- **Deterministic across implementations.** Identical inputs MUST
+  produce the identical 64-hex output, byte for byte.
+- **Order-stable.** Public fields, groups, and field hashes are sorted
+  inside the hash input, so producer insertion order does not affect
+  the hash. (Insertion order does affect the envelope's JSON wire
+  shape; the hash strips that.)
 
 ## Verification
 
-A reader recomputes `row_hash` from the envelope's other fields and
-compares to the wire `row_hash`. Mismatch = tampered record.
-
-The TS SDK exposes this as `tn.readRaw()` returning
-`{envelope, plaintext, valid: {row_hash: bool, ...}}` for explicit
-inspection.
-
-## Source pointers
-
-| Implementation | File:line |
-|---|---|
-| Python (reference) | `python/tn/chain.py:63` |
-| Rust core | `crypto/tn-core/src/chain.rs:50` |
-| Wasm export | `crypto/tn-wasm/src/lib.rs:327` |
-| TS SDK | `ts-sdk/src/core/chain.ts:36` |
+A verifier MUST recompute `row_hash` from the envelope's other fields
+and compare it to the wire `row_hash`. A mismatch MUST be treated as a
+tampered record and rejected.

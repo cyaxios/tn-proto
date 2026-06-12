@@ -1,51 +1,51 @@
 # Envelope
 
-The on-disk shape of a single attested event. Each envelope is **one
-line of JSON** — `json.dumps(envelope, separators=(",", ":")) + "\n"`
-— and the log file is newline-delimited JSON (ndjson).
+The wire shape of a single attested event. Each envelope is **one line
+of compact JSON**, and a log is newline-delimited JSON (ndjson) — one
+envelope per line.
 
-Implementations: `python/tn/logger.py::_emit_locked` is the reference.
-`crypto/tn-core/src/envelope.rs::build_envelope` mirrors it. TS
-delegates to wasm.
+Requirement keywords are normative per [conformance.md](./conformance.md).
+
+Wire format: **wire/1 (draft)**.
 
 ## Structure
 
 An envelope has three regions, in this order:
 
-1. **9 mandatory keys** in fixed write order.
-2. **Public fields** — declared in yaml `public_fields`. Insertion
-   order is preserved.
-3. **Group payloads** — encrypted per group. Insertion order
-   preserved.
+1. Nine mandatory keys, in fixed order.
+2. Public fields, in producer insertion order.
+3. Group payloads, in producer insertion order.
 
-### Mandatory keys (fixed order)
+### Mandatory keys
+
+These nine keys MUST appear, in exactly this order, at the start of
+every envelope:
 
 | Key | Type | Format |
 |---|---|---|
-| `device_identity` | string | `did:key:z…` (Ed25519, see [signing.md](./signing.md)) |
-| `timestamp` | string | ISO-8601 UTC, microsecond precision, `Z` suffix. Example: `"2026-05-22T14:30:00.123456Z"` |
+| `device_identity` | string | `did:key:z…` Ed25519 (see [signing.md](./signing.md)) |
+| `timestamp` | string | ISO-8601 UTC, microsecond precision, `Z` suffix (e.g. `"2026-05-22T14:30:00.123456Z"`) |
 | `event_id` | string | UUID v4 |
-| `event_type` | string | Matches `[a-zA-Z0-9._-]{1,64}` |
-| `level` | string | One of `"debug"`, `"info"`, `"warning"`, `"error"`, or `""` (severity-less `tn.log`) |
-| `sequence` | u64 | Monotonic per (publisher, event_type) chain |
-| `prev_hash` | string | `"sha256:<64-hex>"` of the previous row in this chain. First row in a chain: `"sha256:" + "0"*64` |
-| `row_hash` | string | `"sha256:<64-hex>"` — see [row-hash.md](./row-hash.md) |
-| `signature` | string | Ed25519 over `row_hash.encode("ascii")`, URL-safe base64 NO padding |
+| `event_type` | string | matches `[a-zA-Z0-9._-]{1,64}` |
+| `level` | string | one of `"debug"`, `"info"`, `"warning"`, `"error"`, or `""` |
+| `sequence` | integer | monotonic per (publisher, event_type) chain, unsigned 64-bit |
+| `prev_hash` | string | `"sha256:<64-hex>"` of the previous row in this chain; the zero hash for the first row (see [row-hash.md](./row-hash.md)) |
+| `row_hash` | string | `"sha256:<64-hex>"` (see [row-hash.md](./row-hash.md)) |
+| `signature` | string | Ed25519 over `ascii(row_hash)`, URL-safe base64, no padding (see [signing.md](./signing.md)) |
 
-These nine MUST appear in this exact order on the wire. The
-ordering is enforced because the envelope is serialised with
-sorted-key-OFF dict iteration but the producer code path inserts
-in this order (`logger.py:311-329`, `envelope.rs:69-79`).
+The fixed order is normative. The envelope is serialized with
+sorted-key serialization **off**; the producer writes these keys in the
+order above, and a verifier relies on it.
 
 ### Public fields
 
-Top-level keys NOT in the mandatory set. Comes from yaml
-`public_fields` declaration plus runtime context. Values are
-JSON-shaped (object, array, string, number, bool, null).
+Top-level keys not in the mandatory set, declared by the publisher.
+Values MUST be JSON scalars — string, number, boolean, or null. Array
+and object public-field values are not defined by `wire/1` (see
+[row-hash.md](./row-hash.md#render_public_fields)) and MUST NOT be used.
 
-Field-name collisions with mandatory keys are silently dropped —
-the mandatory value wins (`logger.py:322-323` `setdefault`;
-`envelope.rs:130-132` explicit skip).
+A public-field name that collides with a mandatory key MUST be dropped;
+the mandatory value wins.
 
 ### Group payloads
 
@@ -56,63 +56,49 @@ For each group the publisher writes to:
   "<group_name>": {
     "ciphertext": "<standard-base64>",
     "field_hashes": {
-      "<field_name>": "<hmac-token>"
+      "<field_name>": "<index-token>"
     }
   }
 }
 ```
 
-- `ciphertext` — standard base64 of the group's encrypted payload.
-  Cipher depends on the group's `cipher_suite` (`btn`, `jwe`, etc).
-- `field_hashes` — HMAC-SHA256 tokens for each indexable field,
-  keyed by `group_index_key` (derived from
-  `index_master.key` + ceremony + group + epoch — see Python's
-  `_derive_group_index_key`).
-
-The group key is whatever the yaml `groups:` block declared — e.g.
-`default`, `tn.agents`, or any custom group name.
+- `ciphertext` is the standard base64 of the group's encrypted payload.
+  The cipher is determined by the group's declared suite.
+- `field_hashes` are the per-field [index tokens](./indexing.md) for
+  the group's indexable fields.
 
 ## Serialization
 
-```python
-# Pseudocode, mirrors logger.py:331.
-line = json.dumps(envelope, separators=(",", ":"), ensure_ascii=False) + "\n"
+An envelope is serialized as compact JSON (no inter-token whitespace)
+followed by a newline:
+
+```text
+line = compact_json(envelope) + "\n"
 ```
 
-This is NOT canonical bytes (no sorted keys; insertion order is the
-contract). It's compact JSON for wire efficiency. Only the
-`row_hash` input is canonicalized — see [row-hash.md](./row-hash.md).
+This is **not** [canonical bytes](./canonical-bytes.md): keys are not
+re-sorted, because mandatory-key order and insertion order are part of
+the contract. Only the `row_hash` input is canonicalized.
 
-## Log file layout
+## Chaining
 
-The main log is `<keystore_root>/.tn/<stem>/logs/tn.ndjson`, ndjson
-encoded. Each line is one envelope. Append-only. Rotated by
-`<file>.rotating` handler when configured.
-
-`prev_hash` chains each envelope to the previous one of the same
-`event_type` published by the same `device_identity` — so a reader
-walks `row_hash` -> `prev_hash` -> `row_hash` to verify chain
-integrity per event-type.
+`prev_hash` links each envelope to the previous envelope of the **same
+`event_type`** published by the **same `device_identity`**. A verifier
+walks `row_hash` → `prev_hash` → `row_hash` to check chain integrity
+per event type. The first row of a chain MUST use the zero hash as its
+`prev_hash`.
 
 ## Signing
 
-After computing `row_hash` (see next section), the publisher signs
-the ASCII bytes of the hash string:
+After computing `row_hash`, the publisher signs the ASCII bytes of the
+hash string and stores the URL-safe-no-padding base64 result in
+`signature`:
 
-```python
-message = envelope["row_hash"].encode("ascii")    # e.g. b"sha256:abc..."
-sig_bytes = device_key.sign(message)              # 64 bytes Ed25519
-envelope["signature"] = url_safe_b64_no_pad(sig_bytes)
+```text
+message       = ascii(row_hash)
+signature_raw = Ed25519.sign(seed, message)
+envelope.signature = url_safe_b64_no_pad(signature_raw)
 ```
 
-The signature commits to the row hash. Since the row hash commits
-to every other field in the envelope, the signature transitively
-commits to the whole record.
-
-## Source pointers
-
-| Implementation | File:line |
-|---|---|
-| Python (reference) | `python/tn/logger.py:311-329` |
-| Rust core | `crypto/tn-core/src/envelope.rs:65-152` |
-| TS SDK | `ts-sdk/src/core/envelope.ts:11` |
+Because `row_hash` commits to every other content field, the signature
+transitively commits to the whole record. See [signing.md](./signing.md).
