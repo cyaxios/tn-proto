@@ -173,12 +173,17 @@ export class AdminNamespace {
 
   async ensureGroup(
     group: string,
-    opts?: { cipher?: "btn" | "jwe" },
+    opts?: { cipher?: "btn" | "jwe"; fields?: string[] },
   ): Promise<EnsureGroupResult> {
     const cipher = opts?.cipher ?? "btn";
     const state = this.state();
     const existing = state.groups.find((g) => g.group === group);
     if (existing) {
+      // Idempotent re-ensure: the group is already attested, but still honor
+      // `fields` routing (matches Python's ensure_group on an existing group).
+      if (opts?.fields && opts.fields.length > 0) {
+        this._rt.adminRouteFields(group, opts.fields);
+      }
       return {
         group,
         cipher: existing.cipher as "btn" | "jwe",
@@ -188,7 +193,7 @@ export class AdminNamespace {
       };
     }
     // Group not yet attested in the log — emit tn.group.added.
-    const receipt = this._rt.adminEnsureGroup(group, cipher);
+    const receipt = this._rt.adminEnsureGroup(group, cipher, opts?.fields);
     const addedAt = new Date().toISOString();
     return {
       group,

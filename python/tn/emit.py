@@ -22,11 +22,27 @@ threshold drops them); the standard verbs run it *after*.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from . import _session
 from ._autoinit import maybe_autoinit as _maybe_autoinit
+
+
+class WrittenRecord(dict):
+    """The signed, encrypted envelope returned by :func:`tn.log`.
+
+    Behaves as the on-wire envelope ``dict`` (so ``json=tn.log(...)`` and
+    normal item access keep working), but ``str()`` renders valid JSON rather
+    than Python ``repr`` (single quotes). That makes the attested record easy
+    to *send* verbatim, e.g. ``requests.post(url, data=str(tn.log(...)))``.
+    """
+
+    __slots__ = ()
+
+    def __str__(self) -> str:
+        return json.dumps(self)
 
 # ---------------------------------------------------------------------------
 # Module-level cached state. Populated at package load by
@@ -275,7 +291,7 @@ def log(
     level: str = "",
     _sign: bool | None = None,
     **fields: Any,
-) -> dict[str, Any] | None:
+) -> WrittenRecord | None:
     """Emit an attested event with a caller-chosen level (default: severity-less).
 
     ``tn.log`` is **not** an alias of ``tn.info`` — it emits with
@@ -345,4 +361,5 @@ def log(
     if _tn_module._dispatch_rt is None:
         _maybe_autoinit()
     sign = _sign if _sign is not None else _session._sign_override
-    return _emit_with_splice(level, event_type, fields, sign)
+    rec = _emit_with_splice(level, event_type, fields, sign)
+    return WrittenRecord(rec) if rec is not None else None

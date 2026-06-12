@@ -377,11 +377,11 @@ export function scope<T>(fields: Record<string, unknown>, body: () => T): T {
 
 /** Flush handlers and release the default ceremony. Mirrors Python
  *  `tn.flush_and_close()`. Safe to call multiple times. */
-export async function close(): Promise<void> {
+export async function close(opts: { timeoutMs?: number } = {}): Promise<void> {
   if (_defaultTn === null) return;
   const t = _defaultTn;
   _defaultTn = null;
-  await t.close();
+  await t.close(opts);
 }
 
 /** Flush handlers and release the default ceremony. Snake_case alias
@@ -444,9 +444,10 @@ export const get_context = getContext;
  *  a fresh `Tn` handle (interned per project+name like the class method);
  *  does NOT rebind the module-level default. */
 export function use(
-  name: string,
+  name?: string,
   opts?: TnInitOptions & { projectDir?: string; profile?: string; project?: string },
 ): Promise<_Tn> {
+  // `name` omitted resolves the `default` ceremony (parity with Python `tn.use()`).
   return _Tn.use(name, opts);
 }
 

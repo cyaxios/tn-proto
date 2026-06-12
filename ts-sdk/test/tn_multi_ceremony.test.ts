@@ -177,3 +177,22 @@ test("Tn.use cache is scoped by projectDir and stream name", async () => {
     rmSync(projectB, { recursive: true, force: true });
   }
 });
+
+test("Tn.use() with no name defaults to the 'default' ceremony (parity with Python use(None))", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ts-use-default-"));
+  try {
+    const a = await Tn.use(undefined, { projectDir: dir });
+    const b = await Tn.use("default", { projectDir: dir });
+    try {
+      const ay = (a.config() as { yamlPath?: string }).yamlPath;
+      const by = (b.config() as { yamlPath?: string }).yamlPath;
+      assert.ok(ay, "use() resolved a ceremony");
+      assert.equal(ay, by, "use() and use('default') resolve the same ceremony");
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

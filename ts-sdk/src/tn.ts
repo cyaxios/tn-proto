@@ -28,6 +28,7 @@ import {
   type InitUploadResult,
 } from "./handlers/init_upload.js";
 import { iterLogFiles } from "./runtime/reconcile.js";
+import { DEFAULT_CEREMONY_NAME } from "./multi.js";
 import type { EmitReceipt } from "./core/results.js";
 import { watch as _watchFlat, type WatchOptions as _WatchFlatOptions } from "./watch.js";
 import { asRowHash, type LogLevel } from "./core/types.js";
@@ -517,9 +518,13 @@ export class Tn {
    * calls mint a fresh one.
    */
   static async use(
-    name: string,
+    name: string = DEFAULT_CEREMONY_NAME,
     opts?: TnInitOptions & { projectDir?: string; profile?: string; project?: string },
   ): Promise<Tn> {
+    // Parity with Python `tn.use(name=None)`: a missing name resolves the
+    // `default` ceremony rather than erroring. `name ?? ...` also catches an
+    // explicit `undefined` passed by the module-level `tn.use()` wrapper.
+    name = name ?? DEFAULT_CEREMONY_NAME;
     const {
       ensureCeremonyOnDisk,
       ensureProjectStreamOnDisk,
@@ -907,8 +912,8 @@ export class Tn {
    * so a subsequent ``Tn.use(name, opts)`` call mints a fresh
    * runtime rather than returning a stale closed handle.
    */
-  async close(): Promise<void> {
-    this._rt.close();
+  async close(opts: { timeoutMs?: number } = {}): Promise<void> {
+    await this._rt.closeAsync(opts);
     if (this._ownedTempdir !== undefined) {
       const td = this._ownedTempdir;
       this._ownedTempdir = undefined;

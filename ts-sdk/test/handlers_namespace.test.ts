@@ -49,3 +49,24 @@ test("tn.handlers.flush resolves without error when no handler has flush()", asy
     await tn.close();
   }
 });
+
+test("Tn.close({ timeoutMs }) drains async handlers via closeAsync with the timeout (parity with Python flush_and_close timeout)", async () => {
+  const tn = await Tn.ephemeral({ stdout: false });
+  let drainedWith: number | "UNSET" = "UNSET";
+  let syncCloseCalled = false;
+  const fake = {
+    name: "drain-probe",
+    accepts: () => false,
+    emit() {},
+    close() {
+      syncCloseCalled = true;
+    },
+    async closeAsync(opts: { timeoutMs?: number }) {
+      drainedWith = opts?.timeoutMs ?? -1;
+    },
+  };
+  tn.handlers.add(fake as unknown as TNHandler);
+  await tn.close({ timeoutMs: 1234 });
+  assert.equal(drainedWith, 1234, "close awaited handler.closeAsync with the timeout");
+  assert.equal(syncCloseCalled, false, "bounded async-drain path used, not the sync close()");
+});

@@ -747,6 +747,36 @@ export class NodeRuntime {
     }
   }
 
+  /** Async teardown that drains buffering handlers before release. A handler
+   * exposing `closeAsync({ timeoutMs })` is awaited with that bound (parity
+   * with Python `flush_and_close`'s per-handler outbox-drain timeout); handlers
+   * without it fall back to the synchronous `close()`. The wasm core is
+   * released last. */
+  async closeAsync(opts: { timeoutMs?: number } = {}): Promise<void> {
+    for (const h of this.handlers) {
+      const ah = h as TNHandler & {
+        closeAsync?: (o: { timeoutMs?: number }) => Promise<void>;
+      };
+      try {
+        if (typeof ah.closeAsync === "function") {
+          await ah.closeAsync(opts);
+        } else {
+          h.close();
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+    if (this.wasm !== null) {
+      try {
+        this.wasm.close();
+      } catch {
+        /* best-effort; the Drop impl will still flush */
+      }
+      this.wasm = null;
+    }
+  }
+
   /** True iff a WasmRuntime companion is currently attached (the Rust/WASM
    *  core services the emit path). False before the first emit (wasm
    *  attaches lazily) and after teardown (_resetWasmAfterAdminWrite / close). */
@@ -903,6 +933,18 @@ export class NodeRuntime {
    *  receipt lives there per `protocol_events_location`. */
   vaultLink(vaultDid: string, projectId: string): EmitReceipt {
     const w = this.attachWasm();
+    // Idempotency (parity with Python `_vault_link_impl`): if an active link to
+    // the same (vaultDid, projectId) already exists (unlinkedAt === null), this
+    // is a no-op and emits no second `tn.vault.linked` event.
+    try {
+      for (const l of this.adminState().vaultLinks) {
+        if (l.vaultDid === vaultDid && l.projectId === projectId && l.unlinkedAt === null) {
+          return lastEmitReceipt(w, resolveAdminLogPath(this.config));
+        }
+      }
+    } catch {
+      // admin.state can fail on a corrupt log; fall through and emit (parity).
+    }
     w.vaultLink(vaultDid, projectId);
     return lastEmitReceipt(w, resolveAdminLogPath(this.config));
   }
@@ -1102,9 +1144,9 @@ export class NodeRuntime {
    * writing a jwe group to the yaml would break the next wasm attach (the
    * Rust/wasm runtime resolves `extends:` and errors when a resolved group
    * has no cipher state on disk). jwe ceremonies are Python-owned. */
-  adminEnsureGroup(group: string, cipher: "btn" | "jwe"): EmitReceipt {
+  adminEnsureGroup(group: string, cipher: "btn" | "jwe", fields?: string[]): EmitReceipt {
     if (cipher === "btn") {
-      this.persistBtnGroup(group);
+      this.persistBtnGroup(group, fields);
     }
     const addedAt = new Date().toISOString();
     return this.emit("info", "tn.group.added", {
@@ -1113,6 +1155,15 @@ export class NodeRuntime {
       publisher_identity: this.did,
       added_at: addedAt,
     });
+  }
+
+  /** Route `fields` into an already-attested group WITHOUT re-emitting
+   * `tn.group.added`. Mirrors Python's `ensure_group(..., fields=[...])` on a
+   * group that already exists: it only updates the authoritative yaml routing
+   * and re-attaches wasm so same-process emits pick up the new routes. */
+  adminRouteFields(group: string, fields: string[]): void {
+    if (fields.length === 0) return;
+    this.persistBtnGroup(group, fields);
   }
 
   /** Mint a fresh btn group and persist it AUTHORITATIVELY.
@@ -1139,7 +1190,7 @@ export class NodeRuntime {
    *      unchanged.
    *   4. Drop the cached wasm runtime so the next emit / read re-attaches
    *      off the updated yaml + keystore and sees the new group. */
-  private persistBtnGroup(group: string): void {
+  private persistBtnGroup(group: string, fields?: string[]): void {
     const keystore = this.config.keystorePath;
     const statePath = join(keystore, `${group}.btn.state`);
     const mykitPath = join(keystore, `${group}.btn.mykit`);
@@ -1171,18 +1222,47 @@ export class NodeRuntime {
     const target = authoritativeYamlFor(this.config.yamlPath, "groups");
     const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
     const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
+    let dirty = false;
     if (!groups[group]) {
       groups[group] = {
         policy: "private",
         cipher: "btn",
         recipients: [{ recipient_identity: this.did }],
       };
+      dirty = true;
+    }
+
+    // Route `fields` into the group: canonical `groups[<group>].fields`
+    // (multi-group path) plus the legacy flat `fields:` block, de-duped while
+    // preserving order. Byte-faithful with Python's `_yaml_add_fields`.
+    if (fields && fields.length > 0) {
+      const gspec = groups[group];
+      const existingRaw = gspec.fields;
+      const routed: string[] = Array.isArray(existingRaw)
+        ? (existingRaw as unknown[]).map((f) => String(f))
+        : [];
+      const seen = new Set(routed);
+      for (const f of fields) {
+        if (!seen.has(f)) {
+          routed.push(f);
+          seen.add(f);
+          dirty = true;
+        }
+      }
+      gspec.fields = routed;
+      const flat = (doc.fields ?? {}) as Record<string, unknown>;
+      for (const f of fields) flat[f] = { group };
+      doc.fields = flat;
+      dirty = true;
+    }
+
+    if (dirty) {
       doc.groups = groups;
       writeFileSync(target, stringifyYaml(doc), "utf8");
     }
 
     // Force the next emit/read to re-attach wasm off the freshly-written
-    // yaml + keystore so it builds the new group's cipher.
+    // yaml + keystore so it builds the new group's cipher and routing.
     this._resetWasmAfterAdminWrite();
   }
 

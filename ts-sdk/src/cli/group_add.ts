@@ -10,18 +10,13 @@
 // This module exposes it on the CLI. Under the multi-ceremony layout the
 // group is written to the AUTHORITATIVE project-root yaml (the head of a
 // stream's `extends:` chain) so it persists for fresh-process readers and a
-// later `add-recipient`. The heavy lifting (mint btn keys + write the
-// authoritative `groups.<name>` block) is delegated to the existing SDK
-// machinery — `tn.admin.ensureGroup` → `NodeRuntime.persistBtnGroup`. The
-// only thing layered on top here is `--fields` routing, which the TS
-// `ensureGroup` does not yet accept; it is written into the SAME
-// authoritative yaml exactly as Python's `_yaml_add_fields` does.
-
-import { readFileSync, writeFileSync } from "node:fs";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+// later `add-recipient`. All of it — minting btn keys, writing the
+// authoritative `groups.<name>` block, AND routing `--fields` into it — is
+// delegated to `tn.admin.ensureGroup({ fields })` →
+// `NodeRuntime.persistBtnGroup`, which mirrors Python's
+// `ensure_group(cfg, name, fields=..., cipher=...)`.
 
 import { Tn } from "../tn.js";
-import { authoritativeYamlFor } from "../runtime/config.js";
 
 /** Options for {@link groupAddCmd}, one-to-one with the CLI flags. */
 export interface GroupAddOptions {
@@ -33,44 +28,6 @@ export interface GroupAddOptions {
   cipher?: "btn" | "jwe";
   /** Path to tn.yaml (`--yaml`); default = discover via the standard chain. */
   yaml?: string;
-}
-
-/**
- * Mirror of Python's `_yaml_add_fields`: record `fields` under
- * `groups[<group>].fields` (canonical, multi-group) AND in the legacy flat
- * `fields:` block (single-route back-compat). De-dupes while preserving
- * order. Writes into the authoritative yaml that owns `groups`.
- */
-function addFieldRoutes(yamlPath: string, group: string, fields: string[]): void {
-  const target = authoritativeYamlFor(yamlPath, "groups");
-  const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
-
-  // Canonical: groups[<group>].fields
-  const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
-  const gspec = (groups[group] ?? {}) as Record<string, unknown>;
-  const existingRaw = gspec.fields;
-  const existing: string[] = Array.isArray(existingRaw)
-    ? (existingRaw as unknown[]).map((f) => String(f))
-    : [];
-  const seen = new Set(existing);
-  for (const f of fields) {
-    if (!seen.has(f)) {
-      existing.push(f);
-      seen.add(f);
-    }
-  }
-  gspec.fields = existing;
-  groups[group] = gspec;
-  doc.groups = groups;
-
-  // Legacy flat block — keep up to date for single-route consumers.
-  const flat = (doc.fields ?? {}) as Record<string, unknown>;
-  for (const f of fields) {
-    flat[f] = { group };
-  }
-  doc.fields = flat;
-
-  writeFileSync(target, stringifyYaml(doc), "utf8");
 }
 
 /**
@@ -92,15 +49,12 @@ export async function groupAddCmd(opts: GroupAddOptions): Promise<number> {
   const tn = await Tn.init(opts.yaml);
   try {
     // Python: ensure_group(cfg, name, fields=fields, cipher=args.cipher)
-    // — mints btn keys + writes the authoritative groups.<name> block.
-    await tn.admin.ensureGroup(opts.name, opts.cipher ? { cipher: opts.cipher } : undefined);
-
-    // TS ensureGroup has no `fields` arg yet; layer the field routing onto
-    // the authoritative yaml the same way Python's ensure_group does.
-    if (fields && fields.length > 0) {
-      const yamlPath = (tn.config() as { yamlPath?: string }).yamlPath ?? "";
-      addFieldRoutes(yamlPath, opts.name, fields);
-    }
+    // — mints btn keys, writes the authoritative groups.<name> block, and
+    // routes the fields into it.
+    await tn.admin.ensureGroup(opts.name, {
+      ...(opts.cipher ? { cipher: opts.cipher } : {}),
+      ...(fields && fields.length > 0 ? { fields } : {}),
+    });
 
     // stdout — byte-for-byte the same three lines Python prints.
     const cipherName = opts.cipher ?? (tn.config() as { cipher?: string }).cipher ?? "btn";

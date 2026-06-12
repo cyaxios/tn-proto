@@ -179,6 +179,30 @@ _cached_admin_state: AdminStateCache | None = None
 # — the splice path no-ops.
 _agent_policy_doc: PolicyDocument | None = None
 
+
+class _AgentsNamespace:
+    """``tn.agents.*`` — agent policy accessors (parity with the TS
+    ``tn.agents`` namespace).
+
+    Agent *runtime* enrolment lives on ``tn.admin.add_agent_runtime`` in the
+    Python SDK; this namespace exposes the read side of the agent policy.
+    """
+
+    @staticmethod
+    def policy() -> PolicyDocument | None:
+        """Return the active ceremony's parsed agent ``PolicyDocument``.
+
+        This is the ``.tn/config/agents.md`` document loaded at ``tn.init()``
+        (the same doc that fills the ``tn.agents`` group fields and drives the
+        ``tn.agents.policy_published`` event), or ``None`` when no agents.md is
+        present. Mirrors the TS ``tn.agents.policy()`` accessor.
+        """
+        return _agent_policy_doc
+
+
+#: ``tn.agents`` namespace instance (see :class:`_AgentsNamespace`).
+agents = _AgentsNamespace()
+
 # Note on _sign_override (defined later): a single-attribute read on each
 # emit. Python's GIL makes the load atomic, and the operation is "newest
 # winner" by design — adding a lock is overkill for a session-level toggle.
@@ -1352,6 +1376,8 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "VerifyError",
     # admin subpackage (cipher-agnostic verbs + cache accessors)
     "admin",
+    # agents namespace (agent policy accessor — tn.agents.policy())
+    "agents",
     # pkg subpackage (export, absorb, bundle_for_recipient)
     "pkg",
     # vault subpackage (link, unlink)
