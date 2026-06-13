@@ -83,7 +83,7 @@ import type { Entry } from "tn-proto";
 
 // tn.use creates or opens a project; tn.init makes it the default logger.
 const t = await tn.use("demo");
-await tn.init(t.config().yamlPath);
+await tn.init(t.yamlPath);
 
 tn.log("app.started", { component: "api" });
 tn.info("order.created", { order_id: "o_123", amount: 4999, currency: "USD" });

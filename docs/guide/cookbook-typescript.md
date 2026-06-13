@@ -349,12 +349,14 @@ admin-log filename; the path is recorded in the yaml.
 
 ```typescript
 import { Tn } from "tn-proto";
+import type { Entry } from "tn-proto";
 
 const tn = await Tn.init("./tn.yaml");
 await tn.vault.link("did:web:vault.example.org", "proj_demo123");
 await tn.vault.unlink("did:web:vault.example.org", "proj_demo123");
 
-for (const entry of tn.read()) {
+for (const e of tn.read()) {
+  const entry = e as Entry;
   if (entry.event_type.startsWith("tn.vault.")) {
     console.log(entry.event_type, entry.fields.vault_identity, entry.fields.project_id);
   }
@@ -537,7 +539,7 @@ node bin/tn-js.mjs watch --yaml .tn/demo/tn.yaml --since start --once
 {"event_type":"order.placed","timestamp":"2026-06-08T15:26:50.619Z","level":"info","message":null,"fields":{"qty":"2","sku":"A-100"},"device_identity":"did:key:z6MksPsDhwFCy8Cho6xM83iE2b21oqutKef2KmBdWDAbnSQS","event_id":"019ea7d7-fcfb-7793-bdad-b3793c28b7e4","sequence":1,"run_id":"62963acd5e4e475a951ea53b6b8535a3","prev_hash":"sha256:0000...0000","row_hash":"sha256:7c1059...","signature":"TdsSe...","hidden_groups":[]}
 ```
 
-Code-API equivalent: `for await (const e of tn.watch({ since: "start", once: true })) { ... }`.
+Code-API equivalent (the `--once` snapshot is a one-shot read, not a live tail): `for (const e of tn.read({ allRuns: true })) { ... }`. (`tn.watch({ since: "start" })` is the live-tail form and never returns.)
 
 ### streams
 
