@@ -9,6 +9,14 @@ on:
 permissions:
   contents: read
 
+# crates.io over HTTP/2 intermittently fails cargo's `cargo metadata` /
+# fetch with "[16] Error in the HTTP2 framing layer" when many jobs hit the
+# registry at once. Force HTTP/1.1 (no multiplexing) and retry to make the
+# Rust build deterministic across the matrix.
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   python-tests:
     name: pytest (${{ matrix.os }} / py${{ matrix.python }})

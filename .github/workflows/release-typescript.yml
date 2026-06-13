@@ -39,6 +39,13 @@ on:
 permissions:
   contents: read
 
+# Force cargo to use HTTP/1.1 + retries when fetching from crates.io. The
+# wasm-pack build intermittently fails with "[16] Error in the HTTP2 framing
+# layer" under registry contention.
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   publish:
     name: build + pack tn-proto

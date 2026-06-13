@@ -32,6 +32,13 @@ on:
 permissions:
   contents: write   # gh release create needs write
 
+# Force cargo to use HTTP/1.1 + retries when fetching from crates.io. The
+# maturin wheel build runs `cargo metadata`, which intermittently fails with
+# "[16] Error in the HTTP2 framing layer" under registry contention.
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   # ---------------------------------------------------------------------------
   # One combined wheel per OS. maturin builds the `tn` package + the
