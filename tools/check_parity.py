@@ -540,6 +540,7 @@ _WALLET_SYNC_NAMES: tuple[str, ...] = (
     "walletStatus", "walletSyncCmd",
     "readLinkState", "readSyncQueue",
     "restoreViaPassphrase", "restoreViaLoopback", "restoreWithBek",
+    "restoreViaMnemonic", "restoreCeremony",
     "decryptBlobWithBek", "tryUnpackExportFrame",
     # Option / result / error types (covered by their verbs).
     "WalletSyncCmdOptions", "RestoreOptions", "RestoreResult",
