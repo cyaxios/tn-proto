@@ -391,13 +391,18 @@ class AdminStateCache:
             except OSError:
                 continue
 
-        # Stable sort by timestamp then sequence so order is deterministic
-        # across the union of source files.
+        # Stable sort by (timestamp, sequence) ONLY — no row_hash tiebreaker.
+        # tn.recipient.added and tn.recipient.revoked live on separate
+        # per-event-type chains (both sequence=1) and can share a microsecond
+        # timestamp, so a row_hash tiebreaker would order them by hash
+        # (non-causally). When revoked then sorts before added, the add is
+        # misread as a leaf-reuse attempt and the recipient is dropped. A
+        # stable sort instead keeps the on-disk append order (added before
+        # revoked) for equal keys. Mirrors the TS AdminStateReducer.
         envs.sort(
             key=lambda e: (
                 str(e.get("timestamp") or ""),
                 int(e.get("sequence") or 0),
-                str(e.get("row_hash") or ""),
             )
         )
 

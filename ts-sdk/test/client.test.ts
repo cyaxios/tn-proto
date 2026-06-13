@@ -380,18 +380,11 @@ test("admin.state marks recipients revoked after revoke", async () => {
       const leaf = res.leafIndex;
       await tn.admin.revokeRecipient("default", { leafIndex: leaf });
 
-      // Force the admin-state cache to reload from the durable log before we
-      // read it, so the just-revoked recipient is reflected. A single
-      // refresh still races the buffered revoke write on some runners
-      // (deterministic on CI's node 22), so retry the reload briefly;
-      // the assertions stay strict.
-      let rec;
-      for (let i = 0; i < 40; i += 1) {
-        tn.admin.cache().refresh();
-        rec = tn.admin.state().recipients.find((r) => r.leafIndex === leaf);
-        if (rec && rec.activeStatus === "revoked") break;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
+      // revokeRecipient persists the tn.recipient.revoked envelope through
+      // a synchronous appendFileSync before it returns, so a single forced
+      // cache reload reflects it deterministically — no polling needed.
+      tn.admin.cache().refresh();
+      const rec = tn.admin.state().recipients.find((r) => r.leafIndex === leaf);
       assert.ok(rec, "revoked recipient must still appear in adminState");
       assert.equal(rec!.activeStatus, "revoked");
       assert.ok(rec!.revokedAt, "revokedAt timestamp must propagate");
