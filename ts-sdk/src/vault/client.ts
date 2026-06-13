@@ -226,10 +226,24 @@ export class VaultClient {
    */
   async restoreManifest(projectId: string): Promise<Record<string, unknown>> {
     const resp = await this._request({
-      method: "GET",
-      path: `/api/v1/projects/${encodeURIComponent(projectId)}/restore-manifest`,
+      method: "POST",
+      path: `/api/v1/projects/${encodeURIComponent(projectId)}/restore`,
     });
     return (await resp.json()) as Record<string, unknown>;
+  }
+
+  /**
+   * Download a file's raw sealed blob bytes (the legacy per-file model).
+   * Mirrors Python `VaultClient.download_sealed`:
+   *   GET /api/v1/projects/{project_id}/files/{file_name}
+   * The caller unseals with `tn/sealing.unseal` under its wrap key + AAD.
+   */
+  async downloadSealed(projectId: string, fileName: string): Promise<Uint8Array> {
+    const resp = await this._request({
+      method: "GET",
+      path: `/api/v1/projects/${encodeURIComponent(projectId)}/files/${encodeURIComponent(fileName)}`,
+    });
+    return new Uint8Array(await resp.arrayBuffer());
   }
 
   // ── AWK/BEK account surface (D-20 / D-22) ────────────────────────

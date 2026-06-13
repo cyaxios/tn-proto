@@ -26,11 +26,14 @@ import {
 } from "./index.js";
 import {
   restoreViaLoopback,
+  restoreViaMnemonic,
   restoreViaPassphrase,
   restoreWithBek,
   type RestoreOptions,
   type RestoreResult,
   type RestoreViaLoopbackOptions,
+  type RestoreViaMnemonicOptions,
+  type RestoreViaMnemonicResult,
 } from "./restore.js";
 import type { VaultClient } from "../vault/client.js";
 
@@ -115,6 +118,16 @@ export const wallet = {
     opts: RestoreViaLoopbackOptions,
   ): Promise<RestoreResult & { accountId: string }> {
     return restoreViaLoopback(opts);
+  },
+
+  /**
+   * Legacy mnemonic restore. Mirrors Python `tn wallet restore --mnemonic`:
+   * re-derive the identity from a BIP-39 phrase, write identity.json, and
+   * (when a vault is given) pull + unseal every linked project's per-file
+   * backup under the identity's vault-wrap key.
+   */
+  restoreViaMnemonic(opts: RestoreViaMnemonicOptions): Promise<RestoreViaMnemonicResult> {
+    return restoreViaMnemonic(opts);
   },
 
   /**

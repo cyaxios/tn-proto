@@ -26,7 +26,10 @@ import {
   type CredentialWrap,
   type WrappedKeyRow,
 } from "../vault/awk_bek.js";
-import type { VaultClient } from "../vault/client.js";
+import { VaultClient, vaultIdentityFromDeviceKey } from "../vault/client.js";
+import { Identity } from "../identity.js";
+import { unseal } from "./sealing.js";
+import { parse as parseYaml } from "yaml";
 import { USER_AGENT } from "../version.js";
 
 const DEFAULT_HEADERS: Record<string, string> = {
@@ -391,6 +394,132 @@ export async function restoreViaLoopback(
   } finally {
     rx.shutdown();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy mnemonic restore (per-file sealing model). Mirrors Python
+// `tn.wallet.restore_ceremony` + the `tn wallet restore --mnemonic` CLI path.
+// The per-file sealing is deprecated in favour of the whole-body BEK model
+// above; this port exists for recovering pre-account-bound backups.
+// ---------------------------------------------------------------------------
+
+/**
+ * Pull one project's sealed files into `opts.outDir`, unsealing each under the
+ * BIP-39-derived `wrapKey` with the per-file AAD `(did, ceremonyId, fileName)`.
+ * Mirrors Python `restore_ceremony`: download `tn.yaml` first trusting its
+ * embedded AAD to read `ceremony.id`, then pull the rest with strict AAD.
+ * Writes `tn.yaml` to the target root and other files to `.tn/keys/`.
+ */
+export async function restoreCeremony(
+  client: VaultClient,
+  projectId: string,
+  opts: { outDir: string; wrapKey: Uint8Array; did: string },
+): Promise<RestoreResult> {
+  mkdirSync(opts.outDir, { recursive: true });
+  const keystore = pathResolve(opts.outDir, ".tn", "keys");
+  mkdirSync(keystore, { recursive: true });
+
+  const filesWritten: string[] = [];
+  const notes: string[] = [];
+
+  const manifest = await client.restoreManifest(projectId);
+  const files = Array.isArray(manifest["files"])
+    ? (manifest["files"] as Array<Record<string, unknown>>)
+    : [];
+
+  const yamlEntry = files.find((f) => f["name"] === "tn.yaml");
+  if (yamlEntry === undefined) {
+    throw new RestoreError(`project ${projectId} restore manifest has no tn.yaml`);
+  }
+  // tn.yaml first, trusting the blob's embedded AAD (ceremony id not known yet).
+  const yamlBytes = unseal(await client.downloadSealed(projectId, "tn.yaml"), {
+    wrapKey: opts.wrapKey,
+  });
+  writeFileSync(pathResolve(opts.outDir, "tn.yaml"), Buffer.from(yamlBytes));
+  const doc = (parseYaml(Buffer.from(yamlBytes).toString("utf8")) ?? {}) as Record<string, unknown>;
+  const ceremonyId = String((doc["ceremony"] as Record<string, unknown> | undefined)?.["id"] ?? "");
+  if (!ceremonyId) {
+    throw new RestoreError("restored tn.yaml has no ceremony.id");
+  }
+
+  // Remaining files with strict AAD verification.
+  for (const f of files) {
+    const name = typeof f["name"] === "string" ? (f["name"] as string) : "";
+    if (!name) continue;
+    try {
+      const plain = unseal(await client.downloadSealed(projectId, name), {
+        wrapKey: opts.wrapKey,
+        expectedDid: opts.did,
+        expectedCeremonyId: ceremonyId,
+        expectedFileName: name,
+      });
+      const dst = name === "tn.yaml" ? pathResolve(opts.outDir, "tn.yaml") : pathResolve(keystore, name);
+      writeFileSync(dst, Buffer.from(plain));
+      filesWritten.push(name);
+    } catch (e) {
+      notes.push(`WARN ${name}: ${(e as Error).message}`);
+    }
+  }
+
+  return { outDir: opts.outDir, projectId, filesWritten, rawBlobPath: null, notes };
+}
+
+export interface RestoreViaMnemonicOptions {
+  /** BIP-39 recovery phrase. */
+  mnemonic: string;
+  /** Optional BIP-39 passphrase (the "25th word"). */
+  passphrase?: string;
+  /** Vault base URL. Omit to restore the identity only (no project pull). */
+  vaultUrl?: string;
+  /** Base output dir; each project lands in a `<name|id>` subdir. */
+  outDir?: string;
+  /** Where to write identity.json. Defaults to the standard identity path. */
+  identityPath?: string;
+  /** Restrict to these project ids. Empty/omitted => all linked projects. */
+  projectIds?: string[];
+}
+
+export interface RestoreViaMnemonicResult {
+  did: string;
+  identityPath: string;
+  restored: RestoreResult[];
+}
+
+/**
+ * Recover identity + ceremonies from a BIP-39 mnemonic. Mirrors Python
+ * `cmd_wallet_restore`'s legacy path: derive the identity, write identity.json,
+ * and (when a vault is given) pull every linked project's sealed files,
+ * unsealing under the identity's vault-wrap key.
+ */
+export async function restoreViaMnemonic(
+  opts: RestoreViaMnemonicOptions,
+): Promise<RestoreViaMnemonicResult> {
+  const fromOpts: { passphrase?: string; path?: string } = {};
+  if (opts.passphrase !== undefined) fromOpts.passphrase = opts.passphrase;
+  if (opts.identityPath !== undefined) fromOpts.path = opts.identityPath;
+  const id = Identity.fromMnemonic(opts.mnemonic, fromOpts);
+
+  if (opts.vaultUrl !== undefined) id.linkedVault = opts.vaultUrl;
+  const identityPath = id.save(opts.identityPath);
+
+  if (opts.vaultUrl === undefined) {
+    return { did: id.did, identityPath, restored: [] };
+  }
+
+  const client = await VaultClient.forIdentity(vaultIdentityFromDeviceKey(id.deviceKey()), opts.vaultUrl);
+  const projects = await client.listProjects();
+  const wrapKey = id.vaultWrapKey();
+  const baseDir = opts.outDir ?? pathResolve(process.cwd(), "restored");
+  const restrict = opts.projectIds && opts.projectIds.length > 0 ? new Set(opts.projectIds) : null;
+
+  const restored: RestoreResult[] = [];
+  for (const p of projects) {
+    const pid = String(p["id"] ?? p["_id"] ?? "");
+    if (!pid || (restrict !== null && !restrict.has(pid))) continue;
+    const sub = pathResolve(baseDir, String(p["name"] ?? pid));
+    restored.push(await restoreCeremony(client, pid, { outDir: sub, wrapKey, did: id.did }));
+  }
+  return { did: id.did, identityPath, restored };
 }
 
 /** Internals exposed for tests. */

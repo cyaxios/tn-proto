@@ -76,7 +76,7 @@ import { resolveSigningIdentity } from "../dist/account/signing_identity.js";
 import { VaultClient, VaultError, vaultIdentityFromDeviceKey } from "../dist/vault/client.js";
 import { cacheAccountAwk, loadCachedAwk } from "../dist/vault/awk_cache.js";
 import { WalletNamespace, readLinkState, readSyncQueue } from "../dist/wallet/index.js";
-import { restoreViaLoopback } from "../dist/wallet/restore.js";
+import { restoreViaLoopback, restoreViaMnemonic } from "../dist/wallet/restore.js";
 import { loadKeystore } from "../dist/runtime/keystore.js";
 
 import { bundleCmd } from "../dist/cli/bundle.js";
@@ -1307,7 +1307,7 @@ async function showCmd() {
 async function walletCmd() {
   const sub = argv[3];
   const rest = argv.slice(4);
-  const opts = { yaml: null, vaultUrl: null, projectName: null, out: null, timeoutMs: null };
+  const opts = { yaml: null, vaultUrl: null, projectName: null, out: null, timeoutMs: null, mnemonic: null, mnemonicFile: null, passphrase: null };
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
     if (a === "--yaml") opts.yaml = rest[++i];
@@ -1315,6 +1315,9 @@ async function walletCmd() {
     else if (a === "--vault") opts.vaultUrl = rest[++i];
     else if (a === "--out") opts.out = rest[++i];
     else if (a === "--timeout") opts.timeoutMs = Number(rest[++i]) * 1000;
+    else if (a === "--mnemonic") opts.mnemonic = rest[++i];
+    else if (a === "--mnemonic-file") opts.mnemonicFile = rest[++i];
+    else if (a === "--passphrase") opts.passphrase = rest[++i];
     else if (!a.startsWith("-") && opts.vaultUrl === null) opts.vaultUrl = a;
   }
 
@@ -1344,6 +1347,46 @@ async function walletCmd() {
   // passkey unwrap and POSTs the raw BEK back over loopback; we then fetch
   // + decrypt + write the keystore. Mirrors Python `tn wallet restore`.
   if (sub === "restore") {
+    // Legacy mnemonic restore: re-derive the identity from a BIP-39 phrase,
+    // write identity.json, and (with --vault) pull + unseal per-file backups.
+    // Mirrors Python `tn wallet restore --mnemonic`.
+    if (opts.mnemonic || opts.mnemonicFile) {
+      let mnemonic = opts.mnemonic;
+      if (opts.mnemonicFile) mnemonic = readFileSync(opts.mnemonicFile, "utf8").trim();
+      if (!mnemonic) die("wallet restore: empty --mnemonic / --mnemonic-file");
+      const mnOpts = { mnemonic };
+      const vUrl = opts.vaultUrl || process.env.TN_VAULT_URL;
+      if (vUrl) mnOpts.vaultUrl = vUrl;
+      if (opts.out) mnOpts.outDir = opts.out;
+      if (opts.passphrase) mnOpts.passphrase = opts.passphrase;
+      try {
+        const res = await restoreViaMnemonic(mnOpts);
+        const totalFiles = res.restored.reduce((n, r) => n + r.filesWritten.length, 0);
+        stdout.write(`\n[tn wallet restore] Identity restored: ${res.did}\n`);
+        if (!vUrl) {
+          stdout.write(`[tn wallet restore] No --vault; restored identity only to ${res.identityPath}\n`);
+        } else {
+          stdout.write(`[tn wallet restore] Restored ${res.restored.length} project(s), ${totalFiles} file(s)\n`);
+        }
+        stdout.write(
+          JSON.stringify({
+            ok: true,
+            verb: "wallet.restore",
+            did: res.did,
+            identity_path: res.identityPath,
+            projects: res.restored.map((r) => ({
+              project_id: r.projectId,
+              out_dir: r.outDir,
+              files_written: r.filesWritten,
+              notes: r.notes,
+            })),
+          }) + "\n",
+        );
+      } catch (e) {
+        die(`wallet restore: ${e?.message ?? e}`);
+      }
+      return;
+    }
     const vaultUrl = opts.vaultUrl || process.env.TN_VAULT_URL;
     if (!vaultUrl) die("wallet restore: --vault <url> (or TN_VAULT_URL) is required");
     if (!opts.out) die("wallet restore: --out <dir> is required");

@@ -187,6 +187,8 @@ export {
   restoreWithBek,
   restoreViaPassphrase,
   restoreViaLoopback,
+  restoreViaMnemonic,
+  restoreCeremony,
   decryptBlobWithBek,
   tryUnpackExportFrame,
   RestoreError,
