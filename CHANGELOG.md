@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0b1] - 2026-06-13 -- First beta: SDK parity, TS mnemonic restore, docs
+
+First beta on the 0.6.0 line. No wire-format changes; the focus is
+Python/TypeScript parity, the TypeScript recovery story, and documentation.
+
+* **`tn.init(name)` works the same in both languages.** TypeScript `tn.init`
+  now accepts a bare project name (`tn.init("billing")` opens
+  `.tn/billing/`), matching Python; a value ending in `.yaml` / `.yml` is
+  still treated as an explicit path. Previously the TS entry point only took
+  a yaml path.
+* **TypeScript recovery parity.** Ported the legacy mnemonic-restore path:
+  `Identity.fromMnemonic` (BIP-39 -> HKDF -> Ed25519 device key + vault wrap
+  key), per-file sealing, and `restoreViaMnemonic`, plus the matching CLI
+  verb. Verified byte-for-byte against Python over the live vault.
+* **Cross-language parity fixes.** TS `use()` default name, `vault.link`
+  idempotency, `close()` timeout, and `ensureGroup` field routing now match
+  the Python contract. Python `tn.log` returns the written record (its
+  `str()` is valid JSON) and gained a `tn.agents.policy()` accessor.
+* **Admin-state reducer ordering (both SDKs).** Fixed a latent bug where a
+  just-revoked recipient could vanish from `admin.state()` entirely. The
+  reducer sorted admin events by `(timestamp, sequence, row_hash)`, but
+  `tn.recipient.added` and `tn.recipient.revoked` ride separate event-type
+  chains (both `sequence: 1`) and can share a microsecond timestamp, so the
+  `row_hash` tiebreaker ordered them non-causally; when `revoked` sorted
+  first, the `added` was misread as a leaf-reuse attempt and dropped. The
+  sort is now `(timestamp, sequence)` with a stable sort that preserves the
+  on-disk (causal) order. Fixed identically in Python and TypeScript.
+* **Documentation.** Simplified the guides, removed all references to the
+  deprecated `jwe` cipher (btn is the only documented cipher), and stripped
+  source file paths and line numbers from the protocol reference so it stays
+  correct as the code moves.
+
 ## [0.6.0a3] - 2026-06-11 -- Documentation pass + PyPI polish
 
 Docs and packaging only; no runtime changes versus 0.6.0a2.
