@@ -1,7 +1,7 @@
 {
   "name": "@cyaxios/tn-proto",
   "version": "0.6.0-alpha.4",
-  "description": "TN protocol SDK for TypeScript \u00e2\u20ac\u201d attested logging with broadcast encryption. Wraps tn-wasm (Rust) with idiomatic types.",
+  "description": "TN protocol SDK for TypeScript â€” attested logging with broadcast encryption. Wraps tn-wasm (Rust) with idiomatic types.",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -54,6 +54,7 @@
   "dependencies": {
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
+    "@scure/bip39": "^1.6.0",
     "chokidar": "^4.0.3",
     "fflate": "^0.8.2",
     "tn-wasm": "file:../crypto/tn-wasm/pkg",
@@ -70,6 +71,9 @@
     "typescript-eslint": "^8.59.0"
   },
   "bundledDependencies": [
+    "tn-wasm"
+  ],
+  "bundleDependencies": [
     "tn-wasm"
   ]
 }

@@ -19,6 +19,17 @@ import { dirname, join } from "node:path";
 import { Buffer } from "node:buffer";
 
 import { DeviceKey } from "./core/signing.js";
+import { hkdf } from "@noble/hashes/hkdf";
+import { sha256 } from "@noble/hashes/sha2";
+import { validateMnemonic, mnemonicToSeedSync } from "@scure/bip39";
+import { wordlist as englishWordlist } from "@scure/bip39/wordlists/english";
+
+// HKDF parameters — byte-identical to python/tn/identity.py (_hkdf + HKDF_INFO_*):
+// HKDF-SHA256, salt "tn:v1", info "tn:<stage>:v1", 32-byte output.
+const HKDF_SALT = new TextEncoder().encode("tn:v1");
+const HKDF_INFO_ROOT = new TextEncoder().encode("tn:root:v1");
+const HKDF_INFO_DEVICE = new TextEncoder().encode("tn:device:v1");
+const HKDF_INFO_VAULT_WRAP = new TextEncoder().encode("tn:vault:wrap:v1");
 
 /** Resolve the identity directory. Mirrors Python `_default_identity_dir`. */
 export function defaultIdentityDir(): string {
@@ -61,6 +72,9 @@ export class Identity {
   private _path: string;
   /** Raw doc as loaded, so unknown fields survive a save round-trip. */
   private _raw: Record<string, unknown>;
+  /** In-memory 64-byte BIP-39 seed (mnemonic-derived identities only), kept
+   *  for vaultWrapKey(); null for random/loaded identities. */
+  private _bip39Seed: Uint8Array | null = null;
 
   private constructor(args: {
     did: string;
@@ -107,6 +121,58 @@ export class Identity {
   /** Build a VaultIdentity-compatible DeviceKey from the device seed. */
   deviceKey(): DeviceKey {
     return DeviceKey.fromSeed(this.seed);
+  }
+
+  /**
+   * Deterministically derive the device identity from a BIP-39 mnemonic.
+   * Byte-identical to Python `Identity.from_mnemonic`: BIP-39 seed -> HKDF
+   * `tn:root:v1` -> HKDF `tn:device:v1` -> the 32-byte Ed25519 device key.
+   * Same words + passphrase => same DID (the recovery path). Rejects a bad
+   * checksum, mirroring Python's `Mnemonic.check`.
+   */
+  static fromMnemonic(
+    words: string,
+    opts: { passphrase?: string; path?: string } = {},
+  ): Identity {
+    if (!validateMnemonic(words, englishWordlist)) {
+      throw new Error("invalid BIP-39 mnemonic (bad checksum)");
+    }
+    const bip39Seed = mnemonicToSeedSync(words, opts.passphrase ?? "");
+    const root = hkdf(sha256, bip39Seed, HKDF_SALT, HKDF_INFO_ROOT, 32);
+    const deviceSeed = hkdf(sha256, root, HKDF_SALT, HKDF_INFO_DEVICE, 32);
+    const dk = DeviceKey.fromSeed(deviceSeed);
+    const id = new Identity({
+      did: dk.did,
+      seed: deviceSeed,
+      linkedVault: null,
+      linkedAccountId: null,
+      path: opts.path ?? defaultIdentityPath(),
+      // Persist the 64-byte BIP-39 seed in seed_b64 (matches Python) so the
+      // vault-wrap key survives a save/load round-trip.
+      raw: { seed_b64: Buffer.from(bip39Seed).toString("base64url") },
+    });
+    id._bip39Seed = bip39Seed;
+    return id;
+  }
+
+  /**
+   * Re-derive the 32-byte AES-256 vault-wrap key from the BIP-39 seed.
+   * Byte-identical to Python `Identity.vault_wrap_key()`. Requires a
+   * mnemonic-derived identity (or one loaded with a 64-byte `seed_b64`).
+   */
+  vaultWrapKey(): Uint8Array {
+    let seed = this._bip39Seed;
+    if (seed === null) {
+      const sb = this._raw["seed_b64"];
+      if (typeof sb === "string" && sb) seed = _b64urlDecode(sb);
+    }
+    if (seed === null) {
+      throw new Error(
+        "vaultWrapKey requires the BIP-39 seed (re-derive via Identity.fromMnemonic)",
+      );
+    }
+    const root = hkdf(sha256, seed, HKDF_SALT, HKDF_INFO_ROOT, 32);
+    return hkdf(sha256, root, HKDF_SALT, HKDF_INFO_VAULT_WRAP, 32);
   }
 
   /** Read identity.json. Throws if missing or corrupt. */
