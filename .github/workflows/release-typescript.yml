@@ -85,7 +85,9 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: tn-proto-tarball
-          path: ts-sdk/tn-proto-*.tgz
+          # The package is scoped (@cyaxios/tn-proto), so `npm pack` emits
+          # cyaxios-tn-proto-<version>.tgz — match any .tgz, not the bare name.
+          path: ts-sdk/*.tgz
           if-no-files-found: error
           retention-days: 90
       - name: Publish to npm (gated)
