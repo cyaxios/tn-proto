@@ -1246,7 +1246,6 @@ export class NodeRuntime {
         if (!seen.has(f)) {
           routed.push(f);
           seen.add(f);
-          dirty = true;
         }
       }
       gspec.fields = routed;
