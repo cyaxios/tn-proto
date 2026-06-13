@@ -88,7 +88,7 @@ Unknown tokens fail at `tn.init()` time, not at first emit.
 
 ## Cross-language
 
-Every binding reads byte-identical envelopes for records produced by the shared Rust core, which is every `btn` group. A `btn` row written by Python can be decoded in the browser, and vice versa. Cross-language parity tests run on every PR. The exception is `jwe` groups: `jwe` runs Python-side only and is not portable to the TypeScript or browser bindings.
+Every binding reads byte-identical envelopes: the SDKs share one Rust core. A row written by Python can be decoded in the browser, and vice versa. Cross-language parity tests run on every PR.
 
 | Binding | Where | Use case |
 |---|---|---|

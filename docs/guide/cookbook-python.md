@@ -46,9 +46,7 @@ binding a project at a path you choose.
 
 TN reads the argument as a project NAME unless it ends in `.yaml` / `.yml`,
 in which case it is treated as an explicit yaml path (advanced). Prefer the
-name form. This name-or-path overload is a Python convenience; the
-TypeScript `tn.init` argument is ALWAYS a yaml path (name a project there
-with `tn.use`).
+name form. The same name-or-path rule applies in TypeScript.
 
 ```python
 import os, tempfile, tn
@@ -77,14 +75,14 @@ A fresh project is created with the `btn` cipher and two groups: the
 Write attested entries by calling the verbs directly. Keyword arguments
 become typed fields on the entry.
 
-Use the leveled verbs - `tn.info` / `tn.warning` / `tn.error` / `tn.debug` -
+Use the level verbs - `tn.info` / `tn.warning` / `tn.error` / `tn.debug` -
 for the standard severities; they respect the configured level threshold.
 `tn.log` is **not** a synonym for `tn.info`: reach for `tn.log(event,
 level="...")` only when you need a custom or severity-less level. `tn.log`
 always writes, regardless of the threshold.
 
 Only `tn.log` returns the written record (a dict whose `str()` is valid
-JSON); the leveled verbs `tn.info` / `.warning` / `.error` / `.debug`
+JSON); the level verbs `tn.info` / `.warning` / `.error` / `.debug`
 return `None`. To get the record back, call `tn.log(..., level=...)` or
 read it via `tn.read()`.
 
@@ -203,8 +201,7 @@ PYTHONPATH=python python -m tn.cli init demo --no-link --skip-confirm
 By default `tn init <name>` backs the project up to the vault and prints a
 link to it (default `https://vault.tn-proto.org`, falling back to your saved
 `linked_vault`, then `$TN_VAULT_URL`). `--no-link` opts out for an
-offline-only project with no vault contact, as shown above. `--cipher`
-chooses `btn` (default) or `jwe` (`jwe` is Python-only). `--keep-mnemonic` stores the recovery
+offline-only project with no vault contact, as shown above. `--keep-mnemonic` stores the recovery
 phrase in `identity.json` so `tn wallet export-mnemonic` can re-display it.
 The project is created at `./.tn/<name>/`.
 
@@ -501,7 +498,7 @@ PYTHONPATH=python python -m tn.cli group add partners \
 ```
 
 `--fields` is the comma-separated set of field names routed into the new
-group. `--cipher` defaults to the ceremony's cipher (`jwe` is Python-only).
+group. `--cipher` defaults to the ceremony's cipher.
 
 **Code equivalent:** `tn.ensure_group(cfg, "partners", fields=["deal_size", "partner_name"])`.
 

@@ -99,9 +99,8 @@ order.created 1 {'amount': 4999, 'currency': 'USD', 'order_id': 'o_123'}
 import * as tn from "@cyaxios/tn-proto";
 import type { Entry } from "@cyaxios/tn-proto";
 
-// tn.use creates or opens a project; tn.init makes it the default logger.
-const t = await tn.use("demo");
-await tn.init(t.yamlPath);
+// tn.init opens (or creates) the project by name and makes it the default.
+await tn.init("demo");
 
 tn.log("app.started", { component: "api" });
 tn.info("order.created", { order_id: "o_123", amount: 4999, currency: "USD" });
@@ -118,27 +117,18 @@ app.started 1 {"component":"api"}
 order.created 1 {"amount":4999,"currency":"USD","order_id":"o_123"}
 ```
 
-### Cross-language gotchas
+### Cross-language notes
 
-The two SDKs mirror each other, but three things differ between them. Watch for
-these:
+The two SDKs mirror each other. Two things to know:
 
-- **`tn.init` argument differs by language.** Python `tn.init("billing")` opens
-  a project by NAME; a value ending in `.yaml`/`.yml` or containing a path
-  separator is treated as an explicit yaml path (advanced). TypeScript
-  `tn.init(yamlPath)`'s argument is ALWAYS a yaml path; to open a NAMED project
-  in TS use `await tn.use("billing")`. Never write `tn.init("billing")` in
-  TypeScript - it would be read as a path.
-- **Module verbs vs a handle.** The module-level `tn.log` / `tn.info` /
-  `tn.read` only work after `tn.init()` sets the process default - they throw
-  before that. A handle from `tn.use(...)` (or `Tn.init(...)`) works
-  immediately: call `t.log(...)` / `t.read(...)` on it. This is why the
-  TypeScript quickstart above is two calls: `const t = await tn.use("demo");
-  await tn.init(t.yamlPath);` - `use` opens (or creates) the project, and
-  `init` makes it the module default so the bare `tn.*` calls below it target
-  that project.
+- **`tn.init` takes a project name or a `.yaml` path, the same way in both
+  languages.** `tn.init("billing")` opens (or creates) the project at
+  `.tn/billing/`. A value ending in `.yaml` / `.yml` is treated as an explicit
+  path to a yaml file. For the simplest, consistent usage, stick to the
+  top-level verbs (`tn.init`, `tn.log`, `tn.info`, `tn.read`, `tn.close`) and
+  one project per process.
 - **Return values differ.** Python `tn.log` returns the written record (a dict
-  whose `str()` is valid JSON); the leveled verbs (`tn.info` / `tn.warning` /
+  whose `str()` is valid JSON); the level verbs (`tn.info` / `tn.warning` /
   `tn.error` / `tn.debug`) return `None`. TypeScript: every write verb returns
   an `EmitReceipt` (`{ eventId, rowHash, sequence }`), not the full record -
   re-read with `tn.read()` for the stored fields.
@@ -236,7 +226,7 @@ rather than under `./.tn/<name>/`.
 ## Log levels
 
 `tn.log` records an entry with a custom, severity-less level and always writes,
-regardless of the level threshold; the leveled verbs respect the threshold. It
+regardless of the level threshold; the level verbs respect the threshold. It
 is NOT an alias for `tn.info`. The severity verbs set a level:
 
 ```python

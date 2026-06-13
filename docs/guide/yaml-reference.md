@@ -24,7 +24,7 @@ ceremony:
   linked_vault: ''               # vault URL; empty when offline
   linked_project_id: ''          # vault-side project id; filled by `tn vault link`
   sync_logs: false               # also sync ndjson logs to the vault
-  cipher: btn                    # btn | jwe  (ceremony-wide cipher)
+  cipher: btn                    # ceremony-wide cipher
   sign: true                     # Ed25519-sign every row_hash
   admin_log_location: ./admin/default.ndjson # where tn.* admin events land; read with tn.read(log="admin")
   log_level: debug               # debug | info | warning | error
@@ -139,7 +139,7 @@ any is missing.
 |------|------|----------|---------|-------------|
 | `ceremony.id` | string | yes | — | Ceremony identifier (e.g. `local_f2bb8224`, `cer_...`). Python raises if empty. |
 | `ceremony.mode` | string | no | `local` | `local` (offline) or `linked` (vault-bound). `linked` requires `linked_vault`. |
-| `ceremony.cipher` | string | no | `btn` | Ceremony-wide cipher. `btn` is the default and the only cipher implemented in the Rust/WASM core. `jwe` runs Python-side only and is NOT readable by the TypeScript/browser bindings, so a `jwe` ceremony is not cross-language. The Python and TS loaders fall back to `btn` when the key is absent; the Rust loader requires the key explicitly, and `tn init` always writes it. |
+| `ceremony.cipher` | string | no | `btn` | Ceremony-wide cipher. `btn` is the broadcast cipher used across all bindings. The Python and TS loaders fall back to `btn` when the key is absent; the Rust loader requires the key explicitly, and `tn init` always writes it. |
 | `ceremony.linked_vault` | string | no | `null` / `""` | Vault URL for linked mode. Required when `mode: linked`. |
 | `ceremony.linked_project_id` | string | no | `null` / `""` | Vault-side project id. Empty until `tn vault link` claims one. |
 | `ceremony.sync_logs` | bool | no | `false` | Whether wallet-linked ceremonies also sync ndjson logs. |
@@ -160,7 +160,7 @@ human label use `ceremony.project_name`; to bind to a vault project use
 
 | path | type | required | default | description |
 |------|------|----------|---------|-------------|
-| `keystore.path` | string | yes | — | Directory holding key material (`local.private`, `local.public`, `index_master.key`, `<group>.btn.state`, `<group>.btn.mykit`, JWE sidecars). Relative paths resolve against the yaml directory; absolute paths are used as-is. |
+| `keystore.path` | string | yes | — | Directory holding key material (`local.private`, `local.public`, `index_master.key`, `<group>.btn.state`, `<group>.btn.mykit`). Relative paths resolve against the yaml directory; absolute paths are used as-is. |
 
 ### device
 
@@ -209,12 +209,12 @@ Per-group fields:
 
 | path | type | required | default | description |
 |------|------|----------|---------|-------------|
-| `groups.<name>.cipher` | string | no | ceremony cipher | Cipher for this group: `btn` or `jwe`. Defaults to the ceremony cipher. `btn` is the only cipher implemented in the Rust/WASM core; a `jwe` group runs Python-side only and is not readable by the TypeScript/browser bindings. |
+| `groups.<name>.cipher` | string | no | ceremony cipher | Cipher for this group. Defaults to the ceremony cipher (`btn`). |
 | `groups.<name>.policy` | string | no | `private` | `private` or `public`. |
 | `groups.<name>.recipients` | list of mapping | no | `[]` | Declared recipients (used at ceremony setup; the runtime cipher loads its own state files). See [recipient entries](#recipient-entries). |
 | `groups.<name>.fields` | list of string | no | `[]` | Field names this group encrypts. Canonical multi-group routing source of truth: a field listed under N groups is encrypted into all N groups' payloads. Omitted-when-empty on serialize (round-trip stable). |
 | `groups.<name>.index_epoch` | integer (u64) | no | `0` | Incremented when keys rotate; feeds HKDF info for index-key derivation. |
-| `groups.<name>.pool_size` | integer | no | `4` | BGW pool size. Ignored by `btn`/`jwe` ciphers. |
+| `groups.<name>.pool_size` | integer | no | `4` | BGW pool size. Ignored by the `btn` cipher. |
 | `groups.<name>.auto_populated_by_policy` | bool | no | — | Marker on the `tn.agents` group recording that its fields are policy-driven. Informational. |
 
 #### recipient entries
@@ -225,7 +225,7 @@ Each entry in `recipients` is a mapping:
 |------|------|----------|---------|-------------|
 | `recipient_identity` | string | yes | — | Recipient device DID (`did:key:z…`). |
 | `key` | string | no | `null` | BGW reader-key file path (relative to keystore). |
-| `pub_b64` | string | no | `null` | JWE X25519 public key, standard base64. |
+| `pub_b64` | string | no | `null` | X25519 public key, standard base64 (used by non-`btn` ciphers). |
 
 ### Field routing validation
 

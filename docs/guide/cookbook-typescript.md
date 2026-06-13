@@ -11,12 +11,10 @@ Two ways to drive TN from TypeScript:
 
 `tn-js init` is the universal entry point. There is no separate enroll step.
 
-The module-level verbs (`tn.log` / `tn.info` / `tn.read` / ...) only work
-AFTER `tn.init()` has set a process default - they throw before that. A handle
-returned by `tn.use(...)` or `Tn.init(...)` works immediately; call the methods
-on the handle. Lowercase `tn.init(yamlPath?, opts?)` sets the process default
-AND returns a handle; capital `Tn.init(yamlPath?, opts?)` returns an isolated
-handle and does NOT touch the process default (use it for multiple ceremonies).
+For the simplest, consistent usage, use the top-level verbs (`tn.init`,
+`tn.log`, `tn.info`, `tn.read`, `tn.close`) on one project per process. (To
+work with several ceremonies at once, `Tn.init(...)` and `tn.use(...)` return
+independent handles you call the same methods on directly.)
 
 ### Glossary
 
@@ -29,9 +27,6 @@ handle and does NOT touch the process default (use it for multiple ceremonies).
 - **leaf** - a recipient's slot in a group's key tree; revoking flips a leaf out.
 - **epoch** - the `index_epoch` counter in the yaml, bumped on each rotation.
 - **BEK** - the per-project backup key that encrypts the body backup pushed to the vault.
-
-> Note: `cipher: jwe` is a Python-only group cipher; the TypeScript and browser
-> core cannot read `jwe` groups. Use `cipher: btn` for cross-impl groups.
 
 The code snippets in this guide were run with:
 
@@ -46,15 +41,13 @@ for any script that touches the runtime.
 
 ### Initialize in code
 
-`tn.use(name)` mints (or attaches to) a named ceremony on disk under
-`<projectDir>/.tn/<name>/`. `tn.init(yamlPath)` makes a ceremony the
-process-level default so the bare verbs (`tn.log`, `tn.info`, `tn.read`) act on
-it. Both return the underlying `Tn` instance.
-
-`tn.init`'s first argument is a YAML PATH, never a project name. To open a named
-project in code, use `await tn.use('name')`. (Contrast the CLI: `tn-js init
-<project-name>` does take a name.) Options go in the second argument, so a
-profile is passed as `await tn.init(undefined, { profile: "audit" })`.
+`tn.init(name)` opens (or creates) a project and makes it the process default,
+so the bare verbs (`tn.log`, `tn.info`, `tn.read`) act on it. The first argument
+is a project name (`tn.init("billing")` opens `.tn/billing/`) or a path to a
+yaml file (a value ending in `.yaml`). A profile goes in the second argument:
+`await tn.init("billing", { profile: "audit" })`. `tn.use(name)` opens an
+additional named ceremony and returns its handle without changing the process
+default. Both return the underlying `Tn` instance.
 
 ```typescript
 import * as tn from "@cyaxios/tn-proto";
@@ -395,17 +388,17 @@ The CLI response surfaces this as `vault_did`; the stored/typed entry field is
 import { Tn } from "@cyaxios/tn-proto";
 import type { Entry } from "@cyaxios/tn-proto";
 
-const t = await Tn.init("./tn.yaml");
-await t.vault.link("did:web:vault.tn-proto.org", "proj_demo123");
-await t.vault.unlink("did:web:vault.tn-proto.org", "proj_demo123");
+const tn = await Tn.init("./tn.yaml");
+await tn.vault.link("did:web:vault.tn-proto.org", "proj_demo123");
+await tn.vault.unlink("did:web:vault.tn-proto.org", "proj_demo123");
 
-for (const e of t.read()) {
+for (const e of tn.read()) {
   const entry = e as Entry;
   if (entry.event_type.startsWith("tn.vault.")) {
     console.log(entry.event_type, entry.fields.vault_identity, entry.fields.project_id);
   }
 }
-await t.close();
+await tn.close();
 ```
 
 ```text

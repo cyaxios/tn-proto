@@ -23,11 +23,11 @@ groups:
     cipher: btn
     fields: [order_id, amount, card_last4]
   audits:
-    cipher: jwe
+    cipher: btn
     fields: [reviewer_did, decision]
 ```
 
-A single `tn.info(...)` call can fan one event into N groups, each encrypted under that group's readers only. `btn` is the default broadcast cipher (sub-millisecond encrypt, up to 256 readers per group, selective revocation); `jwe` is the Python-only fallback and is not readable by the TypeScript/browser bindings.
+A single `tn.info(...)` call can fan one event into N groups, each encrypted under that group's readers only. `btn` is the broadcast cipher: sub-millisecond encrypt, up to 256 readers per group, selective revocation.
 
 ---
 
