@@ -20,6 +20,17 @@ PYTHONPATH=python python -m tn.cli <command> [args]
 When a CLI command has a code-level equivalent, the matching `tn.*` verb
 is shown alongside it.
 
+### Terms used below
+
+- **ceremony** - the on-disk project record under `.tn/<project>/`, identified by its `ceremony_id`.
+- **stream** - a named log under a project; opened with `tn.use("<stream>")` or the `stream=` keyword.
+- **group** - a named set of fields encrypted to a shared key; recipients are enrolled per group.
+- **reader kit / `.btn.mykit`** - the per-group key material a recipient needs to decrypt that group.
+- **bundle / `.tnpkg`** - the absorbable package wrapping one or more reader kits plus a manifest.
+- **DID** - a `did:key:z6Mk...` device identifier; the publisher's identity and each recipient's address.
+- **`leaf_index`** - the recipient's slot in a group, assigned by TN - you never set it.
+- **epoch** - the group's key generation, bumped by `tn.rotate` / `tn.admin.rotate`.
+
 ---
 
 ## Basics
@@ -32,6 +43,12 @@ existing project (`$TN_YAML`, `./tn.yaml`, `./.tn/default/tn.yaml`,
 `$TN_HOME/tn.yaml`) and mints a fresh default one if nothing is found. An
 explicit yaml path, `tn.init("./.tn/demo/tn.yaml")`, is an advanced form for
 binding a project at a path you choose.
+
+TN reads the argument as a project NAME unless it ends in `.yaml` / `.yml`,
+in which case it is treated as an explicit yaml path (advanced). Prefer the
+name form. This name-or-path overload is a Python convenience; the
+TypeScript `tn.init` argument is ALWAYS a yaml path (name a project there
+with `tn.use`).
 
 ```python
 import os, tempfile, tn
@@ -57,9 +74,19 @@ A fresh project is created with the `btn` cipher and two groups: the
 
 ### Logging: tn.log and tn.info with fields
 
-Emit attested entries by calling the verbs directly. `tn.log` is the
-neutral verb; `tn.info` / `tn.warning` / `tn.error` / `tn.debug` set the
-level. Keyword arguments become typed fields on the entry.
+Write attested entries by calling the verbs directly. Keyword arguments
+become typed fields on the entry.
+
+Use the leveled verbs - `tn.info` / `tn.warning` / `tn.error` / `tn.debug` -
+for the standard severities; they respect the configured level threshold.
+`tn.log` is **not** a synonym for `tn.info`: reach for `tn.log(event,
+level="...")` only when you need a custom or severity-less level. `tn.log`
+always writes, regardless of the threshold.
+
+Only `tn.log` returns the written record (a dict whose `str()` is valid
+JSON); the leveled verbs `tn.info` / `.warning` / `.error` / `.debug`
+return `None`. To get the record back, call `tn.log(..., level=...)` or
+read it via `tn.read()`.
 
 ```python
 import os, tempfile, tn
@@ -93,6 +120,10 @@ recorded. The last two are the `tn.read()` iteration printing each typed
 `tn.read()` yields `Entry` objects. User fields land in `entry.fields`;
 envelope and chain data surface as typed attributes (`event_type`,
 `level`, `sequence`, `did`, ...).
+
+`tn.read()` returns a lazy, single-pass iterator of `Entry` objects; wrap
+in `list(...)` to index or re-iterate. It defaults to `all_runs=True`
+(every run on disk); pass `all_runs=False` to scope to this process.
 
 ```python
 import os, tempfile, tn
@@ -173,7 +204,7 @@ By default `tn init <name>` backs the project up to the vault and prints a
 link to it (default `https://vault.tn-proto.org`, falling back to your saved
 `linked_vault`, then `$TN_VAULT_URL`). `--no-link` opts out for an
 offline-only project with no vault contact, as shown above. `--cipher`
-chooses `btn` (default) or `jwe`. `--keep-mnemonic` stores the recovery
+chooses `btn` (default) or `jwe` (`jwe` is Python-only). `--keep-mnemonic` stores the recovery
 phrase in `identity.json` so `tn wallet export-mnemonic` can re-display it.
 The project is created at `./.tn/<name>/`.
 
@@ -342,6 +373,13 @@ Without a reachable vault the redeem fails at the HTTP layer; run it
 against your linked vault with the single-use code copied from the
 dashboard.
 
+### Which packaging verb?
+
+`add_recipient` enrolls a NEW reader (mutates the ceremony, assigns a leaf);
+`bundle` / `export` hands an existing reader a read-only copy (no ceremony
+change); `invite` is `add_recipient` wrapped in a shareable zip; `compile`
+packages raw keystore kits.
+
 ### tn bundle
 
 Mint a `kit_bundle` `.tnpkg` for one recipient.
@@ -394,14 +432,17 @@ PYTHONPATH=python python -m tn.cli add_recipient default alice \
 
 A friendly label (`alice`) is auto-prefixed into a placeholder DID
 (`did:key:zLabel-alice`); pass a `did:key:z...` to target a known
-device.
+device. `did:key:zLabel-<name>` is a non-resolvable placeholder TN
+synthesizes from a friendly label so you can try flows offline. Never
+construct these yourself for a real recipient - pass an actual
+`did:key:z6Mk...` device DID to `recipient_did=`.
 
-**Code equivalent:** `tn.admin.add_recipient("default", recipient_did="did:key:zLabel-alice")`.
+**Code equivalent:** `tn.admin.add_recipient("default", recipient_did="did:key:z6Mk...")`.
 
 ```python
-res = tn.admin.add_recipient("default", recipient_did="did:key:zLabel-alice")
+res = tn.admin.add_recipient("default", recipient_did="did:key:z6MkwReader000000000000000000000000000000000")
 # res -> AddRecipientResult(leaf_index, kit_path, updated_cfg)
-tn.admin.recipients("default")   # -> [{'recipient_identity': 'did:key:zLabel-alice', ...}]
+tn.admin.recipients("default")   # -> [{'recipient_identity': 'did:key:z6MkwReader000000000000000000000000000000000', ...}]
 ```
 
 ### tn invite
@@ -460,13 +501,13 @@ PYTHONPATH=python python -m tn.cli group add partners \
 ```
 
 `--fields` is the comma-separated set of field names routed into the new
-group. `--cipher` defaults to the ceremony's cipher.
+group. `--cipher` defaults to the ceremony's cipher (`jwe` is Python-only).
 
 **Code equivalent:** `tn.ensure_group(cfg, "partners", fields=["deal_size", "partner_name"])`.
 
 ```python
 cfg = tn.current_config()
-tn.ensure_group(cfg, "partners", fields=["deal_size"])
+tn.ensure_group(cfg, "partners", fields=["deal_size", "partner_name"])
 list(tn.current_config().groups.keys())   # -> ['default', 'tn.agents', 'partners']
 ```
 
@@ -757,7 +798,9 @@ info: emitted event_type='order.created' level='info' fields=2
 ```
 
 `--field k=v` is repeatable. `--level` routes the four standard levels to
-`tn.<level>`; any other string flows through `tn.log` verbatim. A
+`tn.<level>` (e.g. `--level warning` -> `tn.warning(...)`); any other
+string flows through `tn.log` verbatim, so `--level audit` maps to
+`tn.log('order.created', level='audit', ...)`, NOT `tn.info`. A
 `--level warning` example:
 
 ```bash
@@ -771,7 +814,8 @@ info: emitted event_type='auth.failed' level='warning' fields=1
 ```
 
 **Code equivalent:** `tn.info("order.created", order_id="o_123", amount=4999)`
-(or `tn.warning(...)`, `tn.log(...)`).
+(or `tn.warning(...)` for another standard level, or
+`tn.log("order.created", level="audit", ...)` for a custom one).
 
 ### tn compile
 

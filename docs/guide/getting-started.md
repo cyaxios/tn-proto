@@ -6,14 +6,29 @@ it back and prove it was not altered. There are two implementations that
 produce identical records: a Python SDK with the `tn` command, and a
 TypeScript SDK with the `tn-js` command.
 
+## Glossary
+
+A few terms recur throughout, worth grounding before any code:
+
+- **ceremony** - the on-disk project record under `.tn/<project>/`: its
+  identity, keystore, and config. Called "project" in prose.
+- **stream** - a named log within a project; `tn.use("name")` opens one.
+- **group** - an encrypted domain with its own reader list; fields routed to
+  it are sealed to those readers only.
+- **reader kit / `.btn.mykit`** - one reader's decryption material for a group.
+- **bundle / `.tnpkg`** - a signed zip that wraps a kit plus manifest for
+  hand-off; what `tn.absorb` consumes.
+- **DID** - `did:key:z6Mk...`, a device's public identity.
+- **profile** - an encrypt/sign/chain preset stamped onto a ceremony.
+
 ## Install
 
 ```bash
-# Python SDK + the tn command (alphas publish to TestPyPI)
-pip install --pre -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ tn-proto==0.6.0a1
+# Python SDK + the tn command
+pip install tn-proto
 
-# TypeScript SDK + the tn-js command (in tree; npm publish pending)
-npm install <path-to-repo>/ts-sdk
+# TypeScript SDK + the tn-js command
+npm install @cyaxios/tn-proto
 ```
 
 ```python
@@ -21,20 +36,20 @@ import tn
 ```
 
 ```typescript
-import * as tn from "tn-proto";
+import * as tn from "@cyaxios/tn-proto";
 ```
 
-The Python import name is `tn`; the npm package and its import specifier are
-both `tn-proto`. The two commands above are the beta install paths and are not
-live on the public registries yet. Until the beta is published, install from a
-source checkout of this repository:
+The Python import name is `tn` (pip package `tn-proto`); the npm package and
+its import specifier are both `@cyaxios/tn-proto`.
+
+To work from a source checkout of this repository instead:
 
 ```bash
 git clone https://github.com/cyaxios/tn-proto.git
 cd tn-proto
 
 # Python. The SDK installs from source; its Rust crypto wheels (tn-core,
-# tn-btn) are prerelease and resolve from TestPyPI:
+# tn-btn) resolve from TestPyPI:
 pip install -e ./python --extra-index-url https://test.pypi.org/simple/
 
 # TypeScript. Build the Rust core to WebAssembly once (needs a Rust
@@ -70,6 +85,9 @@ for e in tn.read():
 tn.flush_and_close()
 ```
 
+By default `tn.read()` returns ALL runs on disk; pass `all_runs=False`
+(TypeScript `{ allRuns: false }`) to scope it to this process's run only.
+
 ```
 app.started 1 {'component': 'api'}
 order.created 1 {'amount': 4999, 'currency': 'USD', 'order_id': 'o_123'}
@@ -78,8 +96,8 @@ order.created 1 {'amount': 4999, 'currency': 'USD', 'order_id': 'o_123'}
 ### TypeScript
 
 ```typescript
-import * as tn from "tn-proto";
-import type { Entry } from "tn-proto";
+import * as tn from "@cyaxios/tn-proto";
+import type { Entry } from "@cyaxios/tn-proto";
 
 // tn.use creates or opens a project; tn.init makes it the default logger.
 const t = await tn.use("demo");
@@ -99,6 +117,31 @@ await tn.close();
 app.started 1 {"component":"api"}
 order.created 1 {"amount":4999,"currency":"USD","order_id":"o_123"}
 ```
+
+### Cross-language gotchas
+
+The two SDKs mirror each other, but three things differ between them. Watch for
+these:
+
+- **`tn.init` argument differs by language.** Python `tn.init("billing")` opens
+  a project by NAME; a value ending in `.yaml`/`.yml` or containing a path
+  separator is treated as an explicit yaml path (advanced). TypeScript
+  `tn.init(yamlPath)`'s argument is ALWAYS a yaml path; to open a NAMED project
+  in TS use `await tn.use("billing")`. Never write `tn.init("billing")` in
+  TypeScript - it would be read as a path.
+- **Module verbs vs a handle.** The module-level `tn.log` / `tn.info` /
+  `tn.read` only work after `tn.init()` sets the process default - they throw
+  before that. A handle from `tn.use(...)` (or `Tn.init(...)`) works
+  immediately: call `t.log(...)` / `t.read(...)` on it. This is why the
+  TypeScript quickstart above is two calls: `const t = await tn.use("demo");
+  await tn.init(t.yamlPath);` - `use` opens (or creates) the project, and
+  `init` makes it the module default so the bare `tn.*` calls below it target
+  that project.
+- **Return values differ.** Python `tn.log` returns the written record (a dict
+  whose `str()` is valid JSON); the leveled verbs (`tn.info` / `tn.warning` /
+  `tn.error` / `tn.debug`) return `None`. TypeScript: every write verb returns
+  an `EmitReceipt` (`{ eventId, rowHash, sequence }`), not the full record -
+  re-read with `tn.read()` for the stored fields.
 
 ## Using the command line
 
@@ -192,7 +235,9 @@ rather than under `./.tn/<name>/`.
 
 ## Log levels
 
-`tn.log` records an entry with no severity. The severity verbs set one:
+`tn.log` records an entry with a custom, severity-less level and always writes,
+regardless of the level threshold; the leveled verbs respect the threshold. It
+is NOT an alias for `tn.info`. The severity verbs set a level:
 
 ```python
 tn.debug("cache.miss", key="k")
@@ -373,11 +418,11 @@ log.
 
 ## See also
 
-- [profiles.md](profiles.md) — the logging profiles and how to set them.
-- [yaml-reference.md](yaml-reference.md) — every field of `tn.yaml`.
-- [cookbook-python.md](cookbook-python.md) — every Python verb and command.
-- [cookbook-typescript.md](cookbook-typescript.md) — the same for TypeScript.
-- [protocol.md](protocol.md) — the on-the-wire record format and the BTN cipher.
-- [groups-readers-rotation.md](groups-readers-rotation.md) — encrypted groups, granting/revoking readers, `.tnpkg` bundles, and key rotation.
-- [deploy-containers.md](deploy-containers.md) — the `TN_API_KEY` bootstrap for containers/CI, disk-wins-over-env, and identity paths.
-- [advanced-usage.md](advanced-usage.md) — reading modes (`all_runs`), scoped lifecycles (`tn.session`), templated log paths, and the cross-language guarantee.
+- [profiles.md](profiles.md) - the logging profiles and how to set them.
+- [yaml-reference.md](yaml-reference.md) - every field of `tn.yaml`.
+- [cookbook-python.md](cookbook-python.md) - every Python verb and command.
+- [cookbook-typescript.md](cookbook-typescript.md) - the same for TypeScript.
+- [protocol.md](protocol.md) - the on-the-wire record format and the BTN cipher.
+- [groups-readers-rotation.md](groups-readers-rotation.md) - encrypted groups, granting/revoking readers, `.tnpkg` bundles, and key rotation.
+- [deploy-containers.md](deploy-containers.md) - the `TN_API_KEY` bootstrap for containers/CI, disk-wins-over-env, and identity paths.
+- [advanced-usage.md](advanced-usage.md) - reading modes (`all_runs`), scoped lifecycles (`tn.session`), templated log paths, and the cross-language guarantee.

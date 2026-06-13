@@ -27,13 +27,15 @@ groups:
     fields: [reviewer_did, decision]
 ```
 
-A single `tn.info(...)` call can fan one event into N groups, each encrypted under that group's readers only. `btn` is the default broadcast cipher (sub-millisecond encrypt, thousands of readers, selective revocation); `jwe` is the pure-Python fallback.
+A single `tn.info(...)` call can fan one event into N groups, each encrypted under that group's readers only. `btn` is the default broadcast cipher (sub-millisecond encrypt, up to 256 readers per group, selective revocation); `jwe` is the Python-only fallback and is not readable by the TypeScript/browser bindings.
 
 ---
 
 ## Readers
 
 A reader of a group can decrypt that group's entries. As the publisher you grant read access by minting a **kit** for the reader's DID. The reader installs the kit (or a `.tnpkg` bundle that contains it) and from then on `tn.read` returns decoded entries on their machine.
+
+Two terms that are easy to conflate: a **kit** (`<group>.btn.mykit`) is one reader's raw decryption material; a **bundle** (`.tnpkg`) is a signed zip that wraps a kit plus a manifest, and it is what `tn.absorb` consumes.
 
 Python:
 
@@ -50,7 +52,7 @@ print(result.leaf_index, result.kit_path)
 # 1 alice.btn.mykit
 ```
 
-The call writes a `.btn.mykit` file and emits a `tn.recipient.added` admin event.
+`recipient_did` must be a real `did:key:z6Mk...` device DID (the reader's actual public key). The call writes a `.btn.mykit` file and records a `tn.recipient.added` admin event.
 
 CLI, one-shot mint plus a `.tnpkg` bundle ready to hand off:
 
@@ -61,7 +63,7 @@ $ tn add_recipient default alice
 [tn add_recipient]   recipient: did:key:zLabel-alice
 ```
 
-The CLI form synthesises a `did:key:zLabel-<name>` for friendly labels, mints the kit, and wraps it as a `.tnpkg` in one step.
+The CLI form synthesises a `did:key:zLabel-<name>` placeholder for friendly labels, mints the kit, and wraps it as a `.tnpkg` in one step. That `zLabel-` form is a CLI-only convenience for demos, not a valid key; a real grant binds to the reader's actual `did:key:z6Mk...`.
 
 Revoke a reader when you need to:
 
@@ -69,7 +71,7 @@ Revoke a reader when you need to:
 tn.admin.revoke_recipient(group="default", leaf_index=1)
 ```
 
-For `btn` groups the broadcast tree handles thousands of readers with sub-millisecond encrypt. Revocation is selective: the revoked kit stops decrypting, and every other reader keeps working without rekeying.
+For `btn` groups the broadcast tree handles up to 256 readers (height-8 tree; minting past that returns `TreeExhausted`) with sub-millisecond encrypt. Revocation is selective: the revoked kit stops decrypting, and every other reader keeps working without rekeying.
 
 ---
 
@@ -107,7 +109,9 @@ print(receipt.kind, receipt.accepted_count, receipt.deduped_count)
 
 ## Rotation
 
-`tn rotate` writes a new generation of group keys and emits one per-recipient `.tnpkg` artifact for the surviving readers. The CLI runs unattended:
+Revoke and rotate are different operations with different causality. Revoking a leaf stops that reader from decrypting anything written *after* the revoke; it takes effect on the next write and needs no rotation. Rotation additionally retires the whole key generation (a fresh master seed and a new epoch), so reach for it when the key material itself may be compromised, not merely to drop one reader. In both cases a revoked or pre-rotation reader keeps their old entries: neither operation reaches back and rewrites history.
+
+`tn rotate` writes a new generation of group keys and produces one per-recipient `.tnpkg` artifact for each surviving reader. The CLI runs unattended:
 
 ```bash
 $ tn rotate

@@ -3,10 +3,10 @@
 `tn.yaml` is a project's configuration file: identity, keystore, groups,
 recipients, log destinations, and field routing.
 
-You normally never write this file by hand. `tn init` generates it, and the
-CLI and SDK keep it in sync as you add groups, recipients, fields, or a vault
-link. You can hand-edit it whenever you want finer control; the tools read
-whatever is in the file.
+Run `tn init` to generate this file; the CLI and SDK keep it in sync for you as
+you add groups, recipients, fields, or a vault link. Hand-edit only specific
+fields when you need finer control and understand the merge rules below. Do not
+hand-author the whole file from scratch.
 
 This page documents every field. The file is standard YAML, with
 Compose-style environment-variable substitution applied to the text first
@@ -139,17 +139,22 @@ any is missing.
 |------|------|----------|---------|-------------|
 | `ceremony.id` | string | yes | — | Ceremony identifier (e.g. `local_f2bb8224`, `cer_...`). Python raises if empty. |
 | `ceremony.mode` | string | no | `local` | `local` (offline) or `linked` (vault-bound). `linked` requires `linked_vault`. |
-| `ceremony.cipher` | string | yes | `btn` | Ceremony-wide cipher: `btn` or `jwe`. |
+| `ceremony.cipher` | string | no | `btn` | Ceremony-wide cipher. `btn` is the default and the only cipher implemented in the Rust/WASM core. `jwe` runs Python-side only and is NOT readable by the TypeScript/browser bindings, so a `jwe` ceremony is not cross-language. The Python and TS loaders fall back to `btn` when the key is absent; the Rust loader requires the key explicitly, and `tn init` always writes it. |
 | `ceremony.linked_vault` | string | no | `null` / `""` | Vault URL for linked mode. Required when `mode: linked`. |
 | `ceremony.linked_project_id` | string | no | `null` / `""` | Vault-side project id. Empty until `tn vault link` claims one. |
 | `ceremony.sync_logs` | bool | no | `false` | Whether wallet-linked ceremonies also sync ndjson logs. |
 | `ceremony.sign` | bool | no | `true` | Sign each row's `row_hash` with the device Ed25519 key. `false` = chain-only (still `prev_hash`/`row_hash` tamper-evidence, no identity attestation). |
 | `ceremony.chain` | bool | no | `true` | Maintain a per-`event_type` hash chain (sequence + prev_hash + cross-process tip refresh). `false` emits `sequence: 1`, `prev_hash: ""`, and skips the per-emit advisory lock. |
-| `ceremony.admin_log_location` | string | no | written by `tn init` | Where `tn.*` admin envelopes are written. `tn init` records an explicit per-stream path (`./admin/<stream>.ndjson` in the project layout); a hand-written yaml that omits the field falls back to the legacy `./.tn/admin/admin.ndjson`. Literal `main_log` folds them into the main log. Otherwise a path template (see [path templates](#path-templates)). Read the admin log with `tn.read(log="admin")` rather than hardcoding any filename. |
+| `ceremony.admin_log_location` | string | no | written by `tn init` | Where `tn.*` admin envelopes are written, as distinct from the main user log (`logs.path`). `tn init` records an explicit per-stream path (`./admin/<stream>.ndjson` in the project layout); a hand-written yaml that omits the field falls back to the legacy `./.tn/admin/admin.ndjson`. Literal `main_log` folds them into the main log. Otherwise a path template (see [path templates](#path-templates)). The legacy key name `protocol_events_location` is accepted as an alias for this field (as in the ephemeral example above). Read the admin log with `tn.read(log="admin")` rather than hardcoding any filename. |
 | `ceremony.log_level` | string | no | `debug` | Active log-level threshold: `debug` / `info` / `warning` / `error`. |
 | `ceremony.project_name` | string | no | `null` | Operator-chosen human label. Sent as the `X-Project-Name` header on vault push so the vault shows a name instead of the random `ceremony_id`. |
 | `ceremony.version_name` | string | no | `null` | Per-instance nickname inside the project (e.g. `laptop-dev`, `ci`, `prod`). Falls back to `project_name` when unset. |
 | `ceremony.profile` | string | no | `transaction` | Evidence profile (`transaction` / `audit` / `secure_log` / `telemetry` / `stdout`). Sets `sign` / `chain` / sink at init. See [profiles.md](profiles.md). |
+
+What to write for a project name vs a project binding: to give the project a
+human label use `ceremony.project_name`; to bind to a vault project use
+`ceremony.linked_project_id` (set by `tn vault link`). Never write a top-level
+`project_id` key - no loader reads it.
 
 ### keystore
 
@@ -204,7 +209,7 @@ Per-group fields:
 
 | path | type | required | default | description |
 |------|------|----------|---------|-------------|
-| `groups.<name>.cipher` | string | no | ceremony cipher | Cipher for this group: `btn` or `jwe`. Defaults to the ceremony cipher. |
+| `groups.<name>.cipher` | string | no | ceremony cipher | Cipher for this group: `btn` or `jwe`. Defaults to the ceremony cipher. `btn` is the only cipher implemented in the Rust/WASM core; a `jwe` group runs Python-side only and is not readable by the TypeScript/browser bindings. |
 | `groups.<name>.policy` | string | no | `private` | `private` or `public`. |
 | `groups.<name>.recipients` | list of mapping | no | `[]` | Declared recipients (used at ceremony setup; the runtime cipher loads its own state files). See [recipient entries](#recipient-entries). |
 | `groups.<name>.fields` | list of string | no | `[]` | Field names this group encrypts. Canonical multi-group routing source of truth: a field listed under N groups is encrypted into all N groups' payloads. Omitted-when-empty on serialize (round-trip stable). |
@@ -226,6 +231,10 @@ Each entry in `recipients` is a mapping:
 
 A field routed to an unknown group is an error, and a field cannot appear in
 both `public_fields` and a group's `fields:` list.
+
+A field's effective policy is its group's `policy` if it is routed to a group,
+otherwise `default_policy`. A `public` policy puts the field as plaintext on the
+envelope root; a `private` policy encrypts it into the group.
 
 ### llm_classifier
 

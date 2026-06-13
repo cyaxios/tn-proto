@@ -6,7 +6,7 @@ Reading modes, scoped lifecycles, templated log paths, and the cross-language gu
 
 ## Reading: all runs, this run, admin
 
-`tn.read()` defaults to every entry on disk (`all_runs=True`). A fresh `python hello.py` reading an existing `.tn/` log will surface yesterday's events. To restrict to entries written by this process's runtime, pass `all_runs=False`:
+Gotcha first: `tn.read()` returns **all** runs by default (`all_runs=True`), not just the current one. A fresh `python hello.py` reading an existing `.tn/` log will surface yesterday's events as well as today's. To restrict to entries written by this process's runtime, pass `all_runs=False`:
 
 ```python
 import tn
@@ -88,7 +88,7 @@ Unknown tokens fail at `tn.init()` time, not at first emit.
 
 ## Cross-language
 
-Every binding reads byte-identical envelopes. A row written by Python can be decoded in the browser, and vice versa. Cross-language parity tests run on every PR.
+Every binding reads byte-identical envelopes for records produced by the shared Rust core, which is every `btn` group. A `btn` row written by Python can be decoded in the browser, and vice versa. Cross-language parity tests run on every PR. The exception is `jwe` groups: `jwe` runs Python-side only and is not portable to the TypeScript or browser bindings.
 
 | Binding | Where | Use case |
 |---|---|---|
@@ -96,4 +96,4 @@ Every binding reads byte-identical envelopes. A row written by Python can be dec
 | TypeScript / Node | `ts-sdk/` in the repo | Node services, build tools |
 | Browser (WASM) | `crypto/tn-wasm` build | in-browser verify and decrypt |
 
-The Python wheel and the WASM build share one Rust engine, so the wire format agrees down to the byte across all three.
+The Python wheel and the WASM build share one Rust engine, so for `btn` groups the wire format agrees down to the byte across all three.

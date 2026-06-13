@@ -7,9 +7,14 @@ byte-identical because both call this core.
 
 A TN log is append-only NDJSON: one JSON record per line. Each record is a
 small public header plus one encrypted block per group, with the header
-hash-chained to the record before it and signed by the writer's device key.
-Reading a record back means verifying that chain and signature, then
-decrypting the groups for which you hold a reader kit.
+hash-chained to the record before it and (by default) signed by the writer's
+device key. Reading a record back means verifying that chain and signature,
+then decrypting the groups for which you hold a reader kit.
+
+> This document describes the wire format for **readers and verifiers**. Do not
+> reimplement the writer: always produce records through an SDK, which runs the
+> one shared Rust core. Any byte-divergence in a hand-rolled writer breaks
+> cross-language verification.
 
 This reference has four parts:
 
@@ -33,15 +38,20 @@ JSON (ndjson). That line is the **record**, also called the **envelope**. This
 document describes the exact JSON shape the Rust core produces, field by field,
 citing the authoritative source.
 
+Signing is on by default (the `transaction` profile), which makes a signed
+record non-repudiable. It is not universal: the `telemetry` and `stdout`
+profiles do not sign, and an unsigned record carries an empty `signature` (see
+[signature](#signature)). A reader must not assume every record is signed.
+
 The record is assembled in `crypto/tn-core/src/runtime/emit.rs` (`emit_inner`
 and its stages `classify_fields`, `encrypt_groups`, `build_and_write`),
 serialized to a string by `crypto/tn-core/src/envelope.rs::build_envelope`, and
 appended to the log by `crypto/tn-core/src/log_file.rs::LogFileWriter::append_line`.
 
-This doc covers the **record shape only**. The math behind `row_hash`, the
+This section covers the **record shape only**. The math behind `row_hash`, the
 Ed25519 signature, the per-field equality-index tokens, and the group ciphertext
-is described in the sibling integrity/indexing doc; here we only document what
-those values look like in the record.
+is described in [§2, the integrity layer](#2-integrity-layer-canonical-bytes-hash-chain-signing-index-tokens);
+here we only document what those values look like in the record.
 
 ### Example record
 
@@ -248,10 +258,10 @@ top-level key, named after the group (e.g. `default`), whose value is a
   digest (`indexing.rs:104-112`). One entry is produced per field routed to the
   group (`emit.rs:187-193`).
 - The derivation of each token (the HMAC keying and canonicalization) is
-  documented in the sibling indexing doc; here we record only that the block is
-  the `field_hashes` map inside each group payload. There is **no** separate
-  top-level index-tokens block in the record — the tokens live inside each
-  group's payload.
+  documented in [§2, equality-index HMAC tokens](#equality-index-hmac-tokens);
+  here we record only that the block is the `field_hashes` map inside each group
+  payload. There is **no** separate top-level index-tokens block in the
+  record — the tokens live inside each group's payload.
 
 Both `ciphertext` and the sorted `field_hashes` also feed `row_hash`: per group,
 the preimage includes `group:<name>\x00 ct:<ciphertext-bytes>\x00` then each
@@ -299,13 +309,13 @@ field).
 
 ## 2. Integrity layer (canonical bytes, hash chain, signing, index tokens)
 
-This document describes the math behind a TN record: how a value is turned into
+This section describes the math behind a TN record: how a value is turned into
 deterministic bytes, how those bytes feed the `row_hash`, how records link into a
 per-`event_type` hash chain, how the `row_hash` is signed with Ed25519, and how
-the per-field equality-index HMAC tokens are derived. The sibling
-[`_protocol-record.md`](_protocol-record.md) describes the on-the-wire envelope
-shape; here we cover the cryptographic construction, citing the authoritative
-Rust core (`crypto/tn-core`).
+the per-field equality-index HMAC tokens are derived.
+[§1, the record](#1-the-record-on-the-wire-envelope) describes the on-the-wire
+envelope shape; here we cover the cryptographic construction, citing the
+authoritative Rust core (`crypto/tn-core`).
 
 The values below were produced by:
 
@@ -561,7 +571,7 @@ tolerated: a final line without a `\n` still scans as one line
 (`chain.rs:262-268`). This framing makes the log append-only and line-addressable:
 a reader can stream it line by line, and the reverse-scan tip helpers can walk it
 backward from the end. The exact per-field on-the-wire shape of one line is
-documented in [`_protocol-record.md`](_protocol-record.md).
+documented in [§1, the record](#1-the-record-on-the-wire-envelope).
 
 
 ---

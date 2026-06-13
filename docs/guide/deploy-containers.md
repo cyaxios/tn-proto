@@ -6,6 +6,8 @@ The way TN gets an identity onto a fresh container is the **API key bootstrap**.
 
 The mental model: `TN_API_KEY` is a single string you paste into your platform's secret store. When your container boots, it trades that string with the vault for its keystore, then runs normally. No keys in the image, no identity files in the repo, no startup script.
 
+`TN_API_KEY` is a bearer credential that authorizes fetching this project's keystore from the vault. Treat it as a secret: anyone holding it can pull the keystore. It is not itself your device private key, and only `TN_API_KEY` (never the keystore) belongs in the image env.
+
 ---
 
 ## 1. Mint an API key
@@ -49,6 +51,8 @@ If a project keystore already exists at `<keystore>/local.private`, TN uses it a
 
 - On your laptop, after `tn init`, your local keystore takes precedence even if `TN_API_KEY` is set in your shell.
 - In a container with persistent storage (a Cloudflare Containers R2-backed volume, a mounted EBS, etc.), the keystore survives across cold starts; only the very first boot does the bootstrap round trip.
+
+Persistent storage here means a **runtime volume**, never a build-time `COPY`. Do not add the keystore or `local.private` to your image or build context; only `TN_API_KEY` belongs in the image env, supplied via the secret store. Anyone who pulls an image with a baked-in keystore has your keys.
 
 To force a re-bootstrap, delete the keystore directory and restart.
 

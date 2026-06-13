@@ -14,15 +14,15 @@ profile dials everything else between "maximum evidence" and "fast logger".
 | `audit` | yes | yes | yes | buffered | rotating file | Business events where reconstruction matters but a small flush window is acceptable. Same evidence as `transaction`, weaker durability. |
 | `secure_log` | yes | yes | no | buffered | rotating file | Sensitive application logs where signing matters but sequence does not. Each entry stands alone; cheaper to scale. |
 | `telemetry` | yes | no | no | async | rotating file + stdout | High-volume traces, metrics, and debug output. Signing and chaining are dropped for near-zero overhead. |
-| `stdout` | yes | no | no | async | stdout | Local dev and notebooks. Behaves like a familiar print-style logger, no on-disk file. |
+| `stdout` | yes | no | no | async | stdout | Local dev and notebooks. Writes the same encrypted NDJSON envelope to the console instead of a file. |
 
 ## What the columns mean
 
 - **Encrypts**: per-group field encryption. On for every profile. This is the protocol floor and cannot be turned off.
-- **Signs**: each entry carries an Ed25519 signature over its row hash, so a reader can prove who wrote it. Dropping signing removes non-repudiation but costs nothing to verify because there is nothing to verify.
+- **Signs**: each entry carries an Ed25519 signature over its row hash, so a reader can prove who wrote it. An unsigned entry carries an empty `signature`, and a reader skips the Ed25519 check on it; the trade-off is the loss of authorship proof.
 - **Chains**: each entry's `prev_hash` links it to the previous entry of the same event type, making gaps and reordering detectable. Without chaining, entries are independent and sequence is informational only.
-- **Flush**: `fsync` syncs every write to disk before returning (survives a crash). `buffered` leaves the write in the OS buffer. `async` hands the write to a background path for the lowest latency.
-- **Sink**: `rotating file` writes to `logs/tn.ndjson` and rolls it over by size. `stdout` prints instead of writing a file. `telemetry` does both, so `read()` still works while you also see output.
+- **Flush**: the durability of a write is a property of the handler, not a top-level profile field; there is no `flush:` yaml key. `fsync` syncs every write to disk before returning (survives a crash). `buffered` leaves the write in the OS buffer. `async` hands the write to a background path for the lowest latency.
+- **Sink**: `rotating file` writes to `logs/tn.ndjson` and rolls it over by size. `stdout` writes the encrypted envelope to the console instead of a file; you still use `tn.read()` to see decoded fields. `telemetry` does both, so `tn.read()` still works while you also see console output.
 
 ## Choosing a profile
 
@@ -32,7 +32,7 @@ Pick by the question you need the log to answer later:
 - Same proof, can tolerate a small loss window on crash: `audit`.
 - Need to prove authorship but not order: `secure_log`.
 - Just want fast, encrypted, high-volume logging: `telemetry`.
-- Just want a logger that prints during development: `stdout`.
+- Just want the encrypted envelope written to the console during development: `stdout`.
 
 ## Setting a profile in code
 
@@ -54,7 +54,7 @@ log = tn.use("traces", profile="telemetry")
 TypeScript:
 
 ```typescript
-import * as tn from "tn-proto";
+import * as tn from "@cyaxios/tn-proto";
 
 await tn.use("payments", { profile: "transaction" });
 await tn.use("traces", { profile: "telemetry" });

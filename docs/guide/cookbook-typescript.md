@@ -5,11 +5,33 @@ Recipes for the TN protocol TypeScript SDK and its `tn-js` CLI.
 Two ways to drive TN from TypeScript:
 
 - The CLI: `node bin/tn-js.mjs <command> ...` (run from `ts-sdk/`).
-- The code API: `import * as tn from "tn-proto"` — the module-level
+- The code API: `import * as tn from "@cyaxios/tn-proto"` - the module-level
   surface (`tn.init` / `tn.log` / `tn.info` / `tn.read` / ...) mirrors Python.
   For multiple ceremonies in one process, use the `Tn` class directly.
 
 `tn-js init` is the universal entry point. There is no separate enroll step.
+
+The module-level verbs (`tn.log` / `tn.info` / `tn.read` / ...) only work
+AFTER `tn.init()` has set a process default - they throw before that. A handle
+returned by `tn.use(...)` or `Tn.init(...)` works immediately; call the methods
+on the handle. Lowercase `tn.init(yamlPath?, opts?)` sets the process default
+AND returns a handle; capital `Tn.init(yamlPath?, opts?)` returns an isolated
+handle and does NOT touch the process default (use it for multiple ceremonies).
+
+### Glossary
+
+- **ceremony** - one TN stream's keystore + admin state + log, minted on disk under `.tn/<name>/`.
+- **stream** - the append-only, signed, hash-chained log of attested entries inside a ceremony.
+- **group** - a named field-encryption scope within a ceremony; recipients are added per group.
+- **reader kit / `.btn.mykit`** - the per-recipient key material that lets one DID decrypt a group.
+- **bundle / `.tnpkg`** - a zip (manifest.json + kits) that the Chrome extension, Python SDK, and `tn-js` can all import.
+- **DID** - decentralized identifier; here a `did:key:...` (device/recipient) or `did:web:...` (vault) public-key identity.
+- **leaf** - a recipient's slot in a group's key tree; revoking flips a leaf out.
+- **epoch** - the `index_epoch` counter in the yaml, bumped on each rotation.
+- **BEK** - the per-project backup key that encrypts the body backup pushed to the vault.
+
+> Note: `cipher: jwe` is a Python-only group cipher; the TypeScript and browser
+> core cannot read `jwe` groups. Use `cipher: btn` for cross-impl groups.
 
 The code snippets in this guide were run with:
 
@@ -29,12 +51,17 @@ for any script that touches the runtime.
 process-level default so the bare verbs (`tn.log`, `tn.info`, `tn.read`) act on
 it. Both return the underlying `Tn` instance.
 
+`tn.init`'s first argument is a YAML PATH, never a project name. To open a named
+project in code, use `await tn.use('name')`. (Contrast the CLI: `tn-js init
+<project-name>` does take a name.) Options go in the second argument, so a
+profile is passed as `await tn.init(undefined, { profile: "audit" })`.
+
 ```typescript
-import * as tn from "tn-proto";
+import * as tn from "@cyaxios/tn-proto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Entry } from "tn-proto";
+import type { Entry } from "@cyaxios/tn-proto";
 
 const dir = mkdtempSync(join(tmpdir(), "tncook-"));
 
@@ -79,7 +106,9 @@ read   -> 1 info user.login {"user":"alice"}
 
 Notes on shapes:
 
-- The receipt returned by `tn.log` / `tn.info` has `{ eventId, rowHash, sequence }`.
+- The receipt returned by `tn.log` / `tn.info` is an `EmitReceipt` - exactly
+  `{ eventId, rowHash, sequence }`, not the written record; re-read with
+  `tn.read()` to see stored fields.
 - A typed `Entry` from `tn.read()` carries `event_type`, `timestamp`, `level`,
   `message`, `fields`, `device_identity`, `event_id`, `sequence`, `run_id`,
   `prev_hash`, `row_hash`, `signature`, `hidden_groups`.
@@ -105,7 +134,11 @@ Severity verbs available on the module surface: `tn.debug`, `tn.info`,
 ### Read back in code (typed)
 
 `tn.read()` yields a typed `Entry` by default. Pass `{ raw: true }` only when you
-want the raw envelope dict instead.
+want the raw envelope dict instead. `tn.read()` is typed
+`Iterable<Entry | Record<string, unknown>>` because `{ raw: true }` changes the
+element shape; in the default typed mode, cast with `as Entry` to access typed
+fields. `tn.read()` also scans all runs by default; pass `{ allRuns: false }` to
+scope to this process's run only.
 
 ```typescript
 for (const e of tn.read()) {
@@ -130,6 +163,14 @@ signature, row-hash, and chain integrity:
 ```
 
 ## CLI commands
+
+Some `tn-js` verbs print a machine-parseable JSON receipt (`init`, `info`,
+`wallet link` / `unlink`, `vault link` / `unlink`, `compile`, `admin
+add-recipient` / `revoke-recipient` / `revoked-count`, `canonical`, `seal`,
+`verify`); others print human text (`wallet status`, `wallet sync`, `show
+profiles`, `streams`, `validate`, `bundle`, `add_recipient`, `absorb`, `group
+add`, `inbox *`). For programmatic use, prefer the code API over parsing CLI
+output.
 
 The ceremony used in the examples below was minted once with:
 
@@ -316,7 +357,7 @@ tn-js vault link <vault-did> <project-id> [--yaml <path>]
 ```
 
 Appends a `tn.vault.linked` attested event to the log (this is a log entry, not a
-mode flip — that is `wallet link`):
+mode flip - that is `wallet link`):
 
 ```bash
 node bin/tn-js.mjs vault link did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH proj_demo --yaml .tn/demo/tn.yaml
@@ -347,26 +388,29 @@ Vault link state lives in the admin log, and `tn.read()` includes admin
 events by default, so no extra option is needed. Do not hardcode an
 admin-log filename; the path is recorded in the yaml.
 
+The CLI response surfaces this as `vault_did`; the stored/typed entry field is
+`vault_identity` (alongside `project_id`). Same value, two names.
+
 ```typescript
-import { Tn } from "tn-proto";
-import type { Entry } from "tn-proto";
+import { Tn } from "@cyaxios/tn-proto";
+import type { Entry } from "@cyaxios/tn-proto";
 
-const tn = await Tn.init("./tn.yaml");
-await tn.vault.link("did:web:vault.example.org", "proj_demo123");
-await tn.vault.unlink("did:web:vault.example.org", "proj_demo123");
+const t = await Tn.init("./tn.yaml");
+await t.vault.link("did:web:vault.tn-proto.org", "proj_demo123");
+await t.vault.unlink("did:web:vault.tn-proto.org", "proj_demo123");
 
-for (const e of tn.read()) {
+for (const e of t.read()) {
   const entry = e as Entry;
   if (entry.event_type.startsWith("tn.vault.")) {
     console.log(entry.event_type, entry.fields.vault_identity, entry.fields.project_id);
   }
 }
-await tn.close();
+await t.close();
 ```
 
 ```text
-tn.vault.linked did:web:vault.example.org proj_demo123
-tn.vault.unlinked did:web:vault.example.org proj_demo123
+tn.vault.linked did:web:vault.tn-proto.org proj_demo123
+tn.vault.unlinked did:web:vault.tn-proto.org proj_demo123
 ```
 
 ### show env
@@ -391,6 +435,9 @@ node bin/tn-js.mjs show env --yaml .tn/demo/tn.yaml
   "public_fields_count": 0
 }
 ```
+
+The `me` key in this JSON is the device identity (the canonical config key is
+`device`); same value, the `show env` receipt just labels it `me`.
 
 Code-API equivalent: `t.config()`.
 
@@ -539,7 +586,10 @@ node bin/tn-js.mjs watch --yaml .tn/demo/tn.yaml --since start --once
 {"event_type":"order.placed","timestamp":"2026-06-08T15:26:50.619Z","level":"info","message":null,"fields":{"qty":"2","sku":"A-100"},"device_identity":"did:key:z6MksPsDhwFCy8Cho6xM83iE2b21oqutKef2KmBdWDAbnSQS","event_id":"019ea7d7-fcfb-7793-bdad-b3793c28b7e4","sequence":1,"run_id":"62963acd5e4e475a951ea53b6b8535a3","prev_hash":"sha256:0000...0000","row_hash":"sha256:7c1059...","signature":"TdsSe...","hidden_groups":[]}
 ```
 
-Code-API equivalent (the `--once` snapshot is a one-shot read, not a live tail): `for (const e of tn.read({ allRuns: true })) { ... }`. (`tn.watch({ since: "start" })` is the live-tail form and never returns.)
+> `tn.watch(...)` is an infinite async iterator (it never returns); use
+> `tn.read({ allRuns: true })` for a finite snapshot.
+
+Code-API equivalent (the `--once` snapshot is a one-shot read, not a live tail): `for (const e of tn.read({ allRuns: true })) { ... }`.
 
 ### streams
 
@@ -594,7 +644,7 @@ node bin/tn-js.mjs compile --yaml .tn/demo/tn.yaml --out compiled.tnpkg
 {"ok":true,"out":"...\\compiled.tnpkg","kits":["default.btn.mykit","default.btn.mykit.revoked.1780932479","default.btn.mykit.revoked.1780932490","tn.agents.btn.mykit"],"kind":"readers-only","label":null}
 ```
 
-Code-API equivalent: `compileKitBundleToFile(...)` (exported from `tn-proto`).
+Code-API equivalent: `compileKitBundleToFile(...)` (exported from `@cyaxios/tn-proto`).
 
 ### admin add-recipient
 
