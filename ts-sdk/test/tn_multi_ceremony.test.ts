@@ -196,3 +196,38 @@ test("Tn.use() with no name defaults to the 'default' ceremony (parity with Pyth
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Tn.init('name') opens the named project .tn/<name>/ (parity with Python tn.init('payments'))", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ts-init-name-"));
+  try {
+    // A bare name must open/create .tn/billing/, NOT be treated as a file path.
+    const t = await Tn.init("billing", { projectDir: dir });
+    try {
+      assert.ok(
+        existsSync(join(dir, ".tn", "billing", "tn.yaml")),
+        "init('billing') must create .tn/billing/tn.yaml, not treat 'billing' as a literal path",
+      );
+      const yp = ((t.config() as { yamlPath?: string }).yamlPath ?? "").replace(/\\/g, "/");
+      assert.match(yp, /\.tn\/billing\/tn\.yaml$/);
+    } finally {
+      await t.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Tn.init('./x.yaml') is still treated as an explicit yaml path", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ts-init-path-"));
+  try {
+    const p = join(dir, "x.yaml");
+    const t = await Tn.init(p);
+    try {
+      assert.ok(existsSync(p), "an explicit .yaml path should be created/used at that path");
+    } finally {
+      await t.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

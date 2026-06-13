@@ -176,6 +176,13 @@ function _isValidCeremonyName(name: string): boolean {
   return _CEREMONY_NAME_RE.test(name);
 }
 
+/** True iff `arg` is an explicit yaml path rather than a project name.
+ *  Mirrors Python `_looks_like_yaml_path`: conservative - only a `.yaml` /
+ *  `.yml` suffix counts, so a malformed name still surfaces as a name error. */
+function _looksLikeYamlPath(arg: string): boolean {
+  return arg.endsWith(".yaml") || arg.endsWith(".yml");
+}
+
 // Process-local handle registry — Bug 8 fix. Keyed by
 // (resolved projectDir + "::" + name). Mirrors Python's tn._registry
 // so two ``Tn.use("payments")`` calls return the same instance.
@@ -378,8 +385,32 @@ export class Tn {
    * Use `Tn.use(stream, { project })` for per-stream handles. Fresh
    * project roots keep stream overlays at `.tn/<project>/streams/<stream>.yaml`.
    */
-  static async init(yamlPath?: string, opts?: TnInitOptions): Promise<Tn> {
+  static async init(
+    yamlPath?: string,
+    opts?: TnInitOptions & { projectDir?: string; profile?: string },
+  ): Promise<Tn> {
     let resolvedPath = yamlPath;
+
+    // Parity with Python `tn.init`: the first argument is a PROJECT NAME unless
+    // it ends in `.yaml` / `.yml` (then it's an explicit yaml path). A name
+    // opens/creates the local project at `.tn/<name>/tn.yaml`. Without this, a
+    // bare name like "billing" was wrongly used as a literal file path.
+    if (resolvedPath !== undefined && !_looksLikeYamlPath(resolvedPath)) {
+      const name = resolvedPath;
+      if (!_isValidCeremonyName(name)) {
+        throw new Error(
+          `Tn.init: invalid project name ${JSON.stringify(name)}; must match ` +
+            `[a-zA-Z0-9_][a-zA-Z0-9_-]* and not be 'tn'. Pass a path ending in ` +
+            `.yaml to use an explicit yaml file instead.`,
+        );
+      }
+      const { ensureProjectLayoutOnDisk } = await import("./multi.js");
+      const layoutOpts: { projectDir?: string; profile?: string } = {
+        projectDir: opts?.projectDir ?? process.cwd(),
+      };
+      if (opts?.profile !== undefined) layoutOpts.profile = opts.profile;
+      resolvedPath = ensureProjectLayoutOnDisk(name, layoutOpts);
+    }
 
     if (resolvedPath === undefined) {
       // 1. TN_YAML env var.

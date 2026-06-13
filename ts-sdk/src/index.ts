@@ -297,7 +297,10 @@ function _requireDefault(verb: string): _Tn {
  * @returns the underlying `Tn` instance so callers who want it can keep
  *          it; not required for the bare-export usage.
  */
-export async function init(yamlPath?: string, opts?: TnInitOptions): Promise<_Tn> {
+export async function init(
+  yamlPath?: string,
+  opts?: TnInitOptions & { projectDir?: string; profile?: string },
+): Promise<_Tn> {
   if (_defaultTn !== null) {
     try {
       await _defaultTn.close();
