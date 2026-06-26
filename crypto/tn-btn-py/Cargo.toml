@@ -1,0 +1,27 @@
+[package]
+name = "tn-btn-py"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+description = "Python bindings for tn-btn broadcast-transaction encryption."
+license.workspace = true
+
+[lib]
+# Unique lib name (NOT `tn_btn`): the core crate's lib is already `tn_btn`,
+# and with both compiled as rlibs in one graph a shared name collides
+# (rustdoc's doctest harness sees two `tn_btn` rlibs -> E0464). The Python
+# module name is owned by the umbrella cdylib (`tn._native`), not this lib.
+name = "tn_btn_py"
+# rlib: this is now a library consumed by the umbrella `tn-proto-native`
+# crate (one combined extension). The extension-module feature is supplied
+# by the final cdylib and unifies across the graph.
+crate-type = ["rlib"]
+
+[dependencies]
+tn-btn = { path = "../tn-btn" }
+pyo3 = { version = "0.24", features = ["abi3-py39"] }
+ed25519-dalek = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }

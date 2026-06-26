@@ -1,0 +1,100 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+dist/
+dist_win/
+dist-wheelhouse/
+build/
+.venv-test/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.venv/
+.venv_win/
+venv/
+env/
+
+# Rust
+target/
+Cargo.lock.bak
+
+# Node
+node_modules/
+*.tsbuildinfo
+ts-sdk/dist/
+ts-sdk/coverage/
+
+# Worktrees
+.worktrees/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# TN runtime artifacts (per-stem ceremony state)
+.tn/
+.tn_admin/
+.tn_logs/
+*.ndjson.bak
+vault_blobs/
+# Resolved-extends snapshot the dispatch wrapper writes for the
+# Rust runtime (which doesn't know about extends:); regenerated
+# every init, never hand-edited.
+**/.resolved.yaml
+
+# Generated docs / reports
+**/run_report.txt
+
+# Local env / secrets — should never be committed
+.env
+.env.local
+*.pem
+*.key
+identity.json
+
+#superpowers
+docs/superpowers/*/
+
+# Internal-only notes (critic logs, parity audits, design drafts) —
+# kept on disk for cross-agent collaboration but never published.
+.tn-internal/
+
+# Scratch / dev-only dirs — kept on disk locally, never published.
+_overnight/
+_scratch_bench/
+regression/
+yesterday/
+"tn-proto 0.6.0a1"/
+tn-proto 0.6.0a1/
+_q/
+_docscratch/
+scratch_*/
+# Python dev tooling (perf harnesses, one-off scripts, benchmarks) —
+# not part of the shipped `tn` package.
+python/tools/
+python/scripts/
+python/bench/
+
+# Local IDE / agent config.
+.claude/
+
+# Locally-built maturin extension — the wheel rebuilds it; never tracked.
+python/tn/_native*.so
+python/tn/_native*.pyd
+
+# Local release rehearsal work dir (tools/release.sh)
+.release-rehearsal/
+
+# Local native debug symbols
+python/tn/_native*.pdb

@@ -1,0 +1,233 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:   # manual trigger for the cross-OS sweep (see python-tests-cross)
+
+permissions:
+  contents: read
+
+# crates.io over HTTP/2 intermittently fails cargo's `cargo metadata` /
+# fetch with "[16] Error in the HTTP2 framing layer" when many jobs hit the
+# registry at once. Force HTTP/1.1 (no multiplexing) and retry to make the
+# Rust build deterministic across the matrix.
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
+# One gate, honestly green: the full Python + TypeScript + Rust suites pass,
+# with nothing suppressed. No --deselect pile, no `|| true`. Integration tests
+# (need a live vault server / a Rust CLI binary) live under tests/integration/
+# and are excluded by directory — run them manually with a vault available.
+jobs:
+  version-check:
+    name: version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      # Fails if VERSION, pyproject.toml, package.json, and version.ts disagree.
+      # The single-source guard that makes 0.6.1-vs-0.6.2 drift impossible.
+      - run: python tools/bump.py --check
+
+  python-tests:
+    name: pytest (${{ matrix.os }} / py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Cost control: full Python sweep on Linux only (1x Actions minutes)
+        # for every push/PR. macOS (10x) and Windows (2x) run in the manual
+        # cross-OS sweep below. The release workflow builds all-OS wheels.
+        os: [ubuntu-latest]
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip maturin
+
+      - name: Install tn-proto + test deps
+        working-directory: python
+        # The editable install drives the maturin backend, which compiles the
+        # combined `tn._native` extension (tn-core + tn-btn) from the umbrella
+        # crate at crypto/tn-py.
+        run: |
+          python -m pip install -e .
+          # fastapi + httpx: test_vault_sync_handler.py drives the vault sync
+          # path through FastAPI's in-process TestClient (no live server).
+          python -m pip install pytest pytest-asyncio cryptography fastapi httpx
+
+      - name: Run pytest
+        working-directory: python
+        shell: bash
+        # The whole suite, nothing deselected. Integration tests (live vault /
+        # Rust CLI binary) live under tests/integration/ and are excluded by
+        # directory — the one clean unit/integration boundary.
+        run: python -m pytest tests/ --ignore=tests/integration --tb=short -q
+
+  # Cross-OS sweep — macOS (10x minutes) + Windows (2x). Manual only
+  # (workflow_dispatch); run it before cutting a release.
+  python-tests-cross:
+    name: pytest cross-OS (${{ matrix.os }} / py${{ matrix.python }})
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        python: ['3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip maturin
+
+      - name: Install tn-proto + test deps
+        working-directory: python
+        run: |
+          python -m pip install -e .
+          # fastapi + httpx: test_vault_sync_handler.py drives the vault sync
+          # path through FastAPI's in-process TestClient (no live server).
+          python -m pip install pytest pytest-asyncio cryptography fastapi httpx
+
+      - name: Run pytest
+        working-directory: python
+        shell: bash
+        run: python -m pytest tests/ --ignore=tests/integration --tb=short -q
+
+  rust-tests:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo check
+        run: cargo check --workspace --manifest-path Cargo.toml
+
+      - name: cargo test
+        run: cargo test --workspace --manifest-path Cargo.toml
+
+  ts-tests:
+    name: ts-sdk (node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build tn-wasm (Node + web targets)
+        working-directory: crypto/tn-wasm
+        # nodejs pkg/ is the file: dep ts-sdk consumes; pkg-web/ feeds the
+        # browser bundle build below.
+        run: |
+          wasm-pack build --target nodejs --release
+          wasm-pack build --target web --release --out-dir pkg-web
+
+      - name: Conformance vectors (wasm)
+        working-directory: crypto/tn-wasm
+        # Shared golden vectors (crypto/tn-core/tests/fixtures) run through the
+        # wasm exports, asserting byte-for-byte parity with the Rust core and
+        # the Python reference. Same vectors run in cargo test and the Python
+        # suite — divergence in any implementation turns this red.
+        run: node test/conformance_golden.mjs
+
+      - name: Install ts-sdk deps
+        working-directory: ts-sdk
+        run: npm ci || npm install
+
+      - name: TypeScript typecheck
+        working-directory: ts-sdk
+        run: npm run typecheck
+
+      - name: ESLint
+        working-directory: ts-sdk
+        run: npm run lint
+
+      - name: Build
+        working-directory: ts-sdk
+        run: npm run build
+
+      - name: Run TS tests
+        working-directory: ts-sdk
+        # Full suite via glob (test/**/*.test.ts) — no hand-maintained run-set.
+        # Live tests (*_live.test.ts) self-skip when no vault is reachable.
+        run: npm test
+
+      - name: Build browser bundle
+        working-directory: ts-sdk
+        run: npm run build:browser
+
+      - name: Run SDK smoke scripts
+        working-directory: ts-sdk
+        run: |
+          node scripts/_env_parity_smoke.mjs
+          node scripts/_sealed_absorb_smoke.mjs
+          node scripts/_init_from_seed_smoke.mjs
+          node scripts/_http_smoke.mjs
+          node scripts/_browser_smoke.mjs
+
+  extension-build:
+    name: chrome extension build + freshness
+    runs-on: ubuntu-latest
+    needs: [ts-tests]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build tn-wasm (Node target — same dep ts-sdk consumes)
+        working-directory: crypto/tn-wasm
+        run: wasm-pack build --target nodejs --release
+
+      - name: Install ts-sdk deps
+        working-directory: ts-sdk
+        run: npm ci || npm install
+
+      - name: Build extension (regenerates vendor/sdk-core/)
+        run: bash tools/build-extension.sh
+
+      - name: Verify vendored sdk-core is current
+        # The one non-unit-test gate we keep: it caught the 0.4.3a1
+        # did -> device_identity rename shipping stale into the extension.
+        run: |
+          if ! git diff --exit-code extensions/tn-decrypt/vendor/sdk-core/; then
+            echo "::error::extensions/tn-decrypt/vendor/sdk-core/ is stale — run \`bash tools/build-extension.sh\` locally and commit the result."
+            exit 1
+          fi

@@ -1,0 +1,28 @@
+ceremony:
+  id: redpanda_demo
+  mode: local
+  cipher: btn
+  sign: true
+  chain: true
+  log_level: info
+  project_name: redpanda-firehose-demo
+
+handlers:
+  # File handler — comment out to benchmark Redpanda-only
+  - kind: file.rotating
+    name: local-file
+    path: .tn/logs/tn.ndjson
+    max_bytes: 10485760
+    backup_count: 3
+
+  # Redpanda Cloud — RP_USERNAME / RP_PASSWORD must be set
+  - kind: kafka
+    name: redpanda-cloud
+    bootstrap: "d8guu3lvi6v3jq8i6k2g.any.us-east-1.mpx.prd.cloud.redpanda.com:9092"
+    topic: "tn.firehose.00000000-0000-0000-0000-000000000001"
+    sasl:
+      mechanism: SCRAM-SHA-256
+      user: "env:RP_USERNAME"
+      pass: "env:RP_PASSWORD"
+    compression_type: zstd
+    acks: all

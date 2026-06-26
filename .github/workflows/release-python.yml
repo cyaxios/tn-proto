@@ -1,0 +1,209 @@
+name: release-python
+
+# Triggered on tag push (e.g. v0.6.0a2) or manual dispatch. Builds the
+# SINGLE tn-proto wheel — the pure-Python `tn` package plus the bundled
+# `tn._native` Rust extension (former tn-core + tn-btn, abi3-py39) — for
+# Linux/macOS/Windows via maturin, then uploads to TestPyPI by default
+# (or real PyPI on a manual run with target=pypi).
+#
+# Required repo secrets:
+#   TESTPYPI_API_TOKEN  — https://test.pypi.org/manage/account/token/
+#   PYPI_API_TOKEN      — only for target=pypi
+#
+# Manual trigger: workflow_dispatch, useful to dry-run (target=none) or to
+# rehearse on TestPyPI before a permanent PyPI push.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Where to upload (testpypi | pypi | none)'
+        required: true
+        default: 'testpypi'
+        type: choice
+        options:
+          - testpypi
+          - pypi
+          - none
+
+permissions:
+  contents: write   # gh release create needs write
+
+# Force cargo to use HTTP/1.1 + retries when fetching from crates.io. The
+# maturin wheel build runs `cargo metadata`, which intermittently fails with
+# "[16] Error in the HTTP2 framing layer" under registry contention.
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # One combined wheel per platform. maturin builds the `tn` package + the
+  # `tn._native` extension (umbrella crate at crypto/tn-py, referenced via
+  # pyproject [tool.maturin] manifest-path). abi3-py39 => one wheel per
+  # OS/arch covers Python 3.9+.
+  #
+  # Platform matrix. The Rust runtime is pure-Rust crypto (no openssl-sys /
+  # ring / system C libs), so every cross-compile below is clean.
+  #
+  # Python versions: each wheel is abi3-py39, so ONE wheel per platform tag
+  # covers CPython 3.9 .. 3.14+. The matrix is therefore platform-only —
+  # there is no per-Python axis to multiply by.
+  #
+  # Platforms (the goal is "pip install tn-proto just works everywhere"):
+  #   Linux glibc  (manylinux2014, glibc 2.17 — RHEL7+/CentOS7/Amazon Linux 2/
+  #                 AWS Lambda/Debian 10+/Ubuntu 18.04+):  x86_64 + aarch64
+  #   Linux musl   (musllinux_1_2 — Alpine, python:*-alpine Docker images):
+  #                 x86_64 + aarch64
+  #   macOS        : arm64 (Apple Silicon) + x86_64 (Intel)
+  #   Windows      : x86_64
+  #
+  # Not built:
+  #   * win32 / linux-i686 — 32-bit x86 is EOL and the `cryptography`
+  #     dependency ships no 32-bit wheels, so those targets can't work
+  #     regardless of what we publish; 64-bit is the supported target.
+  #   * windows arm64 — cross-building an abi3 wheel on an x64 runner needs a
+  #     target-arch interpreter maturin can't synthesize here, and the native
+  #     dep chain (pynacl/cryptography) lacks reliable win-arm64 wheels. Parked
+  #     until a windows-arm64 runner / interpreter story exists.
+  # ---------------------------------------------------------------------------
+  build-wheels:
+    name: Build tn-proto wheel (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: '2014'
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: '2014'
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build wheel with maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          # Run from python/, where pyproject's [tool.maturin] points at the
+          # umbrella crate (../crypto/tn-py). The full repo is checked out so
+          # the workspace path-deps resolve. maturin-action sets up the cross
+          # toolchain / manylinux container per `target` + `manylinux`.
+          working-directory: python
+          target: ${{ matrix.target }}
+          # `manylinux` only applies to Linux; default to 'auto' on mac/windows.
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --out dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          # One artifact per target — upload-artifact@v4+ rejects duplicate
+          # names, and two entries now share each of ubuntu / macos.
+          name: wheels-${{ matrix.target }}
+          path: python/dist/*.whl
+
+  # ---------------------------------------------------------------------------
+  # Collect the wheels and upload to TestPyPI (default) or real PyPI
+  # (manual run with target=pypi).
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish to ${{ (github.event_name == 'push' || github.event.inputs.target == 'pypi') && 'pypi' || 'testpypi' }}
+    needs: [build-wheels]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.target != 'none'
+    # Tag pushes (v*) publish to REAL PyPI. Manual workflow_dispatch can still
+    # rehearse on TestPyPI (target=testpypi) or dry-run (target=none).
+    environment:
+      name: ${{ (github.event_name == 'push' || github.event.inputs.target == 'pypi') && 'pypi' || 'testpypi' }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Publish to TestPyPI
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.TESTPYPI_API_TOKEN }}
+          packages-dir: dist/
+          skip-existing: true
+
+      - name: Publish to PyPI
+        if: github.event_name == 'push' || github.event.inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/
+          skip-existing: true
+
+  # ---------------------------------------------------------------------------
+  # GitHub Release for the tag. Tag-push only; auto-flags alpha/beta/rc as
+  # prerelease.
+  # ---------------------------------------------------------------------------
+  github-release:
+    name: Create GitHub Release
+    needs: [publish]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$TAG" =~ (a|b|rc)[0-9]+ ]]; then
+            PRE_FLAG="--prerelease"
+          else
+            PRE_FLAG="--latest"
+          fi
+          NOTES=$(git tag -l --format='%(contents)' "$TAG")
+          if [[ -z "$NOTES" ]]; then
+            NOTES=$(git log -1 --format=%B "$TAG")
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping creation."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            $PRE_FLAG \
+            --title "tn-proto $TAG" \
+            --notes "$NOTES" \
+            dist/*

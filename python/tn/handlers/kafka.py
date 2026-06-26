@@ -1,0 +1,248 @@
+"""Kafka handler via confluent-kafka.
+
+Gated behind the `tn-proto[kafka]` extra so the base wheel stays lean.
+Topic names are templated on `event_type` (already sanitized upstream) and
+the result is checked against Apache's topic-name rules before publish.
+"""
+
+from __future__ import annotations
+
+import atexit
+import logging
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+from .base import AsyncHandler
+
+_log = logging.getLogger("tn.handlers.kafka")
+
+# Apache Kafka topic rules: [a-zA-Z0-9._-], max 249, not "." or "..".
+_TOPIC_RE = re.compile(r"^[A-Za-z0-9._-]{1,249}$")
+
+
+def _resolve(value: str | None) -> str | None:
+    """Resolve `env:NAME` to os.environ[NAME]; pass anything else through."""
+    if not value:
+        return value
+    if isinstance(value, str) and value.startswith("env:"):
+        return os.environ.get(value[4:], "")
+    return value
+
+
+def _validate_topic(topic: str) -> str:
+    if topic in (".", ".."):
+        raise ValueError(f"kafka: topic {topic!r} reserved")
+    if not _TOPIC_RE.match(topic):
+        raise ValueError(
+            f"kafka: topic {topic!r} contains illegal chars (allowed: a-z A-Z 0-9 . _ -)"
+        )
+    return topic
+
+
+class KafkaHandler(AsyncHandler):
+    """Fan out to a Confluent-Cloud-style Kafka cluster.
+
+    YAML:
+        kind: kafka
+        bootstrap: pkc-xxx.confluent.cloud:9092
+        topic:     "tn.{event_type}"
+        sasl:
+          mechanism: PLAIN
+          user: env:CONFLUENT_KEY
+          pass: env:CONFLUENT_SECRET
+        # optional extras
+        client_id: tn-proto-sdk
+        compression_type: zstd
+        acks: all
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        outbox_path: str | Path,
+        bootstrap: str,
+        topic: str,
+        sasl: dict[str, Any] | None = None,
+        client_id: str = "tn-proto",
+        compression_type: str = "zstd",
+        acks: str = "all",
+        filter_spec: dict[str, Any] | None = None,
+        **extra_config: Any,
+    ):
+        try:
+            from confluent_kafka import Producer
+        except ImportError as e:
+            raise ImportError(
+                "KafkaHandler requires confluent-kafka. "
+                "Install via `pip install 'tn-proto[kafka]'`."
+            ) from e
+
+        super().__init__(name, outbox_path, filter_spec=filter_spec)
+        self._topic_tmpl = topic
+
+        conf: dict[str, Any] = {
+            "bootstrap.servers": bootstrap,
+            "client.id": client_id,
+            "compression.type": compression_type,
+            "acks": acks,
+            "enable.idempotence": True,
+        }
+        if sasl:
+            conf.update(
+                {
+                    "security.protocol": "SASL_SSL",
+                    "sasl.mechanisms": sasl.get("mechanism", "PLAIN"),
+                    "sasl.username": _resolve(sasl.get("user", "")),
+                    "sasl.password": _resolve(sasl.get("pass", "")),
+                }
+            )
+        conf.update(extra_config)
+        self._producer = Producer(conf)
+        # Store the consumer config separately so reader() can reuse it.
+        # sasl.mechanisms → sasl_mechanism mapping differs between librdkafka
+        # (confluent-kafka) and kafka-python; reader() uses kafka-python so
+        # it translates below.
+        self._bootstrap = bootstrap
+        self._topic_fixed = topic  # may be a template; reader() only works for fixed topics
+        self._sasl = sasl
+        self._closed = False
+        atexit.register(self._close_on_exit)
+
+    def _publish(self, envelope: dict[str, Any], raw_line: bytes) -> None:
+        topic = _validate_topic(self._topic_tmpl.format(event_type=envelope["event_type"]))
+        err = {"v": None}
+
+        def _dr(e, _msg):
+            if e is not None:
+                err["v"] = e
+
+        self._producer.produce(
+            topic=topic,
+            value=raw_line,
+            key=envelope["event_id"].encode("utf-8"),
+            on_delivery=_dr,
+        )
+        # Block until broker acks (or raises). acks=all + idempotence makes
+        # this reliable. 30s upper bound aligns with outbox backoff ceiling.
+        self._producer.flush(timeout=30.0)
+        if err["v"] is not None:
+            raise RuntimeError(f"kafka delivery: {err['v']}")
+
+    # ------------------------------------------------------------------
+    # Read-side contract
+    #
+    # INTENT (not yet wired into tn.read / tn.watch):
+    #   tn.read() should auto-select its source from the active session's
+    #   handler list, preferring a local file handler when one exists and
+    #   falling back to this reader otherwise.  The caller never specifies
+    #   a source; the session configuration decides.
+    #
+    #   When wired in:
+    #     - resolved_address() is the identity key (file path for file
+    #       handlers, kafka URI here) used by tn.read() to pick the source.
+    #     - reader() yields raw sealed-envelope bytes, identical in shape
+    #       to a line from the local .tn/logs/tn.ndjson file.  The decrypt
+    #       + verify + key-matching layer above it is source-agnostic and
+    #       unchanged.  Keys discovered via tn.absorb() automatically apply.
+    #
+    #   Same contract must land in the TS SDK (ts-sdk/src/handlers/kafka.ts)
+    #   before tn.read() can be made source-aware end-to-end.
+    # ------------------------------------------------------------------
+
+    def resolved_address(self) -> str:
+        return f"kafka://{self._bootstrap}/{self._topic_fixed}"
+
+    # Kafka consumer keys forwarded verbatim from reader_options. Everything
+    # else in the bag is the user's raw kafka-python tuning — honest passthrough.
+    _CONSUMER_PASSTHROUGH = frozenset({
+        "group_id", "max_poll_records", "session_timeout_ms",
+        "fetch_min_bytes", "fetch_max_wait_ms", "consumer_timeout_ms",
+        "enable_auto_commit", "isolation_level",
+    })
+
+    def reader(self, options=None, *, selection=None, filter=None):
+        """Yield ``(label, line)`` pairs of sealed envelopes from the topic.
+
+        options    opaque passthrough bag -> the KafkaConsumer (group_id /
+                   offset / max_poll_records / …). Read verbatim; the only
+                   special key is ``offset`` -> ``auto_offset_reset``.
+        selection  exact event_type -> topic subscription (pushdown) when the
+                   topic is templated ``tn.{event_type}``.
+        filter     declarative hint; ``event_type_in`` narrows topics too.
+        """
+        try:
+            from kafka import KafkaConsumer
+        except ImportError as exc:
+            raise ImportError("reader() requires kafka-python — pip install kafka-python") from exc
+
+        opts = dict(options or {})
+        kwargs: dict[str, Any] = dict(
+            bootstrap_servers=self._bootstrap,
+            auto_offset_reset=opts.get("offset", "earliest"),
+            enable_auto_commit=bool(opts.get("group_id")),  # commit only when durable
+            consumer_timeout_ms=opts.get("consumer_timeout_ms", 10000),
+        )
+        # group_id present -> durable resume; absent -> stateless replay.
+        if opts.get("group_id"):
+            kwargs["group_id"] = opts["group_id"]
+        # Forward the rest of the user's bag verbatim.
+        for k, v in opts.items():
+            if k in self._CONSUMER_PASSTHROUGH and k not in kwargs:
+                kwargs[k] = v
+        if self._sasl:
+            kwargs.update(
+                security_protocol="SASL_SSL",
+                sasl_mechanism=self._sasl.get("mechanism", "PLAIN"),
+                sasl_plain_username=_resolve(self._sasl.get("user", "")),
+                sasl_plain_password=_resolve(self._sasl.get("pass", "")),
+            )
+
+        topics = self._topics_for(selection, filter or {})
+        consumer = KafkaConsumer(*topics, **kwargs)
+        try:
+            for msg in consumer:
+                line = msg.value.decode("utf-8") if isinstance(msg.value, (bytes, bytearray)) else str(msg.value)
+                yield (f"kafka://{self._bootstrap}/{msg.topic}@{msg.offset}", line)
+        finally:
+            consumer.close()
+
+    def _topics_for(self, selection: str | None, filter: dict[str, Any]) -> list[str]:
+        """event_type selection -> concrete topic list (pushdown). No wildcards."""
+        tmpl = self._topic_fixed
+        if "{event_type}" not in tmpl:
+            return [tmpl]                                   # fixed firehose topic
+        if selection is not None:
+            return [tmpl.replace("{event_type}", selection)]
+        if filter.get("event_type_in"):
+            return [tmpl.replace("{event_type}", et) for et in filter["event_type_in"]]
+        # No selector and no membership filter: a templated topic needs SOME
+        # concrete name. Fall back to the literal template's prefix as a single
+        # topic is wrong — require the caller to name an event_type here.
+        raise ValueError(
+            "kafka reader: topic is templated 'tn.{event_type}' — pass a "
+            "selector (exact event_type) or filter={'event_type_in': [...]}"
+        )
+
+    def _close_on_exit(self) -> None:
+        if not self._closed:
+            try:
+                self.close(timeout=30.0)
+            except Exception:  # noqa: BLE001 - preserve broad swallow; see body of handler
+                # atexit teardown: stay best-effort and do not propagate,
+                # but make the failure visible. A swallowed close can leak
+                # producer/consumer resources.
+                _log.warning(
+                    "kafka handler atexit close failed; producer/consumer "
+                    "resources may not have been released cleanly",
+                    exc_info=True,
+                )
+
+    def close(self, *, timeout: float = 30.0) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        super().close(timeout=timeout)
+        self._producer.flush(timeout=timeout)

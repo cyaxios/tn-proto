@@ -1,0 +1,261 @@
+// Port of tn_proto/python/tn/handlers/vault_push.py::init_upload (the
+// pending-claim / claim-URL path).
+//
+// Builds an AES-256-GCM-encrypted `full_keystore` tnpkg, POSTs it
+// UNAUTHENTICATED to `/api/v1/pending-claims`, and returns a claim URL
+// whose fragment carries the BEK. The vault never sees the BEK (it lives
+// only in the URL fragment); the browser claim page recovers it and
+// decrypts the body locally.
+//
+// Python parity is the contract: the encrypted-body blob layout is
+// produced by `encryptBodyBlob` (mirrors `_encrypt_body_in_place`), and the
+// claim URL shape `{base}/claim/{vault_id}#k={password_b64}` matches the
+// browser claim page's sessionStorage key (`static/claim/claim.js`).
+
+import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, extname, join } from "node:path";
+import { Buffer } from "node:buffer";
+
+import type { NodeRuntime } from "../runtime/node_runtime.js";
+import { statePath, updateSyncState } from "../sync_state.js";
+
+/** Result of {@link initUpload}. Mirrors Python's return dict. */
+export interface InitUploadResult {
+  /** Server-assigned pending-claim id (a ULID). */
+  vaultId: string;
+  /** ISO-8601 expiry for the pending claim's TTL. */
+  expiresAt: string;
+  /** `{base}/claim/{vaultId}#k={passwordB64}` — paste into a browser. */
+  claimUrl: string;
+  /** base64url(BEK) — the fragment value. Returned for tests / reuse. */
+  passwordB64: string;
+}
+
+export interface InitUploadOptions {
+  /** Vault base URL, e.g. `http://localhost:38790`. Trailing slash ok. */
+  vaultBase: string;
+  /** Override the global fetch (tests). Default: `globalThis.fetch`. */
+  fetchImpl?: typeof fetch;
+  /** Per-request timeout in ms. Default: 30_000. */
+  timeoutMs?: number;
+}
+
+/**
+ * Per-yaml-stem admin outbox dir, mirroring Python
+ * `tn.conventions.admin_outbox_dir` (`_stem_dir(yaml) / "admin" / "outbox"`).
+ *
+ * For a yaml at `<dir>/tn.yaml` the stem is `tn`, so the outbox lands at
+ * `<dir>/.tn/tn/admin/outbox/` — byte-for-byte the same location Python
+ * writes the `claim_url_issued` event to.
+ */
+function adminOutboxDir(yamlPath: string): string {
+  const ext = extname(yamlPath).toLowerCase();
+  if (ext === ".yaml" || ext === ".yml") {
+    const stem = basename(yamlPath, extname(yamlPath));
+    return join(dirname(yamlPath), ".tn", stem, "admin", "outbox");
+  }
+  // Caller passed a directory (legacy): fall back to default-stem layout.
+  return join(yamlPath, ".tn", "tn", "admin", "outbox");
+}
+
+/**
+ * Drop a `tn.vault.claim_url_issued` admin event into the per-stem admin
+ * outbox, mirroring Python `_emit_claim_url_admin_event`
+ * (`vault_push.py:208-254`). Same filename shape
+ * (`claim_url_issued_<ts>_<vault_id>.json`), same field set, and same
+ * serialization (sorted keys, 2-space indent) so an auditor inspecting the
+ * outbox (live-consistency invariant C17) sees the issuance trail on TS too.
+ *
+ * Best-effort: a write failure is logged and swallowed — it must never fail
+ * the init (matches Python).
+ */
+function emitClaimUrlAdminEvent(
+  yamlPath: string,
+  did: string | null,
+  args: { claimUrl: string; vaultId: string; expiresAt: string },
+): string {
+  const outDir = adminOutboxDir(yamlPath);
+  try {
+    mkdirSync(outDir, { recursive: true });
+  } catch (e) {
+    console.warn(
+      `vault.push init-upload: cannot create admin outbox dir: ${(e as Error).message}`,
+    );
+    return join(outDir, `claim_url_issued_${args.vaultId}.json`);
+  }
+
+  // Timestamp shape mirrors Python's `%Y%m%dT%H%M%S%fZ`
+  // (e.g. 20260606T193028123456Z — 6-digit microseconds, ms*1000).
+  const now = new Date();
+  const pad = (n: number, w: number) => String(n).padStart(w, "0");
+  const ts =
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1, 2)}${pad(now.getUTCDate(), 2)}T` +
+    `${pad(now.getUTCHours(), 2)}${pad(now.getUTCMinutes(), 2)}${pad(now.getUTCSeconds(), 2)}` +
+    `${pad(now.getUTCMilliseconds(), 3)}000Z`;
+  const filename = `claim_url_issued_${ts}_${args.vaultId}.json`;
+  const path = join(outDir, filename);
+
+  // Match Python's `isoformat(timespec="milliseconds")` for emitted_at:
+  // `2026-06-06T19:30:28.123+00:00`.
+  const emittedAt = new Date().toISOString().replace(/\.(\d{3})Z$/, ".$1+00:00");
+
+  const envelope: Record<string, unknown> = {
+    event_type: "tn.vault.claim_url_issued",
+    did,
+    claim_url: args.claimUrl,
+    vault_id: args.vaultId,
+    expires_at: args.expiresAt,
+    emitted_at: emittedAt,
+  };
+
+  // Python writes `json.dumps(envelope, indent=2, sort_keys=True)`. Mirror
+  // the recursive key sort (flat object here, but sort top-level keys).
+  const sortedKeys = Object.keys(envelope).sort();
+  const sorted: Record<string, unknown> = {};
+  for (const k of sortedKeys) sorted[k] = envelope[k];
+  try {
+    writeFileSync(path, JSON.stringify(sorted, null, 2), "utf8");
+  } catch (e) {
+    console.warn(
+      `vault.push init-upload: cannot write claim_url event: ${(e as Error).message}`,
+    );
+  }
+  return path;
+}
+
+/**
+ * Build an encrypted `full_keystore` tnpkg and POST it to the vault's
+ * unauthenticated pending-claims endpoint, returning a claim URL.
+ *
+ * Mirrors `tn.handlers.vault_push.init_upload`. The project name (for the
+ * vault's project label) and publisher DID are read from the runtime's
+ * config; the BEK is freshly minted here and delivered only in the claim
+ * URL fragment.
+ *
+ * @param rt - the active NodeRuntime (an initialized ceremony).
+ * @param opts - vault base URL + optional fetch/timeout overrides.
+ */
+export async function initUpload(
+  rt: NodeRuntime,
+  opts: InitUploadOptions,
+): Promise<InitUploadResult> {
+  const fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const vaultBase = opts.vaultBase.replace(/\/+$/, "");
+
+  // Fresh 32-byte BEK. base64url (no padding) for the URL fragment —
+  // matches Python's `_b64url(bek)`.
+  const bek = new Uint8Array(randomBytes(32));
+  const passwordB64 = Buffer.from(bek).toString("base64url");
+
+  // Encrypt a full-keystore tnpkg under the BEK into a temp file, read the
+  // bytes, then remove the staged file (it carries ciphertext only, but it
+  // has no further local use once POSTed).
+  const tmpDir = mkdtempSync(join(tmpdir(), "tn-init-upload-"));
+  const outPath = join(tmpDir, "init_upload.tnpkg");
+  let body: Uint8Array;
+  try {
+    await rt.exportFullKeystoreEncrypted(bek, outPath);
+    body = new Uint8Array(readFileSync(outPath));
+  } finally {
+    try {
+      rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+
+  // POST to /api/v1/pending-claims — UNAUTHENTICATED. Send the
+  // publisher DID (so the vault can write a contact_update back at bind
+  // time) and the project name (so the bound project is labelled).
+  const headers: Record<string, string> = {
+    "Content-Type": "application/octet-stream",
+  };
+  const publisherDid = rt.config.device.device_identity;
+  if (publisherDid) headers["X-Publisher-Did"] = publisherDid;
+  const projectName = rt.config.projectName;
+  if (projectName) headers["X-Project-Name"] = projectName;
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let resp: Response;
+  try {
+    resp = await fetchImpl(`${vaultBase}/api/v1/pending-claims`, {
+      method: "POST",
+      headers,
+      body,
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(
+      `init-upload: POST /api/v1/pending-claims returned ${resp.status}: ${text.slice(0, 512)}`,
+    );
+  }
+
+  const json = (await resp.json()) as { vault_id?: string; expires_at?: string };
+  const vaultId = json.vault_id;
+  const expiresAt = json.expires_at;
+  if (!vaultId || !expiresAt) {
+    throw new Error(
+      `init-upload: vault accepted the upload but the response was missing ` +
+        `vault_id/expires_at: ${JSON.stringify(json)}`,
+    );
+  }
+
+  // Fragment carries the BEK; the server never sees this value.
+  const claimUrl = `${vaultBase}/claim/${vaultId}#k=${passwordB64}`;
+
+  // Surface the claim URL the same two ways Python `init_upload` does:
+  //
+  //  (a) Persist a `pending_claim` block into sync_state so a handler/CLI
+  //      restart reuses the link inside the TTL window — mirrors Python's
+  //      `set_pending_claim` (`update_sync_state(pending_claim={...})`).
+  //      Writes `<yamlDir>/.tn/sync/state.json`.
+  //  (b) Write a cat-friendly `claim_url.txt` next to it
+  //      (`<yamlDir>/.tn/sync/claim_url.txt`, contents = url + "\n") —
+  //      mirrors Python's `_write_claim_url_file`.
+  //
+  // Both writes are best-effort: a failure must not fail the upload (the
+  // claim URL is already valid on the vault), so each is swallowed.
+  try {
+    updateSyncState(rt.config.yamlPath, {
+      pending_claim: {
+        vault_id: vaultId,
+        expires_at: expiresAt,
+        claim_url: claimUrl,
+        password_b64: passwordB64,
+      },
+    });
+  } catch {
+    /* sync-state is best-effort; the on-vault claim is the source of truth */
+  }
+  try {
+    const syncDir = dirname(statePath(rt.config.yamlPath));
+    mkdirSync(syncDir, { recursive: true });
+    writeFileSync(join(syncDir, "claim_url.txt"), `${claimUrl}\n`, "utf8");
+  } catch {
+    /* claim_url.txt is a convenience surface; best-effort like Python's */
+  }
+
+  //  (c) Drop a `tn.vault.claim_url_issued` admin event into the per-stem
+  //      admin outbox — mirrors Python's `_emit_claim_url_admin_event`
+  //      (`vault_push.py:385`). Best-effort: swallowed on failure.
+  try {
+    emitClaimUrlAdminEvent(rt.config.yamlPath, rt.config.device.device_identity ?? null, {
+      claimUrl,
+      vaultId,
+      expiresAt,
+    });
+  } catch {
+    /* admin event is an audit convenience; best-effort like Python's */
+  }
+
+  return { vaultId, expiresAt, claimUrl, passwordB64 };
+}

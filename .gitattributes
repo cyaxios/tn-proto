@@ -1,0 +1,5 @@
+# Shell scripts must stay LF so they remain executable under bash / WSL on
+# Windows checkouts. With core.autocrlf=true (common on Windows) git would
+# otherwise rewrite them to CRLF, which breaks tools/release.sh and any other
+# bash script ("$'\r': command not found"). eol=lf overrides autocrlf.
+*.sh text eol=lf

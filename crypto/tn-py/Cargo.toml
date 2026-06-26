@@ -1,0 +1,18 @@
+[package]
+name = "tn-proto-native"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Combined PyO3 extension (tn-core + tn-btn) for the single tn-proto wheel."
+
+[lib]
+# Built by maturin into `tn/_native`. One cdylib, one PyInit symbol; the
+# two sub-bindings are linked in as rlibs and exposed as submodules.
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+tn-core-py = { path = "../tn-core-py" }
+tn-btn-py = { path = "../tn-btn-py" }
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }

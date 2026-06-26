@@ -1,0 +1,21 @@
+# Build outputs — CMake, vcpkg, fetched deps. These are reproducible.
+build/
+build-*/
+*.obj
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.exp
+*.pdb
+
+# vcpkg local cache (manifest mode keeps vcpkg.json checked in, everything
+# else is regenerable).
+vcpkg_installed/
+
+# Wheel build artifacts
+dist/
+wheel-test-venv/
+*.egg-info/
+__pycache__/

@@ -1,0 +1,1 @@
+TN Decrypt icons are the official Cyaxios brand tile (square_sizes/cyaxios_*_brand.png from C:/codex/tn/logo_content). Replace by copying the desired variant over icon{16,32,48,128}.png.

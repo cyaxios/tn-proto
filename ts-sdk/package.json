@@ -1,0 +1,89 @@
+{
+  "name": "@cyaxios/tn-proto",
+  "version": "0.6.8",
+  "description": "TN protocol SDK for TypeScript - attested logging with broadcast encryption. Wraps tn-wasm (Rust) with idiomatic types.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cyaxios/tn-proto.git"
+  },
+  "homepage": "https://github.com/cyaxios/tn-proto#readme",
+  "bugs": "https://github.com/cyaxios/tn-proto/issues",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./raw": {
+      "types": "./dist/raw.d.ts",
+      "import": "./dist/raw.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./browser": {
+      "types": "./dist/index.browser.d.ts",
+      "import": "./dist/index.browser.js"
+    },
+    "./local": {
+      "types": "./dist/local/index.d.ts",
+      "import": "./dist/local/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "gen:version": "node scripts/gen-version.mjs",
+    "prebuild": "node scripts/gen-version.mjs",
+    "prepack": "npm run build",
+    "build": "tsc -p tsconfig.json",
+    "build:browser": "npm run build && node scripts/build-browser-bundle.mjs",
+    "build:cdn": "npm run build:browser && node scripts/build-cdn.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint --max-warnings=0 src test bin",
+    "lint:fix": "eslint --fix src test bin",
+    "format": "prettier --write src test bin",
+    "format:check": "prettier --check src test bin",
+    "pretest": "npm run build",
+    "test": "node --import tsx --import ./test/_setup_wasm.mjs --test \"test/**/*.test.ts\"",
+    "test:coverage": "c8 --reporter=text --reporter=lcov --include=src/**/*.ts --exclude=src/**/*.d.ts --all npm test",
+    "test:interop": "node test/interop_driver.mjs",
+    "test:all": "bash test/interop_driver.sh"
+  },
+  "bin": {
+    "tn-js": "./bin/tn-js.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.8.0",
+    "@scure/bip39": "^1.6.0",
+    "chokidar": "^4.0.3",
+    "fflate": "^0.8.2",
+    "tn-wasm": "file:../crypto/tn-wasm/pkg",
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.7.0",
+    "c8": "^10.1.3",
+    "eslint": "^10.2.1",
+    "prettier": "^3.8.3",
+    "tsx": "^4.22.4",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.59.0"
+  },
+  "bundledDependencies": [
+    "tn-wasm"
+  ],
+  "bundleDependencies": [
+    "tn-wasm"
+  ]
+}

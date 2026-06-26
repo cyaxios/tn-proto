@@ -1,0 +1,10 @@
+# Fixture ceremonies are committed wholesale (keystore + logs + outbox):
+# the tests read these files directly, so the repo-root `.tn/` ignore and
+# python/.gitignore's `keys/` + `logs/` must not swallow them. A deeper
+# .gitignore takes precedence over shallower ones, which is the only way
+# to re-include a directory git would otherwise skip. The keys here are
+# disposable test material minted by scripts/build_test_ceremony.py and
+# guard nothing.
+!**/.tn/
+!**/keys/
+!**/logs/

@@ -1,0 +1,130 @@
+name: release-typescript
+
+# On tag push (mirroring release-python.yml), build tn-proto, run
+# typecheck + bundle, and produce a real `.tgz` tarball attached as a
+# workflow artifact. The tarball name matches package.json's version,
+# so for tag v0.6.0a1 the artifact is tn-proto-0.6.0-alpha.1.tgz.
+#
+# NPM PUBLISHING IS GATED OFF BY DEFAULT.
+#
+# The npm publish step only runs when the `NPM_TOKEN` secret AND the
+# `PUBLISH_TO_NPM` repo variable are both set. Without either, the
+# workflow logs a notice and exits 0 — so a missing secret never
+# fails the release pipeline. The packed tarball is always uploaded
+# as an artifact for local install (`npm install ./*.tgz`).
+#
+# When you're ready to publish to npm:
+#   1. Generate an automation token at
+#      https://www.npmjs.com/settings/<user>/tokens
+#      (type: Automation; read-and-write on the tn-proto package).
+#   2. Add `NPM_TOKEN` as a repo secret:
+#      https://github.com/cyaxios/tn-proto/settings/secrets/actions
+#   3. Add `PUBLISH_TO_NPM = true` as a repo *variable* (not a secret):
+#      https://github.com/cyaxios/tn-proto/settings/variables/actions
+#   4. Push the next tag. The workflow will publish under the `alpha`
+#      dist-tag (so default `npm install tn-proto` keeps resolving
+#      to the most recent stable, not whatever alpha just shipped).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "attempt npm publish (requires NPM_TOKEN + PUBLISH_TO_NPM var)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write   # required by `npm publish --provenance`
+
+# Force cargo to use HTTP/1.1 + retries when fetching from crates.io. The
+# wasm-pack build intermittently fails with "[16] Error in the HTTP2 framing
+# layer" under registry contention.
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  publish:
+    name: build + pack tn-proto
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org/
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # Build the wasm bundle the SDK consumes (the published package
+      # vendors it via `files: ["dist", ...]` once tsc compiles).
+      - name: Install rust + wasm-pack
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build tn-wasm (nodejs target)
+        working-directory: crypto/tn-wasm
+        run: wasm-pack build --target nodejs --release
+      - name: Install ts-sdk deps
+        working-directory: ts-sdk
+        run: npm ci || npm install
+      - name: Typecheck
+        working-directory: ts-sdk
+        run: npm run typecheck
+      - name: Build
+        working-directory: ts-sdk
+        run: npm run build
+      - name: Pack tarball
+        working-directory: ts-sdk
+        run: |
+          npm pack
+          ls -la *.tgz
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: tn-proto-tarball
+          # The package is scoped (@cyaxios/tn-proto), so `npm pack` emits
+          # cyaxios-tn-proto-<version>.tgz — match any .tgz, not the bare name.
+          path: ts-sdk/*.tgz
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish to npm (gated)
+        # Push events: rely on PUBLISH_TO_NPM repo variable.
+        # workflow_dispatch: rely on the `publish` input.
+        if: |
+          (github.event_name == 'push' && vars.PUBLISH_TO_NPM == 'true')
+          || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        working-directory: ts-sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::notice::NPM_TOKEN not set; skipping npm publish."
+            echo "The packed tarball is uploaded as the 'tn-proto-tarball' workflow artifact."
+            echo "To enable automatic publishing, add NPM_TOKEN as a repo secret and"
+            echo "set the PUBLISH_TO_NPM repo variable to 'true'."
+            exit 0
+          fi
+          # --provenance attaches a transparency record (npm 9.5+);
+          # --access public is required for scoped packages on a free npm account.
+          # Stable releases (no a/b/rc suffix) publish to the default `latest`
+          # dist-tag so `npm i @cyaxios/tn-proto` resolves to them; prereleases
+          # go under `alpha` to avoid clobbering `latest`.
+          VER=$(node -p "require('./package.json').version")
+          echo "Publishing @cyaxios/tn-proto@${VER}"
+          if echo "$VER" | grep -Eq '(alpha|beta|rc|-)'; then
+            npm publish --access public --provenance --tag alpha
+          else
+            npm publish --access public --provenance
+          fi
+      - name: Publish gate notice (default path)
+        if: |
+          (github.event_name == 'push' && vars.PUBLISH_TO_NPM != 'true')
+          || (github.event_name == 'workflow_dispatch' && !inputs.publish)
+        run: |
+          echo "::notice::npm publish is gated off."
+          echo "The packed tarball is available as the 'tn-proto-tarball' artifact."
+          echo "Install it locally with:  npm install ./tn-proto-*.tgz"

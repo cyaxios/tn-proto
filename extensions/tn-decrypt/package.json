@@ -1,0 +1,11 @@
+{
+  "name": "tn-decrypt-extension",
+  "version": "0.6.8",
+  "private": true,
+  "type": "module",
+  "description": "Tests + tooling for the TN Decrypt Chrome extension. Not shipped in the store zip.",
+  "scripts": {
+    "test": "node test/extension_logic.mjs && node test/service_worker.mjs && node test/file_import.mjs && node test/python_interop.mjs",
+    "test:node": "node test/extension_logic.mjs && node test/service_worker.mjs"
+  }
+}

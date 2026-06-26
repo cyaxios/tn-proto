@@ -1,0 +1,89 @@
+{
+  "valid_names": [
+    "payroll",
+    "default",
+    "api",
+    "acme-payroll",
+    "_ops"
+  ],
+  "invalid_names": [
+    "",
+    "tn",
+    ".hidden",
+    "bad/name",
+    "bad\\name",
+    "bad name",
+    "-bad"
+  ],
+  "cases": [
+    {
+      "id": "init_named_payroll_default_stream",
+      "workspace": "workspace",
+      "project": "payroll",
+      "stream": "default",
+      "project_dir": ".tn/payroll",
+      "project_yaml": ".tn/payroll/tn.yaml",
+      "keys_dir": ".tn/payroll/keys",
+      "streams_dir": ".tn/payroll/streams",
+      "logs_dir": ".tn/payroll/logs",
+      "admin_dir": ".tn/payroll/admin",
+      "vault_dir": ".tn/payroll/vault",
+      "stream_yaml": ".tn/payroll/streams/default.yaml",
+      "log_path": ".tn/payroll/logs/default.ndjson",
+      "admin_log_path": ".tn/payroll/admin/default.ndjson",
+      "stream_extends": "../tn.yaml"
+    },
+    {
+      "id": "use_api_in_payroll",
+      "workspace": "workspace",
+      "project": "payroll",
+      "stream": "api",
+      "project_dir": ".tn/payroll",
+      "project_yaml": ".tn/payroll/tn.yaml",
+      "keys_dir": ".tn/payroll/keys",
+      "streams_dir": ".tn/payroll/streams",
+      "logs_dir": ".tn/payroll/logs",
+      "admin_dir": ".tn/payroll/admin",
+      "vault_dir": ".tn/payroll/vault",
+      "stream_yaml": ".tn/payroll/streams/api.yaml",
+      "log_path": ".tn/payroll/logs/api.ndjson",
+      "admin_log_path": ".tn/payroll/admin/api.ndjson",
+      "stream_extends": "../tn.yaml"
+    },
+    {
+      "id": "cwd_name_as_project",
+      "workspace": "acme-payroll",
+      "project": null,
+      "expected_project": "acme-payroll",
+      "stream": "api",
+      "project_dir": ".tn/acme-payroll",
+      "project_yaml": ".tn/acme-payroll/tn.yaml",
+      "keys_dir": ".tn/acme-payroll/keys",
+      "streams_dir": ".tn/acme-payroll/streams",
+      "logs_dir": ".tn/acme-payroll/logs",
+      "admin_dir": ".tn/acme-payroll/admin",
+      "vault_dir": ".tn/acme-payroll/vault",
+      "stream_yaml": ".tn/acme-payroll/streams/api.yaml",
+      "log_path": ".tn/acme-payroll/logs/api.ndjson",
+      "admin_log_path": ".tn/acme-payroll/admin/api.ndjson",
+      "stream_extends": "../tn.yaml"
+    },
+    {
+      "id": "default_project_is_valid",
+      "workspace": "workspace",
+      "project": "default",
+      "stream": "default",
+      "project_dir": ".tn/default",
+      "project_yaml": ".tn/default/tn.yaml",
+      "keys_dir": ".tn/default/keys",
+      "streams_dir": ".tn/default/streams",
+      "logs_dir": ".tn/default/logs",
+      "admin_dir": ".tn/default/admin",
+      "vault_dir": ".tn/default/vault",
+      "stream_yaml": ".tn/default/streams/default.yaml",
+      "log_path": ".tn/default/logs/default.ndjson",
+      "admin_log_path": ".tn/default/admin/default.ndjson",
+      "stream_extends": "../tn.yaml"
+    }
+  ]
+}
