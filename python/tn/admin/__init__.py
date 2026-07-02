@@ -614,12 +614,19 @@ def _revoke_recipient_jwe_impl(cfg: LoadedConfig, group: str, did: str) -> Loade
 
 
 def _maybe_autosync(cfg: LoadedConfig) -> None:
-    """If the ceremony is linked AND TN_WALLET_AUTOSYNC=1, sync now.
+    """Best-effort sync after an admin state change, when every gate passes:
 
-    Never raises. Best-effort background hook. State-change operation
-    has already succeeded locally before we're called; sync failures
-    don't cascade. But unlike V1's silent-swallow, we now WRITE
-    failures to a queue file at
+    1. ``TN_WALLET_AUTOSYNC`` — ``0`` force-off, ``1`` force-on, unset
+       defers to the yaml ``vault.autosync`` opt-in.
+    2. The ceremony is linked/vault-enabled AND claimed
+       (``linked_project_id`` set) — an unclaimed ceremony has nothing
+       vault-side to sync to, so it never touches the network.
+    3. Throttle: at most one attempt per ``vault_sync_interval_seconds``
+       per ceremony (explicit ``tn wallet sync`` is never throttled).
+
+    Never raises. State-change operation has already succeeded locally
+    before we're called; sync failures don't cascade. But unlike V1's
+    silent-swallow, we WRITE failures to a queue file at
       $XDG_STATE_HOME/tn/sync_queue/<ceremony_id>.jsonl
     so the user can inspect failed syncs via `tn wallet status` and
     drain them via `tn wallet sync --drain-queue`.
@@ -633,6 +640,19 @@ def _maybe_autosync(cfg: LoadedConfig) -> None:
         return  # default: sync only when the YAML opts in
     if not cfg.is_linked() and not getattr(cfg, "vault_enabled", False):
         return
+    # An unclaimed ceremony (linked mode but no vault-side project yet) has
+    # nothing to sync TO — sync_ceremony would only fail after burning two
+    # challenge/verify pairs + a pickups-pending GET against the vault. The
+    # 2026-07-02 call-home flood was exactly this state firing per admin op
+    # from throwaway test ceremonies; short-circuit locally instead.
+    if not getattr(cfg, "linked_project_id", None):
+        return
+    # Rate-limit: one attempt per vault_sync_interval_seconds per ceremony.
+    # State-change ops already succeeded locally; the next op past the
+    # interval (or an explicit `tn wallet sync`) pushes the full state.
+    if _autosync_throttled(cfg):
+        return
+    _stamp_autosync_attempt(cfg.ceremony_id)
 
     err_msg: str | None = None
     try:
@@ -651,25 +671,28 @@ def _maybe_autosync(cfg: LoadedConfig) -> None:
         if not link.enabled or not link.url:
             raise RuntimeError("ceremony has no vault.url; cannot sync")
 
-        # The running-logger backup leg: drain this device's AWK inbox and
-        # resolve the cached AWK exactly as `tn wallet sync` does. Without it
-        # autosync called sync_ceremony() with no AWK, so the keystore body
-        # backup was skipped on every flush and a browser-minted pickup was
-        # never picked up while the logger ran.
-        hint = get_account_id(cfg.yaml_path) or getattr(
-            identity, "linked_account_id", None
-        )
-        awk, account_id = resolve_cached_awk(
-            vault_url=link.url,
-            device_seed=identity.device_private_key_bytes(),
-            account_id_hint=hint,
-        )
-        if account_id and getattr(identity, "linked_account_id", None) is None:
-            identity.linked_account_id = account_id
-            identity.ensure_written(_default_identity_path())
-
+        # One handshake per cycle: authenticate the client first, then let
+        # the AWK drain below reuse its JWT instead of minting a second one.
         client = VaultClient.for_identity(identity, link.url)
         try:
+            # The running-logger backup leg: drain this device's AWK inbox and
+            # resolve the cached AWK exactly as `tn wallet sync` does. Without it
+            # autosync called sync_ceremony() with no AWK, so the keystore body
+            # backup was skipped on every flush and a browser-minted pickup was
+            # never picked up while the logger ran.
+            hint = get_account_id(cfg.yaml_path) or getattr(
+                identity, "linked_account_id", None
+            )
+            awk, account_id = resolve_cached_awk(
+                vault_url=link.url,
+                device_seed=identity.device_private_key_bytes(),
+                account_id_hint=hint,
+                token=getattr(client, "token", None),
+            )
+            if account_id and getattr(identity, "linked_account_id", None) is None:
+                identity.linked_account_id = account_id
+                identity.ensure_written(_default_identity_path())
+
             signer = DeviceKey.from_private_bytes(identity.device_private_key_bytes())
             result = _wallet.sync_ceremony(
                 cfg, client, awk=awk, sign_with=signer, author_did=identity.did,
@@ -685,24 +708,88 @@ def _maybe_autosync(cfg: LoadedConfig) -> None:
         _append_sync_queue(cfg.ceremony_id, err_msg)
 
 
-def _sync_queue_path(ceremony_id: str) -> Path:
-    """$XDG_STATE_HOME/tn/sync_queue/<ceremony_id>.jsonl"""
+def _tn_state_dir() -> Path:
+    """Machine-local tn state root: $TN_STATE_DIR > $XDG_STATE_HOME/tn >
+    %APPDATA%/tn (Windows) > ~/.local/state/tn."""
     import os as _os
     from pathlib import Path as _Path
 
     override = _os.environ.get("TN_STATE_DIR")
     if override:
-        base = _Path(override)
-    else:
-        xdg = _os.environ.get("XDG_STATE_HOME")
-        if xdg:
-            base = _Path(xdg) / "tn"
-        elif _os.name == "nt":
-            appdata = _os.environ.get("APPDATA") or str(_Path.home() / "AppData" / "Roaming")
-            base = _Path(appdata) / "tn"
-        else:
-            base = _Path.home() / ".local" / "state" / "tn"
-    return base / "sync_queue" / f"{ceremony_id}.jsonl"
+        return _Path(override)
+    xdg = _os.environ.get("XDG_STATE_HOME")
+    if xdg:
+        return _Path(xdg) / "tn"
+    if _os.name == "nt":
+        appdata = _os.environ.get("APPDATA") or str(_Path.home() / "AppData" / "Roaming")
+        return _Path(appdata) / "tn"
+    return _Path.home() / ".local" / "state" / "tn"
+
+
+def _sync_queue_path(ceremony_id: str) -> Path:
+    """$XDG_STATE_HOME/tn/sync_queue/<ceremony_id>.jsonl"""
+    return _tn_state_dir() / "sync_queue" / f"{ceremony_id}.jsonl"
+
+
+def _autosync_stamp_path(ceremony_id: str) -> Path:
+    """Last-autosync-attempt marker; its mtime is the throttle clock."""
+    return _tn_state_dir() / "autosync_last" / f"{ceremony_id}.stamp"
+
+
+def _autosync_throttled(cfg: LoadedConfig) -> bool:
+    """True when an autosync attempt for this ceremony ran within
+    ``vault_sync_interval_seconds``. Never raises; on any doubt (missing or
+    unreadable stamp) the sync proceeds."""
+    import time
+
+    try:
+        interval = getattr(cfg, "vault_sync_interval_seconds", 600) or 600
+        stamp = _autosync_stamp_path(cfg.ceremony_id)
+        return (time.time() - stamp.stat().st_mtime) < interval
+    except OSError:
+        return False
+
+
+def _stamp_autosync_attempt(ceremony_id: str) -> None:
+    """Record that an autosync attempt started (success or not — the point
+    is rate-limiting network traffic, not tracking outcomes). Never raises."""
+    try:
+        stamp = _autosync_stamp_path(ceremony_id)
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+        import os as _os
+        import time
+
+        now = time.time()
+        _os.utime(stamp, (now, now))
+    except OSError:
+        pass
+
+
+#: sync-queue failure records older than this are junk — the ceremony either
+#: got fixed (queue drained on success) or was a throwaway that will never
+#: sync. Pruned opportunistically on every append.
+_SYNC_QUEUE_MAX_AGE_DAYS = 30
+
+
+def _prune_sync_queue(max_age_days: int = _SYNC_QUEUE_MAX_AGE_DAYS) -> None:
+    """Delete sync-queue files not touched in ``max_age_days``. Best-effort
+    machine-wide sweep (all ceremonies, not just the appending one) so
+    abandoned ceremonies don't accumulate stale failure records forever.
+    Never raises."""
+    import time
+
+    try:
+        qdir = _tn_state_dir() / "sync_queue"
+        cutoff = time.time() - max_age_days * 86400
+        for f in qdir.glob("*.jsonl"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
 
 
 def _append_sync_queue(ceremony_id: str, err_msg: str) -> None:
@@ -724,6 +811,7 @@ def _append_sync_queue(ceremony_id: str, err_msg: str) -> None:
                 )
                 + "\n"
             )
+        _prune_sync_queue()
     except OSError:
         # last-resort swallow — telemetry isn't critical, but the original
         # error being recorded is lost here, so surface that the failure

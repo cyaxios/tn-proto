@@ -45,23 +45,28 @@ export async function redeemAwkPickup(opts: {
   keyIdB64: string;
   store?: CredentialStore;
   fetchImpl?: typeof fetch;
+  /** Already-minted vault JWT for this device DID. When given, the redeem
+   * reuses it instead of running its own challenge/verify handshake. */
+  token?: string;
 }): Promise<boolean> {
   const f = opts.fetchImpl ?? fetch;
   try {
-    const did = DeviceKey.fromSeed(opts.deviceSeed).did;
+    let token: string | null = opts.token ?? null;
+    if (!token) {
+      const did = DeviceKey.fromSeed(opts.deviceSeed).did;
 
-    // Temporarily replace globalThis.fetch so challengeVerify (which
-    // uses the module-level global) routes through the injected fetchImpl.
-    const originalFetch = globalThis.fetch;
-    if (opts.fetchImpl) {
-      globalThis.fetch = opts.fetchImpl as typeof globalThis.fetch;
-    }
-    let token: string | null;
-    try {
-      token = await challengeVerify(opts.vaultBase, did, opts.deviceSeed);
-    } finally {
+      // Temporarily replace globalThis.fetch so challengeVerify (which
+      // uses the module-level global) routes through the injected fetchImpl.
+      const originalFetch = globalThis.fetch;
       if (opts.fetchImpl) {
-        globalThis.fetch = originalFetch;
+        globalThis.fetch = opts.fetchImpl as typeof globalThis.fetch;
+      }
+      try {
+        token = await challengeVerify(opts.vaultBase, did, opts.deviceSeed);
+      } finally {
+        if (opts.fetchImpl) {
+          globalThis.fetch = originalFetch;
+        }
       }
     }
 
@@ -107,21 +112,26 @@ export async function drainPendingAwk(opts: {
   deviceSeed: Uint8Array;
   store?: CredentialStore;
   fetchImpl?: typeof fetch;
+  /** Already-minted vault JWT for this device DID. When given, the drain
+   * (and any redeems) reuse it — one challenge/verify per sync cycle. */
+  token?: string;
 }): Promise<string[]> {
   const f = opts.fetchImpl ?? fetch;
   try {
-    const did = DeviceKey.fromSeed(opts.deviceSeed).did;
+    let token: string | null = opts.token ?? null;
+    if (!token) {
+      const did = DeviceKey.fromSeed(opts.deviceSeed).did;
 
-    const originalFetch = globalThis.fetch;
-    if (opts.fetchImpl) {
-      globalThis.fetch = opts.fetchImpl as typeof globalThis.fetch;
-    }
-    let token: string | null;
-    try {
-      token = await challengeVerify(opts.vaultBase, did, opts.deviceSeed);
-    } finally {
+      const originalFetch = globalThis.fetch;
       if (opts.fetchImpl) {
-        globalThis.fetch = originalFetch;
+        globalThis.fetch = opts.fetchImpl as typeof globalThis.fetch;
+      }
+      try {
+        token = await challengeVerify(opts.vaultBase, did, opts.deviceSeed);
+      } finally {
+        if (opts.fetchImpl) {
+          globalThis.fetch = originalFetch;
+        }
       }
     }
     if (!token) return [];
@@ -145,6 +155,7 @@ export async function drainPendingAwk(opts: {
         deviceSeed: opts.deviceSeed,
         accountId: acct,
         keyIdB64: kid,
+        token,
         ...(opts.store ? { store: opts.store } : {}),
         ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
       });

@@ -21,6 +21,19 @@ def _fresh_local_ceremony():
     return td, cfg
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_vault_env(monkeypatch):
+    """This module asserts against DEFAULT_VAULT_URL-minted ceremonies and
+    same-vault link flips. An ambient TN_VAULT_URL (including the suite-wide
+    localhost isolation default from conftest) would shadow the minted URL
+    and turn the same-vault paths into re-link errors. Safe: set_link_state
+    is yaml-only — nothing here touches the network. Tests that exercise the
+    env override (test_fresh_ceremony_honors_tn_vault_url) set it back
+    inside their own bodies, which run after this fixture."""
+    monkeypatch.delenv("TN_VAULT_URL", raising=False)
+    monkeypatch.delenv("TN_NO_LINK", raising=False)
+
+
 # --- Defaults --------------------------------------------------------
 
 

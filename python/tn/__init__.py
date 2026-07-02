@@ -407,6 +407,13 @@ def _init_impl(
         except Exception:
             _logger.exception("tn.agents.policy_published emit failed; continuing")
 
+    # One anonymous usage ping per process — "an SDK session started".
+    # Contained: a broken config or dead vault must never affect init.
+    try:
+        _session_ping(_current_config_impl())
+    except Exception:
+        _logger.exception("tn.init session-ping wrapper raised; continuing")
+
     # ------------------------------------------------------------------
     # SDK auto-link — parity with the ``tn init`` CLI verb.
     #
@@ -438,6 +445,52 @@ def _init_impl(
 # Module-level latch so re-entrant ``tn.init()`` calls in the same
 # process don't reprint the claim URL on every call.
 _link_done_this_process: bool = False
+
+# Latch for the session usage ping — one per process, ever.
+_session_ping_done: bool = False
+
+
+def _session_ping(cfg: Any) -> None:
+    """Fire ONE anonymous ``GET /api/v1/ping`` at the ceremony's vault per
+    process — the "this SDK session exists" usage signal.
+
+    Gates: the ceremony's vault block must allow contact (enabled + url;
+    ``TN_NO_LINK=1`` wins), same as every other vault touch. The request
+    runs on a daemon thread with a short timeout and swallows everything —
+    a dead vault must never slow down or break ``tn.init()``.
+    """
+    global _session_ping_done
+    if _session_ping_done:
+        return
+    if __import__("os").environ.get("TN_NO_LINK", "").strip() == "1":
+        return
+    try:
+        # Lazy import: wallet reaches back through admin/init and would
+        # cycle at module import time (same constraint as _maybe_autosync).
+        from . import wallet as _wallet
+
+        link = _wallet.vault_link_info(cfg)
+    except Exception:  # noqa: BLE001 — best-effort signal; no link info, no ping
+        return
+    if not link.enabled or not link.url:
+        return
+    _session_ping_done = True
+    base = link.url.rstrip("/")
+
+    def _fire() -> None:
+        try:
+            import httpx
+
+            from .vault_client import _DEFAULT_HEADERS
+
+            httpx.get(f"{base}/api/v1/ping", headers=_DEFAULT_HEADERS,
+                      timeout=3.0)
+        except Exception:  # noqa: BLE001 — the ping is fire-and-forget
+            pass
+
+    import threading
+
+    threading.Thread(target=_fire, name="tn-session-ping", daemon=True).start()
 
 
 def _in_ipython() -> bool:

@@ -18,14 +18,20 @@ def awk_pickup_aad(account_id: str) -> bytes:
 
 def redeem_awk_pickup(*, vault_url: str, device_seed: bytes,
                       account_id: str, key_id_b64: str,
-                      store: CredentialStore | None = None) -> bool:
+                      store: CredentialStore | None = None,
+                      token: str | None = None) -> bool:
     try:
-        priv = Ed25519PrivateKey.from_private_bytes(device_seed)
-        pub = priv.public_key().public_bytes(encoding=serialization.Encoding.Raw,
-                                             format=serialization.PublicFormat.Raw)
-        did = _did_key_for_ed25519_pub(pub)
         base = vault_url.rstrip("/")
-        token = _challenge_verify(base, did, priv)
+        if token is None:
+            # No JWT supplied — mint one. Callers that already ran the
+            # challenge/verify dance (VaultClient-based sync cycles) pass
+            # their token in so one cycle costs one handshake, not two.
+            priv = Ed25519PrivateKey.from_private_bytes(device_seed)
+            pub = priv.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw)
+            did = _did_key_for_ed25519_pub(pub)
+            token = _challenge_verify(base, did, priv)
         if token is None:
             return False
         status, body = _http_get(f"{base}/api/v1/account/awk-pickups/{key_id_b64}",
@@ -47,20 +53,27 @@ def redeem_awk_pickup(*, vault_url: str, device_seed: bytes,
 
 
 def drain_pending_awk(*, vault_url: str, device_seed: bytes,
-                      store: CredentialStore | None = None) -> list[str]:
+                      store: CredentialStore | None = None,
+                      token: str | None = None) -> list[str]:
     """Check the vault's AWK inbox for pickups addressed to THIS device DID and
     redeem+cache each. Returns the account_ids whose AWK was cached (usually 0
     or 1). Never raises — a degraded vault just means 'nothing drained, retry
     next sync'. This is the device-pull half of the non-blocking flow: the
     browser mints an AWK pickup sealed to this DID at claim/approve time; the
-    sync loop (or a brief init check) drains it whenever it shows up."""
+    sync loop (or a brief init check) drains it whenever it shows up.
+
+    ``token`` is an already-minted vault JWT for this device DID; when given,
+    the drain (and any redeems) reuse it instead of running a second
+    challenge/verify handshake."""
     try:
-        priv = Ed25519PrivateKey.from_private_bytes(device_seed)
-        pub = priv.public_key().public_bytes(encoding=serialization.Encoding.Raw,
-                                             format=serialization.PublicFormat.Raw)
-        did = _did_key_for_ed25519_pub(pub)
         base = vault_url.rstrip("/")
-        token = _challenge_verify(base, did, priv)
+        if token is None:
+            priv = Ed25519PrivateKey.from_private_bytes(device_seed)
+            pub = priv.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw)
+            did = _did_key_for_ed25519_pub(pub)
+            token = _challenge_verify(base, did, priv)
         if token is None:
             return []
         status, body = _http_get(f"{base}/api/v1/account/awk-pickups/pending",
@@ -74,7 +87,8 @@ def drain_pending_awk(*, vault_url: str, device_seed: bytes,
             if not acct or not kid:
                 continue
             if redeem_awk_pickup(vault_url=base, device_seed=device_seed,
-                                 account_id=acct, key_id_b64=kid, store=store):
+                                 account_id=acct, key_id_b64=kid, store=store,
+                                 token=token):
                 cached.append(acct)
         if cached:
             _log.info("drained %d inbound AWK pickup(s)", len(cached))
@@ -87,6 +101,7 @@ def drain_pending_awk(*, vault_url: str, device_seed: bytes,
 def resolve_cached_awk(*, vault_url: str, device_seed: bytes,
                        account_id_hint: str | None = None,
                        store: CredentialStore | None = None,
+                       token: str | None = None,
                        ) -> tuple[bytes | None, str | None]:
     """Drain this device's AWK inbox, then return ``(cached_awk, account_id)``.
 
@@ -100,7 +115,7 @@ def resolve_cached_awk(*, vault_url: str, device_seed: bytes,
     store = store or default_credential_store()
     account_id = account_id_hint
     learned = drain_pending_awk(vault_url=vault_url, device_seed=device_seed,
-                                store=store)
+                                store=store, token=token)
     if learned and not account_id:
         account_id = learned[0]
     awk = store.get(awk_key_name(account_id)) if account_id else None

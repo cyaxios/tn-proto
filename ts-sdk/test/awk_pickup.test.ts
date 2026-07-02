@@ -117,6 +117,49 @@ test("redeemAwkPickup — happy path: stores the unsealed AWK in a FileCredentia
   }
 });
 
+test("redeemAwkPickup — supplied token skips the challenge/verify handshake", async () => {
+  const seed = new Uint8Array(32);
+  crypto.getRandomValues(seed);
+  const did = DeviceKey.fromSeed(seed).did;
+
+  const awk = new Uint8Array(32);
+  crypto.getRandomValues(awk);
+  const wrap = await sealBekForRecipient(awk, did, awkPickupAad(ACCOUNT_ID));
+
+  const tmp = mkdtempSync(join(tmpdir(), `awk-pickup-token-${randomUUID()}-`));
+  try {
+    const store = new FileCredentialStore(join(tmp, "credentials.json"));
+    const base = makeFetchStub(wrap);
+    // Wrap the stub: a sync cycle that already authed must never re-run
+    // the challenge/verify dance.
+    const guarded = (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/api/v1/auth/challenge") || u.endsWith("/api/v1/auth/verify")) {
+        throw new Error("challenge/verify must be skipped when a token is supplied");
+      }
+      return (base as unknown as (u: string | URL, i?: RequestInit) => Promise<Response>)(
+        url,
+        init,
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await redeemAwkPickup({
+      vaultBase: VAULT_BASE,
+      deviceSeed: seed,
+      accountId: ACCOUNT_ID,
+      keyIdB64: KEY_ID_B64,
+      store,
+      fetchImpl: guarded,
+      token: TOKEN,
+    });
+
+    assert.equal(result, true, "redeem with a supplied token should succeed");
+    assert.ok(store.get(awkKeyName(ACCOUNT_ID)) !== null, "AWK must be cached");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("redeemAwkPickup — 404 from vault returns false and stores nothing", async () => {
   const seed = new Uint8Array(32);
   crypto.getRandomValues(seed);

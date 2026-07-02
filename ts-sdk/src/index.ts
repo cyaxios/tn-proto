@@ -87,6 +87,7 @@ import { Tn as _Tn } from "./tn.js";
 // Local bindings for the auto-link helper (the same symbols are re-exported
 // below from ./vault/url.js; a re-export does not bind them into local scope).
 import { resolveVaultUrl, isAutoLinkDisabled } from "./vault/url.js";
+import { USER_AGENT } from "./version.js";
 export const setLevel: typeof _Tn.setLevel = _Tn.setLevel.bind(_Tn);
 export const getLevel: typeof _Tn.getLevel = _Tn.getLevel.bind(_Tn);
 export const isEnabledFor: typeof _Tn.isEnabledFor = _Tn.isEnabledFor.bind(_Tn);
@@ -365,6 +366,9 @@ export async function init(
     _defaultTn = null;
   }
   _defaultTn = await _Tn.init(yamlPath, opts);
+  // One anonymous usage ping per process — "an SDK session started".
+  // Contained: a broken config or dead vault must never affect init.
+  _sessionPing(_defaultTn);
   // SDK auto-link — parity with Python's `_auto_link_after_init`. Surfaces a
   // claim URL by default in serverless deploys (Vercel/Lambda/etc.) so a coded
   // `tn.init()` gives you a link to claim the project, for both an unnamed and a
@@ -372,6 +376,48 @@ export async function init(
   await _maybeAutoLinkAfterInit(_defaultTn, opts);
   return _defaultTn;
 }
+
+// Latch for the session usage ping — one per process, ever.
+let _sessionPingDone = false;
+
+/**
+ * Fire ONE anonymous `GET /api/v1/ping` at the ceremony's vault per process —
+ * the "this SDK session exists" usage signal. Mirrors Python
+ * `tn/__init__.py::_session_ping`.
+ *
+ * Gates: the ceremony's vault block must allow contact (enabled + url;
+ * `TN_NO_LINK=1` wins), same as every other vault touch. Fire-and-forget
+ * with a short timeout; every failure is swallowed — a dead vault must
+ * never slow down or break `tn.init()`.
+ */
+function _sessionPing(tn: _Tn, fetchImpl?: typeof fetch): void {
+  if (_sessionPingDone) return;
+  if (isAutoLinkDisabled()) return; // TN_NO_LINK=1 hard opt-out.
+  let vault: { enabled?: boolean; url?: string } | undefined;
+  try {
+    vault = (tn.config() as { vault?: { enabled?: boolean; url?: string } })
+      .vault;
+  } catch {
+    return;
+  }
+  if (!vault?.enabled || !vault.url) return;
+  _sessionPingDone = true;
+  const base = vault.url.replace(/\/+$/, "");
+  const f = fetchImpl ?? fetch;
+  void f(`${base}/api/v1/ping`, {
+    headers: { "User-Agent": USER_AGENT },
+    signal: AbortSignal.timeout(3000),
+  }).catch(() => {});
+}
+
+/** Test hook: reset the once-per-process ping latch and fire with an
+ * injected fetch. Not part of the public API surface. */
+export const _sessionPingInternals = {
+  fire: _sessionPing,
+  reset(): void {
+    _sessionPingDone = false;
+  },
+};
 
 // Module-level latch so re-entrant `tn.init()` calls in the same process (e.g. a
 // warm serverless container reused across invocations) don't re-mint a pending

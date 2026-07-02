@@ -194,18 +194,28 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
     # the CLI behave identically. Skipped when an explicit passphrase was given
     # (that path derives its own AWK inside sync_ceremony).
     awk: bytes | None = None
-    if not passphrase:
-        drain_url = link.url or (identity.linked_vault if identity else None)
-        if drain_url:
-            awk, account_id = resolve_cached_awk(
-                vault_url=drain_url,
-                device_seed=identity.device_private_key_bytes(),
-                account_id_hint=account_id,
-            )
-            if account_id and identity and not identity.linked_account_id:
-                identity.linked_account_id = account_id
-                identity.ensure_written(identity_path)
+    # Build the push client up front when the ceremony is linked so the AWK
+    # drain reuses its JWT — one challenge/verify per sync instead of two.
+    # The not-linked-but-account-bound path keeps the standalone drain (there
+    # is no client for it to borrow from).
+    client = (
+        VaultClient.for_identity(identity, link.url)
+        if link.enabled and link.url
+        else None
+    )
     try:
+        if not passphrase:
+            drain_url = link.url or (identity.linked_vault if identity else None)
+            if drain_url:
+                awk, account_id = resolve_cached_awk(
+                    vault_url=drain_url,
+                    device_seed=identity.device_private_key_bytes(),
+                    account_id_hint=account_id,
+                    token=(client.token if client is not None else None),
+                )
+                if account_id and identity and not identity.linked_account_id:
+                    identity.linked_account_id = account_id
+                    identity.ensure_written(identity_path)
         # Step 1 (two-way sync): pull the account inbox and ABSORB it
         # before pushing, so a revocation another device/publisher made
         # is merged into local state first and an informed re-add is
@@ -216,7 +226,7 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
         # Step 2: push (backup keystore + yaml to the linked vault). The
         # normalized ``link`` view gates the push: vault sync disabled or
         # URL-less means nothing to push (main's guard semantics).
-        if not link.enabled or not link.url:
+        if client is None:
             if push_only:
                 _die(f"ceremony {cfg.ceremony_id} is not linked; nothing to push")
             if not is_account_bound(yaml_path):
@@ -231,50 +241,48 @@ def cmd_wallet_sync(args: argparse.Namespace) -> int:
             )
             return 0
 
-        client = VaultClient.for_identity(identity, link.url)
-        try:
-            if drain_queue:
-                pending_before = len(_wallet.read_sync_queue(cfg.ceremony_id))
-                result = _wallet.drain_sync_queue(cfg, client, passphrase=passphrase)
-                pending_after = len(_wallet.read_sync_queue(cfg.ceremony_id))
-                print(f"Drained sync queue for {cfg.ceremony_id}")
-                print(f"  pending before: {pending_before}, after: {pending_after}")
-                print(f"  uploaded {len(result.uploaded)} files")
-                if result.errors:
-                    print(f"  WARN {len(result.errors)} still failing: {result.errors}")
-                    return 1
-                return 0
-
-            # Author the group-keys snapshot AS the identity the `client`
-            # authenticates as (DID challenge) — the vault's inbox POST
-            # requires manifest.publisher_identity == auth_did. Mirrors the
-            # TS `publishGroupKeys(client, identity, ...)` author key.
-            identity_signer = _DeviceKey.from_private_bytes(
-                identity.device_private_key_bytes()
-            )
-            result = _wallet.sync_ceremony(
-                cfg,
-                client,
-                passphrase=passphrase,
-                sign_with=identity_signer,
-                author_did=identity.did,
-                awk=awk,
-            )
-            print(f"Synced {cfg.ceremony_id} -> {link.url}")
-            print(f"  uploaded {len(result.uploaded)} files: {result.uploaded}")
-            if result.published_groups:
-                print(
-                    "  published group keys to own inbox: "
-                    f"{result.published_groups}"
-                )
-            if result.publish_warning:
-                print(f"  WARN group-keys publish failed: {result.publish_warning}")
+        if drain_queue:
+            pending_before = len(_wallet.read_sync_queue(cfg.ceremony_id))
+            result = _wallet.drain_sync_queue(cfg, client, passphrase=passphrase)
+            pending_after = len(_wallet.read_sync_queue(cfg.ceremony_id))
+            print(f"Drained sync queue for {cfg.ceremony_id}")
+            print(f"  pending before: {pending_before}, after: {pending_after}")
+            print(f"  uploaded {len(result.uploaded)} files")
             if result.errors:
-                print(f"  WARN {len(result.errors)} errors: {result.errors}")
+                print(f"  WARN {len(result.errors)} still failing: {result.errors}")
                 return 1
-        finally:
-            client.close()
+            return 0
+
+        # Author the group-keys snapshot AS the identity the `client`
+        # authenticates as (DID challenge) — the vault's inbox POST
+        # requires manifest.publisher_identity == auth_did. Mirrors the
+        # TS `publishGroupKeys(client, identity, ...)` author key.
+        identity_signer = _DeviceKey.from_private_bytes(
+            identity.device_private_key_bytes()
+        )
+        result = _wallet.sync_ceremony(
+            cfg,
+            client,
+            passphrase=passphrase,
+            sign_with=identity_signer,
+            author_did=identity.did,
+            awk=awk,
+        )
+        print(f"Synced {cfg.ceremony_id} -> {link.url}")
+        print(f"  uploaded {len(result.uploaded)} files: {result.uploaded}")
+        if result.published_groups:
+            print(
+                "  published group keys to own inbox: "
+                f"{result.published_groups}"
+            )
+        if result.publish_warning:
+            print(f"  WARN group-keys publish failed: {result.publish_warning}")
+        if result.errors:
+            print(f"  WARN {len(result.errors)} errors: {result.errors}")
+            return 1
     finally:
+        if client is not None:
+            client.close()
         tn.flush_and_close()
     return 0
 

@@ -632,24 +632,32 @@ export async function walletSyncCmd(opts: WalletSyncCmdOptions = {}): Promise<nu
   if (!link.linkedProjectId) {
     return die(err, `ceremony ${link.ceremonyId} claims linked but has no linked_project_id; relink to repair`);
   }
+  // The push client, built before the inbox drain so the drain reuses its
+  // JWT — one challenge/verify per sync cycle instead of two. Mirrors
+  // Python cmd_wallet_sync.
+  const vaultUrl = opts.vault ?? link.linkedVault;
+  const client = await VaultClient.forIdentity(
+    vaultIdentityFromDeviceKey(identity.deviceKey()),
+    vaultUrl,
+    { fetchImpl },
+  );
+
   // Inbox drain (non-blocking pull half of the AWK autocache flow): the
   // browser sealed an AWK pickup to this device DID at claim/approve time;
   // draining it caches the AWK so the push below can wrap the BEK without a
   // passphrase. Best-effort — never throws. Skipped when a passphrase was
-  // supplied (that path derives its own AWK). Mirrors Python cmd_wallet_sync.
+  // supplied (that path derives its own AWK).
   if (!opts.passphrase) {
-    const drainUrl = opts.vault ?? link.linkedVault ?? identity.linkedVault;
-    if (drainUrl) {
-      const learned = await drainPendingAwk({
-        vaultBase: drainUrl,
-        deviceSeed: identity.seed,
-        fetchImpl,
-      });
-      const learnedAcct = learned[0];
-      if (learnedAcct && !identity.linkedAccountId) {
-        identity.linkedAccountId = learnedAcct;
-        identity.save();
-      }
+    const learned = await drainPendingAwk({
+      vaultBase: vaultUrl,
+      deviceSeed: identity.seed,
+      fetchImpl,
+      ...(client.token ? { token: client.token } : {}),
+    });
+    const learnedAcct = learned[0];
+    if (learnedAcct && !identity.linkedAccountId) {
+      identity.linkedAccountId = learnedAcct;
+      identity.save();
     }
   }
   // Auto-load the cached AWK when no passphrase was supplied and the identity
@@ -669,13 +677,6 @@ export async function walletSyncCmd(opts: WalletSyncCmdOptions = {}): Promise<nu
         "(run `tn account connect --passphrase`) or `--passphrase`.",
     );
   }
-
-  const vaultUrl = opts.vault ?? link.linkedVault;
-  const client = await VaultClient.forIdentity(
-    vaultIdentityFromDeviceKey(identity.deviceKey()),
-    vaultUrl,
-    { fetchImpl },
-  );
 
   const cfg = NodeRuntime.init(yamlPath);
   let keystorePath: string;

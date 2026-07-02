@@ -41,3 +41,29 @@ def pytest_configure(config):
     # in-process tests. Subprocess tests that explicitly need stdout-on
     # must clear it themselves.
     os.environ.setdefault("TN_NO_STDOUT", "1")
+
+    # Keep the suite off the production vault. Ceremonies mint in linked
+    # mode by default, so any test that runs an admin verb (or the session
+    # ping) would otherwise phone https://vault.tn-proto.org — that leak
+    # produced ~300 real autosync attempts against prod on 2026-07-02
+    # alone. Port 9 (discard) refuses instantly, so a test that DOES reach
+    # the network fails fast instead of hanging. Tests that exercise URL
+    # resolution or a live local vault override this themselves.
+    os.environ.setdefault("TN_VAULT_URL", "http://127.0.0.1:9")
+
+    # Same containment for machine-local state (sync_queue failure records,
+    # autosync throttle stamps): route it to a per-run temp dir instead of
+    # the developer's real %APPDATA%/tn.
+    import tempfile
+
+    os.environ.setdefault(
+        "TN_STATE_DIR", tempfile.mkdtemp(prefix="tn-pytest-state-")
+    )
+
+    # Latch the once-per-process session usage ping off for the whole run —
+    # it would otherwise fire at whatever vault the FIRST tn.init() in the
+    # run resolves (tests that delenv TN_VAULT_URL resolve prod).
+    # tests/test_session_ping.py resets the latch to exercise the ping.
+    import tn
+
+    tn._session_ping_done = True
