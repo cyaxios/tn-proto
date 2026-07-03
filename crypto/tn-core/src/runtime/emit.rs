@@ -674,8 +674,7 @@ impl Runtime {
             None
         };
         let row_hash = if ctx.need_row_hash {
-            let public_bmap: BTreeMap<String, Value> =
-                ctx.public_out.clone().into_iter().collect();
+            let public_bmap: BTreeMap<String, Value> = ctx.public_out.clone().into_iter().collect();
             compute_row_hash(&RowHashInput {
                 device_identity: self.device.did(),
                 timestamp: ctx.ts,
@@ -840,7 +839,12 @@ impl Runtime {
                 // `refresh_chain_tip_under_lock`; a writer-pool failure is
                 // parked in `deferred_err` and re-raised after the lock
                 // releases.
-                self.refresh_chain_tip_under_lock(pel_routed, event_type, ctx.eid, &mut deferred_err)?;
+                self.refresh_chain_tip_under_lock(
+                    pel_routed,
+                    event_type,
+                    ctx.eid,
+                    &mut deferred_err,
+                )?;
 
                 // 4. Chain advance (now reflects disk truth).
                 let _adv_t0 = if crate::perf::enabled() {

@@ -581,6 +581,7 @@ impl PyRuntime {
                 scope,
                 confirm_includes_secrets,
                 groups,
+                keystore: None,
                 package_body,
             };
             let p = self

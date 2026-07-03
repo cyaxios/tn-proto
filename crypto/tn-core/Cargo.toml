@@ -13,6 +13,7 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 hkdf = { workspace = true }
 ed25519-dalek = { workspace = true }
+curve25519-dalek = "4"
 subtle = { workspace = true }
 zeroize = { workspace = true }
 rand_core = { workspace = true }

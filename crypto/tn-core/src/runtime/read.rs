@@ -626,8 +626,10 @@ impl Runtime {
                                     }
                                 }
                                 Err(Error::NotEntitled { .. } | Error::NotAPublisher { .. }) => {
-                                    plaintext_per_group
-                                        .insert(k.clone(), serde_json::json!({"$no_read_key": true}));
+                                    plaintext_per_group.insert(
+                                        k.clone(),
+                                        serde_json::json!({"$no_read_key": true}),
+                                    );
                                 }
                                 Err(_) => {
                                     plaintext_per_group.insert(

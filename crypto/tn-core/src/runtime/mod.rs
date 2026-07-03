@@ -51,6 +51,7 @@ mod read;
 mod types;
 mod util;
 
+pub use admin::EnsureGroupResult;
 pub use types::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
     AdminRotation, AdminState, AdminVaultLink, FlatEntry, Instructions, OnInvalid, ReadEntry,

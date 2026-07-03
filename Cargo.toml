@@ -7,6 +7,7 @@ members = [
     "crypto/tn-core-py",
     "crypto/tn-py",
     "crypto/tn-wasm",
+    "rust-sdk",
 ]
 
 [workspace.package]

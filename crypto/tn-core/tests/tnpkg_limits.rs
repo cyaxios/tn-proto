@@ -102,11 +102,14 @@ fn rejects_oversized_manifest() {
     }
     let err = read_tnpkg(TnpkgSource::Bytes(&buf)).unwrap_err();
     match err {
-        Error::Malformed { reason, .. } => assert!(
-            reason.contains("manifest") && reason.contains("size")
-                || reason.contains("exceeds"),
-            "expected a manifest-size rejection, got: {reason}"
-        ),
+        Error::Malformed { reason, .. } => {
+            let mentions_manifest_size = reason.contains("manifest") && reason.contains("size");
+            let mentions_exceeds = reason.contains("exceeds");
+            assert!(
+                mentions_manifest_size || mentions_exceeds,
+                "expected a manifest-size rejection, got: {reason}"
+            );
+        }
         other => panic!("expected Malformed, got {other:?}"),
     }
 }

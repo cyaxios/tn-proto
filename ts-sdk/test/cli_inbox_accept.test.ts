@@ -14,7 +14,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -64,6 +64,16 @@ async function freshCeremony(
  *  emit path runs for real instead of hitting the non-fatal warn branch. */
 function realKit(keystorePath: string): Uint8Array {
   return new Uint8Array(readFileSync(join(keystorePath, "default.btn.mykit")));
+}
+
+function absorbedEvents(dir: string): Array<Record<string, unknown>> {
+  const adminLog = join(dir, ".tn", "tn", "admin", "default.ndjson");
+  if (!existsSync(adminLog)) return [];
+  return readFileSync(adminLog, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((entry) => entry.event_type === "tn.enrolment.absorbed");
 }
 
 /** Build a `tn-invite-*.zip` (outer zip with manifest.json + kit.tnpkg).
@@ -131,14 +141,17 @@ test("happy accept installs the kit and emits the absorbed attestation (exit 0)"
     // The installed kit file carries the exact kit bytes.
     const kitDest = join(c.keystorePath, "default.btn.mykit");
     assert.deepEqual(new Uint8Array(readFileSync(kitDest)), kit);
-    // GAP (faithful to Python's broad-except): the TS wasm runtime classifies
-    // `tn.enrolment.absorbed` as an admin event and rejects it for a missing
-    // `publisher_identity` field, so the attestation emit hits the non-fatal
-    // warn branch. The kit is installed and the verb still exits 0 — exactly
-    // the contract Python's `accept` guarantees when its own emit fails. See
-    // the REPORT for the parity note.
-    assert.match(s.out, /Warning: could not emit tn\.enrolment\.absorbed/);
-    assert.match(s.out, /The kit is installed\. You may emit the attestation manually\./);
+    // The absorbed attestation is an admin event, so it should land in the
+    // ceremony's admin log rather than the normal application log.
+    assert.doesNotMatch(s.out, /Warning: could not emit tn\.enrolment\.absorbed/);
+    const absorbed = absorbedEvents(c.dir);
+    assert.equal(absorbed.length, 1, "tn.enrolment.absorbed should land in the admin log");
+    assert.equal(absorbed[0].group, "default");
+    assert.equal(absorbed[0].publisher_identity, "did:key:zAlice");
+    assert.equal(
+      absorbed[0].package_sha256,
+      `sha256:${createHash("sha256").update(kit).digest("hex")}`,
+    );
   } finally {
     rmSync(c.dir, { recursive: true, force: true });
   }

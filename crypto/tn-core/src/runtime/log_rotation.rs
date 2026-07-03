@@ -296,7 +296,10 @@ pub(crate) fn seed_chain_from_template(
 
 /// Scan a single ndjson file for any line whose `event_type` is `tn.ceremony.init`.
 /// Returns `true` if found, `false` if file absent or not found.
-pub(crate) fn scan_for_ceremony_init(path: &Path, storage: &Arc<dyn crate::storage::Storage>) -> Result<bool> {
+pub(crate) fn scan_for_ceremony_init(
+    path: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<bool> {
     if !storage.exists(path) {
         return Ok(false);
     }
@@ -315,7 +318,12 @@ pub(crate) fn scan_for_ceremony_init(path: &Path, storage: &Arc<dyn crate::stora
 /// plus `{yaml_dir}`, `{ceremony_id}`, and `{did}`. `{event_type}` becomes
 /// `"tn.ceremony.init"`. `{date}` is not required for fresh-detection purposes;
 /// the file either exists or it doesn't regardless of date.
-pub(crate) fn resolve_pel_static(tmpl: &str, yaml_dir: &Path, ceremony_id: &str, did: &str) -> PathBuf {
+pub(crate) fn resolve_pel_static(
+    tmpl: &str,
+    yaml_dir: &Path,
+    ceremony_id: &str,
+    did: &str,
+) -> PathBuf {
     let date_fmt = time::macros::format_description!("[year]-[month]-[day]");
     let date = OffsetDateTime::now_utc()
         .format(&date_fmt)

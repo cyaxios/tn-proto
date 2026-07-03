@@ -9,11 +9,13 @@
 //! ([`Runtime::vault_link`] / [`Runtime::vault_unlink`]). The export /
 //! absorb verbs they lean on live in the sibling `runtime_export` module.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rand_core::RngCore;
 use serde_json::{Map, Value};
+use serde_yml::Value as YamlValue;
 
 use crate::admin_reduce::{reduce as admin_reduce_envelope, StateDelta};
 use crate::cipher::GroupCipher;
@@ -24,10 +26,94 @@ use super::read::{apply_schema_defaults, merge_envelope};
 use super::util::{current_timestamp_rfc3339, sha2_256};
 use super::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
-    AdminRotation, AdminState, AdminVaultLink, RecipientEntry, Runtime,
+    AdminRotation, AdminState, AdminVaultLink, RecipientEntry, Runtime, RuntimeInitOptions,
 };
 
+/// Result from [`Runtime::admin_ensure_group`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsureGroupResult {
+    /// Group that was ensured or updated.
+    pub group: String,
+    /// Fields routed into the group by this call.
+    pub fields: Vec<String>,
+    /// True when the group did not exist and was created by this call.
+    pub created: bool,
+    /// True when `tn.yaml` was changed.
+    pub changed: bool,
+}
+
 impl Runtime {
+    /// Ensure a btn group exists and route fields into it.
+    ///
+    /// If the group is not already declared, this mints publisher state and a
+    /// self-reader kit in the active keystore, writes the group declaration and
+    /// field routes into `tn.yaml`, reloads the runtime, and emits
+    /// `tn.group.added`. Existing groups only update routing and reload when
+    /// the yaml changes.
+    ///
+    /// This method is native-filesystem only: it edits the ceremony yaml and
+    /// keystore directly, so wasm/browser callers should use their host SDK's
+    /// config management path instead.
+    pub fn admin_ensure_group(
+        &mut self,
+        group: &str,
+        fields: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<EnsureGroupResult> {
+        let fields = normalize_fields(fields)?;
+        if fields.is_empty() {
+            return Ok(EnsureGroupResult {
+                group: group.to_string(),
+                fields,
+                created: false,
+                changed: false,
+            });
+        }
+
+        let yaml_path = self.yaml_path().to_path_buf();
+        let raw = std::fs::read_to_string(&yaml_path)?;
+        let mut doc: YamlValue = serde_yml::from_str(&raw)?;
+
+        let created = !group_declared(&doc, group)?;
+        if created {
+            let keystore = resolve_keystore_path(&doc, &yaml_path)?;
+            mint_btn_group(&keystore, group)?;
+        }
+
+        let changed = ensure_yaml_group(&mut doc, group, self.did(), &fields)?;
+        if changed {
+            let rendered = serde_yml::to_string(&doc)?;
+            std::fs::write(&yaml_path, rendered)?;
+            self.reload_with_options(
+                self.storage.clone(),
+                RuntimeInitOptions {
+                    skip_ceremony_init_emit: true,
+                    skip_policy_published_emit: true,
+                },
+            )?;
+        }
+        if created {
+            let mut event = Map::new();
+            event.insert("group".into(), Value::String(group.to_string()));
+            event.insert("cipher".into(), Value::String("btn".to_string()));
+            event.insert(
+                "publisher_identity".into(),
+                Value::String(self.did().to_string()),
+            );
+            event.insert(
+                "added_at".into(),
+                Value::String(current_timestamp_rfc3339()),
+            );
+            self.info("tn.group.added", event)?;
+        }
+
+        Ok(EnsureGroupResult {
+            group: group.to_string(),
+            fields,
+            created,
+            changed,
+        })
+    }
+
     /// Mint a fresh kit for `recipient_did` across one or more groups
     /// and bundle them into a single `.tnpkg` at `out_path`. Backs
     /// `tn.bundle_for_recipient()`.
@@ -65,6 +151,22 @@ impl Runtime {
         out_path: &Path,
         groups: Option<&[&str]>,
     ) -> Result<PathBuf> {
+        self.bundle_for_recipient_with_options(recipient_did, out_path, groups, false)
+    }
+
+    /// Mint and bundle reader kits, optionally sealing the bundle body for the
+    /// recipient DID.
+    pub fn bundle_for_recipient_with_options(
+        &self,
+        recipient_did: &str,
+        out_path: &Path,
+        groups: Option<&[&str]>,
+        seal_for_recipient: bool,
+    ) -> Result<PathBuf> {
+        if seal_for_recipient {
+            crate::recipient_seal::normalize_recipient_dids(&[recipient_did.to_string()])?;
+        }
+
         let mut requested: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         match groups {
@@ -123,6 +225,13 @@ impl Runtime {
             scope: None,
             confirm_includes_secrets: false,
             groups: Some(requested.clone()),
+            keystore: Some(td.path().to_path_buf()),
+            encrypt_body_with: None,
+            seal_for_recipients: if seal_for_recipient {
+                vec![recipient_did.to_string()]
+            } else {
+                Vec::new()
+            },
             package_body: None,
         };
         let out = self.export(out_path, opts)?;
@@ -202,16 +311,13 @@ impl Runtime {
             scope: None,
             confirm_includes_secrets: false,
             groups: Some(requested.clone()),
+            keystore: Some(td.path().to_path_buf()),
+            encrypt_body_with: None,
+            seal_for_recipients: Vec::new(),
             package_body: None,
         };
-        // `export` already drops the temp-dir kits into the bundle. We
-        // pass `keystore=None` because export reads from the runtime's
-        // own keystore — but the kits were minted into the temp dir.
-        // Workaround: copy them into the keystore (admin_add_recipient
-        // already wrote the actual tnpkg, but the *.mykit goes to the
-        // path we pass). The export reads from `self.keystore` so the
-        // mykit files for the requested groups are already there from
-        // the side-effects of admin_add_recipient.
+        // Keep the tempdir alive until export completes; `keystore` above
+        // points export at the freshly minted recipient kits.
         let out = self.export(out_path, opts)?;
 
         // Best-effort label sidecar. Routed through `self.storage` so
@@ -527,6 +633,118 @@ impl Runtime {
         Ok(pub_cipher.state().revoked_count())
     }
 
+    /// Read admin/governance events from every log source this ceremony may
+    /// have used.
+    ///
+    /// Everyday reads intentionally default to the active session log. Admin
+    /// replay is different: recipient and vault lifecycle state must survive
+    /// process boundaries and log splitting. That means replay needs to scan
+    /// the main log, protocol-events-location logs, and templated log siblings
+    /// when the ceremony routes events by type/date/id.
+    fn read_admin_replay_raw(&self) -> Result<Vec<super::ReadEntry>> {
+        let mut entries = Vec::new();
+        for path in self.admin_replay_log_paths() {
+            let mut from_path = self.read_from(&path)?;
+            entries.append(&mut from_path);
+        }
+        entries.sort_by(|a, b| {
+            let a_ts = a
+                .envelope
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let b_ts = b
+                .envelope
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            a_ts.cmp(b_ts).then_with(|| {
+                let a_event_id = a
+                    .envelope
+                    .get("event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let b_event_id = b
+                    .envelope
+                    .get("event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                a_event_id.cmp(b_event_id)
+            })
+        });
+        Ok(entries)
+    }
+
+    fn admin_replay_log_paths(&self) -> Vec<PathBuf> {
+        let mut seen = BTreeSet::new();
+        let mut paths = Vec::new();
+        self.push_existing_log_path(&mut paths, &mut seen, self.log_path.clone());
+
+        let yaml_dir = self.yaml_path.parent().unwrap_or(Path::new("."));
+        if let Ok(template) = crate::path_template::PathTemplate::parse(
+            &self.cfg.logs.path,
+            yaml_dir,
+            &self.cfg.ceremony.id,
+            self.device.did(),
+        ) {
+            self.push_template_log_paths(&mut paths, &mut seen, &template);
+        }
+
+        let pel = &self.cfg.ceremony.protocol_events_location;
+        if pel != "main_log" {
+            if let Ok(template) = crate::path_template::PathTemplate::parse(
+                pel,
+                yaml_dir,
+                &self.cfg.ceremony.id,
+                self.device.did(),
+            ) {
+                self.push_template_log_paths(&mut paths, &mut seen, &template);
+            }
+        }
+
+        paths
+    }
+
+    fn push_template_log_paths(
+        &self,
+        paths: &mut Vec<PathBuf>,
+        seen: &mut BTreeSet<PathBuf>,
+        template: &crate::path_template::PathTemplate,
+    ) {
+        if !template.is_templated() {
+            self.push_existing_log_path(paths, seen, template.render("", ""));
+            return;
+        }
+
+        let sample = template.render("__admin_probe__", "__admin_probe__");
+        let Some(parent_dir) = sample.parent() else {
+            return;
+        };
+        let Ok(entries) = self.storage.list(parent_dir) else {
+            return;
+        };
+        for entry in entries {
+            if entry.extension().and_then(|ext| ext.to_str()) == Some("ndjson") {
+                self.push_existing_log_path(paths, seen, entry);
+            }
+        }
+    }
+
+    fn push_existing_log_path(
+        &self,
+        paths: &mut Vec<PathBuf>,
+        seen: &mut BTreeSet<PathBuf>,
+        path: PathBuf,
+    ) {
+        if !self.storage.exists(&path) {
+            return;
+        }
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if seen.insert(key) {
+            paths.push(path);
+        }
+    }
+
     /// Return the current recipient roster for `group` by replaying the
     /// log through the admin reducer. Backs `tn.recipients()`; mirrors
     /// Python `tn.recipients(group, …)` and TypeScript
@@ -558,7 +776,7 @@ impl Runtime {
         let mut active: BTreeMap<u64, RecipientEntry> = BTreeMap::new();
         let mut revoked: BTreeMap<u64, RecipientEntry> = BTreeMap::new();
 
-        for entry in self.read_raw()? {
+        for entry in self.read_admin_replay_raw()? {
             let event_type = entry
                 .envelope
                 .get("event_type")
@@ -667,7 +885,7 @@ impl Runtime {
         // Vault links keyed by vault_did.
         let mut vault_links_by_did: BTreeMap<String, AdminVaultLink> = BTreeMap::new();
 
-        for entry in self.read_raw()? {
+        for entry in self.read_admin_replay_raw()? {
             let event_type = entry
                 .envelope
                 .get("event_type")
@@ -977,4 +1195,175 @@ impl Runtime {
         };
         self.emit("info", "tn.vault.unlinked", fields)
     }
+}
+
+fn normalize_fields(fields: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for field in fields {
+        let field = field.as_ref().trim();
+        if field.is_empty() {
+            return Err(Error::InvalidConfig(
+                "admin_ensure_group: field names must not be empty".into(),
+            ));
+        }
+        if seen.insert(field.to_string()) {
+            out.push(field.to_string());
+        }
+    }
+    Ok(out)
+}
+
+fn group_declared(doc: &YamlValue, group: &str) -> Result<bool> {
+    let root = doc
+        .as_mapping()
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml root must be a mapping".into()))?;
+    let Some(groups) = root
+        .get(YamlValue::String("groups".into()))
+        .and_then(YamlValue::as_mapping)
+    else {
+        return Ok(false);
+    };
+    Ok(groups.contains_key(YamlValue::String(group.to_string())))
+}
+
+#[allow(clippy::similar_names)]
+fn ensure_yaml_group(
+    doc: &mut YamlValue,
+    group: &str,
+    publisher_did: &str,
+    fields: &[String],
+) -> Result<bool> {
+    let root = doc
+        .as_mapping_mut()
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml root must be a mapping".into()))?;
+    let groups_yaml_key = YamlValue::String("groups".into());
+    if !root.contains_key(&groups_yaml_key) {
+        root.insert(
+            groups_yaml_key.clone(),
+            YamlValue::Mapping(Default::default()),
+        );
+    }
+    let groups = root
+        .get_mut(&groups_yaml_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml groups must be a mapping".into()))?;
+
+    let mut changed = false;
+    let group_yaml_key = YamlValue::String(group.to_string());
+    if !groups.contains_key(&group_yaml_key) {
+        groups.insert(group_yaml_key.clone(), btn_group_spec(publisher_did)?);
+        changed = true;
+    }
+    let group_spec = groups
+        .get_mut(&group_yaml_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| Error::InvalidConfig(format!("groups[{group:?}] must be a mapping")))?;
+
+    let fields_yaml_key = YamlValue::String("fields".into());
+    if !group_spec.contains_key(&fields_yaml_key) {
+        group_spec.insert(fields_yaml_key.clone(), YamlValue::Sequence(Vec::new()));
+        changed = true;
+    }
+    let routed = group_spec
+        .get_mut(&fields_yaml_key)
+        .and_then(YamlValue::as_sequence_mut)
+        .ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "admin_ensure_group: groups[{group:?}].fields must be a list when present"
+            ))
+        })?;
+    for field in fields {
+        if !routed
+            .iter()
+            .any(|item| item.as_str() == Some(field.as_str()))
+        {
+            routed.push(YamlValue::String(field.clone()));
+            changed = true;
+        }
+    }
+
+    let flat_key = YamlValue::String("fields".into());
+    if !root.contains_key(&flat_key) {
+        root.insert(flat_key.clone(), YamlValue::Mapping(Default::default()));
+        changed = true;
+    }
+    let flat = root
+        .get_mut(&flat_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml top-level fields must be a mapping".into()))?;
+    for field in fields {
+        let field_yaml_key = YamlValue::String(field.clone());
+        let route_value = serde_yml::to_value(serde_json::json!({ "group": group }))?;
+        match flat.get(&field_yaml_key) {
+            Some(existing) if yaml_to_json(existing) == yaml_to_json(&route_value) => {}
+            _ => {
+                flat.insert(field_yaml_key, route_value);
+                changed = true;
+            }
+        }
+    }
+
+    Ok(changed)
+}
+
+fn btn_group_spec(publisher_did: &str) -> Result<YamlValue> {
+    serde_yml::to_value(serde_json::json!({
+        "policy": "private",
+        "cipher": "btn",
+        "recipients": [
+            { "recipient_identity": publisher_did }
+        ],
+        "index_epoch": 0
+    }))
+    .map_err(Error::from)
+}
+
+fn resolve_keystore_path(doc: &YamlValue, yaml_path: &Path) -> Result<PathBuf> {
+    let root = doc
+        .as_mapping()
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml root must be a mapping".into()))?;
+    let rel = root
+        .get(YamlValue::String("keystore".into()))
+        .and_then(YamlValue::as_mapping)
+        .and_then(|keystore| keystore.get(YamlValue::String("path".into())))
+        .and_then(YamlValue::as_str)
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml is missing keystore.path".into()))?;
+    let path = PathBuf::from(rel);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(yaml_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path))
+    }
+}
+
+fn mint_btn_group(keystore: &Path, group: &str) -> Result<()> {
+    std::fs::create_dir_all(keystore)?;
+    let state_path = keystore.join(format!("{group}.btn.state"));
+    let mykit_path = keystore.join(format!("{group}.btn.mykit"));
+
+    if state_path.exists() && mykit_path.exists() {
+        return Ok(());
+    }
+    if state_path.exists() != mykit_path.exists() {
+        return Err(Error::InvalidConfig(format!(
+            "admin_ensure_group: partial btn key material exists for group {group:?}"
+        )));
+    }
+
+    let mut seed = [0_u8; 32];
+    rand_core::OsRng.fill_bytes(&mut seed);
+    let mut publisher = tn_btn::PublisherState::setup_with_seed(tn_btn::Config, seed)?;
+    let kit = publisher.mint()?;
+
+    std::fs::write(state_path, publisher.to_bytes())?;
+    std::fs::write(mykit_path, kit.to_bytes())?;
+    Ok(())
+}
+
+fn yaml_to_json(value: &YamlValue) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
 }

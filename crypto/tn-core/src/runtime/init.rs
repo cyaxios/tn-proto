@@ -22,7 +22,7 @@ use crate::log_file::LogFileWriter;
 use crate::signing::DeviceKey;
 use crate::{Error, Result};
 
-use super::cipher_build::{build_group_states, write_fresh_btn_ceremony};
+use super::cipher_build::{build_group_states, write_fresh_btn_ceremony, FreshBtnCeremonyOptions};
 use super::log_rotation::{
     build_pel_writer, path_with_backup_suffix, read_rotation_config, resolve_pel_static,
     rotate_log_on_session_start, rotation_first_time_this_process, scan_for_ceremony_init,
@@ -461,6 +461,29 @@ impl Runtime {
         Ok(rt)
     }
 
+    /// Reload this runtime from its current `tn.yaml`, preserving ownership
+    /// metadata such as the tempdir created by [`Runtime::ephemeral`].
+    ///
+    /// This is useful after admin operations mutate `tn.yaml`: callers get a
+    /// freshly parsed config and rebuilt group state without accidentally
+    /// dropping the temporary ceremony directory for ephemeral runtimes.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::init_with_options`].
+    pub fn reload_with_options(
+        &mut self,
+        storage: Arc<dyn crate::storage::Storage>,
+        opts: RuntimeInitOptions,
+    ) -> Result<()> {
+        let yaml_path = self.yaml_path.clone();
+        let owned_tempdir = self.owned_tempdir.take();
+        let mut next = Self::init_with_options(&yaml_path, storage, opts)?;
+        next.owned_tempdir = owned_tempdir;
+        *self = next;
+        Ok(())
+    }
+
     /// Run the best-effort side effects after a `Runtime` is constructed in
     /// [`Runtime::init_with_options`]: attach the default stdout handler,
     /// honor a yaml-baked `ceremony.log_level`, and on a fresh ceremony
@@ -610,7 +633,8 @@ impl Runtime {
             .tempdir()
             .map_err(Error::Io)?;
         let yaml_path = td.path().join("tn.yaml");
-        write_fresh_btn_ceremony(td.path()).map_err(Error::Io)?;
+        write_fresh_btn_ceremony(td.path(), FreshBtnCeremonyOptions::ephemeral())
+            .map_err(Error::Io)?;
 
         let mut rt = Self::init(&yaml_path)?;
         rt.owned_tempdir = Some(td);
