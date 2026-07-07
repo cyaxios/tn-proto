@@ -193,17 +193,23 @@ def test_seal_aad_binds_and_roundtrips(tmp_path):
         tn.unseal(tampered)
 
 
-def test_unseal_malformed_sources_raise_unsealerror(tmp_path):
-    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
-    for bad in (
-        "not json at all",
-        "[1,2,3]",
-        "{}",
-        b"\xff\xfe",
-        {"event_type": "x"},
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param("not json at all", id="not-json"),
+        pytest.param("[1,2,3]", id="json-array"),
+        pytest.param("{}", id="empty-object"),
+        pytest.param(b"\xff\xfe", id="invalid-utf8"),
+        pytest.param({"event_type": "x"}, id="missing-most-keys"),
         # four original keys present but timestamp/event_id/sequence
-        # missing — the strict shape now requires all seven.
-        {"device_identity": "d", "event_type": "x", "row_hash": "h", "signature": "s"},
-    ):
-        with pytest.raises(UnsealError):
-            tn.unseal(bad)
+        # missing — the strict shape requires all seven.
+        pytest.param(
+            {"device_identity": "d", "event_type": "x", "row_hash": "h", "signature": "s"},
+            id="missing-3-of-7",
+        ),
+    ],
+)
+def test_unseal_malformed_sources_raise_unsealerror(tmp_path, bad):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    with pytest.raises(UnsealError):
+        tn.unseal(bad)
