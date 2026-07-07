@@ -310,13 +310,16 @@ def test_as_recipient_single_kit_override(tmp_path):
 
 
 def test_seal_unseal_btn_ceremony(tmp_path):
-    # btn-only ceremonies dispatch emits through the Rust runtime; seal
-    # builds its envelope pure-Python regardless. The round-trip proves
-    # the Python-side btn encrypt and the Rust-side emit coexist without
-    # corrupting the publisher sealing state both paths draw on.
+    # btn-only ceremonies dispatch tn.log through the Rust runtime, but
+    # seal's receipt is an internal event and — like every internal
+    # tn.* emit in the codebase — goes through the pure-Python runtime.
+    # So this round-trip coexists a Python-side btn encrypt (seal) and
+    # Python-side receipt emit with a Rust-dispatched probe emit
+    # (tn.log below) against the same publisher sealing state, proving
+    # neither path corrupts the other.
     tn.init(tmp_path / "tn.yaml", cipher="btn")
-    sealed = tn.seal("obj.test.v1", x=1)  # receipt on: Rust emit follows the Python encrypt
-    row = tn.log("probe.v1", y=2)
+    sealed = tn.seal("obj.test.v1", x=1)  # receipt on: Python-side internal emit
+    row = tn.log("probe.v1", y=2)  # the Rust emit path (btn-only dispatch)
     assert row is not None
     entry = tn.unseal(sealed)
     assert entry.fields["x"] == 1
