@@ -94,7 +94,7 @@ pub const CATALOG: &[AdminEventKind] = &[
         // exclude the reserved scalar — so `tn.ceremony.init` failed
         // row_hash verification cross-SDK. The reducer reads
         // `device_identity` from the envelope scalar, so it needs no
-        // catalog field. See `on_ceremony_init` + docs/spec/row-hash.md.
+        // catalog field. See `on_ceremony_init`.
         schema: &[
             ("ceremony_id", FieldType::String),
             ("cipher", FieldType::String),

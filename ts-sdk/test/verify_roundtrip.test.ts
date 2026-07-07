@@ -5,7 +5,7 @@
 // `interop_driver.mjs`. This file fills that gap with a genuine SAME-language
 // round-trip: spawn the REAL `bin/tn-js.mjs seal` subprocess, take its EXACT
 // stdout ndjson, pipe it to the REAL `bin/tn-js.mjs verify` subprocess, and
-// assert ok:true. See docs/cli-test-plans/verify.md.
+// assert ok:true.
 //
 // PASS: genuine seal output verifies ok:true; row_hash / sequence echoed.
 // FAIL cases a correct verify MUST catch: tampered public field, tampered

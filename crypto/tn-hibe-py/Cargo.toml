@@ -1,0 +1,18 @@
+[package]
+name = "tn-hibe-py"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+description = "Python bindings for tn-hibe (BBG HIBE cipher), merged into the tn._native extension."
+license.workspace = true
+
+[lib]
+# Unique lib name for the same reason as tn_btn_py: the Python module name
+# is owned by the umbrella cdylib (`tn._native`), not this rlib.
+name = "tn_hibe_py"
+crate-type = ["rlib"]
+
+[dependencies]
+tn-hibe = { path = "../tn-hibe" }
+pyo3 = { version = "0.24", features = ["abi3-py39"] }
+rand_core = { workspace = true }

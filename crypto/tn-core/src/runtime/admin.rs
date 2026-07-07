@@ -19,7 +19,7 @@ use crate::admin_reduce::{reduce as admin_reduce_envelope, StateDelta};
 use crate::cipher::GroupCipher;
 use crate::{Error, Result};
 
-use super::cipher_build::rebuild_btn_cipher;
+use super::cipher_build::{build_cipher_with_admin_with_storage, rebuild_btn_cipher};
 use super::read::{apply_schema_defaults, merge_envelope};
 use super::util::{current_timestamp_rfc3339, sha2_256};
 use super::{
@@ -28,6 +28,38 @@ use super::{
 };
 
 impl Runtime {
+    /// Rebuild a group's cipher from the current on-disk keystore material
+    /// and swap it into the live group table.
+    ///
+    /// Needed when an admin mutation happened OUTSIDE this runtime's own
+    /// native admin verbs — notably the Python-side hibe admin verbs
+    /// (`grant_reader` / `rotate_reader_path` / `revoke_reader`), which
+    /// rewrite `<group>.hibe.{idpath,sk,idpath.history,...}` on disk. This
+    /// runtime caches the cipher at init, so without a reload the next emit
+    /// would still seal to the pre-rotation identity path. The Python admin
+    /// layer calls this after mutating so the in-process native runtime
+    /// picks up the change before the next emit/read.
+    ///
+    /// Only the cipher is swapped (the config-derived `aad_default` and the
+    /// index key are unchanged). Safe to call for any cipher; a no-op if the
+    /// group is unknown.
+    ///
+    /// # Errors
+    ///
+    /// Propagates cipher-construction errors from the keystore reload.
+    pub fn reload_group_cipher(&self, group: &str) -> Result<()> {
+        let Some(spec) = self.cfg.groups.get(group) else {
+            return Ok(());
+        };
+        let (cipher, _btn_admin, _mykit) =
+            build_cipher_with_admin_with_storage(spec, &self.keystore, group, &self.storage)?;
+        if let Some(gstate_arc) = self.groups.get(group) {
+            let mut gstate = gstate_arc.write().expect("group state RwLock poisoned");
+            gstate.cipher = cipher;
+        }
+        Ok(())
+    }
+
     /// Mint a fresh kit for `recipient_did` across one or more groups
     /// and bundle them into a single `.tnpkg` at `out_path`. Backs
     /// `tn.bundle_for_recipient()`.

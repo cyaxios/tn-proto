@@ -606,10 +606,12 @@ impl Runtime {
                                 field_hashes,
                             },
                         );
-                        // Decrypt if we hold a kit for this group.
+                        // Decrypt if we hold a kit for this group, binding the
+                        // reconstructed AAD marker (empty when none was bound).
                         if let Some(gstate_arc) = self.groups.get(k) {
                             let gstate = gstate_arc.read().expect("group state RwLock poisoned");
-                            match gstate.cipher.decrypt(&ct) {
+                            let aad = aad_bytes_for(env, k);
+                            match gstate.cipher.decrypt_with_aad(&ct, &aad) {
                                 Ok(pt) => {
                                     match serde_json::from_slice::<Value>(&pt) {
                                         Ok(pv) => {
@@ -723,7 +725,8 @@ impl Runtime {
                     }
                 };
                 let gstate = gstate_arc.read().expect("group state RwLock poisoned");
-                match gstate.cipher.decrypt(&ct) {
+                let aad = aad_bytes_for(&env, gname);
+                match gstate.cipher.decrypt_with_aad(&ct, &aad) {
                     Ok(pt) => match serde_json::from_slice::<Value>(&pt) {
                         Ok(v) => {
                             plaintext_per_group.insert(gname.clone(), v);
@@ -1017,6 +1020,17 @@ fn recompute_public_fields(
             if envelope_reserved.contains(k.as_str()) {
                 continue;
             }
+            // `tn_aad` is the auto-injected authenticated AAD echo (a
+            // canonical string). The writer put it in the public fields that
+            // feed row_hash, but it is NOT in the user's `public_fields`
+            // list, so the recompute must fold it back in explicitly or the
+            // row_hash would diverge. Mirrors the pure pipeline's fold-back.
+            if k == "tn_aad" {
+                if v.is_string() {
+                    public_out.insert(k.clone(), v.clone());
+                }
+                continue;
+            }
             if v.as_object().is_some_and(|o| o.contains_key("ciphertext")) {
                 continue;
             }
@@ -1030,6 +1044,30 @@ fn recompute_public_fields(
         }
     }
     public_out
+}
+
+/// Reconstruct a group's AAD bytes from a record's public `tn_aad` echo.
+///
+/// The writer bound `canonical_bytes(marker)` to the group's body and echoed
+/// the `{group: marker}` map as a canonical JSON string under `tn_aad`. Parse
+/// it and re-canonicalize this group's marker so `decrypt_with_aad` verifies;
+/// an absent / empty / malformed entry yields empty bytes (nothing was
+/// bound). Mirrors `tn.reader._aad_bytes_for` and the TS `aadBytesFor`.
+fn aad_bytes_for(env: &Value, group: &str) -> Vec<u8> {
+    let raw = match env.get("tn_aad").and_then(Value::as_str) {
+        Some(s) if !s.is_empty() => s,
+        _ => return Vec::new(),
+    };
+    let binding: Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    match binding.get(group) {
+        Some(marker @ Value::Object(o)) if !o.is_empty() => {
+            crate::canonical::canonical_bytes(marker).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Flatten a `ReadEntry` into a single JSON object: envelope fields plus

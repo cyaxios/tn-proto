@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -80,7 +89,7 @@ def _published_events() -> list:
 
 def test_init_with_no_policy_emits_no_event(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     events = _published_events()
     assert events == []
 
@@ -88,7 +97,7 @@ def test_init_with_no_policy_emits_no_event(tmp_path):
 def test_first_init_with_policy_emits_event(tmp_path):
     yaml = tmp_path / "tn.yaml"
     _write_policy(tmp_path, _POLICY_V1)
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     events = _published_events()
     assert len(events) == 1
     assert events[0].fields["policy_uri"] == ".tn/config/agents.md"
@@ -100,12 +109,12 @@ def test_first_init_with_policy_emits_event(tmp_path):
 def test_second_init_unchanged_does_not_re_emit(tmp_path):
     yaml = tmp_path / "tn.yaml"
     _write_policy(tmp_path, _POLICY_V1)
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     first = _published_events()
     assert len(first) == 1
     tn.flush_and_close()
 
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     second = _published_events()
     assert len(second) == 1, (
         "policy unchanged → no second tn.agents.policy_published event"
@@ -115,14 +124,14 @@ def test_second_init_unchanged_does_not_re_emit(tmp_path):
 def test_init_with_changed_policy_emits_new_event(tmp_path):
     yaml = tmp_path / "tn.yaml"
     _write_policy(tmp_path, _POLICY_V1)
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     first = _published_events()
     h1 = first[0].fields["content_hash"]
     tn.flush_and_close()
 
     # Edit the policy.
     _write_policy(tmp_path, _POLICY_V2)
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     events = _published_events()
     assert len(events) == 2
     assert events[1].fields["content_hash"] != h1

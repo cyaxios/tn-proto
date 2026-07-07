@@ -16,6 +16,15 @@ disk; pytest's ``-m "not integration"`` filter excludes it.
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import os
 from pathlib import Path
 
@@ -34,7 +43,7 @@ def _new_ceremony(tmp_path: Path, name: str) -> Path:
     yaml_path = tmp_path / f"{name}.yaml"
     tn.flush_and_close()
     # Each call mints its own ceremony — separate yaml, separate keystore.
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     return yaml_path
 
@@ -55,7 +64,7 @@ def test_stage6_cross_publisher_btn(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     student_yaml = _new_ceremony(student_dir, "register")
 
     # Open the publisher's ceremony and emit a small log.
-    tn.init(student_yaml, cipher="btn")
+    tn.init(student_yaml, cipher=_workflow_cipher("btn"))
     tn.info("sale.line", item="apple", quantity=2, unit_price="1.50")
     tn.info("sale.line", item="bread", quantity=1, unit_price="3.25")
     tn.info("sale.total", subtotal="6.25")
@@ -97,7 +106,7 @@ def test_stage6_cross_publisher_btn(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.chdir(professor_dir)
     professor_yaml = _new_ceremony(professor_dir, "prof")
 
-    tn.init(professor_yaml, cipher="btn")
+    tn.init(professor_yaml, cipher=_workflow_cipher("btn"))
     receipt = tn.pkg.absorb(tnpkg_path)
     assert receipt.kind == "kit_bundle", f"unexpected absorb kind: {receipt.kind}"
     assert receipt.accepted_count >= 1, f"absorb did not apply kit: {receipt}"
@@ -149,7 +158,7 @@ def test_stage6_recipients_persists_across_processes(tmp_path: Path, monkeypatch
     yaml_path = _new_ceremony(work_dir, "register")
 
     # First "process": add a recipient.
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     bundle_dir = tmp_path / "bundle"
     bundle_dir.mkdir()
     kit_path = bundle_dir / "default.btn.mykit"
@@ -165,7 +174,7 @@ def test_stage6_recipients_persists_across_processes(tmp_path: Path, monkeypatch
 
     # Second "process": re-init and ask for recipients again. Without the
     # all_runs=True fix in _read_raw_admin_aware this returns [].
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     cross_run_recs = tn.admin.recipients("default")
     tn.flush_and_close()
 

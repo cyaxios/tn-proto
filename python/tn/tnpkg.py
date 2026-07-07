@@ -33,17 +33,6 @@ Kinds shipped in v1:
 Cross-implementation kind-recognition state: Rust + TS lag on
 ``identity_seed`` and ``project_seed`` at the type level even though
 all three implementations handle both kinds at runtime.
-
-See Also:
-    `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
-        Authoritative wire spec — manifest schema + signature.
-    `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
-        Sealed body frame for bundles whose body is encrypted.
-    `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
-        Per-recipient BEK seal inside ``state.body_encryption``.
-    `docs/spec/signing.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md>`_:
-        Manifest signatures use standard base64 with padding (distinct
-        from envelope signatures' URL-safe-no-pad encoding).
 """
 
 from __future__ import annotations
@@ -149,15 +138,11 @@ class TnpkgManifest:
 
         Returns:
             UTF-8 canonical-bytes of the manifest minus the signature
-            field. See
-            `docs/spec/canonical-bytes.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/canonical-bytes.md>`_
-            for the encoding rule.
+            field.
 
         See Also:
             :meth:`sign`: Produces ``manifest_signature_b64`` over
                 these bytes.
-            `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
-                Manifest signature spec.
         """
         return bytes(_tn_core.manifest_signing_bytes(_manifest_doc_from_dataclass(self)))
 
@@ -167,8 +152,7 @@ class TnpkgManifest:
         Computes ``sk.sign(self.signing_bytes())`` and writes the
         result into ``manifest_signature_b64`` as **standard base64
         with padding** (distinct from envelope signatures' URL-safe-
-        no-pad encoding — see
-        `docs/spec/signing.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md>`_).
+        no-pad encoding).
 
         Caller is responsible for ensuring ``publisher_identity``
         already names the device whose key is ``sk``. We do NOT
@@ -207,8 +191,6 @@ class TnpkgManifest:
             :meth:`signing_bytes`: The exact bytes this signs.
             :func:`tn.tnpkg._verify_manifest_signature`: The verify
                 side.
-            `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
-                Manifest signature spec.
         """
         sig = sk.sign(self.signing_bytes())
         self.manifest_signature_b64 = base64.b64encode(sig).decode("ascii")

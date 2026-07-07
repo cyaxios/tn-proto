@@ -71,6 +71,10 @@ pub(crate) struct GroupState {
     /// init cost (~2-3 µs per field) every emit. Built once at
     /// runtime construction, never mutated.
     pub(crate) hmac_template: hmac::Hmac<sha2::Sha256>,
+    /// Default AAD marker for this group (from `groups.<name>.aad`),
+    /// overlaid by any per-emit marker and bound into the body AEAD. Empty
+    /// means the group binds no marker (byte-identical to a no-AAD group).
+    pub(crate) aad_default: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The crate's primary interface: one stateful runtime per ceremony.

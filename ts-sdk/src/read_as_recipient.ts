@@ -6,21 +6,26 @@
 // survey (TS had no equivalent verb; cross-publisher reads on TS had no
 // documented path). Pairs with the auto-routing path in `client.read`.
 //
-// Dispatches on the kit file present in `keystorePath`:
+// Dispatches on the kit files present in `keystorePath`:
 //
 //   <group>.btn.mykit   → btn cipher (subset-difference broadcast)
-//   <group>.jwe.mykey   → JWE cipher  (NOT YET IMPLEMENTED in TS)
+//   <group>.hibe.sk     → hibe cipher (BBG hierarchical IBE reader key)
+//   <group>.jwe.mykey   → JWE cipher  (async JOSE — read via readAsync)
 //
-// btn is the shipping default cipher and the one this verb supports
-// today. JWE-keystore reads should fall back to spinning up a TNClient
-// against a yaml that declares the JWE group.
+// The keystore can hold keys for the SAME group name under several ciphers
+// at once (e.g. the reader's own btn ceremony plus an absorbed hibe
+// grant). The log line doesn't say which cipher sealed it, so every
+// candidate is tried per entry — same posture as Python's
+// tn.reader.read_as_recipient. This synchronous foreign-read path covers btn
+// and hibe; jwe groups (async JOSE) are opened through readAsync.
 
 import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { join } from "node:path";
 
 import { verifyChainLink } from "./core/chain.js";
-import { decryptGroup } from "./core/decrypt.js";
+import { aadBytesFor, decryptGroup, decryptGroupAsync, type GroupKits } from "./core/decrypt.js";
+import { hibeCandidateKeys, loadHibeGroup } from "./runtime/hibe_group.js";
 import { signatureFromB64, verify } from "./core/signing.js";
 import { asDid, asSignatureB64 } from "./core/types.js";
 
@@ -59,6 +64,47 @@ export interface ForeignReadEntry {
  * Decryption happens only for `group` (default `"default"`). Other groups
  * the publisher used appear in `envelope` but not `plaintext`.
  */
+/** Assemble btn + hibe reader-kit candidates a keystore holds for a foreign
+ *  group's log (each is tried per line; the first that opens wins). */
+function btnHibeCandidates(keystorePath: string, group: string): GroupKits[] {
+  const candidates: GroupKits[] = [];
+  const btnKitPath = join(keystorePath, `${group}.btn.mykit`);
+  const hibeSkPath = join(keystorePath, `${group}.hibe.sk`);
+  if (existsSync(btnKitPath)) {
+    candidates.push({ cipher: "btn", kits: [new Uint8Array(readFileSync(btnKitPath))] });
+  }
+  if (existsSync(hibeSkPath)) {
+    const mat = loadHibeGroup(keystorePath, group);
+    if (mat !== null) candidates.push({ cipher: "hibe", kits: hibeCandidateKeys(mat), mpk: mat.mpk });
+  }
+  return candidates;
+}
+
+/** The jwe reader-kit (`<group>.jwe.mykey`) as a GroupKits, or null if absent. */
+function jweReaderKit(keystorePath: string, group: string): GroupKits | null {
+  const p = join(keystorePath, `${group}.jwe.mykey`);
+  return existsSync(p) ? { cipher: "jwe", kits: [new Uint8Array(readFileSync(p))] } : null;
+}
+
+/** Verify a foreign envelope's Ed25519 signature over its row_hash. */
+function verifyForeignSig(env: Record<string, unknown>): boolean {
+  const envDid = env["device_identity"];
+  const envSig = env["signature"];
+  const envRow = env["row_hash"];
+  if (typeof envDid !== "string" || typeof envSig !== "string" || typeof envRow !== "string") {
+    return false;
+  }
+  try {
+    return verify(
+      asDid(envDid),
+      new Uint8Array(Buffer.from(envRow, "utf8")),
+      signatureFromB64(asSignatureB64(envSig)),
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function* readAsRecipient(
   logPath: string,
   keystorePath: string,
@@ -68,25 +114,23 @@ export function* readAsRecipient(
   const verifySigs = opts.verifySignatures ?? true;
   const expectGenesis = opts.expectGenesis ?? false;
 
-  const btnKitPath = join(keystorePath, `${group}.btn.mykit`);
-  const jweKeyPath = join(keystorePath, `${group}.jwe.mykey`);
-  if (!existsSync(btnKitPath)) {
-    if (existsSync(jweKeyPath)) {
+  // jwe is async-only, so this sync path rejects a jwe-only keystore.
+  const candidates = btnHibeCandidates(keystorePath, group);
+  if (candidates.length === 0) {
+    if (jweReaderKit(keystorePath, group) !== null) {
       throw new Error(
-        `readAsRecipient: cipher=jwe is not implemented in the TS SDK. ` +
-          `For JWE foreign reads, use the Python tn-proto package or ` +
-          `wait for the upcoming TS JWE port.`,
+        `readAsRecipient is synchronous and cannot open jwe groups (the JOSE ` +
+          `library is async). Use readAsRecipientAsync() (or tn.readAsync({asRecipient})).`,
       );
     }
     throw new Error(
       `readAsRecipient: no recipient kit for group ${JSON.stringify(group)} ` +
-        `in ${keystorePath}. Looked for ${group}.btn.mykit (btn) and ` +
-        `${group}.jwe.mykey (jwe). If you absorbed a kit_bundle, the kit ` +
-        `lands in your ceremony's keystore (cfg.keystorePath) — point ` +
-        `keystorePath there.`,
+        `in ${keystorePath}. Looked for ${group}.btn.mykit (btn), ` +
+        `${group}.hibe.sk (hibe), and ${group}.jwe.mykey (jwe). If you ` +
+        `absorbed a kit_bundle, the kit lands in your ceremony's keystore ` +
+        `(cfg.keystorePath) — point keystorePath there.`,
     );
   }
-  const kit = new Uint8Array(readFileSync(btnKitPath));
 
   const text = readFileSync(logPath, "utf8");
   const prevHashByType = new Map<string, string>();
@@ -124,34 +168,105 @@ export function* readAsRecipient(
       const ct = gObj["ciphertext"];
       if (typeof ct === "string") {
         const ctBytes = new Uint8Array(Buffer.from(ct, "base64"));
-        plaintext[group] = decryptGroup(
-          { ct: ctBytes },
-          { cipher: "btn", kits: [kit] },
-        ) as Record<string, unknown>;
+        const aadBytes = aadBytesFor(env, group);
+        // Try each cipher's kit set; keep the first real plaintext. When
+        // nothing opens, surface the last marker ($no_read_key etc.).
+        let result: Record<string, unknown> | undefined;
+        for (const kits of candidates) {
+          const attempt = decryptGroup({ ct: ctBytes, aad: aadBytes }, kits) as Record<
+            string,
+            unknown
+          >;
+          result = attempt;
+          if (!("$no_read_key" in attempt) && !("$unsupported_cipher" in attempt)) break;
+        }
+        plaintext[group] = result ?? { $no_read_key: true };
       }
     }
 
     // Signature verification (optional but on by default).
-    let sigOk = true;
-    if (verifySigs) {
-      const envDid = env["device_identity"];
-      const envSig = env["signature"];
-      if (typeof envDid !== "string" || typeof envSig !== "string" || typeof envRow !== "string") {
-        sigOk = false;
-      } else {
-        try {
-          const sig = signatureFromB64(asSignatureB64(envSig));
-          sigOk = verify(asDid(envDid), new Uint8Array(Buffer.from(envRow, "utf8")), sig);
-        } catch {
-          sigOk = false;
-        }
-      }
-    }
+    const sigOk = verifySigs ? verifyForeignSig(env) : true;
 
     yield {
       envelope: env,
       plaintext,
       valid: { signature: sigOk, chain: chainOk },
     };
+  }
+}
+
+/**
+ * Async sibling of {@link readAsRecipient} that also decrypts `cipher: jwe`
+ * foreign logs (panva/jose is async). Dispatches on the reader kit files a
+ * keystore holds — `.btn.mykit` (btn), `.hibe.sk` (hibe), `.jwe.mykey` (jwe) —
+ * and tries each per line, so a party who absorbed any of them can read the
+ * publisher's log. This is the path an absorbed jwe recipient uses.
+ */
+export async function* readAsRecipientAsync(
+  logPath: string,
+  keystorePath: string,
+  opts: ReadAsRecipientOptions = {},
+): AsyncGenerator<ForeignReadEntry, void, void> {
+  const group = opts.group ?? "default";
+  const verifySigs = opts.verifySignatures ?? true;
+  const expectGenesis = opts.expectGenesis ?? false;
+
+  const candidates = btnHibeCandidates(keystorePath, group);
+  const jweKit = jweReaderKit(keystorePath, group);
+  if (jweKit !== null) candidates.push(jweKit);
+  if (candidates.length === 0) {
+    throw new Error(
+      `readAsRecipientAsync: no recipient kit for group ${JSON.stringify(group)} in ` +
+        `${keystorePath}. Looked for ${group}.btn.mykit (btn), ${group}.hibe.sk (hibe), ` +
+        `and ${group}.jwe.mykey (jwe). Absorb a kit for this group first.`,
+    );
+  }
+
+  const text = readFileSync(logPath, "utf8");
+  const prevHashByType = new Map<string, string>();
+  for (const rawLine of text.split(/\r?\n/)) {
+    const s = rawLine.trim();
+    if (!s) continue;
+    let env: Record<string, unknown>;
+    try {
+      env = JSON.parse(s) as Record<string, unknown>;
+    } catch {
+      throw new Error(`readAsRecipientAsync: invalid JSON line: ${rawLine.slice(0, 120)}`);
+    }
+    const eventType = env["event_type"];
+    if (typeof eventType !== "string") continue;
+    const envPrev = env["prev_hash"];
+    const envRow = env["row_hash"];
+    const chainOk = verifyChainLink(
+      prevHashByType,
+      eventType,
+      typeof envPrev === "string" ? envPrev : "",
+      typeof envRow === "string" ? envRow : "",
+      expectGenesis,
+    );
+
+    const plaintext: Record<string, Record<string, unknown>> = {};
+    const gBlock = env[group];
+    if (gBlock && typeof gBlock === "object" && !Array.isArray(gBlock)) {
+      const ct = (gBlock as Record<string, unknown>)["ciphertext"];
+      if (typeof ct === "string") {
+        const ctBytes = new Uint8Array(Buffer.from(ct, "base64"));
+        const aadBytes = aadBytesFor(env, group);
+        let result: Record<string, unknown> | undefined;
+        for (const kits of candidates) {
+          const attempt = (await decryptGroupAsync({ ct: ctBytes, aad: aadBytes }, kits)) as Record<
+            string,
+            unknown
+          >;
+          result = attempt;
+          if (!("$no_read_key" in attempt) && !("$unsupported_cipher" in attempt)) break;
+        }
+        plaintext[group] = result ?? { $no_read_key: true };
+      }
+    }
+
+    const sigOk = verifySigs ? verifyForeignSig(env) : true;
+
+    yield { envelope: env, plaintext, valid: { signature: sigOk, chain: chainOk } };
   }
 }

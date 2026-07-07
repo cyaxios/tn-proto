@@ -26,14 +26,6 @@ can verify without a translation layer. The sign path is deliberately
 single-curve to keep the hot code-path simple. The Rust mirror at
 ``crypto/tn-core/src/signing.rs`` returns ``Ok(false)`` for secp256k1
 without erroring (it does not implement secp256k1 verification).
-
-See Also:
-    `docs/spec/signing.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md>`_:
-        Authoritative wire spec — Ed25519 + did:key + the two
-        base64 conventions (URL-safe-no-pad for envelope signatures,
-        standard-with-pad for manifest signatures).
-    `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_:
-        Where ``signature`` lives in the wire envelope.
 """
 
 from __future__ import annotations
@@ -139,8 +131,6 @@ class DeviceKey:
         See Also:
             :meth:`DeviceKey.from_private_bytes`: Restore from an
                 existing 32-byte seed.
-            `docs/spec/signing.md#identity <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md>`_:
-                DID + key format spec.
         """
         priv = Ed25519PrivateKey.generate()
         priv_bytes = priv.private_bytes(
@@ -186,8 +176,6 @@ class DeviceKey:
 
         See Also:
             :meth:`DeviceKey.generate`: Mint a fresh key from the OS RNG.
-            `docs/spec/signing.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md>`_:
-                Ed25519 + did:key wire spec.
         """
         if len(priv_bytes) != 32:
             raise ValueError("Ed25519 private key seed must be 32 bytes")

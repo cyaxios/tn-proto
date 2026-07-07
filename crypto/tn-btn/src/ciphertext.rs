@@ -85,6 +85,35 @@ pub fn encrypt_to_cover(
     revoked_leaves: &[LeafIndex],
     plaintext: &[u8],
 ) -> Result<Ciphertext> {
+    // Back-compat shim: no additional authenticated data.
+    encrypt_to_cover_with_aad(
+        master_seed,
+        tree_height,
+        publisher_id,
+        epoch,
+        revoked_leaves,
+        &[],
+        plaintext,
+    )
+}
+
+/// Like [`encrypt_to_cover`], but also binds `aad` (additional authenticated
+/// data) into the body's AEAD tag.
+///
+/// The identical `aad` must be supplied to [`decrypt_with_keyset_with_aad`] or
+/// the body will not open. `aad` is authenticated but NOT encrypted, and is NOT
+/// stored in the ciphertext — the caller carries it out of band. Use it to weld
+/// a public, tamper-evident marker (e.g. a "governed" flag) onto a ciphertext:
+/// change or drop the marker and the body fails to decrypt.
+pub fn encrypt_to_cover_with_aad(
+    master_seed: &[u8; KEY_LEN],
+    tree_height: u8,
+    publisher_id: [u8; 32],
+    epoch: u32,
+    revoked_leaves: &[LeafIndex],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Ciphertext> {
     let cover_labels = subset_difference_cover(tree_height, revoked_leaves);
 
     // Fresh random CEK, zeroized on drop.
@@ -108,7 +137,7 @@ pub fn encrypt_to_cover(
     }
 
     let body_nonce = random_nonce();
-    let body = seal(&cek, &body_nonce, plaintext, &[]).map_err(|()| {
+    let body = seal(&cek, &body_nonce, plaintext, aad).map_err(|()| {
         Error::Internal(
             "AES-GCM seal failed — should be unreachable with a fresh 32-byte CEK".into(),
         )
@@ -134,6 +163,20 @@ pub fn encrypt_to_cover(
 /// this ciphertext was produced, or the ciphertext was produced by a
 /// different publisher (subset keys won't match).
 pub fn decrypt_with_keyset(keyset: &ReaderKeyset, ct: &Ciphertext) -> Result<Vec<u8>> {
+    // Back-compat shim: no additional authenticated data.
+    decrypt_with_keyset_with_aad(keyset, ct, &[])
+}
+
+/// Like [`decrypt_with_keyset`], but supplies `aad` to the body AEAD open.
+///
+/// `aad` must match the value passed to [`encrypt_to_cover_with_aad`] at seal
+/// time; otherwise every cover entry fails the tag check and this returns
+/// [`Error::NotEntitled`].
+pub fn decrypt_with_keyset_with_aad(
+    keyset: &ReaderKeyset,
+    ct: &Ciphertext,
+    aad: &[u8],
+) -> Result<Vec<u8>> {
     for entry in &ct.cover {
         if let Some(sk) = keyset.try_subset_key(&entry.label) {
             // Reader is entitled (at least per path-key lookup). Try the
@@ -143,8 +186,9 @@ pub fn decrypt_with_keyset(keyset: &ReaderKeyset, ct: &Ciphertext) -> Result<Vec
                 continue;
             };
             let cek = Zeroizing::new(cek);
-            // Open the body. If AEAD fails, same logic: wrong publisher.
-            let Ok(pt) = open(&cek, &ct.body_nonce, &ct.body, &[]) else {
+            // Open the body. If AEAD fails, same logic: wrong publisher, or the
+            // supplied `aad` doesn't match what the body was sealed under.
+            let Ok(pt) = open(&cek, &ct.body_nonce, &ct.body, aad) else {
                 continue;
             };
             return Ok(pt);
@@ -173,6 +217,49 @@ mod tests {
             let pt = decrypt_with_keyset(&ks, &ct).unwrap();
             assert_eq!(pt, b"broadcast body");
         }
+    }
+
+    #[test]
+    fn aad_governed_flag_binds_to_ciphertext() {
+        // Seal a field with a public "governed" flag bound as AAD.
+        let s = seed(61);
+        let flag: &[u8] = b"governed-by:did:key:zG7x ; policy=sha256:9af3c1";
+        let ct = encrypt_to_cover_with_aad(&s, TREE_HEIGHT, [0; 32], 0, &[], flag, b"PRIZE-abc123")
+            .unwrap();
+        let ks = materialize_reader_keyset(&s, LeafIndex(1), TREE_HEIGHT);
+
+        // 1. Correct flag -> opens.
+        assert_eq!(
+            decrypt_with_keyset_with_aad(&ks, &ct, flag).unwrap(),
+            b"PRIZE-abc123"
+        );
+        // 2. Tampered flag (flipped to "ungoverned") -> fails.
+        assert!(matches!(
+            decrypt_with_keyset_with_aad(&ks, &ct, b"governed-by:NOBODY ; policy=none"),
+            Err(Error::NotEntitled)
+        ));
+        // 3. Stripped flag (empty aad, the pre-change default) -> fails.
+        assert!(matches!(
+            decrypt_with_keyset_with_aad(&ks, &ct, &[]),
+            Err(Error::NotEntitled)
+        ));
+        // 4. An aad-unaware reader (plain decrypt == empty aad) cannot open a
+        //    governed ciphertext at all — the flag is inseparable from the value.
+        assert!(matches!(
+            decrypt_with_keyset(&ks, &ct),
+            Err(Error::NotEntitled)
+        ));
+    }
+
+    #[test]
+    fn no_aad_is_backward_compatible() {
+        // The plain (no-aad) seal must still round-trip via the plain decrypt,
+        // and be identical to passing an empty aad.
+        let s = seed(62);
+        let ct = encrypt_to_cover(&s, TREE_HEIGHT, [0; 32], 0, &[], b"plain").unwrap();
+        let ks = materialize_reader_keyset(&s, LeafIndex(3), TREE_HEIGHT);
+        assert_eq!(decrypt_with_keyset(&ks, &ct).unwrap(), b"plain");
+        assert_eq!(decrypt_with_keyset_with_aad(&ks, &ct, &[]).unwrap(), b"plain");
     }
 
     #[test]

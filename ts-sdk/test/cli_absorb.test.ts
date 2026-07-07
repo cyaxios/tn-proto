@@ -285,8 +285,8 @@ test("yaml discovery via $TN_YAML when --yaml is omitted", async () => {
 // Real round-trip: produce -> consume with on-disk install + decrypt read-back.
 //
 // The tests above stop at the receipt line. The ones below add the two
-// load-bearing checks the contract (docs/cli-test-plans/absorb.md PASS #3 /
-// #4) calls out and the original suite SKIPPED:
+// load-bearing checks the contract (PASS #3 / #4) calls out and the original
+// suite SKIPPED:
 //
 //   * the kit really lands as `<group>.btn.mykit` in the recipient's
 //     keystore with the KIT's bytes (not the recipient's own self-kit), and
@@ -470,7 +470,7 @@ test("wrong-recipient unsealed btn kit still decrypts (DOCUMENTED GAP for FAIL #
       { amount: 4200 },
       "DOCUMENTED GAP changed: an unsealed btn kit minted for a DIFFERENT recipient " +
         "no longer decrypts. FAIL #6 may now be enforceable — revisit " +
-        "docs/cli-test-plans/absorb.md and add the real can't-decrypt assertion.",
+        "the absorb contract and add the real can't-decrypt assertion.",
     );
   } finally {
     rmSync(p.dir, { recursive: true, force: true });

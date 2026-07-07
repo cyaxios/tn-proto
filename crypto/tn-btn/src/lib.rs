@@ -51,7 +51,10 @@ pub mod rotate;
 pub mod tree;
 pub mod wire;
 
-pub use ciphertext::{decrypt_with_keyset, encrypt_to_cover, Ciphertext, CoverEntry};
+pub use ciphertext::{
+    decrypt_with_keyset, decrypt_with_keyset_with_aad, encrypt_to_cover,
+    encrypt_to_cover_with_aad, Ciphertext, CoverEntry,
+};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use publisher::PublisherState;

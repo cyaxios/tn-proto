@@ -6,6 +6,7 @@ import { sha256HexBytes } from "../core/chain.js";
 import type { NodeRuntime } from "../runtime/node_runtime.js";
 import type {
   AddRecipientResult,
+  RevokeReaderResult,
   RevokeRecipientResult,
   RotateGroupResult,
   EnsureGroupResult,
@@ -25,7 +26,7 @@ export interface AddRecipientOptions {
   recipientDid?: string;
   publicKey?: Uint8Array;
   outKitPath?: string;
-  cipher?: "btn" | "jwe";
+  cipher?: "btn" | "jwe" | "hibe";
 }
 
 export interface RevokeRecipientOptions {
@@ -46,8 +47,8 @@ export class AdminNamespace {
   async addRecipient(group: string, opts: AddRecipientOptions): Promise<AddRecipientResult> {
     // Polymorphic recipient — explicit kwargs win over resolved fields.
     let recipientDid = opts.recipientDid;
-    // publicKey is captured for future jwe support (TS jwe-add lands later);
-    // for btn the leaf mint doesn't consume it.
+    // publicKey is the jwe recipient's raw X25519 public key (consumed by the
+    // jwe branch below); for btn the leaf mint doesn't use it.
     if (opts.recipient !== undefined) {
       const resolved = resolveRecipient(opts.recipient);
       if (recipientDid === undefined && resolved.recipientDid !== null) {
@@ -55,10 +56,69 @@ export class AdminNamespace {
       }
     }
 
+    const cipher = (this._rt.config.groups.get(group)?.cipher ?? "btn") as
+      | "btn"
+      | "jwe"
+      | "hibe";
+
+    if (cipher === "hibe") {
+      // hibe routes to grantReader (Python: add_recipient -> grant_reader).
+      if (opts.publicKey !== undefined) {
+        throw new Error(
+          `tn.admin.addRecipient: publicKey is JWE-only and was passed to a hibe ` +
+            `group ${JSON.stringify(group)}. For hibe, pass outKitPath.`,
+        );
+      }
+      const grantOpts: { readerDid?: string; outPath?: string } = {};
+      if (recipientDid !== undefined) grantOpts.readerDid = recipientDid;
+      if (opts.outKitPath !== undefined) grantOpts.outPath = opts.outKitPath;
+      const granted = this._rt.grantReader(group, grantOpts);
+      // Seal the kit to the reader's device key when known — an unsealed kit
+      // ships the delegated `.hibe.sk` in cleartext (a bearer token). No-op for
+      // a did-less hand-off; the reader unseals via absorbPkgAsync.
+      await this._rt.sealKitForRecipient(granted.kitPath, recipientDid);
+      const kitSha256 = sha256HexBytes(new Uint8Array(readFileSync(granted.kitPath)));
+      return {
+        group,
+        cipher: "hibe",
+        leafIndex: null,
+        recipientDid: recipientDid ?? null,
+        kitPath: granted.kitPath,
+        kitSha256,
+        mintedAt: new Date().toISOString(),
+        idPath: granted.idPath,
+      };
+    }
+
+    if (cipher === "jwe") {
+      // jwe add_recipient: register the recipient's raw 32-byte X25519 public
+      // key directly (no kit minted). Mirrors Python `_add_recipient_jwe_impl`.
+      if (opts.publicKey === undefined) {
+        throw new Error(
+          `tn.admin.addRecipient: jwe group ${JSON.stringify(group)} requires publicKey ` +
+            `(the recipient's raw 32-byte X25519 public key).`,
+        );
+      }
+      if (recipientDid === undefined) {
+        throw new Error(
+          `tn.admin.addRecipient: jwe group ${JSON.stringify(group)} requires recipientDid.`,
+        );
+      }
+      this._rt.addRecipientJwe(group, recipientDid, opts.publicKey);
+      return {
+        group,
+        cipher: "jwe",
+        leafIndex: null,
+        recipientDid,
+        kitPath: null,
+        kitSha256: null,
+        mintedAt: new Date().toISOString(),
+      };
+    }
+
     // Default outKitPath: keystore subdir, named <group>.btn.mykit (matches Python).
     const outKitPath =
       opts.outKitPath ?? join(this._rt.config.keystorePath, `${group}.btn.mykit`);
-    const cipher = (this._rt.config.groups.get(group)?.cipher ?? "btn") as "btn" | "jwe";
 
     // Validate suffix (TNClient enforces this too; replicate for the namespace path).
     const basename = outKitPath.split(/[\\/]/).pop() ?? "";
@@ -110,7 +170,51 @@ export class AdminNamespace {
         "tn.admin.revokeRecipient: must specify either leafIndex, recipientDid, or recipient",
       );
     }
-    const cipher = (this._rt.config.groups.get(group)?.cipher ?? "btn") as "btn" | "jwe";
+    const cipher = (this._rt.config.groups.get(group)?.cipher ?? "btn") as
+      | "btn"
+      | "jwe"
+      | "hibe";
+    if (cipher === "hibe") {
+      // hibe routes to revokeReader (Python: revoke_recipient -> revoke_reader).
+      if (!recipientDid) {
+        throw new Error("tn.admin.revokeRecipient: recipientDid required for hibe group.");
+      }
+      if (leafIndex !== undefined) {
+        throw new Error(
+          "tn.admin.revokeRecipient: leafIndex is btn-only; for hibe use recipientDid.",
+        );
+      }
+      const res = this._rt.revokeReader(group, recipientDid);
+      return {
+        group,
+        cipher: "hibe",
+        leafIndex: null,
+        recipientDid,
+        revokedAt: new Date().toISOString(),
+        newKitPath: null,
+        newKitSha256: null,
+        newPath: res.newPath,
+        kitPaths: res.kitPaths,
+      };
+    }
+    if (cipher === "jwe") {
+      // jwe revoke_recipient: drop the recipient by DID (keystore + yaml).
+      // Mirrors Python `_revoke_recipient_jwe_impl`. O(1), no rotation.
+      if (!recipientDid) {
+        throw new Error("tn.admin.revokeRecipient: recipientDid required for jwe group.");
+      }
+      this._rt.revokeRecipientJwe(group, recipientDid);
+      return {
+        group,
+        cipher: "jwe",
+        leafIndex: null,
+        recipientDid,
+        revokedAt: new Date().toISOString(),
+        newKitPath: null,
+        newKitSha256: null,
+      };
+    }
+
     const finalLeafIndex =
       leafIndex !== undefined
         ? leafIndex
@@ -138,12 +242,72 @@ export class AdminNamespace {
     return match.leafIndex;
   }
 
+  /**
+   * HIBE's add_recipient: mint a delegated identity key for the group's
+   * (or an ancestor) identity path and package it as an absorbable
+   * `.tnpkg` kit. Mirrors Python `tn.admin.grant_reader`. Grants are
+   * recorded in the authority-side `<group>.hibe.grants` registry, which
+   * never rides a kit; the msk never leaves the authority keystore.
+   */
+  async grantReader(
+    group: string,
+    opts: { readerDid?: string; idPath?: string; outPath?: string } = {},
+  ): Promise<AddRecipientResult> {
+    const granted = this._rt.grantReader(group, opts);
+    // Seal the kit to the reader's device key when known — an unsealed kit ships
+    // the delegated `.hibe.sk` in cleartext (a bearer token). No-op for a
+    // did-less hand-off; the reader unseals via absorbPkgAsync.
+    await this._rt.sealKitForRecipient(granted.kitPath, opts.readerDid);
+    const kitSha256 = sha256HexBytes(new Uint8Array(readFileSync(granted.kitPath)));
+    return {
+      group,
+      cipher: "hibe",
+      leafIndex: null,
+      recipientDid: opts.readerDid ?? null,
+      kitPath: granted.kitPath,
+      kitSha256,
+      mintedAt: new Date().toISOString(),
+      idPath: granted.idPath,
+    };
+  }
+
+  /**
+   * Rotate a hibe group's identity path so FUTURE seals use `newPath`
+   * (admission rotation, not btn-grade revocation — pre-rotation entries
+   * stay open forever for prior grantees). Mirrors Python
+   * `tn.admin.rotate_reader_path`. Returns the new path.
+   */
+  async rotateReaderPath(group: string, newPath: string): Promise<string> {
+    return this._rt.rotateReaderPath(group, newPath);
+  }
+
+  /**
+   * Remove a hibe reader going FORWARD: rotate the group's identity path
+   * and re-issue kits to every other granted reader. Mirrors Python
+   * `tn.admin.revoke_reader` (see its docstring for the honest semantics:
+   * the revoked reader keeps everything sealed before the revocation).
+   */
+  async revokeReader(
+    group: string,
+    readerDid: string,
+    opts: { newPath?: string; outDir?: string } = {},
+  ): Promise<RevokeReaderResult> {
+    return this._rt.revokeReader(group, readerDid, opts);
+  }
+
   async rotate(group: string): Promise<RotateGroupResult> {
     const groupSpec = this._rt.config.groups.get(group);
     if (!groupSpec) {
       throw new Error(`tn.admin.rotate: unknown group ${JSON.stringify(group)}`);
     }
-    const cipher = (groupSpec.cipher ?? "btn") as "btn" | "jwe";
+    const cipher = (groupSpec.cipher ?? "btn") as "btn" | "jwe" | "hibe";
+    if (cipher === "hibe") {
+      throw new Error(
+        `tn.admin.rotate: group ${JSON.stringify(group)} uses cipher 'hibe'; this ` +
+          `rotation is btn/jwe-only. hibe groups rotate their identity path via ` +
+          `tn.admin.rotateReaderPath (or revokeReader).`,
+      );
+    }
 
     if (cipher === "btn") {
       // 0.4.0a3+: TS BTN rotation now mirrors Python end-to-end.
@@ -164,7 +328,9 @@ export class AdminNamespace {
       };
     }
     if (cipher === "jwe") {
-      throw new Error("tn.admin.rotate: jwe cipher rotation not yet implemented in TS SDK.");
+      // jwe rotate: archive + regenerate keys, bump the epoch, and emit
+      // tn.rotation.completed. Prior recipients must re-enroll. Mirrors Python.
+      return this._rt.rotateGroupJwe(group);
     }
     // Unreachable but keeps TS happy.
     throw new Error(`tn.admin.rotate: unknown cipher=${cipher}`);
@@ -172,7 +338,7 @@ export class AdminNamespace {
 
   async ensureGroup(
     group: string,
-    opts?: { cipher?: "btn" | "jwe"; fields?: string[] },
+    opts?: { cipher?: "btn" | "jwe" | "hibe"; fields?: string[] },
   ): Promise<EnsureGroupResult> {
     const cipher = opts?.cipher ?? "btn";
     const state = this.state();
@@ -185,7 +351,7 @@ export class AdminNamespace {
       }
       return {
         group,
-        cipher: existing.cipher as "btn" | "jwe",
+        cipher: existing.cipher as "btn" | "jwe" | "hibe",
         created: false,
         publisherDid: existing.publisherDid,
         addedAt: existing.addedAt,

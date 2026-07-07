@@ -20,6 +20,15 @@ Covers:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 import sys
 from pathlib import Path
@@ -59,10 +68,10 @@ def fresh_runtime():
 def _init_btn(yaml_path: Path) -> None:
     """Init a btn ceremony with admin events routed to the dedicated log.
     Skip the test if the Rust runtime isn't available."""
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(yaml_path)
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     if not tn.using_rust():
         tn.flush_and_close()
         pytest.skip("admin cache tests require the Rust runtime (btn ceremonies)")

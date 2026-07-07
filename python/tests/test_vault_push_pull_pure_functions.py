@@ -13,6 +13,15 @@ Run:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 from typing import Any
@@ -96,10 +105,10 @@ def _force_admin_log_yaml(yaml_path: Path) -> None:
 
 def _build_ceremony_with_recipient(tmp_path: Path) -> Any:
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(yaml_path)
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     if not tn.using_rust():
         tn.flush_and_close()
         pytest.skip("requires the Rust runtime (btn)")
@@ -113,10 +122,10 @@ def _build_consumer_cfg(tmp_path: Path) -> Any:
     cons = tmp_path / "consumer"
     cons.mkdir()
     yaml_path = cons / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(yaml_path)
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     if not tn.using_rust():
         tn.flush_and_close()
         pytest.skip("requires the Rust runtime (btn)")
@@ -127,10 +136,10 @@ def _build_producer_snapshot(tmp_path: Path) -> tuple[bytes, str]:
     src = tmp_path / "producer"
     src.mkdir()
     yaml_path = src / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(yaml_path)
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     if not tn.using_rust():
         tn.flush_and_close()
         pytest.skip("requires the Rust runtime (btn)")

@@ -11,6 +11,7 @@ legacy `bgw` cipher was removed in Workstream G.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -77,12 +78,16 @@ def ensure_group(
     ``tn.flush_and_close()`` + ``tn.init()`` to pick up the change.
     """
     internal_cipher = cipher if cipher is not None else cfg.cipher_name
-    if internal_cipher not in ("jwe", "btn"):
-        raise ValueError(f"ensure_group: unknown cipher {cipher!r}; expected 'jwe' or 'btn'")
+    if internal_cipher not in ("jwe", "btn", "hibe"):
+        raise ValueError(
+            f"ensure_group: unknown cipher {cipher!r}; expected 'jwe', 'btn', or 'hibe'"
+        )
 
     # Presence check differs per cipher.
     if internal_cipher == "btn":
         key_exists = (cfg.keystore / f"{group}.btn.state").exists()
+    elif internal_cipher == "hibe":
+        key_exists = (cfg.keystore / f"{group}.hibe.mpk").exists()
     else:
         key_exists = (cfg.keystore / f"{group}.jwe.sender").exists()
 
@@ -1238,6 +1243,11 @@ def add_recipient(
                 group, str(raw_kit_path), recipient_did=recipient_did,
             )
             from .._pkg_impl import _export_impl
+            from ..recipient_seal import recipient_key_is_resolvable
+            # Seal the btn reader kit to the recipient's device key when it has
+            # a resolvable key (same rationale as hibe grant_reader: an unsealed
+            # .tnpkg body is a bearer token). Falls back to plaintext for a
+            # placeholder / did-less hand-off.
             _export_impl(
                 out_path,
                 kind="kit_bundle",
@@ -1245,6 +1255,7 @@ def add_recipient(
                 to_did=recipient_did,
                 keystore=td_path,
                 groups=[group],
+                seal_for_recipient=recipient_key_is_resolvable(recipient_did),
             )
         _refresh_admin_cache_if_present()
         return AddRecipientResult(
@@ -1271,10 +1282,295 @@ def add_recipient(
             updated_cfg=updated_cfg,
         )
 
+    elif cipher == "hibe":
+        if public_key is not None:
+            raise ValueError(
+                "tn.admin.add_recipient: public_key is JWE-only and was "
+                f"passed to a hibe group {group!r}. For hibe, pass out_path."
+            )
+        return grant_reader(
+            group, reader_did=recipient_did, out_path=out_path, cfg=cfg
+        )
+
     else:
         raise NotImplementedError(
             f"tn.admin.add_recipient: cipher {cipher!r} not yet supported."
         )
+
+
+def grant_reader(
+    group: str,
+    *,
+    reader_did: str | None = None,
+    id_path: str | None = None,
+    out_path: Path | str | None = None,
+    cfg: Any | None = None,
+) -> AddRecipientResult:
+    """HIBE's add_recipient: mint a delegated identity key and package it
+    as an absorbable ``.tnpkg`` kit.
+
+    The kit carries the authority mpk, the group's identity path, and a
+    fresh (independently randomized) identity key — BBG re-randomizes
+    KeyGen, so each grantee holds distinct key material for the same path.
+    ``id_path`` defaults to the group's own sealing path; pass an ancestor
+    path to hand out a key the reader can delegate further down. The
+    authority master secret NEVER rides a kit (export skips ``.hibe.msk``;
+    absorb refuses it from non-self-addressed packages).
+
+    Granting is native to the cipher — no re-keying, no envelope rewrite.
+    A delegated key is permanent for its path: there is no forward
+    revocation of an admitted reader (rotate the policy-hash path for new
+    seals, or use btn for groups that need real forward revocation).
+    """
+    if cfg is None:
+        from .. import current_config
+
+        cfg = current_config()
+
+    group_spec = cfg.groups.get(group)
+    if group_spec is None:
+        raise KeyError(f"unknown group: {group!r}")
+    cipher_inst = group_spec.cipher
+    if cipher_inst.name != "hibe":
+        raise ValueError(
+            f"tn.admin.grant_reader: group {group!r} uses cipher "
+            f"{cipher_inst.name!r}; grant_reader is hibe-only. Use "
+            f"add_recipient for btn/jwe groups."
+        )
+
+    import re as _re
+
+    if out_path is None:
+        safe_stem = _re.sub(
+            r"[^A-Za-z0-9._-]", "_",
+            (reader_did or "reader").split(":")[-1],
+        )
+        out_path = Path.cwd() / f"{safe_stem}.tnpkg"
+    out_path = Path(out_path)
+
+    target_path = id_path or cipher_inst.id_path()
+    sk = cipher_inst.mint_reader_key(target_path)
+
+    import tempfile as _tempfile
+
+    from .._pkg_impl import _export_impl
+
+    with _tempfile.TemporaryDirectory(prefix="tn-grant-reader-") as td:
+        td_path = Path(td)
+        (td_path / f"{group}.hibe.mpk").write_bytes(cipher_inst.mpk())
+        (td_path / f"{group}.hibe.idpath").write_text(
+            cipher_inst.id_path(), encoding="utf-8"
+        )
+        (td_path / f"{group}.hibe.sk").write_bytes(sk)
+        # Seal the body to the reader's device key when we know who they are:
+        # the kit carries a delegated HIBE `sk` (read access to everything
+        # under this path), so a plaintext bundle is a bearer token anyone who
+        # intercepts it can absorb. seal_for_recipient wraps the body BEK to
+        # `reader_did`; only that DID's keystore can unseal on absorb. A DID
+        # with no embedded key (placeholder / did-less hand-off) can't be sealed
+        # to, so it stays plaintext by necessity.
+        from ..recipient_seal import recipient_key_is_resolvable
+
+        _export_impl(
+            out_path,
+            kind="kit_bundle",
+            cfg=cfg,
+            to_did=reader_did,
+            keystore=td_path,
+            groups=[group],
+            seal_for_recipient=recipient_key_is_resolvable(reader_did),
+        )
+    if reader_did:
+        _hibe_grants_update(cfg, group, reader_did, target_path)
+    return AddRecipientResult(
+        leaf_index=None,
+        kit_path=out_path,
+        updated_cfg=None,
+    )
+
+
+def _hibe_grants_path(cfg: Any, group: str) -> Path:
+    """The authority-side grant registry: who was granted which path.
+
+    Lives next to the group's key files, never rides a kit (the export
+    collector only matches ``.hibe.{mpk,idpath,sk}``), and is what
+    ``revoke_reader`` uses to re-issue kits to the survivors."""
+    return Path(cfg.keystore) / f"{group}.hibe.grants"
+
+
+def _hibe_grants_load(cfg: Any, group: str) -> list[dict[str, str]]:
+    path = _hibe_grants_path(cfg, group)
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _hibe_grants_update(cfg: Any, group: str, reader_did: str, id_path: str) -> None:
+    grants = [g for g in _hibe_grants_load(cfg, group) if g.get("reader_did") != reader_did]
+    grants.append({"reader_did": reader_did, "id_path": id_path})
+    _hibe_grants_path(cfg, group).write_text(
+        json.dumps(grants, indent=1), encoding="utf-8"
+    )
+
+
+@dataclass
+class RevokeReaderResult:
+    """Structured return from ``tn.admin.revoke_reader`` (hibe groups).
+
+    ``kit_paths`` are the re-issued ``.tnpkg`` kits for the surviving
+    grantees — distribute them and have each survivor ``tn.absorb`` theirs.
+    ``new_path`` is the identity path future seals use."""
+
+    revoked: bool
+    new_path: str
+    kit_paths: list[Path]
+    remaining: list[str]
+
+
+def _bump_path(path: str) -> str:
+    """Sibling successor of ``path``: bump a ``~r<n>`` counter on the last
+    label (``policy-a`` → ``policy-a~r1`` → ``policy-a~r2``)."""
+    import re as _re
+
+    labels = path.split("/") if path else [""]
+    m = _re.match(r"^(.*?)~r(\d+)$", labels[-1])
+    if m:
+        labels[-1] = f"{m.group(1)}~r{int(m.group(2)) + 1}"
+    else:
+        labels[-1] = f"{labels[-1]}~r1"
+    return "/".join(labels)
+
+
+def revoke_reader(
+    group: str,
+    reader_did: str,
+    *,
+    new_path: str | None = None,
+    out_dir: Path | str | None = None,
+    cfg: Any | None = None,
+) -> RevokeReaderResult:
+    """Remove a hibe reader going FORWARD: rotate the group's identity path
+    and re-issue kits to every other granted reader.
+
+    Honest semantics (the cipher's, not this verb's): the revoked reader
+    keeps everything sealed before the revocation — delegated keys are
+    permanent, nothing can claw history back. What this verb guarantees is
+    that entries sealed AFTER it are closed to them: future seals target
+    ``new_path`` (default: a bumped sibling of the current path), and only
+    the surviving grantees receive keys for it. Distribute the returned
+    kits; each survivor absorbs theirs and keeps reading seamlessly (their
+    superseded key stays in the keystore for the old entries). Groups that
+    need this to be a one-sided O(1) operation should use btn.
+    """
+    if cfg is None:
+        from .. import current_config
+
+        cfg = current_config()
+    group_spec = cfg.groups.get(group)
+    if group_spec is None:
+        raise KeyError(f"unknown group: {group!r}")
+    cipher_inst = group_spec.cipher
+    if cipher_inst.name != "hibe":
+        raise ValueError(
+            f"tn.admin.revoke_reader: group {group!r} uses cipher "
+            f"{cipher_inst.name!r}; this verb is hibe-only. Use "
+            f"revoke_recipient for btn/jwe groups."
+        )
+
+    grants = _hibe_grants_load(cfg, group)
+    if not any(g.get("reader_did") == reader_did for g in grants):
+        raise ValueError(
+            f"tn.admin.revoke_reader: {reader_did!r} has no recorded grant on "
+            f"group {group!r}. Grants made through tn.admin.grant_reader are "
+            f"recorded in {_hibe_grants_path(cfg, group).name}."
+        )
+    remaining = [g for g in grants if g.get("reader_did") != reader_did]
+
+    target = new_path or _bump_path(cipher_inst.id_path())
+    cipher_inst.rotate_id_path(target)
+    _reload_native_group_cipher(group)
+    _hibe_grants_path(cfg, group).write_text(
+        json.dumps(remaining, indent=1), encoding="utf-8"
+    )
+
+    import re as _re
+    from datetime import datetime as _dt, timezone as _tz
+
+    if out_dir is None:
+        ts = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+        out_dir = Path.cwd() / f"hibe_regrant_{ts}"
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    kit_paths: list[Path] = []
+    for g in remaining:
+        did = str(g["reader_did"])
+        safe_stem = _re.sub(r"[^A-Za-z0-9._-]", "_", did.split(":")[-1])
+        kit = out_dir / f"{safe_stem}.tnpkg"
+        grant_reader(group, reader_did=did, out_path=kit, cfg=cfg)
+        kit_paths.append(kit)
+
+    return RevokeReaderResult(
+        revoked=True,
+        new_path=target,
+        kit_paths=kit_paths,
+        remaining=[str(g["reader_did"]) for g in remaining],
+    )
+
+
+def rotate_reader_path(group: str, new_path: str, *, cfg: Any | None = None) -> str:
+    """Rotate a hibe group's identity path so FUTURE seals use ``new_path``.
+
+    This is the hibe cipher's admission rotation, not btn-grade revocation:
+
+    - Pre-rotation entries stay open forever for prior grantees (delegated
+      keys are permanent).
+    - A grantee holding a key for the exact old path loses access to new
+      seals; one holding a key for an ANCESTOR of the new path keeps it.
+    - Pick a sibling path (typically: bump the policy-hash leaf) — rotating
+      to a DESCENDANT of the old path cuts off nobody, because old keys
+      delegate down.
+
+    Groups that need real forward revocation of an admitted reader should
+    use btn (the default cipher). Returns the new path.
+    """
+    if cfg is None:
+        from .. import current_config
+
+        cfg = current_config()
+    group_spec = cfg.groups.get(group)
+    if group_spec is None:
+        raise KeyError(f"unknown group: {group!r}")
+    cipher_inst = group_spec.cipher
+    if cipher_inst.name != "hibe":
+        raise ValueError(
+            f"tn.admin.rotate_reader_path: group {group!r} uses cipher "
+            f"{cipher_inst.name!r}; this rotation is hibe-only (btn groups "
+            f"rotate via tn rotate)."
+        )
+    cipher_inst.rotate_id_path(new_path)
+    _reload_native_group_cipher(group)
+    return new_path
+
+
+def _reload_native_group_cipher(group: str) -> None:
+    """After a hibe admin mutation rewrote a group's keystore files, tell any
+    bound native (Rust) runtime to rebuild that group's cipher so the next
+    emit/read picks up the new identity path. No-op when the ceremony runs on
+    the pure pipeline (no native runtime bound). Best-effort."""
+    import tn
+
+    rt = getattr(tn, "_dispatch_rt", None)
+    native = getattr(rt, "_rt", None) if rt is not None else None
+    if native is None:
+        return
+    reload_fn = getattr(native, "reload_group_cipher", None)
+    if reload_fn is None:
+        return
+    try:
+        reload_fn(group)
+    except Exception:  # noqa: BLE001 — best-effort refresh; never break the verb
+        pass
 
 
 @dataclass
@@ -1282,13 +1578,17 @@ class RevokeRecipientResult:
     """Structured return from `tn.admin.revoke_recipient`.
 
     `revoked` is always True on a successful return (failures raise).
-    `cipher` is the group's cipher ("btn" or "jwe"). JWE revocations
-    return the mutated `updated_cfg`; btn revocations don't.
+    `cipher` is the group's cipher. JWE revocations return the mutated
+    `updated_cfg`; btn revocations don't. hibe revocations rotate the
+    identity path and re-issue survivor kits — `new_path` and `kit_paths`
+    carry that outcome (see ``revoke_reader`` for the honest semantics).
     """
 
     revoked: bool
     cipher: str
     updated_cfg: LoadedConfig | None = None
+    new_path: str | None = None
+    kit_paths: list[Path] | None = None
 
 
 def revoke_recipient(
@@ -1363,6 +1663,25 @@ def revoke_recipient(
             )
         updated_cfg = _revoke_recipient_jwe_impl(cfg, group, recipient_did)
         return RevokeRecipientResult(revoked=True, cipher="jwe", updated_cfg=updated_cfg)
+
+    elif cipher == "hibe":
+        if recipient_did is None:
+            raise ValueError(
+                "tn.admin.revoke_recipient: recipient_did required for hibe group."
+            )
+        if leaf_index is not None:
+            raise ValueError(
+                "tn.admin.revoke_recipient: leaf_index is btn-only; "
+                "for hibe use recipient_did."
+            )
+        res = revoke_reader(group, recipient_did, cfg=cfg)
+        return RevokeRecipientResult(
+            revoked=True,
+            cipher="hibe",
+            updated_cfg=None,
+            new_path=res.new_path,
+            kit_paths=res.kit_paths,
+        )
 
     else:
         raise NotImplementedError(
@@ -1585,6 +1904,12 @@ def rotate(
             renewed_recipients=renewed_recipients,
             renewal_output_dir=renewal_output_dir,
         )
+        # rotate() wrote a fresh publisher state to disk, but a bound native
+        # runtime still holds the pre-rotation cipher in memory — without this
+        # the next in-process emit would seal at the OLD epoch (readable by the
+        # audience we just rotated away from) until the process restarts. The
+        # hibe reader-path verbs already do this; btn rotate must too.
+        _reload_native_group_cipher(group)
         return RotateGroupResult(
             cipher="btn",
             generation=cipher_result.new_epoch,
@@ -1609,9 +1934,17 @@ def rotate(
             cipher_actually_rotated=True,
         )
 
+    elif cipher == "hibe":
+        raise ValueError(
+            f"tn.admin.rotate: group {group!r} uses cipher 'hibe'; this rotation "
+            f"is btn/jwe-only. hibe groups rotate their identity path via "
+            f"tn.admin.rotate_reader_path(group, new_path) (or revoke_reader(...) "
+            f"to cut off a reader)."
+        )
+
     else:
         raise NotImplementedError(
-            f"tn.admin.rotate: cipher {cipher!r} not yet supported."
+            f"tn.admin.rotate: cipher {cipher!r} not supported."
         )
 
 

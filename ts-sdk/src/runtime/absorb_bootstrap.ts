@@ -417,9 +417,6 @@ async function _unsealFirst(
  *   composes this with `parseBearer`, `challengeVerify`, sealed-bundle fetch.
  * @see {@link unsealBekFromWrap}
  * @see {@link decryptBodyBlob}
- * @see [spec/manifest](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md) - tnpkg schema this parses.
- * @see [spec/body-encryption](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md) - the sealed-body frame.
- * @see [spec/recipient-wraps](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md) - the BEK unseal step.
  *
  * @remarks
  * Mirrors `python/tn/absorb.py::_maybe_unseal_recipient_wrap` +

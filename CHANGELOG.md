@@ -340,8 +340,7 @@ gap, plus a small but important fix for non-CF egress clients:
 
 ## [0.4.3a1] - 2026-05-20 — identity-naming flip + btn rotation hook
 
-Single coordinated cut of the identity-and-key naming spec
-(`docs/superpowers/specs/2026-05-20-identity-and-key-naming.md`),
+Single coordinated cut of the identity-and-key naming spec,
 flipping the canonical vocabulary from `did` / role-suffixed
 `*_did` fields to `device_identity` / `*_identity`. Pre-`0.4.3a1`
 logs and yamls are not loadable in this release; the project has
@@ -403,8 +402,7 @@ envelope_did    → envelope_device_identity (tn.read.tampered_row_skipped)
 ### `LooseRotationWarning` (0.4.2a10 stopgap)
 
 Still raised on btn `tn.admin.rotate(...)`. Removal is bundled
-with the cipher rotation work (`docs/superpowers/specs/
-2026-05-20-btn-cipher-rotation.md`), pending land on this
+with the cipher rotation work, pending land on this
 branch before tag.
 
 ### Cascade still in flight on this branch

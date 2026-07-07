@@ -192,8 +192,7 @@ test("accepts the inner kit under the REAL server entry name <group>.btn.mykit (
   // This is a fixture-level bug-fix test, not a full round-trip. A faithful
   // end-to-end round-trip (mint a real recipient-bound invite zip, then
   // accept it) is BLOCKED inside tn_proto: there is no CLI/SDK invite-mint
-  // verb — only tn_proto_web mints the wrapper (see
-  // docs/cli-test-plans/inbox_accept.md). That test is intentionally left
+  // verb — only tn_proto_web mints the wrapper. That test is intentionally left
   // OUT rather than faked.
   const c = await freshCeremony("ts-inbox-realname-");
   // Non-default group so the ceremony's own `default` self-kit stays intact

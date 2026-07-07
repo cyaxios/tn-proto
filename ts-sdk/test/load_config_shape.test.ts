@@ -170,13 +170,30 @@ test("non-string entry in a group's fields: list throws", () => {
 });
 
 test("group without an explicit cipher inherits ceremony.cipher", () => {
+  // "jwe" (not the "btn" default) proves inheritance actually happened.
+  // Cipher names are validated at load since the hibe wiring (mirroring
+  // Python config.py: expected 'jwe', 'btn', or 'hibe'), so a fabricated
+  // name is no longer a usable probe here — see the companion test below.
+  const yaml =
+    "ceremony:\n  id: c\n  cipher: jwe\n" +
+    "device:\n  device_identity: did:key:zDEV\n" +
+    "groups:\n  g:\n    policy: private\n";
+  withConfig(yaml, (p) => {
+    const cfg = loadConfig(p);
+    assert.equal(cfg.groups.get("g")!.cipher, "jwe");
+  });
+});
+
+test("unknown cipher names are rejected at load (Python parity)", () => {
   const yaml =
     "ceremony:\n  id: c\n  cipher: aesgcm\n" +
     "device:\n  device_identity: did:key:zDEV\n" +
     "groups:\n  g:\n    policy: private\n";
   withConfig(yaml, (p) => {
-    const cfg = loadConfig(p);
-    assert.equal(cfg.groups.get("g")!.cipher, "aesgcm");
+    assert.throws(
+      () => loadConfig(p),
+      (e: Error) => e.message.includes("expected 'jwe', 'btn', or 'hibe'"),
+    );
   });
 });
 

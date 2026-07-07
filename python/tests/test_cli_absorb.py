@@ -483,6 +483,6 @@ def test_wrong_recipient_kit_unsealed_btn_still_decrypts_DOCUMENTED_GAP(
     assert "amount=4200" in post.stdout, (
         "DOCUMENTED GAP changed: an unsealed btn kit minted for a DIFFERENT "
         "recipient no longer decrypts. FAIL #6 may now be enforceable at the "
-        "CLI — revisit docs/cli-test-plans/absorb.md and add the real "
+        "CLI — revisit the absorb contract and add the real "
         f"can't-decrypt assertion.\n{post.stdout}"
     )

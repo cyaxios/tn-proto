@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -24,7 +33,7 @@ def _clean_tn():
 
 def test_ensure_group_emits_tn_group_added(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
     tn.ensure_group(cfg, "pii", fields=["email"])
     tn.flush_and_close()
@@ -51,7 +60,7 @@ def test_ensure_group_idempotent_no_duplicate_emit(tmp_path):
     early before reaching the emit block, so only one event should appear.
     """
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
     tn.ensure_group(cfg, "pii", fields=["email"])
     tn.ensure_group(cfg, "pii", fields=["email"])  # second call -- should short-circuit

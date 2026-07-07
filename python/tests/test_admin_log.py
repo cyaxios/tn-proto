@@ -10,6 +10,15 @@ Covers:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 import sys
 import zipfile
@@ -52,7 +61,7 @@ def test_fresh_mint_admin_log_is_per_stream(tmp_path):
     the read surface is ``tn.read(log="admin")`` either way.
     """
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
     assert cfg.admin_log_location == "./.tn/tn/admin/default.ndjson"
     types = [e.event_type for e in tn.read(log="admin")]
@@ -68,10 +77,10 @@ def _make_admin_log(yaml_dir: Path) -> Path:
     events to ship in the snapshot.
     """
     yaml_path = yaml_dir / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(yaml_path)
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
 
     if not tn.using_rust():
         tn.flush_and_close()
@@ -118,7 +127,7 @@ def test_admin_log_snapshot_round_trip_to_fresh_consumer(tmp_path: Path):
     dst = tmp_path / "dst"
     dst.mkdir()
     dst_yaml = dst / "tn.yaml"
-    tn.init(dst_yaml, cipher="btn")
+    tn.init(dst_yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(dst_yaml)
     dst_cfg = load_or_create(dst_yaml)
@@ -149,7 +158,7 @@ def test_admin_log_snapshot_idempotent_absorb(tmp_path: Path):
     dst = tmp_path / "dst"
     dst.mkdir()
     dst_yaml = dst / "tn.yaml"
-    tn.init(dst_yaml, cipher="btn")
+    tn.init(dst_yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(dst_yaml)
     dst_cfg = load_or_create(dst_yaml)
@@ -194,7 +203,7 @@ def test_admin_log_snapshot_rejects_tampered_manifest(tmp_path: Path):
     dst = tmp_path / "dst"
     dst.mkdir()
     dst_yaml = dst / "tn.yaml"
-    tn.init(dst_yaml, cipher="btn")
+    tn.init(dst_yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(dst_yaml)
     dst_cfg = load_or_create(dst_yaml)
@@ -247,7 +256,7 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
 
     # Drive a real revoke through the runtime so the body has a properly
     # signed revoked envelope for (group, leaf_index).
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.admin.revoke_recipient(group, leaf_index=leaf_index)
     tn.flush_and_close()
 
@@ -333,7 +342,7 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
     dst = tmp_path / "dst"
     dst.mkdir()
     dst_yaml = dst / "tn.yaml"
-    tn.init(dst_yaml, cipher="btn")
+    tn.init(dst_yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(dst_yaml)
 

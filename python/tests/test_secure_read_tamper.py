@@ -29,6 +29,15 @@ So:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import base64
 import json
 from pathlib import Path
@@ -67,7 +76,7 @@ def _emit(tmp_path: Path, events: list[tuple[str, dict]]) -> tuple[str, Path]:
     One ``tn`` flow per process: we close the writer before any reader re-binds.
     """
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
     log_path = Path(cfg.resolve_log_path())
     for event_type, fields in events:

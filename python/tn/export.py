@@ -32,16 +32,6 @@ Two non-overlapping paths can lock the body bytes:
 
 The two modes are mutually exclusive — ``export`` raises if both are
 supplied.
-
-See Also:
-    `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
-        Wire spec for the encrypted-body layer (AES-256-GCM frame,
-        STORED-zip plaintext, ciphertext_sha256 binding in the
-        manifest).
-    `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
-        Sealed-box wrap shape + AAD construction.
-    `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
-        Manifest schema (every kind this module emits).
 """
 
 from __future__ import annotations
@@ -204,6 +194,11 @@ def _build_enrolment_body(pkg: Package) -> dict[str, bytes]:
 # A keystore self-kit file: ``<group>.btn.mykit`` or a rotation backup
 # ``<group>.btn.mykit.revoked.<ts>``. group(1) is the group name.
 _KIT_RE = re.compile(r"^(.+?)\.btn\.(mykit|mykit\.revoked\.\d+)$")
+# A hibe reader kit: the authority mpk, the group's identity path, and the
+# delegated identity key. NEVER ``.hibe.msk`` — the master secret can mint a
+# key for ANY path under that authority and only rides full_keystore
+# (self-addressed backup), mirroring the local.private posture.
+_HIBE_KIT_RE = re.compile(r"^(.+?)\.hibe\.(mpk|idpath|sk)$")
 # Private/identity material packed only for a full_keystore export.
 _FULL_KEYSTORE_FILES = ("local.private", "local.public", "index_master.key")
 
@@ -219,7 +214,7 @@ def _collect_kit_files(
     for entry in sorted(keystore.iterdir()):
         if not entry.is_file():
             continue
-        m = _KIT_RE.match(entry.name)
+        m = _KIT_RE.match(entry.name) or _HIBE_KIT_RE.match(entry.name)
         if m:
             group = m.group(1)
             if group_filter is not None and group not in group_filter:
@@ -239,10 +234,13 @@ def _collect_kit_files(
         elif full:
             if entry.name in _FULL_KEYSTORE_FILES:
                 body[f"body/{entry.name}"] = entry.read_bytes()
-            elif entry.name.endswith(".btn.state"):
-                group = entry.name[: -len(".btn.state")]
-                if group_filter is None or group in group_filter:
-                    body[f"body/{entry.name}"] = entry.read_bytes()
+            else:
+                for suffix in (".btn.state", ".hibe.msk", ".hibe.idpath.history"):
+                    if entry.name.endswith(suffix):
+                        group = entry.name[: -len(suffix)]
+                        if group_filter is None or group in group_filter:
+                            body[f"body/{entry.name}"] = entry.read_bytes()
+                        break
     return body, kits_meta
 
 
@@ -309,8 +307,9 @@ def _build_kit_bundle_body(
     if not kits_meta:
         suffix = f" matching groups {sorted(group_filter)}" if group_filter else ""
         raise RuntimeError(
-            f"kit_bundle: no *.btn.mykit files in {keystore}{suffix}. "
-            f"Build a btn ceremony with at least one group before exporting."
+            f"kit_bundle: no *.btn.mykit or *.hibe.* kit files in "
+            f"{keystore}{suffix}. Build a ceremony with at least one group "
+            f"before exporting."
         )
 
     if full and cfg is not None and cfg.yaml_path is not None and cfg.yaml_path.exists():
@@ -763,8 +762,6 @@ def _apply_seal_for_recipient(
         :func:`_encrypt_body_in_place`: Step 1 (body encryption).
         :func:`tn.recipient_seal.seal_bek_for_recipient`: Step 2 (per-recipient wrap).
         :func:`tn.recipient_seal.manifest_aad_for_wrap`: AAD construction.
-        `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
-            Wire spec.
     """
     if kind not in ("kit_bundle", "full_keystore"):
         raise ValueError(
@@ -928,10 +925,6 @@ def export(
         :func:`decrypt_body_blob`: Inverse of the body-encryption
             layer.
         :mod:`tn.recipient_seal`: Sealed-box wrap primitives.
-        `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
-            Wire spec.
-        `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
-            Manifest schema.
     """
     # 1. Pre-flight validation (single deterministic failure point
     #    before we touch a zip).
@@ -1058,8 +1051,6 @@ def _encrypt_body_in_place(
         :func:`decrypt_body_blob`: The inverse.
         :func:`_apply_seal_for_recipient`: Wraps the BEK for
             recipients after this step.
-        `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
-            Wire spec.
     """
     import os as _os
 
@@ -1147,8 +1138,6 @@ def decrypt_body_blob(blob: bytes, key: bytes) -> dict[str, bytes]:
     See Also:
         :func:`_encrypt_body_in_place`: The inverse.
         :mod:`tn.recipient_seal`: BEK recovery for sealed exports.
-        `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
-            Wire spec.
     """
     import io as _io
     import struct as _struct

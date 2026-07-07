@@ -6,6 +6,15 @@ the tn.agents field splice), or None when no agents.md is present.
 """
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 from pathlib import Path
 
 import tn
@@ -42,7 +51,7 @@ def test_agents_policy_is_none_without_file(tmp_path, monkeypatch):
     monkeypatch.setenv("TN_NO_STDOUT", "1")
     yaml = tmp_path / "tn.yaml"
     try:
-        tn.init(yaml, cipher="btn")
+        tn.init(yaml, cipher=_workflow_cipher("btn"))
         assert tn.agents.policy() is None
     finally:
         tn.flush_and_close()
@@ -54,7 +63,7 @@ def test_agents_policy_returns_document(tmp_path, monkeypatch):
     yaml = tmp_path / "tn.yaml"
     _write_policy(tmp_path)
     try:
-        tn.init(yaml, cipher="btn")
+        tn.init(yaml, cipher=_workflow_cipher("btn"))
         doc = tn.agents.policy()
         assert isinstance(doc, PolicyDocument)
         assert "payment.completed" in doc.templates

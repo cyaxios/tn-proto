@@ -6,6 +6,15 @@ returning a structured AddRecipientResult / RevokeRecipientResult / RotateGroupR
 """
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 from pathlib import Path
 
 import pytest
@@ -30,7 +39,7 @@ def _fresh_x25519_pub() -> bytes:
 
 def test_add_recipient_btn_returns_leaf_index(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     out = tmp_path / "alice.btn.mykit"
     result = tn.admin.add_recipient(
         "default",
@@ -45,7 +54,7 @@ def test_add_recipient_btn_returns_leaf_index(tmp_path: Path):
 
 def test_add_recipient_jwe_returns_updated_cfg(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    cfg = load_or_create(yaml, cipher="jwe")
+    cfg = load_or_create(yaml, cipher=_workflow_cipher("jwe"))
     pub = _fresh_x25519_pub()
     result = tn.admin.add_recipient(
         "default",
@@ -60,7 +69,7 @@ def test_add_recipient_jwe_returns_updated_cfg(tmp_path: Path):
 
 def test_add_recipient_btn_rejects_jwe_kwargs(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     out = tmp_path / "alice.btn.mykit"
     with pytest.raises(ValueError, match=r"public_key.*JWE-only"):
         tn.admin.add_recipient(
@@ -73,7 +82,7 @@ def test_add_recipient_btn_rejects_jwe_kwargs(tmp_path: Path):
 
 def test_add_recipient_jwe_rejects_btn_kwargs(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    cfg = load_or_create(yaml, cipher="jwe")
+    cfg = load_or_create(yaml, cipher=_workflow_cipher("jwe"))
     out = tmp_path / "ignored.btn.mykit"
     with pytest.raises(ValueError, match=r"out_path.*btn-only"):
         tn.admin.add_recipient(
@@ -87,7 +96,7 @@ def test_add_recipient_jwe_rejects_btn_kwargs(tmp_path: Path):
 
 def test_revoke_recipient_btn_uses_leaf_index(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     out = tmp_path / "alice.btn.mykit"
     add = tn.admin.add_recipient(
         "default",
@@ -101,7 +110,7 @@ def test_revoke_recipient_btn_uses_leaf_index(tmp_path: Path):
 
 def test_revoke_recipient_jwe_uses_recipient_did(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    cfg = load_or_create(yaml, cipher="jwe")
+    cfg = load_or_create(yaml, cipher=_workflow_cipher("jwe"))
     cfg = tn.admin.add_recipient(
         "default",
         recipient_did="did:key:zBob",
@@ -116,7 +125,7 @@ def test_revoke_recipient_jwe_uses_recipient_did(tmp_path: Path):
 
 def test_rotate_btn(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     result = tn.admin.rotate("default")
     assert result.cipher == "btn"
     assert result.generation == 1, (
@@ -127,7 +136,7 @@ def test_rotate_btn(tmp_path: Path):
 
 def test_rotate_jwe_with_revoke_did(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    cfg = load_or_create(yaml, cipher="jwe")
+    cfg = load_or_create(yaml, cipher=_workflow_cipher("jwe"))
     cfg = tn.admin.add_recipient(
         "default",
         recipient_did="did:key:zCharlie",
@@ -154,7 +163,7 @@ def test_rotate_jwe_with_revoke_did(tmp_path: Path):
 
 def test_add_recipient_btn_polymorphic_did_string(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     out = tmp_path / "alice.btn.mykit"
     result = tn.admin.add_recipient(
         "default", recipient="did:key:zAlice", out_path=out,
@@ -165,7 +174,7 @@ def test_add_recipient_btn_polymorphic_did_string(tmp_path: Path):
 
 def test_add_recipient_jwe_polymorphic_bytes(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    cfg = load_or_create(yaml, cipher="jwe")
+    cfg = load_or_create(yaml, cipher=_workflow_cipher("jwe"))
     pub = _fresh_x25519_pub()
     # 32 raw bytes resolve to public_key; DID still required as kwarg
     # since jwe needs both (the resolver doesn't fabricate DIDs).
@@ -177,7 +186,7 @@ def test_add_recipient_jwe_polymorphic_bytes(tmp_path: Path):
 
 def test_add_recipient_jwe_polymorphic_dict(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    cfg = load_or_create(yaml, cipher="jwe")
+    cfg = load_or_create(yaml, cipher=_workflow_cipher("jwe"))
     pub = _fresh_x25519_pub()
     result = tn.admin.add_recipient(
         "default",
@@ -190,7 +199,7 @@ def test_add_recipient_jwe_polymorphic_dict(tmp_path: Path):
 def test_revoke_recipient_btn_polymorphic_did_resolves_leaf(tmp_path: Path):
     """Backlog #14: btn revoke accepts recipient_did and resolves the leaf."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     out = tmp_path / "alice.btn.mykit"
     tn.admin.add_recipient(
         "default", recipient_did="did:key:zAlice", out_path=out,
@@ -206,7 +215,7 @@ def test_revoke_recipient_btn_polymorphic_did_resolves_leaf(tmp_path: Path):
 def test_revoke_recipient_btn_polymorphic_via_add_result(tmp_path: Path):
     """`recipient=<AddRecipientResult>` should round-trip add then revoke."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     out = tmp_path / "alice.btn.mykit"
     add = tn.admin.add_recipient(
         "default", recipient_did="did:key:zAlice", out_path=out,
@@ -217,7 +226,7 @@ def test_revoke_recipient_btn_polymorphic_via_add_result(tmp_path: Path):
 
 def test_revoke_recipient_btn_polymorphic_int_leaf(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     out = tmp_path / "alice.btn.mykit"
     add = tn.admin.add_recipient(
         "default", recipient_did="did:key:zAlice", out_path=out,
@@ -228,7 +237,7 @@ def test_revoke_recipient_btn_polymorphic_int_leaf(tmp_path: Path):
 
 def test_revoke_recipient_btn_did_not_found_errors(tmp_path: Path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     with pytest.raises(ValueError, match=r"no active recipient"):
         tn.admin.revoke_recipient("default", recipient_did="did:key:zGhost")
 

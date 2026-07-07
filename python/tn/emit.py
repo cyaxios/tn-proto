@@ -148,6 +148,13 @@ Args:
         default) falls through to the session-level / yaml-level
         ``sign`` flag; ``True`` forces a signature on this row;
         ``False`` skips signing.
+    aad: Optional additional-authenticated-data. A flat mapping of
+        string -> scalar bound (authenticated, not encrypted) to every
+        group sealed on this row, merged OVER any per-group ``aad``
+        default declared in the yaml. Echoed into the record's public
+        ``tn_aad`` block so a reader reconstructs it. Bound identically
+        on the native (btn/hibe) runtime and the pure pipeline (jwe).
+        Default ``None`` (bind nothing).
     **fields: Plaintext fields to encrypt into the configured groups
         and chain into the log. Values are JSON-shaped: str, int,
         float, bool, None, list, dict, plus TN-specific sentinels
@@ -171,8 +178,6 @@ See Also:
     :func:`tn.read`: Read entries back.
     :func:`tn.log`: Severity-less variant — always emits regardless
         of the level threshold.
-    `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_: The wire shape this emit produces.
-    `docs/spec/row-hash.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/row-hash.md>`_: The chain-link hash inside each envelope.
 """
 
 
@@ -246,7 +251,13 @@ def _make_levelled_verb(name: str, level_int: int, *, surface_first: bool = Fals
     is invisible at the IDE / introspection layer.
     """
     if surface_first:
-        def verb(event_type: str, *args: Any, _sign: bool | None = None, **fields: Any) -> None:
+        def verb(
+            event_type: str,
+            *args: Any,
+            _sign: bool | None = None,
+            aad: dict[str, Any] | None = None,
+            **fields: Any,
+        ) -> None:
             if args:
                 _raise_extra_positionals(name, args)
             if _surface_enabled(_INFO):
@@ -258,9 +269,15 @@ def _make_levelled_verb(name: str, level_int: int, *, surface_first: bool = Fals
             sign = _sign if _sign is not None else _session._sign_override
             # Fire-and-forget: dispatch the emit and discard the envelope.
             # Only ``tn.log`` returns the written record (for forwarding).
-            _emit_with_splice(name, event_type, fields, sign)
+            _emit_with_splice(name, event_type, fields, sign, aad)
     else:
-        def verb(event_type: str, *args: Any, _sign: bool | None = None, **fields: Any) -> None:
+        def verb(
+            event_type: str,
+            *args: Any,
+            _sign: bool | None = None,
+            aad: dict[str, Any] | None = None,
+            **fields: Any,
+        ) -> None:
             if args:
                 _raise_extra_positionals(name, args)
             if level_int < _session._log_level_threshold:
@@ -272,7 +289,7 @@ def _make_levelled_verb(name: str, level_int: int, *, surface_first: bool = Fals
             sign = _sign if _sign is not None else _session._sign_override
             # Fire-and-forget: dispatch the emit and discard the envelope.
             # Only ``tn.log`` returns the written record (for forwarding).
-            _emit_with_splice(name, event_type, fields, sign)
+            _emit_with_splice(name, event_type, fields, sign, aad)
     verb.__name__ = name
     verb.__qualname__ = name
     verb.__doc__ = _docstring_for(name)
@@ -290,6 +307,7 @@ def log(
     *args: Any,
     level: str = "",
     _sign: bool | None = None,
+    aad: dict[str, Any] | None = None,
     **fields: Any,
 ) -> WrittenRecord | None:
     """Emit an attested event with a caller-chosen level (default: severity-less).
@@ -313,6 +331,11 @@ def log(
         _sign: Per-call signing override. ``None`` falls through to
             the session/yaml default; ``True`` forces signing;
             ``False`` skips it.
+        aad: Optional additional-authenticated-data mapping bound to
+            every group sealed on this row (authenticated, not
+            encrypted), merged over any yaml per-group ``aad`` default
+            and echoed into the public ``tn_aad`` block. Native-runtime
+            (btn) limited — raises on btn ceremonies. Default ``None``.
         **fields: Plaintext fields to encrypt into the configured
             groups and chain into the log. JSON-shaped values plus
             TN sentinels (bytes -> ``$b64``, Decimal -> string,
@@ -352,7 +375,6 @@ def log(
         :func:`tn.info`: Threshold-aware INFO emit.
         :func:`tn.warning`: Threshold-aware WARNING emit.
         :func:`tn.set_level`: Process-wide threshold control.
-        `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_: The wire shape this emit produces.
     """
     if args:
         _raise_extra_positionals("log", args)
@@ -361,5 +383,5 @@ def log(
     if _tn_module._dispatch_rt is None:
         _maybe_autoinit()
     sign = _sign if _sign is not None else _session._sign_override
-    rec = _emit_with_splice(level, event_type, fields, sign)
+    rec = _emit_with_splice(level, event_type, fields, sign, aad)
     return WrittenRecord(rec) if rec is not None else None

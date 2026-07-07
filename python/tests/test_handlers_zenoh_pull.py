@@ -16,6 +16,15 @@ Test plan:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 import time
 from pathlib import Path
@@ -94,7 +103,7 @@ def _make_publisher_with_btn_group(tmp_path: Path):
     """Real publisher cfg via load_or_create — needed to mint kit_bundles."""
     yaml_path = tmp_path / "alice" / "tn.yaml"
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
-    return load_or_create(yaml_path, cipher="btn")
+    return load_or_create(yaml_path, cipher=_workflow_cipher("btn"))
 
 
 # ---------------------------------------------------------------------------

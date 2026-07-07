@@ -19,9 +19,6 @@ Non-standard encodings:
                                         # str back and parses to Decimal as needed
 
 See Also:
-    `docs/spec/canonical-bytes.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/canonical-bytes.md>`_:
-        The full wire spec including golden vectors. Treat the spec as
-        authoritative; this module is a conformant implementation.
     ``crypto/tn-core/tests/fixtures/canonical_vectors.json``:
         Golden vectors every TN canonicalizer must reproduce.
     ``crypto/tn-core/src/canonical.rs``:
@@ -103,10 +100,6 @@ def _canonical_bytes(value: Any) -> bytes:
     Note:
         Underscore-prefixed (legacy). The wasm + Rust exports use the
         public name ``canonicalBytes`` / ``canonical_bytes``.
-
-    See Also:
-        `docs/spec/canonical-bytes.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/canonical-bytes.md>`_:
-            Wire spec + golden vectors.
     """
     return json.dumps(
         _encode(value),

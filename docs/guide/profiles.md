@@ -125,4 +125,5 @@ different profiles:
   also printed to stdout.
 
 The fields you logged and the per-group ciphertext are identical either way.
-Only the evidence and delivery around them change.
+Only the evidence and delivery around them change. The on-the-wire record
+format is documented in [protocol.md](protocol.md).

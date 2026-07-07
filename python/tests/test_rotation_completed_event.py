@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -49,7 +58,7 @@ def _rotation_events(yaml_path):
 
 def test_btn_rotate_emits_rotation_completed(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("order.created", amount=100)
     tn.admin.rotate("default")
     tn.flush_and_close()
@@ -68,7 +77,7 @@ def test_btn_rotate_emits_rotation_completed(tmp_path):
 
 def test_jwe_rotate_emits_rotation_completed(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="jwe")
+    tn.init(yaml, cipher=_workflow_cipher("jwe"))
     tn.info("order.created", amount=42)
     tn.admin.rotate("default")
     tn.flush_and_close()
@@ -94,7 +103,7 @@ def test_jwe_rotate_emits_rotation_completed(tmp_path):
 def test_no_legacy_tn_key_rotation_emitted(tmp_path):
     """Ensure the old event name is gone."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.admin.rotate("default")
     tn.flush_and_close()
 
@@ -120,7 +129,7 @@ def test_no_legacy_tn_key_rotation_emitted(tmp_path):
 def test_rotation_completed_catalog_fields_present(tmp_path):
     """All 7 catalog fields must be present in the emitted event."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.admin.rotate("default")
     tn.flush_and_close()
 

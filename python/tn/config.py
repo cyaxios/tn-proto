@@ -251,6 +251,18 @@ class GroupConfig:
     unissued_slots: list[int] = field(default_factory=list)
     index_key: bytes = b""
     index_epoch: int = 0
+    # Declared recipient DIDs for this group, parsed from the yaml
+    # ``groups.<name>.recipients[].recipient_identity`` list. Declarative
+    # entitlement (who may read), independent of which kits are on disk.
+    # Mirrors the TS ``GroupConfig.recipients``; used by ``tn.scope_to``.
+    recipient_dids: list[str] = field(default_factory=list)
+    # Group-level additional-authenticated-data default, parsed from the
+    # yaml ``groups.<name>.aad`` mapping. A flat map of string -> scalar
+    # that is merged UNDER any per-emit ``aad=`` (per-emit overrides). The
+    # merged dict is canonicalized and bound to this group's seal, and
+    # echoed into the record's public ``tn_aad`` block so a reader can
+    # reconstruct it. Empty default binds nothing.
+    aad_default: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -497,8 +509,15 @@ def _create_group(
         )
     elif cipher_name == "btn":
         inst = _cipher.BtnGroupCipher.create(keystore, name)
+    elif cipher_name == "hibe":
+        # Solo-ceremony default (matching jwe/btn): this keystore becomes
+        # its own HIBE authority. Sealing to an EXTERNAL authority's path
+        # goes through the grant/absorb ceremony, not mint.
+        inst = _cipher.HibeGroupCipher.create(keystore, name)
     else:
-        raise ValueError(f"unknown cipher: {cipher_name!r}; expected 'jwe' or 'btn'")
+        raise ValueError(
+            f"unknown cipher: {cipher_name!r}; expected 'jwe', 'btn', or 'hibe'"
+        )
     unissued: list[int] = []
 
     return GroupConfig(
@@ -527,8 +546,8 @@ def create_fresh(
     `cipher` selects the group-sealing primitive for this ceremony:
     "btn" (NNL subset-difference broadcast — default; uses the Rust
     tn_core extension when available, with a Python fallback for emit)
-    or "jwe" (static-ECDH + AES-KW; pure Python alternative for
-    ceremonies that need no Rust dependency at all).
+    or "jwe" (standard RFC 7516 JWE — ECDH-ES+A256KW per recipient via
+    the joserfc JOSE library; a pure-Python cipher with no Rust dependency).
     Once chosen, the whole ceremony uses that cipher. Change it by
     creating a new ceremony.
 
@@ -544,8 +563,8 @@ def create_fresh(
     matches the caller's Identity). If omitted, a fresh random key is
     generated (legacy behavior).
     """
-    if cipher not in ("jwe", "btn"):
-        raise ValueError(f"unknown cipher {cipher!r}; expected 'jwe' or 'btn'")
+    if cipher not in ("jwe", "btn", "hibe"):
+        raise ValueError(f"unknown cipher {cipher!r}; expected 'jwe', 'btn', or 'hibe'")
     yaml_path = yaml_path.resolve()
     # Namespace the .tn/ subdir by yaml stem so two yamls in the same
     # directory don't collide on the same keys/logs/admin paths
@@ -1369,10 +1388,11 @@ def _resolve_ceremony_settings(
     if not ceremony_id:
         raise ValueError(f"{yaml_path}: ceremony.id must be set")
     cipher_name = str(ceremony_block.get("cipher") or "btn")
-    if cipher_name not in ("jwe", "btn"):
+    if cipher_name not in ("jwe", "btn", "hibe"):
         raise ValueError(
             f"{yaml_path}: unknown ceremony.cipher {cipher_name!r}; "
-            f"expected 'jwe' or 'btn' (legacy 'bgw' was removed in Workstream G)"
+            f"expected 'jwe', 'btn', or 'hibe' (legacy 'bgw' was removed in "
+            f"Workstream G)"
         )
     mode = str(ceremony_block.get("mode") or "local")
     if mode not in ("local", "linked"):
@@ -1488,6 +1508,8 @@ def _instantiate_group_cipher(
     """
     if group_cipher == "btn":
         return _cipher.BtnGroupCipher.load(keystore, name)
+    if group_cipher == "hibe":
+        return _cipher.HibeGroupCipher.load(keystore, name)
     # jwe
     sender_pub_sidecar = keystore / f"{name}.jwe.sender_pub"
     mykey_path = keystore / f"{name}.jwe.mykey"
@@ -1501,6 +1523,39 @@ def _instantiate_group_cipher(
             my_sk,
         )
     return _cipher.JWEGroupCipher.load(keystore, name)
+
+
+def _validate_group_aad(
+    name: str, raw_aad: Any, *, yaml_path: Path
+) -> dict[str, Any]:
+    """Validate and return the ``groups.<name>.aad`` default mapping.
+
+    An aad default must be a flat mapping of string keys to scalar values
+    (str, int, float, bool, or None) — the same shape a per-emit ``aad=``
+    dict is expected to take. A non-mapping, or a nested / non-scalar value,
+    is rejected with a clear message so a malformed yaml fails at load
+    rather than silently binding surprising bytes at emit time.
+    """
+    if raw_aad is None:
+        return {}
+    if not isinstance(raw_aad, dict):
+        raise ValueError(
+            f"{yaml_path}: groups.{name}.aad must be a mapping of "
+            f"string -> scalar, got {type(raw_aad).__name__}"
+        )
+    out: dict[str, Any] = {}
+    for k, v in raw_aad.items():
+        if not isinstance(k, str):
+            raise ValueError(
+                f"{yaml_path}: groups.{name}.aad key {k!r} must be a string"
+            )
+        if not isinstance(v, (str, int, float, bool)) and v is not None:
+            raise ValueError(
+                f"{yaml_path}: groups.{name}.aad[{k!r}] must be a scalar "
+                f"(str/int/float/bool/null), got {type(v).__name__}"
+            )
+        out[k] = v
+    return out
 
 
 def _load_group(
@@ -1522,10 +1577,10 @@ def _load_group(
     pool = int(spec.get("pool_size", DEFAULT_POOL_SIZE))
     epoch = int(spec.get("index_epoch", 0))
     raw_cipher = spec.get("cipher") or ceremony_cipher
-    if raw_cipher not in ("jwe", "btn"):
+    if raw_cipher not in ("jwe", "btn", "hibe"):
         raise ValueError(
             f"{yaml_path}: groups.{name}.cipher is {raw_cipher!r}; "
-            f"expected 'jwe' or 'btn' (legacy 'bgw'/'bearer' removed)"
+            f"expected 'jwe', 'btn', or 'hibe' (legacy 'bgw'/'bearer' removed)"
         )
     inst = _instantiate_group_cipher(name, raw_cipher, keystore)
     derived_index_key = (
@@ -1533,6 +1588,14 @@ def _load_group(
         if master_index_key
         else b""
     )
+    recipient_dids = [
+        str(r["recipient_identity"])
+        for r in spec.get("recipients", [])
+        if isinstance(r, dict) and r.get("recipient_identity")
+    ]
+    # A group-level aad default binds on btn, jwe, and hibe alike — the
+    # native runtime and the pure pipeline both thread it now.
+    aad_default = _validate_group_aad(name, spec.get("aad"), yaml_path=yaml_path)
     return GroupConfig(
         name=name,
         cipher=inst,
@@ -1540,6 +1603,8 @@ def _load_group(
         unissued_slots=[],
         index_key=derived_index_key,
         index_epoch=epoch,
+        recipient_dids=recipient_dids,
+        aad_default=aad_default,
     )
 
 

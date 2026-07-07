@@ -1,0 +1,33 @@
+[package]
+name = "tn-bbg"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+# Fully permissive: this crate is our own Apache-2.0/MIT reimplementation of
+# the BBG HIBE scheme on BLS12-381. It carries NO LGPL obligation — it exists
+# to REPLACE the vendored LGPL `hohibe` behind `tn-hibe`. The core depends only
+# on pure-Rust `bls12_381_plus` + `sha2` (wasm32-clean, no C deps).
+license.workspace = true
+description = "BBG HIBE (Boneh-Boyen-Goh, constant-size ciphertext) on BLS12-381: an Apache-2.0/MIT reimplementation intended to replace the vendored LGPL hohibe scheme behind tn-hibe. Same curve, same construction, same wire format."
+
+[dependencies]
+bls12_381_plus = "0.8.9"
+rand_core = { workspace = true }
+sha2 = { workspace = true }
+hkdf = { workspace = true }
+aes-gcm = { version = "0.10", features = ["aes"] }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Give rand_core a getrandom backend under wasm32 so the crate compiles for the
+# browser target on its own (matches the tn-hibe / tn-wasm pattern).
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+rand_chacha = "0.3"
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

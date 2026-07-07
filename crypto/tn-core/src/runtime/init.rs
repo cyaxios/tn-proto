@@ -544,7 +544,7 @@ impl Runtime {
             init_fields.insert("cipher".into(), serde_json::json!(self.cfg.ceremony.cipher));
             // NOTE: do NOT add `device_identity` here. It is the mandatory
             // reserved envelope scalar (hashed first in the row_hash
-            // preimage — docs/spec/row-hash.md) and `build_envelope`
+            // preimage) and `build_envelope`
             // always writes it at envelope root. On any ceremony whose
             // yaml lists `device_identity` under public_fields (every
             // Python/TS-written ceremony via DEFAULT_PUBLIC_FIELDS),

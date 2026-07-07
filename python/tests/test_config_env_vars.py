@@ -9,6 +9,15 @@ cross-language parity.
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 from pathlib import Path
 
 import pytest
@@ -121,7 +130,7 @@ def test_load_uses_substitution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     from tn.config import create_fresh, load
 
     yaml_path = tmp_path / "tn.yaml"
-    create_fresh(yaml_path, cipher="jwe")
+    create_fresh(yaml_path, cipher=_workflow_cipher("jwe"))
     text = yaml_path.read_text(encoding="utf-8")
 
     # Replace the literal ceremony id with an env-var reference.
@@ -142,7 +151,7 @@ def test_load_propagates_missing_var(
     from tn.config import create_fresh, load
 
     yaml_path = tmp_path / "tn.yaml"
-    create_fresh(yaml_path, cipher="jwe")
+    create_fresh(yaml_path, cipher=_workflow_cipher("jwe"))
     text = yaml_path.read_text(encoding="utf-8")
     cfg_real = load(yaml_path)
     real_id = cfg_real.ceremony_id

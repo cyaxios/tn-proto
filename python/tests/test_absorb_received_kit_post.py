@@ -14,6 +14,15 @@ Run:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import base64
 import json
 from pathlib import Path
@@ -75,7 +84,7 @@ def _install_recipient(workdir: Path, device: DeviceKey, name: str) -> _FakeCfg:
 def _make_publisher(workdir: Path):
     yaml_path = workdir / "alice" / "tn.yaml"
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
-    return load_or_create(yaml_path, cipher="btn")
+    return load_or_create(yaml_path, cipher=_workflow_cipher("btn"))
 
 
 def _install_mock_vault_client(
