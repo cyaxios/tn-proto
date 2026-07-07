@@ -23,6 +23,7 @@ Public API:
     tn.read(log_path, cfg)      # iterate + decrypt entries (flat dicts;
                                 # raw=True for the {envelope, plaintext,
                                 # valid} audit shape)
+    tn.seal/tn.unseal        # portable sealed objects (standalone envelopes)
     tn.flush_and_close()        # drain handlers, release runtime
 
 Ciphers: "jwe" (standard RFC 7516 JWE — ECDH-ES+A256KW per recipient,
@@ -1200,6 +1201,13 @@ from .read import (  # noqa: E402
     watch,
 )
 
+# Sealed-object verbs — portable standalone envelopes.
+from .seal import (  # noqa: E402
+    SealedObject,
+    UnsealError,
+    seal,
+)
+
 # atexit registration: tn.init() registers _atexit_flush once per
 # process so handlers drain on normal interpreter exit without the
 # caller needing to remember tn.flush_and_close(). The flag prevents
@@ -1498,6 +1506,10 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     # Bilateral lifecycle (JWE + btn unified read)
     "offer",
     "read",
+    # sealed objects — portable standalone envelopes
+    "SealedObject",
+    "UnsealError",
+    "seal",
     "sealing",
     # context
     "scope",
