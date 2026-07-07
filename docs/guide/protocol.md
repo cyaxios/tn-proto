@@ -145,6 +145,14 @@ Each value below is filled in by `build_and_write` and the header-prep stage of
 - **Composition:** the caller-supplied event type, validated by
   `validate_event_type`. Events beginning with `tn.` are protocol events and
   may route to a separate protocol-event log. Hashed into `row_hash`.
+- **Reserved:** a few `tn.*` types are protocol events the runtime writes
+  itself, not the caller. `tn.agents.policy_published` (§4) records a new
+  governance policy taking effect. `tn.object.sealed` is the receipt row a
+  `tn.seal` call chains for a seal act (see
+  [Standalone sealed objects](#standalone-sealed-objects) below), carrying
+  `object_id` (the sealed object's `row_hash`), `object_type` (the sealed
+  object's `event_type`), and `groups` (the names of the groups sealed into
+  it).
 
 #### level
 - **Type:** string, lower-cased. May be the empty string `""`.
@@ -287,6 +295,30 @@ into `default` and was encrypted, not surfaced as a public field).
 - Key order in the record is significant for cross-implementation byte-equality:
   `serde_json` runs with the `preserve_order` feature so the insertion order set
   by `build_envelope` is the on-disk order.
+
+### Standalone sealed objects
+
+`tn.seal` builds a record in this exact shape but returns it instead of
+appending it to a log — a signed, per-group-encrypted envelope with no place
+in any chain (`tn.unseal` opens it back into an `Entry`). Three fixed
+differences mark a standalone envelope:
+
+- `sequence` is `0` and `prev_hash` is `""` — there is no chain position to
+  hold.
+- the reserved public field `tn_sealed: 1` marks the envelope as standalone.
+  It is an ordinary public field (above), so it is hashed into `row_hash`
+  like any other; the value is the number `1`, not a boolean, so
+  `str(value)` in the hash preimage renders identically in Python and
+  TypeScript.
+- chain checks do not apply — a standalone envelope has no chain to verify
+  against.
+
+Verification is self-describing: instead of filtering fields through the
+local `tn.yaml`'s `public_fields` the way a log read does, every key that is
+not one of the nine header fields and not a group-payload object is treated
+as public and folded into the `row_hash` recompute. That is what lets a
+holder verify a sealed object from a ceremony whose yaml they have never
+seen.
 
 
 ---

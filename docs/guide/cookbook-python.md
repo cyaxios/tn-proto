@@ -166,6 +166,62 @@ PYTHONPATH=python python -m tn.cli read --yaml .tn/demo/tn.yaml
 2026-06-08T15:25:46.866319+00:00  warning auth.failed  who='alice'
 ```
 
+### Sealing an object: tn.seal and tn.unseal
+
+`tn.seal` builds a signed, encrypted object and hands it back to you instead
+of writing it to the log. `tn.unseal` opens it, using whatever keys you hold.
+
+```python
+import os, tempfile, tn
+
+work = tempfile.mkdtemp(prefix="tn_seal_")
+os.chdir(work)
+tn.init("demo")
+
+sealed = tn.seal("invoice.v1", amount=9800, customer="acme")
+
+# transport is yours to pick: it's a dict, and str() is compact JSON
+payload = str(sealed)
+
+entry = tn.unseal(payload)
+print("fields       :", entry.fields)
+print("hidden_groups:", entry.hidden_groups)
+
+tn.flush_and_close()
+```
+
+```
+fields       : {'amount': 9800, 'customer': 'acme'}
+hidden_groups: []
+```
+
+Fields route into groups and get encrypted exactly as they would on an
+ordinary `tn.log` call; the object is always signed. Whoever calls
+`tn.unseal` gets every group a key at hand can open - their own ceremony's
+keys and every kit they've absorbed are tried automatically.
+
+Holding an object you can't open is normal, not an error: `tn.unseal`
+returns the verified public frame, and `entry.hidden_groups` lists the
+groups that stayed sealed. Tampering is different - a changed byte anywhere
+in the object raises `VerifyError` instead.
+
+By default, sealing also chains one receipt row into your log
+(`tn.object.sealed`), so your own chain proves the seal happened and when.
+Like every `tn.`-prefixed event it routes to the admin/protocol-events
+surface, not the main log:
+
+```python
+receipts = list(tn.read("tn.object.sealed", log="admin"))
+receipts[0].fields["object_id"]     # the sealed object's row_hash
+receipts[0].fields["object_type"]   # "invoice.v1"
+receipts[0].fields["groups"]        # ["default"]
+```
+
+Pass `receipt=False` to skip that row. Pass `raw=True` to `tn.unseal` for the
+`{envelope, plaintext, valid}` audit triple instead of an `Entry`, and
+`as_recipient=<keystore dir>, group=<name>` to open one specific kit
+directly, without an active ceremony.
+
 ---
 
 ## CLI command reference
