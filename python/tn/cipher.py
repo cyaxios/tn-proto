@@ -27,9 +27,10 @@ import base64
 import json
 import time
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Iterator, Protocol, runtime_checkable
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -45,6 +46,18 @@ class NotAPublisherError(CipherError):
 
 class NotARecipientError(CipherError):
     """Raised when decrypt() is called without recipient key material."""
+
+
+@contextmanager
+def _perf_stage(stage: str) -> Iterator[None]:
+    try:
+        from . import _perf
+    except Exception:  # pragma: no cover - standalone cipher import fallback
+        yield
+        return
+
+    with _perf.time_stage(stage):
+        yield
 
 
 @runtime_checkable
@@ -414,12 +427,14 @@ class JWEGroupCipher:
             )
             for e in doc
         ]
-        return _jwe_seal(pubs, plaintext, aad)
+        with _perf_stage("emit:group_encrypt.cipher"):
+            return _jwe_seal(pubs, plaintext, aad)
 
     def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
         if self._my_sk is None:
             raise NotARecipientError("JWE: no recipient X25519 key in this keystore")
-        return _jwe_open(ciphertext, self._my_sk, aad)
+        with _perf_stage("read:group_decrypt.cipher"):
+            return _jwe_open(ciphertext, self._my_sk, aad)
 
 
 # ---------------------------------------------------------------------------
@@ -685,7 +700,8 @@ class HibeGroupCipher:
             what="id_path",
             allow_root=self._allow_root_path,
         )
-        return _native_hibe().seal(self._mpk, self._id_path, plaintext, aad or None)
+        with _perf_stage("emit:group_encrypt.cipher"):
+            return _native_hibe().seal(self._mpk, self._id_path, plaintext, aad or None)
 
     def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
         """Open a group blob.
@@ -704,7 +720,8 @@ class HibeGroupCipher:
         for sk in self._candidate_keys():
             tried = True
             try:
-                return hibe.open(self._mpk, sk, ciphertext, aad or None)
+                with _perf_stage("read:group_decrypt.cipher"):
+                    return hibe.open(self._mpk, sk, ciphertext, aad or None)
             except hibe.HibeCryptoError:
                 continue
         if not tried:
