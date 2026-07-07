@@ -307,3 +307,40 @@ def test_as_recipient_single_kit_override(tmp_path):
     entry = tn.unseal(sealed, as_recipient=bob_keystore, group="partners")
     assert entry.fields == {"body": "for bob's eyes"}
     assert "default" in entry.hidden_groups
+
+
+def test_seal_unseal_btn_ceremony(tmp_path):
+    # btn-only ceremonies dispatch emits through the Rust runtime; seal
+    # builds its envelope pure-Python regardless. The round-trip proves
+    # the Python-side btn encrypt and the Rust-side emit coexist without
+    # corrupting the publisher sealing state both paths draw on.
+    tn.init(tmp_path / "tn.yaml", cipher="btn")
+    sealed = tn.seal("obj.test.v1", x=1)  # receipt on: Rust emit follows the Python encrypt
+    row = tn.log("probe.v1", y=2)
+    assert row is not None
+    entry = tn.unseal(sealed)
+    assert entry.fields["x"] == 1
+    # both log surfaces still verify after the Python-side btn encrypt:
+    # the probe row chains into the main ceremony log...
+    main = list(tn.read(verify="raise"))
+    assert "probe.v1" in [e.event_type for e in main]
+    # ...and the seal receipt chains into the admin/protocol-events log.
+    receipts = list(tn.read("tn.object.sealed", log="admin", verify="raise"))
+    assert len(receipts) == 1
+    assert receipts[0].fields["object_id"] == sealed["row_hash"]
+
+
+def test_unseal_pre_rotation_object_after_rotation(tmp_path):
+    # Pinned to jwe (not _workflow_cipher): rotation retains the old
+    # recipient key as <group>.jwe.mykey.revoked.<ts>, and JWE decrypt
+    # walks those priors (active key first, then each revoked key
+    # newest-first), so a pre-rotation object still opens. btn also
+    # retains its prior kit (.btn.mykit.retired.<epoch>) but only the
+    # Rust runtime's multi-kit read path walks that archive — the
+    # pure-Python unseal walk does not, so this expectation holds for
+    # jwe only today.
+    tn.init(tmp_path / "tn.yaml", cipher="jwe")
+    sealed = tn.seal("obj.test.v1", receipt=False, x=1)
+    admin.rotate("default")
+    entry = tn.unseal(sealed)
+    assert entry.fields["x"] == 1
