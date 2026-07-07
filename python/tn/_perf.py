@@ -22,8 +22,17 @@ class _StageStats:
     total_ns: int = 0
 
 
+@dataclass
+class _MetricStats:
+    count: int = 0
+    total: int = 0
+    min_value: int | None = None
+    max_value: int | None = None
+
+
 _LOCK = threading.Lock()
 _COUNTERS: dict[str, _StageStats] = {}
+_METRICS: dict[str, _MetricStats] = {}
 
 
 def enabled() -> bool:
@@ -40,6 +49,18 @@ def record_ns(stage: str, ns: int) -> None:
         stats = _COUNTERS.setdefault(stage, _StageStats())
         stats.count += 1
         stats.total_ns += int(ns)
+
+
+def record_metric(name: str, value: int) -> None:
+    if not enabled():
+        return
+    value = int(value)
+    with _LOCK:
+        stats = _METRICS.setdefault(name, _MetricStats())
+        stats.count += 1
+        stats.total += value
+        stats.min_value = value if stats.min_value is None else min(stats.min_value, value)
+        stats.max_value = value if stats.max_value is None else max(stats.max_value, value)
 
 
 @contextmanager
@@ -62,6 +83,23 @@ def snapshot() -> list[tuple[str, int, int]]:
     return rows
 
 
+def snapshot_metrics() -> list[tuple[str, int, int, int, int]]:
+    with _LOCK:
+        rows = [
+            (
+                name,
+                stats.count,
+                stats.total,
+                0 if stats.min_value is None else stats.min_value,
+                0 if stats.max_value is None else stats.max_value,
+            )
+            for name, stats in _METRICS.items()
+        ]
+    rows.sort(key=lambda row: row[0])
+    return rows
+
+
 def reset() -> None:
     with _LOCK:
         _COUNTERS.clear()
+        _METRICS.clear()

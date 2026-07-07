@@ -80,6 +80,32 @@ def _snapshot_stage_rows(cell: BenchCell, op: str, trial: int) -> list[dict[str,
     return rows
 
 
+def _snapshot_metric_rows(cell: BenchCell, op: str, trial: int) -> list[dict[str, Any]]:
+    py_perf, _rust_core = _import_perf_modules()
+    rows: list[dict[str, Any]] = []
+    snapshot_metrics = getattr(py_perf, "snapshot_metrics", None)
+    if snapshot_metrics is None:
+        return rows
+    for metric, count, total, min_value, max_value in snapshot_metrics():
+        rows.append(
+            {
+                "schema": "tn-bench-metric/v1",
+                "cell": cell.id,
+                "cipher": cell.cipher,
+                "op": op,
+                "trial": trial,
+                "metric": metric,
+                "source": "python",
+                "count": count,
+                "total": total,
+                "min": min_value,
+                "max": max_value,
+                "avg": total // count if count else 0,
+            }
+        )
+    return rows
+
+
 def _last_wire_bytes(log_path: Path) -> int:
     if not log_path.exists():
         return 0
@@ -141,7 +167,7 @@ def _add_extra_recipients(cell: BenchCell, work_dir: Path) -> str:
     raise ValueError(f"unknown cipher {cell.cipher!r}")
 
 
-def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: int) -> tuple[list[dict], list[dict]]:
+def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: int) -> tuple[list[dict], list[dict], list[dict]]:
     import tn
     import tn.reader
 
@@ -154,6 +180,7 @@ def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: 
 
     op_rows: list[dict[str, Any]] = []
     stage_rows: list[dict[str, Any]] = []
+    metric_rows: list[dict[str, Any]] = []
 
     tn.init(yaml_path, log_path=log_path, cipher=cell.cipher)
     runtime_path = _add_extra_recipients(cell, cell_work)
@@ -203,6 +230,9 @@ def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: 
         emit_stage_rows = _snapshot_stage_rows(cell, "emit", trial)
         stage_rows.extend(emit_stage_rows)
         write_ndjson(layout.raw_dir / f"{cell.id}.ndjson", emit_stage_rows)
+        emit_metric_rows = _snapshot_metric_rows(cell, "emit", trial)
+        metric_rows.extend(emit_metric_rows)
+        write_ndjson(layout.raw_dir / f"{cell.id}.ndjson", emit_metric_rows)
 
     for _ in range(warmup_trials):
         emit_trial(0)
@@ -272,8 +302,11 @@ def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: 
     check_required_stages(cell.id, "read", read_stage_rows, REQUIRED_READ_STAGES)
     stage_rows.extend(read_stage_rows)
     write_ndjson(layout.raw_dir / f"{cell.id}.ndjson", read_stage_rows)
+    read_metric_rows = _snapshot_metric_rows(cell, "read", read_trial)
+    metric_rows.extend(read_metric_rows)
+    write_ndjson(layout.raw_dir / f"{cell.id}.ndjson", read_metric_rows)
 
-    return op_rows, stage_rows
+    return op_rows, stage_rows, metric_rows
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -303,8 +336,9 @@ def main(argv: list[str] | None = None) -> int:
 
     all_ops: list[dict[str, Any]] = []
     all_stages: list[dict[str, Any]] = []
+    all_metrics: list[dict[str, Any]] = []
     for cell in cells:
-        ops, stages = _run_cell(
+        ops, stages, metrics = _run_cell(
             layout,
             cell,
             warmup_trials=args.warmup_trials,
@@ -313,9 +347,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         all_ops.extend(ops)
         all_stages.extend(stages)
+        all_metrics.extend(metrics)
 
     write_json(layout.stats_dir / "summary.json", summarize_operation_rows(all_ops))
     write_json(layout.stats_dir / "stage-summary.json", all_stages)
+    write_json(layout.stats_dir / "metric-summary.json", all_metrics)
     print(f"artifact: {layout.root}")
     return 0
 

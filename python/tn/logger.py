@@ -21,10 +21,12 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from . import cipher as _cipher
 from . import classifier as _classifier
@@ -41,6 +43,33 @@ _log = logging.getLogger("tn.logger")
 # event_type is user-controlled. It's used in filename / topic templates
 # downstream, so whitelist ruthlessly at the entry point.
 _EVENT_TYPE_RE = re.compile(r"^[a-z0-9._-]{1,64}$", re.IGNORECASE)
+
+
+@contextmanager
+def _perf_stage(stage: str) -> Iterator[None]:
+    try:
+        from . import _perf
+    except Exception:  # pragma: no cover - perf must never affect emit
+        yield
+        return
+    with _perf.time_stage(stage):
+        yield
+
+
+def _perf_record_ns(stage: str, ns: int) -> None:
+    try:
+        from . import _perf
+    except Exception:  # pragma: no cover - perf must never affect emit
+        return
+    _perf.record_ns(stage, ns)
+
+
+def _perf_metric(name: str, value: int) -> None:
+    try:
+        from . import _perf
+    except Exception:  # pragma: no cover - perf must never affect emit
+        return
+    _perf.record_metric(name, value)
 
 
 def _validate_event_type(event_type: str) -> str:
@@ -204,8 +233,11 @@ class TNRuntime:
         # envelopes claiming the same (event_type, sequence) slot,
         # corrupting the on-disk chain. RLock so handlers calling back
         # into tn.log() don't deadlock. See Workstream D7.
-        with self._emit_lock:
-            return self._emit_locked(level, event_type, fields, aad)
+        with _perf_stage("emit:_TOTAL"):
+            lock_start = time.perf_counter_ns()
+            with self._emit_lock:
+                _perf_record_ns("emit:lock_acquire", time.perf_counter_ns() - lock_start)
+                return self._emit_locked(level, event_type, fields, aad)
 
     def _emit_locked(
         self,
@@ -228,40 +260,41 @@ class TNRuntime:
         public_keys = set(self.cfg.public_fields)
         public_out: dict[str, Any] = {}
         per_group: dict[str, dict[str, Any]] = {}
-        for k, v in merged.items():
-            if k in public_keys:
-                public_out[k] = v
-                continue
-            gnames = self.cfg.field_to_groups.get(k)
-            if not gnames:
-                # Field has no declared route. Try the LLM classifier (which
-                # is a stub today and returns "default"). If that yields a
-                # known group, use it. Otherwise fall back to the default
-                # group when one exists. As a last resort raise — the silent
-                # fall-through that hid typos is exactly what multi-group
-                # routing was meant to fix.
-                guess = _classifier._classify(k, v, list(self.cfg.groups))
-                if guess in self.cfg.groups:
-                    gnames = [guess]
-                elif "default" in self.cfg.groups:
-                    gnames = ["default"]
-                else:
-                    raise ValueError(
-                        f"field {k!r} has no group route and is not in "
-                        f"public_fields. Add it to `groups[<g>].fields` in "
-                        f"tn.yaml, list it under public_fields, or define a "
-                        f"`default` group to absorb unknowns."
-                    )
-            for gname in gnames:
-                if gname not in self.cfg.groups:
-                    # Should be unreachable: load-time validation rejects
-                    # routes to unknown groups. Defensive raise here so a
-                    # mutated cfg doesn't silently drop fields.
-                    raise ValueError(
-                        f"field {k!r} routed to unknown group {gname!r} "
-                        f"(known groups: {sorted(self.cfg.groups)})"
-                    )
-                per_group.setdefault(gname, {})[k] = v
+        with _perf_stage("emit:field_classify"):
+            for k, v in merged.items():
+                if k in public_keys:
+                    public_out[k] = v
+                    continue
+                gnames = self.cfg.field_to_groups.get(k)
+                if not gnames:
+                    # Field has no declared route. Try the LLM classifier (which
+                    # is a stub today and returns "default"). If that yields a
+                    # known group, use it. Otherwise fall back to the default
+                    # group when one exists. As a last resort raise — the silent
+                    # fall-through that hid typos is exactly what multi-group
+                    # routing was meant to fix.
+                    guess = _classifier._classify(k, v, list(self.cfg.groups))
+                    if guess in self.cfg.groups:
+                        gnames = [guess]
+                    elif "default" in self.cfg.groups:
+                        gnames = ["default"]
+                    else:
+                        raise ValueError(
+                            f"field {k!r} has no group route and is not in "
+                            f"public_fields. Add it to `groups[<g>].fields` in "
+                            f"tn.yaml, list it under public_fields, or define a "
+                            f"`default` group to absorb unknowns."
+                        )
+                for gname in gnames:
+                    if gname not in self.cfg.groups:
+                        # Should be unreachable: load-time validation rejects
+                        # routes to unknown groups. Defensive raise here so a
+                        # mutated cfg doesn't silently drop fields.
+                        raise ValueError(
+                            f"field {k!r} routed to unknown group {gname!r} "
+                            f"(known groups: {sorted(self.cfg.groups)})"
+                        )
+                    per_group.setdefault(gname, {})[k] = v
 
         # 3. index token per private field (keyed HMAC under the group's
         #    HKDF-derived index key; see tn/indexing.py). Tokens are
@@ -277,38 +310,43 @@ class TNRuntime:
         # aad stay byte-identical to the pre-aad wire shape.
         aad_echo: dict[str, dict[str, Any]] = {}
         group_payloads: dict[str, dict[str, Any]] = {}
-        for gname, plain_fields in per_group.items():
-            group_cfg = self.cfg.groups[gname]
-            field_hashes: dict[str, str] = {}
-            for fname, fval in plain_fields.items():
-                field_hashes[fname] = _index_token(group_cfg.index_key, fname, fval)
+        with _perf_stage("emit:group_encrypt"):
+            for gname, plain_fields in per_group.items():
+                group_cfg = self.cfg.groups[gname]
+                field_hashes: dict[str, str] = {}
+                for fname, fval in plain_fields.items():
+                    with _perf_stage("emit:group_encrypt.index_token"):
+                        field_hashes[fname] = _index_token(group_cfg.index_key, fname, fval)
 
-            # Effective marker = group default overlaid by the per-emit
-            # marker. Bound into the body via cipher.encrypt(aad); every
-            # cipher (btn/jwe/hibe) supports it now, matching the native path.
-            effective_aad = {**group_cfg.aad_default, **(aad or {})}
-            aad_bytes = _canonical_bytes(effective_aad) if effective_aad else b""
+                # Effective marker = group default overlaid by the per-emit
+                # marker. Bound into the body via cipher.encrypt(aad); every
+                # cipher (btn/jwe/hibe) supports it now, matching the native path.
+                effective_aad = {**group_cfg.aad_default, **(aad or {})}
+                aad_bytes = _canonical_bytes(effective_aad) if effective_aad else b""
 
-            # 4. encrypt group plaintext via the ceremony's cipher (BGW
-            #    or JWE — see tn/cipher.py). If this party isn't a
-            #    publisher for the group, the cipher raises and we skip.
-            plaintext_bytes = _canonical_bytes(plain_fields)
-            try:
-                ct_bytes = group_cfg.cipher.encrypt(plaintext_bytes, aad_bytes)
-            except _cipher.NotAPublisherError as e:
-                _log.warning(
-                    "skipping group %r for %s: %s",
-                    gname,
-                    event_type,
-                    e,
-                )
-                continue
-            group_payloads[gname] = {
-                "ciphertext": ct_bytes,  # raw bytes — we'll b64 in envelope
-                "field_hashes": field_hashes,
-            }
-            if effective_aad:
-                aad_echo[gname] = effective_aad
+                # 4. encrypt group plaintext via the ceremony's cipher (BGW
+                #    or JWE — see tn/cipher.py). If this party isn't a
+                #    publisher for the group, the cipher raises and we skip.
+                with _perf_stage("emit:group_encrypt.payload_build"):
+                    plaintext_bytes = _canonical_bytes(plain_fields)
+                _perf_metric("emit:group_encrypt.plaintext_bytes", len(plaintext_bytes))
+                try:
+                    ct_bytes = group_cfg.cipher.encrypt(plaintext_bytes, aad_bytes)
+                except _cipher.NotAPublisherError as e:
+                    _log.warning(
+                        "skipping group %r for %s: %s",
+                        gname,
+                        event_type,
+                        e,
+                    )
+                    continue
+                _perf_metric("emit:group_encrypt.ciphertext_bytes", len(ct_bytes))
+                group_payloads[gname] = {
+                    "ciphertext": ct_bytes,  # raw bytes — we'll b64 in envelope
+                    "field_hashes": field_hashes,
+                }
+                if effective_aad:
+                    aad_echo[gname] = effective_aad
 
         # Echo the effective aad into the public section under the reserved
         # ``tn_aad`` key so a reader reconstructs byte-identical binding data.
@@ -326,50 +364,55 @@ class TNRuntime:
             public_out["tn_aad"] = _canonical_bytes(aad_echo).decode("utf-8")
 
         # 5. chain
-        seq, prev_hash = self.chain.advance(event_type)
+        with _perf_stage("emit:chain_advance"):
+            seq, prev_hash = self.chain.advance(event_type)
         timestamp = (
             datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
         )
         event_id = str(uuid.uuid4())
         level_norm = level.lower()
 
-        row_hash = _compute_row_hash(
-            device_identity=self.cfg.device.device_identity,
-            timestamp=timestamp,
-            event_id=event_id,
-            event_type=event_type,
-            level=level_norm,
-            prev_hash=prev_hash,
-            public_fields=public_out,
-            groups=group_payloads,
-        )
+        with _perf_stage("emit:row_hash"):
+            row_hash = _compute_row_hash(
+                device_identity=self.cfg.device.device_identity,
+                timestamp=timestamp,
+                event_id=event_id,
+                event_type=event_type,
+                level=level_norm,
+                prev_hash=prev_hash,
+                public_fields=public_out,
+                groups=group_payloads,
+            )
 
         # 6. sign
-        sig = self.cfg.device.sign(row_hash.encode("ascii"))
+        with _perf_stage("emit:sign"):
+            sig = self.cfg.device.sign(row_hash.encode("ascii"))
 
         # 7. append envelope as JSON line
-        envelope: dict[str, Any] = {
-            "device_identity": self.cfg.device.device_identity,
-            "timestamp": timestamp,
-            "event_id": event_id,
-            "event_type": event_type,
-            "level": level_norm,
-            "sequence": seq,
-            "prev_hash": prev_hash,
-            "row_hash": row_hash,
-            "signature": _signature_b64(sig),
-        }
-        for k, v in public_out.items():
-            envelope.setdefault(k, v)
-        for gname, g in group_payloads.items():
-            envelope[gname] = {
-                "ciphertext": base64.b64encode(g["ciphertext"]).decode("ascii"),
-                "field_hashes": g["field_hashes"],
+        with _perf_stage("emit:envelope_build"):
+            envelope: dict[str, Any] = {
+                "device_identity": self.cfg.device.device_identity,
+                "timestamp": timestamp,
+                "event_id": event_id,
+                "event_type": event_type,
+                "level": level_norm,
+                "sequence": seq,
+                "prev_hash": prev_hash,
+                "row_hash": row_hash,
+                "signature": _signature_b64(sig),
             }
+            for k, v in public_out.items():
+                envelope.setdefault(k, v)
+            for gname, g in group_payloads.items():
+                envelope[gname] = {
+                    "ciphertext": base64.b64encode(g["ciphertext"]).decode("ascii"),
+                    "field_hashes": g["field_hashes"],
+                }
 
-        from ._entry import _json_default
-        line = json.dumps(envelope, separators=(",", ":"), default=_json_default) + "\n"
-        raw = line.encode("utf-8")
+            from ._entry import _json_default
+            line = json.dumps(envelope, separators=(",", ":"), default=_json_default) + "\n"
+            raw = line.encode("utf-8")
+        _perf_metric("emit:envelope.raw_bytes", len(raw))
 
         # Route protocol events (tn.*) to separate file if configured
         if event_type.startswith("tn.") and self.cfg.protocol_events_location != "main_log":
@@ -377,9 +420,12 @@ class TNRuntime:
                 event_type, event_id=event_id
             )
             pel_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(pel_path, "a", encoding="utf-8") as _pel_f:
-                _pel_f.write(line)
-            self.chain.commit(event_type, row_hash)
+            with _perf_stage("emit:file_write"):
+                with open(pel_path, "a", encoding="utf-8") as _pel_f:
+                    _pel_f.write(line)
+            _perf_metric("emit:file_write.raw_bytes", len(raw))
+            with _perf_stage("emit:chain_commit"):
+                self.chain.commit(event_type, row_hash)
             return envelope
 
         # Fan out to every handler whose filter accepts this envelope.
@@ -390,27 +436,28 @@ class TNRuntime:
         # (return None from resolved_address) are always fired.
         delivered = 0
         seen_addresses: set[str] = set()
-        for h in self.handlers:
-            if not h.accepts(envelope):
-                continue
-            try:
-                addr = h.resolved_address()
-            except Exception:  # noqa: BLE001 — defensive
-                addr = None
-            if addr is not None:
-                if addr in seen_addresses:
+        with _perf_stage("emit:fan_out"):
+            for h in self.handlers:
+                if not h.accepts(envelope):
                     continue
-                seen_addresses.add(addr)
-            try:
-                h.emit(envelope, raw)
-                delivered += 1
-            except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
-                _log.exception(
-                    "handler %r raised on %s/%s; entry already sealed",
-                    h.name,
-                    event_type,
-                    envelope["event_id"],
-                )
+                try:
+                    addr = h.resolved_address()
+                except Exception:  # noqa: BLE001 — defensive
+                    addr = None
+                if addr is not None:
+                    if addr in seen_addresses:
+                        continue
+                    seen_addresses.add(addr)
+                try:
+                    h.emit(envelope, raw)
+                    delivered += 1
+                except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
+                    _log.exception(
+                        "handler %r raised on %s/%s; entry already sealed",
+                        h.name,
+                        event_type,
+                        envelope["event_id"],
+                    )
         if delivered == 0:
             _log.warning(
                 "no handler accepted event %s/%s — envelope computed but not written",
@@ -418,7 +465,8 @@ class TNRuntime:
                 envelope["event_id"],
             )
 
-        self.chain.commit(event_type, row_hash)
+        with _perf_stage("emit:chain_commit"):
+            self.chain.commit(event_type, row_hash)
         return envelope
 
     def close(self, *, timeout: float = 30.0) -> None:

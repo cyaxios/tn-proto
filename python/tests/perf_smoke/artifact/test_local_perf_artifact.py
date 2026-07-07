@@ -7,6 +7,7 @@ import pytest
 
 from tn_bench.artifact import create_artifact_layout, write_env_descriptor, write_ndjson
 from tn_bench.cells import expand_local_smoke_cells, make_payload_fields
+from tn_bench.local_perf import _snapshot_metric_rows
 from tn_bench.stats import summarize_operation_rows
 from tn_bench.sufficiency import REQUIRED_READ_STAGES, check_required_stages
 
@@ -68,4 +69,33 @@ def test_artifact_layout_writes_env_and_ndjson(tmp_path: Path) -> None:
     assert [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()] == [
         {"a": 1},
         {"b": 2},
+    ]
+
+
+def test_metric_snapshot_rows_preserve_size_counters(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakePerf:
+        @staticmethod
+        def snapshot_metrics():
+            return [("emit:file_write.raw_bytes", 2, 128, 64, 64)]
+
+    monkeypatch.setattr("tn_bench.local_perf._import_perf_modules", lambda: (FakePerf, None))
+    cell = expand_local_smoke_cells(payloads=[64], recipients=[1])[0]
+
+    rows = _snapshot_metric_rows(cell, "emit", 1)
+
+    assert rows == [
+        {
+            "schema": "tn-bench-metric/v1",
+            "cell": cell.id,
+            "cipher": cell.cipher,
+            "op": "emit",
+            "trial": 1,
+            "metric": "emit:file_write.raw_bytes",
+            "source": "python",
+            "count": 2,
+            "total": 128,
+            "min": 64,
+            "max": 64,
+            "avg": 64,
+        }
     ]
