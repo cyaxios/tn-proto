@@ -4,7 +4,7 @@
 // (python/tn/cli.py) + its `p_group_add` parser. Mirrors the verb's
 // behaviour, flags, stdout, and exit code:
 //
-//     tn group add <name> [--fields a,b,c] [--cipher btn|jwe] [--yaml <path>]
+//     tn group add <name> [--fields a,b,c] [--cipher btn|jwe|hibe] [--yaml <path>]
 //
 // Like Python, group-add was previously API-only (`tn.admin.ensureGroup`).
 // This module exposes it on the CLI. Under the multi-ceremony layout the
@@ -25,7 +25,7 @@ export interface GroupAddOptions {
   /** Comma-separated field names to route into this group (`--fields`). */
   fields?: string;
   /** Cipher for the new group (`--cipher`); default = the ceremony's cipher. */
-  cipher?: "btn" | "jwe";
+  cipher?: "btn" | "jwe" | "hibe";
   /** Path to tn.yaml (`--yaml`); default = discover via the standard chain. */
   yaml?: string;
 }

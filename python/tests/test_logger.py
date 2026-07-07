@@ -13,6 +13,15 @@ Uses cipher=btn so tests stay hermetic (no JWE keypair wiring required).
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 import sys
 from pathlib import Path
@@ -58,7 +67,7 @@ def _read_user_envelopes(log_path: Path) -> list[dict]:
 
 def test_log_bare_emits_with_empty_level(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     envelope = tn.log("evt.bare", n=1)
     assert isinstance(envelope, dict)
     assert envelope["event_type"] == "evt.bare"
@@ -83,7 +92,7 @@ def test_log_bare_emits_with_empty_level(tmp_path):
 )
 def test_level_wrappers_propagate_to_envelope(tmp_path, wrapper_name, expected_level):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     # The levelled verbs are fire-and-forget: they return None (only tn.log
     # returns the written envelope). The chosen level still lands on the
     # written record — verify propagation by reading the log back.
@@ -98,7 +107,7 @@ def test_level_wrappers_propagate_to_envelope(tmp_path, wrapper_name, expected_l
 
 def test_sub_threshold_wrappers_return_none(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.set_level("info")
     try:
         envelope = tn.debug("evt.ignored", k=1)
@@ -127,14 +136,14 @@ def test_sub_threshold_wrappers_return_none(tmp_path):
 )
 def test_rejects_invalid_event_type(tmp_path, bad_event_type):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     with pytest.raises((ValueError, RuntimeError), match=r"event_?type|invalid"):
         tn.info(bad_event_type, k=1)
 
 
 def test_accepts_ordinary_event_type(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     event_type = "module.submodule.event-name_v2"
     tn.info(event_type, k=1)
     tn.flush_and_close()
@@ -154,7 +163,7 @@ def test_context_merges_into_every_envelope(tmp_path):
     # Auto-create a ceremony yaml (fills in `me`, keystore paths, etc.),
     # then append request_id to public_fields so we can inspect it without
     # decryption.
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
 
     text = yaml.read_text(encoding="utf-8")
@@ -204,7 +213,7 @@ def test_log_before_init_raises_runtime_error():
 
 def test_flush_and_close_is_idempotent(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("evt.one", k=1)
     tn.flush_and_close()
     # Calling a second time must not raise even though the runtime is already gone.
@@ -223,7 +232,7 @@ def test_flush_and_close_is_idempotent(tmp_path):
 def test_reinit_flushes_old_runtime(tmp_path):
     """init() on an already-initialized process must close the prior runtime first."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("evt.first", k=1)
     # Re-init with the same yaml should succeed and pick up the prior chain.
     tn.init(yaml)
@@ -244,7 +253,7 @@ def test_reinit_flushes_old_runtime(tmp_path):
 def test_chain_state_seeds_from_existing_log_across_reinit(tmp_path):
     """After re-init, new entries for the same event_type must keep the chain linked."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("chained", k=1)
     tn.flush_and_close()
 

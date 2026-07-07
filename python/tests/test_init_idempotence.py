@@ -20,6 +20,15 @@ up red before the implementation lands and green after.
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 import os
 import sys
@@ -102,7 +111,7 @@ def test_slice1_scan_covers_main_and_pel() -> None:
 
         # Step 1: let tn.init create a fresh ceremony so `me.did` etc.
         # are populated for us.
-        tn.init(yaml_path, cipher="btn")
+        tn.init(yaml_path, cipher=_workflow_cipher("btn"))
         tn.flush_and_close()
 
         # Step 2: override admin_log_location with a {event_type} template
@@ -134,7 +143,7 @@ def test_slice1_scan_covers_main_and_pel() -> None:
         # a tn.group.added directly via the dispatch runtime so we
         # exercise the split-log write path without depending on
         # slice 2 being implemented yet.
-        tn.init(yaml_path, cipher="btn")
+        tn.init(yaml_path, cipher=_workflow_cipher("btn"))
         try:
             pass  # pragma: no cover — not used
         except Exception:
@@ -201,7 +210,7 @@ def test_slice2_init_provisions_missing_recipient() -> None:
         yaml_path = ws / "tn.yaml"
 
         # Fresh btn ceremony (publisher = only recipient initially).
-        tn.init(yaml_path, cipher="btn")
+        tn.init(yaml_path, cipher=_workflow_cipher("btn"))
         tn.flush_and_close()
 
         main_log = ws / ".tn/tn/logs" / "tn.ndjson"
@@ -224,7 +233,7 @@ def test_slice2_init_provisions_missing_recipient() -> None:
         yaml_path.write_text(injected, encoding="utf-8")
 
         # Second init should notice bob is declared but unprovisioned.
-        tn.init(yaml_path, cipher="btn")
+        tn.init(yaml_path, cipher=_workflow_cipher("btn"))
         tn.flush_and_close()
 
         after = _count_events([main_log], "tn.recipient.added")
@@ -272,7 +281,7 @@ def test_slice2_init_provisions_missing_recipient() -> None:
             return
 
         # Third init is a no-op: count stays the same.
-        tn.init(yaml_path, cipher="btn")
+        tn.init(yaml_path, cipher=_workflow_cipher("btn"))
         tn.flush_and_close()
         after2 = _count_events([main_log], "tn.recipient.added")
         if after2 != after:
@@ -297,7 +306,7 @@ def test_slice3_create_fresh_refuses_to_clobber() -> None:
         yaml_path = ws / "tn.yaml"
 
         # First, create a real ceremony so the keystore is populated.
-        tn.init(yaml_path, cipher="btn")
+        tn.init(yaml_path, cipher=_workflow_cipher("btn"))
         tn.flush_and_close()
 
         # Now remove the yaml but leave the keystore.
@@ -309,7 +318,7 @@ def test_slice3_create_fresh_refuses_to_clobber() -> None:
         # Calling create_fresh (or init which will route to it) must
         # refuse rather than silently overwriting the existing key.
         try:
-            create_fresh(yaml_path, cipher="btn")
+            create_fresh(yaml_path, cipher=_workflow_cipher("btn"))
         except Exception as exc:
             msg = str(exc)
             # Good: raised. Check the message is informative.

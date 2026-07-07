@@ -25,8 +25,9 @@ Public API:
                                 # valid} audit shape)
     tn.flush_and_close()        # drain handlers, release runtime
 
-Ciphers: "jwe" (pure-Python static-ECDH + AES-KW + AES-GCM) and "btn"
-(NNL subset-difference broadcast, via the Rust tn_core extension).
+Ciphers: "jwe" (standard RFC 7516 JWE — ECDH-ES+A256KW per recipient,
+via the joserfc JOSE library) and "btn" (NNL subset-difference broadcast,
+via the Rust tn_core extension).
 """
 
 from __future__ import annotations
@@ -1005,6 +1006,7 @@ def _emit_via(
     event_type: str,
     fields: dict[str, Any],
     sign: bool | None,
+    aad: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build the merged-fields dict, splice tn.agents policy text if a
     template applies, then dispatch the emit through the supplied
@@ -1045,10 +1047,10 @@ def _emit_via(
     if not _fields_already_wire_safe(merged):
         merged = _coerce_for_wire(merged)
     _splice_agent_policy(event_type, merged)
-    return rt.emit(level, event_type, merged, sign=sign)
+    return rt.emit(level, event_type, merged, sign=sign, aad=aad)
 
 
-def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign: bool | None) -> dict[str, Any] | None:
+def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign: bool | None, aad: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Module-level emit: routes through the singleton dispatch runtime.
 
     Used by the bare ``tn.info(...)`` / ``tn.log(...)`` API which is
@@ -1057,7 +1059,7 @@ def _emit_with_splice(level: str, event_type: str, fields: dict[str, Any], sign:
     and call ``_emit_via`` with their own runtime — see
     ``tn._handle.TN``.
     """
-    return _emit_via(_require_dispatch(), level, event_type, fields, sign)
+    return _emit_via(_require_dispatch(), level, event_type, fields, sign, aad)
 
 
 def _yaml_log_level(py_rt) -> str | None:
@@ -1351,8 +1353,6 @@ def _current_config_impl():
     See Also:
         :func:`tn.using_rust`: Diagnostic — is the Rust runtime active?
         :func:`tn.init`: How the config gets loaded.
-        `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
-            Ceremony / yaml structure.
     """
     from . import logger as _lg
 
@@ -1423,6 +1423,20 @@ def _refresh_admin_cache_if_present() -> None:
 from ._pkg_impl import _bundle_for_recipient_impl  # noqa: F401, E402
 from ._session_impl import _Session, _session_impl, _SessionHandle  # noqa: F401, E402
 from ._vault_impl import _vault_link_impl, _vault_unlink_impl  # noqa: F401, E402
+from .scope import ScopeBuilder, ScopedTn  # noqa: E402, F401
+
+
+def scope_to(*dids: str) -> ScopeBuilder:
+    """Spawn a per-DID scoped capability handle over the active ceremony.
+
+    Returns a builder; ``.spawn()`` resolves the DIDs against this project's
+    groups and returns a read-only handle that opens ONLY the groups those
+    DIDs are recipients of. Pass several DIDs to union their capabilities —
+    ``tn.scope_to(user_did, tier_did)`` opens the user's groups plus its own,
+    and nothing else. Mirror of the TypeScript ``tn.scopeTo``.
+    """
+    return ScopeBuilder(current_config(), dids)
+
 
 __all__ = [  # noqa: RUF022 — intentional category grouping (see inline comments)
     "AbsorbReceipt",
@@ -1465,6 +1479,8 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "clear_context",
     "compile_enrolment",
     "current_config",
+    # scoped capability handle — tn.scope_to(did).spawn() (TS parity)
+    "scope_to",
     "debug",
     # ceremony admin (code-level equivalents of the CLI verbs)
     "ensure_group",

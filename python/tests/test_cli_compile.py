@@ -12,6 +12,15 @@ that the TS/chrome readers scan, under a Python-``absorb``-able manifest).
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import argparse
 import json
 import zipfile
@@ -32,7 +41,7 @@ def _bootstrap_btn_keystore(tmp_path: Path) -> Path:
     Mirrors the proven fixture in ``tests/test_compile.py``.
     """
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     cfg = load_or_create(yaml)
     return cfg.keystore

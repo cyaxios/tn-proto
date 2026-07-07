@@ -41,7 +41,8 @@ import { HandlersNamespace } from "./handlers/namespace.js";
 import { normalizeLogFields } from "./_log_fields.js";
 import { StdoutHandler } from "./handlers/stdout.js";
 import { buildHandlers } from "./handlers/registry.js";
-import { readAsRecipient } from "./read_as_recipient.js";
+import { readAsRecipient, readAsRecipientAsync } from "./read_as_recipient.js";
+import { ScopeBuilder } from "./scope.js";
 
 // ---------------------------------------------------------------------------
 // Re-export types for callers that import from tn.ts directly.
@@ -286,6 +287,15 @@ export interface TnInitOptions {
   /** Override the vault base URL for the auto-link upload. Default resolution:
    *  `TN_VAULT_URL` env, else the hosted vault. */
   vaultUrl?: string;
+  /**
+   * Group-sealing cipher when the init mints a FRESH ceremony (no effect on
+   * an existing yaml — the cipher is read from the yaml). `"btn"` (default),
+   * `"hibe"` (BBG hierarchical identity-based encryption; the fresh keystore
+   * becomes its own HIBE authority), or `"jwe"` (per-recipient ECDH-ES; the
+   * creator becomes publisher and sole reader — seal/open with the async
+   * emitAsync/readAsync verbs). Mirrors Python's `tn.init(..., cipher=...)`.
+   */
+  cipher?: "btn" | "hibe" | "jwe";
 }
 
 /**
@@ -383,6 +393,17 @@ export interface WatchOptions {
   since?: "start" | "now" | number | string;
   /** Polling fallback interval. Default: 300ms. */
   pollIntervalMs?: number;
+}
+
+/** Per-emit options for the write verbs. Trailing/optional so existing
+ * `tn.info(evt, fields)` calls are unaffected. Mirrors Python's `aad=` kwarg. */
+export interface EmitOpts {
+  /** Additional-authenticated-data: a flat mapping of string -> scalar bound
+   * (authenticated, not encrypted) to every group sealed on this row, merged
+   * OVER any yaml per-group `aad` default and echoed into the public `tn_aad`
+   * block. Not yet wired through the native (btn) runtime — passing it on a
+   * btn ceremony throws. Omit (or empty) to bind nothing. */
+  aad?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -521,10 +542,15 @@ export class Tn {
             `.yaml to use an explicit yaml file instead.`,
         );
       }
-      const layoutOpts: { projectDir?: string; profile?: string } = {
+      const layoutOpts: {
+        projectDir?: string;
+        profile?: string;
+        cipher?: "btn" | "hibe" | "jwe";
+      } = {
         projectDir: opts?.projectDir ?? process.cwd(),
       };
       if (opts?.profile !== undefined) layoutOpts.profile = opts.profile;
+      if (opts?.cipher !== undefined) layoutOpts.cipher = opts.cipher;
       resolvedPath = ensureProjectLayoutOnDisk(name, layoutOpts);
     }
 
@@ -590,7 +616,10 @@ export class Tn {
       }
     }
 
-    const rt = NodeRuntime.init(resolvedPath);
+    const rt = NodeRuntime.init(
+      resolvedPath,
+      opts?.cipher !== undefined ? { cipher: opts.cipher } : {},
+    );
     // Wire yaml-declared handlers (e.g. file.rotating, otel) into the
     // runtime. Two kinds are excluded from buildHandlers here because the
     // runtime handles them separately:
@@ -1043,6 +1072,21 @@ export class Tn {
     return this._rt.config;
   }
 
+  /**
+   * Spawn a per-DID scoped capability handle over this project.
+   *
+   * The returned {@link ScopeBuilder} collects the DIDs to scope to;
+   * `.spawn()` resolves them against this project's groups and returns a
+   * read-only {@link ScopedTn} that opens ONLY the groups those DIDs are
+   * recipients of. Pass several DIDs to union their capabilities — a
+   * governance tier scoping to `scopeTo(userDid, tierDid)` opens the
+   * user's groups plus its own, and nothing else.
+   */
+  scopeTo(...dids: string[]): ScopeBuilder {
+    const cfg = this._rt.config;
+    return new ScopeBuilder({ groups: cfg.groups, keystorePath: cfg.keystorePath }, dids);
+  }
+
   /** True iff this ceremony's runtime has an attached Rust/WASM core
    *  servicing the emit path. False before the first emit (wasm attaches
    *  lazily) and after an admin-driven runtime reset. Mirrors Python's
@@ -1161,6 +1205,36 @@ export class Tn {
   // -------------------------------------------------------------------------
 
   /**
+   * Split the trailing `(msgOrFields, fieldsIfMessage, opts)` arguments into
+   * the merged field dict and the per-emit aad. Supports both call shapes:
+   *
+   *   - `info(evt, "message", fields?, opts?)`  — opts is the 4th arg
+   *   - `info(evt, fields, opts?)`              — opts is the 3rd arg
+   *
+   * When `msgOrFields` is an object (the fields case) and no explicit 4th
+   * `opts` was given, the 3rd argument is treated as `EmitOpts`. This mirrors
+   * Python's `tn.info("evt", field=..., aad={...})` where aad rides alongside
+   * the fields rather than being a positional.
+   */
+  private _resolveEmitArgs(
+    msgOrFields: string | Record<string, unknown> | undefined,
+    fieldsIfMessage: Record<string, unknown> | undefined,
+    opts: EmitOpts | undefined,
+  ): { fields: Record<string, unknown>; aad: Record<string, unknown> | undefined } {
+    let resolvedOpts = opts;
+    let resolvedFieldsArg = fieldsIfMessage;
+    if (typeof msgOrFields !== "string" && msgOrFields !== undefined && opts === undefined) {
+      // Fields-object call: the 3rd argument, if present, is the options bag.
+      resolvedOpts = fieldsIfMessage as EmitOpts | undefined;
+      resolvedFieldsArg = undefined;
+    }
+    return {
+      fields: this._mergeForEmit(normalizeLogFields(msgOrFields, resolvedFieldsArg)),
+      aad: resolvedOpts?.aad,
+    };
+  }
+
+  /**
    * Severity-less attested event. Always emits regardless of `setLevel()`.
    * Mirrors Python `tn.log(event_type, **fields)`.
    */
@@ -1168,64 +1242,54 @@ export class Tn {
     eventType: string,
     msgOrFields?: string | Record<string, unknown>,
     fieldsIfMessage?: Record<string, unknown>,
+    opts?: EmitOpts,
   ): EmitReceipt {
-    return this._rt.emit(
-      "",
-      eventType,
-      this._mergeForEmit(normalizeLogFields(msgOrFields, fieldsIfMessage)),
-    );
+    const { fields, aad } = this._resolveEmitArgs(msgOrFields, fieldsIfMessage, opts);
+    return this._rt.emit("", eventType, fields, aad);
   }
 
   debug(
     eventType: string,
     msgOrFields?: string | Record<string, unknown>,
     fieldsIfMessage?: Record<string, unknown>,
+    opts?: EmitOpts,
   ): EmitReceipt {
     if (10 < _tnLogLevelThreshold) return _nullReceipt();
-    return this._rt.emit(
-      "debug",
-      eventType,
-      this._mergeForEmit(normalizeLogFields(msgOrFields, fieldsIfMessage)),
-    );
+    const { fields, aad } = this._resolveEmitArgs(msgOrFields, fieldsIfMessage, opts);
+    return this._rt.emit("debug", eventType, fields, aad);
   }
 
   info(
     eventType: string,
     msgOrFields?: string | Record<string, unknown>,
     fieldsIfMessage?: Record<string, unknown>,
+    opts?: EmitOpts,
   ): EmitReceipt {
     if (20 < _tnLogLevelThreshold) return _nullReceipt();
-    return this._rt.emit(
-      "info",
-      eventType,
-      this._mergeForEmit(normalizeLogFields(msgOrFields, fieldsIfMessage)),
-    );
+    const { fields, aad } = this._resolveEmitArgs(msgOrFields, fieldsIfMessage, opts);
+    return this._rt.emit("info", eventType, fields, aad);
   }
 
   warning(
     eventType: string,
     msgOrFields?: string | Record<string, unknown>,
     fieldsIfMessage?: Record<string, unknown>,
+    opts?: EmitOpts,
   ): EmitReceipt {
     if (30 < _tnLogLevelThreshold) return _nullReceipt();
-    return this._rt.emit(
-      "warning",
-      eventType,
-      this._mergeForEmit(normalizeLogFields(msgOrFields, fieldsIfMessage)),
-    );
+    const { fields, aad } = this._resolveEmitArgs(msgOrFields, fieldsIfMessage, opts);
+    return this._rt.emit("warning", eventType, fields, aad);
   }
 
   error(
     eventType: string,
     msgOrFields?: string | Record<string, unknown>,
     fieldsIfMessage?: Record<string, unknown>,
+    opts?: EmitOpts,
   ): EmitReceipt {
     if (40 < _tnLogLevelThreshold) return _nullReceipt();
-    return this._rt.emit(
-      "error",
-      eventType,
-      this._mergeForEmit(normalizeLogFields(msgOrFields, fieldsIfMessage)),
-    );
+    const { fields, aad } = this._resolveEmitArgs(msgOrFields, fieldsIfMessage, opts);
+    return this._rt.emit("error", eventType, fields, aad);
   }
 
   /**
@@ -1235,6 +1299,30 @@ export class Tn {
    */
   emit(level: string, eventType: string, fields: Record<string, unknown>): EmitReceipt {
     return this._rt.emit(level, eventType, this._mergeForEmit(fields));
+  }
+
+  /**
+   * Async sibling of {@link emit} that can seal `cipher: jwe` groups. jwe seals
+   * through panva/jose (async), so the synchronous `emit`/`info` cannot publish
+   * to a jwe group — use this (and {@link readAsync} to read them back). btn and
+   * hibe groups seal synchronously within the same pipeline.
+   */
+  async emitAsync(
+    level: string,
+    eventType: string,
+    fields: Record<string, unknown>,
+    aad?: Record<string, unknown> | null,
+  ): Promise<EmitReceipt> {
+    return this._rt.emitAsync(level, eventType, this._mergeForEmit(fields), aad ?? undefined);
+  }
+
+  /** Async `info` for jwe ceremonies (see {@link emitAsync}). */
+  infoAsync(
+    eventType: string,
+    fields: Record<string, unknown> = {},
+    aad?: Record<string, unknown> | null,
+  ): Promise<EmitReceipt> {
+    return this.emitAsync("info", eventType, fields, aad);
   }
 
   /**
@@ -1315,7 +1403,6 @@ export class Tn {
     const selector = opts.selector;
     const filter = opts.filter;
     const rt = this._rt;
-    const runId = this._runId;
 
     // Choose the source of {envelope, plaintext, valid} triples.
     let triples: Iterable<ReadEntry>;
@@ -1346,21 +1433,6 @@ export class Tn {
     } else {
       triples = rt.read(logPath, expectGenesis);
     }
-
-    // Helper: per-row run-id filter (only applies to local reads).
-    const matchesRun = (r: ReadEntry): boolean => {
-      if (allRuns) return true;
-      const pt = r.plaintext ?? {};
-      const env = r.envelope;
-      // run_id is plaintext-payload; check every group's body.
-      for (const body of Object.values(pt)) {
-        if (body && typeof body === "object" && "run_id" in body) {
-          return body["run_id"] === runId;
-        }
-      }
-      const envRid = env["run_id"];
-      return typeof envRid === "string" && envRid === runId;
-    };
 
     // Iterator wrapper that handles parser-level errors per `verify` policy.
     const safeIter = function* (this: Tn): IterableIterator<ReadEntry> {
@@ -1393,60 +1465,157 @@ export class Tn {
     }.call(this);
 
     for (const r of safeIter) {
-      // run_id filter — only on local reads. Recipient-mode reads cross
-      // publishers, so filtering by your local run_id makes no sense.
-      if (!usingRecipient && !matchesRun(r)) continue;
-
-      // Authoritative selector + filter gate on the envelope's public fields,
-      // applied before verify/decrypt so a rejected row never surfaces (parity
-      // with Python read.py `_passes_selector_filter`).
-      if (!_passesSelectorFilter(r.envelope, selector, filter)) continue;
-
-      const v = r.valid;
-      const allValid = Boolean(v.signature) && Boolean(v.rowHash) && Boolean(v.chain);
-      if (!allValid && verify !== false) {
-        const reasons: string[] = [];
-        if (!v.signature) reasons.push("signature");
-        if (!v.rowHash) reasons.push("row_hash");
-        if (!v.chain) reasons.push("chain");
-        if (verify === true || verify === "raise") {
-          throw new VerifyError(
-            Number(r.envelope["sequence"] ?? 0),
-            String(r.envelope["event_type"] ?? ""),
-            reasons,
-          );
-        }
-        if (verify === "skip") {
-          // Avoid looping our own tampered-row event back through.
-          if (String(r.envelope["event_type"] ?? "") === "tn.read.tampered_row_skipped") {
-            continue;
-          }
-          try {
-            this._emitTamperedRowSkipped(r.envelope, reasons);
-          } catch {
-            // best-effort
-          }
-          continue;
-        }
-      }
-
-      if (raw) {
-        const env = r.envelope;
-        if (where && !where(env)) continue;
-        yield env;
-        continue;
-      }
-
-      let entry: Entry;
-      try {
-        entry = Entry.fromRaw(r);
-      } catch {
-        // malformed entry, skip rather than abort
-        continue;
-      }
-      if (where && !where(entry)) continue;
-      yield entry;
+      const out = this._finishReadRow(r, usingRecipient, {
+        allRuns,
+        verify,
+        raw,
+        where,
+        selector,
+        filter,
+      });
+      if (out !== undefined) yield out;
     }
+  }
+
+  /**
+   * Async sibling of {@link read} that also decrypts `cipher: jwe` groups.
+   *
+   * The synchronous `read()` cannot open jwe groups because the JOSE library
+   * (panva/jose) is async; this generator awaits it. Same options and per-row
+   * verify / raw / where / selector / filter / run-id behavior as `read()`,
+   * and `asRecipient` foreign-log reads decrypt btn/hibe/jwe alike (through
+   * readAsRecipientAsync).
+   */
+  async *readAsync(
+    opts: ReadOptions = {},
+  ): AsyncIterableIterator<Entry | Record<string, unknown>> {
+    if (!this._hasReplaySurface()) return;
+    const verify = opts.verify ?? false;
+    _checkVerifyKwarg(verify);
+    const raw = opts.raw ?? false;
+    const allRuns = opts.allRuns ?? true;
+    const expectGenesis = opts.expectGenesis ?? false;
+    const where = opts.where;
+    const selector = opts.selector;
+    const filter = opts.filter;
+
+    // Foreign-log read (asRecipient, or a log that isn't ours): decrypt with an
+    // absorbed reader kit via readAsRecipientAsync (handles btn/hibe/jwe).
+    let usingRecipient = false;
+    let source: AsyncIterable<ReadEntry>;
+    if (opts.asRecipient !== undefined || (opts.log !== undefined && _isForeignLog(opts.log, this.did))) {
+      usingRecipient = true;
+      const keystorePath = opts.asRecipient ?? this._rt.config.keystorePath;
+      const path = opts.log ?? this._rt.config.logPath;
+      const group = opts.group ?? "default";
+      source = (async function* () {
+        for await (const fe of readAsRecipientAsync(path, keystorePath, {
+          group,
+          verifySignatures: verify !== false,
+          expectGenesis,
+        })) {
+          yield {
+            envelope: fe.envelope,
+            plaintext: fe.plaintext,
+            valid: { signature: fe.valid.signature, rowHash: true, chain: fe.valid.chain },
+          } as ReadEntry;
+        }
+      })();
+    } else {
+      source = this._rt.readAsync(opts.log, expectGenesis);
+    }
+
+    for await (const r of source) {
+      const out = this._finishReadRow(r, usingRecipient, {
+        allRuns,
+        verify,
+        raw,
+        where,
+        selector,
+        filter,
+      });
+      if (out !== undefined) yield out;
+    }
+  }
+
+  /** Run-id filter for local reads: keep only rows from this client's current
+   *  run (checks each group body's `run_id`, then the envelope). */
+  private _matchesRun(r: ReadEntry, allRuns: boolean): boolean {
+    if (allRuns) return true;
+    for (const body of Object.values(r.plaintext ?? {})) {
+      if (body && typeof body === "object" && "run_id" in body) {
+        return (body as Record<string, unknown>)["run_id"] === this._runId;
+      }
+    }
+    const envRid = r.envelope["run_id"];
+    return typeof envRid === "string" && envRid === this._runId;
+  }
+
+  /** Shared per-row post-processing for `read` / `readAsync`. Everything after a
+   *  row is decrypted is synchronous and identical: run-id filter, selector +
+   *  filter gate, the verify policy (raise / skip / off), and raw-vs-Entry
+   *  shaping. Returns the value to yield, or undefined to skip the row. Throws
+   *  VerifyError under `verify: true | "raise"`. */
+  private _finishReadRow(
+    r: ReadEntry,
+    usingRecipient: boolean,
+    o: {
+      allRuns: boolean;
+      verify: ReadOptions["verify"];
+      raw: boolean;
+      where: ReadOptions["where"];
+      selector: ReadOptions["selector"];
+      filter: ReadOptions["filter"];
+    },
+  ): Entry | Record<string, unknown> | undefined {
+    // run_id filter — only on local reads. Recipient-mode reads cross
+    // publishers, so filtering by your local run_id makes no sense.
+    if (!usingRecipient && !this._matchesRun(r, o.allRuns)) return undefined;
+    // Authoritative selector + filter gate on the envelope's public fields,
+    // applied before verify so a rejected row never surfaces (parity with
+    // Python read.py `_passes_selector_filter`).
+    if (!_passesSelectorFilter(r.envelope, o.selector, o.filter)) return undefined;
+
+    const v = r.valid;
+    const allValid = Boolean(v.signature) && Boolean(v.rowHash) && Boolean(v.chain);
+    if (!allValid && o.verify !== false) {
+      const reasons: string[] = [];
+      if (!v.signature) reasons.push("signature");
+      if (!v.rowHash) reasons.push("row_hash");
+      if (!v.chain) reasons.push("chain");
+      if (o.verify === true || o.verify === "raise") {
+        throw new VerifyError(
+          Number(r.envelope["sequence"] ?? 0),
+          String(r.envelope["event_type"] ?? ""),
+          reasons,
+        );
+      }
+      if (o.verify === "skip") {
+        // Avoid looping our own tampered-row event back through.
+        if (String(r.envelope["event_type"] ?? "") === "tn.read.tampered_row_skipped") {
+          return undefined;
+        }
+        try {
+          this._emitTamperedRowSkipped(r.envelope, reasons);
+        } catch {
+          // best-effort
+        }
+        return undefined;
+      }
+    }
+
+    if (o.raw) {
+      if (o.where && !o.where(r.envelope)) return undefined;
+      return r.envelope;
+    }
+    let entry: Entry;
+    try {
+      entry = Entry.fromRaw(r);
+    } catch {
+      return undefined; // malformed entry, skip rather than abort
+    }
+    if (o.where && !o.where(entry)) return undefined;
+    return entry;
   }
 
   /**

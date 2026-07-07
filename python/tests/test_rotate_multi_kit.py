@@ -14,6 +14,15 @@ unreadable. Now (0.4.3a1):
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -41,7 +50,7 @@ def _clean_tn():  # pyright: ignore[reportUnusedFunction]
 def test_rotate_preserves_old_kits(tmp_path):
     """After rotate, old .btn.state and .btn.mykit are preserved as .retired.<N>."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("pre.rotate", n=1)
     tn.flush_and_close()
 
@@ -67,7 +76,7 @@ def test_rotate_preserves_old_kits(tmp_path):
 def test_read_spans_rotation_boundary(tmp_path):
     """tn.read() returns pre-rotation and post-rotation entries in one call."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("order.created", order_id="A100", stage="pre")
     tn.info("order.created", order_id="A101", stage="pre")
     tn.flush_and_close()
@@ -105,7 +114,7 @@ def test_read_spans_rotation_boundary(tmp_path):
 def test_multiple_rotations_accumulate_preserved_kits(tmp_path):
     """Every rotation stacks another .retired.<N> kit; reads still span all."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("era.one", n=1)
     tn.flush_and_close()
 
@@ -145,7 +154,7 @@ def test_rotate_crash_midpromote_leaves_publisher_writable(tmp_path, monkeypatch
     yaml = tmp_path / "tn.yaml"
     keystore = tmp_path / ".tn/tn/keys"
 
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("order.created", order_id="A1")
     tn.flush_and_close()
 
@@ -203,7 +212,7 @@ def test_prior_member_keeps_old_access_through_a_synced_rotation(tmp_path):
     yaml = tmp_path / "tn.yaml"
     keystore = tmp_path / ".tn/tn/keys"
 
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("order.created", order_id="OLD")
     did = tn.current_config().device.device_identity
     # The epoch-1 reader material (the prior-member view).
@@ -232,7 +241,7 @@ def test_prior_member_keeps_old_access_through_a_synced_rotation(tmp_path):
     tn.flush_and_close()
 
     # RECEIVE the rotation via a group_keys absorb (the epoch-2 state + kit).
-    cfg = load_or_create(yaml, cipher="btn")
+    cfg = load_or_create(yaml, cipher=_workflow_cipher("btn"))
     _absorb_group_keys(
         cfg,
         TnpkgManifest(

@@ -326,7 +326,13 @@ function _installKitMembers(
       renameSync(dest, pathResolve(keystore, `${rel}.previous.${ts}`));
       replaced.push(dest);
     }
-    writeFileSync(dest, Buffer.from(data));
+    // Secret key material lands owner-only (0600), matching how the keystore
+    // writes it at creation; public members (mpk, recipients index) keep the
+    // default. mode only bites on file creation, so this is the fresh-file path.
+    const secret =
+      rel === "local.private" ||
+      /\.(hibe\.sk|hibe\.msk|jwe\.mykey|jwe\.sender|btn\.mykit|btn\.state)$/.test(rel);
+    writeFileSync(dest, Buffer.from(data), secret ? { mode: 0o600 } : undefined);
     accepted += 1;
   }
   return { accepted, skipped, replaced };

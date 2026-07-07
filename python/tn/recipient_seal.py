@@ -27,16 +27,6 @@ The wrap binds to the manifest via AAD: the AES-GCM AAD is the canonical
 bytes of the manifest with both ``manifest_signature_b64`` and the
 ``recipient_wrap`` block itself excluded. Lifting a wrap from one
 manifest into another fails decryption because the AAD differs.
-
-See Also:
-    `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
-        Authoritative wire spec for the sealed-box wrap shape,
-        Ed25519 to X25519 conversion, and HKDF salt/info derivation.
-    `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
-        How the wrapped BEK fits into the larger body-encryption layer
-        (BEK derives per-row body-encryption keys via HKDF).
-    `docs/spec/canonical-bytes.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/canonical-bytes.md>`_:
-        The byte-stable JSON encoding the AAD relies on.
 """
 
 from __future__ import annotations
@@ -143,6 +133,23 @@ def _did_key_to_ed25519_pub(did: str) -> bytes:
     return pub_bytes
 
 
+def recipient_key_is_resolvable(did: str | None) -> bool:
+    """True when ``did`` is a ``did:key`` with an embedded Ed25519 public key the
+    sealed-box path can wrap the BEK under.
+
+    Synthetic / placeholder DIDs (no embedded key) return False so a caller can
+    seal ONLY when there is a real key to seal to, and fall back to a plaintext
+    hand-off otherwise. Mirrors TS ``recipientKeyIsResolvable``.
+    """
+    if not did:
+        return False
+    try:
+        _did_key_to_ed25519_pub(did)
+        return True
+    except Exception:  # noqa: BLE001 — any parse failure means "can't seal to this"
+        return False
+
+
 # ---------------------------------------------------------------------------
 # AAD: manifest minus signature minus recipient_wrap
 # ---------------------------------------------------------------------------
@@ -183,8 +190,6 @@ def manifest_aad_for_wrap(manifest_dict: dict[str, Any]) -> bytes:
         :func:`seal_bek_for_recipient`, :func:`unseal_bek_from_wrap`.
         :func:`tn.canonical._canonical_bytes`: The byte-stable JSON
             encoding the AAD relies on.
-        `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
-            AAD construction spec.
     """
     # Deep-copy so the caller's dict is not mutated.
     m = json.loads(json.dumps(manifest_dict, sort_keys=True))
@@ -248,8 +253,6 @@ def seal_bek_for_recipient(
     See Also:
         :func:`unseal_bek_from_wrap`: The inverse.
         :func:`manifest_aad_for_wrap`: Build the right AAD.
-        `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
-            Wire spec.
     """
     if len(bek) != 32:
         raise ValueError(
@@ -337,8 +340,6 @@ def unseal_bek_from_wrap(
     See Also:
         :func:`seal_bek_for_recipient`: The inverse.
         :func:`manifest_aad_for_wrap`: Build the right AAD.
-        `docs/spec/recipient-wraps.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md>`_:
-            Wire spec.
     """
     if not isinstance(wrap, dict):
         raise UnsealError(f"recipient_wrap is not an object: {type(wrap).__name__}")

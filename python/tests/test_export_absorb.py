@@ -6,6 +6,15 @@ secret-protection invariants.
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 import os
 import sys
@@ -37,7 +46,7 @@ def fresh_runtime():
 def test_export_offer_round_trip(tmp_path: Path):
     bob = tmp_path / "bob"
     bob.mkdir()
-    bob_cfg = load_or_create(bob / "tn.yaml", cipher="jwe")
+    bob_cfg = load_or_create(bob / "tn.yaml", cipher=_workflow_cipher("jwe"))
     pkg = offer(bob_cfg, publisher_did="did:key:z6MkAlice")
     out = tmp_path / "offer.tnpkg"
     export(out, kind="offer", cfg=bob_cfg, package=pkg, to_did="did:key:z6MkAlice")
@@ -54,7 +63,7 @@ def test_export_offer_round_trip(tmp_path: Path):
 def test_export_enrolment_round_trip(tmp_path: Path):
     alice = tmp_path / "alice"
     alice.mkdir()
-    alice_cfg = load_or_create(alice / "tn.yaml", cipher="jwe")
+    alice_cfg = load_or_create(alice / "tn.yaml", cipher=_workflow_cipher("jwe"))
     admin._add_recipient_jwe_impl(alice_cfg, "default", "did:key:z6MkBob", os.urandom(32))
     pkg = compile_enrolment(alice_cfg, "default", "did:key:z6MkBob")
 
@@ -71,7 +80,7 @@ def test_export_enrolment_round_trip(tmp_path: Path):
 
 def test_export_kit_bundle_round_trip(tmp_path: Path):
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
     out = tmp_path / "bundle.tnpkg"
     export(out, kind="kit_bundle", cfg=cfg)
@@ -127,7 +136,7 @@ def test_build_kit_bundle_body_no_kits_raises(tmp_path: Path):
 
 def test_export_full_keystore_requires_confirmation(tmp_path: Path):
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
 
     out = tmp_path / "full.tnpkg"

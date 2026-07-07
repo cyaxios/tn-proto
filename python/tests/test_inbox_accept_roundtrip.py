@@ -42,6 +42,15 @@ Run:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import hashlib
 import json
 import zipfile
@@ -112,7 +121,7 @@ def _new_btn_ceremony(dir_path: Path, stem: str) -> Path:
     dir_path.mkdir(parents=True, exist_ok=True)
     yaml_path = dir_path / f"{stem}.yaml"
     tn.flush_and_close()
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     return yaml_path
 
@@ -152,7 +161,7 @@ def test_invite_mint_then_accept_roundtrip(
     monkeypatch.chdir(pub_dir)
     pub_yaml = _new_btn_ceremony(pub_dir, "publisher")
 
-    tn.init(pub_yaml, cipher="btn")
+    tn.init(pub_yaml, cipher=_workflow_cipher("btn"))
     tn.info("sale.line", item="apple", quantity=2, unit_price="1.50")
     tn.info("sale.line", item="bread", quantity=1, unit_price="3.25")
     tn.info("sale.total", subtotal="6.25")
@@ -207,7 +216,7 @@ def test_invite_mint_then_accept_roundtrip(
     # ---- §4 PASS #7: R reads / decrypts P's entries with the installed kit ----
     # This is the property a hand-built fixture CANNOT prove: the kit is
     # genuinely minted for the group and actually decrypts the publisher log.
-    tn.init(rec_yaml, cipher="btn")
+    tn.init(rec_yaml, cipher=_workflow_cipher("btn"))
     # Guard: the read below must use the INVITE kit (P's group reader),
     # not R's own self-kit. R is a distinct ceremony, so its self-kit
     # cannot decrypt P's log — but assert the installed bytes survived the

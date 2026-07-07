@@ -1,3 +1,12 @@
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 from scenarios._harness.fixtures import (
     build_ceremony_yaml,
     find_free_port,
@@ -19,7 +28,7 @@ def test_build_ceremony_yaml_basic_jwe(tmp_path):
         ws,
         groups=["pii", "ops"],
         recipients_per_group=3,
-        cipher="jwe",
+        cipher=_workflow_cipher("jwe"),
     )
     text = path.read_text()
     assert "cipher: jwe" in text

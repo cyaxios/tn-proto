@@ -389,7 +389,7 @@ test(
       // sync` already pushed a body to `projectId`, but the verb keys its
       // members `body/keys/<name>` (nested) and the TS restore's traversal
       // guard refuses any name with a separator — the documented TS/Python
-      // body-restore divergence (docs/cli-test-plans/wallet_restore.md). So
+      // body-restore divergence. So
       // for the TS body leg we push A's body under FLAT tokens to a SEPARATE
       // project id (with a layout manifest) — the shape the TS restore can
       // round-trip — exactly as wallet_two_device_sync_live does, then B

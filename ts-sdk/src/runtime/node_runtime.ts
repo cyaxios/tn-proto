@@ -1,10 +1,11 @@
 // Node-only runtime: loads a yaml + keystore from disk, seeds chain
-// state from any existing log, and exposes emit() + read() that match
-// the Python tn.logger flow byte-for-byte (modulo the random CEK/nonce
-// inside each btn ciphertext).
+// state from any existing log, and exposes emit()/emitAsync() + read()/readAsync()
+// that match the Python tn.logger flow byte-for-byte (modulo the random CEK/nonce
+// inside each ciphertext).
 //
-// Only btn ceremonies are supported. A ceremony whose groups use jwe or
-// bgw will throw on emit/read, pointing the caller at the Python path.
+// All three ciphers are first-class: btn and hibe seal/open through the wasm Rust
+// core; jwe seals/opens through the async TS pipeline (emitAsync / readAsync,
+// since panva/jose is async).
 
 // tn-wasm is loaded LAZILY (see `loadWasm()` below), not via a static
 // side-effect import. The nodejs target self-instantiates its .wasm at
@@ -16,6 +17,7 @@
 // (architectural law: the SDK never crashes user space).
 
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -29,7 +31,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { DeviceKey } from "../core/signing.js";
 
@@ -49,14 +51,39 @@ import {
 import { readTnpkg, writeTnpkg } from "../tnpkg_io.js";
 import { encryptBodyBlob, BODY_CIPHER_SUITE, BODY_FRAME } from "../core/body_encryption.js";
 import {
+  sealBundleForRecipient,
+  recipientKeyIsResolvable,
+  absorbSealedKitBundle,
+} from "../seal_bundle_producer.js";
+import {
   appendAdminEnvelopes,
   existingRowHashes,
   isAdminEventType,
   resolveAdminLogPath,
 } from "../admin/log.js";
-import { BtnPublisher, btnKitLeaf } from "../raw.js";
+import { BtnPublisher, btnKitLeaf, canonicalBytes } from "../raw.js";
 import { ensureProcessRunId } from "../_run_id.js";
-import { decryptGroup, type GroupKits } from "../core/decrypt.js";
+import {
+  aadBytesFor,
+  decryptGroup,
+  decryptGroupAsync,
+  type CipherKind,
+  type GroupKits,
+} from "../core/decrypt.js";
+import { jweSeal } from "../core/jwe.js";
+import { buildEnvelopeLine } from "../core/envelope.js";
+import { createJweGroup, jweAddRecipient, jweRevokeRecipient, jweRotateGroup } from "./jwe_group.js";
+import { deriveGroupKey, indexTokenFor } from "../core/indexing.js";
+import {
+  createHibeGroup,
+  hibeBumpPath,
+  hibeCandidateKeys,
+  hibeEncrypt,
+  hibeMintReaderKey,
+  hibeRotateIdPath,
+  loadHibeGroup,
+  type HibeGroupMaterial,
+} from "./hibe_group.js";
 import { getProfile, isKnownProfile } from "../profiles.js";
 import { DEFAULT_VAULT_URL } from "../vault/url.js";
 import type { TNHandler } from "../handlers/index.js";
@@ -65,8 +92,8 @@ function readKitLeaf(kitBytes: Uint8Array): bigint {
   return btnKitLeaf(kitBytes);
 }
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { ZERO_HASH, rowHash, verifyChainLink } from "../core/chain.js";
-import { signatureFromB64, verify } from "../core/signing.js";
+import { ZERO_HASH, rowHash, sha256HexBytes, verifyChainLink } from "../core/chain.js";
+import { signatureB64, signatureFromB64, verify } from "../core/signing.js";
 import { asDid, asRowHash, asSignatureB64 } from "../core/types.js";
 import { authoritativeYamlFor, loadConfig, type CeremonyConfig, type GroupConfig } from "./config.js";
 import { commitGroupKeys, loadKeystore, type LoadedKeystore } from "./keystore.js";
@@ -176,7 +203,7 @@ const _ENVELOPE_RESERVED = new Set([
   "sequence",
 ]);
 
-import type { AbsorbReceipt, EmitReceipt } from "../core/results.js";
+import type { AbsorbReceipt, EmitReceipt, RotateGroupResult } from "../core/results.js";
 export type { AbsorbReceipt, EmitReceipt };
 
 import type { AdminState, RecipientEntry } from "../core/types.js";
@@ -320,6 +347,7 @@ export class NodeRuntime {
     for (const [name, g] of keystore.groups) {
       const gcfg = config.groups.get(name);
       if (gcfg && gcfg.cipher !== "btn") continue;
+      if (g.stateBytes === undefined) continue; // hibe-only or reader-only group
       this.publishers.set(name, BtnPublisher.fromBytes(g.stateBytes));
     }
     // Load `.tn/config/agents.md` (if present). Errors propagate so a
@@ -337,18 +365,21 @@ export class NodeRuntime {
    * .tn/keys/local.private already exists, we refuse rather than silently
    * orphaning every prior log entry.
    */
-  static init(yamlPath: string): NodeRuntime {
+  static init(yamlPath: string, opts: { cipher?: "btn" | "hibe" | "jwe" } = {}): NodeRuntime {
     if (!existsSync(yamlPath)) {
-      createFreshCeremony(yamlPath);
+      const freshOpts: CreateFreshOptions = {};
+      if (opts.cipher !== undefined) freshOpts.cipher = opts.cipher;
+      createFreshCeremony(yamlPath, freshOpts);
     }
     const config = loadConfig(yamlPath);
     for (const [name, g] of config.groups) {
-      if (g.cipher !== "btn") {
-        throw new Error(
-          `group ${name} uses cipher ${g.cipher}; NodeRuntime supports btn only. Run this ceremony from Python.`,
-        );
+      if (g.cipher !== "btn" && g.cipher !== "hibe" && g.cipher !== "jwe") {
+        throw new Error(`group ${name} uses an unknown cipher ${g.cipher}.`);
       }
     }
+    // btn is the default cipher; hibe and jwe are first-class options. jwe
+    // seals/opens through panva/jose (async), so its read path is `readAsync`
+    // and its emit path is `emitJweAsync` — see below.
     const keystore = loadKeystore(config.keystorePath);
     if (keystore.device.did !== config.device.device_identity) {
       throw new Error(
@@ -404,8 +435,13 @@ export class NodeRuntime {
    *  full envelope build / sign / chain / write happens inside the
    *  Rust core. The TS-side `emitInternal` is dead (kept only until
    *  the slim-down deletion pass lands). See `_emitViaWasm` below. */
-  emit(level: string, eventType: string, fields: Record<string, unknown>): EmitReceipt {
-    return this._emitViaWasm(level, eventType, fields, undefined, undefined, undefined);
+  emit(
+    level: string,
+    eventType: string,
+    fields: Record<string, unknown>,
+    aad?: Record<string, unknown> | null,
+  ): EmitReceipt {
+    return this._emitViaWasm(level, eventType, fields, undefined, undefined, undefined, aad);
   }
 
   /**
@@ -470,6 +506,7 @@ export class NodeRuntime {
     timestampOverride: string | undefined,
     eventIdOverride: string | undefined,
     signOverride: boolean | null | undefined,
+    aadOverride?: Record<string, unknown> | null,
   ): EmitReceipt {
     validateEventType(eventType);
     // Apply the agents-policy splice on the TS side so the spec §2.6
@@ -484,6 +521,26 @@ export class NodeRuntime {
       signOverride !== undefined && signOverride !== null
         ? signOverride
         : _sessionSignOverride;
+    // Non-btn ceremonies (any hibe group) run the TS-side pipeline: the
+    // Rust/wasm core deliberately carries no hibe cipher (contract D1 —
+    // tn-core stays scheme-free), so WasmRuntime.init would reject the
+    // ceremony. Mirrors Python's dispatch rule (`should_use_rust` is true
+    // only for btn-only ceremonies; everything else runs the pure-Python
+    // TNRuntime pipeline).
+    if (!this._ceremonyIsBtnOnly()) {
+      return this._emitViaTs(
+        level,
+        eventType,
+        fieldsOut,
+        timestampOverride,
+        eventIdOverride,
+        aadOverride ?? undefined,
+      );
+    }
+    // Per-emit aad is bound by the native (wasm) tn-core runtime, byte-
+    // identical to the pure pipeline; an empty/absent marker binds nothing.
+    const aadArg =
+      aadOverride && Object.keys(aadOverride).length > 0 ? aadOverride : null;
     // SDK never crashes user space: an INFRASTRUCTURE failure in the wasm
     // boundary — the core is unavailable (edge/serverless), init fails, or a
     // Rust panic traps/aborts during the emit — is contained here and surfaced
@@ -507,6 +564,7 @@ export class NodeRuntime {
         timestampOverride ?? null,
         eventIdOverride ?? null,
         resolvedSign,
+        aadArg,
       );
       // Success — clear any self-heal back-off state.
       if (this._wasmFailures !== 0 || this._wasmRetryAfter !== 0) {
@@ -534,6 +592,485 @@ export class NodeRuntime {
       }
       throw err;
     }
+  }
+
+  /** True iff every declared group uses `cipher: btn` — the precondition
+   *  for routing emits through the Rust/wasm core. Mirrors Python's
+   *  `tn._dispatch._ceremony_is_btn_only`. */
+  private _ceremonyIsBtnOnly(): boolean {
+    for (const [, g] of this.config.groups) {
+      if (g.cipher !== "btn") return false;
+    }
+    return true;
+  }
+
+  /** Per-event-type chain state for the TS-side emit pipeline. `null`
+   *  until the first TS-path emit; seeded from the on-disk logs then. */
+  private _tsChain: Map<string, { seq: number; prevHash: string }> | null = null;
+
+  /** Seed the TS chain from every ndjson file in the main-log directory
+   *  plus the admin log (mirrors Python `_seed_chain_from_logs` +
+   *  `_seed_chain_from_pel`): the last (sequence, row_hash) per event_type
+   *  wins, so a restart continues each chain instead of restarting it. */
+  private _tsChainState(): Map<string, { seq: number; prevHash: string }> {
+    if (this._tsChain !== null) return this._tsChain;
+    const chain = new Map<string, { seq: number; prevHash: string }>();
+    const lastByType = new Map<string, { seq: number; row: string }>();
+    const scanFile = (path: string): void => {
+      if (!existsSync(path)) return;
+      let text: string;
+      try {
+        text = readFileSync(path, "utf8");
+      } catch {
+        return;
+      }
+      for (const rawLine of text.split(/\r?\n/)) {
+        const s = rawLine.trim();
+        if (!s) continue;
+        let env: Record<string, unknown>;
+        try {
+          env = JSON.parse(s) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        const et = env["event_type"];
+        const seq = env["sequence"];
+        const row = env["row_hash"];
+        if (typeof et !== "string" || typeof seq !== "number" || typeof row !== "string") continue;
+        const prior = lastByType.get(et);
+        if (prior === undefined || seq > prior.seq) lastByType.set(et, { seq, row });
+      }
+    };
+    const logDir = dirname(this.config.logPath);
+    if (existsSync(logDir)) {
+      for (const entry of readdirSync(logDir).sort()) {
+        if (entry.endsWith(".ndjson")) scanFile(join(logDir, entry));
+      }
+    }
+    const adminPath = resolveAdminLogPath(this.config);
+    if (dirname(adminPath) !== logDir) scanFile(adminPath);
+    for (const [et, { seq, row }] of lastByType) {
+      chain.set(et, { seq, prevHash: row });
+    }
+    this._tsChain = chain;
+    return chain;
+  }
+
+  /** TS-side emit pipeline for ceremonies the wasm core cannot run (any
+   *  non-btn group — today: hibe). Byte-faithful port of Python's
+   *  `TNRuntime._emit_locked` (python/tn/logger.py):
+   *
+   *    1. classify each field public vs group-routed (multi-group aware,
+   *       unrouted fields fall back to the `default` group);
+   *    2. HMAC index token per private field under the group's index key;
+   *    3. seal each group's canonical plaintext with the group's cipher
+   *       (hibe: hibeSeal under mpk+idpath; btn: the group's publisher) —
+   *       a group this party can't seal is skipped with a warning;
+   *    4. advance the per-event-type chain, compute row_hash, sign;
+   *    5. route `tn.*` events to the admin log when configured, else
+   *       append to the main log and fan out to the registered handlers.
+   *
+   *  Note: the pure pipeline always signs (matching Python's TNRuntime,
+   *  which carries no per-emit sign override at this layer). */
+  private _emitViaTs(
+    level: string,
+    eventType: string,
+    fields: Record<string, unknown>,
+    timestampOverride: string | undefined,
+    eventIdOverride: string | undefined,
+    aadOverride: Record<string, unknown> | undefined,
+    // Pre-sealed group ciphertexts (jwe seals asynchronously off the sync
+    // pipeline; `emitAsync` seals jwe groups first and injects them here).
+    preSealed?: Map<string, Uint8Array>,
+  ): EmitReceipt {
+    const cfg = this.config;
+    // 1. classify public vs group buckets.
+    const publicOut: Record<string, unknown> = {};
+    const perGroup = new Map<string, Record<string, unknown>>();
+    for (const [k, v] of Object.entries(fields)) {
+      if (cfg.publicFields.has(k)) {
+        publicOut[k] = v;
+        continue;
+      }
+      let gnames = cfg.fieldToGroups.get(k);
+      if (!gnames || gnames.length === 0) {
+        if (cfg.groups.has("default")) {
+          gnames = ["default"];
+        } else {
+          throw new Error(
+            `field ${JSON.stringify(k)} has no group route and is not in ` +
+              `public_fields. Add it to \`groups[<g>].fields\` in tn.yaml, list ` +
+              `it under public_fields, or define a \`default\` group to absorb unknowns.`,
+          );
+        }
+      }
+      for (const gname of gnames) {
+        if (!cfg.groups.has(gname)) {
+          throw new Error(
+            `field ${JSON.stringify(k)} routed to unknown group ${JSON.stringify(gname)} ` +
+              `(known groups: ${JSON.stringify([...cfg.groups.keys()].sort())})`,
+          );
+        }
+        const bucket = perGroup.get(gname) ?? {};
+        bucket[k] = v;
+        perGroup.set(gname, bucket);
+      }
+    }
+
+    // 2 + 3. index tokens + per-group seal.
+    // Effective additional-authenticated-data per group: the group's yaml
+    // ``aad`` default overridden by any per-emit aad. The merged dict is
+    // canonicalized (same routine as the group plaintext / row_hash) and
+    // bound to the seal; the non-empty ones are echoed into the public
+    // ``tn_aad`` block so a reader reconstructs byte-identical aad. An empty
+    // merged dict binds nothing and adds no echo — aad-free records stay
+    // byte-identical to the pre-aad wire shape.
+    const aadEcho: Record<string, Record<string, unknown>> = {};
+    const groupPayloads = new Map<string, { ct: Uint8Array; fieldHashes: Record<string, string> }>();
+    for (const [gname, plainFields] of perGroup) {
+      const gcfg = cfg.groups.get(gname)!;
+      const indexKey = deriveGroupKey(
+        this.keystore.indexMaster,
+        cfg.ceremonyId,
+        gname,
+        gcfg.indexEpoch,
+      );
+      const fieldHashes: Record<string, string> = {};
+      for (const [fname, fval] of Object.entries(plainFields)) {
+        fieldHashes[fname] = indexTokenFor(indexKey, fname, fval);
+      }
+      const effectiveAad: Record<string, unknown> = {
+        ...(gcfg.aadDefault ?? {}),
+        ...(aadOverride ?? {}),
+      };
+      const hasAad = Object.keys(effectiveAad).length > 0;
+      if (hasAad && gcfg.cipher === "btn") {
+        // Reject before the seal try/catch (which would otherwise swallow
+        // this as a "not a publisher" skip). The wasm btn path can't bind
+        // aad; fail loudly, identical to the native-btn limitation.
+        throw new Error(
+          "per-emit aad is not yet wired through the native (btn) runtime; " +
+            "use a hibe/jwe ceremony, a group-level aad in config is likewise " +
+            "native-limited, or bind at the group-cipher level.",
+        );
+      }
+      const aadBytes = hasAad ? canonicalBytes(effectiveAad) : new Uint8Array(0);
+      const plaintextBytes = canonicalBytes(plainFields);
+      // A jwe group seals asynchronously (panva/jose uses WebCrypto), so the
+      // async emit path pre-seals into `preSealed`. Reaching the SYNC seal for
+      // a jwe group with nothing pre-sealed means the caller used sync emit()/
+      // info() — which cannot seal jwe. Fail loudly BEFORE the try/catch below
+      // (which would otherwise swallow the throw as a "not a publisher" skip and
+      // write a signed record with the group's payload silently dropped).
+      if (gcfg.cipher === "jwe" && preSealed?.get(gname) === undefined) {
+        throw new Error(
+          `group ${JSON.stringify(gname)} uses cipher "jwe", which seals ` +
+            `asynchronously; use the async emit path (emitAsync, or the async ` +
+            `tn.info/tn.log/read) for this ceremony. The synchronous emit() ` +
+            `cannot seal jwe and must not silently drop the payload.`,
+        );
+      }
+      let ct: Uint8Array;
+      try {
+        const pre = preSealed?.get(gname);
+        ct = pre !== undefined ? pre : this._sealGroupTs(gname, gcfg.cipher, plaintextBytes, aadBytes);
+      } catch (e) {
+        // Not a publisher for this group — skip it, exactly like Python's
+        // NotAPublisherError branch (warn, drop the group, keep the emit).
+        process.emitWarning(
+          `tn-proto: skipping group ${JSON.stringify(gname)} for ${eventType}: ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        );
+        continue;
+      }
+      groupPayloads.set(gname, { ct, fieldHashes });
+      if (hasAad) aadEcho[gname] = effectiveAad;
+    }
+
+    // Echo the effective aad into the public section under the reserved
+    // ``tn_aad`` key so a reader reconstructs byte-identical binding data.
+    // It rides in ``publicOut`` so it feeds the row_hash (and thus the
+    // signature) — an authenticated echo. Absent when no group bound aad,
+    // keeping aad-free records byte-identical to the pre-aad wire shape.
+    //
+    // Stored as the CANONICAL JSON STRING of the {group: dict} map, not a
+    // raw object: a string public field hashes identically in the pure,
+    // wasm, and native row_hash (str(s) == s), whereas an object would hash
+    // as Python str(dict) vs compact JSON — a cross-impl mismatch. Mirrors
+    // Python tn.logger.
+    if (Object.keys(aadEcho).length > 0) {
+      publicOut["tn_aad"] = new TextDecoder().decode(canonicalBytes(aadEcho));
+    }
+
+    // 4. chain + row_hash + signature.
+    const chain = this._tsChainState();
+    const slot = chain.get(eventType) ?? { seq: 0, prevHash: String(ZERO_HASH()) };
+    const seq = slot.seq + 1;
+    const prevHash = slot.prevHash;
+    const timestamp =
+      timestampOverride ??
+      new Date().toISOString().replace(/\.(\d{3})Z$/, ".$1000Z");
+    const eventId = eventIdOverride ?? randomUUID();
+    const levelNorm = level.toLowerCase();
+
+    const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
+    for (const [gname, g] of groupPayloads) {
+      groupsForHash[gname] = { ciphertext: g.ct, fieldHashes: g.fieldHashes };
+    }
+    const rh = rowHash({
+      device_identity: asDid(cfg.device.device_identity),
+      timestamp,
+      eventId,
+      eventType,
+      level: levelNorm,
+      prevHash: asRowHash(prevHash),
+      publicFields: publicOut,
+      groups: groupsForHash,
+    });
+    const sig = this.keystore.device.sign(new Uint8Array(Buffer.from(rh, "ascii")));
+
+    // 5. build + write the envelope line.
+    const groupPayloadsWire: Record<string, { ciphertext: string; field_hashes: Record<string, string> }> = {};
+    for (const [gname, g] of groupPayloads) {
+      groupPayloadsWire[gname] = {
+        ciphertext: Buffer.from(g.ct).toString("base64"),
+        field_hashes: g.fieldHashes,
+      };
+    }
+    const line = buildEnvelopeLine({
+      device_identity: asDid(cfg.device.device_identity),
+      timestamp,
+      eventId,
+      eventType,
+      level: levelNorm,
+      sequence: seq,
+      prevHash: asRowHash(prevHash),
+      rowHash: rh,
+      signatureB64: signatureB64(sig),
+      publicFields: publicOut,
+      groupPayloads: groupPayloadsWire,
+    });
+
+    const isProtocolEvent =
+      eventType.startsWith("tn.") && cfg.protocolEventsLocation !== "main_log";
+    if (isProtocolEvent) {
+      // Route protocol events to the configured admin location (with
+      // {event_type}/{event_id} template support, mirroring Python's
+      // resolve_protocol_events_path).
+      const pelPath = this._resolveProtocolEventsPath(eventType, eventId);
+      mkdirSync(dirname(pelPath), { recursive: true });
+      appendFileSync(pelPath, line);
+    } else {
+      mkdirSync(dirname(cfg.logPath), { recursive: true });
+      appendFileSync(cfg.logPath, line);
+      // Handler fan-out (stdout, custom sinks). Failures never abort the
+      // emit — the entry is already sealed on disk.
+      let envForHandlers: Record<string, unknown> | null = null;
+      for (const h of this.handlers) {
+        try {
+          if (envForHandlers === null) {
+            envForHandlers = JSON.parse(line) as Record<string, unknown>;
+          }
+          if (!h.accepts(envForHandlers)) continue;
+          h.emit(envForHandlers, line);
+        } catch {
+          /* a failing handler must not abort the emit */
+        }
+      }
+    }
+    chain.set(eventType, { seq, prevHash: rh });
+    return { eventId, rowHash: rh, sequence: seq };
+  }
+
+  /** Seal one group's plaintext under its declared cipher (TS pipeline).
+   *  ``aad`` is bound (authenticated, not encrypted); empty binds nothing
+   *  and is byte-identical to a plain seal. Throws when this keystore holds
+   *  no publisher-side material. */
+  private _sealGroupTs(
+    gname: string,
+    cipher: string,
+    plaintext: Uint8Array,
+    aad: Uint8Array,
+  ): Uint8Array {
+    if (cipher === "hibe") {
+      const mat = this.keystore.groups.get(gname)?.hibe;
+      if (!mat) {
+        throw new Error("HIBE: no authority mpk / identity path in this keystore");
+      }
+      return hibeEncrypt(mat, plaintext, aad);
+    }
+    if (cipher === "btn") {
+      const pub = this.publishers.get(gname);
+      if (!pub) {
+        throw new Error("btn: no state file in this keystore");
+      }
+      if (aad.length > 0) {
+        // A btn group reached here inside a mixed (non-btn-only) ceremony.
+        // The wasm BtnPublisher.encrypt has no aad parameter, so binding it
+        // would silently drop the aad. Reject rather than diverge — matches
+        // the native-btn limitation raised for btn-only ceremonies and the
+        // Python pure-pipeline btn guard.
+        throw new Error(
+          "per-emit aad is not yet wired through the native (btn) runtime; " +
+            "use a hibe/jwe ceremony, a group-level aad in config is likewise " +
+            "native-limited, or bind at the group-cipher level.",
+        );
+      }
+      return pub.encrypt(plaintext);
+    }
+    throw new Error(`cipher ${JSON.stringify(cipher)} has no TS publisher path`);
+  }
+
+  /** Load a jwe group's recipient X25519 public keys (raw 32-byte) from
+   *  `<group>.jwe.recipients` in the keystore, for async sealing. */
+  private _jweRecipientPubs(gname: string): Uint8Array[] {
+    const path = join(this.config.keystorePath, `${gname}.jwe.recipients`);
+    if (!existsSync(path)) {
+      throw new Error(`jwe: no recipients file for group ${JSON.stringify(gname)} at ${path}`);
+    }
+    const doc = JSON.parse(readFileSync(path, "utf8")) as { pub_b64: string }[];
+    return doc.map((e) => new Uint8Array(Buffer.from(e.pub_b64, "base64")));
+  }
+
+  /** Async emit that can seal `cipher: jwe` groups (panva/jose is async). btn
+   *  and hibe groups seal synchronously inside the shared pipeline; jwe groups
+   *  are sealed here first and injected. Same validate / agent-policy splice /
+   *  envelope / signature / chain as `emit`. */
+  async emitAsync(
+    level: string,
+    eventType: string,
+    fields: Record<string, unknown>,
+    aad?: Record<string, unknown> | null,
+  ): Promise<EmitReceipt> {
+    validateEventType(eventType);
+    const fieldsOut = this._spliceAgentPolicy(eventType, fields);
+    const cfg = this.config;
+    // Route fields to jwe groups exactly as _emitViaTs does (jwe-only) so we
+    // can seal them off the sync pipeline before it runs.
+    const jwePer = new Map<string, Record<string, unknown>>();
+    for (const [k, v] of Object.entries(fieldsOut)) {
+      if (cfg.publicFields.has(k)) continue;
+      let gnames = cfg.fieldToGroups.get(k);
+      if (!gnames || gnames.length === 0) gnames = cfg.groups.has("default") ? ["default"] : [];
+      for (const gname of gnames) {
+        if (cfg.groups.get(gname)?.cipher !== "jwe") continue;
+        const bucket = jwePer.get(gname) ?? {};
+        bucket[k] = v;
+        jwePer.set(gname, bucket);
+      }
+    }
+    const preSealed = new Map<string, Uint8Array>();
+    for (const [gname, plainFields] of jwePer) {
+      const gcfg = cfg.groups.get(gname)!;
+      const effectiveAad = { ...(gcfg.aadDefault ?? {}), ...(aad ?? {}) };
+      const aadBytes =
+        Object.keys(effectiveAad).length > 0 ? canonicalBytes(effectiveAad) : new Uint8Array(0);
+      preSealed.set(
+        gname,
+        await jweSeal(this._jweRecipientPubs(gname), canonicalBytes(plainFields), aadBytes),
+      );
+    }
+    return this._emitViaTs(level, eventType, fieldsOut, undefined, undefined, aad ?? undefined, preSealed);
+  }
+
+  /** jwe add_recipient: append a raw 32-byte X25519 public key to the group's
+   *  recipients (keystore file + authoritative yaml) so the next seal wraps a
+   *  CEK for it, then emit `tn.recipient.added`. Idempotent per DID. Mirrors
+   *  Python `_add_recipient_jwe_impl`. */
+  addRecipientJwe(group: string, recipientDid: string, pub: Uint8Array): void {
+    jweAddRecipient(this.config.keystorePath, group, recipientDid, pub);
+    this._yamlMutateJweRecipients(group, (recips) => {
+      const next = recips.filter((r) => r?.recipient_identity !== recipientDid);
+      next.push({ recipient_identity: recipientDid, pub_b64: Buffer.from(pub).toString("base64") });
+      return next;
+    });
+    this.emit("info", "tn.recipient.added", { group, recipient_identity: recipientDid });
+  }
+
+  /** jwe revoke_recipient: drop a recipient from the keystore list + yaml so the
+   *  next seal omits it, then emit `tn.recipient.revoked`. O(1), idempotent.
+   *  Mirrors Python `_revoke_recipient_jwe_impl`. */
+  revokeRecipientJwe(group: string, recipientDid: string): void {
+    jweRevokeRecipient(this.config.keystorePath, group, recipientDid);
+    this._yamlMutateJweRecipients(group, (recips) =>
+      recips.filter((r) => r?.recipient_identity !== recipientDid),
+    );
+    this.emit("info", "tn.recipient.revoked", { group, recipient_identity: recipientDid });
+  }
+
+  /** Read-modify-write the `recipients` list of a jwe group in the yaml that
+   *  authoritatively owns `groups` (head of the extends chain). */
+  private _yamlMutateJweRecipients(
+    group: string,
+    fn: (recips: Record<string, unknown>[]) => Record<string, unknown>[],
+  ): void {
+    const target = authoritativeYamlFor(this.config.yamlPath, "groups");
+    const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
+    const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
+    const g = (groups[group] ??= { policy: "private", cipher: "jwe", recipients: [] });
+    const recips = (Array.isArray(g.recipients) ? g.recipients : []) as Record<string, unknown>[];
+    g.recipients = fn(recips);
+    doc.groups = groups;
+    writeFileSync(target, stringifyYaml(doc), "utf8");
+  }
+
+  /** jwe rotate: archive the current sender/recipients/mykey as `.revoked.<ts>`,
+   *  mint fresh material (prior recipients must re-enroll), bump the group
+   *  epoch, mirror the fresh recipients into the yaml, and emit
+   *  tn.rotation.completed. Mirrors Python's jwe rotate. */
+  rotateGroupJwe(group: string): RotateGroupResult {
+    const keystore = this.config.keystorePath;
+    const prevMk = join(keystore, `${group}.jwe.mykey`);
+    const previousKitSha256 = existsSync(prevMk)
+      ? sha256HexBytes(new Uint8Array(readFileSync(prevMk)))
+      : "";
+
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    jweRotateGroup(keystore, group, this.did, ts);
+
+    // Refresh the in-memory keystore + bump the group epoch.
+    const mk = join(keystore, `${group}.jwe.mykey`);
+    const gk = this.keystore.groups.get(group) ?? { kits: [] };
+    gk.jweKey = new Uint8Array(readFileSync(mk));
+    this.keystore.groups.set(group, gk);
+    const newKitSha256 = sha256HexBytes(gk.jweKey);
+    const gcfg = this.config.groups.get(group);
+    const generation = (gcfg?.indexEpoch ?? 0) + 1;
+    if (gcfg) gcfg.indexEpoch = generation;
+
+    // Mirror the fresh (self-only) recipients + new epoch into the yaml.
+    const recips = JSON.parse(
+      readFileSync(join(keystore, `${group}.jwe.recipients`), "utf8"),
+    ) as Record<string, unknown>[];
+    const target = authoritativeYamlFor(this.config.yamlPath, "groups");
+    const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
+    const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
+    const g = (groups[group] ??= { policy: "private", cipher: "jwe" });
+    g.recipients = recips;
+    g.group_epoch = generation;
+    doc.groups = groups;
+    writeFileSync(target, stringifyYaml(doc), "utf8");
+
+    const rotatedAt = new Date().toISOString();
+    this.emit("info", "tn.rotation.completed", {
+      group,
+      cipher: "jwe",
+      generation,
+      previous_kit_sha256: previousKitSha256,
+      rotated_at: rotatedAt,
+    });
+    return { group, cipher: "jwe", generation, previousKitSha256, newKitSha256, rotatedAt };
+  }
+
+  /** Render the yaml's protocol-events location for one event. Supports the
+   *  `{yaml_dir}` / `{event_type}` / `{event_id}` tokens Python honors. */
+  private _resolveProtocolEventsPath(eventType: string, eventId: string): string {
+    let pel = this.config.protocolEventsLocation;
+    pel = pel
+      .replace(/\{yaml_dir\}/g, this.config.yamlDir)
+      .replace(/\{event_type\}/g, eventType)
+      .replace(/\{event_id\}/g, eventId);
+    return isAbsolute(pel) ? pel : pathResolve(this.config.yamlDir, pel);
   }
 
   /** Emit-side splice (spec §2.6).
@@ -604,6 +1141,189 @@ export class NodeRuntime {
     return actualLeaf;
   }
 
+  // ---------------------------------------------------------------------------
+  // hibe reader admin — grant / rotate / revoke. Mirrors Python's
+  // tn.admin.grant_reader / rotate_reader_path / revoke_reader
+  // (python/tn/admin/__init__.py).
+  // ---------------------------------------------------------------------------
+
+  /** Load a group's hibe material fresh from disk, with the group-and-cipher
+   *  guards shared by every hibe admin verb. */
+  private _requireHibeGroup(verb: string, group: string): HibeGroupMaterial {
+    const gcfg = this.config.groups.get(group);
+    if (gcfg === undefined) {
+      throw new Error(`unknown group: ${JSON.stringify(group)}`);
+    }
+    if (gcfg.cipher !== "hibe") {
+      throw new Error(
+        `tn.admin.${verb}: group ${JSON.stringify(group)} uses cipher ` +
+          `${JSON.stringify(gcfg.cipher)}; ${verb} is hibe-only. Use ` +
+          `addRecipient/revokeRecipient for btn/jwe groups.`,
+      );
+    }
+    const mat = loadHibeGroup(this.config.keystorePath, group);
+    if (mat === null) {
+      throw new Error(
+        `HIBE: keystore is missing ${group}.hibe.mpk/.idpath; ` +
+          `was this group minted (or its kit absorbed) here?`,
+      );
+    }
+    return mat;
+  }
+
+  /** Authority-side grant registry path: who was granted which path. Lives
+   *  next to the group's key files, never rides a kit (the export collector
+   *  only matches `.hibe.{mpk,idpath,sk}`). */
+  private _hibeGrantsPath(group: string): string {
+    return join(this.config.keystorePath, `${group}.hibe.grants`);
+  }
+
+  private _hibeGrantsLoad(group: string): Array<{ reader_did: string; id_path: string }> {
+    const p = this._hibeGrantsPath(group);
+    if (!existsSync(p)) return [];
+    return JSON.parse(readFileSync(p, "utf8")) as Array<{ reader_did: string; id_path: string }>;
+  }
+
+  private _hibeGrantsWrite(
+    group: string,
+    grants: Array<{ reader_did: string; id_path: string }>,
+  ): void {
+    // indent=1 matches Python's `json.dumps(grants, indent=1)` byte layout.
+    writeFileSync(this._hibeGrantsPath(group), JSON.stringify(grants, null, 1), "utf8");
+  }
+
+  /**
+   * HIBE's add_recipient: mint a delegated identity key and package it as
+   * an absorbable `.tnpkg` kit (authority mpk + the group's identity path +
+   * a fresh identity key — BBG re-randomizes KeyGen, so each grantee holds
+   * distinct key material for the same path). The authority master secret
+   * NEVER rides a kit. Records the grant in the `<group>.hibe.grants`
+   * registry when `readerDid` is given.
+   */
+  grantReader(
+    group: string,
+    opts: { readerDid?: string; idPath?: string; outPath?: string } = {},
+  ): { kitPath: string; idPath: string } {
+    const mat = this._requireHibeGroup("grantReader", group);
+    const safeStem = (opts.readerDid ?? "reader").split(":").pop()!.replace(/[^A-Za-z0-9._-]/g, "_");
+    const outPath = pathResolve(opts.outPath ?? join(process.cwd(), `${safeStem}.tnpkg`));
+    const targetPath = opts.idPath ?? mat.idPath;
+    const sk = hibeMintReaderKey(mat, targetPath);
+
+    const files: Array<[string, Uint8Array]> = [
+      [`${group}.hibe.idpath`, new Uint8Array(Buffer.from(mat.idPath, "utf8"))],
+      [`${group}.hibe.mpk`, mat.mpk],
+      [`${group}.hibe.sk`, sk],
+    ];
+    const body: Record<string, Uint8Array> = {};
+    const kitsMeta: Array<{ name: string; sha256: string; bytes: number }> = [];
+    for (const [name, data] of files) {
+      body[`body/${name}`] = data;
+      kitsMeta.push({
+        name,
+        sha256: "sha256:" + createHash("sha256").update(Buffer.from(data)).digest("hex"),
+        bytes: data.length,
+      });
+    }
+    const manifestArgs: {
+      kind: ManifestKind;
+      fromDid: string;
+      ceremonyId: string;
+      scope: string;
+      toDid?: string;
+    } = {
+      kind: "kit_bundle",
+      fromDid: this.config.device.device_identity,
+      ceremonyId: this.config.ceremonyId,
+      scope: "kit_bundle",
+    };
+    if (opts.readerDid !== undefined) manifestArgs.toDid = opts.readerDid;
+    const manifest = newManifest(manifestArgs);
+    manifest.state = { kits: kitsMeta, kind: "readers-only" };
+    signManifest(manifest, this.keystore.device);
+    writeTnpkg(outPath, manifest, body);
+
+    if (opts.readerDid) {
+      const grants = this._hibeGrantsLoad(group).filter((g) => g.reader_did !== opts.readerDid);
+      grants.push({ reader_did: opts.readerDid, id_path: targetPath });
+      this._hibeGrantsWrite(group, grants);
+    }
+    return { kitPath: outPath, idPath: targetPath };
+  }
+
+  /**
+   * Rotate a hibe group's identity path so FUTURE seals use `newPath`.
+   * Admission rotation, not btn-grade revocation: pre-rotation entries stay
+   * open forever for prior grantees (delegated keys are permanent), and a
+   * grantee holding a key for an ANCESTOR of the new path keeps access to
+   * new seals too. Authority-only. Returns the new path.
+   */
+  rotateReaderPath(group: string, newPath: string): string {
+    const mat = this._requireHibeGroup("rotateReaderPath", group);
+    hibeRotateIdPath(this.config.keystorePath, group, mat, newPath);
+    this._refreshHibeKeystore(group);
+    return newPath;
+  }
+
+  /**
+   * Remove a hibe reader going FORWARD: rotate the group's identity path
+   * (default: a `~r<n>`-bumped sibling of the current path) and re-issue
+   * kits to every other granted reader. The revoked reader keeps everything
+   * sealed before the revocation — delegated keys are permanent; what this
+   * guarantees is that entries sealed AFTER it are closed to them.
+   */
+  revokeReader(
+    group: string,
+    readerDid: string,
+    opts: { newPath?: string; outDir?: string } = {},
+  ): { revoked: boolean; newPath: string; kitPaths: string[]; remaining: string[] } {
+    const mat = this._requireHibeGroup("revokeReader", group);
+    const grants = this._hibeGrantsLoad(group);
+    if (!grants.some((g) => g.reader_did === readerDid)) {
+      throw new Error(
+        `tn.admin.revokeReader: ${JSON.stringify(readerDid)} has no recorded grant on ` +
+          `group ${JSON.stringify(group)}. Grants made through tn.admin.grantReader are ` +
+          `recorded in ${group}.hibe.grants.`,
+      );
+    }
+    const remaining = grants.filter((g) => g.reader_did !== readerDid);
+
+    const target = opts.newPath ?? hibeBumpPath(mat.idPath);
+    hibeRotateIdPath(this.config.keystorePath, group, mat, target);
+    this._hibeGrantsWrite(group, remaining);
+    this._refreshHibeKeystore(group);
+
+    const ts = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    const outDir = pathResolve(opts.outDir ?? join(process.cwd(), `hibe_regrant_${ts}`));
+    mkdirSync(outDir, { recursive: true });
+
+    const kitPaths: string[] = [];
+    for (const g of remaining) {
+      const safeStem = g.reader_did.split(":").pop()!.replace(/[^A-Za-z0-9._-]/g, "_");
+      const kit = join(outDir, `${safeStem}.tnpkg`);
+      this.grantReader(group, { readerDid: g.reader_did, outPath: kit });
+      kitPaths.push(kit);
+    }
+
+    return {
+      revoked: true,
+      newPath: target,
+      kitPaths,
+      remaining: remaining.map((g) => g.reader_did),
+    };
+  }
+
+  /** Re-read a group's hibe material from disk into the loaded keystore so
+   *  same-process emits/reads see a rotation immediately. */
+  private _refreshHibeKeystore(group: string): void {
+    const mat = loadHibeGroup(this.config.keystorePath, group);
+    if (mat === null) return;
+    const entry = this.keystore.groups.get(group) ?? { kits: [] };
+    entry.hibe = mat;
+    entry.hibeKits = hibeCandidateKeys(mat);
+    this.keystore.groups.set(group, entry);
+  }
+
   /**
    * Rotate the keys for a btn group. Mirrors the Python
    * ``tn.admin.rotate(group)`` semantics:
@@ -637,6 +1357,13 @@ export class NodeRuntime {
     newKitSha256: string;
     rotatedAt: string;
   } {
+    if (this.config.groups.get(group)?.cipher === "hibe") {
+      throw new Error(
+        `rotateGroup: group ${group} uses cipher 'hibe'; this rotation is btn-only. ` +
+          `hibe groups rotate their identity path via tn.admin.rotateReaderPath ` +
+          `(or revokeReader, which rotates and re-kits the survivors).`,
+      );
+    }
     const oldPub = this.publishers.get(group);
     if (!oldPub) {
       throw new Error(`rotateGroup: group ${group} is not a btn publisher in this runtime`);
@@ -1262,21 +1989,89 @@ export class NodeRuntime {
     });
   }
 
+  /** Register a group in the in-memory config so same-process routing sees it
+   *  immediately (matches Python's `cfg.groups[group] = ...`). No-op if present. */
+  private _registerGroupInConfig(group: string, cipher: "btn" | "hibe" | "jwe"): void {
+    if (this.config.groups.has(group)) return;
+    this.config.groups.set(group, {
+      name: group,
+      policy: "private",
+      cipher,
+      recipients: this.did ? [{ did: this.did }] : [],
+      indexEpoch: 0,
+      aadDefault: {},
+    });
+  }
+
+  /** Persist a group's `groups.<name>` block (policy/cipher/recipients) + field
+   *  routing to the yaml that authoritatively owns `groups`. When `liveRouting`,
+   *  also updates the in-memory `fieldToGroups` so same-process emits route
+   *  without a wasm reload (btn relies on the wasm reattach instead). */
+  private _persistGroupYaml(
+    group: string,
+    cipher: "btn" | "hibe" | "jwe",
+    fields: string[] | undefined,
+    liveRouting: boolean,
+  ): void {
+    const target = authoritativeYamlFor(this.config.yamlPath, "groups");
+    const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
+    const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
+    let dirty = false;
+    if (!groups[group]) {
+      groups[group] = { policy: "private", cipher, recipients: [{ recipient_identity: this.did }] };
+      dirty = true;
+    }
+    if (fields && fields.length > 0) {
+      const gspec = groups[group];
+      const existingRaw = gspec.fields;
+      const routed: string[] = Array.isArray(existingRaw)
+        ? (existingRaw as unknown[]).map((f) => String(f))
+        : [];
+      const seen = new Set(routed);
+      for (const f of fields) {
+        if (!seen.has(f)) {
+          routed.push(f);
+          seen.add(f);
+        }
+      }
+      gspec.fields = routed;
+      const flat = (doc.fields ?? {}) as Record<string, unknown>;
+      for (const f of fields) flat[f] = { group };
+      doc.fields = flat;
+      if (liveRouting) {
+        for (const f of fields) {
+          const list = this.config.fieldToGroups.get(f) ?? [];
+          if (!list.includes(group)) list.push(group);
+          this.config.fieldToGroups.set(f, [...list].sort());
+        }
+      }
+      dirty = true;
+    }
+    if (dirty) {
+      doc.groups = groups;
+      writeFileSync(target, stringifyYaml(doc), "utf8");
+    }
+  }
+
   /** Add a group post-init and emit `tn.group.added`. Returns the emit
    * receipt. Caller is responsible for checking idempotency before calling.
    *
-   * For btn (the only cipher NodeRuntime supports) this mirrors Python's
+   * For btn groups this mirrors Python's
    * `tn.admin.ensure_group`: it mints the group's key material and persists
    * the `groups.<name>` block to the AUTHORITATIVE yaml so the group both
    * survives the next load and is routable. See {@link persistBtnGroup}.
    *
-   * jwe groups stay log-only: NodeRuntime can't mint jwe key material, and
-   * writing a jwe group to the yaml would break the next wasm attach (the
-   * Rust/wasm runtime resolves `extends:` and errors when a resolved group
-   * has no cipher state on disk). jwe ceremonies are Python-owned. */
-  adminEnsureGroup(group: string, cipher: "btn" | "jwe", fields?: string[]): EmitReceipt {
+   * btn/hibe mint through the wasm / tn-hibe cores; jwe mints its recipient
+   * keystore via the TS pipeline (see {@link persistJweGroup}). A ceremony that
+   * contains a jwe group runs the TS emit/read pipeline (no wasm attach), so
+   * the group persists to the yaml like the others. */
+  adminEnsureGroup(group: string, cipher: "btn" | "jwe" | "hibe", fields?: string[]): EmitReceipt {
     if (cipher === "btn") {
       this.persistBtnGroup(group, fields);
+    } else if (cipher === "hibe") {
+      this.persistHibeGroup(group, fields);
+    } else {
+      this.persistJweGroup(group, fields);
     }
     const addedAt = new Date().toISOString();
     return this.emit("info", "tn.group.added", {
@@ -1336,63 +2131,47 @@ export class NodeRuntime {
       this.publishers.set(group, BtnPublisher.fromBytes(new Uint8Array(readFileSync(statePath))));
     }
 
-    // Keep the in-memory config consistent so same-process routing sees the
-    // new group immediately (matches Python's `cfg.groups[group] = ...`).
-    if (!this.config.groups.has(group)) {
-      this.config.groups.set(group, {
-        name: group,
-        policy: "private",
-        cipher: "btn",
-        recipients: this.did ? [{ did: this.did }] : [],
-      });
-    }
-
-    // Persist the group block to the yaml that authoritatively owns
-    // `groups` (head of the extends chain). See the method doc above.
-    const target = authoritativeYamlFor(this.config.yamlPath, "groups");
-    const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
-    const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
-    let dirty = false;
-    if (!groups[group]) {
-      groups[group] = {
-        policy: "private",
-        cipher: "btn",
-        recipients: [{ recipient_identity: this.did }],
-      };
-      dirty = true;
-    }
-
-    // Route `fields` into the group: canonical `groups[<group>].fields`
-    // (multi-group path) plus the legacy flat `fields:` block, de-duped while
-    // preserving order. Byte-faithful with Python's `_yaml_add_fields`.
-    if (fields && fields.length > 0) {
-      const gspec = groups[group];
-      const existingRaw = gspec.fields;
-      const routed: string[] = Array.isArray(existingRaw)
-        ? (existingRaw as unknown[]).map((f) => String(f))
-        : [];
-      const seen = new Set(routed);
-      for (const f of fields) {
-        if (!seen.has(f)) {
-          routed.push(f);
-          seen.add(f);
-        }
-      }
-      gspec.fields = routed;
-      const flat = (doc.fields ?? {}) as Record<string, unknown>;
-      for (const f of fields) flat[f] = { group };
-      doc.fields = flat;
-      dirty = true;
-    }
-
-    if (dirty) {
-      doc.groups = groups;
-      writeFileSync(target, stringifyYaml(doc), "utf8");
-    }
-
-    // Force the next emit/read to re-attach wasm off the freshly-written
-    // yaml + keystore so it builds the new group's cipher and routing.
+    this._registerGroupInConfig(group, "btn");
+    this._persistGroupYaml(group, "btn", fields, false);
+    // Force the next emit/read to re-attach wasm off the freshly-written yaml +
+    // keystore so it builds the new group's cipher and routing.
     this._resetWasmAfterAdminWrite();
+  }
+
+  /** Mint a fresh hibe group (this keystore becomes its own authority) and
+   *  persist it AUTHORITATIVELY. hibe sibling of {@link persistBtnGroup}:
+   *  key material is minted only when `<group>.hibe.mpk` is absent
+   *  (mirrors Python `ensure_group`'s hibe key_exists check), the group is
+   *  registered in the in-memory config, and the `groups.<name>` block is
+   *  written to the yaml that authoritatively owns `groups`. */
+  private persistHibeGroup(group: string, fields?: string[]): void {
+    const keystore = this.config.keystorePath;
+    const mpkPath = join(keystore, `${group}.hibe.mpk`);
+    if (!existsSync(mpkPath)) {
+      createHibeGroup(keystore, group);
+    }
+    this._refreshHibeKeystore(group);
+
+    this._registerGroupInConfig(group, "hibe");
+    this._persistGroupYaml(group, "hibe", fields, true);
+  }
+
+  /** Mint a fresh jwe group (recipient keystore + self-recipient) and persist
+   *  it AUTHORITATIVELY. jwe sibling of {@link persistHibeGroup}: mirrors
+   *  Python's `ensure_group` jwe branch. */
+  private persistJweGroup(group: string, fields?: string[]): void {
+    const keystore = this.config.keystorePath;
+    if (!existsSync(join(keystore, `${group}.jwe.recipients`))) {
+      createJweGroup(keystore, group, this.did);
+    }
+    // Refresh the in-memory keystore so a same-process readAsync opens the
+    // group (the LoadedKeystore was snapshotted at init, before this mint).
+    const myKeyPath = join(keystore, `${group}.jwe.mykey`);
+    const gk = this.keystore.groups.get(group) ?? { kits: [] };
+    if (existsSync(myKeyPath)) gk.jweKey = new Uint8Array(readFileSync(myKeyPath));
+    this.keystore.groups.set(group, gk);
+    this._registerGroupInConfig(group, "jwe");
+    this._persistGroupYaml(group, "jwe", fields, true);
   }
 
   /**
@@ -1821,6 +2600,65 @@ export class NodeRuntime {
   }
 
   /**
+   * Absorb a `.tnpkg` that MAY be recipient-sealed. When the manifest carries
+   * a `state.body_encryption.recipient_wraps[]` (a kit sealed to a DID via
+   * {@link sealKitForRecipient} / the Python `seal_for_recipient` path), this
+   * unwraps the BEK with this device's key, decrypts the body, and installs
+   * the kit files — the async peer of the synchronous {@link absorbPkg}
+   * (WebCrypto unseal cannot run on the sync path). An unsealed package falls
+   * straight through to {@link absorbPkg}, so this is always safe to call.
+   */
+  async absorbPkgAsync(source: string | Uint8Array): Promise<AbsorbReceipt> {
+    let manifest: Manifest;
+    try {
+      manifest = readTnpkg(source).manifest;
+    } catch {
+      return this.absorbPkg(source); // let the sync path report the parse error
+    }
+    const state = manifest.state as Record<string, unknown> | undefined;
+    const be = state?.["body_encryption"] as Record<string, unknown> | undefined;
+    const sealed =
+      be !== undefined &&
+      (be["recipient_wraps"] !== undefined || be["recipient_wrap"] !== undefined);
+    if (sealed && (manifest.kind === "kit_bundle" || manifest.kind === "full_keystore")) {
+      const r = await absorbSealedKitBundle(source, {
+        seed: this.keystore.device.seed,
+        keystoreDir: this.config.keystorePath,
+      });
+      const receipt: AbsorbReceipt = {
+        kind: r.kind,
+        acceptedCount: r.acceptedCount,
+        dedupedCount: r.dedupedCount,
+        noop: r.acceptedCount === 0 && r.rejectedReason === undefined,
+        derivedState: null,
+        conflicts: [],
+      };
+      if (r.rejectedReason !== undefined) receipt.rejectedReason = r.rejectedReason;
+      if (this._adminCache !== null) this._adminCache.refresh();
+      return receipt;
+    }
+    return this.absorbPkg(source);
+  }
+
+  /**
+   * Re-seal an unsealed kit_bundle `.tnpkg` in place so ONLY `recipientDid`'s
+   * device key can open it (closes the plaintext-bearer-token gap: an
+   * intercepted kit is useless to anyone else). No-op — returns false — when
+   * the DID is absent or has no embedded key (a did-less hand-off stays
+   * plaintext by necessity). Mirrors the Python `seal_for_recipient` opt-in.
+   */
+  async sealKitForRecipient(kitPath: string, recipientDid?: string): Promise<boolean> {
+    if (!recipientDid || !recipientKeyIsResolvable(recipientDid)) return false;
+    await sealBundleForRecipient({
+      unsealedBundle: kitPath,
+      recipientDid,
+      publisherKey: this.keystore.device,
+      outPath: kitPath,
+    });
+    return true;
+  }
+
+  /**
    * Mint kits for `recipientDid` across the specified groups and bundle them
    * into a `.tnpkg` at `outPath`. Returns the absolute path. Mirrors
    * TNClient.bundleForRecipient (avoids FINDINGS #5).
@@ -1857,6 +2695,21 @@ export class NodeRuntime {
     const td = mkdtempSync(join(tmpdir(), "tn-bundle-"));
     try {
       for (const gname of requested) {
+        if (cfg.groups.get(gname)?.cipher === "hibe") {
+          // hibe grant: stage the reader-kit files (mpk + idpath + a fresh
+          // delegated key) — same file set grantReader packages.
+          const mat = this._requireHibeGroup("addRecipient", gname);
+          const sk = hibeMintReaderKey(mat, mat.idPath);
+          writeFileSync(join(td, `${gname}.hibe.mpk`), Buffer.from(mat.mpk));
+          writeFileSync(join(td, `${gname}.hibe.idpath`), mat.idPath, "utf8");
+          writeFileSync(join(td, `${gname}.hibe.sk`), Buffer.from(sk));
+          const grants = this._hibeGrantsLoad(gname).filter(
+            (g) => g.reader_did !== recipientDid,
+          );
+          grants.push({ reader_did: recipientDid, id_path: mat.idPath });
+          this._hibeGrantsWrite(gname, grants);
+          continue;
+        }
         const kitPath = join(td, `${gname}.btn.mykit`);
         this.addRecipient(gname, kitPath, recipientDid);
       }
@@ -1880,16 +2733,23 @@ export class NodeRuntime {
     const body: Record<string, Uint8Array> = {};
     const kitsMeta: Array<{ name: string; sha256: string; bytes: number }> = [];
     for (const gname of [...groups].sort()) {
-      const name = `${gname}.btn.mykit`;
-      const p = join(kitsDir, name);
-      if (!existsSync(p)) continue;
-      const data = new Uint8Array(readFileSync(p));
-      body[`body/${name}`] = data;
-      kitsMeta.push({
-        name,
-        sha256: "sha256:" + createHash("sha256").update(Buffer.from(data)).digest("hex"),
-        bytes: data.length,
-      });
+      const names = [
+        `${gname}.btn.mykit`,
+        `${gname}.hibe.idpath`,
+        `${gname}.hibe.mpk`,
+        `${gname}.hibe.sk`,
+      ];
+      for (const name of names) {
+        const p = join(kitsDir, name);
+        if (!existsSync(p)) continue;
+        const data = new Uint8Array(readFileSync(p));
+        body[`body/${name}`] = data;
+        kitsMeta.push({
+          name,
+          sha256: "sha256:" + createHash("sha256").update(Buffer.from(data)).digest("hex"),
+          bytes: data.length,
+        });
+      }
     }
     if (kitsMeta.length === 0) {
       throw new Error(`_buildAgentRuntimeBundle: no kits for groups ${JSON.stringify(groups)}`);
@@ -1968,11 +2828,17 @@ export class NodeRuntime {
     }
     const groupFilter = opts.groups && opts.groups.length > 0 ? new Set(opts.groups) : null;
     const kitRe = /^(.+?)\.btn\.(mykit|mykit\.revoked\.\d+)$/;
+    // A hibe reader kit: the authority mpk, the group's identity path, and
+    // the delegated identity key. NEVER `.hibe.msk` — the master secret can
+    // mint a key for ANY path under that authority and only rides
+    // full_keystore (self-addressed backup), mirroring the local.private
+    // posture. Mirrors Python export.py `_HIBE_KIT_RE`.
+    const hibeKitRe = /^(.+?)\.hibe\.(mpk|idpath|sk)$/;
     const body: Record<string, Uint8Array> = {};
     const kitsMeta: Array<{ name: string; sha256: string; bytes: number }> = [];
 
     for (const entry of readdirSync(keystore).sort()) {
-      const m = kitRe.exec(entry);
+      const m = kitRe.exec(entry) ?? hibeKitRe.exec(entry);
       if (m) {
         const group = m[1]!;
         if (groupFilter && !groupFilter.has(group)) continue;
@@ -1986,10 +2852,18 @@ export class NodeRuntime {
       } else if (opts.full) {
         if (entry === "local.private" || entry === "local.public" || entry === "index_master.key") {
           body[`body/${entry}`] = new Uint8Array(readFileSync(join(keystore, entry)));
-        } else if (entry.endsWith(".btn.state")) {
-          const group = entry.slice(0, -".btn.state".length);
-          if (!groupFilter || groupFilter.has(group)) {
-            body[`body/${entry}`] = new Uint8Array(readFileSync(join(keystore, entry)));
+        } else {
+          // Private/per-group material packed only for full_keystore:
+          // btn publisher state, the hibe master secret, and the hibe
+          // idpath rotation history (mirrors Python `_collect_kit_files`).
+          for (const suffix of [".btn.state", ".hibe.msk", ".hibe.idpath.history"]) {
+            if (entry.endsWith(suffix)) {
+              const group = entry.slice(0, -suffix.length);
+              if (!groupFilter || groupFilter.has(group)) {
+                body[`body/${entry}`] = new Uint8Array(readFileSync(join(keystore, entry)));
+              }
+              break;
+            }
           }
         }
       }
@@ -1997,7 +2871,7 @@ export class NodeRuntime {
 
     if (kitsMeta.length === 0) {
       const suffix = groupFilter ? ` matching groups [${[...groupFilter].sort().join(", ")}]` : "";
-      throw new Error(`kit_bundle: no *.btn.mykit files in ${keystore}${suffix}`);
+      throw new Error(`kit_bundle: no *.btn.mykit or *.hibe.* kit files in ${keystore}${suffix}`);
     }
 
     if (opts.full) {
@@ -2739,11 +3613,30 @@ export class NodeRuntime {
     let accepted = 0;
     let skipped = 0;
     const replaced: string[] = [];
+    // SECURITY: a kit_bundle / full_keystore from a COUNTERPARTY must never
+    // install the recipient's device identity secret, and `.hibe.msk` is a
+    // HIBE authority master secret with the same posture — it can mint a
+    // reader key for ANY path under that authority. Installing either is
+    // legitimate ONLY in a self-addressed restore of one's own backup
+    // (from_did === to_did). Mirrors Python `_absorb_kit_bundle`.
+    const selfAddressed = manifest.toDid !== undefined && manifest.fromDid === manifest.toDid;
     for (const [name, data] of body) {
       if (!name.startsWith("body/")) continue;
       const rel = name.slice("body/".length);
       if (!rel) continue;
       if (rel.includes("/") || rel.includes("\\")) continue;
+      if (
+        (rel === "local.private" || rel === "local.public" || rel.endsWith(".hibe.msk")) &&
+        !selfAddressed
+      ) {
+        process.emitWarning(
+          `tn-proto: refusing to install device secret ${JSON.stringify(rel)} from a ` +
+            `non-self-addressed ${manifest.kind} package (from=${manifest.fromDid} ` +
+            `to=${manifest.toDid ?? "<unset>"}); the device identity is restore-self only`,
+        );
+        skipped += 1;
+        continue;
+      }
       const dest = pathResolve(keystore, rel);
       if (existsSync(dest)) {
         const existing = readFileSync(dest);
@@ -3165,6 +4058,13 @@ export class NodeRuntime {
         publicFields[k] = v;
       }
     }
+    // The ``tn_aad`` echo is an authenticated public field the writer folded
+    // into row_hash even though it is not a user-declared public field. Fold
+    // it back so recompute matches — and so a tampered echo flips row_hash to
+    // invalid alongside the AEAD failure.
+    if ("tn_aad" in env) {
+      publicFields["tn_aad"] = env["tn_aad"];
+    }
 
     const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
     for (const [gname, g] of groupRaw) {
@@ -3197,11 +4097,10 @@ export class NodeRuntime {
 
     const plaintext: Record<string, Record<string, unknown>> = {};
     for (const [gname, g] of groupRaw) {
-      const gk = this.keystore.groups.get(gname);
-      const gcfg = this.config.groups.get(gname);
-      const cipherKind = (gcfg?.cipher ?? "btn") as "btn" | "jwe";
-      const kits: GroupKits = { cipher: cipherKind, kits: gk?.kits ?? [] };
-      plaintext[gname] = decryptGroup({ ct: g.ct }, kits) as Record<string, unknown>;
+      plaintext[gname] = decryptGroup(
+        { ct: g.ct, aad: aadBytesFor(env, gname) },
+        this._kitsForGroup(gname),
+      ) as Record<string, unknown>;
     }
 
     return {
@@ -3209,6 +4108,71 @@ export class NodeRuntime {
       plaintext,
       valid: { signature: sigOk, rowHash: rowHashOk, chain: chainOk },
     };
+  }
+
+  /** Assemble the decrypt kits for one group from the loaded keystore,
+   *  keyed by the group's declared cipher. hibe groups carry the mpk plus
+   *  the precomputed candidate keys (held sk, derived-down, superseded
+   *  `.previous` keys, and — authority-side — msk-minted keys for the
+   *  current and prior identity paths). */
+  private _kitsForGroup(gname: string): GroupKits {
+    const gk = this.keystore.groups.get(gname);
+    const cipherKind = (this.config.groups.get(gname)?.cipher ?? "btn") as CipherKind;
+    if (cipherKind === "hibe") {
+      const kits: GroupKits = { cipher: "hibe", kits: gk?.hibeKits ?? [] };
+      if (gk?.hibe) kits.mpk = gk.hibe.mpk;
+      return kits;
+    }
+    if (cipherKind === "jwe") {
+      return { cipher: "jwe", kits: gk?.jweKey ? [gk.jweKey] : [] };
+    }
+    return { cipher: cipherKind, kits: gk?.kits ?? [] };
+  }
+
+  /** Async sibling of {@link read} that also opens `cipher: jwe` groups
+   * (panva/jose is async). Signature/row_hash/chain and btn/hibe decrypt reuse
+   * the synchronous decode; only jwe groups are (re)opened asynchronously. */
+  async *readAsync(logPath?: string, expectGenesis = false): AsyncGenerator<ReadEntry, void, void> {
+    const sources = this._collectReadSources(logPath);
+    const prevHashByType = new Map<string, string>();
+    for (const src of sources) {
+      const { path, lineno, line: rawLine } = src;
+      let env: Record<string, unknown>;
+      try {
+        env = JSON.parse(rawLine) as Record<string, unknown>;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`${path}:${lineno}: invalid JSON: ${msg}`, { cause: e });
+      }
+      const eventType = String(env["event_type"] ?? "");
+      const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH());
+      const chainOk = verifyChainLink(
+        prevHashByType,
+        eventType,
+        envPrevHash,
+        String(env["row_hash"] ?? ""),
+        expectGenesis,
+      );
+      yield await this._decodeReadEnvelopeAsync(env, chainOk);
+    }
+  }
+
+  /** Decode one envelope, opening jwe groups asynchronously. Reuses the
+   * synchronous decode for everything (verify + btn/hibe decrypt), then
+   * overlays each `cipher: jwe` group's plaintext via {@link decryptGroupAsync}. */
+  private async _decodeReadEnvelopeAsync(
+    env: Record<string, unknown>,
+    chainOk: boolean,
+  ): Promise<ReadEntry> {
+    const entry = this._decodeReadEnvelope(env, chainOk);
+    for (const [gname, g] of _identifyGroupPayloads(env)) {
+      if (this.config.groups.get(gname)?.cipher !== "jwe") continue;
+      entry.plaintext[gname] = (await decryptGroupAsync(
+        { ct: g.ct, aad: aadBytesFor(env, gname) },
+        this._kitsForGroup(gname),
+      )) as Record<string, unknown>;
+    }
+    return entry;
   }
 
   /**
@@ -3262,6 +4226,11 @@ export class NodeRuntime {
         publicFields[k] = v;
       }
     }
+    // Fold the authenticated ``tn_aad`` echo back for the recompute (see the
+    // matching note in `_decodeReadEnvelope`).
+    if ("tn_aad" in env) {
+      publicFields["tn_aad"] = env["tn_aad"];
+    }
 
     // Recompute row_hash.
     const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
@@ -3301,11 +4270,10 @@ export class NodeRuntime {
     // Decrypt each group we hold kits for.
     const plaintext: Record<string, Record<string, unknown>> = {};
     for (const [gname, g] of groupRaw) {
-      const gk = this.keystore.groups.get(gname);
-      const gcfg = this.config.groups.get(gname);
-      const cipherKind = (gcfg?.cipher ?? "btn") as "btn" | "jwe";
-      const kits: GroupKits = { cipher: cipherKind, kits: gk?.kits ?? [] };
-      plaintext[gname] = decryptGroup({ ct: g.ct }, kits) as Record<string, unknown>;
+      plaintext[gname] = decryptGroup(
+        { ct: g.ct, aad: aadBytesFor(env, gname) },
+        this._kitsForGroup(gname),
+      ) as Record<string, unknown>;
     }
 
     return {
@@ -3803,6 +4771,13 @@ export interface CreateFreshOptions {
    *  caller has the absorbed device key and wants to mint a real
    *  ceremony around it. */
   devicePrivateBytes?: Uint8Array;
+  /** Group-sealing cipher for the fresh ceremony's `default` group.
+   *  `"btn"` (default) or `"hibe"` (the keystore becomes its own HIBE
+   *  authority — Setup + msk + a self-delegated reader key on `"self"`),
+   *  or `jwe` (a per-recipient ECDH-ES group; the creator becomes publisher
+   *  and sole reader). The reserved `tn.agents` group always stays btn
+   *  (kit-bundle onboarding), matching Python's `create_fresh`. */
+  cipher?: "btn" | "hibe" | "jwe";
 }
 
 export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions = {}): void {
@@ -3843,12 +4818,24 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
   }
   const dk = DeviceKey.fromSeed(seed);
 
-  // Fresh btn publisher + self-kit (default group).
-  const btnSeed = new Uint8Array(randomBytes(32));
-  const pub = new BtnPublisher(btnSeed);
-  const selfKit = pub.mint();
-  const stateBytes = pub.toBytes();
-  pub.free();
+  const cipher = opts.cipher ?? "btn";
+  if (cipher !== "btn" && cipher !== "hibe" && cipher !== "jwe") {
+    throw new Error(
+      `createFreshCeremony: unknown cipher ${JSON.stringify(cipher)}; expected 'btn', 'hibe', or 'jwe'.`,
+    );
+  }
+
+  // Fresh default-group key material: btn publisher + self-kit, or a hibe
+  // authority (Setup + msk + self-delegated reader key on "self").
+  let stateBytes: Uint8Array | null = null;
+  let selfKit: Uint8Array | null = null;
+  if (cipher === "btn") {
+    const btnSeed = new Uint8Array(randomBytes(32));
+    const pub = new BtnPublisher(btnSeed);
+    selfKit = pub.mint();
+    stateBytes = pub.toBytes();
+    pub.free();
+  }
 
   // Auto-inject reserved `tn.agents` group per the 2026-04-25 read-ergonomics
   // spec §2.3. Always cipher: btn so kits can be bundled via
@@ -3871,8 +4858,14 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
   writeFileSync(privatePath, Buffer.from(seed));
   writeFileSync(join(keysDir, "local.public"), dk.did, "utf8");
   writeFileSync(join(keysDir, "index_master.key"), Buffer.from(indexMaster));
-  writeFileSync(join(keysDir, "default.btn.state"), Buffer.from(stateBytes));
-  writeFileSync(join(keysDir, "default.btn.mykit"), Buffer.from(selfKit));
+  if (cipher === "btn") {
+    writeFileSync(join(keysDir, "default.btn.state"), Buffer.from(stateBytes!));
+    writeFileSync(join(keysDir, "default.btn.mykit"), Buffer.from(selfKit!));
+  } else if (cipher === "hibe") {
+    createHibeGroup(keysDir, "default");
+  } else {
+    createJweGroup(keysDir, "default", dk.did);
+  }
   writeFileSync(join(keysDir, "tn.agents.btn.state"), Buffer.from(agentsStateBytes));
   writeFileSync(join(keysDir, "tn.agents.btn.mykit"), Buffer.from(agentsSelfKit));
 
@@ -3932,7 +4925,7 @@ export function createFreshCeremony(yamlPath: string, opts: CreateFreshOptions =
   mode: local
   linked_vault: ''
   linked_project_id: ''
-  cipher: btn
+  cipher: ${cipher}
   sign: true${_profileLine}
   admin_log_location: ${_adminLogStr}
   log_level: debug
@@ -4013,7 +5006,7 @@ default_policy: private
 groups:
   default:
     policy: private
-    cipher: btn
+    cipher: ${cipher}
     recipients:
     - recipient_identity: ${dk.did}
   tn.agents:

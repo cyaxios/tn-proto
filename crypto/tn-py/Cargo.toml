@@ -4,7 +4,7 @@ version = "0.0.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Combined PyO3 extension (tn-core + tn-btn) for the single tn-proto wheel."
+description = "Combined PyO3 extension (tn-core + tn-btn + tn-hibe) for the single tn-proto wheel."
 
 [lib]
 # Built by maturin into `tn/_native`. One cdylib, one PyInit symbol; the
@@ -15,4 +15,5 @@ crate-type = ["cdylib"]
 [dependencies]
 tn-core-py = { path = "../tn-core-py" }
 tn-btn-py = { path = "../tn-btn-py" }
+tn-hibe-py = { path = "../tn-hibe-py" }
 pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }

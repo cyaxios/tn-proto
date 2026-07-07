@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -24,7 +33,7 @@ def _clean_tn():
 
 def test_admin_state_fresh_ceremony_has_ceremony_and_no_recipients(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
 
     tn.init(yaml)
@@ -39,7 +48,7 @@ def test_admin_state_fresh_ceremony_has_ceremony_and_no_recipients(tmp_path):
 
 def test_admin_state_includes_recipients(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.admin.add_recipient("default", recipient_did="did:key:zFrank", out_path=str(tmp_path / "frank.btn.mykit"))
     tn.flush_and_close()
 
@@ -53,7 +62,7 @@ def test_admin_state_includes_recipients(tmp_path):
 
 def test_admin_state_marks_retired_after_rotation(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.admin.add_recipient("default", recipient_did="did:key:zFrank", out_path=str(tmp_path / "frank.btn.mykit"))
     tn.admin.rotate("default")
     tn.flush_and_close()
@@ -68,7 +77,7 @@ def test_admin_state_marks_retired_after_rotation(tmp_path):
 
 def test_admin_state_records_vault_link_and_unlink(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.vault.link("did:web:tn-proto.org", "proj_test")
     tn.vault.unlink("did:web:tn-proto.org", "proj_test", reason="user_request")
     tn.flush_and_close()
@@ -83,7 +92,7 @@ def test_admin_state_records_vault_link_and_unlink(tmp_path):
 
 def test_admin_state_group_filter(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.admin.add_recipient("default", recipient_did="did:key:zFrank", out_path=str(tmp_path / "frank.btn.mykit"))
     tn.flush_and_close()
 

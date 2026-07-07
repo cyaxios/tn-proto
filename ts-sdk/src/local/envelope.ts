@@ -2,7 +2,7 @@
 // No decryption or entry-construction logic lives here — all delegated to the SDK.
 
 import { btnCiphertextPublisherId } from "../raw.js";
-import { decryptAllGroups } from "../core/decrypt.js";
+import { aadBytesFor, decryptAllGroups } from "../core/decrypt.js";
 import type { GroupCiphertext, GroupKits } from "../core/decrypt.js";
 import { RESERVED_ENVELOPE_KEYS, isGroupPayloadValue } from "../core/read_shape.js";
 import { Entry } from "../Entry.js";
@@ -18,7 +18,9 @@ export function extractGroupCts(
     if (!isGroupPayloadValue(v)) continue;
     const ctB64 = (v as { ciphertext: string }).ciphertext;
     if (typeof ctB64 !== "string") continue;
-    out[k] = { ct: fromBase64(ctB64) };
+    // Reconstruct the group's aad from the public tn_aad echo (empty for a
+    // btn group, which cannot be aad-bound; carried uniformly regardless).
+    out[k] = { ct: fromBase64(ctB64), aad: aadBytesFor(envelope, k) };
   }
   return out;
 }

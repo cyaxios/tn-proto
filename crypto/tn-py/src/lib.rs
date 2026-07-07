@@ -24,6 +24,11 @@ fn native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     tn_btn_py::populate(&btn)?;
     m.add_submodule(&btn)?;
 
+    // hibe submodule: BBG HIBE cipher core (cipher: hibe groups)
+    let hibe = PyModule::new(py, "hibe")?;
+    tn_hibe_py::populate(&hibe)?;
+    m.add_submodule(&hibe)?;
+
     // PyO3 only wires attribute access for submodules; register them (and
     // the nested `core.admin`) in sys.modules so explicit imports like
     // `from tn._native.core import Runtime` and
@@ -31,6 +36,7 @@ fn native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let modules = py.import("sys")?.getattr("modules")?;
     modules.set_item("tn._native.core", &core)?;
     modules.set_item("tn._native.btn", &btn)?;
+    modules.set_item("tn._native.hibe", &hibe)?;
     if let Ok(admin) = core.getattr("admin") {
         modules.set_item("tn._native.core.admin", &admin)?;
     }

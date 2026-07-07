@@ -20,6 +20,15 @@ Coverage:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import zipfile
 from pathlib import Path
 
@@ -44,7 +53,7 @@ def _fresh_keystore(tmp_path: Path, name: str = "fresh"):
 
     # We use load_or_create to get a fully-formed LoadedConfig, then
     # remove local.private so absorb has a clean slate.
-    cfg = load_or_create(yaml_path, cipher="btn")
+    cfg = load_or_create(yaml_path, cipher=_workflow_cipher("btn"))
     (cfg.keystore / "local.private").unlink(missing_ok=True)
     (cfg.keystore / "local.public").unlink(missing_ok=True)
     yaml_path.unlink(missing_ok=True)
@@ -130,7 +139,7 @@ def test_identity_seed_rejects_cross_identity_after_user_events(tmp_path: Path):
     # yaml minted by load_or_create so tn.init can reload it later).
     yaml_path = tmp_path / "agent" / "tn.yaml"
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg = load_or_create(yaml_path, cipher="btn", device_private_bytes=device_a.private_bytes)
+    cfg = load_or_create(yaml_path, cipher=_workflow_cipher("btn"), device_private_bytes=device_a.private_bytes)
 
     # Emit a real user event so local.private's signature trail is
     # load-bearing (B would orphan it).

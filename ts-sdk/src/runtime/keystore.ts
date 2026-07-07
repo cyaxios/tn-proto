@@ -1,10 +1,12 @@
-// Keystore on-disk layout (mirrors Python tn.logger + tn.cipher.BtnGroupCipher):
+// Keystore on-disk layout (mirrors Python tn.logger + tn.cipher.BtnGroupCipher
+// / tn.cipher.HibeGroupCipher):
 //
 //   <keystore>/local.private        32-byte Ed25519 seed
 //   <keystore>/local.public         UTF-8 did:key:... (diagnostic)
 //   <keystore>/index_master.key     32-byte HMAC master for field tokens
 //   <keystore>/<group>.btn.state    btn PublisherState bytes (SECRET)
 //   <keystore>/<group>.btn.mykit    self-kit bytes so the publisher can read
+//   <keystore>/<group>.hibe.*       hibe group material (see runtime/hibe_group.ts)
 //
 // We do not touch jwe/bgw layouts here. A JWE ceremony yaml loaded
 // through this module will still read the keystore parts that exist
@@ -14,19 +16,33 @@ import { readFileSync, readdirSync, writeFileSync, existsSync, renameSync, rmSyn
 import { join } from "node:path";
 
 import { DeviceKey } from "../core/signing.js";
+import { hibeCandidateKeys, loadHibeGroup, type HibeGroupMaterial } from "./hibe_group.js";
 
 export interface LoadedKeystore {
   device: DeviceKey;
   indexMaster: Uint8Array;
   // Per-group state. Keys are group names. Values carry the raw btn
   // publisher-state bytes plus any kit bytes we found on disk (current
-  // self-kit plus any rotation-preserved kits).
+  // self-kit plus any rotation-preserved kits), and/or the group's hibe
+  // material — a keystore can hold keys for the SAME group name under
+  // several ciphers at once (e.g. its own btn ceremony plus an absorbed
+  // hibe grant), mirroring Python's read_as_recipient posture.
   groups: Map<string, GroupKeystore>;
 }
 
 export interface GroupKeystore {
-  stateBytes: Uint8Array;
-  kits: Uint8Array[]; // index 0 is the current self-kit
+  /** btn publisher state — absent for hibe-only groups. */
+  stateBytes?: Uint8Array;
+  /** btn kits; index 0 is the current self-kit. Empty for hibe-only groups. */
+  kits: Uint8Array[];
+  /** hibe material when `<group>.hibe.mpk` exists in the keystore. */
+  hibe?: HibeGroupMaterial;
+  /** Precomputed hibe decrypt candidates (held sk, derived-down, superseded
+   * `.previous` keys, msk-minted current + prior paths), try-first order. */
+  hibeKits?: Uint8Array[];
+  /** jwe reader key: the raw 32-byte X25519 private (`<group>.jwe.mykey`),
+   * when present. The async read path derives the public half to open. */
+  jweKey?: Uint8Array;
 }
 
 /** Atomically write bytes: write to `<path>.tmp`, then rename over the target.
@@ -172,6 +188,32 @@ export function loadKeystore(keystorePath: string): LoadedKeystore {
       }
     }
     groups.set(name, { stateBytes, kits });
+  }
+
+  // hibe groups: discovered by their `<group>.hibe.mpk` file. A group can
+  // carry BOTH btn and hibe material (own ceremony + absorbed grant) — the
+  // hibe side is attached to the existing entry rather than replacing it.
+  for (const entry of readdirSync(keystorePath)) {
+    const m = entry.match(/^(.+)\.hibe\.mpk$/);
+    if (!m || !m[1]) continue;
+    const name = m[1];
+    const mat = loadHibeGroup(keystorePath, name);
+    if (mat === null) continue;
+    const existing = groups.get(name) ?? { kits: [] };
+    existing.hibe = mat;
+    existing.hibeKits = hibeCandidateKeys(mat);
+    groups.set(name, existing);
+  }
+
+  // jwe groups: the reader's X25519 private in `<group>.jwe.mykey`. A group can
+  // hold jwe material alongside btn/hibe (own ceremony + absorbed reader key).
+  for (const entry of readdirSync(keystorePath)) {
+    const m = entry.match(/^(.+)\.jwe\.mykey$/);
+    if (!m || !m[1]) continue;
+    const name = m[1];
+    const existing = groups.get(name) ?? { kits: [] };
+    existing.jweKey = new Uint8Array(readFileSync(join(keystorePath, entry)));
+    groups.set(name, existing);
   }
 
   return { device, indexMaster, groups };

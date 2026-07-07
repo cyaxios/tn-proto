@@ -20,6 +20,15 @@ Run:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -52,7 +61,7 @@ def ident_and_yaml(tmp_path: Path) -> tuple[Identity, Path]:
     """Mint a fresh identity + minimal jwe ceremony bound to acct_test."""
     yaml_path = tmp_path / "tn.yaml"
     # jwe is the no-rust cipher; keeps the fixture light.
-    tn.init(yaml_path, cipher="jwe")
+    tn.init(yaml_path, cipher=_workflow_cipher("jwe"))
     tn.flush_and_close()
     identity = Identity.create_new()
     # Pretend `tn account connect` already ran.

@@ -26,6 +26,15 @@ Coverage:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -337,7 +346,7 @@ class TestInitUseList:
         monkeypatch.delenv("TN_NO_LINK", raising=False)
         monkeypatch.delenv("TN_VAULT_URL", raising=False)
 
-        default_handle = tn.init(project_dir=tmp_path, cipher="jwe")
+        default_handle = tn.init(project_dir=tmp_path, cipher=_workflow_cipher("jwe"))
         default_yaml = default_handle.yaml_path
         default_doc = yaml.safe_load(default_yaml.read_text(encoding="utf-8"))
         assert default_doc["ceremony"]["mode"] == "linked"
@@ -545,7 +554,7 @@ class TestInitMigration:
         try:
             _config.create_fresh(
                 legacy_yaml,
-                cipher="btn",
+                cipher=_workflow_cipher("btn"),
                 keystore_dir=legacy / "keys",
                 log_path=legacy / "logs" / "tn.ndjson",
                 admin_log_path=legacy / "admin" / "admin.ndjson",

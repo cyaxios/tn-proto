@@ -9,6 +9,15 @@ wiring, not just the Python-level admin API the verb wraps.
 """
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 import os
 import subprocess
@@ -45,7 +54,7 @@ def _run_cli(*args: str, cwd: Path, env_overrides: dict[str, str] | None = None)
 def project(tmp_path: Path) -> Path:
     """Spin up a fresh BTN ceremony with two recipients in tmp_path."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     (tmp_path / "_a").mkdir()
     (tmp_path / "_b").mkdir()
     admin.add_recipient(
@@ -133,7 +142,7 @@ def test_rotate_without_recipients_succeeds_with_no_artifacts(tmp_path: Path):
     """Rotation against a ceremony with no recipients still bumps the
     epoch (the deploy event is recorded) but emits no .tnpkg files."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
 
     res = _run_cli("rotate", cwd=tmp_path)

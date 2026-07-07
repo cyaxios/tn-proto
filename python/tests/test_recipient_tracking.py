@@ -10,6 +10,15 @@ map. No sidecar state file; the attested log is the source of truth.
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -32,7 +41,7 @@ def _clean_tn():  # pyright: ignore[reportUnusedFunction]
 
 def test_add_recipient_with_did_emits_attested_event(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     leaf = tn.admin.add_recipient("default", recipient_did="did:key:zFrank", out_path=str(tmp_path / "frank.btn.mykit")).leaf_index
     tn.flush_and_close()
 
@@ -57,7 +66,7 @@ def test_add_recipient_with_did_emits_attested_event(tmp_path):
 
 def test_add_recipient_without_did_still_emits_event_without_did_field(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.admin.add_recipient("default", out_path=str(tmp_path / "anon.btn.mykit"))
     tn.flush_and_close()
 
@@ -77,7 +86,7 @@ def test_add_recipient_without_did_still_emits_event_without_did_field(tmp_path)
 
 def test_recipients_returns_active_only_by_default(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     leaf_frank = tn.admin.add_recipient("default", recipient_did="did:key:zFrank", out_path=str(tmp_path / "frank.btn.mykit")).leaf_index
     leaf_carol = tn.admin.add_recipient("default", recipient_did="did:key:zCarol", out_path=str(tmp_path / "carol.btn.mykit")).leaf_index
     tn.admin.revoke_recipient("default", leaf_index=leaf_frank)
@@ -94,7 +103,7 @@ def test_recipients_returns_active_only_by_default(tmp_path):
 
 def test_recipients_include_revoked_returns_full_history(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     leaf_frank = tn.admin.add_recipient("default", recipient_did="did:key:zFrank", out_path=str(tmp_path / "frank.btn.mykit")).leaf_index
     leaf_carol = tn.admin.add_recipient("default", recipient_did="did:key:zCarol", out_path=str(tmp_path / "carol.btn.mykit")).leaf_index
     tn.admin.revoke_recipient("default", leaf_index=leaf_frank)
@@ -113,7 +122,7 @@ def test_recipients_include_revoked_returns_full_history(tmp_path):
 def test_recipients_scopes_to_named_group(tmp_path):
     """A recipient.added event for group 'default' does not leak into group 'other'."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.admin.add_recipient("default", recipient_did="did:key:zAlice", out_path=str(tmp_path / "a.btn.mykit"))
     tn.flush_and_close()
 

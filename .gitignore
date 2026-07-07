@@ -95,6 +95,3 @@ python/tn/_native*.pyd
 
 # Local release rehearsal work dir (tools/release.sh)
 .release-rehearsal/
-
-# Local native debug symbols
-python/tn/_native*.pdb

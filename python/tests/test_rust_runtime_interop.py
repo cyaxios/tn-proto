@@ -1,17 +1,26 @@
 """Cross-runtime interop: Python<->Rust read/write of btn ceremonies.
 
 Python writes, Rust reads:
-  Create a ceremony with cipher="btn", emit events via tn.info(), then
+  Create a ceremony with cipher=_workflow_cipher("btn"), emit events via tn.info(), then
   invoke the Rust CLI (tn-core-cli read) and verify it decrypts and
   returns both entries with the expected plaintext.
 
 Rust writes, Python reads:
-  Create a ceremony with cipher="btn", invoke tn-core-cli log to emit
+  Create a ceremony with cipher=_workflow_cipher("btn"), invoke tn-core-cli log to emit
   two events, then call tn.read() from Python and verify Python can
   verify signatures and decrypt both entries.
 """
 
 from __future__ import annotations
+
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
 import json
 import os
@@ -68,7 +77,7 @@ def test_python_writes_rust_reads(tmp_path):
     yaml_path = tmp_path / "tn.yaml"
 
     # Create a fresh btn ceremony and emit two events.
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     try:
         tn.info("order.created", amount=100, note="first")
         tn.info("order.paid", amount=100, currency="USD")
@@ -116,7 +125,7 @@ def test_rust_writes_python_reads(tmp_path):
     yaml_path = tmp_path / "tn.yaml"
 
     # Create the ceremony in Python so the keystore exists on disk.
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
 
     bin_path = _rust_bin()

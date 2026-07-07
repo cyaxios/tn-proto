@@ -855,6 +855,33 @@ def _absorb_identity_seed(
     )
 
 
+def _write_kit_file(dest: Path, data: bytes) -> None:
+    """Install a kit file, giving secret key material owner-only (0600) perms.
+
+    A kit body carries a mix: public parts (mpk, public keys, the recipients
+    index) and secret parts (a delegated HIBE ``sk``, a btn reader kit, a JWE
+    private half, or — on a self-addressed restore — ``local.private``). The
+    secret ones must land 0600, matching how the keystore writes them at
+    creation; a plain ``write_bytes`` would leave them 0644 (world-readable).
+    """
+    secret = dest.name == "local.private" or dest.name.endswith(
+        (
+            ".hibe.sk",
+            ".hibe.msk",
+            ".jwe.mykey",
+            ".jwe.sender",
+            ".btn.mykit",
+            ".btn.state",
+        )
+    )
+    if secret:
+        from ._keystore_backend import atomic_write_bytes
+
+        atomic_write_bytes(dest, data)
+    else:
+        dest.write_bytes(data)
+
+
 def _absorb_kit_bundle(
     cfg: LoadedConfig, manifest: TnpkgManifest, body: dict[str, bytes]
 ) -> AbsorbReceipt:
@@ -893,7 +920,12 @@ def _absorb_kit_bundle(
         # bundles. Skip anything that smuggles in a path separator.
         if "/" in rel or "\\" in rel:
             continue
-        if rel in ("local.private", "local.public") and not self_addressed:
+        # .hibe.msk is a HIBE authority master secret: same posture as the
+        # device seed — it can mint a reader key for ANY path under that
+        # authority, so it only ever arrives via a self-addressed restore.
+        if (
+            rel in ("local.private", "local.public") or rel.endswith(".hibe.msk")
+        ) and not self_addressed:
             _logging.getLogger("tn.absorb").warning(
                 "refusing to install device secret %r from a non-self-addressed "
                 "%s package (from=%s to=%s); the device identity is "
@@ -918,7 +950,7 @@ def _absorb_kit_bundle(
             # can map it back to the .previous file by appending the
             # same UTC timestamp suffix.
             replaced.append(dest)
-        dest.write_bytes(data)
+        _write_kit_file(dest, data)
         accepted += 1
     # Stream yamls: restore each ``body/streams/<name>/tn.yaml`` to
     # ``<project_root>/<name>/tn.yaml`` verbatim, preserving the
@@ -2186,7 +2218,7 @@ def _absorb_project_seed(
             backup = dest.with_name(f"{rel}.previous.{ts}")
             _preserve_before_overwrite(dest, backup)
             replaced.append(dest)
-        dest.write_bytes(data)
+        _write_kit_file(dest, data)
         accepted += 1
 
     # Restore stream yamls packed under body/streams/<name>/tn.yaml.

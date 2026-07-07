@@ -1,3 +1,12 @@
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 from pathlib import Path
 
@@ -12,13 +21,13 @@ from tn.tnpkg import TnpkgManifest
 def test_absorb_offer_lands_in_pending_offers(tmp_path: Path):
     bob_dir = tmp_path / "bob"
     bob_dir.mkdir()
-    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     offer(bob_cfg, publisher_did="did:key:z6MkAlice")
     pkg_path = next(outbox_dir(bob_dir).glob("*.tnpkg"))
 
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
-    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
+    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     result = absorb(alice_cfg, pkg_path)
     assert result.status == "offer_stashed"
     safe = bob_cfg.device.device_identity.replace(":", "_")
@@ -37,7 +46,7 @@ def test_absorb_rejects_bad_signature(tmp_path: Path):
 
     bob_dir = tmp_path / "bob"
     bob_dir.mkdir()
-    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     offer(bob_cfg, publisher_did="did:key:z6MkAlice")
     pkg_path = next(outbox_dir(bob_dir).glob("*.tnpkg"))
 
@@ -52,7 +61,7 @@ def test_absorb_rejects_bad_signature(tmp_path: Path):
         zf.writestr("manifest.json", manifest_bytes)
         zf.writestr("body/package.json", new_body)
 
-    alice_cfg = load_or_create((tmp_path / "alice_t.yaml").parent / "alice_t.yaml", cipher="jwe")
+    alice_cfg = load_or_create((tmp_path / "alice_t.yaml").parent / "alice_t.yaml", cipher=_workflow_cipher("jwe"))
     result = absorb(alice_cfg, pkg_path)
     assert result.status == "rejected"
     assert "signature" in result.reason.lower()
@@ -81,7 +90,7 @@ def test_absorb_rejects_unsupported_kind(tmp_path: Path):
     path = tmp_path / "pkg.tnpkg"
     dump_tnpkg(pkg, path)
 
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     result = absorb(cfg, path)
     assert result.status == "rejected"
     assert "future_thing" in result.reason
@@ -98,12 +107,12 @@ def test_absorb_enrolment_makes_recipient_read(tmp_path: Path):
     Bob absorbs enrolment, Alice writes an entry, Bob reads + decrypts it."""
     bob_dir = tmp_path / "bob"
     bob_dir.mkdir()
-    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     bob_pub = _ensure_mykey(bob_cfg, "default")
 
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
-    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
+    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity, bob_pub)
     pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.device_identity)
     pkg_path = emit_to_outbox(alice_cfg, pkg)
@@ -139,14 +148,14 @@ def test_absorb_accepts_bytes_input(tmp_path: Path):
     then unlinks. End-to-end through the offer kind path."""
     bob_dir = tmp_path / "bob"
     bob_dir.mkdir()
-    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     offer(bob_cfg, publisher_did="did:key:z6MkAlice")
     pkg_path = next(outbox_dir(bob_dir).glob("*.tnpkg"))
     pkg_bytes = pkg_path.read_bytes()
 
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
-    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
+    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     result = absorb(alice_cfg, pkg_bytes)
     assert result.status == "offer_stashed", f"reason: {result.reason}"
     safe = bob_cfg.device.device_identity.replace(":", "_")
@@ -165,7 +174,7 @@ def _make_valid_offer_tnpkg(tmp_path: Path) -> Path:
     """Produce a real, signed offer `.tnpkg` that absorbs cleanly."""
     bob_dir = tmp_path / "bob_src"
     bob_dir.mkdir()
-    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     offer(bob_cfg, publisher_did="did:key:z6MkAlice")
     return next(outbox_dir(bob_dir).glob("*.tnpkg"))
 
@@ -219,7 +228,7 @@ def test_absorb_rejects_zip_bomb(tmp_path: Path):
         zf.writestr("manifest.json", b"{}")
         zf.writestr("body/huge.bin", huge)
 
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     result = absorb(cfg, bomb)
     assert result.status == "rejected"
     assert "body/huge.bin" in result.reason
@@ -239,7 +248,7 @@ def test_absorb_rejects_entry_flood(tmp_path: Path):
         for i in range(MAX_PKG_ENTRY_COUNT + 5):
             zf.writestr(f"body/e{i}", b"x")
 
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     result = absorb(cfg, flood)
     assert result.status == "rejected"
     assert str(MAX_PKG_ENTRY_COUNT) in result.reason
@@ -261,7 +270,7 @@ def test_absorb_rejects_oversized_manifest(tmp_path: Path):
     with zipfile.ZipFile(pkg, "w", zipfile.ZIP_STORED) as zf:
         zf.writestr("manifest.json", big_manifest)
 
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     result = absorb(cfg, pkg)
     assert result.status == "rejected"
     assert "manifest.json" in result.reason
@@ -275,7 +284,7 @@ def test_absorb_normal_package_still_absorbs_after_limits(tmp_path: Path):
 
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
-    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
+    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     result = absorb(alice_cfg, pkg_path)
     assert result.status == "offer_stashed", f"reason: {result.reason}"
 
@@ -289,7 +298,7 @@ def test_kit_bundle_cannot_overwrite_device_identity_from_counterparty(tmp_path:
     victim = DeviceKey.generate()
     cfg = load_or_create(
         tmp_path / "victim" / "tn.yaml",
-        cipher="btn",
+        cipher=_workflow_cipher("btn"),
         device_private_bytes=victim.private_bytes,
     )
     victim_priv = (cfg.keystore / "local.private").read_bytes()

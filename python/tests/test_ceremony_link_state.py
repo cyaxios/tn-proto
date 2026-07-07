@@ -3,6 +3,15 @@ tn.admin.set_link_state."""
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import tempfile
 from pathlib import Path
 
@@ -16,7 +25,7 @@ from tn import wallet as _wallet
 def _fresh_local_ceremony():
     td = tempfile.TemporaryDirectory(prefix="link_")
     ws = Path(td.name)
-    tn.init(ws / "tn.yaml", log_path=ws / ".tn/tn/logs/tn.ndjson", cipher="jwe")
+    tn.init(ws / "tn.yaml", log_path=ws / ".tn/tn/logs/tn.ndjson", cipher=_workflow_cipher("jwe"))
     cfg = tn.current_config()
     return td, cfg
 
@@ -95,7 +104,7 @@ def test_fresh_ceremony_honors_tn_vault_url(monkeypatch):
     td = tempfile.TemporaryDirectory(prefix="link_env_")
     ws = Path(td.name)
     try:
-        tn.init(ws / "tn.yaml", log_path=ws / ".tn/tn/logs/tn.ndjson", cipher="jwe")
+        tn.init(ws / "tn.yaml", log_path=ws / ".tn/tn/logs/tn.ndjson", cipher=_workflow_cipher("jwe"))
         cfg = tn.current_config()
         assert cfg.mode == "linked"
         assert cfg.linked_vault == "http://127.0.0.1:8790"
@@ -122,7 +131,7 @@ def test_fresh_ceremony_honors_tn_no_link_env(monkeypatch):
     td = tempfile.TemporaryDirectory(prefix="link_env_")
     ws = Path(td.name)
     try:
-        tn.init(ws / "tn.yaml", log_path=ws / ".tn/tn/logs/tn.ndjson", cipher="jwe")
+        tn.init(ws / "tn.yaml", log_path=ws / ".tn/tn/logs/tn.ndjson", cipher=_workflow_cipher("jwe"))
         cfg = tn.current_config()
         assert cfg.mode == "local"
         assert cfg.linked_vault is None
@@ -153,7 +162,7 @@ def test_link_ceremony_claims_project_when_born_linked(monkeypatch):
     td = tempfile.TemporaryDirectory(prefix="link_claim_")
     ws = Path(td.name)
     try:
-        tn.init(ws / "tn.yaml", log_path=ws / ".tn/tn/logs/tn.ndjson", cipher="jwe")
+        tn.init(ws / "tn.yaml", log_path=ws / ".tn/tn/logs/tn.ndjson", cipher=_workflow_cipher("jwe"))
         cfg = tn.current_config()
         assert cfg.is_linked() is True
         assert cfg.linked_project_id is None  # born linked, unclaimed
@@ -176,7 +185,7 @@ def test_link_ceremony_claims_project_when_born_linked(monkeypatch):
         # Persists across a fresh load.
         yaml_path = cfg.yaml_path
         tn.flush_and_close()
-        tn.init(yaml_path, log_path=ws / ".tn/tn/logs/tn.ndjson", cipher="jwe")
+        tn.init(yaml_path, log_path=ws / ".tn/tn/logs/tn.ndjson", cipher=_workflow_cipher("jwe"))
         assert tn.current_config().linked_project_id == "proj_born_linked"
     finally:
         tn.flush_and_close()
@@ -265,7 +274,7 @@ def test_linked_persists_across_reload():
         )
         tn.flush_and_close()
 
-        tn.init(yaml_path, log_path=log_path, cipher="jwe")
+        tn.init(yaml_path, log_path=log_path, cipher=_workflow_cipher("jwe"))
         reloaded = tn.current_config()
         assert reloaded.mode == "linked"
         assert reloaded.linked_vault == "https://vault.tn-proto.org"
@@ -344,7 +353,7 @@ def test_load_rejects_enabled_vault_without_url(tmp_path):
     # Hand-craft a broken yaml.
     yaml_path = tmp_path / "tn.yaml"
     # First create a good ceremony so key files exist, then corrupt the yaml.
-    tn.init(yaml_path, log_path=tmp_path / ".tn/tn/logs/tn.ndjson", cipher="jwe")
+    tn.init(yaml_path, log_path=tmp_path / ".tn/tn/logs/tn.ndjson", cipher=_workflow_cipher("jwe"))
     tn.flush_and_close()
     doc = yaml_mod.safe_load(yaml_path.read_text(encoding="utf-8"))
     # Fresh ceremonies now carry the vault URL in the project-level
@@ -356,18 +365,18 @@ def test_load_rejects_enabled_vault_without_url(tmp_path):
     yaml_path.write_text(yaml_mod.safe_dump(doc, sort_keys=False))
 
     with pytest.raises(ValueError, match="requires vault.url"):
-        tn.init(yaml_path, log_path=tmp_path / ".tn/tn/logs/tn.ndjson", cipher="jwe")
+        tn.init(yaml_path, log_path=tmp_path / ".tn/tn/logs/tn.ndjson", cipher=_workflow_cipher("jwe"))
     tn.flush_and_close()
 
 
 def test_load_rejects_unknown_mode(tmp_path):
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, log_path=tmp_path / ".tn/tn/logs/tn.ndjson", cipher="jwe")
+    tn.init(yaml_path, log_path=tmp_path / ".tn/tn/logs/tn.ndjson", cipher=_workflow_cipher("jwe"))
     tn.flush_and_close()
     doc = yaml_mod.safe_load(yaml_path.read_text(encoding="utf-8"))
     doc["ceremony"]["mode"] = "bogus"
     yaml_path.write_text(yaml_mod.safe_dump(doc, sort_keys=False))
 
     with pytest.raises(ValueError, match="unknown ceremony.mode"):
-        tn.init(yaml_path, log_path=tmp_path / ".tn/tn/logs/tn.ndjson", cipher="jwe")
+        tn.init(yaml_path, log_path=tmp_path / ".tn/tn/logs/tn.ndjson", cipher=_workflow_cipher("jwe"))
     tn.flush_and_close()

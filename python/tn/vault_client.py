@@ -346,8 +346,6 @@ class VaultClient:
         See Also:
             :meth:`for_identity`: Calls this for you when
                 ``auto_auth=True``.
-            `docs/spec/vault-http.md#auth <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md#auth>`_:
-                Wire spec.
         """
         # Step 1: challenge
         resp = self._http.post(
@@ -400,8 +398,6 @@ class VaultClient:
         See Also:
             :meth:`list_projects`, :meth:`get_project`,
             :meth:`delete_project`.
-            `docs/spec/vault-http.md#project-routes <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md#project-routes>`_:
-                Wire spec.
         """
         resp = self._request(
             "POST",
@@ -546,8 +542,6 @@ class VaultClient:
             :meth:`upload_sealed`: Lower-level entry that takes a
                 pre-built :class:`SealedBlob`.
             :meth:`download_file`: The inverse.
-            `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
-                AAD construction + seal/unseal spec.
         """
         wk = self.identity.vault_wrap_key()
         blob = _seal(
@@ -624,8 +618,6 @@ class VaultClient:
             :meth:`upload_file`: The inverse.
             :meth:`download_sealed`: Lower-level entry that returns the
                 raw :class:`SealedBlob` without unsealing.
-            `docs/spec/body-encryption.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md>`_:
-                AAD construction + seal/unseal spec.
         """
         blob = self.download_sealed(project_id, file_name)
         return _unseal(

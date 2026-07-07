@@ -123,7 +123,6 @@ export function packBodyPlaintextZip(
  * @see {@link BODY_CIPHER_SUITE} / {@link BODY_FRAME} - record these in
  *   the manifest's `state.body_encryption` so the consumer knows what
  *   to invoke.
- * @see [spec/body-encryption](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md) - the wire frame.
  *
  * @remarks
  * Mirrors `python/tn/export.py::_encrypt_body_in_place`. AAD is empty
@@ -206,7 +205,6 @@ export async function encryptBodyBlob(
  * @see {@link unsealBekFromWrap}
  * @see {@link absorbSealedBootstrap} - the full sealed-tnpkg install flow that
  *   composes BEK unseal + body decrypt + keystore write.
- * @see [spec/body-encryption](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md) - the wire frame this decrypts.
  *
  * @remarks
  * Mirrors `python/tn/export.py::decrypt_body_blob` for the v2 frame.

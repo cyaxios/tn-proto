@@ -5,8 +5,6 @@
 // with an existing on-disk ceremony yaml, the on-disk value wins and a
 // warning is logged (operator authority) — logging never fails. An
 // unknown profile name is misconfig at the call site and throws.
-//
-// See docs/spec-next/profiles.md.
 
 import { strict as assert } from "node:assert";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";

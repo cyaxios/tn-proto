@@ -22,8 +22,7 @@
 //     containing a separator, whereas the Python push keys members NESTED as
 //     `body/keys/<name>` / `body/tn.yaml` (and the Python restore rebuilds
 //     those subpaths). So a TS `restoreViaPassphrase` of a Python-pushed body
-//     blob writes no usable keystore. This is the divergence catalogued in
-//     docs/cli-test-plans/wallet_restore.md. The capstone
+//     blob writes no usable keystore. The capstone
 //     (account_sync_full_live) therefore keeps the cross-device body leg
 //     same-language; the GROUP-KEYS snapshot is the piece that crosses, and
 //     that is what this test pins.

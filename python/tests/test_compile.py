@@ -1,3 +1,12 @@
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import base64
 import os
 import zipfile
@@ -14,7 +23,7 @@ from tn.packaging import verify
 
 def test_compile_enrolment_produces_signed_package(tmp_path: Path):
     yaml_path = tmp_path / "tn.yaml"
-    cfg = load_or_create(yaml_path, cipher="jwe")
+    cfg = load_or_create(yaml_path, cipher=_workflow_cipher("jwe"))
     admin._add_recipient_jwe_impl(cfg, "default", "did:key:z6MkBob", os.urandom(32))
     pkg = compile_enrolment(cfg, "default", "did:key:z6MkBob")
     assert pkg.package_kind == "enrolment"
@@ -26,7 +35,7 @@ def test_compile_enrolment_produces_signed_package(tmp_path: Path):
 
 
 def test_emit_to_outbox_writes_file(tmp_path: Path):
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     admin._add_recipient_jwe_impl(cfg, "default", "did:key:z6MkBob", os.urandom(32))
     pkg = compile_enrolment(cfg, "default", "did:key:z6MkBob")
     path = emit_to_outbox(cfg, pkg)
@@ -36,8 +45,8 @@ def test_emit_to_outbox_writes_file(tmp_path: Path):
 
 
 def test_compile_enrolment_rejects_btn_group(tmp_path: Path):
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
-    admin.ensure_group(cfg, "press", cipher="btn")
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    admin.ensure_group(cfg, "press", cipher=_workflow_cipher("btn"))
     import pytest
 
     with pytest.raises(RuntimeError) as e:
@@ -54,7 +63,7 @@ def _bootstrap_btn_keystore(tmp_path: Path) -> Path:
     import tn
 
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     cfg = load_or_create(yaml)
     return cfg.keystore

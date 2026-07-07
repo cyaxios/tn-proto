@@ -85,10 +85,24 @@ impl ReaderKit {
     /// if no cover entry unwraps under this keyset (reader revoked
     /// before the ciphertext was produced, or tampered ciphertext).
     pub fn decrypt(&self, ct: &Ciphertext) -> Result<Vec<u8>> {
+        // Back-compat: no additional authenticated data.
+        self.decrypt_with_aad(ct, &[])
+    }
+
+    /// Like [`Self::decrypt`], but supplies `aad` to the body AEAD open.
+    ///
+    /// `aad` must match the value bound at seal time (see
+    /// [`crate::PublisherState::encrypt_with_aad`]); otherwise the body fails
+    /// the tag check and this returns [`Error::NotEntitled`].
+    ///
+    /// # Errors
+    /// Returns [`Error::NotEntitled`] on publisher/epoch mismatch, if no cover
+    /// entry unwraps under this keyset, or if `aad` does not match.
+    pub fn decrypt_with_aad(&self, ct: &Ciphertext, aad: &[u8]) -> Result<Vec<u8>> {
         if ct.publisher_id != self.publisher_id || ct.epoch != self.epoch {
             return Err(Error::NotEntitled);
         }
-        crate::decrypt_with_keyset(&self.keyset, ct)
+        crate::decrypt_with_keyset_with_aad(&self.keyset, ct, aad)
     }
 }
 

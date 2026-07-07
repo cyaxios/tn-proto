@@ -241,6 +241,10 @@ export function ensureCeremonyOnDisk(
      *  ceremony to the machine-global identity (so they share one DID).
      *  Only honoured on the default / as-root mint path. */
     devicePrivateBytes?: Uint8Array;
+    /** Group-sealing cipher for a fresh mint ("btn" default, "hibe" for a
+     *  HIBE-authority ceremony). Only honoured on the default / as-root
+     *  mint path; named streams inherit the root's groups. */
+    cipher?: "btn" | "hibe" | "jwe";
   } = {},
 ): string {
   const yamlPath = ceremonyYamlPath(name, opts.projectDir);
@@ -271,6 +275,7 @@ export function ensureCeremonyOnDisk(
       profile,
       projectName,
       opts.devicePrivateBytes,
+      opts.cipher,
     );
   }
   return _createStreamYaml(name, yamlPath, opts.projectDir, profile);
@@ -282,6 +287,10 @@ export function ensureProjectLayoutOnDisk(
     projectDir?: string;
     profile?: string;
     devicePrivateBytes?: Uint8Array;
+    /** Group-sealing cipher for a freshly-minted project ("btn" default,
+     * "hibe" for a HIBE-authority ceremony). No effect when the project
+     * yaml already exists. */
+    cipher?: "btn" | "hibe" | "jwe";
   } = {},
 ): string {
   const profile = opts.profile ?? DEFAULT_PROFILE;
@@ -310,6 +319,7 @@ export function ensureProjectLayoutOnDisk(
     profile: ProfileName;
     projectName: string;
     devicePrivateBytes?: Uint8Array;
+    cipher?: "btn" | "hibe" | "jwe";
   } = {
     keystoreDir: layout.keysDir,
     logPath: join(layout.logsDir, `${DEFAULT_CEREMONY_NAME}.ndjson`),
@@ -320,6 +330,7 @@ export function ensureProjectLayoutOnDisk(
   if (opts.devicePrivateBytes !== undefined) {
     freshOpts.devicePrivateBytes = opts.devicePrivateBytes;
   }
+  if (opts.cipher !== undefined) freshOpts.cipher = opts.cipher;
   createFreshCeremony(layout.projectYaml, freshOpts);
   const defaultOverlay = join(layout.streamsDir, `${DEFAULT_CEREMONY_NAME}.yaml`);
   if (!existsSync(defaultOverlay)) {
@@ -394,6 +405,7 @@ function _createDefaultCeremony(
   profile: ProfileName,
   projectName?: string,
   devicePrivateBytes?: Uint8Array,
+  cipher?: "btn" | "hibe" | "jwe",
 ): string {
   const ydir = ceremonyDir(name, projectDir);
   mkdirSync(ydir, { recursive: true });
@@ -408,6 +420,7 @@ function _createDefaultCeremony(
       profile: ProfileName;
       projectName?: string;
       devicePrivateBytes?: Uint8Array;
+      cipher?: "btn" | "hibe" | "jwe";
     } = {
       keystoreDir: join(ydir, "keys"),
       logPath: join(ydir, "logs", "tn.ndjson"),
@@ -416,6 +429,7 @@ function _createDefaultCeremony(
     };
     if (projectName !== undefined) freshOpts.projectName = projectName;
     if (devicePrivateBytes !== undefined) freshOpts.devicePrivateBytes = devicePrivateBytes;
+    if (cipher !== undefined) freshOpts.cipher = cipher;
     createFreshCeremony(yamlPath, freshOpts);
   } catch (e) {
     throw new TNCreateFailed(

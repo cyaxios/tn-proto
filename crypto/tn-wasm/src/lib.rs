@@ -811,13 +811,19 @@ impl BtnPublisher {
     }
 }
 
-/// Decrypt `ctBytes` with `kitBytes`. Returns plaintext bytes. Throws
-/// on NotEntitled or malformed input.
+/// Decrypt `ctBytes` with `kitBytes`, requiring the same `aad` (marker)
+/// bound at seal time (omit/undefined for none). Returns plaintext bytes.
+/// Throws on NotEntitled, an AAD mismatch, or malformed input.
 #[wasm_bindgen(js_name = "btnDecrypt")]
-pub fn btn_decrypt_js(kit_bytes: &[u8], ct_bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn btn_decrypt_js(
+    kit_bytes: &[u8],
+    ct_bytes: &[u8],
+    aad: Option<Vec<u8>>,
+) -> Result<Vec<u8>, JsError> {
     let kit = BtnReaderKit::from_bytes(kit_bytes).map_err(|e| JsError::new(&format!("{e}")))?;
     let ct = BtnCiphertext::from_bytes(ct_bytes).map_err(|e| JsError::new(&format!("{e}")))?;
-    kit.decrypt(&ct).map_err(|e| JsError::new(&format!("{e}")))
+    kit.decrypt_with_aad(&ct, aad.as_deref().unwrap_or(&[]))
+        .map_err(|e| JsError::new(&format!("{e}")))
 }
 
 /// Extract the 32-byte publisher_id from a ciphertext.
@@ -845,6 +851,141 @@ pub fn btn_kit_leaf_js(kit_bytes: &[u8]) -> Result<u64, JsError> {
 #[wasm_bindgen(js_name = "btnTreeHeight")]
 pub fn btn_tree_height_js() -> u8 {
     tn_btn::config::TREE_HEIGHT
+}
+
+// ---------------------------------------------------------------------------
+// hibe — BBG HIBE cipher (`cipher: hibe` groups). Bytes in, bytes out
+// against the canonical tn-hibe encodings, mirroring tn._native.hibe so the
+// TS SDK and Python hold byte-identical keystore material.
+// ---------------------------------------------------------------------------
+
+fn hibe_err(e: tn_hibe::HibeError) -> JsError {
+    JsError::new(&format!("{e}"))
+}
+
+fn hibe_pp(mpk: &[u8]) -> Result<tn_hibe::PublicParams, JsError> {
+    tn_hibe::PublicParams::from_bytes(mpk).map_err(hibe_err)
+}
+
+fn hibe_sk(sk: &[u8]) -> Result<tn_hibe::PrivateKey, JsError> {
+    tn_hibe::PrivateKey::from_bytes(sk).map_err(hibe_err)
+}
+
+/// Run BBG Setup for a fresh authority.
+///
+/// Returns `{ mpk_b64, msk_b64 }` (canonical PublicParams / MasterKey bytes).
+#[wasm_bindgen(js_name = "hibeSetup")]
+pub fn hibe_setup_js(max_depth: usize) -> Result<JsValue, JsError> {
+    use base64::Engine as _;
+    let (pp, msk) = tn_hibe::setup(max_depth, rand_core::OsRng).map_err(hibe_err)?;
+    let v = serde_json::json!({
+        "mpk_b64": base64::engine::general_purpose::STANDARD.encode(pp.to_bytes()),
+        "msk_b64": base64::engine::general_purpose::STANDARD.encode(msk.to_bytes()),
+    });
+    json_to_js(&v)
+}
+
+/// Generate the private key for a slash-separated identity path from the msk.
+#[wasm_bindgen(js_name = "hibeKeygen")]
+pub fn hibe_keygen_js(mpk: &[u8], msk: &[u8], id_path: &str) -> Result<Vec<u8>, JsError> {
+    let pp = hibe_pp(mpk)?;
+    let msk = tn_hibe::MasterKey::from_bytes(msk).map_err(hibe_err)?;
+    let id = tn_hibe::Identity::from_str_path(id_path);
+    Ok(tn_hibe::keygen(&pp, &msk, &id, rand_core::OsRng)
+        .map_err(hibe_err)?
+        .to_bytes())
+}
+
+/// Derive the key for `parent_sk`'s child labelled `child_label` — no msk.
+#[wasm_bindgen(js_name = "hibeDelegate")]
+pub fn hibe_delegate_js(mpk: &[u8], parent_sk: &[u8], child_label: &str) -> Result<Vec<u8>, JsError> {
+    let pp = hibe_pp(mpk)?;
+    let parent = hibe_sk(parent_sk)?;
+    Ok(
+        tn_hibe::delegate(&pp, &parent, child_label.as_bytes(), rand_core::OsRng)
+            .map_err(hibe_err)?
+            .to_bytes(),
+    )
+}
+
+/// The slash-separated identity path a private key opens.
+#[wasm_bindgen(js_name = "hibeKeyIdPath")]
+pub fn hibe_key_id_path_js(sk: &[u8]) -> Result<String, JsError> {
+    let sk = hibe_sk(sk)?;
+    let labels: Vec<String> = sk
+        .identity()
+        .labels()
+        .iter()
+        .map(|l| String::from_utf8_lossy(l).into_owned())
+        .collect();
+    Ok(labels.join("/"))
+}
+
+/// Wrap a 32-byte content-encryption key to an identity path. The KEM half
+/// of the hybrid — byte-identical to Python's kem_wrap.
+#[wasm_bindgen(js_name = "hibeKemWrap")]
+pub fn hibe_kem_wrap_js(mpk: &[u8], id_path: &str, cek: &[u8]) -> Result<Vec<u8>, JsError> {
+    let pp = hibe_pp(mpk)?;
+    let cek: [u8; 32] = cek
+        .try_into()
+        .map_err(|_| JsError::new("cek must be exactly 32 bytes"))?;
+    let id = tn_hibe::Identity::from_str_path(id_path);
+    tn_hibe::kem_wrap(&pp, &id, &cek, rand_core::OsRng).map_err(hibe_err)
+}
+
+/// Unwrap a wrapped CEK with a key on its identity path. Throws on a
+/// wrong-path key or any tampered byte.
+#[wasm_bindgen(js_name = "hibeKemUnwrap")]
+pub fn hibe_kem_unwrap_js(mpk: &[u8], sk: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, JsError> {
+    let pp = hibe_pp(mpk)?;
+    let sk = hibe_sk(sk)?;
+    Ok(tn_hibe::kem_unwrap(&pp, &sk, wrapped).map_err(hibe_err)?.to_vec())
+}
+
+/// The maximum identity-path depth an authority's mpk supports. Doubles as
+/// a parse check: throws on malformed mpk bytes.
+#[wasm_bindgen(js_name = "hibeMpkMaxDepth")]
+pub fn hibe_mpk_max_depth_js(mpk: &[u8]) -> Result<usize, JsError> {
+    Ok(hibe_pp(mpk)?.max_depth())
+}
+
+/// Seal a full group body to an identity path (the blob a hibe group
+/// stores as its `ciphertext`). Single canonical layout owned by tn-hibe.
+/// `aad` binds additional authenticated data into the body tag (empty for
+/// no binding); the reader must supply the identical `aad` to open.
+#[wasm_bindgen(js_name = "hibeSeal")]
+pub fn hibe_seal_js(
+    mpk: &[u8],
+    id_path: &str,
+    plaintext: &[u8],
+    aad: Option<Vec<u8>>,
+) -> Result<Vec<u8>, JsError> {
+    let pp = hibe_pp(mpk)?;
+    let id = tn_hibe::Identity::from_str_path(id_path);
+    tn_hibe::seal_with_aad(&pp, &id, plaintext, aad.as_deref().unwrap_or(&[]), rand_core::OsRng)
+        .map_err(hibe_err)
+}
+
+/// Open a sealed hibe group blob with a key on its identity path. Throws
+/// on a wrong-path key or any tampered byte. `aad` (omit/undefined for none)
+/// must byte-match what was bound at seal.
+#[wasm_bindgen(js_name = "hibeOpen")]
+pub fn hibe_open_js(
+    mpk: &[u8],
+    sk: &[u8],
+    blob: &[u8],
+    aad: Option<Vec<u8>>,
+) -> Result<Vec<u8>, JsError> {
+    let pp = hibe_pp(mpk)?;
+    let sk = hibe_sk(sk)?;
+    tn_hibe::open_with_aad(&pp, &sk, blob, aad.as_deref().unwrap_or(&[])).map_err(hibe_err)
+}
+
+/// SHA-256 fingerprint of an authority's mpk (the manifest `mpk_fp`).
+#[wasm_bindgen(js_name = "hibeMpkFingerprint")]
+pub fn hibe_mpk_fingerprint_js(mpk: &[u8]) -> Result<Vec<u8>, JsError> {
+    let pp = hibe_pp(mpk)?;
+    Ok(tn_hibe::mpk_fingerprint(&pp).to_vec())
 }
 
 /// Max leaves constant.

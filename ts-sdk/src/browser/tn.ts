@@ -335,8 +335,6 @@ export class Tn {
    *
    * @see {@link Tn.initFromSeed} - the variant for server-provisioned credentials.
    * @see {@link TnInitOptions}
-   * @see [spec/envelope](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md) - what each emit produces.
-   * @see [spec/env-vars](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/env-vars.md) - the `TN_*` knobs that affect init.
    *
    * @public
    */
@@ -388,8 +386,6 @@ export class Tn {
    * @see {@link Tn.init} - the fresh-mint variant.
    * @see {@link TnInitFromSeedOptions}
    * @see {@link createFromSeed} - lower-level keystore-synthesis helper.
-   * @see [spec/body-encryption](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md) - the sealed-bundle frame the server-provisioned `project_seed` uses.
-   * @see [spec/vault-http](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md) - the routes that deliver the seed + state in the witness flow.
    *
    * @public
    */
@@ -680,8 +676,6 @@ export class Tn {
    * @see {@link Tn.log} - severity-less variant for facts.
    * @see {@link Tn.warning} - for events worth highlighting.
    * @see {@link Tn.read} - read entries back.
-   * @see [spec/envelope](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md) - the wire shape this emit produces.
-   * @see [spec/row-hash](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/row-hash.md) - the chain-link hash inside each envelope.
    *
    * @remarks
    * The DevTools console handler routes this to `console.info` so the
@@ -781,7 +775,6 @@ export class Tn {
    *
    * @see {@link Tn.readRaw} - audit-grade variant with full envelope +
    *   per-group plaintext map.
-   * @see [spec/envelope](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md) - the per-entry shape.
    *
    * @remarks
    * Sync return. Once the wasm side grows an iterator surface this

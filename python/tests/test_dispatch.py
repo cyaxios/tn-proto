@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -16,7 +25,7 @@ from tn import _dispatch
 
 def test_btn_ceremony_uses_rust(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("x.test", k=1)
     assert tn.using_rust() is True
     tn.flush_and_close()
@@ -24,7 +33,7 @@ def test_btn_ceremony_uses_rust(tmp_path):
 
 def test_jwe_ceremony_uses_python(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="jwe")
+    tn.init(yaml, cipher=_workflow_cipher("jwe"))
     tn.info("x.test", k=1)
     assert tn.using_rust() is False
     tn.flush_and_close()
@@ -33,7 +42,7 @@ def test_jwe_ceremony_uses_python(tmp_path):
 def test_tn_force_python_env_var_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("TN_FORCE_PYTHON", "1")
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("x.test", k=1)
     assert tn.using_rust() is False
     tn.flush_and_close()
@@ -62,12 +71,12 @@ def test_btn_ceremony_with_explicit_log_path_keeps_rust(tmp_path):
     yaml = tmp_path / "tn.yaml"
     log_path = tmp_path / "logs" / "tn.ndjson"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    tn.init(yaml, log_path=str(log_path), cipher="btn")
+    tn.init(yaml, log_path=str(log_path), cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     # Re-init now that yaml exists, with the same explicit log_path. This
     # is the call shape tnproto-org/src/allocate_worker.py uses against a
     # publisher's pre-minted ceremony.
-    tn.init(yaml, log_path=str(log_path), cipher="btn")
+    tn.init(yaml, log_path=str(log_path), cipher=_workflow_cipher("btn"))
     try:
         assert tn.using_rust() is True
         # admin_add_recipient requires Rust dispatch — minting it under

@@ -22,6 +22,15 @@ real home directory.
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -127,7 +136,7 @@ def test_autoinit_loads_existing_cwd_yaml_silently(tmp_path, monkeypatch, capsys
     monkeypatch.setenv("TN_HOME", str(tmp_path / "tnhome4"))
 
     # Bootstrap the cwd ceremony with an explicit init, then close.
-    tn.init(cwd / "tn.yaml", cipher="btn")
+    tn.init(cwd / "tn.yaml", cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _autoinit.reset_state_for_tests()
     capsys.readouterr()  # discard any output from explicit init
@@ -147,7 +156,7 @@ def test_autoinit_loads_tn_yaml_env_var(tmp_path, monkeypatch, capsys):
     yaml = other / "tn.yaml"
 
     # Bootstrap the env-var ceremony.
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _autoinit.reset_state_for_tests()
     capsys.readouterr()
@@ -231,7 +240,7 @@ def test_explicit_init_skips_autoinit(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TN_HOME", str(tmp_path / "tnhomeE"))
 
     yaml = cwd / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     capsys.readouterr()  # drop any output from explicit init
 
     tn.info("evt.explicit", k=1)

@@ -8,7 +8,6 @@
 // reinterprets the wire independently.
 //
 // Shared golden: crypto/tn-core/tests/fixtures/btn_vectors.json.
-// See docs/spec-next/btn-wire.md.
 
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";

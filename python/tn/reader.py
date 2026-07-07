@@ -30,7 +30,36 @@ from typing import Any
 from . import cipher as _cipher
 from .chain import _compute_row_hash, verify_chain_link
 from .config import LoadedConfig
+from .canonical import _canonical_bytes
 from .signing import DeviceKey, _signature_from_b64
+
+
+def _aad_bytes_for(env: dict[str, Any], group_name: str) -> bytes:
+    """Reconstruct a group's additional-authenticated-data bytes from a
+    record's public ``tn_aad`` echo.
+
+    The writer bound ``_canonical_bytes(effective_aad_dict)`` to the group's
+    seal and echoed the ``{group: dict}`` map as a CANONICAL JSON STRING into
+    ``env["tn_aad"]``. Parse it and re-canonicalize this group's dict so
+    ``cipher.decrypt`` can verify the AEAD; an absent / empty / malformed
+    entry yields ``b""`` (the writer bound nothing). Tampering the echo
+    changes these bytes and the AEAD fails — the group opens to a
+    decrypt-error marker, never plaintext.
+    """
+    raw = env.get("tn_aad")
+    if not isinstance(raw, str) or not raw:
+        return b""
+    try:
+        binding = json.loads(raw)
+    except (ValueError, TypeError):
+        return b""
+    if not isinstance(binding, dict):
+        return b""
+    group_aad = binding.get(group_name)
+    if not isinstance(group_aad, dict) or not group_aad:
+        return b""
+    return _canonical_bytes(group_aad)
+
 
 # --------------------------------------------------------------------------
 # Migration flag — see module docstring.
@@ -380,7 +409,7 @@ def _lines_with_keybag(
                 continue
             try:
                 ct_bytes = base64.b64decode(block["ciphertext"])
-                pt = cipher.decrypt(ct_bytes)
+                pt = cipher.decrypt(ct_bytes, _aad_bytes_for(env, key))
                 plaintext[key] = json.loads(pt.decode("utf-8"))
             except _cipher.NotARecipientError:
                 plaintext[key] = {"$no_read_key": True}
@@ -451,17 +480,26 @@ def read_as_recipient(
     keystore_path = Path(keystore_dir)
     btn_kit = keystore_path / f"{group}.btn.mykit"
     jwe_key = keystore_path / f"{group}.jwe.mykey"
+    hibe_key = keystore_path / f"{group}.hibe.sk"
+    # The keystore can hold keys for the SAME group name under several
+    # ciphers at once (e.g. the reader's own btn ceremony plus an absorbed
+    # hibe grant). The log line doesn't say which cipher sealed it, so try
+    # every candidate at decrypt time — same posture as JWE trying each
+    # wrapped key — and remember the first one that opens.
+    ciphers: list[Any] = []
     if btn_kit.exists():
-        cipher = _cipher.BtnGroupCipher.load(keystore_path, group)
-    elif jwe_key.exists():
-        cipher = _cipher.JWEGroupCipher.load(keystore_path, group)
-    else:
+        ciphers.append(_cipher.BtnGroupCipher.load(keystore_path, group))
+    if jwe_key.exists():
+        ciphers.append(_cipher.JWEGroupCipher.load(keystore_path, group))
+    if hibe_key.exists():
+        ciphers.append(_cipher.HibeGroupCipher.load(keystore_path, group))
+    if not ciphers:
         raise FileNotFoundError(
             f"read_as_recipient: no recipient key found for group={group!r} in "
-            f"{keystore_path}. Looked for {btn_kit.name} (btn) and "
-            f"{jwe_key.name} (jwe). If you absorbed a kit_bundle, the kit lands "
-            f"in your ceremony's keystore (./.tn/keys/ by default) — point "
-            f"keystore_dir there."
+            f"{keystore_path}. Looked for {btn_kit.name} (btn), "
+            f"{jwe_key.name} (jwe), and {hibe_key.name} (hibe). If you "
+            f"absorbed a kit_bundle, the kit lands in your ceremony's "
+            f"keystore (./.tn/keys/ by default) — point keystore_dir there."
         )
     prev_hash_by_event: dict[str, str] = {}
 
@@ -484,13 +522,25 @@ def read_as_recipient(
             g_block = env.get(group)
             if isinstance(g_block, dict) and "ciphertext" in g_block:
                 ct_bytes = base64.b64decode(g_block["ciphertext"])
-                try:
-                    pt = cipher.decrypt(ct_bytes)
-                    plaintext[group] = json.loads(pt.decode("utf-8"))
-                except _cipher.NotARecipientError:
-                    plaintext[group] = {"$no_read_key": True}
-                except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
-                    plaintext[group] = {"$decrypt_error": True}
+                saw_no_key = False
+                aad_bytes = _aad_bytes_for(env, group)
+                for candidate in ciphers:
+                    try:
+                        pt = candidate.decrypt(ct_bytes, aad_bytes)
+                        plaintext[group] = json.loads(pt.decode("utf-8"))
+                        # Promote the winner so later lines try it first.
+                        if ciphers[0] is not candidate:
+                            ciphers.remove(candidate)
+                            ciphers.insert(0, candidate)
+                        break
+                    except _cipher.NotARecipientError:
+                        saw_no_key = True
+                    except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
+                        pass
+                if group not in plaintext:
+                    plaintext[group] = (
+                        {"$no_read_key": True} if saw_no_key else {"$decrypt_error": True}
+                    )
 
             sig_ok = True
             if verify_signatures:
@@ -571,7 +621,7 @@ def parse_envelope_line(
             continue
         ct_bytes = groups_from_env[gname]["ciphertext"]
         try:
-            pt = gcfg.cipher.decrypt(ct_bytes)
+            pt = gcfg.cipher.decrypt(ct_bytes, _aad_bytes_for(env, gname))
             plaintext[gname] = json.loads(pt.decode("utf-8"))
         except _cipher.NotARecipientError:
             plaintext[gname] = {"$no_read_key": True}
@@ -590,6 +640,12 @@ def parse_envelope_line(
             and k not in _envelope_reserved
             and k not in cfg.groups
         }
+        # The ``tn_aad`` echo is an authenticated public field the writer
+        # folded into the row_hash even though it is not a user-declared
+        # public field. Fold it back so recompute matches — and so tampering
+        # the echo flips row_hash to invalid (alongside the AEAD failure).
+        if "tn_aad" in env:
+            public_out["tn_aad"] = env["tn_aad"]
         expected_row_hash = _compute_row_hash(
             device_identity=env.get("device_identity", ""),
             timestamp=env.get("timestamp", ""),
@@ -679,7 +735,7 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
                     continue
                 ct_bytes = groups_from_env[gname]["ciphertext"]
                 try:
-                    pt = gcfg.cipher.decrypt(ct_bytes)
+                    pt = gcfg.cipher.decrypt(ct_bytes, _aad_bytes_for(env, gname))
                     plaintext[gname] = json.loads(pt.decode("utf-8"))
                 except _cipher.NotARecipientError:
                     plaintext[gname] = {"$no_read_key": True}
@@ -707,6 +763,11 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
                 for k, v in env.items()
                 if k in cfg.public_fields and k not in _envelope_reserved and k not in cfg.groups
             }
+            # ``tn_aad`` is an authenticated public echo folded into the
+            # writer's row_hash; fold it back so recompute matches and so a
+            # tampered echo flips row_hash to invalid.
+            if "tn_aad" in env:
+                public_out["tn_aad"] = env["tn_aad"]
             expected_row_hash = _compute_row_hash(
                 device_identity=env["device_identity"],
                 timestamp=env["timestamp"],

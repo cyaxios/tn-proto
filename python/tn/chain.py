@@ -11,10 +11,6 @@ The first entry in any (publisher, event_type) chain uses
 ``row_hash`` -> ``prev_hash`` -> ``row_hash``.
 
 See Also:
-    `docs/spec/row-hash.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/row-hash.md>`_:
-        Authoritative wire spec for the hash algorithm.
-    `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_:
-        Envelope layout the hash commits to.
     ``crypto/tn-core/src/chain.rs``: Rust mirror.
 """
 
@@ -28,8 +24,7 @@ from typing import Any
 #: The ``prev_hash`` value for the first entry in any
 #: ``(publisher, event_type)`` chain. Format: ``"sha256:"`` + 64 zero
 #: hex chars. Recognised across every TN implementation as the
-#: chain-start sentinel. See
-#: `docs/spec/row-hash.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/row-hash.md>`_.
+#: chain-start sentinel.
 ZERO_HASH = "sha256:" + "0" * 64
 
 
@@ -194,12 +189,6 @@ def _compute_row_hash(
         ... )
         >>> h.startswith("sha256:")
         True
-
-    See Also:
-        `docs/spec/row-hash.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/row-hash.md>`_:
-            Authoritative wire spec — implementations MUST match.
-        `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_:
-            What ``row_hash`` lives inside.
     """
     h = hashlib.sha256()
     h.update(device_identity.encode("utf-8"))

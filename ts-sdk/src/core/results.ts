@@ -73,21 +73,30 @@ export interface AbsorbResult {
 
 export interface AddRecipientResult {
   group: string;
-  cipher: "btn" | "jwe";
-  leafIndex: number;
+  cipher: "btn" | "jwe" | "hibe";
+  /** btn leaf index; null for hibe (grants carry no leaf — the reader kit
+   * is a delegated identity key, mirroring Python's
+   * `AddRecipientResult.leaf_index = None`). */
+  leafIndex: number | null;
   recipientDid: string | null;
-  /** Absolute path to the kit file written to disk by `tn.admin.addRecipient`. */
-  kitPath: string;
-  /** sha256 hex of the kit file bytes. */
-  kitSha256: string;
+  /** Absolute path to the kit file written to disk by `tn.admin.addRecipient`.
+   * null for jwe — a jwe recipient's public key is registered directly, no kit
+   * is minted (mirrors Python's jwe add_recipient returning a config update). */
+  kitPath: string | null;
+  /** sha256 hex of the kit file bytes; null for jwe (no kit). */
+  kitSha256: string | null;
   /** ISO-8601 timestamp the kit was minted at. */
   mintedAt: string;
+  /** hibe only: the identity path the granted key sits on. */
+  idPath?: string;
 }
 
 export interface RevokeRecipientResult {
   group: string;
-  cipher: "btn" | "jwe";
-  leafIndex: number;
+  cipher: "btn" | "jwe" | "hibe";
+  /** btn leaf index; null for hibe (revocation rotates the identity path
+   * instead of flipping a leaf). */
+  leafIndex: number | null;
   recipientDid: string | null;
   revokedAt: string;
   /** For jwe rotation: the path to the new kit file written for remaining
@@ -95,6 +104,23 @@ export interface RevokeRecipientResult {
    * out of the subset-difference tree). */
   newKitPath: string | null;
   newKitSha256: string | null;
+  /** hibe only: the identity path future seals use after the revocation. */
+  newPath?: string;
+  /** hibe only: re-issued `.tnpkg` kits for the surviving grantees —
+   * distribute them and have each survivor absorb theirs. */
+  kitPaths?: string[];
+}
+
+/** Structured return from `tn.admin.revokeReader` (hibe groups). Mirrors
+ * Python's `RevokeReaderResult`. */
+export interface RevokeReaderResult {
+  revoked: boolean;
+  /** Identity path future seals use. */
+  newPath: string;
+  /** Re-issued kits for the surviving grantees. */
+  kitPaths: string[];
+  /** DIDs still granted after the revocation. */
+  remaining: string[];
 }
 
 export interface RotateGroupResult {
@@ -108,7 +134,7 @@ export interface RotateGroupResult {
 
 export interface EnsureGroupResult {
   group: string;
-  cipher: "btn" | "jwe";
+  cipher: "btn" | "jwe" | "hibe";
   /** false when the group already existed (idempotent ensure). */
   created: boolean;
   publisherDid: string;

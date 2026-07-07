@@ -77,8 +77,6 @@ export const ENV_VAULT_DEFAULT_BASE = "TN_VAULT_DEFAULT_BASE";
  * @see {@link resolveDidEndpoint} - for "where does this DID's vault live?"
  * @see {@link ENV_VAULT_URL}
  * @see {@link DEFAULT_VAULT_URL}
- * @see [spec/vault-http](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md) - the API rooted at this base URL.
- * @see [spec/env-vars#tn_vault_url](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/env-vars.md) - precedence rules.
  *
  * @remarks
  * Mirrors `python/tn/vault_client.py::resolve_vault_url`. Pure function;
@@ -145,8 +143,6 @@ const _didEndpointCache: Map<string, string> = new Map();
  *
  * @see {@link resolveVaultUrl} - for explicit base URLs (not DID-derived).
  * @see {@link ENV_VAULT_DEFAULT_BASE}
- * @see [spec/signing#did-format](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md#did-format) - DID method conventions.
- * @see [spec/vault-http](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md) - what the returned URL roots.
  *
  * @remarks
  * Mirrors `python/tn/identity.py::_resolve_did_endpoint`. Trailing
@@ -269,7 +265,6 @@ export const ENV_NO_LINK = "TN_NO_LINK";
  * them with a silent no-op based on env would be wrong.
  *
  * @see {@link ENV_NO_LINK}
- * @see [spec/env-vars#tn_no_link](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/env-vars.md) - truthiness convention.
  * @public
  */
 export function isAutoLinkDisabled(): boolean {

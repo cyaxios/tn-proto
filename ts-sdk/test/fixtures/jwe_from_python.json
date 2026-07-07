@@ -1,0 +1,41 @@
+{
+  "jwe": {
+    "aad": "cG9saWN5PWZpbnJhLW9iYQ",
+    "ciphertext": "-nqpsR8JfT3xgeoNMWGqWv9RtpHwqhRD_gJoV8ecWZRvEuI",
+    "iv": "Rrp_d2tF_MpJ_2HD",
+    "protected": "eyJlbmMiOiJBMjU2R0NNIn0",
+    "recipients": [
+      {
+        "encrypted_key": "QtDD5Q51xKl-HcOOvCNR1qJOLCYB-mrO0efCMeamfiDfMBEDjYK6Zg",
+        "header": {
+          "alg": "ECDH-ES+A256KW",
+          "epk": {
+            "crv": "X25519",
+            "kty": "OKP",
+            "x": "tmdMbYME83_mANzIsQvIrqxzqHnagfNhJrLkcCno6zQ"
+          }
+        }
+      },
+      {
+        "encrypted_key": "S6xdMoRYe2_BpLgYNCjz9ffO3u2brmhJTa9Raxx90JHdxMfzwLUzHw",
+        "header": {
+          "alg": "ECDH-ES+A256KW",
+          "epk": {
+            "crv": "X25519",
+            "kty": "OKP",
+            "x": "Huq8u98_9OMr3CUbt_GWeQRtU3fHsAt9l6LaguAvjjY"
+          }
+        }
+      }
+    ],
+    "tag": "AIvKLTn9_2XoXJJhsqCAeQ"
+  },
+  "reader_jwk": {
+    "kty": "OKP",
+    "crv": "X25519",
+    "x": "_oydO1rURhsqFX40VhYqoSxMaYLv9ezqMjnyBuA-iRk",
+    "d": "0Pg8QoMSMRDZXATd3PELi_tDdybNfjcT1gv-lqjMJWo"
+  },
+  "plaintext": "{\"sealed_by\":\"python\",\"amount\":999}",
+  "aad": "policy=finra-oba"
+}

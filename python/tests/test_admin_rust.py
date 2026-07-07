@@ -8,6 +8,15 @@ envelopes.
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import base64
 import json
 import sys
@@ -26,7 +35,7 @@ def _rebuild_rt(tmp_path: Path) -> None:  # referenced by fixtures when needed
     """Helper: flush_and_close and re-init from the same yaml."""
     tn.flush_and_close()
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
 
 
 @pytest.fixture(autouse=True)
@@ -42,13 +51,13 @@ def _clean_tn(tmp_path):  # pyright: ignore[reportUnusedFunction]  # autouse fix
 
 def test_using_rust_is_true_for_btn_ceremony(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     assert tn.using_rust() is True, "btn ceremony must route through Rust"
 
 
 def test_admin_add_recipient_returns_leaf_and_writes_file(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     assert tn.using_rust() is True
 
     kit_path = tmp_path / "reader_a.btn.mykit"
@@ -60,7 +69,7 @@ def test_admin_add_recipient_returns_leaf_and_writes_file(tmp_path):
 
 def test_admin_revoke_recipient_increments_revoked_count(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
 
     kit_path = tmp_path / "reader_b.btn.mykit"
     leaf = tn.admin.add_recipient("default", out_path=str(kit_path)).leaf_index
@@ -78,7 +87,7 @@ def test_revoke_then_decrypt_fails_for_revoked_reader(tmp_path):
     """The full revocation story: emit before and after revocation, verify
     that the revoked reader cannot decrypt post-revocation envelopes."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     assert tn.using_rust() is True
 
     # Baseline emit — before any external recipient.
@@ -127,7 +136,7 @@ def test_revoke_then_decrypt_fails_for_revoked_reader(tmp_path):
 def test_add_recipient_state_survives_runtime_reload(tmp_path):
     """State written by add_recipient_btn must be loadable by a fresh Runtime."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
 
     kit_path1 = tmp_path / "reader1.btn.mykit"
     tn.admin.add_recipient("default", out_path=str(kit_path1))
@@ -136,7 +145,7 @@ def test_add_recipient_state_survives_runtime_reload(tmp_path):
     tn.flush_and_close()
 
     # Reload.
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     assert tn.using_rust() is True
 
     # Mint a second kit from the reloaded runtime — must work.

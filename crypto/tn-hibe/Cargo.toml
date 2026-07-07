@@ -1,0 +1,28 @@
+[package]
+name = "tn-hibe"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+# Fully permissive again (MIT OR Apache-2.0): the BBG scheme now comes from
+# the tn-bbg crate — our own Apache/MIT reimplementation on BLS12-381 — NOT
+# the LGPL `hohibe`, which has been deleted. tn-hibe is a thin, STABLE
+# re-export of tn-bbg so its consumers (tn-hibe-py, tn-wasm, tn-core) keep
+# importing `tn_hibe::*` unchanged and the on-wire bytes are identical.
+license.workspace = true
+description = "BBG HIBE cipher core for tn-proto: a stable re-export of the tn-bbg scheme (identity paths, canonical encodings, the CEK KEM, and the hybrid seal blob)."
+
+[dependencies]
+tn-bbg = { path = "../tn-bbg" }
+# Tests and the golden-vector generator reference GT directly; pin the same
+# curve version tn-bbg uses so the element types unify.
+bls12_381_plus = "0.8.9"
+
+[dev-dependencies]
+rand_core = { workspace = true }
+rand_chacha = "0.3"
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+getrandom = { version = "0.2", features = ["js"] }

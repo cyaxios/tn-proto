@@ -1,3 +1,12 @@
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 from pathlib import Path
 
 import pytest
@@ -33,11 +42,11 @@ def _clean_tn():  # noqa: PT004
 def test_init_absorbs_inbox_and_reconciles(tmp_path: Path):
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
-    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
+    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
 
     bob_dir = tmp_path / "bob"
     bob_dir.mkdir()
-    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     tn.init(str(bob_cfg.yaml_path))
     offer(bob_cfg, publisher_did=alice_cfg.device.device_identity)
     tn.flush_and_close()

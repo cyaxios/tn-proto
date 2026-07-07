@@ -23,6 +23,15 @@ in isolation.
 """
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 from tn.absorb import _reuse_is_informed
 
 _REVOKED = "tn.recipient.revoked"
@@ -85,7 +94,7 @@ def _setup_revoked_leaf(tmp_path):
     from tn.admin.log import resolve_admin_log_path
 
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     add = tn.admin.add_recipient(
         "default", recipient_did="did:key:zVictim",
         out_path=str(tmp_path / "victim.btn.mykit"),
