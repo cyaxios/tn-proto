@@ -94,6 +94,16 @@ def seal(
     per_group: dict[str, dict[str, Any]] = {}
     for k, v in merged.items():
         if k in public_keys:
+            if isinstance(v, dict) and "ciphertext" in v:
+                # The wire is self-describing: unseal treats any dict value
+                # carrying a "ciphertext" key as an encrypted group block,
+                # so a public field shaped like that could never round-trip.
+                raise ValueError(
+                    f"public field {k!r} is a dict containing a 'ciphertext' "
+                    f"key; unseal would misread it as an encrypted group "
+                    f"block. Rename the inner key or route the field into "
+                    f"a group."
+                )
             public_out[k] = v
             continue
         gnames = cfg.field_to_groups.get(k)
@@ -152,6 +162,13 @@ def seal(
     # Detachment marker — a number so str(value) in the row-hash
     # preimage renders identically in every SDK implementation.
     public_out["tn_sealed"] = 1
+
+    # The preimage must commit to what the wire carries: verifiers
+    # recompute the row hash from parsed JSON, so hash the public
+    # values in their wire rendering (datetime -> ISO string, etc.),
+    # not the in-memory Python objects _json_default would still have
+    # to convert at str() time.
+    public_out = json.loads(json.dumps(public_out, default=_json_default))
 
     # -- standalone identity + hash + sign (mirrors the emit path's
     #    hash/sign steps, with sequence=0 / prev_hash="" and NO chain
@@ -268,7 +285,12 @@ def unseal(
     triple = {"envelope": env, "plaintext": plaintext, "valid": valid}
     if raw:
         return triple
-    return Entry.from_raw(triple)
+    # Entry.from_raw copies non-reserved public extras into Entry.fields,
+    # which would leak the tn_sealed marker into user fields — and make
+    # tn.seal(**entry.fields) trip the reserved-name guard. Drop it from
+    # the Entry-bound copy only; the raw triple above stays wire-faithful.
+    entry_env = {k: v for k, v in env.items() if k != "tn_sealed"}
+    return Entry.from_raw({**triple, "envelope": entry_env})
 
 
 def _normalize_source(
@@ -300,8 +322,15 @@ def _parse_envelope_text(text: str) -> dict[str, Any]:
 
 
 def _require_envelope_shape(env: dict[str, Any]) -> dict[str, Any]:
-    missing = [k for k in ("device_identity", "event_type", "row_hash", "signature")
-               if k not in env]
+    # seal always writes all nine envelope scalars; require the ones the
+    # rest of unseal dereferences unconditionally (Entry.from_raw needs
+    # timestamp/event_id/sequence even with verify=False) so malformed
+    # input surfaces as UnsealError, never a bare KeyError.
+    required = (
+        "device_identity", "event_type", "row_hash", "signature",
+        "timestamp", "event_id", "sequence",
+    )
+    missing = [k for k in required if k not in env]
     if missing:
         raise UnsealError(f"not a sealed object: missing {', '.join(missing)}")
     return env
@@ -342,7 +371,13 @@ def _decrypt_walk(
     as_recipient: str | Path | None,
     group: str,
 ) -> dict[str, dict[str, Any]]:
-    """Try every candidate key per group; first fit wins, failures skip."""
+    """Try every candidate key per group; first fit wins, failures skip.
+
+    The default keybag walk (reader._discover_keybag_ciphers) holds one
+    cipher per group and skips hibe kits, unlike the as_recipient
+    candidate loading — known inherited reader behavior; the fix belongs
+    in the reader later.
+    """
     plaintext: dict[str, dict[str, Any]] = {}
 
     def _try(gname: str, cipher_obj: Any) -> bool:
@@ -356,9 +391,12 @@ def _decrypt_walk(
 
     if as_recipient is not None:
         # single-kit override: load every cipher candidate for `group`
-        # from that directory and decrypt only `group`.
+        # from that directory and decrypt only `group`. Nothing to open
+        # means nothing to load — return before touching the keystore.
+        if group not in groups_from_env:
+            return plaintext
         for cipher_obj in _load_recipient_candidates(Path(as_recipient), group):
-            if group in groups_from_env and _try(group, cipher_obj):
+            if _try(group, cipher_obj):
                 break
         return plaintext
 

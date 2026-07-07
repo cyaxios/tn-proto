@@ -113,9 +113,11 @@ def test_unseal_roundtrip_own_ceremony(tmp_path):
     sealed = tn.seal("obj.invoice.v1", receipt=False, amount=9800, customer="acme")
     entry = tn.unseal(sealed)
     assert entry.event_type == "obj.invoice.v1"
-    assert entry.fields["amount"] == 9800
-    assert entry.fields["customer"] == "acme"
+    # exact: the tn_sealed wire marker must NOT leak into user fields
+    assert entry.fields == {"amount": 9800, "customer": "acme"}
     assert entry.sequence == 0
+    assert entry.prev_hash == ""
+    assert entry.did == sealed["device_identity"]
     assert entry.hidden_groups == []
 
 
@@ -141,3 +143,10 @@ def test_unseal_raw_returns_triple(tmp_path):
     assert triple["plaintext"]["default"] == {"x": 1}
     assert triple["valid"]["signature"] is True
     assert triple["valid"]["row_hash"] is True
+
+
+def test_unseal_verify_false_reports_unverified(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.test.v1", receipt=False, x=1)
+    triple = tn.unseal(sealed, verify=False, raw=True)
+    assert triple["valid"] == {"signature": False, "row_hash": False}
