@@ -111,6 +111,39 @@ def test_read_spans_rotation_boundary(tmp_path):
     assert order_entries[3].fields["stage"] == "post"
 
 
+def test_jwe_read_spans_rotation_boundary(tmp_path):
+    """jwe sibling of test_read_spans_rotation_boundary: rotation archives the
+    reader key as `.jwe.mykey.revoked.<ts>`; a single tn.read() after re-init
+    must still decrypt pre-rotation entries via those prior keys (not surface
+    `$no_read_key`). Cipher pinned to jwe — this is a jwe-specific regression."""
+    yaml = tmp_path / "tn.yaml"
+    tn.init(yaml, cipher="jwe")
+    tn.info("order.created", order_id="J100", stage="pre")
+    tn.flush_and_close()
+
+    tn.init(yaml)
+    tn.admin.rotate("default")
+    tn.flush_and_close()
+
+    keystore = tmp_path / ".tn/tn/keys"
+    assert list(keystore.glob("default.jwe.mykey.revoked.*")), (
+        "rotation should archive the prior jwe reader key"
+    )
+
+    tn.init(yaml)
+    tn.info("order.created", order_id="J101", stage="post")
+    tn.flush_and_close()
+
+    tn.init(yaml)
+    entries = [e for e in tn.read(all_runs=True) if e.event_type == "order.created"]
+    ids = {e.fields.get("order_id") for e in entries}
+    assert ids == {"J100", "J101"}, (
+        f"expected pre- and post-rotation entries to decrypt, got order_ids={ids}; "
+        + "entries:\n"
+        + "\n".join(f"  seq={e.sequence} fields={e.fields}" for e in entries)
+    )
+
+
 def test_multiple_rotations_accumulate_preserved_kits(tmp_path):
     """Every rotation stacks another .retired.<N> kit; reads still span all."""
     yaml = tmp_path / "tn.yaml"

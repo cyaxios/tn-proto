@@ -96,7 +96,7 @@ import { ZERO_HASH, rowHash, sha256HexBytes, verifyChainLink } from "../core/cha
 import { signatureB64, signatureFromB64, verify } from "../core/signing.js";
 import { asDid, asRowHash, asSignatureB64 } from "../core/types.js";
 import { authoritativeYamlFor, loadConfig, type CeremonyConfig, type GroupConfig } from "./config.js";
-import { commitGroupKeys, loadKeystore, type LoadedKeystore } from "./keystore.js";
+import { commitGroupKeys, loadJweKeys, loadKeystore, type LoadedKeystore } from "./keystore.js";
 import { scanAttestedEventRecords, yamlRecipientDids } from "./reconcile.js";
 import { createRequire } from "node:module";
 import type { WasmRuntime } from "tn-wasm";
@@ -1028,12 +1028,14 @@ export class NodeRuntime {
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     jweRotateGroup(keystore, group, this.did, ts);
 
-    // Refresh the in-memory keystore + bump the group epoch.
+    // Refresh the in-memory keystore + bump the group epoch. loadJweKeys
+    // picks up the fresh mykey plus the just-archived `.revoked.<ts>` keys,
+    // so a same-process read still spans the rotation boundary.
     const mk = join(keystore, `${group}.jwe.mykey`);
+    const newKitSha256 = sha256HexBytes(new Uint8Array(readFileSync(mk)));
     const gk = this.keystore.groups.get(group) ?? { kits: [] };
-    gk.jweKey = new Uint8Array(readFileSync(mk));
+    gk.jweKeys = loadJweKeys(keystore, group);
     this.keystore.groups.set(group, gk);
-    const newKitSha256 = sha256HexBytes(gk.jweKey);
     const gcfg = this.config.groups.get(group);
     const generation = (gcfg?.indexEpoch ?? 0) + 1;
     if (gcfg) gcfg.indexEpoch = generation;
@@ -2166,9 +2168,9 @@ export class NodeRuntime {
     }
     // Refresh the in-memory keystore so a same-process readAsync opens the
     // group (the LoadedKeystore was snapshotted at init, before this mint).
-    const myKeyPath = join(keystore, `${group}.jwe.mykey`);
     const gk = this.keystore.groups.get(group) ?? { kits: [] };
-    if (existsSync(myKeyPath)) gk.jweKey = new Uint8Array(readFileSync(myKeyPath));
+    const jweKeys = loadJweKeys(keystore, group);
+    if (jweKeys.length > 0) gk.jweKeys = jweKeys;
     this.keystore.groups.set(group, gk);
     this._registerGroupInConfig(group, "jwe");
     this._persistGroupYaml(group, "jwe", fields, true);
@@ -4124,7 +4126,9 @@ export class NodeRuntime {
       return kits;
     }
     if (cipherKind === "jwe") {
-      return { cipher: "jwe", kits: gk?.jweKey ? [gk.jweKey] : [] };
+      // Current reader key first, then rotation-archived `.revoked.<ts>` keys
+      // — the async trial-decrypt loop tries each until one opens.
+      return { cipher: "jwe", kits: gk?.jweKeys ?? [] };
     }
     return { cipher: cipherKind, kits: gk?.kits ?? [] };
   }

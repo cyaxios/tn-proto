@@ -206,9 +206,15 @@ def _atomic_write_text(path: Path, content: str) -> None:
     Path.replace is atomic on POSIX; on Windows it's not guaranteed atomic
     but is far safer than a truncating write. Acceptable for a local
     keystore file, where corruption is the only concern we guard against.
+
+    newline="" keeps the on-disk bytes identical across platforms: the Rust
+    runtime parses some of these files (the hibe idpath history) and rejects
+    CR, so Windows "\n" -> "\r\n" translation would break re-init after a
+    hibe rotation.
     """
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
+    with tmp.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(content)
     tmp.replace(path)
 
 
@@ -226,6 +232,27 @@ def _atomic_write_secret_bytes(path: Path, data: bytes) -> None:
     from ._keystore_backend import atomic_write_bytes
 
     atomic_write_bytes(path, data)
+
+
+def _load_prior_jwe_sks(keystore: Path, group_name: str) -> list[X25519PrivateKey]:
+    """Load the reader keys rotations archived as
+    ``<group>.jwe.mykey.revoked.<ts>``, newest first.
+
+    A corrupt or truncated archive is skipped with a warning rather than
+    failing the whole load — that epoch's entries just stay unreadable.
+    """
+    prior_sks: list[X25519PrivateKey] = []
+    for prior_path in sorted(keystore.glob(f"{group_name}.jwe.mykey.revoked.*"), reverse=True):
+        try:
+            prior_sks.append(X25519PrivateKey.from_private_bytes(prior_path.read_bytes()))
+        except (OSError, ValueError) as exc:
+            warnings.warn(
+                f"JWE group {group_name!r}: skipping unreadable archived reader "
+                f"key {prior_path.name} ({exc}). Entries sealed to that key "
+                f"generation stay unreadable; current reads are unaffected.",
+                stacklevel=2,
+            )
+    return prior_sks
 
 
 @dataclass
@@ -249,6 +276,8 @@ class JWEGroupCipher:
         <keystore>/<group>.jwe.sender       32B X25519 private (identity anchor)
         <keystore>/<group>.jwe.recipients   JSON list [{recipient_identity, pub_b64}, ...]
         <keystore>/<group>.jwe.mykey        32B X25519 private (recipient)
+        <keystore>/<group>.jwe.mykey.revoked.<ts>  superseded recipient keys
+                                            (archived by tn.admin's rotate)
     """
 
     name: str = "jwe"
@@ -256,6 +285,12 @@ class JWEGroupCipher:
     _sender_pub: bytes = b""
     _my_sk: X25519PrivateKey | None = field(default=None, repr=False)
     _recipients_path: Path | None = field(default=None, repr=False)
+    # Reader keys superseded by rotations, newest first. Rotation archives
+    # the active ``<group>.jwe.mykey`` as ``.revoked.<ts>``; loading them
+    # back keeps this party's pre-rotation entries readable — the same
+    # posture as btn's ``.retired.<epoch>`` kits and hibe's ``.previous``
+    # identity keys.
+    _prior_sks: list[X25519PrivateKey] = field(default_factory=list, repr=False)
 
     @classmethod
     def create(
@@ -336,11 +371,13 @@ class JWEGroupCipher:
             _sender_pub=sender_pub,
             _my_sk=my_sk,
             _recipients_path=recipients_path,
+            _prior_sks=_load_prior_jwe_sks(keystore, group_name),
         )
 
     @classmethod
     def load(cls, keystore: Path, group_name: str) -> JWEGroupCipher:
-        """Load an existing JWE group from its keystore files."""
+        """Load an existing JWE group from its keystore files, including any
+        rotation-archived reader keys (``.jwe.mykey.revoked.<ts>``)."""
         sender_path = keystore / f"{group_name}.jwe.sender"
         my_path = keystore / f"{group_name}.jwe.mykey"
         recipients_path = keystore / f"{group_name}.jwe.recipients"
@@ -364,6 +401,7 @@ class JWEGroupCipher:
             _sender_pub=sender_pub,
             _my_sk=my_sk,
             _recipients_path=recipients_path if recipients_path.exists() else None,
+            _prior_sks=_load_prior_jwe_sks(keystore, group_name),
         )
 
     @classmethod
@@ -431,10 +469,30 @@ class JWEGroupCipher:
             return _jwe_seal(pubs, plaintext, aad)
 
     def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
-        if self._my_sk is None:
+        """Open a group blob, falling back to rotation-archived reader keys.
+
+        A log mixes entries sealed before and after rotations, and a blob
+        does not say which key generation sealed it, so try the current key
+        first and then each ``.revoked.<ts>`` prior key (newest first). The
+        trial loop in ``_jwe_open`` already tolerates a wrong key via AEAD
+        tag failure, so a miss is safe."""
+        candidates = [sk for sk in (self._my_sk, *self._prior_sks) if sk is not None]
+        if not candidates:
             raise NotARecipientError("JWE: no recipient X25519 key in this keystore")
         with _perf_stage("read:group_decrypt.cipher"):
-            return _jwe_open(ciphertext, self._my_sk, aad)
+            last_exc: NotARecipientError | None = None
+            for sk in candidates:
+                try:
+                    return _jwe_open(ciphertext, sk, aad)
+                except NotARecipientError as exc:
+                    last_exc = exc
+            assert last_exc is not None
+            if len(candidates) == 1:
+                raise last_exc
+            raise NotARecipientError(
+                f"JWE: none of {len(candidates)} recipient keys in this "
+                f"keystore opens this envelope ({last_exc})"
+            ) from last_exc
 
 
 # ---------------------------------------------------------------------------
