@@ -106,3 +106,38 @@ def test_seal_receipt_false_writes_nothing(tmp_path):
     tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     tn.seal("obj.invoice.v1", receipt=False, amount=1)
     assert list(tn.read("tn.object.sealed", log="admin")) == []
+
+
+def test_unseal_roundtrip_own_ceremony(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.invoice.v1", receipt=False, amount=9800, customer="acme")
+    entry = tn.unseal(sealed)
+    assert entry.event_type == "obj.invoice.v1"
+    assert entry.fields["amount"] == 9800
+    assert entry.fields["customer"] == "acme"
+    assert entry.sequence == 0
+    assert entry.hidden_groups == []
+
+
+def test_unseal_accepts_all_source_shapes(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.test.v1", receipt=False, x=1)
+    as_dict = tn.unseal(dict(sealed))
+    as_str = tn.unseal(str(sealed))
+    as_bytes = tn.unseal(str(sealed).encode("utf-8"))
+    p = tmp_path / "obj.json"
+    p.write_text(str(sealed), encoding="utf-8")
+    as_path = tn.unseal(p)
+    for e in (as_dict, as_str, as_bytes, as_path):
+        assert e.fields["x"] == 1
+
+
+def test_unseal_raw_returns_triple(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.test.v1", receipt=False, x=1)
+    triple = tn.unseal(sealed, raw=True)
+    assert set(triple) == {"envelope", "plaintext", "valid"}
+    assert triple["envelope"]["row_hash"] == sealed["row_hash"]
+    assert triple["plaintext"]["default"] == {"x": 1}
+    assert triple["valid"]["signature"] is True
+    assert triple["valid"]["row_hash"] is True

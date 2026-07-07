@@ -1206,6 +1206,7 @@ from .seal import (  # noqa: E402
     SealedObject,
     UnsealError,
     seal,
+    unseal,
 )
 
 # atexit registration: tn.init() registers _atexit_flush once per
@@ -1510,6 +1511,7 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "SealedObject",
     "UnsealError",
     "seal",
+    "unseal",
     "sealing",
     # context
     "scope",
