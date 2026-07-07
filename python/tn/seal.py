@@ -304,7 +304,13 @@ def _normalize_source(
             raise UnsealError(f"cannot read sealed object file: {e}") from e
         return _parse_envelope_text(text)
     if isinstance(source, (str, bytes)):
-        text = source.decode("utf-8") if isinstance(source, bytes) else source
+        if isinstance(source, bytes):
+            try:
+                text = source.decode("utf-8")
+            except UnicodeDecodeError as e:
+                raise UnsealError(f"not a sealed object: invalid utf-8 ({e})") from e
+        else:
+            text = source
         return _parse_envelope_text(text)
     if isinstance(source, dict):
         return _require_envelope_shape(dict(source))

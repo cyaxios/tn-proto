@@ -7,6 +7,7 @@ import os
 import pytest
 
 import tn
+from tn import UnsealError, VerifyError
 from tn.chain import ZERO_HASH, _compute_row_hash
 from tn.signing import DeviceKey, _signature_from_b64
 
@@ -150,3 +151,59 @@ def test_unseal_verify_false_reports_unverified(tmp_path):
     sealed = tn.seal("obj.test.v1", receipt=False, x=1)
     triple = tn.unseal(sealed, verify=False, raw=True)
     assert triple["valid"] == {"signature": False, "row_hash": False}
+
+
+def test_unseal_tampered_public_field_raises(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.test.v1", receipt=False, x=1)
+    tampered = dict(sealed)
+    tampered["tn_sealed"] = 2
+    with pytest.raises(VerifyError):
+        tn.unseal(tampered)
+
+
+def test_unseal_tampered_ciphertext_raises(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.test.v1", receipt=False, x=1)
+    tampered = json.loads(str(sealed))
+    block = tampered["default"]["ciphertext"]
+    tampered["default"]["ciphertext"] = block[:-4] + ("AAAA" if block[-4:] != "AAAA" else "BBBB")
+    with pytest.raises(VerifyError):
+        tn.unseal(tampered)
+
+
+def test_unseal_verify_false_returns_despite_tamper(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.test.v1", receipt=False, x=1)
+    tampered = dict(sealed)
+    tampered["tn_sealed"] = 2
+    entry = tn.unseal(tampered, verify=False)
+    assert entry.event_type == "obj.test.v1"
+
+
+def test_seal_aad_binds_and_roundtrips(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.test.v1", receipt=False, aad={"case": "A-17"}, x=1)
+    assert "tn_aad" in sealed          # authenticated public echo present
+    entry = tn.unseal(sealed)          # _aad_bytes_for reconstructs binding
+    assert entry.fields["x"] == 1
+    tampered = dict(sealed)
+    tampered["tn_aad"] = tampered["tn_aad"].replace("A-17", "B-99")
+    with pytest.raises(VerifyError):   # echo is bound into row_hash
+        tn.unseal(tampered)
+
+
+def test_unseal_malformed_sources_raise_unsealerror(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    for bad in (
+        "not json at all",
+        "[1,2,3]",
+        "{}",
+        b"\xff\xfe",
+        {"event_type": "x"},
+        # four original keys present but timestamp/event_id/sequence
+        # missing — the strict shape now requires all seven.
+        {"device_identity": "d", "event_type": "x", "row_hash": "h", "signature": "s"},
+    ):
+        with pytest.raises(UnsealError):
+            tn.unseal(bad)
