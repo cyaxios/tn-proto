@@ -220,29 +220,48 @@ def test_unseal_malformed_sources_raise_unsealerror(tmp_path, bad):
 
 
 def _two_peer(tmp_path):
-    """Alice seals; Bob is enrolled in 'default' via a compiled+absorbed kit.
+    """Alice seals into 'partners'; Bob is enrolled in that group only.
 
-    Leaves Bob's ceremony ACTIVE (tests exercising the keystore key-bag
-    walk rely on that). Returns ``(sealed, bob_keystore)`` where
-    ``bob_keystore`` is Bob's real keystore directory (``cfg.keystore``),
-    usable as an ``as_recipient=`` target after the ceremony closes.
+    Bob's own ceremony has NO 'partners' group, so unseal's pass 1
+    (own-ceremony group ciphers) structurally cannot open that block —
+    only the pass-2 keystore key-bag can. The sealed object also
+    carries an Alice-only 'default' block ('note'), making the
+    enrolled-peer open a real partial open.
+
+    The absorb step is the real enrolment flow and must apply cleanly,
+    but it is not what makes the decrypt work: JWE decrypt needs only
+    partners.jwe.mykey (the ECDH-ES ephemeral travels in the envelope
+    header), and _ensure_mykey already minted that file into Bob's
+    keystore.
+
+    Leaves Bob's ceremony ACTIVE (the key-bag tests rely on that).
+    Returns ``(sealed, bob_keystore)`` where ``bob_keystore`` is Bob's
+    real keystore directory (``cfg.keystore``), usable as an
+    ``as_recipient=`` target after the ceremony closes.
     """
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
     alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
+    alice_cfg = admin.ensure_group(alice_cfg, "partners", fields=["body"])
     bob_dir = tmp_path / "bob"
     bob_dir.mkdir()
     bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
-    bob_pub = _ensure_mykey(bob_cfg, "default")
+    bob_pub = _ensure_mykey(bob_cfg, "partners")
     admin._add_recipient_jwe_impl(
-        alice_cfg, "default", bob_cfg.device.device_identity, bob_pub
+        alice_cfg, "partners", bob_cfg.device.device_identity, bob_pub
     )
-    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.device_identity)
+    pkg = compile_enrolment(alice_cfg, "partners", bob_cfg.device.device_identity)
     pkg_path = emit_to_outbox(alice_cfg, pkg)
 
     tn.init(str(alice_cfg.yaml_path))
-    sealed = tn.seal("obj.memo.v1", receipt=False, body="for bob's eyes")
+    # body -> partners (routed), note -> default (unrouted fallback)
+    sealed = tn.seal(
+        "obj.memo.v1", receipt=False, body="for bob's eyes", note="alice private"
+    )
     tn.flush_and_close()
+    assert "partners" in sealed and "default" in sealed, (
+        f"setup must seal two group blocks, got: {sorted(sealed)}"
+    )
 
     tn.init(str(bob_cfg.yaml_path))
     result = absorb(bob_cfg, pkg_path)
@@ -254,9 +273,14 @@ def _two_peer(tmp_path):
 
 def test_enrolled_peer_opens_their_slice(tmp_path):
     sealed, _bob_keystore = _two_peer(tmp_path)
-    entry = tn.unseal(sealed)  # active ceremony is Bob's -> keystore key-bag walk
-    assert entry.fields["body"] == "for bob's eyes"
-    assert entry.hidden_groups == []
+    # Structural guard: Bob's active ceremony has no 'partners' group, so
+    # pass 1 (own-ceremony group ciphers) cannot fire for that block; an
+    # open below proves the pass-2 keystore key-bag walk did it.
+    assert "partners" not in tn.current_config().groups
+    entry = tn.unseal(sealed)  # active ceremony is Bob's
+    # partial open: exactly Bob's slice; Alice's private block stays sealed
+    assert entry.fields == {"body": "for bob's eyes"}
+    assert "default" in entry.hidden_groups
 
 
 def test_unenrolled_peer_gets_public_frame_no_error(tmp_path):
@@ -278,6 +302,8 @@ def test_unenrolled_peer_gets_public_frame_no_error(tmp_path):
 def test_as_recipient_single_kit_override(tmp_path):
     sealed, bob_keystore = _two_peer(tmp_path)
     tn.flush_and_close()
-    # no active ceremony needed: bring-your-own-kit against Bob's keystore
-    entry = tn.unseal(sealed, as_recipient=bob_keystore)
-    assert entry.fields["body"] == "for bob's eyes"
+    # no active ceremony needed: bring-your-own-kit against Bob's keystore,
+    # opening only the named group
+    entry = tn.unseal(sealed, as_recipient=bob_keystore, group="partners")
+    assert entry.fields == {"body": "for bob's eyes"}
+    assert "default" in entry.hidden_groups
