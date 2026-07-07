@@ -1078,7 +1078,8 @@ class BtnGroupCipher:
     def encrypt(self, plaintext: bytes, aad: bytes = b"") -> bytes:
         if self._state is None:
             raise NotAPublisherError("btn: no state file in this keystore")
-        return self._state.encrypt(plaintext, aad or None)
+        with _perf_stage("emit:group_encrypt.cipher"):
+            return self._state.encrypt(plaintext, aad or None)
 
     def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
         from tn._native import btn as _btn
@@ -1086,7 +1087,8 @@ class BtnGroupCipher:
         if not self._self_kit:
             raise NotARecipientError("btn: no self-kit in this keystore")
         try:
-            return _btn.decrypt(self._self_kit, ciphertext, aad or None)
+            with _perf_stage("read:group_decrypt.cipher"):
+                return _btn.decrypt(self._self_kit, ciphertext, aad or None)
         except _btn.NotEntitled as e:
             raise NotARecipientError(f"btn: kit not entitled: {e}") from e
 
