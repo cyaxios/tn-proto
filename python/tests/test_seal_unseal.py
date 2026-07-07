@@ -86,3 +86,23 @@ def test_seal_does_not_disturb_chain(tmp_path):
     row = tn.log("obj.test.v1", y=2)
     assert row["sequence"] == 1
     assert row["prev_hash"] == ZERO_HASH
+
+
+def test_seal_writes_receipt_row_by_default(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.invoice.v1", amount=1)
+    # tn.* events route to the admin/protocol-events log by default (a
+    # dedicated file, not the main ceremony log), per logger.py's
+    # `event_type.startswith("tn.")` routing — read that surface.
+    receipts = list(tn.read("tn.object.sealed", log="admin"))
+    assert len(receipts) == 1
+    r = receipts[0]
+    assert r.fields["object_id"] == sealed["row_hash"]
+    assert r.fields["object_type"] == "obj.invoice.v1"
+    assert r.fields["groups"] == ["default"]
+
+
+def test_seal_receipt_false_writes_nothing(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    tn.seal("obj.invoice.v1", receipt=False, amount=1)
+    assert list(tn.read("tn.object.sealed", log="admin")) == []
