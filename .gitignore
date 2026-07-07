@@ -5,6 +5,7 @@ __pycache__/
 .Python
 *.egg-info/
 dist/
+dist-local/
 dist_win/
 dist-wheelhouse/
 build/
@@ -92,6 +93,7 @@ python/bench/
 # Locally-built maturin extension — the wheel rebuilds it; never tracked.
 python/tn/_native*.so
 python/tn/_native*.pyd
+python/tn/_native*.pdb
 
 # Local release rehearsal work dir (tools/release.sh)
 .release-rehearsal/

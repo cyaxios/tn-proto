@@ -2,12 +2,12 @@
 //! its `ciphertext`. Byte-identical layout to tn-hibe's `seal.rs`.
 //!
 //! Blob layout:
-//! `version(1) | wrapped_CEK(237, see kem.rs) | body_nonce(12) | AES-256-GCM(body)`.
+//! `version(1) | wrapped_CEK(205, see kem.rs) | body_nonce(12) | AES-256-GCM(body)`.
 //! The wrapped-CEK bytes are the body's AEAD associated data.
 
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use rand_core::RngCore;
+use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroize;
 
 use crate::error::{BbgError, Result};
@@ -23,18 +23,24 @@ const MIN_BLOB_LEN: usize = 1 + WRAPPED_CEK_LEN + NONCE_LEN + TAG_LEN;
 
 /// Seals `plaintext` to `id`: fresh CEK, KEM-wrapped to the identity path, body
 /// under AES-256-GCM. No caller AAD.
-pub fn seal(pp: &PublicParams, id: &Identity, plaintext: &[u8], rng: impl RngCore) -> Result<Vec<u8>> {
+pub fn seal(
+    pp: &PublicParams,
+    id: &Identity,
+    plaintext: &[u8],
+    rng: impl RngCore + CryptoRng,
+) -> Result<Vec<u8>> {
     seal_with_aad(pp, id, plaintext, &[], rng)
 }
 
 /// Like [`seal`], but binds `aad` into the body's AEAD tag. An empty `aad`
-/// produces a blob byte-identical to [`seal`].
+/// uses the same wire construction as [`seal`]; individual blobs are still
+/// randomized by the CEK and nonce.
 pub fn seal_with_aad(
     pp: &PublicParams,
     id: &Identity,
     plaintext: &[u8],
     aad: &[u8],
-    mut rng: impl RngCore,
+    mut rng: impl RngCore + CryptoRng,
 ) -> Result<Vec<u8>> {
     let mut cek = [0u8; 32];
     rng.fill_bytes(&mut cek);
@@ -69,7 +75,12 @@ pub fn open(pp: &PublicParams, sk: &PrivateKey, blob: &[u8]) -> Result<Vec<u8>> 
 }
 
 /// Like [`open`], but requires the same `aad` bound at seal time.
-pub fn open_with_aad(pp: &PublicParams, sk: &PrivateKey, blob: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+pub fn open_with_aad(
+    pp: &PublicParams,
+    sk: &PrivateKey,
+    blob: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
     const WHAT: &str = "sealed blob";
     if blob.len() < MIN_BLOB_LEN || blob[0] != BLOB_VERSION {
         return Err(BbgError::Malformed(WHAT));

@@ -27,19 +27,57 @@ the per-authority trust model).
 
 from __future__ import annotations
 
-from tn._native.hibe import (  # noqa: A004  (`open` mirrors the native verb)
-    HibeCryptoError,
-    delegate,
-    kem_unwrap,
-    kem_wrap,
-    key_id_path,
-    keygen,
-    mpk_fingerprint,
-    mpk_max_depth,
-    open,
-    seal,
-    setup,
-)
+from typing import Any
+
+_HIBE_IMPORT_ERROR: BaseException | None = None
+
+try:
+    # ``tn._native`` is a single PyO3 extension module, not a Python package;
+    # HIBE is exposed as its ``hibe`` attribute/submodule.
+    from tn._native import hibe as _native_hibe
+except (AttributeError, ImportError) as exc:  # pragma: no cover - platform build matrix
+    _native_hibe = None
+    _HIBE_IMPORT_ERROR = exc
+
+
+def _missing_hibe(*_args: Any, **_kwargs: Any) -> Any:
+    """Raise when this wheel/runtime was built without the HIBE submodule."""
+    hint = (
+        "HIBE native extension is unavailable: tn._native does not expose "
+        "the hibe submodule. Rebuild or install tn-proto with tn-hibe support."
+    )
+    if _HIBE_IMPORT_ERROR is None:
+        raise RuntimeError(hint)
+    raise RuntimeError(hint) from _HIBE_IMPORT_ERROR
+
+
+if _native_hibe is None:
+
+    class HibeCryptoError(RuntimeError):
+        """Placeholder error type used when the native HIBE module is absent."""
+
+    delegate = _missing_hibe
+    kem_unwrap = _missing_hibe
+    kem_wrap = _missing_hibe
+    key_id_path = _missing_hibe
+    keygen = _missing_hibe
+    mpk_fingerprint = _missing_hibe
+    mpk_max_depth = _missing_hibe
+    open = _missing_hibe
+    seal = _missing_hibe
+    setup = _missing_hibe
+else:
+    HibeCryptoError = _native_hibe.HibeCryptoError
+    delegate = _native_hibe.delegate
+    kem_unwrap = _native_hibe.kem_unwrap
+    kem_wrap = _native_hibe.kem_wrap
+    key_id_path = _native_hibe.key_id_path
+    keygen = _native_hibe.keygen
+    mpk_fingerprint = _native_hibe.mpk_fingerprint
+    mpk_max_depth = _native_hibe.mpk_max_depth
+    open = _native_hibe.open
+    seal = _native_hibe.seal
+    setup = _native_hibe.setup
 
 __all__ = [
     "HibeCryptoError",

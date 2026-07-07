@@ -11,8 +11,8 @@
 //! interop gate in `tests/interop.rs`, which opens the frozen golden
 //! vectors that were generated under hohibe).
 //!
-//! `tn-hibe` is now a thin re-export of this crate's public surface, so its
-//! consumers (tn-hibe-py, tn-wasm, tn-core) are unchanged.
+//! `tn-hibe` is now a thin re-export of this crate's high-level HIBE surface,
+//! so its consumers (tn-hibe-py, tn-wasm, tn-core) are unchanged.
 //!
 //! # Provenance / licensing
 //!
@@ -28,7 +28,7 @@
 //! - `PublicParams { max_depth, g:G1, g1:G1, g2:G2, g3:G2, hs:[G2] }`
 //! - `MasterKey { g2^alpha : G2 }`
 //! - `PrivateKey { a0:G2, a1:G1, bs:Vec<G2>, id }`
-//! - `Ciphertext { a:GT, b:G1, c:G2 }` (constant 3 elements)
+//! - `raw::Ciphertext { a:GT, b:G1, c:G2 }` (constant 3 elements)
 //!
 //! # Security status
 //!
@@ -45,8 +45,17 @@ mod key;
 mod params;
 mod seal;
 
-pub use codec::{gt_from_bytes, gt_to_bytes, mpk_fingerprint};
-pub use encrypt::{decrypt, encrypt, Ciphertext};
+/// Raw BBG primitives over GT.
+///
+/// The normal HIBE wire surface is [`kem_wrap`]/[`kem_unwrap`] and
+/// [`seal`]/[`open`]. Direct GT encryption and GT byte codecs are kept here
+/// for golden-vector fixtures and advanced interop checks.
+pub mod raw {
+    pub use crate::codec::{gt_from_bytes, gt_to_bytes};
+    pub use crate::encrypt::{decrypt, encrypt, Ciphertext};
+}
+
+pub use codec::mpk_fingerprint;
 pub use error::BbgError;
 pub use identity::Identity;
 pub use kem::{kem_unwrap, kem_wrap, WRAPPED_CEK_LEN};
@@ -66,11 +75,15 @@ mod tests {
         (pp, msk, rng)
     }
 
+    fn id(path: &str) -> Identity {
+        Identity::try_from_str_path(path).unwrap()
+    }
+
     #[test]
     fn roundtrip_depths_1_2_3() {
         for path in ["a", "a/b", "a/b/c"] {
             let (pp, msk, mut rng) = sys(3);
-            let id = Identity::from_str_path(path);
+            let id = id(path);
             let sk = keygen(&pp, &msk, &id, &mut rng).unwrap();
             let cek = [7u8; 32];
             let wrapped = kem_wrap(&pp, &id, &cek, &mut rng).unwrap();
@@ -82,40 +95,40 @@ mod tests {
     fn ciphertext_is_three_elements_any_depth() {
         for path in ["a", "a/b", "a/b/c"] {
             let (pp, msk, mut rng) = sys(3);
-            let id = Identity::from_str_path(path);
+            let id = id(path);
             let sk = keygen(&pp, &msk, &id, &mut rng).unwrap();
             let m = {
                 use bls12_381_plus::group::Group;
                 bls12_381_plus::Gt::random(&mut rng)
             };
-            let ct = encrypt(&pp, &id, &m, &mut rng).unwrap();
+            let ct = raw::encrypt(&pp, &id, &m, &mut rng).unwrap();
             // Exactly a:GT + b:G1 + c:G2, independent of depth.
             assert_eq!(ct.to_bytes().len(), 1 + 576 + 48 + 96);
-            assert_eq!(decrypt(&pp, &sk, &ct).unwrap(), m, "{path}");
+            assert_eq!(raw::decrypt(&pp, &sk, &ct).unwrap(), m, "{path}");
         }
     }
 
     #[test]
     fn delegate_then_decrypt() {
         let (pp, msk, mut rng) = sys(3);
-        let parent = keygen(&pp, &msk, &Identity::from_str_path("a"), &mut rng).unwrap();
+        let parent = keygen(&pp, &msk, &id("a"), &mut rng).unwrap();
         let child = delegate(&pp, &parent, b"b", &mut rng).unwrap();
-        assert_eq!(child.identity(), &Identity::from_str_path("a/b"));
+        assert_eq!(child.identity(), &id("a/b"));
         let cek = [9u8; 32];
-        let wrapped = kem_wrap(&pp, &Identity::from_str_path("a/b"), &cek, &mut rng).unwrap();
+        let wrapped = kem_wrap(&pp, &id("a/b"), &cek, &mut rng).unwrap();
         assert_eq!(kem_unwrap(&pp, &child, &wrapped).unwrap(), cek);
         // Two-level delegation.
         let grand = delegate(&pp, &child, b"c", &mut rng).unwrap();
-        let wrapped2 = kem_wrap(&pp, &Identity::from_str_path("a/b/c"), &cek, &mut rng).unwrap();
+        let wrapped2 = kem_wrap(&pp, &id("a/b/c"), &cek, &mut rng).unwrap();
         assert_eq!(kem_unwrap(&pp, &grand, &wrapped2).unwrap(), cek);
     }
 
     #[test]
     fn wrong_identity_fails() {
         let (pp, msk, mut rng) = sys(3);
-        let alice = keygen(&pp, &msk, &Identity::from_str_path("alice"), &mut rng).unwrap();
+        let alice = keygen(&pp, &msk, &id("alice"), &mut rng).unwrap();
         let cek = [3u8; 32];
-        let wrapped = kem_wrap(&pp, &Identity::from_str_path("bob"), &cek, &mut rng).unwrap();
+        let wrapped = kem_wrap(&pp, &id("bob"), &cek, &mut rng).unwrap();
         // A key on a different path must not recover the CEK (AEAD tag fails).
         assert!(kem_unwrap(&pp, &alice, &wrapped).is_err());
     }
@@ -124,7 +137,7 @@ mod tests {
     fn encoding_roundtrips() {
         let (pp, msk, mut rng) = sys(2);
         assert_eq!(PublicParams::from_bytes(&pp.to_bytes()).unwrap(), pp);
-        let sk = keygen(&pp, &msk, &Identity::from_str_path("x"), &mut rng).unwrap();
+        let sk = keygen(&pp, &msk, &id("x"), &mut rng).unwrap();
         assert_eq!(PrivateKey::from_bytes(&sk.to_bytes()).unwrap(), sk);
         let msk2 = MasterKey::from_bytes(&msk.to_bytes()).unwrap();
         assert_eq!(msk2.to_bytes(), msk.to_bytes());

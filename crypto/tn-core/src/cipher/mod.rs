@@ -63,7 +63,8 @@ pub trait GroupCipher: Send + Sync {
     /// malformed input or cipher failure.
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>>;
 
-    /// Return the stable cipher identifier (`"btn"`, `"jwe"`, `"bgw"`).
+    /// Return the stable cipher identifier (`"btn"`, `"hibe"`, `"jwe"`,
+    /// `"bgw"`).
     ///
     /// Used in logs and diagnostics and to tag which cipher produced a record;
     /// must match the `cipher:` value that selects this implementation.

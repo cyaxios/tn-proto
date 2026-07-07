@@ -36,8 +36,8 @@ type BuildCipherResult = (
 );
 
 /// The per-group tables [`Runtime::init`](super::Runtime) holds: the live
-/// [`GroupState`] map (cipher + index key + HMAC template), the btn admin
-/// side-table, and the remembered mykit bytes per group.
+/// [`GroupState`] map (cipher + HMAC template), the btn admin side-table,
+/// and the remembered mykit bytes per group.
 type GroupTables = (
     BTreeMap<String, Arc<RwLock<GroupState>>>,
     BTreeMap<String, Arc<Mutex<BtnPublisherCipher>>>,
@@ -84,7 +84,6 @@ pub(crate) fn build_group_states(
             name.clone(),
             Arc::new(RwLock::new(GroupState {
                 cipher,
-                index_key,
                 hmac_template,
                 aad_default: spec.aad.clone(),
             })),
@@ -129,12 +128,10 @@ pub(crate) fn build_cipher_with_admin(
 /// kit bytes through the supplied [`Storage`] handle so a wasm
 /// `JsStorageAdapter` can satisfy the loads from its JS callbacks.
 ///
-/// Today only the publisher-state load is routed through storage; the
-/// kit-bytes collection still goes through `std::fs::read_dir` because
-/// the directory-listing storage hook is part of the trait but not yet
-/// wired here. The wasm path therefore still hits a runtime error when
-/// groups need kit-bytes from disk; migrating the directory-listing
-/// call sites remains to be done.
+/// Publisher-state, current-kit, and historical-kit discovery all route
+/// through storage. Backends must return an empty list when a directory has
+/// no archived material; listing errors are propagated so hidden historical
+/// reader material does not get silently dropped.
 ///
 /// [`Storage`]: crate::storage::Storage
 #[allow(dead_code)]
@@ -163,9 +160,9 @@ pub(crate) fn build_cipher_with_admin_with_storage(
 }
 
 /// Storage-aware btn cipher builder. Reads `<group>.btn.state` and
-/// `<group>.btn.mykit` through `storage`; `*.btn.mykit.revoked.<ts>`
-/// rotation siblings are still discovered via `std::fs::read_dir`;
-/// migrating the directory-listing call sites remains to be done.
+/// `<group>.btn.mykit` through `storage`; `*.btn.mykit.retired.<epoch>`
+/// and legacy `*.btn.mykit.revoked.<ts>` siblings are discovered through
+/// `Storage::list` and read through the same backend.
 pub(crate) fn build_btn_cipher_with_admin_with_storage(
     keystore: &Path,
     group: &str,
@@ -233,20 +230,34 @@ fn build_hibe_cipher_with_storage(
         ))
     })?;
     let id_path = String::from_utf8(idpath_bytes)
-        .map_err(|_| Error::InvalidConfig(format!("hibe group {group}: idpath is not utf-8")))?
-        .trim()
-        .to_string();
+        .map_err(|_| Error::InvalidConfig(format!("hibe group {group}: idpath is not utf-8")))?;
 
     let sk = read_opt(format!("{group}.hibe.sk"))?;
     let msk = read_opt(format!("{group}.hibe.msk"))?;
 
     let prior_paths: Vec<String> = match read_opt(format!("{group}.hibe.idpath.history"))? {
-        Some(bytes) => String::from_utf8_lossy(&bytes)
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect(),
+        Some(bytes) => {
+            let text = String::from_utf8(bytes).map_err(|_| {
+                Error::InvalidConfig(format!("hibe group {group}: idpath history is not utf-8"))
+            })?;
+            let mut out = Vec::new();
+            let lines: Vec<&str> = text.split('\n').collect();
+            let last = lines.len().saturating_sub(1);
+            for (idx, line) in lines.into_iter().enumerate() {
+                if line.is_empty() && idx == last {
+                    continue;
+                }
+                if line.ends_with('\r') {
+                    return Err(Error::InvalidConfig(format!(
+                        "hibe group {group}: idpath history line {} contains CR",
+                        idx + 1
+                    )));
+                }
+                let id = crate::cipher::hibe::validate_identity_path(line)?;
+                out.push(crate::cipher::hibe::identity_to_path(&id)?);
+            }
+            out
+        }
         None => Vec::new(),
     };
 
@@ -255,7 +266,7 @@ fn build_hibe_cipher_with_storage(
     let prev_prefix = format!("{group}.hibe.sk.previous.");
     let mut prev_paths: Vec<PathBuf> = storage
         .list(keystore)
-        .unwrap_or_default()
+        .map_err(Error::Io)?
         .into_iter()
         .filter(|p| {
             p.file_name()
@@ -270,23 +281,16 @@ fn build_hibe_cipher_with_storage(
         prior_sks.push(storage.read_bytes(&p).map_err(Error::Io)?);
     }
 
-    let cipher = crate::cipher::hibe::HibeCipher::new(
-        &mpk,
-        &id_path,
-        sk,
-        msk,
-        prior_paths,
-        prior_sks,
-    )?;
+    let cipher =
+        crate::cipher::hibe::HibeCipher::new(&mpk, &id_path, sk, msk, prior_paths, prior_sks)?;
     Ok((Arc::new(cipher), None, None))
 }
 
 /// Storage-aware kit-bytes collection. Mirrors
 /// [`collect_btn_kit_bytes`] but routes the current-kit read through
-/// `storage`. Revoked-kit discovery still falls back to
-/// `std::fs::read_dir` because directory listing through storage is
-/// part of the trait but not yet wired into all of init's helpers;
-/// that migration remains to be done.
+/// `storage`. Archived-kit discovery uses `Storage::list`; listing errors
+/// propagate because treating them as "no archived kits" can hide the only
+/// material capable of opening historical rows.
 pub(crate) fn collect_btn_kit_bytes_with_storage(
     keystore: &Path,
     group: &str,
@@ -299,12 +303,11 @@ pub(crate) fn collect_btn_kit_bytes_with_storage(
         kits.push(storage.read_bytes(&current).map_err(Error::Io)?);
     }
 
-    // Retired + revoked kit discovery: list directory through storage if
-    // the backend supports it; absent / errored listing means "no
-    // archived kits" rather than a hard failure. That keeps a wasm
-    // `JsStorageAdapter` whose `list()` returns an empty array from
-    // breaking init when no rotations have happened.
-    //
+    // Retired + revoked kit discovery: list directory through storage. A
+    // backend with no archived kits must return an empty list; an error here
+    // is load-bearing because old rows may only decrypt with archived kits.
+    let entries = storage.list(keystore).map_err(Error::Io)?;
+
     // 0.4.3a1 introduces `.btn.mykit.retired.<epoch>` as the canonical
     // post-rotation archive name (epoch-indexed). The legacy
     // `.btn.mykit.revoked.<unix_ts>` shape from 0.4.2-line keystores is
@@ -314,19 +317,17 @@ pub(crate) fn collect_btn_kit_bytes_with_storage(
     let revoked_prefix = format!("{group}.btn.mykit.revoked.");
     let mut retired: Vec<(std::path::PathBuf, u32)> = Vec::new();
     let mut revoked: Vec<(std::path::PathBuf, u64)> = Vec::new();
-    if let Ok(entries) = storage.list(keystore) {
-        for path in entries {
-            let Some(name_str) = path.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if let Some(n_str) = name_str.strip_prefix(&retired_prefix) {
-                if let Ok(n) = n_str.parse::<u32>() {
-                    retired.push((path, n));
-                }
-            } else if let Some(ts_str) = name_str.strip_prefix(&revoked_prefix) {
-                let ts: u64 = ts_str.parse().unwrap_or(0);
-                revoked.push((path, ts));
+    for path in entries {
+        let Some(name_str) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if let Some(n_str) = name_str.strip_prefix(&retired_prefix) {
+            if let Ok(n) = n_str.parse::<u32>() {
+                retired.push((path, n));
             }
+        } else if let Some(ts_str) = name_str.strip_prefix(&revoked_prefix) {
+            let ts: u64 = ts_str.parse().unwrap_or(0);
+            revoked.push((path, ts));
         }
     }
     retired.sort_by_key(|b| std::cmp::Reverse(b.1));
@@ -339,52 +340,6 @@ pub(crate) fn collect_btn_kit_bytes_with_storage(
     }
 
     Ok(kits)
-}
-
-/// Internal: feeds [`Runtime`]'s historical-decrypt path on the read
-/// side (surfaced as `tn.read()` / `tn read`).
-///
-/// Scan `keystore` for files of the form `<group>.btn.state.retired.<N>`
-/// (where N is a u32 — the epoch the state served as active). Returns
-/// each as `(epoch, bytes)`. Files whose suffix doesn't parse as u32
-/// are skipped silently. Used by the publisher-side init path to
-/// archive retired states alongside the active one, so historical
-/// keywalk decryption has the seed material available.
-///
-/// 0.4.3a1 only. Pre-rename keystores use `<group>.btn.state.revoked.<ts>`
-/// which intentionally is NOT picked up here — those entries archived
-/// the prior PublisherState (kind 0x03), not the new lightweight
-/// RetiredPublisherState (kind 0x04), so attempting to deserialize them
-/// as retired states would error.
-pub(crate) fn discover_retired_btn_states(
-    keystore: &Path,
-    group: &str,
-) -> std::io::Result<Vec<(u32, Vec<u8>)>> {
-    let prefix = format!("{group}.btn.state.retired.");
-    let mut out = Vec::new();
-    let entries = match std::fs::read_dir(keystore) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-        Err(e) => return Err(e),
-    };
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        let Some(rest) = name_str.strip_prefix(&prefix) else {
-            continue;
-        };
-        let Ok(epoch) = rest.parse::<u32>() else {
-            continue;
-        };
-        let bytes = std::fs::read(entry.path())?;
-        out.push((epoch, bytes));
-    }
-    Ok(out)
 }
 
 /// Collect all kit files for a group: the current `<group>.btn.mykit` first,
@@ -444,7 +399,10 @@ pub(crate) fn collect_btn_kit_bytes(keystore: &Path, group: &str) -> Result<Vec<
 }
 
 #[allow(dead_code)] // retained as the non-storage reference impl; init now goes through *_with_storage.
-pub(crate) fn build_btn_cipher_with_admin(keystore: &Path, group: &str) -> Result<BuildCipherResult> {
+pub(crate) fn build_btn_cipher_with_admin(
+    keystore: &Path,
+    group: &str,
+) -> Result<BuildCipherResult> {
     // Filenames verified against tn/cipher.py::BtnGroupCipher:
     //   <keystore>/<group>.btn.state                  - serialized PublisherState (SECRET)
     //   <keystore>/<group>.btn.mykit                  - current self-kit (for decrypt)
@@ -599,4 +557,78 @@ pub(crate) fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
     );
     crate::keystore_backend::atomic_write_bytes(&root.join("tn.yaml"), yaml.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use crate::storage::Storage;
+
+    use super::collect_btn_kit_bytes_with_storage;
+
+    struct ListingFailsStorage;
+
+    impl Storage for ListingFailsStorage {
+        fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == "default.btn.mykit")
+            {
+                return Ok(b"current-kit".to_vec());
+            }
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing"))
+        }
+
+        fn write_bytes(&self, _path: &Path, _data: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn append_bytes(&self, _path: &Path, _data: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == "default.btn.mykit")
+        }
+
+        fn list(&self, _dir: &Path) -> io::Result<Vec<PathBuf>> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "listing denied",
+            ))
+        }
+
+        fn rename(&self, _from: &Path, _to: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn remove(&self, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn create_dir_all(&self, _dir: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn cas_write(&self, _path: &Path, _prior: Option<&[u8]>, _new: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn btn_kit_collection_propagates_storage_listing_errors() {
+        let storage: Arc<dyn Storage> = Arc::new(ListingFailsStorage);
+        let err = collect_btn_kit_bytes_with_storage(Path::new("/keys"), "default", &storage)
+            .expect_err("storage.list errors must not hide archived kit material");
+        match err {
+            crate::Error::Io(e) => assert_eq!(e.kind(), io::ErrorKind::PermissionDenied),
+            other => panic!("expected Io(PermissionDenied), got {other:?}"),
+        }
+    }
 }

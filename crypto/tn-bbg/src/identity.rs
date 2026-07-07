@@ -2,11 +2,17 @@
 //!
 //! `I_i = SHA-256(label) mod p`, digest read as a big-endian integer. This
 //! mapping is part of the wire contract: it must be byte-for-byte identical to
-//! `tn_hibe::Identity` (crypto/tn-hibe/src/identity.rs) or every wrapped CEK
-//! ever sealed stops opening. It is covered by the interop golden vectors.
+//! `tn_hibe::Identity` (re-exported from crypto/tn-hibe/src/lib.rs) or every
+//! wrapped CEK ever sealed stops opening. It is covered by the interop golden
+//! vectors.
 
 use bls12_381_plus::Scalar;
 use sha2::{Digest, Sha256};
+
+use crate::error::{BbgError, Result};
+
+/// Maximum label size supported by the canonical private-key encoding.
+pub const MAX_LABEL_LEN: usize = u16::MAX as usize;
 
 /// A hierarchical identity path, e.g. `did:key:zReader/sha256:policy...`.
 /// Labels are ordered root-first.
@@ -18,22 +24,53 @@ pub struct Identity {
 
 impl Identity {
     /// Builds an identity from raw label bytes, root-first.
+    ///
+    /// Panics if any label is empty, contains a path separator or control
+    /// delimiter, has traversal semantics, carries leading/trailing ASCII
+    /// whitespace, is longer than [`MAX_LABEL_LEN`], or if the path has more
+    /// than 255 labels. Prefer [`Identity::try_from_path`] at public
+    /// boundaries.
     pub fn from_path(labels: &[&[u8]]) -> Self {
-        Self {
-            labels: labels.iter().map(|l| l.to_vec()).collect(),
-            scalars: labels.iter().map(|l| hash_to_scalar(l)).collect(),
-        }
+        Self::try_from_path(labels).expect("valid HIBE identity path")
     }
 
-    /// Builds an identity from a `/`-separated string path. Empty segments are
-    /// dropped, so `"a//b/"` equals `"a/b"` and `""` is the root identity.
+    /// Fallibly builds an identity from raw label bytes, root-first.
+    pub fn try_from_path(labels: &[&[u8]]) -> Result<Self> {
+        validate_depth(labels.len())?;
+        for label in labels {
+            validate_label(label)?;
+        }
+        Ok(Self {
+            labels: labels.iter().map(|l| l.to_vec()).collect(),
+            scalars: labels.iter().map(|l| hash_to_scalar(l)).collect(),
+        })
+    }
+
+    /// Builds an identity from a `/`-separated string path.
+    ///
+    /// Panics if the path is empty, contains an empty segment such as
+    /// `"a//b"` or `"a/"`, or contains an overlong segment. Prefer
+    /// [`Identity::try_from_str_path`] at public string boundaries.
     pub fn from_str_path(path: &str) -> Self {
+        Self::try_from_str_path(path).expect("valid HIBE identity string path")
+    }
+
+    /// Fallibly builds an identity from a `/`-separated string path.
+    pub fn try_from_str_path(path: &str) -> Result<Self> {
+        if path.is_empty() {
+            return Err(BbgError::InvalidIdentityPath("empty path"));
+        }
         let labels: Vec<&[u8]> = path
             .split('/')
-            .filter(|s| !s.is_empty())
-            .map(str::as_bytes)
-            .collect();
-        Self::from_path(&labels)
+            .map(|segment| {
+                if segment.is_empty() {
+                    Err(BbgError::InvalidIdentityPath("empty path segment"))
+                } else {
+                    Ok(segment.as_bytes())
+                }
+            })
+            .collect::<Result<_>>()?;
+        Self::try_from_path(&labels)
     }
 
     /// Number of path elements. The root identity has depth 0.
@@ -48,12 +85,25 @@ impl Identity {
     }
 
     /// The identity one level down from `self` with `label` appended.
+    ///
+    /// Panics if `label` is empty, contains a path separator or control
+    /// delimiter, has traversal semantics, carries leading/trailing ASCII
+    /// whitespace, is overlong, or if the child would exceed 255 labels.
+    /// Prefer [`Identity::try_child`] at public boundaries.
     pub fn child(&self, label: &[u8]) -> Identity {
+        self.try_child(label)
+            .expect("valid HIBE identity child label")
+    }
+
+    /// Fallibly appends one validated child label to this identity.
+    pub fn try_child(&self, label: &[u8]) -> Result<Identity> {
+        validate_label(label)?;
+        validate_depth(self.labels.len() + 1)?;
         let mut labels = self.labels.clone();
         labels.push(label.to_vec());
         let mut scalars = self.scalars.clone();
         scalars.push(hash_to_scalar(label));
-        Identity { labels, scalars }
+        Ok(Identity { labels, scalars })
     }
 
     /// The raw labels, root-first.
@@ -69,6 +119,41 @@ impl Identity {
         let scalars = labels.iter().map(|l| hash_to_scalar(l)).collect();
         Identity { labels, scalars }
     }
+}
+
+fn validate_depth(depth: usize) -> Result<()> {
+    if depth > u8::MAX as usize {
+        return Err(BbgError::IdentityTooDeep);
+    }
+    Ok(())
+}
+
+fn validate_label(label: &[u8]) -> Result<()> {
+    if label.is_empty() {
+        return Err(BbgError::InvalidIdentityLabel("empty label"));
+    }
+    if label.len() > MAX_LABEL_LEN {
+        return Err(BbgError::InvalidIdentityLabel("label too long"));
+    }
+    if label == b"." || label == b".." {
+        return Err(BbgError::InvalidIdentityLabel("traversal label"));
+    }
+    if label.first().is_some_and(u8::is_ascii_whitespace)
+        || label.last().is_some_and(u8::is_ascii_whitespace)
+    {
+        return Err(BbgError::InvalidIdentityLabel(
+            "leading or trailing whitespace",
+        ));
+    }
+    if label
+        .iter()
+        .any(|b| matches!(*b, b'/' | b'\\' | b'\0' | b'\r' | b'\n'))
+    {
+        return Err(BbgError::InvalidIdentityLabel(
+            "label contains path or line delimiter",
+        ));
+    }
+    Ok(())
 }
 
 /// `I = SHA-256(label) mod p`, digest read as a big-endian integer.

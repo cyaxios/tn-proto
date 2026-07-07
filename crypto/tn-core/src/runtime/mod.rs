@@ -59,17 +59,15 @@ pub use types::{
 
 pub use read::flatten_raw_entry;
 
-/// Internal: per-group cipher + derived index key held inside
-/// [`Runtime`]; backs every group on the write / read paths (surfaced as
-/// `tn.info()` / `tn.read()`).
+/// Internal: per-group cipher and derived index-token HMAC state held
+/// inside [`Runtime`]; backs every group on the write / read paths
+/// (surfaced as `tn.info()` / `tn.read()`).
 pub(crate) struct GroupState {
     pub(crate) cipher: Arc<dyn GroupCipher>,
-    pub(crate) index_key: [u8; 32],
-    /// Pre-initialized HMAC-SHA256 keyed by `index_key`. Each
-    /// per-emit `index_token` call clones this template and feeds
-    /// the field bytes into the clone — skips the `Mac::new_from_slice`
-    /// init cost (~2-3 µs per field) every emit. Built once at
-    /// runtime construction, never mutated.
+    /// Pre-initialized HMAC-SHA256 keyed by the group's derived index key.
+    /// Each per-emit `index_token` call clones this template and feeds the
+    /// field bytes into the clone, skipping the `Mac::new_from_slice` init
+    /// cost every emit. Built once at runtime construction, never mutated.
     pub(crate) hmac_template: hmac::Hmac<sha2::Sha256>,
     /// Default AAD marker for this group (from `groups.<name>.aad`),
     /// overlaid by any per-emit marker and bound into the body AEAD. Empty

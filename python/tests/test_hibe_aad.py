@@ -27,11 +27,30 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-import tn  # noqa: E402
-import tn.reader  # noqa: E402
+import tn
+import tn.reader
+from tn import _hibe
+
+
+def _hibe_available() -> bool:
+    try:
+        _hibe.setup(1)
+    except RuntimeError as exc:
+        if "HIBE native extension is unavailable" in str(exc):
+            return False
+        raise
+    return True
+
+
+pytestmark = pytest.mark.skipif(
+    not _hibe_available(),
+    reason="tn._native was built without the HIBE submodule",
+)
 
 
 def _read_authority(log_path: Path, cfg) -> list[dict]:
@@ -79,7 +98,9 @@ def main() -> int:
         env = rec["envelope"]
         # tn_aad is echoed as the canonical JSON STRING of the {group: dict}
         # map (so a string public field hashes identically across engines).
-        assert json.loads(env["tn_aad"]) == {"default": {"policy": "finra-oba", "v": "1"}}, env.get("tn_aad")
+        assert json.loads(env["tn_aad"]) == {"default": {"policy": "finra-oba", "v": "1"}}, env.get(
+            "tn_aad"
+        )
         assert rec["valid"]["row_hash"], "row_hash must verify on an aad record"
         assert rec["valid"]["signature"], "signature must verify on an aad record"
         tn.flush_and_close()
@@ -138,7 +159,9 @@ def main() -> int:
         by = _by_type(_read_authority(d_log, d_cfg))
         rec = by["cfg.first"]
         assert rec["plaintext"]["default"]["note"] == "uses yaml aad default", rec["plaintext"]
-        assert json.loads(rec["envelope"]["tn_aad"]) == {"default": {"tenant": "acme", "region": "us"}}
+        assert json.loads(rec["envelope"]["tn_aad"]) == {
+            "default": {"tenant": "acme", "region": "us"}
+        }
         assert rec["valid"]["row_hash"] and rec["valid"]["signature"]
         tn.flush_and_close()
         print("(d) yaml group aad default bound + echoed with no per-emit arg")
@@ -189,8 +212,7 @@ def main() -> int:
         tn.init(b_yaml, log_path=b_log, cipher="btn")
         b_cfg = tn.current_config()
         rec = next(
-            e for e in tn.reader.read(b_log, b_cfg)
-            if e["envelope"]["event_type"] == "btn.governed"
+            e for e in tn.reader.read(b_log, b_cfg) if e["envelope"]["event_type"] == "btn.governed"
         )
         assert rec["plaintext"]["default"]["note"] == "btn body", rec["plaintext"]
         assert json.loads(rec["envelope"]["tn_aad"]) == {"default": {"policy": "sox-404"}}

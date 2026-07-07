@@ -35,6 +35,7 @@ pub(super) fn build_kit_bundle_body(
     let group_set: Option<HashSet<String>> = groups_filter.map(|gs| gs.iter().cloned().collect());
     let mut body: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut kits_meta: Vec<Value> = Vec::new();
+    let mut saw_reader_secret = false;
 
     let mut entries: Vec<_> = std::fs::read_dir(keystore)?.flatten().collect();
     entries.sort_by_key(std::fs::DirEntry::file_name);
@@ -47,15 +48,7 @@ pub(super) fn build_kit_bundle_body(
         let Some(name_str) = name.to_str() else {
             continue;
         };
-        if let Some(group) = name_str.strip_suffix(".btn.mykit").and_then(|g| {
-            // Reject `<g>.btn.mykit.revoked.N` style — the strip above would
-            // already fail on those (suffix mismatch).
-            if g.is_empty() {
-                None
-            } else {
-                Some(g)
-            }
-        }) {
+        if let Some(group) = reader_material_group(name_str) {
             if let Some(filter) = &group_set {
                 if !filter.contains(group) {
                     continue;
@@ -70,6 +63,9 @@ pub(super) fn build_kit_bundle_body(
             );
             o.insert("bytes".into(), Value::Number(data.len().into()));
             kits_meta.push(Value::Object(o));
+            if is_reader_secret_material(name_str) {
+                saw_reader_secret = true;
+            }
             body.insert(format!("body/{name_str}"), data);
         } else if full
             && (name_str == "local.private"
@@ -77,18 +73,18 @@ pub(super) fn build_kit_bundle_body(
                 || name_str == "index_master.key")
         {
             body.insert(format!("body/{name_str}"), std::fs::read(entry.path())?);
-        } else if full {
-            if let Some(group) = name_str.strip_suffix(".btn.state") {
-                if group_set.as_ref().map_or(true, |f| f.contains(group)) {
-                    body.insert(format!("body/{name_str}"), std::fs::read(entry.path())?);
-                }
-            }
+        } else if full
+            && full_group_material_group(name_str)
+                .is_some_and(|group| group_set.as_ref().map_or(true, |f| f.contains(group)))
+        {
+            body.insert(format!("body/{name_str}"), std::fs::read(entry.path())?);
         }
     }
 
-    if kits_meta.is_empty() {
+    if !saw_reader_secret {
         return Err(Error::InvalidConfig(format!(
-            "kit_bundle: no *.btn.mykit files in {}",
+            "kit_bundle: no reader kit material (*.btn.mykit, *.jwe.mykey, \
+             *.hibe.mpk/*.hibe.idpath/*.hibe.sk) in {}",
             keystore.display()
         )));
     }
@@ -98,6 +94,55 @@ pub(super) fn build_kit_bundle_body(
     }
 
     Ok((body, kits_meta))
+}
+
+fn reader_material_group(name: &str) -> Option<&str> {
+    for suffix in [
+        ".btn.mykit",
+        ".jwe.mykey",
+        ".hibe.mpk",
+        ".hibe.idpath",
+        ".hibe.sk",
+    ] {
+        if let Some(group) = name.strip_suffix(suffix) {
+            if !group.is_empty() {
+                return Some(group);
+            }
+        }
+    }
+    None
+}
+
+fn is_reader_secret_material(name: &str) -> bool {
+    [".btn.mykit", ".jwe.mykey", ".hibe.sk"]
+        .iter()
+        .any(|suffix| name.strip_suffix(suffix).is_some_and(|g| !g.is_empty()))
+}
+
+fn full_group_material_group(name: &str) -> Option<&str> {
+    if let Some(group) = reader_material_group(name) {
+        return Some(group);
+    }
+    for suffix in [
+        ".btn.state",
+        ".jwe.sender",
+        ".jwe.recipients",
+        ".hibe.msk",
+        ".hibe.idpath.history",
+        ".hibe.grants",
+    ] {
+        if let Some(group) = name.strip_suffix(suffix) {
+            if !group.is_empty() {
+                return Some(group);
+            }
+        }
+    }
+    if let Some((group, _)) = name.split_once(".hibe.sk.previous.") {
+        if !group.is_empty() {
+            return Some(group);
+        }
+    }
+    None
 }
 
 pub(super) fn build_identity_seed_body(device: &DeviceKey) -> BTreeMap<String, Vec<u8>> {

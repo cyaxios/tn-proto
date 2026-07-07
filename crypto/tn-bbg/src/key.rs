@@ -24,7 +24,8 @@
 
 use bls12_381_plus::ff::Field;
 use bls12_381_plus::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
-use rand_core::RngCore;
+use core::fmt;
+use rand_core::{CryptoRng, RngCore};
 
 use crate::codec::{read_g1, read_g2, Reader, G1_LEN, G2_LEN, VERSION};
 use crate::error::{BbgError, Result};
@@ -37,12 +38,22 @@ use crate::params::{MasterKey, PublicParams};
 /// delegatable level — a leaf at `max_depth` has an empty `bs`.
 ///
 /// A private key is a permanent trapdoor for its path (no forward revocation).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PrivateKey {
     pub(crate) a0: G2Affine,
     pub(crate) a1: G1Affine,
     pub(crate) bs: Vec<G2Affine>,
     pub(crate) id: Identity,
+}
+
+impl fmt::Debug for PrivateKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivateKey")
+            .field("identity", &self.id)
+            .field("bs_count", &self.bs.len())
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Generates the key for `id` directly from the master secret. Only the
@@ -51,7 +62,7 @@ pub fn keygen(
     pp: &PublicParams,
     msk: &MasterKey,
     id: &Identity,
-    mut rng: impl RngCore,
+    mut rng: impl RngCore + CryptoRng,
 ) -> Result<PrivateKey> {
     let k = id.depth();
     if k > pp.max_depth {
@@ -83,9 +94,9 @@ pub fn delegate(
     pp: &PublicParams,
     parent: &PrivateKey,
     child_label: &[u8],
-    mut rng: impl RngCore,
+    mut rng: impl RngCore + CryptoRng,
 ) -> Result<PrivateKey> {
-    let child_id = parent.id.child(child_label);
+    let child_id = parent.id.try_child(child_label)?;
     let k = child_id.depth();
     if k > pp.max_depth {
         return Err(BbgError::IdentityTooDeep);
@@ -106,7 +117,8 @@ pub fn delegate(
     // bs[j] = parent.bs[j+1] * hs[k+j]^t
     let bs: Vec<G2Affine> = (0..pp.max_depth - k)
         .map(|j| {
-            let updated = G2Projective::from(parent.bs[j + 1]) + G2Projective::from(pp.hs[k + j]) * t;
+            let updated =
+                G2Projective::from(parent.bs[j + 1]) + G2Projective::from(pp.hs[k + j]) * t;
             G2Affine::from(updated)
         })
         .collect();

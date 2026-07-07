@@ -730,6 +730,11 @@ impl WasmRuntime {
     /// is optional — pass `null`/`undefined` to bundle every non-
     /// internal group declared in the active ceremony.
     ///
+    /// Cipher behavior comes from tn-core: BTN groups mint `.btn.mykit`
+    /// reader kits; native HIBE builds mint `.hibe.mpk/.idpath/.sk`
+    /// material; JWE groups return an explicit unsupported error because
+    /// JWE lives in the TypeScript pure-JS JOSE pipeline.
+    ///
     /// Mirrors PyO3 `bundle_for_recipient` and Python
     /// `tn.bundle_for_recipient`. Returns the absolute bundle path.
     #[wasm_bindgen(js_name = "bundleForRecipient")]
@@ -806,6 +811,13 @@ impl WasmRuntime {
     /// Returns the same `{envelope, plaintext}` shape that `readRaw()`
     /// produces; consumers who want the flat hoisted shape can post-
     /// process or call `readWithVerify` once it grows a path arg.
+    ///
+    /// For this wasm runtime build, configured BTN logs are supported.
+    /// Foreign BTN recipient-kit reads are supported when BTN kits are in
+    /// the keystore. Foreign HIBE/JWE recipient-kit dispatch returns a
+    /// clear unsupported error instead of using BTN assumptions; HIBE is
+    /// exposed separately through the standalone `hibe*` primitives and
+    /// JWE through the TS pure-JS JOSE path.
     #[wasm_bindgen(js_name = "readFrom")]
     pub fn read_from_js(&self, log_path: &str) -> Result<JsValue, JsError> {
         let normalized = log_path.replace('\\', "/");
@@ -846,6 +858,10 @@ impl WasmRuntime {
     /// As [`Self::read_raw_with_validity_js`] but reads from an
     /// explicit `logPath`. Mirrors Python
     /// `tn.read_raw_with_validity(log_path=…)`.
+    ///
+    /// The explicit-path validity path handles configured-runtime reads.
+    /// Foreign recipient-kit reads with validity fail clearly today rather
+    /// than reporting BTN-shaped validity for HIBE/JWE material.
     #[wasm_bindgen(js_name = "readFromWithValidity")]
     pub fn read_from_with_validity_js(&self, log_path: &str) -> Result<JsValue, JsError> {
         let normalized = log_path.replace('\\', "/");

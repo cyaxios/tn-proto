@@ -358,6 +358,15 @@ impl Runtime {
         if !self.storage.exists(log_path) {
             return Ok(Vec::new());
         }
+        if is_foreign_log(
+            log_path,
+            &self.log_path,
+            self.device.did(),
+            &self.keystore,
+            &self.storage,
+        )? {
+            reject_unsupported_foreign_log_with_validity(&self.keystore, &self.storage)?;
+        }
         let mut out: Vec<(ReadEntry, ValidFlags)> = Vec::new();
         let mut prev_hash_by_event: HashMap<String, String> = HashMap::new();
         let public_set: HashSet<&str> = self.cfg.public_fields.iter().map(String::as_str).collect();
@@ -628,8 +637,10 @@ impl Runtime {
                                     }
                                 }
                                 Err(Error::NotEntitled { .. } | Error::NotAPublisher { .. }) => {
-                                    plaintext_per_group
-                                        .insert(k.clone(), serde_json::json!({"$no_read_key": true}));
+                                    plaintext_per_group.insert(
+                                        k.clone(),
+                                        serde_json::json!({"$no_read_key": true}),
+                                    );
                                 }
                                 Err(_) => {
                                     plaintext_per_group.insert(
@@ -682,7 +693,7 @@ impl Runtime {
             self.device.did(),
             &self.keystore,
             &self.storage,
-        ) {
+        )? {
             return read_foreign_log(log_path, &self.keystore, &self.storage);
         }
         let mut out = Vec::new();
@@ -1116,17 +1127,18 @@ pub(crate) fn flat_in_current_run(flat: &FlatEntry, current_run_id: &str) -> boo
 /// reads through the foreign-decrypt path. Mirrors Python's
 /// `_is_foreign_log` and TS's `_isForeignLog`.
 ///
-/// Conservative on failure: if the file is unreadable, has no
-/// parseable line, lacks our default kit, or is exactly our own log,
-/// return false so the regular path runs and surfaces the underlying
-/// error itself.
+/// Conservative on log-peek failure: if the file is unreadable, has no
+/// parseable line, lacks BTN reader material, or is exactly our own log,
+/// return false so the regular path runs and surfaces the underlying log
+/// error itself. Keystore listing errors propagate because otherwise kit
+/// discovery failures could silently choose the wrong read path.
 pub(crate) fn is_foreign_log(
     log_path: &Path,
     own_log: &Path,
     own_did: &str,
     keystore: &Path,
     storage: &Arc<dyn crate::storage::Storage>,
-) -> bool {
+) -> Result<bool> {
     // Exempt exactly our own log path — post-flush "reading my own log"
     // case where the auto-discovery cfg may have a different device but
     // the log is conceptually own. Narrowed per AVL J7.1 Bug 2.
@@ -1136,23 +1148,23 @@ pub(crate) fn is_foreign_log(
     // raw paths via the rest of the logic.
     if let (Ok(a), Ok(b)) = (log_path.canonicalize(), own_log.canonicalize()) {
         if a == b {
-            return false;
+            return Ok(false);
         }
     }
 
-    // No kit on disk → foreign route guaranteed to yield $no_read_key
-    // for every entry. Regular path's "kit not entitled" is more
-    // actionable, so let it run.
-    if !storage.exists(&keystore.join("default.btn.mykit")) {
-        return false;
+    // No BTN recipient kit on disk → the BTN foreign-recipient route is not
+    // useful. HIBE groups can still be opened by the regular configured
+    // runtime path, so let that path run when no BTN material exists.
+    if !has_btn_reader_material(keystore, storage)? {
+        return Ok(false);
     }
 
     // Peek the first parseable envelope's `did`.
     let Ok(bytes) = storage.read_bytes(log_path) else {
-        return false;
+        return Ok(false);
     };
     let Ok(text) = std::str::from_utf8(&bytes) else {
-        return false;
+        return Ok(false);
     };
     for raw_line in text.split('\n') {
         let s = raw_line.trim();
@@ -1164,13 +1176,107 @@ pub(crate) fn is_foreign_log(
         };
         if let Some(env_did) = env.get("device_identity").and_then(Value::as_str) {
             if !env_did.is_empty() {
-                return env_did != own_did;
+                return Ok(env_did != own_did);
             }
         }
         // First non-empty line had no did — give up; let regular path run.
-        return false;
+        return Ok(false);
     }
-    false
+    Ok(false)
+}
+
+#[derive(Debug, Default)]
+struct ForeignReaderMaterial {
+    btn_groups: Vec<String>,
+    hibe_groups: Vec<String>,
+    jwe_groups: Vec<String>,
+}
+
+impl ForeignReaderMaterial {
+    fn sort_and_dedup(&mut self) {
+        self.btn_groups.sort();
+        self.btn_groups.dedup();
+        self.hibe_groups.sort();
+        self.hibe_groups.dedup();
+        self.jwe_groups.sort();
+        self.jwe_groups.dedup();
+    }
+
+    fn unsupported_error(&self, verb: &str) -> Option<Error> {
+        match (
+            self.hibe_groups.is_empty(),
+            self.jwe_groups.is_empty(),
+            verb,
+        ) {
+            (true, true, _) => None,
+            (false, true, "read_from") => Some(Error::NotImplemented(
+                "read_from: foreign recipient-kit dispatch for cipher=hibe is not implemented; \
+                 HIBE reads are supported by configured HIBE runtimes, not by the BTN shortcut",
+            )),
+            (true, false, "read_from") => Some(Error::NotImplemented(
+                "read_from: foreign recipient-kit dispatch for cipher=jwe is not implemented in \
+                 tn-core; JWE reads are pure JS/Python today",
+            )),
+            (false, false, "read_from") => Some(Error::NotImplemented(
+                "read_from: foreign recipient-kit dispatch for cipher=hibe and cipher=jwe is not \
+                 implemented; only cipher=btn is supported by this shortcut",
+            )),
+            (false, true, _) => Some(Error::NotImplemented(
+                "read_from_with_validity: foreign recipient-kit dispatch for cipher=hibe is not \
+                 implemented; HIBE reads are supported by configured HIBE runtimes, not by the \
+                 BTN shortcut",
+            )),
+            (true, false, _) => Some(Error::NotImplemented(
+                "read_from_with_validity: foreign recipient-kit dispatch for cipher=jwe is not \
+                 implemented in tn-core; JWE reads are pure JS/Python today",
+            )),
+            (false, false, _) => Some(Error::NotImplemented(
+                "read_from_with_validity: foreign recipient-kit dispatch for cipher=hibe and \
+                 cipher=jwe is not implemented; only configured-runtime reads are supported",
+            )),
+        }
+    }
+}
+
+fn discover_foreign_reader_material(
+    keystore: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<ForeignReaderMaterial> {
+    let entries = storage.list(keystore).map_err(Error::Io)?;
+    let mut material = ForeignReaderMaterial::default();
+    for path in entries {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if let Some(group) = name.strip_suffix(".btn.mykit") {
+            if !group.is_empty() {
+                material.btn_groups.push(group.to_string());
+            }
+        } else if let Some(group) = name.strip_suffix(".hibe.sk") {
+            if !group.is_empty() {
+                material.hibe_groups.push(group.to_string());
+            }
+        } else if let Some(group) = name.strip_suffix(".jwe.mykey") {
+            if !group.is_empty() {
+                material.jwe_groups.push(group.to_string());
+            }
+        }
+    }
+    material.sort_and_dedup();
+    Ok(material)
+}
+
+fn has_btn_reader_material(
+    keystore: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<bool> {
+    let entries = storage.list(keystore).map_err(Error::Io)?;
+    Ok(entries.into_iter().any(|p| {
+        p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+            n.strip_suffix(".btn.mykit")
+                .is_some_and(|group| !group.is_empty())
+        })
+    }))
 }
 
 /// Decrypt a foreign publisher's log, attempting EVERY group for which
@@ -1189,24 +1295,13 @@ pub(crate) fn read_foreign_log(
     keystore: &Path,
     storage: &Arc<dyn crate::storage::Storage>,
 ) -> Result<Vec<ReadEntry>> {
-    use crate::read_as_recipient::{read_as_recipient, ReadAsRecipientOptions};
+    use crate::read_as_recipient::ReadAsRecipientOptions;
 
-    // Discover every group the keystore has a kit for. The foreign
-    // route is btn-only today (read_as_recipient errors out on JWE
-    // keys) so we only scan `<group>.btn.mykit`.
-    let mut groups: Vec<String> = Vec::new();
-    if let Ok(entries) = storage.list(keystore) {
-        for path in entries {
-            let Some(s) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if let Some(stem) = s.strip_suffix(".btn.mykit") {
-                if !stem.is_empty() {
-                    groups.push(stem.to_string());
-                }
-            }
-        }
+    let material = discover_foreign_reader_material(keystore, storage)?;
+    if let Some(err) = material.unsupported_error("read_from") {
+        return Err(err);
     }
+    let mut groups = material.btn_groups;
     if groups.is_empty() {
         // No kits at all — fall through to the single-group default
         // path so the underlying error message is "no recipient kit
@@ -1226,7 +1321,7 @@ pub(crate) fn read_foreign_log(
             group: group.clone(),
             verify_signatures: true,
         };
-        let foreign = read_as_recipient(log_path, keystore, opts)?;
+        let foreign = read_btn_as_recipient_with_storage(log_path, keystore, storage, opts)?;
         if idx == 0 {
             envelopes.reserve(foreign.len());
             merged_plaintext.reserve(foreign.len());
@@ -1258,4 +1353,144 @@ pub(crate) fn read_foreign_log(
         });
     }
     Ok(out)
+}
+
+pub(crate) fn reject_unsupported_foreign_log_with_validity(
+    keystore: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<()> {
+    let material = discover_foreign_reader_material(keystore, storage)?;
+    if let Some(err) = material.unsupported_error("read_from_with_validity") {
+        return Err(err);
+    }
+    Err(Error::NotImplemented(
+        "read_from_with_validity: foreign recipient-kit reads are not implemented in tn-core; \
+         use read_from for BTN plaintext or a native configured runtime for same-ceremony reads",
+    ))
+}
+
+fn read_btn_as_recipient_with_storage(
+    log_path: &Path,
+    keystore_path: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+    opts: crate::read_as_recipient::ReadAsRecipientOptions,
+) -> Result<Vec<crate::read_as_recipient::ForeignReadEntry>> {
+    use crate::cipher::btn::BtnReaderCipher;
+    use crate::read_as_recipient::{ForeignReadEntry, ForeignValid};
+
+    let group = opts.group;
+    let btn_kit_path = keystore_path.join(format!("{group}.btn.mykit"));
+    if !storage.exists(&btn_kit_path) {
+        return Err(Error::InvalidConfig(format!(
+            "read_as_recipient: no recipient kit for group {group:?} in {}. \
+             Looked for {} (btn). If you absorbed a kit_bundle, the kit lands \
+             in your ceremony's keystore — point keystore_path there.",
+            keystore_path.display(),
+            btn_kit_path.display(),
+        )));
+    }
+
+    let kit_bytes = storage.read_bytes(&btn_kit_path).map_err(Error::Io)?;
+    let cipher = BtnReaderCipher::from_kit_bytes(&kit_bytes)?;
+    let bytes = storage.read_bytes(log_path).map_err(Error::Io)?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| Error::Malformed {
+        kind: "foreign log",
+        reason: format!("not valid UTF-8: {e}"),
+    })?;
+    let mut entries = Vec::new();
+    let mut prev_hash_by_type: BTreeMap<String, String> = BTreeMap::new();
+
+    for raw_line in text.split('\n') {
+        let s = raw_line.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let env: Value = serde_json::from_str(s).map_err(Error::Json)?;
+        let env_map = env
+            .as_object()
+            .ok_or_else(|| Error::Malformed {
+                kind: "envelope",
+                reason: "expected JSON object".into(),
+            })?
+            .clone();
+
+        let event_type = env_map
+            .get("event_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if event_type.is_empty() {
+            continue;
+        }
+
+        let env_prev = env_map.get("prev_hash").and_then(Value::as_str);
+        let env_row = env_map.get("row_hash").and_then(Value::as_str);
+        let last = prev_hash_by_type.get(event_type);
+        let chain_ok = match (last, env_prev) {
+            (None, _) => true,
+            (Some(prev), Some(env)) => prev == env,
+            _ => false,
+        };
+        if let Some(rh) = env_row {
+            prev_hash_by_type.insert(event_type.to_string(), rh.to_string());
+        }
+
+        let mut plaintext: Map<String, Value> = Map::new();
+        if let Some(g_block) = env_map.get(&group).and_then(Value::as_object) {
+            if let Some(ct) = g_block.get("ciphertext").and_then(Value::as_str) {
+                plaintext.insert(group.clone(), decrypt_btn_foreign_ciphertext(&cipher, ct));
+            }
+        }
+
+        let mut sig_ok = true;
+        if opts.verify_signatures {
+            let did = env_map.get("device_identity").and_then(Value::as_str);
+            let sig_str = env_map.get("signature").and_then(Value::as_str);
+            match (did, sig_str, env_row) {
+                (Some(did), Some(sig_b64), Some(row)) => {
+                    sig_ok = match signature_from_b64(sig_b64) {
+                        Ok(sig_bytes) => {
+                            DeviceKey::verify_did(did, row.as_bytes(), &sig_bytes).unwrap_or(false)
+                        }
+                        Err(_) => false,
+                    };
+                }
+                _ => sig_ok = false,
+            }
+        }
+
+        entries.push(ForeignReadEntry {
+            envelope: env_map,
+            plaintext,
+            valid: ForeignValid {
+                signature: sig_ok,
+                chain: chain_ok,
+            },
+        });
+    }
+
+    Ok(entries)
+}
+
+fn decrypt_btn_foreign_ciphertext(
+    cipher: &crate::cipher::btn::BtnReaderCipher,
+    ct_b64: &str,
+) -> Value {
+    use crate::cipher::GroupCipher as _;
+
+    let sentinel = |key: &str| -> Value {
+        let mut m = Map::new();
+        m.insert(key.to_string(), Value::Bool(true));
+        Value::Object(m)
+    };
+
+    let Ok(ct_bytes) = STANDARD.decode(ct_b64) else {
+        return sentinel("$decrypt_error");
+    };
+    let Ok(pt_bytes) = cipher.decrypt(&ct_bytes) else {
+        return sentinel("$no_read_key");
+    };
+    let Ok(pt) = serde_json::from_slice::<Value>(&pt_bytes) else {
+        return sentinel("$decrypt_error");
+    };
+    pt
 }

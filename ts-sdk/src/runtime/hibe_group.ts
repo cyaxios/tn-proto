@@ -51,6 +51,64 @@ export interface HibeGroupMaterial {
   priorSks: Uint8Array[];
 }
 
+function validateHibeGroupName(group: string): string {
+  if (
+    group.length === 0 ||
+    group !== group.trim() ||
+    group === "." ||
+    group === ".." ||
+    group.includes("/") ||
+    group.includes("\\") ||
+    group.includes("\0")
+  ) {
+    throw new Error(`HIBE: invalid group name ${JSON.stringify(group)} for keystore filenames`);
+  }
+  return group;
+}
+
+function validateHibeIdentityPath(path: string, subject = "identity path"): string {
+  if (path.length === 0) {
+    throw new Error(`HIBE: invalid ${subject}: empty identity path`);
+  }
+  if (path !== path.trim()) {
+    throw new Error(`HIBE: invalid ${subject}: leading/trailing whitespace is not allowed`);
+  }
+  if (path.includes("\\") || path.includes("\0")) {
+    throw new Error(`HIBE: invalid ${subject}: labels must not contain path separators`);
+  }
+  const labels = path.split("/");
+  for (const label of labels) {
+    if (label.length === 0) {
+      throw new Error(`HIBE: invalid ${subject}: empty path segment in ${JSON.stringify(path)}`);
+    }
+    if (label === "." || label === "..") {
+      throw new Error(`HIBE: invalid ${subject}: traversal segment ${JSON.stringify(label)}`);
+    }
+    if (label !== label.trim()) {
+      throw new Error(`HIBE: invalid ${subject}: whitespace-only label mutation`);
+    }
+  }
+  return path;
+}
+
+function readHibeIdPath(path: string, subject = "identity path"): string {
+  return validateHibeIdentityPath(readFileSync(path, "utf8"), subject);
+}
+
+function readHibeHistory(path: string): string[] {
+  const raw = readFileSync(path, "utf8").split(/\r?\n/);
+  const out: string[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const line = raw[i]!;
+    if (line.length === 0 && i === raw.length - 1) continue;
+    if (line.length === 0) {
+      throw new Error("HIBE: invalid identity path history: empty path segment");
+    }
+    out.push(validateHibeIdentityPath(line, "prior identity path"));
+  }
+  return out;
+}
+
 /** Atomic-ish write: temp + rename (same posture as Python's
  * `_atomic_write_text` — rename is not guaranteed atomic on Windows but
  * is far safer than a truncating write). */
@@ -76,6 +134,7 @@ function _atomicWriteSecret(path: string, data: Uint8Array): void {
  * `<group>.hibe.mpk`. Throws when the mpk exists but `.idpath` is missing
  * (mirrors Python `HibeGroupCipher.load`'s CipherError). */
 export function loadHibeGroup(keystorePath: string, group: string): HibeGroupMaterial | null {
+  validateHibeGroupName(group);
   const mpkPath = join(keystorePath, `${group}.hibe.mpk`);
   if (!existsSync(mpkPath)) return null;
   const idpathPath = join(keystorePath, `${group}.hibe.idpath`);
@@ -88,12 +147,7 @@ export function loadHibeGroup(keystorePath: string, group: string): HibeGroupMat
   const skPath = join(keystorePath, `${group}.hibe.sk`);
   const mskPath = join(keystorePath, `${group}.hibe.msk`);
   const historyPath = join(keystorePath, `${group}.hibe.idpath.history`);
-  const priorPaths = existsSync(historyPath)
-    ? readFileSync(historyPath, "utf8")
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0)
-    : [];
+  const priorPaths = existsSync(historyPath) ? readHibeHistory(historyPath) : [];
   const previousPrefix = `${group}.hibe.sk.previous.`;
   const priorSks = readdirSync(keystorePath)
     .filter((e) => e.startsWith(previousPrefix))
@@ -102,7 +156,7 @@ export function loadHibeGroup(keystorePath: string, group: string): HibeGroupMat
     .map((e) => new Uint8Array(readFileSync(join(keystorePath, e))));
   const mat: HibeGroupMaterial = {
     mpk: new Uint8Array(readFileSync(mpkPath)),
-    idPath: readFileSync(idpathPath, "utf8").trim(),
+    idPath: readHibeIdPath(idpathPath),
     priorPaths,
     priorSks,
   };
@@ -114,15 +168,34 @@ export function loadHibeGroup(keystorePath: string, group: string): HibeGroupMat
 /** Mint a fresh hibe group as its OWN authority (the solo-ceremony default,
  * matching Python `HibeGroupCipher.create` without `authority_mpk`): run
  * Setup, keep the msk, and self-delegate a reader key for `idPath`
- * (default `"self"`). Writes all four key files. */
+ * (default `"self"`). With `authorityMpk` plus `idPath`, create a write-only
+ * group under an external authority: only `.hibe.mpk` and `.hibe.idpath` are
+ * written, and no local reader key or master secret is minted.
+ *
+ * Throws when `group` is unsafe for flat keystore filenames, when `idPath`
+ * has empty/traversal/whitespace-mutating segments, or when `authorityMpk`
+ * is malformed. */
 export function createHibeGroup(
   keystorePath: string,
   group: string,
-  opts: { idPath?: string; maxDepth?: number } = {},
+  opts: { idPath?: string; maxDepth?: number; authorityMpk?: Uint8Array } = {},
 ): HibeGroupMaterial {
-  const path = opts.idPath ?? "self";
+  validateHibeGroupName(group);
+  const path = validateHibeIdentityPath(opts.idPath ?? "self");
   const maxDepth = opts.maxDepth ?? 2;
   mkdirSync(keystorePath, { recursive: true });
+
+  if (opts.authorityMpk !== undefined) {
+    if (opts.idPath === undefined) {
+      throw new Error("HIBE.create: idPath is required when authorityMpk is provided");
+    }
+    const mpk = new Uint8Array(opts.authorityMpk);
+    hibeMpkFingerprint(mpk);
+    writeFileSync(join(keystorePath, `${group}.hibe.mpk`), Buffer.from(mpk));
+    _atomicWrite(join(keystorePath, `${group}.hibe.idpath`), path);
+    return { mpk, idPath: path, priorPaths: [], priorSks: [] };
+  }
+
   const setup = hibeSetup(maxDepth) as { mpk_b64: string; msk_b64: string };
   const mpk = new Uint8Array(Buffer.from(setup.mpk_b64, "base64"));
   const msk = new Uint8Array(Buffer.from(setup.msk_b64, "base64"));
@@ -136,8 +209,8 @@ export function createHibeGroup(
 
 /** Seal a group plaintext to the group's current identity path. Needs only
  * the public half (mpk + idpath) — any holder can write. ``aad`` is bound
- * (authenticated, not encrypted); empty binds nothing and is byte-identical
- * to a plain seal. */
+ * (authenticated, not encrypted); empty binds nothing and uses the same wire
+ * shape as a plain seal. */
 export function hibeEncrypt(
   mat: HibeGroupMaterial,
   plaintext: Uint8Array,
@@ -146,13 +219,19 @@ export function hibeEncrypt(
   if (mat.mpk.length === 0 || !mat.idPath) {
     throw new Error("HIBE: no authority mpk / identity path in this keystore");
   }
-  return hibeSeal(mat.mpk, mat.idPath, plaintext, aad.length > 0 ? aad : undefined);
+  return hibeSeal(
+    mat.mpk,
+    validateHibeIdentityPath(mat.idPath),
+    plaintext,
+    aad.length > 0 ? aad : undefined,
+  );
 }
 
 /** The held key if it sits on `targetPath`, derived down from an ancestor
  * when needed (BBG opens only with an exact-path key). `null` when the held
  * key is absent or not an ancestor. Mirrors Python `_derive_from_held`. */
 function _deriveFromHeld(mat: HibeGroupMaterial, targetPath: string): Uint8Array | null {
+  targetPath = validateHibeIdentityPath(targetPath);
   if (mat.sk === undefined) return null;
   const held = hibeKeyIdPath(mat.sk);
   if (held === targetPath) return mat.sk;
@@ -210,9 +289,7 @@ export function hibeDecrypt(
 ): Uint8Array {
   const candidates = hibeCandidateKeys(mat);
   if (candidates.length === 0) {
-    throw new Error(
-      "HIBE: no delegated identity key for this group's path in this keystore",
-    );
+    throw new Error("HIBE: no delegated identity key for this group's path in this keystore");
   }
   const aadArg = aad.length > 0 ? aad : undefined;
   for (const sk of candidates) {
@@ -235,7 +312,7 @@ export function hibeMintReaderKey(mat: HibeGroupMaterial, idPath: string): Uint8
   if (mat.msk === undefined) {
     throw new Error("HIBE: only the authority (msk holder) can mint reader keys");
   }
-  return hibeKeygen(mat.mpk, mat.msk, idPath);
+  return hibeKeygen(mat.mpk, mat.msk, validateHibeIdentityPath(idPath));
 }
 
 /** Point future seals at `newPath` (admission rotation, not revocation).
@@ -248,20 +325,30 @@ export function hibeRotateIdPath(
   mat: HibeGroupMaterial,
   newPath: string,
 ): void {
+  validateHibeGroupName(group);
+  const currentPath = validateHibeIdentityPath(mat.idPath, "current identity path");
+  newPath = validateHibeIdentityPath(newPath, "new identity path");
   if (mat.msk === undefined) {
     throw new Error("HIBE: only the authority (msk holder) can rotate the identity path");
   }
-  if (newPath === mat.idPath) {
+  if (newPath === currentPath) {
     throw new Error(`HIBE: new path equals the current path ${JSON.stringify(newPath)}`);
   }
   const sk = hibeKeygen(mat.mpk, mat.msk, newPath);
-  _atomicWriteSecret(join(keystorePath, `${group}.hibe.sk`), sk);
-  _atomicWrite(join(keystorePath, `${group}.hibe.idpath`), newPath);
-  mat.priorPaths.unshift(mat.idPath);
+  const nextPriorPaths = [currentPath, ...mat.priorPaths];
   _atomicWrite(
     join(keystorePath, `${group}.hibe.idpath.history`),
-    mat.priorPaths.join("\n") + "\n",
+    nextPriorPaths.join("\n") + "\n",
   );
+  const skPath = join(keystorePath, `${group}.hibe.sk`);
+  const idpathPath = join(keystorePath, `${group}.hibe.idpath`);
+  const skPending = `${skPath}.pending`;
+  const idpathPending = `${idpathPath}.pending`;
+  _atomicWriteSecret(skPending, sk);
+  _atomicWrite(idpathPending, newPath);
+  renameSync(skPending, skPath);
+  renameSync(idpathPending, idpathPath);
+  mat.priorPaths = nextPriorPaths;
   mat.sk = sk;
   mat.idPath = newPath;
 }
@@ -275,7 +362,7 @@ export function hibeGroupMpkFingerprint(mat: HibeGroupMaterial): Uint8Array {
  * (`policy-a` → `policy-a~r1` → `policy-a~r2`). Mirrors Python
  * `tn.admin._bump_path`. */
 export function hibeBumpPath(path: string): string {
-  const labels = path ? path.split("/") : [""];
+  const labels = validateHibeIdentityPath(path).split("/");
   const last = labels[labels.length - 1]!;
   const m = /^(.*?)~r(\d+)$/.exec(last);
   labels[labels.length - 1] = m ? `${m[1]}~r${Number(m[2]) + 1}` : `${last}~r1`;

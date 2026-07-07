@@ -9,7 +9,7 @@
 // used to seal or open — it is kept only so the keystore layout matches Python
 // (the ceremony / compile / absorb surface reads it as a stable group anchor).
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { join } from "node:path";
 
@@ -29,8 +29,89 @@ function recipientsPath(keysDir: string, group: string): string {
   return join(keysDir, `${group}.jwe.recipients`);
 }
 
+function validateJweGroupName(group: string): string {
+  if (
+    group.length === 0 ||
+    group !== group.trim() ||
+    group === "." ||
+    group === ".." ||
+    group.includes("/") ||
+    group.includes("\\") ||
+    group.includes("\0")
+  ) {
+    throw new Error(`jwe: invalid group name ${JSON.stringify(group)} for keystore filenames`);
+  }
+  return group;
+}
+
+function validateRecipientDid(did: string): string {
+  if (did.length === 0 || did !== did.trim() || did.includes("\0")) {
+    throw new Error(`jwe: invalid recipient identity ${JSON.stringify(did)}`);
+  }
+  return did;
+}
+
+function validateTimestamp(ts: string): string {
+  if (
+    ts.length === 0 ||
+    ts !== ts.trim() ||
+    ts === "." ||
+    ts === ".." ||
+    ts.includes("/") ||
+    ts.includes("\\") ||
+    ts.includes("\0")
+  ) {
+    throw new Error(`jwe: invalid rotation timestamp ${JSON.stringify(ts)}`);
+  }
+  return ts;
+}
+
+function validateRecipientPublicKey(pub: Uint8Array, label = "recipient public key"): Uint8Array {
+  if (pub.length !== 32) {
+    throw new Error(`jwe: ${label} must be 32 raw X25519 bytes, got ${pub.length}`);
+  }
+  return pub;
+}
+
+function decodeRecipientPublicKey(pubB64: unknown, index: number): Uint8Array {
+  if (typeof pubB64 !== "string" || pubB64.length === 0) {
+    throw new Error(`jwe: recipient public key at index ${index} must be base64 text`);
+  }
+  return validateRecipientPublicKey(
+    new Uint8Array(Buffer.from(pubB64, "base64")),
+    `recipient public key at index ${index}`,
+  );
+}
+
 function readRecipients(path: string): JweRecipientEntry[] {
-  return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as JweRecipientEntry[]) : [];
+  if (!existsSync(path)) {
+    throw new Error(`jwe: recipients file is missing at ${path}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new Error(`jwe: recipients file is invalid JSON at ${path}: ${(err as Error).message}`, {
+      cause: err,
+    });
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`jwe: recipients file must contain an array at ${path}`);
+  }
+  return parsed.map((entry, index) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`jwe: recipient entry at index ${index} must be an object`);
+    }
+    const e = entry as Record<string, unknown>;
+    if (typeof e.recipient_identity !== "string") {
+      throw new Error(`jwe: recipient_identity at index ${index} must be a string`);
+    }
+    validateRecipientDid(e.recipient_identity);
+    return {
+      recipient_identity: e.recipient_identity,
+      pub_b64: b64(decodeRecipientPublicKey(e.pub_b64, index)),
+    };
+  });
 }
 
 /** Write JSON via write-temp-then-rename so a crash can't tear the file. */
@@ -56,8 +137,21 @@ function writeSecretBytes(path: string, data: Uint8Array): void {
  * Mint a fresh jwe group as publisher-and-sole-reader: an inert sender key, a
  * self-recipient X25519 keypair, and a recipients list holding `selfDid`.
  * Mirrors `JWEGroupCipher.create` for the solo-ceremony case.
+ *
+ * Throws if the flat keystore filenames would be unsafe, if `selfDid` is not a
+ * usable recipient identity, or if any group material already exists. Rotation
+ * must use {@link jweRotateGroup}; create never overwrites live material.
  */
 export function createJweGroup(keysDir: string, group: string, selfDid: string): void {
+  validateJweGroupName(group);
+  validateRecipientDid(selfDid);
+  mkdirSync(keysDir, { recursive: true });
+  for (const suffix of ["jwe.sender", "jwe.mykey", "jwe.recipients"]) {
+    const path = join(keysDir, `${group}.${suffix}`);
+    if (existsSync(path)) {
+      throw new Error(`jwe: group ${JSON.stringify(group)} already exists at ${path}`);
+    }
+  }
   const senderPriv = x25519.utils.randomPrivateKey();
   writeSecretBytes(join(keysDir, `${group}.jwe.sender`), senderPriv);
 
@@ -81,9 +175,9 @@ export function jweAddRecipient(
   did: string,
   pub: Uint8Array,
 ): void {
-  if (pub.length !== 32) {
-    throw new Error(`jwe: recipient public key must be 32 raw X25519 bytes, got ${pub.length}`);
-  }
+  validateJweGroupName(group);
+  validateRecipientDid(did);
+  validateRecipientPublicKey(pub);
   const path = recipientsPath(keysDir, group);
   const doc = readRecipients(path).filter((e) => e.recipient_identity !== did);
   doc.push({ recipient_identity: did, pub_b64: b64(pub) });
@@ -96,6 +190,8 @@ export function jweAddRecipient(
  * Mirrors `JWEGroupCipher.revoke_recipient`.
  */
 export function jweRevokeRecipient(keysDir: string, group: string, did: string): boolean {
+  validateJweGroupName(group);
+  validateRecipientDid(did);
   const path = recipientsPath(keysDir, group);
   const doc = readRecipients(path);
   const next = doc.filter((e) => e.recipient_identity !== did);
@@ -106,6 +202,7 @@ export function jweRevokeRecipient(keysDir: string, group: string, did: string):
 
 /** The recipient DIDs currently entitled for a jwe group (order preserved). */
 export function jweRecipients(keysDir: string, group: string): string[] {
+  validateJweGroupName(group);
   return readRecipients(recipientsPath(keysDir, group)).map((e) => e.recipient_identity);
 }
 
@@ -114,11 +211,40 @@ export function jweRecipients(keysDir: string, group: string): string[] {
  * `.revoked.<ts>` and mint fresh material (the new recipients list holds only
  * `selfDid` — prior recipients must re-enroll). Mirrors Python's jwe rotate.
  * `ts` is a filename-safe timestamp supplied by the caller.
+ *
+ * New material is staged to `.pending` files before any active file is archived,
+ * so a failed mint leaves the currently usable group files in place.
  */
 export function jweRotateGroup(keysDir: string, group: string, selfDid: string, ts: string): void {
-  for (const suffix of ["jwe.sender", "jwe.recipients", "jwe.mykey"]) {
-    const src = join(keysDir, `${group}.${suffix}`);
-    if (existsSync(src)) renameSync(src, `${src}.revoked.${ts}`);
+  validateJweGroupName(group);
+  validateRecipientDid(selfDid);
+  validateTimestamp(ts);
+
+  const senderPath = join(keysDir, `${group}.jwe.sender`);
+  const recipients = recipientsPath(keysDir, group);
+  const myKeyPath = join(keysDir, `${group}.jwe.mykey`);
+  for (const path of [senderPath, recipients, myKeyPath]) {
+    if (!existsSync(path)) {
+      throw new Error(`jwe: recipients file/group material is missing at ${path}`);
+    }
   }
-  createJweGroup(keysDir, group, selfDid);
+  readRecipients(recipients);
+
+  const senderPriv = x25519.utils.randomPrivateKey();
+  const myPriv = x25519.utils.randomPrivateKey();
+  const myPub = x25519.getPublicKey(myPriv);
+  const recipientsDoc = [
+    { recipient_identity: selfDid, pub_b64: b64(myPub) },
+  ] satisfies JweRecipientEntry[];
+
+  writeSecretBytes(`${senderPath}.pending`, senderPriv);
+  writeSecretBytes(`${myKeyPath}.pending`, myPriv);
+  atomicWriteJson(`${recipients}.pending`, recipientsDoc);
+
+  for (const src of [senderPath, recipients, myKeyPath]) {
+    renameSync(src, `${src}.revoked.${ts}`);
+  }
+  renameSync(`${senderPath}.pending`, senderPath);
+  renameSync(`${myKeyPath}.pending`, myKeyPath);
+  renameSync(`${recipients}.pending`, recipients);
 }

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,9 +59,11 @@ class GroupCipher(Protocol):
         if this party doesn't hold the write key.
 
         ``aad`` is optional additional-authenticated-data bound to the body
-        AEAD — authenticated, not encrypted, not stored. A reader must supply
+        AEAD — authenticated, not encrypted. Storage is cipher-specific:
+        JWE serializes it in the RFC 7516 ``aad`` member inside the
+        ciphertext; btn and HIBE do not store it. A reader must supply
         byte-identical ``aad`` to open. Empty (the default) binds nothing and
-        is byte-identical to a plain seal."""
+        uses the same wire shape as a plain seal."""
         ...
 
     def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
@@ -82,9 +85,17 @@ def _b64u(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
+def _validate_x25519_public_key(pub_bytes: bytes, *, what: str = "pub_bytes") -> bytes:
+    """Return raw X25519 public bytes or raise ``ValueError`` with context."""
+    raw = bytes(pub_bytes)
+    if len(raw) != 32:
+        raise ValueError(f"{what} must be 32 raw X25519 bytes, got {len(raw)}")
+    return raw
+
+
 def _okp_public_jwk(pub_raw: bytes) -> dict[str, str]:
     """A raw 32-byte X25519 public key as an RFC 8037 OKP JWK."""
-    return {"kty": "OKP", "crv": "X25519", "x": _b64u(pub_raw)}
+    return {"kty": "OKP", "crv": "X25519", "x": _b64u(_validate_x25519_public_key(pub_raw))}
 
 
 def _okp_private_jwk(my_sk: X25519PrivateKey) -> dict[str, str]:
@@ -121,13 +132,15 @@ def _jwe_open(blob: bytes, my_sk: X25519PrivateKey, aad: bytes) -> bytes:
     byte-match ``aad`` — the marker reconstructed from the record's public
     ``tn_aad`` echo — so a tampered echo fails to open.
     """
-    from joserfc import jwe as _jwe
-    from joserfc.jwk import OKPKey
-
     try:
         obj = json.loads(blob.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise NotARecipientError(f"JWE: ciphertext is not a JWE JSON object ({exc})") from exc
+    _validate_jwe_general_json_shape(obj)
+
+    from joserfc import jwe as _jwe
+    from joserfc.jwk import OKPKey
+
     key = OKPKey.import_key(_okp_private_jwk(my_sk))
     base = {k: obj[k] for k in ("protected", "iv", "ciphertext", "tag") if k in obj}
     if "aad" in obj:
@@ -140,14 +153,38 @@ def _jwe_open(blob: bytes, my_sk: X25519PrivateKey, aad: bytes) -> bytes:
             flat["header"] = rcpt["header"]
         try:
             got = _jwe.decrypt_json(flat, key, algorithms=_JWE_ALGS)
-        except Exception:
+        except Exception:  # noqa: BLE001 - try every anonymous recipient block
             continue
         if (got.aad or b"") != expected:
             raise NotARecipientError("JWE: aad marker mismatch")
         return got.plaintext
-    raise NotARecipientError(
-        "JWE: no recipient block in this envelope opens under this key"
-    )
+    raise NotARecipientError("JWE: no recipient block in this envelope opens under this key")
+
+
+def _validate_jwe_general_json_shape(obj: Any) -> None:
+    """Validate the JWE General JSON shape expected by this cipher.
+
+    Shape errors are reported as ``NotARecipientError`` so callers see a
+    malformed ciphertext as an unopened envelope, not as an incidental
+    ``TypeError``/``KeyError`` from inside the JOSE library.
+    """
+    if not isinstance(obj, dict):
+        raise NotARecipientError("JWE: ciphertext is not a JWE JSON object")
+    for field_name in ("protected", "iv", "ciphertext", "tag"):
+        if not isinstance(obj.get(field_name), str):
+            raise NotARecipientError(f"JWE: field {field_name!r} must be present as a string")
+    if "aad" in obj and not isinstance(obj["aad"], str):
+        raise NotARecipientError("JWE: field 'aad' must be a string when present")
+    recipients = obj.get("recipients")
+    if not isinstance(recipients, list):
+        raise NotARecipientError("JWE: field 'recipients' must be a list")
+    for idx, rcpt in enumerate(recipients):
+        if not isinstance(rcpt, dict):
+            raise NotARecipientError(f"JWE: recipient {idx} must be an object")
+        if not isinstance(rcpt.get("encrypted_key"), str):
+            raise NotARecipientError(f"JWE: recipient {idx} must include string 'encrypted_key'")
+        if "header" in rcpt and not isinstance(rcpt["header"], dict):
+            raise NotARecipientError(f"JWE: recipient {idx} header must be an object")
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -223,6 +260,11 @@ class JWEGroupCipher:
         the solo-ceremony case where the creator is both publisher and
         sole reader.
 
+        Supplied public keys must be exactly 32 raw X25519 bytes. When all
+        recipients have supplied public keys, any stale ``.jwe.mykey`` from a
+        previous local create is removed so this publisher does not keep a
+        misleading private key for an external-only recipient set.
+
         WARNING: Overwrites any existing JWE keystore files for this
         group. Use rotate() at the ceremony layer for key cycling.
         """
@@ -234,6 +276,12 @@ class JWEGroupCipher:
         sender_pub = sender_sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
         pubs = dict(recipient_pubs or {})
+        for did in recipient_dids:
+            if did in pubs:
+                pubs[did] = _validate_x25519_public_key(
+                    pubs[did],
+                    what=f"recipient_pubs[{did!r}]",
+                )
         missing = [d for d in recipient_dids if d not in pubs]
         if len(missing) > 1:
             raise ValueError(
@@ -248,6 +296,10 @@ class JWEGroupCipher:
                 keystore / f"{group_name}.jwe.mykey", my_sk_new.private_bytes_raw()
             )
             pubs[missing[0]] = my_sk_new.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        else:
+            stale_mykey = keystore / f"{group_name}.jwe.mykey"
+            if stale_mykey.exists():
+                stale_mykey.unlink()
 
         recipients_doc = [
             {
@@ -335,8 +387,7 @@ class JWEGroupCipher:
         """
         if self._sender_sk is None or self._recipients_path is None:
             raise NotAPublisherError("JWE: only the publisher can add recipients")
-        if len(pub_bytes) != 32:
-            raise ValueError(f"pub_bytes must be 32 raw X25519 bytes, got {len(pub_bytes)}")
+        pub_bytes = _validate_x25519_public_key(pub_bytes)
         doc = json.loads(self._recipients_path.read_text(encoding="utf-8"))
         doc = [e for e in doc if e.get("recipient_identity") != did]
         doc.append(
@@ -356,7 +407,13 @@ class JWEGroupCipher:
                 "JWE: cannot encrypt with zero recipients. Add a recipient "
                 "before calling encrypt()."
             )
-        pubs = [base64.b64decode(e["pub_b64"]) for e in doc]
+        pubs = [
+            _validate_x25519_public_key(
+                base64.b64decode(e["pub_b64"]),
+                what=f"recipient {e.get('recipient_identity', '<unknown>')!r} pub_b64",
+            )
+            for e in doc
+        ]
         return _jwe_seal(pubs, plaintext, aad)
 
     def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
@@ -371,12 +428,94 @@ class JWEGroupCipher:
 # public key; readers hold delegated identity keys.
 # ---------------------------------------------------------------------------
 
+_HIBE_HISTORY_ROOT_SENTINEL = "\troot"
+
 
 def _native_hibe() -> Any:
-    """Deferred native import, same posture as BtnGroupCipher's ``_btn``."""
-    from tn._native import hibe
+    """Deferred HIBE import, with a clear runtime error when unavailable."""
+    from . import _hibe as hibe
 
     return hibe
+
+
+def _validate_hibe_label(label: str, *, what: str) -> str:
+    """Validate one non-root HIBE label without lossy normalization."""
+    if not isinstance(label, str):
+        raise ValueError(f"HIBE: {what} must be a string")
+    if label == "":
+        raise ValueError(f"HIBE: {what} must not be empty")
+    if "/" in label:
+        raise ValueError(f"HIBE: {what} must be one path segment, not contain '/'")
+    if label != label.strip():
+        raise ValueError(f"HIBE: {what} must not have leading or trailing whitespace")
+    if any(ch in label for ch in "\r\n"):
+        raise ValueError(f"HIBE: {what} must not contain line breaks")
+    return label
+
+
+def _normalize_hibe_path(
+    id_path: str | None,
+    *,
+    what: str = "id_path",
+    allow_root: bool = False,
+) -> str:
+    """Return a canonical slash-separated HIBE path or raise ``ValueError``.
+
+    The Python boundary does not trim, collapse slashes, or skip blank
+    segments because those transformations create ambiguous authorization
+    paths. The HIBE root path is the empty string and is accepted only when
+    ``allow_root`` is explicitly true.
+    """
+    if id_path is None:
+        raise ValueError(f"HIBE: {what} is required")
+    if not isinstance(id_path, str):
+        raise ValueError(f"HIBE: {what} must be a string")
+    if id_path == "":
+        if allow_root:
+            return ""
+        raise ValueError(
+            f"HIBE: {what} must not be blank; pass allow_root_path=True "
+            "to use the root identity path explicitly"
+        )
+    if id_path != id_path.strip():
+        raise ValueError(f"HIBE: {what} must not have leading or trailing whitespace")
+    if any(ch in id_path for ch in "\r\n"):
+        raise ValueError(f"HIBE: {what} must not contain line breaks")
+    labels = id_path.split("/")
+    if any(label == "" for label in labels):
+        raise ValueError(f"HIBE: {what} must not contain empty path segments")
+    return "/".join(
+        _validate_hibe_label(label, what=f"{what} segment {idx}")
+        for idx, label in enumerate(labels)
+    )
+
+
+def _previous_hibe_sk_path(keystore: Path, group_name: str) -> Path:
+    """Return an unused archive path for a superseded HIBE identity key."""
+    base = keystore / f"{group_name}.hibe.sk.previous.{time.time_ns()}"
+    candidate = base
+    counter = 1
+    while candidate.exists():
+        candidate = keystore / f"{base.name}.{counter}"
+        counter += 1
+    return candidate
+
+
+def _hibe_root_marker_path(keystore: Path, group_name: str) -> Path:
+    """Marker showing an empty active idpath is intentional root use."""
+    return keystore / f"{group_name}.hibe.idpath.root"
+
+
+def _encode_hibe_history_path(path: str) -> str:
+    """Encode one validated path for the line-oriented idpath history file."""
+    return _HIBE_HISTORY_ROOT_SENTINEL if path == "" else path
+
+
+def _decode_hibe_history_line(line: str, *, what: str) -> str:
+    """Decode one idpath history line, including explicit prior root paths."""
+    if line == _HIBE_HISTORY_ROOT_SENTINEL:
+        return ""
+    return _normalize_hibe_path(line, what=what)
 
 
 @dataclass
@@ -406,6 +545,7 @@ class HibeGroupCipher:
     _msk: bytes | None = field(default=None, repr=False)
     _keystore: Path | None = field(default=None, repr=False)
     _group_name: str = ""
+    _allow_root_path: bool = field(default=False, repr=False)
     # Paths this group sealed to before rotations, newest first. Lets the
     # authority (msk holder) open pre-rotation entries; persisted in
     # ``<group>.hibe.idpath.history``, one path per line.
@@ -425,6 +565,7 @@ class HibeGroupCipher:
         authority_mpk: bytes | None = None,
         id_path: str | None = None,
         max_depth: int = 2,
+        allow_root_path: bool = False,
     ) -> HibeGroupCipher:
         """Mint a fresh hibe group.
 
@@ -436,29 +577,40 @@ class HibeGroupCipher:
         jwe/btn create semantics): this keystore becomes its own authority
         (per-authority trust root) — runs Setup, keeps the msk, and
         self-delegates a reader key for ``id_path`` (default ``"self"``).
+
+        ``id_path`` is validated as slash-separated labels with no empty
+        segments and no lossy whitespace trimming. The root identity path is
+        the empty string and is accepted only with ``allow_root_path=True``.
         """
         hibe = _native_hibe()
         keystore.mkdir(parents=True, exist_ok=True)
         sk: bytes | None = None
         msk: bytes | None = None
         if authority_mpk is None:
-            path = id_path or "self"
+            path = (
+                "self"
+                if id_path is None
+                else _normalize_hibe_path(
+                    id_path,
+                    allow_root=allow_root_path,
+                )
+            )
             mpk_new, msk_new = hibe.setup(max_depth)
             sk_new = hibe.keygen(mpk_new, msk_new, path)
             _atomic_write_secret_bytes(keystore / f"{group_name}.hibe.msk", msk_new)
             _atomic_write_secret_bytes(keystore / f"{group_name}.hibe.sk", sk_new)
             mpk, msk, sk = mpk_new, msk_new, sk_new
         else:
-            if not id_path:
-                raise ValueError(
-                    "HIBE.create: id_path is required when sealing to an "
-                    "external authority_mpk"
-                )
-            path = id_path
+            path = _normalize_hibe_path(id_path, allow_root=allow_root_path)
             mpk = authority_mpk
             hibe.mpk_fingerprint(mpk)  # parse now: reject malformed mpk at mint
         (keystore / f"{group_name}.hibe.mpk").write_bytes(mpk)
         _atomic_write_text(keystore / f"{group_name}.hibe.idpath", path)
+        root_marker = _hibe_root_marker_path(keystore, group_name)
+        if path == "":
+            _atomic_write_text(root_marker, "root\n")
+        elif root_marker.exists():
+            root_marker.unlink()
         return cls(
             _mpk=mpk,
             _id_path=path,
@@ -466,6 +618,7 @@ class HibeGroupCipher:
             _msk=msk,
             _keystore=keystore,
             _group_name=group_name,
+            _allow_root_path=allow_root_path and path == "",
         )
 
     @classmethod
@@ -481,28 +634,33 @@ class HibeGroupCipher:
                 f"was this group minted (or its kit absorbed) here?"
             )
         history_path = keystore / f"{group_name}.hibe.idpath.history"
-        prior = (
-            [
-                line.strip()
-                for line in history_path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-            if history_path.exists()
-            else []
+        prior = []
+        if history_path.exists():
+            for idx, line in enumerate(history_path.read_text(encoding="utf-8").splitlines()):
+                prior.append(
+                    _decode_hibe_history_line(
+                        line,
+                        what=f"{group_name}.hibe.idpath.history line {idx + 1}",
+                    )
+                )
+        allow_root_path = _hibe_root_marker_path(keystore, group_name).exists()
+        id_path = _normalize_hibe_path(
+            idpath_path.read_text(encoding="utf-8"),
+            what=f"{group_name}.hibe.idpath",
+            allow_root=allow_root_path,
         )
         prior_sks = [
             p.read_bytes()
-            for p in sorted(
-                keystore.glob(f"{group_name}.hibe.sk.previous.*"), reverse=True
-            )
+            for p in sorted(keystore.glob(f"{group_name}.hibe.sk.previous.*"), reverse=True)
         ]
         return cls(
             _mpk=mpk_path.read_bytes(),
-            _id_path=idpath_path.read_text(encoding="utf-8").strip(),
+            _id_path=id_path,
             _sk=sk_path.read_bytes() if sk_path.exists() else None,
             _msk=msk_path.read_bytes() if msk_path.exists() else None,
             _keystore=keystore,
             _group_name=group_name,
+            _allow_root_path=allow_root_path and id_path == "",
             _prior_paths=prior,
             _prior_sks=prior_sks,
         )
@@ -520,10 +678,13 @@ class HibeGroupCipher:
         return _native_hibe().mpk_fingerprint(self._mpk)
 
     def encrypt(self, plaintext: bytes, aad: bytes = b"") -> bytes:
-        if not self._mpk or not self._id_path:
-            raise NotAPublisherError(
-                "HIBE: no authority mpk / identity path in this keystore"
-            )
+        if not self._mpk:
+            raise NotAPublisherError("HIBE: no authority mpk in this keystore")
+        self._id_path = _normalize_hibe_path(
+            self._id_path,
+            what="id_path",
+            allow_root=self._allow_root_path,
+        )
         return _native_hibe().seal(self._mpk, self._id_path, plaintext, aad or None)
 
     def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
@@ -548,8 +709,7 @@ class HibeGroupCipher:
                 continue
         if not tried:
             raise NotARecipientError(
-                "HIBE: no delegated identity key for this group's path in "
-                "this keystore"
+                "HIBE: no delegated identity key for this group's path in this keystore"
             )
         raise NotARecipientError(
             "HIBE: no identity key in this keystore opens this group's "
@@ -561,21 +721,38 @@ class HibeGroupCipher:
         minting the same path twice."""
         hibe = _native_hibe()
         seen: set[str] = set()
+        target_paths = [
+            _normalize_hibe_path(
+                path,
+                what="id_path",
+                allow_root=True,
+            )
+            for path in [self._id_path, *self._prior_paths]
+        ]
+
+        def emit(sk: bytes):
+            path = _normalize_hibe_path(
+                hibe.key_id_path(sk),
+                what="identity key path",
+                allow_root=True,
+            )
+            if path not in seen:
+                seen.add(path)
+                yield sk
+            for target_path in target_paths:
+                if target_path in seen:
+                    continue
+                derived = self._derive_from_key(sk, target_path)
+                if derived is not None:
+                    seen.add(target_path)
+                    yield derived
+
         if self._sk is not None:
-            seen.add(hibe.key_id_path(self._sk))
-            yield self._sk
-        derived = self._derive_from_held(self._id_path)
-        if derived is not None and self._id_path not in seen:
-            seen.add(self._id_path)
-            yield derived
+            yield from emit(self._sk)
         for old_sk in self._prior_sks:
-            path = hibe.key_id_path(old_sk)
-            if path in seen:
-                continue
-            seen.add(path)
-            yield old_sk
+            yield from emit(old_sk)
         if self._msk is not None:
-            for path in [self._id_path, *self._prior_paths]:
+            for path in target_paths:
                 if path in seen:
                     continue
                 seen.add(path)
@@ -584,41 +761,55 @@ class HibeGroupCipher:
     def _derive_from_held(self, target_path: str) -> bytes | None:
         """The held key if it sits on ``target_path``, derived down from an
         ancestor when needed (BBG opens only with an exact-path key)."""
-        hibe = _native_hibe()
         if self._sk is None:
             return None
-        held = hibe.key_id_path(self._sk)
+        return self._derive_from_key(self._sk, target_path)
+
+    def _derive_from_key(self, source_sk: bytes, target_path: str) -> bytes | None:
+        """Derive ``source_sk`` to ``target_path`` when it is an ancestor."""
+        hibe = _native_hibe()
+        target_path = _normalize_hibe_path(target_path, what="target_path")
+        held = _normalize_hibe_path(
+            hibe.key_id_path(source_sk),
+            what="identity key path",
+            allow_root=True,
+        )
         if held == target_path:
-            return self._sk
+            return source_sk
         target_labels = target_path.split("/")
         held_labels = held.split("/") if held else []
         if held_labels != target_labels[: len(held_labels)]:
             return None
-        sk = self._sk
-        for label in target_labels[len(held_labels):]:
+        sk = source_sk
+        for label in target_labels[len(held_labels) :]:
             sk = hibe.delegate(self._mpk, sk, label)
         return sk
 
-    def mint_reader_key(self, id_path: str) -> bytes:
+    def mint_reader_key(self, id_path: str, *, allow_root_path: bool = False) -> bytes:
         """Authority-side grant: generate the identity key for ``id_path``
-        from the msk. The admin layer packages this into a ``hibe-id-key``
-        kit; the cipher only mints the material."""
+        from the msk.
+
+        ``id_path`` follows the same validated, slash-separated rules as
+        group seal paths. The root path is allowed only when
+        ``allow_root_path=True`` is passed explicitly. The admin layer
+        packages the result into a ``hibe-id-key`` kit; the cipher only mints
+        the material.
+        """
         if self._msk is None:
-            raise NotAPublisherError(
-                "HIBE: only the authority (msk holder) can mint reader keys"
-            )
-        return _native_hibe().keygen(self._mpk, self._msk, id_path)
+            raise NotAPublisherError("HIBE: only the authority (msk holder) can mint reader keys")
+        path = _normalize_hibe_path(id_path, allow_root=allow_root_path)
+        return _native_hibe().keygen(self._mpk, self._msk, path)
 
     def delegate_reader_key(self, child_label: str) -> bytes:
         """Parent-side grant: derive the key one level below this
-        keystore's own identity key. No msk involved."""
+        keystore's own identity key. ``child_label`` must be one label, not a
+        slash-separated path. No msk involved."""
         if self._sk is None:
-            raise NotARecipientError(
-                "HIBE: no identity key to delegate from in this keystore"
-            )
-        return _native_hibe().delegate(self._mpk, self._sk, child_label)
+            raise NotARecipientError("HIBE: no identity key to delegate from in this keystore")
+        label = _validate_hibe_label(child_label, what="child_label")
+        return _native_hibe().delegate(self._mpk, self._sk, label)
 
-    def rotate_id_path(self, new_path: str) -> None:
+    def rotate_id_path(self, new_path: str, *, allow_root_path: bool = False) -> None:
         """Point future seals at ``new_path`` (the policy-path rotation).
 
         This is admission rotation, not revocation: pre-rotation seals stay
@@ -627,34 +818,52 @@ class HibeGroupCipher:
         new path keeps access to new seals too. Pick a sibling path (e.g.
         bump the policy-hash leaf) to cut off exact-path grantees going
         forward. Authority-only: the msk mints this keystore's own fresh
-        key for the new path.
+        key for the new path. ``new_path`` is validated without trimming or
+        collapsing labels; the root path requires ``allow_root_path=True``.
         """
         if self._msk is None:
             raise NotAPublisherError(
-                "HIBE: only the authority (msk holder) can rotate the "
-                "identity path"
+                "HIBE: only the authority (msk holder) can rotate the identity path"
             )
         if self._keystore is None:
             raise CipherError(
                 "HIBE: this cipher instance is not bound to a keystore "
                 "(recipient view); rotate from the authority's ceremony"
             )
+        new_path = _normalize_hibe_path(new_path, allow_root=allow_root_path)
         if new_path == self._id_path:
             raise ValueError(f"HIBE: new path equals the current path {new_path!r}")
         sk = _native_hibe().keygen(self._mpk, self._msk, new_path)
-        _atomic_write_secret_bytes(self._keystore / f"{self._group_name}.hibe.sk", sk)
-        _atomic_write_text(
-            self._keystore / f"{self._group_name}.hibe.idpath", new_path
+        outgoing_path = _normalize_hibe_path(
+            self._id_path,
+            what="current id_path",
+            allow_root=self._allow_root_path,
         )
-        # Record the outgoing path so the authority keeps opening the
-        # entries sealed under it (newest first).
-        self._prior_paths.insert(0, self._id_path)
+        prior_paths = [outgoing_path, *self._prior_paths]
         _atomic_write_text(
             self._keystore / f"{self._group_name}.hibe.idpath.history",
-            "\n".join(self._prior_paths) + "\n",
+            "\n".join(_encode_hibe_history_path(path) for path in prior_paths) + "\n",
         )
+        if self._sk is not None:
+            _atomic_write_secret_bytes(
+                _previous_hibe_sk_path(self._keystore, self._group_name),
+                self._sk,
+            )
+        _atomic_write_secret_bytes(self._keystore / f"{self._group_name}.hibe.sk", sk)
+        _atomic_write_text(self._keystore / f"{self._group_name}.hibe.idpath", new_path)
+        root_marker = _hibe_root_marker_path(self._keystore, self._group_name)
+        if new_path == "":
+            _atomic_write_text(root_marker, "root\n")
+        elif root_marker.exists():
+            root_marker.unlink()
+        # Record the outgoing path so the authority keeps opening the
+        # entries sealed under it (newest first).
+        if self._sk is not None:
+            self._prior_sks.insert(0, self._sk)
+        self._prior_paths = prior_paths
         self._sk = sk
         self._id_path = new_path
+        self._allow_root_path = allow_root_path and new_path == ""
 
 
 # ---------------------------------------------------------------------------
@@ -741,9 +950,7 @@ class BtnGroupCipher:
         # exist, somebody minted into the same group before us and
         # our caller (admin add_group, fresh ceremony bootstrap) made
         # an invariant mistake; surfacing the conflict is correct.
-        LocalFileKeystoreBackend(keystore).write_state(
-            group_name, prior=None, new=state_bytes
-        )
+        LocalFileKeystoreBackend(keystore).write_state(group_name, prior=None, new=state_bytes)
         atomic_write_bytes(keystore / f"{group_name}.btn.mykit", self_kit)
         return cls(
             _state=state,
@@ -930,9 +1137,7 @@ class BtnGroupCipher:
         retired-pair collision on disk.
         """
         if self._state is None or self._keystore is None:
-            raise NotAPublisherError(
-                "btn: cannot rotate a cipher with no publisher state on disk"
-            )
+            raise NotAPublisherError("btn: cannot rotate a cipher with no publisher state on disk")
 
         from .btn_keystore import BtnKeystore
 

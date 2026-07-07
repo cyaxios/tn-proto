@@ -2,7 +2,7 @@ name: release-python
 
 # Triggered on tag push (e.g. v0.6.0a2) or manual dispatch. Builds the
 # SINGLE tn-proto wheel — the pure-Python `tn` package plus the bundled
-# `tn._native` Rust extension (former tn-core + tn-btn, abi3-py39) — for
+# `tn._native` Rust extension (core + btn + hibe, abi3-py39) — for
 # Linux/macOS/Windows via maturin, then uploads to TestPyPI by default
 # (or real PyPI on a manual run with target=pypi).
 #

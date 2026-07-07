@@ -10,15 +10,33 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-from tn import _hibe  # noqa: E402
-from tn.cipher import (  # noqa: E402
+from tn import _hibe
+from tn.cipher import (
     BtnGroupCipher,
     HibeGroupCipher,
     JWEGroupCipher,
     NotARecipientError,
+)
+
+
+def _hibe_available() -> bool:
+    try:
+        _hibe.setup(1)
+    except RuntimeError as exc:
+        if "HIBE native extension is unavailable" in str(exc):
+            return False
+        raise
+    return True
+
+
+pytestmark = pytest.mark.skipif(
+    not _hibe_available(),
+    reason="tn._native was built without the HIBE submodule",
 )
 
 
@@ -51,9 +69,7 @@ def test_hibe_external_authority_write_only_then_granted() -> None:
     mpk, msk = _hibe.setup(2)
     with tempfile.TemporaryDirectory() as td:
         ks = Path(td)
-        c = HibeGroupCipher.create(
-            ks, "g1", authority_mpk=mpk, id_path="reader-did/policy-1"
-        )
+        c = HibeGroupCipher.create(ks, "g1", authority_mpk=mpk, id_path="reader-did/policy-1")
         blob = c.encrypt(b"governed")
         try:
             c.decrypt(blob)
@@ -71,9 +87,7 @@ def test_hibe_ancestor_key_derives_down() -> None:
     mpk, msk = _hibe.setup(2)
     with tempfile.TemporaryDirectory() as td:
         ks = Path(td)
-        c = HibeGroupCipher.create(
-            ks, "g1", authority_mpk=mpk, id_path="reader-did/policy-1"
-        )
+        c = HibeGroupCipher.create(ks, "g1", authority_mpk=mpk, id_path="reader-did/policy-1")
         blob = c.encrypt(b"delegated read")
         (ks / "g1.hibe.sk").write_bytes(_hibe.keygen(mpk, msk, "reader-did"))
         assert HibeGroupCipher.load(ks, "g1").decrypt(blob) == b"delegated read"
@@ -83,9 +97,7 @@ def test_hibe_wrong_path_key_cannot_decrypt() -> None:
     mpk, msk = _hibe.setup(2)
     with tempfile.TemporaryDirectory() as td:
         ks = Path(td)
-        c = HibeGroupCipher.create(
-            ks, "g1", authority_mpk=mpk, id_path="reader-did/policy-1"
-        )
+        c = HibeGroupCipher.create(ks, "g1", authority_mpk=mpk, id_path="reader-did/policy-1")
         blob = c.encrypt(b"not for you")
         (ks / "g1.hibe.sk").write_bytes(_hibe.keygen(mpk, msk, "other-did/policy-1"))
         try:

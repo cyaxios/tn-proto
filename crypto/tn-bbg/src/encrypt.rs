@@ -24,7 +24,7 @@
 
 use bls12_381_plus::ff::Field;
 use bls12_381_plus::{pairing, G1Affine, G1Projective, G2Affine, Gt, Scalar};
-use rand_core::RngCore;
+use rand_core::{CryptoRng, RngCore};
 
 use crate::codec::{gt_bytes, read_g1, read_g2, read_gt, Reader, G1_LEN, G2_LEN, VERSION};
 use crate::error::{BbgError, Result};
@@ -43,7 +43,11 @@ pub struct Ciphertext {
 
 /// The randomized BBG head shared by Encrypt and Encapsulate:
 /// `(mask = e(g1,g2)^s, B = g^s, C = base^s)`.
-fn encaps_head(pp: &PublicParams, id_scalars: &[Scalar], rng: &mut impl RngCore) -> (Gt, G1Affine, G2Affine) {
+fn encaps_head(
+    pp: &PublicParams,
+    id_scalars: &[Scalar],
+    rng: &mut (impl RngCore + CryptoRng),
+) -> (Gt, G1Affine, G2Affine) {
     let s = Scalar::random(rng);
     let mask = pairing(&pp.g1, &pp.g2) * s;
     let b = G1Affine::from(G1Projective::from(pp.g) * s);
@@ -56,11 +60,18 @@ fn encaps_head(pp: &PublicParams, id_scalars: &[Scalar], rng: &mut impl RngCore)
 fn recover_mask(sk: &PrivateKey, b: &G1Affine, c: &G2Affine) -> Gt {
     let left = pairing(b, &sk.a0);
     let right = pairing(&sk.a1, c);
-    left * right.invert().expect("pairing of curve points is never the GT identity")
+    left * right
+        .invert()
+        .expect("pairing of curve points is never the GT identity")
 }
 
 /// Encrypts a GT element to `id` under the authority's public params.
-pub fn encrypt(pp: &PublicParams, id: &Identity, m: &Gt, mut rng: impl RngCore) -> Result<Ciphertext> {
+pub fn encrypt(
+    pp: &PublicParams,
+    id: &Identity,
+    m: &Gt,
+    mut rng: impl RngCore + CryptoRng,
+) -> Result<Ciphertext> {
     if id.depth() > pp.max_depth() {
         return Err(BbgError::IdentityTooDeep);
     }
@@ -76,7 +87,10 @@ pub fn decrypt(pp: &PublicParams, sk: &PrivateKey, ct: &Ciphertext) -> Result<Gt
     let _ = pp;
     let mask = recover_mask(sk, &ct.b, &ct.c);
     // m = A * mask^{-1}
-    Ok(ct.a * mask.invert().expect("mask is a pairing of curve points, never GT identity"))
+    Ok(ct.a
+        * mask
+            .invert()
+            .expect("mask is a pairing of curve points, never GT identity"))
 }
 
 /// BBG key encapsulation: returns the shared masking element and the two
@@ -85,7 +99,7 @@ pub fn decrypt(pp: &PublicParams, sk: &PrivateKey, ct: &Ciphertext) -> Result<Gt
 pub(crate) fn encapsulate(
     pp: &PublicParams,
     id_scalars: &[Scalar],
-    mut rng: impl RngCore,
+    mut rng: impl RngCore + CryptoRng,
 ) -> (Gt, G1Affine, G2Affine) {
     encaps_head(pp, id_scalars, &mut rng)
 }

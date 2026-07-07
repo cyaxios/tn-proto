@@ -31,7 +31,8 @@ use crate::tnpkg::{
 use crate::{Error, Result};
 
 use admin_clock::{
-    append_admin_envelopes, build_local_admin_clock, scan_admin_envelopes, try_accept_admin_envelope,
+    append_admin_envelopes, build_local_admin_clock, scan_admin_envelopes,
+    try_accept_admin_envelope,
 };
 use receipts::{noop_receipt, rejected_receipt};
 use seed_builders::{build_identity_seed_body, build_kit_bundle_body, build_project_seed_body};
@@ -305,6 +306,39 @@ impl Runtime {
         let sk = ed25519_dalek::SigningKey::from_bytes(&priv_bytes);
         sign_manifest(&mut manifest, &sk)?;
 
+        write_tnpkg(out_path, &manifest, &body)?;
+        Ok(out_path.to_path_buf())
+    }
+
+    pub(crate) fn export_kit_bundle_from_keystore(
+        &self,
+        out_path: &Path,
+        source_keystore: &Path,
+        to_did: Option<&str>,
+        groups: &[String],
+    ) -> Result<PathBuf> {
+        let (body, kits_meta) = build_kit_bundle_body(source_keystore, false, Some(groups))?;
+        let mut state_obj = Map::new();
+        state_obj.insert("kits".into(), Value::Array(kits_meta));
+        state_obj.insert("kind".into(), Value::String("readers-only".into()));
+
+        let mut manifest = Manifest {
+            kind: ManifestKind::KitBundle,
+            version: crate::tnpkg::MANIFEST_VERSION,
+            publisher_identity: self.did().to_string(),
+            recipient_identity: to_did.map(str::to_string),
+            ceremony_id: self.cfg.ceremony.id.clone(),
+            as_of: now_iso_millis(),
+            scope: "kit_bundle".into(),
+            clock: VectorClock::new(),
+            event_count: 0,
+            head_row_hash: None,
+            state: Some(Value::Object(state_obj)),
+            manifest_signature_b64: None,
+        };
+        let priv_bytes = self.device_private_bytes();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&priv_bytes);
+        sign_manifest(&mut manifest, &sk)?;
         write_tnpkg(out_path, &manifest, &body)?;
         Ok(out_path.to_path_buf())
     }

@@ -10,9 +10,7 @@ use bls12_381_plus::group::Group;
 use bls12_381_plus::Gt;
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use tn_hibe::{
-    encrypt, gt_to_bytes, kem_wrap, keygen, mpk_fingerprint, seal, setup, Identity,
-};
+use tn_hibe::{kem_wrap, keygen, mpk_fingerprint, raw, seal, setup, Identity};
 
 const PATHS: [&str; 3] = ["alice", "alice/policy-1", "alice/policy-1/epoch-0"];
 
@@ -28,7 +26,7 @@ fn main() {
         rng.fill_bytes(&mut cek);
         let wrapped = kem_wrap(&pp, &id, &cek, &mut rng).expect("kem_wrap");
         let m = Gt::random(&mut rng);
-        let ct = encrypt(&pp, &id, &m, &mut rng).expect("encrypt");
+        let ct = raw::encrypt(&pp, &id, &m, &mut rng).expect("encrypt");
         let body = format!("tn-hibe golden body for {path}").into_bytes();
         let sealed = seal(&pp, &id, &body, &mut rng).expect("seal");
         paths.push(serde_json::json!({
@@ -36,7 +34,7 @@ fn main() {
             "sk": hex::encode(sk.to_bytes()),
             "cek": hex::encode(cek),
             "wrapped": hex::encode(&wrapped),
-            "m": hex::encode(gt_to_bytes(&m)),
+            "m": hex::encode(raw::gt_to_bytes(&m)),
             "ct": hex::encode(ct.to_bytes()),
             "body": hex::encode(&body),
             "sealed": hex::encode(&sealed),

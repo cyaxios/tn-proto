@@ -8,10 +8,11 @@
 //! off (an Apache-only `tn-core` without the LGPL scheme), a hibe group
 //! yields a clear `NotImplemented` from the runtime.
 //!
-//! Wire compatibility: the group `ciphertext` blob and the candidate-key
-//! decrypt order match `tn/cipher.py::HibeGroupCipher` byte-for-byte, so a
-//! record written by the native runtime is identical to one written by the
-//! pure Python pipeline and vice versa.
+//! Wire compatibility: the group `ciphertext` blob format and the
+//! candidate-key decrypt order match `tn/cipher.py::HibeGroupCipher`, so
+//! records written by the native runtime and Python pipeline are mutually
+//! readable. Ciphertext bytes are randomized and are not expected to match
+//! for the same plaintext.
 
 use crate::{Error, Result};
 
@@ -37,10 +38,13 @@ impl super::GroupCipher for HibePlaceholder {
 
 #[cfg(feature = "hibe")]
 pub use real::HibeCipher;
+#[cfg(feature = "hibe")]
+pub(crate) use real::{identity_to_path, validate_identity_path};
 
 #[cfg(feature = "hibe")]
 mod real {
     use std::collections::HashSet;
+    use std::str;
 
     use rand_core::OsRng;
     use tn_hibe::{
@@ -52,6 +56,35 @@ mod real {
 
     fn hibe_err(e: HibeError) -> Error {
         Error::Cipher(format!("hibe: {e}"))
+    }
+
+    pub(crate) fn validate_identity_path(path: &str) -> Result<Identity> {
+        Identity::try_from_str_path(path).map_err(hibe_err)
+    }
+
+    pub(crate) fn identity_to_path(id: &Identity) -> Result<String> {
+        let label_refs: Vec<&[u8]> = id.labels().iter().map(Vec::as_slice).collect();
+        Identity::try_from_path(&label_refs).map_err(hibe_err)?;
+        let mut out = Vec::with_capacity(id.labels().len());
+        for label in id.labels() {
+            let s = str::from_utf8(label).map_err(|_| {
+                Error::Cipher("hibe: identity label is not valid UTF-8".to_string())
+            })?;
+            out.push(s.to_string());
+        }
+        Ok(out.join("/"))
+    }
+
+    fn add_candidate(
+        out: &mut Vec<PrivateKey>,
+        seen: &mut HashSet<String>,
+        sk: PrivateKey,
+    ) -> Result<()> {
+        let key_path = path_of(&sk)?;
+        if seen.insert(key_path) {
+            out.push(sk);
+        }
+        Ok(())
     }
 
     /// One hibe group's key material, loaded from the keystore.
@@ -84,6 +117,10 @@ mod real {
             prior_sks: Vec<Vec<u8>>,
         ) -> Result<Self> {
             let pp = PublicParams::from_bytes(mpk).map_err(hibe_err)?;
+            validate_identity_path(id_path)?;
+            for prior_path in &prior_paths {
+                validate_identity_path(prior_path)?;
+            }
             Ok(Self {
                 pp,
                 id_path: id_path.to_string(),
@@ -95,37 +132,41 @@ mod real {
         }
 
         /// Decryption-key candidates, most likely first, without minting the
-        /// same path twice. Byte-for-byte the order of
-        /// `HibeGroupCipher._candidate_keys`.
+        /// same path twice. Mirrors `HibeGroupCipher._candidate_keys`: try
+        /// held keys directly, derive ancestor keys to active and prior
+        /// sealing paths, then mint exact-path keys when this keystore is the
+        /// authority.
         fn candidate_keys(&self) -> Result<Vec<PrivateKey>> {
             let mut out: Vec<PrivateKey> = Vec::new();
             let mut seen: HashSet<String> = HashSet::new();
+            let mut target_paths = vec![self.id_path.clone()];
+            target_paths.extend(self.prior_paths.iter().cloned());
 
             if let Some(sk_bytes) = &self.sk {
                 let sk = PrivateKey::from_bytes(sk_bytes).map_err(hibe_err)?;
-                seen.insert(path_of(&sk));
-                out.push(sk.clone());
-                if let Some(derived) = derive_from_held(&self.pp, &sk, &self.id_path)? {
-                    if seen.insert(self.id_path.clone()) {
-                        out.push(derived);
+                add_candidate(&mut out, &mut seen, sk.clone())?;
+                for target_path in &target_paths {
+                    if let Some(derived) = derive_from_held(&self.pp, &sk, target_path)? {
+                        add_candidate(&mut out, &mut seen, derived)?;
                     }
                 }
             }
 
             for old in &self.prior_sks {
                 let sk = PrivateKey::from_bytes(old).map_err(hibe_err)?;
-                if seen.insert(path_of(&sk)) {
-                    out.push(sk);
+                add_candidate(&mut out, &mut seen, sk.clone())?;
+                for target_path in &target_paths {
+                    if let Some(derived) = derive_from_held(&self.pp, &sk, target_path)? {
+                        add_candidate(&mut out, &mut seen, derived)?;
+                    }
                 }
             }
 
             if let Some(msk_bytes) = &self.msk {
                 let msk = MasterKey::from_bytes(msk_bytes).map_err(hibe_err)?;
-                let mut paths = vec![self.id_path.clone()];
-                paths.extend(self.prior_paths.iter().cloned());
-                for p in paths {
+                for p in target_paths {
                     if seen.insert(p.clone()) {
-                        let id = Identity::from_str_path(&p);
+                        let id = validate_identity_path(&p)?;
                         out.push(keygen(&self.pp, &msk, &id, OsRng).map_err(hibe_err)?);
                     }
                 }
@@ -141,7 +182,7 @@ mod real {
         }
 
         fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-            let id = Identity::from_str_path(&self.id_path);
+            let id = validate_identity_path(&self.id_path)?;
             seal_with_aad(&self.pp, &id, plaintext, aad, OsRng).map_err(hibe_err)
         }
 
@@ -174,13 +215,8 @@ mod real {
     }
 
     /// The slash-joined identity path a key opens.
-    fn path_of(sk: &PrivateKey) -> String {
-        sk.identity()
-            .labels()
-            .iter()
-            .map(|l| String::from_utf8_lossy(l).into_owned())
-            .collect::<Vec<_>>()
-            .join("/")
+    fn path_of(sk: &PrivateKey) -> Result<String> {
+        identity_to_path(sk.identity())
     }
 
     /// The held key if it sits on `target_path`, derived down from an
@@ -192,7 +228,7 @@ mod real {
         target_path: &str,
     ) -> Result<Option<PrivateKey>> {
         let held = sk.identity();
-        let target = Identity::from_str_path(target_path);
+        let target = validate_identity_path(target_path)?;
         if held == &target {
             return Ok(Some(sk.clone()));
         }
@@ -223,38 +259,83 @@ mod test {
             .to_bytes();
 
         // Reader-only cipher: mpk + idpath + sk, no master secret.
-        let reader = HibeCipher::new(&mpk, "reader/policy", Some(reader_sk), None, vec![], vec![])
-            .unwrap();
+        let reader =
+            HibeCipher::new(&mpk, "reader/policy", Some(reader_sk), None, vec![], vec![]).unwrap();
         let blob = reader.encrypt(b"body").unwrap();
         assert_eq!(reader.decrypt(&blob).unwrap(), b"body");
 
         // AAD bind + gate + no-aad back-compat.
-        let sealed = reader.encrypt_with_aad(b"governed", b"policy=finra").unwrap();
-        assert_eq!(reader.decrypt_with_aad(&sealed, b"policy=finra").unwrap(), b"governed");
+        let sealed = reader
+            .encrypt_with_aad(b"governed", b"policy=finra")
+            .unwrap();
+        assert_eq!(
+            reader.decrypt_with_aad(&sealed, b"policy=finra").unwrap(),
+            b"governed"
+        );
         assert!(reader.decrypt_with_aad(&sealed, b"policy=other").is_err());
         assert!(reader.decrypt(&sealed).is_err());
 
         // Authority cipher (holds msk, not the exact sk) opens by minting the
         // path key on demand — exercises the msk-minted candidate branch.
-        let authority =
-            HibeCipher::new(&mpk, "reader/policy", None, Some(msk.to_bytes()), vec![], vec![])
-                .unwrap();
+        let authority = HibeCipher::new(
+            &mpk,
+            "reader/policy",
+            None,
+            Some(msk.to_bytes()),
+            vec![],
+            vec![],
+        )
+        .unwrap();
         assert_eq!(authority.decrypt(&blob).unwrap(), b"body");
 
         // An ancestor-path key opens by deriving down (derive_from_held).
         let dept_sk = keygen(&pp, &msk, &Identity::from_str_path("reader"), OsRng)
             .unwrap()
             .to_bytes();
-        let dept = HibeCipher::new(&mpk, "reader/policy", Some(dept_sk), None, vec![], vec![])
-            .unwrap();
+        let dept =
+            HibeCipher::new(&mpk, "reader/policy", Some(dept_sk), None, vec![], vec![]).unwrap();
         assert_eq!(dept.decrypt(&blob).unwrap(), b"body");
 
         // A stranger's key cannot open.
         let stranger_sk = keygen(&pp, &msk, &Identity::from_str_path("other/policy"), OsRng)
             .unwrap()
             .to_bytes();
-        let stranger =
-            HibeCipher::new(&mpk, "reader/policy", Some(stranger_sk), None, vec![], vec![]).unwrap();
+        let stranger = HibeCipher::new(
+            &mpk,
+            "reader/policy",
+            Some(stranger_sk),
+            None,
+            vec![],
+            vec![],
+        )
+        .unwrap();
         assert!(stranger.decrypt(&blob).is_err());
+    }
+
+    #[test]
+    fn prior_ancestor_key_derives_to_current_and_prior_paths() {
+        let (pp, msk) = setup(2, OsRng).unwrap();
+        let mpk = pp.to_bytes();
+
+        let old_writer = HibeCipher::new(&mpk, "reader/old", None, None, vec![], vec![]).unwrap();
+        let old_blob = old_writer.encrypt(b"old body").unwrap();
+        let new_writer = HibeCipher::new(&mpk, "reader/new", None, None, vec![], vec![]).unwrap();
+        let new_blob = new_writer.encrypt(b"new body").unwrap();
+
+        let archived_ancestor_sk = keygen(&pp, &msk, &Identity::from_str_path("reader"), OsRng)
+            .unwrap()
+            .to_bytes();
+        let reader = HibeCipher::new(
+            &mpk,
+            "reader/new",
+            None,
+            None,
+            vec!["reader/old".to_string()],
+            vec![archived_ancestor_sk],
+        )
+        .unwrap();
+
+        assert_eq!(reader.decrypt(&old_blob).unwrap(), b"old body");
+        assert_eq!(reader.decrypt(&new_blob).unwrap(), b"new body");
     }
 }

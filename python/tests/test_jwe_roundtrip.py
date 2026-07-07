@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 import tn
+import tn.reader
 
 
 def main() -> int:
@@ -51,10 +52,9 @@ def main() -> int:
         cfg = tn.current_config()
         assert cfg.cipher_name == "jwe"
 
-        # 2026-04-25 read-reshape: this script introspects entry["envelope"] /
-        # ["plaintext"] / ["valid"], so it needs the audit-grade shape. The
-        # default tn.read() now returns a flat decrypted dict.
-        entries = list(tn.read(log_path, cfg, raw=True))
+        # This script introspects entry["envelope"] / ["plaintext"] /
+        # ["valid"], so it uses the audit-grade reader shape directly.
+        entries = list(tn.reader.read(log_path, cfg))
         print(f"\nread back {len(entries)} entries")
         assert len(entries) == 4, f"expected 4 entries, got {len(entries)}"
 

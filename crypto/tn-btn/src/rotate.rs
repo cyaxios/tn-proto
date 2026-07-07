@@ -68,19 +68,13 @@ impl RetiredPublisherState {
         if buf.len() != EXPECTED_LEN {
             return Err(Error::Malformed {
                 kind: "retired_publisher_state",
-                reason: format!(
-                    "buffer length {} != expected {EXPECTED_LEN}",
-                    buf.len()
-                ),
+                reason: format!("buffer length {} != expected {EXPECTED_LEN}", buf.len()),
             });
         }
         if buf[0] != WIRE_MAGIC {
             return Err(Error::Malformed {
                 kind: "retired_publisher_state",
-                reason: format!(
-                    "wrong magic byte {:#x}; expected {WIRE_MAGIC:#x}",
-                    buf[0]
-                ),
+                reason: format!("wrong magic byte {:#x}; expected {WIRE_MAGIC:#x}", buf[0]),
             });
         }
         if buf[1] != WIRE_VERSION {
@@ -130,7 +124,9 @@ impl RetiredPublisherState {
 /// just-deposed state, archived for keywalk on historical ciphertexts.
 #[derive(Debug)]
 pub struct RotationOutcome {
+    /// Publisher state that becomes active for future emits.
     pub active: PublisherState,
+    /// Previously active state, archived for historical decrypts.
     pub retired: RetiredPublisherState,
 }
 
@@ -161,8 +157,7 @@ mod tests {
             retired_at_unix_secs: 1_700_123_456,
         };
         let bytes = original.to_bytes();
-        let decoded = RetiredPublisherState::from_bytes(&bytes)
-            .expect("valid bytes should decode");
+        let decoded = RetiredPublisherState::from_bytes(&bytes).expect("valid bytes should decode");
         assert_eq!(decoded.publisher_id(), original.publisher_id());
         assert_eq!(decoded.epoch(), original.epoch());
         assert_eq!(
