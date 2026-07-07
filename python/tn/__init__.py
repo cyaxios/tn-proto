@@ -20,9 +20,9 @@ Public API:
     tn.debug/info/warning/error # emit attested log entries
     tn.set_context(**kwargs)    # per-request context (PRD §13)
     tn.update_context / clear_context / get_context
-    tn.read(log_path, cfg)      # iterate + decrypt entries (flat dicts;
-                                # raw=True for the {envelope, plaintext,
-                                # valid} audit shape)
+    tn.read(selector=None)      # iterate + decrypt typed Entry objects
+                                # (raw=True for the {envelope, plaintext,
+                                # valid} audit shape; log= for other files)
     tn.seal/tn.unseal        # portable sealed objects (standalone envelopes)
     tn.flush_and_close()        # drain handlers, release runtime
 

@@ -176,6 +176,20 @@ def test_unseal_tampered_ciphertext_raises(tmp_path):
         tn.unseal(tampered)
 
 
+def test_unseal_swapped_signature_raises(tmp_path):
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.test.v1", receipt=False, x=1)
+    other = tn.seal("obj.other.v1", receipt=False, y=2)
+    # a validly-encoded signature from a different object: row_hash still
+    # recomputes, so only the signature check trips
+    tampered = dict(sealed)
+    tampered["signature"] = other["signature"]
+    with pytest.raises(VerifyError) as exc:
+        tn.unseal(tampered)
+    assert "signature" in exc.value.failed_checks
+    assert "row_hash" not in exc.value.failed_checks
+
+
 def test_unseal_verify_false_returns_despite_tamper(tmp_path):
     tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     sealed = tn.seal("obj.test.v1", receipt=False, x=1)
