@@ -44,9 +44,10 @@ _ENVELOPE_RESERVED = frozenset({
 class SealedObject(dict):
     """Signed standalone envelope returned by :func:`tn.seal`.
 
-    Behaves as the envelope ``dict``; ``str()`` renders canonical
-    JSON so the object can be written to a file, posted over HTTP,
-    or interpolated into a prompt without a serialization step.
+    Behaves as the envelope ``dict``; ``str()`` renders compact wire
+    JSON (the same line format the log writes) so the object can be
+    written to a file, posted over HTTP, or interpolated into a
+    prompt without a serialization step.
     """
 
     __slots__ = ()
@@ -115,12 +116,15 @@ def seal(
                 )
             per_group.setdefault(gname, {})[k] = v
 
-    # -- index tokens + aad + encrypt (mirrors the emit path's
-    #    per-group sort, token, aad-bind, and encrypt steps) --
+    # -- index tokens + aad + encrypt (the emit path's token,
+    #    aad-bind, and encrypt steps) --
     aad_echo: dict[str, dict[str, Any]] = {}
     group_payloads: dict[str, dict[str, Any]] = {}
     for gname, plain_fields in per_group.items():
         group_cfg = cfg.groups[gname]
+        # Sort up front so a sealed envelope's field_hashes ordering is
+        # deterministic across builds; the row_hash is unaffected either
+        # way because _canonical_bytes sorts keys internally.
         plain_fields = dict(sorted(plain_fields.items()))
         field_hashes = {
             fname: _index_token(group_cfg.index_key, fname, fval)

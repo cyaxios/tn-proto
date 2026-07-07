@@ -1,11 +1,13 @@
 """tn.seal / tn.unseal round-trip and verification tests."""
 
+import base64
 import json
 import os
 
 import pytest
 
 import tn
+from tn.chain import ZERO_HASH, _compute_row_hash
 from tn.signing import DeviceKey, _signature_from_b64
 
 
@@ -24,7 +26,7 @@ def test_seal_returns_sealed_object(tmp_path):
     sealed = tn.seal("obj.invoice.v1", amount=9800, customer="acme")
 
     assert isinstance(sealed, dict)
-    # str() renders canonical JSON, not Python repr
+    # str() renders compact wire JSON (the log's line format), not Python repr
     parsed = json.loads(str(sealed))
     assert parsed == dict(sealed)
 
@@ -46,6 +48,28 @@ def test_seal_returns_sealed_object(tmp_path):
         _signature_from_b64(sealed["signature"]),
     )
 
+    # row_hash is honestly derived from the envelope contents: the
+    # standalone preimage hashes prev_hash "" (not ZERO_HASH), excludes
+    # sequence, and binds the tn_sealed marker as a public field
+    groups = {
+        "default": {
+            "ciphertext": base64.b64decode(sealed["default"]["ciphertext"]),
+            "field_hashes": sealed["default"]["field_hashes"],
+        }
+    }
+    assert sealed["row_hash"] == _compute_row_hash(
+        device_identity=sealed["device_identity"],
+        timestamp=sealed["timestamp"],
+        event_id=sealed["event_id"],
+        event_type=sealed["event_type"],
+        level=sealed["level"],
+        prev_hash=sealed["prev_hash"],
+        public_fields={"tn_sealed": sealed["tn_sealed"]},
+        groups=groups,
+    )
+    # no aad passed -> no tn_aad echo; aad-free wire shape stays minimal
+    assert "tn_aad" not in sealed
+
 
 def test_seal_rejects_reserved_field(tmp_path):
     tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
@@ -56,6 +80,9 @@ def test_seal_rejects_reserved_field(tmp_path):
 def test_seal_does_not_disturb_chain(tmp_path):
     tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     tn.seal("obj.test.v1", receipt=False, x=1)
-    row = tn.log("chain.probe.v1", y=2)
-    # first log row for this event_type is sequence 1 — seal advanced nothing
+    # chains are per-event_type: log the SAME type the seal used. If seal
+    # had advanced that chain, this row would be sequence 2 with a real
+    # prev_hash instead of the genesis link.
+    row = tn.log("obj.test.v1", y=2)
     assert row["sequence"] == 1
+    assert row["prev_hash"] == ZERO_HASH
