@@ -7,8 +7,12 @@ import os
 import pytest
 
 import tn
-from tn import UnsealError, VerifyError
+from tn import UnsealError, VerifyError, admin
+from tn.absorb import absorb
 from tn.chain import ZERO_HASH, _compute_row_hash
+from tn.compile import compile_enrolment, emit_to_outbox
+from tn.config import load_or_create
+from tn.offer import _ensure_mykey
 from tn.signing import DeviceKey, _signature_from_b64
 
 
@@ -213,3 +217,67 @@ def test_unseal_malformed_sources_raise_unsealerror(tmp_path, bad):
     tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     with pytest.raises(UnsealError):
         tn.unseal(bad)
+
+
+def _two_peer(tmp_path):
+    """Alice seals; Bob is enrolled in 'default' via a compiled+absorbed kit.
+
+    Leaves Bob's ceremony ACTIVE (tests exercising the keystore key-bag
+    walk rely on that). Returns ``(sealed, bob_keystore)`` where
+    ``bob_keystore`` is Bob's real keystore directory (``cfg.keystore``),
+    usable as an ``as_recipient=`` target after the ceremony closes.
+    """
+    alice_dir = tmp_path / "alice"
+    alice_dir.mkdir()
+    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
+    bob_dir = tmp_path / "bob"
+    bob_dir.mkdir()
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
+    bob_pub = _ensure_mykey(bob_cfg, "default")
+    admin._add_recipient_jwe_impl(
+        alice_cfg, "default", bob_cfg.device.device_identity, bob_pub
+    )
+    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.device_identity)
+    pkg_path = emit_to_outbox(alice_cfg, pkg)
+
+    tn.init(str(alice_cfg.yaml_path))
+    sealed = tn.seal("obj.memo.v1", receipt=False, body="for bob's eyes")
+    tn.flush_and_close()
+
+    tn.init(str(bob_cfg.yaml_path))
+    result = absorb(bob_cfg, pkg_path)
+    assert result.status == "enrolment_applied", (
+        f"absorb must succeed before cross-ceremony unseal; reason: {result.reason}"
+    )
+    return sealed, bob_cfg.keystore
+
+
+def test_enrolled_peer_opens_their_slice(tmp_path):
+    sealed, _bob_keystore = _two_peer(tmp_path)
+    entry = tn.unseal(sealed)  # active ceremony is Bob's -> keystore key-bag walk
+    assert entry.fields["body"] == "for bob's eyes"
+    assert entry.hidden_groups == []
+
+
+def test_unenrolled_peer_gets_public_frame_no_error(tmp_path):
+    alice_dir = tmp_path / "alice"
+    alice_dir.mkdir()
+    tn.init(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    sealed = tn.seal("obj.memo.v1", receipt=False, body="private")
+    tn.flush_and_close()
+
+    carol_dir = tmp_path / "carol"
+    carol_dir.mkdir()
+    tn.init(carol_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    entry = tn.unseal(sealed)  # Carol holds no fitting key -> no exception
+    assert entry.event_type == "obj.memo.v1"
+    assert "body" not in entry.fields
+    assert "default" in entry.hidden_groups
+
+
+def test_as_recipient_single_kit_override(tmp_path):
+    sealed, bob_keystore = _two_peer(tmp_path)
+    tn.flush_and_close()
+    # no active ceremony needed: bring-your-own-kit against Bob's keystore
+    entry = tn.unseal(sealed, as_recipient=bob_keystore)
+    assert entry.fields["body"] == "for bob's eyes"
