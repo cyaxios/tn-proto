@@ -599,6 +599,8 @@ impl PyRuntime {
                 confirm_includes_secrets,
                 groups,
                 keystore: None,
+                encrypt_body_with: None,
+                seal_for_recipients: Vec::new(),
                 package_body,
             };
             let p = self
