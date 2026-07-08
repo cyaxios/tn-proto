@@ -57,10 +57,11 @@ def write_env_descriptor(
     dirty: bool,
     argv: list[str] | None = None,
 ) -> dict[str, Any]:
+    paper_eligible = os.environ.get("TN_BENCH_PAPER_ELIGIBLE", "").strip().lower()
     env = {
         "schema": "tn-bench-env/v1",
-        "environment_class": "local_windows_smoke",
-        "paper_eligible": False,
+        "environment_class": os.environ.get("TN_BENCH_ENVIRONMENT_CLASS", "local_windows_smoke"),
+        "paper_eligible": paper_eligible in {"1", "true", "yes"},
         "revision": revision,
         "dirty": dirty,
         "python": sys.version,

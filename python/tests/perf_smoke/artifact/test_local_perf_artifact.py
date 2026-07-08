@@ -154,6 +154,19 @@ def test_artifact_layout_writes_env_and_ndjson(tmp_path: Path) -> None:
     ]
 
 
+def test_env_descriptor_accepts_benchmark_environment_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TN_BENCH_ENVIRONMENT_CLASS", "aws_ec2_c6i_large")
+    monkeypatch.setenv("TN_BENCH_PAPER_ELIGIBLE", "1")
+    layout = create_artifact_layout(tmp_path / "artifact")
+
+    env = write_env_descriptor(layout, revision="abc123", dirty=False)
+
+    assert env["environment_class"] == "aws_ec2_c6i_large"
+    assert env["paper_eligible"] is True
+
+
 def test_metric_snapshot_rows_preserve_size_counters(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakePerf:
         @staticmethod
