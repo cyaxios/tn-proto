@@ -361,3 +361,84 @@ def test_unseal_pre_rotation_object_after_rotation(tmp_path):
     admin.rotate("default")
     entry = tn.unseal(sealed)
     assert entry.fields["x"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Client JSON round-trip integrity (row_hash across transports)
+# ---------------------------------------------------------------------------
+
+def _ceremony_with_public(tmp_path, *field_names):
+    """Init a jwe ceremony that routes `field_names` to public_fields.
+
+    Public field values feed the row_hash as str(value); group fields do
+    not. These tests need values in PUBLIC position to exercise that path.
+    """
+    import yaml  # local: only these tests reshape the yaml
+
+    yaml_path = tmp_path / "tn.yaml"
+    tn.init(yaml_path, cipher="jwe")
+    tn.flush_and_close()
+    doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    doc["vault"]["enabled"] = False
+    doc["ceremony"]["mode"] = "local"
+    doc["public_fields"].extend(field_names)
+    yaml_path.write_text(yaml.safe_dump(doc, allow_unicode=True), encoding="utf-8")
+    tn.init(yaml_path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(42, id="int"),
+        pytest.param("hello", id="str"),
+        pytest.param(True, id="bool"),
+        pytest.param(None, id="none"),
+        pytest.param([1, 2, 3], id="list"),
+        pytest.param({"a": 1, "b": 2}, id="dict"),
+        pytest.param("café — naïve", id="unicode"),
+        pytest.param("", id="empty-str"),
+        pytest.param(2**53 - 1, id="js-safe-int-max"),
+    ],
+)
+def test_public_field_survives_python_and_string_transport(tmp_path, value):
+    # Certifies the two transports that are always safe: a pure-Python
+    # json round-trip, and the object's own canonical string. Every
+    # JSON-representable public value must open through both.
+    _ceremony_with_public(tmp_path, "pv")
+    sealed = tn.seal("obj.rt.v1", receipt=False, pv=value)
+
+    from_py = tn.unseal(json.loads(json.dumps(dict(sealed))))
+    from_str = tn.unseal(str(sealed))
+    assert from_py.fields["pv"] == value
+    assert from_str.fields["pv"] == value
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"pv": 1.0}, id="integral-float"),
+        pytest.param({"pv": 3.14}, id="non-integral-float"),
+        pytest.param({"pv": -0.0}, id="negative-zero"),
+        pytest.param({"pv": float("nan")}, id="nan"),
+        pytest.param({"pv": 2**53 + 1}, id="int-beyond-2^53"),
+        pytest.param({"pv": [1.0, 2]}, id="float-in-list"),
+        pytest.param({"pv": {"amt": 5.0}}, id="float-in-dict"),
+    ],
+)
+def test_seal_rejects_fragile_public_value(tmp_path, kwargs):
+    # A public value a foreign JSON runtime would silently reformat must
+    # be refused at seal time, not fail at a remote unseal.
+    _ceremony_with_public(tmp_path, "pv")
+    with pytest.raises(ValueError, match="public field"):
+        tn.seal("obj.rt.v1", receipt=False, **kwargs)
+
+
+def test_fragile_value_is_safe_in_an_encrypted_group(tmp_path):
+    # The escape hatch the guard points to: the same float carried in an
+    # ENCRYPTED group (the default) round-trips fine, because group
+    # fields are hashed as opaque ciphertext, not as str(value).
+    tn.init(tmp_path / "tn.yaml", cipher="jwe")
+    sealed = tn.seal("obj.rt.v1", receipt=False, price=19.0)  # -> default group
+    entry = tn.unseal(json.loads(json.dumps(dict(sealed))))
+    assert entry.fields["price"] == 19.0
+    assert tn.unseal(str(sealed)).fields["price"] == 19.0

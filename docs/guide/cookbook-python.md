@@ -222,6 +222,25 @@ Pass `receipt=False` to skip that row. Pass `raw=True` to `tn.unseal` for the
 `as_recipient=<keystore dir>, group=<name>` to open one specific kit
 directly, without an active ceremony.
 
+### Moving a sealed object between programs
+
+`tn.unseal` verifies the object before decrypting: it re-hashes the public
+fields and checks the signature, so any change to the bytes since sealing
+makes it refuse to open. Transport the object as its canonical string
+(`str(sealed)`) or its bytes and hand that back to `tn.unseal` — the string
+is re-parsed identically and always verifies. A pure-Python
+`json.loads(json.dumps(sealed))` round-trip is also always safe.
+
+The one thing to avoid is letting another runtime parse the object into
+native values and re-serialize it with a **fragile value in a public
+field**. A browser, PowerShell, or an LLM tool boundary rewrites some
+numbers when it re-serializes JSON — an integral float like `1.0` becomes
+`1`, an integer past two-to-the-53rd loses precision — and that change fails
+verification. Encrypted group fields are safe for any value, because they
+are hashed as ciphertext, not by value. To keep you out of this trap,
+`tn.seal` refuses a float or an out-of-range integer in a public field up
+front; put the value in a group, or pass it as a string or `Decimal`.
+
 ---
 
 ## CLI command reference

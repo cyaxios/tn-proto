@@ -42,6 +42,64 @@ _ENVELOPE_RESERVED = frozenset({
     "sequence", "prev_hash", "row_hash", "signature",
 })
 
+#: JavaScript's Number.MAX_SAFE_INTEGER. Integers past this are not
+#: exactly representable as float64, so a JSON runtime that parses them
+#: into a double (every browser, and .NET by default) silently changes
+#: their value.
+_JS_SAFE_INT_MAX = 2**53 - 1
+
+
+def _reject_fragile_public(public_out: dict[str, Any]) -> None:
+    """Reject public field values that cannot survive a foreign JSON round-trip.
+
+    A sealed object is verified by re-hashing its PUBLIC fields as
+    ``str(value)`` (encrypted group fields are hashed as opaque
+    ciphertext, so they are safe for any value). That rendering is
+    stable across Python and across the object's own canonical string,
+    but a non-Python JSON runtime that parses the object into native
+    values and re-serializes it — a browser, PowerShell/.NET, most LLM
+    tool boundaries — will reformat some numbers: an integral float
+    like ``1.0`` collapses to ``1``, ``-0.0`` collapses to ``0``, and
+    an integer past ``2**53`` loses precision. Any of those flips the
+    recomputed row hash and the object fails to open with a bare
+    ``VerifyError`` on a different machine, far from the seal call.
+
+    We refuse those values here so the failure is loud, local, and
+    early. Put the value in an encrypted group (safe for any type), or
+    pass it as a string / ``Decimal`` if it must stay public.
+    """
+    def check(value: Any, path: str) -> None:
+        # bool is an int subclass but round-trips cleanly (true/false),
+        # so it is exempt from the numeric checks below.
+        if isinstance(value, bool):
+            return
+        if isinstance(value, float):
+            raise ValueError(
+                f"public field {path!r} is a float ({value!r}); floats do not "
+                f"have a canonical form across JSON runtimes (an integral float "
+                f"like 1.0 collapses to 1 when a browser or .NET reserializes "
+                f"the object), which would break row-hash verification. Put it "
+                f"in an encrypted group (any type is safe there), or pass it as "
+                f"a string or Decimal."
+            )
+        if isinstance(value, int) and abs(value) > _JS_SAFE_INT_MAX:
+            raise ValueError(
+                f"public field {path!r} is an integer beyond +/-(2**53-1) "
+                f"({value!r}); a JSON runtime that parses it into a float64 "
+                f"loses precision, which would break row-hash verification. "
+                f"Put it in an encrypted group (any type is safe there), or "
+                f"pass it as a string."
+            )
+        if isinstance(value, list):
+            for i, item in enumerate(value):
+                check(item, f"{path}[{i}]")
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                check(v, f"{path}.{k}")
+
+    for k, v in public_out.items():
+        check(v, k)
+
 
 class SealedObject(dict):
     """Signed standalone envelope returned by :func:`tn.seal`.
@@ -162,6 +220,12 @@ def seal(
     # Detachment marker — a number so str(value) in the row-hash
     # preimage renders identically in every SDK implementation.
     public_out["tn_sealed"] = 1
+
+    # A sealed object is meant to travel through arbitrary intermediaries
+    # (LLM tool boundaries, browsers), which reserialize JSON. Refuse
+    # public values that such a round-trip would silently mutate, so the
+    # failure lands here at seal time instead of at a remote unseal.
+    _reject_fragile_public(public_out)
 
     # The preimage must commit to what the wire carries: verifiers
     # recompute the row hash from parsed JSON, so hash the public
