@@ -139,7 +139,11 @@ def test_sufficiency_fails_when_required_stage_is_missing() -> None:
         check_required_stages("jwe.r1.p64b.none", "read", stage_rows, REQUIRED_READ_STAGES)
 
 
-def test_artifact_layout_writes_env_and_ndjson(tmp_path: Path) -> None:
+def test_artifact_layout_writes_env_and_ndjson(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TN_BENCH_ENVIRONMENT_CLASS", raising=False)
+    monkeypatch.delenv("TN_BENCH_PAPER_ELIGIBLE", raising=False)
     layout = create_artifact_layout(tmp_path / "artifact")
     env = write_env_descriptor(layout, revision="abc123", dirty=True)
     assert env["environment_class"] == "local_windows_smoke"
