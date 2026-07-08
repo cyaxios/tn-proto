@@ -29,10 +29,18 @@ if _PY_DIR_STR in sys.path:
     sys.path.remove(_PY_DIR_STR)
 sys.path.insert(0, _PY_DIR_STR)
 
-# If ``tn`` was already imported (e.g. by a plugin), drop it so the
-# subsequent ``import tn`` picks up the in-repo source.
-for _modname in [m for m in list(sys.modules) if m == "tn" or m.startswith("tn.")]:
-    del sys.modules[_modname]
+# If ``tn`` was already imported from OUTSIDE the repo (e.g. a plugin
+# pulled the pip-installed wheel), drop it so the subsequent ``import tn``
+# picks up the in-repo source. An in-repo ``tn`` stays cached: evicting it
+# would force a second init of the PyO3 native module in one process,
+# which PyO3 refuses — that breaks the ``python tests/test_x.py`` shims
+# (``pytest.main([__file__])``) the cipher sweep relies on.
+_tn_mod = sys.modules.get("tn")
+if _tn_mod is not None and not str(
+    getattr(_tn_mod, "__file__", "") or ""
+).startswith(_PY_DIR_STR):
+    for _modname in [m for m in list(sys.modules) if m == "tn" or m.startswith("tn.")]:
+        del sys.modules[_modname]
 
 
 def pytest_configure(config):
