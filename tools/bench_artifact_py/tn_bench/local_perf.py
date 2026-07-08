@@ -254,16 +254,27 @@ def _validity_ok_for_profile(valid: dict[str, Any], tn_profile: str) -> bool:
 
 def _required_emit_stages_for_profile(tn_profile: str) -> set[str]:
     if tn_profile in {"telemetry", "stdout"}:
-        return REQUIRED_EMIT_STAGES - {"emit:row_hash", "emit:sign"}
+        return {
+            "emit:_TOTAL",
+            "emit:field_classify",
+            "emit:group_encrypt",
+            "emit:group_encrypt.index_token",
+            "emit:group_encrypt.cipher",
+            "emit:envelope_build",
+            "emit:file_write",
+        }
     return REQUIRED_EMIT_STAGES
 
 
 def _required_read_stages_for_profile(tn_profile: str) -> set[str]:
     if tn_profile in {"telemetry", "stdout"}:
-        return REQUIRED_READ_STAGES - {
-            "read:row_hash_verify",
-            "read:signature_verify",
-            "read:chain_verify",
+        return {
+            "read:_TOTAL",
+            "read:line_parse",
+            "read:group_decode",
+            "read:group_decrypt",
+            "read:group_decrypt.cipher",
+            "read:group_plaintext_parse",
         }
     return REQUIRED_READ_STAGES
 
