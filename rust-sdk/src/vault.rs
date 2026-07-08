@@ -2321,6 +2321,9 @@ impl<'a> Vault<'a> {
         let body_member_count = body.len();
         let encrypted = encrypt_vault_body(&body, &options.bek)?;
         let encrypted_len = encrypted.len();
+        let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted[..12]);
+        let mut salt = [0_u8; 16];
+        rand_core::OsRng.fill_bytes(&mut salt);
 
         let wrapped_key_response = if options.store_wrapped_key {
             client.put_wrapped_key(&project_id, options.wrapped_key)?
@@ -2331,6 +2334,8 @@ impl<'a> Vault<'a> {
             &project_id,
             serde_json::json!({
                 "ciphertext_b64": base64::engine::general_purpose::STANDARD.encode(&encrypted),
+                "nonce_b64": nonce_b64,
+                "salt_b64": base64::engine::general_purpose::STANDARD.encode(salt),
             }),
             if_match,
         )?;

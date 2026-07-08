@@ -34,6 +34,21 @@ pub struct RevokeRecipientResult {
     pub leaf_index: u64,
 }
 
+/// Result from [`Admin::rotate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RotateGroupResult {
+    /// Group whose publisher keys were rotated.
+    pub group: String,
+    /// New key generation/epoch.
+    pub generation: u32,
+    /// `sha256:` digest of the self-kit retired by this rotation.
+    pub previous_kit_sha256: String,
+    /// `sha256:` digest of the newly minted self-kit.
+    pub new_kit_sha256: String,
+    /// RFC3339 timestamp emitted on `tn.rotation.completed`.
+    pub rotated_at: String,
+}
+
 impl<'a> Admin<'a> {
     pub(crate) fn new(tn: &'a mut Tn) -> Self {
         Self { tn }
@@ -109,6 +124,21 @@ impl<'a> Admin<'a> {
         Ok(RevokeRecipientResult {
             group: group.to_string(),
             leaf_index,
+        })
+    }
+
+    /// Rotate a btn publisher group to a fresh key generation.
+    ///
+    /// Historical self-kits are preserved so the local project can still read
+    /// pre-rotation entries, while future writes use the new generation.
+    pub fn rotate(&mut self, group: &str) -> Result<RotateGroupResult> {
+        let result = self.tn.runtime().admin_rotate_group(group)?;
+        Ok(RotateGroupResult {
+            group: result.group,
+            generation: result.generation,
+            previous_kit_sha256: result.previous_kit_sha256,
+            new_kit_sha256: result.new_kit_sha256,
+            rotated_at: result.rotated_at,
         })
     }
 

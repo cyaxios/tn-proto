@@ -1573,9 +1573,19 @@ fn vault_push_body_with_http_client_uploads_collected_encrypted_body() -> tn_pro
 
     let ciphertext_b64 = extract_json_string(&requests[1], "ciphertext_b64")
         .expect("encrypted body request should contain ciphertext_b64");
+    let nonce_b64 = extract_json_string(&requests[1], "nonce_b64")
+        .expect("encrypted body request should contain nonce_b64");
+    let salt_b64 = extract_json_string(&requests[1], "salt_b64")
+        .expect("encrypted body request should contain salt_b64");
     let encrypted =
         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, ciphertext_b64)
             .expect("ciphertext_b64 should decode");
+    let nonce = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, nonce_b64)
+        .expect("nonce_b64 should decode");
+    let salt = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, salt_b64)
+        .expect("salt_b64 should decode");
+    assert_eq!(nonce, &encrypted[..12]);
+    assert_eq!(salt.len(), 16);
     let decrypted = tn_proto::decrypt_vault_body(&encrypted, &bek)?;
     assert!(decrypted.contains_key("body/tn.yaml"));
     assert!(decrypted.contains_key("body/keys/local.private"));

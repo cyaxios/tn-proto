@@ -18,10 +18,11 @@ use serde_json::{Map, Value};
 use serde_yml::Value as YamlValue;
 
 use crate::admin_reduce::{reduce as admin_reduce_envelope, StateDelta};
+use crate::cipher::btn::BtnPublisherCipher;
 use crate::cipher::GroupCipher;
 use crate::{Error, Result};
 
-use super::cipher_build::rebuild_btn_cipher;
+use super::cipher_build::{collect_btn_kit_bytes_with_storage, rebuild_btn_cipher};
 use super::read::{apply_schema_defaults, merge_envelope};
 use super::util::{current_timestamp_rfc3339, sha2_256};
 use super::{
@@ -40,6 +41,21 @@ pub struct EnsureGroupResult {
     pub created: bool,
     /// True when `tn.yaml` was changed.
     pub changed: bool,
+}
+
+/// Result from [`Runtime::admin_rotate_group`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RotateGroupResult {
+    /// Group whose publisher keys were rotated.
+    pub group: String,
+    /// New key generation/epoch.
+    pub generation: u32,
+    /// `sha256:` digest of the self-kit retired by this rotation.
+    pub previous_kit_sha256: String,
+    /// `sha256:` digest of the newly minted self-kit.
+    pub new_kit_sha256: String,
+    /// RFC3339 timestamp emitted on `tn.rotation.completed`.
+    pub rotated_at: String,
 }
 
 impl Runtime {
@@ -611,6 +627,108 @@ impl Runtime {
         }
 
         Ok(())
+    }
+
+    /// Rotate a btn publisher group to a fresh key generation.
+    ///
+    /// The previous publisher state and self-kit are preserved under
+    /// `.retired.<epoch>` siblings so historical entries remain readable by
+    /// this project. The active state and self-kit are replaced atomically
+    /// enough for the state file to retain the same CAS protection used by
+    /// recipient add/revoke. A `tn.rotation.completed` attestation is emitted
+    /// after the in-memory cipher swap, so subsequent writes use the new
+    /// generation immediately.
+    pub fn admin_rotate_group(&self, group: &str) -> Result<RotateGroupResult> {
+        let pub_cipher_arc = self.btn_admin.get(group).ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "admin_rotate_group: group {group:?} is not a btn publisher group"
+            ))
+        })?;
+        let mut pub_cipher = pub_cipher_arc.lock().expect("btn_admin Mutex poisoned");
+
+        let keystore_backend = crate::keystore_backend::LocalKeystore::new(
+            self.keystore.clone(),
+            self.storage.clone(),
+        );
+        let prior_state_bytes = keystore_backend.read_state(group).map_err(Error::Io)?;
+        let previous_mykit_bytes = self
+            .storage
+            .read_bytes(&self.keystore.join(format!("{group}.btn.mykit")))
+            .map_err(Error::Io)?;
+        let previous_kit_sha256 =
+            format!("sha256:{}", hex::encode(sha2_256(&previous_mykit_bytes)));
+
+        let outcome = tn_btn::PublisherState::from_bytes(&pub_cipher.state_to_bytes())?.rotate()?;
+        let mut active = outcome.active;
+        let new_self_kit = active.mint()?;
+        let new_self_kit_bytes = new_self_kit.to_bytes();
+        let new_state_bytes = active.to_bytes();
+        let generation = active.epoch();
+        let new_kit_sha256 = format!("sha256:{}", hex::encode(sha2_256(&new_self_kit_bytes)));
+
+        let retired_state_path = self.keystore.join(format!(
+            "{group}.btn.state.retired.{}",
+            outcome.retired.epoch()
+        ));
+        let retired_mykit_path = self.keystore.join(format!(
+            "{group}.btn.mykit.retired.{}",
+            outcome.retired.epoch()
+        ));
+        self.storage
+            .write_bytes(&retired_state_path, &outcome.retired.to_bytes())
+            .map_err(Error::Io)?;
+        self.storage
+            .write_bytes(&retired_mykit_path, &previous_mykit_bytes)
+            .map_err(Error::Io)?;
+
+        keystore_backend.write_state(group, prior_state_bytes.as_deref(), &new_state_bytes)?;
+        self.storage
+            .write_bytes(
+                &self.keystore.join(format!("{group}.btn.mykit")),
+                &new_self_kit_bytes,
+            )
+            .map_err(Error::Io)?;
+
+        *pub_cipher = BtnPublisherCipher::from_state(active);
+
+        let all_kits = collect_btn_kit_bytes_with_storage(&self.keystore, group, &self.storage)?;
+        let new_cipher = rebuild_btn_cipher_with_kits(&pub_cipher, &all_kits)?;
+        drop(pub_cipher);
+
+        if let Some(gstate_arc) = self.groups.get(group) {
+            let mut gstate = gstate_arc.write().expect("group state RwLock poisoned");
+            gstate.cipher = new_cipher;
+        }
+
+        let _ = bump_group_index_epoch(&self.yaml_path, group, generation as u64);
+
+        let rotated_at = current_timestamp_rfc3339();
+        let mut fields = Map::new();
+        fields.insert("group".into(), Value::String(group.to_string()));
+        fields.insert("cipher".into(), Value::String("btn".to_string()));
+        fields.insert("generation".into(), Value::Number(generation.into()));
+        fields.insert(
+            "previous_kit_sha256".into(),
+            Value::String(previous_kit_sha256.clone()),
+        );
+        fields.insert("old_pool_size".into(), Value::Null);
+        fields.insert("new_pool_size".into(), Value::Null);
+        fields.insert("rotated_at".into(), Value::String(rotated_at.clone()));
+        if let Err(e) = self.emit("info", "tn.rotation.completed", fields) {
+            log::warn!(
+                "admin state persisted but attestation emit failed: event_type={} error={}",
+                "tn.rotation.completed",
+                e
+            );
+        }
+
+        Ok(RotateGroupResult {
+            group: group.to_string(),
+            generation,
+            previous_kit_sha256,
+            new_kit_sha256,
+            rotated_at,
+        })
     }
 
     /// Return the number of revoked recipients in `group`'s publisher state.
@@ -1317,6 +1435,45 @@ fn btn_group_spec(publisher_did: &str) -> Result<YamlValue> {
         "index_epoch": 0
     }))
     .map_err(Error::from)
+}
+
+fn rebuild_btn_cipher_with_kits(
+    pub_cipher: &BtnPublisherCipher,
+    kit_bytes: &[Vec<u8>],
+) -> Result<Arc<dyn GroupCipher>> {
+    let state_bytes = pub_cipher.state_to_bytes();
+    let new_pc = BtnPublisherCipher::from_state_bytes(&state_bytes)?;
+    let cipher: Arc<dyn GroupCipher> = if kit_bytes.is_empty() {
+        Arc::new(new_pc)
+    } else {
+        Arc::new(new_pc.with_reader_kits(kit_bytes)?)
+    };
+    Ok(cipher)
+}
+
+fn bump_group_index_epoch(yaml_path: &Path, group: &str, generation: u64) -> Result<()> {
+    let raw = std::fs::read_to_string(yaml_path)?;
+    let mut doc: YamlValue = serde_yml::from_str(&raw)?;
+    let root = doc
+        .as_mapping_mut()
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml root must be a mapping".into()))?;
+    let groups_key = YamlValue::String("groups".into());
+    let groups = root
+        .get_mut(&groups_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml groups must be a mapping".into()))?;
+    let group_key = YamlValue::String(group.to_string());
+    let group_spec = groups
+        .get_mut(&group_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| Error::InvalidConfig(format!("groups[{group:?}] must be a mapping")))?;
+    group_spec.insert(
+        YamlValue::String("index_epoch".into()),
+        serde_yml::to_value(generation)?,
+    );
+    let updated = serde_yml::to_string(&doc)?;
+    std::fs::write(yaml_path, updated)?;
+    Ok(())
 }
 
 fn resolve_keystore_path(doc: &YamlValue, yaml_path: &Path) -> Result<PathBuf> {

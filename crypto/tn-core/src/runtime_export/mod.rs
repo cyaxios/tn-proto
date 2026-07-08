@@ -17,6 +17,7 @@ mod seed_builders;
 mod util;
 
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use rand_core::RngCore;
@@ -658,7 +659,7 @@ impl Runtime {
                 ),
                 replaced_kit_paths: Vec::new(),
             }),
-            ManifestKind::IdentitySeed | ManifestKind::ProjectSeed => Ok(AbsorbReceipt {
+            ManifestKind::IdentitySeed => Ok(AbsorbReceipt {
                 kind: manifest.kind.as_str().into(),
                 accepted_count: 0,
                 deduped_count: 0,
@@ -673,6 +674,7 @@ impl Runtime {
                 ),
                 replaced_kit_paths: Vec::new(),
             }),
+            ManifestKind::ProjectSeed => self.absorb_project_seed(&manifest, &body),
             ManifestKind::GroupKeys => Ok(AbsorbReceipt {
                 kind: manifest.kind.as_str().into(),
                 accepted_count: 0,
@@ -820,6 +822,220 @@ impl Runtime {
                 "no_op".into()
             },
             legacy_reason: String::new(),
+            replaced_kit_paths: replaced,
+        })
+    }
+
+    fn absorb_project_seed(
+        &self,
+        manifest: &Manifest,
+        body: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<AbsorbReceipt> {
+        let Some(yaml_bytes) = body.get("body/tn.yaml") else {
+            return Ok(rejected_receipt(
+                manifest,
+                "project_seed body is missing required member \"body/tn.yaml\"",
+            ));
+        };
+        let Some(private_bytes) = body
+            .get("body/keys/local.private")
+            .or_else(|| body.get("body/local.private"))
+        else {
+            return Ok(rejected_receipt(
+                manifest,
+                "project_seed body is missing required member \"body/keys/local.private\" \
+                 or legacy member \"body/local.private\"",
+            ));
+        };
+        let Some(public_bytes) = body
+            .get("body/keys/local.public")
+            .or_else(|| body.get("body/local.public"))
+        else {
+            return Ok(rejected_receipt(
+                manifest,
+                "project_seed body is missing required member \"body/keys/local.public\" \
+                 or legacy member \"body/local.public\"",
+            ));
+        };
+        if private_bytes.len() != 32 {
+            return Ok(rejected_receipt(
+                manifest,
+                &format!(
+                    "project_seed local.private must be 32 bytes; got {}",
+                    private_bytes.len()
+                ),
+            ));
+        }
+        let public_did = match std::str::from_utf8(public_bytes) {
+            Ok(value) => value.trim(),
+            Err(err) => {
+                return Ok(rejected_receipt(
+                    manifest,
+                    &format!("project_seed local.public is not utf-8: {err}"),
+                ))
+            }
+        };
+        let derived = match crate::DeviceKey::from_private_bytes(private_bytes) {
+            Ok(value) => value,
+            Err(err) => {
+                return Ok(rejected_receipt(
+                    manifest,
+                    &format!("project_seed private key is invalid: {err}"),
+                ))
+            }
+        };
+        if derived.did() != public_did || derived.did() != manifest.publisher_identity {
+            return Ok(rejected_receipt(
+                manifest,
+                &format!(
+                    "project_seed integrity check failed: manifest.from_did={:?}, \
+                     local.public={public_did:?}, derived-from-private={:?}",
+                    manifest.publisher_identity,
+                    derived.did()
+                ),
+            ));
+        }
+        if manifest.recipient_identity.as_deref() != Some(manifest.publisher_identity.as_str()) {
+            return Ok(rejected_receipt(
+                manifest,
+                &format!(
+                    "project_seed must be self-addressed (from_did == to_did); \
+                     got from_did={:?}, to_did={:?}",
+                    manifest.publisher_identity, manifest.recipient_identity
+                ),
+            ));
+        }
+        if self.did() != manifest.publisher_identity {
+            return Ok(rejected_receipt(
+                manifest,
+                &format!(
+                    "project_seed is addressed to {:?}, but this runtime identity is {:?}",
+                    manifest.publisher_identity,
+                    self.did()
+                ),
+            ));
+        }
+
+        let ts = OffsetDateTime::now_utc()
+            .format(&time::macros::format_description!(
+                "[year][month][day]T[hour][minute][second]Z"
+            ))
+            .unwrap_or_else(|_| "19700101T000000Z".into());
+        let mut accepted = 0usize;
+        let mut deduped = 0usize;
+        let mut replaced: Vec<PathBuf> = Vec::new();
+
+        let yaml_path = self.yaml_path();
+        if let Some(parent) = yaml_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if yaml_path.exists() {
+            let existing = fs::read(yaml_path)?;
+            if existing == *yaml_bytes {
+                deduped += 1;
+            } else if self.read_raw()?.is_empty() {
+                let backup = yaml_path.with_file_name(format!(
+                    "{}.previous.{ts}",
+                    yaml_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("tn.yaml")
+                ));
+                fs::rename(yaml_path, backup)?;
+                fs::write(yaml_path, yaml_bytes)?;
+                replaced.push(yaml_path.to_path_buf());
+                accepted += 1;
+            } else {
+                return Ok(rejected_receipt(
+                    manifest,
+                    &format!(
+                        "refusing to overwrite existing tn.yaml at {}: contents differ and \
+                         the local log already contains entries",
+                        yaml_path.display()
+                    ),
+                ));
+            }
+        } else {
+            fs::write(yaml_path, yaml_bytes)?;
+            accepted += 1;
+        }
+
+        let keystore = self.keystore_path();
+        fs::create_dir_all(&keystore)?;
+        let existing_private = keystore.join("local.private");
+        if existing_private.exists()
+            && fs::read(&existing_private)? != *private_bytes
+            && !self.read_raw()?.is_empty()
+        {
+            return Ok(rejected_receipt(
+                manifest,
+                &format!(
+                    "refusing to overwrite existing identity at {}: a different device key \
+                     is already installed and the local log contains entries",
+                    existing_private.display()
+                ),
+            ));
+        }
+
+        let mut key_files: BTreeMap<String, &Vec<u8>> = BTreeMap::new();
+        for (name, data) in body {
+            if let Some(rel) = name.strip_prefix("body/keys/") {
+                if !rel.is_empty()
+                    && !rel.contains('/')
+                    && !rel.contains('\\')
+                    && !rel.contains(':')
+                {
+                    key_files.insert(rel.to_string(), data);
+                }
+                continue;
+            }
+            let Some(rel) = name.strip_prefix("body/") else {
+                continue;
+            };
+            if rel == "tn.yaml"
+                || rel == "encrypted.bin"
+                || rel == "WARNING_CONTAINS_PRIVATE_KEYS"
+                || rel.is_empty()
+                || rel.contains('/')
+                || rel.contains('\\')
+                || rel.contains(':')
+            {
+                continue;
+            }
+            key_files.entry(rel.to_string()).or_insert(data);
+        }
+
+        for (rel, data) in key_files {
+            let dest = keystore.join(&rel);
+            if dest.exists() {
+                if fs::read(&dest)? == *data {
+                    deduped += 1;
+                    continue;
+                }
+                let backup = keystore.join(format!("{rel}.previous.{ts}"));
+                fs::rename(&dest, &backup)?;
+                replaced.push(dest.clone());
+            }
+            fs::write(&dest, data)?;
+            accepted += 1;
+        }
+
+        Ok(AbsorbReceipt {
+            kind: manifest.kind.as_str().into(),
+            accepted_count: accepted,
+            deduped_count: deduped,
+            noop: accepted == 0,
+            derived_state: None,
+            conflicts: Vec::new(),
+            legacy_status: if accepted > 0 {
+                "enrolment_applied".into()
+            } else {
+                "no_op".into()
+            },
+            legacy_reason: format!(
+                "installed project seed for {public_did} into {}",
+                keystore.display()
+            ),
             replaced_kit_paths: replaced,
         })
     }

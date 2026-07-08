@@ -12,7 +12,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256, Sha512};
 use std::collections::BTreeMap;
 
-use crate::body_encryption::decrypt_body_blob;
+use crate::body_encryption::{
+    decrypt_body_blob, decrypt_legacy_vault_body_blob, LEGACY_VAULT_BODY_FRAME,
+};
 use crate::canonical::canonical_bytes;
 use crate::tnpkg::Manifest;
 use crate::{Error, Result};
@@ -104,14 +106,26 @@ pub(crate) fn maybe_unseal_recipient_body(
     for wrap in wraps.candidates {
         match unseal_bek_from_wrap(wrap, device_seed, &aad) {
             Ok(bek) => {
-                let encrypted = body.get("body/encrypted.bin").ok_or_else(|| {
-                    Error::Malformed {
+                let encrypted = body
+                    .get("body/encrypted.bin")
+                    .ok_or_else(|| Error::Malformed {
                         kind: "recipient-sealed tnpkg body",
                         reason: "manifest declares body_encryption but body/encrypted.bin is \
                                  missing from the zip"
                             .into(),
-                    }
-                })?;
+                    })?;
+                if body_encryption.get("frame").and_then(Value::as_str)
+                    == Some(LEGACY_VAULT_BODY_FRAME)
+                {
+                    let nonce_b64 = body_encryption
+                        .get("nonce_b64")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| Error::Malformed {
+                            kind: "recipient-sealed tnpkg body",
+                            reason: "legacy body_encryption frame requires nonce_b64".into(),
+                        })?;
+                    return decrypt_legacy_vault_body_blob(encrypted, &bek, nonce_b64).map(Some);
+                }
                 return decrypt_body_blob(encrypted, &bek).map(Some);
             }
             Err(err) => {
@@ -259,9 +273,9 @@ fn did_key_to_ed25519_pub(did: &str) -> Result<[u8; 32]> {
             pub_bytes.len()
         )));
     }
-    pub_bytes.try_into().map_err(|_| {
-        Error::Internal("recipient DID public key length was validated above".into())
-    })
+    pub_bytes
+        .try_into()
+        .map_err(|_| Error::Internal("recipient DID public key length was validated above".into()))
 }
 
 fn ed25519_pub_to_x25519_pub(ed_pub: &[u8; 32]) -> Result<MontgomeryPoint> {
@@ -303,7 +317,10 @@ fn select_recipient_wraps<'a>(
 
     let mut consider = |wrap: &'a Map<String, Value>| {
         out.present = true;
-        let recipient = wrap.get("recipient_identity").cloned().unwrap_or(Value::Null);
+        let recipient = wrap
+            .get("recipient_identity")
+            .cloned()
+            .unwrap_or(Value::Null);
         if recipient.as_str() == Some(our_did) {
             out.candidates.push(wrap);
         }

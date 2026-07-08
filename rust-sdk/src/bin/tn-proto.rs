@@ -30,6 +30,8 @@ enum Command {
     Init(ProjectInitArgs),
     /// Create/open a project, upload an encrypted pending claim, and print the claim URL.
     ClaimLink(ClaimLinkArgs),
+    /// Emit an info-level event into an existing ceremony.
+    Info(EmitArgs),
     /// Read decrypted entries from an existing ceremony.
     Read(ReadArgs),
     /// Verify entries in an existing ceremony and fail on invalid rows.
@@ -89,6 +91,18 @@ struct ClaimLinkArgs {
     /// Workspace directory that owns .tn/<project>.
     #[arg(long)]
     project_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct EmitArgs {
+    /// Event type to emit.
+    event_type: String,
+    /// Ceremony tn.yaml to emit into.
+    #[arg(long)]
+    yaml: PathBuf,
+    /// JSON object fields for the emitted row.
+    #[arg(long, default_value = "{}")]
+    fields: String,
 }
 
 #[derive(Debug, Parser)]
@@ -595,6 +609,7 @@ fn main() -> tn_proto::Result<()> {
     match cli.command {
         Command::Init(args) => init_project(args),
         Command::ClaimLink(args) => claim_link(args),
+        Command::Info(args) => emit_info(args),
         Command::Read(args) => read_entries(args),
         Command::Verify(args) => verify_entries(args),
         Command::Show(args) => show_project(args),
@@ -642,6 +657,16 @@ fn claim_link(args: ClaimLinkArgs) -> tn_proto::Result<()> {
     println!("expires: {}", onboarding.claim.expires_at);
     println!("claim URL: {}", onboarding.claim.claim_url);
     eprintln!("Treat the full claim URL as a secret until it expires.");
+    Ok(())
+}
+
+fn emit_info(args: EmitArgs) -> tn_proto::Result<()> {
+    let tn = Tn::init(&args.yaml)?;
+    let fields: serde_json::Value = serde_json::from_str(&args.fields)?;
+    let receipt = tn.info(&args.event_type, fields)?;
+    println!("yaml: {}", tn.yaml_path().display());
+    println!("event_type: {}", args.event_type);
+    println!("emitted: {}", receipt.emitted);
     Ok(())
 }
 

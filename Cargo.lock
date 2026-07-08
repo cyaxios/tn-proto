@@ -2338,6 +2338,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tn-core-ffi"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "serde_json",
+ "tn-core",
+ "tn-proto",
+]
+
+[[package]]
 name = "tn-core-py"
 version = "0.0.1"
 dependencies = [
