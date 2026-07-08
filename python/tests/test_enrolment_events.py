@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import os
 import sys
 from pathlib import Path
@@ -57,7 +66,7 @@ def _enrolments_from_admin_log(yaml_path, *, event_type="tn.enrolment.compiled")
 def test_compile_enrolment_emits_event(tmp_path):
     """compile_enrolment emits tn.enrolment.compiled with all catalog fields."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="jwe")
+    tn.init(yaml, cipher=_workflow_cipher("jwe"))
 
     cfg = tn.current_config()
     peer_did = "did:key:zBob"
@@ -85,7 +94,7 @@ def test_compile_enrolment_emits_event(tmp_path):
 def test_compile_enrolment_all_catalog_fields_present(tmp_path):
     """All 4 required catalog fields must appear in the emitted event."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="jwe")
+    tn.init(yaml, cipher=_workflow_cipher("jwe"))
 
     cfg = tn.current_config()
     peer_did = "did:key:zCarol"
@@ -112,7 +121,7 @@ def test_compile_enrolment_all_catalog_fields_present(tmp_path):
 def test_compile_enrolment_direct_call_emits_event(tmp_path):
     """Calling compile_enrolment directly while tn is init'd emits the event."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="jwe")
+    tn.init(yaml, cipher=_workflow_cipher("jwe"))
 
     cfg = tn.current_config()
     peer_did = "did:key:zDave"
@@ -143,7 +152,7 @@ def test_compile_enrolment_no_emit_without_runtime(tmp_path):
     """compile_enrolment must not raise if called without tn.init() (no runtime)."""
     from tn.config import load_or_create
 
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     peer_did = "did:key:zEve"
     admin._add_recipient_jwe_impl(cfg, "default", peer_did, os.urandom(32))
     # tn is not init'd — _runtime is None; compile should succeed silently.
@@ -164,12 +173,12 @@ def test_absorb_emits_event(tmp_path):
     # Alice: create workspace, set up Bob as a recipient, compile + emit.
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
-    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
+    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     alice_did = alice_cfg.device.device_identity
 
     bob_dir = tmp_path / "bob"
     bob_dir.mkdir()
-    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     bob_pub = _ensure_mykey(bob_cfg, "default")
 
     admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity, bob_pub)
@@ -211,11 +220,11 @@ def test_absorb_no_emit_without_runtime(tmp_path):
     """absorb() must not raise if called without tn.init() (no runtime)."""
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
-    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher="jwe")
+    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
 
     bob_dir = tmp_path / "bob"
     bob_dir.mkdir()
-    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     bob_pub = _ensure_mykey(bob_cfg, "default")
 
     admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity, bob_pub)

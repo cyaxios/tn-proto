@@ -3,6 +3,7 @@
 //! Mirrors the schema emitted by `tn/config.py::create_fresh`.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -346,6 +347,12 @@ pub struct GroupSpec {
     /// yamls that omit it stay byte-identical on round-trip.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<String>,
+    /// Default AAD (governance/policy marker) bound to this group's body on
+    /// every emit and overlaid by any per-emit marker. A flat mapping of
+    /// string keys to scalar values. When empty (the default) the group
+    /// binds no marker and seals byte-identically to a no-AAD group.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub aad: Map<String, Value>,
 }
 
 /// Per-field group routing.

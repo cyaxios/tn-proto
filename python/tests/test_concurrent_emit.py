@@ -17,6 +17,15 @@ the encrypt/sign/IO calls that release the GIL).
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 import sys
 import threading
@@ -68,7 +77,7 @@ def test_concurrent_emit_preserves_chain_and_uniqueness(tmp_path):
     prior = os.environ.get("TN_FORCE_PYTHON")
     os.environ["TN_FORCE_PYTHON"] = "1"
     try:
-        tn.init(yaml, cipher="btn")
+        tn.init(yaml, cipher=_workflow_cipher("btn"))
 
         n_threads = 16
         per_thread = 50
@@ -108,7 +117,7 @@ def test_concurrent_emit_preserves_chain_and_uniqueness(tmp_path):
         # attach), so tn.read after flush_and_close needs an explicit
         # init — otherwise auto-init load-only walks the chain, finds
         # nothing in tmp_path, and raises.
-        tn.init(yaml, cipher="btn")
+        tn.init(yaml, cipher=_workflow_cipher("btn"))
 
         # Every line must parse as JSON: no torn lines, no interleaved bytes.
         raw_lines = [

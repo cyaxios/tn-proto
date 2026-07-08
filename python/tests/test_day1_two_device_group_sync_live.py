@@ -34,6 +34,15 @@ Run:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import base64
 import json
 import os
@@ -189,7 +198,7 @@ def _init_ceremony(src_dir: Path, *, groups: list[str]) -> tuple[Path, DeviceKey
     """Init a btn ceremony with the given groups. Returns
     ``(yaml_path, device_key)``."""
     yaml_path = src_dir / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
     for g in groups:
         tn.ensure_group(cfg, g, fields=["amount", "memo"])

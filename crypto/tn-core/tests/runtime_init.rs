@@ -109,8 +109,7 @@ fn fresh_init_emits_ceremony_init_as_first_entry() {
     // field — it is the reserved envelope scalar (asserted via
     // env["device_identity"] above). Carrying it as a public field too
     // double-hashed it relative to spec-correct readers and broke
-    // cross-SDK row_hash verification; see admin_catalog.rs +
-    // docs/spec/row-hash.md.
+    // cross-SDK row_hash verification; see admin_catalog.rs.
     assert!(
         pt.get("device_identity").is_none(),
         "device_identity must NOT appear in the ceremony.init payload; it is the envelope scalar"

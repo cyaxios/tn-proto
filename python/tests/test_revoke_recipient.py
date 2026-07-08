@@ -7,6 +7,15 @@ remain intact across the revocation.
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 import tempfile
 from pathlib import Path
@@ -23,7 +32,7 @@ def main() -> int:
         yaml_path = ws / "tn.yaml"
         log_path = ws / ".tn/tn/logs" / "tn.ndjson"
 
-        tn.init(yaml_path, log_path=log_path, cipher="jwe")
+        tn.init(yaml_path, log_path=log_path, cipher=_workflow_cipher("jwe"))
         cfg = tn.current_config()
         assert cfg.cipher_name == "jwe"
 
@@ -43,7 +52,7 @@ def main() -> int:
         tn.info("order.created", amount=200)
         tn.flush_and_close()
 
-        tn.init(yaml_path, log_path=log_path, cipher="jwe")
+        tn.init(yaml_path, log_path=log_path, cipher=_workflow_cipher("jwe"))
         cfg = tn.current_config()
         entries = list(tn.read(log_path, cfg))
         # 2 business events + 1 tn.recipient.revoked attestation

@@ -1,5 +1,5 @@
 //! The [`GroupCipher`] extension point and its per-group implementations
-//! (`btn`, `jwe`, `bgw`).
+//! (`btn`, `jwe`, `hibe`, `bgw`).
 //!
 //! A TN group's confidentiality is defined by its cipher. [`GroupCipher`] is
 //! the trait the [`crate::Runtime`] holds one of per group: it seals plaintext
@@ -14,6 +14,7 @@
 #[cfg(feature = "bgw")]
 pub mod bgw;
 pub mod btn;
+pub mod hibe;
 pub mod jwe;
 
 use crate::Result;
@@ -67,4 +68,43 @@ pub trait GroupCipher: Send + Sync {
     /// Used in logs and diagnostics and to tag which cipher produced a record;
     /// must match the `cipher:` value that selects this implementation.
     fn kind(&self) -> &'static str;
+
+    /// Seal `plaintext` binding `aad` (additional authenticated data) into
+    /// the body's authentication tag. `aad` is authenticated, not encrypted,
+    /// and not stored in the ciphertext — the reader must supply byte-
+    /// identical `aad` to [`decrypt_with_aad`](Self::decrypt_with_aad).
+    ///
+    /// The default delegates to [`encrypt`](Self::encrypt) for an EMPTY
+    /// `aad` (so the no-marker path stays byte-identical) and rejects a
+    /// non-empty `aad` — a cipher that supports markers overrides this.
+    ///
+    /// # Errors
+    /// Same as [`encrypt`](Self::encrypt); plus [`crate::Error::NotImplemented`]
+    /// if a non-empty `aad` is passed to a cipher without marker support.
+    fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+        if aad.is_empty() {
+            self.encrypt(plaintext)
+        } else {
+            Err(crate::Error::NotImplemented(
+                "this cipher does not support AAD (marker) binding",
+            ))
+        }
+    }
+
+    /// Open `ciphertext` requiring the same `aad` bound at seal time. A
+    /// different or absent `aad` fails the tag. Default: delegate to
+    /// [`decrypt`](Self::decrypt) for an empty `aad`, reject non-empty.
+    ///
+    /// # Errors
+    /// Same as [`decrypt`](Self::decrypt); plus [`crate::Error::NotImplemented`]
+    /// for a non-empty `aad` on a cipher without marker support.
+    fn decrypt_with_aad(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+        if aad.is_empty() {
+            self.decrypt(ciphertext)
+        } else {
+            Err(crate::Error::NotImplemented(
+                "this cipher does not support AAD (marker) binding",
+            ))
+        }
+    }
 }

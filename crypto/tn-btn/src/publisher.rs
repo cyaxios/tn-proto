@@ -289,6 +289,23 @@ impl PublisherState {
     /// Returns [`Error::Internal`] only on unreachable failures in the
     /// underlying AEAD / KW primitives.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Ciphertext> {
+        // Back-compat: no additional authenticated data.
+        self.encrypt_with_aad(plaintext, &[])
+    }
+
+    /// Like [`Self::encrypt`], but binds `aad` (additional authenticated data)
+    /// into the body's AEAD tag.
+    ///
+    /// The identical `aad` must be supplied to [`crate::ReaderKit::decrypt_with_aad`]
+    /// (or [`crate::decrypt_with_keyset_with_aad`]) or the body will not open.
+    /// `aad` is authenticated but not encrypted, and is NOT stored in the
+    /// ciphertext — the caller carries it out of band. Use it to weld a public,
+    /// tamper-evident marker (e.g. a "governed" flag) onto the ciphertext.
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] only on unreachable failures in the
+    /// underlying AEAD / KW primitives.
+    pub fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<Ciphertext> {
         let revoked: Vec<LeafIndex> = self.revoked.iter().copied().collect();
         let cover_labels = subset_difference_cover(TREE_HEIGHT, &revoked);
 
@@ -311,7 +328,7 @@ impl PublisherState {
         }
 
         let body_nonce = random_nonce();
-        let body = seal(&cek, &body_nonce, plaintext, &[]).map_err(|()| {
+        let body = seal(&cek, &body_nonce, plaintext, aad).map_err(|()| {
             Error::Internal(
                 "AES-GCM seal failed; should be unreachable with a fresh 32-byte CEK.".into(),
             )

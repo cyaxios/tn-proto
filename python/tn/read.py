@@ -430,10 +430,6 @@ def read(
     See Also:
         :func:`tn.watch`: Tail the log live (async generator).
         :func:`tn.info` / :func:`tn.log`: The producer side.
-        `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_:
-            The wire shape this returns.
-        `docs/spec/row-hash.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/row-hash.md>`_:
-            The chain-link hash ``verify`` checks.
     """
     _check_verify_kwarg(verify)
 
@@ -868,8 +864,6 @@ async def watch(
     See Also:
         :func:`tn.read`: Synchronous one-shot read of every entry.
         :func:`tn.info` / :func:`tn.log`: The producer side.
-        `docs/spec/envelope.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md>`_:
-            The wire shape this yields.
     """
     _check_verify_kwarg(verify)
 

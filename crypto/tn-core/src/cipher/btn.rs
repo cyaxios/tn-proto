@@ -115,9 +115,18 @@ impl super::GroupCipher for BtnPublisherCipher {
         Ok(ct.to_bytes())
     }
 
+    fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+        let ct: Ciphertext = self.state.encrypt_with_aad(plaintext, aad)?;
+        Ok(ct.to_bytes())
+    }
+
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        self.decrypt_with_aad(ciphertext, &[])
+    }
+
+    fn decrypt_with_aad(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         match &self.reader {
-            Some(r) => r.decrypt(ciphertext),
+            Some(r) => r.decrypt_with_aad(ciphertext, aad),
             None => Err(Error::NotEntitled {
                 group: "btn".into(),
             }),
@@ -202,6 +211,10 @@ impl super::GroupCipher for BtnReaderCipher {
     }
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        self.decrypt_with_aad(ciphertext, &[])
+    }
+
+    fn decrypt_with_aad(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         let ct = Ciphertext::from_bytes(ciphertext)?;
         // Try each kit; first one that decrypts wins. Kits that aren't
         // entitled for this ciphertext return tn_btn::Error::NotEntitled
@@ -220,7 +233,7 @@ impl super::GroupCipher for BtnReaderCipher {
         // would crash the whole read rather than mark the group hidden.
         let mut malformed_err: Option<Error> = None;
         for kit in &self.kits {
-            match kit.decrypt(&ct) {
+            match kit.decrypt_with_aad(&ct, aad) {
                 Ok(pt) => return Ok(pt),
                 Err(tn_btn::Error::NotEntitled) => continue,
                 Err(e) => malformed_err = Some(Error::from(e)),

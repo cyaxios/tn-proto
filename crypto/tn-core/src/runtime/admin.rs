@@ -22,7 +22,9 @@ use crate::cipher::btn::BtnPublisherCipher;
 use crate::cipher::GroupCipher;
 use crate::{Error, Result};
 
-use super::cipher_build::{collect_btn_kit_bytes_with_storage, rebuild_btn_cipher};
+use super::cipher_build::{
+    build_cipher_with_admin_with_storage, collect_btn_kit_bytes_with_storage, rebuild_btn_cipher,
+};
 use super::read::{apply_schema_defaults, merge_envelope};
 use super::util::{current_timestamp_rfc3339, sha2_256};
 use super::{
@@ -59,6 +61,27 @@ pub struct RotateGroupResult {
 }
 
 impl Runtime {
+    /// Rebuild a group's cipher from the current on-disk keystore material
+    /// and swap it into the live group table.
+    ///
+    /// Needed when an admin mutation happened outside this runtime's own
+    /// native admin verbs, notably Python-side hibe admin verbs that rewrite
+    /// `<group>.hibe.*` material on disk. The runtime caches each cipher at
+    /// init, so without a reload the next emit can still seal to stale
+    /// material.
+    pub fn reload_group_cipher(&self, group: &str) -> Result<()> {
+        let Some(spec) = self.cfg.groups.get(group) else {
+            return Ok(());
+        };
+        let (cipher, _btn_admin, _mykit) =
+            build_cipher_with_admin_with_storage(spec, &self.keystore, group, &self.storage)?;
+        if let Some(gstate_arc) = self.groups.get(group) {
+            let mut gstate = gstate_arc.write().expect("group state RwLock poisoned");
+            gstate.cipher = cipher;
+        }
+        Ok(())
+    }
+
     /// Ensure a btn group exists and route fields into it.
     ///
     /// If the group is not already declared, this mints publisher state and a

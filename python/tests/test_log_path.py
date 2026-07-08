@@ -7,6 +7,15 @@ AND by the Python legacy path so both code paths agree.
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -34,7 +43,7 @@ def _user_entries():
 
 def test_default_log_path_is_yaml_dir_logs_tn_ndjson(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.info("x.test", k=1)
     tn.flush_and_close()
 
@@ -51,7 +60,7 @@ def test_default_log_path_is_yaml_dir_logs_tn_ndjson(tmp_path):
 def test_yaml_advertises_log_path(tmp_path):
     """Freshly generated yaml must show where the log is written."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
 
     text = yaml.read_text(encoding="utf-8")
@@ -63,7 +72,7 @@ def test_yaml_advertises_log_path(tmp_path):
 def test_custom_relative_log_path(tmp_path):
     """A relative path in yaml redirects writes to that path (relative to yaml dir)."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
 
     # Edit the yaml to redirect logs to ./custom/events.ndjson
@@ -96,7 +105,7 @@ def test_custom_relative_log_path(tmp_path):
 def test_custom_absolute_log_path(tmp_path):
     """An absolute path in yaml is used verbatim, not resolved against yaml dir."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
 
     abs_log = (tmp_path / "absolute_logs" / "tn.ndjson").resolve()

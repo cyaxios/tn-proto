@@ -1,11 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
+    # tn-bbg: our own Apache-2.0/MIT BBG HIBE scheme on BLS12-381. It
+    # replaced the vendored LGPL `hohibe` (now deleted); tn-hibe re-exports
+    # it, so the whole tree is permissively licensed.
+    "crypto/tn-bbg",
     "crypto/tn-btn",
     "crypto/tn-btn-py",
     "crypto/tn-core",
     "crypto/tn-core-ffi",
     "crypto/tn-core-py",
+    "crypto/tn-hibe",
+    "crypto/tn-hibe-py",
     "crypto/tn-py",
     "crypto/tn-wasm",
     "rust-sdk",

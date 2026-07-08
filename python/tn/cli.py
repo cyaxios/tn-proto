@@ -160,9 +160,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     # ``btn`` is the shipping default cipher; ``jwe`` is the pure-Python
-    # alternative kept for environments that can't ship the Rust extension.
+    # RFC 7516 alternative; ``hibe`` is the identity-path (BBG) cipher.
     # ``bgw`` was retired in Workstream G — removed from choices.
-    p_init.add_argument("--cipher", default="btn", choices=["btn", "jwe"])
+    p_init.add_argument("--cipher", default="btn", choices=["btn", "jwe", "hibe"])
     p_init.add_argument("--words", type=int, default=12, choices=[12, 15, 18, 21, 24])
     p_init.add_argument(
         "--mnemonic-file", default=None, help="Read mnemonic from this file (non-interactive)."
@@ -549,7 +549,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated field names to route into this group.",
     )
     p_group_add.add_argument(
-        "--cipher", default=None, choices=["btn", "jwe"],
+        "--cipher", default=None, choices=["btn", "jwe", "hibe"],
         help="Cipher for the new group. Default: the ceremony's cipher.",
     )
     p_group_add.add_argument(

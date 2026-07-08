@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import hashlib
 import zipfile
 from pathlib import Path
@@ -10,7 +19,7 @@ from tn.tnpkg import _read_manifest, _verify_manifest_signature
 
 
 def test_byok_full_keystore_outer_package_exposes_only_encrypted_body(tmp_path: Path):
-    cfg = load_or_create(tmp_path / "payroll" / "tn.yaml", cipher="btn")
+    cfg = load_or_create(tmp_path / "payroll" / "tn.yaml", cipher=_workflow_cipher("btn"))
     out = tmp_path / "payroll-sealed.tnpkg"
     bek = bytes(range(32))
 

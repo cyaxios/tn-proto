@@ -189,7 +189,13 @@ class TNRuntime:
         if extra_handlers:
             self.handlers.extend(extra_handlers)
 
-    def emit(self, level: str, event_type: str, fields: dict[str, Any]) -> dict[str, Any]:
+    def emit(
+        self,
+        level: str,
+        event_type: str,
+        fields: dict[str, Any],
+        aad: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         _validate_event_type(event_type)
         # The whole pipeline below — _classify, encrypt, chain.advance,
         # _compute_row_hash, sign, write, handler fan-out, chain.commit —
@@ -199,10 +205,14 @@ class TNRuntime:
         # corrupting the on-disk chain. RLock so handlers calling back
         # into tn.log() don't deadlock. See Workstream D7.
         with self._emit_lock:
-            return self._emit_locked(level, event_type, fields)
+            return self._emit_locked(level, event_type, fields, aad)
 
     def _emit_locked(
-        self, level: str, event_type: str, fields: dict[str, Any]
+        self,
+        level: str,
+        event_type: str,
+        fields: dict[str, Any],
+        aad: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # 1. merge context
         merged = {**get_context(), **fields}
@@ -258,6 +268,14 @@ class TNRuntime:
         #    emitted per-group only for private fields — public fields
         #    need no index token since their value is already in the
         #    clear.
+        # Effective additional-authenticated-data per group: the group's
+        # yaml-declared ``aad`` default overridden by any per-emit ``aad=``.
+        # The merged dict is canonicalized and bound to the group's seal;
+        # the non-empty ones are echoed into the record's public ``tn_aad``
+        # block so a reader reconstructs byte-identical aad. An empty merged
+        # dict binds nothing (empty bytes) and adds no echo — records without
+        # aad stay byte-identical to the pre-aad wire shape.
+        aad_echo: dict[str, dict[str, Any]] = {}
         group_payloads: dict[str, dict[str, Any]] = {}
         for gname, plain_fields in per_group.items():
             group_cfg = self.cfg.groups[gname]
@@ -265,12 +283,18 @@ class TNRuntime:
             for fname, fval in plain_fields.items():
                 field_hashes[fname] = _index_token(group_cfg.index_key, fname, fval)
 
+            # Effective marker = group default overlaid by the per-emit
+            # marker. Bound into the body via cipher.encrypt(aad); every
+            # cipher (btn/jwe/hibe) supports it now, matching the native path.
+            effective_aad = {**group_cfg.aad_default, **(aad or {})}
+            aad_bytes = _canonical_bytes(effective_aad) if effective_aad else b""
+
             # 4. encrypt group plaintext via the ceremony's cipher (BGW
             #    or JWE — see tn/cipher.py). If this party isn't a
             #    publisher for the group, the cipher raises and we skip.
             plaintext_bytes = _canonical_bytes(plain_fields)
             try:
-                ct_bytes = group_cfg.cipher.encrypt(plaintext_bytes)
+                ct_bytes = group_cfg.cipher.encrypt(plaintext_bytes, aad_bytes)
             except _cipher.NotAPublisherError as e:
                 _log.warning(
                     "skipping group %r for %s: %s",
@@ -283,6 +307,23 @@ class TNRuntime:
                 "ciphertext": ct_bytes,  # raw bytes — we'll b64 in envelope
                 "field_hashes": field_hashes,
             }
+            if effective_aad:
+                aad_echo[gname] = effective_aad
+
+        # Echo the effective aad into the public section under the reserved
+        # ``tn_aad`` key so a reader reconstructs byte-identical binding data.
+        # It rides in ``public_out`` so it feeds the row_hash (and thus the
+        # signature) — an authenticated echo. Absent when no group bound aad,
+        # keeping aad-free records byte-identical to the pre-aad wire shape.
+        #
+        # Stored as the CANONICAL JSON STRING of the {group: dict} map, not a
+        # raw dict: row_hash serializes a string public field identically in
+        # every implementation (str(s) == s), whereas a dict value would hash
+        # as Python ``str(dict)`` here and as compact JSON in the Rust/wasm
+        # row_hash — a cross-impl mismatch that breaks recomputation. A string
+        # keeps native, wasm, and pure records byte-identical.
+        if aad_echo:
+            public_out["tn_aad"] = _canonical_bytes(aad_echo).decode("utf-8")
 
         # 5. chain
         seq, prev_hash = self.chain.advance(event_type)
@@ -725,7 +766,6 @@ def current_config() -> LoadedConfig:
 
     See Also:
         :func:`tn.using_rust`: Diagnostic — is the Rust runtime active?
-        `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_: Ceremony structure.
     """
     return _require_init().cfg
 

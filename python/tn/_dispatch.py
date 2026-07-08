@@ -39,11 +39,16 @@ _log = logging.getLogger("tn._dispatch")
 
 
 def _ceremony_is_btn_only(yaml_path: Path) -> bool:
-    """True iff every group in the yaml uses ``cipher: btn``.
+    """True iff every group in the yaml uses a native-capable cipher
+    (``btn`` or ``hibe``).
 
-    Resolves ``extends:`` first so streams that inherit groups from
-    a parent yaml are correctly detected as btn-only based on the
-    parent's groups.
+    Both run on the Rust runtime: btn always, and hibe when tn-core was
+    built with the ``hibe`` feature (default). ``jwe`` stays on the pure
+    pipeline (the native runtime has no jwe cipher). Named for history;
+    the gate now admits hibe too.
+
+    Resolves ``extends:`` first so streams that inherit groups from a
+    parent yaml are detected based on the parent's groups.
     """
     from . import config as _config
 
@@ -61,7 +66,7 @@ def _ceremony_is_btn_only(yaml_path: Path) -> bool:
     if not groups:
         return False
     for g in groups.values():
-        if not isinstance(g, dict) or g.get("cipher") != "btn":
+        if not isinstance(g, dict) or g.get("cipher") not in ("btn", "hibe"):
             return False
     return True
 
@@ -430,14 +435,17 @@ class DispatchRuntime:
         fields: dict[str, Any],
         *,
         sign: bool | None = None,
+        aad: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if self._use_rust:
             if self._rt is None:
                 raise RuntimeError("DispatchRuntime: Rust runtime not initialized")
             # sign=None → Rust uses ceremony.sign default; True/False overrides.
-            # Returns the canonical NDJSON line as bytes (or None if filtered
-            # by Rust's level threshold).
-            raw_line = self._rt.emit(level, event_type, fields, None, None, sign)
+            # aad (a marker dict or None) is bound + echoed by the native
+            # runtime, byte-identical to the pure pipeline. Returns the
+            # canonical NDJSON line as bytes (or None if filtered by Rust's
+            # level threshold).
+            raw_line = self._rt.emit(level, event_type, fields, None, None, sign, aad)
             # Fast-path: when the effective handler list is empty (default
             # for vanilla ``tn.init()`` profiles where Rust already covers
             # every declared handler), skip the fan-out call entirely.
@@ -453,7 +461,7 @@ class DispatchRuntime:
         # always signs). The yaml ceremony.sign flag is a Rust-only feature
         # until the legacy logger gains it. Ignore sign on the Python path
         # for now; document in set_signing() docstring.
-        return self._py_rt.emit(level, event_type, fields)
+        return self._py_rt.emit(level, event_type, fields, aad)
 
     def _fan_out_python_handlers(self, raw_line: bytes) -> None:
         """Run user-registered Python handlers on a Rust-produced envelope.

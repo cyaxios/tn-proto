@@ -114,7 +114,6 @@ export interface ParsedBearer {
  *
  * @see {@link bootstrapFromApiKey} - the full cold-start flow that
  *   uses this internally.
- * @see [spec/vault-http#api-key-cold-start](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md#api-key-cold-start) - the bearer shape.
  *
  * @remarks
  * Mirrors `python/tn/bootstrap.py::_parse_bearer` line-for-line.
@@ -438,9 +437,6 @@ export class UnsealNotWiredError extends Error {
  * @see {@link parseBearer}
  * @see {@link challengeVerify}
  * @see {@link absorbSealedBootstrap}
- * @see [spec/vault-http](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md) - the routes this calls (`/auth/challenge`, `/auth/verify`, `/api-keys/{id}/sealed-bundle`).
- * @see [spec/body-encryption](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md) - how the returned bundle is unsealed.
- * @see [spec/env-vars#tn_api_key](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/env-vars.md) - the `TN_API_KEY` env var this consumes.
  *
  * @remarks
  * Mirrors `python/tn/bootstrap.py::bootstrap_from_api_key`. Same

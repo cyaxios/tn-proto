@@ -186,9 +186,17 @@ impl PyPublisherState {
 
     /// Encrypt `plaintext` for all currently-active readers. Returns
     /// serialized ciphertext bytes.
-    fn encrypt<'py>(&self, py: Python<'py>, plaintext: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    #[pyo3(signature = (plaintext, aad = None))]
+    fn encrypt<'py>(
+        &self,
+        py: Python<'py>,
+        plaintext: &[u8],
+        aad: Option<Vec<u8>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let inner = self.require_inner()?;
-        let ct = inner.encrypt(plaintext).map_err(err_to_py)?;
+        let ct = inner
+            .encrypt_with_aad(plaintext, aad.as_deref().unwrap_or(&[]))
+            .map_err(err_to_py)?;
         Ok(PyBytes::new(py, &ct.to_bytes()))
     }
 
@@ -362,14 +370,18 @@ fn convert_outcome(outcome: RustOutcome) -> PyRotationOutcome {
 /// (revoked, or ciphertext from a different publisher / epoch). Raises
 /// `btn.BtnRuntimeError` for malformed input.
 #[pyfunction]
+#[pyo3(signature = (kit_bytes, ct_bytes, aad = None))]
 fn decrypt<'py>(
     py: Python<'py>,
     kit_bytes: &[u8],
     ct_bytes: &[u8],
+    aad: Option<Vec<u8>>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let kit = ReaderKit::from_bytes(kit_bytes).map_err(err_to_py)?;
     let ct = Ciphertext::from_bytes(ct_bytes).map_err(err_to_py)?;
-    let pt = kit.decrypt(&ct).map_err(err_to_py)?;
+    let pt = kit
+        .decrypt_with_aad(&ct, aad.as_deref().unwrap_or(&[]))
+        .map_err(err_to_py)?;
     Ok(PyBytes::new(py, &pt))
 }
 

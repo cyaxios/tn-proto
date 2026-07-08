@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +56,7 @@ def _init_jwe(tmp_path: Path, protocol_events_location: str | None = None) -> Pa
     the new key is the path that exercises the active code.
     """
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, cipher="jwe")
+    tn.init(yaml_path, cipher=_workflow_cipher("jwe"))
     tn.flush_and_close()
     if protocol_events_location is not None:
         with open(yaml_path, encoding="utf-8") as f:

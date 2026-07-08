@@ -85,8 +85,6 @@ def current_config():
     See Also:
         :func:`tn.using_rust`: Diagnostic — is the Rust runtime active?
         :func:`tn.init`: How the config gets loaded.
-        `docs/spec/manifest.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md>`_:
-            Ceremony / yaml structure.
     """
     from . import _current_config_impl
     return _current_config_impl()
@@ -115,8 +113,6 @@ def using_rust() -> bool:
 
     See Also:
         :func:`tn.current_config`: Inspect the loaded ceremony.
-        `docs/spec/env-vars.md <https://github.com/cyaxios/tn-proto/blob/main/docs/spec/env-vars.md>`_
-        (``TN_FORCE_PYTHON``): How to force the Python path.
     """
     from . import _using_rust_impl
     return _using_rust_impl()

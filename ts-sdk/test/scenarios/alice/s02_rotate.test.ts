@@ -2,11 +2,9 @@
 //
 // Python original: python/scenarios/alice/s02_rotate.py
 //
-// SKIP REASON: tn.admin.rotate() throws on the btn cipher ("btn cipher does
-// not support in-band rotation") and the TS SDK does not yet implement JWE
-// rotation either ("jwe cipher rotation not yet implemented in TS SDK").
-// This structural placeholder preserves the assertion intent; when JWE
-// rotation lands the body below should be un-skipped and validated.
+// tn.admin.rotate() works for btn (and jwe) in the TS SDK, so this runs the
+// full assertion body: rotate mid-stream and verify the chain stays continuous.
+// The catch/skip branch below survives only as a guard if rotate ever throws.
 //
 // Assertion intent (for when rotation is available):
 //   1. Emit 200 evt.pre events.
@@ -25,7 +23,7 @@ import { strict as assert } from "node:assert";
 import { ScenarioContext } from "../_harness.js";
 import { Entry } from "../../../src/Entry.js";
 
-test("alice/s02_rotate — structural placeholder (rotation not yet supported in TS SDK)", async (t) => {
+test("alice/s02_rotate — rotate mid-stream, chain continues", async (t) => {
   const ctx = new ScenarioContext();
   const tn = await ScenarioContext.newTn();
 
@@ -35,8 +33,8 @@ test("alice/s02_rotate — structural placeholder (rotation not yet supported in
       tn.info("evt.pre", { seq: i });
     }
 
-    // Attempt rotation — this is expected to throw until JWE rotation is
-    // implemented.  Catch the error and skip the test rather than failing.
+    // Rotate mid-stream. btn/jwe rotation is implemented; the catch below only
+    // guards against an unexpected throw (e.g. a hibe default ceremony).
     let rotateError: Error | null = null;
     try {
       await tn.admin.rotate("default");
@@ -46,10 +44,7 @@ test("alice/s02_rotate — structural placeholder (rotation not yet supported in
 
     if (rotateError !== null) {
       // Document the reason so the skip message is informative.
-      t.skip(
-        `rotation is not yet supported in the TS SDK: ${rotateError.message}. ` +
-          "Covered by Python's alice/s02_rotate. Un-skip when JWE rotation lands.",
-      );
+      t.skip(`rotation unexpectedly failed: ${rotateError.message}`);
 
       // Structural assertions below — commented to show what would be checked:
       //

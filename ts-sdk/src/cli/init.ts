@@ -69,7 +69,7 @@ export async function initCmd(argv: string[]): Promise<number> {
     else if (a === "-h" || a === "--help") {
       process.stdout.write(
         "tn-js init [<project-name>] [--yaml <yaml-path>] [--no-link] [--link <url>]\n" +
-          "           [--force] [--cipher btn] [--version-name <name>] [--json]\n" +
+          "           [--force] [--cipher btn|hibe] [--version-name <name>] [--json]\n" +
           "           [--words 12|15|18|21|24] [--mnemonic-file <path>]\n" +
           "           [--skip-confirm] [--keep-mnemonic]\n" +
           "  Mint or attach to a TN ceremony. A <project-name> mints a root\n" +
@@ -94,12 +94,12 @@ export async function initCmd(argv: string[]): Promise<number> {
     return 1;
   }
 
-  // NodeRuntime is btn-only; reject a non-btn cipher up front with the same
-  // "run from Python" guidance the runtime gives (Python `tn init` supports jwe).
-  if (cipher !== "btn") {
+  // NodeRuntime creates btn, hibe, and jwe ceremonies (createFreshCeremony
+  // mints the matching default group for each). Reject anything else up front.
+  if (cipher !== "btn" && cipher !== "hibe" && cipher !== "jwe") {
     process.stderr.write(
-      `tn: error: tn-js init supports cipher 'btn' only (got ${JSON.stringify(cipher)}); ` +
-        "run a jwe ceremony from the Python CLI.\n",
+      `tn: error: tn-js init supports cipher 'btn', 'hibe', or 'jwe' ` +
+        `(got ${JSON.stringify(cipher)}).\n`,
     );
     return 1;
   }
@@ -175,6 +175,7 @@ export async function initCmd(argv: string[]): Promise<number> {
         projectDir,
         asRoot: true,
         devicePrivateBytes: identity.seed,
+        cipher: cipher as "btn" | "hibe" | "jwe",
       });
       // Stamp the operator-chosen version label into the freshly-minted yaml
       // (ensureCeremonyOnDisk already stamps ceremony.project_name = name).

@@ -19,6 +19,15 @@ is found via PATH; if absent the test skips with a clear message.
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import shutil
 import subprocess
 import tempfile
@@ -218,7 +227,7 @@ def test_browser_extracts_package_key_from_python_built_full_keystore_body(tmp_p
 
     # ── Step 1: Python builds a real full_keystore tnpkg ──────────────
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
     pkg_path = tmp_path / "full.tnpkg"
     export(pkg_path, kind="full_keystore", cfg=cfg, confirm_includes_secrets=True)

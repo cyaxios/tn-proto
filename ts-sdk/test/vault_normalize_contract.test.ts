@@ -7,8 +7,6 @@
 // ceremony.linked_* bridge, enabled:false suppression, the 600s interval
 // default, and the error conditions. Python asserts the same cases in
 // python/tests/test_vault_normalize_contract.py.
-//
-// See docs/spec-next/vault-sync.md.
 
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";

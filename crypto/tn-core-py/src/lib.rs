@@ -104,7 +104,7 @@ impl PyRuntime {
     // Argument count matches the Python-visible signature; PyO3 methods
     // surface individual args to keep the Python callsite ergonomic.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (level, event_type, fields, timestamp=None, event_id=None, sign=None))]
+    #[pyo3(signature = (level, event_type, fields, timestamp=None, event_id=None, sign=None, aad=None))]
     fn emit<'py>(
         &self,
         py: Python<'py>,
@@ -114,6 +114,7 @@ impl PyRuntime {
         timestamp: Option<&str>,
         event_id: Option<&str>,
         sign: Option<bool>,
+        aad: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         guard(|| {
             // PyO3-layer perf hooks. Same env-gating as the in-runtime
@@ -126,6 +127,10 @@ impl PyRuntime {
                 None
             };
             let fields_json = pydict_to_json(fields)?;
+            let aad_json = match aad {
+                Some(d) => pydict_to_json(d)?,
+                None => serde_json::Map::new(),
+            };
             if let Some(t0) = _py_t0 {
                 tn_core::perf::record_ns("emit:py_dict_marshal", t0.elapsed().as_nanos() as u64);
             }
@@ -136,13 +141,14 @@ impl PyRuntime {
             };
             let line = self
                 .inner
-                .emit_with_override_sign_returning_line(
+                .emit_with_aad_returning_line(
                     level,
                     event_type,
                     fields_json,
                     timestamp,
                     event_id,
                     sign,
+                    &aad_json,
                 )
                 .map_err(err_to_py)?;
             let result = Ok(line.map(|s| PyBytes::new(py, s.as_bytes())));
@@ -154,6 +160,17 @@ impl PyRuntime {
             }
             result
         })
+    }
+
+    /// Rebuild a group's cipher from the current on-disk keystore material.
+    ///
+    /// Call after a Python-side admin mutation that rewrote a group's key
+    /// files outside this runtime's own native admin verbs — notably the
+    /// hibe admin verbs (grant/rotate/revoke), which change
+    /// `<group>.hibe.{idpath,sk,idpath.history,...}`. Without it, the cached
+    /// native cipher would keep sealing to the pre-mutation identity path.
+    fn reload_group_cipher(&self, group: &str) -> PyResult<()> {
+        guard(|| self.inner.reload_group_cipher(group).map_err(err_to_py))
     }
 
     /// Read all entries as flat dicts (the default 2026-04-25 shape).

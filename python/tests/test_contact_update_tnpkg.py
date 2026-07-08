@@ -19,6 +19,15 @@ Run::
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import io
 import json
 import sys
@@ -171,7 +180,7 @@ def test_validate_body_rejects_non_dict():
 def _ceremony(tmp_path: Path) -> Path:
     """Init a tiny ceremony so _contacts_yaml_path resolves under .tn/<stem>/."""
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     return yaml_path
 
@@ -234,7 +243,7 @@ def test_absorb_writes_contacts_yaml(tmp_path: Path):
     yaml_path = _ceremony(tmp_path)
     # Re-init so absorb can pull current_config (flush_and_close above
     # released the runtime).
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
 
     signer = DeviceKey.generate()
@@ -261,7 +270,7 @@ def test_absorb_writes_contacts_yaml(tmp_path: Path):
 
 def test_absorb_rejects_invalid_contact_update_body(tmp_path: Path):
     yaml_path = _ceremony(tmp_path)
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
 
     signer = DeviceKey.generate()
@@ -282,7 +291,7 @@ def test_absorb_rejects_invalid_contact_update_body(tmp_path: Path):
 
 def test_absorb_rejects_signature_tampering(tmp_path: Path):
     yaml_path = _ceremony(tmp_path)
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
 
     signer = DeviceKey.generate()

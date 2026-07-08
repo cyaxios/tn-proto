@@ -28,6 +28,15 @@ Run:
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 import os
 import secrets
@@ -153,7 +162,7 @@ def _build_and_push(
     Returns the body member map that was pushed (for byte-match asserts).
     """
     yaml_path = src_dir / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     cfg = tn.current_config()
     tn.ensure_group(cfg, group, fields=["amount", "memo"])
     for et, fields in entries:

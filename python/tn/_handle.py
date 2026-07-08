@@ -268,6 +268,7 @@ class TN:
         event_type: str,
         args: tuple,
         fields: dict[str, Any],
+        aad: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         from . import (
             _emit_via,
@@ -296,13 +297,16 @@ class TN:
         if level in thresholds:
             if thresholds[level] < _session._log_level_threshold:
                 return None
-        return _emit_via(self._get_runtime(), level, event_type, fields, _resolve_sign(None))
+        return _emit_via(
+            self._get_runtime(), level, event_type, fields, _resolve_sign(None), aad
+        )
 
     def log(
         self,
         event_type: str,
         *args: Any,
         level: str = "",
+        aad: dict[str, Any] | None = None,
         **fields: Any,
     ) -> dict[str, Any] | None:
         """Emit an entry on this stream with a caller-chosen level.
@@ -320,22 +324,30 @@ class TN:
         json=stream.log(...))``), or ``None`` if filtered. The levelled
         verbs above are fire-and-forget and return ``None``.
         """
-        return self._emit(level, event_type, args, fields)
+        return self._emit(level, event_type, args, fields, aad)
 
     # The levelled verbs are fire-and-forget (return None). Only ``.log``
     # returns the written envelope — for forwarding downstream — mirroring
     # the module-level ``tn.log`` vs ``tn.info`` split.
-    def debug(self, event_type: str, *args: Any, **fields: Any) -> None:
-        self._emit("debug", event_type, args, fields)
+    def debug(
+        self, event_type: str, *args: Any, aad: dict[str, Any] | None = None, **fields: Any
+    ) -> None:
+        self._emit("debug", event_type, args, fields, aad)
 
-    def info(self, event_type: str, *args: Any, **fields: Any) -> None:
-        self._emit("info", event_type, args, fields)
+    def info(
+        self, event_type: str, *args: Any, aad: dict[str, Any] | None = None, **fields: Any
+    ) -> None:
+        self._emit("info", event_type, args, fields, aad)
 
-    def warning(self, event_type: str, *args: Any, **fields: Any) -> None:
-        self._emit("warning", event_type, args, fields)
+    def warning(
+        self, event_type: str, *args: Any, aad: dict[str, Any] | None = None, **fields: Any
+    ) -> None:
+        self._emit("warning", event_type, args, fields, aad)
 
-    def error(self, event_type: str, *args: Any, **fields: Any) -> None:
-        self._emit("error", event_type, args, fields)
+    def error(
+        self, event_type: str, *args: Any, aad: dict[str, Any] | None = None, **fields: Any
+    ) -> None:
+        self._emit("error", event_type, args, fields, aad)
 
     # ------------------------------------------------------------------
     # Read verbs

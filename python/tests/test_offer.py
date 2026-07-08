@@ -1,3 +1,12 @@
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import base64
 from pathlib import Path
 
@@ -9,7 +18,7 @@ from tn.packaging import verify
 
 def test_offer_emits_signed_package(tmp_path: Path):
     yaml_path = tmp_path / "tn.yaml"
-    cfg = load_or_create(yaml_path, cipher="jwe")
+    cfg = load_or_create(yaml_path, cipher=_workflow_cipher("jwe"))
     pkg = offer(cfg, publisher_did="did:key:z6MkAlice")
     assert pkg.package_kind == "offer"
     assert pkg.recipient_identity == "did:key:z6MkAlice"
@@ -20,7 +29,7 @@ def test_offer_emits_signed_package(tmp_path: Path):
 
 
 def test_offer_reuses_existing_mykey(tmp_path: Path):
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
     pkg1 = offer(cfg, publisher_did="did:key:z6MkAlice")
     pub1 = pkg1.payload["x25519_pub_b64"]
     pkg2 = offer(cfg, publisher_did="did:key:z6MkBob")

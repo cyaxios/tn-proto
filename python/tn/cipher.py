@@ -7,9 +7,10 @@ serialization, HMAC index tokens, chain, signature — is cipher-agnostic.
 
 Two implementations ship:
 
-  * JWEGroupCipher — static ECDH (X25519) + HKDF-SHA256 + AES-256-KW
-    per recipient + AES-256-GCM body. Per-recipient revocation is O(1):
-    drop the recipient from the list, next seal omits them.
+  * JWEGroupCipher — RFC 7516 JWE General JSON Serialization via a
+    production JOSE library (Authlib/joserfc): ECDH-ES+A256KW per
+    recipient over X25519, A256GCM body. Per-recipient revocation is
+    O(1): drop the recipient from the list, next seal omits them.
   * BtnGroupCipher — NNL subset-difference broadcast encryption (see
     the `btn` Rust crate / PyO3 binding). Entitlement + revocation
     without per-recipient headers. Implementation at the bottom of
@@ -24,25 +25,12 @@ from __future__ import annotations
 
 import base64
 import json
-import os
-import secrets
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric.x25519 import (
-    X25519PrivateKey,
-    X25519PublicKey,
-)
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.keywrap import (
-    InvalidUnwrap,
-    aes_key_unwrap,
-    aes_key_wrap,
-)
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 
@@ -63,122 +51,103 @@ class GroupCipher(Protocol):
     """One cipher instance per (ceremony, group). Stateful: holds key
     material on disk under `keystore/`."""
 
-    name: str  # "jwe" or "btn"
+    name: str  # "jwe", "btn", or "hibe"
 
-    def encrypt(self, plaintext: bytes) -> bytes:
+    def encrypt(self, plaintext: bytes, aad: bytes = b"") -> bytes:
         """Seal `plaintext` into an opaque blob. Raises NotAPublisherError
-        if this party doesn't hold the write key."""
+        if this party doesn't hold the write key.
+
+        ``aad`` is optional additional-authenticated-data bound to the body
+        AEAD — authenticated, not encrypted, not stored. A reader must supply
+        byte-identical ``aad`` to open. Empty (the default) binds nothing and
+        is byte-identical to a plain seal."""
         ...
 
-    def decrypt(self, ciphertext: bytes) -> bytes:
+    def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
         """Open `ciphertext` to recover plaintext. Raises
-        NotARecipientError if this party can't read this group."""
+        NotARecipientError if this party can't read this group.
+
+        ``aad`` must byte-match whatever was bound at seal time."""
         ...
 
 
 # ---------------------------------------------------------------------------
-# JWE cipher — static ECDH (X25519) + HKDF-SHA256 + AES-256-KW + AES-256-GCM
+# JWE cipher — RFC 7516 JWE General JSON (ECDH-ES+A256KW / A256GCM / X25519) via joserfc
 # ---------------------------------------------------------------------------
 
-_HKDF_INFO = b"tn-jwe:v1:A256KW"
+_JWE_ALGS = ["ECDH-ES+A256KW", "A256GCM"]
 
 
-def _derive_kek(peer_pub: bytes, my_sk: X25519PrivateKey) -> bytes:
-    shared = my_sk.exchange(X25519PublicKey.from_public_bytes(peer_pub))
-    return HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=None,
-        info=_HKDF_INFO,
-    ).derive(shared)
+def _b64u(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-# Wire format v1 fixed sizes. A future version byte changes these wholesale.
-_V1_IV_LEN = 12  # AES-GCM 96-bit nonce
-_V1_SENDER_PUB_LEN = 32  # X25519 raw encoding
-_V1_WRAPPED_LEN = 40  # AES-KW output for a 32-byte key
-_V1_MIN_LEN = 1 + _V1_IV_LEN + _V1_SENDER_PUB_LEN + 2 + 4  # + 0 wrapped keys + 0 ct
+def _okp_public_jwk(pub_raw: bytes) -> dict[str, str]:
+    """A raw 32-byte X25519 public key as an RFC 8037 OKP JWK."""
+    return {"kty": "OKP", "crv": "X25519", "x": _b64u(pub_raw)}
 
 
-def _pack_ciphertext(iv: bytes, ct: bytes, sender_pub: bytes, wrapped_keys: list[bytes]) -> bytes:
-    """Pack JWE components into a single opaque blob so the envelope
-    schema stays ``{ciphertext: b64, field_hashes}`` regardless of cipher.
+def _okp_private_jwk(my_sk: X25519PrivateKey) -> dict[str, str]:
+    """A cryptography X25519 private key as an RFC 8037 OKP private JWK."""
+    pub = my_sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return {"kty": "OKP", "crv": "X25519", "x": _b64u(pub), "d": _b64u(my_sk.private_bytes_raw())}
 
-    Wire format v1 (big-endian integers):
 
-        version_byte (1B) = 0x01
-        iv (12B)
-        sender_pub (32B)
-        n_recipients (2B)
-        wrapped_keys (40 * n_recipients)
-        ct_len (4B)
-        ciphertext (ct_len bytes)
+def _jwe_seal(recipient_pubs: list[bytes], plaintext: bytes, aad: bytes) -> bytes:
+    """Seal to N X25519 recipients as an RFC 7516 General JSON JWE.
 
-    Sizes are fixed per version. A change of primitives allocates a new
-    version byte (0x02, ...) with its own fixed sizes.
+    Returns the UTF-8 JSON bytes (sorted keys, tight separators) that become
+    the group's opaque ``ciphertext``. Per recipient: ECDH-ES+A256KW wraps one
+    shared A256GCM CEK. An empty ``aad`` omits the JWE ``aad`` member so the
+    no-marker path stays a plain seal.
     """
-    if len(iv) != _V1_IV_LEN:
-        raise CipherError(f"JWE v1 iv must be {_V1_IV_LEN} bytes, got {len(iv)}")
-    if len(sender_pub) != _V1_SENDER_PUB_LEN:
-        raise CipherError(
-            f"JWE v1 sender_pub must be {_V1_SENDER_PUB_LEN} bytes, got {len(sender_pub)}"
-        )
-    for w in wrapped_keys:
-        if len(w) != _V1_WRAPPED_LEN:
-            raise CipherError(f"JWE v1 wrapped key must be {_V1_WRAPPED_LEN} bytes, got {len(w)}")
+    from joserfc import jwe as _jwe
+    from joserfc.jwk import OKPKey
 
-    out = bytearray([0x01])
-    out += iv
-    out += sender_pub
-    out += len(wrapped_keys).to_bytes(2, "big")
-    for w in wrapped_keys:
-        out += w
-    out += len(ct).to_bytes(4, "big") + ct
-    return bytes(out)
+    enc = _jwe.GeneralJSONEncryption({"enc": "A256GCM"}, plaintext, aad=aad or None)
+    for pub in recipient_pubs:
+        enc.add_recipient({"alg": "ECDH-ES+A256KW"}, OKPKey.import_key(_okp_public_jwk(pub)))
+    obj = _jwe.encrypt_json(enc, None, algorithms=_JWE_ALGS)
+    return json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
-def _unpack_ciphertext(blob: bytes) -> tuple[bytes, bytes, list[bytes], bytes]:
-    """Inverse of ``_pack_ciphertext`` for version 0x01.
+def _jwe_open(blob: bytes, my_sk: X25519PrivateKey, aad: bytes) -> bytes:
+    """Open a General JSON JWE by trial-decrypting each recipient block.
 
-    Returns (iv, sender_pub, wrapped_keys, ct). Raises CipherError on
-    malformed input: wrong version, insufficient length, or trailing bytes.
+    joserfc's multi-recipient ``decrypt_json`` needs a ``kid`` to match a key
+    to a block; our blocks are anonymous, so we view each recipient as a
+    flattened JWE and try the reader's key against it (the AEAD tag rejects a
+    wrong key with no false-plaintext risk). The embedded ``aad`` member must
+    byte-match ``aad`` — the marker reconstructed from the record's public
+    ``tn_aad`` echo — so a tampered echo fails to open.
     """
-    if len(blob) < 1:
-        raise CipherError("JWE: packed ciphertext is empty")
-    if blob[0] != 0x01:
-        raise CipherError(f"JWE: unknown packed version {blob[0]:#x}")
-    if len(blob) < _V1_MIN_LEN:
-        raise CipherError(
-            f"JWE v1 packed ciphertext shorter than minimum {_V1_MIN_LEN} bytes (got {len(blob)})"
-        )
-    p = 1
-    iv = blob[p : p + _V1_IV_LEN]
-    p += _V1_IV_LEN
-    sender_pub = blob[p : p + _V1_SENDER_PUB_LEN]
-    p += _V1_SENDER_PUB_LEN
-    n = int.from_bytes(blob[p : p + 2], "big")
-    p += 2
+    from joserfc import jwe as _jwe
+    from joserfc.jwk import OKPKey
 
-    expected_end = p + n * _V1_WRAPPED_LEN + 4  # wrapped_keys + ct_len
-    if len(blob) < expected_end:
-        raise CipherError(
-            f"JWE v1 packed ciphertext truncated at wrapped-key array "
-            f"(n={n}, expected at least {expected_end} bytes, got {len(blob)})"
-        )
-    wrapped: list[bytes] = []
-    for _ in range(n):
-        wrapped.append(blob[p : p + _V1_WRAPPED_LEN])
-        p += _V1_WRAPPED_LEN
-    ct_len = int.from_bytes(blob[p : p + 4], "big")
-    p += 4
-    ct = blob[p : p + ct_len]
-    p += ct_len
-    if p != len(blob):
-        raise CipherError(
-            f"JWE v1 packed ciphertext malformed: parsed {p} bytes of "
-            f"{len(blob)} ({len(blob) - p} trailing bytes)"
-        )
-    return iv, sender_pub, wrapped, ct
+    try:
+        obj = json.loads(blob.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise NotARecipientError(f"JWE: ciphertext is not a JWE JSON object ({exc})") from exc
+    key = OKPKey.import_key(_okp_private_jwk(my_sk))
+    base = {k: obj[k] for k in ("protected", "iv", "ciphertext", "tag") if k in obj}
+    if "aad" in obj:
+        base["aad"] = obj["aad"]
+    expected = aad or b""
+    for rcpt in obj.get("recipients", []):
+        flat = dict(base)
+        flat["encrypted_key"] = rcpt.get("encrypted_key", "")
+        if "header" in rcpt:
+            flat["header"] = rcpt["header"]
+        try:
+            got = _jwe.decrypt_json(flat, key, algorithms=_JWE_ALGS)
+        except Exception:
+            continue
+        if (got.aad or b"") != expected:
+            raise NotARecipientError("JWE: aad marker mismatch")
+        return got.plaintext
+    raise NotARecipientError(
+        "JWE: no recipient block in this envelope opens under this key"
+    )
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -193,20 +162,41 @@ def _atomic_write_text(path: Path, content: str) -> None:
     tmp.replace(path)
 
 
+def _atomic_write_secret_bytes(path: Path, data: bytes) -> None:
+    """Owner-only (0600) atomic write for secret key material — HIBE msk/sk,
+    the X25519 private halves of a JWE group.
+
+    Routes through the keystore backend so these land with the same posture
+    as ``local.private`` / ``index_master.key``: a same-dir temp opened 0600,
+    fsync, atomic replace. A plain ``Path.write_bytes`` inherits the process
+    umask and leaves the file world-readable (0644) — fine for the mpk, wrong
+    for a master secret. On Windows the mode is a no-op; the user-profile ACL
+    is the protection there, same as every other keystore secret.
+    """
+    from ._keystore_backend import atomic_write_bytes
+
+    atomic_write_bytes(path, data)
+
+
 @dataclass
 class JWEGroupCipher:
-    """Static-DH JWE cipher: one cipher per (ceremony, group).
+    """RFC 7516 JWE cipher: one cipher per (ceremony, group).
 
-    Threat model: sender's long-lived X25519 private is the root of all
-    per-recipient KEKs. Compromise that key and past envelopes are
-    readable. (Same posture as BGW master — no per-envelope forward
-    secrecy.) In exchange: every per-seal cost is in-place AES-KW,
-    microseconds per recipient. Revoking a recipient is an O(1)
-    recipient-list edit with no coordination.
+    Seals the group body as a JWE General JSON Serialization via a production
+    JOSE library (Authlib/joserfc): one fresh A256GCM CEK for the body, wrapped
+    per recipient with ECDH-ES+A256KW over the recipient's X25519 key. The
+    ephemeral ECDH-ES sender key travels in each recipient header, so there is
+    no long-lived sender secret in the decrypt path (sender authenticity comes
+    from the record's Ed25519 signature, not the cipher). Revoking a recipient
+    is an O(1) recipient-list edit; the next seal omits their block.
+
+    The ``<group>.jwe.sender`` keypair below is retained only as a stable group
+    identity anchor for the ceremony / compile / absorb surface — ECDH-ES does
+    not use it to seal or open.
 
     Keystore layout::
 
-        <keystore>/<group>.jwe.sender       32B X25519 private (publisher)
+        <keystore>/<group>.jwe.sender       32B X25519 private (identity anchor)
         <keystore>/<group>.jwe.recipients   JSON list [{recipient_identity, pub_b64}, ...]
         <keystore>/<group>.jwe.mykey        32B X25519 private (recipient)
     """
@@ -216,7 +206,6 @@ class JWEGroupCipher:
     _sender_pub: bytes = b""
     _my_sk: X25519PrivateKey | None = field(default=None, repr=False)
     _recipients_path: Path | None = field(default=None, repr=False)
-    _kek_cache: dict[str, bytes] | None = field(default=None, repr=False)
 
     @classmethod
     def create(
@@ -239,7 +228,9 @@ class JWEGroupCipher:
         """
         keystore.mkdir(parents=True, exist_ok=True)
         sender_sk = X25519PrivateKey.generate()
-        (keystore / f"{group_name}.jwe.sender").write_bytes(sender_sk.private_bytes_raw())
+        _atomic_write_secret_bytes(
+            keystore / f"{group_name}.jwe.sender", sender_sk.private_bytes_raw()
+        )
         sender_pub = sender_sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
         pubs = dict(recipient_pubs or {})
@@ -253,7 +244,9 @@ class JWEGroupCipher:
             )
         if missing:
             my_sk_new = X25519PrivateKey.generate()
-            (keystore / f"{group_name}.jwe.mykey").write_bytes(my_sk_new.private_bytes_raw())
+            _atomic_write_secret_bytes(
+                keystore / f"{group_name}.jwe.mykey", my_sk_new.private_bytes_raw()
+            )
             pubs[missing[0]] = my_sk_new.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
         recipients_doc = [
@@ -273,15 +266,12 @@ class JWEGroupCipher:
             else None
         )
 
-        inst = cls(
+        return cls(
             _sender_sk=sender_sk,
             _sender_pub=sender_pub,
             _my_sk=my_sk,
             _recipients_path=recipients_path,
-            _kek_cache={},
         )
-        inst._recompute_kek_cache()
-        return inst
 
     @classmethod
     def load(cls, keystore: Path, group_name: str) -> JWEGroupCipher:
@@ -304,16 +294,12 @@ class JWEGroupCipher:
             X25519PrivateKey.from_private_bytes(my_path.read_bytes()) if my_path.exists() else None
         )
 
-        inst = cls(
+        return cls(
             _sender_sk=sender_sk,
             _sender_pub=sender_pub,
             _my_sk=my_sk,
             _recipients_path=recipients_path if recipients_path.exists() else None,
-            _kek_cache={} if sender_sk else None,
         )
-        if sender_sk and recipients_path.exists():
-            inst._recompute_kek_cache()
-        return inst
 
     @classmethod
     def as_recipient(cls, sender_pub: bytes, my_sk: X25519PrivateKey) -> JWEGroupCipher:
@@ -328,25 +314,6 @@ class JWEGroupCipher:
         """Return the sender's X25519 public key bytes (32 bytes, raw)."""
         return self._sender_pub
 
-    def _recompute_kek_cache(self) -> None:
-        """Re-derive the per-recipient KEKs. Called at create() and after
-        revoke_recipient()."""
-        if self._sender_sk is None:
-            raise RuntimeError(
-                "_recompute_kek_cache called without sender secret key bound"
-            )
-        if self._recipients_path is None:
-            raise RuntimeError(
-                "_recompute_kek_cache called without recipients_path bound"
-            )
-        doc = json.loads(self._recipients_path.read_text(encoding="utf-8"))
-        cache: dict[str, bytes] = {}
-        for entry in doc:
-            pub = base64.b64decode(entry["pub_b64"])
-            kek = _derive_kek(pub, self._sender_sk)
-            cache[entry["recipient_identity"]] = kek
-        self._kek_cache = cache
-
     def revoke_recipient(self, did: str) -> None:
         """Drop ``did`` from the recipient list. Subsequent encrypts exclude
         them. O(1) — no coordination with other recipients."""
@@ -358,7 +325,6 @@ class JWEGroupCipher:
         if len(doc) == before:
             return  # already absent — idempotent
         _atomic_write_text(self._recipients_path, json.dumps(doc, indent=2))
-        self._recompute_kek_cache()
 
     def add_recipient(self, did: str, pub_bytes: bytes) -> None:
         """Append ``did`` with raw 32-byte X25519 pub to the recipient list.
@@ -380,42 +346,315 @@ class JWEGroupCipher:
             }
         )
         _atomic_write_text(self._recipients_path, json.dumps(doc, indent=2))
-        self._recompute_kek_cache()
 
-    def encrypt(self, plaintext: bytes) -> bytes:
-        if self._sender_sk is None or self._kek_cache is None:
-            raise NotAPublisherError("JWE: no sender X25519 key in this keystore")
-        if not self._kek_cache:
+    def encrypt(self, plaintext: bytes, aad: bytes = b"") -> bytes:
+        if self._recipients_path is None:
+            raise NotAPublisherError("JWE: no recipient list in this keystore")
+        doc = json.loads(self._recipients_path.read_text(encoding="utf-8"))
+        if not doc:
             raise NotAPublisherError(
                 "JWE: cannot encrypt with zero recipients. Add a recipient "
                 "before calling encrypt()."
             )
-        cek = secrets.token_bytes(32)
-        iv = os.urandom(12)
-        ct = AESGCM(cek).encrypt(iv, plaintext, None)
-        wrapped = [aes_key_wrap(kek, cek) for kek in self._kek_cache.values()]
-        return _pack_ciphertext(iv, ct, self._sender_pub, wrapped)
+        pubs = [base64.b64decode(e["pub_b64"]) for e in doc]
+        return _jwe_seal(pubs, plaintext, aad)
 
-    def decrypt(self, ciphertext: bytes) -> bytes:
+    def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
         if self._my_sk is None:
             raise NotARecipientError("JWE: no recipient X25519 key in this keystore")
-        iv, sender_pub, wrapped, ct = _unpack_ciphertext(ciphertext)
-        # Recipient doesn't know which wrapped_key is theirs — try each.
-        # At N<=10 that's at most ~50µs of wasted unwrap work; the AEAD
-        # tag catches a mismatch without risk of silent false plaintext.
-        kek = _derive_kek(sender_pub, self._my_sk)
-        from cryptography.exceptions import InvalidTag
+        return _jwe_open(ciphertext, self._my_sk, aad)
 
-        for w in wrapped:
+
+# ---------------------------------------------------------------------------
+# HIBE cipher — BBG hierarchical identity-based encryption via the tn-hibe
+# Rust extension. Encrypt to an identity path under an authority's master
+# public key; readers hold delegated identity keys.
+# ---------------------------------------------------------------------------
+
+
+def _native_hibe() -> Any:
+    """Deferred native import, same posture as BtnGroupCipher's ``_btn``."""
+    from tn._native import hibe
+
+    return hibe
+
+
+@dataclass
+class HibeGroupCipher:
+    """Ceremony/group cipher backed by BBG HIBE (constant-size ciphertext).
+
+    Writing needs only the authority's master public key plus the group's
+    identity path — no per-recipient key exchange at write time. Reading
+    needs a delegated key on that exact path; a key for an ancestor path
+    derives down locally (no msk, no re-keying). Delegated keys are
+    permanent: no forward revocation of an admitted reader — groups that
+    need that use btn (the default cipher).
+
+    Keystore layout::
+
+        <keystore>/<group>.hibe.mpk     authority PublicParams (public)
+        <keystore>/<group>.hibe.idpath  identity path this group seals to (public)
+        <keystore>/<group>.hibe.sk      delegated identity key (SECRET)
+        <keystore>/<group>.hibe.msk     master secret (SECRET; present only
+                                        when this keystore IS the authority)
+    """
+
+    name: str = "hibe"
+    _mpk: bytes = b""
+    _id_path: str = ""
+    _sk: bytes | None = field(default=None, repr=False)
+    _msk: bytes | None = field(default=None, repr=False)
+    _keystore: Path | None = field(default=None, repr=False)
+    _group_name: str = ""
+    # Paths this group sealed to before rotations, newest first. Lets the
+    # authority (msk holder) open pre-rotation entries; persisted in
+    # ``<group>.hibe.idpath.history``, one path per line.
+    _prior_paths: list[str] = field(default_factory=list, repr=False)
+    # Superseded identity keys, newest first. When a re-issued kit lands,
+    # absorb renames the old ``<group>.hibe.sk`` to ``.previous.<ts>``;
+    # loading them back keeps a surviving reader's pre-rotation entries
+    # readable without any special ceremony.
+    _prior_sks: list[bytes] = field(default_factory=list, repr=False)
+
+    @classmethod
+    def create(
+        cls,
+        keystore: Path,
+        group_name: str,
+        *,
+        authority_mpk: bytes | None = None,
+        id_path: str | None = None,
+        max_depth: int = 2,
+    ) -> HibeGroupCipher:
+        """Mint a fresh hibe group.
+
+        With ``authority_mpk`` (and ``id_path``): seal to an EXTERNAL
+        authority's path. No read key is written — this keystore can write
+        but cannot read until a delegated key arrives via grant/absorb.
+
+        Without ``authority_mpk`` (the solo-ceremony default, matching
+        jwe/btn create semantics): this keystore becomes its own authority
+        (per-authority trust root) — runs Setup, keeps the msk, and
+        self-delegates a reader key for ``id_path`` (default ``"self"``).
+        """
+        hibe = _native_hibe()
+        keystore.mkdir(parents=True, exist_ok=True)
+        sk: bytes | None = None
+        msk: bytes | None = None
+        if authority_mpk is None:
+            path = id_path or "self"
+            mpk_new, msk_new = hibe.setup(max_depth)
+            sk_new = hibe.keygen(mpk_new, msk_new, path)
+            _atomic_write_secret_bytes(keystore / f"{group_name}.hibe.msk", msk_new)
+            _atomic_write_secret_bytes(keystore / f"{group_name}.hibe.sk", sk_new)
+            mpk, msk, sk = mpk_new, msk_new, sk_new
+        else:
+            if not id_path:
+                raise ValueError(
+                    "HIBE.create: id_path is required when sealing to an "
+                    "external authority_mpk"
+                )
+            path = id_path
+            mpk = authority_mpk
+            hibe.mpk_fingerprint(mpk)  # parse now: reject malformed mpk at mint
+        (keystore / f"{group_name}.hibe.mpk").write_bytes(mpk)
+        _atomic_write_text(keystore / f"{group_name}.hibe.idpath", path)
+        return cls(
+            _mpk=mpk,
+            _id_path=path,
+            _sk=sk,
+            _msk=msk,
+            _keystore=keystore,
+            _group_name=group_name,
+        )
+
+    @classmethod
+    def load(cls, keystore: Path, group_name: str) -> HibeGroupCipher:
+        """Load an existing hibe group from its keystore files."""
+        mpk_path = keystore / f"{group_name}.hibe.mpk"
+        idpath_path = keystore / f"{group_name}.hibe.idpath"
+        sk_path = keystore / f"{group_name}.hibe.sk"
+        msk_path = keystore / f"{group_name}.hibe.msk"
+        if not mpk_path.exists() or not idpath_path.exists():
+            raise CipherError(
+                f"HIBE: keystore is missing {group_name}.hibe.mpk/.idpath; "
+                f"was this group minted (or its kit absorbed) here?"
+            )
+        history_path = keystore / f"{group_name}.hibe.idpath.history"
+        prior = (
+            [
+                line.strip()
+                for line in history_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            if history_path.exists()
+            else []
+        )
+        prior_sks = [
+            p.read_bytes()
+            for p in sorted(
+                keystore.glob(f"{group_name}.hibe.sk.previous.*"), reverse=True
+            )
+        ]
+        return cls(
+            _mpk=mpk_path.read_bytes(),
+            _id_path=idpath_path.read_text(encoding="utf-8").strip(),
+            _sk=sk_path.read_bytes() if sk_path.exists() else None,
+            _msk=msk_path.read_bytes() if msk_path.exists() else None,
+            _keystore=keystore,
+            _group_name=group_name,
+            _prior_paths=prior,
+            _prior_sks=prior_sks,
+        )
+
+    def id_path(self) -> str:
+        """The identity path this group seals to."""
+        return self._id_path
+
+    def mpk(self) -> bytes:
+        """The authority's master public key bytes."""
+        return self._mpk
+
+    def mpk_fingerprint(self) -> bytes:
+        """SHA-256 fingerprint of the authority mpk (manifest ``mpk_fp``)."""
+        return _native_hibe().mpk_fingerprint(self._mpk)
+
+    def encrypt(self, plaintext: bytes, aad: bytes = b"") -> bytes:
+        if not self._mpk or not self._id_path:
+            raise NotAPublisherError(
+                "HIBE: no authority mpk / identity path in this keystore"
+            )
+        return _native_hibe().seal(self._mpk, self._id_path, plaintext, aad or None)
+
+    def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
+        """Open a group blob.
+
+        A blob does not carry the path it was sealed to, and after a path
+        rotation a log mixes epochs, so try every key this keystore can
+        legitimately produce: the held key as-is, the held key derived down
+        to the current path, and — for the authority — msk-minted keys for
+        the current path and every prior path recorded by rotations.
+
+        ``aad`` must byte-match whatever was bound at seal time (empty when
+        the group binds no marker); a mismatch fails every candidate.
+        """
+        hibe = _native_hibe()
+        tried = False
+        for sk in self._candidate_keys():
+            tried = True
             try:
-                cek = aes_key_unwrap(kek, w)
-            except (InvalidUnwrap, ValueError):
+                return hibe.open(self._mpk, sk, ciphertext, aad or None)
+            except hibe.HibeCryptoError:
                 continue
-            try:
-                return AESGCM(cek).decrypt(iv, ct, None)
-            except InvalidTag:
+        if not tried:
+            raise NotARecipientError(
+                "HIBE: no delegated identity key for this group's path in "
+                "this keystore"
+            )
+        raise NotARecipientError(
+            "HIBE: no identity key in this keystore opens this group's "
+            "ciphertext (sealed to a different path, or tampered bytes)"
+        )
+
+    def _candidate_keys(self):
+        """Yield decryption-key candidates, most likely first, without
+        minting the same path twice."""
+        hibe = _native_hibe()
+        seen: set[str] = set()
+        if self._sk is not None:
+            seen.add(hibe.key_id_path(self._sk))
+            yield self._sk
+        derived = self._derive_from_held(self._id_path)
+        if derived is not None and self._id_path not in seen:
+            seen.add(self._id_path)
+            yield derived
+        for old_sk in self._prior_sks:
+            path = hibe.key_id_path(old_sk)
+            if path in seen:
                 continue
-        raise NotARecipientError("JWE: no wrapped key in this envelope decrypts under my KEK")
+            seen.add(path)
+            yield old_sk
+        if self._msk is not None:
+            for path in [self._id_path, *self._prior_paths]:
+                if path in seen:
+                    continue
+                seen.add(path)
+                yield hibe.keygen(self._mpk, self._msk, path)
+
+    def _derive_from_held(self, target_path: str) -> bytes | None:
+        """The held key if it sits on ``target_path``, derived down from an
+        ancestor when needed (BBG opens only with an exact-path key)."""
+        hibe = _native_hibe()
+        if self._sk is None:
+            return None
+        held = hibe.key_id_path(self._sk)
+        if held == target_path:
+            return self._sk
+        target_labels = target_path.split("/")
+        held_labels = held.split("/") if held else []
+        if held_labels != target_labels[: len(held_labels)]:
+            return None
+        sk = self._sk
+        for label in target_labels[len(held_labels):]:
+            sk = hibe.delegate(self._mpk, sk, label)
+        return sk
+
+    def mint_reader_key(self, id_path: str) -> bytes:
+        """Authority-side grant: generate the identity key for ``id_path``
+        from the msk. The admin layer packages this into a ``hibe-id-key``
+        kit; the cipher only mints the material."""
+        if self._msk is None:
+            raise NotAPublisherError(
+                "HIBE: only the authority (msk holder) can mint reader keys"
+            )
+        return _native_hibe().keygen(self._mpk, self._msk, id_path)
+
+    def delegate_reader_key(self, child_label: str) -> bytes:
+        """Parent-side grant: derive the key one level below this
+        keystore's own identity key. No msk involved."""
+        if self._sk is None:
+            raise NotARecipientError(
+                "HIBE: no identity key to delegate from in this keystore"
+            )
+        return _native_hibe().delegate(self._mpk, self._sk, child_label)
+
+    def rotate_id_path(self, new_path: str) -> None:
+        """Point future seals at ``new_path`` (the policy-path rotation).
+
+        This is admission rotation, not revocation: pre-rotation seals stay
+        open forever for whoever held a key on the old path (delegated keys
+        are permanent), and a grantee holding a key for an ANCESTOR of the
+        new path keeps access to new seals too. Pick a sibling path (e.g.
+        bump the policy-hash leaf) to cut off exact-path grantees going
+        forward. Authority-only: the msk mints this keystore's own fresh
+        key for the new path.
+        """
+        if self._msk is None:
+            raise NotAPublisherError(
+                "HIBE: only the authority (msk holder) can rotate the "
+                "identity path"
+            )
+        if self._keystore is None:
+            raise CipherError(
+                "HIBE: this cipher instance is not bound to a keystore "
+                "(recipient view); rotate from the authority's ceremony"
+            )
+        if new_path == self._id_path:
+            raise ValueError(f"HIBE: new path equals the current path {new_path!r}")
+        sk = _native_hibe().keygen(self._mpk, self._msk, new_path)
+        _atomic_write_secret_bytes(self._keystore / f"{self._group_name}.hibe.sk", sk)
+        _atomic_write_text(
+            self._keystore / f"{self._group_name}.hibe.idpath", new_path
+        )
+        # Record the outgoing path so the authority keeps opening the
+        # entries sealed under it (newest first).
+        self._prior_paths.insert(0, self._id_path)
+        _atomic_write_text(
+            self._keystore / f"{self._group_name}.hibe.idpath.history",
+            "\n".join(self._prior_paths) + "\n",
+        )
+        self._sk = sk
+        self._id_path = new_path
 
 
 # ---------------------------------------------------------------------------
@@ -612,18 +851,18 @@ class BtnGroupCipher:
             _retired_states=retired_states,
         )
 
-    def encrypt(self, plaintext: bytes) -> bytes:
+    def encrypt(self, plaintext: bytes, aad: bytes = b"") -> bytes:
         if self._state is None:
             raise NotAPublisherError("btn: no state file in this keystore")
-        return self._state.encrypt(plaintext)
+        return self._state.encrypt(plaintext, aad or None)
 
-    def decrypt(self, ciphertext: bytes) -> bytes:
+    def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
         from tn._native import btn as _btn
 
         if not self._self_kit:
             raise NotARecipientError("btn: no self-kit in this keystore")
         try:
-            return _btn.decrypt(self._self_kit, ciphertext)
+            return _btn.decrypt(self._self_kit, ciphertext, aad or None)
         except _btn.NotEntitled as e:
             raise NotARecipientError(f"btn: kit not entitled: {e}") from e
 

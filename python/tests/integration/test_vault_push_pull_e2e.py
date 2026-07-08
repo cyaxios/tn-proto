@@ -34,6 +34,15 @@ Run::
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import asyncio
 import base64
 import shutil
@@ -479,10 +488,10 @@ def _build_alice(tmp_path: Path, frank_did: str) -> dict[str, Any]:
     _write_policy(alice_dir)
 
     tn.flush_and_close()
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(yaml)
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     if not tn.using_rust():
         tn.flush_and_close()
         pytest.skip("vault e2e test requires the Rust runtime (btn)")
@@ -535,10 +544,10 @@ def _build_frank(tmp_path: Path) -> dict[str, Any]:
     yaml = frank_dir / "tn.yaml"
 
     tn.flush_and_close()
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     _force_admin_log_yaml(yaml)
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     if not tn.using_rust():
         tn.flush_and_close()
         pytest.skip("vault e2e test requires the Rust runtime (btn)")
@@ -659,7 +668,7 @@ def test_alice_to_frank_round_trip(tmp_path: Path, _shared_loop) -> None:
     # Re-bind to Frank's runtime so his ceremony is the active one and
     # absorb writes to HIS admin log (.tn/tn/admin/default.ndjson).
     tn.flush_and_close()
-    tn.init(frank["yaml"], cipher="btn")
+    tn.init(frank["yaml"], cipher=_workflow_cipher("btn"))
     frank_cfg = tn.current_config()
 
     # 6. Authenticate Frank and run his pull handler against the vault.

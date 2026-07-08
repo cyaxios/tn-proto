@@ -5,6 +5,15 @@ opt-out via TN_NO_STDOUT=1 env var or tn.init(stdout=False) kwarg.
 """
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import io
 import json
 import sys
@@ -259,7 +268,7 @@ def test_stdout_fires_on_btn_rust_path(tmp_path, capfd, monkeypatch):
 
     monkeypatch.delenv("TN_NO_STDOUT", raising=False)
     monkeypatch.delenv("TN_FORCE_PYTHON", raising=False)
-    tn.init(tmp_path / "tn.yaml", cipher="btn")
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("btn"))
     if not tn.using_rust():
         pytest.skip("Rust path not active even with btn cipher; nothing to verify")
     tn.info("evt.btn_rust_stdout", x=1)

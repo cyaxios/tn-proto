@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 from pathlib import Path
 
@@ -24,7 +33,7 @@ def _clean_tn():
 
 def test_vault_link_emits_event(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.vault.link("did:web:tn-proto.org", "proj_test")
     tn.flush_and_close()
 
@@ -43,7 +52,7 @@ def test_vault_link_emits_event(tmp_path):
 
 def test_vault_unlink_emits_event_with_reason(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.vault.link("did:web:tn-proto.org", "proj_test")
     tn.vault.unlink("did:web:tn-proto.org", "proj_test", reason="user_request")
     tn.flush_and_close()
@@ -60,7 +69,7 @@ def test_vault_unlink_emits_event_with_reason(tmp_path):
 
 def test_vault_unlink_without_reason(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.vault.link("did:web:tn-proto.org", "proj_test")
     tn.vault.unlink("did:web:tn-proto.org", "proj_test")  # reason=None
     tn.flush_and_close()
@@ -77,7 +86,7 @@ def test_vault_unlink_without_reason(tmp_path):
 
 def test_vault_link_is_idempotent(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.vault.link("did:web:tn-proto.org", "proj_test")
     tn.vault.link("did:web:tn-proto.org", "proj_test")  # duplicate
     tn.flush_and_close()
@@ -94,7 +103,7 @@ def test_vault_link_is_idempotent(tmp_path):
 def test_vault_link_to_different_project_emits_again(tmp_path):
     """Changing either vault_did or project_id is a new link."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.vault.link("did:web:tn-proto.org", "proj_a")
     tn.vault.link("did:web:tn-proto.org", "proj_b")  # different project
     tn.flush_and_close()
@@ -111,7 +120,7 @@ def test_vault_link_to_different_project_emits_again(tmp_path):
 def test_vault_link_after_unlink_emits_again(tmp_path):
     """Re-linking after an unlink is a new event."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     tn.vault.link("did:web:tn-proto.org", "proj_test")
     tn.vault.unlink("did:web:tn-proto.org", "proj_test", reason="temp")
     tn.vault.link("did:web:tn-proto.org", "proj_test")  # re-link

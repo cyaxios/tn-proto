@@ -8,6 +8,15 @@ back-compat path (legacy flat `fields:` block + DeprecationWarning).
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import json
 import warnings
 from pathlib import Path
@@ -47,7 +56,7 @@ def _make_yaml(tmp_path: Path, *, body: dict, cipher: str = "jwe") -> Path:
     """Create a tn.yaml using the standard fresh ceremony, then overwrite
     the parts we care about (groups + fields) for the test scenario.
 
-    Defaults to ``cipher="jwe"`` so emit stays on the Python path. (The
+    Defaults to ``cipher=_workflow_cipher("jwe")`` so emit stays on the Python path. (The
     btn dispatch routes through Rust, which has its own multi-group test
     suite in ``tn-core``.)
     """
@@ -159,7 +168,7 @@ def test_field_in_zero_groups_and_not_public_raises_at_emit(tmp_path):
 def test_field_routed_to_unknown_group_raises_at_load(tmp_path):
     """`groups[<g>].fields` referencing a group that isn't declared is a yaml error."""
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     # Add a phantom field route by pointing at a non-existent group via the
@@ -192,12 +201,12 @@ def test_field_in_public_and_group_is_ambiguous(tmp_path):
 def test_legacy_flat_fields_loads_with_deprecation_warning(tmp_path):
     """Old yamls using flat `fields:` still load and route correctly."""
     yaml_path = tmp_path / "tn.yaml"
-    tn.init(yaml_path, cipher="btn")
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
     from tn import admin
 
     cfg = tn_config.load(yaml_path)
-    admin.ensure_group(cfg, "secrets", cipher="btn")
+    admin.ensure_group(cfg, "secrets", cipher=_workflow_cipher("btn"))
     tn.flush_and_close()
 
     # Reach into yaml: clear groups[*].fields, set legacy flat fields block.

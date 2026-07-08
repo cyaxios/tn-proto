@@ -3,6 +3,15 @@ every admin verb under both ciphers and prints PASS/FAIL per scenario."""
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 import tempfile
 import traceback
@@ -77,7 +86,7 @@ def audit_jwe() -> None:
     section("JWE ensure_group + revoke_recipient + rotate")
     with tempfile.TemporaryDirectory() as td:
         ws = Path(td)
-        tn.init(ws / "tn.yaml", cipher="jwe")
+        tn.init(ws / "tn.yaml", cipher=_workflow_cipher("jwe"))
         cfg = tn.current_config()
 
         cfg = tn.ensure_group(cfg, "pii", fields=["email"])
@@ -89,7 +98,7 @@ def audit_jwe() -> None:
         tn.info("profile.update", email="alice@example.com")
         tn.flush_and_close()
 
-        tn.init(ws / "tn.yaml", cipher="jwe")
+        tn.init(ws / "tn.yaml", cipher=_workflow_cipher("jwe"))
         cfg = tn.current_config()
         log = ws / ".tn/tn/logs" / "tn.ndjson"
         entries = list(tn.read(log, cfg))
@@ -117,11 +126,11 @@ def audit_jwe() -> None:
             return
 
         tn.flush_and_close()
-        tn.init(ws / "tn.yaml", cipher="jwe")
+        tn.init(ws / "tn.yaml", cipher=_workflow_cipher("jwe"))
         tn.info("profile.update", email="new@example.com")
         tn.flush_and_close()
 
-        tn.init(ws / "tn.yaml", cipher="jwe")
+        tn.init(ws / "tn.yaml", cipher=_workflow_cipher("jwe"))
         cfg = tn.current_config()
         entries = list(tn.read(log, cfg))
         ok(f"log+read after JWE rotate: {len(entries)} entries readable")
@@ -143,7 +152,7 @@ def audit_guards() -> None:
         ws = Path(td)
 
         # issue_key on JWE should raise
-        tn.init(ws / "tn.yaml", cipher="jwe")
+        tn.init(ws / "tn.yaml", cipher=_workflow_cipher("jwe"))
         cfg = tn.current_config()
         try:
             tn.issue_key(cfg, "default", "did:key:zFoo")
@@ -163,7 +172,7 @@ def audit_guards() -> None:
         tn.flush_and_close()
 
         # import_key on JWE — this is the one we're not sure about
-        tn.init(ws / "tn3.yaml", cipher="jwe")
+        tn.init(ws / "tn3.yaml", cipher=_workflow_cipher("jwe"))
         cfg = tn.current_config()
         fake_key_path = ws / "fake.read"
         fake_key_path.write_bytes(b"\x00" * 100)

@@ -11,6 +11,15 @@ suites). Run with the tne2e stack up:
 """
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import base64
 import json
 import os
@@ -149,7 +158,7 @@ def test_warm_create_then_warm_sync(tmp_path: Path) -> None:
 
     # A fresh, NOT-yet-linked ceremony (no linked_project_id) → WARM_CREATE.
     yaml_path = tmp_path / "proj" / "tn.yaml"
-    tn.init(yaml_path, cipher="btn", identity=identity, link=False)
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"), identity=identity, link=False)
     cfg = tn.current_config()
     tn.ensure_group(cfg, "payments", fields=["amount", "memo"])
     tn.info("order.created", amount=42, memo="hi")
@@ -213,7 +222,7 @@ def test_wired_connect_cache_then_init(tmp_path: Path, capsys, monkeypatch) -> N
     # no project yet → WARM_CREATE. _try_warm_attach's internal tn_init LOADS
     # this existing yaml (preserving linked_vault) instead of re-minting.
     yaml_path = tmp_path / "proj" / "tn.yaml"
-    tn.init(yaml_path, cipher="btn", identity=identity, link=False)
+    tn.init(yaml_path, cipher=_workflow_cipher("btn"), identity=identity, link=False)
     cfg = tn.current_config()
     tn.ensure_group(cfg, "payments", fields=["amount"])
     tn.info("order.created", amount=1)

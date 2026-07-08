@@ -9,6 +9,12 @@ readme = "README.md"
 
 [dependencies]
 tn-btn = { path = "../tn-btn" }
+# tn-hibe (→ the Apache-2.0/MIT tn-bbg scheme) backs the native hibe cipher.
+# Gated behind the default-on `hibe` feature purely as a BUILD-WEIGHT knob:
+# it pulls the pairing stack (bls12_381_plus), which a btn-only embedder can
+# skip by disabling the feature. No license consideration — the whole tree
+# is permissive since hohibe was removed.
+tn-hibe = { path = "../tn-hibe", optional = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 hkdf = { workspace = true }
@@ -63,7 +69,13 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 
 [features]
-default = ["fs", "fs-locking"]
+default = ["fs", "fs-locking", "hibe"]
+# `hibe` wires the BBG HIBE cipher into the native runtime (cipher dispatch,
+# emit, read) via the tn-hibe crate. Default-on so the shipped wheel and
+# wasm bundle run hibe groups natively. Turning it OFF drops the tn-hibe
+# dependency (and its pairing stack) for a lighter btn-only tn-core in which
+# hibe groups fall back to a NotImplemented dispatch arm.
+hibe = ["dep:tn-hibe"]
 # `fs` enables filesystem-backed modules (log_file, identity,
 # FsStorage, Runtime, CLI bin). On its own it does NOT pull in
 # `fs4`, so wasm consumers can opt in to `fs` without the

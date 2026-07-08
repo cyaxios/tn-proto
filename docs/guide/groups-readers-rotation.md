@@ -124,3 +124,58 @@ $ tn rotate
 Distribute the per-recipient files however you like (vault push, CI artifact, email). Each reader runs `tn absorb` on theirs. The revoked reader is not in the new generation, so they keep their old entries but cannot read anything written after the rotation.
 
 Everything the dashboard at `vault.tn-proto.org` does (invite a reader by email, watch absorb status, trigger rotations) is backed by this same `.tnpkg` format that `tn.export` and `tn.absorb` produce locally.
+
+---
+
+## HIBE groups
+
+`hibe` is a third cipher option, peer to `btn` (the default) and `jwe`, selected per group the same way:
+
+```yaml
+groups:
+  governed:
+    cipher: hibe
+    fields: [decision, rationale]
+```
+
+A hibe group encrypts to an **identity path** (like `reader-did/policy-hash`) under an authority's published master public key. That gives it two properties the other ciphers don't have:
+
+- **No key exchange at write time.** Anyone holding the authority's public key can seal to a path — including a reader who doesn't hold any key yet.
+- **Hierarchical delegation.** A key for a parent path can derive keys for paths below it, locally, with no re-keying and no authority involvement.
+
+The ceremony that mints a hibe group becomes its own authority (it runs setup and keeps its own master secret). Nothing tn-hosted ever holds a decryption root.
+
+### Granting readers
+
+`grant_reader` is hibe's `add_recipient` — the generic `add_recipient` verb also routes here for hibe groups:
+
+```python
+result = tn.admin.grant_reader(
+    "governed",
+    reader_did="did:key:z6MkAlice...",
+    out_path="./alice.tnpkg",
+)
+```
+
+The bundle carries the authority's public key, the group's identity path, and a freshly minted identity key. Each grant gets independently randomized key material for the same path, and every grantee decrypts the same entries. The reader absorbs it with `tn.absorb` like any other kit bundle. The authority's master secret never rides a bundle; it only appears in a self-addressed full-keystore backup.
+
+### Revocation: the honest tradeoff
+
+Choose the cipher by its revocation story. **btn revokes forward**: drop a reader and the next write already excludes them. **hibe cannot do that**: a delegated key is a permanent trapdoor for its path — once admitted, a reader opens everything ever sealed to that path, past and future. What hibe offers instead is **path rotation**:
+
+```python
+tn.admin.rotate_reader_path("governed", "policy-b")
+```
+
+Future seals target the new path, so holders of exact old-path keys stop reading new entries; everything sealed before the rotation stays open to them forever. A grantee holding a key for an *ancestor* of the new path keeps access (ancestor keys delegate down — grant exact paths when you want rotation to cut people off). If a group genuinely needs per-reader forward revocation, use btn for that group. That's what the default is for.
+
+### If the authority's master secret leaks
+
+The master secret can mint a key for any path under its public key, which means whoever holds it can read every entry ever sealed by that group. There is no partial fix:
+
+1. Stop sealing under the compromised authority immediately.
+2. Run a fresh setup (a new authority) and point the group at it — this is a new cipher domain, equivalent to minting the group fresh.
+3. Re-grant every legitimate reader under the new authority.
+4. Treat everything sealed under the old authority as readable by the attacker. Rotation cannot claw it back; that history's confidentiality is bounded by whatever the attacker captured.
+
+Because each ceremony is its own authority, the blast radius of a leak is that one ceremony's hibe groups — never anyone else's.

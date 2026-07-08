@@ -84,6 +84,7 @@ pub(crate) fn build_group_states(
                 cipher,
                 index_key,
                 hmac_template,
+                aad_default: spec.aad.clone(),
             })),
         );
         if let Some(pub_cipher) = maybe_pub_cipher {
@@ -110,6 +111,9 @@ pub(crate) fn build_cipher_with_admin(
         "btn" => build_btn_cipher_with_admin(keystore, group_name),
         "jwe" | "bearer" => Err(Error::NotImplemented(
             "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
+        )),
+        "hibe" => Err(Error::NotImplemented(
+            "HIBE groups run through the Python runtime in this plan (tn-hibe backs them)",
         )),
         "bgw" => Err(Error::NotImplemented(
             "BGW groups run through the Python runtime; FFI port deferred",
@@ -142,6 +146,12 @@ pub(crate) fn build_cipher_with_admin_with_storage(
         "btn" => build_btn_cipher_with_admin_with_storage(keystore, group_name, storage),
         "jwe" | "bearer" => Err(Error::NotImplemented(
             "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
+        )),
+        #[cfg(feature = "hibe")]
+        "hibe" => build_hibe_cipher_with_storage(keystore, group_name, storage),
+        #[cfg(not(feature = "hibe"))]
+        "hibe" => Err(Error::NotImplemented(
+            "HIBE support is not built into this tn-core (the `hibe` feature is off)",
         )),
         "bgw" => Err(Error::NotImplemented(
             "BGW groups run through the Python runtime; FFI port deferred",
@@ -186,6 +196,81 @@ pub(crate) fn build_btn_cipher_with_admin_with_storage(
             "btn group {group}: no {group}.btn.state and no {group}.btn.mykit in keystore"
         ))),
     }
+}
+
+/// Storage-aware hibe cipher builder. Reads the group's hibe key files
+/// (`<group>.hibe.{mpk,idpath,sk,msk,idpath.history}` plus superseded
+/// `<group>.hibe.sk.previous.*`) through `storage` and constructs a native
+/// [`HibeCipher`](crate::cipher::hibe::HibeCipher) that seals/opens via the
+/// `tn-hibe` scheme. `mpk` and `idpath` are required; the rest are optional
+/// (a write-only party holds neither `sk` nor `msk`). Returns the cipher
+/// with no btn admin side-table.
+#[cfg(feature = "hibe")]
+fn build_hibe_cipher_with_storage(
+    keystore: &Path,
+    group: &str,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<BuildCipherResult> {
+    let read_opt = |name: String| -> Result<Option<Vec<u8>>> {
+        let p = keystore.join(name);
+        if storage.exists(&p) {
+            Ok(Some(storage.read_bytes(&p).map_err(Error::Io)?))
+        } else {
+            Ok(None)
+        }
+    };
+
+    let mpk = read_opt(format!("{group}.hibe.mpk"))?.ok_or_else(|| {
+        Error::InvalidConfig(format!(
+            "hibe group {group}: no {group}.hibe.mpk in keystore"
+        ))
+    })?;
+    let idpath_bytes = read_opt(format!("{group}.hibe.idpath"))?.ok_or_else(|| {
+        Error::InvalidConfig(format!(
+            "hibe group {group}: no {group}.hibe.idpath in keystore"
+        ))
+    })?;
+    let id_path = String::from_utf8(idpath_bytes)
+        .map_err(|_| Error::InvalidConfig(format!("hibe group {group}: idpath is not utf-8")))?
+        .trim()
+        .to_string();
+
+    let sk = read_opt(format!("{group}.hibe.sk"))?;
+    let msk = read_opt(format!("{group}.hibe.msk"))?;
+
+    let prior_paths: Vec<String> = match read_opt(format!("{group}.hibe.idpath.history"))? {
+        Some(bytes) => String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
+
+    // Superseded reader keys, newest first (same order the Python loader
+    // uses: reverse-sorted `.previous.<ts>` siblings).
+    let prev_prefix = format!("{group}.hibe.sk.previous.");
+    let mut prev_paths: Vec<PathBuf> = storage
+        .list(keystore)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prev_prefix))
+        })
+        .collect();
+    prev_paths.sort();
+    prev_paths.reverse();
+    let mut prior_sks: Vec<Vec<u8>> = Vec::with_capacity(prev_paths.len());
+    for p in prev_paths {
+        prior_sks.push(storage.read_bytes(&p).map_err(Error::Io)?);
+    }
+
+    let cipher =
+        crate::cipher::hibe::HibeCipher::new(&mpk, &id_path, sk, msk, prior_paths, prior_sks)?;
+    Ok((Arc::new(cipher), None, None))
 }
 
 /// Storage-aware kit-bytes collection. Mirrors
@@ -440,8 +525,8 @@ impl FreshBtnCeremonyOptions {
 ///   tn.yaml
 /// ```
 ///
-/// Used by [`Runtime::ephemeral`](super::Runtime::ephemeral). Lives in tn-core
-/// so tests + benches don't have to duplicate the throwaway ceremony layout.
+/// Used by [`Runtime::ephemeral`]. Lives in the public crate so
+/// downstream tests + benches don't have to duplicate it.
 ///
 /// Auto-injects the reserved `tn.agents` group per the 2026-04-25
 /// read-ergonomics spec §2.3. Pure-logging users pay nothing — the

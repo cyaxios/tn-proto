@@ -498,16 +498,24 @@ impl WasmRuntime {
         timestamp: Option<String>,
         event_id: Option<String>,
         sign: Option<bool>,
+        aad: JsValue,
     ) -> Result<Option<String>, JsError> {
         let map = fields_object(fields)?;
+        // `aad` is an optional marker object (undefined/null -> no marker).
+        let aad_map = if aad.is_undefined() || aad.is_null() {
+            serde_json::Map::new()
+        } else {
+            fields_object(aad)?
+        };
         self.inner
-            .emit_with_override_sign_returning_line(
+            .emit_with_aad_returning_line(
                 level,
                 event_type,
                 map,
                 timestamp.as_deref(),
                 event_id.as_deref(),
                 sign,
+                &aad_map,
             )
             .map_err(|e| JsError::new(&e.to_string()))
     }

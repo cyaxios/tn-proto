@@ -5,8 +5,7 @@ This is the CLI-side counterpart to the server's
 verb existed, the outer invitation wrapper (``manifest.json`` + the inner
 ``<group>.btn.mykit`` kit entry) was produced *only* server-side by the
 web vault, so a faithful same-language round-trip
-(``mint invite zip -> inbox accept``) was impossible inside ``tn_proto``
-(see ``docs/cli-test-plans/inbox_accept.md``).
+(``mint invite zip -> inbox accept``) was impossible inside ``tn_proto``.
 
 The verb is a thin shim over primitives that already exist:
 

@@ -30,17 +30,7 @@
  * ## Protocol spec
  *
  * Everything in this surface is a conformant implementation of the
- * TN protocol spec at `docs/spec/`:
- *
- * - [canonical-bytes](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/canonical-bytes.md)
- * - [envelope](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/envelope.md)
- * - [row-hash](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/row-hash.md)
- * - [signing](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/signing.md)
- * - [manifest](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/manifest.md)
- * - [body-encryption](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/body-encryption.md)
- * - [recipient-wraps](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/recipient-wraps.md)
- * - [vault-http](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/vault-http.md)
- * - [env-vars](https://github.com/cyaxios/tn-proto/blob/main/docs/spec/env-vars.md)
+ * TN protocol spec.
  *
  * When the spec and this library disagree, the spec wins.
  *

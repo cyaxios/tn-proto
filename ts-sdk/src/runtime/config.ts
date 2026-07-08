@@ -1,6 +1,7 @@
 // Ceremony yaml loader. Mirrors the minimum shape that tn.logger.build_runtime
-// consumes in Python. Only btn ceremonies are supported; jwe/bgw fall
-// outside the Rust-backed path (those stay Python-owned for now).
+// consumes in Python. Loads btn, hibe, and jwe ceremonies: btn/hibe seal and
+// open through the wasm Rust core, jwe through the async TS pipeline
+// (emitAsync / readAsync).
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -15,7 +16,22 @@ export interface GroupConfig {
   policy: string;
   cipher: string;
   recipients: RecipientSpec[];
+  /** HMAC search-key counter (`groups.<name>.index_epoch`), bumped on
+   * rotation. Feeds the per-group index-key derivation used by the
+   * TS-side emit pipeline (non-btn ceremonies). Default 0. */
+  indexEpoch: number;
+  /** Group-level additional-authenticated-data default, parsed from
+   * `groups.<name>.aad`. A flat map of string -> scalar merged UNDER any
+   * per-emit aad (per-emit overrides). Canonicalized and bound to this
+   * group's seal, echoed into the record's public `tn_aad` block. Empty
+   * (the default) binds nothing. Mirrors Python `GroupConfig.aad_default`. */
+  aadDefault: Record<string, unknown>;
 }
+
+/** Cipher names the yaml may declare. Mirrors Python's config validation
+ * (`expected 'jwe', 'btn', or 'hibe'`); which of these a given runtime can
+ * actually run is checked separately (NodeRuntime supports btn + hibe). */
+const KNOWN_CIPHERS = new Set(["jwe", "btn", "hibe"]);
 
 export interface CeremonyConfig {
   yamlPath: string;
@@ -403,6 +419,38 @@ function _rejectReservedGroupNames(groups: Record<string, unknown>, resolved: st
   }
 }
 
+/** Validate and return a `groups.<name>.aad` default mapping.
+ *
+ * An aad default must be a flat mapping of string keys to scalar values
+ * (string, number, boolean, or null) — the same shape a per-emit aad dict
+ * takes. A non-mapping, or a nested / non-scalar value, is rejected with a
+ * clear message so a malformed yaml fails at load rather than silently
+ * binding surprising bytes at emit time. Mirrors Python `_validate_group_aad`. */
+function _validateGroupAad(
+  name: string,
+  rawAad: unknown,
+  resolved: string,
+): Record<string, unknown> {
+  if (rawAad === undefined || rawAad === null) return {};
+  if (typeof rawAad !== "object" || Array.isArray(rawAad)) {
+    throw new Error(
+      `${resolved}: groups.${name}.aad must be a mapping of string -> scalar, ` +
+        `got ${Array.isArray(rawAad) ? "array" : typeof rawAad}`,
+    );
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rawAad as Record<string, unknown>)) {
+    if (v !== null && typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
+      throw new Error(
+        `${resolved}: groups.${name}.aad[${JSON.stringify(k)}] must be a scalar ` +
+          `(string/number/boolean/null), got ${typeof v}`,
+      );
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
 interface BuiltGroups {
   groupMap: Map<string, GroupConfig>;
   /** Per-group `fields:` declarations (canonical multi-group routing path). */
@@ -433,11 +481,23 @@ function _buildGroupMap(
           did: String(r.recipient_identity ?? r.did ?? ""),
         }))
       : [];
+    const cipher = String(g.cipher ?? ceremony.cipher ?? "btn");
+    if (!KNOWN_CIPHERS.has(cipher)) {
+      throw new Error(
+        `${resolved}: groups.${name}.cipher is ${JSON.stringify(cipher)}; ` +
+          `expected 'jwe', 'btn', or 'hibe' (legacy 'bgw'/'bearer' removed)`,
+      );
+    }
+    // A group-level aad default binds on btn, jwe, and hibe alike now — the
+    // native (wasm) runtime and the pure TS pipeline both thread it.
+    const aadDefault = _validateGroupAad(name, g.aad, resolved);
     groupMap.set(name, {
       name,
       policy: String(g.policy ?? "private"),
-      cipher: String(g.cipher ?? ceremony.cipher ?? "btn"),
+      cipher,
       recipients,
+      indexEpoch: Number(g.index_epoch ?? 0) || 0,
+      aadDefault,
     });
     if (Array.isArray(g.fields)) {
       anyGroupDeclaresFields = true;
@@ -459,6 +519,8 @@ function _buildGroupMap(
       policy: "private",
       cipher: String(ceremony.cipher ?? "btn"),
       recipients: device.device_identity ? [{ did: String(device.device_identity) }] : [],
+      indexEpoch: 0,
+      aadDefault: {},
     });
   }
   return { groupMap, perGroupFields, anyGroupDeclaresFields };
@@ -591,12 +653,19 @@ function _assembleConfig(
   const keystore = (doc.keystore ?? {}) as Record<string, unknown>;
   const vaultRaw = (doc.vault ?? null) as Record<string, unknown> | null;
   const vault = normalizeVaultConfig(resolved, vaultRaw, ceremony);
+  const ceremonyCipher = String(ceremony.cipher ?? "btn");
+  if (!KNOWN_CIPHERS.has(ceremonyCipher)) {
+    throw new Error(
+      `${resolved}: unknown ceremony.cipher ${JSON.stringify(ceremonyCipher)}; ` +
+        `expected 'jwe', 'btn', or 'hibe' (legacy 'bgw' was removed in Workstream G)`,
+    );
+  }
   const cfg: CeremonyConfig = {
     yamlPath: resolved,
     yamlDir,
     ceremonyId: String(ceremony.id ?? ""),
     mode: String(ceremony.mode ?? "local"),
-    cipher: String(ceremony.cipher ?? "btn"),
+    cipher: ceremonyCipher,
     ...(ceremony.project_name != null && String(ceremony.project_name) !== ""
       ? { projectName: String(ceremony.project_name) }
       : {}),

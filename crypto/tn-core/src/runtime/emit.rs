@@ -28,6 +28,20 @@ use crate::{
 };
 
 use super::util::{current_timestamp, validate_event_type};
+
+/// Effective AAD marker for a group: its configured default overlaid by the
+/// per-emit marker (per-emit wins per key). Returns an empty map when both
+/// are empty so the caller seals with no binding.
+fn merge_aad(default: &Map<String, Value>, per_emit: &Map<String, Value>) -> Map<String, Value> {
+    if default.is_empty() && per_emit.is_empty() {
+        return Map::new();
+    }
+    let mut out = default.clone();
+    for (k, v) in per_emit {
+        out.insert(k.clone(), v.clone());
+    }
+    out
+}
 use super::{level_value, Runtime, LOG_LEVEL_THRESHOLD};
 
 /// Borrowed inputs [`Runtime::build_and_write`] needs to hash, sign,
@@ -85,7 +99,7 @@ impl Runtime {
     ///
     /// Panics if an internal log-writer or group-state lock is poisoned.
     pub fn emit(&self, level: &str, event_type: &str, fields: Map<String, Value>) -> Result<()> {
-        self.emit_inner(level, event_type, fields, None, None, None)
+        self.emit_inner(level, event_type, fields, None, None, None, &Map::new())
             .map(|_| ())
     }
 
@@ -111,8 +125,16 @@ impl Runtime {
         timestamp: Option<&str>,
         event_id: Option<&str>,
     ) -> Result<()> {
-        self.emit_inner(level, event_type, fields, timestamp, event_id, None)
-            .map(|_| ())
+        self.emit_inner(
+            level,
+            event_type,
+            fields,
+            timestamp,
+            event_id,
+            None,
+            &Map::new(),
+        )
+        .map(|_| ())
     }
 
     /// Write an attested event with an explicit `sign` override, current
@@ -131,7 +153,7 @@ impl Runtime {
         fields: Map<String, Value>,
         sign: Option<bool>,
     ) -> Result<()> {
-        self.emit_inner(level, event_type, fields, None, None, sign)
+        self.emit_inner(level, event_type, fields, None, None, sign, &Map::new())
             .map(|_| ())
     }
 
@@ -153,8 +175,16 @@ impl Runtime {
         event_id: Option<&str>,
         sign: Option<bool>,
     ) -> Result<()> {
-        self.emit_inner(level, event_type, fields, timestamp, event_id, sign)
-            .map(|_| ())
+        self.emit_inner(
+            level,
+            event_type,
+            fields,
+            timestamp,
+            event_id,
+            sign,
+            &Map::new(),
+        )
+        .map(|_| ())
     }
 
     /// Same as [`Runtime::emit_with_override_sign`] but returns the canonical
@@ -181,7 +211,37 @@ impl Runtime {
         event_id: Option<&str>,
         sign: Option<bool>,
     ) -> Result<Option<String>> {
-        self.emit_inner(level, event_type, fields, timestamp, event_id, sign)
+        self.emit_inner(
+            level,
+            event_type,
+            fields,
+            timestamp,
+            event_id,
+            sign,
+            &Map::new(),
+        )
+    }
+
+    /// Same as [`emit_with_override_sign_returning_line`] but binds an AAD
+    /// marker map (per-emit, overlaid onto each group's configured default)
+    /// into the sealed bodies and echoes it under the public `tn_aad` field.
+    ///
+    /// [`emit_with_override_sign_returning_line`]: Self::emit_with_override_sign_returning_line
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Runtime::emit`].
+    pub fn emit_with_aad_returning_line(
+        &self,
+        level: &str,
+        event_type: &str,
+        fields: Map<String, Value>,
+        timestamp: Option<&str>,
+        event_id: Option<&str>,
+        sign: Option<bool>,
+        aad: &Map<String, Value>,
+    ) -> Result<Option<String>> {
+        self.emit_inner(level, event_type, fields, timestamp, event_id, sign, aad)
     }
 
     /// Write a severity-less attested event. Backs `tn.log()`.
@@ -377,9 +437,16 @@ impl Runtime {
     fn encrypt_groups(
         &self,
         per_group: BTreeMap<String, Map<String, Value>>,
+        aad: &Map<String, Value>,
         need_row_hash: bool,
-    ) -> Result<(BTreeMap<String, GroupInput>, BTreeMap<String, String>)> {
+    ) -> Result<(
+        BTreeMap<String, GroupInput>,
+        BTreeMap<String, String>,
+        Map<String, Value>,
+    )> {
         let mut group_inputs_for_hash: BTreeMap<String, GroupInput> = BTreeMap::new();
+        // Per-group effective markers actually bound, echoed as `tn_aad`.
+        let mut aad_echo: Map<String, Value> = Map::new();
         // group_payloads (0.4.2a7): pre-rendered JSON snippets rather
         // than serde_json::Value trees. envelope_build splices the
         // raw snippet in verbatim, skipping a `to_value` tree alloc
@@ -401,13 +468,16 @@ impl Runtime {
             let gstate = gstate_arc.read().expect("group state RwLock poisoned");
             // A group this runtime can't publish into (NotAPublisher)
             // yields None and is skipped, matching Python's fall-through.
-            let Some((maybe_input, payload_json)) =
-                Self::seal_one_group(&gstate, plain, need_row_hash)?
+            let Some((maybe_input, payload_json, effective_aad)) =
+                Self::seal_one_group(&gstate, plain, aad, need_row_hash)?
             else {
                 continue;
             };
             if let Some(input) = maybe_input {
                 group_inputs_for_hash.insert(gname.clone(), input);
+            }
+            if !effective_aad.is_empty() {
+                aad_echo.insert(gname.clone(), Value::Object(effective_aad));
             }
             group_payloads.insert(gname, payload_json);
         }
@@ -416,7 +486,7 @@ impl Runtime {
             crate::perf::record_ns("emit:group_encrypt", t0.elapsed().as_nanos() as u64);
         }
 
-        Ok((group_inputs_for_hash, group_payloads))
+        Ok((group_inputs_for_hash, group_payloads, aad_echo))
     }
 
     /// Index, canonicalize, encrypt, and render one group's field set.
@@ -434,8 +504,9 @@ impl Runtime {
     fn seal_one_group(
         gstate: &super::GroupState,
         plain: Map<String, Value>,
+        per_emit_aad: &Map<String, Value>,
         need_row_hash: bool,
-    ) -> Result<Option<(Option<GroupInput>, String)>> {
+    ) -> Result<Option<(Option<GroupInput>, String, Map<String, Value>)>> {
         // Sub-stage timing inside group_encrypt. emit:group_encrypt
         // (outer) is still the total; these four sum to it.
         let _sort_t0 = if crate::perf::enabled() {
@@ -485,10 +556,25 @@ impl Runtime {
         } else {
             None
         };
-        let ct = match gstate.cipher.encrypt(&plaintext_bytes) {
-            Ok(ct) => ct,
-            Err(Error::NotAPublisher { .. }) => return Ok(None),
-            Err(e) => return Err(e),
+        // Effective marker = group default overlaid by the per-emit marker
+        // (per-emit wins per key). When non-empty it is canonicalized and
+        // bound into the body AEAD; empty binds nothing (byte-identical to a
+        // plain seal). The effective map is returned so the caller echoes it.
+        let effective_aad = merge_aad(&gstate.aad_default, per_emit_aad);
+        let ct = if effective_aad.is_empty() {
+            match gstate.cipher.encrypt(&plaintext_bytes) {
+                Ok(ct) => ct,
+                Err(Error::NotAPublisher { .. }) => return Ok(None),
+                Err(e) => return Err(e),
+            }
+        } else {
+            let aad_bytes =
+                crate::canonical::canonical_bytes(&Value::Object(effective_aad.clone()))?;
+            match gstate.cipher.encrypt_with_aad(&plaintext_bytes, &aad_bytes) {
+                Ok(ct) => ct,
+                Err(Error::NotAPublisher { .. }) => return Ok(None),
+                Err(e) => return Err(e),
+            }
         };
         if let Some(t0) = _enc_t0 {
             crate::perf::record_ns("emit:group_encrypt.cipher", t0.elapsed().as_nanos() as u64);
@@ -524,7 +610,7 @@ impl Runtime {
                 t0.elapsed().as_nanos() as u64,
             );
         }
-        Ok(Some((maybe_input, payload_json)))
+        Ok(Some((maybe_input, payload_json, effective_aad)))
     }
 
     /// Refresh the in-memory chain tip for `event_type` from on-disk truth
@@ -961,6 +1047,7 @@ impl Runtime {
         timestamp: Option<&str>,
         event_id: Option<&str>,
         sign: Option<bool>,
+        aad: &Map<String, Value>,
     ) -> Result<Option<String>> {
         // Outer perf wrapper — measures total emit_inner time so we
         // can confirm the per-stage breakdown sums correctly.
@@ -1039,7 +1126,7 @@ impl Runtime {
         });
 
         // 1. Classify fields: public vs per-group.
-        let (public_out, per_group) = self.classify_fields(fields)?;
+        let (mut public_out, per_group) = self.classify_fields(fields)?;
 
         // row_hash gating (0.4.2a7): hoisted up here from below so the
         // per-group encrypt loop can skip building `group_inputs_for_hash`
@@ -1052,9 +1139,24 @@ impl Runtime {
         let need_row_hash =
             chain_enabled_for_row_hash || self.cfg.ceremony.sign || sign.unwrap_or(false);
 
-        // 2. Index tokens + 3. Encrypt per group.
-        let (group_inputs_for_hash, group_payloads) =
-            self.encrypt_groups(per_group, need_row_hash)?;
+        // 2. Index tokens + 3. Encrypt per group (binding each group's
+        //    effective AAD marker into its body).
+        let (group_inputs_for_hash, group_payloads, aad_echo) =
+            self.encrypt_groups(per_group, aad, need_row_hash)?;
+
+        // Echo the effective markers into the public `tn_aad` field as the
+        // canonical JSON string of the {group: marker} map, so a reader
+        // reconstructs byte-identical AAD. It rides in `public_out`, so it
+        // feeds row_hash and the signature (an authenticated echo). Absent
+        // when no group bound a marker, keeping such records byte-identical
+        // to the pre-AAD wire shape. A STRING (not an object) so row_hash
+        // matches the pure pipeline and every implementation.
+        if !aad_echo.is_empty() {
+            let bytes = crate::canonical::canonical_bytes(&Value::Object(aad_echo))?;
+            let s = String::from_utf8(bytes)
+                .map_err(|_| Error::Internal("tn_aad canonical bytes not utf-8".into()))?;
+            public_out.insert("tn_aad".to_string(), Value::String(s));
+        }
 
         // DX review 0.4.2a3: cross-process emit serialization.
         //

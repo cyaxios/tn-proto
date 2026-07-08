@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+
+# TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
+# sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
+import os as _cipher_os
+
+
+def _workflow_cipher(default: str) -> str:
+    return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 import sys
 import zipfile
 from pathlib import Path
@@ -36,7 +45,7 @@ def _kit_filenames_in_bundle(tnpkg: Path) -> set[str]:
 
 def test_admin_add_agent_runtime_includes_tn_agents_kit(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     out = tn.admin.add_agent_runtime(
         "did:key:zRuntime1",
         groups=["default"],
@@ -51,7 +60,7 @@ def test_admin_add_agent_runtime_includes_tn_agents_kit(tmp_path):
 def test_admin_add_agent_runtime_dedupes_tn_agents(tmp_path):
     """Passing tn.agents in groups list should not double-mint."""
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     out = tn.admin.add_agent_runtime(
         "did:key:zRuntime2",
         groups=["default", "tn.agents"],
@@ -71,7 +80,7 @@ def test_admin_add_agent_runtime_dedupes_tn_agents(tmp_path):
 
 def test_admin_add_agent_runtime_unknown_group_raises(tmp_path):
     yaml = tmp_path / "tn.yaml"
-    tn.init(yaml, cipher="btn")
+    tn.init(yaml, cipher=_workflow_cipher("btn"))
     with pytest.raises(ValueError, match="not declared"):
         tn.admin.add_agent_runtime(
             "did:key:zX",
@@ -111,7 +120,7 @@ POST https://example.com/escalate
         encoding="utf-8",
     )
 
-    tn.init(pub_yaml, cipher="btn")
+    tn.init(pub_yaml, cipher=_workflow_cipher("btn"))
     runtime_did = "did:key:zRuntimeAlice"
     bundle = tn.admin.add_agent_runtime(
         runtime_did,
@@ -125,7 +134,7 @@ POST https://example.com/escalate
 
     # Runtime side: spin up a fresh ceremony and absorb the bundle.
     rt_yaml = tmp_path / "runtime" / "tn.yaml"
-    tn.init(rt_yaml, cipher="btn")
+    tn.init(rt_yaml, cipher=_workflow_cipher("btn"))
     # Drop the bundled kits into the runtime's keystore directly. This
     # mirrors the absorb path for kit_bundle archives — extract every
     # ``body/*.btn.mykit`` into the keystore as ``<group>.btn.mykit``.
@@ -138,7 +147,7 @@ POST https://example.com/escalate
     tn.flush_and_close()
 
     # Re-init so the runtime picks up the new kits.
-    tn.init(rt_yaml, cipher="btn")
+    tn.init(rt_yaml, cipher=_workflow_cipher("btn"))
     # Now read the publisher's log file.
     payments = []
     for entry in tn.read(log=pub_log, verify="skip"):
