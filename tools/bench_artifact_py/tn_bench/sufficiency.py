@@ -3,6 +3,20 @@ from __future__ import annotations
 from typing import Iterable
 
 
+REQUIRED_EMIT_STAGES = {
+    "emit:_TOTAL",
+    "emit:field_classify",
+    "emit:group_encrypt",
+    "emit:group_encrypt.sort",
+    "emit:group_encrypt.index_token",
+    "emit:group_encrypt.canonical_bytes",
+    "emit:group_encrypt.cipher",
+    "emit:row_hash",
+    "emit:sign",
+    "emit:envelope_build",
+    "emit:file_write",
+}
+
 REQUIRED_READ_STAGES = {
     "read:_TOTAL",
     "read:line_parse",

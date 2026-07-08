@@ -11,15 +11,25 @@ class BenchCell:
     recipients: int
     payload_bytes: int
     revocation: str = "none"
+    rotation: str = "none"
 
     @property
     def id(self) -> str:
-        return f"{self.cipher}.r{self.recipients}.{payload_label(self.payload_bytes)}.{self.revocation}"
+        base = f"{self.cipher}.r{self.recipients}.{payload_label(self.payload_bytes)}.{self.revocation}"
+        if self.rotation != "none":
+            return f"{base}.{self.rotation}"
+        return base
 
 
 def payload_label(payload_bytes: int) -> str:
     if payload_bytes == 1024:
         return "p1k"
+    if payload_bytes == 3072:
+        return "p3k"
+    if payload_bytes == 4096:
+        return "p4k"
+    if payload_bytes == 32768:
+        return "p32k"
     return f"p{payload_bytes}b"
 
 
@@ -53,5 +63,45 @@ def expand_local_smoke_cells(
                     cells.append(
                         BenchCell(cipher, int(recipient_count), int(payload_bytes), "dispersed64")
                     )
+    return cells
+
+
+def expand_paper_cells(
+    *,
+    payloads: Iterable[int] = (64, 256, 1024, 3072, 4096, 32768),
+    recipients: Iterable[int] = (1, 4, 8, 32),
+    ciphers: Iterable[str] = ("btn", "jwe", "hibe"),
+    include_baselines: bool = True,
+) -> list[BenchCell]:
+    cells: list[BenchCell] = []
+    normalized_payloads = [int(payload) for payload in payloads]
+    normalized_recipients = [int(recipient_count) for recipient_count in recipients]
+
+    if include_baselines:
+        for payload_bytes in normalized_payloads:
+            cells.append(BenchCell("plaintext", 0, payload_bytes, "none"))
+            cells.append(BenchCell("signchain", 0, payload_bytes, "none"))
+
+    for cipher in ciphers:
+        if cipher == "btn":
+            for recipient_count in normalized_recipients:
+                for payload_bytes in normalized_payloads:
+                    for revocation in ("none", "clustered", "dispersed"):
+                        for rotation in ("pre_rotation", "post_rotation"):
+                            cells.append(
+                                BenchCell(
+                                    cipher,
+                                    recipient_count,
+                                    payload_bytes,
+                                    revocation,
+                                    rotation,
+                                )
+                            )
+            continue
+
+        for recipient_count in normalized_recipients:
+            for payload_bytes in normalized_payloads:
+                cells.append(BenchCell(cipher, recipient_count, payload_bytes, "none"))
+
     return cells
 
