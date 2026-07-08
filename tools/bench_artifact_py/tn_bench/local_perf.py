@@ -26,6 +26,9 @@ from .sufficiency import (
     check_required_stages,
 )
 
+TN_PROFILES = ("transaction", "audit", "secure_log", "telemetry", "stdout")
+OTEL_HANDLER_MODES = ("none", "null")
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
@@ -196,6 +199,75 @@ def _runtime_metadata_for_cipher(actual_cipher: str) -> dict[str, str]:
     raise ValueError(f"unknown cipher {actual_cipher!r}")
 
 
+def _otel_extra_handlers(mode: str):
+    if mode == "none":
+        return None
+    if mode == "null":
+        from tn.handlers.otel import OpenTelemetryHandler
+
+        return [OpenTelemetryHandler("otel")]
+    raise ValueError(f"unknown otel handler mode {mode!r}")
+
+
+def _init_tn_for_benchmark(
+    yaml_path: Path,
+    *,
+    log_path: Path,
+    actual_cipher: str,
+    tn_profile: str,
+    otel_handler: str,
+) -> None:
+    import tn
+
+    tn.init(
+        yaml_path,
+        log_path=log_path,
+        cipher=actual_cipher,
+        profile=tn_profile,
+        stdout=False,
+        extra_handlers=_otel_extra_handlers(otel_handler),
+    )
+
+
+def _apply_tn_profile_to_yaml(yaml_path: Path, tn_profile: str) -> bool:
+    import tn._profiles as profiles
+
+    prof = profiles.get(tn_profile)
+    doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    ceremony = doc.setdefault("ceremony", {})
+    before = json.dumps(ceremony, sort_keys=True, default=str)
+    ceremony["profile"] = tn_profile
+    ceremony["sign"] = bool(prof.signs)
+    ceremony["chain"] = bool(prof.chains)
+    after = json.dumps(ceremony, sort_keys=True, default=str)
+    if before == after:
+        return False
+    yaml_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    return True
+
+
+def _validity_ok_for_profile(valid: dict[str, Any], tn_profile: str) -> bool:
+    if tn_profile in {"telemetry", "stdout"}:
+        return True
+    return valid == {"signature": True, "row_hash": True, "chain": True}
+
+
+def _required_emit_stages_for_profile(tn_profile: str) -> set[str]:
+    if tn_profile in {"telemetry", "stdout"}:
+        return REQUIRED_EMIT_STAGES - {"emit:row_hash", "emit:sign"}
+    return REQUIRED_EMIT_STAGES
+
+
+def _required_read_stages_for_profile(tn_profile: str) -> set[str]:
+    if tn_profile in {"telemetry", "stdout"}:
+        return REQUIRED_READ_STAGES - {
+            "read:row_hash_verify",
+            "read:signature_verify",
+            "read:chain_verify",
+        }
+    return REQUIRED_READ_STAGES
+
+
 def _add_extra_recipients(cell: BenchCell, work_dir: Path) -> dict[str, Any]:
     import tn
     import tn.admin
@@ -327,6 +399,8 @@ def _run_plaintext_cell(
     warmup_trials: int,
     trials: int,
     ops: int,
+    tn_profile: str,
+    otel_handler: str,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     cell_work = layout.work_dir / cell.id
     log_path = cell_work / "plain.ndjson"
@@ -360,6 +434,8 @@ def _run_plaintext_cell(
                 "runtime_path": runtime_metadata["runtime_path"],
                 "dispatch_path": runtime_metadata["dispatch_path"],
                 "cipher_impl": runtime_metadata["cipher_impl"],
+                "tn_profile": tn_profile,
+                "otel_handler": otel_handler,
                 "stdout_handlers_present": False,
                 "status": "ok",
             }
@@ -436,7 +512,16 @@ def _run_plaintext_cell(
     return op_rows, stage_rows, metric_rows
 
 
-def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: int) -> tuple[list[dict], list[dict], list[dict]]:
+def _run_cell(
+    layout,
+    cell: BenchCell,
+    *,
+    warmup_trials: int,
+    trials: int,
+    ops: int,
+    tn_profile: str,
+    otel_handler: str,
+) -> tuple[list[dict], list[dict], list[dict]]:
     if cell.cipher == "plaintext":
         return _run_plaintext_cell(
             layout,
@@ -444,6 +529,8 @@ def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: 
             warmup_trials=warmup_trials,
             trials=trials,
             ops=ops,
+            tn_profile=tn_profile,
+            otel_handler=otel_handler,
         )
 
     import tn
@@ -461,14 +548,41 @@ def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: 
     metric_rows: list[dict[str, Any]] = []
 
     actual_cipher = _tn_cipher_for_cell(cell)
-    tn.init(yaml_path, log_path=log_path, cipher=actual_cipher, stdout=False)
+    _init_tn_for_benchmark(
+        yaml_path,
+        log_path=log_path,
+        actual_cipher=actual_cipher,
+        tn_profile=tn_profile,
+        otel_handler=otel_handler,
+    )
+    if _apply_tn_profile_to_yaml(yaml_path, tn_profile):
+        tn.flush_and_close()
+        _init_tn_for_benchmark(
+            yaml_path,
+            log_path=log_path,
+            actual_cipher=actual_cipher,
+            tn_profile=tn_profile,
+            otel_handler=otel_handler,
+        )
     if cell.cipher == "signchain":
         tn.flush_and_close()
         _mark_payload_public(yaml_path)
-        tn.init(yaml_path, log_path=log_path, cipher=actual_cipher, stdout=False)
+        _init_tn_for_benchmark(
+            yaml_path,
+            log_path=log_path,
+            actual_cipher=actual_cipher,
+            tn_profile=tn_profile,
+            otel_handler=otel_handler,
+        )
     if _remove_stdout_handlers(yaml_path):
         tn.flush_and_close()
-        tn.init(yaml_path, log_path=log_path, cipher=actual_cipher, stdout=False)
+        _init_tn_for_benchmark(
+            yaml_path,
+            log_path=log_path,
+            actual_cipher=actual_cipher,
+            tn_profile=tn_profile,
+            otel_handler=otel_handler,
+        )
     setup = _add_extra_recipients(cell, cell_work)
     _apply_btn_revocation_and_rotation(cell, setup)
 
@@ -487,6 +601,8 @@ def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: 
                 "runtime_path": setup["runtime_path"],
                 "dispatch_path": setup["dispatch_path"],
                 "cipher_impl": setup["cipher_impl"],
+                "tn_profile": tn_profile,
+                "otel_handler": otel_handler,
                 "added_recipients": setup["added_recipients"],
                 "leaf_indices": setup["leaf_indices"],
                 "revoked_leaf_indices": setup["revoked_leaf_indices"],
@@ -537,7 +653,13 @@ def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: 
         tn.flush_and_close()
         if log_path.exists():
             log_path.unlink()
-        tn.init(yaml_path, log_path=log_path, cipher=actual_cipher, stdout=False)
+        _init_tn_for_benchmark(
+            yaml_path,
+            log_path=log_path,
+            actual_cipher=actual_cipher,
+            tn_profile=tn_profile,
+            otel_handler=otel_handler,
+        )
 
     for trial in range(1, trials + 1):
         emit_trial(trial)
@@ -552,11 +674,22 @@ def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: 
         if row.get("op") == "emit" and int(row.get("trial", 0)) >= 1
     ]
     if cell.cipher in {"btn", "jwe", "hibe"}:
-        check_required_stages(cell.id, "emit", measured_emit_stage_rows, REQUIRED_EMIT_STAGES)
+        check_required_stages(
+            cell.id,
+            "emit",
+            measured_emit_stage_rows,
+            _required_emit_stages_for_profile(tn_profile),
+        )
 
     tn.flush_and_close()
 
-    tn.init(yaml_path, log_path=log_path, cipher=actual_cipher, stdout=False)
+    _init_tn_for_benchmark(
+        yaml_path,
+        log_path=log_path,
+        actual_cipher=actual_cipher,
+        tn_profile=tn_profile,
+        otel_handler=otel_handler,
+    )
     cfg = tn.current_config()
     _reset_perf()
     started = time.perf_counter_ns()
@@ -568,14 +701,14 @@ def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: 
     business_entries = [entry for entry in entries if entry["envelope"]["event_type"] == "bench.local"]
     if cell.cipher == "signchain":
         ok = all(
-            entry["valid"] == {"signature": True, "row_hash": True, "chain": True}
+            _validity_ok_for_profile(entry["valid"], tn_profile)
             and entry["envelope"].get("payload") == expected_payload
             and "default" not in entry["plaintext"]
             for entry in business_entries
         )
     else:
         ok = all(
-            entry["valid"] == {"signature": True, "row_hash": True, "chain": True}
+            _validity_ok_for_profile(entry["valid"], tn_profile)
             and entry["plaintext"]["default"]["payload"] == expected_payload
             for entry in business_entries
         )
@@ -616,7 +749,12 @@ def _run_cell(layout, cell: BenchCell, *, warmup_trials: int, trials: int, ops: 
 
     read_stage_rows = _snapshot_stage_rows(cell, "read", read_trial)
     if cell.cipher in {"btn", "jwe", "hibe"}:
-        check_required_stages(cell.id, "read", read_stage_rows, REQUIRED_READ_STAGES)
+        check_required_stages(
+            cell.id,
+            "read",
+            read_stage_rows,
+            _required_read_stages_for_profile(tn_profile),
+        )
     stage_rows.extend(read_stage_rows)
     write_ndjson(layout.raw_dir / f"{cell.id}.ndjson", read_stage_rows)
     read_metric_rows = _snapshot_metric_rows(cell, "read", read_trial)
@@ -699,6 +837,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--payloads", default="")
     parser.add_argument("--recipients", default="")
     parser.add_argument("--btn-stress", action="store_true")
+    parser.add_argument("--tn-profile", choices=TN_PROFILES, default="transaction")
+    parser.add_argument("--otel-handler", choices=OTEL_HANDLER_MODES, default="none")
     parser.add_argument("--out", default="")
     args = parser.parse_args(argv)
 
@@ -734,6 +874,8 @@ def main(argv: list[str] | None = None) -> int:
             "ops": args.ops,
             "warmup_trials": args.warmup_trials,
             "btn_stress": bool(args.btn_stress),
+            "tn_profile": args.tn_profile,
+            "otel_handler": args.otel_handler,
             "cell_count": len(cells),
             "read_sampling": "batch-derived per-event rows",
             "stage_sampling": "aggregate counters; stage summary reports means only",
@@ -751,6 +893,8 @@ def main(argv: list[str] | None = None) -> int:
             warmup_trials=args.warmup_trials,
             trials=args.trials,
             ops=args.ops,
+            tn_profile=args.tn_profile,
+            otel_handler=args.otel_handler,
         )
         all_ops.extend(ops)
         all_stages.extend(stages)

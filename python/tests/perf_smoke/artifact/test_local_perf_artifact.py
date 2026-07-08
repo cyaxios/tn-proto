@@ -9,6 +9,7 @@ import yaml
 from tn_bench.artifact import create_artifact_layout, write_env_descriptor, write_ndjson
 from tn_bench.cells import expand_local_smoke_cells, expand_paper_cells, make_payload_fields
 from tn_bench.local_perf import (
+    main as local_perf_main,
     _mark_payload_public,
     _remove_stdout_handlers,
     _runtime_metadata_for_cipher,
@@ -250,3 +251,53 @@ def test_runtime_metadata_distinguishes_hibe_dispatch_from_cipher_binding() -> N
     }
     assert _runtime_metadata_for_cipher("jwe")["cipher_impl"] == "joserfc-cryptography"
     assert _runtime_metadata_for_cipher("btn")["dispatch_path"] == "rust-dispatch"
+
+
+def test_local_perf_records_telemetry_profile_and_otel_handler(tmp_path: Path) -> None:
+    out_dir = tmp_path / "artifact"
+
+    rc = local_perf_main(
+        [
+            "--profile",
+            "local-smoke",
+            "--payloads",
+            "64",
+            "--recipients",
+            "1",
+            "--trials",
+            "1",
+            "--ops",
+            "1",
+            "--warmup-trials",
+            "0",
+            "--tn-profile",
+            "telemetry",
+            "--otel-handler",
+            "null",
+            "--out",
+            str(out_dir),
+        ]
+    )
+
+    assert rc == 0
+    config = json.loads((out_dir / "raw" / "config.json").read_text(encoding="utf-8"))
+    assert config["tn_profile"] == "telemetry"
+    assert config["otel_handler"] == "null"
+
+    cell_rows = [
+        json.loads(line)
+        for line in (out_dir / "raw" / "jwe.r1.p64b.none.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    cell_meta = next(row for row in cell_rows if row["schema"] == "tn-bench-cell/v1")
+    assert cell_meta["tn_profile"] == "telemetry"
+    assert cell_meta["otel_handler"] == "null"
+    assert cell_meta["stdout_handlers_present"] is False
+
+    yaml_path = out_dir / "work" / "jwe.r1.p64b.none" / "publisher" / "tn.yaml"
+    yaml_doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    assert yaml_doc["ceremony"]["profile"] == "telemetry"
+    assert yaml_doc["ceremony"]["sign"] is False
+    assert yaml_doc["ceremony"]["chain"] is False
+    assert not _stdout_handlers_present(yaml_path)
