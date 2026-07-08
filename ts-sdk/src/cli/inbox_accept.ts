@@ -217,7 +217,7 @@ export async function accept(
     try {
       tn.info("tn.enrolment.absorbed", {
         group: groupName,
-        from_did: fromDid,
+        publisher_identity: fromDid,
         package_sha256: kitSha256,
         absorbed_at: absorbedAt,
       });

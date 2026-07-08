@@ -12,9 +12,7 @@
 //! [`GroupCipher`]: crate::cipher::GroupCipher
 
 use std::collections::BTreeMap;
-use std::path::Path;
-#[cfg(feature = "hibe")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use uuid::Uuid;
@@ -270,14 +268,8 @@ fn build_hibe_cipher_with_storage(
         prior_sks.push(storage.read_bytes(&p).map_err(Error::Io)?);
     }
 
-    let cipher = crate::cipher::hibe::HibeCipher::new(
-        &mpk,
-        &id_path,
-        sk,
-        msk,
-        prior_paths,
-        prior_sks,
-    )?;
+    let cipher =
+        crate::cipher::hibe::HibeCipher::new(&mpk, &id_path, sk, msk, prior_paths, prior_sks)?;
     Ok((Arc::new(cipher), None, None))
 }
 
@@ -444,7 +436,10 @@ pub(crate) fn collect_btn_kit_bytes(keystore: &Path, group: &str) -> Result<Vec<
 }
 
 #[allow(dead_code)] // retained as the non-storage reference impl; init now goes through *_with_storage.
-pub(crate) fn build_btn_cipher_with_admin(keystore: &Path, group: &str) -> Result<BuildCipherResult> {
+pub(crate) fn build_btn_cipher_with_admin(
+    keystore: &Path,
+    group: &str,
+) -> Result<BuildCipherResult> {
     // Filenames verified against tn/cipher.py::BtnGroupCipher:
     //   <keystore>/<group>.btn.state                  - serialized PublisherState (SECRET)
     //   <keystore>/<group>.btn.mykit                  - current self-kit (for decrypt)
@@ -499,6 +494,21 @@ pub(crate) fn rebuild_btn_cipher(
     Ok(cipher)
 }
 
+/// Options for minting a fresh btn ceremony on disk.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FreshBtnCeremonyOptions {
+    /// Prefix used for the generated ceremony id.
+    pub ceremony_id_prefix: &'static str,
+}
+
+impl FreshBtnCeremonyOptions {
+    pub(crate) const fn ephemeral() -> Self {
+        Self {
+            ceremony_id_prefix: "cer_eph",
+        }
+    }
+}
+
 /// Mint a fresh btn ceremony at `root`. Layout matches the test helper
 /// in `tests/common/mod.rs::setup_minimal_btn_ceremony`:
 ///
@@ -521,10 +531,14 @@ pub(crate) fn rebuild_btn_cipher(
 /// Auto-injects the reserved `tn.agents` group per the 2026-04-25
 /// read-ergonomics spec §2.3. Pure-logging users pay nothing — the
 /// group's plaintext stays empty when no policy file exists.
-pub(crate) fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
+pub(crate) fn write_fresh_btn_ceremony(
+    root: &Path,
+    options: FreshBtnCeremonyOptions,
+) -> std::io::Result<PathBuf> {
     use crate::keystore_backend::atomic_write_bytes;
     use rand_core::{OsRng, RngCore};
 
+    let yaml_path = root.join("tn.yaml");
     let keystore = root.join(".tn").join("keys");
     std::fs::create_dir_all(&keystore)?;
 
@@ -573,7 +587,11 @@ pub(crate) fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
     )?;
 
     let did = dk.did().to_string();
-    let id = format!("cer_eph_{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let id = format!(
+        "{}_{}",
+        options.ceremony_id_prefix,
+        &Uuid::new_v4().simple().to_string()[..12]
+    );
     let yaml = format!(
         "ceremony: {{id: {id}, mode: local, cipher: btn, protocol_events_location: main_log}}\n\
          keystore: {{path: ./.tn/keys}}\n\
@@ -597,6 +615,6 @@ pub(crate) fn write_fresh_btn_ceremony(root: &Path) -> std::io::Result<()> {
          fields: {{}}\n\
          llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
     );
-    crate::keystore_backend::atomic_write_bytes(&root.join("tn.yaml"), yaml.as_bytes())?;
-    Ok(())
+    crate::keystore_backend::atomic_write_bytes(&yaml_path, yaml.as_bytes())?;
+    Ok(yaml_path)
 }

@@ -8,11 +8,13 @@ members = [
     "crypto/tn-btn",
     "crypto/tn-btn-py",
     "crypto/tn-core",
+    "crypto/tn-core-ffi",
     "crypto/tn-core-py",
     "crypto/tn-hibe",
     "crypto/tn-hibe-py",
     "crypto/tn-py",
     "crypto/tn-wasm",
+    "rust-sdk",
 ]
 
 [workspace.package]

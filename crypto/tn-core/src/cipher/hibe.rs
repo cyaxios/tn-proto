@@ -223,38 +223,56 @@ mod test {
             .to_bytes();
 
         // Reader-only cipher: mpk + idpath + sk, no master secret.
-        let reader = HibeCipher::new(&mpk, "reader/policy", Some(reader_sk), None, vec![], vec![])
-            .unwrap();
+        let reader =
+            HibeCipher::new(&mpk, "reader/policy", Some(reader_sk), None, vec![], vec![]).unwrap();
         let blob = reader.encrypt(b"body").unwrap();
         assert_eq!(reader.decrypt(&blob).unwrap(), b"body");
 
         // AAD bind + gate + no-aad back-compat.
-        let sealed = reader.encrypt_with_aad(b"governed", b"policy=finra").unwrap();
-        assert_eq!(reader.decrypt_with_aad(&sealed, b"policy=finra").unwrap(), b"governed");
+        let sealed = reader
+            .encrypt_with_aad(b"governed", b"policy=finra")
+            .unwrap();
+        assert_eq!(
+            reader.decrypt_with_aad(&sealed, b"policy=finra").unwrap(),
+            b"governed"
+        );
         assert!(reader.decrypt_with_aad(&sealed, b"policy=other").is_err());
         assert!(reader.decrypt(&sealed).is_err());
 
         // Authority cipher (holds msk, not the exact sk) opens by minting the
         // path key on demand — exercises the msk-minted candidate branch.
-        let authority =
-            HibeCipher::new(&mpk, "reader/policy", None, Some(msk.to_bytes()), vec![], vec![])
-                .unwrap();
+        let authority = HibeCipher::new(
+            &mpk,
+            "reader/policy",
+            None,
+            Some(msk.to_bytes()),
+            vec![],
+            vec![],
+        )
+        .unwrap();
         assert_eq!(authority.decrypt(&blob).unwrap(), b"body");
 
         // An ancestor-path key opens by deriving down (derive_from_held).
         let dept_sk = keygen(&pp, &msk, &Identity::from_str_path("reader"), OsRng)
             .unwrap()
             .to_bytes();
-        let dept = HibeCipher::new(&mpk, "reader/policy", Some(dept_sk), None, vec![], vec![])
-            .unwrap();
+        let dept =
+            HibeCipher::new(&mpk, "reader/policy", Some(dept_sk), None, vec![], vec![]).unwrap();
         assert_eq!(dept.decrypt(&blob).unwrap(), b"body");
 
         // A stranger's key cannot open.
         let stranger_sk = keygen(&pp, &msk, &Identity::from_str_path("other/policy"), OsRng)
             .unwrap()
             .to_bytes();
-        let stranger =
-            HibeCipher::new(&mpk, "reader/policy", Some(stranger_sk), None, vec![], vec![]).unwrap();
+        let stranger = HibeCipher::new(
+            &mpk,
+            "reader/policy",
+            Some(stranger_sk),
+            None,
+            vec![],
+            vec![],
+        )
+        .unwrap();
         assert!(stranger.decrypt(&blob).is_err());
     }
 }

@@ -24,20 +24,23 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { Tn } from "../src/tn.js";
 import { readAsRecipient } from "../src/read_as_recipient.js";
 import type { NodeRuntime } from "../src/runtime/node_runtime.js";
+import type { ReadEntry } from "../src/runtime/node_runtime.js";
 
 function rt(a: Tn): NodeRuntime {
   return (a as unknown as { _rt: NodeRuntime })._rt;
 }
 
-function byType(a: Tn, log: string): Record<string, ReturnType<NodeRuntime["read"]> extends never ? never : any> {
-  const out: Record<string, any> = {};
+function byType(a: Tn, log: string): Record<string, ReadEntry> {
+  const out: Record<string, ReadEntry> = {};
   for (const e of rt(a).read(log)) out[String(e.envelope["event_type"])] = e;
   return out;
 }
 
 function injectGroupAad(yamlPath: string, group: string, aad: Record<string, unknown>): void {
-  const doc = parseYaml(readFileSync(yamlPath, "utf8")) as Record<string, any>;
-  doc["groups"][group]["aad"] = aad;
+  const doc = parseYaml(readFileSync(yamlPath, "utf8")) as {
+    groups: Record<string, { aad?: Record<string, unknown> }>;
+  };
+  doc.groups[group]!.aad = aad;
   writeFileSync(yamlPath, stringifyYaml(doc), "utf8");
 }
 
@@ -79,7 +82,7 @@ test("hibe aad: per-emit + config default binding, tamper detection, btn limitat
     // --- (c) tamper the on-disk tn_aad -> row_hash fails AND no decrypt.
     const lines = readFileSync(aLog, "utf8").split(/\r?\n/).filter((l) => l.length > 0);
     const tampered = lines.map((line) => {
-      const obj = JSON.parse(line) as Record<string, any>;
+      const obj = JSON.parse(line) as Record<string, unknown>;
       // tn_aad is a canonical JSON STRING; flip a bound value inside it so
       // the reader reconstructs different bytes and the string public field
       // changes (breaking row_hash too).

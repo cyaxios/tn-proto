@@ -31,6 +31,14 @@ node_modules/
 ts-sdk/dist/
 ts-sdk/coverage/
 
+# .NET
+csharp-sdk/**/bin/
+csharp-sdk/**/obj/
+TestResults/
+*.nupkg
+*.snupkg
+*.pdb
+
 # Worktrees
 .worktrees/
 
@@ -71,6 +79,7 @@ docs/superpowers/*/
 .tn-internal/
 
 # Scratch / dev-only dirs — kept on disk locally, never published.
+.manual-*/
 _overnight/
 _scratch_bench/
 regression/

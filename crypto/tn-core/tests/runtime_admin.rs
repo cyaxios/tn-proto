@@ -6,6 +6,7 @@
 mod common;
 
 use base64::Engine as _;
+use serde_json::Value;
 use tn_core::cipher::btn::BtnReaderCipher;
 use tn_core::cipher::GroupCipher;
 
@@ -108,4 +109,33 @@ fn revoked_count_unknown_group_returns_error() {
         matches!(err, tn_core::Error::InvalidConfig(_)),
         "expected InvalidConfig, got {err:?}"
     );
+}
+
+#[test]
+fn ensure_group_creates_btn_group_and_routes_fields() {
+    let mut rt = tn_core::Runtime::ephemeral().unwrap();
+    let result = rt
+        .admin_ensure_group("payments", ["order_id", "amount"])
+        .unwrap();
+
+    assert_eq!(result.group, "payments");
+    assert_eq!(result.fields, vec!["order_id", "amount"]);
+    assert!(result.created);
+    assert!(result.changed);
+    assert!(rt.group_names().contains(&"payments".to_string()));
+
+    let mut fields = serde_json::Map::new();
+    fields.insert("order_id".into(), Value::String("PAY-1".to_string()));
+    fields.insert("amount".into(), Value::Number(2500.into()));
+    rt.info("payment.created", fields).unwrap();
+
+    let entries = rt.read_all_runs().unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry.get("event_type").and_then(Value::as_str) == Some("tn.group.added")
+            && entry.get("group").and_then(Value::as_str) == Some("payments")
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry.get("event_type").and_then(Value::as_str) == Some("payment.created")
+            && entry.get("order_id").and_then(Value::as_str) == Some("PAY-1")
+    }));
 }

@@ -125,8 +125,16 @@ impl Runtime {
         timestamp: Option<&str>,
         event_id: Option<&str>,
     ) -> Result<()> {
-        self.emit_inner(level, event_type, fields, timestamp, event_id, None, &Map::new())
-            .map(|_| ())
+        self.emit_inner(
+            level,
+            event_type,
+            fields,
+            timestamp,
+            event_id,
+            None,
+            &Map::new(),
+        )
+        .map(|_| ())
     }
 
     /// Write an attested event with an explicit `sign` override, current
@@ -167,8 +175,16 @@ impl Runtime {
         event_id: Option<&str>,
         sign: Option<bool>,
     ) -> Result<()> {
-        self.emit_inner(level, event_type, fields, timestamp, event_id, sign, &Map::new())
-            .map(|_| ())
+        self.emit_inner(
+            level,
+            event_type,
+            fields,
+            timestamp,
+            event_id,
+            sign,
+            &Map::new(),
+        )
+        .map(|_| ())
     }
 
     /// Same as [`Runtime::emit_with_override_sign`] but returns the canonical
@@ -195,7 +211,15 @@ impl Runtime {
         event_id: Option<&str>,
         sign: Option<bool>,
     ) -> Result<Option<String>> {
-        self.emit_inner(level, event_type, fields, timestamp, event_id, sign, &Map::new())
+        self.emit_inner(
+            level,
+            event_type,
+            fields,
+            timestamp,
+            event_id,
+            sign,
+            &Map::new(),
+        )
     }
 
     /// Same as [`emit_with_override_sign_returning_line`] but binds an AAD
@@ -736,8 +760,7 @@ impl Runtime {
             None
         };
         let row_hash = if ctx.need_row_hash {
-            let public_bmap: BTreeMap<String, Value> =
-                ctx.public_out.clone().into_iter().collect();
+            let public_bmap: BTreeMap<String, Value> = ctx.public_out.clone().into_iter().collect();
             compute_row_hash(&RowHashInput {
                 device_identity: self.device.did(),
                 timestamp: ctx.ts,
@@ -902,7 +925,12 @@ impl Runtime {
                 // `refresh_chain_tip_under_lock`; a writer-pool failure is
                 // parked in `deferred_err` and re-raised after the lock
                 // releases.
-                self.refresh_chain_tip_under_lock(pel_routed, event_type, ctx.eid, &mut deferred_err)?;
+                self.refresh_chain_tip_under_lock(
+                    pel_routed,
+                    event_type,
+                    ctx.eid,
+                    &mut deferred_err,
+                )?;
 
                 // 4. Chain advance (now reflects disk truth).
                 let _adv_t0 = if crate::perf::enabled() {

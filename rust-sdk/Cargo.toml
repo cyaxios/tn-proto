@@ -1,0 +1,78 @@
+[package]
+name = "tn-proto"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Idiomatic Rust SDK for tn-proto attested logging"
+repository = "https://github.com/cyaxios/tn-proto"
+homepage = "https://github.com/cyaxios/tn-proto"
+readme = "README.md"
+keywords = ["cryptography", "attestation", "audit-log", "logging"]
+categories = ["cryptography", "development-tools::debugging"]
+include = [
+    "Cargo.toml",
+    "README.md",
+    "SDK_REFERENCE.md",
+    "src/**/*.rs",
+    "examples/**/*.rs",
+    "tests/**/*.rs",
+]
+publish = false
+
+[lib]
+name = "tn_proto"
+path = "src/lib.rs"
+
+[[example]]
+name = "vault_passphrase"
+path = "examples/vault_passphrase.rs"
+required-features = ["http"]
+
+[[example]]
+name = "vault_claim"
+path = "examples/vault_claim.rs"
+required-features = ["http"]
+
+[[bin]]
+name = "tn-proto"
+path = "src/bin/tn-proto.rs"
+required-features = ["cli"]
+
+[features]
+default = ["fs"]
+fs = ["tn-core/fs"]
+# Enable native file notification support for the sync watcher.
+watch = ["dep:notify"]
+# Reserved for future async watch support. Empty until an async public API is
+# added with concrete runtime/cancellation/backpressure decisions.
+async = []
+# Enable the blocking HTTP vault project client.
+http = ["dep:reqwest"]
+# Build the small developer/user CLI. The first CLI commands include hosted
+# vault claim-link onboarding, so this feature also enables HTTP support.
+cli = ["dep:clap", "http"]
+
+[dependencies]
+tn-core = { version = "0.0.1", path = "../crypto/tn-core", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yml = "0.0.12"
+thiserror = { workspace = true }
+tn-btn = { version = "0.0.1", path = "../crypto/tn-btn" }
+rand_core = { workspace = true }
+time = { version = "0.3", features = ["formatting", "macros"] }
+base64 = { workspace = true }
+hkdf = { workspace = true }
+aes-gcm = { version = "0.10", features = ["aes"] }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+bip39 = { version = "2", features = ["rand"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+notify = { version = "6", optional = true }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
+tempfile = "3"
