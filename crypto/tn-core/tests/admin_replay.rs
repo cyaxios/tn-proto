@@ -90,10 +90,8 @@ fn admin_state_ceremony_from_log_event() {
 }
 
 /// When `tn.ceremony.init` is routed to a separate file via
-/// `protocol_events_location`, the main-log replay produces no
-/// `CeremonyInit` delta, so `admin_state` must fall back to deriving the
-/// ceremony record from the active config (with `created_at == None`).
-/// This is the normal Python fallback shape.
+/// `protocol_events_location`, admin replay should still discover that
+/// sidecar event and populate the ceremony timestamp.
 #[test]
 fn admin_state_ceremony_fallback_when_init_routed_elsewhere() {
     let td = tempfile::tempdir().unwrap();
@@ -115,8 +113,8 @@ fn admin_state_ceremony_fallback_when_init_routed_elsewhere() {
     assert_eq!(cer_rec.cipher, "btn");
     assert_eq!(cer_rec.device_identity, cer.device_identity);
     assert!(
-        cer_rec.created_at.is_none(),
-        "fallback ceremony has no timestamp"
+        cer_rec.created_at.is_some(),
+        "routed ceremony init carries a timestamp"
     );
 }
 
