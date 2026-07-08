@@ -1,8 +1,8 @@
 """Full-TN-pipeline benchmark at a single 4 KB payload.
 
-Runs the SAME full tn.info() / tn.read() pipeline for all three
-ciphers: BGW, JWE, and btn. Measures seal-side and open-side
-throughput at 4 KB, which is where all three are exercised on both
+Runs the SAME full tn.info() / tn.read() pipeline for both
+ciphers: JWE and btn. Measures seal-side and open-side
+throughput at 4 KB, which is where both are exercised on both
 the crypto and the body-encryption paths. Matches the Table §6.2
 methodology from crypto_model_JWE_Seal.md but at one payload size.
 
@@ -112,14 +112,14 @@ def report(name: str, events: int, size: int, seal_total: float,
 
 def main():
     import tn
-    print("Full TN pipeline head-to-head — BGW vs JWE vs btn")
+    print("Full TN pipeline head-to-head — JWE vs btn")
     print(f"  Python:  {sys.version.split()[0]}  Platform: {sys.platform}")
     print(f"  Payload: {PAYLOAD_SIZE} B  Events: {EVENTS}  N=1 recipient")
     print("  Each variant: full tn.info() pipeline (HMAC index tokens +")
     print("  Ed25519 row_hash signature + chain + cipher seal + ndjson).")
     print("-" * 90)
 
-    for name in ["bgw", "jwe", "btn"]:
+    for name in ["jwe", "btn"]:
         try:
             results = run_cipher(name, EVENTS, PAYLOAD_SIZE)
             report(name, EVENTS, PAYLOAD_SIZE, *results)

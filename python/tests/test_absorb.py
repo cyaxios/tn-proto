@@ -138,7 +138,6 @@ def test_absorb_enrolment_makes_recipient_read(tmp_path: Path):
     tn.flush_and_close()
 
 
-# test_bearer_coupon_roundtrip was removed alongside the BGW cipher (Workstream G).
 # btn coupon/invite coverage lives in test_recipient_tracking.py +
 # test_admin_state.py which exercise tn.admin_add_recipient and compile_kit_bundle.
 

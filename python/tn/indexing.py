@@ -64,7 +64,7 @@ def _derive_group_index_key(
 
     Info string binds the output to the (ceremony, group, epoch) scope.
     `epoch` is incremented by `tn.admin.rotate()` so that rotating a
-    group's BGW keys also invalidates its search index — old index
+    group's keys also invalidates its search index — old index
     holders cannot search new entries.
     """
     if len(master) != MASTER_KEY_BYTES:

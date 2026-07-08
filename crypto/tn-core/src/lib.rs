@@ -39,7 +39,6 @@
 //!   `indexing`, `signing`, `envelope`, `cipher`, `config`, `classifier`.
 //!   Useful for `wasm32-unknown-unknown` targets (browser / TS wrappers), which
 //!   will provide their own storage-equivalent via the `Storage` trait.
-//! - `bgw`: enables the (stubbed) BGW cipher FFI wrapper.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

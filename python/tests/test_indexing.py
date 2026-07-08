@@ -1,7 +1,7 @@
 """Unit tests for tn.indexing — the keyed equality-token module.
 
 No native-crypto dependency: exercises HKDF derivation + HMAC tokens
-directly, independent of BGW.
+directly, independent of any cipher.
 """
 
 from __future__ import annotations

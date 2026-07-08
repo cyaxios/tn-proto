@@ -116,9 +116,6 @@ pub(crate) fn build_cipher_with_admin(
         "hibe" => Err(Error::NotImplemented(
             "HIBE groups run through the Python runtime in this plan (tn-hibe backs them)",
         )),
-        "bgw" => Err(Error::NotImplemented(
-            "BGW groups run through the Python runtime; FFI port deferred",
-        )),
         other => Err(Error::InvalidConfig(format!("unknown cipher {other:?}"))),
     }
 }
@@ -151,9 +148,6 @@ pub(crate) fn build_cipher_with_admin_with_storage(
         #[cfg(not(feature = "hibe"))]
         "hibe" => Err(Error::NotImplemented(
             "HIBE support is not built into this tn-core (the `hibe` feature is off)",
-        )),
-        "bgw" => Err(Error::NotImplemented(
-            "BGW groups run through the Python runtime; FFI port deferred",
         )),
         other => Err(Error::InvalidConfig(format!("unknown cipher {other:?}"))),
     }

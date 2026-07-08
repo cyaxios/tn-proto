@@ -161,7 +161,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # ``btn`` is the shipping default cipher; ``jwe`` is the pure-Python
     # RFC 7516 alternative; ``hibe`` is the identity-path (BBG) cipher.
-    # ``bgw`` was retired in Workstream G — removed from choices.
     p_init.add_argument("--cipher", default="btn", choices=["btn", "jwe", "hibe"])
     p_init.add_argument("--words", type=int, default=12, choices=[12, 15, 18, 21, 24])
     p_init.add_argument(

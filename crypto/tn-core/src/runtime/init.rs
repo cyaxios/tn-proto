@@ -131,7 +131,7 @@ impl Runtime {
     /// a wrong-length master key, or a group that can't be built (e.g. a
     /// btn group with neither state nor kit on disk). [`Error::Yaml`](crate::Error::Yaml)
     /// on a yaml parse failure. [`Error::NotImplemented`](crate::Error::NotImplemented)
-    /// for a JWE/BGW group (those run through the Python runtime in this
+    /// for a JWE group (those run through the Python runtime in this
     /// plan). The ceremony-init / policy-published attestations are
     /// best-effort and never fail the load.
     ///

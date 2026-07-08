@@ -128,9 +128,20 @@ def _jwe_seal(recipient_pubs: list[bytes], plaintext: bytes, aad: bytes) -> byte
     from joserfc import jwe as _jwe
     from joserfc.jwk import OKPKey
 
+    return _jwe_seal_keys(
+        [OKPKey.import_key(_okp_public_jwk(pub)) for pub in recipient_pubs],
+        plaintext,
+        aad,
+    )
+
+
+def _jwe_seal_keys(recipient_keys: list[Any], plaintext: bytes, aad: bytes) -> bytes:
+    """Seal to pre-imported joserfc OKP recipient keys."""
+    from joserfc import jwe as _jwe
+
     enc = _jwe.GeneralJSONEncryption({"enc": "A256GCM"}, plaintext, aad=aad or None)
-    for pub in recipient_pubs:
-        enc.add_recipient({"alg": "ECDH-ES+A256KW"}, OKPKey.import_key(_okp_public_jwk(pub)))
+    for key in recipient_keys:
+        enc.add_recipient({"alg": "ECDH-ES+A256KW"}, key)
     obj = _jwe.encrypt_json(enc, None, algorithms=_JWE_ALGS)
     return json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
@@ -145,6 +156,13 @@ def _jwe_open(blob: bytes, my_sk: X25519PrivateKey, aad: bytes) -> bytes:
     byte-match ``aad`` — the marker reconstructed from the record's public
     ``tn_aad`` echo — so a tampered echo fails to open.
     """
+    from joserfc.jwk import OKPKey
+
+    return _jwe_open_key(blob, OKPKey.import_key(_okp_private_jwk(my_sk)), aad)
+
+
+def _jwe_open_key(blob: bytes, key: Any, aad: bytes) -> bytes:
+    """Open a General JSON JWE with a pre-imported joserfc OKP private key."""
     try:
         obj = json.loads(blob.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
@@ -152,9 +170,7 @@ def _jwe_open(blob: bytes, my_sk: X25519PrivateKey, aad: bytes) -> bytes:
     _validate_jwe_general_json_shape(obj)
 
     from joserfc import jwe as _jwe
-    from joserfc.jwk import OKPKey
 
-    key = OKPKey.import_key(_okp_private_jwk(my_sk))
     base = {k: obj[k] for k in ("protected", "iv", "ciphertext", "tag") if k in obj}
     if "aad" in obj:
         base["aad"] = obj["aad"]
@@ -285,6 +301,9 @@ class JWEGroupCipher:
     _sender_pub: bytes = b""
     _my_sk: X25519PrivateKey | None = field(default=None, repr=False)
     _recipients_path: Path | None = field(default=None, repr=False)
+    _recipient_pubs_cache: list[bytes] | None = field(default=None, repr=False)
+    _recipient_keys_cache: list[Any] | None = field(default=None, repr=False)
+    _decrypt_keys_cache: list[Any] | None = field(default=None, repr=False)
     # Reader keys superseded by rotations, newest first. Rotation archives
     # the active ``<group>.jwe.mykey`` as ``.revoked.<ts>``; loading them
     # back keeps this party's pre-rotation entries readable — the same
@@ -371,6 +390,7 @@ class JWEGroupCipher:
             _sender_pub=sender_pub,
             _my_sk=my_sk,
             _recipients_path=recipients_path,
+            _recipient_pubs_cache=[pubs[d] for d in recipient_dids],
             _prior_sks=_load_prior_jwe_sks(keystore, group_name),
         )
 
@@ -417,6 +437,60 @@ class JWEGroupCipher:
         """Return the sender's X25519 public key bytes (32 bytes, raw)."""
         return self._sender_pub
 
+    def _clear_recipient_cache(self) -> None:
+        self._recipient_pubs_cache = None
+        self._recipient_keys_cache = None
+
+    def _recipient_keys(self) -> list[Any]:
+        if self._recipients_path is None:
+            raise NotAPublisherError("JWE: no recipient list in this keystore")
+
+        if self._recipient_pubs_cache is None:
+            with _perf_stage("emit:group_encrypt.recipient_load"):
+                doc = json.loads(self._recipients_path.read_text(encoding="utf-8"))
+                if not doc:
+                    raise NotAPublisherError(
+                        "JWE: cannot encrypt with zero recipients. Add a recipient "
+                        "before calling encrypt()."
+                    )
+                self._recipient_pubs_cache = [
+                    _validate_x25519_public_key(
+                        base64.b64decode(e["pub_b64"]),
+                        what=f"recipient {e.get('recipient_identity', '<unknown>')!r} pub_b64",
+                    )
+                    for e in doc
+                ]
+
+        if not self._recipient_pubs_cache:
+            raise NotAPublisherError(
+                "JWE: cannot encrypt with zero recipients. Add a recipient "
+                "before calling encrypt()."
+            )
+
+        if self._recipient_keys_cache is None:
+            with _perf_stage("emit:group_encrypt.recipient_key_import"):
+                from joserfc.jwk import OKPKey
+
+                self._recipient_keys_cache = [
+                    OKPKey.import_key(_okp_public_jwk(pub))
+                    for pub in self._recipient_pubs_cache
+                ]
+        return self._recipient_keys_cache
+
+    def _decrypt_keys(self) -> list[Any]:
+        candidates = [sk for sk in (self._my_sk, *self._prior_sks) if sk is not None]
+        if not candidates:
+            raise NotARecipientError("JWE: no recipient X25519 key in this keystore")
+        if self._decrypt_keys_cache is None:
+            with _perf_stage("read:group_decrypt.key_import"):
+                from joserfc.jwk import OKPKey
+
+                self._decrypt_keys_cache = [
+                    OKPKey.import_key(_okp_private_jwk(sk))
+                    for sk in candidates
+                ]
+        return self._decrypt_keys_cache
+
     def revoke_recipient(self, did: str) -> None:
         """Drop ``did`` from the recipient list. Subsequent encrypts exclude
         them. O(1) — no coordination with other recipients."""
@@ -428,6 +502,7 @@ class JWEGroupCipher:
         if len(doc) == before:
             return  # already absent — idempotent
         _atomic_write_text(self._recipients_path, json.dumps(doc, indent=2))
+        self._clear_recipient_cache()
 
     def add_recipient(self, did: str, pub_bytes: bytes) -> None:
         """Append ``did`` with raw 32-byte X25519 pub to the recipient list.
@@ -448,25 +523,12 @@ class JWEGroupCipher:
             }
         )
         _atomic_write_text(self._recipients_path, json.dumps(doc, indent=2))
+        self._clear_recipient_cache()
 
     def encrypt(self, plaintext: bytes, aad: bytes = b"") -> bytes:
-        if self._recipients_path is None:
-            raise NotAPublisherError("JWE: no recipient list in this keystore")
-        doc = json.loads(self._recipients_path.read_text(encoding="utf-8"))
-        if not doc:
-            raise NotAPublisherError(
-                "JWE: cannot encrypt with zero recipients. Add a recipient "
-                "before calling encrypt()."
-            )
-        pubs = [
-            _validate_x25519_public_key(
-                base64.b64decode(e["pub_b64"]),
-                what=f"recipient {e.get('recipient_identity', '<unknown>')!r} pub_b64",
-            )
-            for e in doc
-        ]
+        recipient_keys = self._recipient_keys()
         with _perf_stage("emit:group_encrypt.cipher"):
-            return _jwe_seal(pubs, plaintext, aad)
+            return _jwe_seal_keys(recipient_keys, plaintext, aad)
 
     def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
         """Open a group blob, falling back to rotation-archived reader keys.
@@ -476,21 +538,19 @@ class JWEGroupCipher:
         first and then each ``.revoked.<ts>`` prior key (newest first). The
         trial loop in ``_jwe_open`` already tolerates a wrong key via AEAD
         tag failure, so a miss is safe."""
-        candidates = [sk for sk in (self._my_sk, *self._prior_sks) if sk is not None]
-        if not candidates:
-            raise NotARecipientError("JWE: no recipient X25519 key in this keystore")
         with _perf_stage("read:group_decrypt.cipher"):
+            keys = self._decrypt_keys()
             last_exc: NotARecipientError | None = None
-            for sk in candidates:
+            for key in keys:
                 try:
-                    return _jwe_open(ciphertext, sk, aad)
+                    return _jwe_open_key(ciphertext, key, aad)
                 except NotARecipientError as exc:
                     last_exc = exc
             assert last_exc is not None
-            if len(candidates) == 1:
+            if len(keys) == 1:
                 raise last_exc
             raise NotARecipientError(
-                f"JWE: none of {len(candidates)} recipient keys in this "
+                f"JWE: none of {len(keys)} recipient keys in this "
                 f"keystore opens this envelope ({last_exc})"
             ) from last_exc
 
@@ -943,7 +1003,7 @@ class HibeGroupCipher:
 
 # ---------------------------------------------------------------------------
 # Btn cipher — NNL subset-difference broadcast encryption via the `btn` Rust
-# extension. Pluggable under this Protocol the same way BGW and JWE are.
+# extension. Pluggable under this Protocol the same way JWE is.
 # ---------------------------------------------------------------------------
 
 

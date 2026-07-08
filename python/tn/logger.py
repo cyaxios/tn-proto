@@ -4,7 +4,7 @@ Steps of `_emit` (PRD §6.3):
   1. Merge context (contextvars) with kwargs.
   2. Classify each field: public (per YAML) vs group-routed.
   3. Hash every field value (SHA-256 over canonical serialization).
-  4. Encrypt each group's field dict with BGW (one ciphertext per group).
+  4. Encrypt each group's field dict with its cipher (one ciphertext per group).
   5. Build chain: prev_hash from last entry in this event_type's chain.
   6. Sign row_hash with the device Ed25519 key.
   7. Append the JSON envelope to the log file.
@@ -324,9 +324,9 @@ class TNRuntime:
                 effective_aad = {**group_cfg.aad_default, **(aad or {})}
                 aad_bytes = _canonical_bytes(effective_aad) if effective_aad else b""
 
-                # 4. encrypt group plaintext via the ceremony's cipher (BGW
-                #    or JWE — see tn/cipher.py). If this party isn't a
-                #    publisher for the group, the cipher raises and we skip.
+                # 4. encrypt group plaintext via the ceremony's cipher (see
+                #    tn/cipher.py). If this party isn't a publisher for the
+                #    group, the cipher raises and we skip.
                 with _perf_stage("emit:group_encrypt.payload_build"):
                     plaintext_bytes = _canonical_bytes(plain_fields)
                 _perf_metric("emit:group_encrypt.plaintext_bytes", len(plaintext_bytes))
@@ -512,7 +512,7 @@ def build_runtime(
       3. Else default to `<yaml-dir>/.tn/logs/tn.ndjson` (5 MB x 5 backups).
 
     `cipher` selects the group-sealing primitive when the YAML doesn't
-    exist yet and a fresh ceremony is created ("jwe" or "bgw"). Has no
+    exist yet and a fresh ceremony is created ("btn", "jwe", or "hibe"). Has no
     effect when the YAML already exists — the cipher is read from the YAML.
 
     `identity` — optional tn.identity.Identity. If passed AND the yaml

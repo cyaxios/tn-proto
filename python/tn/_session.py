@@ -49,7 +49,7 @@ def set_signing(enabled: bool | None) -> None:
       default.
 
     Only takes effect on Rust-routed btn ceremonies (the default for btn).
-    JWE/BGW ceremonies always sign — the feature is a Rust-path-only flag
+    JWE ceremonies always sign — the feature is a Rust-path-only flag
     until the legacy logger gains it.
     """
     global _sign_override

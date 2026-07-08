@@ -8,7 +8,7 @@
 //   <keystore>/<group>.btn.mykit    self-kit bytes so the publisher can read
 //   <keystore>/<group>.hibe.*       hibe group material (see runtime/hibe_group.ts)
 //
-// We do not touch jwe/bgw layouts here. A JWE ceremony yaml loaded
+// We do not touch jwe layouts here. A JWE ceremony yaml loaded
 // through this module will still read the keystore parts that exist
 // but cannot emit or read.
 

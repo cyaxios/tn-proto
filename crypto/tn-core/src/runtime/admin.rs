@@ -164,11 +164,6 @@ impl Runtime {
                          tn-core; use the Python runtime or pure JS JWE pipeline",
                     ));
                 }
-                "bgw" => {
-                    return Err(Error::NotImplemented(
-                        "bundle_for_recipient: cipher=bgw kit minting is not implemented in Rust",
-                    ));
-                }
                 other => {
                     return Err(Error::InvalidConfig(format!(
                         "bundle_for_recipient: group {gname:?} uses unknown cipher {other:?}"
