@@ -442,6 +442,13 @@ class JWEGroupCipher:
         self._recipient_keys_cache = None
 
     def _recipient_keys(self) -> list[Any]:
+        # Caching contract: the recipients file is read once per cipher
+        # instance; mutations made through THIS process (add/revoke/
+        # reconcile on the live cfg's cipher) invalidate via
+        # _clear_recipient_cache(). A different process editing the file
+        # (CLI revoke, a separately-loaded cfg) is not seen by a live
+        # runtime until it re-inits — before the cache, every emit
+        # re-read the file and picked such edits up immediately.
         if self._recipients_path is None:
             raise NotAPublisherError("JWE: no recipient list in this keystore")
 

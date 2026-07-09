@@ -270,8 +270,14 @@ def test_runtime_metadata_distinguishes_hibe_dispatch_from_cipher_binding() -> N
     assert _runtime_metadata_for_cipher("btn")["dispatch_path"] == "rust-dispatch"
 
 
-def test_local_perf_records_telemetry_profile_and_otel_handler(tmp_path: Path) -> None:
+def test_local_perf_records_telemetry_profile_and_otel_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     out_dir = tmp_path / "artifact"
+
+    # local_perf_main setdefaults TN_PERF_TRACE=1 into os.environ; scope it
+    # to this test so later tests in the worker don't run traced.
+    monkeypatch.setenv("TN_PERF_TRACE", "1")
 
     rc = local_perf_main(
         [
