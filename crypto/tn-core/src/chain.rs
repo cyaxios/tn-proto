@@ -110,7 +110,8 @@ pub fn compute_row_hash(input: &RowHashInput<'_>) -> String {
 /// - `bool` → `"True"` / `"False"` (Python capitalisation)
 /// - `null` → `"None"`
 /// - number → decimal string
-/// - arrays/objects → JSON fallback (no current fixture exercises these)
+/// - arrays/objects → CPython container repr (`[1, 2, 3]`,
+///   `{'a': 1, 'b': 2}`) via [`python_repr_value`]
 fn render_value(v: &Value, h: &mut Sha256) {
     match v {
         Value::String(s) => h.update(s.as_bytes()),
@@ -119,11 +120,96 @@ fn render_value(v: &Value, h: &mut Sha256) {
         Value::Null => h.update(b"None"),
         Value::Number(n) => h.update(n.to_string().as_bytes()),
         Value::Array(_) | Value::Object(_) => {
-            // Python str(list) / str(dict) — not exercised by current fixtures.
-            // Fall back to JSON representation; extend here if a future fixture needs Python repr.
-            h.update(v.to_string().as_bytes());
+            // Python hashes public containers as str(value) — the
+            // CPython repr. The prior JSON fallback diverged from the
+            // Python reference (str([1, 2, 3]) is "[1, 2, 3]", not
+            // "[1,2,3]"), so envelopes with container public values
+            // written by the old Rust runtime already disagreed with
+            // Python; Python is normative.
+            h.update(python_repr_value(v).as_bytes());
         }
     }
+}
+
+/// Render `v` as CPython `repr()` would render the equivalent Python
+/// object (the container arm of `str(value)` in the row-hash preimage).
+///
+/// Dict entries render in the map's iteration order — with serde_json's
+/// `preserve_order` feature that is wire/document order, matching a
+/// Python dict parsed from the same JSON (insertion order).
+///
+/// Known limit: CPython escapes non-printable non-ASCII characters
+/// (`\u`/`\U` forms) inside string repr; this port passes non-ASCII
+/// through raw. Exotic values in public container strings may fail a
+/// cross-implementation verify — encrypted group fields are hashed as
+/// opaque ciphertext and are safe for any value.
+pub(crate) fn python_repr_value(v: &Value) -> String {
+    let mut out = String::new();
+    python_repr(v, &mut out);
+    out
+}
+
+fn python_repr(v: &Value, out: &mut String) {
+    match v {
+        Value::Null => out.push_str("None"),
+        Value::Bool(true) => out.push_str("True"),
+        Value::Bool(false) => out.push_str("False"),
+        Value::Number(n) => out.push_str(&n.to_string()),
+        Value::String(s) => python_str_repr(s, out),
+        Value::Array(xs) => {
+            out.push('[');
+            for (i, x) in xs.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                python_repr(x, out);
+            }
+            out.push(']');
+        }
+        Value::Object(m) => {
+            out.push('{');
+            for (i, (k, val)) in m.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                python_str_repr(k, out);
+                out.push_str(": ");
+                python_repr(val, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// CPython `unicode_repr` for a string: quote selection (prefer `'`;
+/// use `"` when the string contains `'` and no `"`; otherwise `'` with
+/// `\'` escapes), 2-char escapes for backslash / `\n` / `\r` / `\t`,
+/// `\xXX` for other ASCII control chars (< 0x20 and 0x7f), and raw
+/// pass-through for everything else (see [`python_repr_value`] for the
+/// non-printable non-ASCII limit).
+fn python_str_repr(s: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    let has_single = s.contains('\'');
+    let has_double = s.contains('"');
+    let quote = if has_single && !has_double { '"' } else { '\'' };
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                write!(out, "\\x{:02x}", c as u32).expect("write to String is infallible");
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +404,110 @@ pub fn chain_tip_from_log_files_reverse(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod python_repr_tests {
+    use super::python_repr_value;
+    use serde_json::json;
+
+    // Oracle: CPython `str(value)` output, captured from a live
+    // interpreter (see the R1 task of the sealed-objects-core-port
+    // plan). Python hashes public field values as `str(value)`, so a
+    // Rust verifier must reproduce these renderings byte-for-byte.
+
+    #[test]
+    fn render_value_python_list() {
+        assert_eq!(python_repr_value(&json!([1, 2, 3])), "[1, 2, 3]");
+        assert_eq!(python_repr_value(&json!([])), "[]");
+        assert_eq!(python_repr_value(&json!([[], {}])), "[[], {}]");
+    }
+
+    #[test]
+    fn render_value_python_dict() {
+        assert_eq!(
+            python_repr_value(&json!({"a": 1, "b": 2})),
+            "{'a': 1, 'b': 2}"
+        );
+        // Python dict repr renders in INSERTION order, not sorted;
+        // serde_json's preserve_order Map matches the wire document order.
+        assert_eq!(
+            python_repr_value(&json!({"b": 2, "a": 1})),
+            "{'b': 2, 'a': 1}"
+        );
+        assert_eq!(
+            python_repr_value(&json!({"k": [1, {"x": "y"}]})),
+            "{'k': [1, {'x': 'y'}]}"
+        );
+    }
+
+    #[test]
+    fn render_value_nested_string_quoting() {
+        // CPython quote selection: prefer single quotes; use double
+        // quotes when the string contains ' and no "; otherwise single
+        // quotes with \' escapes.
+        assert_eq!(
+            python_repr_value(&json!(["it's", "say \"hi\"", "both ' and \"", "plain"])),
+            r#"["it's", 'say "hi"', 'both \' and "', 'plain']"#
+        );
+        assert_eq!(python_repr_value(&json!([""])), "['']");
+        // Printable non-ASCII passes through raw.
+        assert_eq!(
+            python_repr_value(&json!(["café — naïve"])),
+            "['café — naïve']"
+        );
+    }
+
+    #[test]
+    fn render_value_container_scalars() {
+        assert_eq!(
+            python_repr_value(&json!([true, false, null])),
+            "[True, False, None]"
+        );
+    }
+
+    #[test]
+    fn render_value_control_chars() {
+        // \n \r \t and backslash use their 2-char escapes; other ASCII
+        // control chars (< 0x20 and 0x7f) render as \xXX.
+        assert_eq!(
+            python_repr_value(&json!(["\n", "\t", "\\", "\u{0}", "\u{7f}", "\r"])),
+            r"['\n', '\t', '\\', '\x00', '\x7f', '\r']"
+        );
+    }
+
+    /// Top-level rendering is UNCHANGED by the container fix: a
+    /// container public value hashes as its Python repr, which is the
+    /// same bytes a top-level STRING of that repr hashes as. This is
+    /// exactly Python's behavior (str of a str is raw) and gives an
+    /// end-to-end row-hash check without a fixture.
+    #[test]
+    fn row_hash_container_equals_prerendered_string() {
+        use super::{compute_row_hash, RowHashInput, ZERO_HASH};
+        use serde_json::Value;
+        use std::collections::BTreeMap;
+
+        let hash_of = |pv: Value| {
+            let mut public: BTreeMap<String, Value> = BTreeMap::new();
+            public.insert("pv".to_string(), pv);
+            let groups = BTreeMap::new();
+            compute_row_hash(&RowHashInput {
+                device_identity: "did:key:zTest",
+                timestamp: "2026-07-09T00:00:00.000000Z",
+                event_id: "00000000-0000-4000-8000-000000000001",
+                event_type: "obj.rt.v1",
+                level: "",
+                prev_hash: ZERO_HASH,
+                public_fields: &public,
+                groups: &groups,
+            })
+        };
+        assert_eq!(hash_of(json!([1, 2, 3])), hash_of(json!("[1, 2, 3]")));
+        assert_eq!(
+            hash_of(json!({"a": 1, "b": 2})),
+            hash_of(json!("{'a': 1, 'b': 2}"))
+        );
+    }
 }
 
 #[cfg(test)]
