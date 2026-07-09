@@ -50,8 +50,7 @@ def test_reconcile_promotes_pending_jwe_recipient(tmp_path: Path):
     assert base64.b64decode(bob["pub_b64"]) == bob_pub
 
 
-# test_reconcile_auto_issues_bearer_coupon removed alongside the BGW cipher
-# (Workstream G). btn recipient reconciliation lives in the btn admin
+# btn recipient reconciliation lives in the btn admin
 # test suite (test_recipient_tracking.py, test_admin_state.py); the orphan
 # tn/__init__.py::_emit_missing_recipients helper was deleted.
 

@@ -13,6 +13,7 @@ use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use rand_core::OsRng;
+use std::str;
 
 use tn_hibe::{HibeError, Identity, MasterKey, PrivateKey, PublicParams};
 
@@ -36,6 +37,22 @@ fn parse_sk(sk: &[u8]) -> PyResult<PrivateKey> {
     PrivateKey::from_bytes(sk).map_err(err_to_py)
 }
 
+fn parse_id_path(id_path: &str) -> PyResult<Identity> {
+    Identity::try_from_str_path(id_path).map_err(err_to_py)
+}
+
+fn identity_to_path(id: &Identity) -> PyResult<String> {
+    let label_refs: Vec<&[u8]> = id.labels().iter().map(Vec::as_slice).collect();
+    Identity::try_from_path(&label_refs).map_err(err_to_py)?;
+    let mut labels = Vec::with_capacity(id.labels().len());
+    for label in id.labels() {
+        let s = str::from_utf8(label)
+            .map_err(|_| PyValueError::new_err("identity label is not valid UTF-8"))?;
+        labels.push(s.to_string());
+    }
+    Ok(labels.join("/"))
+}
+
 /// Run BBG Setup for a fresh authority. Returns `(mpk_bytes, msk_bytes)`.
 #[pyfunction]
 fn setup(py: Python<'_>, max_depth: usize) -> PyResult<(Py<PyBytes>, Py<PyBytes>)> {
@@ -51,14 +68,19 @@ fn setup(py: Python<'_>, max_depth: usize) -> PyResult<(Py<PyBytes>, Py<PyBytes>
 fn keygen(py: Python<'_>, mpk: &[u8], msk: &[u8], id_path: &str) -> PyResult<Py<PyBytes>> {
     let pp = parse_pp(mpk)?;
     let msk = MasterKey::from_bytes(msk).map_err(err_to_py)?;
-    let id = Identity::from_str_path(id_path);
+    let id = parse_id_path(id_path)?;
     let sk = tn_hibe::keygen(&pp, &msk, &id, OsRng).map_err(err_to_py)?;
     Ok(PyBytes::new(py, &sk.to_bytes()).into())
 }
 
 /// Derive the key for `parent_sk`'s child labelled `child_label` — no msk.
 #[pyfunction]
-fn delegate(py: Python<'_>, mpk: &[u8], parent_sk: &[u8], child_label: &str) -> PyResult<Py<PyBytes>> {
+fn delegate(
+    py: Python<'_>,
+    mpk: &[u8],
+    parent_sk: &[u8],
+    child_label: &str,
+) -> PyResult<Py<PyBytes>> {
     let pp = parse_pp(mpk)?;
     let parent = parse_sk(parent_sk)?;
     let sk = tn_hibe::delegate(&pp, &parent, child_label.as_bytes(), OsRng).map_err(err_to_py)?;
@@ -69,13 +91,7 @@ fn delegate(py: Python<'_>, mpk: &[u8], parent_sk: &[u8], child_label: &str) -> 
 #[pyfunction]
 fn key_id_path(sk: &[u8]) -> PyResult<String> {
     let sk = parse_sk(sk)?;
-    let labels: Vec<String> = sk
-        .identity()
-        .labels()
-        .iter()
-        .map(|l| String::from_utf8_lossy(l).into_owned())
-        .collect();
-    Ok(labels.join("/"))
+    identity_to_path(sk.identity())
 }
 
 /// Wrap a 32-byte CEK to `id_path` under the authority's mpk.
@@ -85,7 +101,7 @@ fn kem_wrap(py: Python<'_>, mpk: &[u8], id_path: &str, cek: &[u8]) -> PyResult<P
     let cek: [u8; 32] = cek
         .try_into()
         .map_err(|_| PyValueError::new_err("cek must be exactly 32 bytes"))?;
-    let id = Identity::from_str_path(id_path);
+    let id = parse_id_path(id_path)?;
     let wrapped = tn_hibe::kem_wrap(&pp, &id, &cek, OsRng).map_err(err_to_py)?;
     Ok(PyBytes::new(py, &wrapped).into())
 }
@@ -105,8 +121,8 @@ fn kem_unwrap(py: Python<'_>, mpk: &[u8], sk: &[u8], wrapped: &[u8]) -> PyResult
 ///
 /// `aad` (optional) binds additional authenticated data into the body tag:
 /// authenticated, not encrypted, not stored. The reader must supply the
-/// identical `aad` to open. Omitting it (or passing empty) yields a blob
-/// byte-identical to a plain seal.
+/// identical `aad` to open. Omitting it (or passing empty) uses the same wire
+/// shape as a plain seal; individual blobs are still randomized.
 #[pyfunction]
 #[pyo3(signature = (mpk, id_path, plaintext, aad=None))]
 fn seal(
@@ -117,7 +133,7 @@ fn seal(
     aad: Option<&[u8]>,
 ) -> PyResult<Py<PyBytes>> {
     let pp = parse_pp(mpk)?;
-    let id = Identity::from_str_path(id_path);
+    let id = parse_id_path(id_path)?;
     let blob = tn_hibe::seal_with_aad(&pp, &id, plaintext, aad.unwrap_or(&[]), OsRng)
         .map_err(err_to_py)?;
     Ok(PyBytes::new(py, &blob).into())

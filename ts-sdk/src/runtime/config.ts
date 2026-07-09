@@ -657,7 +657,7 @@ function _assembleConfig(
   if (!KNOWN_CIPHERS.has(ceremonyCipher)) {
     throw new Error(
       `${resolved}: unknown ceremony.cipher ${JSON.stringify(ceremonyCipher)}; ` +
-        `expected 'jwe', 'btn', or 'hibe' (legacy 'bgw' was removed in Workstream G)`,
+        `expected 'jwe', 'btn', or 'hibe' (legacy 'bgw' was removed)`,
     );
   }
   const cfg: CeremonyConfig = {

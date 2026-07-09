@@ -254,8 +254,31 @@ impl Runtime {
             .tempdir()
             .map_err(Error::Io)?;
         for gname in &requested {
-            let kit_path = td.path().join(format!("{gname}.btn.mykit"));
-            self.admin_add_recipient(gname, &kit_path, Some(recipient_did))?;
+            let spec = self
+                .cfg
+                .groups
+                .get(gname)
+                .expect("requested groups were validated above");
+            match spec.cipher.as_str() {
+                "btn" => {
+                    let kit_path = td.path().join(format!("{gname}.btn.mykit"));
+                    self.admin_add_recipient(gname, &kit_path, Some(recipient_did))?;
+                }
+                "hibe" => {
+                    self.stage_hibe_reader_bundle_material(gname, recipient_did, td.path())?;
+                }
+                "jwe" | "bearer" => {
+                    return Err(Error::NotImplemented(
+                        "bundle_for_recipient: cipher=jwe kit minting is not implemented in \
+                         tn-core; use the Python runtime or pure JS JWE pipeline",
+                    ));
+                }
+                other => {
+                    return Err(Error::InvalidConfig(format!(
+                        "bundle_for_recipient: group {gname:?} uses unknown cipher {other:?}"
+                    )));
+                }
+            }
         }
 
         let opts = crate::runtime_export::ExportOptions {
@@ -276,6 +299,98 @@ impl Runtime {
         let out = self.export(out_path, opts)?;
         drop(td);
         Ok(out)
+    }
+
+    #[cfg(feature = "hibe")]
+    fn stage_hibe_reader_bundle_material(
+        &self,
+        group: &str,
+        recipient_did: &str,
+        out_dir: &Path,
+    ) -> Result<()> {
+        let read_required = |suffix: &str| -> Result<Vec<u8>> {
+            let path = self.keystore.join(format!("{group}.{suffix}"));
+            self.storage.read_bytes(&path).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Error::InvalidConfig(format!(
+                        "bundle_for_recipient: cipher=hibe group {group:?} requires {} \
+                         authority material in {}",
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("<unknown>"),
+                        self.keystore.display()
+                    ))
+                } else {
+                    Error::Io(e)
+                }
+            })
+        };
+
+        let mpk = read_required("hibe.mpk")?;
+        let msk_bytes = read_required("hibe.msk")?;
+        let idpath_bytes = read_required("hibe.idpath")?;
+        let id_path = String::from_utf8(idpath_bytes).map_err(|_| {
+            Error::InvalidConfig(format!(
+                "bundle_for_recipient: cipher=hibe group {group:?} idpath is not utf-8"
+            ))
+        })?;
+
+        let pp = tn_hibe::PublicParams::from_bytes(&mpk)
+            .map_err(|e| Error::Cipher(format!("hibe: {e}")))?;
+        let msk = tn_hibe::MasterKey::from_bytes(&msk_bytes)
+            .map_err(|e| Error::Cipher(format!("hibe: {e}")))?;
+        let id = tn_hibe::Identity::try_from_str_path(&id_path)
+            .map_err(|e| Error::Cipher(format!("hibe: {e}")))?;
+        let sk = tn_hibe::keygen(&pp, &msk, &id, rand_core::OsRng)
+            .map_err(|e| Error::Cipher(format!("hibe: {e}")))?
+            .to_bytes();
+
+        self.storage
+            .write_bytes(&out_dir.join(format!("{group}.hibe.mpk")), &mpk)
+            .map_err(Error::Io)?;
+        self.storage
+            .write_bytes(
+                &out_dir.join(format!("{group}.hibe.idpath")),
+                id_path.as_bytes(),
+            )
+            .map_err(Error::Io)?;
+        self.storage
+            .write_bytes(&out_dir.join(format!("{group}.hibe.sk")), &sk)
+            .map_err(Error::Io)?;
+        self.record_hibe_grant(group, recipient_did, &id_path)?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hibe"))]
+    fn stage_hibe_reader_bundle_material(
+        &self,
+        _group: &str,
+        _recipient_did: &str,
+        _out_dir: &Path,
+    ) -> Result<()> {
+        Err(Error::NotImplemented(
+            "bundle_for_recipient: cipher=hibe kit minting requires tn-core's hibe feature",
+        ))
+    }
+
+    #[cfg(feature = "hibe")]
+    fn record_hibe_grant(&self, group: &str, recipient_did: &str, id_path: &str) -> Result<()> {
+        let path = self.keystore.join(format!("{group}.hibe.grants"));
+        let mut grants: Vec<Map<String, Value>> = if self.storage.exists(&path) {
+            serde_json::from_slice(&self.storage.read_bytes(&path).map_err(Error::Io)?)?
+        } else {
+            Vec::new()
+        };
+        grants.retain(|g| g.get("reader_did").and_then(Value::as_str) != Some(recipient_did));
+        let mut grant = Map::new();
+        grant.insert(
+            "reader_did".into(),
+            Value::String(recipient_did.to_string()),
+        );
+        grant.insert("id_path".into(), Value::String(id_path.to_string()));
+        grants.push(grant);
+        let bytes = serde_json::to_vec_pretty(&grants)?;
+        self.storage.write_bytes(&path, &bytes).map_err(Error::Io)
     }
 
     /// Mint kits for an LLM-runtime DID across all named groups + the
@@ -1335,6 +1450,84 @@ impl Runtime {
             None => fields.insert("reason".into(), Value::Null),
         };
         self.emit("info", "tn.vault.unlinked", fields)
+    }
+}
+
+#[cfg(all(test, feature = "fs", feature = "hibe"))]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use rand_core::OsRng;
+    use tn_hibe::{keygen, setup, Identity};
+
+    use crate::runtime::Runtime;
+    use crate::tnpkg::{read_tnpkg, ManifestKind, TnpkgSource};
+
+    struct HibeCeremony {
+        yaml_path: PathBuf,
+    }
+
+    fn setup_minimal_hibe_ceremony(root: &Path) -> HibeCeremony {
+        let keystore = root.join(".tn").join("keys");
+        std::fs::create_dir_all(&keystore).unwrap();
+
+        let dk = crate::DeviceKey::generate();
+        std::fs::write(keystore.join("local.private"), dk.private_bytes()).unwrap();
+        std::fs::write(keystore.join("index_master.key"), [0x11u8; 32]).unwrap();
+
+        let (pp, msk) = setup(2, OsRng).unwrap();
+        let id_path = "team/audit";
+        let sk = keygen(&pp, &msk, &Identity::from_str_path(id_path), OsRng)
+            .unwrap()
+            .to_bytes();
+        std::fs::write(keystore.join("default.hibe.mpk"), pp.to_bytes()).unwrap();
+        std::fs::write(keystore.join("default.hibe.msk"), msk.to_bytes()).unwrap();
+        std::fs::write(keystore.join("default.hibe.idpath"), id_path).unwrap();
+        std::fs::write(keystore.join("default.hibe.sk"), sk).unwrap();
+
+        let did = dk.did().to_string();
+        let yaml = format!(
+            "ceremony: {{id: cer_hibe_test, mode: local, cipher: hibe, protocol_events_location: main_log}}\n\
+             keystore: {{path: ./.tn/keys}}\n\
+             device: {{device_identity: \"{did}\"}}\n\
+             public_fields: []\n\
+             default_policy: private\n\
+             groups:\n\
+             \x20 default:\n\
+             \x20   policy: private\n\
+             \x20   cipher: hibe\n\
+             \x20   recipients:\n\
+             \x20     - {{recipient_identity: \"{did}\"}}\n\
+             \x20   index_epoch: 0\n\
+             fields: {{}}\n\
+             llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
+        );
+        let yaml_path = root.join("tn.yaml");
+        std::fs::write(&yaml_path, yaml).unwrap();
+
+        HibeCeremony { yaml_path }
+    }
+
+    #[test]
+    fn bundle_for_recipient_stages_hibe_reader_material() {
+        let td = tempfile::tempdir().unwrap();
+        let cer = setup_minimal_hibe_ceremony(td.path());
+        let rt = Runtime::init(&cer.yaml_path).unwrap();
+
+        let out = td.path().join("reader-hibe.tnpkg");
+        rt.bundle_for_recipient("did:key:zRecipient", &out, Some(&["default"]))
+            .unwrap();
+
+        let (manifest, body) = read_tnpkg(TnpkgSource::Path(&out)).unwrap();
+        assert_eq!(manifest.kind, ManifestKind::KitBundle);
+        assert_eq!(
+            manifest.recipient_identity.as_deref(),
+            Some("did:key:zRecipient")
+        );
+        assert!(body.contains_key("body/default.hibe.mpk"));
+        assert!(body.contains_key("body/default.hibe.idpath"));
+        assert!(body.contains_key("body/default.hibe.sk"));
+        assert!(!body.contains_key("body/default.btn.mykit"));
     }
 }
 

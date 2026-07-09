@@ -9,11 +9,6 @@ Keystore layout on disk:
     <keystore>/local.public          # did:key string, utf-8 text
     <keystore>/index_master.key      # 32-byte HKDF master secret
 
-BGW groups additionally write:
-    <keystore>/<group>.write         # BGW write key, binary with magic header
-    <keystore>/<group>.read          # this party's slot key, binary w/ magic
-    <keystore>/<group>.read.a|b|c    # unissued pool slots
-
 JWE groups write:
     <keystore>/<group>.jwe.sender    # X25519 private (publisher)
     <keystore>/<group>.jwe.recipients# JSON [{did, pub_b64}, ...]
@@ -235,10 +230,10 @@ DEFAULT_PUBLIC_FIELDS = [
 class GroupConfig:
     """Per-group runtime state.
 
-    `cipher` is the GroupCipher instance for this group. BGW or JWE —
-    the ceremony picks one at create_fresh() time and it's stored in
-    the YAML at `ceremony.cipher`. `pool_size` is BGW-specific and only
-    meaningful when `cipher.name == "bgw"`.
+    `cipher` is the GroupCipher instance for this group — the ceremony
+    picks one at create_fresh() time and it's stored in the YAML at
+    `ceremony.cipher`. `pool_size` is recorded for schema stability;
+    no current cipher consumes it.
 
     `index_key` is the HKDF-derived HMAC key for this group's equality
     index tokens. Derived from the ceremony master secret bound to
@@ -272,7 +267,7 @@ class LoadedConfig:
     device: DeviceKey
     ceremony_id: str
     master_index_key: bytes  # 32-byte secret; scopes all group index keys
-    cipher_name: str  # "bgw" or "jwe"
+    cipher_name: str  # "btn", "jwe", or "hibe"
     public_fields: list[str]
     default_policy: str
     groups: dict[str, GroupConfig]
@@ -1391,8 +1386,7 @@ def _resolve_ceremony_settings(
     if cipher_name not in ("jwe", "btn", "hibe"):
         raise ValueError(
             f"{yaml_path}: unknown ceremony.cipher {cipher_name!r}; "
-            f"expected 'jwe', 'btn', or 'hibe' (legacy 'bgw' was removed in "
-            f"Workstream G)"
+            f"expected 'jwe', 'btn', or 'hibe' (legacy 'bgw' was removed)"
         )
     mode = str(ceremony_block.get("mode") or "local")
     if mode not in ("local", "linked"):

@@ -214,7 +214,7 @@ Per-group fields:
 | `groups.<name>.recipients` | list of mapping | no | `[]` | Declared recipients (used at ceremony setup; the runtime cipher loads its own state files). See [recipient entries](#recipient-entries). |
 | `groups.<name>.fields` | list of string | no | `[]` | Field names this group encrypts. Canonical multi-group routing source of truth: a field listed under N groups is encrypted into all N groups' payloads. Omitted-when-empty on serialize (round-trip stable). |
 | `groups.<name>.index_epoch` | integer (u64) | no | `0` | Incremented when keys rotate; feeds HKDF info for index-key derivation. |
-| `groups.<name>.pool_size` | integer | no | `4` | BGW pool size. Ignored by the `btn` cipher. |
+| `groups.<name>.pool_size` | integer | no | `4` | Recipient pool size recorded for schema stability; no current cipher consumes it. |
 | `groups.<name>.auto_populated_by_policy` | bool | no | — | Marker on the `tn.agents` group recording that its fields are policy-driven. Informational. |
 
 #### recipient entries
@@ -224,7 +224,7 @@ Each entry in `recipients` is a mapping:
 | path | type | required | default | description |
 |------|------|----------|---------|-------------|
 | `recipient_identity` | string | yes | — | Recipient device DID (`did:key:z…`). |
-| `key` | string | no | `null` | BGW reader-key file path (relative to keystore). |
+| `key` | string | no | `null` | Reader-key file path (relative to keystore). Written by the legacy `bgw` cipher; accepted so old yamls still parse. |
 | `pub_b64` | string | no | `null` | X25519 public key, standard base64 (used by non-`btn` ciphers). |
 
 ### Field routing validation

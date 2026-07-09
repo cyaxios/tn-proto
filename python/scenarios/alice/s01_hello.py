@@ -1,6 +1,6 @@
 """Alice s01 — first attested log, 1000 entries, read back, verify.
 
-Mirrors examples/ex01_hello.py and tests/test_jwe_roundtrip.py but
+Mirrors examples/ex01_hello.py and tests/test_tnlog_roundtrip.py (jwe leg) but
 under the harness so metrics, yaml snapshot, and invariants are
 recorded.
 """

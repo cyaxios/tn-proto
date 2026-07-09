@@ -1,4 +1,4 @@
-"""Verify btn ceremonies route through Rust; JWE/BGW fall back to Python."""
+"""Verify btn ceremonies route through Rust; JWE falls back to Python."""
 
 from __future__ import annotations
 

@@ -17,7 +17,7 @@
 use bls12_381_plus::ff::Field;
 use bls12_381_plus::group::Group;
 use bls12_381_plus::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
-use rand_core::RngCore;
+use rand_core::{CryptoRng, RngCore};
 
 use crate::codec::{read_g1, read_g2, Reader, G1_LEN, G2_LEN, VERSION};
 use crate::error::{BbgError, Result};
@@ -56,12 +56,18 @@ pub struct MasterKey {
 /// hs[i]  <- random G2   for i in 0..max_depth
 /// msk    = g2^alpha                (G2)
 /// ```
-pub fn setup(max_depth: usize, mut rng: impl RngCore) -> Result<(PublicParams, MasterKey)> {
+pub fn setup(
+    max_depth: usize,
+    mut rng: impl RngCore + CryptoRng,
+) -> Result<(PublicParams, MasterKey)> {
     if max_depth == 0 || max_depth > 255 {
         return Err(BbgError::BadMaxDepth(max_depth));
     }
     let g = G1Affine::generator();
     let alpha = Scalar::random(&mut rng);
+    if bool::from(alpha.is_zero()) {
+        return Err(BbgError::DegenerateRandomness("alpha"));
+    }
     let g1 = G1Affine::from(G1Projective::from(g) * alpha);
     let g2 = G2Affine::from(G2Projective::random(&mut rng));
     let g3 = G2Affine::from(G2Projective::random(&mut rng));

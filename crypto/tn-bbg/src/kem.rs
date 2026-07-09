@@ -6,14 +6,14 @@
 //! group points plus canonical AEAD output — the GT element only ever exists in
 //! memory as a KDF input.
 //!
-//! Wire layout (fixed 237 bytes), byte-identical to tn-hibe:
+//! Wire layout (fixed 205 bytes), byte-identical to tn-hibe:
 //! `version(1) | B(48, G1) | C(96, G2) | nonce(12) | AES-256-GCM(CEK)(32+16)`.
 //! `version | B | C` doubles as the AEAD associated data.
 
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use hkdf::Hkdf;
-use rand_core::RngCore;
+use rand_core::{CryptoRng, RngCore};
 use sha2::Sha256;
 use zeroize::Zeroize;
 
@@ -37,7 +37,7 @@ pub fn kem_wrap(
     pp: &PublicParams,
     id: &Identity,
     cek: &[u8; CEK_LEN],
-    mut rng: impl RngCore,
+    mut rng: impl RngCore + CryptoRng,
 ) -> Result<Vec<u8>> {
     if id.depth() > pp.max_depth() {
         return Err(BbgError::IdentityTooDeep);

@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { verifyChainLink } from "./core/chain.js";
 import { aadBytesFor, decryptGroup, decryptGroupAsync, type GroupKits } from "./core/decrypt.js";
 import { hibeCandidateKeys, loadHibeGroup } from "./runtime/hibe_group.js";
+import { loadJweKeys } from "./runtime/keystore.js";
 import { signatureFromB64, verify } from "./core/signing.js";
 import { asDid, asSignatureB64 } from "./core/types.js";
 
@@ -80,10 +81,11 @@ function btnHibeCandidates(keystorePath: string, group: string): GroupKits[] {
   return candidates;
 }
 
-/** The jwe reader-kit (`<group>.jwe.mykey`) as a GroupKits, or null if absent. */
+/** The jwe reader keys (`<group>.jwe.mykey` plus rotation-archived
+ *  `.revoked.<ts>` priors) as a GroupKits, or null if none are present. */
 function jweReaderKit(keystorePath: string, group: string): GroupKits | null {
-  const p = join(keystorePath, `${group}.jwe.mykey`);
-  return existsSync(p) ? { cipher: "jwe", kits: [new Uint8Array(readFileSync(p))] } : null;
+  const keys = loadJweKeys(keystorePath, group);
+  return keys.length > 0 ? { cipher: "jwe", kits: keys } : null;
 }
 
 /** Verify a foreign envelope's Ed25519 signature over its row_hash. */

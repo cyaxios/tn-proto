@@ -8,7 +8,7 @@
 //   <keystore>/<group>.btn.mykit    self-kit bytes so the publisher can read
 //   <keystore>/<group>.hibe.*       hibe group material (see runtime/hibe_group.ts)
 //
-// We do not touch jwe/bgw layouts here. A JWE ceremony yaml loaded
+// We do not touch jwe layouts here. A JWE ceremony yaml loaded
 // through this module will still read the keystore parts that exist
 // but cannot emit or read.
 
@@ -40,9 +40,27 @@ export interface GroupKeystore {
   /** Precomputed hibe decrypt candidates (held sk, derived-down, superseded
    * `.previous` keys, msk-minted current + prior paths), try-first order. */
   hibeKits?: Uint8Array[];
-  /** jwe reader key: the raw 32-byte X25519 private (`<group>.jwe.mykey`),
-   * when present. The async read path derives the public half to open. */
-  jweKey?: Uint8Array;
+  /** jwe reader keys: the raw 32-byte X25519 privates, current
+   * (`<group>.jwe.mykey`) first, then any rotation-archived
+   * `.jwe.mykey.revoked.<ts>` keys newest first — so pre-rotation entries
+   * stay readable, mirroring btn's `kits` list. The async read path derives
+   * each public half to open. */
+  jweKeys?: Uint8Array[];
+}
+
+/** Load a group's jwe reader keys: the active `<group>.jwe.mykey` first,
+ * then every rotation-archived `.jwe.mykey.revoked.<ts>` newest first.
+ * Returns an empty list when the group holds no jwe reader material. */
+export function loadJweKeys(keystorePath: string, group: string): Uint8Array[] {
+  const keys: Uint8Array[] = [];
+  const current = join(keystorePath, `${group}.jwe.mykey`);
+  if (existsSync(current)) keys.push(new Uint8Array(readFileSync(current)));
+  const revoked = readdirSync(keystorePath)
+    .filter((f: string) => f.startsWith(`${group}.jwe.mykey.revoked.`))
+    .sort()
+    .reverse();
+  for (const f of revoked) keys.push(new Uint8Array(readFileSync(join(keystorePath, f))));
+  return keys;
 }
 
 /** Atomically write bytes: write to `<path>.tmp`, then rename over the target.
@@ -205,14 +223,19 @@ export function loadKeystore(keystorePath: string): LoadedKeystore {
     groups.set(name, existing);
   }
 
-  // jwe groups: the reader's X25519 private in `<group>.jwe.mykey`. A group can
-  // hold jwe material alongside btn/hibe (own ceremony + absorbed reader key).
+  // jwe groups: the reader's X25519 privates — the active `<group>.jwe.mykey`
+  // plus rotation-archived `.revoked.<ts>` keys. A group can hold jwe material
+  // alongside btn/hibe (own ceremony + absorbed reader key).
+  const jweNames = new Set<string>();
   for (const entry of readdirSync(keystorePath)) {
-    const m = entry.match(/^(.+)\.jwe\.mykey$/);
-    if (!m || !m[1]) continue;
-    const name = m[1];
+    const m = entry.match(/^(.+)\.jwe\.mykey(?:\.revoked\..+)?$/);
+    if (m && m[1]) jweNames.add(m[1]);
+  }
+  for (const name of jweNames) {
+    const keys = loadJweKeys(keystorePath, name);
+    if (keys.length === 0) continue;
     const existing = groups.get(name) ?? { kits: [] };
-    existing.jweKey = new Uint8Array(readFileSync(join(keystorePath, entry)));
+    existing.jweKeys = keys;
     groups.set(name, existing);
   }
 

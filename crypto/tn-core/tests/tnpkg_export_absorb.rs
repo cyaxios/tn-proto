@@ -106,6 +106,35 @@ fn export_kit_bundle_only() {
 }
 
 #[test]
+fn export_kit_bundle_includes_jwe_and_hibe_reader_material() {
+    let td = tempfile::tempdir().unwrap();
+    let cer = common::setup_minimal_btn_ceremony(td.path());
+    let rt = Runtime::init(&cer.yaml_path).unwrap();
+    std::fs::write(cer.keystore.join("default.jwe.mykey"), [0x33u8; 32]).unwrap();
+    std::fs::write(cer.keystore.join("default.hibe.mpk"), b"mpk-bytes").unwrap();
+    std::fs::write(cer.keystore.join("default.hibe.idpath"), b"team/audit").unwrap();
+    std::fs::write(cer.keystore.join("default.hibe.sk"), b"sk-bytes").unwrap();
+
+    let out = td.path().join("kits-with-non-btn.tnpkg");
+    rt.export(
+        &out,
+        ExportOptions {
+            kind: Some(ManifestKind::KitBundle),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (_manifest, body) = read_tnpkg(TnpkgSource::Path(&out)).unwrap();
+
+    assert!(body.contains_key("body/default.btn.mykit"));
+    assert!(body.contains_key("body/default.jwe.mykey"));
+    assert!(body.contains_key("body/default.hibe.mpk"));
+    assert!(body.contains_key("body/default.hibe.idpath"));
+    assert!(body.contains_key("body/default.hibe.sk"));
+    assert!(!body.contains_key("body/default.hibe.msk"));
+}
+
+#[test]
 fn export_full_keystore_requires_confirm() {
     let td = tempfile::tempdir().unwrap();
     let rt = fresh_runtime(&td);

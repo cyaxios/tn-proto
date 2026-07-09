@@ -25,6 +25,10 @@ fn reload_sk(sk: &PrivateKey) -> PrivateKey {
     PrivateKey::from_bytes(&sk.to_bytes()).expect("sk reload")
 }
 
+fn identity(path: &str) -> Identity {
+    Identity::try_from_str_path(path).unwrap()
+}
+
 #[test]
 fn full_lifecycle() {
     let mut rng = ChaCha20Rng::seed_from_u64(0x6c69666563796c65); // "lifecyle"
@@ -34,10 +38,14 @@ fn full_lifecycle() {
     let pp = reload_pp(&pp0);
     let msk = MasterKey::from_bytes(&msk0.to_bytes()).unwrap();
     let fp = mpk_fingerprint(&pp);
-    assert_eq!(fp, mpk_fingerprint(&pp0), "fingerprint stable across reload");
+    assert_eq!(
+        fp,
+        mpk_fingerprint(&pp0),
+        "fingerprint stable across reload"
+    );
 
     // --- Act 2: seals to the reader's admission path, epoch A.
-    let path_a = Identity::from_str_path("reader-did/policy-a");
+    let path_a = identity("reader-did/policy-a");
     let e1 = seal(&pp, &path_a, b"epoch-a entry 1", &mut rng).unwrap();
     let e2 = seal(&pp, &path_a, b"epoch-a entry 2", &mut rng).unwrap();
 
@@ -56,24 +64,13 @@ fn full_lifecycle() {
 
     // --- Act 4: delegation. A department key holder derives the admission
     // key locally — the msk is never involved.
-    let dept_sk = reload_sk(
-        &keygen(&pp, &msk, &Identity::from_str_path("reader-did"), &mut rng).unwrap(),
-    );
+    let dept_sk = reload_sk(&keygen(&pp, &msk, &identity("reader-did"), &mut rng).unwrap());
     let derived = delegate(&pp, &dept_sk, b"policy-a", &mut rng).unwrap();
     assert_eq!(open(&pp, &derived, &e1).unwrap(), b"epoch-a entry 1");
 
     // --- Act 5: wrong identities are refused, not garbled.
-    let stranger = keygen(
-        &pp,
-        &msk,
-        &Identity::from_str_path("other-did/policy-a"),
-        &mut rng,
-    )
-    .unwrap();
-    assert!(matches!(
-        open(&pp, &stranger, &e1),
-        Err(HibeError::Unwrap)
-    ));
+    let stranger = keygen(&pp, &msk, &identity("other-did/policy-a"), &mut rng).unwrap();
+    assert!(matches!(open(&pp, &stranger, &e1), Err(HibeError::Unwrap)));
 
     // The KEM alone shows the same behavior (this is what rides inside a
     // group's ciphertext blob).
@@ -83,7 +80,7 @@ fn full_lifecycle() {
     assert!(kem_unwrap(&pp, &stranger, &wrapped).is_err());
 
     // --- Act 6: policy-path rotation. New seals move to policy-b.
-    let path_b = Identity::from_str_path("reader-did/policy-b");
+    let path_b = identity("reader-did/policy-b");
     let e3 = seal(&pp, &path_b, b"epoch-b entry", &mut rng).unwrap();
 
     // The old exact-path grantee loses new seals but keeps history — the

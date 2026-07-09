@@ -9,8 +9,8 @@
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use tn_hibe::{
-    decrypt, delegate, gt_to_bytes, kem_unwrap, kem_wrap, mpk_fingerprint, open, seal, Ciphertext,
-    Identity, MasterKey, PrivateKey, PublicParams,
+    delegate, kem_unwrap, kem_wrap, mpk_fingerprint, open, raw, seal, Identity, MasterKey,
+    PrivateKey, PublicParams,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -18,6 +18,10 @@ use wasm_bindgen_test::wasm_bindgen_test;
 
 fn h(v: &serde_json::Value) -> Vec<u8> {
     hex::decode(v.as_str().expect("hex string")).expect("valid hex")
+}
+
+fn id(path: &str) -> Identity {
+    Identity::try_from_str_path(path).expect("valid fixture path")
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -46,11 +50,15 @@ fn golden_vectors_hold() {
 
     for entry in v["paths"].as_array().expect("paths") {
         let path = entry["path"].as_str().unwrap();
-        let id = Identity::from_str_path(path);
+        let id = id(path);
 
         let sk_bytes = h(&entry["sk"]);
         let sk = PrivateKey::from_bytes(&sk_bytes).expect("sk decodes");
-        assert_eq!(sk.to_bytes(), sk_bytes, "PrivateKey encoding drifted: {path}");
+        assert_eq!(
+            sk.to_bytes(),
+            sk_bytes,
+            "PrivateKey encoding drifted: {path}"
+        );
         assert_eq!(sk.identity(), &id, "identity labels drifted: {path}");
 
         // Frozen KEM blob opens to the frozen CEK.
@@ -63,10 +71,18 @@ fn golden_vectors_hold() {
 
         // Frozen BBG ciphertext decrypts to the frozen GT message.
         let ct_bytes = h(&entry["ct"]);
-        let ct = Ciphertext::from_bytes(&ct_bytes).expect("ct decodes");
-        assert_eq!(ct.to_bytes(), ct_bytes, "Ciphertext encoding drifted: {path}");
-        let m = decrypt(&pp, &sk, &ct).expect("decrypt");
-        assert_eq!(gt_to_bytes(&m), h(&entry["m"]), "BBG decrypt drifted: {path}");
+        let ct = raw::Ciphertext::from_bytes(&ct_bytes).expect("ct decodes");
+        assert_eq!(
+            ct.to_bytes(),
+            ct_bytes,
+            "Ciphertext encoding drifted: {path}"
+        );
+        let m = raw::decrypt(&pp, &sk, &ct).expect("decrypt");
+        assert_eq!(
+            raw::gt_to_bytes(&m),
+            h(&entry["m"]),
+            "BBG decrypt drifted: {path}"
+        );
 
         // Frozen full group blob opens to the frozen body.
         assert_eq!(

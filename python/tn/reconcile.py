@@ -117,6 +117,5 @@ def _reconcile(cfg: LoadedConfig) -> ReconcileResult:
         # btn groups: yaml-declared DIDs are NOT auto-minted at init.
         # Use tn.admin_add_recipient(group, out_path, did) explicitly. The
         # previous orphan auto-mint path (_emit_missing_recipients) was
-        # removed because no consumer read its output. No coupon flow —
-        # that was BGW-only and has been removed.
+        # removed because no consumer read its output.
     return result

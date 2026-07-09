@@ -5,8 +5,8 @@ build-backend = "maturin"
 [tool.maturin]
 # One combined wheel: the pure-Python `tn` package (python-source ".") plus
 # the `tn._native` extension built from the umbrella crate at
-# crypto/tn-py, which links the former tn-core + tn-btn bindings as the
-# `core` and `btn` submodules. abi3-py39, so one wheel per platform.
+# crypto/tn-py, which links the core, btn, and hibe bindings as
+# `core`, `btn`, and `hibe` submodules. abi3-py39, so one wheel per platform.
 module-name = "tn._native"
 python-source = "."
 manifest-path = "../crypto/tn-py/Cargo.toml"
@@ -216,8 +216,8 @@ module = [
     "base58.*",
     "persist_queue.*",
     # PyO3 native extension — built by maturin from crypto/tn-py/ (the
-    # combined tn-core + tn-btn bindings, exposed as tn._native.core /
-    # tn._native.btn). Typing it properly means adding py.typed or
+    # combined core + btn + hibe bindings, exposed as tn._native.core /
+    # tn._native.btn / tn._native.hibe). Typing it properly means adding py.typed or
     # hand-written stubs, tracked in Workstream B/F. Until then mypy treats
     # it as Any at the import boundary.
     "tn._native",

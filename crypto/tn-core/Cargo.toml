@@ -88,7 +88,6 @@ fs = ["dep:uuid", "dep:clap", "dep:tempfile"]
 # omitted on single-process wasm where there's no other writer.
 # Requires `fs`.
 fs-locking = ["fs", "dep:fs4"]
-bgw = []
 
 [[bench]]
 name = "pipeline"

@@ -1,8 +1,10 @@
 //! WebAssembly bindings for tn-core.
 //!
 //! Exported surface: canonical, chain, signing, indexing, envelope, the
-//! admin catalog, plus btn encrypt/decrypt and JWE so the Node CLI can
-//! round-trip real logs with Python.
+//! admin catalog, plus btn encrypt/decrypt. The default `WasmRuntime`
+//! supports tn-core's BTN runtime path; HIBE is exposed as standalone
+//! `hibe*` primitives for the TS/Python-compatible HIBE pipeline, and
+//! JWE remains pure JS/JOSE rather than a Rust/wasm runtime cipher.
 //!
 //! Invariants:
 //! - JSON outputs must match what tn_core (via PyO3) produces in Python,
@@ -17,6 +19,7 @@
 
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::str;
 use wasm_bindgen::prelude::*;
 
 use tn_core::admin_catalog;
@@ -871,6 +874,22 @@ fn hibe_sk(sk: &[u8]) -> Result<tn_hibe::PrivateKey, JsError> {
     tn_hibe::PrivateKey::from_bytes(sk).map_err(hibe_err)
 }
 
+fn hibe_id_path(id_path: &str) -> Result<tn_hibe::Identity, JsError> {
+    tn_hibe::Identity::try_from_str_path(id_path).map_err(hibe_err)
+}
+
+fn hibe_identity_to_path(id: &tn_hibe::Identity) -> Result<String, JsError> {
+    let label_refs: Vec<&[u8]> = id.labels().iter().map(Vec::as_slice).collect();
+    tn_hibe::Identity::try_from_path(&label_refs).map_err(hibe_err)?;
+    let mut labels = Vec::with_capacity(id.labels().len());
+    for label in id.labels() {
+        let s = str::from_utf8(label)
+            .map_err(|_| JsError::new("HIBE identity label is not valid UTF-8"))?;
+        labels.push(s.to_string());
+    }
+    Ok(labels.join("/"))
+}
+
 /// Run BBG Setup for a fresh authority.
 ///
 /// Returns `{ mpk_b64, msk_b64 }` (canonical PublicParams / MasterKey bytes).
@@ -890,7 +909,7 @@ pub fn hibe_setup_js(max_depth: usize) -> Result<JsValue, JsError> {
 pub fn hibe_keygen_js(mpk: &[u8], msk: &[u8], id_path: &str) -> Result<Vec<u8>, JsError> {
     let pp = hibe_pp(mpk)?;
     let msk = tn_hibe::MasterKey::from_bytes(msk).map_err(hibe_err)?;
-    let id = tn_hibe::Identity::from_str_path(id_path);
+    let id = hibe_id_path(id_path)?;
     Ok(tn_hibe::keygen(&pp, &msk, &id, rand_core::OsRng)
         .map_err(hibe_err)?
         .to_bytes())
@@ -898,7 +917,11 @@ pub fn hibe_keygen_js(mpk: &[u8], msk: &[u8], id_path: &str) -> Result<Vec<u8>, 
 
 /// Derive the key for `parent_sk`'s child labelled `child_label` — no msk.
 #[wasm_bindgen(js_name = "hibeDelegate")]
-pub fn hibe_delegate_js(mpk: &[u8], parent_sk: &[u8], child_label: &str) -> Result<Vec<u8>, JsError> {
+pub fn hibe_delegate_js(
+    mpk: &[u8],
+    parent_sk: &[u8],
+    child_label: &str,
+) -> Result<Vec<u8>, JsError> {
     let pp = hibe_pp(mpk)?;
     let parent = hibe_sk(parent_sk)?;
     Ok(
@@ -912,13 +935,7 @@ pub fn hibe_delegate_js(mpk: &[u8], parent_sk: &[u8], child_label: &str) -> Resu
 #[wasm_bindgen(js_name = "hibeKeyIdPath")]
 pub fn hibe_key_id_path_js(sk: &[u8]) -> Result<String, JsError> {
     let sk = hibe_sk(sk)?;
-    let labels: Vec<String> = sk
-        .identity()
-        .labels()
-        .iter()
-        .map(|l| String::from_utf8_lossy(l).into_owned())
-        .collect();
-    Ok(labels.join("/"))
+    hibe_identity_to_path(sk.identity())
 }
 
 /// Wrap a 32-byte content-encryption key to an identity path. The KEM half
@@ -929,7 +946,7 @@ pub fn hibe_kem_wrap_js(mpk: &[u8], id_path: &str, cek: &[u8]) -> Result<Vec<u8>
     let cek: [u8; 32] = cek
         .try_into()
         .map_err(|_| JsError::new("cek must be exactly 32 bytes"))?;
-    let id = tn_hibe::Identity::from_str_path(id_path);
+    let id = hibe_id_path(id_path)?;
     tn_hibe::kem_wrap(&pp, &id, &cek, rand_core::OsRng).map_err(hibe_err)
 }
 
@@ -939,7 +956,9 @@ pub fn hibe_kem_wrap_js(mpk: &[u8], id_path: &str, cek: &[u8]) -> Result<Vec<u8>
 pub fn hibe_kem_unwrap_js(mpk: &[u8], sk: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, JsError> {
     let pp = hibe_pp(mpk)?;
     let sk = hibe_sk(sk)?;
-    Ok(tn_hibe::kem_unwrap(&pp, &sk, wrapped).map_err(hibe_err)?.to_vec())
+    Ok(tn_hibe::kem_unwrap(&pp, &sk, wrapped)
+        .map_err(hibe_err)?
+        .to_vec())
 }
 
 /// The maximum identity-path depth an authority's mpk supports. Doubles as
@@ -961,9 +980,15 @@ pub fn hibe_seal_js(
     aad: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsError> {
     let pp = hibe_pp(mpk)?;
-    let id = tn_hibe::Identity::from_str_path(id_path);
-    tn_hibe::seal_with_aad(&pp, &id, plaintext, aad.as_deref().unwrap_or(&[]), rand_core::OsRng)
-        .map_err(hibe_err)
+    let id = hibe_id_path(id_path)?;
+    tn_hibe::seal_with_aad(
+        &pp,
+        &id,
+        plaintext,
+        aad.as_deref().unwrap_or(&[]),
+        rand_core::OsRng,
+    )
+    .map_err(hibe_err)
 }
 
 /// Open a sealed hibe group blob with a key on its identity path. Throws

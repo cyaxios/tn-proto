@@ -11,6 +11,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
@@ -36,6 +38,20 @@ cipher_mod = _load_module("tn.cipher_standalone", "tn/cipher.py")
 JWEGroupCipher = cipher_mod.JWEGroupCipher
 NotAPublisherError = cipher_mod.NotAPublisherError
 NotARecipientError = cipher_mod.NotARecipientError
+
+
+def _x25519_pub() -> bytes:
+    import cryptography.hazmat.primitives.asymmetric.x25519 as _x
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    return (
+        _x.X25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(
+            Encoding.Raw,
+            PublicFormat.Raw,
+        )
+    )
 
 
 def test_jwe_roundtrip_publisher_can_decrypt_own() -> None:
@@ -117,11 +133,95 @@ def test_jwe_revoked_recipient_cannot_decrypt_new_entries() -> None:
         assert kept_view.decrypt(ct_after) == b"after"
 
 
+def test_jwe_load_decrypts_pre_rotation_ciphertext_via_revoked_keys() -> None:
+    """Rotation archives the reader key as `.jwe.mykey.revoked.<ts>` (see
+    tn.admin._rotate_impl). A reloaded cipher must fall back to those prior
+    keys so pre-rotation ciphertexts stay readable by the publisher."""
+    with tempfile.TemporaryDirectory(prefix="jwe_") as td:
+        ks = Path(td)
+        old_cipher = JWEGroupCipher.create(ks, "default", recipient_dids=["did:self"])
+        ct_old = old_cipher.encrypt(b"pre-rotation payload")
+
+        # Archive exactly the way tn.admin._rotate_impl does, then mint the
+        # fresh generation over the same group name.
+        ts = 1_700_000_000
+        for suffix in ("jwe.sender", "jwe.recipients", "jwe.mykey"):
+            src = ks / f"default.{suffix}"
+            src.rename(src.with_suffix(src.suffix + f".revoked.{ts}"))
+        new_cipher = JWEGroupCipher.create(ks, "default", recipient_dids=["did:self"])
+        ct_new = new_cipher.encrypt(b"post-rotation payload")
+
+        reloaded = JWEGroupCipher.load(ks, "default")
+        assert reloaded.decrypt(ct_new) == b"post-rotation payload"
+        assert reloaded.decrypt(ct_old) == b"pre-rotation payload"
+
+
+def test_jwe_load_spans_multiple_rotations() -> None:
+    """Every rotation stacks another revoked key; all generations decrypt."""
+    with tempfile.TemporaryDirectory(prefix="jwe_") as td:
+        ks = Path(td)
+        cts: list[bytes] = []
+        for generation in range(3):
+            if generation > 0:
+                ts = 1_700_000_000 + generation
+                for suffix in ("jwe.sender", "jwe.recipients", "jwe.mykey"):
+                    src = ks / f"default.{suffix}"
+                    src.rename(src.with_suffix(src.suffix + f".revoked.{ts}"))
+            cipher = JWEGroupCipher.create(ks, "default", recipient_dids=["did:self"])
+            cts.append(cipher.encrypt(f"era {generation}".encode()))
+
+        reloaded = JWEGroupCipher.load(ks, "default")
+        for generation, ct in enumerate(cts):
+            assert reloaded.decrypt(ct) == f"era {generation}".encode()
+
+
+def test_jwe_decrypt_rejects_non_object_shape() -> None:
+    with tempfile.TemporaryDirectory(prefix="jwe_") as td:
+        cipher = JWEGroupCipher.create(Path(td), "default", recipient_dids=["did:self"])
+
+        with pytest.raises(NotARecipientError, match="JWE JSON object"):
+            cipher.decrypt(b"[]")
+
+
+def test_jwe_create_rejects_invalid_public_key_length() -> None:
+    with tempfile.TemporaryDirectory(prefix="jwe_") as td:
+        with pytest.raises(ValueError, match="32 raw X25519 bytes"):
+            JWEGroupCipher.create(
+                Path(td),
+                "default",
+                recipient_dids=["did:bad"],
+                recipient_pubs={"did:bad": b"short"},
+            )
+
+
+def test_jwe_create_removes_stale_self_key_when_no_self_key_is_minted() -> None:
+    with tempfile.TemporaryDirectory(prefix="jwe_") as td:
+        ks = Path(td)
+        JWEGroupCipher.create(ks, "default", recipient_dids=["did:self"])
+        assert (ks / "default.jwe.mykey").exists()
+
+        cipher = JWEGroupCipher.create(
+            ks,
+            "default",
+            recipient_dids=["did:external"],
+            recipient_pubs={"did:external": _x25519_pub()},
+        )
+
+        assert not (ks / "default.jwe.mykey").exists()
+        with pytest.raises(NotARecipientError, match="no recipient X25519 key"):
+            cipher.decrypt(b"{}")
+
+
 def main() -> int:
     tests = [
         test_jwe_roundtrip_publisher_can_decrypt_own,
         test_jwe_multi_recipient_all_decrypt,
         test_jwe_revoked_recipient_cannot_decrypt_new_entries,
+        test_jwe_load_decrypts_pre_rotation_ciphertext_via_revoked_keys,
+        test_jwe_load_spans_multiple_rotations,
+        test_jwe_decrypt_rejects_non_object_shape,
+        test_jwe_create_rejects_invalid_public_key_length,
+        test_jwe_create_removes_stale_self_key_when_no_self_key_is_minted,
     ]
     for t in tests:
         t()

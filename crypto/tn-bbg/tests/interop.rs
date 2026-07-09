@@ -12,16 +12,19 @@ use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use tn_bbg::{
-    decrypt, delegate, gt_to_bytes, kem_unwrap, kem_wrap, mpk_fingerprint, open, seal, Ciphertext,
-    Identity, MasterKey, PrivateKey, PublicParams,
+    delegate, kem_unwrap, kem_wrap, mpk_fingerprint, open, raw, seal, Identity, MasterKey,
+    PrivateKey, PublicParams,
 };
 
 fn h(v: &serde_json::Value) -> Vec<u8> {
     hex::decode(v.as_str().expect("hex string")).expect("valid hex")
 }
 
-const GOLDEN: &str =
-    include_str!("../../tn-hibe/tests/golden/vectors.json");
+fn id(path: &str) -> Identity {
+    Identity::try_from_str_path(path).expect("valid fixture path")
+}
+
+const GOLDEN: &str = include_str!("../../tn-hibe/tests/golden/vectors.json");
 
 #[test]
 fn interop_gate_tn_bbg_opens_frozen_hohibe_vectors() {
@@ -38,7 +41,7 @@ fn interop_gate_tn_bbg_opens_frozen_hohibe_vectors() {
 
     for entry in v["paths"].as_array().unwrap() {
         let path = entry["path"].as_str().unwrap();
-        let id = Identity::from_str_path(path);
+        let id = id(path);
 
         // The frozen (hohibe-generated) private key for this path.
         let sk = PrivateKey::from_bytes(&h(&entry["sk"])).unwrap();
@@ -46,10 +49,10 @@ fn interop_gate_tn_bbg_opens_frozen_hohibe_vectors() {
 
         // GATE 1a — BBG decrypt: our decrypt opens the FROZEN hohibe ciphertext
         // with the FROZEN hohibe key, recovering the frozen GT message.
-        let ct = Ciphertext::from_bytes(&h(&entry["ct"])).unwrap();
-        let m = decrypt(&pp, &sk, &ct).expect("decrypt");
+        let ct = raw::Ciphertext::from_bytes(&h(&entry["ct"])).unwrap();
+        let m = raw::decrypt(&pp, &sk, &ct).expect("decrypt");
         assert_eq!(
-            gt_to_bytes(&m),
+            raw::gt_to_bytes(&m),
             h(&entry["m"]),
             "BBG DECRYPT INTEROP FAILED at {path}: recovered GT != frozen m"
         );
@@ -77,7 +80,7 @@ fn interop_gate_tn_bbg_opens_frozen_hohibe_vectors() {
     let mut rng = ChaCha20Rng::seed_from_u64(7);
     let entries = v["paths"].as_array().unwrap();
     for entry in entries {
-        let id = Identity::from_str_path(entry["path"].as_str().unwrap());
+        let id = id(entry["path"].as_str().unwrap());
         let sk = PrivateKey::from_bytes(&h(&entry["sk"])).unwrap();
         let fresh = [0x42u8; 32];
         let wrapped = kem_wrap(&pp, &id, &fresh, &mut rng).unwrap();

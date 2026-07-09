@@ -2,8 +2,8 @@
 
 A package is the on-the-wire unit that publishers and recipients exchange
 to stay in sync about group state. Signed, idempotent to absorb, opaque
-to transports (filesystem, wallet, QR). Covers both JWE and bearer (BGW)
-lifecycles — the cipher kind lives in the payload, not the envelope.
+to transports (filesystem, wallet, QR). The cipher kind lives in the
+payload, not the envelope.
 """
 
 from __future__ import annotations

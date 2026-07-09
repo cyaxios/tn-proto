@@ -15,7 +15,7 @@ tn-core owns the protocol hot path and the wire format:
   decrypting it.
 - Ed25519 signing and verification over the row hash.
 - Envelope assembly: public fields plus per-group ciphertext blocks.
-- Cipher dispatch (btn is first class; JWE and BGW are pluggable).
+- Cipher dispatch (btn is first class; JWE and HIBE are pluggable).
 - Log file I/O, ceremony config loading, and `.tnpkg` package read/write.
 
 ## Key surface

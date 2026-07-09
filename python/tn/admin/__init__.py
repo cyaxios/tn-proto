@@ -4,9 +4,9 @@ These are the code-level equivalents of the admin CLI commands. Exposing
 them as functions means library users can drive ceremony changes from
 their own scripts / admin tools without shelling out.
 
-Ciphers: `jwe` (static-ECDH + AES-KW + AES-GCM, pure Python) and `btn`
-(NNL subset-difference broadcast, via the Rust `tn_core` extension). The
-legacy `bgw` cipher was removed in Workstream G.
+Ciphers: `jwe` (static-ECDH + AES-KW + AES-GCM, pure Python), `btn`
+(NNL subset-difference broadcast, via the Rust `tn_core` extension), and
+`hibe` (identity-path delegation, via `tn-hibe`).
 """
 
 from __future__ import annotations
@@ -977,7 +977,7 @@ def _yaml_rotate_group(
     g["pool_size"] = pool_size
     g["index_epoch"] = new_epoch
 
-    # YAML recipient entry shape (bgw cipher was removed in Workstream G).
+    # YAML recipient entry shape.
     me_entry: dict[str, Any] = {"recipient_identity": me_did}
     recipients: list[dict[str, Any]] = [me_entry]
     if revoke_did is not None:

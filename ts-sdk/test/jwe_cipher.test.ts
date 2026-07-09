@@ -8,8 +8,9 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { x25519 } from "@noble/curves/ed25519";
+import { GeneralEncrypt, importJWK, type JWK } from "jose";
 
-import { jweDecrypt, jweSeal, okpPrivateJwk } from "../src/core/jwe.js";
+import { jweDecrypt, jweSeal, okpPrivateJwk, okpPublicJwk } from "../src/core/jwe.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -67,4 +68,34 @@ test("jwe: garbage and non-recipient inputs fail closed, never throw", async () 
   const jwk = okpPrivateJwk(r.pub, r.priv);
   assert.equal(await jweDecrypt(jwk, enc("not json")), null);
   assert.equal(await jweDecrypt(jwk, enc('{"recipients":[]}')), null);
+});
+
+test("jwe: raw X25519 public keys are length-validated before seal", async () => {
+  await assert.rejects(
+    () => jweSeal([new Uint8Array(31)], enc('{"x":1}')),
+    /jwe: recipient public key/i,
+  );
+});
+
+test("jwe: decrypt rejects JOSE profiles outside the TN allowlist", async () => {
+  const r = keypair();
+  const pt = enc('{"profile":"wrong-alg"}');
+  const otherAlg = "ECDH-ES+A128KW";
+  const key = await importJWK(okpPublicJwk(r.pub), otherAlg);
+  const obj = await new GeneralEncrypt(pt)
+    .setProtectedHeader({ enc: "A256GCM" })
+    .addRecipient(key)
+    .setUnprotectedHeader({ alg: otherAlg })
+    .done()
+    .encrypt();
+
+  assert.equal(await jweDecrypt(okpPrivateJwk(r.pub, r.priv), enc(JSON.stringify(obj))), null);
+});
+
+test("jwe: invalid local reader JWK import errors are not recipient misses", async () => {
+  const r = keypair();
+  const blob = await jweSeal([r.pub], enc('{"x":1}'));
+  const invalidReader: JWK = { kty: "OKP", crv: "X25519", x: "not-base64url", d: "not-base64url" };
+
+  await assert.rejects(() => jweDecrypt(invalidReader, blob), /jwe: failed to import reader key/i);
 });

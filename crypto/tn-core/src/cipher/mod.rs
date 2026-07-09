@@ -1,5 +1,5 @@
 //! The [`GroupCipher`] extension point and its per-group implementations
-//! (`btn`, `jwe`, `hibe`, `bgw`).
+//! (`btn`, `jwe`, `hibe`).
 //!
 //! A TN group's confidentiality is defined by its cipher. [`GroupCipher`] is
 //! the trait the [`crate::Runtime`] holds one of per group: it seals plaintext
@@ -8,11 +8,8 @@
 //!
 //! `btn` is first-class in tn-core (see [`btn`]). `jwe` stays Python-owned for
 //! this plan — a JWE group configured in a yaml yields a clear
-//! [`crate::Error::NotImplemented`] from the Rust runtime. `bgw` is stubbed
-//! behind the `bgw` feature flag.
+//! [`crate::Error::NotImplemented`] from the Rust runtime.
 
-#[cfg(feature = "bgw")]
-pub mod bgw;
 pub mod btn;
 pub mod hibe;
 pub mod jwe;
@@ -22,7 +19,7 @@ use crate::Result;
 /// The pluggable per-group encryption surface.
 ///
 /// An implementor binds a concrete cipher to a concrete party — a btn
-/// publisher, a btn reader at a given leaf, JWE, BGW — and exposes the two
+/// publisher, a btn reader at a given leaf, JWE — and exposes the two
 /// directional operations the [`crate::Runtime`] needs: seal (publisher-side)
 /// and open (reader-side). One `GroupCipher` corresponds to one group's
 /// material for one party; the runtime selects it from the group's `cipher:`
@@ -63,7 +60,7 @@ pub trait GroupCipher: Send + Sync {
     /// malformed input or cipher failure.
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>>;
 
-    /// Return the stable cipher identifier (`"btn"`, `"jwe"`, `"bgw"`).
+    /// Return the stable cipher identifier (`"btn"`, `"hibe"`, `"jwe"`).
     ///
     /// Used in logs and diagnostics and to tag which cipher produced a record;
     /// must match the `cipher:` value that selects this implementation.

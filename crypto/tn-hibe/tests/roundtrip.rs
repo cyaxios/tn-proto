@@ -10,13 +10,17 @@ use bls12_381_plus::Gt;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use tn_hibe::{
-    decrypt, delegate, encrypt, kem_unwrap, kem_wrap, keygen, mpk_fingerprint, open, open_with_aad,
-    seal, seal_with_aad, setup, Ciphertext, HibeError, Identity, MasterKey, PrivateKey,
-    PublicParams, WRAPPED_CEK_LEN,
+    delegate, kem_unwrap, kem_wrap, keygen, mpk_fingerprint, open, open_with_aad, raw, seal,
+    seal_with_aad, setup, HibeError, Identity, MasterKey, PrivateKey, PublicParams,
+    WRAPPED_CEK_LEN,
 };
 
 fn rng(seed: u64) -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(seed)
+}
+
+fn identity(path: &str) -> Identity {
+    Identity::try_from_str_path(path).unwrap()
 }
 
 #[test]
@@ -24,11 +28,16 @@ fn encrypt_decrypt_round_trip_depths_1_2_3() {
     let mut r = rng(1);
     let (pp, msk) = setup(3, &mut r).unwrap();
     for path in ["alice", "alice/policy-1", "alice/policy-1/epoch-0"] {
-        let id = Identity::from_str_path(path);
+        let id = identity(path);
         let sk = keygen(&pp, &msk, &id, &mut r).unwrap();
         let m = Gt::random(&mut r);
-        let ct = encrypt(&pp, &id, &m, &mut r).unwrap();
-        assert_eq!(decrypt(&pp, &sk, &ct).unwrap(), m, "depth {}", id.depth());
+        let ct = raw::encrypt(&pp, &id, &m, &mut r).unwrap();
+        assert_eq!(
+            raw::decrypt(&pp, &sk, &ct).unwrap(),
+            m,
+            "depth {}",
+            id.depth()
+        );
     }
 }
 
@@ -37,19 +46,19 @@ fn delegate_then_decrypt_without_msk() {
     let mut r = rng(2);
     let (pp, msk) = setup(3, &mut r).unwrap();
     // The authority hands out a depth-1 key; the holder delegates down twice.
-    let parent = keygen(&pp, &msk, &Identity::from_str_path("dept"), &mut r).unwrap();
+    let parent = keygen(&pp, &msk, &identity("dept"), &mut r).unwrap();
     let child = delegate(&pp, &parent, b"team", &mut r).unwrap();
     let leaf = delegate(&pp, &child, b"reader", &mut r).unwrap();
     assert_eq!(leaf.identity().depth(), 3);
 
-    let id = Identity::from_str_path("dept/team/reader");
+    let id = identity("dept/team/reader");
     let m = Gt::random(&mut r);
-    let ct = encrypt(&pp, &id, &m, &mut r).unwrap();
-    assert_eq!(decrypt(&pp, &leaf, &ct).unwrap(), m);
+    let ct = raw::encrypt(&pp, &id, &m, &mut r).unwrap();
+    assert_eq!(raw::decrypt(&pp, &leaf, &ct).unwrap(), m);
     // The parent still opens its own path.
     let m2 = Gt::random(&mut r);
-    let ct2 = encrypt(&pp, &Identity::from_str_path("dept"), &m2, &mut r).unwrap();
-    assert_eq!(decrypt(&pp, &parent, &ct2).unwrap(), m2);
+    let ct2 = raw::encrypt(&pp, &identity("dept"), &m2, &mut r).unwrap();
+    assert_eq!(raw::decrypt(&pp, &parent, &ct2).unwrap(), m2);
 }
 
 #[test]
@@ -57,11 +66,11 @@ fn wrong_identity_cannot_decrypt() {
     let mut r = rng(3);
     let (pp, msk) = setup(2, &mut r).unwrap();
     let m = Gt::random(&mut r);
-    let ct = encrypt(&pp, &Identity::from_str_path("alice/p"), &m, &mut r).unwrap();
+    let ct = raw::encrypt(&pp, &identity("alice/p"), &m, &mut r).unwrap();
     // Sibling and unrelated identities recover garbage, never the message.
     for other in ["alice/q", "bob/p", "bob"] {
-        let sk = keygen(&pp, &msk, &Identity::from_str_path(other), &mut r).unwrap();
-        assert_ne!(decrypt(&pp, &sk, &ct).unwrap(), m, "id {other}");
+        let sk = keygen(&pp, &msk, &identity(other), &mut r).unwrap();
+        assert_ne!(raw::decrypt(&pp, &sk, &ct).unwrap(), m, "id {other}");
     }
 }
 
@@ -72,7 +81,7 @@ fn ciphertext_is_constant_size_across_depths() {
     let m = Gt::random(&mut r);
     let mut sizes = Vec::new();
     for path in ["a", "a/b", "a/b/c"] {
-        let ct = encrypt(&pp, &Identity::from_str_path(path), &m, &mut r).unwrap();
+        let ct = raw::encrypt(&pp, &identity(path), &m, &mut r).unwrap();
         sizes.push(ct.to_bytes().len());
     }
     assert_eq!(sizes[0], sizes[1]);
@@ -84,12 +93,12 @@ fn depth_limits_are_enforced() {
     let mut r = rng(5);
     assert!(matches!(setup(0, &mut r), Err(HibeError::BadMaxDepth(0))));
     let (pp, msk) = setup(1, &mut r).unwrap();
-    let too_deep = Identity::from_str_path("a/b");
+    let too_deep = identity("a/b");
     assert!(matches!(
         keygen(&pp, &msk, &too_deep, &mut r),
         Err(HibeError::IdentityTooDeep)
     ));
-    let leaf = keygen(&pp, &msk, &Identity::from_str_path("a"), &mut r).unwrap();
+    let leaf = keygen(&pp, &msk, &identity("a"), &mut r).unwrap();
     assert!(delegate(&pp, &leaf, b"b", &mut r).is_err());
 }
 
@@ -97,7 +106,7 @@ fn depth_limits_are_enforced() {
 fn kem_round_trip_and_negatives() {
     let mut r = rng(6);
     let (pp, msk) = setup(2, &mut r).unwrap();
-    let id = Identity::from_str_path("reader/policy");
+    let id = identity("reader/policy");
     let sk = keygen(&pp, &msk, &id, &mut r).unwrap();
 
     let mut cek = [0u8; 32];
@@ -114,14 +123,14 @@ fn kem_round_trip_and_negatives() {
     }
 
     // A key on a different path cannot unwrap.
-    let other = keygen(&pp, &msk, &Identity::from_str_path("reader/other"), &mut r).unwrap();
+    let other = keygen(&pp, &msk, &identity("reader/other"), &mut r).unwrap();
     assert!(matches!(
         kem_unwrap(&pp, &other, &wrapped),
         Err(HibeError::Unwrap)
     ));
 
     // A delegated key on the right path CAN unwrap.
-    let parent = keygen(&pp, &msk, &Identity::from_str_path("reader"), &mut r).unwrap();
+    let parent = keygen(&pp, &msk, &identity("reader"), &mut r).unwrap();
     let delegated = delegate(&pp, &parent, b"policy", &mut r).unwrap();
     assert_eq!(kem_unwrap(&pp, &delegated, &wrapped).unwrap(), cek);
 }
@@ -130,7 +139,7 @@ fn kem_round_trip_and_negatives() {
 fn seal_open_round_trip_and_negatives() {
     let mut r = rng(8);
     let (pp, msk) = setup(2, &mut r).unwrap();
-    let id = Identity::from_str_path("reader/policy");
+    let id = identity("reader/policy");
     let sk = keygen(&pp, &msk, &id, &mut r).unwrap();
 
     let blob = seal(&pp, &id, b"the governed section body", &mut r).unwrap();
@@ -149,7 +158,7 @@ fn seal_open_round_trip_and_negatives() {
     }
 
     // Wrong-path key cannot open.
-    let other = keygen(&pp, &msk, &Identity::from_str_path("reader/other"), &mut r).unwrap();
+    let other = keygen(&pp, &msk, &identity("reader/other"), &mut r).unwrap();
     assert!(open(&pp, &other, &blob).is_err());
 }
 
@@ -157,13 +166,16 @@ fn seal_open_round_trip_and_negatives() {
 fn aad_binding_seals_and_gates() {
     let mut r = rng(9);
     let (pp, msk) = setup(2, &mut r).unwrap();
-    let id = Identity::from_str_path("reader/policy");
+    let id = identity("reader/policy");
     let sk = keygen(&pp, &msk, &id, &mut r).unwrap();
     let aad = b"policy=finra-oba;v=1";
 
     let blob = seal_with_aad(&pp, &id, b"governed body", aad, &mut r).unwrap();
     // Same AAD opens.
-    assert_eq!(open_with_aad(&pp, &sk, &blob, aad).unwrap(), b"governed body");
+    assert_eq!(
+        open_with_aad(&pp, &sk, &blob, aad).unwrap(),
+        b"governed body"
+    );
     // Different AAD fails.
     assert!(open_with_aad(&pp, &sk, &blob, b"policy=none").is_err());
     // Absent AAD fails (a stripped flag breaks decryption).
@@ -186,7 +198,7 @@ fn canonical_encodings_round_trip() {
     assert_eq!(mpk_fingerprint(&pp), mpk_fingerprint(&pp2));
 
     let msk2 = MasterKey::from_bytes(&msk.to_bytes()).unwrap();
-    let id = Identity::from_str_path("alice/policy");
+    let id = identity("alice/policy");
     // Keys generated from the round-tripped msk must interoperate.
     let sk = keygen(&pp2, &msk2, &id, &mut r).unwrap();
     let sk2 = PrivateKey::from_bytes(&sk.to_bytes()).unwrap();
@@ -194,10 +206,10 @@ fn canonical_encodings_round_trip() {
     assert_eq!(sk2.identity(), &id);
 
     let m = Gt::random(&mut r);
-    let ct = encrypt(&pp, &id, &m, &mut r).unwrap();
-    let ct2 = Ciphertext::from_bytes(&ct.to_bytes()).unwrap();
+    let ct = raw::encrypt(&pp, &id, &m, &mut r).unwrap();
+    let ct2 = raw::Ciphertext::from_bytes(&ct.to_bytes()).unwrap();
     assert_eq!(ct, ct2);
-    assert_eq!(decrypt(&pp, &sk2, &ct2).unwrap(), m);
+    assert_eq!(raw::decrypt(&pp, &sk2, &ct2).unwrap(), m);
 
     // Truncation and version corruption fail loudly.
     assert!(PublicParams::from_bytes(&pp.to_bytes()[..10]).is_err());

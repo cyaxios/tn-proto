@@ -148,7 +148,7 @@ pub struct Ceremony {
     /// Ceremony mode: `"local"` or `"linked"`.
     #[serde(default = "default_local")]
     pub mode: String,
-    /// Cipher name: `"btn"`, `"jwe"`, or `"bgw"`.
+    /// Cipher name: `"btn"`, `"jwe"`, or `"hibe"`.
     pub cipher: String,
     /// Vault URL for linked-mode ceremonies.
     #[serde(default)]
@@ -316,7 +316,8 @@ pub struct GroupRecipient {
     /// in 0.4.3a1 to match the canonical role vocabulary.
     #[serde(alias = "did")]
     pub recipient_identity: String,
-    /// BGW reader-key file path (relative to keystore).
+    /// Reader-key file path (relative to keystore). Written by the legacy
+    /// bgw cipher; kept so old yamls still parse.
     #[serde(default)]
     pub key: Option<String>,
     /// JWE X25519 public key as standard base64.
@@ -335,7 +336,8 @@ pub struct GroupSpec {
     /// Declared recipients (used at ceremony setup; run-time cipher loads its own state files).
     #[serde(default)]
     pub recipients: Vec<GroupRecipient>,
-    /// Pool size for BGW (ignored by other ciphers).
+    /// Recipient pool size. Written into ceremony yamls and admin events
+    /// for schema stability; no current cipher consumes it.
     #[serde(default)]
     pub pool_size: Option<u32>,
     /// Incremented when keys rotate; feeds into HKDF info for index-key derivation.

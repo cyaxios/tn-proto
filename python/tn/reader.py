@@ -24,6 +24,7 @@ import json
 import os
 import re as _re
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,18 @@ from .chain import _compute_row_hash, verify_chain_link
 from .config import LoadedConfig
 from .canonical import _canonical_bytes
 from .signing import DeviceKey, _signature_from_b64
+
+
+@contextmanager
+def _perf_stage(stage: str) -> Iterator[None]:
+    try:
+        from . import _perf
+    except Exception:  # pragma: no cover - legacy standalone import fallback
+        yield
+        return
+
+    with _perf.time_stage(stage):
+        yield
 
 
 def _aad_bytes_for(env: dict[str, Any], group_name: str) -> bytes:
@@ -702,96 +715,104 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
 
     with open(log_path, encoding="utf-8") as f:
         for lineno, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                env = json.loads(line)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"{log_path}:{lineno}: invalid JSON: {e}") from e
-
-            event_type = env["event_type"]
-
-            # chain integrity: compare prev_hash against last row_hash
-            chain_ok = verify_chain_link(
-                prev_hash_by_event, event_type, env["prev_hash"], env["row_hash"]
-            )
-
-            # row_hash recomputation
-            groups_from_env: dict[str, dict[str, Any]] = {}
-            plaintext: dict[str, dict[str, Any]] = {}
-            # Row_hash recomputation needs EVERY group from the envelope
-            # (even ones we can't decrypt). Start by collecting raw bytes.
-            for gname in env:
-                if isinstance(env[gname], dict) and "ciphertext" in env[gname]:
-                    ct_bytes = base64.b64decode(env[gname]["ciphertext"])
-                    groups_from_env[gname] = {
-                        "ciphertext": ct_bytes,
-                        "field_hashes": env[gname].get("field_hashes", {}),
-                    }
-            # Then decrypt the ones we have keys for.
-            for gname, gcfg in cfg.groups.items():
-                if gname not in groups_from_env:
+            with _perf_stage("read:_TOTAL"):
+                line = line.strip()
+                if not line:
                     continue
-                ct_bytes = groups_from_env[gname]["ciphertext"]
                 try:
-                    pt = gcfg.cipher.decrypt(ct_bytes, _aad_bytes_for(env, gname))
-                    plaintext[gname] = json.loads(pt.decode("utf-8"))
-                except _cipher.NotARecipientError:
-                    plaintext[gname] = {"$no_read_key": True}
-                except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
-                    plaintext[gname] = {"$decrypt_error": True}
+                    with _perf_stage("read:line_parse"):
+                        env = json.loads(line)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"{log_path}:{lineno}: invalid JSON: {e}") from e
 
-            # public_out must mirror what the writer put in: envelope fields
-            # handled separately by _compute_row_hash (device_identity/
-            # timestamp/event_id/event_type/level/prev_hash/row_hash/
-            # signature/sequence) plus group names MUST NOT appear in
-            # public_out.
-            _envelope_reserved = {
-                "device_identity",
-                "timestamp",
-                "event_id",
-                "event_type",
-                "level",
-                "prev_hash",
-                "row_hash",
-                "signature",
-                "sequence",
-            }
-            public_out = {
-                k: v
-                for k, v in env.items()
-                if k in cfg.public_fields and k not in _envelope_reserved and k not in cfg.groups
-            }
-            # ``tn_aad`` is an authenticated public echo folded into the
-            # writer's row_hash; fold it back so recompute matches and so a
-            # tampered echo flips row_hash to invalid.
-            if "tn_aad" in env:
-                public_out["tn_aad"] = env["tn_aad"]
-            expected_row_hash = _compute_row_hash(
-                device_identity=env["device_identity"],
-                timestamp=env["timestamp"],
-                event_id=env["event_id"],
-                event_type=event_type,
-                level=env["level"],
-                prev_hash=env["prev_hash"],
-                public_fields=public_out,
-                groups=groups_from_env,
-            )
-            row_hash_ok = expected_row_hash == env["row_hash"]
+                event_type = env["event_type"]
 
-            sig_ok = DeviceKey.verify(
-                env["device_identity"],
-                env["row_hash"].encode("ascii"),
-                _signature_from_b64(env["signature"]),
-            )
+                # chain integrity: compare prev_hash against last row_hash
+                with _perf_stage("read:chain_verify"):
+                    chain_ok = verify_chain_link(
+                        prev_hash_by_event, event_type, env["prev_hash"], env["row_hash"]
+                    )
 
-            yield {
-                "envelope": env,
-                "plaintext": plaintext,
-                "valid": {
-                    "signature": sig_ok,
-                    "row_hash": row_hash_ok,
-                    "chain": chain_ok,
-                },
-            }
+                # row_hash recomputation
+                groups_from_env: dict[str, dict[str, Any]] = {}
+                plaintext: dict[str, dict[str, Any]] = {}
+                # Row_hash recomputation needs EVERY group from the envelope
+                # (even ones we can't decrypt). Start by collecting raw bytes.
+                for gname in env:
+                    if isinstance(env[gname], dict) and "ciphertext" in env[gname]:
+                        with _perf_stage("read:group_decode"):
+                            ct_bytes = base64.b64decode(env[gname]["ciphertext"])
+                        groups_from_env[gname] = {
+                            "ciphertext": ct_bytes,
+                            "field_hashes": env[gname].get("field_hashes", {}),
+                        }
+                # Then decrypt the ones we have keys for.
+                for gname, gcfg in cfg.groups.items():
+                    if gname not in groups_from_env:
+                        continue
+                    ct_bytes = groups_from_env[gname]["ciphertext"]
+                    try:
+                        with _perf_stage("read:group_decrypt"):
+                            pt = gcfg.cipher.decrypt(ct_bytes, _aad_bytes_for(env, gname))
+                        with _perf_stage("read:group_plaintext_parse"):
+                            plaintext[gname] = json.loads(pt.decode("utf-8"))
+                    except _cipher.NotARecipientError:
+                        plaintext[gname] = {"$no_read_key": True}
+                    except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
+                        plaintext[gname] = {"$decrypt_error": True}
+
+                # public_out must mirror what the writer put in: envelope fields
+                # handled separately by _compute_row_hash (device_identity/
+                # timestamp/event_id/event_type/level/prev_hash/row_hash/
+                # signature/sequence) plus group names MUST NOT appear in
+                # public_out.
+                _envelope_reserved = {
+                    "device_identity",
+                    "timestamp",
+                    "event_id",
+                    "event_type",
+                    "level",
+                    "prev_hash",
+                    "row_hash",
+                    "signature",
+                    "sequence",
+                }
+                public_out = {
+                    k: v
+                    for k, v in env.items()
+                    if k in cfg.public_fields and k not in _envelope_reserved and k not in cfg.groups
+                }
+                # ``tn_aad`` is an authenticated public echo folded into the
+                # writer's row_hash; fold it back so recompute matches and so a
+                # tampered echo flips row_hash to invalid.
+                if "tn_aad" in env:
+                    public_out["tn_aad"] = env["tn_aad"]
+                with _perf_stage("read:row_hash_verify"):
+                    expected_row_hash = _compute_row_hash(
+                        device_identity=env["device_identity"],
+                        timestamp=env["timestamp"],
+                        event_id=env["event_id"],
+                        event_type=event_type,
+                        level=env["level"],
+                        prev_hash=env["prev_hash"],
+                        public_fields=public_out,
+                        groups=groups_from_env,
+                    )
+                    row_hash_ok = expected_row_hash == env["row_hash"]
+
+                with _perf_stage("read:signature_verify"):
+                    sig_ok = DeviceKey.verify(
+                        env["device_identity"],
+                        env["row_hash"].encode("ascii"),
+                        _signature_from_b64(env["signature"]),
+                    )
+
+                yield {
+                    "envelope": env,
+                    "plaintext": plaintext,
+                    "valid": {
+                        "signature": sig_ok,
+                        "row_hash": row_hash_ok,
+                        "chain": chain_ok,
+                    },
+                }

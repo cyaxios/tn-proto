@@ -3,10 +3,9 @@
 //! Historically the Python package depended on two separately-published
 //! Rust wheels (`tn-core` exposing `tn_core._core`, `tn-btn` exposing
 //! `tn_btn._core`). They always shipped on the same version axis, so we
-//! fold both into one extension here: `tn._native` with a `core`
-//! submodule (the former `tn_core._core`) and a `btn` submodule (the
-//! former `tn_btn._core`). One `pip install tn-proto` now carries both
-//! Rust runtimes in a single wheel.
+//! fold the native pieces into one extension here: `tn._native` with `core`,
+//! `btn`, and `hibe` submodules. One `pip install tn-proto` now carries the
+//! Rust runtime and cipher bindings in a single wheel.
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;

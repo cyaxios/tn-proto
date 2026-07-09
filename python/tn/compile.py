@@ -3,7 +3,6 @@
 compile_enrolment(cfg, group, peer_did)  - JWE: tell peer how to decrypt
 emit_to_outbox(cfg, pkg) - write to <yaml_dir>/outbox/
 
-compile_bearer_coupon (BGW) is added in a later task (Task 13).
 """
 
 from __future__ import annotations

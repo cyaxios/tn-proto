@@ -31,12 +31,32 @@ from __future__ import annotations
 
 import logging.handlers
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from pathvalidate import sanitize_filename
 
 from .base import SyncHandler
+
+
+@contextmanager
+def _perf_stage(stage: str) -> Iterator[None]:
+    try:
+        from tn import _perf
+    except Exception:  # pragma: no cover - defensive; perf is best-effort
+        yield
+        return
+    with _perf.time_stage(stage):
+        yield
+
+
+def _perf_metric(name: str, value: int) -> None:
+    try:
+        from tn import _perf
+    except Exception:  # pragma: no cover - defensive; perf is best-effort
+        return
+    _perf.record_metric(name, value)
 
 
 class _BytesRotatingFileHandler(logging.handlers.RotatingFileHandler):
@@ -126,8 +146,10 @@ class FileRotatingHandler(SyncHandler):
                 pass
 
     def emit(self, envelope: dict[str, Any], raw_line: bytes) -> None:
-        with self._lock:
-            self._h.emit_bytes(raw_line)
+        with _perf_stage("emit:file_write"):
+            with self._lock:
+                self._h.emit_bytes(raw_line)
+        _perf_metric("emit:file_write.raw_bytes", len(raw_line))
 
     def close(self, *, timeout: float = 30.0) -> None:
         with self._lock:
@@ -179,8 +201,10 @@ class FileTimedRotatingHandler(SyncHandler):
         )
 
     def emit(self, envelope: dict[str, Any], raw_line: bytes) -> None:
-        with self._lock:
-            self._h.emit_bytes(raw_line)
+        with _perf_stage("emit:file_write"):
+            with self._lock:
+                self._h.emit_bytes(raw_line)
+        _perf_metric("emit:file_write.raw_bytes", len(raw_line))
 
     def close(self, *, timeout: float = 30.0) -> None:
         with self._lock:
@@ -295,17 +319,21 @@ class FileTemplatedRotatingHandler(SyncHandler):
             if not isinstance(event_id, str) or not event_id:
                 event_id = "tn.unrouted"
             path = self._cfg.resolve_log_path_for(event_type, event_id=event_id)
-            with self._lock:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                # Open-write-close: one row, then release the handle so
-                # a long run can't accumulate one descriptor per event.
-                # Append mode is defensive — a re-emitted event_id keeps
-                # both rows rather than clobbering the first.
-                with open(path, "ab") as f:
-                    f.write(raw_line)
+            with _perf_stage("emit:file_write"):
+                with self._lock:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    # Open-write-close: one row, then release the handle so
+                    # a long run can't accumulate one descriptor per event.
+                    # Append mode is defensive — a re-emitted event_id keeps
+                    # both rows rather than clobbering the first.
+                    with open(path, "ab") as f:
+                        f.write(raw_line)
+            _perf_metric("emit:file_write.raw_bytes", len(raw_line))
             return
-        with self._lock:
-            self._handler_for(event_type).emit_bytes(raw_line)
+        with _perf_stage("emit:file_write"):
+            with self._lock:
+                self._handler_for(event_type).emit_bytes(raw_line)
+        _perf_metric("emit:file_write.raw_bytes", len(raw_line))
 
     def close(self, *, timeout: float = 30.0) -> None:
         with self._lock:

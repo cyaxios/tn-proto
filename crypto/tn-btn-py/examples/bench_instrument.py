@@ -203,7 +203,7 @@ def bench(cipher_name: str, events: int, size: int):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--cipher", choices=["bgw", "jwe", "btn", "all"], default="all")
+    p.add_argument("--cipher", choices=["jwe", "btn", "all"], default="all")
     p.add_argument("--events", type=int, default=2000)
     p.add_argument("--size", type=int, default=4096)
     args = p.parse_args()
@@ -213,7 +213,7 @@ def main():
     print(f"  Payload: {args.size}B  Events: {args.events}  N=1 recipient")
     print("-" * 70)
     if args.cipher == "all":
-        for c in ["bgw", "jwe", "btn"]:
+        for c in ["jwe", "btn"]:
             bench(c, args.events, args.size)
     else:
         bench(args.cipher, args.events, args.size)

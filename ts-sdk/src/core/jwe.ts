@@ -32,14 +32,80 @@ function b64u(bytes: Uint8Array): string {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+function requireRawX25519(bytes: Uint8Array, label: string): Uint8Array {
+  if (bytes.length !== 32) {
+    throw new Error(`jwe: ${label} must be 32 raw X25519 bytes, got ${bytes.length}`);
+  }
+  return bytes;
+}
+
 /** A raw 32-byte X25519 public key as an RFC 8037 OKP JWK. */
 export function okpPublicJwk(pubRaw: Uint8Array): JWK {
+  requireRawX25519(pubRaw, "recipient public key");
   return { kty: "OKP", crv: "X25519", x: b64u(pubRaw) };
 }
 
 /** A raw X25519 keypair (32-byte public + 32-byte private) as an OKP private JWK. */
 export function okpPrivateJwk(pubRaw: Uint8Array, privRaw: Uint8Array): JWK {
+  requireRawX25519(pubRaw, "reader public key");
+  requireRawX25519(privRaw, "reader private key");
   return { kty: "OKP", crv: "X25519", x: b64u(pubRaw), d: b64u(privRaw) };
+}
+
+type JsonObject = Record<string, unknown>;
+
+function asObject(value: unknown): JsonObject | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as JsonObject)
+    : null;
+}
+
+function b64uDecodeText(value: string): string {
+  const b64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+  return atob(padded);
+}
+
+function decodeProtectedHeader(value: unknown): JsonObject | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    return asObject(JSON.parse(b64uDecodeText(value)));
+  } catch {
+    return null;
+  }
+}
+
+function mergedHeaderValue(
+  key: string,
+  protectedHeader: JsonObject,
+  sharedHeader: JsonObject,
+  recipientHeader: JsonObject,
+): unknown {
+  return recipientHeader[key] ?? sharedHeader[key] ?? protectedHeader[key];
+}
+
+function isTnJweProfile(obj: GeneralJWE): boolean {
+  const doc = obj as unknown as JsonObject;
+  const protectedHeader = decodeProtectedHeader(doc.protected);
+  if (protectedHeader === null || protectedHeader.enc !== JWE_ENC) return false;
+  const sharedHeader = asObject(doc.unprotected) ?? {};
+  if (sharedHeader.enc !== undefined && sharedHeader.enc !== JWE_ENC) return false;
+  if (sharedHeader.alg !== undefined && sharedHeader.alg !== JWE_ALG) return false;
+  const recipients = Array.isArray(doc.recipients) ? doc.recipients : null;
+  if (recipients === null || recipients.length === 0) return false;
+  for (const rawRecipient of recipients) {
+    const recipient = asObject(rawRecipient);
+    if (recipient === null) return false;
+    const recipientHeader = asObject(recipient.header) ?? {};
+    if (recipientHeader.enc !== undefined && recipientHeader.enc !== JWE_ENC) return false;
+    if (mergedHeaderValue("enc", protectedHeader, sharedHeader, recipientHeader) !== JWE_ENC) {
+      return false;
+    }
+    if (mergedHeaderValue("alg", protectedHeader, sharedHeader, recipientHeader) !== JWE_ALG) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** Seal `plaintext` to N X25519 recipients as an RFC 7516 General JSON JWE.
@@ -70,10 +136,13 @@ export async function jweSeal(
 /** Open a General JSON JWE with the reader's X25519 key.
  *
  * panva/jose trials the recipient blocks internally (our blocks are anonymous —
- * no `kid`). Returns the plaintext bytes, or `null` if this key opens no block
- * or the blob is malformed. The embedded `aad` member must byte-match `aad`
- * (the marker reconstructed from the record's public `tn_aad` echo); a mismatch
- * — including a tampered echo — returns `null`, never plaintext. */
+ * no `kid`). Returns the plaintext bytes, or `null` if this key opens no block,
+ * the blob is malformed, or the blob is outside TN's JOSE profile
+ * (`ECDH-ES+A256KW` + `A256GCM`). Local reader-key import/runtime failures are
+ * thrown with a `jwe:` message instead of being collapsed into recipient misses.
+ * The embedded `aad` member must byte-match `aad` (the marker reconstructed from
+ * the record's public `tn_aad` echo); a mismatch — including a tampered echo —
+ * returns `null`, never plaintext. */
 export async function jweDecrypt(
   readerJwk: JWK,
   blob: Uint8Array,
@@ -85,14 +154,20 @@ export async function jweDecrypt(
   } catch {
     return null;
   }
+  if (!isTnJweProfile(obj)) return null;
   let key;
   try {
     key = await importJWK(readerJwk, JWE_ALG);
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(`jwe: failed to import reader key for TN profile: ${(err as Error).message}`, {
+      cause: err,
+    });
   }
   try {
-    const r = await generalDecrypt(obj, key);
+    const r = await generalDecrypt(obj, key, {
+      keyManagementAlgorithms: [JWE_ALG],
+      contentEncryptionAlgorithms: [JWE_ENC],
+    });
     const got = r.additionalAuthenticatedData ?? new Uint8Array(0);
     const want = aad ?? new Uint8Array(0);
     if (got.length !== want.length || !got.every((v, i) => v === want[i])) {

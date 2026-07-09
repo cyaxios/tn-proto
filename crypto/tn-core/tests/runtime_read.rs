@@ -57,3 +57,51 @@ fn read_from_missing_file_returns_empty() {
     let entries = rt.read_from(&bogus).unwrap();
     assert!(entries.is_empty());
 }
+
+fn write_minimal_foreign_log(path: &std::path::Path, did: &str) {
+    let row = serde_json::json!({
+        "device_identity": did,
+        "event_type": "x.foreign",
+        "default": {
+            "ciphertext": "not-valid-base64",
+            "field_hashes": {}
+        }
+    });
+    std::fs::write(path, format!("{row}\n")).unwrap();
+}
+
+#[test]
+fn read_from_foreign_log_with_jwe_material_fails_explicitly() {
+    let td = tempfile::tempdir().unwrap();
+    let cer = setup_minimal_btn_ceremony(td.path());
+    std::fs::write(cer.keystore.join("default.jwe.mykey"), [0x44u8; 32]).unwrap();
+    let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
+    let foreign_log = td.path().join("foreign-jwe.ndjson");
+    write_minimal_foreign_log(&foreign_log, "did:key:zForeignJwe");
+
+    let err = match rt.read_from(&foreign_log) {
+        Ok(_) => panic!("read_from should reject foreign JWE material explicitly"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("read_from"), "{msg}");
+    assert!(msg.contains("cipher=jwe"), "{msg}");
+}
+
+#[test]
+fn read_from_with_validity_foreign_log_with_hibe_material_fails_explicitly() {
+    let td = tempfile::tempdir().unwrap();
+    let cer = setup_minimal_btn_ceremony(td.path());
+    std::fs::write(cer.keystore.join("default.hibe.sk"), b"sk-bytes").unwrap();
+    let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
+    let foreign_log = td.path().join("foreign-hibe.ndjson");
+    write_minimal_foreign_log(&foreign_log, "did:key:zForeignHibe");
+
+    let err = match rt.read_from_with_validity(&foreign_log) {
+        Ok(_) => panic!("read_from_with_validity should reject foreign HIBE material explicitly"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("read_from_with_validity"), "{msg}");
+    assert!(msg.contains("cipher=hibe"), "{msg}");
+}
