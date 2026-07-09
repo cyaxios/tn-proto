@@ -24,27 +24,15 @@ import json
 import os
 import re as _re
 from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from . import cipher as _cipher
+from ._perf import time_stage as _perf_stage
+from .canonical import _canonical_bytes
 from .chain import _compute_row_hash, verify_chain_link
 from .config import LoadedConfig
-from .canonical import _canonical_bytes
 from .signing import DeviceKey, _signature_from_b64
-
-
-@contextmanager
-def _perf_stage(stage: str) -> Iterator[None]:
-    try:
-        from . import _perf
-    except Exception:  # pragma: no cover - legacy standalone import fallback
-        yield
-        return
-
-    with _perf.time_stage(stage):
-        yield
 
 
 def _aad_bytes_for(env: dict[str, Any], group_name: str) -> bytes:
@@ -295,7 +283,7 @@ def read_all(
 
 def _discover_keybag_ciphers(
     keystore_path: Path,
-) -> dict[str, "_cipher.GroupCipher"]:
+) -> dict[str, _cipher.GroupCipher]:
     """Load every kit in ``keystore_path`` as ``{group_name: cipher}``.
 
     Used by :func:`read_with_keybag` so a reader holding kits from one
@@ -715,6 +703,9 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
 
     with open(log_path, encoding="utf-8") as f:
         for lineno, line in enumerate(f, 1):
+            # ``yield`` sits OUTSIDE this stage so the consumer's own work
+            # between next() calls is not attributed to read:_TOTAL — the
+            # stage times exactly one entry's parse/verify/decrypt.
             with _perf_stage("read:_TOTAL"):
                 line = line.strip()
                 if not line:
@@ -807,7 +798,7 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
                         _signature_from_b64(env["signature"]),
                     )
 
-                yield {
+                result = {
                     "envelope": env,
                     "plaintext": plaintext,
                     "valid": {
@@ -816,3 +807,4 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
                         "chain": chain_ok,
                     },
                 }
+            yield result

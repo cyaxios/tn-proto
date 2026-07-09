@@ -31,32 +31,15 @@ from __future__ import annotations
 
 import logging.handlers
 import threading
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from pathvalidate import sanitize_filename
 
+from tn._perf import record_metric as _perf_metric
+from tn._perf import time_stage as _perf_stage
+
 from .base import SyncHandler
-
-
-@contextmanager
-def _perf_stage(stage: str) -> Iterator[None]:
-    try:
-        from tn import _perf
-    except Exception:  # pragma: no cover - defensive; perf is best-effort
-        yield
-        return
-    with _perf.time_stage(stage):
-        yield
-
-
-def _perf_metric(name: str, value: int) -> None:
-    try:
-        from tn import _perf
-    except Exception:  # pragma: no cover - defensive; perf is best-effort
-        return
-    _perf.record_metric(name, value)
 
 
 class _BytesRotatingFileHandler(logging.handlers.RotatingFileHandler):
