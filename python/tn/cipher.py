@@ -1037,9 +1037,16 @@ class BtnGroupCipher:
     # Retired states keyed by the epoch they served as active. Populated
     # at load time from `<group>.btn.state.retired.<epoch>` files, and
     # appended-to by `rotate()`. Used by future feature surface for
-    # historical-kit re-minting; the active decrypt path doesn't need
-    # them today (runtime kit-glob already picks up retired kit files).
+    # historical-kit re-minting; the decrypt walk uses the retired KIT
+    # bytes in `_prior_kits` below, not these states.
     _retired_states: dict[int, Any] = field(default_factory=dict, repr=False)
+    # Self-kits superseded by rotations, newest first: the
+    # `.btn.mykit.retired.<epoch>` archive (epoch-descending) followed
+    # by any legacy 0.4.2-line `.btn.mykit.revoked.<ts>` archives
+    # (ts-descending). decrypt() trials [active, *these] so pre-rotation
+    # entries stay readable — the same posture as JWE's `_prior_sks`
+    # above and the Rust runtime's kit-glob (runtime/cipher_build.rs).
+    _prior_kits: list[bytes] = field(default_factory=list, repr=False)
 
     # ---------------------------------------------------------------
     # rotation properties
@@ -1150,9 +1157,11 @@ class BtnGroupCipher:
             )
 
         # 0.4.3a1: parse retired-state archive into an epoch-keyed dict
-        # on the cipher. The retired *kit* files (`.btn.mykit.retired.<N>`)
-        # are picked up separately by the Rust runtime's multi-kit
-        # decrypt path; cipher.py only owns the state side.
+        # on the cipher (the historical re-mint surface). The retired
+        # *kit* bytes from the same archive feed `_prior_kits` below so
+        # this cipher's own decrypt walks them — the pure-Python mirror
+        # of the Rust runtime's multi-kit read path.
+        retired_files = ks.load_retired_states(group_name)
         retired_states: dict[int, Any] = {}
         try:
             retired_cls = _btn.RetiredPublisherState
@@ -1164,7 +1173,7 @@ class BtnGroupCipher:
             # this module.
             retired_cls = None
         if retired_cls is not None:
-            for epoch, files in ks.load_retired_states(group_name).items():
+            for epoch, files in retired_files.items():
                 try:
                     retired_states[epoch] = retired_cls.from_bytes(files.state_bytes)
                 except (_btn.BtnRuntimeError, ValueError) as exc:
@@ -1182,6 +1191,14 @@ class BtnGroupCipher:
                         stacklevel=2,
                     )
 
+        # Prior self-kits for the decrypt walk: retired newest-first, then
+        # the legacy `.revoked.<ts>` archives newest-first — the same
+        # try-order as the Rust runtime's kit-glob (cipher_build.rs), so a
+        # log that mixes rotation epochs reads identically through the
+        # pure-Python cipher.
+        prior_kits = [retired_files[epoch].self_kit for epoch in sorted(retired_files, reverse=True)]
+        prior_kits.extend(kf.self_kit for kf in reversed(ks.load_legacy_revoked(group_name)))
+
         return cls(
             _state=state,
             _self_kit=self_kit,
@@ -1189,6 +1206,7 @@ class BtnGroupCipher:
             _group_name=group_name,
             _last_persisted_bytes=last_persisted,
             _retired_states=retired_states,
+            _prior_kits=prior_kits,
         )
 
     def encrypt(self, plaintext: bytes, aad: bytes = b"") -> bytes:
@@ -1198,15 +1216,38 @@ class BtnGroupCipher:
             return self._state.encrypt(plaintext, aad or None)
 
     def decrypt(self, ciphertext: bytes, aad: bytes = b"") -> bytes:
+        """Open a group blob, trying the active self-kit and then every
+        rotation-archived prior kit (newest first).
+
+        A log mixes entries sealed before and after rotations and a blob
+        does not say which epoch sealed it, so trial each kit: a kit that
+        is not entitled to the blob signals ``NotEntitled`` and the walk
+        moves on. A non-entitlement failure (malformed wire) is remembered
+        and re-raised only when no kit opens the blob — it signals data
+        corruption, not "wrong audience" — mirroring the Rust runtime's
+        ``BtnReaderCipher`` and the JWE prior-key walk above.
+        """
         from tn._native import btn as _btn
 
-        if not self._self_kit:
+        kits = [kit for kit in (self._self_kit, *self._prior_kits) if kit]
+        if not kits:
             raise NotARecipientError("btn: no self-kit in this keystore")
-        try:
-            with _perf_stage("read:group_decrypt.cipher"):
-                return _btn.decrypt(self._self_kit, ciphertext, aad or None)
-        except _btn.NotEntitled as e:
-            raise NotARecipientError(f"btn: kit not entitled: {e}") from e
+        not_entitled: Exception | None = None
+        malformed: Exception | None = None
+        with _perf_stage("read:group_decrypt.cipher"):
+            for kit in kits:
+                try:
+                    return _btn.decrypt(kit, ciphertext, aad or None)
+                except _btn.NotEntitled as e:
+                    not_entitled = e
+                except _btn.BtnRuntimeError as e:
+                    malformed = e
+        if malformed is not None:
+            raise malformed
+        raise NotARecipientError(
+            f"btn: none of {len(kits)} kits in this keystore is entitled "
+            f"to this ciphertext ({not_entitled})"
+        ) from not_entitled
 
     def _persist_state(self) -> None:
         """Persist the cipher's mutated state to disk under CAS.
@@ -1321,7 +1362,11 @@ class BtnGroupCipher:
         # Step 5: atomic rename swap.
         ks.promote_pending(self._group_name, retiring_epoch=prior_epoch)
 
-        # Step 6: refresh in-memory view to match disk.
+        # Step 6: refresh in-memory view to match disk. The retiring
+        # self-kit joins the prior-kit walk so this live instance keeps
+        # opening pre-rotation ciphertexts without a reload (mirrors
+        # HibeGroupCipher.rotate_id_path's in-memory handoff).
+        self._prior_kits.insert(0, self._self_kit)
         self._state = new_active
         self._self_kit = new_self_kit
         self._last_persisted_bytes = new_active.to_bytes()

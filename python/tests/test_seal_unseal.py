@@ -348,15 +348,24 @@ def test_seal_unseal_btn_ceremony(tmp_path):
 
 
 def test_unseal_pre_rotation_object_after_rotation(tmp_path):
-    # Pinned to jwe (not _workflow_cipher): rotation retains the old
+    # Pinned to jwe (the btn sibling is below): rotation retains the old
     # recipient key as <group>.jwe.mykey.revoked.<ts>, and JWE decrypt
     # walks those priors (active key first, then each revoked key
-    # newest-first), so a pre-rotation object still opens. btn also
-    # retains its prior kit (.btn.mykit.retired.<epoch>) but only the
-    # Rust runtime's multi-kit read path walks that archive — the
-    # pure-Python unseal walk does not, so this expectation holds for
-    # jwe only today.
+    # newest-first), so a pre-rotation object still opens. btn decrypt
+    # walks its .btn.mykit.retired.<epoch> archive the same way.
     tn.init(tmp_path / "tn.yaml", cipher="jwe")
+    sealed = tn.seal("obj.test.v1", receipt=False, x=1)
+    admin.rotate("default")
+    entry = tn.unseal(sealed)
+    assert entry.fields["x"] == 1
+
+
+def test_unseal_pre_rotation_object_after_rotation_btn(tmp_path):
+    # btn sibling of the jwe test above: rotation archives the prior
+    # self-kit as <group>.btn.mykit.retired.<epoch>, and the pure-Python
+    # BtnGroupCipher.decrypt trials [active, *retired] kits, so the
+    # pre-rotation object opens without the Rust runtime's kit-glob.
+    tn.init(tmp_path / "tn.yaml", cipher="btn")
     sealed = tn.seal("obj.test.v1", receipt=False, x=1)
     admin.rotate("default")
     entry = tn.unseal(sealed)
