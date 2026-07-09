@@ -730,7 +730,9 @@ async function _decryptWalk(
   }
   // Pass 2: keystore key-bag (own kits + everything absorbed).
   for (const gname of blocks.keys()) {
-    if (gname in plaintext) continue;
+    // Own-property check, not `in`: a group named like an Object.prototype
+    // member ("constructor", "toString") must not read as already open.
+    if (Object.prototype.hasOwnProperty.call(plaintext, gname)) continue;
     for (const kits of _keystoreCandidates(keystoreDir, gname)) {
       if (await tryOpen(gname, kits)) break;
     }

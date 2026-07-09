@@ -398,8 +398,13 @@ test("unseal raises SealedObjectError for every malformed source shape", async (
  * the file the real enrolment flow's mykey mint lands there.
  *
  * Returns `{sealed, bob, bobKeystore}` with Bob's ceremony ACTIVE.
+ * `group` defaults to "partners"; the Object.prototype-named regression
+ * below passes "toString".
  */
-async function twoPeer(base: string): Promise<{
+async function twoPeer(
+  base: string,
+  group = "partners",
+): Promise<{
   sealed: SealedObject;
   bob: Tn;
   bobKeystore: string;
@@ -410,22 +415,22 @@ async function twoPeer(base: string): Promise<{
   mkdirSync(bobDir, { recursive: true });
 
   let alice = await initClient(aliceDir, "jwe");
-  await alice.admin.ensureGroup("partners", { cipher: "jwe", fields: ["body"] });
+  await alice.admin.ensureGroup(group, { cipher: "jwe", fields: ["body"] });
   // Re-open so the freshly-persisted group + field routing load from yaml.
   await alice.close();
   alice = await Tn.init(join(aliceDir, "tn.yaml"), { stdout: false });
 
   const bob = await initClient(bobDir, "jwe");
   const bobKeystore = cfgOf(bob).keystorePath;
-  // Bob's reader key for 'partners' — the mykey mint of the enrolment flow.
+  // Bob's reader key for the group — the mykey mint of the enrolment flow.
   const bobPriv = x25519.utils.randomPrivateKey();
-  writeFileSync(join(bobKeystore, "partners.jwe.mykey"), Buffer.from(bobPriv));
-  await alice.admin.addRecipient("partners", {
+  writeFileSync(join(bobKeystore, `${group}.jwe.mykey`), Buffer.from(bobPriv));
+  await alice.admin.addRecipient(group, {
     recipientDid: bob.did,
     publicKey: x25519.getPublicKey(bobPriv),
   });
 
-  // body -> partners (routed), note -> default (unrouted fallback)
+  // body -> the named group (routed), note -> default (unrouted fallback)
   const sealed = await alice.seal(
     "obj.memo.v1",
     { body: "for bob's eyes", note: "alice private" },
@@ -433,7 +438,7 @@ async function twoPeer(base: string): Promise<{
   );
   await alice.close();
   assert.ok(
-    "partners" in sealed.envelope && "default" in sealed.envelope,
+    group in sealed.envelope && "default" in sealed.envelope,
     `setup must seal two group blocks, got: ${Object.keys(sealed.envelope).sort()}`,
   );
   return { sealed, bob, bobKeystore };
@@ -449,6 +454,34 @@ test("an enrolled peer opens exactly their slice (keystore key-bag walk)", async
     assert.ok(!cfgOf(bob).groups.has("partners"));
     const entry = (await bob.unseal(sealed)) as Entry;
     // partial open: exactly Bob's slice; Alice's private block stays sealed
+    assert.deepEqual(entry.fields, { body: "for bob's eyes" });
+    assert.ok(entry.hidden_groups.includes("default"));
+  } finally {
+    await bob.close();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("a group named like an Object.prototype member still opens (pass-2 walk)", async () => {
+  const base = makeBase();
+  const { sealed, bob, bobKeystore } = await twoPeer(base);
+  try {
+    // "toString" is inherited by every plain object, so a naive `gname in
+    // plaintext` check would misread such a block as already open and
+    // skip the key-bag walk entirely. The TS runtime cannot author a
+    // group with that name today (its yaml persistence chokes on
+    // prototype-named keys), but a foreign SDK can — simulate the wire by
+    // renaming the block and Bob's reader-key file. The rename breaks the
+    // row-hash binding by design, so open with verify off: the walk under
+    // test runs regardless of verification.
+    const env = JSON.parse(sealed.rawJson) as Record<string, unknown>;
+    env["toString"] = env["partners"];
+    delete env["partners"];
+    writeFileSync(
+      join(bobKeystore, "toString.jwe.mykey"),
+      readFileSync(join(bobKeystore, "partners.jwe.mykey")),
+    );
+    const entry = (await bob.unseal(env, { verify: false })) as Entry;
     assert.deepEqual(entry.fields, { body: "for bob's eyes" });
     assert.ok(entry.hidden_groups.includes("default"));
   } finally {
