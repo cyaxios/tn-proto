@@ -17,7 +17,11 @@ public sealed class NativeBridgeTests
 
         var error = Assert.Throws<TnException>(() => NativeBridge.Open(missing));
 
-        Assert.Contains("cannot find", error.Message, StringComparison.OrdinalIgnoreCase);
+        // The OS wording differs per platform ("The system cannot find the
+        // path specified" on Windows, "No such file or directory" on Linux);
+        // the stable part is the native I/O error prefix proving the
+        // tn_last_error message crossed the bridge.
+        Assert.Contains("I/O error", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
