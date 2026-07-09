@@ -74,11 +74,14 @@ pub use pkg::{
     PackageManifest, PackageSignatureStatus, SecretExportConsent,
 };
 pub use tn::{
-    ConfigView, EmitReceipt, LogLevel, ReadOptions, Tn, TnInitOptions, TnProfile, TnProjectOptions,
+    ConfigView, EmitReceipt, LogLevel, ReadOptions, SealedObject, Tn, TnInitOptions, TnProfile,
+    TnProjectOptions,
 };
 #[cfg(feature = "http")]
 pub use tn::{TnProjectVaultClaim, TnProjectVaultClaimOptions};
-pub use tn_core::RecipientEntry;
+pub use tn_core::{
+    RecipientEntry, SealOptions, SealedGroupInfo, SealedValid, UnsealOptions, UnsealOutcome,
+};
 pub use vault::{
     decrypt_vault_body, derive_awk_from_material, derive_bek_from_material,
     derive_credential_key_pbkdf2, encrypt_vault_body, encrypt_vault_body_with_nonce,
@@ -129,8 +132,9 @@ pub mod prelude {
         LogLevel, ManifestKind, MintInvitationOptions, MintInvitationResult, OfferOptions,
         OfferReceipt, Package, PackageInfo, PackageManifest, PackageSignatureStatus,
         PkgExportOptions, PollingWatch, PollingWatchOptions, ReadOptions, RecipientEntry, Result,
-        RevokeRecipientResult, SecretExportConsent, SetLinkStateOptions, Tn, TnInitOptions,
-        TnProfile, TnProjectOptions, Vault, VaultAwk, VaultBek, VaultBodyPlaintext,
+        RevokeRecipientResult, SealOptions, SealedGroupInfo, SealedObject, SealedValid,
+        SecretExportConsent, SetLinkStateOptions, Tn, TnInitOptions, TnProfile, TnProjectOptions,
+        UnsealOptions, UnsealOutcome, Vault, VaultAwk, VaultBek, VaultBodyPlaintext,
         VaultClientConnectOptions, VaultConnectOptions, VaultConnectResult,
         VaultCredentialKdfParams, VaultCredentialWrap, VaultInstallBodyOptions,
         VaultInstallBodyResult, VaultLinkResult, VaultLinkState, VaultLinkStateInfo,

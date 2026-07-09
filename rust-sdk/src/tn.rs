@@ -13,7 +13,7 @@ use std::sync::Arc;
 use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 use serde_json::{Map, Value};
-use tn_core::Runtime;
+use tn_core::{Runtime, SealOptions, UnsealOptions, UnsealOutcome};
 
 use crate::account::Account;
 use crate::admin::Admin;
@@ -198,6 +198,39 @@ pub struct EmitReceipt {
     pub emitted: bool,
     /// Parsed envelope for the written row when one was produced.
     pub envelope: Option<Value>,
+}
+
+/// A sealed object as returned by [`Tn::seal`]: the parsed envelope plus
+/// the verbatim wire line.
+///
+/// `Display` prints [`SealedObject::wire`] — the compact envelope JSON,
+/// no trailing newline. Transport `wire` (or this type's `to_string()`)
+/// verbatim to [`Tn::unseal`] or a foreign SDK's `tn.unseal`;
+/// re-serializing `envelope` through a different JSON runtime is exactly
+/// the round-trip the sealing-time fragile-public-value guard exists to
+/// prevent (an integral float or a big integer can silently reformat).
+#[derive(Debug, Clone)]
+pub struct SealedObject {
+    /// The compact envelope JSON line, no trailing newline. This is the
+    /// transport artifact — pass it to another SDK's `tn.unseal`.
+    pub wire: String,
+    /// The envelope as a parsed JSON object (wire-faithful key order).
+    pub envelope: Map<String, Value>,
+}
+
+impl std::fmt::Display for SealedObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.wire)
+    }
+}
+
+impl From<tn_core::SealedObjectLine> for SealedObject {
+    fn from(line: tn_core::SealedObjectLine) -> Self {
+        Self {
+            wire: line.wire,
+            envelope: line.envelope,
+        }
+    }
 }
 
 /// Lightweight view of the active ceremony.
@@ -422,6 +455,52 @@ impl Tn {
             .runtime
             .emit_with_aad_returning_line(level, event_type, fields, None, None, None, &aad)?;
         receipt_from_line(line)
+    }
+
+    /// Seal `fields` into a portable, standalone attested object — the
+    /// same wire schema [`Tn::emit`] writes, but built and RETURNED
+    /// instead of appended to the log. Fields route into groups and
+    /// encrypt exactly as an emit would; the ceremony's chain state is
+    /// never touched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if `fields` is not a JSON object, `object_type`
+    /// is invalid, a field is named `tn_sealed` (the reserved
+    /// sealed-object marker), a public field would not survive a foreign
+    /// JSON round-trip, or the underlying runtime fails — including a
+    /// propagated receipt-emit failure when `options.receipt` is set
+    /// (the default).
+    pub fn seal(
+        &self,
+        object_type: &str,
+        fields: impl Serialize,
+        options: SealOptions,
+    ) -> Result<SealedObject> {
+        let fields = json_object("fields", fields)?;
+        let line = self.runtime.seal(object_type, fields, &options)?;
+        Ok(line.into())
+    }
+
+    /// Verify and open a sealed object produced by [`Tn::seal`] (or a
+    /// foreign SDK's `tn.seal`).
+    ///
+    /// `source` is the sealed object's wire JSON text — pass
+    /// [`SealedObject::wire`] (or `to_string()`) verbatim, never a
+    /// re-serialization of `envelope`. Holding no key that fits a block
+    /// is NOT an error: the verified public frame comes back with those
+    /// blocks listed in `hidden_groups` / `sealed_blocks` on the
+    /// returned [`UnsealOutcome`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Verify`] when `options.verify` is set (the
+    /// default) and the signature or row-hash check fails. Returns
+    /// [`Error::Core`] for malformed input (`tn_core::Error::Malformed`)
+    /// or an `as_recipient` keystore miss
+    /// (`tn_core::Error::InvalidConfig`).
+    pub fn unseal(&self, source: &str, options: UnsealOptions) -> Result<UnsealOutcome> {
+        Ok(self.runtime.unseal(source, &options)?)
     }
 
     /// Read decrypted entries from the active log.
