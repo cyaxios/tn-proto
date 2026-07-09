@@ -103,10 +103,10 @@ pub use signing::DeviceKey;
 pub use admin_cache::{AdminStateCache, ChainConflict, LKV_VERSION};
 #[cfg(feature = "fs")]
 pub use runtime::{
-    AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
-    AdminRotation, AdminState, AdminVaultLink, EnsureGroupResult, FlatEntry, Instructions,
-    OnInvalid, ReadEntry, RecipientEntry, Runtime, RuntimeInitOptions, SealOptions, SecureEntry,
-    SecureReadOptions, ValidFlags,
+    unseal_as_recipient, AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord,
+    AdminRecipientRecord, AdminRotation, AdminState, AdminVaultLink, EnsureGroupResult, FlatEntry,
+    Instructions, OnInvalid, ReadEntry, RecipientEntry, Runtime, RuntimeInitOptions, SealOptions,
+    SealedGroupInfo, SecureEntry, SecureReadOptions, UnsealOptions, UnsealOutcome, ValidFlags,
 };
 #[cfg(feature = "fs")]
 pub use runtime_export::{AbsorbReceipt, AbsorbSource, ExportOptions};

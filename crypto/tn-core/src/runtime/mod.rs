@@ -53,7 +53,7 @@ mod types;
 mod util;
 
 pub use admin::EnsureGroupResult;
-pub use seal::SealOptions;
+pub use seal::{unseal_as_recipient, SealOptions, SealedGroupInfo, UnsealOptions, UnsealOutcome};
 pub use types::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
     AdminRotation, AdminState, AdminVaultLink, FlatEntry, Instructions, OnInvalid, ReadEntry,

@@ -196,8 +196,11 @@ pub(crate) fn build_btn_cipher_with_admin_with_storage(
 /// `tn-hibe` scheme. `mpk` and `idpath` are required; the rest are optional
 /// (a write-only party holds neither `sk` nor `msk`). Returns the cipher
 /// with no btn admin side-table.
+///
+/// `pub(crate)`: also the hibe candidate loader for the sealed-object
+/// key-bag walk (runtime/seal.rs).
 #[cfg(feature = "hibe")]
-fn build_hibe_cipher_with_storage(
+pub(crate) fn build_hibe_cipher_with_storage(
     keystore: &Path,
     group: &str,
     storage: &Arc<dyn crate::storage::Storage>,

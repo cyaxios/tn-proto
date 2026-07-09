@@ -143,6 +143,23 @@ pub enum Error {
         name: String,
     },
 
+    /// A sealed object failed verification on `unseal` with
+    /// `verify=true`. Mirrors Python's `VerifyError(sequence,
+    /// event_type, failed_checks)`; `failed_checks` values are
+    /// `"signature"` / `"row_hash"`. Malformed input is
+    /// [`Error::Malformed`] (`kind: "sealed object"`) instead, and
+    /// holding no fitting key is not an error at all — the public
+    /// frame comes back with the blocks sealed.
+    #[error("entry seq={sequence} event={event_type:?} failed: {}", failed_checks.join(", "))]
+    SealedObjectVerify {
+        /// Which integrity checks failed (`"signature"` / `"row_hash"`).
+        failed_checks: Vec<String>,
+        /// The envelope's `sequence` (always 0 for sealed objects).
+        sequence: u64,
+        /// The envelope's `event_type`.
+        event_type: String,
+    },
+
     /// Publisher state file on disk has diverged from the caller's
     /// `prior` snapshot. Another writer (process or thread) committed
     /// a state mutation between the caller's read and the caller's
