@@ -92,8 +92,11 @@ _q/
 _docscratch/
 scratch_*/
 # Python dev tooling (perf harnesses, one-off scripts, benchmarks) —
-# not part of the shipped `tn` package.
-python/tools/
+# not part of the shipped `tn` package. (`/*` not `/` so the tracked
+# fixture generator below can be re-included; a dir-level ignore
+# cannot be negated per-file.)
+python/tools/*
+!python/tools/gen_sealed_object_vectors.py
 python/scripts/
 python/bench/
 

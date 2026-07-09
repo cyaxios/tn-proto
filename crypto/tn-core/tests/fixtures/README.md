@@ -9,22 +9,31 @@ corresponding primitive must reproduce the expected output byte-for-byte.
 | File | What it tests |
 |------|--------------|
 | `canonical_vectors.json` | `canonical_bytes()` — RFC 8785-style deterministic JSON encoding |
-| `row_hash_vectors.json` | `compute_row_hash()` — SHA-256 over the full envelope commitment |
+| `row_hash_vectors.json` | `compute_row_hash()` — SHA-256 over the full envelope commitment, incl. container public values hashed as Python `str(value)` |
 | `index_token_vectors.json` | `derive_group_index_key()` + `index_token()` — HKDF + HMAC-SHA256 |
 | `signing_vectors.json` | Ed25519 signing + `did:key` derivation via DeviceKey |
 | `envelope_vectors.json` | Full two-entry chained envelope using the identity cipher |
 | `btn_vectors.json` | btn broadcast-encryption round-trip (encrypt + mint + decrypt) |
+| `sealed_object_vectors.json` | `tn.seal` / `tn.unseal` wire parity — Python-sealed standalone envelopes that Rust must verify and open (VERIFY vectors: wire line + key material + expected plaintext, plus tampered variants with expected failed checks) |
 
 ## Regenerating
 
-Run from the repo root:
+The original `generate_rust_fixtures.py` that produced the first six
+files is gone; those fixtures are stable and stay committed as-is.
+
+`sealed_object_vectors.json` and the container-public cases appended to
+`row_hash_vectors.json` come from a dedicated generator. Run from
+`tn_proto/python`:
 
 ```
-.venv/Scripts/python.exe tn_proto/python/tools/generate_rust_fixtures.py
+python tools/gen_sealed_object_vectors.py
 ```
 
-Requires the Python venv at `C:\codex\content_platform\.venv` with the `btn`
-extension built (`maturin develop` inside `tn_proto/crypto/btn-py`).
+The generator self-checks every case (verify + as-recipient open)
+before writing. Sealing is randomized (btn/hibe scheme material, AEAD
+nonces), so regeneration changes ciphertext bytes; the committed cases
+remain valid indefinitely because each is self-consistent. The
+row-hash extension is idempotent by case name.
 
 Never hand-edit these files. If an output changes, regenerate and commit
 both the script change and the new fixtures in the same commit, with a

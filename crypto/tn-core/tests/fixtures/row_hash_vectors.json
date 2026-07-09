@@ -37,5 +37,88 @@
       }
     },
     "expected_row_hash": "sha256:d2893f098f3f6e2e37a52c09b9cc5d4c8901e2e8a0382e04b1146f3a24384064"
+  },
+  {
+    "name": "container_public_list_and_dict",
+    "inputs": {
+      "did": "did:key:zContainers",
+      "timestamp": "2026-07-09T00:00:00.000000Z",
+      "event_id": "00000000-0000-4000-8000-0000000000c1",
+      "event_type": "obj.rt.v1",
+      "level": "",
+      "prev_hash": "",
+      "public_fields": {
+        "pv": [
+          1,
+          2,
+          3
+        ],
+        "pv2": {
+          "b": 2,
+          "a": 1
+        },
+        "tn_sealed": 1
+      },
+      "groups": {}
+    },
+    "expected_row_hash": "sha256:95e8a729637e0222ebeb88a95808f9b42046a766bddebf151c0578a990405f3d"
+  },
+  {
+    "name": "container_nested_string_quoting",
+    "inputs": {
+      "did": "did:key:zContainers",
+      "timestamp": "2026-07-09T00:00:01.000000Z",
+      "event_id": "00000000-0000-4000-8000-0000000000c2",
+      "event_type": "obj.rt.v1",
+      "level": "",
+      "prev_hash": "",
+      "public_fields": {
+        "pv": [
+          "it's",
+          "say \"hi\"",
+          "both ' and \"",
+          "plain"
+        ],
+        "pv2": {
+          "k": [
+            1,
+            {
+              "x": "y"
+            }
+          ]
+        }
+      },
+      "groups": {}
+    },
+    "expected_row_hash": "sha256:20e54f1ba7883896bea61271ea86789140267b882e87265cc114d9cb72876f31"
+  },
+  {
+    "name": "container_scalars_unicode_and_controls",
+    "inputs": {
+      "did": "did:key:zContainers",
+      "timestamp": "2026-07-09T00:00:02.000000Z",
+      "event_id": "00000000-0000-4000-8000-0000000000c3",
+      "event_type": "obj.rt.v1",
+      "level": "",
+      "prev_hash": "",
+      "public_fields": {
+        "pv": [
+          true,
+          false,
+          null
+        ],
+        "pv2": [
+          "café — naïve"
+        ],
+        "pv3": [
+          "\n",
+          "\t",
+          "\\",
+          "\u0000"
+        ]
+      },
+      "groups": {}
+    },
+    "expected_row_hash": "sha256:9dd57de5ae21834e7412b55c1e21cabc159f8d2458f14b00dafb99a42fe545bc"
   }
 ]
