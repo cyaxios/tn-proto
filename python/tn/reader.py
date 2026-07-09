@@ -419,10 +419,16 @@ def _lines_with_keybag(
             candidates = bag.get(key)
             if not candidates:
                 continue
+            # Decode once: a bad base64 payload fails identically for
+            # every candidate, so it is a $decrypt_error, not a retry.
+            try:
+                ct_bytes = base64.b64decode(block["ciphertext"])
+            except Exception:  # noqa: BLE001 — bad ciphertext doesn't abort the stream
+                plaintext[key] = {"$decrypt_error": True}
+                continue
             saw_no_key = False
             for cipher in candidates:
                 try:
-                    ct_bytes = base64.b64decode(block["ciphertext"])
                     pt = cipher.decrypt(ct_bytes, _aad_bytes_for(env, key))
                     plaintext[key] = json.loads(pt.decode("utf-8"))
                     break

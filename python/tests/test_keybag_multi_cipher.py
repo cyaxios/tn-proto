@@ -79,6 +79,31 @@ def test_btn_keybag_spans_rotation(tmp_path):
     )
 
 
+def test_btn_rotate_hands_prior_kit_to_live_instance(tmp_path):
+    """rotate() must let the SAME live cipher instance open pre-rotation
+    ciphertext without a reload.
+
+    The on-disk retired archive is deleted after rotating, so success
+    here can only come from the in-memory prior-kit handoff — the disk
+    walk (covered above) cannot rescue it.
+    """
+    yaml = tmp_path / "tn.yaml"
+    tn.init(yaml, log_path=tmp_path / "log.ndjson", cipher="btn")
+    cfg = tn.current_config()
+    cipher = cfg.groups["default"].cipher
+    old_ct = cipher.encrypt(b'{"stage":"pre"}')
+
+    cipher.rotate()
+    for retired in cfg.keystore.glob("default.btn.mykit.retired.*"):
+        retired.unlink()
+
+    assert cipher.decrypt(old_ct) == b'{"stage":"pre"}', (
+        "live instance must open pre-rotation ciphertext via the "
+        "in-memory prior-kit handoff, not the (deleted) disk archive"
+    )
+    tn.flush_and_close()
+
+
 def test_hibe_grant_joins_the_keybag(tmp_path):
     """An absorbed hibe grant decrypts through the default key bag.
 
