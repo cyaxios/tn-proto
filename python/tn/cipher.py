@@ -27,13 +27,14 @@ import base64
 import json
 import time
 import warnings
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+from ._perf import time_stage as _perf_stage
 
 
 class CipherError(RuntimeError):
@@ -46,18 +47,6 @@ class NotAPublisherError(CipherError):
 
 class NotARecipientError(CipherError):
     """Raised when decrypt() is called without recipient key material."""
-
-
-@contextmanager
-def _perf_stage(stage: str) -> Iterator[None]:
-    try:
-        from . import _perf
-    except Exception:  # pragma: no cover - standalone cipher import fallback
-        yield
-        return
-
-    with _perf.time_stage(stage):
-        yield
 
 
 @runtime_checkable
@@ -125,7 +114,6 @@ def _jwe_seal(recipient_pubs: list[bytes], plaintext: bytes, aad: bytes) -> byte
     shared A256GCM CEK. An empty ``aad`` omits the JWE ``aad`` member so the
     no-marker path stays a plain seal.
     """
-    from joserfc import jwe as _jwe
     from joserfc.jwk import OKPKey
 
     return _jwe_seal_keys(
@@ -553,7 +541,10 @@ class JWEGroupCipher:
                     return _jwe_open_key(ciphertext, key, aad)
                 except NotARecipientError as exc:
                     last_exc = exc
-            assert last_exc is not None
+            if last_exc is None:
+                # Unreachable hardening (kept under python -O, where an assert
+                # would vanish): _decrypt_keys() guarantees at least one key.
+                raise NotARecipientError("JWE: no recipient X25519 key in this keystore")
             if len(keys) == 1:
                 raise last_exc
             raise NotARecipientError(
