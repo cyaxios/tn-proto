@@ -21,6 +21,7 @@ use base64::Engine as _;
 use crate::{
     chain::{compute_row_hash, GroupInput, RowHashInput},
     log_file::LogFileReader,
+    sealed_object::aad_bytes_for,
     signing::{signature_from_b64, DeviceKey},
     Error, Result,
 };
@@ -1057,29 +1058,10 @@ fn recompute_public_fields(
     public_out
 }
 
-/// Reconstruct a group's AAD bytes from a record's public `tn_aad` echo.
-///
-/// The writer bound `canonical_bytes(marker)` to the group's body and echoed
-/// the `{group: marker}` map as a canonical JSON string under `tn_aad`. Parse
-/// it and re-canonicalize this group's marker so `decrypt_with_aad` verifies;
-/// an absent / empty / malformed entry yields empty bytes (nothing was
-/// bound). Mirrors `tn.reader._aad_bytes_for` and the TS `aadBytesFor`.
-fn aad_bytes_for(env: &Value, group: &str) -> Vec<u8> {
-    let raw = match env.get("tn_aad").and_then(Value::as_str) {
-        Some(s) if !s.is_empty() => s,
-        _ => return Vec::new(),
-    };
-    let binding: Value = match serde_json::from_str(raw) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    match binding.get(group) {
-        Some(marker @ Value::Object(o)) if !o.is_empty() => {
-            crate::canonical::canonical_bytes(marker).unwrap_or_default()
-        }
-        _ => Vec::new(),
-    }
-}
+// `aad_bytes_for` (the `tn_aad` echo → AAD bytes reconstruction) moved to
+// `crate::sealed_object::aad_bytes_for` so the sealed-object decrypt walk
+// and this log read path share one implementation. Imported at the top of
+// this module.
 
 /// Flatten a `ReadEntry` into a single JSON object: envelope fields plus
 /// every per-group plaintext dict merged on top. Mirrors Python's

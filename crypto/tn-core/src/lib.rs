@@ -70,6 +70,7 @@ pub mod panic_guard;
 pub mod path_template;
 pub(crate) mod pathutil;
 pub mod perf;
+pub mod sealed_object;
 pub mod signing;
 pub mod storage;
 pub mod tnpkg;
@@ -95,6 +96,7 @@ pub mod runtime_export;
 
 pub use error::{Error, Result};
 pub use panic_guard::catch_panic;
+pub use sealed_object::{GroupBlock, SealedObjectLine, SealedValid};
 pub use signing::DeviceKey;
 
 #[cfg(feature = "fs")]
