@@ -46,7 +46,7 @@ console.log("ts: reconstructed python aad, opened body; sig+chain ok");
 // Tamper the python record's tn_aad on disk -> TS must fail to decrypt.
 const pyLines = readFileSync(pyLog, "utf8").split(/\r?\n/).filter((l) => l.length > 0);
 const pyTampered = pyLines.map((line) => {
-  const obj = JSON.parse(line) as Record<string, any>;
+  const obj = JSON.parse(line) as Record<string, unknown>;
   if (obj["event_type"] === "py.aad")
     obj["tn_aad"] = (obj["tn_aad"] as string).replace("finra-oba", "tampered");
   return JSON.stringify(obj);

@@ -1,0 +1,18 @@
+[package]
+name = "tn-core-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "C ABI bridge for tn-proto SDK bindings"
+publish = false
+
+[lib]
+name = "tn_core_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+tn-core = { path = "../tn-core" }
+tn-proto = { path = "../../rust-sdk", package = "tn-proto", features = ["http"] }
+base64 = { workspace = true }
+serde_json = { workspace = true }

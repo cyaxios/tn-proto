@@ -9,44 +9,66 @@
 //! ([`Runtime::vault_link`] / [`Runtime::vault_unlink`]). The export /
 //! absorb verbs they lean on live in the sibling `runtime_export` module.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rand_core::RngCore;
 use serde_json::{Map, Value};
+use serde_yml::Value as YamlValue;
 
 use crate::admin_reduce::{reduce as admin_reduce_envelope, StateDelta};
+use crate::cipher::btn::BtnPublisherCipher;
 use crate::cipher::GroupCipher;
 use crate::{Error, Result};
 
-use super::cipher_build::{build_cipher_with_admin_with_storage, rebuild_btn_cipher};
+use super::cipher_build::{
+    build_cipher_with_admin_with_storage, collect_btn_kit_bytes_with_storage, rebuild_btn_cipher,
+};
 use super::read::{apply_schema_defaults, merge_envelope};
 use super::util::{current_timestamp_rfc3339, sha2_256};
 use super::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
-    AdminRotation, AdminState, AdminVaultLink, RecipientEntry, Runtime,
+    AdminRotation, AdminState, AdminVaultLink, RecipientEntry, Runtime, RuntimeInitOptions,
 };
+
+/// Result from [`Runtime::admin_ensure_group`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsureGroupResult {
+    /// Group that was ensured or updated.
+    pub group: String,
+    /// Fields routed into the group by this call.
+    pub fields: Vec<String>,
+    /// True when the group did not exist and was created by this call.
+    pub created: bool,
+    /// True when `tn.yaml` was changed.
+    pub changed: bool,
+}
+
+/// Result from [`Runtime::admin_rotate_group`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RotateGroupResult {
+    /// Group whose publisher keys were rotated.
+    pub group: String,
+    /// New key generation/epoch.
+    pub generation: u32,
+    /// `sha256:` digest of the self-kit retired by this rotation.
+    pub previous_kit_sha256: String,
+    /// `sha256:` digest of the newly minted self-kit.
+    pub new_kit_sha256: String,
+    /// RFC3339 timestamp emitted on `tn.rotation.completed`.
+    pub rotated_at: String,
+}
 
 impl Runtime {
     /// Rebuild a group's cipher from the current on-disk keystore material
     /// and swap it into the live group table.
     ///
-    /// Needed when an admin mutation happened OUTSIDE this runtime's own
-    /// native admin verbs — notably the Python-side hibe admin verbs
-    /// (`grant_reader` / `rotate_reader_path` / `revoke_reader`), which
-    /// rewrite `<group>.hibe.{idpath,sk,idpath.history,...}` on disk. This
-    /// runtime caches the cipher at init, so without a reload the next emit
-    /// would still seal to the pre-rotation identity path. The Python admin
-    /// layer calls this after mutating so the in-process native runtime
-    /// picks up the change before the next emit/read.
-    ///
-    /// Only the cipher is swapped (the config-derived `aad_default` and the
-    /// index key are unchanged). Safe to call for any cipher; a no-op if the
-    /// group is unknown.
-    ///
-    /// # Errors
-    ///
-    /// Propagates cipher-construction errors from the keystore reload.
+    /// Needed when an admin mutation happened outside this runtime's own
+    /// native admin verbs, notably Python-side hibe admin verbs that rewrite
+    /// `<group>.hibe.*` material on disk. The runtime caches each cipher at
+    /// init, so without a reload the next emit can still seal to stale
+    /// material.
     pub fn reload_group_cipher(&self, group: &str) -> Result<()> {
         let Some(spec) = self.cfg.groups.get(group) else {
             return Ok(());
@@ -58,6 +80,77 @@ impl Runtime {
             gstate.cipher = cipher;
         }
         Ok(())
+    }
+
+    /// Ensure a btn group exists and route fields into it.
+    ///
+    /// If the group is not already declared, this mints publisher state and a
+    /// self-reader kit in the active keystore, writes the group declaration and
+    /// field routes into `tn.yaml`, reloads the runtime, and emits
+    /// `tn.group.added`. Existing groups only update routing and reload when
+    /// the yaml changes.
+    ///
+    /// This method is native-filesystem only: it edits the ceremony yaml and
+    /// keystore directly, so wasm/browser callers should use their host SDK's
+    /// config management path instead.
+    pub fn admin_ensure_group(
+        &mut self,
+        group: &str,
+        fields: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<EnsureGroupResult> {
+        let fields = normalize_fields(fields)?;
+        if fields.is_empty() {
+            return Ok(EnsureGroupResult {
+                group: group.to_string(),
+                fields,
+                created: false,
+                changed: false,
+            });
+        }
+
+        let yaml_path = self.yaml_path().to_path_buf();
+        let raw = std::fs::read_to_string(&yaml_path)?;
+        let mut doc: YamlValue = serde_yml::from_str(&raw)?;
+
+        let created = !group_declared(&doc, group)?;
+        if created {
+            let keystore = resolve_keystore_path(&doc, &yaml_path)?;
+            mint_btn_group(&keystore, group)?;
+        }
+
+        let changed = ensure_yaml_group(&mut doc, group, self.did(), &fields)?;
+        if changed {
+            let rendered = serde_yml::to_string(&doc)?;
+            std::fs::write(&yaml_path, rendered)?;
+            self.reload_with_options(
+                self.storage.clone(),
+                RuntimeInitOptions {
+                    skip_ceremony_init_emit: true,
+                    skip_policy_published_emit: true,
+                },
+            )?;
+        }
+        if created {
+            let mut event = Map::new();
+            event.insert("group".into(), Value::String(group.to_string()));
+            event.insert("cipher".into(), Value::String("btn".to_string()));
+            event.insert(
+                "publisher_identity".into(),
+                Value::String(self.did().to_string()),
+            );
+            event.insert(
+                "added_at".into(),
+                Value::String(current_timestamp_rfc3339()),
+            );
+            self.info("tn.group.added", event)?;
+        }
+
+        Ok(EnsureGroupResult {
+            group: group.to_string(),
+            fields,
+            created,
+            changed,
+        })
     }
 
     /// Mint a fresh kit for `recipient_did` across one or more groups
@@ -97,6 +190,22 @@ impl Runtime {
         out_path: &Path,
         groups: Option<&[&str]>,
     ) -> Result<PathBuf> {
+        self.bundle_for_recipient_with_options(recipient_did, out_path, groups, false)
+    }
+
+    /// Mint and bundle reader kits, optionally sealing the bundle body for the
+    /// recipient DID.
+    pub fn bundle_for_recipient_with_options(
+        &self,
+        recipient_did: &str,
+        out_path: &Path,
+        groups: Option<&[&str]>,
+        seal_for_recipient: bool,
+    ) -> Result<PathBuf> {
+        if seal_for_recipient {
+            crate::recipient_seal::normalize_recipient_dids(&[recipient_did.to_string()])?;
+        }
+
         let mut requested: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         match groups {
@@ -172,12 +281,22 @@ impl Runtime {
             }
         }
 
-        let out = self.export_kit_bundle_from_keystore(
-            out_path,
-            td.path(),
-            Some(recipient_did),
-            &requested,
-        )?;
+        let opts = crate::runtime_export::ExportOptions {
+            kind: Some(crate::tnpkg::ManifestKind::KitBundle),
+            to_did: Some(recipient_did.to_string()),
+            scope: None,
+            confirm_includes_secrets: false,
+            groups: Some(requested.clone()),
+            keystore: Some(td.path().to_path_buf()),
+            encrypt_body_with: None,
+            seal_for_recipients: if seal_for_recipient {
+                vec![recipient_did.to_string()]
+            } else {
+                Vec::new()
+            },
+            package_body: None,
+        };
+        let out = self.export(out_path, opts)?;
         drop(td);
         Ok(out)
     }
@@ -346,16 +465,13 @@ impl Runtime {
             scope: None,
             confirm_includes_secrets: false,
             groups: Some(requested.clone()),
+            keystore: Some(td.path().to_path_buf()),
+            encrypt_body_with: None,
+            seal_for_recipients: Vec::new(),
             package_body: None,
         };
-        // `export` already drops the temp-dir kits into the bundle. We
-        // pass `keystore=None` because export reads from the runtime's
-        // own keystore — but the kits were minted into the temp dir.
-        // Workaround: copy them into the keystore (admin_add_recipient
-        // already wrote the actual tnpkg, but the *.mykit goes to the
-        // path we pass). The export reads from `self.keystore` so the
-        // mykit files for the requested groups are already there from
-        // the side-effects of admin_add_recipient.
+        // Keep the tempdir alive until export completes; `keystore` above
+        // points export at the freshly minted recipient kits.
         let out = self.export(out_path, opts)?;
 
         // Best-effort label sidecar. Routed through `self.storage` so
@@ -651,6 +767,108 @@ impl Runtime {
         Ok(())
     }
 
+    /// Rotate a btn publisher group to a fresh key generation.
+    ///
+    /// The previous publisher state and self-kit are preserved under
+    /// `.retired.<epoch>` siblings so historical entries remain readable by
+    /// this project. The active state and self-kit are replaced atomically
+    /// enough for the state file to retain the same CAS protection used by
+    /// recipient add/revoke. A `tn.rotation.completed` attestation is emitted
+    /// after the in-memory cipher swap, so subsequent writes use the new
+    /// generation immediately.
+    pub fn admin_rotate_group(&self, group: &str) -> Result<RotateGroupResult> {
+        let pub_cipher_arc = self.btn_admin.get(group).ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "admin_rotate_group: group {group:?} is not a btn publisher group"
+            ))
+        })?;
+        let mut pub_cipher = pub_cipher_arc.lock().expect("btn_admin Mutex poisoned");
+
+        let keystore_backend = crate::keystore_backend::LocalKeystore::new(
+            self.keystore.clone(),
+            self.storage.clone(),
+        );
+        let prior_state_bytes = keystore_backend.read_state(group).map_err(Error::Io)?;
+        let previous_mykit_bytes = self
+            .storage
+            .read_bytes(&self.keystore.join(format!("{group}.btn.mykit")))
+            .map_err(Error::Io)?;
+        let previous_kit_sha256 =
+            format!("sha256:{}", hex::encode(sha2_256(&previous_mykit_bytes)));
+
+        let outcome = tn_btn::PublisherState::from_bytes(&pub_cipher.state_to_bytes())?.rotate()?;
+        let mut active = outcome.active;
+        let new_self_kit = active.mint()?;
+        let new_self_kit_bytes = new_self_kit.to_bytes();
+        let new_state_bytes = active.to_bytes();
+        let generation = active.epoch();
+        let new_kit_sha256 = format!("sha256:{}", hex::encode(sha2_256(&new_self_kit_bytes)));
+
+        let retired_state_path = self.keystore.join(format!(
+            "{group}.btn.state.retired.{}",
+            outcome.retired.epoch()
+        ));
+        let retired_mykit_path = self.keystore.join(format!(
+            "{group}.btn.mykit.retired.{}",
+            outcome.retired.epoch()
+        ));
+        self.storage
+            .write_bytes(&retired_state_path, &outcome.retired.to_bytes())
+            .map_err(Error::Io)?;
+        self.storage
+            .write_bytes(&retired_mykit_path, &previous_mykit_bytes)
+            .map_err(Error::Io)?;
+
+        keystore_backend.write_state(group, prior_state_bytes.as_deref(), &new_state_bytes)?;
+        self.storage
+            .write_bytes(
+                &self.keystore.join(format!("{group}.btn.mykit")),
+                &new_self_kit_bytes,
+            )
+            .map_err(Error::Io)?;
+
+        *pub_cipher = BtnPublisherCipher::from_state(active);
+
+        let all_kits = collect_btn_kit_bytes_with_storage(&self.keystore, group, &self.storage)?;
+        let new_cipher = rebuild_btn_cipher_with_kits(&pub_cipher, &all_kits)?;
+        drop(pub_cipher);
+
+        if let Some(gstate_arc) = self.groups.get(group) {
+            let mut gstate = gstate_arc.write().expect("group state RwLock poisoned");
+            gstate.cipher = new_cipher;
+        }
+
+        let _ = bump_group_index_epoch(&self.yaml_path, group, generation as u64);
+
+        let rotated_at = current_timestamp_rfc3339();
+        let mut fields = Map::new();
+        fields.insert("group".into(), Value::String(group.to_string()));
+        fields.insert("cipher".into(), Value::String("btn".to_string()));
+        fields.insert("generation".into(), Value::Number(generation.into()));
+        fields.insert(
+            "previous_kit_sha256".into(),
+            Value::String(previous_kit_sha256.clone()),
+        );
+        fields.insert("old_pool_size".into(), Value::Null);
+        fields.insert("new_pool_size".into(), Value::Null);
+        fields.insert("rotated_at".into(), Value::String(rotated_at.clone()));
+        if let Err(e) = self.emit("info", "tn.rotation.completed", fields) {
+            log::warn!(
+                "admin state persisted but attestation emit failed: event_type={} error={}",
+                "tn.rotation.completed",
+                e
+            );
+        }
+
+        Ok(RotateGroupResult {
+            group: group.to_string(),
+            generation,
+            previous_kit_sha256,
+            new_kit_sha256,
+            rotated_at,
+        })
+    }
+
     /// Return the number of revoked recipients in `group`'s publisher state.
     ///
     /// Matches Python `tn.admin_revoked_count(group)`.
@@ -669,6 +887,118 @@ impl Runtime {
         })?;
         let pub_cipher = pub_cipher_arc.lock().expect("btn_admin Mutex poisoned");
         Ok(pub_cipher.state().revoked_count())
+    }
+
+    /// Read admin/governance events from every log source this ceremony may
+    /// have used.
+    ///
+    /// Everyday reads intentionally default to the active session log. Admin
+    /// replay is different: recipient and vault lifecycle state must survive
+    /// process boundaries and log splitting. That means replay needs to scan
+    /// the main log, protocol-events-location logs, and templated log siblings
+    /// when the ceremony routes events by type/date/id.
+    fn read_admin_replay_raw(&self) -> Result<Vec<super::ReadEntry>> {
+        let mut entries = Vec::new();
+        for path in self.admin_replay_log_paths() {
+            let mut from_path = self.read_from(&path)?;
+            entries.append(&mut from_path);
+        }
+        entries.sort_by(|a, b| {
+            let a_ts = a
+                .envelope
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let b_ts = b
+                .envelope
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            a_ts.cmp(b_ts).then_with(|| {
+                let a_event_id = a
+                    .envelope
+                    .get("event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let b_event_id = b
+                    .envelope
+                    .get("event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                a_event_id.cmp(b_event_id)
+            })
+        });
+        Ok(entries)
+    }
+
+    fn admin_replay_log_paths(&self) -> Vec<PathBuf> {
+        let mut seen = BTreeSet::new();
+        let mut paths = Vec::new();
+        self.push_existing_log_path(&mut paths, &mut seen, self.log_path.clone());
+
+        let yaml_dir = self.yaml_path.parent().unwrap_or(Path::new("."));
+        if let Ok(template) = crate::path_template::PathTemplate::parse(
+            &self.cfg.logs.path,
+            yaml_dir,
+            &self.cfg.ceremony.id,
+            self.device.did(),
+        ) {
+            self.push_template_log_paths(&mut paths, &mut seen, &template);
+        }
+
+        let pel = &self.cfg.ceremony.protocol_events_location;
+        if pel != "main_log" {
+            if let Ok(template) = crate::path_template::PathTemplate::parse(
+                pel,
+                yaml_dir,
+                &self.cfg.ceremony.id,
+                self.device.did(),
+            ) {
+                self.push_template_log_paths(&mut paths, &mut seen, &template);
+            }
+        }
+
+        paths
+    }
+
+    fn push_template_log_paths(
+        &self,
+        paths: &mut Vec<PathBuf>,
+        seen: &mut BTreeSet<PathBuf>,
+        template: &crate::path_template::PathTemplate,
+    ) {
+        if !template.is_templated() {
+            self.push_existing_log_path(paths, seen, template.render("", ""));
+            return;
+        }
+
+        let sample = template.render("__admin_probe__", "__admin_probe__");
+        let Some(parent_dir) = sample.parent() else {
+            return;
+        };
+        let Ok(entries) = self.storage.list(parent_dir) else {
+            return;
+        };
+        for entry in entries {
+            if entry.extension().and_then(|ext| ext.to_str()) == Some("ndjson") {
+                self.push_existing_log_path(paths, seen, entry);
+            }
+        }
+    }
+
+    fn push_existing_log_path(
+        &self,
+        paths: &mut Vec<PathBuf>,
+        seen: &mut BTreeSet<PathBuf>,
+        path: PathBuf,
+    ) {
+        if !self.storage.exists(&path) {
+            return;
+        }
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if seen.insert(key) {
+            paths.push(path);
+        }
     }
 
     /// Return the current recipient roster for `group` by replaying the
@@ -702,7 +1032,7 @@ impl Runtime {
         let mut active: BTreeMap<u64, RecipientEntry> = BTreeMap::new();
         let mut revoked: BTreeMap<u64, RecipientEntry> = BTreeMap::new();
 
-        for entry in self.read_raw()? {
+        for entry in self.read_admin_replay_raw()? {
             let event_type = entry
                 .envelope
                 .get("event_type")
@@ -811,7 +1141,7 @@ impl Runtime {
         // Vault links keyed by vault_did.
         let mut vault_links_by_did: BTreeMap<String, AdminVaultLink> = BTreeMap::new();
 
-        for entry in self.read_raw()? {
+        for entry in self.read_admin_replay_raw()? {
             let event_type = entry
                 .envelope
                 .get("event_type")
@@ -1199,4 +1529,214 @@ mod tests {
         assert!(body.contains_key("body/default.hibe.sk"));
         assert!(!body.contains_key("body/default.btn.mykit"));
     }
+}
+
+fn normalize_fields(fields: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for field in fields {
+        let field = field.as_ref().trim();
+        if field.is_empty() {
+            return Err(Error::InvalidConfig(
+                "admin_ensure_group: field names must not be empty".into(),
+            ));
+        }
+        if seen.insert(field.to_string()) {
+            out.push(field.to_string());
+        }
+    }
+    Ok(out)
+}
+
+fn group_declared(doc: &YamlValue, group: &str) -> Result<bool> {
+    let root = doc
+        .as_mapping()
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml root must be a mapping".into()))?;
+    let Some(groups) = root
+        .get(YamlValue::String("groups".into()))
+        .and_then(YamlValue::as_mapping)
+    else {
+        return Ok(false);
+    };
+    Ok(groups.contains_key(YamlValue::String(group.to_string())))
+}
+
+#[allow(clippy::similar_names)]
+fn ensure_yaml_group(
+    doc: &mut YamlValue,
+    group: &str,
+    publisher_did: &str,
+    fields: &[String],
+) -> Result<bool> {
+    let root = doc
+        .as_mapping_mut()
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml root must be a mapping".into()))?;
+    let groups_yaml_key = YamlValue::String("groups".into());
+    if !root.contains_key(&groups_yaml_key) {
+        root.insert(
+            groups_yaml_key.clone(),
+            YamlValue::Mapping(Default::default()),
+        );
+    }
+    let groups = root
+        .get_mut(&groups_yaml_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml groups must be a mapping".into()))?;
+
+    let mut changed = false;
+    let group_yaml_key = YamlValue::String(group.to_string());
+    if !groups.contains_key(&group_yaml_key) {
+        groups.insert(group_yaml_key.clone(), btn_group_spec(publisher_did)?);
+        changed = true;
+    }
+    let group_spec = groups
+        .get_mut(&group_yaml_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| Error::InvalidConfig(format!("groups[{group:?}] must be a mapping")))?;
+
+    let fields_yaml_key = YamlValue::String("fields".into());
+    if !group_spec.contains_key(&fields_yaml_key) {
+        group_spec.insert(fields_yaml_key.clone(), YamlValue::Sequence(Vec::new()));
+        changed = true;
+    }
+    let routed = group_spec
+        .get_mut(&fields_yaml_key)
+        .and_then(YamlValue::as_sequence_mut)
+        .ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "admin_ensure_group: groups[{group:?}].fields must be a list when present"
+            ))
+        })?;
+    for field in fields {
+        if !routed
+            .iter()
+            .any(|item| item.as_str() == Some(field.as_str()))
+        {
+            routed.push(YamlValue::String(field.clone()));
+            changed = true;
+        }
+    }
+
+    let flat_key = YamlValue::String("fields".into());
+    if !root.contains_key(&flat_key) {
+        root.insert(flat_key.clone(), YamlValue::Mapping(Default::default()));
+        changed = true;
+    }
+    let flat = root
+        .get_mut(&flat_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml top-level fields must be a mapping".into()))?;
+    for field in fields {
+        let field_yaml_key = YamlValue::String(field.clone());
+        let route_value = serde_yml::to_value(serde_json::json!({ "group": group }))?;
+        match flat.get(&field_yaml_key) {
+            Some(existing) if yaml_to_json(existing) == yaml_to_json(&route_value) => {}
+            _ => {
+                flat.insert(field_yaml_key, route_value);
+                changed = true;
+            }
+        }
+    }
+
+    Ok(changed)
+}
+
+fn btn_group_spec(publisher_did: &str) -> Result<YamlValue> {
+    serde_yml::to_value(serde_json::json!({
+        "policy": "private",
+        "cipher": "btn",
+        "recipients": [
+            { "recipient_identity": publisher_did }
+        ],
+        "index_epoch": 0
+    }))
+    .map_err(Error::from)
+}
+
+fn rebuild_btn_cipher_with_kits(
+    pub_cipher: &BtnPublisherCipher,
+    kit_bytes: &[Vec<u8>],
+) -> Result<Arc<dyn GroupCipher>> {
+    let state_bytes = pub_cipher.state_to_bytes();
+    let new_pc = BtnPublisherCipher::from_state_bytes(&state_bytes)?;
+    let cipher: Arc<dyn GroupCipher> = if kit_bytes.is_empty() {
+        Arc::new(new_pc)
+    } else {
+        Arc::new(new_pc.with_reader_kits(kit_bytes)?)
+    };
+    Ok(cipher)
+}
+
+fn bump_group_index_epoch(yaml_path: &Path, group: &str, generation: u64) -> Result<()> {
+    let raw = std::fs::read_to_string(yaml_path)?;
+    let mut doc: YamlValue = serde_yml::from_str(&raw)?;
+    let root = doc
+        .as_mapping_mut()
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml root must be a mapping".into()))?;
+    let groups_key = YamlValue::String("groups".into());
+    let groups = root
+        .get_mut(&groups_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml groups must be a mapping".into()))?;
+    let group_key = YamlValue::String(group.to_string());
+    let group_spec = groups
+        .get_mut(&group_key)
+        .and_then(YamlValue::as_mapping_mut)
+        .ok_or_else(|| Error::InvalidConfig(format!("groups[{group:?}] must be a mapping")))?;
+    group_spec.insert(
+        YamlValue::String("index_epoch".into()),
+        serde_yml::to_value(generation)?,
+    );
+    let updated = serde_yml::to_string(&doc)?;
+    std::fs::write(yaml_path, updated)?;
+    Ok(())
+}
+
+fn resolve_keystore_path(doc: &YamlValue, yaml_path: &Path) -> Result<PathBuf> {
+    let root = doc
+        .as_mapping()
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml root must be a mapping".into()))?;
+    let rel = root
+        .get(YamlValue::String("keystore".into()))
+        .and_then(YamlValue::as_mapping)
+        .and_then(|keystore| keystore.get(YamlValue::String("path".into())))
+        .and_then(YamlValue::as_str)
+        .ok_or_else(|| Error::InvalidConfig("tn.yaml is missing keystore.path".into()))?;
+    let path = PathBuf::from(rel);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(yaml_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path))
+    }
+}
+
+fn mint_btn_group(keystore: &Path, group: &str) -> Result<()> {
+    std::fs::create_dir_all(keystore)?;
+    let state_path = keystore.join(format!("{group}.btn.state"));
+    let mykit_path = keystore.join(format!("{group}.btn.mykit"));
+
+    if state_path.exists() && mykit_path.exists() {
+        return Ok(());
+    }
+    if state_path.exists() != mykit_path.exists() {
+        return Err(Error::InvalidConfig(format!(
+            "admin_ensure_group: partial btn key material exists for group {group:?}"
+        )));
+    }
+
+    let mut seed = [0_u8; 32];
+    rand_core::OsRng.fill_bytes(&mut seed);
+    let mut publisher = tn_btn::PublisherState::setup_with_seed(tn_btn::Config, seed)?;
+    let kit = publisher.mint()?;
+
+    std::fs::write(state_path, publisher.to_bytes())?;
+    std::fs::write(mykit_path, kit.to_bytes())?;
+    Ok(())
+}
+
+fn yaml_to_json(value: &YamlValue) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
 }

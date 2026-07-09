@@ -10,7 +10,7 @@
 //! Reach for these; most other modules are internal primitives these
 //! compose.
 //!
-//! - [`Runtime`] — the front door: open or create a ceremony, write
+//! - [`Runtime`] — the front door: open a ceremony, write
 //!   attested events (the write family, behind `tn.info()` / `tn log`),
 //!   read them back (behind `tn.read()` / `tn read`), and run admin verbs
 //!   (behind `tn.admin.*` / `tn rotate`). Configured by
@@ -87,6 +87,8 @@ pub mod log_file;
 #[cfg(feature = "fs")]
 pub mod read_as_recipient;
 #[cfg(feature = "fs")]
+mod recipient_seal;
+#[cfg(feature = "fs")]
 pub mod runtime;
 #[cfg(feature = "fs")]
 pub mod runtime_export;
@@ -100,8 +102,9 @@ pub use admin_cache::{AdminStateCache, ChainConflict, LKV_VERSION};
 #[cfg(feature = "fs")]
 pub use runtime::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
-    AdminRotation, AdminState, AdminVaultLink, FlatEntry, Instructions, OnInvalid, ReadEntry,
-    RecipientEntry, Runtime, RuntimeInitOptions, SecureEntry, SecureReadOptions, ValidFlags,
+    AdminRotation, AdminState, AdminVaultLink, EnsureGroupResult, FlatEntry, Instructions,
+    OnInvalid, ReadEntry, RecipientEntry, Runtime, RuntimeInitOptions, SecureEntry,
+    SecureReadOptions, ValidFlags,
 };
 #[cfg(feature = "fs")]
 pub use runtime_export::{AbsorbReceipt, AbsorbSource, ExportOptions};
