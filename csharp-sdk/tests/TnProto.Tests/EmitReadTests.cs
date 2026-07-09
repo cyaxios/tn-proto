@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace TnProto.Tests;
 
 public sealed class EmitReadTests
@@ -115,6 +117,75 @@ public sealed class EmitReadTests
             tn.EmitAsync(TnLogLevel.Info, "", new { ok = true }));
 
         Assert.Equal("eventType", error.ParamName);
+    }
+
+    [Fact]
+    public async Task InfoAsyncWithAadBindsMarkersAndReadsBack()
+    {
+        var projectDir = Path.Combine(Path.GetTempPath(), "tn-csharp-" + Guid.NewGuid().ToString("N"));
+        await using var tn = await Tn.InitProjectAsync(
+            "aadmarkers",
+            new TnProjectOptions { ProjectDirectory = projectDir });
+
+        var marker = new Dictionary<string, object?>
+        {
+            ["purpose"] = "audit",
+            ["ticket"] = "T-77",
+        };
+        var receipt = await tn.InfoAsync(
+            "payment.flagged",
+            new { secret_note = "escalate" },
+            aad: marker);
+
+        Assert.True(receipt.Emitted);
+        Assert.NotNull(receipt.Envelope);
+        var echoed = receipt.Envelope["tn_aad"]?.GetValue<string>();
+        Assert.NotNull(echoed);
+
+        // The sealed group still opens on read: the reader reconstructs
+        // the bound AAD bytes from the public tn_aad echo.
+        var entries = await tn.ReadAsync();
+        var entry = Assert.Single(entries.Where(e => e.EventType == "payment.flagged"));
+        Assert.Equal("escalate", entry.GetString("secret_note"));
+
+        // The marker dict round-trips through the canonical tn_aad echo.
+        Assert.Equal(echoed, entry.TnAad);
+        var binding = JsonNode.Parse(entry.TnAad!) as JsonObject;
+        Assert.NotNull(binding);
+        var boundMarker = binding["default"] as JsonObject;
+        Assert.NotNull(boundMarker);
+        Assert.Equal("audit", boundMarker["purpose"]?.GetValue<string>());
+        Assert.Equal("T-77", boundMarker["ticket"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task EmptyAadKeepsWireShapeIdenticalToPlainEmit()
+    {
+        var projectDir = Path.Combine(Path.GetTempPath(), "tn-csharp-" + Guid.NewGuid().ToString("N"));
+        await using var tn = await Tn.InitProjectAsync(
+            "aadempty",
+            new TnProjectOptions { ProjectDirectory = projectDir });
+
+        var withEmpty = await tn.InfoAsync(
+            "payment.plain",
+            new { secret_note = "quiet" },
+            aad: new Dictionary<string, object?>());
+        var withNull = await tn.InfoAsync("payment.plain", new { secret_note = "quiet" });
+
+        foreach (var receipt in new[] { withEmpty, withNull })
+        {
+            Assert.True(receipt.Emitted);
+            Assert.NotNull(receipt.Envelope);
+            Assert.False(
+                receipt.Envelope.ContainsKey("tn_aad"),
+                "empty aad must not add a tn_aad field");
+        }
+
+        var entries = await tn.ReadAsync();
+        foreach (var entry in entries.Where(e => e.EventType == "payment.plain"))
+        {
+            Assert.Null(entry.TnAad);
+        }
     }
 
     [Fact]

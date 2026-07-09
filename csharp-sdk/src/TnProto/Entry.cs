@@ -28,6 +28,16 @@ public sealed class Entry
     public string? Level => GetString("level");
 
     /// <summary>
+    /// Canonical JSON echo of the AAD markers bound per group, when present.
+    /// </summary>
+    /// <remarks>
+    /// The publisher writes the effective <c>{group: marker}</c> map as a
+    /// canonical JSON string under <c>tn_aad</c>; parse it to recover the
+    /// markers bound to each sealed group body.
+    /// </remarks>
+    public string? TnAad => GetString("tn_aad");
+
+    /// <summary>
     /// Entry sequence number, when present.
     /// </summary>
     public long? Sequence => Fields["sequence"]?.GetValue<long>();

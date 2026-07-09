@@ -178,68 +178,101 @@ public sealed class Tn : IDisposable, IAsyncDisposable
     /// <summary>
     /// Emit a severity-less TN log event.
     /// </summary>
+    /// <remarks>
+    /// When <paramref name="aad"/> carries markers, they are merged over each
+    /// group's configured default marker, bound as additional authenticated
+    /// data into every sealed group body, and echoed under the public
+    /// <c>tn_aad</c> envelope field. A null or empty map leaves the wire
+    /// shape unchanged.
+    /// </remarks>
     public Task<EmitReceipt> LogAsync<TFields>(
         string eventType,
         TFields fields,
+        IReadOnlyDictionary<string, object?>? aad = null,
         CancellationToken cancellationToken = default)
     {
-        return EmitAsync(level: null, eventType, fields, cancellationToken);
+        return EmitAsync(level: null, eventType, fields, aad, cancellationToken);
     }
 
     /// <summary>
     /// Emit an info-level TN event.
     /// </summary>
+    /// <remarks>
+    /// See <see cref="LogAsync{TFields}"/> for the <paramref name="aad"/>
+    /// marker semantics.
+    /// </remarks>
     public Task<EmitReceipt> InfoAsync<TFields>(
         string eventType,
         TFields fields,
+        IReadOnlyDictionary<string, object?>? aad = null,
         CancellationToken cancellationToken = default)
     {
-        return EmitAsync(TnLogLevel.Info, eventType, fields, cancellationToken);
+        return EmitAsync(TnLogLevel.Info, eventType, fields, aad, cancellationToken);
     }
 
     /// <summary>
     /// Emit a debug-level TN event.
     /// </summary>
+    /// <remarks>
+    /// See <see cref="LogAsync{TFields}"/> for the <paramref name="aad"/>
+    /// marker semantics.
+    /// </remarks>
     public Task<EmitReceipt> DebugAsync<TFields>(
         string eventType,
         TFields fields,
+        IReadOnlyDictionary<string, object?>? aad = null,
         CancellationToken cancellationToken = default)
     {
-        return EmitAsync(TnLogLevel.Debug, eventType, fields, cancellationToken);
+        return EmitAsync(TnLogLevel.Debug, eventType, fields, aad, cancellationToken);
     }
 
     /// <summary>
     /// Emit a warning-level TN event.
     /// </summary>
+    /// <remarks>
+    /// See <see cref="LogAsync{TFields}"/> for the <paramref name="aad"/>
+    /// marker semantics.
+    /// </remarks>
     public Task<EmitReceipt> WarningAsync<TFields>(
         string eventType,
         TFields fields,
+        IReadOnlyDictionary<string, object?>? aad = null,
         CancellationToken cancellationToken = default)
     {
-        return EmitAsync(TnLogLevel.Warning, eventType, fields, cancellationToken);
+        return EmitAsync(TnLogLevel.Warning, eventType, fields, aad, cancellationToken);
     }
 
     /// <summary>
     /// Emit an error-level TN event.
     /// </summary>
+    /// <remarks>
+    /// See <see cref="LogAsync{TFields}"/> for the <paramref name="aad"/>
+    /// marker semantics.
+    /// </remarks>
     public Task<EmitReceipt> ErrorAsync<TFields>(
         string eventType,
         TFields fields,
+        IReadOnlyDictionary<string, object?>? aad = null,
         CancellationToken cancellationToken = default)
     {
-        return EmitAsync(TnLogLevel.Error, eventType, fields, cancellationToken);
+        return EmitAsync(TnLogLevel.Error, eventType, fields, aad, cancellationToken);
     }
 
     /// <summary>
     /// Emit a TN event at an explicit level.
     /// </summary>
+    /// <remarks>
+    /// See <see cref="LogAsync{TFields}"/> for the <paramref name="aad"/>
+    /// marker semantics.
+    /// </remarks>
     public Task<EmitReceipt> EmitAsync<TFields>(
         TnLogLevel level,
         string eventType,
         TFields fields,
+        IReadOnlyDictionary<string, object?>? aad = null,
         CancellationToken cancellationToken = default)
     {
-        return EmitAsync(level.ToTnName(), eventType, fields, cancellationToken);
+        return EmitAsync(level.ToTnName(), eventType, fields, aad, cancellationToken);
     }
 
     /// <summary>
@@ -315,6 +348,7 @@ public sealed class Tn : IDisposable, IAsyncDisposable
         string? level,
         string eventType,
         TFields fields,
+        IReadOnlyDictionary<string, object?>? aad,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -326,7 +360,9 @@ public sealed class Tn : IDisposable, IAsyncDisposable
         }
 
         var fieldsJson = JsonSerializer.Serialize(fields);
-        var receiptJson = NativeBridge.Emit(_handle, level, eventType, fieldsJson);
+        var receiptJson = aad is { Count: > 0 }
+            ? NativeBridge.EmitWithAad(_handle, level, eventType, fieldsJson, JsonSerializer.Serialize(aad))
+            : NativeBridge.Emit(_handle, level, eventType, fieldsJson);
         var receipt = JsonNode.Parse(receiptJson) as JsonObject
             ?? throw new TnException("native emit returned non-object JSON");
         var emitted = receipt["emitted"]?.GetValue<bool>()

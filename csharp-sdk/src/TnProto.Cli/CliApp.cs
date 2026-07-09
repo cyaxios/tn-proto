@@ -2699,8 +2699,8 @@ public static class CliApp
         var options = ParseEmitArgs(args, level is null ? "log" : "info");
         await using var tn = await Tn.InitAsync(options.YamlPath, cancellationToken).ConfigureAwait(false);
         var receipt = level is null
-            ? await tn.LogAsync(options.EventType, options.Fields, cancellationToken).ConfigureAwait(false)
-            : await tn.EmitAsync(level.Value, options.EventType, options.Fields, cancellationToken).ConfigureAwait(false);
+            ? await tn.LogAsync(options.EventType, options.Fields, cancellationToken: cancellationToken).ConfigureAwait(false)
+            : await tn.EmitAsync(level.Value, options.EventType, options.Fields, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (options.Json)
         {

@@ -147,6 +147,22 @@ public static class NativeBridge
             ?? throw new TnException(LastError() ?? "native emit returned a null receipt");
     }
 
+    internal static string EmitWithAad(
+        TnNativeHandle handle,
+        string? level,
+        string eventType,
+        string fieldsJson,
+        string aadJson)
+    {
+        return NativeString.Consume(NativeMethods.RuntimeEmitWithAad(
+                handle.RawHandle,
+                level,
+                eventType,
+                fieldsJson,
+                aadJson))
+            ?? throw new TnException(LastError() ?? "native emit with aad returned a null receipt");
+    }
+
     internal static string Read(TnNativeHandle handle, bool allRuns, bool verify)
     {
         return NativeString.Consume(NativeMethods.RuntimeRead(handle.RawHandle, allRuns ? 1 : 0, verify ? 1 : 0))

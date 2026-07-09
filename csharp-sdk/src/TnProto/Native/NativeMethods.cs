@@ -76,6 +76,14 @@ internal static partial class NativeMethods
     [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_emit", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial IntPtr RuntimeEmit(IntPtr handle, string? level, string eventType, string fieldsJson);
 
+    [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_emit_with_aad", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial IntPtr RuntimeEmitWithAad(
+        IntPtr handle,
+        string? level,
+        string eventType,
+        string fieldsJson,
+        string aadJson);
+
     [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_read")]
     internal static partial IntPtr RuntimeRead(IntPtr handle, int allRuns, int verify);
 
