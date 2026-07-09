@@ -656,6 +656,16 @@ impl Runtime {
         self.cfg.groups.keys().cloned().collect()
     }
 
+    /// Borrow the `.tn/config/agents.md` policy document loaded at init.
+    ///
+    /// `None` when the ceremony has no policy file. This is the same
+    /// document the emit-side splice and the `tn.agents.policy_published`
+    /// lifecycle event read; language bindings surface it as their
+    /// `agents.policy()` accessor.
+    pub fn agent_policy_doc(&self) -> Option<&crate::agents_policy::PolicyDocument> {
+        self.agent_policies.as_ref()
+    }
+
     /// Explicit close: flush every open log writer and consume `self`.
     ///
     /// Dropping a `Runtime` without calling `close` is fine; `File`'s own

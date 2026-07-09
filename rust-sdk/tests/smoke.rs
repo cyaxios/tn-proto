@@ -79,6 +79,72 @@ fn emit_with_aad_echoes_markers_and_reads_back() -> tn_proto::Result<()> {
 }
 
 #[test]
+fn agent_policy_doc_loads_from_ceremony_config() -> tn_proto::Result<()> {
+    const POLICY_MD: &str = "# TN Agents Policy\n\
+        version: 1\n\
+        schema: tn-agents-policy@v1\n\
+        \n\
+        ## deal.approved\n\
+        \n\
+        ### instruction\n\
+        Record one approved deal.\n\
+        \n\
+        ### use_for\n\
+        Deal reporting.\n\
+        \n\
+        ### do_not_use_for\n\
+        Compensation decisions.\n\
+        \n\
+        ### consequences\n\
+        Exposure violates the deal desk policy.\n\
+        \n\
+        ### on_violation_or_error\n\
+        Escalate to compliance.\n";
+
+    let temp = tempfile::tempdir()?;
+    let tn = Tn::init_project_with_options(
+        "agents-policy",
+        TnProjectOptions {
+            project_dir: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        },
+    )?;
+    assert!(tn.agent_policy_doc().is_none());
+
+    let yaml_path = tn.yaml_path().to_path_buf();
+    let config_dir = yaml_path
+        .parent()
+        .expect("yaml path has a parent")
+        .join(".tn")
+        .join("config");
+    std::fs::create_dir_all(&config_dir)?;
+    std::fs::write(config_dir.join("agents.md"), POLICY_MD)?;
+    tn.close()?;
+
+    // Reopening loads the policy; the emit-side splice fills the
+    // tn.agents fields for the covered event type.
+    let tn = Tn::init(&yaml_path)?;
+    let doc = tn.agent_policy_doc().expect("policy doc loaded on reopen");
+    assert!(doc.content_hash.starts_with("sha256:"));
+    let template = doc
+        .templates
+        .get("deal.approved")
+        .expect("policy doc missing deal.approved template");
+    assert_eq!(template.instruction, "Record one approved deal.");
+
+    tn.info("deal.approved", json!({ "deal_id": "D-9" }))?;
+    let entries = tn.read(ReadOptions::default())?;
+    let entry = common::find_event(&entries, "deal.approved");
+    assert_eq!(
+        entry.get("instruction").and_then(Value::as_str),
+        Some("Record one approved deal.")
+    );
+
+    tn.close()?;
+    Ok(())
+}
+
+#[test]
 fn emit_with_aad_empty_map_keeps_plain_wire_shape() -> tn_proto::Result<()> {
     let tn = Tn::ephemeral()?;
 

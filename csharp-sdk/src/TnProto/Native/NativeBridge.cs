@@ -141,6 +141,12 @@ public static class NativeBridge
             ?? throw new TnException(LastError() ?? "native bridge returned a null log path");
     }
 
+    internal static string AgentPolicyDoc(TnNativeHandle handle)
+    {
+        return NativeString.Consume(NativeMethods.RuntimeAgentPolicyDoc(handle.RawHandle))
+            ?? throw new TnException(LastError() ?? "native agent policy doc returned a null result");
+    }
+
     internal static string Emit(TnNativeHandle handle, string? level, string eventType, string fieldsJson)
     {
         return NativeString.Consume(NativeMethods.RuntimeEmit(handle.RawHandle, level, eventType, fieldsJson))

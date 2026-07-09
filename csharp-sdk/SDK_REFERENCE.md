@@ -42,6 +42,8 @@ Currently exposed:
 - `Tn.Admin.RevokeRecipientAsync(group, leafIndex)`
 - `Tn.Admin.RecipientsAsync(group, includeRevoked)`
 - `Tn.Admin.RevokedCountAsync(group)`
+- `Tn.Agents.PublishAsync(markdown)`
+- `Tn.Agents.Current`
 - `Tn.Packages.ExportAdminSnapshotAsync(outPath)`
 - `Tn.Packages.ExportKitBundleAsync(outPath, groups, toDid)`
 - `Tn.Packages.BundleForRecipientAsync(recipientDid, outPath, options)`

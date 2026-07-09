@@ -73,6 +73,9 @@ internal static partial class NativeMethods
     [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_log_path")]
     internal static partial IntPtr RuntimeLogPath(IntPtr handle);
 
+    [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_agent_policy_doc")]
+    internal static partial IntPtr RuntimeAgentPolicyDoc(IntPtr handle);
+
     [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_emit", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial IntPtr RuntimeEmit(IntPtr handle, string? level, string eventType, string fieldsJson);
 

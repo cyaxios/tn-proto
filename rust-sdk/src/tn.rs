@@ -544,6 +544,17 @@ impl Tn {
         self.runtime.group_names()
     }
 
+    /// Borrow the agent policy document loaded from `.tn/config/agents.md`
+    /// (relative to the ceremony yaml directory) at init, or `None` when
+    /// the ceremony has no policy file.
+    ///
+    /// This is the document that fills the `tn.agents` group fields on
+    /// emit and drives the `tn.agents.policy_published` lifecycle event.
+    /// Re-open the ceremony after changing the file to load a new version.
+    pub fn agent_policy_doc(&self) -> Option<&tn_core::agents_policy::PolicyDocument> {
+        self.runtime.agent_policy_doc()
+    }
+
     /// Explicitly flush and close the runtime.
     ///
     /// Dropping `Tn` is fine for most callers; explicit close gives you a

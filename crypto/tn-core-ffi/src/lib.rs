@@ -810,6 +810,66 @@ pub unsafe extern "C" fn tn_runtime_log_path(handle: *const TnHandle) -> *mut c_
     }
 }
 
+/// Return the loaded `.tn/config/agents.md` policy document as JSON.
+///
+/// Returns the JSON literal `null` when the active ceremony has no policy
+/// file loaded; otherwise a JSON object with `version`, `schema`, `path`,
+/// `body`, `content_hash`, and per-event `templates`. The document is the
+/// one loaded at runtime open — re-open the handle after changing the file.
+/// The returned string is owned by the caller and must be released with
+/// [`tn_string_free`]. Returns null on error. Use [`tn_last_error`] for
+/// details.
+#[no_mangle]
+pub unsafe extern "C" fn tn_runtime_agent_policy_doc(handle: *const TnHandle) -> *mut c_char {
+    clear_error();
+    match take_result(|| {
+        let value = match handle_ref(handle)?.tn()?.agent_policy_doc() {
+            Some(doc) => policy_doc_to_json(doc),
+            None => Value::Null,
+        };
+        serde_json::to_string(&value).map_err(|err| err.to_string())
+    }) {
+        Ok(value) => into_c_string_ptr(value),
+        Err(err) => {
+            set_error(err);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Render a parsed agents policy document into the stable JSON shape the
+/// language SDKs consume from [`tn_runtime_agent_policy_doc`].
+fn policy_doc_to_json(doc: &tn_core::agents_policy::PolicyDocument) -> Value {
+    let templates: Map<String, Value> = doc
+        .templates
+        .iter()
+        .map(|(event_type, t)| {
+            (
+                event_type.clone(),
+                json!({
+                    "event_type": t.event_type,
+                    "instruction": t.instruction,
+                    "use_for": t.use_for,
+                    "do_not_use_for": t.do_not_use_for,
+                    "consequences": t.consequences,
+                    "on_violation_or_error": t.on_violation_or_error,
+                    "content_hash": t.content_hash,
+                    "version": t.version,
+                    "path": t.path,
+                }),
+            )
+        })
+        .collect();
+    json!({
+        "version": doc.version,
+        "schema": doc.schema,
+        "path": doc.path,
+        "body": doc.body,
+        "content_hash": doc.content_hash,
+        "templates": templates,
+    })
+}
+
 /// Emit an event and return a JSON receipt.
 ///
 /// `level` may be null or empty for the severity-less log path. `fields_json`
@@ -2168,6 +2228,81 @@ mod tests {
             assert!(
                 message.contains("aad_json must be a JSON object"),
                 "unexpected error: {message}"
+            );
+
+            assert_eq!(tn_runtime_close(handle), 0);
+        }
+    }
+
+    const POLICY_MD: &str = "# TN Agents Policy\n\
+        version: 1\n\
+        schema: tn-agents-policy@v1\n\
+        \n\
+        ## deal.approved\n\
+        \n\
+        ### instruction\n\
+        Record one approved deal.\n\
+        \n\
+        ### use_for\n\
+        Deal reporting.\n\
+        \n\
+        ### do_not_use_for\n\
+        Compensation decisions.\n\
+        \n\
+        ### consequences\n\
+        Exposure violates the deal desk policy.\n\
+        \n\
+        ### on_violation_or_error\n\
+        Escalate to compliance.\n";
+
+    #[test]
+    fn agent_policy_doc_loads_after_file_write_and_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            let handle = open_project(dir.path(), "ffi_agents");
+
+            // No policy file yet: the accessor returns the JSON literal null.
+            assert_eq!(consume(tn_runtime_agent_policy_doc(handle)), "null");
+
+            // Drop the policy under the ceremony yaml dir, then reopen so
+            // the core reloads it and auto-publishes on the hash change.
+            let yaml_path = consume(tn_runtime_yaml_path(handle));
+            let yaml_dir = std::path::Path::new(&yaml_path)
+                .parent()
+                .expect("yaml path has a parent")
+                .to_path_buf();
+            let config_dir = yaml_dir.join(".tn").join("config");
+            std::fs::create_dir_all(&config_dir).expect("create policy dir");
+            std::fs::write(config_dir.join("agents.md"), POLICY_MD).expect("write policy");
+            assert_eq!(tn_runtime_close(handle), 0);
+
+            let yaml_c = c(&yaml_path);
+            let handle = tn_runtime_open(yaml_c.as_ptr());
+            assert!(
+                !handle.is_null(),
+                "reopen failed: {:?}",
+                last_error_message()
+            );
+
+            let doc: Value = serde_json::from_str(&consume(tn_runtime_agent_policy_doc(handle)))
+                .expect("policy doc is not JSON");
+            assert_eq!(doc["version"], Value::String("1".into()));
+            assert!(doc["content_hash"]
+                .as_str()
+                .expect("policy doc missing content_hash")
+                .starts_with("sha256:"));
+            assert_eq!(
+                doc["templates"]["deal.approved"]["instruction"],
+                Value::String("Record one approved deal.".into())
+            );
+
+            // The reopen emitted tn.agents.policy_published onto the
+            // ceremony's admin/protocol surface.
+            let admin_log = yaml_dir.join("admin").join("default.ndjson");
+            let admin_text = std::fs::read_to_string(&admin_log).expect("admin log missing");
+            assert!(
+                admin_text.contains("tn.agents.policy_published"),
+                "policy_published event not on the admin surface"
             );
 
             assert_eq!(tn_runtime_close(handle), 0);

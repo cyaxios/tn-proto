@@ -104,6 +104,7 @@ await using var tn = await Tn.InitAsync(".tn/payments/tn.yaml");
 | `tn.ReadAsync(options)` | Read decrypted entries |
 | `tn.WatchAsync(options)` | Poll for newly visible entries |
 | `tn.Admin.*` | Create groups, mint/revoke readers, rotate keys |
+| `tn.Agents.*` | Publish and read the ceremony's agent policy document |
 | `tn.Packages.*` | Export, inspect, seal, and absorb `.tnpkg` bundles |
 | `tn.Inbox.*` | Mint, inspect, list, and accept invitation zips |
 | `tn.Vault.*` | Claim-link, connect, link/unlink, push/restore encrypted body backups |

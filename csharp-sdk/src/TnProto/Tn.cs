@@ -9,7 +9,7 @@ namespace TnProto;
 /// </summary>
 public sealed class Tn : IDisposable, IAsyncDisposable
 {
-    private readonly TnNativeHandle _handle;
+    private TnNativeHandle _handle;
     private bool _disposed;
 
     private Tn(TnNativeHandle handle, string yamlPath, string logPath, string did, string? projectName, string? projectDirectory)
@@ -22,6 +22,7 @@ public sealed class Tn : IDisposable, IAsyncDisposable
         ProjectDirectory = projectDirectory is null ? null : Path.GetFullPath(projectDirectory);
         Account = new Account.AccountClient(this);
         Admin = new Admin.AdminClient(this);
+        Agents = new Agents.AgentsClient(this);
         Packages = new Packages.PackageClient(this);
         Inbox = new Inbox.InboxClient(this);
         Rotation = new Rotation.RotationClient(this);
@@ -63,6 +64,11 @@ public sealed class Tn : IDisposable, IAsyncDisposable
     /// Administration helpers for groups and recipients.
     /// </summary>
     public Admin.AdminClient Admin { get; }
+
+    /// <summary>
+    /// Agent policy helpers riding the core <c>tn.agents</c> lifecycle.
+    /// </summary>
+    public Agents.AgentsClient Agents { get; }
 
     /// <summary>
     /// Package export and absorb helpers.
@@ -373,6 +379,26 @@ public sealed class Tn : IDisposable, IAsyncDisposable
     }
 
     internal TnNativeHandle NativeHandle => _handle;
+
+    /// <summary>
+    /// Close the current native runtime and open a fresh one over the same
+    /// <c>tn.yaml</c>, exactly like a new <see cref="InitAsync"/> would.
+    /// </summary>
+    /// <remarks>
+    /// Used by verbs that change on-disk ceremony inputs the core only
+    /// reads at open time (for example the <c>.tn/config/agents.md</c>
+    /// policy file, which the reopened runtime reloads and auto-publishes
+    /// on hash change). The replacement handle is opened before the old
+    /// one is disposed so a failed reopen leaves this instance usable.
+    /// </remarks>
+    internal void ReopenNativeHandle()
+    {
+        ThrowIfDisposed();
+
+        var reopened = NativeBridge.Open(YamlPath);
+        _handle.Dispose();
+        _handle = reopened;
+    }
 
     internal void ThrowIfDisposed()
     {
