@@ -105,7 +105,7 @@ pub use admin_cache::{AdminStateCache, ChainConflict, LKV_VERSION};
 pub use runtime::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
     AdminRotation, AdminState, AdminVaultLink, EnsureGroupResult, FlatEntry, Instructions,
-    OnInvalid, ReadEntry, RecipientEntry, Runtime, RuntimeInitOptions, SecureEntry,
+    OnInvalid, ReadEntry, RecipientEntry, Runtime, RuntimeInitOptions, SealOptions, SecureEntry,
     SecureReadOptions, ValidFlags,
 };
 #[cfg(feature = "fs")]

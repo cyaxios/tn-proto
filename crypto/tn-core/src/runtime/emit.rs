@@ -340,7 +340,11 @@ impl Runtime {
     /// [`Error::InvalidConfig`](crate::Error::InvalidConfig) when a field
     /// has no declared route, the classifier guess is not a known group,
     /// and there is no `default` group to absorb it.
-    fn classify_fields(
+    ///
+    /// `pub(crate)`: also the classification step of `Runtime::seal`
+    /// (runtime/seal.rs), which calls it directly — without the emit
+    /// prelude's run_id injection or agent-policy splice.
+    pub(crate) fn classify_fields(
         &self,
         fields: Map<String, Value>,
     ) -> Result<(Map<String, Value>, BTreeMap<String, Map<String, Value>>)> {
@@ -434,7 +438,11 @@ impl Runtime {
     /// # Panics
     ///
     /// Panics if an internal group-state `RwLock` is poisoned.
-    fn encrypt_groups(
+    ///
+    /// `pub(crate)`: also the encrypt step of `Runtime::seal`
+    /// (runtime/seal.rs), which reuses the per-group sort / index-token
+    /// / AAD-merge / encrypt pipeline for standalone objects.
+    pub(crate) fn encrypt_groups(
         &self,
         per_group: BTreeMap<String, Map<String, Value>>,
         aad: &Map<String, Value>,

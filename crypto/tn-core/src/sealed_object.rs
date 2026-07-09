@@ -91,6 +91,7 @@ pub struct SealedValid {
 /// runtime is exactly the round-trip the fragile-value guard exists to
 /// protect, and key order is load-bearing only for byte-identity, not
 /// verification.
+#[derive(Debug, Clone)]
 pub struct SealedObjectLine {
     /// The envelope as a parsed JSON object (wire-faithful key order).
     pub envelope: Map<String, Value>,
