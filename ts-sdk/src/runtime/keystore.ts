@@ -48,6 +48,26 @@ export interface GroupKeystore {
   jweKeys?: Uint8Array[];
 }
 
+/** Load a group's btn reader kits: the active `<group>.btn.mykit` first,
+ * then every rotation-archived `.btn.mykit.revoked.<ts>` — so pre-rotation
+ * records stay decryptable. Returns an empty list when the group holds no
+ * btn kit. Shared by `loadKeystore` and the sealed-object decrypt walk
+ * (`src/seal.ts`), which needs the same multi-kit candidate list against a
+ * bare recipient directory. */
+export function loadBtnKits(keystorePath: string, group: string): Uint8Array[] {
+  const kits: Uint8Array[] = [];
+  const selfKitPath = join(keystorePath, `${group}.btn.mykit`);
+  if (existsSync(selfKitPath)) {
+    kits.push(new Uint8Array(readFileSync(selfKitPath)));
+  }
+  for (const entry of readdirSync(keystorePath)) {
+    if (entry.startsWith(`${group}.btn.mykit.revoked.`)) {
+      kits.push(new Uint8Array(readFileSync(join(keystorePath, entry))));
+    }
+  }
+  return kits;
+}
+
 /** Load a group's jwe reader keys: the active `<group>.jwe.mykey` first,
  * then every rotation-archived `.jwe.mykey.revoked.<ts>` newest first.
  * Returns an empty list when the group holds no jwe reader material. */
@@ -194,17 +214,8 @@ export function loadKeystore(keystorePath: string): LoadedKeystore {
   }
   for (const name of groupNames) {
     const stateBytes = new Uint8Array(readFileSync(join(keystorePath, `${name}.btn.state`)));
-    const kits: Uint8Array[] = [];
-    const selfKitPath = join(keystorePath, `${name}.btn.mykit`);
-    if (existsSync(selfKitPath)) {
-      kits.push(new Uint8Array(readFileSync(selfKitPath)));
-    }
-    // Rotation-preserved kits: `<group>.btn.mykit.revoked.<ts>`
-    for (const entry of readdirSync(keystorePath)) {
-      if (entry.startsWith(`${name}.btn.mykit.revoked.`)) {
-        kits.push(new Uint8Array(readFileSync(join(keystorePath, entry))));
-      }
-    }
+    // Active self-kit + rotation-preserved `.revoked.<ts>` kits.
+    const kits = loadBtnKits(keystorePath, name);
     groups.set(name, { stateBytes, kits });
   }
 

@@ -29,6 +29,8 @@ test("module surface: verbs + runtime namespaces present and correctly bound", a
     assert.equal(typeof tn.scope, "function", "tn.scope should be a function");
     assert.equal(typeof tn.use, "function", "tn.use should be a function");
     assert.equal(typeof tn.listCeremonies, "function", "tn.listCeremonies should be a function");
+    assert.equal(typeof tn.seal, "function", "tn.seal should be a function");
+    assert.equal(typeof tn.unseal, "function", "tn.unseal should be a function");
 
     // --- tn.scope is bound to the default instance's context stack ---
     const inside = tn.scope({ scoped_field: 7 }, () => asRecord(tn.getContext()));

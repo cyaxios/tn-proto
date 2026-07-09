@@ -43,7 +43,15 @@ import { StdoutHandler } from "./handlers/stdout.js";
 import { buildHandlers } from "./handlers/registry.js";
 import { readAsRecipient, readAsRecipientAsync } from "./read_as_recipient.js";
 import { ScopeBuilder } from "./scope.js";
-import { sealWithRuntime, type SealOptions, type SealedObject } from "./seal.js";
+import {
+  sealWithRuntime,
+  unsealWithRuntime,
+  type SealOptions,
+  type SealedObject,
+  type SealedTriple,
+  type UnsealOptions,
+  type UnsealSource,
+} from "./seal.js";
 
 // ---------------------------------------------------------------------------
 // Re-export types for callers that import from tn.ts directly.
@@ -52,8 +60,8 @@ export type { LogLevel } from "./core/types.js";
 export type { EmitReceipt } from "./core/results.js";
 export { Entry, VerifyError } from "./Entry.js";
 export type { WatchSince } from "./watch.js";
-export { SealedObject } from "./seal.js";
-export type { SealOptions } from "./seal.js";
+export { SealedObject, SealedObjectError } from "./seal.js";
+export type { SealOptions, SealedTriple, UnsealOptions, UnsealSource } from "./seal.js";
 
 // ---------------------------------------------------------------------------
 // Module-level log-level state — own copy for Tn (does not share with
@@ -1562,6 +1570,21 @@ export class Tn {
     opts: SealOptions = {},
   ): Promise<SealedObject> {
     return sealWithRuntime(this._rt, objectType, fields, opts);
+  }
+
+  /**
+   * Verify a sealed object and open every group block a held key fits.
+   * Mirrors Python `tn.unseal`.
+   *
+   * Holding no fitting key is not an error — the verified public frame
+   * comes back with the blocks left sealed (`Entry.hidden_groups`).
+   * Malformed input throws `SealedObjectError`; failed verification
+   * (with `verify: true`, the default) throws `VerifyError`. Pass
+   * `raw: true` for the `{envelope, plaintext, valid}` triple, and
+   * `asRecipient` (+ `group`) to open one kit directory directly.
+   */
+  async unseal(source: UnsealSource, opts: UnsealOptions = {}): Promise<Entry | SealedTriple> {
+    return unsealWithRuntime(this._rt, source, opts);
   }
 
   /** Run-id filter for local reads: keep only rows from this client's current

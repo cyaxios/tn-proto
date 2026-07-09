@@ -30,11 +30,31 @@ import {
   canonicalBytes,
   computeRowHash,
 } from "./raw.js";
+import { aadBytesFor, decryptGroupAsync, type GroupKits } from "./core/decrypt.js";
 import { jweSeal } from "./core/jwe.js";
 import { deriveGroupKey, indexTokenFor } from "./core/indexing.js";
-import { signatureB64 } from "./core/signing.js";
-import { hibeEncrypt } from "./runtime/hibe_group.js";
+import { signatureB64, signatureFromB64, verify as verifySignature } from "./core/signing.js";
+import { asDid } from "./core/types.js";
+import { Entry, VerifyError } from "./Entry.js";
+import { hibeCandidateKeys, hibeEncrypt, loadHibeGroup } from "./runtime/hibe_group.js";
+import { loadBtnKits, loadJweKeys } from "./runtime/keystore.js";
 import type { NodeRuntime } from "./runtime/node_runtime.js";
+
+// The nine mandatory envelope scalars. Everything else in a sealed
+// object is either a public field or a group block. Re-declared from
+// node_runtime's module-local `_ENVELOPE_RESERVED` (not exported there;
+// mirrors python/tn/seal.py's `_ENVELOPE_RESERVED`).
+const _ENVELOPE_RESERVED = new Set([
+  "device_identity",
+  "timestamp",
+  "event_id",
+  "event_type",
+  "level",
+  "sequence",
+  "prev_hash",
+  "row_hash",
+  "signature",
+]);
 
 /** Event-type charset gate — same rule as the runtime's emit path
  * (node_runtime's module-local `validateEventType`) so a bad object
@@ -103,6 +123,22 @@ export class SealedObject {
   }
 }
 
+/**
+ * Thrown when unseal input is not a sealed-object envelope at all.
+ *
+ * This is the TS equivalent of Python's `tn.UnsealError` under a
+ * non-colliding name: `UnsealError` is already exported from
+ * `core/recipient_seal.ts` for a different failure (a sealed-box BEK
+ * that no recipient wrap opens). Having no key that fits is NOT this
+ * error — that returns the public frame with the blocks left sealed.
+ */
+export class SealedObjectError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SealedObjectError";
+  }
+}
+
 /** Options for {@link sealWithRuntime} / `tn.seal`. */
 export interface SealOptions {
   /** Chain a `tn.object.sealed` receipt row through the runtime's
@@ -116,6 +152,37 @@ export interface SealOptions {
    * field. Omit (or empty) to bind nothing. */
   aad?: Record<string, unknown>;
 }
+
+/** Options for {@link unsealWithRuntime} / `tn.unseal`. */
+export interface UnsealOptions {
+  /** Verify signature + row hash before decrypting (default `true`).
+   * A failed check throws {@link VerifyError}; with `verify: false`
+   * both `valid` flags report `false` and the walk proceeds. */
+  verify?: boolean;
+  /** Return the raw `{envelope, plaintext, valid}` triple instead of
+   * an {@link Entry}. */
+  raw?: boolean;
+  /** Bring-your-own-kit override: a directory holding recipient key
+   * files (`<group>.btn.mykit` / `<group>.jwe.mykey` /
+   * `<group>.hibe.sk`). When set, only {@link UnsealOptions.group} is
+   * decrypted and the active ceremony (if any) is not consulted. */
+  asRecipient?: string;
+  /** The group the `asRecipient` override opens (default `"default"`).
+   * Ignored on the default walk, which tries every block. */
+  group?: string;
+}
+
+/** The raw `{envelope, plaintext, valid}` triple `unseal({raw: true})`
+ * returns. Wire-faithful: the envelope keeps the `tn_sealed` marker.
+ * Key names mirror Python's triple (`valid.row_hash`, snake_case). */
+export interface SealedTriple {
+  envelope: Record<string, unknown>;
+  plaintext: Record<string, Record<string, unknown>>;
+  valid: { signature: boolean; row_hash: boolean };
+}
+
+/** Any source shape `unseal` accepts. */
+export type UnsealSource = SealedObject | string | Record<string, unknown>;
 
 // ---------------------------------------------------------------------------
 // seal
@@ -414,4 +481,314 @@ export async function sealWithRuntime(
   }
 
   return new SealedObject(wire);
+}
+
+// ---------------------------------------------------------------------------
+// unseal
+// ---------------------------------------------------------------------------
+
+interface _GroupBlock {
+  ciphertext: Uint8Array;
+  fieldHashes: Record<string, string>;
+}
+
+/** Any accepted source shape -> one envelope object, or SealedObjectError. */
+function _normalizeSource(source: UnsealSource): Record<string, unknown> {
+  if (source instanceof SealedObject) {
+    // The wire string is the source of truth — parse it fresh so the
+    // result is wire-faithful and isolated from the cached view.
+    return _parseEnvelopeText(source.rawJson);
+  }
+  if (typeof source === "string") {
+    return _parseEnvelopeText(source);
+  }
+  if (source !== null && typeof source === "object" && !Array.isArray(source)) {
+    return _requireEnvelopeShape({ ...source });
+  }
+  throw new SealedObjectError(
+    `unsupported sealed object source type: ${source === null ? "null" : typeof source}`,
+  );
+}
+
+function _parseEnvelopeText(text: string): Record<string, unknown> {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(text);
+  } catch (e) {
+    throw new SealedObjectError(
+      `not a sealed object: invalid JSON (${e instanceof Error ? e.message : String(e)})`,
+    );
+  }
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+    throw new SealedObjectError("not a sealed object: JSON is not an object");
+  }
+  return _requireEnvelopeShape(obj as Record<string, unknown>);
+}
+
+function _requireEnvelopeShape(env: Record<string, unknown>): Record<string, unknown> {
+  // seal always writes all nine envelope scalars; require the ones the
+  // rest of unseal dereferences unconditionally (Entry.fromRaw needs
+  // timestamp/event_id/sequence even with verify=false) so malformed
+  // input surfaces as SealedObjectError, never a bare lookup crash.
+  const required = [
+    "device_identity",
+    "event_type",
+    "row_hash",
+    "signature",
+    "timestamp",
+    "event_id",
+    "sequence",
+  ];
+  const missing = required.filter((k) => !(k in env));
+  if (missing.length > 0) {
+    throw new SealedObjectError(`not a sealed object: missing ${missing.join(", ")}`);
+  }
+  return env;
+}
+
+/** Lift every encrypted group block out of the envelope. The wire is
+ * self-describing: any object value carrying a "ciphertext" key is a
+ * group block. */
+function _extractGroupBlocks(env: Record<string, unknown>): Map<string, _GroupBlock> {
+  const blocks = new Map<string, _GroupBlock>();
+  for (const [k, v] of Object.entries(env)) {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) continue;
+    const obj = v as Record<string, unknown>;
+    if (!("ciphertext" in obj)) continue;
+    const ctB64 = obj["ciphertext"];
+    if (typeof ctB64 !== "string") {
+      throw new SealedObjectError(`group block ${JSON.stringify(k)} has undecodable ciphertext`);
+    }
+    const fieldHashes =
+      obj["field_hashes"] !== null &&
+      typeof obj["field_hashes"] === "object" &&
+      !Array.isArray(obj["field_hashes"])
+        ? (obj["field_hashes"] as Record<string, string>)
+        : {};
+    blocks.set(k, {
+      ciphertext: new Uint8Array(Buffer.from(ctB64, "base64")),
+      fieldHashes,
+    });
+  }
+  return blocks;
+}
+
+/** Envelope scalar as a string for the row-hash recompute; a non-string
+ * (only possible on hand-tampered input) hashes as "" and simply fails
+ * the check, keeping garbage on the VerifyError path. */
+function _strOf(env: Record<string, unknown>, key: string): string {
+  const v = env[key];
+  return typeof v === "string" ? v : "";
+}
+
+/** Self-describing verify: recompute the row hash over every
+ * non-reserved, non-group-block key as a public field (the log reader
+ * filters through the local yaml's public_fields, which would make
+ * foreign sealed objects unverifiable), then check the signature over
+ * the row_hash bytes. */
+function _verifySealed(
+  env: Record<string, unknown>,
+  blocks: Map<string, _GroupBlock>,
+): { signature: boolean; row_hash: boolean } {
+  const publicOut: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (_ENVELOPE_RESERVED.has(k) || blocks.has(k)) continue;
+    publicOut[k] = v;
+  }
+  const groups: Record<string, { ciphertext_b64: string; field_hashes: Record<string, string> }> = {};
+  for (const [gname, b] of blocks) {
+    groups[gname] = {
+      // Decode -> re-encode normalizes the wire base64 into the canonical
+      // form the preimage commits to (same effect as Python hashing the
+      // decoded bytes).
+      ciphertext_b64: Buffer.from(b.ciphertext).toString("base64"),
+      field_hashes: b.fieldHashes,
+    };
+  }
+  let rowHashOk = false;
+  try {
+    const expected = computeRowHash({
+      device_identity: _strOf(env, "device_identity"),
+      timestamp: _strOf(env, "timestamp"),
+      event_id: _strOf(env, "event_id"),
+      event_type: _strOf(env, "event_type"),
+      level: _strOf(env, "level"),
+      prev_hash: _strOf(env, "prev_hash"),
+      public_fields: publicOut,
+      groups,
+    });
+    rowHashOk = expected === env["row_hash"];
+  } catch {
+    /* an unhashable value means unverified — the flag stays false */
+  }
+  let signatureOk = false;
+  try {
+    signatureOk = verifySignature(
+      asDid(_strOf(env, "device_identity")),
+      new Uint8Array(Buffer.from(_strOf(env, "row_hash"), "ascii")),
+      signatureFromB64(_strOf(env, "signature")),
+    );
+  } catch {
+    /* any failure shape means unverified — the flag stays false */
+  }
+  // Insertion order matters downstream: failed_checks lists "signature"
+  // before "row_hash" (Python's valid-dict insertion order).
+  return { signature: signatureOk, row_hash: rowHashOk };
+}
+
+/** Every decrypt-kit candidate a keystore directory holds for `group`,
+ * in the fixed btn → jwe → hibe order (the same order as
+ * read_as_recipient / Python's `_discover_keybag_ciphers`). Each
+ * candidate carries its full multi-kit list — rotation-archived btn
+ * kits and jwe keys included — so pre-rotation objects still open. */
+function _keystoreCandidates(keystoreDir: string, group: string): GroupKits[] {
+  const out: GroupKits[] = [];
+  const btnKits = loadBtnKits(keystoreDir, group);
+  if (btnKits.length > 0) out.push({ cipher: "btn", kits: btnKits });
+  const jweKeys = loadJweKeys(keystoreDir, group);
+  if (jweKeys.length > 0) out.push({ cipher: "jwe", kits: jweKeys });
+  if (existsSync(join(keystoreDir, `${group}.hibe.sk`))) {
+    const mat = loadHibeGroup(keystoreDir, group);
+    if (mat !== null) out.push({ cipher: "hibe", kits: hibeCandidateKeys(mat), mpk: mat.mpk });
+  }
+  return out;
+}
+
+/** As {@link _keystoreCandidates} but for the `asRecipient` override:
+ * an empty candidate list is an error (the caller pointed at a
+ * directory that holds no key for the group). Mirrors
+ * `seal.py::_load_recipient_candidates`. */
+function _loadRecipientCandidates(keystoreDir: string, group: string): GroupKits[] {
+  const candidates = _keystoreCandidates(keystoreDir, group);
+  if (candidates.length === 0) {
+    throw new Error(
+      `unseal: no recipient key found for group=${JSON.stringify(group)} in ` +
+        `${keystoreDir}. Looked for ${group}.btn.mykit (btn), ` +
+        `${group}.jwe.mykey (jwe), and ${group}.hibe.sk (hibe). If you ` +
+        `absorbed a kit_bundle, the kit lands in your ceremony's ` +
+        `keystore — point asRecipient there.`,
+    );
+  }
+  return candidates;
+}
+
+/** Try every candidate key per group; first fit wins, failures skip.
+ *
+ * Both walks hold multi-cipher candidates: the asRecipient path loads
+ * every cipher for the named group, and the default keystore walk maps
+ * each group to a candidate list (btn, jwe, hibe) — so an absorbed
+ * grant under a different cipher than the reader's own ceremony still
+ * opens. Only successful opens land in the result; a group nothing
+ * fits is simply absent (it surfaces as hidden, never an error). */
+async function _decryptWalk(
+  rt: NodeRuntime | null,
+  env: Record<string, unknown>,
+  blocks: Map<string, _GroupBlock>,
+  asRecipient: string | undefined,
+  group: string,
+): Promise<Record<string, Record<string, unknown>>> {
+  const plaintext: Record<string, Record<string, unknown>> = {};
+
+  const tryOpen = async (gname: string, kits: GroupKits): Promise<boolean> => {
+    const block = blocks.get(gname)!;
+    const result = await decryptGroupAsync(
+      { ct: block.ciphertext, aad: aadBytesFor(env, gname) },
+      kits,
+    );
+    if (
+      "$no_read_key" in result ||
+      "$decrypt_error" in result ||
+      "$unsupported_cipher" in result
+    ) {
+      return false;
+    }
+    plaintext[gname] = result as Record<string, unknown>;
+    return true;
+  };
+
+  if (asRecipient !== undefined) {
+    // Single-kit override: load every cipher candidate for `group` from
+    // that directory and decrypt only `group`. Nothing to open means
+    // nothing to load — return before touching the directory.
+    if (!blocks.has(group)) return plaintext;
+    for (const kits of _loadRecipientCandidates(asRecipient, group)) {
+      if (await tryOpen(group, kits)) break;
+    }
+    return plaintext;
+  }
+
+  if (rt === null) return plaintext;
+  const keystoreDir = rt.config.keystorePath;
+
+  // Pass 1: own-ceremony group ciphers (publisher side) — the
+  // config-declared cipher's candidate for each declared group.
+  for (const gname of blocks.keys()) {
+    const gcfg = rt.config.groups.get(gname);
+    if (!gcfg) continue;
+    const own = _keystoreCandidates(keystoreDir, gname).find((c) => c.cipher === gcfg.cipher);
+    if (own) await tryOpen(gname, own);
+  }
+  // Pass 2: keystore key-bag (own kits + everything absorbed).
+  for (const gname of blocks.keys()) {
+    if (gname in plaintext) continue;
+    for (const kits of _keystoreCandidates(keystoreDir, gname)) {
+      if (await tryOpen(gname, kits)) break;
+    }
+  }
+  return plaintext;
+}
+
+/**
+ * Verify a sealed object and open every group block a held key fits.
+ *
+ * No key fitting is not an error: you get the verified public frame
+ * with the blocks left sealed (listed in `Entry.hidden_groups`).
+ * {@link SealedObjectError} is malformed input only; {@link VerifyError}
+ * is failed verification with `verify: true` (`failed_checks` drawn
+ * from `"signature"` / `"row_hash"`). Mirrors `python/tn/seal.py::unseal`.
+ *
+ * `rt` may be `null` (no active ceremony): verification still runs and
+ * the `asRecipient` override still opens its group; the default
+ * keystore walk is skipped.
+ */
+export async function unsealWithRuntime(
+  rt: NodeRuntime | null,
+  source: UnsealSource,
+  opts: UnsealOptions = {},
+): Promise<Entry | SealedTriple> {
+  const env = _normalizeSource(source);
+  const blocks = _extractGroupBlocks(env);
+
+  let valid: { signature: boolean; row_hash: boolean } = { signature: false, row_hash: false };
+  if (opts.verify ?? true) {
+    valid = _verifySealed(env, blocks);
+    const failed = Object.entries(valid)
+      .filter(([, ok]) => !ok)
+      .map(([k]) => k);
+    if (failed.length > 0) {
+      const seqRaw = Number(env["sequence"]);
+      throw new VerifyError(
+        Number.isFinite(seqRaw) ? seqRaw : 0,
+        _strOf(env, "event_type"),
+        failed,
+      );
+    }
+  }
+
+  const plaintext = await _decryptWalk(rt, env, blocks, opts.asRecipient, opts.group ?? "default");
+
+  const triple: SealedTriple = { envelope: env, plaintext, valid };
+  if (opts.raw ?? false) {
+    return triple;
+  }
+  // Entry.fromRaw copies non-reserved public extras into Entry.fields,
+  // which would leak the tn_sealed marker into user fields — and make
+  // tn.seal(entry.fields) trip the reserved-name guard. Drop it from
+  // the Entry-bound copy only; the raw triple above stays wire-faithful.
+  const entryEnv: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (k === "tn_sealed") continue;
+    entryEnv[k] = v;
+  }
+  return Entry.fromRaw({ envelope: entryEnv, plaintext, valid });
 }

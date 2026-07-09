@@ -48,6 +48,18 @@ test("module-level scope merges default context into emitted entries", async () 
   }
 });
 
+test("module-level seal and unseal round-trip on the default ceremony", async () => {
+  await tn.init(undefined, { stdout: false });
+  try {
+    const sealed = await tn.seal("evt.module.seal", { marker: 7 }, { receipt: false });
+    assert.ok(sealed instanceof tn.SealedObject);
+    const entry = (await tn.unseal(sealed)) as InstanceType<typeof tn.Entry>;
+    assert.equal(entry.fields["marker"], 7);
+  } finally {
+    await tn.close();
+  }
+});
+
 test("module-level watch returns the default ceremony async iterator", async () => {
   await tn.init(undefined, { stdout: false });
   try {

@@ -70,9 +70,17 @@ export type {
 } from "./tn.js";
 export type { WatchSince } from "./watch.js";
 export { Entry, VerifyError } from "./Entry.js";
-// Portable sealed objects (tn.seal).
-export { SealedObject } from "./seal.js";
-export type { SealOptions } from "./seal.js";
+// Portable sealed objects (tn.seal / tn.unseal). `SealedObjectError` is
+// the malformed-source error (Python's tn.UnsealError under a
+// non-colliding name — `UnsealError` below is recipient_seal's BEK
+// unwrap failure, a different animal).
+export { SealedObject, SealedObjectError } from "./seal.js";
+export type {
+  SealOptions,
+  SealedTriple,
+  UnsealOptions,
+  UnsealSource,
+} from "./seal.js";
 export { LOG_LEVELS } from "./tn.js";
 export type {
   AddRuntimeOptions,
@@ -304,9 +312,13 @@ import type {
   TnInitOptions,
   WatchOptions,
 } from "./tn.js";
-import type {
-  SealOptions as _SealOptions,
-  SealedObject as _SealedObject,
+import {
+  unsealWithRuntime as _unsealWithRuntime,
+  type SealOptions as _SealOptions,
+  type SealedObject as _SealedObject,
+  type SealedTriple as _SealedTriple,
+  type UnsealOptions as _UnsealOptions,
+  type UnsealSource as _UnsealSource,
 } from "./seal.js";
 
 let _defaultTn: _Tn | null = null;
@@ -585,6 +597,30 @@ export async function seal(
   return _ensureDefault("seal").seal(objectType, fields, opts);
 }
 
+/** Verify a sealed object and open every group block a held key fits.
+ *  Mirrors Python `tn.unseal(source)`.
+ *
+ *  Auto-inits LOAD-ONLY (like `read`): an existing ceremony is
+ *  discovered but never minted. Unlike `read`, finding no ceremony is
+ *  not an error here — verification needs no ceremony at all, and the
+ *  `asRecipient` override brings its own keys — so the walk simply
+ *  runs key-less and returns the verified public frame (mirrors
+ *  Python, whose unseal never auto-inits). */
+export async function unseal(
+  source: _UnsealSource,
+  opts: _UnsealOptions = {},
+): Promise<_Entry | _SealedTriple> {
+  let handle: _Tn | null = _defaultTn;
+  if (handle === null) {
+    try {
+      handle = _ensureDefaultLoadOnly("unseal");
+    } catch {
+      handle = null;
+    }
+  }
+  if (handle !== null) return handle.unseal(source, opts);
+  return _unsealWithRuntime(null, source, opts);
+}
 
 /** Block-scoped context overlay on the default ceremony. Mirrors Python
  *  `with tn.scope(**fields):`. Runs `body` with `fields` layered on top
