@@ -364,7 +364,13 @@ public sealed class Tn : IDisposable, IAsyncDisposable
         }
 
         var outcomeJson = NativeBridge.Unseal(_handle, source, optionsJson);
-        return Task.FromResult(UnsealResult.FromNativeJson(outcomeJson));
+        var result = UnsealResult.FromNativeJson(outcomeJson);
+        if (options?.GroupCiphers is { Count: > 0 } groupCiphers)
+        {
+            result = ApplyManagedCiphers(result, groupCiphers);
+        }
+
+        return Task.FromResult(result);
     }
 
     /// <summary>
@@ -447,6 +453,127 @@ public sealed class Tn : IDisposable, IAsyncDisposable
     {
         Dispose();
         return ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// The nine reserved envelope scalars of a sealed object; everything
+    /// else is a public field or a group block.
+    /// </summary>
+    private static readonly string[] SealedEnvelopeReserved =
+    [
+        "device_identity",
+        "timestamp",
+        "event_id",
+        "event_type",
+        "level",
+        "sequence",
+        "prev_hash",
+        "row_hash",
+        "signature",
+    ];
+
+    /// <summary>
+    /// Second-pass decrypt over the blocks the native walk left sealed,
+    /// using the caller's managed ciphers
+    /// (<see cref="UnsealOptions.GroupCiphers"/>).
+    /// </summary>
+    /// <remarks>
+    /// Opened blocks join <see cref="UnsealResult.Plaintext"/> and leave
+    /// <see cref="UnsealResult.HiddenGroups"/> /
+    /// <see cref="UnsealResult.SealedBlocks"/>; the Entry-style
+    /// <see cref="UnsealResult.Fields"/> merge is rebuilt with the native
+    /// rule (opened plaintexts in alphabetical group order,
+    /// last-write-wins, then non-reserved non-block public extras with the
+    /// <c>tn_sealed</c> marker dropped). A cipher throw for one block is
+    /// swallowed — that block simply stays sealed, mirroring the native
+    /// candidate walk.
+    /// </remarks>
+    private static UnsealResult ApplyManagedCiphers(
+        UnsealResult native,
+        IReadOnlyDictionary<string, ISealedGroupCipher> groupCiphers)
+    {
+        var opened = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var block in native.SealedBlocks)
+        {
+            if (!groupCiphers.TryGetValue(block.Name, out var cipher))
+            {
+                continue;
+            }
+
+            try
+            {
+                var plaintextBytes = cipher.Decrypt(
+                    Convert.FromBase64String(block.CiphertextB64),
+                    block.AadB64.Length == 0 ? [] : Convert.FromBase64String(block.AadB64));
+                var body = JsonNode.Parse(System.Text.Encoding.UTF8.GetString(plaintextBytes));
+                if (body is JsonObject bodyObject)
+                {
+                    opened[block.Name] = bodyObject;
+                }
+            }
+            catch
+            {
+                // A failing cipher must not abort the walk — the block
+                // stays sealed (mirrors the native candidate rule).
+            }
+        }
+
+        if (opened.Count == 0)
+        {
+            return native;
+        }
+
+        var plaintext = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var (group, body) in native.Plaintext)
+        {
+            plaintext[group] = body;
+        }
+
+        foreach (var (group, body) in opened)
+        {
+            plaintext[group] = body;
+        }
+
+        // Every block name, opened or not, so public extras below skip the
+        // group blocks exactly as the native merge does.
+        var blockNames = new HashSet<string>(native.Plaintext.Keys, StringComparer.Ordinal);
+        blockNames.UnionWith(native.HiddenGroups);
+
+        var fields = new JsonObject();
+        foreach (var group in plaintext.Keys.OrderBy(name => name, StringComparer.Ordinal))
+        {
+            foreach (var (key, value) in plaintext[group])
+            {
+                fields[key] = value?.DeepClone();
+            }
+        }
+
+        foreach (var (key, value) in native.Envelope)
+        {
+            if (SealedEnvelopeReserved.Contains(key)
+                || key is "run_id" or "message" or "tn_sealed"
+                || blockNames.Contains(key))
+            {
+                continue;
+            }
+
+            fields[key] = value?.DeepClone();
+        }
+
+        var hiddenGroups = native.HiddenGroups
+            .Where(group => !opened.ContainsKey(group))
+            .ToList();
+        var sealedBlocks = native.SealedBlocks
+            .Where(block => !opened.ContainsKey(block.Name))
+            .ToList();
+
+        return new UnsealResult(
+            native.Envelope,
+            plaintext,
+            native.Valid,
+            hiddenGroups,
+            sealedBlocks,
+            fields);
     }
 
     private Task<EmitReceipt> EmitAsync<TFields>(

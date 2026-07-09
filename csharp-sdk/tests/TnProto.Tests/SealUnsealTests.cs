@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 
 namespace TnProto.Tests;
@@ -302,5 +304,139 @@ public sealed class SealUnsealTests
         Assert.NotEqual(sealedObject.RawJson, tampered);
         var error = await Assert.ThrowsAsync<TnVerifyException>(() => tn.UnsealAsync(tampered));
         Assert.Contains("row_hash", error.FailedChecks);
+    }
+
+    /// <summary>
+    /// Test-only managed cipher for the second-pass seam: AES-GCM with the
+    /// wire layout nonce(12) || body || tag(16).
+    /// </summary>
+    private sealed class AesGcmSealedGroupCipher : ISealedGroupCipher
+    {
+        private readonly byte[] _key;
+
+        public AesGcmSealedGroupCipher(byte[] key)
+        {
+            _key = key;
+        }
+
+        public string Kind => "test-aesgcm";
+
+        public byte[] Decrypt(byte[] ciphertext, byte[] aad)
+        {
+            var nonce = ciphertext[..12];
+            var tag = ciphertext[^16..];
+            var body = ciphertext[12..^16];
+            var plaintext = new byte[body.Length];
+            using var aes = new AesGcm(_key, 16);
+            aes.Decrypt(nonce, body, tag, plaintext, aad);
+            return plaintext;
+        }
+
+        public byte[] Encrypt(byte[] plaintext, byte[] aad)
+        {
+            var nonce = RandomNumberGenerator.GetBytes(12);
+            var body = new byte[plaintext.Length];
+            var tag = new byte[16];
+            using var aes = new AesGcm(_key, 16);
+            aes.Encrypt(nonce, plaintext, body, tag, aad);
+            return [.. nonce, .. body, .. tag];
+        }
+    }
+
+    [Fact]
+    public async Task UnsealSecondPassMergesManagedCipherPlaintext()
+    {
+        await using var tn = await Tn.InitProjectAsync(
+            "sealing",
+            new TnProjectOptions { ProjectDirectory = NewProjectDir() });
+
+        // Hand-build an envelope whose "partners" block only a managed
+        // cipher can open (the native build holds no key for it) plus a
+        // "vendors" block of AES garbage the cipher will throw on.
+        var key = RandomNumberGenerator.GetBytes(32);
+        var cipher = new AesGcmSealedGroupCipher(key);
+        var partnersBody = Encoding.UTF8.GetBytes("{\"body\":\"for partners\"}");
+        var envelope = new JsonObject
+        {
+            ["device_identity"] = "did:key:zTestPublisher",
+            ["timestamp"] = "2026-07-09T00:00:00.000000Z",
+            ["event_id"] = "00000000-0000-0000-0000-000000000000",
+            ["event_type"] = "obj.memo.v1",
+            ["level"] = "",
+            ["sequence"] = 0,
+            ["prev_hash"] = "",
+            ["row_hash"] = "unverified",
+            ["signature"] = "unverified",
+            ["tn_sealed"] = 1,
+            ["memo"] = "public extra",
+            ["partners"] = new JsonObject
+            {
+                ["ciphertext"] = Convert.ToBase64String(cipher.Encrypt(partnersBody, [])),
+                ["field_hashes"] = new JsonObject { ["body"] = "tok" },
+            },
+            ["vendors"] = new JsonObject
+            {
+                ["ciphertext"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(48)),
+                ["field_hashes"] = new JsonObject(),
+            },
+        };
+
+        var result = await tn.UnsealAsync(
+            envelope.ToJsonString(),
+            new UnsealOptions
+            {
+                Verify = false,
+                GroupCiphers = new Dictionary<string, ISealedGroupCipher>
+                {
+                    ["partners"] = cipher,
+                    ["vendors"] = cipher,
+                },
+            });
+
+        // The managed cipher opened partners: merged into Plaintext and
+        // Fields, removed from HiddenGroups and SealedBlocks.
+        var partners = Assert.Contains("partners", result.Plaintext);
+        Assert.Equal("for partners", partners["body"]?.GetValue<string>());
+        Assert.Equal("for partners", result.Fields["body"]?.GetValue<string>());
+        Assert.DoesNotContain("partners", result.HiddenGroups);
+        Assert.DoesNotContain(result.SealedBlocks, block => block.Name == "partners");
+
+        // Public extras survive the re-merge; the wire marker still never
+        // leaks into user fields.
+        Assert.Equal("public extra", result.Fields["memo"]?.GetValue<string>());
+        Assert.False(result.Fields.ContainsKey("tn_sealed"));
+
+        // The cipher THREW on the vendors garbage: swallowed, block stays
+        // sealed rather than failing the unseal.
+        Assert.Contains("vendors", result.HiddenGroups);
+        var vendorsBlock = Assert.Single(result.SealedBlocks);
+        Assert.Equal("vendors", vendorsBlock.Name);
+        Assert.False(result.Fields.ContainsKey("vendors"));
+    }
+
+    [Fact]
+    public async Task UnsealSecondPassIgnoresUnregisteredGroups()
+    {
+        await using var tn = await Tn.InitProjectAsync(
+            "sealing",
+            new TnProjectOptions { ProjectDirectory = NewProjectDir() });
+
+        var sealedObject = await tn.SealAsync("obj.memo.v1", new { body = "own" }, NoReceipt());
+
+        // Registering a cipher for a group that is not sealed (or passing
+        // no ciphers at all) leaves the native outcome untouched.
+        var result = await tn.UnsealAsync(
+            sealedObject,
+            new UnsealOptions
+            {
+                GroupCiphers = new Dictionary<string, ISealedGroupCipher>
+                {
+                    ["partners"] = new AesGcmSealedGroupCipher(RandomNumberGenerator.GetBytes(32)),
+                },
+            });
+
+        Assert.Equal("own", result.Fields["body"]?.GetValue<string>());
+        Assert.Empty(result.HiddenGroups);
+        Assert.Empty(result.SealedBlocks);
     }
 }

@@ -29,4 +29,13 @@ public sealed class UnsealOptions
     /// block.
     /// </summary>
     public string Group { get; init; } = "default";
+
+    /// <summary>
+    /// Managed ciphers for the second-pass decrypt seam, keyed by group
+    /// name. After the native walk, every block still sealed whose group
+    /// has a registered cipher is decrypted managed-side and merged into
+    /// the result exactly as a native open would be. A cipher throw for
+    /// one block is swallowed — that block simply stays sealed.
+    /// </summary>
+    public IReadOnlyDictionary<string, ISealedGroupCipher>? GroupCiphers { get; init; }
 }
