@@ -17,8 +17,8 @@ env:
   CARGO_HTTP_MULTIPLEXING: "false"
   CARGO_NET_RETRY: "10"
 
-# One gate, honestly green: the full Python + TypeScript + Rust suites pass,
-# with nothing suppressed. No --deselect pile, no `|| true`. Integration tests
+# One gate, honestly green: the full Python + TypeScript + Rust + C# suites
+# pass, with nothing suppressed. No --deselect pile, no `|| true`. Integration tests
 # (need a live vault server / a Rust CLI binary) live under tests/integration/
 # and are excluded by directory — run them manually with a vault available.
 jobs:
@@ -125,6 +125,33 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --manifest-path Cargo.toml
+
+  csharp-tests:
+    name: csharp-sdk (dotnet test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          # Matches the net8.0 TargetFramework in csharp-sdk/Directory.Build.props.
+          dotnet-version: '8.0.x'
+
+      - name: Build tn-core-ffi
+        # The C# SDK P/Invokes the tn-core-ffi cdylib. NativeLibraryResolver
+        # walks up from the test bin dir probing target/{debug,release}/ for
+        # libtn_core_ffi.so, so a repo-root cargo build is all the discovery
+        # the tests need.
+        run: cargo build -p tn-core-ffi --release
+
+      - name: Run C# tests
+        # Both projects in the sln (TnProto.Tests + TnProto.Cli.Tests) — the
+        # documented recipe from csharp-sdk/README.md. Interop tests
+        # (TN_CSHARP_INTEROP*) and live vault tests (PLUMB_VAULT) self-skip
+        # while their env gates are unset, so the suite runs offline.
+        run: dotnet test csharp-sdk/TnProto.sln
 
   ts-tests:
     name: ts-sdk (node ${{ matrix.node }})
