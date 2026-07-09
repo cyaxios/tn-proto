@@ -87,6 +87,19 @@ internal static partial class NativeMethods
         string fieldsJson,
         string aadJson);
 
+    [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_seal", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial IntPtr RuntimeSeal(
+        IntPtr handle,
+        string objectType,
+        string fieldsJson,
+        string? optionsJson);
+
+    [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_unseal", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial IntPtr RuntimeUnseal(
+        IntPtr handle,
+        string source,
+        string? optionsJson);
+
     [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_read")]
     internal static partial IntPtr RuntimeRead(IntPtr handle, int allRuns, int verify);
 

@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace TnProto.Native;
 
 /// <summary>
@@ -167,6 +169,84 @@ public static class NativeBridge
                 fieldsJson,
                 aadJson))
             ?? throw new TnException(LastError() ?? "native emit with aad returned a null receipt");
+    }
+
+    internal static string Seal(
+        TnNativeHandle handle,
+        string objectType,
+        string fieldsJson,
+        string? optionsJson)
+    {
+        return NativeString.Consume(NativeMethods.RuntimeSeal(
+                handle.RawHandle,
+                objectType,
+                fieldsJson,
+                optionsJson))
+            ?? throw new TnException(LastError() ?? "native seal returned a null result");
+    }
+
+    internal static string Unseal(TnNativeHandle handle, string source, string? optionsJson)
+    {
+        var outcome = NativeString.Consume(NativeMethods.RuntimeUnseal(
+            handle.RawHandle,
+            source,
+            optionsJson));
+        if (outcome is not null)
+        {
+            return outcome;
+        }
+
+        throw MapUnsealError(LastError() ?? "native unseal returned a null result");
+    }
+
+    /// <summary>
+    /// Map the native unseal error channel onto the typed exceptions:
+    /// <c>VerifyError:{json}</c> becomes <see cref="TnVerifyException"/>,
+    /// <c>UnsealError: reason</c> becomes <see cref="TnUnsealException"/>,
+    /// anything else stays a plain <see cref="TnException"/>.
+    /// </summary>
+    private static TnException MapUnsealError(string message)
+    {
+        const string verifyPrefix = "VerifyError:";
+        const string unsealPrefix = "UnsealError: ";
+
+        if (message.StartsWith(verifyPrefix, StringComparison.Ordinal))
+        {
+            var payload = message[verifyPrefix.Length..];
+            try
+            {
+                if (JsonNode.Parse(payload) is JsonObject details)
+                {
+                    var failedChecks = new List<string>();
+                    if (details["failed_checks"] is JsonArray checksNode)
+                    {
+                        foreach (var check in checksNode)
+                        {
+                            if (check?.GetValue<string>() is { } name)
+                            {
+                                failedChecks.Add(name);
+                            }
+                        }
+                    }
+
+                    return new TnVerifyException(
+                        failedChecks,
+                        details["sequence"]?.GetValue<long>() ?? 0,
+                        details["event_type"]?.GetValue<string>() ?? "");
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Fall through to the plain exception with the raw message.
+            }
+        }
+
+        if (message.StartsWith(unsealPrefix, StringComparison.Ordinal))
+        {
+            return new TnUnsealException(message[unsealPrefix.Length..]);
+        }
+
+        return new TnException(message);
     }
 
     internal static string Read(TnNativeHandle handle, bool allRuns, bool verify)

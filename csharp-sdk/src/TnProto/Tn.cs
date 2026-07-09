@@ -282,6 +282,105 @@ public sealed class Tn : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Seal fields into a portable attested object (standalone envelope).
+    /// </summary>
+    /// <remarks>
+    /// The returned <see cref="SealedObject"/> travels outside any log — a
+    /// file, an HTTP body, a prompt. Transport its
+    /// <see cref="SealedObject.RawJson"/> verbatim; never re-serialize the
+    /// parsed envelope. Fields encrypt per the ceremony's group config
+    /// exactly as an emit would, but the ceremony's chain state is never
+    /// touched. By default a <c>tn.object.sealed</c> receipt row is chained
+    /// onto the ceremony's admin surface; see <see cref="SealOptions"/>.
+    /// </remarks>
+    public Task<SealedObject> SealAsync<TFields>(
+        string objectType,
+        TFields fields,
+        SealOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        if (string.IsNullOrWhiteSpace(objectType))
+        {
+            throw new ArgumentException("Object type must not be empty.", nameof(objectType));
+        }
+
+        var fieldsJson = JsonSerializer.Serialize(fields);
+        string? optionsJson = null;
+        if (options is not null)
+        {
+            optionsJson = JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["receipt"] = options.Receipt,
+                ["aad"] = options.Aad,
+            });
+        }
+
+        var wire = NativeBridge.Seal(_handle, objectType, fieldsJson, optionsJson);
+        return Task.FromResult(SealedObject.FromJson(wire));
+    }
+
+    /// <summary>
+    /// Verify a sealed object and open every group block a held key fits.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="source"/> is the sealed object's wire JSON text —
+    /// the original wire string is the safe input. Holding no key that fits
+    /// a block is NOT an error: the verified public frame comes back with
+    /// those blocks listed in <see cref="UnsealResult.HiddenGroups"/> /
+    /// <see cref="UnsealResult.SealedBlocks"/>.
+    /// </remarks>
+    /// <exception cref="TnVerifyException">
+    /// A signature or row-hash check failed with
+    /// <see cref="UnsealOptions.Verify"/> set (the default).
+    /// </exception>
+    /// <exception cref="TnUnsealException">
+    /// The input is not a sealed-object envelope at all.
+    /// </exception>
+    public Task<UnsealResult> UnsealAsync(
+        string source,
+        UnsealOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            throw new ArgumentException("Source must not be empty.", nameof(source));
+        }
+
+        string? optionsJson = null;
+        if (options is not null)
+        {
+            optionsJson = JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["verify"] = options.Verify,
+                ["as_recipient"] = options.AsRecipient,
+                ["group"] = options.Group,
+            });
+        }
+
+        var outcomeJson = NativeBridge.Unseal(_handle, source, optionsJson);
+        return Task.FromResult(UnsealResult.FromNativeJson(outcomeJson));
+    }
+
+    /// <summary>
+    /// Verify and open a <see cref="SealedObject"/> returned by
+    /// <see cref="SealAsync{TFields}"/>.
+    /// </summary>
+    public Task<UnsealResult> UnsealAsync(
+        SealedObject sealedObject,
+        UnsealOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sealedObject);
+        return UnsealAsync(sealedObject.RawJson, options, cancellationToken);
+    }
+
+    /// <summary>
     /// Read decrypted TN log entries.
     /// </summary>
     public Task<IReadOnlyList<Entry>> ReadAsync(
