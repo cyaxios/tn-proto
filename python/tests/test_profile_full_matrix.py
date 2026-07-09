@@ -84,6 +84,7 @@ def _emit_and_inspect(tmp_path: Path, profile: str) -> dict:
                 "chain":   cer.get("chain"),
             }},
             "yaml_handlers_sink_kinds": sink_kinds,
+            "yaml_handlers": handlers,
             "last_entry": last,
         }}))
     """).strip()
@@ -212,14 +213,22 @@ def test_flush_axis_GAP(tmp_path: Path, profile: str):
     sub = tmp_path / profile
     sub.mkdir()
     result = _emit_and_inspect(sub, profile)
-    handlers_text = json.dumps(result.get("yaml_handlers_sink_kinds", []))
-    # The yaml handler dicts only carry kind/path/etc — no flush field.
-    # This test pins the gap as a known-skip for now.
-    pytest.xfail(
-        f"GAP: profile.flush={CATALOG[profile].flush!r} is not "
-        f"reflected in yaml handlers (no flush policy field on the "
-        f"handler dict). handlers_text={handlers_text}"
-    )
+    handlers = [h for h in result.get("yaml_handlers", []) if isinstance(h, dict)]
+    # Self-checking like its siblings: if a flush policy field ever ships
+    # on the handler dicts, this test flips to a genuine pass/assert
+    # instead of masking the fix as an eternal expected-failure.
+    flushed = [h for h in handlers if "flush" in h]
+    if not flushed:
+        pytest.xfail(
+            f"GAP: profile.flush={CATALOG[profile].flush!r} is not "
+            f"reflected in yaml handlers (no flush policy field on the "
+            f"handler dict). handlers={json.dumps(handlers)}"
+        )
+    for h in flushed:
+        assert h["flush"] == CATALOG[profile].flush, (
+            f"handler {h.get('kind')} carries flush={h['flush']!r}, "
+            f"expected profile.flush={CATALOG[profile].flush!r}"
+        )
 
 
 # --------------------------------------------------------------------
