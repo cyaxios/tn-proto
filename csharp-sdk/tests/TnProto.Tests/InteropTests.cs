@@ -1096,6 +1096,277 @@ public sealed class InteropTests
         Assert.True(receipt.AcceptedCount > 0);
     }
 
+    [Fact]
+    public async Task PythonSealsCSharpUnseals()
+    {
+        if (!await PythonReadyAsync())
+        {
+            return;
+        }
+
+        var projectDir = NewTempDir();
+        var output = await RunPythonAsync(
+            """
+            import tn
+
+            tn.init("interop_seal_py")
+            sealed = tn.seal("obj.invoice.v1", receipt=False, amount=9800, customer="acme")
+            print("YAML=" + str(tn.current_config().yaml_path))
+            print("SEALED=" + str(sealed))
+            tn.flush_and_close()
+            """,
+            projectDir);
+        var yamlPath = ValueAfterPrefix(output, "YAML=");
+        var sealedLine = ValueAfterPrefix(output, "SEALED=");
+
+        // Same ceremony, C# side: the native walk opens the block with the
+        // ceremony's own kit and the self-describing verify passes.
+        await using var tn = await Tn.InitAsync(yamlPath);
+        var result = await tn.UnsealAsync(sealedLine);
+
+        Assert.True(result.Valid.Signature);
+        Assert.True(result.Valid.RowHash);
+        Assert.Empty(result.HiddenGroups);
+        Assert.Equal(2, result.Fields.Count);
+        Assert.Equal(9800, result.Fields["amount"]?.GetValue<int>());
+        Assert.Equal("acme", result.Fields["customer"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CSharpSealsPythonUnseals()
+    {
+        if (!await PythonReadyAsync())
+        {
+            return;
+        }
+
+        var projectDir = NewTempDir();
+        var sealedPath = Path.Combine(projectDir, "sealed.json");
+        string yamlPath;
+
+        await using (var tn = await Tn.InitProjectAsync(
+            "interop_seal_cs",
+            new TnProjectOptions { ProjectDirectory = projectDir }))
+        {
+            var sealedObject = await tn.SealAsync(
+                "obj.invoice.v1",
+                new { amount = 4200, customer = "zenith" },
+                new SealOptions { Receipt = false });
+            // RawJson is the transport artifact — written verbatim.
+            await File.WriteAllTextAsync(sealedPath, sealedObject.RawJson);
+            yamlPath = tn.YamlPath;
+        }
+
+        var output = await RunPythonAsync(
+            """
+            import json
+            import sys
+            from pathlib import Path
+
+            import tn
+
+            tn.init(sys.argv[1])
+            entry = tn.unseal(Path(sys.argv[2]))
+            print(json.dumps(dict(entry.fields), sort_keys=True))
+            tn.flush_and_close()
+            """,
+            projectDir,
+            yamlPath,
+            sealedPath);
+
+        var fields = LastJsonObject(output);
+        Assert.Equal(4200, fields["amount"]?.GetValue<int>());
+        Assert.Equal("zenith", fields["customer"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task PythonSealsCSharpUnsealsPublicContainers()
+    {
+        if (!await PythonReadyAsync())
+        {
+            return;
+        }
+
+        // Public container values feed the row hash as Python str(value)
+        // (repr rendering); a C# unseal recomputing that hash natively
+        // proves the cross-impl rendering end to end.
+        var projectDir = NewTempDir();
+        var output = await RunPythonAsync(
+            """
+            import sys
+            from pathlib import Path
+
+            import yaml as _yaml
+
+            import tn
+
+            yaml_path = Path(sys.argv[1])
+            tn.init(yaml_path, cipher="btn")
+            tn.flush_and_close()
+
+            doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+            doc["vault"]["enabled"] = False
+            doc["ceremony"]["mode"] = "local"
+            doc["public_fields"].extend(["pv", "pv2"])
+            yaml_path.write_text(_yaml.safe_dump(doc, allow_unicode=True), encoding="utf-8")
+
+            tn.init(yaml_path)
+            sealed = tn.seal(
+                "obj.container.v1",
+                receipt=False,
+                pv=[1, 2, 3],
+                pv2={"a": 1},
+                amount=5,
+            )
+            print("SEALED=" + str(sealed))
+            tn.flush_and_close()
+            """,
+            projectDir,
+            Path.Combine(projectDir, "tn.yaml"));
+        var sealedLine = ValueAfterPrefix(output, "SEALED=");
+
+        await using var tn = await Tn.InitAsync(Path.Combine(projectDir, "tn.yaml"));
+        var result = await tn.UnsealAsync(sealedLine);
+
+        // row_hash true IS the container-rendering parity proof.
+        Assert.True(result.Valid.Signature);
+        Assert.True(result.Valid.RowHash);
+        Assert.True(JsonNode.DeepEquals(
+            result.Fields["pv"],
+            new JsonArray(1, 2, 3)));
+        Assert.True(JsonNode.DeepEquals(
+            result.Fields["pv2"],
+            new JsonObject { ["a"] = 1 }));
+        Assert.Equal(5, result.Fields["amount"]?.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task CSharpUnsealForeignObjectReturnsPublicFrame()
+    {
+        if (!await PythonReadyAsync())
+        {
+            return;
+        }
+
+        var publisherDir = NewTempDir();
+        var output = await RunPythonAsync(
+            """
+            import tn
+
+            tn.init("interop_seal_a")
+            sealed = tn.seal("obj.memo.v1", receipt=False, body="private")
+            print("SEALED=" + str(sealed))
+            tn.flush_and_close()
+            """,
+            publisherDir);
+        var sealedLine = ValueAfterPrefix(output, "SEALED=");
+
+        // A fresh, unrelated C# ceremony holds no fitting key: no
+        // exception, verified public frame, block left sealed.
+        await using var stranger = await Tn.InitProjectAsync(
+            "interop_seal_b",
+            new TnProjectOptions { ProjectDirectory = NewTempDir() });
+        var result = await stranger.UnsealAsync(sealedLine);
+
+        Assert.True(result.Valid.Signature);
+        Assert.True(result.Valid.RowHash);
+        Assert.Equal(["default"], result.HiddenGroups);
+        Assert.False(result.Fields.ContainsKey("body"));
+        var block = Assert.Single(result.SealedBlocks);
+        Assert.Equal("default", block.Name);
+    }
+
+    [Fact]
+    public async Task PythonSealsCSharpUnsealsAsRecipient()
+    {
+        if (!await PythonReadyAsync())
+        {
+            return;
+        }
+
+        var publisherDir = NewTempDir();
+        var kitDir = Path.Combine(NewTempDir(), "recipient-keys");
+        Directory.CreateDirectory(kitDir);
+
+        var output = await RunPythonAsync(
+            """
+            import sys
+
+            import tn
+
+            tn.init("interop_seal_pub")
+            tn.admin.add_recipient(
+                "default",
+                recipient_did="did:key:zCSharpRecipientStub",
+                out_path=sys.argv[1],
+                raw=True,
+            )
+            sealed = tn.seal("obj.invoice.v1", receipt=False, amount=7)
+            print("SEALED=" + str(sealed))
+            tn.flush_and_close()
+            """,
+            publisherDir,
+            Path.Combine(kitDir, "default.btn.mykit"));
+        var sealedLine = ValueAfterPrefix(output, "SEALED=");
+
+        // Bring-your-own-kit: the C# ceremony is unrelated; only the kit
+        // directory Python minted opens the named group.
+        await using var recipient = await Tn.InitProjectAsync(
+            "interop_seal_recipient",
+            new TnProjectOptions { ProjectDirectory = NewTempDir() });
+        var result = await recipient.UnsealAsync(
+            sealedLine,
+            new UnsealOptions { AsRecipient = kitDir, Group = "default" });
+
+        Assert.True(result.Valid.Signature);
+        Assert.True(result.Valid.RowHash);
+        Assert.Empty(result.HiddenGroups);
+        Assert.Equal(7, result.Fields["amount"]?.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task PythonSealsWithAadCSharpUnseals()
+    {
+        if (!await PythonReadyAsync())
+        {
+            return;
+        }
+
+        var projectDir = NewTempDir();
+        var output = await RunPythonAsync(
+            """
+            import tn
+
+            tn.init("interop_seal_aad")
+            sealed = tn.seal(
+                "obj.case.v1",
+                receipt=False,
+                aad={"case": "A-17"},
+                note="sealed note",
+            )
+            print("YAML=" + str(tn.current_config().yaml_path))
+            print("SEALED=" + str(sealed))
+            tn.flush_and_close()
+            """,
+            projectDir);
+        var yamlPath = ValueAfterPrefix(output, "YAML=");
+        var sealedLine = ValueAfterPrefix(output, "SEALED=");
+
+        await using var tn = await Tn.InitAsync(yamlPath);
+        var result = await tn.UnsealAsync(sealedLine);
+
+        // The tn_aad echo crossed implementations: C# reconstructed the
+        // bound AAD bytes from it (the decrypt opened) and the echo fed
+        // the recomputed row hash (verify passed).
+        Assert.True(result.Valid.Signature);
+        Assert.True(result.Valid.RowHash);
+        Assert.Equal("sealed note", result.Fields["note"]?.GetValue<string>());
+        var echo = result.Envelope["tn_aad"]?.GetValue<string>();
+        Assert.NotNull(echo);
+        var binding = JsonNode.Parse(echo) as JsonObject;
+        Assert.Equal("A-17", binding?["default"]?["case"]?.GetValue<string>());
+    }
+
     private static string NewTempDir()
     {
         var path = Path.Combine(Path.GetTempPath(), "tn-csharp-interop-" + Guid.NewGuid().ToString("N"));
