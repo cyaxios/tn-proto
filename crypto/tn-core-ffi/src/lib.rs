@@ -967,6 +967,218 @@ pub unsafe extern "C" fn tn_runtime_emit_with_aad(
     }
 }
 
+/// Render a sealed-object verb error into the machine-parseable
+/// `tn_last_error` channel:
+///
+/// - failed verification (the SDK's `Error::Verify`) becomes
+///   `VerifyError:` + a JSON object `{"failed_checks": [...],
+///   "sequence": n, "event_type": "..."}`;
+/// - malformed unseal input (`tn_core::Error::Malformed` for a sealed
+///   object) becomes `UnsealError: ` + the reason;
+/// - everything else stays a plain message.
+fn sealed_object_error_message(err: &tn_proto::Error) -> String {
+    match err {
+        tn_proto::Error::Verify {
+            failed_checks,
+            sequence,
+            event_type,
+        } => format!(
+            "VerifyError:{}",
+            json!({
+                "failed_checks": failed_checks,
+                "sequence": sequence,
+                "event_type": event_type,
+            })
+        ),
+        tn_proto::Error::Core(tn_core::Error::Malformed {
+            kind: "sealed object",
+            reason,
+        }) => format!("UnsealError: {reason}"),
+        other => other.to_string(),
+    }
+}
+
+/// Parse [`tn_runtime_seal`]'s nullable `options_json`:
+/// `{"receipt": bool (default true), "aad": object|null}`.
+fn parse_seal_options(options_json: Option<String>) -> Result<tn_core::SealOptions, String> {
+    let mut opts = tn_core::SealOptions::default();
+    let Some(text) = options_json else {
+        return Ok(opts);
+    };
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|err| format!("options_json must be valid JSON: {err}"))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "options_json must be a JSON object".to_string())?;
+    match obj.get("receipt") {
+        None | Some(Value::Null) => {}
+        Some(Value::Bool(receipt)) => opts.receipt = *receipt,
+        Some(_) => {
+            return Err("options_json field \"receipt\" must be a boolean or null".to_string())
+        }
+    }
+    match obj.get("aad") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(aad)) => opts.aad = aad.clone(),
+        Some(_) => {
+            return Err("options_json field \"aad\" must be a JSON object or null".to_string())
+        }
+    }
+    Ok(opts)
+}
+
+/// Parse [`tn_runtime_unseal`]'s nullable `options_json`:
+/// `{"verify": bool (default true), "as_recipient": "path"|null,
+/// "group": "default"}`.
+fn parse_unseal_options(options_json: Option<String>) -> Result<tn_core::UnsealOptions, String> {
+    let mut opts = tn_core::UnsealOptions::default();
+    let Some(text) = options_json else {
+        return Ok(opts);
+    };
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|err| format!("options_json must be valid JSON: {err}"))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "options_json must be a JSON object".to_string())?;
+    match obj.get("verify") {
+        None | Some(Value::Null) => {}
+        Some(Value::Bool(verify)) => opts.verify = *verify,
+        Some(_) => {
+            return Err("options_json field \"verify\" must be a boolean or null".to_string())
+        }
+    }
+    if let Some(dir) = optional_json_string(obj, "as_recipient")? {
+        opts.as_recipient = Some(PathBuf::from(dir));
+    }
+    if let Some(group) = optional_json_string(obj, "group")? {
+        opts.group = group;
+    }
+    Ok(opts)
+}
+
+/// Serialize an [`tn_core::UnsealOutcome`] into the stable JSON shape the
+/// language SDKs consume from [`tn_runtime_unseal`].
+fn unseal_outcome_json(outcome: tn_core::UnsealOutcome) -> Result<String, String> {
+    let plaintext: Map<String, Value> = outcome.plaintext.into_iter().collect();
+    let sealed_blocks: Vec<Value> = outcome
+        .sealed_blocks
+        .into_iter()
+        .map(|block| {
+            json!({
+                "name": block.name,
+                "ciphertext_b64": block.ciphertext_b64,
+                "field_hashes": block.field_hashes,
+                "aad_b64": block.aad_b64,
+                "keystore_candidates": block.keystore_candidates,
+            })
+        })
+        .collect();
+    serde_json::to_string(&json!({
+        "envelope": outcome.envelope,
+        "plaintext": plaintext,
+        "valid": {
+            "signature": outcome.valid.signature,
+            "row_hash": outcome.valid.row_hash,
+        },
+        "hidden_groups": outcome.hidden_groups,
+        "sealed_blocks": sealed_blocks,
+        "fields": outcome.fields,
+    }))
+    .map_err(|err| err.to_string())
+}
+
+/// Seal fields into a portable attested object (standalone envelope) and
+/// return its wire line.
+///
+/// `fields_json` must be a JSON object. `options_json` may be null;
+/// `{"receipt": bool (default true), "aad": object|null}`. The returned
+/// string is the sealed object's compact envelope JSON line with NO trailing
+/// newline — the transport artifact. SDKs must hand it on verbatim, never a
+/// re-serialization (foreign JSON round-trips are exactly what the
+/// fragile-value guard protects against). The returned string is owned by
+/// the caller and must be released with [`tn_string_free`]. Returns null on
+/// error. Use [`tn_last_error`] for details.
+#[no_mangle]
+pub unsafe extern "C" fn tn_runtime_seal(
+    handle: *const TnHandle,
+    object_type: *const c_char,
+    fields_json: *const c_char,
+    options_json: *const c_char,
+) -> *mut c_char {
+    clear_error();
+    match take_result(|| {
+        let object_type = string_from_ptr(object_type, "object_type")?;
+        let fields_json = string_from_ptr(fields_json, "fields_json")?;
+        let fields_value: Value = serde_json::from_str(&fields_json)
+            .map_err(|err| format!("fields_json must be valid JSON: {err}"))?;
+        let fields = fields_value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "fields_json must be a JSON object".to_string())?;
+        let opts = parse_seal_options(optional_string_from_ptr(options_json, "options_json")?)?;
+        let sealed = handle_ref(handle)?
+            .tn()?
+            .seal(&object_type, Value::Object(fields), opts)
+            .map_err(|err| sealed_object_error_message(&err))?;
+        Ok(sealed.wire)
+    }) {
+        Ok(value) => into_c_string_ptr(value),
+        Err(err) => {
+            set_error(err);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Verify a sealed object and open every group block a held key fits.
+///
+/// `source` is the sealed object's wire JSON text (the original wire string
+/// is the safe input). `options_json` may be null; `{"verify": bool (default
+/// true), "as_recipient": "path"|null, "group": "default"}`. With
+/// `as_recipient` set, only `group` is decrypted, with keys from that bare
+/// directory (the handle's own groups and keystore are not consulted).
+///
+/// Returns the outcome JSON: `{"envelope": {...}, "plaintext":
+/// {"<group>": {...}}, "valid": {"signature": bool, "row_hash": bool},
+/// "hidden_groups": [...], "sealed_blocks": [{"name", "ciphertext_b64",
+/// "field_hashes", "aad_b64", "keystore_candidates"}], "fields": {...}}`.
+/// `sealed_blocks` + `aad_b64` are the managed-cipher seam: a host holding a
+/// cipher this build lacks (jwe always; hibe when the feature is off — the
+/// FFI build itself gets hibe via feature unification from its direct
+/// tn-core dependency) can run a second-pass decrypt without reimplementing
+/// the AAD reconstruction. Holding no fitting key is NOT an error — the
+/// verified public frame comes back with the blocks left sealed.
+///
+/// Error channel (see [`tn_last_error`]): failed verification is
+/// `VerifyError:` + JSON `{"failed_checks": [...], "sequence": n,
+/// "event_type": "..."}`; malformed input is `UnsealError: ` + reason;
+/// everything else is a plain message. The returned string is owned by the
+/// caller and must be released with [`tn_string_free`]. Returns null on
+/// error.
+#[no_mangle]
+pub unsafe extern "C" fn tn_runtime_unseal(
+    handle: *const TnHandle,
+    source: *const c_char,
+    options_json: *const c_char,
+) -> *mut c_char {
+    clear_error();
+    match take_result(|| {
+        let source = string_from_ptr(source, "source")?;
+        let opts = parse_unseal_options(optional_string_from_ptr(options_json, "options_json")?)?;
+        let outcome = handle_ref(handle)?
+            .tn()?
+            .unseal(&source, opts)
+            .map_err(|err| sealed_object_error_message(&err))?;
+        unseal_outcome_json(outcome)
+    }) {
+        Ok(value) => into_c_string_ptr(value),
+        Err(err) => {
+            set_error(err);
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Read decrypted entries and return a JSON array.
 ///
 /// `all_runs` and `verify` are treated as false when set to 0 and true
@@ -2142,6 +2354,37 @@ mod tests {
             .clone()
     }
 
+    unsafe fn seal_wire(
+        handle: *mut TnHandle,
+        object_type: &str,
+        fields: &str,
+        options: Option<&str>,
+    ) -> String {
+        let object_type = c(object_type);
+        let fields = c(fields);
+        let options_c = options.map(c);
+        consume(tn_runtime_seal(
+            handle,
+            object_type.as_ptr(),
+            fields.as_ptr(),
+            options_c.as_ref().map_or(ptr::null(), |o| o.as_ptr()),
+        ))
+    }
+
+    unsafe fn unseal_raw(
+        handle: *mut TnHandle,
+        source: &str,
+        options: Option<&str>,
+    ) -> *mut c_char {
+        let source = c(source);
+        let options_c = options.map(c);
+        tn_runtime_unseal(
+            handle,
+            source.as_ptr(),
+            options_c.as_ref().map_or(ptr::null(), |o| o.as_ptr()),
+        )
+    }
+
     #[test]
     fn emit_with_aad_binds_markers_and_reads_back() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2303,6 +2546,130 @@ mod tests {
             assert!(
                 admin_text.contains("tn.agents.policy_published"),
                 "policy_published event not on the admin surface"
+            );
+
+            assert_eq!(tn_runtime_close(handle), 0);
+        }
+    }
+
+    #[test]
+    fn ffi_seal_unseal_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            let handle = open_project(dir.path(), "ffi_seal");
+
+            let wire = seal_wire(
+                handle,
+                "obj.invoice.v1",
+                r#"{"amount":9800,"customer":"acme"}"#,
+                Some(r#"{"receipt":false}"#),
+            );
+            assert!(
+                !wire.ends_with('\n'),
+                "wire line must carry no trailing newline"
+            );
+            let sealed: Value = serde_json::from_str(&wire).expect("wire is not JSON");
+            assert_eq!(sealed["sequence"], json!(0));
+            assert_eq!(sealed["prev_hash"], json!(""));
+            assert_eq!(sealed["tn_sealed"], json!(1));
+            assert!(
+                sealed.get("amount").is_none(),
+                "fields must not ride in the clear"
+            );
+            assert!(sealed["default"]["ciphertext"].is_string());
+            // receipt:false wrote nothing onto the admin surface.
+            let yaml_path = consume(tn_runtime_yaml_path(handle));
+            let admin_log = std::path::Path::new(&yaml_path)
+                .parent()
+                .expect("yaml path has a parent")
+                .join("admin")
+                .join("default.ndjson");
+            let admin_text = std::fs::read_to_string(&admin_log).unwrap_or_default();
+            assert!(
+                !admin_text.contains("tn.object.sealed"),
+                "receipt:false must not write a receipt row"
+            );
+
+            let outcome: Value =
+                serde_json::from_str(&consume(unseal_raw(handle, &wire, None)))
+                    .expect("unseal outcome is not JSON");
+            assert_eq!(outcome["valid"]["signature"], json!(true));
+            assert_eq!(outcome["valid"]["row_hash"], json!(true));
+            assert_eq!(
+                outcome["fields"],
+                json!({"amount": 9800, "customer": "acme"})
+            );
+            assert_eq!(outcome["plaintext"]["default"]["amount"], json!(9800));
+            assert_eq!(outcome["hidden_groups"], json!([]));
+            assert_eq!(outcome["sealed_blocks"], json!([]));
+            assert_eq!(outcome["envelope"]["row_hash"], sealed["row_hash"]);
+            assert_eq!(outcome["envelope"]["tn_sealed"], json!(1));
+            assert!(
+                outcome["fields"].get("tn_sealed").is_none(),
+                "the wire marker must not leak into user fields"
+            );
+
+            // Default options chain a tn.object.sealed receipt row onto
+            // the ceremony's admin surface.
+            let _ = seal_wire(handle, "obj.invoice.v1", r#"{"amount":1}"#, None);
+            let admin_text = std::fs::read_to_string(&admin_log).expect("admin log missing");
+            assert!(
+                admin_text.contains("tn.object.sealed"),
+                "default seal must write the receipt row onto the admin surface"
+            );
+
+            assert_eq!(tn_runtime_close(handle), 0);
+        }
+    }
+
+    #[test]
+    fn ffi_unseal_verifyerror_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            let handle = open_project(dir.path(), "ffi_seal_verify");
+
+            let wire = seal_wire(
+                handle,
+                "obj.invoice.v1",
+                r#"{"amount":1}"#,
+                Some(r#"{"receipt":false}"#),
+            );
+            let tampered = wire.replace("\"tn_sealed\":1", "\"tn_sealed\":2");
+            assert_ne!(wire, tampered, "wire must carry the compact marker to tamper");
+
+            // Tampering a public value flips the recomputed row hash but
+            // leaves the signature (over the untouched row_hash string)
+            // valid, so failed_checks names row_hash alone.
+            let result = unseal_raw(handle, &tampered, None);
+            assert!(result.is_null(), "tampered object must fail verification");
+            let message = last_error_message().expect("verify failure must set tn_last_error");
+            let payload = message
+                .strip_prefix("VerifyError:")
+                .unwrap_or_else(|| panic!("expected VerifyError: prefix, got: {message}"));
+            let parsed: Value =
+                serde_json::from_str(payload).expect("VerifyError payload is not JSON");
+            assert_eq!(parsed["failed_checks"], json!(["row_hash"]));
+            assert_eq!(parsed["sequence"], json!(0));
+            assert_eq!(parsed["event_type"], json!("obj.invoice.v1"));
+
+            // verify:false returns the outcome despite the tamper, with
+            // both valid flags reported false.
+            let outcome: Value = serde_json::from_str(&consume(unseal_raw(
+                handle,
+                &tampered,
+                Some(r#"{"verify":false}"#),
+            )))
+            .expect("unseal outcome is not JSON");
+            assert_eq!(outcome["valid"], json!({"signature": false, "row_hash": false}));
+
+            // Malformed input is the UnsealError: prefix, not a verify
+            // failure and not a plain message.
+            let malformed = unseal_raw(handle, "not a sealed object at all", None);
+            assert!(malformed.is_null(), "malformed input must be rejected");
+            let message = last_error_message().expect("malformed input must set tn_last_error");
+            assert!(
+                message.starts_with("UnsealError: "),
+                "unexpected error: {message}"
             );
 
             assert_eq!(tn_runtime_close(handle), 0);
