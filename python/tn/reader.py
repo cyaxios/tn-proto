@@ -283,36 +283,45 @@ def read_all(
 
 def _discover_keybag_ciphers(
     keystore_path: Path,
-) -> dict[str, _cipher.GroupCipher]:
-    """Load every kit in ``keystore_path`` as ``{group_name: cipher}``.
+) -> dict[str, list[_cipher.GroupCipher]]:
+    """Load every kit in ``keystore_path`` as ``{group_name: [ciphers]}``.
 
     Used by :func:`read_with_keybag` so a reader holding kits from one
     or more groups (e.g. ``default.btn.mykit`` + ``tn.agents.btn.mykit``
     + an absorbed ``payments.btn.mykit``) gets ALL those groups
-    decrypted on a single ``tn.read`` call. Missing kits are silently
-    omitted — the read pass just yields ``$no_read_key`` for any group
-    we don't have a kit for, matching the single-group behaviour.
+    decrypted on a single ``tn.read`` call. A group can hold keys under
+    SEVERAL ciphers at once (the reader's own btn ceremony plus an
+    absorbed jwe key or hibe grant for the same group name) and a log
+    line does not say which cipher sealed it, so each group maps to a
+    candidate list — btn, then jwe, then hibe, the same order as
+    :func:`read_as_recipient` — and callers try each candidate until
+    one opens. Missing kits are silently omitted — the read pass just
+    yields ``$no_read_key`` for any group we hold no key for, matching
+    the single-group behaviour.
     """
-    bag: dict[str, _cipher.GroupCipher] = {}
+    bag: dict[str, list[_cipher.GroupCipher]] = {}
     if not keystore_path.is_dir():
         return bag
-    for entry in keystore_path.iterdir():
-        name = entry.name
-        if name.endswith(".btn.mykit"):
-            group = name[: -len(".btn.mykit")]
+    names = sorted(entry.name for entry in keystore_path.iterdir() if entry.is_file())
+    for suffix, loader in (
+        (".btn.mykit", _cipher.BtnGroupCipher.load),
+        # JWE: ``mykey`` is the recipient's private key; sidecar files
+        # (sender pub, recipients list) are optional for decrypt.
+        (".jwe.mykey", _cipher.JWEGroupCipher.load),
+        # hibe: needs the ``.hibe.mpk`` + ``.hibe.idpath`` sidecars an
+        # absorbed grant kit lands next to the sk; a bare sk fails the
+        # load and is skipped like any other bad kit.
+        (".hibe.sk", _cipher.HibeGroupCipher.load),
+    ):
+        for name in names:
+            if not name.endswith(suffix):
+                continue
+            group = name[: -len(suffix)]
             try:
-                bag[group] = _cipher.BtnGroupCipher.load(keystore_path, group)
+                candidate = loader(keystore_path, group)
             except Exception:  # noqa: BLE001 — best-effort load; bad kit just doesn't join the bag
                 continue
-        elif name.endswith(".jwe.mykey"):
-            group = name[: -len(".jwe.mykey")]
-            # JWE: ``mykey`` is the recipient's private key; the sender's
-            # pub-key sidecar must also be present for ``as_recipient``
-            # construction. Fall back silently if not.
-            try:
-                bag[group] = _cipher.JWEGroupCipher.load(keystore_path, group)
-            except Exception:  # noqa: BLE001
-                continue
+            bag.setdefault(group, []).append(candidate)
     return bag
 
 
@@ -326,10 +335,11 @@ def read_with_keybag(
     """Read a log decrypting every group whose kit lives in
     ``keystore_dir``.
 
-    "Key bag" semantics: the SDK walks every ``*.btn.mykit`` and
-    ``*.jwe.mykey`` in ``keystore_dir``, builds one cipher per group,
-    and on each envelope tries every group block against its matching
-    kit. The reader gets back the union of what any kit can decrypt.
+    "Key bag" semantics: the SDK walks every ``*.btn.mykit``,
+    ``*.jwe.mykey``, and ``*.hibe.sk`` in ``keystore_dir``, builds the
+    cipher candidates per group, and on each envelope tries every group
+    block against its group's candidates. The reader gets back the
+    union of what any kit can decrypt.
 
     This is the default path for ``tn.read(log=...)`` after PR (#57):
     after ``tn.absorb(bundle)`` the bundle's kits land in
@@ -397,25 +407,33 @@ def _lines_with_keybag(
             expect_genesis=expect_genesis,
         )
 
-        # Walk every group block in the envelope; try the matching
-        # cipher from the bag. Groups we don't have a kit for stay
-        # silent (no $no_read_key entry — matches what an outside
-        # observer would see).
+        # Walk every group block in the envelope; try each candidate
+        # cipher the bag holds for that group — first success wins, and
+        # the sentinel is chosen only after every candidate missed.
+        # Groups we hold no key for stay silent (no $no_read_key entry
+        # — matches what an outside observer would see).
         plaintext: dict[str, dict[str, Any]] = {}
         for key, block in env.items():
             if not isinstance(block, dict) or "ciphertext" not in block:
                 continue
-            cipher = bag.get(key)
-            if cipher is None:
+            candidates = bag.get(key)
+            if not candidates:
                 continue
-            try:
-                ct_bytes = base64.b64decode(block["ciphertext"])
-                pt = cipher.decrypt(ct_bytes, _aad_bytes_for(env, key))
-                plaintext[key] = json.loads(pt.decode("utf-8"))
-            except _cipher.NotARecipientError:
-                plaintext[key] = {"$no_read_key": True}
-            except Exception:  # noqa: BLE001 — bad ciphertext doesn't abort the stream
-                plaintext[key] = {"$decrypt_error": True}
+            saw_no_key = False
+            for cipher in candidates:
+                try:
+                    ct_bytes = base64.b64decode(block["ciphertext"])
+                    pt = cipher.decrypt(ct_bytes, _aad_bytes_for(env, key))
+                    plaintext[key] = json.loads(pt.decode("utf-8"))
+                    break
+                except _cipher.NotARecipientError:
+                    saw_no_key = True
+                except Exception:  # noqa: BLE001 — bad ciphertext doesn't abort the stream
+                    pass
+            if key not in plaintext:
+                plaintext[key] = (
+                    {"$no_read_key": True} if saw_no_key else {"$decrypt_error": True}
+                )
 
         sig_ok = True
         if verify_signatures:

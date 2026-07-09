@@ -443,10 +443,11 @@ def _decrypt_walk(
 ) -> dict[str, dict[str, Any]]:
     """Try every candidate key per group; first fit wins, failures skip.
 
-    The default keybag walk (reader._discover_keybag_ciphers) holds one
-    cipher per group and skips hibe kits, unlike the as_recipient
-    candidate loading — known inherited reader behavior; the fix belongs
-    in the reader later.
+    Both walks hold multi-cipher candidates: the as_recipient path
+    loads every cipher for the named group, and the default keybag walk
+    (reader._discover_keybag_ciphers) maps each group to a candidate
+    list (btn, jwe, hibe) — so an absorbed grant under a different
+    cipher than the reader's own ceremony still opens.
     """
     plaintext: dict[str, dict[str, Any]] = {}
 
@@ -486,9 +487,9 @@ def _decrypt_walk(
         for gname in groups_from_env:
             if gname in plaintext:
                 continue
-            cipher_obj = bag.get(gname)
-            if cipher_obj is not None:
-                _try(gname, cipher_obj)
+            for cipher_obj in bag.get(gname, []):
+                if _try(gname, cipher_obj):
+                    break
     return plaintext
 
 
