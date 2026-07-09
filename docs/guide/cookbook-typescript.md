@@ -155,6 +155,75 @@ signature, row-hash, and chain integrity:
 {"event_type":"user.login","sequence":1,"timestamp":"2026-06-08T15:26:51.051000Z","device_identity":"did:key:z6MksPsDhwFCy8Cho6xM83iE2b21oqutKef2KmBdWDAbnSQS","row_hash":"sha256:afddf5316e103e43261462039e223edace2dd94225847e9a4f015279ada8e8cb","plaintext":{"default":{"run_id":"df56ae5e259249278f476a300ab71438","user":"alice"}},"valid":{"signature":true,"rowHash":true,"chain":true}}
 ```
 
+### Sealing an object: tn.seal and tn.unseal
+
+`tn.seal` builds a signed, encrypted object and hands it back to you instead
+of writing it to the log. `tn.unseal` opens it, using whatever keys you hold.
+Both are async — the jwe cipher seals and opens through an async JOSE
+library.
+
+```typescript
+import { tn } from "tn-proto";
+
+await tn.init("demo");
+
+const sealed = await tn.seal("invoice.v1", { amount: 9800, customer: "acme" });
+
+// transport is yours to pick: toString() is the compact wire JSON
+const payload = String(sealed);
+
+const entry = await tn.unseal(payload);
+console.log("fields       :", entry.fields);
+console.log("hidden_groups:", entry.hidden_groups);
+
+await tn.close();
+```
+
+```
+fields       : { amount: 9800, customer: 'acme' }
+hidden_groups: []
+```
+
+Fields route into groups and get encrypted exactly as they would on an
+ordinary `tn.log` call; the object is always signed. Whoever calls
+`tn.unseal` gets every group a key at hand can open - their own ceremony's
+keys and every kit they've absorbed are tried automatically.
+
+Holding an object you can't open is normal, not an error: `tn.unseal`
+returns the verified public frame, and `entry.hidden_groups` lists the
+groups that stayed sealed. Tampering is different - a changed byte anywhere
+in the object throws `VerifyError` instead.
+
+By default, sealing also chains one receipt row into your log
+(`tn.object.sealed`), so your own chain proves the seal happened and when.
+Like every `tn.`-prefixed event it routes to the admin/protocol-events
+surface, not the main log. Pass `{ receipt: false }` to skip that row. Pass
+`{ raw: true }` to `tn.unseal` for the `{envelope, plaintext, valid}` audit
+triple instead of an `Entry`, and `{ asRecipient: <keystore dir>, group:
+<name> }` to open one specific kit directly, without an active ceremony.
+
+### Moving a sealed object between programs
+
+`tn.unseal` verifies the object before decrypting: it re-hashes the public
+fields and checks the signature, so any change to the bytes since sealing
+makes it refuse to open. Transport the object as its wire string
+(`String(sealed)`, or `sealed.rawJson`) and hand that back to `tn.unseal` —
+the string is re-parsed identically and always verifies, in any SDK
+language, with no ceremony on the verifying side.
+
+The one thing to avoid is letting another runtime parse the object into
+native values and re-serialize it with a **fragile value in a public
+field**. A JSON reserialization rewrites some numbers — an integer past
+two-to-the-53rd loses precision, and a non-integral float has no canonical
+rendering across runtimes — and that change fails verification. Encrypted
+group fields are safe for any value, because they are hashed as ciphertext,
+not by value. To keep you out of this trap, `tn.seal` refuses a
+non-integral or out-of-range number in a public field up front; put the
+value in a group, or pass it as a string. (One JS-specific note: `1.0` is
+already the integer `1` at the language level, so the integral-float case
+Python rejects simply cannot arise here — the value on the wire is the safe
+integer form.)
+
 ## CLI commands
 
 Some `tn-js` verbs print a machine-parseable JSON receipt (`init`, `info`,
