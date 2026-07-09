@@ -43,6 +43,7 @@ import { StdoutHandler } from "./handlers/stdout.js";
 import { buildHandlers } from "./handlers/registry.js";
 import { readAsRecipient, readAsRecipientAsync } from "./read_as_recipient.js";
 import { ScopeBuilder } from "./scope.js";
+import { sealWithRuntime, type SealOptions, type SealedObject } from "./seal.js";
 
 // ---------------------------------------------------------------------------
 // Re-export types for callers that import from tn.ts directly.
@@ -51,6 +52,8 @@ export type { LogLevel } from "./core/types.js";
 export type { EmitReceipt } from "./core/results.js";
 export { Entry, VerifyError } from "./Entry.js";
 export type { WatchSince } from "./watch.js";
+export { SealedObject } from "./seal.js";
+export type { SealOptions } from "./seal.js";
 
 // ---------------------------------------------------------------------------
 // Module-level log-level state — own copy for Tn (does not share with
@@ -1536,6 +1539,29 @@ export class Tn {
       });
       if (out !== undefined) yield out;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Sealed objects (portable standalone envelopes)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Seal `fields` into a portable attested object — a signed,
+   * per-group-encrypted standalone envelope returned to the caller
+   * instead of appended to the log. Mirrors Python `tn.seal`.
+   *
+   * Fields route into groups and encrypt exactly as a write verb
+   * would; the object is always signed; the ceremony's chain state is
+   * never touched. By default one `tn.object.sealed` receipt row is
+   * chained through the normal write path (`receipt: false` skips it).
+   * Async because jwe groups seal through panva/jose.
+   */
+  async seal(
+    objectType: string,
+    fields: Record<string, unknown> = {},
+    opts: SealOptions = {},
+  ): Promise<SealedObject> {
+    return sealWithRuntime(this._rt, objectType, fields, opts);
   }
 
   /** Run-id filter for local reads: keep only rows from this client's current

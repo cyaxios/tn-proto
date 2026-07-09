@@ -70,6 +70,9 @@ export type {
 } from "./tn.js";
 export type { WatchSince } from "./watch.js";
 export { Entry, VerifyError } from "./Entry.js";
+// Portable sealed objects (tn.seal).
+export { SealedObject } from "./seal.js";
+export type { SealOptions } from "./seal.js";
 export { LOG_LEVELS } from "./tn.js";
 export type {
   AddRuntimeOptions,
@@ -301,6 +304,10 @@ import type {
   TnInitOptions,
   WatchOptions,
 } from "./tn.js";
+import type {
+  SealOptions as _SealOptions,
+  SealedObject as _SealedObject,
+} from "./seal.js";
 
 let _defaultTn: _Tn | null = null;
 
@@ -563,6 +570,21 @@ export function watch(
 ): AsyncIterableIterator<_Entry | Record<string, unknown>> {
   return _ensureDefaultLoadOnly("watch").watch(opts);
 }
+
+/** Seal fields into a portable attested object (standalone envelope).
+ *  Mirrors Python `tn.seal(object_type, **fields)`.
+ *
+ *  Auto-inits like the write verbs (a seal needs a bound publisher to
+ *  encrypt its groups and sign): if no default ceremony is bound yet,
+ *  discover-or-mint one. */
+export async function seal(
+  objectType: string,
+  fields: Record<string, unknown> = {},
+  opts: _SealOptions = {},
+): Promise<_SealedObject> {
+  return _ensureDefault("seal").seal(objectType, fields, opts);
+}
+
 
 /** Block-scoped context overlay on the default ceremony. Mirrors Python
  *  `with tn.scope(**fields):`. Runs `body` with `fields` layered on top
