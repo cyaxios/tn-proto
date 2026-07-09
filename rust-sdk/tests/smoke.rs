@@ -46,6 +46,67 @@ fn rejects_non_object_fields() -> tn_proto::Result<()> {
 }
 
 #[test]
+fn emit_with_aad_echoes_markers_and_reads_back() -> tn_proto::Result<()> {
+    let tn = Tn::ephemeral()?;
+
+    let receipt = tn.emit_with_aad(
+        "info",
+        "order.flagged",
+        json!({ "order_note": "escalate" }),
+        json!({ "purpose": "audit" }),
+    )?;
+    assert!(receipt.emitted);
+    let envelope = receipt.envelope.as_ref().expect("envelope");
+    let echo = envelope
+        .get("tn_aad")
+        .and_then(Value::as_str)
+        .expect("aad emit must echo a public tn_aad string");
+    let echo: Value = serde_json::from_str(echo).expect("tn_aad echo is canonical JSON");
+    assert_eq!(echo["default"]["purpose"], Value::String("audit".into()));
+
+    // The sealed group still opens on read: the reader reconstructs the
+    // bound AAD bytes from the public tn_aad echo.
+    let entries = tn.read(ReadOptions::default())?;
+    let entry = common::find_event(&entries, "order.flagged");
+    assert_eq!(
+        entry.get("order_note").and_then(Value::as_str),
+        Some("escalate")
+    );
+    assert!(entry.get("tn_aad").is_some());
+
+    tn.close()?;
+    Ok(())
+}
+
+#[test]
+fn emit_with_aad_empty_map_keeps_plain_wire_shape() -> tn_proto::Result<()> {
+    let tn = Tn::ephemeral()?;
+
+    let receipt = tn.emit_with_aad(
+        "info",
+        "order.plain",
+        json!({ "order_note": "quiet" }),
+        json!({}),
+    )?;
+    assert!(receipt.emitted);
+    let envelope = receipt.envelope.as_ref().expect("envelope");
+    assert!(
+        envelope.get("tn_aad").is_none(),
+        "empty aad must not add a tn_aad field"
+    );
+
+    let err = tn
+        .emit_with_aad("info", "order.bad", json!({ "ok": true }), json!(["nope"]))
+        .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("aad must serialize to a JSON object"));
+
+    tn.close()?;
+    Ok(())
+}
+
+#[test]
 fn config_view_exposes_runtime_basics() -> tn_proto::Result<()> {
     let tn = Tn::ephemeral()?;
     let cfg = tn.config();

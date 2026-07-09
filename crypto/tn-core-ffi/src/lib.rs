@@ -852,6 +852,61 @@ pub unsafe extern "C" fn tn_runtime_emit(
     }
 }
 
+/// Emit an event with an AAD marker map and return a JSON receipt.
+///
+/// `level` may be null or empty for the severity-less log path. `fields_json`
+/// and `aad_json` must be JSON objects. The markers in `aad_json` are merged
+/// over each group's configured default marker, bound as additional
+/// authenticated data into every sealed group body, and echoed under the
+/// public `tn_aad` envelope field. An empty `aad_json` object behaves exactly
+/// like [`tn_runtime_emit`] for ceremonies without per-group default markers.
+/// The returned string is owned by the caller and must be released with
+/// [`tn_string_free`]. Returns null on error. Use [`tn_last_error`] for
+/// details.
+#[no_mangle]
+pub unsafe extern "C" fn tn_runtime_emit_with_aad(
+    handle: *const TnHandle,
+    level: *const c_char,
+    event_type: *const c_char,
+    fields_json: *const c_char,
+    aad_json: *const c_char,
+) -> *mut c_char {
+    clear_error();
+    match take_result(|| {
+        let level = optional_string_from_ptr(level, "level")?.unwrap_or_default();
+        let event_type = string_from_ptr(event_type, "event_type")?;
+        let fields_json = string_from_ptr(fields_json, "fields_json")?;
+        let aad_json = string_from_ptr(aad_json, "aad_json")?;
+        let fields_value: Value = serde_json::from_str(&fields_json)
+            .map_err(|err| format!("fields_json must be valid JSON: {err}"))?;
+        let fields = fields_value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "fields_json must be a JSON object".to_string())?;
+        let aad_value: Value = serde_json::from_str(&aad_json)
+            .map_err(|err| format!("aad_json must be valid JSON: {err}"))?;
+        let aad = aad_value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "aad_json must be a JSON object".to_string())?;
+        let receipt = handle_ref(handle)?
+            .tn()?
+            .emit_with_aad(&level, &event_type, fields, aad)
+            .map_err(|err| err.to_string())?;
+        serde_json::to_string(&json!({
+            "emitted": receipt.emitted,
+            "envelope": receipt.envelope,
+        }))
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(value) => into_c_string_ptr(value),
+        Err(err) => {
+            set_error(err);
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Read decrypted entries and return a JSON array.
 ///
 /// `all_runs` and `verify` are treated as false when set to 0 and true
@@ -1939,6 +1994,183 @@ pub unsafe extern "C" fn tn_runtime_close(handle: *mut TnHandle) -> i32 {
         Err(err) => {
             set_error(err);
             -1
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    fn c(s: &str) -> CString {
+        CString::new(s).expect("test string contains an interior NUL")
+    }
+
+    fn last_error_message() -> Option<String> {
+        LAST_ERROR.with(|slot| slot.borrow().clone())
+    }
+
+    /// Take ownership of a returned C string, assert the call succeeded,
+    /// and free it through the public ABI like a real consumer would.
+    unsafe fn consume(ptr: *mut c_char) -> String {
+        assert!(
+            !ptr.is_null(),
+            "ffi call failed: {:?}",
+            last_error_message()
+        );
+        let s = CStr::from_ptr(ptr)
+            .to_str()
+            .expect("ffi returned non-UTF-8")
+            .to_owned();
+        tn_string_free(ptr);
+        s
+    }
+
+    /// Create a hermetic project ceremony inside `dir` and return its handle.
+    unsafe fn open_project(dir: &std::path::Path, project: &str) -> *mut TnHandle {
+        let project = c(project);
+        let project_dir = c(dir.to_str().expect("tempdir path is not UTF-8"));
+        let handle = tn_runtime_init_project(project.as_ptr(), project_dir.as_ptr());
+        assert!(
+            !handle.is_null(),
+            "init_project failed: {:?}",
+            last_error_message()
+        );
+        handle
+    }
+
+    unsafe fn emit_json(handle: *mut TnHandle, event_type: &str, fields: &str) -> Value {
+        let level = c("info");
+        let event_type = c(event_type);
+        let fields = c(fields);
+        let receipt = consume(tn_runtime_emit(
+            handle,
+            level.as_ptr(),
+            event_type.as_ptr(),
+            fields.as_ptr(),
+        ));
+        serde_json::from_str(&receipt).expect("emit receipt is not JSON")
+    }
+
+    unsafe fn emit_with_aad_json(
+        handle: *mut TnHandle,
+        event_type: &str,
+        fields: &str,
+        aad: &str,
+    ) -> Value {
+        let level = c("info");
+        let event_type = c(event_type);
+        let fields = c(fields);
+        let aad = c(aad);
+        let receipt = consume(tn_runtime_emit_with_aad(
+            handle,
+            level.as_ptr(),
+            event_type.as_ptr(),
+            fields.as_ptr(),
+            aad.as_ptr(),
+        ));
+        serde_json::from_str(&receipt).expect("emit receipt is not JSON")
+    }
+
+    unsafe fn read_entries(handle: *mut TnHandle) -> Vec<Value> {
+        let json = consume(tn_runtime_read(handle, 0, 0));
+        serde_json::from_str::<Value>(&json)
+            .expect("read result is not JSON")
+            .as_array()
+            .expect("read result is not an array")
+            .clone()
+    }
+
+    #[test]
+    fn emit_with_aad_binds_markers_and_reads_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            let handle = open_project(dir.path(), "ffi_aad");
+
+            let receipt = emit_with_aad_json(
+                handle,
+                "payment.flagged",
+                r#"{"secret_note":"escalate"}"#,
+                r#"{"purpose":"audit"}"#,
+            );
+            assert_eq!(receipt["emitted"], Value::Bool(true));
+            let echoed = receipt["envelope"]["tn_aad"]
+                .as_str()
+                .expect("envelope missing tn_aad echo");
+            let echoed: Value = serde_json::from_str(echoed).expect("tn_aad echo is not JSON");
+            assert_eq!(echoed["default"]["purpose"], Value::String("audit".into()));
+
+            // The group still opens on read: the reader reconstructs the
+            // bound AAD from the public tn_aad echo.
+            let entries = read_entries(handle);
+            let entry = entries
+                .iter()
+                .find(|e| e["event_type"] == "payment.flagged")
+                .expect("emitted entry not visible to read");
+            assert_eq!(entry["secret_note"], Value::String("escalate".into()));
+            let read_echo = entry["tn_aad"].as_str().expect("read entry missing tn_aad");
+            let read_echo: Value =
+                serde_json::from_str(read_echo).expect("read tn_aad echo is not JSON");
+            assert_eq!(
+                read_echo["default"]["purpose"],
+                Value::String("audit".into())
+            );
+
+            assert_eq!(tn_runtime_close(handle), 0);
+        }
+    }
+
+    #[test]
+    fn emit_with_aad_empty_map_matches_plain_emit_wire_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            let handle = open_project(dir.path(), "ffi_aad_empty");
+
+            let with_empty =
+                emit_with_aad_json(handle, "payment.plain", r#"{"secret_note":"quiet"}"#, "{}");
+            let plain = emit_json(handle, "payment.plain", r#"{"secret_note":"quiet"}"#);
+
+            for receipt in [&with_empty, &plain] {
+                assert_eq!(receipt["emitted"], Value::Bool(true));
+                let envelope = receipt["envelope"]
+                    .as_object()
+                    .expect("receipt envelope is not an object");
+                assert!(
+                    !envelope.contains_key("tn_aad"),
+                    "empty aad must not add a tn_aad field"
+                );
+            }
+
+            assert_eq!(tn_runtime_close(handle), 0);
+        }
+    }
+
+    #[test]
+    fn emit_with_aad_rejects_non_object_aad() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            let handle = open_project(dir.path(), "ffi_aad_reject");
+
+            let level = c("info");
+            let event_type = c("payment.bad_aad");
+            let fields = c(r#"{"ok":true}"#);
+            let aad = c(r#"["not","an","object"]"#);
+            let result = tn_runtime_emit_with_aad(
+                handle,
+                level.as_ptr(),
+                event_type.as_ptr(),
+                fields.as_ptr(),
+                aad.as_ptr(),
+            );
+            assert!(result.is_null(), "array aad must be rejected");
+            let message = last_error_message().expect("rejection must set tn_last_error");
+            assert!(
+                message.contains("aad_json must be a JSON object"),
+                "unexpected error: {message}"
+            );
+
+            assert_eq!(tn_runtime_close(handle), 0);
         }
     }
 }

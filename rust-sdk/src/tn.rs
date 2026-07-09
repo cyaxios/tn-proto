@@ -387,23 +387,41 @@ impl Tn {
         event_type: &str,
         fields: impl Serialize,
     ) -> Result<EmitReceipt> {
-        let fields = fields_to_map(fields)?;
+        let fields = json_object("fields", fields)?;
         let line = self
             .runtime
             .emit_with_override_sign_returning_line(level, event_type, fields, None, None, None)?;
-        let Some(line) = line else {
-            return Ok(EmitReceipt {
-                emitted: false,
-                envelope: None,
-            });
-        };
-        let envelope = serde_json::from_str::<Value>(line.trim_end()).map_err(|err| {
-            Error::InvalidArgument(format!("tn-core returned malformed envelope JSON: {err}"))
-        })?;
-        Ok(EmitReceipt {
-            emitted: true,
-            envelope: Some(envelope),
-        })
+        receipt_from_line(line)
+    }
+
+    /// Emit an attested event, binding an AAD marker map into every sealed
+    /// group body.
+    ///
+    /// The markers in `aad` are merged over each group's configured default
+    /// marker, bound as additional authenticated data when the group's body
+    /// is sealed, and echoed under the public `tn_aad` envelope field so a
+    /// reader reconstructs byte-identical AAD. An empty `aad` object leaves
+    /// the wire shape identical to [`Tn::emit`] for ceremonies without
+    /// per-group default markers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if `fields` or `aad` is not a JSON object, if the
+    /// emitted envelope cannot be parsed back from the core runtime, or if
+    /// the underlying runtime fails.
+    pub fn emit_with_aad(
+        &self,
+        level: &str,
+        event_type: &str,
+        fields: impl Serialize,
+        aad: impl Serialize,
+    ) -> Result<EmitReceipt> {
+        let fields = json_object("fields", fields)?;
+        let aad = json_object("aad", aad)?;
+        let line = self
+            .runtime
+            .emit_with_aad_returning_line(level, event_type, fields, None, None, None, &aad)?;
+        receipt_from_line(line)
     }
 
     /// Read decrypted entries from the active log.
@@ -776,14 +794,33 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-fn fields_to_map(fields: impl Serialize) -> Result<Map<String, Value>> {
-    match serde_json::to_value(fields).map_err(|err| Error::InvalidArgument(err.to_string()))? {
+fn json_object(what: &str, value: impl Serialize) -> Result<Map<String, Value>> {
+    match serde_json::to_value(value).map_err(|err| Error::InvalidArgument(err.to_string()))? {
         Value::Object(map) => Ok(map),
         other => Err(Error::InvalidArgument(format!(
-            "fields must serialize to a JSON object, got {}",
+            "{what} must serialize to a JSON object, got {}",
             value_kind(&other)
         ))),
     }
+}
+
+/// Parse the canonical envelope line tn-core returned into an
+/// [`EmitReceipt`]. `None` means the emit was filtered by the log-level
+/// threshold and produced no envelope.
+fn receipt_from_line(line: Option<String>) -> Result<EmitReceipt> {
+    let Some(line) = line else {
+        return Ok(EmitReceipt {
+            emitted: false,
+            envelope: None,
+        });
+    };
+    let envelope = serde_json::from_str::<Value>(line.trim_end()).map_err(|err| {
+        Error::InvalidArgument(format!("tn-core returned malformed envelope JSON: {err}"))
+    })?;
+    Ok(EmitReceipt {
+        emitted: true,
+        envelope: Some(envelope),
+    })
 }
 
 fn value_kind(value: &Value) -> &'static str {
