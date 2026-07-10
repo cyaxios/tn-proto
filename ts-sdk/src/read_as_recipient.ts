@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { verifyChainLink } from "./core/chain.js";
 import { aadBytesFor, decryptGroup, decryptGroupAsync, type GroupKits } from "./core/decrypt.js";
 import { hibeCandidateKeys, loadHibeGroup } from "./runtime/hibe_group.js";
-import { loadJweKeys } from "./runtime/keystore.js";
+import { loadBtnKits, loadJweKeys } from "./runtime/keystore.js";
 import { signatureFromB64, verify } from "./core/signing.js";
 import { asDid, asSignatureB64 } from "./core/types.js";
 
@@ -66,17 +66,23 @@ export interface ForeignReadEntry {
  * the publisher used appear in `envelope` but not `plaintext`.
  */
 /** Assemble btn + hibe reader-kit candidates a keystore holds for a foreign
- *  group's log (each is tried per line; the first that opens wins). */
+ *  group's log (each is tried per line; the first that opens wins). The btn
+ *  candidate carries the FULL kit list — the active `<group>.btn.mykit` plus
+ *  both rotation-archive families (`.retired.<epoch>`, legacy
+ *  `.revoked.<ts>`) — so rows sealed before a publisher rotation still open,
+ *  mirroring Python's `BtnGroupCipher.load` and the sealed-object walk in
+ *  `src/seal.ts`. */
 function btnHibeCandidates(keystorePath: string, group: string): GroupKits[] {
   const candidates: GroupKits[] = [];
-  const btnKitPath = join(keystorePath, `${group}.btn.mykit`);
   const hibeSkPath = join(keystorePath, `${group}.hibe.sk`);
-  if (existsSync(btnKitPath)) {
-    candidates.push({ cipher: "btn", kits: [new Uint8Array(readFileSync(btnKitPath))] });
+  const btnKits = loadBtnKits(keystorePath, group);
+  if (btnKits.length > 0) {
+    candidates.push({ cipher: "btn", kits: btnKits });
   }
   if (existsSync(hibeSkPath)) {
     const mat = loadHibeGroup(keystorePath, group);
-    if (mat !== null) candidates.push({ cipher: "hibe", kits: hibeCandidateKeys(mat), mpk: mat.mpk });
+    if (mat !== null)
+      candidates.push({ cipher: "hibe", kits: hibeCandidateKeys(mat), mpk: mat.mpk });
   }
   return candidates;
 }
