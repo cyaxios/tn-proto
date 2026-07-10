@@ -156,6 +156,90 @@ public sealed class AdminClient
     }
 
     /// <summary>
+    /// HIBE's add-recipient: mint a delegated identity key for a reader and
+    /// export it as an absorbable <c>.tnpkg</c> kit. Hibe groups only —
+    /// grant_reader is hibe-only; use <see cref="AddRecipientAsync"/> for
+    /// btn/jwe groups. <paramref name="idPath"/> defaults to the group's
+    /// current sealing path; pass an ancestor path to hand out a key the
+    /// reader can delegate further down. The kit body is sealed to
+    /// <paramref name="readerDid"/> when the DID embeds a resolvable key,
+    /// and the grant is recorded in the authority's grant registry.
+    /// </summary>
+    public Task<AdminGrantReaderResult> GrantReaderAsync(
+        string group,
+        string readerDid,
+        string outPath,
+        string? idPath = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _tn.ThrowIfDisposed();
+        ValidateGroup(group);
+
+        if (string.IsNullOrWhiteSpace(readerDid))
+        {
+            throw new ArgumentException("Reader DID must not be empty.", nameof(readerDid));
+        }
+
+        if (string.IsNullOrWhiteSpace(outPath))
+        {
+            throw new ArgumentException("Output package path must not be empty.", nameof(outPath));
+        }
+
+        var fullOutPath = Path.GetFullPath(outPath);
+        var resultJson = NativeBridge.AdminGrantReader(
+            _tn.NativeHandle,
+            group,
+            readerDid,
+            fullOutPath,
+            idPath);
+        var result = JsonNode.Parse(resultJson) as JsonObject
+            ?? throw new TnException("native admin grant-reader returned non-object JSON");
+
+        return Task.FromResult(new AdminGrantReaderResult(
+            result["group"]?.GetValue<string>()
+                ?? throw new TnException("native admin grant-reader result omitted group"),
+            result["reader_did"]?.GetValue<string>(),
+            result["id_path"]?.GetValue<string>()
+                ?? throw new TnException("native admin grant-reader result omitted id path"),
+            Path.GetFullPath(result["path"]?.GetValue<string>()
+                ?? throw new TnException("native admin grant-reader result omitted kit path"))));
+    }
+
+    /// <summary>
+    /// Rotate a hibe group's identity path so FUTURE seals use
+    /// <paramref name="newPath"/>. Admission rotation, not revocation:
+    /// pre-rotation seals stay open for prior grantees, and the authority
+    /// keeps opening every epoch via the recorded path history. The live
+    /// runtime's group cipher is refreshed, so the next emit or seal
+    /// through this handle already lands on the new path. The root path
+    /// (empty string) requires <paramref name="allowRootPath"/>.
+    /// </summary>
+    public Task<AdminRotateIdPathResult> RotateIdPathAsync(
+        string group,
+        string newPath,
+        bool allowRootPath = false,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _tn.ThrowIfDisposed();
+        ValidateGroup(group);
+        ArgumentNullException.ThrowIfNull(newPath);
+
+        var resultJson = NativeBridge.AdminRotateIdPath(_tn.NativeHandle, group, newPath, allowRootPath);
+        var result = JsonNode.Parse(resultJson) as JsonObject
+            ?? throw new TnException("native admin rotate-id-path returned non-object JSON");
+
+        return Task.FromResult(new AdminRotateIdPathResult(
+            result["group"]?.GetValue<string>()
+                ?? throw new TnException("native admin rotate-id-path result omitted group"),
+            result["previous_path"]?.GetValue<string>()
+                ?? throw new TnException("native admin rotate-id-path result omitted previous path"),
+            result["new_path"]?.GetValue<string>()
+                ?? throw new TnException("native admin rotate-id-path result omitted new path")));
+    }
+
+    /// <summary>
     /// Return recipient roster rows for a group.
     /// </summary>
     public Task<IReadOnlyList<AdminRecipient>> RecipientsAsync(

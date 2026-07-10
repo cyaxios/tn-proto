@@ -428,4 +428,81 @@ public sealed class AdminTests
 
         Assert.Equal("group", error.ParamName);
     }
+
+    [Fact]
+    public async Task GrantReaderAsyncRejectsEmptyArgumentsBeforeNativeCall()
+    {
+        var projectDir = Path.Combine(Path.GetTempPath(), "tn-csharp-" + Guid.NewGuid().ToString("N"));
+
+        await using var tn = await Tn.InitProjectAsync(
+            "payments",
+            new TnProjectOptions { ProjectDirectory = projectDir });
+
+        var groupError = await Assert.ThrowsAsync<ArgumentException>(() =>
+            tn.Admin.GrantReaderAsync("", "did:key:zReader", "kit.tnpkg"));
+        Assert.Equal("group", groupError.ParamName);
+
+        var didError = await Assert.ThrowsAsync<ArgumentException>(() =>
+            tn.Admin.GrantReaderAsync("payments", "", "kit.tnpkg"));
+        Assert.Equal("readerDid", didError.ParamName);
+
+        var pathError = await Assert.ThrowsAsync<ArgumentException>(() =>
+            tn.Admin.GrantReaderAsync("payments", "did:key:zReader", ""));
+        Assert.Equal("outPath", pathError.ParamName);
+    }
+
+    [Fact]
+    public async Task GrantReaderAsyncIsHibeOnly()
+    {
+        var projectDir = Path.Combine(Path.GetTempPath(), "tn-csharp-" + Guid.NewGuid().ToString("N"));
+
+        await using var tn = await Tn.InitProjectAsync(
+            "payments",
+            new TnProjectOptions { ProjectDirectory = projectDir });
+
+        // Message parity with Python tn.admin.grant_reader's guard.
+        var error = await Assert.ThrowsAsync<TnException>(() =>
+            tn.Admin.GrantReaderAsync(
+                "default",
+                "did:key:zReader",
+                Path.Combine(projectDir, "kit.tnpkg")));
+
+        Assert.Contains(
+            "grant_reader is hibe-only. Use add_recipient for btn/jwe groups.",
+            error.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RotateIdPathAsyncRejectsEmptyGroupBeforeNativeCall()
+    {
+        var projectDir = Path.Combine(Path.GetTempPath(), "tn-csharp-" + Guid.NewGuid().ToString("N"));
+
+        await using var tn = await Tn.InitProjectAsync(
+            "payments",
+            new TnProjectOptions { ProjectDirectory = projectDir });
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+            tn.Admin.RotateIdPathAsync("", "team/policy-b"));
+
+        Assert.Equal("group", error.ParamName);
+    }
+
+    [Fact]
+    public async Task RotateIdPathAsyncIsHibeOnly()
+    {
+        var projectDir = Path.Combine(Path.GetTempPath(), "tn-csharp-" + Guid.NewGuid().ToString("N"));
+
+        await using var tn = await Tn.InitProjectAsync(
+            "payments",
+            new TnProjectOptions { ProjectDirectory = projectDir });
+
+        var error = await Assert.ThrowsAsync<TnException>(() =>
+            tn.Admin.RotateIdPathAsync("default", "team/policy-b"));
+
+        Assert.Contains(
+            "this rotation is hibe-only (btn groups rotate via tn rotate).",
+            error.Message,
+            StringComparison.Ordinal);
+    }
 }

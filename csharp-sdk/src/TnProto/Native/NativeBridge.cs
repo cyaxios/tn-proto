@@ -290,6 +290,36 @@ public static class NativeBridge
             ?? throw new TnException(LastError() ?? "native admin rotate returned a null result");
     }
 
+    internal static string AdminGrantReader(
+        TnNativeHandle handle,
+        string group,
+        string? readerDid,
+        string outPath,
+        string? idPath)
+    {
+        return NativeString.Consume(NativeMethods.RuntimeAdminGrantReader(
+                handle.RawHandle,
+                group,
+                readerDid,
+                outPath,
+                idPath))
+            ?? throw new TnException(LastError() ?? "native admin grant-reader returned a null result");
+    }
+
+    internal static string AdminRotateIdPath(
+        TnNativeHandle handle,
+        string group,
+        string newPath,
+        bool allowRootPath)
+    {
+        return NativeString.Consume(NativeMethods.RuntimeAdminRotateIdPath(
+                handle.RawHandle,
+                group,
+                newPath,
+                allowRootPath ? 1 : 0))
+            ?? throw new TnException(LastError() ?? "native admin rotate-id-path returned a null result");
+    }
+
     internal static string AdminRecipients(TnNativeHandle handle, string group, bool includeRevoked)
     {
         return NativeString.Consume(NativeMethods.RuntimeAdminRecipients(

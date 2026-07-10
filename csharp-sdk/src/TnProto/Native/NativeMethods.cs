@@ -119,6 +119,21 @@ internal static partial class NativeMethods
     [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_admin_rotate_group", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial IntPtr RuntimeAdminRotateGroup(IntPtr handle, string group);
 
+    [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_admin_grant_reader", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial IntPtr RuntimeAdminGrantReader(
+        IntPtr handle,
+        string group,
+        string? readerDid,
+        string outPath,
+        string? idPath);
+
+    [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_admin_rotate_id_path", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial IntPtr RuntimeAdminRotateIdPath(
+        IntPtr handle,
+        string group,
+        string newPath,
+        int allowRootPath);
+
     [LibraryImport("tn_core_ffi", EntryPoint = "tn_runtime_admin_recipients", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial IntPtr RuntimeAdminRecipients(IntPtr handle, string group, int includeRevoked);
 
