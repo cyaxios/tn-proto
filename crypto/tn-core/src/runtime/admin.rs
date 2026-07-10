@@ -60,6 +60,31 @@ pub struct RotateGroupResult {
     pub rotated_at: String,
 }
 
+/// Result from [`Runtime::admin_grant_reader`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantReaderResult {
+    /// The hibe group the reader was granted access to.
+    pub group: String,
+    /// Reader DID recorded in the grant registry, when supplied.
+    pub reader_did: Option<String>,
+    /// Identity path the minted reader key is keyed to (the group's
+    /// sealing path unless a custom ancestor path was requested).
+    pub id_path: String,
+    /// Path of the written `.tnpkg` kit bundle.
+    pub path: PathBuf,
+}
+
+/// Result from [`Runtime::admin_rotate_id_path`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RotateIdPathResult {
+    /// The hibe group whose identity path was rotated.
+    pub group: String,
+    /// The outgoing sealing path (now first in the idpath history).
+    pub previous_path: String,
+    /// The path future seals target.
+    pub new_path: String,
+}
+
 impl Runtime {
     /// Rebuild a group's cipher from the current on-disk keystore material
     /// and swap it into the live group table.
@@ -265,7 +290,12 @@ impl Runtime {
                     self.admin_add_recipient(gname, &kit_path, Some(recipient_did))?;
                 }
                 "hibe" => {
-                    self.stage_hibe_reader_bundle_material(gname, recipient_did, td.path())?;
+                    self.stage_hibe_reader_bundle_material(
+                        gname,
+                        Some(recipient_did),
+                        td.path(),
+                        None,
+                    )?;
                 }
                 "jwe" | "bearer" => {
                     return Err(Error::NotImplemented(
@@ -301,13 +331,23 @@ impl Runtime {
         Ok(out)
     }
 
+    /// Mint and stage one hibe reader's kit files into `out_dir`, and record
+    /// the grant when the reader has a DID.
+    ///
+    /// `id_path: None` keys the fresh reader key to the group's CURRENT
+    /// sealing path; `Some(path)` keys it to a caller-chosen (typically
+    /// ancestor) path, mirroring Python `tn.admin.grant_reader(id_path=...)`.
+    /// Either way the staged `<group>.hibe.idpath` file carries the group's
+    /// sealing path — the reader derives an ancestor key down locally.
+    /// Returns the path the minted key is keyed to.
     #[cfg(feature = "hibe")]
     fn stage_hibe_reader_bundle_material(
         &self,
         group: &str,
-        recipient_did: &str,
+        recipient_did: Option<&str>,
         out_dir: &Path,
-    ) -> Result<()> {
+        id_path: Option<&str>,
+    ) -> Result<String> {
         let read_required = |suffix: &str| -> Result<Vec<u8>> {
             let path = self.keystore.join(format!("{group}.{suffix}"));
             self.storage.read_bytes(&path).map_err(|e| {
@@ -329,17 +369,26 @@ impl Runtime {
         let mpk = read_required("hibe.mpk")?;
         let msk_bytes = read_required("hibe.msk")?;
         let idpath_bytes = read_required("hibe.idpath")?;
-        let id_path = String::from_utf8(idpath_bytes).map_err(|_| {
+        let group_path = String::from_utf8(idpath_bytes).map_err(|_| {
             Error::InvalidConfig(format!(
                 "bundle_for_recipient: cipher=hibe group {group:?} idpath is not utf-8"
             ))
         })?;
+        let target_path = match id_path {
+            // A custom path passes the same boundary validation Python's
+            // mint_reader_key applies (no root grants without the flag —
+            // grant_reader never sets it, so none here either).
+            Some(custom) => {
+                crate::cipher::hibe::normalize_hibe_path(custom, "id_path", false)?
+            }
+            None => group_path.clone(),
+        };
 
         let pp = tn_hibe::PublicParams::from_bytes(&mpk)
             .map_err(|e| Error::Cipher(format!("hibe: {e}")))?;
         let msk = tn_hibe::MasterKey::from_bytes(&msk_bytes)
             .map_err(|e| Error::Cipher(format!("hibe: {e}")))?;
-        let id = tn_hibe::Identity::try_from_str_path(&id_path)
+        let id = tn_hibe::Identity::try_from_str_path(&target_path)
             .map_err(|e| Error::Cipher(format!("hibe: {e}")))?;
         let sk = tn_hibe::keygen(&pp, &msk, &id, rand_core::OsRng)
             .map_err(|e| Error::Cipher(format!("hibe: {e}")))?
@@ -351,46 +400,388 @@ impl Runtime {
         self.storage
             .write_bytes(
                 &out_dir.join(format!("{group}.hibe.idpath")),
-                id_path.as_bytes(),
+                group_path.as_bytes(),
             )
             .map_err(Error::Io)?;
         self.storage
             .write_bytes(&out_dir.join(format!("{group}.hibe.sk")), &sk)
             .map_err(Error::Io)?;
-        self.record_hibe_grant(group, recipient_did, &id_path)?;
-        Ok(())
+        if let Some(did) = recipient_did {
+            self.record_hibe_grant(group, did, &target_path)?;
+        }
+        Ok(target_path)
     }
 
     #[cfg(not(feature = "hibe"))]
     fn stage_hibe_reader_bundle_material(
         &self,
         _group: &str,
-        _recipient_did: &str,
+        _recipient_did: Option<&str>,
         _out_dir: &Path,
-    ) -> Result<()> {
+        _id_path: Option<&str>,
+    ) -> Result<String> {
         Err(Error::NotImplemented(
             "bundle_for_recipient: cipher=hibe kit minting requires tn-core's hibe feature",
         ))
     }
 
+    /// Append/replace one reader's row in `<group>.hibe.grants`.
+    ///
+    /// The file is the authority-side grant registry Python's
+    /// `tn.admin.revoke_reader` re-issues kits from, so the bytes follow
+    /// Python's normative writer (`_hibe_grants_update`:
+    /// `json.dumps(grants, indent=1)`): one-space indent, `reader_did`
+    /// before `id_path`, no trailing newline.
     #[cfg(feature = "hibe")]
     fn record_hibe_grant(&self, group: &str, recipient_did: &str, id_path: &str) -> Result<()> {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct HibeGrantRecord {
+            reader_did: String,
+            id_path: String,
+        }
+
         let path = self.keystore.join(format!("{group}.hibe.grants"));
-        let mut grants: Vec<Map<String, Value>> = if self.storage.exists(&path) {
+        let mut grants: Vec<HibeGrantRecord> = if self.storage.exists(&path) {
             serde_json::from_slice(&self.storage.read_bytes(&path).map_err(Error::Io)?)?
         } else {
             Vec::new()
         };
-        grants.retain(|g| g.get("reader_did").and_then(Value::as_str) != Some(recipient_did));
-        let mut grant = Map::new();
-        grant.insert(
-            "reader_did".into(),
-            Value::String(recipient_did.to_string()),
-        );
-        grant.insert("id_path".into(), Value::String(id_path.to_string()));
-        grants.push(grant);
-        let bytes = serde_json::to_vec_pretty(&grants)?;
+        grants.retain(|g| g.reader_did != recipient_did);
+        grants.push(HibeGrantRecord {
+            reader_did: recipient_did.to_string(),
+            id_path: id_path.to_string(),
+        });
+        let mut bytes = Vec::new();
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
+        let mut ser = serde_json::Serializer::with_formatter(&mut bytes, formatter);
+        serde::Serialize::serialize(&grants, &mut ser)?;
         self.storage.write_bytes(&path, &bytes).map_err(Error::Io)
+    }
+
+    /// HIBE's add_recipient: mint a delegated identity key for `reader_did`
+    /// and export it as an absorbable `.tnpkg` kit at `out_path`.
+    ///
+    /// Verb-for-verb port of Python `tn.admin.grant_reader`. The kit carries
+    /// the authority mpk, the group's sealing path, and a fresh
+    /// (independently randomized) identity key — the authority master secret
+    /// NEVER rides a kit. `id_path: None` keys the reader to the group's own
+    /// sealing path; pass an ancestor path to hand out a key the reader can
+    /// delegate further down. When `reader_did` resolves to a real
+    /// `did:key:z...` Ed25519 DID the bundle body is sealed to it (a
+    /// plaintext kit is a bearer token); a placeholder DID stays plaintext by
+    /// necessity, exactly like Python's `recipient_key_is_resolvable` gate.
+    /// A supplied DID is recorded in `<group>.hibe.grants`.
+    ///
+    /// Granting is native to the cipher — no re-keying, no envelope rewrite,
+    /// and no forward revocation of an admitted reader (rotate the identity
+    /// path for new seals, or use btn for groups that need real forward
+    /// revocation).
+    ///
+    /// # Errors
+    ///
+    /// - [`InvalidConfig`](crate::Error::InvalidConfig) if the group is
+    ///   unknown, is not a hibe group (grant_reader is hibe-only — use
+    ///   add_recipient for btn/jwe groups), or `id_path` fails the boundary
+    ///   validation.
+    /// - [`Cipher`](crate::Error::Cipher) when the scheme rejects the key
+    ///   material or path, plus I/O errors from staging or writing the kit.
+    #[cfg(feature = "hibe")]
+    pub fn admin_grant_reader(
+        &self,
+        group: &str,
+        reader_did: Option<&str>,
+        out_path: &Path,
+        id_path: Option<&str>,
+    ) -> Result<GrantReaderResult> {
+        let spec = self.cfg.groups.get(group).ok_or_else(|| {
+            Error::InvalidConfig(format!("tn.admin.grant_reader: unknown group: {group:?}"))
+        })?;
+        if spec.cipher != "hibe" {
+            return Err(Error::InvalidConfig(format!(
+                "tn.admin.grant_reader: group {group:?} uses cipher {:?}; \
+                 grant_reader is hibe-only. Use add_recipient for btn/jwe groups.",
+                spec.cipher
+            )));
+        }
+
+        let td = tempfile::Builder::new()
+            .prefix("tn-grant-reader-")
+            .tempdir()
+            .map_err(Error::Io)?;
+        let target_path =
+            self.stage_hibe_reader_bundle_material(group, reader_did, td.path(), id_path)?;
+
+        // Seal the bundle body to the reader's device key when the DID
+        // resolves (Python: recipient_key_is_resolvable). A stub DID with no
+        // embedded key can't be sealed to, so it stays plaintext.
+        let seal_for_recipients = match reader_did {
+            Some(did)
+                if crate::recipient_seal::normalize_recipient_dids(&[did.to_string()])
+                    .is_ok() =>
+            {
+                vec![did.to_string()]
+            }
+            _ => Vec::new(),
+        };
+
+        let opts = crate::runtime_export::ExportOptions {
+            kind: Some(crate::tnpkg::ManifestKind::KitBundle),
+            to_did: reader_did.map(str::to_string),
+            scope: None,
+            confirm_includes_secrets: false,
+            groups: Some(vec![group.to_string()]),
+            keystore: Some(td.path().to_path_buf()),
+            encrypt_body_with: None,
+            seal_for_recipients,
+            package_body: None,
+        };
+        let written = self.export(out_path, opts)?;
+        drop(td);
+        Ok(GrantReaderResult {
+            group: group.to_string(),
+            reader_did: reader_did.map(str::to_string),
+            id_path: target_path,
+            path: written,
+        })
+    }
+
+    /// HIBE's add_recipient — unavailable in this build: the `hibe` feature
+    /// is off, so the verb yields a clear `NotImplemented` instead of a
+    /// build error.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`NotImplemented`](crate::Error::NotImplemented).
+    #[cfg(not(feature = "hibe"))]
+    pub fn admin_grant_reader(
+        &self,
+        _group: &str,
+        _reader_did: Option<&str>,
+        _out_path: &Path,
+        _id_path: Option<&str>,
+    ) -> Result<GrantReaderResult> {
+        Err(Error::NotImplemented(
+            "admin_grant_reader: cipher=hibe kit minting requires tn-core's hibe feature",
+        ))
+    }
+
+    /// Rotate a hibe group's identity path so FUTURE seals use `new_path`
+    /// (the policy-path rotation).
+    ///
+    /// File-for-file port of Python `HibeGroupCipher.rotate_id_path` behind
+    /// the `tn.admin.rotate_reader_path` driver, producing a keystore a
+    /// Python authority opens unchanged: the outgoing path is prepended to
+    /// `<group>.hibe.idpath.history` (one path per line, LF, root sentinel
+    /// encoding), a held reader key is archived as
+    /// `<group>.hibe.sk.previous.<ns>`, a fresh msk-minted key and the new
+    /// path replace `<group>.hibe.sk` / `<group>.hibe.idpath`, and the root
+    /// marker file is maintained. Write order matches the Python contract
+    /// (history and archive land before the active swap).
+    ///
+    /// This is admission rotation, not revocation: pre-rotation seals stay
+    /// open forever for whoever held a key on the old path, and a grantee
+    /// holding an ANCESTOR of the new path keeps access to new seals too.
+    /// Pick a sibling path to cut off exact-path grantees going forward.
+    ///
+    /// After rewriting the keystore the live group cipher is rebuilt in
+    /// place ([`Runtime::reload_group_cipher`]) so the very next emit/seal
+    /// from THIS runtime lands on the new path — a stale cached cipher would
+    /// keep sealing to the audience the caller just rotated away from.
+    ///
+    /// # Errors
+    ///
+    /// - [`InvalidConfig`](crate::Error::InvalidConfig) if the group is
+    ///   unknown or not hibe, `new_path` fails validation (the root path
+    ///   requires `allow_root_path`), or `new_path` equals the current path.
+    /// - [`NotAPublisher`](crate::Error::NotAPublisher) when this keystore
+    ///   holds no `<group>.hibe.msk` — only the authority rotates.
+    /// - [`Cipher`](crate::Error::Cipher) when the scheme rejects the path
+    ///   (the root path is currently rejected at this layer, matching the
+    ///   Python native boundary) — nothing is written in that case.
+    #[cfg(feature = "hibe")]
+    pub fn admin_rotate_id_path(
+        &self,
+        group: &str,
+        new_path: &str,
+        allow_root_path: bool,
+    ) -> Result<RotateIdPathResult> {
+        use crate::cipher::hibe::{
+            decode_hibe_history_line, encode_hibe_history_path, normalize_hibe_path,
+        };
+
+        let spec = self.cfg.groups.get(group).ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "tn.admin.rotate_id_path: unknown group: {group:?}"
+            ))
+        })?;
+        if spec.cipher != "hibe" {
+            return Err(Error::InvalidConfig(format!(
+                "tn.admin.rotate_id_path: group {group:?} uses cipher {:?}; \
+                 this rotation is hibe-only (btn groups rotate via tn rotate).",
+                spec.cipher
+            )));
+        }
+
+        let read_opt = |suffix: &str| -> Result<Option<Vec<u8>>> {
+            let path = self.keystore.join(format!("{group}.{suffix}"));
+            if self.storage.exists(&path) {
+                Ok(Some(self.storage.read_bytes(&path).map_err(Error::Io)?))
+            } else {
+                Ok(None)
+            }
+        };
+
+        let mpk = read_opt("hibe.mpk")?.ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "hibe group {group}: no {group}.hibe.mpk in keystore"
+            ))
+        })?;
+        let msk_bytes = read_opt("hibe.msk")?.ok_or_else(|| Error::NotAPublisher {
+            group: group.to_string(),
+            reason: "HIBE: only the authority (msk holder) can rotate the identity path".into(),
+        })?;
+        let idpath_bytes = read_opt("hibe.idpath")?.ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "hibe group {group}: no {group}.hibe.idpath in keystore"
+            ))
+        })?;
+        let idpath_raw = String::from_utf8(idpath_bytes).map_err(|_| {
+            Error::InvalidConfig(format!("hibe group {group}: idpath is not utf-8"))
+        })?;
+
+        let root_marker = self.keystore.join(format!("{group}.hibe.idpath.root"));
+        let allow_root_current = self.storage.exists(&root_marker);
+        let current_path = normalize_hibe_path(
+            &idpath_raw,
+            "current id_path",
+            allow_root_current,
+        )?;
+
+        let new_path = normalize_hibe_path(new_path, "id_path", allow_root_path)?;
+        if new_path == current_path {
+            return Err(Error::InvalidConfig(format!(
+                "HIBE: new path equals the current path {new_path:?}"
+            )));
+        }
+
+        // Prior sealing paths recorded by earlier rotations, newest first.
+        let mut prior_paths: Vec<String> = Vec::new();
+        if let Some(bytes) = read_opt("hibe.idpath.history")? {
+            let text = String::from_utf8(bytes).map_err(|_| {
+                Error::InvalidConfig(format!(
+                    "hibe group {group}: idpath history is not utf-8"
+                ))
+            })?;
+            for (idx, line) in text.lines().enumerate() {
+                prior_paths.push(decode_hibe_history_line(
+                    line,
+                    &format!("{group}.hibe.idpath.history line {}", idx + 1),
+                )?);
+            }
+        }
+
+        // Fresh key for the new path, minted BEFORE any file is touched: a
+        // scheme-level rejection (e.g. the root path, or exceeding the
+        // authority's max depth) must leave the keystore unchanged.
+        let pp = tn_hibe::PublicParams::from_bytes(&mpk)
+            .map_err(|e| Error::Cipher(format!("hibe: {e}")))?;
+        let msk = tn_hibe::MasterKey::from_bytes(&msk_bytes)
+            .map_err(|e| Error::Cipher(format!("hibe: {e}")))?;
+        let id = tn_hibe::Identity::try_from_str_path(&new_path)
+            .map_err(|e| Error::Cipher(format!("hibe: {e}")))?;
+        let new_sk = tn_hibe::keygen(&pp, &msk, &id, rand_core::OsRng)
+            .map_err(|e| Error::Cipher(format!("hibe: {e}")))?
+            .to_bytes();
+
+        // Write order pinned by the Python contract (history and the
+        // superseded-key archive land before the active sk/idpath swap, so
+        // a crash mid-rotation never strands an epoch's material).
+        prior_paths.insert(0, current_path.clone());
+        let history_text = prior_paths
+            .iter()
+            .map(|p| encode_hibe_history_path(p))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        self.storage
+            .write_bytes(
+                &self.keystore.join(format!("{group}.hibe.idpath.history")),
+                history_text.as_bytes(),
+            )
+            .map_err(Error::Io)?;
+
+        if let Some(current_sk) = read_opt("hibe.sk")? {
+            self.storage
+                .write_bytes(&self.previous_hibe_sk_path(group), &current_sk)
+                .map_err(Error::Io)?;
+        }
+
+        self.storage
+            .write_bytes(&self.keystore.join(format!("{group}.hibe.sk")), &new_sk)
+            .map_err(Error::Io)?;
+        self.storage
+            .write_bytes(
+                &self.keystore.join(format!("{group}.hibe.idpath")),
+                new_path.as_bytes(),
+            )
+            .map_err(Error::Io)?;
+        if new_path.is_empty() {
+            self.storage
+                .write_bytes(&root_marker, b"root\n")
+                .map_err(Error::Io)?;
+        } else if self.storage.exists(&root_marker) {
+            self.storage.remove(&root_marker).map_err(Error::Io)?;
+        }
+
+        // The runtime caches each group cipher at init (see
+        // reload_group_cipher): rebuild NOW or the next emit still seals
+        // under the pre-rotation path. A failed rebuild is a security
+        // failure, not a DX nit — propagate it.
+        self.reload_group_cipher(group)?;
+
+        Ok(RotateIdPathResult {
+            group: group.to_string(),
+            previous_path: current_path,
+            new_path,
+        })
+    }
+
+    /// HIBE identity-path rotation — unavailable in this build: the `hibe`
+    /// feature is off, so the verb yields a clear `NotImplemented` instead
+    /// of a build error.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`NotImplemented`](crate::Error::NotImplemented).
+    #[cfg(not(feature = "hibe"))]
+    pub fn admin_rotate_id_path(
+        &self,
+        _group: &str,
+        _new_path: &str,
+        _allow_root_path: bool,
+    ) -> Result<RotateIdPathResult> {
+        Err(Error::NotImplemented(
+            "admin_rotate_id_path: cipher=hibe rotation requires tn-core's hibe feature",
+        ))
+    }
+
+    /// An unused archive path for a superseded HIBE identity key. Mirrors
+    /// Python `_previous_hibe_sk_path`: `<group>.hibe.sk.previous.<ns>`,
+    /// appending a counter suffix on the (nanosecond-resolution) collision.
+    #[cfg(feature = "hibe")]
+    fn previous_hibe_sk_path(&self, group: &str) -> PathBuf {
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base_name = format!("{group}.hibe.sk.previous.{ns}");
+        let mut candidate = self.keystore.join(&base_name);
+        let mut counter = 1u32;
+        while self.storage.exists(&candidate) {
+            candidate = self.keystore.join(format!("{base_name}.{counter}"));
+            counter += 1;
+        }
+        candidate
     }
 
     /// Mint kits for an LLM-runtime DID across all named groups + the

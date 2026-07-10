@@ -105,8 +105,9 @@ pub use admin_cache::{AdminStateCache, ChainConflict, LKV_VERSION};
 pub use runtime::{
     unseal_as_recipient, AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord,
     AdminRecipientRecord, AdminRotation, AdminState, AdminVaultLink, EnsureGroupResult, FlatEntry,
-    Instructions, OnInvalid, ReadEntry, RecipientEntry, Runtime, RuntimeInitOptions, SealOptions,
-    SealedGroupInfo, SecureEntry, SecureReadOptions, UnsealOptions, UnsealOutcome, ValidFlags,
+    GrantReaderResult, Instructions, OnInvalid, ReadEntry, RecipientEntry, RotateIdPathResult,
+    Runtime, RuntimeInitOptions, SealOptions, SealedGroupInfo, SecureEntry, SecureReadOptions,
+    UnsealOptions, UnsealOutcome, ValidFlags,
 };
 #[cfg(feature = "fs")]
 pub use runtime_export::{AbsorbReceipt, AbsorbSource, ExportOptions};

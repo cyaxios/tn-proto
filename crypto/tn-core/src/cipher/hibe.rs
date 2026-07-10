@@ -39,7 +39,10 @@ impl super::GroupCipher for HibePlaceholder {
 #[cfg(feature = "hibe")]
 pub use real::HibeCipher;
 #[cfg(feature = "hibe")]
-pub(crate) use real::{identity_to_path, validate_identity_path};
+pub(crate) use real::{
+    decode_hibe_history_line, encode_hibe_history_path, identity_to_path, normalize_hibe_path,
+    validate_identity_path,
+};
 
 #[cfg(feature = "hibe")]
 mod real {
@@ -73,6 +76,103 @@ mod real {
             out.push(s.to_string());
         }
         Ok(out.join("/"))
+    }
+
+    /// Sentinel line the idpath history file uses for a prior ROOT path —
+    /// the tab prefix cannot appear in a validated path, so the line is
+    /// unambiguous. Wire contract with Python's
+    /// `tn/cipher.py::_HIBE_HISTORY_ROOT_SENTINEL`.
+    const HIBE_HISTORY_ROOT_SENTINEL: &str = "\troot";
+
+    /// Validate one non-root HIBE label without lossy normalization.
+    /// Message-for-message mirror of `tn/cipher.py::_validate_hibe_label`
+    /// (the TN boundary rejects rather than trims — a silently "fixed"
+    /// path would be a different authorization path).
+    fn validate_hibe_label(label: &str, what: &str) -> Result<()> {
+        if label.is_empty() {
+            return Err(Error::InvalidConfig(format!(
+                "HIBE: {what} must not be empty"
+            )));
+        }
+        if label.contains('/') {
+            return Err(Error::InvalidConfig(format!(
+                "HIBE: {what} must be one path segment, not contain '/'"
+            )));
+        }
+        if label != label.trim() {
+            return Err(Error::InvalidConfig(format!(
+                "HIBE: {what} must not have leading or trailing whitespace"
+            )));
+        }
+        if label.contains('\r') || label.contains('\n') {
+            return Err(Error::InvalidConfig(format!(
+                "HIBE: {what} must not contain line breaks"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Return a canonical slash-separated HIBE path or an error.
+    ///
+    /// Check-for-check mirror of `tn/cipher.py::_normalize_hibe_path`: no
+    /// trimming, no slash collapsing, no blank-segment skipping — those
+    /// transformations create ambiguous authorization paths. The HIBE root
+    /// path is the empty string and is accepted only when `allow_root` is
+    /// explicitly true (the error text names the Python-normative
+    /// `allow_root_path=True` flag all SDK surfaces expose).
+    pub(crate) fn normalize_hibe_path(
+        id_path: &str,
+        what: &str,
+        allow_root: bool,
+    ) -> Result<String> {
+        if id_path.is_empty() {
+            if allow_root {
+                return Ok(String::new());
+            }
+            return Err(Error::InvalidConfig(format!(
+                "HIBE: {what} must not be blank; pass allow_root_path=True \
+                 to use the root identity path explicitly"
+            )));
+        }
+        if id_path != id_path.trim() {
+            return Err(Error::InvalidConfig(format!(
+                "HIBE: {what} must not have leading or trailing whitespace"
+            )));
+        }
+        if id_path.contains('\r') || id_path.contains('\n') {
+            return Err(Error::InvalidConfig(format!(
+                "HIBE: {what} must not contain line breaks"
+            )));
+        }
+        let labels: Vec<&str> = id_path.split('/').collect();
+        if labels.iter().any(|label| label.is_empty()) {
+            return Err(Error::InvalidConfig(format!(
+                "HIBE: {what} must not contain empty path segments"
+            )));
+        }
+        for (idx, label) in labels.iter().enumerate() {
+            validate_hibe_label(label, &format!("{what} segment {idx}"))?;
+        }
+        Ok(id_path.to_string())
+    }
+
+    /// Encode one validated path for the line-oriented idpath history file.
+    /// Mirrors `tn/cipher.py::_encode_hibe_history_path`.
+    pub(crate) fn encode_hibe_history_path(path: &str) -> &str {
+        if path.is_empty() {
+            HIBE_HISTORY_ROOT_SENTINEL
+        } else {
+            path
+        }
+    }
+
+    /// Decode one idpath history line, including explicit prior root paths.
+    /// Mirrors `tn/cipher.py::_decode_hibe_history_line`.
+    pub(crate) fn decode_hibe_history_line(line: &str, what: &str) -> Result<String> {
+        if line == HIBE_HISTORY_ROOT_SENTINEL {
+            return Ok(String::new());
+        }
+        normalize_hibe_path(line, what, false)
     }
 
     fn add_candidate(
@@ -240,6 +340,48 @@ mod real {
             cur = delegate(pp, &cur, label, OsRng).map_err(hibe_err)?;
         }
         Ok(Some(cur))
+    }
+}
+
+#[cfg(all(test, feature = "hibe"))]
+mod path_test {
+    use super::real::{decode_hibe_history_line, encode_hibe_history_path, normalize_hibe_path};
+
+    #[test]
+    fn normalize_matches_python_boundary_rules() {
+        // Accepted paths come back unchanged.
+        assert_eq!(
+            normalize_hibe_path("team/policy-a", "id_path", false).unwrap(),
+            "team/policy-a"
+        );
+        assert_eq!(normalize_hibe_path("solo", "id_path", false).unwrap(), "solo");
+
+        // Root only with the explicit flag — same message Python raises.
+        let err = normalize_hibe_path("", "id_path", false).unwrap_err();
+        assert!(err.to_string().contains("must not be blank"), "{err}");
+        assert!(err.to_string().contains("allow_root_path=True"), "{err}");
+        assert_eq!(normalize_hibe_path("", "id_path", true).unwrap(), "");
+
+        // The Python-parity rejection set (test_hibe_boundary.py's
+        // ambiguous-path parametrization).
+        for bad in ["/", "team//reader", "team/reader/", " team/reader", "team/reader ", "team/\nreader"] {
+            let err = normalize_hibe_path(bad, "id_path", false).unwrap_err();
+            assert!(err.to_string().contains("HIBE: id_path"), "{bad:?}: {err}");
+        }
+        let err = normalize_hibe_path("a\rb", "id_path", false).unwrap_err();
+        assert!(err.to_string().contains("line breaks"), "{err}");
+        // Per-segment whitespace check fires even when the ends are clean.
+        let err = normalize_hibe_path("a/ b/c", "id_path", false).unwrap_err();
+        assert!(err.to_string().contains("segment 1"), "{err}");
+    }
+
+    #[test]
+    fn history_root_sentinel_round_trips() {
+        assert_eq!(encode_hibe_history_path(""), "\troot");
+        assert_eq!(encode_hibe_history_path("a/b"), "a/b");
+        assert_eq!(decode_hibe_history_line("\troot", "line 1").unwrap(), "");
+        assert_eq!(decode_hibe_history_line("a/b", "line 1").unwrap(), "a/b");
+        assert!(decode_hibe_history_line(" bad", "line 1").is_err());
     }
 }
 

@@ -52,7 +52,7 @@ mod seal;
 mod types;
 mod util;
 
-pub use admin::EnsureGroupResult;
+pub use admin::{EnsureGroupResult, GrantReaderResult, RotateIdPathResult};
 pub use seal::{unseal_as_recipient, SealOptions, SealedGroupInfo, UnsealOptions, UnsealOutcome};
 pub use types::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
