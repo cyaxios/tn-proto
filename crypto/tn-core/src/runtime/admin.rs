@@ -374,15 +374,14 @@ impl Runtime {
                 "bundle_for_recipient: cipher=hibe group {group:?} idpath is not utf-8"
             ))
         })?;
-        let target_path = match id_path {
-            // A custom path passes the same boundary validation Python's
-            // mint_reader_key applies (no root grants without the flag —
-            // grant_reader never sets it, so none here either).
-            Some(custom) => {
-                crate::cipher::hibe::normalize_hibe_path(custom, "id_path", false)?
-            }
-            None => group_path.clone(),
-        };
+        // Either path passes the boundary validation Python's
+        // mint_reader_key applies (no root grants without the flag —
+        // grant_reader never sets it, so none here either).
+        let target_path = crate::cipher::hibe::normalize_hibe_path(
+            id_path.unwrap_or(&group_path),
+            "id_path",
+            false,
+        )?;
 
         let pp = tn_hibe::PublicParams::from_bytes(&mpk)
             .map_err(|e| Error::Cipher(format!("hibe: {e}")))?;
