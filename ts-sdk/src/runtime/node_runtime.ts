@@ -294,6 +294,17 @@ function expandTemplatedLogPath(pattern: string, yamlDir: string): string[] {
   });
 }
 
+/** Own-property read of a parsed-yaml mapping. A bare `map[name]` read on a
+ *  plain object resolves inherited Object.prototype members when no own key
+ *  exists, so a group named "toString" or "constructor" reads as a Function —
+ *  truthy and non-nullish — and a `??=` / `if (!...)` guard then mutates the
+ *  shared prototype member instead of the document while the real block is
+ *  never written. Python dict keys have no such collision, so yaml authored
+ *  there can carry these names; treat only own keys as present. */
+function ownEntry<T>(map: Record<string, T>, name: string): T | undefined {
+  return Object.hasOwn(map, name) ? map[name] : undefined;
+}
+
 /**
  * Load and run a ceremony from disk.
  *
@@ -1007,7 +1018,11 @@ export class NodeRuntime {
     const target = authoritativeYamlFor(this.config.yamlPath, "groups");
     const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
     const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
-    const g = (groups[group] ??= { policy: "private", cipher: "jwe", recipients: [] });
+    let g = ownEntry(groups, group);
+    if (g == null) {
+      g = { policy: "private", cipher: "jwe", recipients: [] };
+      groups[group] = g;
+    }
     const recips = (Array.isArray(g.recipients) ? g.recipients : []) as Record<string, unknown>[];
     g.recipients = fn(recips);
     doc.groups = groups;
@@ -1047,7 +1062,11 @@ export class NodeRuntime {
     const target = authoritativeYamlFor(this.config.yamlPath, "groups");
     const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
     const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
-    const g = (groups[group] ??= { policy: "private", cipher: "jwe" });
+    let g = ownEntry(groups, group);
+    if (g == null) {
+      g = { policy: "private", cipher: "jwe" };
+      groups[group] = g;
+    }
     g.recipients = recips;
     g.group_epoch = generation;
     doc.groups = groups;
@@ -1471,7 +1490,7 @@ export class NodeRuntime {
       const text = readFileSync(yamlPath, "utf8");
       const doc = parseYaml(text) as Record<string, unknown>;
       const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
-      const groupSpec = groups[group] ?? {};
+      const groupSpec = ownEntry(groups, group) ?? {};
       const cur = typeof groupSpec.index_epoch === "number" ? groupSpec.index_epoch : 0;
       nextEpoch = cur + 1;
       groupSpec.index_epoch = nextEpoch;
@@ -2019,12 +2038,13 @@ export class NodeRuntime {
     const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
     const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
     let dirty = false;
-    if (!groups[group]) {
-      groups[group] = { policy: "private", cipher, recipients: [{ recipient_identity: this.did }] };
+    let gspec = ownEntry(groups, group);
+    if (!gspec) {
+      gspec = { policy: "private", cipher, recipients: [{ recipient_identity: this.did }] };
+      groups[group] = gspec;
       dirty = true;
     }
     if (fields && fields.length > 0) {
-      const gspec = groups[group];
       const existingRaw = gspec.fields;
       const routed: string[] = Array.isArray(existingRaw)
         ? (existingRaw as unknown[]).map((f) => String(f))
@@ -3734,7 +3754,7 @@ export class NodeRuntime {
       body[`body/keys/${group}.btn.mykit`] = new Uint8Array(readFileSync(mykitPath));
       // Carry the authoritative yaml block if present, else a minimal one.
       blocks[group] =
-        authGroups[group] ??
+        ownEntry(authGroups, group) ??
         {
           policy: gcfg?.policy ?? "private",
           cipher: "btn",
@@ -3860,7 +3880,7 @@ export class NodeRuntime {
       let changed = false;
       for (const [group, block] of Object.entries(blocks)) {
         if (group === "tn.agents") continue;
-        if (groups[group]) continue; // union: keep the local block, don't clobber
+        if (ownEntry(groups, group)) continue; // union: keep the local block, don't clobber
         groups[group] = block;
         changed = true;
         accepted += 1;
