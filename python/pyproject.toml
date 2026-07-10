@@ -19,7 +19,7 @@ exclude = ["tn/**/*.md"]
 
 [project]
 name            = "tn-proto"
-version         = "0.6.10"
+version         = "0.6.11"
 description     = "TN protocol: attested logging with the btn broadcast cipher"
 readme          = "README.md"
 requires-python = ">=3.10"

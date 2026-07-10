@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.11] - 2026-07-10 -- C# JWE opening + HIBE admin verbs
+
+Completes the C# parity arc started in 0.6.10: sealed objects carrying
+JWE group blocks now open in C#, and HIBE granting and identity-path
+rotation are first-class admin verbs in Rust and C#.
+
+* **Managed C# JWE cipher.** `JweSealedGroupCipher` opens JWE group
+  blocks inside sealed objects (RFC 7516 General JSON,
+  ECDH-ES+A256KW over X25519, A256GCM), plugged into `Tn.UnsealAsync`
+  through the `ISealedGroupCipher` seam shipped in 0.6.10.
+  `JweKeystore.LoadGroupCiphers` builds the cipher map from a keystore
+  directory, walking current and superseded reader keys so
+  pre-rotation blocks keep opening.
+* **HIBE grant and rotation as admin verbs.** `grant_reader` (mint a
+  fresh delegated reader key and package it as an absorbable,
+  recipient-sealed kit — the authority master secret never leaves the
+  keystore) and `rotate_id_path` (point future seals at a new
+  identity path, archiving the outgoing path and key) are now on the
+  Rust runtime, the C ABI, and the C# `AdminClient`; the Rust SDK
+  gains both as pass-throughs. `grant_reader` accepts an ancestor
+  path so a grantee can delegate further down, matching Python.
+* **Rotation refreshes the live cipher.** Rotating the identity path
+  rebuilds the runtime's cached group cipher in place — the next
+  seal from the same runtime lands on the new path with no re-open;
+  a failed rebuild is raised, not swallowed.
+* **Grants file converged.** The Rust runtime's `<group>.hibe.grants`
+  record now matches the Python and TypeScript format byte for byte
+  (Rust had drifted); one grants file reads identically from every
+  language.
+* **Cross-language keystore proof.** A Python authority opens a
+  keystore rotated from C#, reads pre-rotation entries, and unseals
+  post-rotation objects sealed under the new path; a kit granted by
+  Python absorbs and opens in C#.
+
 ## [0.6.10] - 2026-07-09 -- Portable sealed objects in all four SDKs
 
 `tn.seal` / `tn.unseal` (introduced in Python at 0.6.9) now ship in every
