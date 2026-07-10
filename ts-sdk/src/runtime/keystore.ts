@@ -49,23 +49,56 @@ export interface GroupKeystore {
 }
 
 /** Load a group's btn reader kits: the active `<group>.btn.mykit` first,
- * then every rotation-archived `.btn.mykit.revoked.<ts>` — so pre-rotation
- * records stay decryptable. Returns an empty list when the group holds no
- * btn kit. Shared by `loadKeystore` and the sealed-object decrypt walk
- * (`src/seal.ts`), which needs the same multi-kit candidate list against a
- * bare recipient directory. */
+ * then both rotation-archive families — modern `.btn.mykit.retired.<epoch>`
+ * (what Python's tn.admin.rotate and the Rust runtime write since 0.4.3a1)
+ * before legacy `.btn.mykit.revoked.<ts>` (0.4.2-line keystores, and still
+ * what {@link commitGroupKeys} produces) — so pre-rotation records stay
+ * decryptable across implementations. Each family is ordered by its own
+ * numeric index descending (newest kit tried first), mirroring the Rust
+ * reference `collect_btn_kit_bytes_with_storage` (runtime/cipher_build.rs)
+ * and Python's `BtnGroupCipher.load`. Returns an empty list when the group
+ * holds no btn kit. Shared by `loadKeystore` and the sealed-object decrypt
+ * walk (`src/seal.ts`), which needs the same multi-kit candidate list
+ * against a bare recipient directory. */
 export function loadBtnKits(keystorePath: string, group: string): Uint8Array[] {
   const kits: Uint8Array[] = [];
   const selfKitPath = join(keystorePath, `${group}.btn.mykit`);
   if (existsSync(selfKitPath)) {
     kits.push(new Uint8Array(readFileSync(selfKitPath)));
   }
+  const retiredPrefix = `${group}.btn.mykit.retired.`;
+  const revokedPrefix = `${group}.btn.mykit.revoked.`;
+  const retired: { name: string; index: number }[] = [];
+  const revoked: { name: string; index: number }[] = [];
   for (const entry of readdirSync(keystorePath)) {
-    if (entry.startsWith(`${group}.btn.mykit.revoked.`)) {
-      kits.push(new Uint8Array(readFileSync(join(keystorePath, entry))));
+    if (entry.startsWith(retiredPrefix)) {
+      retired.push({ name: entry, index: archiveIndex(entry.slice(retiredPrefix.length)) });
+    } else if (entry.startsWith(revokedPrefix)) {
+      revoked.push({ name: entry, index: archiveIndex(entry.slice(revokedPrefix.length)) });
+    }
+  }
+  for (const family of [retired, revoked]) {
+    family.sort(newestFirst);
+    for (const { name } of family) {
+      kits.push(new Uint8Array(readFileSync(join(keystorePath, name))));
     }
   }
   return kits;
+}
+
+/** Numeric archive index from a filename suffix. A suffix that isn't a clean
+ * number (e.g. a torn `.tmp` leftover of an atomic write) maps to -Infinity
+ * so it sorts LAST in its family instead of crashing the load — the decrypt
+ * walk skips any kit that fails to parse, so offering a dud costs one failed
+ * trial, while dropping a readable kit would lose historical rows. */
+function archiveIndex(suffix: string): number {
+  return /^\d+$/.test(suffix) ? Number(suffix) : Number.NEGATIVE_INFINITY;
+}
+
+/** Sort comparator: larger archive index first. Explicit three-way compare
+ * (not subtraction) so two -Infinity fallbacks compare equal instead of NaN. */
+function newestFirst(a: { index: number }, b: { index: number }): number {
+  return b.index > a.index ? 1 : b.index < a.index ? -1 : 0;
 }
 
 /** Load a group's jwe reader keys: the active `<group>.jwe.mykey` first,
@@ -214,7 +247,8 @@ export function loadKeystore(keystorePath: string): LoadedKeystore {
   }
   for (const name of groupNames) {
     const stateBytes = new Uint8Array(readFileSync(join(keystorePath, `${name}.btn.state`)));
-    // Active self-kit + rotation-preserved `.revoked.<ts>` kits.
+    // Active self-kit + rotation-preserved kits (`.retired.<epoch>` then
+    // legacy `.revoked.<ts>`, each newest first).
     const kits = loadBtnKits(keystorePath, name);
     groups.set(name, { stateBytes, kits });
   }
