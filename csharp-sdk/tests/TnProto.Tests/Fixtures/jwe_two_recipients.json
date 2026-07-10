@@ -1,0 +1,8 @@
+{
+  "aad_b64": "",
+  "description": "two anonymous recipient blocks; each key opens its own",
+  "first_recipient_sk_b64": "gIN1H3aW/y07cQ+UWSM4bjJpUZeKWGg4vbDM4YRTbXk=",
+  "jwe": "{\"ciphertext\":\"BzT4hL8PmrZtx-iLRL0vIoKrhtvoGwlrqScdrymur4SA\",\"iv\":\"CfYzLAOaHb_KG_b6\",\"protected\":\"eyJlbmMiOiJBMjU2R0NNIn0\",\"recipients\":[{\"encrypted_key\":\"Jbmx3SBt0mBlR-FB3PPKJ88OI_vXlBgnrUcfsON2jtVhifwxwiAubg\",\"header\":{\"alg\":\"ECDH-ES+A256KW\",\"epk\":{\"crv\":\"X25519\",\"kty\":\"OKP\",\"x\":\"HHSqWOgCaYk1I4AZdvSLcg5noUWglVgCZoNgW4sUx2A\"}}},{\"encrypted_key\":\"KkHB4-gxum-GDbTo3nKMWxy92xBs3Z2TJe2YcHtCGP3zxmjvJB3f_g\",\"header\":{\"alg\":\"ECDH-ES+A256KW\",\"epk\":{\"crv\":\"X25519\",\"kty\":\"OKP\",\"x\":\"IIvuMu_dtRM2ek4-d73Y29yQjj1pZsQbCf5LskEZyDI\"}}}],\"tag\":\"yTegYZttMh_r6vJXmQvCaA\"}",
+  "plaintext_b64": "eyJib2R5IjoiZm9yIHRoZSBmaXh0dXJlIHJlYWRlciJ9",
+  "second_recipient_sk_b64": "AGAXXQHuxt2SfA4mNUxKE6pf7bhISubB4AfELegr2XA="
+}

@@ -1,0 +1,7 @@
+{
+  "aad_b64": "eyJjYXNlIjoiQS0xNyJ9",
+  "description": "one recipient with the marker bound as the JWE aad member",
+  "jwe": "{\"aad\":\"eyJjYXNlIjoiQS0xNyJ9\",\"ciphertext\":\"8ULmV3u06PL2Wiv4RUjnTlc5M8IaNvVJSvrV047WDq-Q\",\"iv\":\"CbdMj2HSnAEUPgp_\",\"protected\":\"eyJlbmMiOiJBMjU2R0NNIn0\",\"recipients\":[{\"encrypted_key\":\"5iuYeotoopCzNfX42VOI0nk8_8a9uENysbmhEQxzP4k6NcabzWScOw\",\"header\":{\"alg\":\"ECDH-ES+A256KW\",\"epk\":{\"crv\":\"X25519\",\"kty\":\"OKP\",\"x\":\"92Mxen2goMjKTUvsG2q2dZ0TAdcXqRxtf-69sek6uUc\"}}}],\"tag\":\"0ehMHCGrxxqi-OxAHdl6Mg\"}",
+  "plaintext_b64": "eyJib2R5IjoiZm9yIHRoZSBmaXh0dXJlIHJlYWRlciJ9",
+  "reader_sk_b64": "EAiveBEst/XZV9exN09stuq+3Jc67rcwVCV1nuolYUM="
+}

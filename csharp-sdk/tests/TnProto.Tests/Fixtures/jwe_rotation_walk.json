@@ -1,0 +1,8 @@
+{
+  "aad_b64": "",
+  "current_sk_b64": "qIE8J9t3nAAzxW2dCzSkAjTgMnYnypiH8dMh1qft0XY=",
+  "description": "sealed to the OLD reader key only; a post-rotation keystore holds mykey=new and mykey.revoked.<ts>=old, so only the revoked-key walk opens this blob",
+  "jwe": "{\"ciphertext\":\"gyCHryor6CucWiayUMZ5jlYstsjvJmAUreKJ24ygpA8M\",\"iv\":\"iT8ZVKTZW0fAUwGH\",\"protected\":\"eyJlbmMiOiJBMjU2R0NNIn0\",\"recipients\":[{\"encrypted_key\":\"8F7As8SmANmTXpHt8sgS36cIHx0g1MhXl5By5GzP83iojX_jUL9uow\",\"header\":{\"alg\":\"ECDH-ES+A256KW\",\"epk\":{\"crv\":\"X25519\",\"kty\":\"OKP\",\"x\":\"pTp0P8zy1OWOh_uMb5NYrmqCP6OSeMQPwBoWYA3YAVM\"}}}],\"tag\":\"T72-VinaDgZF7JKIun-agA\"}",
+  "plaintext_b64": "eyJib2R5IjoiZm9yIHRoZSBmaXh0dXJlIHJlYWRlciJ9",
+  "revoked_sk_b64": "eFE7Hbn1Mp0b17Bw8NnConIAlLUjdRcA6Z8QPcGqtUQ="
+}

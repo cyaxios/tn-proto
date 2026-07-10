@@ -1,0 +1,7 @@
+{
+  "aad_b64": "",
+  "description": "one recipient, no aad member",
+  "jwe": "{\"ciphertext\":\"GhXWJqiym_5rDZcsyW26OaIt5x_sc-y0gynvuQvabwQk\",\"iv\":\"vGEqdLnvnX6LN5Wo\",\"protected\":\"eyJlbmMiOiJBMjU2R0NNIn0\",\"recipients\":[{\"encrypted_key\":\"z_95yJwyQZSlfmo9pBrg87a3NtUDCEIz_SScVCK9xl210uh-fCG3gg\",\"header\":{\"alg\":\"ECDH-ES+A256KW\",\"epk\":{\"crv\":\"X25519\",\"kty\":\"OKP\",\"x\":\"DxHt1sNSAzP62HYvoT3P_hrji4s8boSI0-9MzS3mnTM\"}}}],\"tag\":\"Wd5aI03Uk1_ShErsk7V_ZQ\"}",
+  "plaintext_b64": "eyJib2R5IjoiZm9yIHRoZSBmaXh0dXJlIHJlYWRlciJ9",
+  "reader_sk_b64": "eJWnYXnT7754IDC+dWpHuPhtAFDW0leNrs+Rl04dLEo="
+}
