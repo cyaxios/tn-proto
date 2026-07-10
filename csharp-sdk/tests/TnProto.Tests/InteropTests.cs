@@ -236,6 +236,157 @@ public sealed class InteropTests
     }
 
     [Fact]
+    public async Task PythonGrantsHibeReaderCSharpAbsorbsAndOpens()
+    {
+        if (!await PythonReadyAsync())
+        {
+            return;
+        }
+
+        var authorityDir = NewTempDir();
+        await using var reader = await Tn.InitProjectAsync(
+            "hibe_interop_reader",
+            new TnProjectOptions { ProjectDirectory = NewTempDir() });
+        var kitPath = Path.Combine(authorityDir, "reader.tnpkg");
+
+        // Python authority: hibe ceremony, one sealed object, one grant
+        // addressed to the C# reader's real DID (so the kit rides sealed).
+        var output = await RunPythonAsync(
+            """
+            import sys
+            from pathlib import Path
+
+            import tn
+
+            reader_did = sys.argv[1]
+            kit_path = sys.argv[2]
+
+            ws = Path.cwd()
+            tn.init(ws / "authority" / "tn.yaml",
+                    log_path=ws / "authority" / "log.ndjson",
+                    cipher="hibe")
+            sealed = tn.seal(
+                "obj.gov.v1",
+                secret="python-grants-csharp-opens",
+                receipt=False,
+            )
+            tn.admin.grant_reader("default", reader_did=reader_did, out_path=kit_path)
+            print("WIRE=" + str(sealed))
+            tn.flush_and_close()
+            """,
+            authorityDir,
+            reader.Did,
+            kitPath);
+
+        var wire = ValueAfterPrefix(output, "WIRE=");
+
+        var receipt = await reader.Packages.AbsorbAsync(kitPath);
+        Assert.Equal("kit_bundle", receipt.Kind);
+        Assert.False(receipt.Rejected);
+
+        var opened = await reader.UnsealAsync(wire);
+        Assert.Empty(opened.HiddenGroups);
+        Assert.Equal(
+            "python-grants-csharp-opens",
+            opened.Fields["secret"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CSharpRotatesHibeIdPathPythonAuthorityStillOpens()
+    {
+        if (!await PythonReadyAsync())
+        {
+            return;
+        }
+
+        var authorityDir = NewTempDir();
+
+        // Python creates the hibe authority ceremony and seals one log
+        // entry under the initial identity path.
+        var setup = await RunPythonAsync(
+            """
+            from pathlib import Path
+
+            import tn
+
+            ws = Path.cwd()
+            tn.init(ws / "authority" / "tn.yaml",
+                    log_path=ws / "authority" / "log.ndjson",
+                    cipher="hibe")
+            tn.info("epoch.a", body="sealed before rotation")
+            cfg = tn.current_config()
+            print("YAML=" + str(cfg.yaml_path))
+            print("IDPATH=" + (Path(cfg.keystore) / "default.hibe.idpath").read_text(encoding="utf-8"))
+            tn.flush_and_close()
+            """,
+            authorityDir);
+
+        var yamlPath = ValueAfterPrefix(setup, "YAML=");
+        var previousPath = ValueAfterPrefix(setup, "IDPATH=");
+        var newPath = previousPath + "-r1";
+
+        // C# opens the SAME ceremony, rotates the identity path, and seals
+        // a post-rotation object — which must land on the new path.
+        string wireAfter;
+        await using (var authority = await Tn.InitAsync(yamlPath))
+        {
+            var rotation = await authority.Admin.RotateIdPathAsync("default", newPath);
+            Assert.Equal(previousPath, rotation.PreviousPath);
+            Assert.Equal(newPath, rotation.NewPath);
+
+            wireAfter = (await authority.SealAsync(
+                "obj.gov.v1",
+                new { epoch = "two" },
+                new SealOptions { Receipt = false })).RawJson;
+        }
+
+        // Python re-opens the rotated keystore: the idpath/history files
+        // parse, the pre-rotation log entry still opens (msk + recorded
+        // history), the C#-sealed post-rotation object opens, and a fresh
+        // Python seal works on the rotated ceremony.
+        var verify = await RunPythonAsync(
+            """
+            import json
+            import sys
+            from pathlib import Path
+
+            import tn
+
+            yaml_path = Path(sys.argv[1])
+            wire = sys.argv[2]
+            expected_new_path = sys.argv[3]
+            expected_old_path = sys.argv[4]
+
+            tn.init(yaml_path, log_path=yaml_path.parent / "log.ndjson", cipher="hibe")
+            cfg = tn.current_config()
+            keystore = Path(cfg.keystore)
+            idpath = (keystore / "default.hibe.idpath").read_text(encoding="utf-8")
+            history = (keystore / "default.hibe.idpath.history").read_text(encoding="utf-8")
+            assert idpath == expected_new_path, (idpath, expected_new_path)
+            assert history == expected_old_path + "\n", history
+
+            rows = {}
+            for entry in tn.read(all_runs=True):
+                rows[getattr(entry, "event_type", None)] = getattr(entry, "fields", {})
+            assert rows["epoch.a"].get("body") == "sealed before rotation", rows
+
+            entry = tn.unseal(wire)
+            assert entry.fields.get("epoch") == "two", dict(entry.fields)
+
+            tn.info("epoch.c", body="python seals after csharp rotation")
+            print("VERIFY=ok")
+            tn.flush_and_close()
+            """,
+            authorityDir,
+            yamlPath,
+            wireAfter,
+            newPath,
+            previousPath);
+
+        Assert.Equal("ok", ValueAfterPrefix(verify, "VERIFY="));
+    }
+
+    [Fact]
     public async Task CSharpAdminSnapshotTypeScriptAbsorbs()
     {
         if (!await TypeScriptReadyAsync())
