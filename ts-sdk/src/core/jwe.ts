@@ -19,6 +19,7 @@
 // btn/hibe loop.
 
 import { GeneralEncrypt, generalDecrypt, importJWK, type GeneralJWE, type JWK } from "jose";
+import { x25519 } from "@noble/curves/ed25519";
 
 /** Per-recipient key-management algorithm: ECDH-ES derives a KEK, A256KW wraps
  * the shared CEK. Body content-encryption is A256GCM. */
@@ -37,6 +38,16 @@ function requireRawX25519(bytes: Uint8Array, label: string): Uint8Array {
     throw new Error(`jwe: ${label} must be 32 raw X25519 bytes, got ${bytes.length}`);
   }
   return bytes;
+}
+
+/** Mint a fresh X25519 recipient keypair (raw 32-byte halves). The
+ * public half enrolls the recipient (`tn.admin.addRecipient` /
+ * `jweSeal`); the private half opens their blocks — package it with
+ * {@link okpPrivateJwk} for {@link jweDecrypt}, or store it under
+ * `<group>.jwe.mykey` in a recipient keystore / key bag for `unseal`. */
+export function generateX25519KeyPair(): { publicKey: Uint8Array; privateKey: Uint8Array } {
+  const privateKey = x25519.utils.randomPrivateKey();
+  return { publicKey: x25519.getPublicKey(privateKey), privateKey };
 }
 
 /** A raw 32-byte X25519 public key as an RFC 8037 OKP JWK. */

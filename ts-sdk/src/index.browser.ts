@@ -116,6 +116,29 @@ export {
   keystoreFromBodyFiles,
 } from "./local/keystore.js";
 
+// ---------------------------------------------------------------------------
+// Portable sealed objects (tn.seal / tn.unseal) + the jwe recipient
+// surface. `SealedObjectError` is the malformed-source error;
+// `VerifyError` (exported above with Entry) is failed verification.
+// ---------------------------------------------------------------------------
+
+export { SealedObject, SealedObjectError } from "./core/sealed_object.js";
+export type { SealOptions, SealedTriple, UnsealSource } from "./core/sealed_object.js";
+export type { BrowserKeyBag, BrowserUnsealOptions } from "./browser/seal.js";
+
+// RFC 7516 JWE for `cipher: jwe` groups — pure JS (panva/jose over
+// WebCrypto), so the browser is a first-class jwe recipient: mint a
+// keypair, get enrolled by a publisher, open your blocks.
+export {
+  JWE_ALG,
+  JWE_ENC,
+  generateX25519KeyPair,
+  jweDecrypt,
+  jweSeal,
+  okpPrivateJwk,
+  okpPublicJwk,
+} from "./core/jwe.js";
+
 // Raw wasm primitives, for callers who want them.
 export * from "./raw.js";
 
@@ -143,6 +166,17 @@ import {
   type TnInitOptions as _TnInitOptions,
   type TnInitFromSeedOptions as _TnInitFromSeedOptions,
 } from "./browser/tn.js";
+import {
+  unsealWithBrowserRuntime,
+  type BrowserUnsealOptions as _BrowserUnsealOptions,
+} from "./browser/seal.js";
+import type {
+  SealOptions as _SealOptions,
+  SealedObject as _SealedObject,
+  SealedTriple as _SealedTriple,
+  UnsealSource as _UnsealSource,
+} from "./core/sealed_object.js";
+import type { Entry as _Entry } from "./Entry.js";
 
 /**
  * Process-singleton {@link Tn} instance backing the bare module-level
@@ -375,6 +409,39 @@ export function read(): Array<Record<string, unknown>> {
  */
 export function readRaw(): Array<Record<string, unknown>> {
   return _requireDefault("readRaw").readRaw();
+}
+
+/**
+ * Seal fields into a portable attested object on the default ceremony.
+ * Mirrors Node/Python `tn.seal`. Like the other browser module verbs,
+ * requires `tn.init()` first (the browser never auto-mints).
+ *
+ * @throws Error - when called before {@link init} / {@link initFromSeed}.
+ * @public
+ */
+export async function seal(
+  objectType: string,
+  fields: Record<string, unknown> = {},
+  opts: _SealOptions = {},
+): Promise<_SealedObject> {
+  return _requireDefault("seal").seal(objectType, fields, opts);
+}
+
+/**
+ * Verify a sealed object and open what the default ceremony's keys (or
+ * an `asRecipient` key bag) fit. Works without any ceremony too:
+ * before `tn.init()` the walk simply runs key-less — verification and
+ * the `asRecipient` override need no ceremony at all (mirrors the Node
+ * entry's ceremony-less fallback).
+ *
+ * @public
+ */
+export async function unseal(
+  source: _UnsealSource,
+  opts: _BrowserUnsealOptions = {},
+): Promise<_Entry | _SealedTriple> {
+  if (_defaultTn !== null) return _defaultTn.unseal(source, opts);
+  return unsealWithBrowserRuntime(null, source, opts);
 }
 
 /**

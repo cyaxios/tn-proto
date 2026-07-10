@@ -44,6 +44,18 @@ import {
   type BrowserRuntimeFromSeedOptions,
 } from "./runtime.js";
 import { normalizeLogFields } from "../_log_fields.js";
+import {
+  sealWithBrowserRuntime,
+  unsealWithBrowserRuntime,
+  type BrowserUnsealOptions,
+} from "./seal.js";
+import type {
+  SealOptions,
+  SealedObject,
+  SealedTriple,
+  UnsealSource,
+} from "../core/sealed_object.js";
+import type { Entry } from "../Entry.js";
 
 // ---------------------------------------------------------------------------
 // Module-level state — mirrors src/tn.ts (`_tnLogLevelThreshold`, run_id).
@@ -806,6 +818,41 @@ export class Tn {
    */
   readRaw(): Array<Record<string, unknown>> {
     return this._rt.readRaw();
+  }
+
+  /**
+   * Seal fields into a portable attested object (standalone envelope)
+   * using this ceremony's groups and key material. The receipt row (on
+   * by default) chains through the live wasm write path. Mirrors the
+   * Node `tn.seal(objectType, fields)` / Python `tn.seal(object_type,
+   * **fields)`.
+   *
+   * @example
+   * ```ts
+   * const sealed = await tn.seal("obj.invoice.v1", { amount: 42 });
+   * sendSomewhere(sealed.rawJson);   // verbatim wire string
+   * ```
+   */
+  async seal(
+    objectType: string,
+    fields: Record<string, unknown> = {},
+    opts: SealOptions = {},
+  ): Promise<SealedObject> {
+    return sealWithBrowserRuntime(this._rt, objectType, fields, opts);
+  }
+
+  /**
+   * Verify a sealed object and open every group block a held key fits,
+   * walking this ceremony's keystore. With `asRecipient` (a
+   * {filename -> bytes} key bag — the browser analog of a recipient
+   * keystore directory) only the named `group` is opened and the
+   * ceremony is not consulted. Mirrors Node/Python `tn.unseal`.
+   */
+  async unseal(
+    source: UnsealSource,
+    opts: BrowserUnsealOptions = {},
+  ): Promise<Entry | SealedTriple> {
+    return unsealWithBrowserRuntime(this._rt, source, opts);
   }
 
   /**
