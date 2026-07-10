@@ -51,7 +51,10 @@ pub use account::{
 pub use account::{
     AccountConnectOptions, AccountConnectResult, ResolvedSigningIdentity, SigningIdentityTier,
 };
-pub use admin::{AddRecipientResult, Admin, EnsureGroupResult, RevokeRecipientResult};
+pub use admin::{
+    AddRecipientResult, Admin, EnsureGroupResult, GrantReaderResult, RevokeRecipientResult,
+    RotateIdPathResult,
+};
 #[cfg(feature = "http")]
 pub use credential_store::cache_account_awk_with_client;
 pub use credential_store::{

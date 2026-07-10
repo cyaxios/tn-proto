@@ -1356,6 +1356,95 @@ pub unsafe extern "C" fn tn_runtime_admin_rotate_group(
     }
 }
 
+/// Grant a hibe reader: mint a delegated identity key for `reader_did` and
+/// export it as an absorbable `.tnpkg` kit, returning a JSON receipt
+/// (`{"group", "reader_did", "id_path", "path"}`).
+///
+/// `reader_did` may be null or empty (no grant recorded, plaintext kit).
+/// `id_path` may be null or empty to key the reader to the group's current
+/// sealing path; pass an ancestor path to hand out a delegatable key.
+/// hibe groups only — btn/jwe groups use `tn_runtime_admin_add_recipient`.
+/// The returned string is owned by the caller and must be released with
+/// [`tn_string_free`]. Returns null on error. Use [`tn_last_error`] for
+/// details.
+#[no_mangle]
+pub unsafe extern "C" fn tn_runtime_admin_grant_reader(
+    handle: *mut TnHandle,
+    group: *const c_char,
+    reader_did: *const c_char,
+    out_path: *const c_char,
+    id_path: *const c_char,
+) -> *mut c_char {
+    clear_error();
+    match take_result(|| {
+        let group = string_from_ptr(group, "group")?;
+        let reader_did = optional_string_from_ptr(reader_did, "reader_did")?;
+        let out_path = PathBuf::from(string_from_ptr(out_path, "out_path")?);
+        let id_path = optional_string_from_ptr(id_path, "id_path")?;
+        let result = handle_mut(handle)?
+            .tn_mut()?
+            .admin()
+            .grant_reader(&group, reader_did, &out_path, id_path)
+            .map_err(|err| err.to_string())?;
+        serde_json::to_string(&json!({
+            "group": result.group,
+            "reader_did": result.reader_did,
+            "id_path": result.id_path,
+            "path": result.path.to_string_lossy(),
+        }))
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(value) => into_c_string_ptr(value),
+        Err(err) => {
+            set_error(err);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Rotate a hibe group's identity path so future seals use `new_path`,
+/// returning a JSON receipt (`{"group", "previous_path", "new_path"}`).
+///
+/// `allow_root_path` is treated as false when set to 0 and true otherwise;
+/// the root path is the empty string and requires the flag. The live group
+/// cipher is refreshed in place, so the next emit/seal through this handle
+/// lands on the new path. hibe groups only — btn groups rotate via
+/// `tn_runtime_admin_rotate_group`. The returned string is owned by the
+/// caller and must be released with [`tn_string_free`]. Returns null on
+/// error. Use [`tn_last_error`] for details.
+#[no_mangle]
+pub unsafe extern "C" fn tn_runtime_admin_rotate_id_path(
+    handle: *mut TnHandle,
+    group: *const c_char,
+    new_path: *const c_char,
+    allow_root_path: i32,
+) -> *mut c_char {
+    clear_error();
+    match take_result(|| {
+        let group = string_from_ptr(group, "group")?;
+        // The empty string is meaningful here (the root path), so this is
+        // a required pointer, not an optional-and-empty-collapsing one.
+        let new_path = string_from_ptr(new_path, "new_path")?;
+        let result = handle_mut(handle)?
+            .tn_mut()?
+            .admin()
+            .rotate_id_path(&group, &new_path, allow_root_path != 0)
+            .map_err(|err| err.to_string())?;
+        serde_json::to_string(&json!({
+            "group": result.group,
+            "previous_path": result.previous_path,
+            "new_path": result.new_path,
+        }))
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(value) => into_c_string_ptr(value),
+        Err(err) => {
+            set_error(err);
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Return the recipient roster for an admin group as JSON.
 ///
 /// `include_revoked` is treated as false when set to 0 and true otherwise.
@@ -2669,6 +2758,55 @@ mod tests {
             let message = last_error_message().expect("malformed input must set tn_last_error");
             assert!(
                 message.starts_with("UnsealError: "),
+                "unexpected error: {message}"
+            );
+
+            assert_eq!(tn_runtime_close(handle), 0);
+        }
+    }
+
+    /// The hibe admin exports marshal their guards through the error
+    /// channel: a btn project rejects both verbs with the hibe-only
+    /// messages. (The happy path needs a hibe ceremony's key material and
+    /// is covered end-to-end by the tn-core suite and the C# SDK tests.)
+    #[test]
+    fn ffi_hibe_admin_verbs_are_hibe_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            let handle = open_project(dir.path(), "ffi_hibe_admin");
+
+            let group = c("default");
+            let reader = c("did:key:z6Mk-reader");
+            let out = c(dir
+                .path()
+                .join("reader.tnpkg")
+                .to_str()
+                .expect("tempdir path is not UTF-8"));
+            let granted = tn_runtime_admin_grant_reader(
+                handle,
+                group.as_ptr(),
+                reader.as_ptr(),
+                out.as_ptr(),
+                ptr::null(),
+            );
+            assert!(granted.is_null(), "btn group must reject grant_reader");
+            let message = last_error_message().expect("guard must set tn_last_error");
+            assert!(
+                message.contains("grant_reader is hibe-only. Use add_recipient for btn/jwe groups."),
+                "unexpected error: {message}"
+            );
+
+            let new_path = c("team/policy-b");
+            let rotated = tn_runtime_admin_rotate_id_path(
+                handle,
+                group.as_ptr(),
+                new_path.as_ptr(),
+                0,
+            );
+            assert!(rotated.is_null(), "btn group must reject rotate_id_path");
+            let message = last_error_message().expect("guard must set tn_last_error");
+            assert!(
+                message.contains("this rotation is hibe-only (btn groups rotate via tn rotate)."),
                 "unexpected error: {message}"
             );
 

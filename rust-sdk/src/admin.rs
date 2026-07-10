@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::tn::Tn;
 use crate::Result;
 
-pub use tn_core::EnsureGroupResult;
+pub use tn_core::{EnsureGroupResult, GrantReaderResult, RotateIdPathResult};
 
 /// Runtime administration namespace for a [`Tn`] handle.
 pub struct Admin<'a> {
@@ -125,6 +125,64 @@ impl<'a> Admin<'a> {
             group: group.to_string(),
             leaf_index,
         })
+    }
+
+    /// HIBE's add_recipient: mint a delegated identity key for `reader_did`
+    /// in the hibe group `group` and export it as an absorbable `.tnpkg`
+    /// kit at `out_path`.
+    ///
+    /// `id_path: None` keys the reader to the group's current sealing path;
+    /// pass an ancestor path to hand out a key the reader can delegate
+    /// further down. The kit body is sealed to `reader_did` when the DID
+    /// resolves to a real `did:key:z...` key. The authority master secret
+    /// never rides a kit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] when the group is unknown or not hibe
+    /// (grant_reader is hibe-only — use [`Admin::add_recipient`] for
+    /// btn/jwe groups), the id path fails validation, or the kit cannot
+    /// be minted/written.
+    pub fn grant_reader(
+        &mut self,
+        group: &str,
+        reader_did: impl Into<Option<String>>,
+        out_path: impl AsRef<Path>,
+        id_path: impl Into<Option<String>>,
+    ) -> Result<GrantReaderResult> {
+        let reader_did = reader_did.into();
+        let id_path = id_path.into();
+        Ok(self.tn.runtime().admin_grant_reader(
+            group,
+            reader_did.as_deref(),
+            out_path.as_ref(),
+            id_path.as_deref(),
+        )?)
+    }
+
+    /// Rotate a hibe group's identity path so FUTURE seals use `new_path`.
+    ///
+    /// Admission rotation, not revocation: pre-rotation seals stay open for
+    /// prior grantees, and the authority keeps opening every epoch via the
+    /// recorded path history. The live group cipher is refreshed in place,
+    /// so the next emit/seal from this handle lands on the new path. The
+    /// root path (empty string) requires `allow_root_path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] when the group is unknown or not hibe, this
+    /// keystore is not the authority (no msk), the path fails validation,
+    /// or `new_path` equals the current path.
+    pub fn rotate_id_path(
+        &mut self,
+        group: &str,
+        new_path: &str,
+        allow_root_path: bool,
+    ) -> Result<RotateIdPathResult> {
+        Ok(self
+            .tn
+            .runtime()
+            .admin_rotate_id_path(group, new_path, allow_root_path)?)
     }
 
     /// Rotate a btn publisher group to a fresh key generation.
