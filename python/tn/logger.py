@@ -313,6 +313,14 @@ class TNRuntime:
         with _perf_stage("emit:group_encrypt"):
             for gname, plain_fields in per_group.items():
                 group_cfg = self.cfg.groups[gname]
+                # Stable field ordering up front, mirroring the native
+                # runtime's BTreeMap collect: index tokens, canonical
+                # bytes, and the envelope's field_hashes all see the same
+                # sorted view (canonical_bytes re-sorts internally, so
+                # this is byte-neutral for hashing; it aligns the
+                # envelope's field_hashes order with the Rust runtime).
+                with _perf_stage("emit:group_encrypt.sort"):
+                    plain_fields = dict(sorted(plain_fields.items()))
                 field_hashes: dict[str, str] = {}
                 for fname, fval in plain_fields.items():
                     with _perf_stage("emit:group_encrypt.index_token"):
@@ -327,7 +335,7 @@ class TNRuntime:
                 # 4. encrypt group plaintext via the ceremony's cipher (see
                 #    tn/cipher.py). If this party isn't a publisher for the
                 #    group, the cipher raises and we skip.
-                with _perf_stage("emit:group_encrypt.payload_build"):
+                with _perf_stage("emit:group_encrypt.canonical_bytes"):
                     plaintext_bytes = _canonical_bytes(plain_fields)
                 _perf_metric("emit:group_encrypt.plaintext_bytes", len(plaintext_bytes))
                 try:
@@ -436,6 +444,12 @@ class TNRuntime:
         # (return None from resolved_address) are always fired.
         delivered = 0
         seen_addresses: set[str] = set()
+        # Stage-vocabulary note: on this pure-Python path the durable log
+        # append is itself a handler, so ``emit:fan_out`` CONTAINS the
+        # ``emit:file_write`` time the file handlers record inside it.
+        # (The Rust runtime writes the log before its fan-out, so its
+        # fan_out excludes file_write.) Compare file_write across sources;
+        # treat fan_out as source-local.
         with _perf_stage("emit:fan_out"):
             for h in self.handlers:
                 if not h.accepts(envelope):
@@ -832,6 +846,16 @@ def reload_from_yaml() -> None:
     Quiet by design: does NOT re-emit ``tn.ceremony.init`` or any
     other init-time admin events — those fired on the original
     ``tn.init`` and would be misleading if duplicated.
+
+    Raises:
+        RuntimeError: If the Rust dispatch runtime fails to rebuild
+            from the on-disk yaml. Swallowing that failure would leave
+            the runtime sealing under its PRE-reload state — after a
+            key/path rotation that means entries a revoked grantee can
+            still open. This is an explicit rebind call, so the error
+            surfaces here; ambient internal callers wrap it in their
+            own contain-and-warn (the SDK never throws an exception
+            the user didn't ask for).
     """
     global _runtime
     with _runtime_lock:
@@ -848,16 +872,13 @@ def reload_from_yaml() -> None:
     if _current_dispatch_rt is not None:
         try:
             _current_dispatch_rt.reload()
-        except Exception:  # noqa: BLE001
-            # A Rust reload failure shouldn't tank the caller — the
-            # next full tn.init() will recover. Log and continue.
-            import logging as _logging
-
-            _logging.getLogger("tn").warning(
-                "tn.logger.reload_from_yaml: Rust runtime reload failed; "
-                "the next full tn.init() will recover.",
-                exc_info=True,
-            )
+        except Exception as exc:
+            raise RuntimeError(
+                "tn.logger.reload_from_yaml: the Rust runtime failed to "
+                "rebuild from the on-disk yaml and is still sealing with "
+                "its stale pre-reload state. Do not emit until you rebind: "
+                "run tn.flush_and_close(); tn.init(...) to reload from disk."
+            ) from exc
 
 
 def flush_and_close(*, timeout: float = 30.0) -> None:

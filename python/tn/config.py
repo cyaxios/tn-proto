@@ -492,14 +492,23 @@ def _create_group(
     """Mint a fresh group's cipher + derive its index key."""
     inst: _cipher.GroupCipher
     if cipher_name == "jwe":
-        # Solo-ceremony default: publisher is also the sole recipient.
-        # Callers that want a multi-party ceremony must pass recipient_dids
-        # plus recipient_pubs (every non-self recipient's public key).
-        dids = recipient_dids or ["self"]
+        # Solo ceremony passes the publisher's own DID as the sole
+        # recipient; multi-party callers pass recipient_dids plus
+        # recipient_pubs (every non-self recipient's public key). The
+        # label must be a real identity: the yaml records the device DID
+        # for the same slot, add/revoke match entries by DID, and the TS
+        # SDK writes the DID — a placeholder like "self" diverges from
+        # all three.
+        if not recipient_dids:
+            raise ValueError(
+                f"jwe group {name!r}: recipient_dids must include at least "
+                f"the publisher's own identity (the device DID for a solo "
+                f"ceremony); refusing to mint a placeholder recipient label"
+            )
         inst = _cipher.JWEGroupCipher.create(
             keystore,
             name,
-            recipient_dids=dids,
+            recipient_dids=recipient_dids,
             recipient_pubs=recipient_pubs,
         )
     elif cipher_name == "btn":
@@ -647,6 +656,7 @@ def create_fresh(
         ceremony_id=ceremony_id,
         cipher_name=cipher,
         pool_size=pool_size,
+        recipient_dids=[device.device_identity],
     )
 
     # JWE records the DID only (the publisher's pub lives in

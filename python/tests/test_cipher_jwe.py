@@ -91,6 +91,92 @@ def test_jwe_multi_recipient_all_decrypt() -> None:
             assert recv_cipher.decrypt(ct) == b"shared payload"
 
 
+def test_jwe_encrypt_reuses_cached_recipient_material() -> None:
+    with tempfile.TemporaryDirectory(prefix="jwe_") as td:
+        ks = Path(td)
+        recipients = {f"did:r{i}": _x25519_pub() for i in range(3)}
+        cipher = JWEGroupCipher.create(
+            ks,
+            "default",
+            recipient_dids=list(recipients),
+            recipient_pubs=recipients,
+        )
+
+        reads = 0
+        original_read_text = Path.read_text
+
+        def counting_read_text(self: Path, *args, **kwargs):
+            nonlocal reads
+            if self == cipher._recipients_path:
+                reads += 1
+            return original_read_text(self, *args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Path, "read_text", counting_read_text)
+            cipher.encrypt(b"first")
+            cipher.encrypt(b"second")
+
+        assert reads <= 1
+
+
+def test_jwe_add_recipient_invalidates_cached_recipient_material() -> None:
+    with tempfile.TemporaryDirectory(prefix="jwe_") as td:
+        ks = Path(td)
+        first_sk = __import__(
+            "cryptography.hazmat.primitives.asymmetric.x25519",
+            fromlist=["X25519PrivateKey"],
+        ).X25519PrivateKey.generate()
+        second_sk = __import__(
+            "cryptography.hazmat.primitives.asymmetric.x25519",
+            fromlist=["X25519PrivateKey"],
+        ).X25519PrivateKey.generate()
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        first_pub = first_sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        second_pub = second_sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        cipher = JWEGroupCipher.create(
+            ks,
+            "default",
+            recipient_dids=["did:first"],
+            recipient_pubs={"did:first": first_pub},
+        )
+        cipher.encrypt(b"prime recipient cache")
+
+        cipher.add_recipient("did:second", second_pub)
+        ct = cipher.encrypt(b"after add")
+
+        second_view = JWEGroupCipher.as_recipient(cipher.sender_pub(), second_sk)
+        assert second_view.decrypt(ct) == b"after add"
+
+
+def test_jwe_decrypt_reuses_cached_private_key_material() -> None:
+    with tempfile.TemporaryDirectory(prefix="jwe_") as td:
+        ks = Path(td)
+        cipher = JWEGroupCipher.create(ks, "default", recipient_dids=["did:self"])
+        ct_one = cipher.encrypt(b"one")
+        ct_two = cipher.encrypt(b"two")
+
+        from joserfc.jwk import OKPKey
+
+        imports = 0
+        original_import_key = OKPKey.import_key
+
+        def counting_import_key(*args, **kwargs):
+            nonlocal imports
+            if args and isinstance(args[0], dict) and "d" in args[0]:
+                imports += 1
+            elif kwargs.get("key") and isinstance(kwargs["key"], dict) and "d" in kwargs["key"]:
+                imports += 1
+            return original_import_key(*args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(OKPKey, "import_key", staticmethod(counting_import_key))
+            assert cipher.decrypt(ct_one) == b"one"
+            assert cipher.decrypt(ct_two) == b"two"
+
+        assert imports <= 1
+
+
 def test_jwe_revoked_recipient_cannot_decrypt_new_entries() -> None:
     """After revoke, next encrypt must not include the revoked recipient's
     wrapped CEK. Attempting to decrypt the new envelope raises."""
@@ -216,6 +302,9 @@ def main() -> int:
     tests = [
         test_jwe_roundtrip_publisher_can_decrypt_own,
         test_jwe_multi_recipient_all_decrypt,
+        test_jwe_encrypt_reuses_cached_recipient_material,
+        test_jwe_add_recipient_invalidates_cached_recipient_material,
+        test_jwe_decrypt_reuses_cached_private_key_material,
         test_jwe_revoked_recipient_cannot_decrypt_new_entries,
         test_jwe_load_decrypts_pre_rotation_ciphertext_via_revoked_keys,
         test_jwe_load_spans_multiple_rotations,

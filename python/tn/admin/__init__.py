@@ -111,6 +111,7 @@ def ensure_group(
         ceremony_id=cfg.ceremony_id,
         cipher_name=internal_cipher,
         pool_size=pool_size,
+        recipient_dids=[cfg.device.device_identity],
     )
     cfg.groups[group] = new_group
 
@@ -354,6 +355,7 @@ def _rotate_impl(
             cipher_name=cfg.cipher_name,
             pool_size=pool,
             epoch=old.index_epoch + 1,
+            recipient_dids=[cfg.device.device_identity],
         )
         cfg.groups[group] = new_group
         new_index_epoch = new_group.index_epoch
@@ -1554,10 +1556,18 @@ def rotate_reader_path(group: str, new_path: str, *, cfg: Any | None = None) -> 
 
 
 def _reload_native_group_cipher(group: str) -> None:
-    """After a hibe admin mutation rewrote a group's keystore files, tell any
-    bound native (Rust) runtime to rebuild that group's cipher so the next
-    emit/read picks up the new identity path. No-op when the ceremony runs on
-    the pure pipeline (no native runtime bound). Best-effort."""
+    """After a rotation/revocation admin verb rewrote a group's keystore
+    files, tell any bound native (Rust) runtime to rebuild that group's
+    cipher so the next emit/read picks up the new identity path / epoch.
+    No-op when the ceremony runs on the pure pipeline (no native runtime
+    bound — the pure pipeline seals with the same in-memory cipher instance
+    the verb just mutated, so it is never stale).
+
+    A bound native runtime that FAILS to rebuild is a security failure,
+    not a DX nit: it would keep sealing under the pre-rotation state, so
+    the audience the caller just rotated away from could still open every
+    subsequent entry. The callers are all explicit admin verbs the user
+    awaits, so raise instead of continuing on the stale runtime."""
     import tn
 
     rt = getattr(tn, "_dispatch_rt", None)
@@ -1565,12 +1575,19 @@ def _reload_native_group_cipher(group: str) -> None:
     if native is None:
         return
     reload_fn = getattr(native, "reload_group_cipher", None)
-    if reload_fn is None:
-        return
     try:
+        if reload_fn is None:
+            raise AttributeError(
+                "bound native runtime has no reload_group_cipher hook"
+            )
         reload_fn(group)
-    except Exception:  # noqa: BLE001 — best-effort refresh; never break the verb
-        pass
+    except Exception as exc:
+        raise RuntimeError(
+            f"rotation of group {group!r} is on disk, but the live runtime "
+            f"failed to rebuild the group cipher and would keep sealing "
+            f"under the PRE-rotation state. Do not emit until you rebind: "
+            f"run tn.flush_and_close(); tn.init(...) to reload from disk."
+        ) from exc
 
 
 @dataclass
