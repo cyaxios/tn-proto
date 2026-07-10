@@ -13,13 +13,12 @@
 // honest custodial property: least privilege per request, even though the
 // holder could open more.
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Buffer } from "node:buffer";
 
 import { Entry } from "./Entry.js";
 import { aadBytesFor, decryptGroup, type GroupKits } from "./core/decrypt.js";
 import { hibeCandidateKeys, loadHibeGroup } from "./runtime/hibe_group.js";
+import { loadBtnKits } from "./runtime/keystore.js";
 import type { CeremonyConfig } from "./runtime/config.js";
 
 /**
@@ -102,9 +101,12 @@ export class ScopedTn {
   }
 
   /**
-   * Load (and memoize) the decrypt kits for one group — the btn self-kit
-   * when `<group>.btn.mykit` exists, else the hibe reader material when
-   * `<group>.hibe.sk` exists.
+   * Load (and memoize) the decrypt kits for one group — the btn kits when
+   * any `<group>.btn.mykit` exists (the current one plus both
+   * rotation-archive families, `.retired.<epoch>` and legacy
+   * `.revoked.<ts>`, so rows sealed before a publisher rotation still
+   * open — the same walk as `readAsRecipient`), else the hibe reader
+   * material when `<group>.hibe.sk` exists.
    *
    * @returns the kit set, or `null` when no key file is present — in which
    * case the group simply stays sealed (it surfaces in `entry.hidden_groups`).
@@ -114,10 +116,10 @@ export class ScopedTn {
     if (cached !== undefined) return cached;
     let kits: GroupKits | null = null;
     try {
-      const kit = new Uint8Array(readFileSync(join(this._keystorePath, `${group}.btn.mykit`)));
-      kits = { cipher: "btn", kits: [kit] };
+      const btnKits = loadBtnKits(this._keystorePath, group);
+      if (btnKits.length > 0) kits = { cipher: "btn", kits: btnKits };
     } catch {
-      // No btn kit on disk — try the hibe material next.
+      // No readable btn kit on disk — try the hibe material next.
     }
     if (kits === null) {
       try {
