@@ -63,16 +63,19 @@ admin = str(resolve_log_target("admin", cfg)[0])
 print(json.dumps({"yaml": str(Path(proj) / "tn.yaml"), "admin": admin}))
 `;
 
+// Resolve once and reuse for both the skip decision and the test body:
+// each probe spawns Python with a 10s timeout, so a second call under a
+// loaded machine can flip from a binary to null and crash the body
+// instead of skipping.
+const PYTHON = pickPython();
+
 test(
   "Python-written tn.ceremony.init verifies row_hash under TS read({verify:'raise'})",
   {
-    skip:
-      pickPython() === null
-        ? "Python tn-proto not available locally; runs in CI"
-        : false,
+    skip: PYTHON === null ? "Python tn-proto not available locally; runs in CI" : false,
   },
   async () => {
-    const python = pickPython()!;
+    const python = PYTHON!;
     const base = mkdtempSync(join(tmpdir(), "tn-ceremony-init-parity-"));
     const proj = join(base, "proj");
     const ident = join(base, "ident");
