@@ -13,6 +13,8 @@
 
 use serde_json::{Map, Value};
 
+use crate::sealed_object::ENVELOPE_RESERVED;
+
 /// Accepted JSON-value shape for an admin event field. Drives `validate_emit`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldType {
@@ -26,6 +28,8 @@ pub enum FieldType {
     OptionalInt,
     /// ISO-8601 timestamp string (any parseable format).
     Iso8601,
+    /// JSON array containing only non-empty strings.
+    StringArray,
 }
 
 /// One entry in the admin event catalog: the event type, its required field
@@ -58,6 +62,11 @@ pub enum ValidateError {
         /// Stringified form of the value actually received.
         got: String,
     },
+    /// A strict catalog kind received a field outside its declared schema.
+    UnexpectedField {
+        /// Name of the field absent from the strict schema.
+        field: String,
+    },
 }
 
 impl std::fmt::Display for ValidateError {
@@ -72,6 +81,7 @@ impl std::fmt::Display for ValidateError {
             } => {
                 write!(f, "field {field:?}: expected {expected:?}, got {got}")
             }
+            Self::UnexpectedField { field } => write!(f, "unexpected field {field:?}"),
         }
     }
 }
@@ -239,6 +249,20 @@ pub const CATALOG: &[AdminEventKind] = &[
         sign: true,
         sync: false,
     },
+    // Explicit security weakening uses one strict, non-secret five-field
+    // statement across every SDK.
+    AdminEventKind {
+        event_type: "tn.security.unsafe_operation",
+        schema: &[
+            ("artifact_digest", FieldType::OptionalString),
+            ("group", FieldType::OptionalString),
+            ("operation", FieldType::String),
+            ("relaxations", FieldType::StringArray),
+            ("subject_did", FieldType::OptionalString),
+        ],
+        sign: true,
+        sync: true,
+    },
 ];
 
 /// Look up a kind by event_type.
@@ -258,6 +282,17 @@ pub fn validate_emit(event_type: &str, fields: &Map<String, Value>) -> Result<()
         let v = fields.get(*name).ok_or(ValidateError::MissingField(name))?;
         check_field(name, *ftype, v)?;
     }
+    let unexpected = fields.keys().find(|field| {
+        !kind.schema.iter().any(|(name, _)| name == field)
+            && !ENVELOPE_RESERVED.contains(&field.as_str())
+    });
+    if kind.event_type == "tn.security.unsafe_operation" {
+        if let Some(field) = unexpected {
+            return Err(ValidateError::UnexpectedField {
+                field: field.clone(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -272,6 +307,13 @@ fn check_field(name: &'static str, ftype: FieldType, v: &Value) -> Result<(), Va
         (FieldType::OptionalInt, Value::Number(n)) if n.as_u64().is_some() => Ok(()),
         (FieldType::OptionalInt, Value::Null) => Ok(()),
         (FieldType::Iso8601, Value::String(s)) if !s.is_empty() => Ok(()),
+        (FieldType::StringArray, Value::Array(values))
+            if values
+                .iter()
+                .all(|value| matches!(value, Value::String(s) if !s.is_empty())) =>
+        {
+            Ok(())
+        }
         _ => Err(ValidateError::WrongType {
             field: name,
             expected: ftype,

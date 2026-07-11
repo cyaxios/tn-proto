@@ -56,6 +56,11 @@ public sealed class Tn : IDisposable, IAsyncDisposable
     public string? ProjectDirectory { get; }
 
     /// <summary>
+    /// Raised when an SDK operation explicitly weakens a security guarantee.
+    /// </summary>
+    public event EventHandler<TnSecurityWarningEventArgs>? SecurityWarning;
+
+    /// <summary>
     /// Account binding helpers for vault-backed workflows.
     /// </summary>
     public Account.AccountClient Account { get; }
@@ -605,6 +610,15 @@ public sealed class Tn : IDisposable, IAsyncDisposable
     }
 
     internal TnNativeHandle NativeHandle => _handle;
+
+    /// <summary>
+    /// Raises the shared structured warning for an explicitly unsafe operation.
+    /// </summary>
+    internal void RaiseSecurityWarning(UnsafeOperationNotice notice)
+    {
+        ArgumentNullException.ThrowIfNull(notice);
+        SecurityWarning?.Invoke(this, new TnSecurityWarningEventArgs(notice));
+    }
 
     /// <summary>
     /// Close the current native runtime and open a fresh one over the same

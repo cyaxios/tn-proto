@@ -117,7 +117,7 @@ pub fn admin_reduce_js(envelope: JsValue) -> Result<JsValue, JsError> {
 ///
 /// Returns `[{event_type, sign, sync, schema: [[name, type], ...]}, ...]`.
 /// Schema types are strings: `string`, `optional_string`, `int`,
-/// `optional_int`, `iso8601`.
+/// `optional_int`, `iso8601`, `string_array`.
 #[wasm_bindgen(js_name = "adminCatalogKinds")]
 pub fn admin_catalog_kinds_js() -> Result<JsValue, JsError> {
     let mut out = Vec::with_capacity(admin_catalog::CATALOG.len());
@@ -157,6 +157,20 @@ fn field_type_str(t: admin_catalog::FieldType) -> &'static str {
         FieldType::Int => "int",
         FieldType::OptionalInt => "optional_int",
         FieldType::Iso8601 => "iso8601",
+        FieldType::StringArray => "string_array",
+    }
+}
+
+#[cfg(test)]
+mod admin_catalog_tests {
+    use super::{admin_catalog, field_type_str};
+
+    #[test]
+    fn string_array_field_type_has_stable_wire_label() {
+        assert_eq!(
+            field_type_str(admin_catalog::FieldType::StringArray),
+            "string_array"
+        );
     }
 }
 

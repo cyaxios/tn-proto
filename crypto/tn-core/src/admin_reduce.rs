@@ -210,18 +210,18 @@ fn build_delta(event_type: &str, obj: &Map<String, Value>) -> StateDelta {
             reason: opt_s(obj, "reason"),
             unlinked_at: s(obj, "unlinked_at"),
         },
-        // Everything else recognized by `kind_for` maps to `Unknown`:
-        //  - `tn.agents.policy_published` / `tn.read.tampered_row_skipped` are
-        //    catalog-valid (the publisher can sign, the reducer validates
-        //    shape) but carry no admin-state mutation per the 2026-04-25
-        //    read-ergonomics spec; existing reducers ignore them and the
-        //    dedicated policy / tampered-row consumers walk the log directly.
-        //  - any future `kind_for` entry without a matching arm above
-        //    (catalog/reducer drift) also lands here rather than panicking.
-        //    `build_delta` is reached from the wasm `adminReduce` export and
-        //    the Python admin path, so a panic would trap the wasm instance /
-        //    raise a pyo3 PanicException in user space — which the SDK must
-        //    never do.
+        // Catalog-valid observability/provenance records deliberately carry no
+        // administrative state mutation. Their dedicated consumers walk the
+        // log directly.
+        "tn.agents.policy_published"
+        | "tn.read.tampered_row_skipped"
+        | "tn.security.unsafe_operation" => StateDelta::Unknown {
+            event_type: event_type.to_string(),
+        },
+        // Any future `kind_for` entry without a matching arm lands here rather
+        // than panicking. `build_delta` is reached from the wasm `adminReduce`
+        // export and the Python admin path, where a panic would become a wasm
+        // trap / pyo3 PanicException in user space.
         _ => StateDelta::Unknown {
             event_type: event_type.to_string(),
         },

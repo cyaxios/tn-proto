@@ -4,13 +4,21 @@ use serde_json::{json, Value};
 use tn_core::admin_reduce::{reduce, ReduceError, StateDelta};
 
 fn env(event_type: &str, fields: Value) -> Value {
-    // Build an envelope with the required tn.* fields plus the admin fields.
-    // row_hash etc. are not inspected by reduce.
+    // Build a realistic envelope with the nine mandatory scalar fields plus
+    // the admin fields. Attestation values are not inspected by reduce.
     let mut m = serde_json::Map::new();
+    m.insert("device_identity".into(), json!("did:key:zTest"));
+    m.insert("timestamp".into(), json!("2026-04-22T12:00:00Z"));
+    m.insert(
+        "event_id".into(),
+        json!("0198a000-0000-7000-8000-000000000001"),
+    );
     m.insert("event_type".into(), json!(event_type));
-    m.insert("did".into(), json!("did:key:zTest"));
     m.insert("level".into(), json!("info"));
-    m.insert("sync".into(), json!(true));
+    m.insert("sequence".into(), json!(1));
+    m.insert("prev_hash".into(), json!("sha256:previous"));
+    m.insert("row_hash".into(), json!("sha256:current"));
+    m.insert("signature".into(), json!("base64-signature"));
     if let Value::Object(f) = fields {
         for (k, v) in f {
             m.insert(k, v);
@@ -225,6 +233,27 @@ fn reduce_unknown_event_type_returns_unknown() {
 }
 
 #[test]
+fn reduce_unsafe_operation_is_valid_without_state_mutation() {
+    let e = env(
+        "tn.security.unsafe_operation",
+        json!({
+            "artifact_digest": null,
+            "group": null,
+            "operation": "read",
+            "relaxations": ["verification_disabled"],
+            "subject_did": null,
+        }),
+    );
+
+    match reduce(&e).unwrap() {
+        StateDelta::Unknown { event_type } => {
+            assert_eq!(event_type, "tn.security.unsafe_operation");
+        }
+        d => panic!("expected no-state-mutation Unknown, got {d:?}"),
+    }
+}
+
+#[test]
 fn reduce_missing_event_type_errors() {
     let e = json!({"did": "did:key:zTest"});
     assert!(matches!(
@@ -280,14 +309,15 @@ fn serde_roundtrip_delta() {
 fn catalog_and_reducer_do_not_drift() {
     use tn_core::admin_catalog::{FieldType, CATALOG};
 
-    // tn.agents.policy_published and tn.read.tampered_row_skipped are
-    // catalog-valid (so the publisher can sign + the reducer can validate
-    // shape) but carry no admin-state mutation — they intentionally
-    // resolve to StateDelta::Unknown. Per 2026-04-25 read-ergonomics spec.
-    let no_state_mutation: std::collections::HashSet<&str> =
-        ["tn.agents.policy_published", "tn.read.tampered_row_skipped"]
-            .into_iter()
-            .collect();
+    // These catalog-valid observability/provenance events intentionally
+    // resolve to StateDelta::Unknown without mutating admin state.
+    let no_state_mutation: std::collections::HashSet<&str> = [
+        "tn.agents.policy_published",
+        "tn.read.tampered_row_skipped",
+        "tn.security.unsafe_operation",
+    ]
+    .into_iter()
+    .collect();
 
     for kind in CATALOG {
         let mut fields = serde_json::Map::new();
@@ -298,6 +328,7 @@ fn catalog_and_reducer_do_not_drift() {
                 FieldType::Int => json!(0),
                 FieldType::OptionalInt => json!(null),
                 FieldType::Iso8601 => json!("2026-04-22T12:00:00Z"),
+                FieldType::StringArray => json!([]),
             };
             fields.insert((*name).to_string(), v);
         }
