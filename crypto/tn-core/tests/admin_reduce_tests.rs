@@ -253,6 +253,48 @@ fn reduce_unsafe_operation_is_valid_without_state_mutation() {
     }
 }
 
+fn canonical_unsafe_operation_fields() -> Value {
+    json!({
+        "artifact_digest": null,
+        "group": null,
+        "operation": "read",
+        "relaxations": ["verification_disabled"],
+        "subject_did": null,
+    })
+}
+
+fn assert_unsafe_operation_schema_violation(fields: Value) {
+    let envelope = env("tn.security.unsafe_operation", fields);
+    assert!(matches!(
+        reduce(&envelope).unwrap_err(),
+        ReduceError::SchemaViolation(_)
+    ));
+}
+
+#[test]
+fn reduce_unsafe_operation_rejects_unknown_operation() {
+    let mut fields = canonical_unsafe_operation_fields();
+    fields["operation"] = json!("delete_everything");
+
+    assert_unsafe_operation_schema_violation(fields);
+}
+
+#[test]
+fn reduce_unsafe_operation_rejects_unknown_relaxation() {
+    let mut fields = canonical_unsafe_operation_fields();
+    fields["relaxations"] = json!(["trust_everything"]);
+
+    assert_unsafe_operation_schema_violation(fields);
+}
+
+#[test]
+fn reduce_unsafe_operation_rejects_empty_relaxations() {
+    let mut fields = canonical_unsafe_operation_fields();
+    fields["relaxations"] = json!([]);
+
+    assert_unsafe_operation_schema_violation(fields);
+}
+
 #[test]
 fn reduce_missing_event_type_errors() {
     let e = json!({"did": "did:key:zTest"});
@@ -328,9 +370,12 @@ fn catalog_and_reducer_do_not_drift() {
                 FieldType::Int => json!(0),
                 FieldType::OptionalInt => json!(null),
                 FieldType::Iso8601 => json!("2026-04-22T12:00:00Z"),
-                FieldType::StringArray => json!([]),
+                FieldType::StringArray => json!(["verification_disabled"]),
             };
             fields.insert((*name).to_string(), v);
+        }
+        if kind.event_type == "tn.security.unsafe_operation" {
+            fields.insert("operation".into(), json!("read"));
         }
         let envelope = env(kind.event_type, Value::Object(fields));
 

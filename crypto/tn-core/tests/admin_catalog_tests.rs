@@ -152,6 +152,7 @@ fn unsafe_operation_catalog_accepts_a_realistic_full_envelope() {
         "prev_hash": "sha256:previous",
         "row_hash": "sha256:current",
         "signature": "base64-signature",
+        "run_id": "0198a000-0000-7000-8000-000000000002",
         "artifact_digest": null,
         "group": null,
         "operation": "read",
@@ -163,6 +164,80 @@ fn unsafe_operation_catalog_accepts_a_realistic_full_envelope() {
     .clone();
 
     assert!(validate_emit("tn.security.unsafe_operation", &fields).is_ok());
+}
+
+#[test]
+fn unsafe_operation_catalog_rejects_invalid_run_id_metadata() {
+    let invalid = [
+        ("empty", json!("")),
+        ("null", Value::Null),
+        ("number", json!(42)),
+    ];
+    let accepted: Vec<_> = invalid
+        .into_iter()
+        .filter_map(|(label, run_id)| {
+            let mut fields = canonical_unsafe_operation_fields();
+            fields.insert("run_id".into(), run_id);
+            validate_emit("tn.security.unsafe_operation", &fields)
+                .is_ok()
+                .then_some(label)
+        })
+        .collect();
+
+    assert!(
+        accepted.is_empty(),
+        "invalid run_id metadata was accepted: {accepted:?}"
+    );
+}
+
+#[test]
+fn unsafe_operation_catalog_rejects_extra_field_after_run_id() {
+    let mut fields = canonical_unsafe_operation_fields();
+    fields.insert(
+        "run_id".into(),
+        json!("0198a000-0000-7000-8000-000000000002"),
+    );
+    fields.insert("zz_arbitrary".into(), json!("not permitted"));
+
+    let err = validate_emit("tn.security.unsafe_operation", &fields).unwrap_err();
+    assert!(format!("{err}").contains("zz_arbitrary"));
+}
+
+fn canonical_unsafe_operation_fields() -> Map<String, Value> {
+    json!({
+        "artifact_digest": null,
+        "group": null,
+        "operation": "read",
+        "relaxations": ["verification_disabled"],
+        "subject_did": null,
+    })
+    .as_object()
+    .unwrap()
+    .clone()
+}
+
+#[test]
+fn unsafe_operation_catalog_rejects_unknown_operation() {
+    let mut fields = canonical_unsafe_operation_fields();
+    fields.insert("operation".into(), json!("delete_everything"));
+
+    assert!(validate_emit("tn.security.unsafe_operation", &fields).is_err());
+}
+
+#[test]
+fn unsafe_operation_catalog_rejects_unknown_relaxation() {
+    let mut fields = canonical_unsafe_operation_fields();
+    fields.insert("relaxations".into(), json!(["trust_everything"]));
+
+    assert!(validate_emit("tn.security.unsafe_operation", &fields).is_err());
+}
+
+#[test]
+fn unsafe_operation_catalog_rejects_empty_relaxations() {
+    let mut fields = canonical_unsafe_operation_fields();
+    fields.insert("relaxations".into(), json!([]));
+
+    assert!(validate_emit("tn.security.unsafe_operation", &fields).is_err());
 }
 
 #[test]
@@ -189,6 +264,7 @@ fn unsafe_operation_catalog_rejects_extra_fields() {
         "group": null,
         "operation": "read",
         "relaxations": ["verification_disabled"],
+        "run_id": "0198a000-0000-7000-8000-000000000002",
         "subject_did": null,
     })
     .as_object()

@@ -124,7 +124,17 @@ def test_every_negative_vector_has_one_approved_reason_and_one_mutation() -> Non
 
             baseline_id = case.get("baseline")
             assert baseline_id in by_id, f"{path.name}:{case['id']} has no baseline"
-            assert _leaf_differences(case["input"], by_id[baseline_id]["input"]) == 1, (
+            case_input = case["input"]
+            baseline_input = by_id[baseline_id]["input"]
+            if (
+                path.name == "signed_statements.json"
+                and expected.get("reason") != "signature_invalid"
+            ):
+                case_input = json.loads(json.dumps(case_input))
+                baseline_input = json.loads(json.dumps(baseline_input))
+                case_input["statement"].pop("signature_b64")
+                baseline_input["statement"].pop("signature_b64")
+            assert _leaf_differences(case_input, baseline_input) == 1, (
                 f"{path.name}:{case['id']} must change exactly one input property"
             )
 
@@ -161,10 +171,13 @@ def test_signed_statement_vectors_are_real_ed25519_signatures() -> None:
         signature = base64.b64decode(signing_value.pop("signature_b64"), validate=True)
         canonical = _canonical_bytes(signing_value)
         assert base64.b64decode(case["canonical_b64"], validate=True) == canonical
-        if not case["expected"]["accepted"]:
-            continue
         public_key = base64.b64decode(case["signer_public_key_b64"], validate=True)
-        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, canonical)
+        verifier = Ed25519PublicKey.from_public_bytes(public_key)
+        if case["expected"].get("reason") == "signature_invalid":
+            with pytest.raises(InvalidSignature):
+                verifier.verify(signature, canonical)
+            continue
+        verifier.verify(signature, canonical)
 
 
 def test_manifest_vectors_use_exact_body_index_and_signing_domain() -> None:
@@ -254,6 +267,7 @@ def test_vectors_cover_downstream_enrollment_and_read_contracts() -> None:
         case["input"]["policy"]["verify"]
         for case in read_cases
         if isinstance(case["input"]["policy"]["verify"], str)
+        and not case["expected"].get("parameter_error")
     } == {
         "auto",
         "raise",
@@ -267,6 +281,7 @@ def test_vectors_cover_downstream_enrollment_and_read_contracts() -> None:
             "auto": "raise",
             "raise": "raise",
             "skip": "skip",
+            True: "raise",
             False: "disabled",
         }[verify]
         assert case["expected"]["resolved_mode"] == expected_mode
@@ -282,6 +297,14 @@ def test_vectors_cover_downstream_enrollment_and_read_contracts() -> None:
         "not_a_recipient",
     } <= read_reasons
     read_by_id = {case["id"]: case for case in read_cases}
+    assert read_by_id["true_local_signed"]["input"]["policy"]["verify"] is True
+    assert read_by_id["true_local_signed"]["expected"]["accepted"] is True
+    assert read_by_id["true_local_signed"]["expected"]["resolved_mode"] == "raise"
+    string_disabled = read_by_id["string_disabled_parameter_error"]
+    assert string_disabled["input"]["policy"]["verify"] == "disabled"
+    assert string_disabled["expected"]["accepted"] is False
+    assert string_disabled["expected"]["parameter_error"] is True
+    assert "resolved_mode" not in string_disabled["expected"]
     assert read_by_id["disabled_ignores_unknown_writer"]["expected"] == {
         "accepted": True,
         "reasons": ["writer_untrusted"],

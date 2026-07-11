@@ -189,6 +189,11 @@ where
     D: Deserializer<'de>,
 {
     let mut relaxations = Vec::<UnsafeRelaxation>::deserialize(deserializer)?;
+    if relaxations.is_empty() {
+        return Err(<D::Error as serde::de::Error>::custom(
+            "at least one unsafe relaxation is required",
+        ));
+    }
     normalize_relaxations(&mut relaxations);
     Ok(relaxations)
 }

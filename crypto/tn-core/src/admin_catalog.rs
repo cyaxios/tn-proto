@@ -14,6 +14,10 @@
 use serde_json::{Map, Value};
 
 use crate::sealed_object::ENVELOPE_RESERVED;
+use crate::unsafe_operation::UnsafeOperationNotice;
+
+const UNSAFE_OPERATION_EVENT: &str = "tn.security.unsafe_operation";
+const UNSAFE_OPERATION_RUNTIME_METADATA: [&str; 1] = ["run_id"];
 
 /// Accepted JSON-value shape for an admin event field. Drives `validate_emit`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +71,12 @@ pub enum ValidateError {
         /// Name of the field absent from the strict schema.
         field: String,
     },
+    /// A field has the correct broad JSON shape but violates the event's
+    /// typed value contract.
+    InvalidPayload {
+        /// Typed deserialization failure explaining the invalid value.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ValidateError {
@@ -82,6 +92,7 @@ impl std::fmt::Display for ValidateError {
                 write!(f, "field {field:?}: expected {expected:?}, got {got}")
             }
             Self::UnexpectedField { field } => write!(f, "unexpected field {field:?}"),
+            Self::InvalidPayload { reason } => write!(f, "invalid payload: {reason}"),
         }
     }
 }
@@ -282,18 +293,45 @@ pub fn validate_emit(event_type: &str, fields: &Map<String, Value>) -> Result<()
         let v = fields.get(*name).ok_or(ValidateError::MissingField(name))?;
         check_field(name, *ftype, v)?;
     }
-    let unexpected = fields.keys().find(|field| {
-        !kind.schema.iter().any(|(name, _)| name == field)
-            && !ENVELOPE_RESERVED.contains(&field.as_str())
-    });
-    if kind.event_type == "tn.security.unsafe_operation" {
-        if let Some(field) = unexpected {
-            return Err(ValidateError::UnexpectedField {
-                field: field.clone(),
-            });
-        }
+    if kind.event_type == UNSAFE_OPERATION_EVENT {
+        validate_unsafe_operation(fields, kind)?;
     }
     Ok(())
+}
+
+fn validate_unsafe_operation(
+    fields: &Map<String, Value>,
+    kind: &AdminEventKind,
+) -> Result<(), ValidateError> {
+    if let Some(field) = fields.keys().find(|field| {
+        !kind.schema.iter().any(|(name, _)| name == field)
+            && !ENVELOPE_RESERVED.contains(&field.as_str())
+            && !UNSAFE_OPERATION_RUNTIME_METADATA.contains(&field.as_str())
+    }) {
+        return Err(ValidateError::UnexpectedField {
+            field: field.clone(),
+        });
+    }
+
+    if let Some(run_id) = fields.get("run_id") {
+        check_field("run_id", FieldType::String, run_id)?;
+    }
+
+    let mut payload = Map::new();
+    for (name, _) in kind.schema {
+        payload.insert(
+            (*name).to_string(),
+            fields
+                .get(*name)
+                .expect("schema fields were checked before typed validation")
+                .clone(),
+        );
+    }
+    serde_json::from_value::<UnsafeOperationNotice>(Value::Object(payload))
+        .map(|_| ())
+        .map_err(|error| ValidateError::InvalidPayload {
+            reason: error.to_string(),
+        })
 }
 
 fn check_field(name: &'static str, ftype: FieldType, v: &Value) -> Result<(), ValidateError> {

@@ -652,7 +652,18 @@ def _signed_statements(materials: JsonObject) -> JsonObject:
             ),
         ),
     )
+    signers_by_public_key = {
+        _b64(signer["public"]): signer["private"]
+        for signer in (publisher, reader, authority)
+    }
     for case in cases:
+        if case["expected"].get("reason") != "signature_invalid":
+            statement = copy.deepcopy(case["input"]["statement"])
+            statement.pop("signature_b64", None)
+            case["input"]["statement"] = _sign_statement(
+                statement,
+                signers_by_public_key[case["signer_public_key_b64"]],
+            )
         case["canonical_b64"] = _b64(
             _statement_signing_bytes(case["input"]["statement"]),
         )
@@ -1166,15 +1177,21 @@ def _read_case(
         "expected": {
             "accepted": accepted,
             "reasons": reasons or [],
-            "resolved_mode": "raise"
-            if verify == "auto"
-            else ("disabled" if verify is False else verify),
+            "resolved_mode": _resolved_read_mode(verify),
             "writer_authenticated": writer_authenticated,
             "writer_authorized": writer_authorized,
         },
         "id": case_id,
         "input": value,
     }
+
+
+def _resolved_read_mode(verify: str | bool) -> str:
+    if verify is True or verify == "auto":
+        return "raise"
+    if verify is False:
+        return "disabled"
+    return verify
 
 
 def _read_reject(
@@ -1193,15 +1210,7 @@ def _read_reject(
     case["expected"] = {
         "accepted": False,
         "reasons": reasons,
-        "resolved_mode": (
-            "raise"
-            if case["input"]["policy"]["verify"] == "auto"
-            else (
-                "disabled"
-                if case["input"]["policy"]["verify"] is False
-                else case["input"]["policy"]["verify"]
-            )
-        ),
+        "resolved_mode": _resolved_read_mode(case["input"]["policy"]["verify"]),
         "writer_authenticated": writer_authenticated,
         "writer_authorized": writer_authorized,
     }
@@ -1212,6 +1221,7 @@ def _read_policy_matrix(materials: JsonObject) -> JsonObject:
     auto = _read_case("auto_local_signed", _read_input(materials, "auto"))
     raise_mode = _read_case("raise_local_signed", _read_input(materials, "raise"))
     skip_mode = _read_case("skip_local_signed", _read_input(materials, "skip"))
+    true_mode = _read_case("true_local_signed", _read_input(materials, True))
     disabled = _read_case(
         "false_local_signed",
         _read_input(materials, False),
@@ -1294,6 +1304,7 @@ def _read_policy_matrix(materials: JsonObject) -> JsonObject:
         auto,
         raise_mode,
         skip_mode,
+        true_mode,
         disabled,
         local_unsigned,
         foreign,
@@ -1472,6 +1483,17 @@ def _read_policy_matrix(materials: JsonObject) -> JsonObject:
     parameter_error["expected"]["parameter_error"] = True
     parameter_error["expected"].pop("resolved_mode")
     cases.append(parameter_error)
+    string_disabled_parameter_error = _read_reject(
+        auto,
+        "string_disabled_parameter_error",
+        [],
+        lambda value: value["policy"].__setitem__("verify", "disabled"),
+        writer_authenticated=True,
+        writer_authorized=True,
+    )
+    string_disabled_parameter_error["expected"]["parameter_error"] = True
+    string_disabled_parameter_error["expected"].pop("resolved_mode")
+    cases.append(string_disabled_parameter_error)
     return _document("read_policy_matrix", cases)
 
 

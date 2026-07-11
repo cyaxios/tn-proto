@@ -185,3 +185,16 @@ fn deserialization_requires_all_five_fields_even_when_nullable() {
         );
     }
 }
+
+#[test]
+fn notice_deserialization_rejects_empty_relaxations() {
+    let empty = json!({
+        "artifact_digest": null,
+        "group": null,
+        "operation": "read",
+        "relaxations": [],
+        "subject_did": null,
+    });
+
+    assert!(serde_json::from_value::<UnsafeOperationNotice>(empty).is_err());
+}
