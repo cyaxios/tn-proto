@@ -1,6 +1,6 @@
 # Trusted Enrollment and Secure-Default Read Design
 
-**Status:** Approved in conversation; written-spec review pending
+**Status:** Approved in conversation; written-spec review complete
 
 **Date:** 2026-07-11
 
@@ -128,6 +128,28 @@ fields in a version 1 security statement are rejected rather than ignored.
 All timestamps are UTC RFC 3339 strings. Binary values use standard padded
 base64 unless an existing TN wire field explicitly requires base64url.
 
+### Package body digest index
+
+Every newly written `.tnpkg` manifest carries a `body_sha256` object whose keys
+are the exact normalized `body/...` member paths and whose values are
+`sha256:<lowercase hex>`. The map is part of the manifest signing domain. The
+writer computes it from the final stored member bytes before signing. A reader
+verifies that the archive contains exactly the indexed body members and that
+every digest matches before parsing, decrypting, or applying a body.
+
+All producers use one `sign_manifest_with_body` builder that validates body
+paths, computes the final digest index, and only then signs. Verified readers
+enforce resource limits, read and verify the bounded manifest signature, then
+stream/read bounded body members to verify the exact index before returning any
+body to kind-specific code. A low-level unverified inspector is never used by an
+absorb/apply path.
+
+Security-sensitive version-1 offers, enrollment responses, and HIBE grants
+without this index fail closed. Other legacy packages may enter only through the
+named unsafe legacy-import path; that path emits the common unsafe-operation
+warning and audit event and never marks the package or installed principal as
+verified.
+
 ### `KeyBindingProofV1`
 
 Common fields:
@@ -208,6 +230,51 @@ before producing a JWE key-binding proof. A publisher may create the challenge
 from a pre-authorized reader record or during an explicit administrative
 approval flow.
 
+### `EnrollmentResponseV1`
+
+The publisher's accepted-enrollment response is a canonical signed statement:
+
+```json
+{
+  "version": 1,
+  "kind": "tn-enrollment-response",
+  "publisher_did": "did:key:z...",
+  "reader_did": "did:key:z...",
+  "ceremony_id": "...",
+  "group": "default",
+  "accepted_offer_digest": "sha256:...",
+  "x25519_public_key_sha256": "sha256:...",
+  "group_epoch": 1,
+  "issued_at": "2026-07-11T14:01:00Z",
+  "expires_at": "2026-07-11T14:11:00Z",
+  "signature_b64": "..."
+}
+```
+
+The response uses the same strict version/field/canonicalization rules as the
+challenge and proof. The reader verifies it against the expected publisher DID
+and its retained offer before changing local publisher metadata.
+
+### Verified JWE binding
+
+Every verified-principal value retains the subject DID, purpose, audience DID,
+ceremony ID, group, proof digest, issuance time, and expiry. APIs that accept a
+verified principal re-check this retained scope against their own receiver,
+ceremony, and group.
+
+Successful JWE proof verification produces a typed binding containing that
+verified principal, the 32-byte X25519 public key, its SHA-256 digest, the proof
+digest, and the optional challenge digest. Promotion returns one
+`AcceptedOffer` containing the binding, exact offer digest, and retained
+artifact digest. Recipient registration and enrollment-response compilation
+consume that single value; callers cannot pair one valid binding with another
+offer's digest.
+
+`offer_digest` is SHA-256 over the canonical inner offer statement bytes,
+including its signature. It is stable across compliant `.tnpkg` containers.
+`artifact_digest` is SHA-256 over the exact retained `.tnpkg` bytes and protects
+the receiver's stored artifact. Both use the `sha256:<lowercase hex>` form.
+
 ## JWE enrollment lifecycle
 
 ### 1. Reader key creation
@@ -256,6 +323,14 @@ Pending offers are keyed by `(ceremony_id, group, reader_did, offer_digest)`,
 not by DID alone. The complete signed artifact is retained so reconcile can
 re-verify rather than trusting a filename or reduced JSON cache.
 
+Enrollment state version 1 uses one private state root with separate
+`challenges/`, `offers/`, `approvals/`, and `consumed/` trees plus one
+`enrollment.lock`. Challenge consumption, exact-digest approval, and promotion
+are serialized under that cross-process advisory lock. Writes use same-directory
+temporary files, file/directory synchronization where supported, and atomic
+replacement. Concurrent exact repeats converge on one accepted state; a
+different artifact for a used nonce/challenge returns `replay_conflict`.
+
 ### 5. Reconcile and registration
 
 Reconcile re-verifies the retained artifact and promotes only an exact,
@@ -263,11 +338,21 @@ authorized match. Registration persists the authenticated DID-to-X25519 binding
 and proof digest with the recipient entry. No mutation occurs before all checks
 pass.
 
+The public `approve/reconcile` operation performs exact-digest approval,
+re-verification, challenge consumption, promotion, and registration atomically
+and returns the resulting `AcceptedOffer`. Every SDK exposes this operation;
+response compilation accepts only that returned value.
+
 The low-level `add_recipient(did, public_key)` path requires a valid proof. Its
 legacy raw form remains available only as
 `unsafe_unverified=True`, emits a warning and administrative audit event, and
 stores the recipient as unverified so it cannot be silently promoted to trusted
 state.
+
+SDKs whose primary typed registration accepts only `AcceptedOffer` also expose
+an explicitly named raw compatibility call taking the DID, 32-byte X25519 public
+key, and `unsafe_unverified=true`. The flag is mandatory; omitting it is a hard
+parameter error.
 
 ### 6. Publisher enrollment response
 
@@ -319,6 +404,17 @@ path, epoch, and assertion digest. A conflicting MPK at the same epoch and an
 epoch rollback are rejected. An expired assertion cannot authorize a new seal;
 it does not prevent opening already-held ciphertext under existing reader keys.
 
+The authority API signs the initial assertion and every path/epoch update. The
+reader-contact API issues a scoped HIBE challenge and verifies the resulting
+`hibe-reader` proof. External writers expose one explicit
+accept-and-pin/update operation and cannot seal merely because raw MPK bytes and
+an `id_path` are present.
+
+Python, Rust, TypeScript, and C# each expose all four operations: reader
+challenge issuance, reader proof creation/verification, authority assertion
+issue/install, and path rotation returning the new higher-epoch signed
+assertion.
+
 ### Path update
 
 A path update is a new signed authority assertion with a strictly greater epoch.
@@ -351,7 +447,8 @@ ancestor grant an ordinary reader grant.
 `read()` remains the primary read API and retains its iterator, entry, stats,
 callback, and log-selection shapes. `secure_read()` becomes a convenience wrapper
 that delegates to strict `read()` parameters; it is not a competing policy
-engine.
+engine. It rejects caller-supplied parameters that would weaken strict
+verification, authentication, or authorization.
 
 ### Default policy resolution
 
@@ -369,6 +466,11 @@ before returning plaintext:
 
 The verified DID is authorized only after all applicable cryptographic checks
 pass.
+
+`"auto"` resolves to raise-on-first-rejection after context-dependent signature
+requirements and trust defaults are resolved. It never silently drops a bad or
+unauthorized row. Callers that want verified continuity choose
+`verify="skip"` and use the existing stats/callback observability.
 
 ### Signature requirement
 
@@ -395,6 +497,18 @@ The default receiver-local trusted-writer set contains:
 - the active local device DID;
 - authenticated publisher DIDs installed through verified packages; and
 - configured exact-DID trust entries.
+
+Each SDK exposes the same receiver-local `ReadTrustProvider` boundary:
+
+- `trusted_writer_dids(context) -> exact-DID set`; and
+- `source_for(did) -> local-device | verified-package | explicit-config | null`.
+
+The default adapter combines the active device DID, verified publisher records
+under the ceremony's private state directory, and the ceremony configuration's
+explicit `trust.writers` list. Workstream B can use an in-memory provider and the
+local-device/config sources without enrollment state. Workstream A later adds
+verified publisher records through this interface; read-policy evaluation never
+imports or depends on enrollment state types.
 
 `trusted_writers=` supplies an explicit set for the call. Unknown writers are
 rejected by default even when their self-asserted signature is cryptographically
@@ -425,6 +539,52 @@ Combinations that would claim authorization without verification are invalid.
 For example, `verify=False` with `trusted_writers` raises a parameter error rather
 than treating an unverified envelope DID as trusted.
 
+`verify=False` disables row-hash, chain, signature, and writer-authorization
+gates only. Canonical parsing and authenticated group decryption/AAD validation
+remain mandatory; a malformed record, failed required-recipient lookup, or AEAD
+failure is never returned as plaintext.
+
+Validity metadata carries an ordered, de-duplicated `reasons` array in the same
+order as the default checks above. Compatibility callbacks and exceptions use
+the first reason as their primary reason. `not_a_recipient` applies only when an
+explicitly requested/required group or recipient-mode decryption cannot find a
+fitting recipient block/key. A hidden optional group does not reject an
+otherwise readable row and remains represented through the existing hidden-group
+metadata.
+
+Watch/report plumbing uses one `ReadCursorV1` token:
+
+```json
+{
+  "version": 1,
+  "sources": {
+    "<canonical-source-id>": {
+      "kind": "byte_offset | sequence | opaque",
+      "value": "123"
+    }
+  }
+}
+```
+
+Source IDs are canonical and the map is serialized in sorted order. `value` is
+a decimal or opaque string so every SDK preserves it losslessly. Read reports
+carry both a scanned-row count for observability and this cursor for resumption;
+watchers persist the cursor, never derive progress from yielded-entry count.
+
+The canonical source ID is `source:sha256:<lowercase hex>` over a UTF-8 source
+descriptor:
+
+- file: `file\0` plus the lexically absolute path anchored at the ceremony YAML
+  directory, with `.`/`..` removed, separators changed to `/`, and only a
+  Windows drive letter lowercased; symlinks and the remaining path are not
+  case-folded;
+- configured handler: `handler\0<kind>\0<configured-id>` using the exact
+  validated configuration strings; and
+- detached bytes/address: `detached\0sha256:<content-or-address digest>`.
+
+The NUL separators are literal single zero bytes. Shared cursor fixtures cover
+Windows, POSIX, handler, detached, and multi-source sorting cases.
+
 ### Weakening observability
 
 Explicitly weakening defaults emits:
@@ -435,7 +595,44 @@ Explicitly weakening defaults emits:
 Audit emission is guarded against recursion and is skipped for read-only or
 detached readers. It never changes the result of the requested read.
 
+All SDKs use the event type `tn.security.unsafe_operation` with this exact
+non-secret payload:
+
+```json
+{
+  "operation": "read | watch | jwe_add_recipient | hibe_grant | legacy_package_import",
+  "relaxations": ["verification_disabled"],
+  "group": null,
+  "subject_did": null,
+  "artifact_digest": null
+}
+```
+
+`relaxations` is a sorted, de-duplicated array drawn from
+`verification_disabled`, `signature_not_required`,
+`unauthenticated_allowed`, `unknown_writer_allowed`,
+`unverified_key_binding`, `plaintext_bearer_delivery`, and
+`legacy_signer_mismatch`. The structured warning exposes the same fields. SDKs
+whose normal API returns a warning/result collection include it there; SDKs with
+language warning facilities use those facilities. Every SDK applies a
+thread/task-local recursion guard and treats audit failure as best effort.
+
+Ownership is single-shot: the outer language-facing SDK wrapper emits exactly
+one language warning, while the mutation/read-owning runtime layer emits exactly
+one best-effort admin audit event. A native-backed wrapper never emits a second
+audit; a pure-language runtime combines the two responsibilities but still
+produces one warning and one event. Tests count both.
+
 ## Stable rejection reasons
+
+Common signed-statement reasons:
+
+- `statement_invalid` — malformed canonical JSON, an unsupported version, or
+  an unknown field in a versioned security statement;
+- `statement_expired` — an otherwise valid proof or authority assertion is
+  outside its acceptance window; and
+- `signature_invalid` — the signature does not verify under the complete
+  Ed25519 DID named by the statement or package.
 
 Package/enrollment reasons:
 
@@ -449,11 +646,14 @@ Package/enrollment reasons:
 - `challenge_expired`
 - `challenge_replayed`
 - `replay_conflict`
+- `binding_invalid`
 - `untrusted_principal`
 - `epoch_rollback`
+- `epoch_conflict`
 
 Read reasons:
 
+- `record_invalid`
 - `row_hash_invalid`
 - `chain_invalid`
 - `signature_required`
@@ -465,12 +665,22 @@ Read reasons:
 SDK-specific exception text may add context, but the machine-readable reason is
 identical across SDKs.
 
+These mappings are exhaustive for version 1. Outer-manifest, challenge, proof,
+and authority-assertion signature failures use `signature_invalid`. Unknown
+versions and unknown fields use `statement_invalid`. Invalid algorithms, key
+lengths, key digests, or MPK/depth bindings use `binding_invalid`. A conflicting
+MPK or path assertion at the already-pinned epoch uses `epoch_conflict`; a lower
+epoch uses `epoch_rollback`. Read parse and canonical-shape failures use
+`record_invalid`.
+
 ## Compatibility and migration
 
 - Valid packages whose signing key already matches their claimed real DID
   continue to work after full scope/digest validation.
-- Legacy packages with unrelated signing keys are rejected by default and may be
-  imported only through a named unsafe migration path.
+- Legacy packages with unrelated signing keys or no signed body index are
+  rejected by default and may be imported only with
+  `unsafe_legacy_signer=True`; the import remains unverified and emits the
+  common unsafe-operation warning/audit event.
 - Raw JWE DID-plus-key enrollment requires `unsafe_unverified=True`.
 - Implicit plaintext HIBE grant fallback is removed; use
   `unsafe_plaintext=True` explicitly.
@@ -495,6 +705,19 @@ Python, Rust, TypeScript, and C# must share:
 
 No SDK is considered complete if it accepts an artifact another SDK rejects for
 identity, scope, digest, freshness, or authorization reasons.
+
+Each SDK exposes public challenge/proof verification, offer creation, package
+absorption/pending approval, accepted-response verification, JWE recipient
+registration, HIBE assertion pin/update, and fail-closed HIBE grant controls.
+Cross-SDK lifecycle tests rotate producer/consumer roles so the complete JWE
+ceremony and first decrypt do not depend on one language's private state format.
+
+The established JWE architecture remains library-per-language and outside the
+Rust native runtime/wasm cipher dispatch. Python, TypeScript, and C#'s managed
+JWE layer participate in first-decrypt tests. Rust participates in canonical
+statement, package, replay/epoch, approval, and enrollment-artifact interop but
+keeps its documented JWE runtime `NotImplemented` sentinel; this milestone does
+not add a hand-rolled JOSE implementation to `tn-core`.
 
 ## Testing strategy
 
@@ -537,6 +760,11 @@ Tests assert that plaintext is never returned before all required checks pass.
 ### Performance and robustness
 
 - Verification remains streaming and memory-bounded.
+- Watch cursors advance by scanned source position/sequence rather than the
+  count of accepted rows, so a skipped row is neither replayed nor allowed to
+  hide a later row.
+- APIs that intentionally materialize a complete result list may accumulate
+  that result, but verification adds only bounded per-row working memory.
 - Trust lookup is constant-time per exact DID after configuration load.
 - Challenge and pending-state writes are atomic and concurrency tested.
 - Malformed packages and records have bounded input sizes and stable failures.
@@ -547,15 +775,22 @@ Tests assert that plaintext is never returned before all required checks pass.
 
 After the written spec and implementation plan are approved:
 
-- **Track A1:** canonical statements, DID-bound package verification, and shared
-  fixtures;
+- **Foundation:** freeze canonical statement/DID interfaces, reason mappings,
+  the deterministic fixture generator, all shared fixture files, the common
+  unsafe-operation catalog event, and language-level warning payload/event
+  surfaces;
+- **Track A1:** DID-bound package verification and cross-SDK trust adapters;
 - **Track A2:** complete JWE enrollment lifecycle and state machine;
 - **Track A3:** HIBE authority assertions and fail-closed grants; and
 - **Track B:** secure-default `read()` and writer policy.
 
-Track B starts immediately and does not wait for A1-A3. A2 and A3 share A1's
-wire/verifier contract and may proceed in parallel after its interfaces and
-fixtures are frozen. Integration happens only after per-track tests pass.
+The Foundation is a short contract-freeze barrier. Immediately after it lands,
+Track B starts in parallel with A1-A3 and does not wait for enrollment state or
+package APIs. A2 and A3 share A1's verifier contract. After Rust/core and
+TypeScript track-local APIs for A and B pass, one joint bridge integration task
+adds all FFI functions, C# native declarations, and SDK root exports before
+C# lifecycle/read GREEN gates run. One later joint documentation/verification
+task owns shared guides/readmes. No other task edits those shared paths.
 
 ## Success criteria
 
