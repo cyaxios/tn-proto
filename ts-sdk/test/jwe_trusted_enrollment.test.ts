@@ -12,7 +12,7 @@
 // Also covers exact/conflicting replay and the unsafe raw registration
 // warning + audit trail.
 import { strict as assert } from "node:assert";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -22,6 +22,9 @@ import { PkgNamespace } from "../src/pkg/index.js";
 import { readAsRecipientAsync } from "../src/read_as_recipient.js";
 import { NodeRuntime } from "../src/runtime/node_runtime.js";
 import { UNSAFE_OPERATION_EVENT_TYPE } from "../src/runtime/enrollment.js";
+import { newManifest, signManifest, toWireDict, type Manifest } from "../src/core/tnpkg.js";
+import { canonicalize } from "../src/core/canonical.js";
+import { packTnpkg } from "../src/tnpkg_io.js";
 
 function collectWarnings(): { warnings: Error[]; stop: () => void } {
   const warnings: Error[] = [];
@@ -223,6 +226,51 @@ test("two-home JWE trusted enrollment completes through first decrypt", async ()
   }
   assert.equal(opened.length, 1, "reader could not open the publisher's sealed entry");
   assert.deepEqual(opened[0], { code: "first-decrypt-ok" });
+});
+
+test("legacy packages without a body index need unsafeLegacySigner and stay unverified", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tn-legacy-"));
+  const rt = NodeRuntime.init(join(dir, "tn.yaml"));
+  const pkg = new PkgNamespace(rt);
+
+  // A signed pre-body-index package: the manifest carries NO body_sha256, so
+  // its signature domain simply omits the index (the historical wire form).
+  const buildLegacy = (kind: Manifest["kind"]): string => {
+    const manifest = newManifest({ kind, fromDid: rt.did, ceremonyId: rt.config.ceremonyId, toDid: rt.did });
+    signManifest(manifest, rt.keystore.device);
+    const body = { "body/package.json": new TextEncoder().encode("{}") };
+    const bytes = packTnpkg([
+      { name: "manifest.json", data: canonicalize(toWireDict(manifest, true)) },
+      { name: "body/package.json", data: body["body/package.json"] },
+    ]);
+    const path = join(dir, `legacy-${String(kind)}.tnpkg`);
+    writeFileSync(path, Buffer.from(bytes));
+    return path;
+  };
+  const legacyPath = buildLegacy("admin_log_snapshot");
+
+  // Fails closed by default.
+  const rejected = await pkg.absorb(legacyPath);
+  assert.match(rejected.rejectedReason ?? "", /body_digest_mismatch/);
+
+  // Enters only through the named unsafe path, warned + audited + labeled.
+  const { warnings, stop } = collectWarnings();
+  try {
+    const receipt = await pkg.absorb(legacyPath, { unsafeLegacySigner: true });
+    assert.equal(receipt.rejectedReason, undefined);
+    assert.equal(receipt.unsafeLegacyImport, true);
+    await flushWarnings();
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!.message, /"operation":"legacy_package_import"/);
+    assert.match(warnings[0]!.message, /"relaxations":\["legacy_signer_mismatch"\]/);
+  } finally {
+    stop();
+  }
+
+  // Security-sensitive kinds never enter through the legacy path.
+  const legacyOffer = buildLegacy("offer");
+  const offerReceipt = await pkg.absorb(legacyOffer, { unsafeLegacySigner: true });
+  assert.match(offerReceipt.rejectedReason ?? "", /cannot enter through unsafeLegacySigner/);
 });
 
 test("raw JWE registration is explicit, warned, audited, and unverified", async () => {
