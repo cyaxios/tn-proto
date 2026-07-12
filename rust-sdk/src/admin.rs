@@ -711,6 +711,17 @@ impl<'a> Admin<'a> {
         &mut self,
         options: GrantReaderOptionsV1,
     ) -> Result<GrantReaderResult> {
+        // Resolve the target identity path first: the grant scope digest and
+        // artifact label both bind it.
+        let sealing_path = current_hibe_path(self.tn, &options.group)?;
+        let target_path = options.id_path.clone().or_else(|| sealing_path.clone());
+        let delegated_subauthority = match (&options.id_path, &sealing_path) {
+            (Some(id_path), Some(current)) => {
+                current != id_path && is_path_ancestor(id_path, current)
+            }
+            _ => false,
+        };
+
         if options.unsafe_plaintext {
             let notice = tn_core::UnsafeOperationNotice {
                 artifact_digest: None,
@@ -724,42 +735,76 @@ impl<'a> Admin<'a> {
             enrollment::parse_ed25519_did_key(&options.reader_did).map_err(trust_err)?;
             enrollment::ensure_expected_signer(&options.reader_did, &options.proof.subject_did)
                 .map_err(trust_err)?;
-            // A challenged proof must bind a challenge this authority
-            // retained; the enrollment store is the receiver-local ledger.
-            let bound_digest = options
+            // A normal grant is authorized by an authority-issued one-time
+            // challenge: the proof MUST bind its digest, the challenge must
+            // still be retained (not consumed), and delivery consumes it.
+            let Some(bound_digest) = options
                 .proof
                 .binding
                 .get("challenge_digest")
                 .and_then(Value::as_str)
-                .map(str::to_string);
-            let challenge = match bound_digest {
-                Some(digest) => {
-                    let store = enrollment::enrollment_store(self.tn)?;
-                    match store.resolve(&digest).map_err(trust_err)? {
-                        enrollment::ChallengeState::Retained(challenge)
-                        | enrollment::ChallengeState::Consumed(challenge) => Some(challenge),
-                        enrollment::ChallengeState::Missing => {
-                            return Err(trust_err(TrustError::new(
-                                TrustReason::ChallengeMissing,
-                                "grant proof names a challenge this authority has not retained",
-                            )));
-                        }
-                        enrollment::ChallengeState::Expired => {
-                            return Err(trust_err(TrustError::new(
-                                TrustReason::ChallengeExpired,
-                                "grant proof names an expired challenge",
-                            )));
-                        }
-                        _ => {
-                            return Err(trust_err(TrustError::new(
-                                TrustReason::ChallengeReplayed,
-                                "grant proof names a consumed challenge",
-                            )));
-                        }
-                    }
-                }
-                None => None,
+                .map(str::to_string)
+            else {
+                return Err(trust_err(TrustError::new(
+                    TrustReason::ChallengeMissing,
+                    "HIBE reader proof must bind an authority-issued challenge",
+                )));
             };
+            let target = target_path.clone().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "grant_reader_verified: cannot resolve the group sealing path".into(),
+                )
+            })?;
+            let proof_digest = options.proof.digest().map_err(trust_err)?;
+            let grant_digest = tn_core::trusted_enrollment::hibe_grant_digest(
+                &proof_digest,
+                &options.reader_did,
+                &options.proof.ceremony_id,
+                &options.group,
+                &target,
+            )
+            .map_err(trust_err)?;
+            let store = enrollment::enrollment_store(self.tn)?;
+            let challenge = match store.resolve(&bound_digest).map_err(trust_err)? {
+                enrollment::ChallengeState::Retained(challenge) => challenge,
+                enrollment::ChallengeState::Missing => {
+                    return Err(trust_err(TrustError::new(
+                        TrustReason::ChallengeMissing,
+                        "challenge digest is not retained",
+                    )));
+                }
+                enrollment::ChallengeState::Expired => {
+                    return Err(trust_err(TrustError::new(
+                        TrustReason::ChallengeExpired,
+                        "grant proof names an expired challenge",
+                    )));
+                }
+                enrollment::ChallengeState::Consumed(challenge) => {
+                    // Classify against the consumed ledger: an exact prior
+                    // grant or a foreign consumption is a replay; different
+                    // grant bytes are a conflict.
+                    store
+                        .check_hibe_grant_challenge(
+                            &challenge.challenge_id,
+                            &proof_digest,
+                            &grant_digest,
+                        )
+                        .map_err(trust_err)?;
+                    return Err(trust_err(TrustError::new(
+                        TrustReason::ChallengeReplayed,
+                        "HIBE reader challenge has already been consumed",
+                    )));
+                }
+                _ => {
+                    return Err(trust_err(TrustError::new(
+                        TrustReason::ChallengeReplayed,
+                        "HIBE reader challenge has already been consumed",
+                    )));
+                }
+            };
+            store
+                .check_hibe_grant_challenge(&challenge.challenge_id, &proof_digest, &grant_digest)
+                .map_err(trust_err)?;
             enrollment::verify_key_binding_proof(
                 &options.proof,
                 &enrollment::ProofExpectation {
@@ -769,56 +814,169 @@ impl<'a> Admin<'a> {
                     group: options.group.clone(),
                     now: SystemTime::now(),
                 },
-                challenge.as_ref(),
+                Some(&challenge),
             )
             .map_err(trust_err)?;
         }
-        if let Some(id_path) = &options.id_path {
-            let sealing_path = current_hibe_path(self.tn, &options.group)?;
-            let is_ancestor = sealing_path
-                .as_deref()
-                .is_some_and(|current| current != id_path && is_path_ancestor(id_path, current));
-            if is_ancestor && !options.allow_subauthority {
+        if delegated_subauthority {
+            if !options.allow_subauthority {
                 return Err(Error::InvalidArgument(format!(
-                    "grant_reader_verified: id_path {id_path:?} is an ancestor of the sealing \
+                    "grant_reader_verified: id_path {:?} is an ancestor of the sealing \
                      path; an ancestor grant delegates the whole subtree and requires \
-                     allow_subauthority=true"
+                     allow_subauthority=true",
+                    options.id_path.as_deref().unwrap_or_default()
                 )));
             }
-            if is_ancestor {
-                // Record the explicit subtree delegation; no API or event
-                // presents an ancestor grant as an ordinary reader grant.
-                let _ = self.tn.info(
-                    "hibe.subauthority.granted",
-                    json!({
-                        "group": options.group,
-                        "reader_did": options.reader_did,
-                        "id_path": id_path,
-                    }),
-                );
-            }
+            // Record the explicit subtree delegation; no API or event
+            // presents an ancestor grant as an ordinary reader grant.
+            let _ = self.tn.info(
+                "hibe.subauthority.granted",
+                json!({
+                    "group": options.group,
+                    "reader_did": options.reader_did,
+                    "id_path": options.id_path,
+                }),
+            );
         }
-        let result = self.tn.runtime().admin_grant_reader(
+
+        // Mint to a sibling staging path so nothing lands at out_path before
+        // verification, labeling, and one-time consumption complete.
+        let staging_path = staging_grant_path(&options.out_path);
+        let minted = self.tn.runtime().admin_grant_reader(
             &options.group,
             Some(options.reader_did.as_str()),
-            &options.out_path,
+            &staging_path,
             options.id_path.as_deref(),
-        )?;
-        if !options.unsafe_plaintext {
+        );
+        let minted = match minted {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = fs::remove_file(&staging_path);
+                return Err(error.into());
+            }
+        };
+        let delivered = self.finish_grant_delivery(&options, &minted, delegated_subauthority);
+        let _ = fs::remove_file(&staging_path);
+        delivered
+    }
+
+    /// Verify sealing, stamp the Python-parity `hibe_grant` label where the
+    /// body is plaintext, consume the challenge one-time, and atomically
+    /// deliver the artifact to `out_path`.
+    fn finish_grant_delivery(
+        &self,
+        options: &GrantReaderOptionsV1,
+        minted: &GrantReaderResult,
+        delegated_subauthority: bool,
+    ) -> Result<GrantReaderResult> {
+        let bytes = fs::read(&minted.path)?;
+        let sealed = grant_bytes_are_sealed(&bytes)?;
+        let final_bytes = if options.unsafe_plaintext {
+            if sealed {
+                // The runtime seals for every resolvable DID; a sealed
+                // artifact is stronger than the requested plaintext, and a
+                // sealed manifest cannot be relabeled without breaking its
+                // wrap AAD. Deliver it unmodified.
+                bytes
+            } else {
+                let device = enrollment::device_key(self.tn)?;
+                tn_core::trusted_enrollment::label_hibe_grant_artifact(
+                    &bytes,
+                    &device,
+                    "unsafe-plaintext-bearer",
+                    delegated_subauthority,
+                    &minted.id_path,
+                    true,
+                )
+                .map_err(trust_err)?
+            }
+        } else {
             // Fail closed: a verified grant must leave recipient-sealed
             // bytes behind, never a plaintext bearer artifact.
-            let sealed = grant_artifact_is_sealed(&result.path)?;
             if !sealed {
-                let _ = fs::remove_file(&result.path);
                 return Err(trust_err(TrustError::new(
                     TrustReason::BindingInvalid,
                     "grant artifact was not recipient-sealed; refusing plaintext delivery \
                      (use unsafe_plaintext=true only for the explicit compatibility path)",
                 )));
             }
+            bytes
+        };
+        if !options.unsafe_plaintext {
+            // One-time challenge consumption: retained and committed under
+            // the store lock before anything lands at out_path.
+            let proof_digest = options.proof.digest().map_err(trust_err)?;
+            let grant_digest = tn_core::trusted_enrollment::hibe_grant_digest(
+                &proof_digest,
+                &options.reader_did,
+                &options.proof.ceremony_id,
+                &options.group,
+                &minted.id_path,
+            )
+            .map_err(trust_err)?;
+            let store = enrollment::enrollment_store(self.tn)?;
+            let bound_digest = options
+                .proof
+                .binding
+                .get("challenge_digest")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let challenge = match store.resolve(bound_digest).map_err(trust_err)? {
+                enrollment::ChallengeState::Retained(challenge)
+                | enrollment::ChallengeState::Consumed(challenge) => challenge,
+                _ => {
+                    return Err(trust_err(TrustError::new(
+                        TrustReason::ChallengeMissing,
+                        "challenge digest is not retained",
+                    )));
+                }
+            };
+            store
+                .commit_hibe_grant(
+                    &challenge.challenge_id,
+                    &tn_core::trusted_enrollment::HibeGrantConsumptionV1 {
+                        proof_digest,
+                        grant_digest,
+                        artifact_digest: enrollment::sha256_tagged(&final_bytes),
+                    },
+                    &final_bytes,
+                )
+                .map_err(trust_err)?;
         }
-        Ok(result)
+        if let Some(parent) = options.out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        tn_core::keystore_backend::atomic_write_bytes(&options.out_path, &final_bytes)?;
+        Ok(GrantReaderResult {
+            group: minted.group.clone(),
+            reader_did: minted.reader_did.clone(),
+            id_path: minted.id_path.clone(),
+            path: options.out_path.clone(),
+        })
     }
+}
+
+fn staging_grant_path(out_path: &Path) -> PathBuf {
+    let parent = out_path.parent().unwrap_or_else(|| Path::new("."));
+    let name = out_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("grant.tnpkg");
+    parent.join(format!(".{name}.minting.{}", std::process::id()))
+}
+
+fn grant_bytes_are_sealed(bytes: &[u8]) -> Result<bool> {
+    let (manifest, body) = tn_core::tnpkg::read_tnpkg(tn_core::tnpkg::TnpkgSource::Bytes(bytes))?;
+    let has_wraps = manifest
+        .state
+        .as_ref()
+        .and_then(|state| state.get("body_encryption"))
+        .and_then(Value::as_object)
+        .is_some_and(|body_encryption| {
+            body_encryption.contains_key("recipient_wraps")
+                || body_encryption.contains_key("recipient_wrap")
+        });
+    Ok(has_wraps && body.contains_key("body/encrypted.bin"))
 }
 
 fn group_cipher(tn: &Tn, group: &str) -> Result<Option<String>> {
@@ -843,18 +1001,4 @@ fn current_hibe_path(tn: &Tn, group: &str) -> Result<Option<String>> {
 fn is_path_ancestor(candidate: &str, path: &str) -> bool {
     path.strip_prefix(candidate)
         .is_some_and(|rest| rest.starts_with('/'))
-}
-
-fn grant_artifact_is_sealed(path: &Path) -> Result<bool> {
-    let (manifest, body) = tn_core::tnpkg::read_tnpkg(tn_core::tnpkg::TnpkgSource::Path(path))?;
-    let has_wraps = manifest
-        .state
-        .as_ref()
-        .and_then(|state| state.get("body_encryption"))
-        .and_then(Value::as_object)
-        .is_some_and(|body_encryption| {
-            body_encryption.contains_key("recipient_wraps")
-                || body_encryption.contains_key("recipient_wrap")
-        });
-    Ok(has_wraps && body.contains_key("body/encrypted.bin"))
 }

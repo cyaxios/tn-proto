@@ -2212,6 +2212,119 @@ pub fn authorize_offer(
 }
 
 // ---------------------------------------------------------------------------
+// One-time HIBE reader-grant consumption and artifact labeling
+// ---------------------------------------------------------------------------
+
+/// The scope digest one delivered HIBE reader grant consumes a challenge for:
+/// `sha256:<hex>` over the canonical grant statement binding the proof digest
+/// to the exact reader, ceremony, group, and identity path (the Python
+/// `_hibe_grant_digests` shape).
+///
+/// # Errors
+///
+/// [`TrustReason::StatementInvalid`] for malformed inputs.
+pub fn hibe_grant_digest(
+    proof_digest: &str,
+    reader_did: &str,
+    ceremony_id: &str,
+    group: &str,
+    id_path: &str,
+) -> Result<String, TrustError> {
+    validate_digest(proof_digest, "proof_digest", TrustReason::StatementInvalid)?;
+    validate_nonempty(reader_did, "reader_did")?;
+    validate_nonempty(ceremony_id, "ceremony_id")?;
+    validate_nonempty(group, "group")?;
+    validate_nonempty(id_path, "id_path")?;
+    let statement = serde_json::json!({
+        "version": 1,
+        "purpose": "hibe-reader-grant",
+        "proof_digest": proof_digest,
+        "reader_did": reader_did,
+        "ceremony_id": ceremony_id,
+        "group": group,
+        "id_path": id_path,
+    });
+    Ok(sha256_tagged(
+        &canonical_bytes(&statement).map_err(|error| statement_invalid(error.to_string()))?,
+    ))
+}
+
+/// The durable record one delivered HIBE reader grant consumes its challenge
+/// with (kind `hibe-reader-grant` in the `consumed/` ledger).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HibeGrantConsumptionV1 {
+    /// Digest of the complete signed reader proof.
+    pub proof_digest: String,
+    /// Digest of the grant scope statement ([`hibe_grant_digest`]).
+    pub grant_digest: String,
+    /// Digest of the exact delivered `.tnpkg` bytes.
+    pub artifact_digest: String,
+}
+
+/// Stamp the Python-parity `hibe_grant` manifest state onto a grant artifact
+/// and re-sign it: `{delivery, delegated_subauthority, id_path, unsafe}`.
+///
+/// Only plaintext-body artifacts can be relabeled: a recipient-sealed body
+/// binds its manifest as wrap AAD, so mutating the manifest after sealing
+/// would break every reader's unwrap. Sealed inputs are refused.
+///
+/// # Errors
+///
+/// [`TrustReason::StatementInvalid`] for sealed or unreadable artifacts and
+/// [`TrustReason::DidSignerMismatch`] when `signer` is not the artifact
+/// publisher.
+pub fn label_hibe_grant_artifact(
+    tnpkg: &[u8],
+    signer: &DeviceKey,
+    delivery: &str,
+    delegated_subauthority: bool,
+    id_path: &str,
+    unsafe_delivery: bool,
+) -> Result<Vec<u8>, TrustError> {
+    let (mut manifest, body) = crate::tnpkg::read_tnpkg(crate::tnpkg::TnpkgSource::Bytes(tnpkg))
+        .map_err(|error| statement_invalid(error.to_string()))?;
+    if manifest.publisher_identity != signer.did() {
+        return Err(err(
+            TrustReason::DidSignerMismatch,
+            "labeling key does not match the artifact publisher",
+        ));
+    }
+    let body_is_sealed = manifest
+        .state
+        .as_ref()
+        .and_then(|state| state.get("body_encryption"))
+        .is_some()
+        || body.contains_key("body/encrypted.bin");
+    if body_is_sealed {
+        return Err(statement_invalid(
+            "a recipient-sealed grant binds its manifest as wrap AAD and cannot be relabeled",
+        ));
+    }
+    let mut state = match manifest.state.take() {
+        Some(Value::Object(map)) => map,
+        Some(_) => {
+            return Err(statement_invalid("manifest state must be an object"));
+        }
+        None => Map::new(),
+    };
+    state.insert(
+        "hibe_grant".into(),
+        serde_json::json!({
+            "delivery": delivery,
+            "delegated_subauthority": delegated_subauthority,
+            "id_path": id_path,
+            "unsafe": unsafe_delivery,
+        }),
+    );
+    manifest.state = Some(Value::Object(state));
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&signer.private_bytes());
+    crate::tnpkg::sign_manifest_with_body(&mut manifest, &body, &signing_key)
+        .map_err(|error| statement_invalid(error.to_string()))?;
+    crate::tnpkg::write_tnpkg_bytes(&manifest, &body)
+        .map_err(|error| statement_invalid(error.to_string()))
+}
+
+// ---------------------------------------------------------------------------
 // Receiver-local enrollment state store (version 1)
 // ---------------------------------------------------------------------------
 
@@ -2918,6 +3031,121 @@ mod store {
                     ));
                 }
                 self.promote_locked(&verified)
+            })
+        }
+
+        /// Classify a HIBE reader-grant attempt against the consumed ledger.
+        ///
+        /// A fresh challenge passes; one consumed by any prior grant or
+        /// enrollment rejects the new attempt.
+        ///
+        /// # Errors
+        ///
+        /// [`TrustReason::ChallengeReplayed`] when the challenge was already
+        /// consumed (by an exact prior grant or a non-grant consumption) and
+        /// [`TrustReason::ReplayConflict`] when it was consumed by a
+        /// different signed proof or grant.
+        pub fn check_hibe_grant_challenge(
+            &self,
+            challenge_id: &str,
+            proof_digest: &str,
+            grant_digest: &str,
+        ) -> Result<(), TrustError> {
+            let Some(record) = self.consumed_record(challenge_id)? else {
+                return Ok(());
+            };
+            if record.get("kind").and_then(Value::as_str) != Some("hibe-reader-grant") {
+                return Err(err(
+                    TrustReason::ChallengeReplayed,
+                    "HIBE reader challenge has already been consumed",
+                ));
+            }
+            if record.get("proof_digest").and_then(Value::as_str) != Some(proof_digest)
+                || record.get("grant_digest").and_then(Value::as_str) != Some(grant_digest)
+            {
+                return Err(err(
+                    TrustReason::ReplayConflict,
+                    "HIBE reader challenge was consumed by a different signed proof or grant",
+                ));
+            }
+            // The exact committed grant exists; a NEW grant call is still a
+            // replay of the one-time challenge (redelivery recovery of the
+            // retained artifact is not part of this surface).
+            Err(err(
+                TrustReason::ChallengeReplayed,
+                "HIBE reader challenge has already been consumed",
+            ))
+        }
+
+        /// Atomically consume one challenge for one delivered grant: retain
+        /// the exact delivery bytes under `hibe-grants/` and write the
+        /// `hibe-reader-grant` consumption record under the store lock.
+        /// The identical concurrent commit converges on the same retained
+        /// path; a different one is a conflict.
+        ///
+        /// # Errors
+        ///
+        /// [`TrustReason::ReplayConflict`] when another grant concurrently
+        /// consumed the challenge.
+        pub fn commit_hibe_grant(
+            &self,
+            challenge_id: &str,
+            consumption: &HibeGrantConsumptionV1,
+            package: &[u8],
+        ) -> Result<PathBuf, TrustError> {
+            validate_digest(
+                &consumption.proof_digest,
+                "proof_digest",
+                TrustReason::StatementInvalid,
+            )?;
+            validate_digest(
+                &consumption.grant_digest,
+                "grant_digest",
+                TrustReason::StatementInvalid,
+            )?;
+            validate_digest(
+                &consumption.artifact_digest,
+                "artifact_digest",
+                TrustReason::StatementInvalid,
+            )?;
+            let retained_path = self.state_root.join("hibe-grants").join(format!(
+                "{}.tnpkg",
+                digest_component(&consumption.grant_digest)?
+            ));
+            let consumed_path = self.consumed_path(challenge_id)?;
+            self.locked(|| {
+                if let Some(record) = self.consumed_record(challenge_id)? {
+                    let exact = record.get("kind").and_then(Value::as_str)
+                        == Some("hibe-reader-grant")
+                        && record.get("proof_digest").and_then(Value::as_str)
+                            == Some(consumption.proof_digest.as_str())
+                        && record.get("grant_digest").and_then(Value::as_str)
+                            == Some(consumption.grant_digest.as_str());
+                    if exact {
+                        return Ok(retained_path.clone());
+                    }
+                    return Err(err(
+                        TrustReason::ReplayConflict,
+                        "HIBE reader challenge was concurrently consumed by another grant",
+                    ));
+                }
+                atomic_write(&retained_path, package)?;
+                let record = serde_json::json!({
+                    "version": 1,
+                    "kind": "hibe-reader-grant",
+                    "challenge_id": challenge_id,
+                    "proof_digest": consumption.proof_digest,
+                    "grant_digest": consumption.grant_digest,
+                    "artifact_digest": consumption.artifact_digest,
+                });
+                // The grant record is compact canonical JSON without a
+                // trailing newline, byte-matching the Python commit.
+                atomic_write(
+                    &consumed_path,
+                    &canonical_bytes(&record)
+                        .map_err(|error| statement_invalid(error.to_string()))?,
+                )?;
+                Ok(retained_path.clone())
             })
         }
 

@@ -458,3 +458,182 @@ fn unsafe_plaintext_grant_is_explicit_and_audited() -> tn_proto::Result<()> {
     authority.close()?;
     Ok(())
 }
+
+#[test]
+fn grant_requires_a_bound_authority_challenge() -> tn_proto::Result<()> {
+    use base64::Engine as _;
+
+    let (mut authority, _mpk) = hibe_authority();
+    let reader = Tn::ephemeral()?;
+    let td = tempfile::tempdir().expect("tempdir");
+    let reader_device = device_key(&reader);
+    let now = SystemTime::now();
+
+    // An externally crafted hibe-reader proof with challenge_digest: null is
+    // authentic but unauthorized: grants demand an authority-issued challenge.
+    let issued_at = enrollment::canonical_utc_timestamp(now).expect("issued_at");
+    let expires_at =
+        enrollment::canonical_utc_timestamp(now + Duration::from_secs(600)).expect("expires_at");
+    let unsolicited = enrollment::KeyBindingProofV1 {
+        version: 1,
+        purpose: "hibe-reader".into(),
+        subject_did: reader.did().to_string(),
+        audience_did: authority.did().to_string(),
+        ceremony_id: ceremony_id(&authority),
+        group: "default".into(),
+        issued_at,
+        expires_at,
+        nonce_b64: base64::engine::general_purpose::STANDARD.encode([0x44u8; 32]),
+        binding: json!({
+            "algorithm": "Ed25519-did-key",
+            "delivery": "recipient-seal-v1",
+            "challenge_digest": serde_json::Value::Null,
+        }),
+        signature_b64: String::new(),
+    }
+    .signed(&reader_device)
+    .expect("sign unsolicited proof");
+
+    let out_path = td.path().join("grant-null-digest.tnpkg");
+    let err = authority
+        .admin()
+        .grant_reader_verified(GrantReaderOptionsV1 {
+            group: "default".into(),
+            reader_did: reader.did().to_string(),
+            out_path: out_path.clone(),
+            id_path: None,
+            proof: unsolicited,
+            allow_subauthority: false,
+            unsafe_plaintext: false,
+        })
+        .expect_err("a proof without a bound challenge cannot authorize a grant");
+    assert!(
+        trust_reason(&err, TrustReason::ChallengeMissing),
+        "got {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("must bind an authority-issued challenge"),
+        "got {err}"
+    );
+    assert!(!out_path.exists(), "no artifact for a refused grant");
+
+    authority.close()?;
+    reader.close()?;
+    Ok(())
+}
+
+#[test]
+fn grant_challenges_are_one_time() -> tn_proto::Result<()> {
+    let (mut authority, _mpk) = hibe_authority();
+    let reader = Tn::ephemeral()?;
+    let td = tempfile::tempdir().expect("tempdir");
+
+    let challenge = authority.admin().issue_hibe_reader_challenge(
+        "default",
+        reader.did(),
+        Duration::from_secs(600),
+    )?;
+    let reader_device = device_key(&reader);
+    let proof = enrollment::create_hibe_reader_proof(&challenge, &reader_device, SystemTime::now())
+        .map_err(|err| tn_proto::Error::InvalidArgument(err.to_string()))?;
+
+    // A grant attempt that fails at the mint (this ceremony's default group
+    // is btn, so the hibe-only mint refuses) must NOT consume the challenge.
+    let consumed_path = {
+        let yaml = authority.yaml_path();
+        let stem = yaml
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("yaml stem");
+        yaml.parent()
+            .expect("yaml parent")
+            .join(".tn")
+            .join(stem)
+            .join("enrollment")
+            .join("v1")
+            .join("consumed")
+            .join(format!("{}.json", challenge.challenge_id))
+    };
+    let err = authority
+        .admin()
+        .grant_reader_verified(GrantReaderOptionsV1 {
+            group: "default".into(),
+            reader_did: reader.did().to_string(),
+            out_path: td.path().join("grant-failed-mint.tnpkg"),
+            id_path: None,
+            proof: proof.clone(),
+            allow_subauthority: false,
+            unsafe_plaintext: false,
+        })
+        .expect_err("btn group cannot mint a hibe grant");
+    assert!(
+        !trust_reason(&err, TrustReason::ChallengeReplayed),
+        "mint failure is not a replay: {err}"
+    );
+    assert!(
+        !consumed_path.exists(),
+        "a failed grant never consumes the challenge"
+    );
+
+    // Simulate one delivered grant: commit the challenge one-time through the
+    // same locked consumed/ machinery the SDK uses.
+    let proof_digest = proof
+        .digest()
+        .map_err(|err| tn_proto::Error::InvalidArgument(err.to_string()))?;
+    let grant_digest = tn_core::trusted_enrollment::hibe_grant_digest(
+        &proof_digest,
+        reader.did(),
+        &challenge.ceremony_id,
+        "default",
+        "org/fraud/case-17",
+    )
+    .map_err(|err| tn_proto::Error::InvalidArgument(err.to_string()))?;
+    let store = tn_core::trusted_enrollment::EnrollmentStore::new(
+        device_key(&authority),
+        ceremony_id(&authority),
+        authority.group_names(),
+        consumed_path
+            .parent()
+            .expect("consumed dir")
+            .parent()
+            .expect("state root")
+            .to_path_buf(),
+    )
+    .map_err(|err| tn_proto::Error::InvalidArgument(err.to_string()))?;
+    store
+        .commit_hibe_grant(
+            &challenge.challenge_id,
+            &tn_core::trusted_enrollment::HibeGrantConsumptionV1 {
+                proof_digest,
+                grant_digest,
+                artifact_digest: enrollment::sha256_tagged(b"delivered-grant"),
+            },
+            b"delivered-grant",
+        )
+        .map_err(|err| tn_proto::Error::InvalidArgument(err.to_string()))?;
+    assert!(consumed_path.exists(), "grant consumption is durable");
+
+    // The consumed challenge now rejects every further grant attempt.
+    let err = authority
+        .admin()
+        .grant_reader_verified(GrantReaderOptionsV1 {
+            group: "default".into(),
+            reader_did: reader.did().to_string(),
+            out_path: td.path().join("grant-replayed.tnpkg"),
+            id_path: None,
+            proof,
+            allow_subauthority: false,
+            unsafe_plaintext: false,
+        })
+        .expect_err("a consumed challenge cannot back another grant");
+    assert!(
+        trust_reason(&err, TrustReason::ChallengeReplayed)
+            || trust_reason(&err, TrustReason::ReplayConflict),
+        "got {err}"
+    );
+
+    authority.close()?;
+    reader.close()?;
+    Ok(())
+}

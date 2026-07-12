@@ -586,3 +586,214 @@ fn store_retains_multi_group_offers_from_one_reader_without_collision() {
     assert_ne!(paths[0], paths[1], "group-scoped retention paths differ");
     assert!(paths.iter().all(|p| p.exists()));
 }
+
+// ---------------------------------------------------------------------------
+// One-time HIBE grant challenge consumption
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hibe_grant_challenge_consumption_is_one_time_and_atomic() {
+    use tn_core::trusted_enrollment::{hibe_grant_digest, HibeGrantConsumptionV1};
+
+    let document = fixture("enrollment_lifecycle.json");
+    let td = tempfile::tempdir().expect("tempdir");
+    let store = store_for(&document, td.path());
+    let reader = device_from_vectors("reader");
+    let now = parse_time("2026-07-11T14:05:00Z");
+    let challenge = store
+        .issue_challenge(reader.did(), "default", Duration::from_secs(600), now)
+        .expect("issue challenge");
+
+    let proof_digest = sha256_tagged(b"proof-bytes");
+    let grant_digest = hibe_grant_digest(
+        &proof_digest,
+        reader.did(),
+        &challenge.ceremony_id,
+        "default",
+        "org/fraud/case-17",
+    )
+    .expect("grant digest");
+    let consumption = HibeGrantConsumptionV1 {
+        proof_digest: proof_digest.clone(),
+        grant_digest: grant_digest.clone(),
+        artifact_digest: sha256_tagged(b"grant-package"),
+    };
+
+    // An unconsumed challenge passes the grant gate.
+    store
+        .check_hibe_grant_challenge(&challenge.challenge_id, &proof_digest, &grant_digest)
+        .expect("fresh challenge is grantable");
+
+    // Committing retains the exact delivery bytes and consumes atomically.
+    let retained = store
+        .commit_hibe_grant(&challenge.challenge_id, &consumption, b"grant-package")
+        .expect("commit grant");
+    assert!(retained.exists(), "delivery artifact retained");
+    assert!(retained.starts_with(store.state_root()));
+    assert_eq!(
+        fs::read(&retained).expect("retained bytes"),
+        b"grant-package"
+    );
+    let consumed_path = store
+        .state_root()
+        .join("consumed")
+        .join(format!("{}.json", challenge.challenge_id));
+    let record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&consumed_path).expect("consumed record"))
+            .expect("record json");
+    assert_eq!(record["kind"].as_str(), Some("hibe-reader-grant"));
+    assert_eq!(record["proof_digest"].as_str(), Some(proof_digest.as_str()));
+    assert_eq!(record["grant_digest"].as_str(), Some(grant_digest.as_str()));
+
+    // The identical concurrent commit converges; a different one conflicts.
+    let repeat = store
+        .commit_hibe_grant(&challenge.challenge_id, &consumption, b"grant-package")
+        .expect("exact concurrent commit converges");
+    assert_eq!(repeat, retained);
+    let conflicting = HibeGrantConsumptionV1 {
+        proof_digest: sha256_tagged(b"other-proof"),
+        grant_digest: sha256_tagged(b"other-grant"),
+        artifact_digest: sha256_tagged(b"other-package"),
+    };
+    let conflict = store
+        .commit_hibe_grant(&challenge.challenge_id, &conflicting, b"other-package")
+        .expect_err("different grant cannot reuse the challenge");
+    assert_eq!(conflict.reason, TrustReason::ReplayConflict);
+
+    // A consumed challenge rejects every NEW grant attempt.
+    let replay = store
+        .check_hibe_grant_challenge(&challenge.challenge_id, &proof_digest, &grant_digest)
+        .expect_err("consumed challenge is not grantable again");
+    assert_eq!(replay.reason, TrustReason::ChallengeReplayed);
+    let foreign = store
+        .check_hibe_grant_challenge(
+            &challenge.challenge_id,
+            &sha256_tagged(b"other-proof"),
+            &sha256_tagged(b"other-grant"),
+        )
+        .expect_err("a different proof conflicts with the committed grant");
+    assert_eq!(foreign.reason, TrustReason::ReplayConflict);
+
+    // A challenge consumed by ENROLLMENT (not a grant) reads as replayed.
+    let enrollment_challenge = store
+        .issue_challenge(reader.did(), "fraud", Duration::from_secs(600), now)
+        .expect("second challenge");
+    let offer = tn_core::trusted_enrollment::build_offer_artifact(
+        &tn_core::trusted_enrollment::OfferArtifactSpec {
+            ceremony_id: &enrollment_challenge.ceremony_id,
+            group: "fraud",
+            publisher_did: &enrollment_challenge.publisher_did,
+            reader_key: &reader,
+            reader_public_key: [7u8; 32],
+            challenge: Some(&enrollment_challenge),
+            now,
+        },
+    )
+    .expect("build offer");
+    store.stage_offer(&offer.tnpkg, now).expect("stage");
+    store
+        .approve_and_reconcile(&offer.offer_digest, now)
+        .expect("enrollment consumption");
+    let cross = store
+        .check_hibe_grant_challenge(
+            &enrollment_challenge.challenge_id,
+            &proof_digest,
+            &grant_digest,
+        )
+        .expect_err("an enrollment-consumed challenge cannot back a grant");
+    assert_eq!(cross.reason, TrustReason::ChallengeReplayed);
+}
+
+// ---------------------------------------------------------------------------
+// HIBE grant artifact labeling
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hibe_grant_artifacts_are_labeled_and_sealed_bodies_refuse_relabeling() {
+    use tn_core::trusted_enrollment::label_hibe_grant_artifact;
+
+    let device = device_from_vectors("authority");
+    let signing = ed25519_dalek::SigningKey::from_bytes(&device.private_bytes());
+    let mut body = std::collections::BTreeMap::new();
+    body.insert("body/keys/default.hibe.sk".to_string(), vec![0x77u8; 16]);
+    let mut manifest = tn_core::Manifest {
+        kind: tn_core::ManifestKind::KitBundle,
+        version: 1,
+        publisher_identity: device.did().to_string(),
+        recipient_identity: Some(device.did().to_string()),
+        ceremony_id: "cer_grant_label".into(),
+        as_of: "2026-07-11T14:00:00Z".into(),
+        scope: "default".into(),
+        clock: std::collections::BTreeMap::new(),
+        event_count: 0,
+        head_row_hash: None,
+        state: None,
+        body_sha256: std::collections::BTreeMap::new(),
+        body_sha256_present: false,
+        manifest_signature_b64: None,
+    };
+    tn_core::tnpkg::sign_manifest_with_body(&mut manifest, &body, &signing).expect("sign");
+    let plaintext = tn_core::tnpkg::write_tnpkg_bytes(&manifest, &body).expect("package");
+
+    // The unsafe plaintext label matches the Python manifest-state shape.
+    let labeled = label_hibe_grant_artifact(
+        &plaintext,
+        &device,
+        "unsafe-plaintext-bearer",
+        true,
+        "org/fraud",
+        true,
+    )
+    .expect("label plaintext grant");
+    let (labeled_manifest, _) =
+        tn_core::tnpkg::read_tnpkg_verified(tn_core::tnpkg::TnpkgSource::Bytes(&labeled))
+            .expect("labeled artifact stays verifiable");
+    let state = labeled_manifest.state.clone().expect("manifest state");
+    let grant = state.get("hibe_grant").expect("hibe_grant state");
+    assert_eq!(
+        grant.get("delivery").and_then(serde_json::Value::as_str),
+        Some("unsafe-plaintext-bearer")
+    );
+    assert_eq!(
+        grant
+            .get("delegated_subauthority")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        grant.get("id_path").and_then(serde_json::Value::as_str),
+        Some("org/fraud")
+    );
+    assert_eq!(
+        grant.get("unsafe").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+
+    // A recipient-sealed body binds its manifest as wrap AAD; relabeling it
+    // would break every reader's unwrap, so the labeler refuses.
+    let mut sealed_manifest = tn_core::Manifest {
+        state: Some(serde_json::json!({
+            "body_encryption": {"frame": "tn-body-aes256gcm-v1"}
+        })),
+        manifest_signature_b64: None,
+        body_sha256: std::collections::BTreeMap::new(),
+        body_sha256_present: false,
+        ..labeled_manifest
+    };
+    let mut sealed_body = std::collections::BTreeMap::new();
+    sealed_body.insert("body/encrypted.bin".to_string(), vec![0u8; 8]);
+    tn_core::tnpkg::sign_manifest_with_body(&mut sealed_manifest, &sealed_body, &signing)
+        .expect("sign sealed");
+    let sealed =
+        tn_core::tnpkg::write_tnpkg_bytes(&sealed_manifest, &sealed_body).expect("sealed package");
+    let refused = label_hibe_grant_artifact(
+        &sealed,
+        &device,
+        "recipient-seal-v1",
+        false,
+        "org/fraud/case-17",
+        false,
+    )
+    .expect_err("sealed bodies cannot be relabeled");
+    assert_eq!(refused.reason, TrustReason::StatementInvalid);
+}
