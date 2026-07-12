@@ -36,6 +36,7 @@ For joint Task 9 / Task 12 and the python-side session:
 7. RUST - exact-replay grant redelivery intentionally not implemented (stricter than python `_recover_committed_hibe_grant`): committed re-attempt = `challenge_replayed`, delivery bytes retained under `hibe-grants/` for operator recovery. Joint task decides redelivery semantics.
 8. TS - runtime-level `grantReader`/`revokeReader` stay ungated beneath the admin namespace (admin surface hard-gated); joint task owns runtime-level gating and must confirm no other public entry reaches them.
 9. RUST informational - `compile_enrolment_v1` response packages omit `publisher_identity`/`sender_pub_b64` (python includes them from the live JWE cipher); moot for the working direction (python-compiled -> rust reader), noted for Task 12 interop review.
+10. RUST residuals from A7 re-review (non-blocking): (a) signer-equality check sits before verify (python: after) - multi-fault inputs surface `did_signer_mismatch` vs python `challenge_missing`; (b) concurrent-exact grant commit delivers the caller's new mint bytes where python redelivers the committed retained bytes (race-only, ledger consistent); (c) sealed verified ancestor grants record subtree delegation via the attested event only - python stamps `hibe_grant` manifest state pre-seal inside its mint (fix requires extending the core mint API).
 
 
 **Goal:** Bind JWE and HIBE key material to complete Ed25519 `did:key` principals, complete the JWE reader enrollment lifecycle through first decrypt, and make normal HIBE authority/grant ceremonies fail closed.
