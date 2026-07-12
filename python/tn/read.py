@@ -12,7 +12,6 @@ Kwargs (both verbs):
                        :class:`VerifyError` on the first rejected row,
                        ``"skip"`` drops rejected rows with observability, and
                        ``False`` explicitly disables the security gate.
-                       ``watch`` retains its legacy ``False`` default.
   - ``raw``          — yield the envelope dict plus ``_valid`` audit metadata
                        instead of an Entry.
   - ``log``          — alternate log address. Defaults to the current
@@ -40,12 +39,13 @@ from __future__ import annotations
 
 import json
 import logging as _logging
-from collections.abc import AsyncIterator, Callable, Collection, Iterator
+from collections.abc import AsyncIterator, Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, overload
 
 from ._entry import Entry, VerifyError
+from ._watch_impl import ReadCursorV1
 from .read_policy import (
     ReadContext,
     ReadDecision,
@@ -54,6 +54,12 @@ from .read_policy import (
     VerifyMode,
 )
 from .read_trust import InMemoryReadTrustProvider, LocalReadTrustProvider
+from .security_audit import (
+    UnsafeOperation,
+    UnsafeOperationNotice,
+    UnsafeRelaxation,
+    record_unsafe_operation,
+)
 
 # ---------------------------------------------------------------------
 # Public read-side observability primitives (DX review #11)
@@ -116,6 +122,101 @@ class _ReadIterator:
         close = getattr(self._gen, "close", None)
         if close is not None:
             close()
+
+
+class _WatchIterator:
+    """Async-iterator-compatible watch result with a live resumable cursor."""
+
+    def __init__(self, gen: Any, progress: Any) -> None:
+        self._gen = gen
+        self._progress = progress
+
+    @property
+    def cursor(self) -> ReadCursorV1:
+        return self._progress.cursor
+
+    def __aiter__(self) -> _WatchIterator:
+        return self
+
+    def __anext__(self) -> Any:
+        return self._gen.__anext__()
+
+    async def aclose(self) -> None:
+        close = getattr(self._gen, "aclose", None)
+        if close is not None:
+            await close()
+
+    def asend(self, value: Any) -> Any:
+        return self._gen.asend(value)
+
+    def athrow(self, *args: Any) -> Any:
+        return self._gen.athrow(*args)
+
+
+@dataclass
+class _RuntimeAuditContext:
+    """Adapt a bound read runtime to the shared unsafe-operation sink."""
+
+    runtime: Any | None
+    writable: bool
+    emitted_event_id: str | None = None
+
+    def emit_admin(self, event_type: str, fields: dict[str, object]) -> Any:
+        if self.runtime is None:
+            return None
+        emitted = self.runtime.emit("warning", event_type, fields)
+        if isinstance(emitted, dict):
+            event_id = emitted.get("event_id")
+            if isinstance(event_id, str) and event_id:
+                self.emitted_event_id = event_id
+        return emitted
+
+
+def record_policy_weakening(
+    operation: Literal["read", "watch"],
+    policy: ReadTrustPolicy,
+    context: ReadContext,
+    *,
+    runtime: Any | None = None,
+) -> str | None:
+    """Emit one common warning/audit notice for an actually weaker policy.
+
+    Explicit unsigned settings are not weaker when the active local profile
+    is already unsigned. Every other departure from the secure automatic
+    policy is represented by the stable shared relaxation names.
+    """
+
+    automatic_unsigned = (
+        context.active
+        and context.local_log
+        and not context.detached
+        and context.profile_sign is False
+    )
+    relaxations: list[UnsafeRelaxation] = []
+    if policy.mode == "disabled":
+        relaxations.append(UnsafeRelaxation.VERIFICATION_DISABLED)
+    if not automatic_unsigned and not policy.require_signature:
+        relaxations.append(UnsafeRelaxation.SIGNATURE_NOT_REQUIRED)
+    if not automatic_unsigned and policy.allow_unauthenticated:
+        relaxations.append(UnsafeRelaxation.UNAUTHENTICATED_ALLOWED)
+    if policy.allow_unknown_writers:
+        relaxations.append(UnsafeRelaxation.UNKNOWN_WRITER_ALLOWED)
+    if not relaxations:
+        return None
+
+    notice = UnsafeOperationNotice(
+        operation=UnsafeOperation(operation),
+        relaxations=tuple(relaxations),
+        group=context.required_group,
+        subject_did=None,
+        artifact_digest=None,
+    )
+    audit_context = _RuntimeAuditContext(
+        runtime=runtime,
+        writable=context.writable and runtime is not None,
+    )
+    record_unsafe_operation(notice, audit_context)
+    return audit_context.emitted_event_id
 
 # ---------------------------------------------------------------------
 # Internal helpers
@@ -263,25 +364,25 @@ def _emit_tampered_row(envelope: dict[str, Any], reasons: list[str]) -> None:
         pass
 
 
-def _check_verify_kwarg(verify: bool | Literal["skip", "raise"]) -> None:
+def _check_verify_kwarg(verify: VerifyMode) -> None:
     """Validate the ``verify`` kwarg.
 
     Legal values:
-      * ``False`` (default) — don't verify; parse errors raise.
+      * ``"auto"`` (default) — resolve the secure receiver-local policy.
+      * ``False`` — don't verify; parse errors raise.
       * ``True`` / ``'raise'`` — verify; raise on first failure
         (synonyms — ``True`` is the idiomatic Python form,
         ``'raise'`` is the explicit string form).
       * ``'skip'`` — verify; drop failures; populate ``.stats`` /
         fire ``on_skip``.
 
-    DX review #17: the type is ``bool | Literal["skip", "raise"]``
-    so IDE autocomplete suggests the legal string values. The
-    runtime check still accepts the same four values as before.
+    The shared ``VerifyMode`` type keeps IDE autocomplete and runtime
+    validation aligned across read and watch.
     """
-    if verify in (False, True, "skip", "raise"):
+    if verify in (False, True, "auto", "skip", "raise"):
         return
     raise ValueError(
-        f"verify must be False | True | 'skip' | 'raise'; got {verify!r}"
+        f"verify must be 'auto' | False | True | 'skip' | 'raise'; got {verify!r}"
     )
 
 
@@ -662,6 +763,12 @@ def _read_bound(
         allow_unknown_writers=allow_unknown_writers,
         context=context,
     )
+    unsafe_audit_event_id = record_policy_weakening(
+        "read",
+        policy,
+        context,
+        runtime=_runtime,
+    )
     pre_decrypt_context = replace(context, required_group=None)
 
     def _pre_decrypt_gate(envelope: dict[str, Any], valid: dict[str, Any]) -> bool:
@@ -911,6 +1018,15 @@ def _read_bound(
                     reasons=reasons,
                 )
 
+            envelope_event_id = (r.get("envelope") or {}).get("event_id")
+            if (
+                unsafe_audit_event_id is not None
+                and envelope_event_id == unsafe_audit_event_id
+            ):
+                # The audit row still passed through scan/policy so chain state
+                # advances, but this operation must not change its own result.
+                continue
+
             # 0.4.2a10: surface decrypt failures.
             # When the dispatch returned a triple whose `plaintext` is
             # missing keys for at least one group present in the
@@ -976,8 +1092,27 @@ def _read_bound(
 
             try:
                 entry = Entry.from_raw(r)
-            except Exception:  # noqa: BLE001 — malformed entry, skip rather than abort
-                continue
+            except Exception as error:
+                observed_envelope["_valid"]["reasons"] = ["record_invalid"]
+                stats.skipped_parse += 1
+                stats.skipped_reasons.append("record_invalid")
+                if on_skip is not None:
+                    try:
+                        on_skip(observed_envelope, "record_invalid")
+                    except Exception:  # noqa: BLE001 - observers cannot alter results
+                        _logging.getLogger("tn.read").warning(
+                            "on_skip callback raised; continuing.",
+                            exc_info=True,
+                        )
+                from ._watch_impl import _handle_parse_failure
+
+                if _handle_parse_failure(
+                    error,
+                    policy,
+                    envelope=r.get("envelope"),
+                ):
+                    continue
+                raise
             if where is not None and not where(entry):
                 continue
             stats.yielded += 1
@@ -1050,143 +1185,122 @@ def _secure_read_bound(
     )
 
 
-async def watch(
+def watch(
     *,
     where: Callable[[Any], bool] | None = None,
-    verify: bool | Literal["skip", "raise"] = False,
+    verify: VerifyMode = "auto",
+    require_signature: bool | None = None,
+    allow_unauthenticated: bool | None = None,
+    trusted_writers: Collection[str] | None = None,
+    allow_unknown_writers: bool = False,
     raw: bool = False,
     log: str | Path | None = None,
     as_recipient: str | Path | None = None,
     group: str = "default",
+    cursor: ReadCursorV1 | Mapping[str, Any] | None = None,
     since: str | int = "now",
     poll_interval: float = 0.3,
-) -> AsyncIterator[Entry] | AsyncIterator[dict[str, Any]]:
-    """Tail the active ceremony's log live, yielding entries as they arrive.
+) -> _WatchIterator:
+    """Tail with the same frozen receiver-local trust policy as :func:`read`.
 
-    Async generator — use ``async for entry in tn.watch(...)``. Polls
-    the underlying ndjson file(s) every ``poll_interval`` seconds;
-    decrypted, optionally verified entries flow out as they're
-    appended. Cancel by breaking out of the loop or letting the
-    coroutine be garbage-collected.
-
-    Args:
-        where: Optional predicate ``(Entry|dict) -> bool``. Entries
-            that return ``False`` are skipped. Applied AFTER decrypt
-            so the predicate sees the iterator's yield shape.
-        verify: Signature / row_hash / chain verification mode. Same
-            three values as :func:`tn.read` (``False`` /
-            ``"skip"`` / ``"raise"``). Today watch is best-effort
-            here: malformed rows are silently skipped regardless of
-            mode (see ``docs/sdk-parity.md`` for the rationale).
-        raw: ``False`` (default) yields :class:`Entry` instances.
-            ``True`` yields flat-dict envelopes — same shape as
-            :func:`tn.read` (raw=True) modulo signature: watch
-            doesn't expose the per-row ``valid`` block today.
-        log: Source log address. ``None`` (default) tails the active
-            ceremony's main log. Same forms as :func:`tn.read`:
-            ``"admin"`` alias, absolute / relative path, or a
-            template with ``{event_type}`` / ``{event_class}`` /
-            ``{date}`` / ``{yaml_dir}`` / ``{ceremony_id}`` /
-            ``{did}`` tokens (every matching file tailed in parallel).
-        as_recipient: NOT SUPPORTED on watch (raises
-            :class:`NotImplementedError`). For one-shot foreign reads
-            use :func:`tn.read` with ``as_recipient=``.
-        group: Reserved for future ``as_recipient`` support.
-        since: Starting cursor. ``"now"`` (default) yields only
-            entries appended AFTER the call. ``"start"`` replays
-            from the beginning of the log. An ``int`` is a sequence
-            number (resume after that seq). A string in ISO-8601
-            form is a timestamp (resume from the first entry whose
-            timestamp >= the cursor).
-        poll_interval: Seconds between file-tail polls. Default
-            ``0.3``. Lower = lower latency, higher CPU. The
-            underlying watcher uses ``inotify`` / ``FSEvents`` /
-            ``ReadDirectoryChangesW`` where available; poll-interval
-            is the fallback ceiling.
-
-    Yields:
-        :class:`Entry` (default) or ``dict`` (when ``raw=True``).
-        The generator never completes on its own — it tails forever
-        until cancelled.
-
-    Raises:
-        NotImplementedError: If ``as_recipient`` is set (use
-            :func:`tn.read` for foreign reads).
-        RuntimeError: If :func:`tn.init` hasn't been called and
-            ``TN_STRICT=1`` blocks auto-init.
-        FileNotFoundError: If ``log`` resolves to a path that
-            doesn't exist (and isn't a template that produces zero
-            files — which is allowed; watch waits for the first
-            match).
-
-    Example:
-        >>> import asyncio
-        >>> import tn
-        >>>
-        >>> async def main():
-        ...     tn.init()
-        ...     async for entry in tn.watch():
-        ...         print(entry.sequence, entry.event_type)
-        ...         if entry.event_type == "scan.done":
-        ...             break
-        >>> # asyncio.run(main())  # would block forever otherwise
-
-        >>> # Tail admin events (tn.* protocol bookkeeping).
-        >>> async def admin_watcher():
-        ...     async for e in tn.watch(log="admin"):
-        ...         if e.event_type == "tn.recipient.added":
-        ...             notify(e)
-
-        >>> # Resume from a specific sequence after a crash.
-        >>> async def resume(last_seq):
-        ...     async for e in tn.watch(since=last_seq):
-        ...         process(e)
-
-    See Also:
-        :func:`tn.read`: Synchronous one-shot read of every entry.
-        :func:`tn.info` / :func:`tn.log`: The producer side.
+    ``verify="auto"`` is secure by default. ``True`` / ``"raise"``,
+    ``"skip"``, and explicit ``False`` retain the read-side meanings, and
+    every complete source row advances the watch cursor exactly once even
+    when skip mode rejects it. Verification and writer authorization happen
+    before group decryption. ``raw=True`` preserves the on-disk envelope and
+    adds the same ``_valid`` metadata as ``read(raw=True)``. The returned
+    async iterator exposes a live ``.cursor``; pass that object or its
+    ``to_dict()`` value back through ``cursor=`` to resume losslessly.
     """
-    _check_verify_kwarg(verify)
 
-    if as_recipient is not None:
-        # Recipient-mode tail isn't wired yet — clear error rather than
-        # silently wrong behavior. Use ``tn.read`` for one-shot foreign
-        # reads.
-        del group  # acknowledge unused
-        raise NotImplementedError(
-            "tn.watch(as_recipient=...) is not yet supported. "
-            "Use tn.read(as_recipient=..., log=...) for foreign reads."
-        )
+    import tn
 
-    from ._watch_impl import _watch_impl as _impl
+    tn._maybe_autoinit_load_only()
+    cfg = tn.current_config()
+    runtime = getattr(tn, "_dispatch_rt", None)
 
-    # _watch_impl yields flat dicts (post-flatten_raw_entry). With the
-    # 0.4.0a1 envelope-key expansion the flat dict carries every field
-    # Entry.from_flat needs.
-    async for flat in _impl(
+    from . import _watch_impl as _watch
+
+    if cursor is not None and since != "now":
+        raise ValueError("watch cursor cannot be combined with non-default since")
+
+    paths = _watch._resolve_watch_sources(cfg, log)
+    progress = _watch.build_watch_progress(
+        cfg,
+        paths,
         since=since,
-        verify=False,  # we re-implement verify gate below
-        poll_interval=poll_interval,
-        log_path=log,
+        cursor=cursor,
+    )
+    context = _build_read_context(
+        cfg,
+        log=log,
+        log_targets=paths,
+        as_recipient=as_recipient,
+        group=group,
+    )
+    if (
+        (not context.local_log or context.detached)
+        and (require_signature is False or allow_unauthenticated is True)
+        and not (require_signature is False and allow_unauthenticated is True)
     ):
-        # _watch_impl currently does its own per-row signature check
-        # when verify=True; we asked it for verify=False so we can apply
-        # our own three-mode gate here. Without raw triples accessible
-        # post-watch, "verify" on the watch path is best-effort: we can
-        # only detect failures the writer caught (none in the flat
-        # output today). For 0.4.0a1, treat watch's verify modes the
-        # same as ``False`` and document this in the parity doc.
-        if raw:
-            # Flat dict from watch — best we can do without a triple
-            # source. Document under sdk-parity.
-            if where is not None and not where(flat):
+        raise ValueError(
+            "foreign or detached unsigned reads require both "
+            "require_signature=False and allow_unauthenticated=True",
+        )
+    policy = ReadTrustPolicy.resolve(
+        verify=verify,
+        require_signature=require_signature,
+        allow_unauthenticated=allow_unauthenticated,
+        trusted_writers=trusted_writers,
+        allow_unknown_writers=allow_unknown_writers,
+        context=context,
+    )
+    unsafe_audit_event_id = record_policy_weakening(
+        "watch",
+        policy,
+        context,
+        runtime=runtime,
+    )
+
+    async def _gen() -> AsyncIterator[Entry | dict[str, Any]]:
+        async for record in _watch._watch_impl(
+            since=since,
+            poll_interval=poll_interval,
+            log_path=log,
+            policy=policy,
+            context=context,
+            cfg=cfg,
+            paths=paths,
+            progress=progress,
+            as_recipient=as_recipient,
+            group=group,
+        ):
+            envelope_event_id = (record.raw.get("envelope") or {}).get("event_id")
+            if (
+                unsafe_audit_event_id is not None
+                and envelope_event_id == unsafe_audit_event_id
+            ):
+                # Scan/evaluate the self-audit row for chain continuity but do
+                # not let observability change this operation's result.
                 continue
-            yield flat
-            continue
-        try:
-            entry = Entry.from_flat(flat)
-        except Exception:  # noqa: BLE001 — skip malformed
-            continue
-        if where is not None and not where(entry):
-            continue
-        yield entry
+            if raw:
+                envelope = _raw_envelope_with_validity(record.raw, record.decision)
+                if where is not None and not where(envelope):
+                    continue
+                yield envelope
+                continue
+            try:
+                entry = Entry.from_raw(record.raw)
+            except Exception as error:
+                if _watch._handle_parse_failure(
+                    error,
+                    policy,
+                    envelope=record.raw.get("envelope"),
+                ):
+                    continue
+                raise
+            if where is not None and not where(entry):
+                continue
+            yield entry
+
+    return _WatchIterator(_gen(), progress)

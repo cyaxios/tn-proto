@@ -129,16 +129,45 @@ class ReadInput(BaseModel):
             "ceremony's admin log (tn.* protocol events)."
         ),
     )
-    verify: bool | Literal["skip", "raise"] = Field(
-        default=False,
+    verify: bool | Literal["auto", "skip", "raise"] = Field(
+        default="auto",
         description=(
             "Integrity-check mode, passed through to tn.read unchanged. "
-            "False (default): no signature/row_hash/chain verification; "
-            "every row is returned as-is. "
+            "'auto' (default): enforce receiver-local integrity, signature, "
+            "and writer trust and fail on the first rejection. "
             "True or 'raise' (synonyms): verify each row and fail the whole "
             "read on the first row that fails a check. "
             "'skip': verify each row and silently drop failing rows "
-            "(dropped rows are counted, not returned)."
+            "(dropped rows are counted, not returned). False deliberately "
+            "disables record verification and emits a security warning."
+        ),
+    )
+    require_signature: bool | None = Field(
+        default=None,
+        description=(
+            "Signature-presence policy. None resolves from the active read "
+            "context; False is an explicit unsigned-input relaxation."
+        ),
+    )
+    allow_unauthenticated: bool | None = Field(
+        default=None,
+        description=(
+            "Whether unsigned rows may be returned without authentication "
+            "claims. None resolves from the active read context."
+        ),
+    )
+    trusted_writers: list[str] | None = Field(
+        default=None,
+        description=(
+            "Exact canonical Ed25519 did:key allowlist replacing the "
+            "receiver-local trusted-writer set for this call."
+        ),
+    )
+    allow_unknown_writers: bool = Field(
+        default=False,
+        description=(
+            "Allow cryptographically authenticated writers outside the "
+            "receiver-local allowlist; emits a security warning when true."
         ),
     )
     event_type: str | None = Field(

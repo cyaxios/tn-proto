@@ -127,7 +127,11 @@ def test_entry_full_shape():
 def test_read_input_defaults():
     inp = ReadInput.model_validate({})
     assert inp.log is None
-    assert inp.verify is False
+    assert inp.verify == "auto"
+    assert inp.require_signature is None
+    assert inp.allow_unauthenticated is None
+    assert inp.trusted_writers is None
+    assert inp.allow_unknown_writers is False
     assert inp.event_type is None
     assert inp.since is None
     assert inp.until is None
@@ -147,7 +151,7 @@ def test_read_input_limit_bounds():
 
 def test_read_input_verify_modes():
     """verify accepts the tn.read passthrough values and nothing else."""
-    for value in (False, True, "skip", "raise"):
+    for value in (False, True, "auto", "skip", "raise"):
         assert ReadInput.model_validate({"verify": value}).verify == value
     with pytest.raises(ValidationError):
         ReadInput.model_validate({"verify": "forensic"})
