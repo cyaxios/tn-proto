@@ -442,7 +442,18 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
             legacy_reason=f"absorb: not a `.tnpkg` zip and not a legacy JSON Package: {exc}",
         )
 
-    if manifest.kind == "offer" and _is_trusted_enrollment_offer(body):
+    try:
+        trusted_enrollment_offer = (
+            manifest.kind == "offer" and _is_trusted_enrollment_offer(body)
+        )
+    except PackageError as exc:
+        return AbsorbReceipt(
+            kind="offer",
+            legacy_status="rejected",
+            legacy_reason=str(exc),
+        )
+
+    if trusted_enrollment_offer:
         try:
             from .enrollment import EnrollmentStore, read_enrollment_artifact
 
@@ -479,6 +490,10 @@ def _is_trusted_enrollment_offer(body: dict[str, bytes]) -> bool:
         return False
     try:
         value = json.loads(raw.decode("utf-8"))
+    except RecursionError as exc:
+        raise PackageError(
+            "offer package JSON nesting exceeds the parser limit"
+        ) from exc
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
     if not isinstance(value, dict):

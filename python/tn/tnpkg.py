@@ -45,7 +45,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -375,21 +375,22 @@ def verify_manifest_body_index(
 # --------------------------------------------------------------------------
 #
 # A `.tnpkg` is just a zip. An attacker (or a corrupt producer) can craft one
-# that, when fully read into memory, exhausts the host: a zip bomb (tiny
-# compressed size that inflates to gigabytes), one enormous entry, or tens of
-# thousands of small entries. The reader MUST bound the archive using zip
-# CENTRAL-DIRECTORY METADATA (``ZipInfo.file_size`` / ``ZipInfo.compress_size``,
-# both available WITHOUT decompressing) BEFORE any entry's bytes are read, and
-# the manifest signature MUST be verified before any body member is read on the
-# absorb path. The limits below are deliberately generous relative to real
-# packages — a full_keystore backup is a handful of small key files plus a
-# manifest, and on-disk fixtures top out around 15 KiB with 2 entries — so they
-# stop bombs without rejecting any legitimate bundle. Raise them if a real
-# fixture ever exceeds one; the point is to cap blast radius, not to be tight.
+# that exhausts the host through a huge central directory, a compressed member
+# that inflates before declared-size slicing, one enormous STORED entry, or
+# tens of thousands of small entries. The reader first bounds EOCD central
+# metadata before constructing ZipFile, then requires ZIP_STORED with equal
+# compressed/uncompressed sizes before reading any member bytes. The manifest
+# signature is verified before any body read on the absorb path. Limits are
+# deliberately generous relative to real packages.
 
 # Max number of zip entries. A real `.tnpkg` has a manifest plus a small
 # handful of body members; thousands of entries is an attack, not a backup.
 MAX_PKG_ENTRY_COUNT = 2000
+
+# Bound ZipFile's central-directory allocation before constructing it. Two
+# MiB leaves roughly one KiB of central metadata per entry at the entry-count
+# ceiling, far beyond honest `.tnpkg` member names and attributes.
+MAX_PKG_CENTRAL_DIRECTORY_BYTES = 2 * 1024 * 1024
 
 # Max uncompressed size of ``manifest.json``. Real manifests are a few KiB even
 # with a per-recipient ``recipient_wraps`` array; 2 MiB is far past any honest
@@ -404,9 +405,9 @@ MAX_PKG_ENTRY_BYTES = 128 * 1024 * 1024  # 128 MiB
 # full read of the archive can consume.
 MAX_PKG_TOTAL_BYTES = 512 * 1024 * 1024  # 512 MiB
 
-# Max per-entry compression ratio (uncompressed / compressed). `.tnpkg` is
-# written ZIP_STORED, so legitimate packages have a ratio of ~1.0. A high ratio
-# is the signature of a zip bomb: a few KiB on disk inflating to gigabytes.
+# Retained for cross-implementation/API parity. Python now rejects every
+# non-ZIP_STORED or unequal-size member before read, making the effective ratio
+# exactly 1 (or 0 for an empty member).
 MAX_PKG_COMPRESSION_RATIO = 200
 
 
@@ -441,8 +442,9 @@ def _enforce_zip_limits(zf: zipfile.ZipFile) -> None:
     limit and the offending value on the first violation. Returns
     normally for a within-bounds archive.
 
-    This is the cheap pre-flight that stops zip bombs / huge entries /
-    entry floods before any read allocates memory.
+    EOCD preflight has already bounded ZipFile's central-directory allocation;
+    this second metadata-only gate rejects unsafe member methods, flags, sizes,
+    and entry floods before any member read allocates payload memory.
     """
     infos = zf.infolist()
     if len(infos) > MAX_PKG_ENTRY_COUNT:
@@ -453,6 +455,29 @@ def _enforce_zip_limits(zf: zipfile.ZipFile) -> None:
         )
     total = 0
     for info in infos:
+        unsupported_flags = info.flag_bits & (0x1 | 0x20 | 0x40)
+        if unsupported_flags:
+            raise PackageError(
+                f"`.tnpkg` entry {info.filename!r} uses encrypted or unsupported "
+                f"ZIP flag bits 0x{unsupported_flags:x}. Encryption, compressed "
+                "patched data, and strong encryption are not part of the "
+                "`.tnpkg` wire format; refusing to read it."
+            )
+        if info.compress_type != zipfile.ZIP_STORED:
+            raise PackageError(
+                f"`.tnpkg` entry {info.filename!r} uses ZIP compression method "
+                f"{info.compress_type}; every `.tnpkg` member must use "
+                "ZIP_STORED. Refusing before member read (possible zip bomb / "
+                "malformed archive)."
+            )
+        if info.compress_size != info.file_size:
+            raise PackageError(
+                f"`.tnpkg` entry {info.filename!r} has inconsistent stored size "
+                f"metadata ({info.compress_size} compressed bytes versus "
+                f"{info.file_size} uncompressed bytes). ZIP_STORED members must "
+                "have equal sizes; refusing before member read (possible forged "
+                "metadata / zip bomb)."
+            )
         size = info.file_size
         if size > MAX_PKG_ENTRY_BYTES:
             raise PackageError(
@@ -460,18 +485,6 @@ def _enforce_zip_limits(zf: zipfile.ZipFile) -> None:
                 f"size of {size} bytes, exceeding the per-entry limit of "
                 f"{MAX_PKG_ENTRY_BYTES} bytes ({MAX_PKG_ENTRY_BYTES // (1024 * 1024)} "
                 f"MiB). Refusing to read it (possible zip bomb)."
-            )
-        # Compression-ratio guard. file_size / max(compress_size, 1) catches a
-        # tiny compressed blob that inflates to a huge buffer — the classic
-        # zip-bomb shape. Legitimate `.tnpkg` files are STORED (ratio ~1).
-        ratio = size / max(info.compress_size, 1)
-        if ratio > MAX_PKG_COMPRESSION_RATIO:
-            raise PackageError(
-                f"`.tnpkg` entry {info.filename!r} has a compression ratio of "
-                f"{ratio:.1f}x ({size} bytes uncompressed from "
-                f"{info.compress_size} bytes), exceeding the limit of "
-                f"{MAX_PKG_COMPRESSION_RATIO}x. Refusing to inflate it "
-                f"(possible zip bomb)."
             )
         total += size
         if total > MAX_PKG_TOTAL_BYTES:
@@ -538,22 +551,167 @@ def _validate_tnpkg_body_name(name: str) -> None:
         )
 
 
-def _open_zip(source: Path | str | bytes | bytearray) -> zipfile.ZipFile:
-    """Open a `.tnpkg` zip from a path or in-memory bytes. Raises
-    ValueError with a friendly message on a non-zip input.
-    """
-    if isinstance(source, (bytes, bytearray)):
+_EOCD_SIGNATURE = b"PK\x05\x06"
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_EOCD_MIN_BYTES = 22
+_EOCD_MAX_COMMENT_BYTES = 65535
+_ZIP64_LOCATOR_BYTES = 20
+
+
+def _read_stream_at(stream: BinaryIO, offset: int, size: int) -> bytes:
+    stream.seek(offset)
+    return stream.read(size)
+
+
+def _preflight_zip_eocd(stream: BinaryIO) -> None:
+    """Bound central metadata from the EOCD before ZipFile allocates it."""
+    stream.seek(0, 2)
+    source_size = stream.tell()
+    tail_size = min(
+        source_size,
+        _EOCD_MIN_BYTES + _EOCD_MAX_COMMENT_BYTES + _ZIP64_LOCATOR_BYTES,
+    )
+    tail_offset = source_size - tail_size
+    tail = _read_stream_at(stream, tail_offset, tail_size)
+    search_end = len(tail)
+    saw_signature = False
+    eocd_in_tail = -1
+    while True:
+        candidate = tail.rfind(_EOCD_SIGNATURE, 0, search_end)
+        if candidate < 0:
+            break
+        saw_signature = True
+        if len(tail) - candidate >= _EOCD_MIN_BYTES:
+            candidate_comment_size = int.from_bytes(
+                tail[candidate + 20 : candidate + 22], "little"
+            )
+            candidate_offset = tail_offset + candidate
+            if (
+                candidate_offset + _EOCD_MIN_BYTES + candidate_comment_size
+                == source_size
+            ):
+                eocd_in_tail = candidate
+                break
+        search_end = candidate
+    if eocd_in_tail < 0:
+        stream.seek(0)
+        if saw_signature:
+            raise PackageError("`.tnpkg` has no EOCD record that ends at EOF")
+        return
+
+    eocd_offset = tail_offset + eocd_in_tail
+    eocd = tail[eocd_in_tail : eocd_in_tail + _EOCD_MIN_BYTES]
+    comment_size = int.from_bytes(eocd[20:22], "little")
+    if eocd_offset + _EOCD_MIN_BYTES + comment_size != source_size:
+        raise PackageError("`.tnpkg` EOCD and its declared comment must end at EOF")
+
+    if (
+        eocd_offset >= _ZIP64_LOCATOR_BYTES
+        and _read_stream_at(
+            stream,
+            eocd_offset - _ZIP64_LOCATOR_BYTES,
+            len(_ZIP64_LOCATOR_SIGNATURE),
+        )
+        == _ZIP64_LOCATOR_SIGNATURE
+    ):
+        raise PackageError("ZIP64 `.tnpkg` archives are not supported")
+
+    disk_number = int.from_bytes(eocd[4:6], "little")
+    central_disk = int.from_bytes(eocd[6:8], "little")
+    entries_on_disk = int.from_bytes(eocd[8:10], "little")
+    total_entries = int.from_bytes(eocd[10:12], "little")
+    central_size = int.from_bytes(eocd[12:16], "little")
+    central_offset = int.from_bytes(eocd[16:20], "little")
+    if (
+        entries_on_disk == 0xFFFF
+        or total_entries == 0xFFFF
+        or central_size == 0xFFFFFFFF
+        or central_offset == 0xFFFFFFFF
+    ):
+        raise PackageError("ZIP64 `.tnpkg` EOCD sentinels are not supported")
+    if disk_number != 0 or central_disk != 0 or entries_on_disk != total_entries:
+        raise PackageError("multi-disk `.tnpkg` archives are not supported")
+    if total_entries > MAX_PKG_ENTRY_COUNT:
+        raise PackageError(
+            f"`.tnpkg` EOCD declares {total_entries} entries, exceeding the "
+            f"limit of {MAX_PKG_ENTRY_COUNT} before central-directory parsing"
+        )
+    if central_size > MAX_PKG_CENTRAL_DIRECTORY_BYTES:
+        raise PackageError(
+            f"`.tnpkg` central directory declares {central_size} bytes, "
+            f"exceeding the preflight limit of {MAX_PKG_CENTRAL_DIRECTORY_BYTES}"
+        )
+
+    # ZIP offsets exclude a legal prepended/self-extracting prefix. Infer that
+    # prefix exactly as ZipFile does, while requiring the bounded central
+    # directory itself to occupy the bytes immediately preceding the EOCD.
+    prefix_size = eocd_offset - central_size - central_offset
+    actual_central_offset = central_offset + prefix_size
+    if (
+        prefix_size < 0
+        or actual_central_offset < 0
+        or actual_central_offset + central_size != eocd_offset
+        or eocd_offset > source_size
+    ):
+        raise PackageError("`.tnpkg` central directory metadata is inconsistent")
+    if total_entries == 0:
+        if central_size != 0:
+            raise PackageError("empty `.tnpkg` has non-empty central directory metadata")
+    elif _read_stream_at(stream, actual_central_offset, 4) != b"PK\x01\x02":
+        raise PackageError("`.tnpkg` central directory does not start at its EOCD offset")
+    stream.seek(0)
+
+
+class _OwnedZipFile(zipfile.ZipFile):
+    """ZipFile that closes the already-preflighted source stream it owns."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self._tn_owned_stream: BinaryIO | None = stream
         try:
-            return zipfile.ZipFile(BytesIO(bytes(source)), "r")
-        except zipfile.BadZipFile as exc:
-            raise ValueError(f"absorb: input bytes are not a valid `.tnpkg` zip: {exc}") from exc
-    p = Path(source)
-    if not p.exists():
-        raise FileNotFoundError(f"absorb: source path does not exist: {p}")
+            super().__init__(stream, "r")
+        except BaseException:
+            stream.close()
+            self._tn_owned_stream = None
+            raise
+
+    def close(self) -> None:
+        stream = self._tn_owned_stream
+        try:
+            super().close()
+        finally:
+            if stream is not None:
+                self._tn_owned_stream = None
+                stream.close()
+
+
+def _open_zip(source: Path | str | bytes | bytearray) -> zipfile.ZipFile:
+    """Preflight then open a `.tnpkg` from a path or in-memory bytes.
+
+    Path inputs stay on one owned handle across bounded EOCD inspection and
+    ZipFile construction, avoiding a path-replacement race between the two.
+    Raises ValueError with a friendly message on a non-zip input.
+    """
+    stream: BinaryIO
+    label: str
+    if isinstance(source, (bytes, bytearray)):
+        stream = BytesIO(bytes(source))
+        label = "input bytes"
+    else:
+        p = Path(source)
+        try:
+            stream = p.open("rb")
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"absorb: source path does not exist: {p}") from exc
+        label = str(p)
     try:
-        return zipfile.ZipFile(p, "r")
+        _preflight_zip_eocd(stream)
+        return _OwnedZipFile(stream)
     except zipfile.BadZipFile as exc:
-        raise ValueError(f"absorb: {p} is not a valid `.tnpkg` zip: {exc}") from exc
+        stream.close()
+        raise ValueError(f"absorb: {label} is not a valid `.tnpkg` zip: {exc}") from exc
+    except BaseException:
+        stream.close()
+        raise
 
 
 def _inspect_tnpkg_archive(
@@ -599,9 +757,51 @@ def _inspect_tnpkg_archive(
     return names
 
 
+def _zip_runtime_read_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "encrypted",
+            "password",
+            "compression method",
+            "compression type",
+            "decompression",
+            "compressed patched data",
+        )
+    )
+
+
+def _read_zip_member(zf: zipfile.ZipFile, name: str) -> bytes:
+    """Read one preflighted member and normalize only ZIP-layer failures."""
+    try:
+        return zf.read(name)
+    except (zipfile.BadZipFile, EOFError) as exc:
+        raise PackageError(
+            f"`.tnpkg` ZIP member {name!r} could not be read: {exc}"
+        ) from exc
+    except NotImplementedError as exc:
+        # At this boundary NotImplementedError is emitted by ZipExtFile for a
+        # ZIP feature/method it cannot decode, not by application dispatch.
+        raise PackageError(
+            f"`.tnpkg` ZIP member {name!r} could not be read: {exc}"
+        ) from exc
+    except RuntimeError as exc:
+        if _zip_runtime_read_error(exc):
+            raise PackageError(
+                f"`.tnpkg` ZIP member {name!r} could not be read: {exc}"
+            ) from exc
+        raise
+
+
 def _read_manifest_document(zf: zipfile.ZipFile) -> dict[str, Any]:
     """Read and JSON-decode only the already-bounded manifest member."""
-    doc = json.loads(zf.read("manifest.json").decode("utf-8"))
+    try:
+        doc = json.loads(_read_zip_member(zf, "manifest.json").decode("utf-8"))
+    except RecursionError as exc:
+        raise PackageError(
+            "`.tnpkg` manifest JSON nesting exceeds the parser limit"
+        ) from exc
     if not isinstance(doc, dict):
         raise ValueError(f"manifest must be a JSON object; got {type(doc).__name__}")
     return doc
@@ -640,16 +840,17 @@ def _read_manifest(
     Read order (so a malicious / malformed package can't exhaust memory —
     P0-5):
 
-    1. Enforce :func:`_enforce_zip_limits` on the archive using zip
-       metadata ONLY — no entry bytes are read yet. A zip bomb / huge
-       entry / entry flood is rejected here with a :class:`PackageError`.
-    2. Read and parse ``manifest.json`` (its own size is capped at
+    1. Before constructing ZipFile, bound EOCD entry count and central-directory
+       bytes, and reject ZIP64/multi-disk structure.
+    2. Enforce :func:`_enforce_zip_limits` on parsed metadata only: STORED
+       method, equal stored sizes, safe flags, entry count, and payload sizes.
+    3. Read and parse ``manifest.json`` (its own size is capped at
        :data:`MAX_MANIFEST_BYTES` via the zip metadata before the read).
-    3. If ``verify_signature`` is set, verify the manifest signature and
+    4. If ``verify_signature`` is set, verify the manifest signature and
        require the body-index field BEFORE any body member is read. On a bad
        signature raise :class:`ManifestSignatureError`; a missing index raises
        :class:`TrustError`. Neither path reads body bytes.
-    4. Only then read the body members into memory and check exact digest-map
+    5. Only then read the body members into memory and check exact digest-map
        equality before returning them.
 
     ``verify_signature`` defaults to False to preserve the long-standing
@@ -659,16 +860,16 @@ def _read_manifest(
     dispatcher passes ``verify_signature=True``.
     """
     with _open_zip(source) as zf:
-        # (1) Metadata-only resource guard — must run before any read.
+        # (2) Parsed metadata resource guard — must run before any member read.
         names = _inspect_tnpkg_archive(zf)
 
-        # (2) Manifest first. Its uncompressed size is bounded separately
+        # (3) Manifest first. Its uncompressed size is bounded separately
         # (and more tightly) than a body member — a multi-MiB "manifest"
         # is an attack, not an honest index.
         manifest_doc = _read_manifest_document(zf)
         manifest = TnpkgManifest.from_dict(manifest_doc)
 
-        # (3) Verify the manifest signature BEFORE reading any body member.
+        # (4) Verify the manifest signature BEFORE reading any body member.
         if verify_signature and not _verify_manifest_signature(manifest):
             raise ManifestSignatureError(
                 f"manifest signature does not verify against from_did "
@@ -682,12 +883,12 @@ def _read_manifest(
         if verify_signature and not manifest._body_sha256_present:
             verify_manifest_body_index(manifest, {}, require_index=True)
 
-        # (4) Bodies last — only now do we pull entry bytes into memory.
+        # (5) Bodies last — only now do we pull entry bytes into memory.
         body: dict[str, bytes] = {}
         for name in names:
             if name == "manifest.json":
                 continue
-            body[name] = zf.read(name)
+            body[name] = _read_zip_member(zf, name)
         if verify_signature:
             verify_manifest_body_index(manifest, body, require_index=True)
         return manifest, body
