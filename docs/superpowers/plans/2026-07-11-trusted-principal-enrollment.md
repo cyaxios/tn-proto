@@ -23,6 +23,17 @@ Evidence: 246-test Python arc suite green on the dirty working tree (2026-07-12)
 
 Per-SDK: Python ahead (T1-T5 done/in-tree); Rust core in-tree (T6 crypto); rust-sdk only T3 pkg parity; TypeScript only T3 tnpkg + T1 vectors; C# only T1 vectors; browser/JS untouched (rides T9 exports + secure-read plan T6).
 
+### Cross-SDK parity carry-forwards (2026-07-12, from A7/A8 spec reviews)
+
+For joint Task 9 / Task 12 and the python-side session:
+
+1. PYTHON GAP - consumed-marker filenames: python `_consumed_path` is strict-UUID and cannot classify the frozen fixtures' `challenge-...` ids; TS and Rust accept `[A-Za-z0-9._-]{1,128}`. Python store needs the relaxed safe-charset rule.
+2. PYTHON GAP - both-expired challenge corner: TS store pre-check yields `challenge_expired` when challenge and proof are both lapsed (fixture-conformant); python order yields `statement_expired` for the same artifact. No fixture pins the corner; python needs the same pre-check when it wires the `offer_challenge_expired` fixture case.
+3. TS/PY ALIGN - same-epoch authority assertion renewal: TS `pinHibeAuthority` rejects a freshly signed assertion at an unchanged epoch (`epoch_conflict`); in-flight python accepts it as renewal. Decide one semantic in the joint task; fixtures only pin mpk-level conflict/idempotence.
+4. TS NIT - unsafe-audit recursion window: async guard can drop a second unsafe operation's warning while the first audit settles.
+5. RUST BOUNDS - fleet-wide pending-offer quotas not implemented (per-artifact 1 MiB + zip limits are); `compile_enrolment_v1` stamps `group_epoch: 1` (no live JWE epoch in rust-sdk; managed runtimes stamp real epochs).
+
+
 **Goal:** Bind JWE and HIBE key material to complete Ed25519 `did:key` principals, complete the JWE reader enrollment lifecycle through first decrypt, and make normal HIBE authority/grant ceremonies fail closed.
 
 **Architecture:** One versioned canonical-statement layer defines strict DID verification, stable reasons, and deterministic fixtures. Python owns ceremony orchestration and receiver-local state. Rust owns the reusable strict verifier and FFI contract; TypeScript and C# expose equivalent typed APIs and independently consume the same vectors. Enrollment mutations occur only after complete package, scope, freshness, replay, and authorization validation.
