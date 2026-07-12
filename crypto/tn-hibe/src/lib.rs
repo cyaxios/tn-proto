@@ -32,10 +32,13 @@
 //!
 //! # Security status
 //!
-//! `bls12_381_plus` and the `tn_bbg` scheme code are unaudited; external
-//! review is required before production use. BBG delegated keys are
-//! permanent: there is no forward revocation of an admitted reader — groups
-//! that need that use btn.
+//! `bls12_381_plus` and the `tn_bbg` scheme code are unaudited. External
+//! cryptographic review is required before production use.
+//!
+//! # Key lifecycle
+//!
+//! BBG delegated keys are permanent: there is no forward revocation of an
+//! admitted reader. Groups that need that use btn.
 
 pub use tn_bbg::{
     delegate, kem_unwrap, kem_wrap, keygen, mpk_fingerprint, open, open_with_aad, seal,

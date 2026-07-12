@@ -354,7 +354,10 @@ mod path_test {
             normalize_hibe_path("team/policy-a", "id_path", false).unwrap(),
             "team/policy-a"
         );
-        assert_eq!(normalize_hibe_path("solo", "id_path", false).unwrap(), "solo");
+        assert_eq!(
+            normalize_hibe_path("solo", "id_path", false).unwrap(),
+            "solo"
+        );
 
         // Root only with the explicit flag — same message Python raises.
         let err = normalize_hibe_path("", "id_path", false).unwrap_err();
@@ -364,7 +367,14 @@ mod path_test {
 
         // The Python-parity rejection set (test_hibe_boundary.py's
         // ambiguous-path parametrization).
-        for bad in ["/", "team//reader", "team/reader/", " team/reader", "team/reader ", "team/\nreader"] {
+        for bad in [
+            "/",
+            "team//reader",
+            "team/reader/",
+            " team/reader",
+            "team/reader ",
+            "team/\nreader",
+        ] {
             let err = normalize_hibe_path(bad, "id_path", false).unwrap_err();
             assert!(err.to_string().contains("HIBE: id_path"), "{bad:?}: {err}");
         }

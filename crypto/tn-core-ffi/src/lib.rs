@@ -2679,9 +2679,8 @@ mod tests {
                 "receipt:false must not write a receipt row"
             );
 
-            let outcome: Value =
-                serde_json::from_str(&consume(unseal_raw(handle, &wire, None)))
-                    .expect("unseal outcome is not JSON");
+            let outcome: Value = serde_json::from_str(&consume(unseal_raw(handle, &wire, None)))
+                .expect("unseal outcome is not JSON");
             assert_eq!(outcome["valid"]["signature"], json!(true));
             assert_eq!(outcome["valid"]["row_hash"], json!(true));
             assert_eq!(
@@ -2724,7 +2723,10 @@ mod tests {
                 Some(r#"{"receipt":false}"#),
             );
             let tampered = wire.replace("\"tn_sealed\":1", "\"tn_sealed\":2");
-            assert_ne!(wire, tampered, "wire must carry the compact marker to tamper");
+            assert_ne!(
+                wire, tampered,
+                "wire must carry the compact marker to tamper"
+            );
 
             // Tampering a public value flips the recomputed row hash but
             // leaves the signature (over the untouched row_hash string)
@@ -2749,7 +2751,10 @@ mod tests {
                 Some(r#"{"verify":false}"#),
             )))
             .expect("unseal outcome is not JSON");
-            assert_eq!(outcome["valid"], json!({"signature": false, "row_hash": false}));
+            assert_eq!(
+                outcome["valid"],
+                json!({"signature": false, "row_hash": false})
+            );
 
             // Malformed input is the UnsealError: prefix, not a verify
             // failure and not a plain message.
@@ -2792,17 +2797,14 @@ mod tests {
             assert!(granted.is_null(), "btn group must reject grant_reader");
             let message = last_error_message().expect("guard must set tn_last_error");
             assert!(
-                message.contains("grant_reader is hibe-only. Use add_recipient for btn/jwe groups."),
+                message
+                    .contains("grant_reader is hibe-only. Use add_recipient for btn/jwe groups."),
                 "unexpected error: {message}"
             );
 
             let new_path = c("team/policy-b");
-            let rotated = tn_runtime_admin_rotate_id_path(
-                handle,
-                group.as_ptr(),
-                new_path.as_ptr(),
-                0,
-            );
+            let rotated =
+                tn_runtime_admin_rotate_id_path(handle, group.as_ptr(), new_path.as_ptr(), 0);
             assert!(rotated.is_null(), "btn group must reject rotate_id_path");
             let message = last_error_message().expect("guard must set tn_last_error");
             assert!(

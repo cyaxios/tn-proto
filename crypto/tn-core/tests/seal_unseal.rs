@@ -50,7 +50,10 @@ fn setup_ceremony_with_admin_pel(root: &Path) -> common::BtnCeremony {
         "protocol_events_location: main_log",
         "protocol_events_location: \"./.tn/admin/admin.ndjson\"",
     );
-    assert_ne!(yaml, patched, "ceremony yaml must carry the PEL key to patch");
+    assert_ne!(
+        yaml, patched,
+        "ceremony yaml must carry the PEL key to patch"
+    );
     std::fs::write(&cer.yaml_path, patched).unwrap();
     cer
 }
@@ -63,7 +66,10 @@ fn setup_ceremony_with_public_pv(root: &Path) -> common::BtnCeremony {
     let cer = setup_minimal_btn_ceremony(root);
     let yaml = std::fs::read_to_string(&cer.yaml_path).unwrap();
     let patched = yaml.replace("public_fields: []", "public_fields: [pv]");
-    assert_ne!(yaml, patched, "ceremony yaml must carry public_fields to patch");
+    assert_ne!(
+        yaml, patched,
+        "ceremony yaml must carry public_fields to patch"
+    );
     std::fs::write(&cer.yaml_path, patched).unwrap();
     cer
 }
@@ -162,7 +168,11 @@ fn seal_rejects_reserved_field() {
     let rt = Runtime::init(&cer.yaml_path).unwrap();
 
     let err = rt
-        .seal("obj.test.v1", fields(&[("tn_sealed", json!(1))]), &no_receipt())
+        .seal(
+            "obj.test.v1",
+            fields(&[("tn_sealed", json!(1))]),
+            &no_receipt(),
+        )
         .unwrap_err();
     match err {
         Error::InvalidConfig(msg) => assert!(msg.contains("tn_sealed"), "{msg}"),
@@ -218,9 +228,7 @@ fn seal_receipt_row_written_by_default() {
     let raw = rt.read_from(&admin_log).unwrap();
     let receipt = raw
         .iter()
-        .find(|e| {
-            e.envelope.get("event_type").and_then(Value::as_str) == Some("tn.object.sealed")
-        })
+        .find(|e| e.envelope.get("event_type").and_then(Value::as_str) == Some("tn.object.sealed"))
         .expect("receipt readable through read_from(admin log)");
     let body = &receipt.plaintext_per_group["default"];
     assert_eq!(body["object_id"], sealed.envelope["row_hash"]);
@@ -234,15 +242,22 @@ fn seal_receipt_false_writes_nothing() {
     let cer = setup_ceremony_with_admin_pel(td.path());
     let rt = Runtime::init(&cer.yaml_path).unwrap();
 
-    rt.seal("obj.invoice.v1", fields(&[("amount", json!(1))]), &no_receipt())
-        .unwrap();
+    rt.seal(
+        "obj.invoice.v1",
+        fields(&[("amount", json!(1))]),
+        &no_receipt(),
+    )
+    .unwrap();
 
     let admin_log = td.path().join(".tn").join("admin").join("admin.ndjson");
     let receipts: Vec<Value> = read_ndjson(&admin_log)
         .into_iter()
         .filter(|e| e["event_type"] == json!("tn.object.sealed"))
         .collect();
-    assert!(receipts.is_empty(), "receipt=false must write no receipt row");
+    assert!(
+        receipts.is_empty(),
+        "receipt=false must write no receipt row"
+    );
 }
 
 #[test]
@@ -261,7 +276,11 @@ fn seal_rejects_fragile_public_value() {
         json!({"amt": 5.0}),             // float in dict
     ] {
         let err = rt
-            .seal("obj.rt.v1", fields(&[("pv", fragile.clone())]), &no_receipt())
+            .seal(
+                "obj.rt.v1",
+                fields(&[("pv", fragile.clone())]),
+                &no_receipt(),
+            )
             .unwrap_err();
         match err {
             Error::InvalidConfig(msg) => {
@@ -273,8 +292,12 @@ fn seal_rejects_fragile_public_value() {
 
     // The same fragile value in an ENCRYPTED group (the default) seals
     // fine — group fields are hashed as opaque ciphertext.
-    rt.seal("obj.rt.v1", fields(&[("price", json!(19.0))]), &no_receipt())
-        .unwrap();
+    rt.seal(
+        "obj.rt.v1",
+        fields(&[("price", json!(19.0))]),
+        &no_receipt(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -286,7 +309,10 @@ fn seal_wire_string_has_no_trailing_newline_and_reparses_identically() {
     let sealed = rt
         .seal("obj.test.v1", fields(&[("x", json!(1))]), &no_receipt())
         .unwrap();
-    assert!(!sealed.wire.ends_with('\n'), "wire must have no trailing newline");
+    assert!(
+        !sealed.wire.ends_with('\n'),
+        "wire must have no trailing newline"
+    );
     assert!(!sealed.wire.contains('\n'), "wire is a single line");
     let reparsed: Map<String, Value> = serde_json::from_str(&sealed.wire).unwrap();
     assert_eq!(reparsed, sealed.envelope);
@@ -398,7 +424,11 @@ fn unseal_tampered_ciphertext_raises_verify() {
     let mut env = sealed.envelope.clone();
     let block = env["default"].as_object().unwrap().clone();
     let ct = block["ciphertext"].as_str().unwrap().to_string();
-    let tail = if &ct[ct.len() - 4..] == "AAAA" { "BBBB" } else { "AAAA" };
+    let tail = if &ct[ct.len() - 4..] == "AAAA" {
+        "BBBB"
+    } else {
+        "AAAA"
+    };
     let mut new_block = block;
     new_block.insert(
         "ciphertext".into(),
@@ -464,7 +494,11 @@ fn unseal_no_key_returns_public_frame() {
     let cer_a = setup_minimal_btn_ceremony(td_a.path());
     let rt_a = Runtime::init(&cer_a.yaml_path).unwrap();
     let sealed = rt_a
-        .seal("obj.memo.v1", fields(&[("body", json!("private"))]), &no_receipt())
+        .seal(
+            "obj.memo.v1",
+            fields(&[("body", json!("private"))]),
+            &no_receipt(),
+        )
         .unwrap();
 
     // A second, unrelated ceremony holds no fitting key: no error, the
@@ -474,7 +508,9 @@ fn unseal_no_key_returns_public_frame() {
     // share keys and defeat this test.)
     let rt_b = Runtime::ephemeral().unwrap();
 
-    let out = rt_b.unseal(&sealed.wire, &UnsealOptions::default()).unwrap();
+    let out = rt_b
+        .unseal(&sealed.wire, &UnsealOptions::default())
+        .unwrap();
     assert!(out.valid.signature && out.valid.row_hash);
     assert_eq!(out.hidden_groups, vec!["default".to_string()]);
     assert_eq!(out.sealed_blocks.len(), 1);
@@ -500,7 +536,10 @@ fn unseal_aad_binds_and_roundtrips() {
         .seal(
             "obj.test.v1",
             fields(&[("x", json!(1))]),
-            &SealOptions { receipt: false, aad },
+            &SealOptions {
+                receipt: false,
+                aad,
+            },
         )
         .unwrap();
 
@@ -621,21 +660,30 @@ fn unseal_keybag_two_ciphers_one_group() {
     std::fs::write(&yaml_a, yaml).unwrap();
     let rt_a = Runtime::init(&yaml_a).unwrap();
     let sealed = rt_a
-        .seal("obj.gov.v1", fields(&[("secret", json!("s3"))]), &no_receipt())
+        .seal(
+            "obj.gov.v1",
+            fields(&[("secret", json!("s3"))]),
+            &no_receipt(),
+        )
         .unwrap();
 
     // Reader: own btn ceremony PLUS an absorbed hibe grant for the SAME
     // group name — the bag must hold both candidates and open via hibe.
     let td_b = tempfile::tempdir().unwrap();
     let cer_b = setup_minimal_btn_ceremony(td_b.path());
-    let sk = tn_hibe::keygen(&pp, &msk, &tn_hibe::Identity::from_str_path(id_path), OsRng)
-        .unwrap();
+    let sk = tn_hibe::keygen(&pp, &msk, &tn_hibe::Identity::from_str_path(id_path), OsRng).unwrap();
     std::fs::write(cer_b.keystore.join("default.hibe.mpk"), pp.to_bytes()).unwrap();
-    std::fs::write(cer_b.keystore.join("default.hibe.idpath"), id_path.as_bytes()).unwrap();
+    std::fs::write(
+        cer_b.keystore.join("default.hibe.idpath"),
+        id_path.as_bytes(),
+    )
+    .unwrap();
     std::fs::write(cer_b.keystore.join("default.hibe.sk"), sk.to_bytes()).unwrap();
     let rt_b = Runtime::init(&cer_b.yaml_path).unwrap();
 
-    let out = rt_b.unseal(&sealed.wire, &UnsealOptions::default()).unwrap();
+    let out = rt_b
+        .unseal(&sealed.wire, &UnsealOptions::default())
+        .unwrap();
     assert_eq!(out.fields["secret"], json!("s3"));
     assert!(out.hidden_groups.is_empty());
 }

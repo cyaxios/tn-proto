@@ -219,7 +219,10 @@ pub fn extract_group_blocks(env: &Map<String, Value>) -> Result<BTreeMap<String,
 /// Self-describing recompute: every key not in [`ENVELOPE_RESERVED`]
 /// and not in `blocks` is a public field. `timestamp` / `event_id` /
 /// `level` / `prev_hash` default to `""` when absent.
-pub fn verify_sealed(env: &Map<String, Value>, blocks: &BTreeMap<String, GroupBlock>) -> SealedValid {
+pub fn verify_sealed(
+    env: &Map<String, Value>,
+    blocks: &BTreeMap<String, GroupBlock>,
+) -> SealedValid {
     let mut public_out: BTreeMap<String, Value> = BTreeMap::new();
     for (k, v) in env {
         if ENVELOPE_RESERVED.contains(&k.as_str()) || blocks.contains_key(k) {

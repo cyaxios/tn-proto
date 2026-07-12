@@ -32,9 +32,13 @@
 //!
 //! # Security status
 //!
-//! `bls12_381_plus` is unaudited and this scheme code is new; external review
-//! is required before production use. BBG delegated keys are permanent — there
-//! is no forward revocation of an admitted reader.
+//! The `tn-bbg` scheme implementation and `bls12_381_plus` pairing library are
+//! unaudited. External cryptographic review is required before production use.
+//!
+//! # Key lifecycle
+//!
+//! BBG delegated keys are permanent: there is no forward revocation of an
+//! admitted reader.
 
 mod codec;
 mod encrypt;

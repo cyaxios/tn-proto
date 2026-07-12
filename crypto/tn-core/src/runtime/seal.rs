@@ -246,7 +246,11 @@ impl Runtime {
     /// # Panics
     ///
     /// Panics if an internal group-state lock is poisoned.
-    pub fn unseal_env(&self, env: Map<String, Value>, opts: &UnsealOptions) -> Result<UnsealOutcome> {
+    pub fn unseal_env(
+        &self,
+        env: Map<String, Value>,
+        opts: &UnsealOptions,
+    ) -> Result<UnsealOutcome> {
         let env = require_envelope_shape(env)?;
         let blocks = extract_group_blocks(&env)?;
         let valid = verify_gate(&env, &blocks, opts.verify)?;
@@ -261,8 +265,13 @@ impl Runtime {
             if blocks.contains_key(&opts.group) {
                 if let Some(block) = blocks.get(&opts.group) {
                     for cipher in load_recipient_candidates(dir, &opts.group)? {
-                        if try_open(&opts.group, block, cipher.as_ref(), &env_value, &mut plaintext)
-                        {
+                        if try_open(
+                            &opts.group,
+                            block,
+                            cipher.as_ref(),
+                            &env_value,
+                            &mut plaintext,
+                        ) {
                             break;
                         }
                     }
@@ -274,7 +283,13 @@ impl Runtime {
             for (gname, block) in &blocks {
                 if let Some(gstate_arc) = self.groups.get(gname) {
                     let gstate = gstate_arc.read().expect("group state RwLock poisoned");
-                    try_open(gname, block, gstate.cipher.as_ref(), &env_value, &mut plaintext);
+                    try_open(
+                        gname,
+                        block,
+                        gstate.cipher.as_ref(),
+                        &env_value,
+                        &mut plaintext,
+                    );
                 }
             }
             // Pass 2: keystore key-bag (own kits + everything absorbed).
@@ -292,7 +307,13 @@ impl Runtime {
             &self.keystore
         };
 
-        Ok(build_outcome(env_value, blocks, plaintext, valid, walk_keystore))
+        Ok(build_outcome(
+            env_value,
+            blocks,
+            plaintext,
+            valid,
+            walk_keystore,
+        ))
     }
 }
 

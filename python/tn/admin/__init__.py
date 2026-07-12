@@ -15,6 +15,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +26,45 @@ from ..config import (
     LoadedConfig,
     _create_group,
 )
+from ..trust import AcceptedOffer
 
 _log = logging.getLogger("tn.admin")
+
+
+# --------------------------------------------------------------------
+# trusted enrollment approval / reconciliation
+# --------------------------------------------------------------------
+
+
+def reconcile_enrollment(
+    offer_digest: str,
+    *,
+    approve: bool = False,
+    cfg: LoadedConfig | None = None,
+    now: datetime | None = None,
+) -> AcceptedOffer:
+    """Reverify and promote one retained JWE enrollment offer.
+
+    ``approve=False`` accepts only a challenged offer whose exact reader,
+    ceremony, and group were preauthorized. ``approve=True`` records approval
+    for this exact signed offer/artifact digest and performs approval,
+    challenge consumption, re-verification, and promotion under one lock.
+    """
+    if cfg is None:
+        from .. import current_config
+
+        cfg = current_config()
+    if now is None:
+        from datetime import timezone
+
+        now = datetime.now(timezone.utc)
+    from ..enrollment import EnrollmentStore
+
+    store = EnrollmentStore(cfg, cfg.device)
+    if approve:
+        return store.approve_and_reconcile(offer_digest, now=now)
+    pending = store.pending_offer(offer_digest, now=now)
+    return store.reconcile(pending, now=now)
 
 
 def _add_field_route(cfg: LoadedConfig, field_name: str, group: str) -> None:
@@ -258,7 +296,9 @@ def _rotate_impl(
 
     Behavior differs per cipher:
       jwe: regenerates the sender X25519 key + recipient list. Old
-           sender/mykey/recipients files renamed `.revoked.<ts>`.
+           sender/mykey/recipients files are renamed `.revoked.<ts>`;
+           the new list contains only the publisher self-recipient, so
+           every external reader requires explicit re-enrollment.
       btn: the public `rotate()` verb (above) has already driven the
            btn cipher's forward-secret rotation via
            `BtnGroupCipher.rotate()` — new master_seed, new
@@ -1152,17 +1192,26 @@ def add_recipient(
         shape of the kit material.
 
     JWE ceremonies:
-        Pass `public_key` (32-byte X25519 public key) and `cfg` (the
-        LoadedConfig to mutate). Returns
+        Pass the required `recipient_did`, its authenticated 32-byte X25519
+        `public_key`, and `cfg` (the LoadedConfig to mutate). Returns
         `AddRecipientResult(updated_cfg=cfg')`. `raw` is btn-only
         and ignored on JWE.
 
-    For re-distributing kit material to an already-known recipient
-    WITHOUT a new attestation event, use
-    `tn.pkg.bundle_for_recipient` instead.
+    HIBE ceremonies:
+        Routes to `grant_reader`. The API permits a missing or unresolvable
+        DID for local/plaintext workflows, but a sensitive grant requires a
+        complete resolvable Ed25519 `did:key`; otherwise the bearer key is
+        written in a plaintext package.
 
-    `recipient_did` is optional in both cases (provided for the
-    `tn.recipient.added` admin event's metadata).
+    For re-distributing BTN kit material to an already-known recipient
+    WITHOUT a new attestation event, use
+    `tn.pkg.bundle_for_recipient` instead. That helper is BTN-only; JWE
+    readers generate and retain their own `.jwe.mykey`, and HIBE readers
+    receive grants through `grant_reader`.
+
+    `recipient_did` is optional only for BTN's low-level metadata path. It is
+    required for JWE enrollment and operationally required for secure HIBE
+    grant delivery as described above.
 
     `cfg` defaults to the runtime singleton's cfg.
 
@@ -1319,6 +1368,12 @@ def grant_reader(
     authority master secret NEVER rides a kit (export skips ``.hibe.msk``;
     absorb refuses it from non-self-addressed packages).
 
+    The ``.hibe.sk`` is a bearer capability and is not cryptographically
+    bound to ``reader_did``. That DID is registry/package-addressing
+    metadata. The package body is recipient-sealed only for a complete
+    resolvable Ed25519 ``did:key``; otherwise this API falls back to a
+    plaintext kit.
+
     Granting is native to the cipher — no re-keying, no envelope rewrite.
     A delegated key is permanent for its path: there is no forward
     revocation of an admitted reader (rotate the policy-hash path for new
@@ -1456,13 +1511,15 @@ def revoke_reader(
 
     Honest semantics (the cipher's, not this verb's): the revoked reader
     keeps everything sealed before the revocation — delegated keys are
-    permanent, nothing can claw history back. What this verb guarantees is
-    that entries sealed AFTER it are closed to them: future seals target
-    ``new_path`` (default: a bumped sibling of the current path), and only
-    the surviving grantees receive keys for it. Distribute the returned
-    kits; each survivor absorbs theirs and keeps reading seamlessly (their
-    superseded key stays in the keystore for the old entries). Groups that
-    need this to be a one-sided O(1) operation should use btn.
+    permanent, nothing can claw history back. This verb rotates THIS
+    authority ceremony to ``new_path`` (default: a bumped sibling of the
+    current path) and reissues survivor kits. It does not update external
+    writers, which retain their own idpath and must authenticate/adopt the
+    sibling before sealing again. Until every writer does so, an old
+    exact-path key can still open stale-writer output. A reader holding an
+    ancestor of the new path remains able to delegate down and is not
+    revoked by this operation. Distribute the returned survivor kits and
+    writer path update; use btn when routine per-reader cutoff is required.
     """
     if cfg is None:
         from .. import current_config
@@ -1496,7 +1553,8 @@ def revoke_reader(
     )
 
     import re as _re
-    from datetime import datetime as _dt, timezone as _tz
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
 
     if out_dir is None:
         ts = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1527,8 +1585,10 @@ def rotate_reader_path(group: str, new_path: str, *, cfg: Any | None = None) -> 
 
     - Pre-rotation entries stay open forever for prior grantees (delegated
       keys are permanent).
-    - A grantee holding a key for the exact old path loses access to new
-      seals; one holding a key for an ANCESTOR of the new path keeps it.
+    - A grantee holding a key for the exact old path loses access only to
+      seals made by this updated ceremony (and external writers after they
+      authenticate/adopt the new sibling path); one holding a key for an
+      ANCESTOR of the new path keeps access.
     - Pick a sibling path (typically: bump the policy-hash leaf) — rotating
       to a DESCENDANT of the old path cuts off nobody, because old keys
       delegate down.
@@ -1621,6 +1681,10 @@ def revoke_recipient(
     btn: pass ``leaf_index`` *or* ``recipient_did`` (the did is resolved
     to its active leaf via the admin log).
     JWE: pass ``recipient_did``.
+    HIBE: pass ``recipient_did``. This routes to ``revoke_reader`` and only
+    rotates the authority ceremony's local path. External writers must
+    authenticate/adopt the new sibling path before sealing, and an ancestor
+    capability remains effective below its path.
 
     ``recipient=`` is the polymorphic shortcut — accepts a DID str, an
     int leaf, an ``AddRecipientResult`` from the matching add call, a
@@ -1716,10 +1780,10 @@ class RotateGroupResult:
     internally via the `tn.rotation.completed` admin event), so
     `generation` may be None.
 
-    `cipher_actually_rotated` is the honest flag. Both ciphers now run
-    a real forward-secret rotation, so this is True for jwe and btn
-    alike: jwe re-keys the cover set, and btn mints a fresh master_seed
-    + publisher_id and bumps the cipher epoch.
+    `cipher_actually_rotated` is the honest flag. Both ciphers rotate key
+    material, so this is True for jwe and btn alike: jwe archives the active
+    files and recreates the group with only the publisher self-recipient;
+    btn mints a fresh master_seed + publisher_id and bumps the cipher epoch.
     """
 
     cipher: str
@@ -1869,10 +1933,12 @@ def rotate(
 ) -> RotateGroupResult:
     """Rotate group keys.
 
-    Both ciphers run a real forward-secret rotation:
+    Both ciphers rotate their active key material:
 
-      - **JWE**: the cover set is re-wrapped under fresh keys; old
-        recipient kits no longer decrypt post-rotation entries.
+      - **JWE**: archives sender/mykey/recipients and recreates the group
+        with only the publisher self-recipient. Every external reader must
+        be re-enrolled before it receives post-rotation entries. Reusing an
+        old reader public key also reuses that old private-key capability.
 
       - **btn**: drives `BtnGroupCipher.rotate()` which mints a fresh
         master_seed, derives a new publisher_id, bumps the cipher
