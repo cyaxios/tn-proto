@@ -24,6 +24,7 @@ import { canonicalize } from "./canonical.js";
 import { sha256HexBytes } from "./chain.js";
 import { b64ToBytes, bytesToB64 } from "./encoding.js";
 import { type DeviceKey, verify as verifySignature } from "./signing.js";
+import { TrustError, parseEd25519DidKey, verifyEd25519DidSignature } from "./trust.js";
 import { asDid } from "./types.js";
 
 /** Manifest schema version. Bump if required fields change incompatibly. */
@@ -281,7 +282,10 @@ export function signManifestWithBody(
 }
 
 function bodyDigestMismatch(detail: string): Error {
-  return new Error(`body_digest_mismatch: ${detail}`);
+  // A TrustError so enrollment/absorb boundaries surface the stable
+  // `body_digest_mismatch` reason; the message shape (`body_digest_mismatch:
+  // <detail>`) is unchanged for existing string-matching callers.
+  return new TrustError("body_digest_mismatch", detail);
 }
 
 /** Verify exact member names and lowercase tagged digests against the manifest. */
@@ -436,6 +440,161 @@ export function nowIsoMillis(): string {
   // Node's Date.toISOString already yields ms precision. Convert the
   // trailing "Z" to "+00:00" to match Python's isoformat output.
   return new Date().toISOString().replace(/Z$/, "+00:00");
+}
+
+// -----------------------------------------------------------------------
+// Inner signed Package — the `body/package.json` member of offer/enrolment
+// `.tnpkg` archives. Mirrors `python/tn/packaging.py` byte-for-byte: the
+// signature covers `json.dumps(asdict(pkg) minus sig_b64, sort_keys,
+// separators=(",", ":"))`, which the shared canonical serializer reproduces.
+// -----------------------------------------------------------------------
+
+/** Wire shape of the inner bilateral lifecycle package. */
+export interface TnPackage {
+  package_version: number;
+  package_kind: string;
+  ceremony_id: string;
+  group: string;
+  group_epoch: number;
+  device_identity: string;
+  signer_verify_pub_b64: string;
+  recipient_identity: string | null;
+  payload: Record<string, unknown>;
+  compiled_at: string;
+  sig_b64?: string | null;
+}
+
+const TN_PACKAGE_REQUIRED_FIELDS = [
+  "package_version",
+  "package_kind",
+  "ceremony_id",
+  "group",
+  "group_epoch",
+  "device_identity",
+  "signer_verify_pub_b64",
+  "recipient_identity",
+  "payload",
+  "compiled_at",
+] as const;
+
+/**
+ * Parse the inner package with the same strictness as Python's
+ * `Package(**value)`: unknown fields and missing fields are rejected before
+ * any signature work (`sig_b64` is the only optional member).
+ */
+export function parseTnPackage(value: unknown): TnPackage {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TrustError("statement_invalid", "offer package must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  const allowed = new Set<string>([...TN_PACKAGE_REQUIRED_FIELDS, "sig_b64"]);
+  const unknown = Object.keys(record).filter((key) => !allowed.has(key));
+  const missing = TN_PACKAGE_REQUIRED_FIELDS.filter((key) => !(key in record));
+  if (unknown.length > 0 || missing.length > 0) {
+    throw new TrustError("statement_invalid", "offer package shape is invalid");
+  }
+  if (
+    typeof record["package_version"] !== "number" ||
+    !Number.isSafeInteger(record["package_version"])
+  ) {
+    throw new TrustError("statement_invalid", "unsupported offer package version");
+  }
+  const requireStr = (key: string): string => {
+    const v = record[key];
+    if (typeof v !== "string") {
+      throw new TrustError("statement_invalid", "offer package shape is invalid");
+    }
+    return v;
+  };
+  const payload = record["payload"];
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TrustError("statement_invalid", "offer payload must be an object");
+  }
+  const recipient = record["recipient_identity"];
+  if (recipient !== null && typeof recipient !== "string") {
+    throw new TrustError("statement_invalid", "offer package shape is invalid");
+  }
+  const groupEpoch = record["group_epoch"];
+  if (typeof groupEpoch !== "number" || !Number.isSafeInteger(groupEpoch)) {
+    throw new TrustError("statement_invalid", "offer package shape is invalid");
+  }
+  const sig = record["sig_b64"];
+  if (sig !== undefined && sig !== null && typeof sig !== "string") {
+    throw new TrustError("statement_invalid", "offer package shape is invalid");
+  }
+  return {
+    package_version: record["package_version"] as number,
+    package_kind: requireStr("package_kind"),
+    ceremony_id: requireStr("ceremony_id"),
+    group: requireStr("group"),
+    group_epoch: groupEpoch,
+    device_identity: requireStr("device_identity"),
+    signer_verify_pub_b64: requireStr("signer_verify_pub_b64"),
+    recipient_identity: recipient as string | null,
+    payload: { ...(payload as Record<string, unknown>) },
+    compiled_at: requireStr("compiled_at"),
+    sig_b64: sig === undefined ? null : (sig as string | null),
+  };
+}
+
+/** The complete wire dict of a package (including its signature slot). */
+export function tnPackageWireValue(pkg: TnPackage): Record<string, unknown> {
+  return {
+    package_version: pkg.package_version,
+    package_kind: pkg.package_kind,
+    ceremony_id: pkg.ceremony_id,
+    group: pkg.group,
+    group_epoch: pkg.group_epoch,
+    device_identity: pkg.device_identity,
+    signer_verify_pub_b64: pkg.signer_verify_pub_b64,
+    recipient_identity: pkg.recipient_identity,
+    payload: pkg.payload,
+    compiled_at: pkg.compiled_at,
+    sig_b64: pkg.sig_b64 ?? null,
+  };
+}
+
+/** Deterministic serialization over every field EXCEPT `sig_b64`. */
+export function tnPackageSigningBytes(pkg: TnPackage): Uint8Array {
+  const wire = tnPackageWireValue(pkg);
+  delete wire["sig_b64"];
+  return canonicalize(wire);
+}
+
+/** Sign the package with an Ed25519 device key: sets both the raw
+ * verification key mirror and the signature, like Python `packaging.sign`. */
+export function signTnPackage(pkg: TnPackage, key: DeviceKey): TnPackage {
+  const signed: TnPackage = { ...pkg, signer_verify_pub_b64: bytesToB64(key.publicKey) };
+  signed.sig_b64 = bytesToB64(key.sign(tnPackageSigningBytes(signed)));
+  return signed;
+}
+
+/**
+ * Fail-closed inner-package signature verification. The declared raw
+ * verification key must equal the key embedded in the asserted DID, and the
+ * signature must verify under that DID — an unrelated raw key never
+ * establishes identity. Throws {@link TrustError} on failure.
+ */
+export function verifyTnPackageSignature(pkg: TnPackage): void {
+  if (typeof pkg.sig_b64 !== "string" || typeof pkg.signer_verify_pub_b64 !== "string") {
+    throw new TrustError("signature_invalid", "offer signature is missing");
+  }
+  let signature: Uint8Array;
+  let declaredPublicKey: Uint8Array;
+  try {
+    signature = b64ToBytes(pkg.sig_b64);
+    declaredPublicKey = b64ToBytes(pkg.signer_verify_pub_b64);
+  } catch {
+    throw new TrustError("signature_invalid", "offer signature is malformed");
+  }
+  const didPublicKey = parseEd25519DidKey(pkg.device_identity);
+  if (
+    declaredPublicKey.length !== didPublicKey.length ||
+    declaredPublicKey.some((byte, index) => byte !== didPublicKey[index])
+  ) {
+    throw new TrustError("did_signer_mismatch", "offer verification key does not match its asserted DID");
+  }
+  verifyEd25519DidSignature(pkg.device_identity, tnPackageSigningBytes(pkg), signature);
 }
 
 // Internal helpers re-exported for the tnpkg_io layer (Layer 2).

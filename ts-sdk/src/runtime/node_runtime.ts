@@ -48,7 +48,7 @@ import {
   type ManifestKind,
   type VectorClock,
 } from "../core/tnpkg.js";
-import { readTnpkgVerified, writeTnpkg } from "../tnpkg_io.js";
+import { readTnpkg, readTnpkgVerified, writeTnpkg } from "../tnpkg_io.js";
 import { encryptBodyBlob, BODY_CIPHER_SUITE, BODY_FRAME } from "../core/body_encryption.js";
 import {
   sealBundleForRecipient,
@@ -77,6 +77,7 @@ import {
   jweAddRecipient,
   jweRevokeRecipient,
   jweRotateGroup,
+  type JweRecipientTrust,
 } from "./jwe_group.js";
 import { deriveGroupKey, indexTokenFor } from "../core/indexing.js";
 import {
@@ -84,11 +85,38 @@ import {
   hibeBumpPath,
   hibeCandidateKeys,
   hibeEncrypt,
+  hibeGroupMpkMaxDepth,
+  hibeAuthorityEpoch,
   hibeMintReaderKey,
   hibeRotateIdPath,
   loadHibeGroup,
+  loadPinnedHibeAuthority,
+  pinHibeAuthority,
   type HibeGroupMaterial,
 } from "./hibe_group.js";
+import {
+  EnrollmentStore,
+  UNSAFE_OPERATION_EVENT_TYPE,
+  enrollmentCeremonyFromConfig,
+  installEnrollmentResponse,
+} from "./enrollment.js";
+import { reconcileTrustedOffers } from "./reconcile.js";
+import {
+  TrustError,
+  formatTrustTimestamp,
+  parseKeyBindingProof,
+  sha256Digest,
+  signKeyBindingProof,
+  verifyKeyBindingProof,
+  type EnrollmentChallengeV1,
+  type KeyBindingProofV1,
+} from "../core/trust.js";
+import { parseTnPackage, verifyTnPackageSignature, type TnPackage } from "../core/tnpkg.js";
+import {
+  canonicalUnsafeOperationPayload,
+  normalizeUnsafeOperationNotice,
+  type UnsafeOperationNotice,
+} from "../core/unsafe_operation.js";
 import { getProfile, isKnownProfile } from "../profiles.js";
 import { DEFAULT_VAULT_URL } from "../vault/url.js";
 import type { TNHandler } from "../handlers/index.js";
@@ -1014,8 +1042,13 @@ export class NodeRuntime {
    *  recipients (keystore file + authoritative yaml) so the next seal wraps a
    *  CEK for it, then emit `tn.recipient.added`. Idempotent per DID. Mirrors
    *  Python `_add_recipient_jwe_impl`. */
-  addRecipientJwe(group: string, recipientDid: string, pub: Uint8Array): void {
-    jweAddRecipient(this.config.keystorePath, group, recipientDid, pub);
+  addRecipientJwe(
+    group: string,
+    recipientDid: string,
+    pub: Uint8Array,
+    trust?: JweRecipientTrust,
+  ): void {
+    jweAddRecipient(this.config.keystorePath, group, recipientDid, pub, trust);
     this._yamlMutateJweRecipients(group, (recips) => {
       const next = recips.filter((r) => r?.recipient_identity !== recipientDid);
       next.push({ recipient_identity: recipientDid, pub_b64: Buffer.from(pub).toString("base64") });
@@ -1249,8 +1282,19 @@ export class NodeRuntime {
    */
   grantReader(
     group: string,
-    opts: { readerDid?: string; idPath?: string; outPath?: string } = {},
-  ): { kitPath: string; idPath: string } {
+    opts: {
+      readerDid?: string;
+      idPath?: string;
+      outPath?: string;
+      /** Required to mint an ANCESTOR of the group's current sealing path —
+       * such a key delegates the whole subtree below it. */
+      allowSubauthority?: boolean;
+      /** Trust metadata recorded with the grant registry entry. */
+      grantTrust?: { verified: boolean; proofDigest?: string; proofExpiresAt?: string };
+      /** Label the kit manifest as explicit unsafe plaintext delivery. */
+      unsafePlaintextLabel?: boolean;
+    } = {},
+  ): { kitPath: string; idPath: string; subtreeDelegation: boolean } {
     const mat = this._requireHibeGroup("grantReader", group);
     const safeStem = (opts.readerDid ?? "reader")
       .split(":")
@@ -1258,6 +1302,21 @@ export class NodeRuntime {
       .replace(/[^A-Za-z0-9._-]/g, "_");
     const outPath = pathResolve(opts.outPath ?? join(process.cwd(), `${safeStem}.tnpkg`));
     const targetPath = opts.idPath ?? mat.idPath;
+    // Exact-path grants are the default. A proper ancestor of the current
+    // sealing path is a subtree delegation within the remaining depth and
+    // must be requested explicitly.
+    const currentLabels = mat.idPath.split("/");
+    const targetLabels = targetPath.split("/");
+    const isProperAncestor =
+      targetLabels.length < currentLabels.length &&
+      targetLabels.every((label, index) => label === currentLabels[index]);
+    if (isProperAncestor && opts.allowSubauthority !== true) {
+      throw new Error(
+        `tn.admin.grantReader: id_path ${JSON.stringify(targetPath)} is an ANCESTOR of the ` +
+          `group's sealing path ${JSON.stringify(mat.idPath)} — the key would delegate the ` +
+          `whole subtree below it. Pass allowSubauthority: true to mint a subauthority grant.`,
+      );
+    }
     const sk = hibeMintReaderKey(mat, targetPath);
 
     const files: Array<[string, Uint8Array]> = [
@@ -1289,16 +1348,28 @@ export class NodeRuntime {
     };
     if (opts.readerDid !== undefined) manifestArgs.toDid = opts.readerDid;
     const manifest = newManifest(manifestArgs);
-    manifest.state = { kits: kitsMeta, kind: "readers-only" };
+    const manifestState: Record<string, unknown> = { kits: kitsMeta, kind: "readers-only" };
+    if (isProperAncestor) manifestState["subtree_delegation"] = true;
+    if (opts.unsafePlaintextLabel === true) manifestState["unsafe_plaintext_delivery"] = true;
+    manifest.state = manifestState;
     signManifestWithBody(manifest, body, this.keystore.device);
     writeTnpkg(outPath, manifest, body);
 
     if (opts.readerDid) {
       const grants = this._hibeGrantsLoad(group).filter((g) => g.reader_did !== opts.readerDid);
-      grants.push({ reader_did: opts.readerDid, id_path: targetPath });
+      const entry: Record<string, unknown> = { reader_did: opts.readerDid, id_path: targetPath };
+      if (opts.grantTrust !== undefined) {
+        entry["verified"] = opts.grantTrust.verified;
+        if (opts.grantTrust.proofDigest !== undefined) entry["proof_digest"] = opts.grantTrust.proofDigest;
+        if (opts.grantTrust.proofExpiresAt !== undefined) {
+          entry["proof_expires_at"] = opts.grantTrust.proofExpiresAt;
+        }
+      }
+      if (isProperAncestor) entry["subtree_delegation"] = true;
+      grants.push(entry as { reader_did: string; id_path: string });
       this._hibeGrantsWrite(group, grants);
     }
-    return { kitPath: outPath, idPath: targetPath };
+    return { kitPath: outPath, idPath: targetPath, subtreeDelegation: isProperAncestor };
   }
 
   /**
@@ -1313,6 +1384,259 @@ export class NodeRuntime {
     hibeRotateIdPath(this.config.keystorePath, group, mat, newPath);
     this._refreshHibeKeystore(group);
     return newPath;
+  }
+
+  // ── trusted enrollment + HIBE authority trust ─────────────────────
+
+  /** The receiver-local trusted-enrollment state store for this ceremony. */
+  enrollmentStore(): EnrollmentStore {
+    return new EnrollmentStore(enrollmentCeremonyFromConfig(this.config), this.keystore.device);
+  }
+
+  /** Guards {@link recordUnsafeOperation} against audit-emission recursion. */
+  private _unsafeOperationActive = false;
+
+  /**
+   * Emit the common unsafe-operation observability pair: exactly one
+   * structured `TnSecurityWarning` language warning (synchronous) plus one
+   * best-effort `tn.security.unsafe_operation` admin audit event. The audit
+   * rides the async emit pipeline so it works on every ceremony cipher
+   * (jwe seals cannot run on the sync path); audit failure never changes
+   * the result of the requested operation. Callers that can await the
+   * returned promise get a durably appended event; fire-and-forget callers
+   * stay best-effort.
+   */
+  recordUnsafeOperation(notice: UnsafeOperationNotice): Promise<void> {
+    if (this._unsafeOperationActive) return Promise.resolve();
+    this._unsafeOperationActive = true;
+    let normalized: UnsafeOperationNotice;
+    try {
+      normalized = normalizeUnsafeOperationNotice(notice);
+      process.emitWarning(
+        `explicit TN security weakening requested: ${canonicalUnsafeOperationPayload(normalized)}`,
+        "TnSecurityWarning",
+      );
+    } catch (err) {
+      this._unsafeOperationActive = false;
+      throw err;
+    }
+    const audit = this.emitAsync("warning", UNSAFE_OPERATION_EVENT_TYPE, {
+      artifact_digest: normalized.artifact_digest,
+      group: normalized.group,
+      operation: normalized.operation,
+      relaxations: [...normalized.relaxations],
+      subject_did: normalized.subject_did,
+    })
+      .then(() => undefined)
+      .catch(() => undefined) // audit observability is deliberately best effort
+      .finally(() => {
+        this._unsafeOperationActive = false;
+      });
+    return audit;
+  }
+
+  /**
+   * Pre-authorize `readerDid` for `group` and issue a signed one-time
+   * enrollment challenge. Naming the exact reader DID is the publisher's
+   * pre-authorization act; reconcile later auto-promotes only offers that
+   * answer a retained challenge from a preauthorized reader.
+   */
+  issueEnrollmentChallenge(readerDid: string, group: string, ttlMs: number): EnrollmentChallengeV1 {
+    const store = this.enrollmentStore();
+    store.preauthorize(readerDid, group);
+    return store.issueChallenge(readerDid, group, ttlMs);
+  }
+
+  /** Sign this authority's current MPK/depth/path/epoch binding for one
+   * audience (defaults to a self-addressed assertion). */
+  issueHibeAuthorityAssertion(
+    group: string,
+    ttlMs: number,
+    opts: { audienceDid?: string } = {},
+  ): KeyBindingProofV1 {
+    const mat = this._requireHibeGroup("issueHibeAuthorityAssertion", group);
+    if (mat.msk === undefined) {
+      throw new TrustError(
+        "untrusted_principal",
+        "only the authority (msk holder) can issue authority assertions",
+      );
+    }
+    if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+      throw new TrustError("statement_invalid", "assertion ttl must be positive");
+    }
+    const nowMicros = Date.now() * 1000;
+    const proof: KeyBindingProofV1 = {
+      version: 1,
+      purpose: "hibe-authority",
+      subject_did: this.did,
+      audience_did: opts.audienceDid ?? this.did,
+      ceremony_id: this.config.ceremonyId,
+      group,
+      issued_at: formatTrustTimestamp(nowMicros),
+      expires_at: formatTrustTimestamp(nowMicros + Math.round(ttlMs) * 1000),
+      nonce_b64: Buffer.from(randomBytes(32)).toString("base64"),
+      binding: {
+        algorithm: "TN-BBG-HIBE-BLS12-381",
+        mpk_sha256: sha256Digest(mat.mpk),
+        max_depth: hibeGroupMpkMaxDepth(mat.mpk),
+        id_path: mat.idPath,
+        path_epoch: hibeAuthorityEpoch(mat),
+      },
+      signature_b64: "",
+    };
+    return signKeyBindingProof(proof, this.keystore.device);
+  }
+
+  /**
+   * External-writer accept/pin/update for a HIBE authority assertion.
+   *
+   * Verifies the authority DID and signature, the MPK bytes against the
+   * asserted digest, the encoded MPK depth, the path depth, the exact scope,
+   * and the monotonic path epoch — then atomically persists the pinned
+   * record and installs/updates the group's public sealing material
+   * (`.hibe.mpk` + `.hibe.idpath`). No mutation happens before validation.
+   */
+  installHibeAuthorityAssertion(opts: {
+    group: string;
+    mpk: Uint8Array;
+    assertion: KeyBindingProofV1;
+    expectedAuthorityDid: string;
+    now?: string;
+  }): void {
+    const assertion = parseKeyBindingProof(opts.assertion);
+    if (assertion.subject_did !== opts.expectedAuthorityDid) {
+      throw new TrustError(
+        "did_signer_mismatch",
+        "assertion subject does not match the expected authority DID",
+      );
+    }
+    if (assertion.group !== opts.group) {
+      throw new TrustError("scope_mismatch", "assertion names a different group");
+    }
+    const pinned = loadPinnedHibeAuthority(this.config.keystorePath, opts.group);
+    if (pinned !== null && pinned.ceremonyId !== assertion.ceremony_id) {
+      throw new TrustError("scope_mismatch", "assertion names a different authority ceremony");
+    }
+    const now = opts.now ?? formatTrustTimestamp(Date.now() * 1000);
+    const principal = verifyKeyBindingProof(assertion, {
+      purpose: "hibe-authority",
+      audienceDid: this.did,
+      ceremonyId: assertion.ceremony_id,
+      group: opts.group,
+      now,
+    });
+    const mpk = new Uint8Array(opts.mpk);
+    if (sha256Digest(mpk) !== assertion.binding["mpk_sha256"]) {
+      throw new TrustError("binding_invalid", "MPK bytes do not match the asserted digest");
+    }
+    let encodedDepth: number;
+    try {
+      encodedDepth = hibeGroupMpkMaxDepth(mpk);
+    } catch {
+      throw new TrustError("binding_invalid", "MPK bytes are not a valid authority public key");
+    }
+    if (encodedDepth !== assertion.binding["max_depth"]) {
+      throw new TrustError("binding_invalid", "encoded MPK depth does not match the asserted max_depth");
+    }
+    const idPath = String(assertion.binding["id_path"]);
+    const pathEpoch = Number(assertion.binding["path_epoch"]);
+
+    // Pin first (fails closed on rollback/conflict), then install material.
+    pinHibeAuthority(this.config.keystorePath, opts.group, {
+      authorityDid: principal.did,
+      ceremonyId: assertion.ceremony_id,
+      group: opts.group,
+      mpkSha256: sha256Digest(mpk),
+      maxDepth: encodedDepth,
+      idPath,
+      pathEpoch,
+      assertionDigest: principal.proofDigest,
+    });
+
+    const keystore = this.config.keystorePath;
+    const existing = loadHibeGroup(keystore, opts.group);
+    if (existing === null) {
+      createHibeGroup(keystore, opts.group, { idPath, authorityMpk: mpk });
+      this._registerHibeGroupInYaml(opts.group);
+    } else {
+      writeFileSync(join(keystore, `${opts.group}.hibe.mpk`), Buffer.from(mpk));
+      const idpathPath = join(keystore, `${opts.group}.hibe.idpath`);
+      const pending = `${idpathPath}.pending`;
+      writeFileSync(pending, idPath, "utf8");
+      renameSync(pending, idpathPath);
+    }
+    this._refreshHibeKeystore(opts.group);
+  }
+
+  /** Register an installed external-authority hibe group in the yaml +
+   * in-memory config so seals can route through it. */
+  private _registerHibeGroupInYaml(group: string): void {
+    if (!this.config.groups.has(group)) {
+      this.config.groups.set(group, {
+        name: group,
+        cipher: "hibe",
+        policy: "private",
+        recipients: [],
+        indexEpoch: 0,
+        aadDefault: {},
+      });
+    }
+    const target = authoritativeYamlFor(this.config.yamlPath, "groups");
+    const doc = (parseYaml(readFileSync(target, "utf8")) as Record<string, unknown>) ?? {};
+    const groups = (doc.groups ?? {}) as Record<string, Record<string, unknown>>;
+    const existing = groups[group];
+    if (existing !== undefined && existing !== null && existing["cipher"] !== "hibe") {
+      throw new TrustError(
+        "scope_mismatch",
+        `group ${JSON.stringify(group)} already exists with cipher ${JSON.stringify(existing["cipher"])}`,
+      );
+    }
+    if (existing === undefined || existing === null) {
+      groups[group] = { policy: "private", cipher: "hibe" };
+      doc.groups = groups;
+      writeFileSync(target, stringifyYaml(doc), "utf8");
+    }
+  }
+
+  /**
+   * Rotate this authority's identity path and return the new higher-epoch
+   * signed assertion in one step.
+   */
+  rotateHibePathWithAssertion(
+    group: string,
+    newPath: string,
+    opts: { ttlMs?: number; audienceDid?: string } = {},
+  ): { group: string; idPath: string; pathEpoch: number; assertion: KeyBindingProofV1 } {
+    this.rotateReaderPath(group, newPath);
+    const mat = this._requireHibeGroup("rotateHibePathWithAssertion", group);
+    const assertionOpts: { audienceDid?: string } = {};
+    if (opts.audienceDid !== undefined) assertionOpts.audienceDid = opts.audienceDid;
+    const assertion = this.issueHibeAuthorityAssertion(group, opts.ttlMs ?? 10 * 60_000, assertionOpts);
+    return { group, idPath: mat.idPath, pathEpoch: hibeAuthorityEpoch(mat), assertion };
+  }
+
+  /** Look up a retained, unexpired verified grant record for a reader. */
+  retainedVerifiedGrant(
+    group: string,
+    readerDid: string,
+    now?: string,
+  ): { proofDigest: string | null } | null {
+    const grants = this._hibeGrantsLoad(group) as Array<Record<string, unknown>>;
+    const entry = grants.find((g) => g["reader_did"] === readerDid);
+    if (entry === undefined || entry["verified"] !== true) return null;
+    const expiresAt = entry["proof_expires_at"];
+    if (typeof expiresAt === "string") {
+      const nowText = now ?? formatTrustTimestamp(Date.now() * 1000);
+      try {
+        if (Date.parse(nowText.replace(/\.\d+Z$/, "Z")) >= Date.parse(expiresAt.replace(/\.\d+Z$/, "Z"))) {
+          return null;
+        }
+      } catch {
+        return null;
+      }
+    }
+    const proofDigest = entry["proof_digest"];
+    return { proofDigest: typeof proofDigest === "string" ? proofDigest : null };
   }
 
   /**
@@ -2583,24 +2907,51 @@ export class NodeRuntime {
   }
 
   /** Apply a `.tnpkg` to local state. Idempotent. Mirrors Python `tn.absorb`. */
-  absorbPkg(source: string | Uint8Array): AbsorbReceipt {
+  absorbPkg(source: string | Uint8Array, opts: { unsafeLegacySigner?: boolean } = {}): AbsorbReceipt {
     let manifest: Manifest;
     let body: Map<string, Uint8Array>;
+    let unsafeLegacyImport = false;
     try {
       const parsed = readTnpkgVerified(source);
       manifest = parsed.manifest;
       body = parsed.body;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      return {
-        kind: "unknown",
-        acceptedCount: 0,
-        dedupedCount: 0,
-        noop: false,
-        derivedState: null,
-        conflicts: [],
-        rejectedReason: `absorb: not a valid \`.tnpkg\` zip: ${msg}`,
-      };
+      // The named unsafe legacy-import path: a signed package with NO body
+      // digest index may enter only with the explicit flag, never for
+      // security-sensitive kinds, and never marked verified.
+      const missingIndexOnly =
+        e instanceof TrustError &&
+        e.reason === "body_digest_mismatch" &&
+        e.detail.includes("index is missing");
+      if (opts.unsafeLegacySigner === true && missingIndexOnly) {
+        const legacy = this._absorbLegacyUnverified(source);
+        if (legacy !== null) {
+          manifest = legacy.manifest;
+          body = legacy.body;
+          unsafeLegacyImport = true;
+        } else {
+          return {
+            kind: "unknown",
+            acceptedCount: 0,
+            dedupedCount: 0,
+            noop: false,
+            derivedState: null,
+            conflicts: [],
+            rejectedReason: `absorb: not a valid \`.tnpkg\` zip: ${msg}`,
+          };
+        }
+      } else {
+        return {
+          kind: "unknown",
+          acceptedCount: 0,
+          dedupedCount: 0,
+          noop: false,
+          derivedState: null,
+          conflicts: [],
+          rejectedReason: `absorb: not a valid \`.tnpkg\` zip: ${msg}`,
+        };
+      }
     }
 
     if (!isManifestSignatureValid(manifest)) {
@@ -2634,14 +2985,25 @@ export class NodeRuntime {
     } else if (kind === "contact_update") {
       receipt = this._absorbContactUpdate(manifest, body);
     } else if (kind === "offer" || kind === "enrolment") {
-      receipt = {
-        kind,
-        acceptedCount: body.has("body/package.json") ? 1 : 0,
-        dedupedCount: 0,
-        noop: false,
-        derivedState: null,
-        conflicts: [],
-      };
+      // Security-sensitive version-1 kinds always fail closed: they never
+      // enter through the unsafe legacy-import path.
+      if (unsafeLegacyImport) {
+        return {
+          kind,
+          acceptedCount: 0,
+          dedupedCount: 0,
+          noop: false,
+          derivedState: null,
+          conflicts: [],
+          rejectedReason:
+            `absorb: ${kind} packages require a signed body digest index and cannot ` +
+            `enter through unsafeLegacySigner`,
+        };
+      }
+      receipt =
+        kind === "offer"
+          ? this._absorbTrustedOffer(source, body)
+          : this._absorbEnrolment(manifest, body);
     } else {
       receipt = {
         kind,
@@ -2654,8 +3016,157 @@ export class NodeRuntime {
       };
     }
 
+    if (unsafeLegacyImport) {
+      receipt.unsafeLegacyImport = true;
+      const artifactBytes = typeof source === "string" ? new Uint8Array(readFileSync(source)) : source;
+      // Best-effort from this sync path; async callers can await the audit
+      // via recordUnsafeOperation directly.
+      void this.recordUnsafeOperation({
+        operation: "legacy_package_import",
+        relaxations: ["legacy_signer_mismatch"],
+        group: null,
+        subject_did: manifest.fromDid,
+        artifact_digest: sha256Digest(artifactBytes),
+      });
+    }
     if (this._adminCache !== null) this._adminCache.refresh();
     return receipt;
+  }
+
+  /** Explicitly unverified legacy read: bounded structure checks + manifest
+   * signature only. Returns null when even that fails. */
+  private _absorbLegacyUnverified(
+    source: string | Uint8Array,
+  ): { manifest: Manifest; body: Map<string, Uint8Array> } | null {
+    try {
+      const parsed = readTnpkg(source);
+      if (!isManifestSignatureValid(parsed.manifest)) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Stage a trusted key-binding offer into pending enrollment state. A
+   * legacy offer without a signed proof keeps the historical stub receipt. */
+  private _absorbTrustedOffer(source: string | Uint8Array, body: Map<string, Uint8Array>): AbsorbReceipt {
+    let pkg: TnPackage | null = null;
+    const raw = body.get("body/package.json");
+    if (raw !== undefined) {
+      try {
+        pkg = parseTnPackage(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw)));
+      } catch {
+        pkg = null;
+      }
+    }
+    const hasProof =
+      pkg !== null &&
+      pkg.payload["key_binding_proof"] !== undefined &&
+      pkg.payload["key_binding_proof"] !== null;
+    if (!hasProof) {
+      // Historical offer stub (no strict signed binding declared).
+      return {
+        kind: "offer",
+        acceptedCount: body.has("body/package.json") ? 1 : 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+      };
+    }
+    try {
+      const artifact = typeof source === "string" ? new Uint8Array(readFileSync(source)) : source;
+      const pending = this.enrollmentStore().stageOffer(artifact, this.did);
+      return {
+        kind: "offer",
+        acceptedCount: 1,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        offerDigest: pending.offerDigest,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return {
+        kind: "offer",
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason: msg,
+      };
+    }
+  }
+
+  /** Reader-side enrolment absorb: verify and install an accepted-enrollment
+   * response as a verified publisher. Legacy enrolment bodies keep the
+   * historical stub receipt. */
+  private _absorbEnrolment(manifest: Manifest, body: Map<string, Uint8Array>): AbsorbReceipt {
+    const raw = body.get("body/package.json");
+    let pkg: TnPackage | null = null;
+    if (raw !== undefined) {
+      try {
+        pkg = parseTnPackage(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw)));
+      } catch {
+        pkg = null;
+      }
+    }
+    const responseValue = pkg?.payload["enrollment_response"];
+    if (pkg === null || responseValue === undefined || responseValue === null) {
+      return {
+        kind: "enrolment",
+        acceptedCount: body.has("body/package.json") ? 1 : 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+      };
+    }
+    try {
+      if (manifest.fromDid !== pkg.device_identity) {
+        throw new TrustError(
+          "outer_inner_signer_mismatch",
+          "outer manifest and inner enrolment name different signers",
+        );
+      }
+      verifyTnPackageSignature(pkg);
+      if (manifest.toDid !== this.did || pkg.recipient_identity !== this.did) {
+        throw new TrustError("wrong_recipient", "enrolment response names a different reader");
+      }
+      const installed = installEnrollmentResponse({
+        keystoreDir: this.config.keystorePath,
+        readerDid: this.did,
+        response: responseValue,
+      });
+      if (installed.publisherDid !== pkg.device_identity) {
+        throw new TrustError(
+          "outer_inner_signer_mismatch",
+          "enrolment response publisher and package signer differ",
+        );
+      }
+      return {
+        kind: "enrolment",
+        acceptedCount: 1,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        verifiedPublisherDid: installed.publisherDid,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return {
+        kind: "enrolment",
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason: msg,
+      };
+    }
   }
 
   /**
@@ -2667,12 +3178,15 @@ export class NodeRuntime {
    * (WebCrypto unseal cannot run on the sync path). An unsealed package falls
    * straight through to {@link absorbPkg}, so this is always safe to call.
    */
-  async absorbPkgAsync(source: string | Uint8Array): Promise<AbsorbReceipt> {
+  async absorbPkgAsync(
+    source: string | Uint8Array,
+    opts: { unsafeLegacySigner?: boolean } = {},
+  ): Promise<AbsorbReceipt> {
     let manifest: Manifest;
     try {
       manifest = readTnpkgVerified(source).manifest;
     } catch {
-      return this.absorbPkg(source); // let the sync path report the parse error
+      return this.absorbPkg(source, opts); // let the sync path report the parse error
     }
     const state = manifest.state as Record<string, unknown> | undefined;
     const be = state?.["body_encryption"] as Record<string, unknown> | undefined;
@@ -2696,7 +3210,7 @@ export class NodeRuntime {
       if (this._adminCache !== null) this._adminCache.refresh();
       return receipt;
     }
-    return this.absorbPkg(source);
+    return this.absorbPkg(source, opts);
   }
 
   /**
@@ -3960,6 +4474,16 @@ export class NodeRuntime {
    * Called automatically by `NodeRuntime.init`.
    */
   reconcileRecipients(): void {
+    // Trusted enrollment: reverify retained offers and auto-promote only
+    // challenged, preauthorized bindings (mirrors the Python init-time
+    // reconcile tail). Best-effort: no retained state means a fast no-op,
+    // and a conflict never aborts recipient reconciliation.
+    try {
+      reconcileTrustedOffers(this.config, this.keystore.device);
+    } catch {
+      // Enrollment-state failures surface on the explicit verbs instead.
+    }
+
     const attested = new Set<string>();
     const addKey = (g: string, did: string) => attested.add(`${g}|${did}`);
     for (const et of ["tn.recipient.added", "tn.recipient.revoked"]) {

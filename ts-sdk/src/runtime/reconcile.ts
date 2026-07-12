@@ -18,6 +18,9 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 
+import type { DeviceKey } from "../core/signing.js";
+import { TrustError, type AcceptedOffer } from "../core/trust.js";
+import { EnrollmentStore, enrollmentCeremonyFromConfig } from "./enrollment.js";
 import { loadConfig, type CeremonyConfig } from "./config.js";
 
 /**
@@ -145,6 +148,49 @@ export function scanAttestedEventRecords(
 export function scanAttestedGroups(yamlPath: string): Set<string> {
   const cfg = loadConfig(yamlPath);
   return scanAttestedEvents(cfg, "tn.group.added", "group");
+}
+
+/** Result of the init-time trusted-offer reconciliation pass. */
+export interface TrustedOfferReconcileResult {
+  acceptedOffers: AcceptedOffer[];
+  conflicts: string[];
+}
+
+/**
+ * Reverify every retained trusted enrollment offer and auto-promote only
+ * challenged, preauthorized bindings. Unauthorized offers stay pending
+ * (awaiting exact-digest approval) without being reported as conflicts;
+ * every other trust failure is reported. Mirrors the trusted-offer tail of
+ * Python `tn.reconcile._reconcile`.
+ */
+export function reconcileTrustedOffers(
+  cfg: CeremonyConfig,
+  device: DeviceKey,
+  now?: string,
+): TrustedOfferReconcileResult {
+  const result: TrustedOfferReconcileResult = { acceptedOffers: [], conflicts: [] };
+  const store = new EnrollmentStore(enrollmentCeremonyFromConfig(cfg), device);
+  let scan: ReturnType<EnrollmentStore["scanPendingOffers"]>;
+  try {
+    scan = store.scanPendingOffers(now);
+  } catch (err) {
+    result.conflicts.push(`reconcile: trusted offer state rejected: ${String(err)}`);
+    return result;
+  }
+  for (const conflict of scan.conflicts) {
+    result.conflicts.push(`reconcile: trusted offer ${conflict.path} rejected: ${conflict.error.message}`);
+  }
+  for (const pending of scan.offers) {
+    try {
+      result.acceptedOffers.push(store.reconcile(pending, now));
+    } catch (err) {
+      if (err instanceof TrustError && err.reason === "untrusted_principal") continue;
+      result.conflicts.push(
+        `reconcile: trusted offer ${pending.offerDigest} rejected: ${String(err)}`,
+      );
+    }
+  }
+  return result;
 }
 
 /**

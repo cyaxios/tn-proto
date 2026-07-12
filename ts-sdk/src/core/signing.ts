@@ -105,8 +105,17 @@ export function didFromPublicKey(publicKey: Uint8Array): Did {
 /**
  * Verify a signature against a did:key identity. Returns false (not an
  * error) for non-Ed25519 DIDs, matching the Rust core policy.
+ *
+ * This is the legacy boolean multi-curve verifier. Enrollment ceremonies do
+ * not use it to establish identity: they call the strict
+ * `verifyEd25519DidSignature` in `core/trust.ts`, which accepts only a
+ * canonical Ed25519 `did:key` and raises a stable `TrustReason` on failure.
  */
 export function verify(did: Did, message: Uint8Array, signature: Uint8Array): boolean {
+  // Runtime guard for untyped JS callers: a non-string DID is never valid,
+  // and must not reach the wasm boundary (mirrors Python's isinstance guard
+  // in DeviceKey.verify).
+  if (typeof did !== "string") return false;
   return verifyDid(did, message, signature);
 }
 
