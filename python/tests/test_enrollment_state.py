@@ -315,6 +315,42 @@ def test_stage_and_reconcile_retain_exact_artifact_and_exact_replay_is_idempoten
     assert _state_files(state_root) == after_first
 
 
+def test_first_promotion_durably_links_consumed_and_accepted_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tn._keystore_backend as backend_module
+
+    cfg, store, reader, state_root = _store(tmp_path)
+    store.preauthorize(reader.device_identity, "default")
+    challenge = store.issue_challenge(
+        reader.device_identity,
+        "default",
+        timedelta(minutes=5),
+    )
+    now = challenge.issued_at + timedelta(seconds=1)
+    artifact, _ = _make_offer_artifact(tmp_path, cfg, reader, challenge=challenge)
+    pending = store.stage_offer(artifact, cfg.device.device_identity, now)
+    synced: list[Path] = []
+    monkeypatch.setattr(
+        backend_module,
+        "_fsync_directory",
+        lambda path: synced.append(Path(path)),
+    )
+
+    store.reconcile(pending, now=now)
+
+    assert synced == [
+        state_root.parent,
+        state_root.parent,
+        state_root,
+        state_root / "consumed",
+        state_root.parent,
+        state_root,
+        state_root / "accepted",
+    ]
+
+
 def test_same_challenge_with_changed_signed_body_is_replay_conflict(tmp_path: Path) -> None:
     cfg, store, reader, state_root = _store(tmp_path)
     store.preauthorize(reader.device_identity, "default")

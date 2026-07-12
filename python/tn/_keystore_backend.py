@@ -47,6 +47,43 @@ class KeystoreBackend(Protocol):
         ...
 
 
+def durable_mkdir(path: Path) -> None:
+    """Create missing directories top-down, durably linking every new name."""
+    path = Path(path)
+    if path.exists():
+        if not path.is_dir():
+            raise NotADirectoryError(f"directory path is not a directory: {path}")
+        _fsync_directory(path.parent)
+        return
+
+    missing: list[Path] = []
+    cursor = path
+    while not cursor.exists():
+        missing.append(cursor)
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        cursor = parent
+    if cursor.exists() and not cursor.is_dir():
+        raise NotADirectoryError(f"directory ancestor is not a directory: {cursor}")
+    if cursor.exists():
+        # Confirm the deepest existing frontier before linking children below
+        # it. This also closes the retry case where an earlier mkdir succeeded
+        # but synchronizing its containing directory failed.
+        _fsync_directory(cursor.parent)
+
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            # Another creator may win between discovery and mkdir. Observe a
+            # real directory, then synchronize the containing name exactly as
+            # for our own creation; any non-directory collision still fails.
+            if not directory.is_dir():
+                raise
+        _fsync_directory(directory.parent)
+
+
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     """Write ``data`` to ``path`` atomically and owner-only: tmp file
     (created ``0600``) + fsync + replace.
@@ -60,6 +97,10 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
       * Temporary siblings use unique, exclusive names and are removed after
         success. Failure cleanup is best-effort, so a cleanup error can leave
         an inert stale temporary file without changing the target.
+      * Missing parent directories are created top-down; each new directory
+        name is synchronized through its containing parent before descending.
+        The deepest preexisting directory link is also synchronized so a retry
+        after an earlier mkdir/fsync failure cannot silently skip durability.
       * POSIX permissions are ``0600`` (owner read/write only) from
         creation, not after a chmod race: the tmp file is opened with
         ``os.open(..., O_CREAT | O_EXCL | O_WRONLY, 0o600)`` and the
@@ -76,7 +117,7 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     """
     path = Path(path)
     parent = path.parent
-    parent.mkdir(parents=True, exist_ok=True)
+    durable_mkdir(parent)
     tmp = parent / (
         f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}."
         f"{secrets.token_hex(8)}"
@@ -159,10 +200,11 @@ def secure_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
     """Owner-only atomic text write — the str twin of :func:`atomic_write_bytes`.
 
     Encodes ``text`` and hands off to :func:`atomic_write_bytes`, so it
-    inherits the same guarantees: same-dir tmp file created ``0600``,
-    fsync, atomic ``os.replace``, tmp cleanup on failure, and log+reraise
-    on a torn write. Use this for secret-bearing text files (sync state
-    JSON carrying the BEK, the claim-URL file whose fragment is the BEK)
+    inherits the same guarantees: durable parent creation, same-dir tmp file
+    created ``0600``, fsync, atomic ``os.replace``, tmp cleanup on failure,
+    and log+reraise on a durability error. Use this for secret-bearing text
+    files (sync state JSON carrying the BEK, the claim-URL file whose fragment
+    is the BEK)
     that previously went through ``Path.write_text`` with the default
     umask. On Windows the POSIX mode is a no-op; the user-profile ACL is
     the protection, same as the keystore/credential-store posture.
@@ -227,6 +269,7 @@ class AdvisoryFileLock:
         import os as _os
 
         try:
+            durable_mkdir(self._path.parent)
             # In-process serialisation first. Released last on exit.
             self._proc_lock.acquire()
             self._proc_lock_held = True
@@ -265,7 +308,7 @@ class AdvisoryFileLock:
             # cannot permanently poison the per-path process lock.
             try:
                 self._release()
-            except BaseException:
+            except Exception:  # noqa: BLE001 — preserve acquisition failure
                 # Cleanup failure must not replace the acquisition error.
                 pass
             raise
@@ -330,7 +373,7 @@ class LocalFileKeystoreBackend:
 
     def __init__(self, keystore_dir: Path) -> None:
         self._dir = Path(keystore_dir)
-        self._dir.mkdir(parents=True, exist_ok=True)
+        durable_mkdir(self._dir)
 
     def _path(self, group_name: str) -> Path:
         return self._dir / f"{group_name}.btn.state"

@@ -253,7 +253,6 @@ class EnrollmentStore:
         self.preauthorized_dir = self.state_root / "preauthorized"
 
     def _lock(self) -> AdvisoryFileLock:
-        self.state_root.mkdir(parents=True, exist_ok=True)
         return AdvisoryFileLock(self.lock_path)
 
     def _validate_scope(self, reader_did: str, group: str) -> None:
