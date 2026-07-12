@@ -55,6 +55,7 @@ from .tnpkg import (
     _peek_manifest_kind,
     _read_manifest,
 )
+from .trust import TrustError
 
 _DID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -397,6 +398,11 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
     # package can't exhaust memory via this path (CLI absorb or a watched
     # fs.scan inbox).
     try:
+        peeked_kind = _peek_manifest_kind(source)
+        if peeked_kind == "offer":
+            from .enrollment import validate_enrollment_archive
+
+            validate_enrollment_archive(source)
         manifest, body = _read_manifest(source, verify_signature=True)
     except ManifestSignatureError as exc:
         # Bad manifest signature — a corrupt / tampered package, NOT a
@@ -417,6 +423,12 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
             legacy_status="rejected",
             legacy_reason=str(exc),
         )
+    except TrustError as exc:
+        return AbsorbReceipt(
+            kind="offer",
+            legacy_status="rejected",
+            legacy_reason=str(exc),
+        )
     except (ValueError, FileNotFoundError) as exc:
         # Legacy fallback: the old ``dump_tnpkg`` produced a flat JSON
         # ``Package`` (no zip header). Honor it when we can; otherwise
@@ -430,7 +442,49 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
             legacy_reason=f"absorb: not a `.tnpkg` zip and not a legacy JSON Package: {exc}",
         )
 
+    if manifest.kind == "offer" and _is_trusted_enrollment_offer(body):
+        try:
+            from .enrollment import EnrollmentStore, read_enrollment_artifact
+
+            artifact = (
+                bytes(source)
+                if isinstance(source, (bytes, bytearray))
+                else read_enrollment_artifact(Path(source))
+            )
+
+            EnrollmentStore(cfg, cfg.device).stage_offer(
+                artifact,
+                expected_publisher_did=cfg.device.device_identity,
+                now=datetime.now(_tz.utc),
+            )
+        except (OSError, TrustError, ValueError) as exc:
+            return AbsorbReceipt(
+                kind="offer",
+                legacy_status="rejected",
+                legacy_reason=str(exc),
+            )
+        return AbsorbReceipt(
+            kind="offer",
+            accepted_count=1,
+            legacy_status="offer_stashed",
+        )
+
     return _absorb_verified_package(cfg, manifest, body)
+
+
+def _is_trusted_enrollment_offer(body: dict[str, bytes]) -> bool:
+    """Whether an offer declares the strict signed key-binding payload."""
+    raw = body.get("body/package.json")
+    if raw is None:
+        return False
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(value, dict):
+        return False
+    payload = value.get("payload")
+    return isinstance(payload, dict) and "key_binding_proof" in payload
 
 
 def _absorb_verified_package(

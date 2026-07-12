@@ -295,11 +295,12 @@ def _proof_binding(binding: object, purpose: Purpose) -> dict[str, object]:
             length=32,
             reason=TrustReason.BINDING_INVALID,
         )
-        _validate_digest(
-            value["challenge_digest"],
-            "binding.challenge_digest",
-            reason=TrustReason.BINDING_INVALID,
-        )
+        if value["challenge_digest"] is not None:
+            _validate_digest(
+                value["challenge_digest"],
+                "binding.challenge_digest",
+                reason=TrustReason.BINDING_INVALID,
+            )
         return result
 
     if purpose == "hibe-reader":
@@ -327,11 +328,12 @@ def _proof_binding(binding: object, purpose: Purpose) -> dict[str, object]:
                 TrustReason.BINDING_INVALID,
                 "hibe-reader delivery must be recipient-seal-v1",
             )
-        _validate_digest(
-            value["challenge_digest"],
-            "binding.challenge_digest",
-            reason=TrustReason.BINDING_INVALID,
-        )
+        if value["challenge_digest"] is not None:
+            _validate_digest(
+                value["challenge_digest"],
+                "binding.challenge_digest",
+                reason=TrustReason.BINDING_INVALID,
+            )
         return result
 
     if (
@@ -605,29 +607,36 @@ def verify_key_binding_proof(
     _validate_freshness(proof.issued_at, proof.expires_at, now)
 
     if proof.purpose in {"jwe-reader", "hibe-reader"}:
-        if challenge is None:
+        bound_challenge_digest = proof.binding["challenge_digest"]
+        if challenge is None and bound_challenge_digest is not None:
             raise _error(TrustReason.CHALLENGE_MISSING, "reader proof requires a challenge")
-        try:
-            verify_enrollment_challenge(
-                challenge,
-                expected_publisher_did=expected_audience_did,
-                expected_reader_did=proof.subject_did,
-                expected_ceremony_id=expected_ceremony_id,
-                expected_group=expected_group,
-                now=now,
+        if challenge is not None:
+            try:
+                verify_enrollment_challenge(
+                    challenge,
+                    expected_publisher_did=expected_audience_did,
+                    expected_reader_did=proof.subject_did,
+                    expected_ceremony_id=expected_ceremony_id,
+                    expected_group=expected_group,
+                    now=now,
+                )
+            except TrustError as exc:
+                if exc.reason is TrustReason.STATEMENT_EXPIRED:
+                    raise _error(TrustReason.CHALLENGE_EXPIRED, exc.detail) from exc
+                raise
+            if not (challenge.issued_at <= proof.issued_at < challenge.expires_at):
+                raise _error(
+                    TrustReason.BINDING_INVALID,
+                    "proof issuance time is outside the challenge validity interval",
+                )
+            challenge_digest = _sha256(
+                _canonical_bytes(challenge._wire_value(include_signature=True))
             )
-        except TrustError as exc:
-            if exc.reason is TrustReason.STATEMENT_EXPIRED:
-                raise _error(TrustReason.CHALLENGE_EXPIRED, exc.detail) from exc
-            raise
-        if not (challenge.issued_at <= proof.issued_at < challenge.expires_at):
-            raise _error(
-                TrustReason.BINDING_INVALID,
-                "proof issuance time is outside the challenge validity interval",
-            )
-        challenge_digest = _sha256(_canonical_bytes(challenge._wire_value(include_signature=True)))
-        if proof.binding["challenge_digest"] != challenge_digest:
-            raise _error(TrustReason.BINDING_INVALID, "proof is bound to a different challenge")
+            if bound_challenge_digest != challenge_digest:
+                raise _error(
+                    TrustReason.BINDING_INVALID,
+                    "proof is bound to a different challenge",
+                )
 
     signature = cast(bytes, _signature_bytes(proof.signature_b64))
     verify_ed25519_did_signature(proof.subject_did, proof.signing_bytes(), signature)
@@ -667,7 +676,9 @@ def verify_jwe_key_binding(
         length=32,
         reason=TrustReason.BINDING_INVALID,
     )
-    challenge_digest = cast(str, proof.binding.get("challenge_digest"))
+    challenge_digest = proof.binding.get("challenge_digest")
+    if challenge_digest is not None and not isinstance(challenge_digest, str):
+        raise _error(TrustReason.BINDING_INVALID, "challenge digest has an invalid type")
     return VerifiedJweBinding(
         principal=principal,
         public_key=public_key,

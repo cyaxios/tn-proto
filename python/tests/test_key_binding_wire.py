@@ -237,6 +237,97 @@ def test_jwe_binding_returns_verified_key_and_digests() -> None:
     assert binding.challenge_digest == validation["challenge_digest"]
 
 
+@pytest.mark.parametrize(
+    ("case_id", "purpose"),
+    [
+        ("valid_jwe_reader_proof", "jwe-reader"),
+        ("valid_hibe_reader_proof", "hibe-reader"),
+    ],
+)
+def test_unsolicited_reader_proof_accepts_null_digest_without_challenge(
+    case_id: str,
+    purpose: str,
+) -> None:
+    case = _cases()[case_id]
+    original = KeyBindingProofV1.from_dict(case["input"]["statement"])
+    proof = replace(
+        original,
+        binding={**original.binding, "challenge_digest": None},
+        signature_b64="",
+    ).sign(_device("reader"))
+    validation = case["input"]["validation"]
+
+    principal = verify_key_binding_proof(
+        proof,
+        expected_purpose=purpose,
+        expected_audience_did=validation["expected_audience_did"],
+        expected_ceremony_id=validation["expected_ceremony_id"],
+        expected_group=validation["expected_group"],
+        now=_utc(validation["now"]),
+        challenge=None,
+    )
+
+    assert principal.did == proof.subject_did
+    if purpose == "jwe-reader":
+        binding = verify_jwe_key_binding(
+            proof,
+            expected_audience_did=validation["expected_audience_did"],
+            expected_ceremony_id=validation["expected_ceremony_id"],
+            expected_group=validation["expected_group"],
+            now=_utc(validation["now"]),
+            challenge=None,
+        )
+        assert binding.challenge_digest is None
+
+
+def test_reader_proof_with_digest_still_requires_the_named_challenge() -> None:
+    case = _cases()["valid_jwe_reader_proof"]
+    proof = KeyBindingProofV1.from_dict(case["input"]["statement"])
+    validation = case["input"]["validation"]
+
+    with pytest.raises(TrustError) as raised:
+        verify_key_binding_proof(
+            proof,
+            expected_purpose="jwe-reader",
+            expected_audience_did=validation["expected_audience_did"],
+            expected_ceremony_id=validation["expected_ceremony_id"],
+            expected_group=validation["expected_group"],
+            now=_utc(validation["now"]),
+            challenge=None,
+        )
+
+    assert raised.value.reason is TrustReason.CHALLENGE_MISSING
+
+
+def test_null_digest_is_rejected_when_a_challenge_is_supplied() -> None:
+    cases = _cases()
+    original = KeyBindingProofV1.from_dict(
+        cases["valid_jwe_reader_proof"]["input"]["statement"]
+    )
+    proof = replace(
+        original,
+        binding={**original.binding, "challenge_digest": None},
+        signature_b64="",
+    ).sign(_device("reader"))
+    challenge = EnrollmentChallengeV1.from_dict(
+        cases["valid_enrollment_challenge"]["input"]["statement"]
+    )
+    validation = cases["valid_jwe_reader_proof"]["input"]["validation"]
+
+    with pytest.raises(TrustError) as raised:
+        verify_key_binding_proof(
+            proof,
+            expected_purpose="jwe-reader",
+            expected_audience_did=validation["expected_audience_did"],
+            expected_ceremony_id=validation["expected_ceremony_id"],
+            expected_group=validation["expected_group"],
+            now=_utc(validation["now"]),
+            challenge=challenge,
+        )
+
+    assert raised.value.reason is TrustReason.BINDING_INVALID
+
+
 def test_response_mismatches_have_stable_reasons() -> None:
     case = _cases()["valid_enrollment_response"]
     response = EnrollmentResponseV1.from_dict(case["input"]["statement"])

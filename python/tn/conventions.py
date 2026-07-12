@@ -12,7 +12,8 @@ collide on the same paths (FINDINGS #2). For a yaml at
     <yaml_dir>/.tn/_register/inbox/              .tnpkg packages awaiting absorb
     <yaml_dir>/.tn/_register/outbox/             .tnpkg packages produced by compile/export
     <yaml_dir>/.tn/_register/config/             agents.md policy, etc.
-    <yaml_dir>/.tn/_register/pending_offers/     offers absorbed but not promoted
+    <yaml_dir>/.tn/_register/pending_offers/     legacy offers awaiting migration
+    <yaml_dir>/.tn/_register/enrollment/v1/      trusted enrollment state
 
 These helpers accept the yaml *path* (not the parent directory) so the
 stem can be extracted; an older ``yaml_dir``-typed caller can pass
@@ -71,6 +72,11 @@ def outbox_dir(yaml_path: Path) -> Path:
 
 def pending_offers_dir(yaml_path: Path) -> Path:
     return _stem_dir(yaml_path) / "pending_offers"
+
+
+def enrollment_dir(yaml_path: Path) -> Path:
+    """Private version-1 challenge, offer, approval, and replay state."""
+    return _stem_dir(yaml_path) / "enrollment" / "v1"
 
 
 # ---------------------------------------------------------------------------
