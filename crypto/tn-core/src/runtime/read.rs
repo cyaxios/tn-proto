@@ -9,14 +9,16 @@
 //! ([`flatten_raw_entry`] and friends). The write side lives in the `emit`
 //! submodule.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read as _};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
+use sha2::{Digest, Sha256};
 
 use crate::{
     chain::{compute_row_hash, GroupInput, RowHashInput},
@@ -27,9 +29,225 @@ use crate::{
 };
 
 use super::{
-    FlatEntry, Instructions, OnInvalid, ReadEntry, Runtime, SecureEntry, SecureReadOptions,
-    ValidFlags,
+    CursorKind, FlatEntry, Instructions, OnInvalid, ReadContext, ReadCursorV1, ReadDecision,
+    ReadEntry, ReadRecordState, ReadRejectReason, ReadReport, ReadTrustPolicy, Runtime,
+    SecureEntry, SecureReadOptions, SourceCursorV1, ValidFlags, VerifyMode,
 };
+
+impl ReadTrustPolicy {
+    /// Resolve context-sensitive defaults once, before scanning any rows.
+    pub fn resolve(&self, context: &ReadContext) -> Result<Self> {
+        let verify = match self.verify {
+            VerifyMode::Auto => VerifyMode::Raise,
+            mode => mode,
+        };
+        if verify == VerifyMode::Disabled && self.trusted_writers_supplied {
+            return Err(Error::InvalidConfig(
+                "verify=False cannot be combined with trusted_writers".into(),
+            ));
+        }
+
+        let inferred_unsigned_profile = context.active
+            && context.local_log
+            && !context.detached
+            && context.profile_sign == Some(false);
+        let require_signature = self.require_signature.unwrap_or_else(|| {
+            self.allow_unauthenticated
+                .map_or(!inferred_unsigned_profile, |allow| !allow)
+        });
+        let allow_unauthenticated = self.allow_unauthenticated.unwrap_or(!require_signature);
+        if require_signature == allow_unauthenticated {
+            return Err(Error::InvalidConfig(
+                "require_signature and allow_unauthenticated must express one consistent policy"
+                    .into(),
+            ));
+        }
+        for did in &self.trusted_writers {
+            validate_trusted_writer_did(did)?;
+        }
+
+        Ok(Self {
+            verify,
+            require_signature: Some(require_signature),
+            allow_unauthenticated: Some(allow_unauthenticated),
+            trusted_writers: self.trusted_writers.clone(),
+            trusted_writers_supplied: self.trusted_writers_supplied,
+            allow_unknown_writers: self.allow_unknown_writers,
+        })
+    }
+
+    /// Apply the frozen policy to one already-scanned record.
+    #[must_use]
+    pub fn evaluate(&self, record: &ReadRecordState, context: &ReadContext) -> ReadDecision {
+        let mut reasons = Vec::new();
+        if !record.record_valid {
+            push_once(&mut reasons, ReadRejectReason::RecordInvalid);
+            return ReadDecision {
+                accepted: false,
+                reasons,
+                writer_authenticated: false,
+                writer_authorized: false,
+            };
+        }
+
+        let chain_required = read_chain_required(context);
+        let row_hash_valid = !chain_required || (record.row_hash_present && record.row_hash_valid);
+        if !row_hash_valid {
+            push_once(&mut reasons, ReadRejectReason::RowHashInvalid);
+        }
+        let chain_valid = !chain_required || record.chain_valid;
+        if !chain_valid {
+            push_once(&mut reasons, ReadRejectReason::ChainInvalid);
+        }
+
+        let mut writer_authenticated = record.signature_present && record.signature_valid;
+        if !record.signature_present {
+            if self.require_signature == Some(true) {
+                push_once(&mut reasons, ReadRejectReason::SignatureRequired);
+            }
+        } else if !record.signature_valid {
+            push_once(&mut reasons, ReadRejectReason::SignatureInvalid);
+        }
+
+        let writer_trusted = record
+            .writer_did
+            .as_ref()
+            .is_some_and(|did| self.trusted_writers.contains(did));
+        if !writer_trusted && !self.allow_unknown_writers {
+            push_once(&mut reasons, ReadRejectReason::WriterUntrusted);
+        }
+        if !record.aad_valid {
+            push_once(&mut reasons, ReadRejectReason::AadInvalid);
+        }
+        if context
+            .required_group
+            .as_ref()
+            .is_some_and(|group| !record.recipient_groups.contains(group))
+        {
+            push_once(&mut reasons, ReadRejectReason::NotARecipient);
+        }
+
+        let mut writer_authorized =
+            writer_authenticated && writer_trusted && row_hash_valid && chain_valid;
+        let accepted = match self.verify {
+            VerifyMode::Disabled => {
+                writer_authenticated = false;
+                writer_authorized = false;
+                reasons.iter().all(|reason| {
+                    matches!(
+                        reason,
+                        ReadRejectReason::RowHashInvalid
+                            | ReadRejectReason::ChainInvalid
+                            | ReadRejectReason::SignatureRequired
+                            | ReadRejectReason::SignatureInvalid
+                            | ReadRejectReason::WriterUntrusted
+                    )
+                })
+            }
+            VerifyMode::Auto | VerifyMode::Raise | VerifyMode::Skip => {
+                let allow_unauthenticated = self.allow_unauthenticated == Some(true);
+                reasons.iter().all(|reason| {
+                    allow_unauthenticated && *reason == ReadRejectReason::SignatureRequired
+                })
+            }
+        };
+        ReadDecision {
+            accepted,
+            reasons,
+            writer_authenticated,
+            writer_authorized,
+        }
+    }
+}
+
+fn push_once(reasons: &mut Vec<ReadRejectReason>, reason: ReadRejectReason) {
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
+}
+
+fn read_chain_required(context: &ReadContext) -> bool {
+    !(context.active
+        && context.local_log
+        && !context.detached
+        && context.profile_chain == Some(false))
+}
+
+fn validate_trusted_writer_did(did: &str) -> Result<()> {
+    let Some(encoded) = did.strip_prefix("did:key:z") else {
+        return Err(Error::InvalidConfig(format!(
+            "trusted writer must be a canonical Ed25519 did:key; got {did:?}"
+        )));
+    };
+    let decoded = bs58::decode(encoded).into_vec().map_err(|_| {
+        Error::InvalidConfig(format!(
+            "trusted writer must be a canonical Ed25519 did:key; got {did:?}"
+        ))
+    })?;
+    if decoded.len() != 34
+        || decoded[..2] != [0xed, 0x01]
+        || bs58::encode(&decoded).into_string() != encoded
+    {
+        return Err(Error::InvalidConfig(format!(
+            "trusted writer must be a canonical Ed25519 did:key; got {did:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Hash a canonical NUL-delimited source descriptor into its stable ID.
+#[must_use]
+pub fn canonical_source_id(descriptor: &[u8]) -> String {
+    format!("source:sha256:{}", hex::encode(Sha256::digest(descriptor)))
+}
+
+/// Build the stable source ID for an already-joined file path.
+///
+/// Normalization is lexical and host-independent: both slash styles are
+/// accepted, `.` / `..` components are folded, and only a Windows drive
+/// letter is case-normalized. Filesystem canonicalization is deliberately
+/// avoided so symlinks and nonexistent cursor sources remain deterministic.
+#[must_use]
+pub fn canonical_file_source_id(path: &str) -> String {
+    let normalized = normalize_file_source_path(path);
+    let mut descriptor = b"file\0".to_vec();
+    descriptor.extend_from_slice(normalized.as_bytes());
+    canonical_source_id(&descriptor)
+}
+
+fn normalize_file_source_path(path: &str) -> String {
+    let slashed = path.replace('\\', "/");
+    let slashed = slashed.strip_prefix("//?/").unwrap_or(&slashed);
+    let (prefix, remainder) = if slashed.len() >= 3
+        && slashed.as_bytes()[0].is_ascii_alphabetic()
+        && slashed.as_bytes()[1] == b':'
+        && slashed.as_bytes()[2] == b'/'
+    {
+        (
+            format!("{}:/", slashed[..1].to_ascii_lowercase()),
+            &slashed[3..],
+        )
+    } else if let Some(remainder) = slashed.strip_prefix("//") {
+        ("//".to_owned(), remainder)
+    } else if let Some(remainder) = slashed.strip_prefix('/') {
+        ("/".to_owned(), remainder)
+    } else {
+        (String::new(), slashed)
+    };
+
+    let mut components: Vec<&str> = Vec::new();
+    for component in remainder.split('/') {
+        match component {
+            ".." if components.last().is_some_and(|last| *last != "..") => {
+                components.pop();
+            }
+            ".." if prefix.is_empty() => components.push(component),
+            "" | "." | ".." => {}
+            _ => components.push(component),
+        }
+    }
+    format!("{prefix}{}", components.join("/"))
+}
 
 impl Runtime {
     /// Read this runtime's log, decrypting every group it holds a kit
@@ -117,19 +335,315 @@ impl Runtime {
     ///
     /// Panics if an internal `RwLock` is poisoned.
     pub fn read_with_verify(&self) -> Result<Vec<FlatEntry>> {
-        let raw = self.read_raw_with_validity()?;
-        Ok(raw
+        let options = SecureReadOptions::default();
+        let context = self.read_context_for_path(&self.log_path, None);
+        let policy = self.default_read_policy(VerifyMode::Disabled)?;
+        Ok(self
+            .read_with_policy(&options, &policy, &context, None)?
+            .entries)
+    }
+
+    /// Scan one file source under a frozen trust policy and return accepted
+    /// flat entries plus bounded accounting and a lossless byte cursor.
+    pub fn read_with_policy(
+        &self,
+        options: &SecureReadOptions,
+        policy: &ReadTrustPolicy,
+        context: &ReadContext,
+        cursor: Option<&ReadCursorV1>,
+    ) -> Result<ReadReport<FlatEntry>> {
+        let path = self.resolve_read_source_path(options.log_path.as_deref());
+        let effective_context = self.read_context_for_path(&path, context.required_group.clone());
+        let raw = self.scan_file_with_policy(&path, policy, &effective_context, cursor)?;
+        let entries = raw
+            .entries
             .into_iter()
-            .map(|(entry, valid)| {
+            .map(|(entry, validity)| {
                 let mut flat = flatten_raw_entry(&entry, false);
-                let mut v = Map::new();
-                v.insert("signature".into(), Value::Bool(valid.signature));
-                v.insert("row_hash".into(), Value::Bool(valid.row_hash));
-                v.insert("chain".into(), Value::Bool(valid.chain));
-                flat.insert("_valid".into(), Value::Object(v));
+                insert_validity_metadata(&mut flat, &validity);
                 flat
             })
-            .collect())
+            .collect();
+        Ok(ReadReport {
+            entries,
+            scanned: raw.scanned,
+            yielded: raw.yielded,
+            skipped: raw.skipped,
+            cursor: raw.cursor,
+        })
+    }
+
+    fn scan_file_with_policy(
+        &self,
+        path: &Path,
+        policy: &ReadTrustPolicy,
+        context: &ReadContext,
+        cursor: Option<&ReadCursorV1>,
+    ) -> Result<ReadReport<(ReadEntry, ValidFlags)>> {
+        let policy = policy.resolve(context)?;
+        let source_id = file_source_id(path)?;
+        let (mut next_cursor, start_u64) = file_cursor_start(cursor, &source_id)?;
+
+        if !self.storage.exists(path) {
+            return Ok(empty_file_read_report(source_id, next_cursor));
+        }
+        let snapshot = open_storage_read_snapshot(self.storage.as_ref(), path)?;
+        let snapshot_len = snapshot.len;
+        if start_u64 > snapshot_len {
+            return Err(Error::InvalidConfig(format!(
+                "byte-offset cursor {start_u64} exceeds source length {snapshot_len}"
+            )));
+        }
+        let mut reader = BufReader::new(snapshot.reader.take(snapshot_len));
+        let public_set: HashSet<&str> = self.cfg.public_fields.iter().map(String::as_str).collect();
+        let configured_groups: HashSet<&str> = self.cfg.groups.keys().map(String::as_str).collect();
+        let mut prev_hash_by_event: HashMap<String, String> = HashMap::new();
+        let mut entries = Vec::new();
+        let mut scanned = 0usize;
+        let mut skipped = 0usize;
+        let mut offset = 0u64;
+        let mut line = Vec::new();
+
+        while let Some(line_meta) = read_bounded_line(&mut reader, &mut line).map_err(Error::Io)? {
+            let line_start = offset;
+            offset = offset.checked_add(line_meta.physical_len).ok_or_else(|| {
+                Error::InvalidConfig("read source byte offset overflowed u64".into())
+            })?;
+            let line_end = offset;
+            while line
+                .last()
+                .is_some_and(|byte| matches!(byte, b'\r' | b'\n'))
+            {
+                line.pop();
+            }
+            if !line_meta.overflowed && line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let line_text = (!line_meta.overflowed)
+                .then(|| std::str::from_utf8(&line).ok())
+                .flatten();
+            if line_end <= start_u64 {
+                if let Some(line_text) = line_text {
+                    seed_chain_from_line(line_text, &mut prev_hash_by_event);
+                }
+                continue;
+            }
+            if start_u64 > line_start {
+                return Err(Error::InvalidConfig(
+                    "byte-offset cursor must point to a record boundary".into(),
+                ));
+            }
+            scanned += 1;
+
+            let prepared = line_text.map_or_else(
+                || invalid_record(serde_json::json!({"event_type": "<parse-error>"})),
+                |line_text| {
+                    prepare_record(
+                        line_text,
+                        &public_set,
+                        &configured_groups,
+                        &mut prev_hash_by_event,
+                    )
+                },
+            );
+            match self.evaluate_prepared_record(prepared, &policy, context) {
+                EvaluatedRecord::Accepted(entry, validity) => entries.push((entry, validity)),
+                EvaluatedRecord::Rejected(entry, decision) => {
+                    skipped += 1;
+                    if policy.verify == VerifyMode::Raise {
+                        return Err(read_rejection_error(&entry, &decision));
+                    }
+                    if policy.verify == VerifyMode::Skip && context.writable {
+                        self.emit_skip_event_best_effort(&entry, &decision.reasons);
+                    }
+                }
+            }
+        }
+        if offset != snapshot_len {
+            return Err(Error::Malformed {
+                kind: "log file",
+                reason: "read source ended before its captured snapshot length".into(),
+            });
+        }
+        next_cursor.sources.insert(
+            source_id,
+            SourceCursorV1 {
+                kind: CursorKind::ByteOffset,
+                value: snapshot_len.to_string(),
+            },
+        );
+        let yielded = entries.len();
+        Ok(ReadReport {
+            entries,
+            scanned,
+            yielded,
+            skipped,
+            cursor: next_cursor,
+        })
+    }
+
+    fn evaluate_prepared_record(
+        &self,
+        prepared: PreparedRecord,
+        policy: &ReadTrustPolicy,
+        context: &ReadContext,
+    ) -> EvaluatedRecord {
+        let mut record = prepared.record;
+        let pre_decrypt = policy.evaluate(&record, context);
+        if !pre_decrypt.accepted {
+            return EvaluatedRecord::Rejected(prepared.entry, pre_decrypt);
+        }
+
+        let mut entry = prepared.entry;
+        let (plaintext, _, row_parse_error) = self.decrypt_groups_for_row(&entry.envelope);
+        if row_parse_error.is_some() {
+            record.record_valid = false;
+        }
+        entry.plaintext_per_group = plaintext;
+        record.recipient_groups = successfully_decrypted_groups(&entry);
+        let local_authentication_failure = context.active
+            && context.local_log
+            && !context.detached
+            && entry
+                .plaintext_per_group
+                .iter()
+                .any(|(group, value)| self.groups.contains_key(group) && is_no_read_key(value));
+        record.aad_valid = !local_authentication_failure
+            && !entry.plaintext_per_group.values().any(is_decrypt_error);
+        let decision = policy.evaluate(&record, context);
+        if !decision.accepted {
+            return EvaluatedRecord::Rejected(entry, decision);
+        }
+
+        let validity = ValidFlags {
+            signature: record.signature_present && record.signature_valid,
+            row_hash: record.row_hash_present && record.row_hash_valid,
+            chain: !read_chain_required(context) || record.chain_valid,
+            writer_authenticated: decision.writer_authenticated,
+            writer_authorized: decision.writer_authorized,
+            reasons: decision.reasons,
+        };
+        EvaluatedRecord::Accepted(entry, validity)
+    }
+
+    fn emit_skip_event_best_effort(&self, entry: &ReadEntry, reasons: &[ReadRejectReason]) {
+        let event_type = entry
+            .envelope
+            .get("event_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if event_type == "tn.read.tampered_row_skipped" {
+            return;
+        }
+        if let Err(error) = self.emit_tampered_row_skipped(entry, reasons) {
+            log::warn!("tn.read.tampered_row_skipped emit failed: {error}");
+        }
+    }
+
+    fn read_context_for_path(&self, path: &Path, required_group: Option<String>) -> ReadContext {
+        ReadContext {
+            active: true,
+            local_log: paths_equivalent(path, &self.log_path),
+            detached: false,
+            writable: true,
+            profile_sign: Some(self.cfg.ceremony.sign),
+            profile_chain: Some(self.cfg.ceremony.chain),
+            local_device_did: Some(self.device.did().to_owned()),
+            required_group,
+        }
+    }
+
+    fn resolve_read_source_path(&self, requested: Option<&Path>) -> PathBuf {
+        let path = match requested {
+            None => self.log_path.clone(),
+            Some(path) => {
+                let yaml_directory = self.yaml_path.parent().unwrap_or_else(|| Path::new("."));
+                crate::pathutil::resolve(yaml_directory, path)
+            }
+        };
+        lexical_normalize(&path)
+    }
+
+    fn default_read_policy(&self, verify: VerifyMode) -> Result<ReadTrustPolicy> {
+        let mut trusted_writers = BTreeSet::from([self.device.did().to_owned()]);
+        trusted_writers.extend(self.configured_trusted_writers()?);
+        trusted_writers.extend(self.verified_publisher_writers()?);
+        Ok(ReadTrustPolicy {
+            verify,
+            require_signature: None,
+            allow_unauthenticated: None,
+            trusted_writers,
+            trusted_writers_supplied: false,
+            allow_unknown_writers: false,
+        })
+    }
+
+    fn configured_trusted_writers(&self) -> Result<BTreeSet<String>> {
+        let bytes = self
+            .storage
+            .read_bytes(&self.yaml_path)
+            .map_err(Error::Io)?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| {
+            Error::InvalidConfig("tn.yaml is not valid UTF-8 while loading trust.writers".into())
+        })?;
+        let document: Value = serde_yml::from_str(text).map_err(|error| {
+            Error::InvalidConfig(format!(
+                "invalid tn.yaml while loading trust.writers: {error}"
+            ))
+        })?;
+        let Some(trust) = document.get("trust") else {
+            return Ok(BTreeSet::new());
+        };
+        let trust = trust
+            .as_object()
+            .ok_or_else(|| Error::InvalidConfig("trust must be a mapping when present".into()))?;
+        let Some(writers) = trust.get("writers") else {
+            return Ok(BTreeSet::new());
+        };
+        let writers = writers
+            .as_array()
+            .ok_or_else(|| Error::InvalidConfig("trust.writers must be a list".into()))?;
+        writers
+            .iter()
+            .map(|writer| {
+                writer.as_str().map(str::to_owned).ok_or_else(|| {
+                    Error::InvalidConfig("trust.writers entries must be strings".into())
+                })
+            })
+            .collect()
+    }
+
+    fn verified_publisher_writers(&self) -> Result<BTreeSet<String>> {
+        let path = self
+            .keystore
+            .join("trust")
+            .join("verified_publishers.v1.json");
+        if !self.storage.exists(&path) {
+            return Ok(BTreeSet::new());
+        }
+        let bytes = self.storage.read_bytes(&path).map_err(Error::Io)?;
+        let document: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            Error::InvalidConfig(format!(
+                "invalid verified publisher record {}: {error}",
+                path.display()
+            ))
+        })?;
+        let publishers = document.get("publishers").unwrap_or(&document);
+        let publishers = publishers.as_object().ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "invalid verified publisher record {}: publishers must be an object",
+                path.display()
+            ))
+        })?;
+        for (did, metadata) in publishers {
+            if !metadata.is_object() {
+                return Err(Error::InvalidConfig(format!(
+                    "invalid verified publisher record {}: {did:?} metadata must be an object",
+                    path.display()
+                )));
+            }
+        }
+        Ok(publishers.keys().cloned().collect())
     }
 
     /// Read all entries (every run) in the audit-grade [`ReadEntry`]
@@ -200,95 +714,40 @@ impl Runtime {
     /// ```
     #[allow(clippy::needless_pass_by_value)]
     pub fn secure_read(&self, opts: SecureReadOptions) -> Result<Vec<SecureEntry>> {
-        let raw_with_valid = match opts.log_path.as_deref() {
-            Some(p) => self.read_from_with_validity(p)?,
-            None => self.read_raw_with_validity()?,
-        };
-        let mut out: Vec<SecureEntry> = Vec::new();
-        for (entry, valid) in raw_with_valid {
-            let all_valid = valid.signature && valid.row_hash && valid.chain;
-            if !all_valid {
-                let reasons = invalid_reasons(valid);
-                match opts.on_invalid {
-                    OnInvalid::Raise => {
-                        let event_type = entry
-                            .envelope
-                            .get("event_type")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        let event_id = entry
-                            .envelope
-                            .get("event_id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        return Err(Error::Malformed {
-                            kind: "verification",
-                            reason: format!(
-                                "tn.secure_read: envelope event_type={event_type:?} \
-                                 event_id={event_id:?} failed verification: {reasons:?}"
-                            ),
-                        });
-                    }
-                    OnInvalid::Skip => {
-                        // Don't loop our own tampered-row event back through
-                        // secure_read — that would emit an event for the
-                        // very event we're verifying. Skip silently.
-                        let event_type = entry
-                            .envelope
-                            .get("event_type")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        if event_type == "tn.read.tampered_row_skipped" {
-                            continue;
-                        }
-                        if let Err(e) = self.emit_tampered_row_skipped(&entry, &reasons) {
-                            log::warn!("tn.read.tampered_row_skipped emit failed: {e}");
-                        }
-                        continue;
-                    }
-                    OnInvalid::Forensic => {
-                        let mut flat = flatten_raw_entry(&entry, false);
-                        let mut v = Map::new();
-                        v.insert("signature".into(), Value::Bool(valid.signature));
-                        v.insert("row_hash".into(), Value::Bool(valid.row_hash));
-                        v.insert("chain".into(), Value::Bool(valid.chain));
-                        flat.insert("_valid".into(), Value::Object(v));
-                        flat.insert(
-                            "_invalid_reasons".into(),
-                            Value::Array(
-                                reasons
-                                    .iter()
-                                    .map(|s| Value::String((*s).to_string()))
-                                    .collect(),
-                            ),
-                        );
-                        let (instructions, hidden, errs) = attach_instructions(&mut flat, &entry);
-                        out.push(SecureEntry {
-                            fields: flat,
-                            instructions,
-                            hidden_groups: hidden,
-                            decrypt_errors: errs,
-                        });
-                        continue;
-                    }
-                }
-            }
-
-            let mut flat = flatten_raw_entry(&entry, false);
-            let (instructions, hidden, errs) = attach_instructions(&mut flat, &entry);
-            out.push(SecureEntry {
-                fields: flat,
-                instructions,
-                hidden_groups: hidden,
-                decrypt_errors: errs,
-            });
+        let path = self.resolve_read_source_path(opts.log_path.as_deref());
+        if self.storage.exists(&path)
+            && is_foreign_log(
+                &path,
+                &self.log_path,
+                self.device.did(),
+                &self.keystore,
+                &self.storage,
+            )?
+        {
+            reject_unsupported_foreign_log_with_validity(&self.keystore, &self.storage)?;
         }
-        Ok(out)
+        let context = self.read_context_for_path(&path, None);
+        let verify = match opts.on_invalid {
+            OnInvalid::Raise => VerifyMode::Raise,
+            OnInvalid::Skip => VerifyMode::Skip,
+            OnInvalid::Forensic => VerifyMode::Disabled,
+        };
+        let policy = self.default_read_policy(verify)?;
+        let report = self.read_with_policy(&opts, &policy, &context, None)?;
+        Ok(report
+            .entries
+            .into_iter()
+            .map(|flat| secure_entry_from_flat(flat, opts.on_invalid == OnInvalid::Forensic))
+            .collect())
     }
 
     /// Append a `tn.read.tampered_row_skipped` admin event with public
     /// fields only. The bad row's payload is NOT exposed.
-    fn emit_tampered_row_skipped(&self, entry: &ReadEntry, reasons: &[&'static str]) -> Result<()> {
+    fn emit_tampered_row_skipped(
+        &self,
+        entry: &ReadEntry,
+        reasons: &[ReadRejectReason],
+    ) -> Result<()> {
         let env = entry.envelope.as_object();
         let event_id = env
             .and_then(|o| o.get("event_id"))
@@ -317,7 +776,7 @@ impl Runtime {
             Value::Array(
                 reasons
                     .iter()
-                    .map(|s| Value::String((*s).to_string()))
+                    .map(|reason| Value::String(reason.as_str().to_string()))
                     .collect(),
             ),
         );
@@ -368,199 +827,11 @@ impl Runtime {
         )? {
             reject_unsupported_foreign_log_with_validity(&self.keystore, &self.storage)?;
         }
-        let mut out: Vec<(ReadEntry, ValidFlags)> = Vec::new();
-        let mut prev_hash_by_event: HashMap<String, String> = HashMap::new();
-        let public_set: HashSet<&str> = self.cfg.public_fields.iter().map(String::as_str).collect();
-        let group_names: HashSet<&str> = self.cfg.groups.keys().map(String::as_str).collect();
-
-        for res in LogFileReader::open(log_path, &self.storage)? {
-            // DX review 0.4.2a3 follow-up: a single malformed row (bad
-            // base64 ciphertext, JSON parse failure, etc.) must not
-            // halt iteration. Skip the row and emit a sentinel triple
-            // with the special event_type "<parse-error>" + all-false
-            // validity flags; the reader's verify='skip' path
-            // recognises this and counts it as ``skipped_parse``.
-            let env = match res {
-                Ok(e) => e,
-                Err(e) => {
-                    out.push((
-                        ReadEntry {
-                            envelope: serde_json::json!({
-                                "event_type": "<parse-error>",
-                                "_parse_error": e.to_string(),
-                            }),
-                            plaintext_per_group: BTreeMap::new(),
-                        },
-                        ValidFlags {
-                            signature: false,
-                            row_hash: false,
-                            chain: false,
-                        },
-                    ));
-                    continue;
-                }
-            };
-
-            let event_type = env
-                .get("event_type")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let prev = env
-                .get("prev_hash")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let row_hash = env
-                .get("row_hash")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let sequence = env.get("sequence").and_then(Value::as_u64).unwrap_or(0);
-            let did = env
-                .get("device_identity")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let signature = env
-                .get("signature")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-
-            // Chain-disabled ceremonies (telemetry / secure_log /
-            // stdout — anything with `ceremony.chain: false`) emit
-            // every row with `prev_hash=""` + `sequence=1` sentinels.
-            // The writer never advances the chain; the on-disk shape
-            // is "N independent attestations" rather than a linked
-            // list. A byte-for-byte `prev_hash == prior.row_hash`
-            // compare always fails from row 2 onward. Skip the
-            // per-row chain check entirely for such ceremonies — the
-            // chain claim isn't being made, so there's nothing to
-            // verify against. We could check the sentinel pattern is
-            // intact (`prev == ""` + `sequence == 1`) and fail
-            // otherwise; for now treat chain=false as "chain is not
-            // a load-bearing field," matching the writer's contract.
-            //
-            // sequence is read for parity with the writer's sentinel
-            // contract and to make this branch self-documenting in
-            // a future tightening.
-            let _ = sequence;
-            let last = prev_hash_by_event.get(&event_type).cloned();
-            let chain_ok = if !self.cfg.ceremony.chain {
-                true
-            } else {
-                match last {
-                    None => true,
-                    Some(l) => l == prev,
-                }
-            };
-            // Track the row_hash forward only for chained ceremonies.
-            // Chain-disabled rows have nothing to chain, and carrying
-            // their row_hash forward would just confuse a future
-            // tightening of this branch.
-            if self.cfg.ceremony.chain {
-                prev_hash_by_event.insert(event_type.clone(), row_hash.clone());
-            }
-
-            // Decrypt every group we hold a kit for.
-            let (plaintext_per_group, groups_for_hash, row_parse_error) =
-                self.decrypt_groups_for_row(&env);
-
-            // DX review 0.4.2a3 follow-up: if any per-row error fired
-            // during the group/ciphertext loop above, surface a
-            // sentinel triple and move on. Don't update
-            // ``prev_hash_by_event`` — subsequent rows that chain
-            // through this one will fail chain verify, which is the
-            // correct semantics (the chain branched at this row, and
-            // we can't tell which fork is real).
-            if let Some(err) = row_parse_error {
-                out.push((
-                    ReadEntry {
-                        envelope: serde_json::json!({
-                            "event_type": "<parse-error>",
-                            "_parse_error": err,
-                        }),
-                        plaintext_per_group: BTreeMap::new(),
-                    },
-                    ValidFlags {
-                        signature: false,
-                        row_hash: false,
-                        chain: false,
-                    },
-                ));
-                continue;
-            }
-
-            // Recompute row_hash from envelope + decrypted/raw groups.
-            let public_out = recompute_public_fields(&env, &public_set, &group_names);
-            let timestamp = env
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let event_id = env
-                .get("event_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let level = env
-                .get("level")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-
-            // Row-hash sentinel: when the writer's ceremony has both
-            // `chain: false` AND `sign: false` (telemetry, stdout),
-            // `need_row_hash` was false at emit time and the
-            // envelope's `row_hash` field is the documented empty
-            // sentinel. Recomputing would produce a non-empty hash
-            // and the byte compare would always fail. Accept the
-            // sentinel as "row_hash is not a load-bearing field for
-            // this ceremony shape" — same shape the writer
-            // documents at emit time.
-            let row_hash_ok =
-                if !self.cfg.ceremony.chain && !self.cfg.ceremony.sign && row_hash.is_empty() {
-                    true
-                } else {
-                    let expected = compute_row_hash(&RowHashInput {
-                        device_identity: &did,
-                        timestamp: &timestamp,
-                        event_id: &event_id,
-                        event_type: &event_type,
-                        level: &level,
-                        prev_hash: &prev,
-                        public_fields: &public_out,
-                        groups: &groups_for_hash,
-                    });
-                    expected == row_hash
-                };
-
-            // Signature: empty signature counts as `false` (unsigned mode
-            // is intentionally fail-closed for verifiers — matches Python).
-            let sig_ok = if signature.is_empty() {
-                false
-            } else {
-                match signature_from_b64(&signature) {
-                    Ok(sig_bytes) => DeviceKey::verify_did(&did, row_hash.as_bytes(), &sig_bytes)
-                        .unwrap_or(false),
-                    Err(_) => false,
-                }
-            };
-
-            out.push((
-                ReadEntry {
-                    envelope: env,
-                    plaintext_per_group,
-                },
-                ValidFlags {
-                    signature: sig_ok,
-                    row_hash: row_hash_ok,
-                    chain: chain_ok,
-                },
-            ));
-        }
-        Ok(out)
+        let context = self.read_context_for_path(log_path, None);
+        let policy = self.default_read_policy(VerifyMode::Disabled)?;
+        Ok(self
+            .scan_file_with_policy(log_path, &policy, &context, None)?
+            .entries)
     }
 
     /// Decrypt every group block in one envelope that this runtime holds a
@@ -774,81 +1045,465 @@ impl Runtime {
     }
 }
 
-/// Map a [`ValidFlags`] to the public ``invalid_reasons`` shape.
-pub(crate) fn invalid_reasons(valid: ValidFlags) -> Vec<&'static str> {
-    let mut out: Vec<&'static str> = Vec::new();
-    if !valid.signature {
-        out.push("signature");
-    }
-    if !valid.row_hash {
-        out.push("row_hash");
-    }
-    if !valid.chain {
-        out.push("chain");
-    }
-    out
+struct PreparedRecord {
+    entry: ReadEntry,
+    record: ReadRecordState,
 }
 
-/// Lift the six tn.agents fields out of `flat` into a typed
-/// `Instructions` block. Returns the instructions plus the
-/// `(hidden_groups, decrypt_errors)` lists already computed by
-/// [`flatten_raw_entry`].
-pub(crate) fn attach_instructions(
-    flat: &mut FlatEntry,
-    raw: &ReadEntry,
-) -> (Option<Instructions>, Vec<String>, Vec<String>) {
-    // Pull hidden_groups / decrypt_errors out so we can return them as
-    // typed Vec<String>. They were inserted by flatten_raw_entry.
-    let hidden = match flat.remove("_hidden_groups") {
-        Some(Value::Array(arr)) => arr
-            .into_iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-        _ => Vec::new(),
+const MAX_POLICY_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+struct BoundedLine {
+    physical_len: u64,
+    overflowed: bool,
+}
+
+fn open_storage_read_snapshot(
+    storage: &dyn crate::storage::Storage,
+    path: &Path,
+) -> Result<crate::storage::StorageReadSnapshot> {
+    if let Some(snapshot) = storage.open_read_snapshot(path).map_err(Error::Io)? {
+        return Ok(snapshot);
+    }
+    let bytes = storage.read_bytes(path).map_err(Error::Io)?;
+    let len = u64::try_from(bytes.len()).map_err(|_| {
+        Error::InvalidConfig("read source is too large for a u64 byte cursor".into())
+    })?;
+    Ok(crate::storage::StorageReadSnapshot {
+        reader: Box::new(std::io::Cursor::new(bytes)),
+        len,
+    })
+}
+
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+) -> std::io::Result<Option<BoundedLine>> {
+    buffer.clear();
+    let mut physical_len = 0u64;
+    let mut overflowed = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if physical_len == 0 {
+                Ok(None)
+            } else {
+                Ok(Some(BoundedLine {
+                    physical_len,
+                    overflowed,
+                }))
+            };
+        }
+        let chunk_len = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        let line_ended = available[chunk_len - 1] == b'\n';
+        let remaining = MAX_POLICY_LINE_BYTES.saturating_sub(buffer.len());
+        let retained = remaining.min(chunk_len);
+        buffer.extend_from_slice(&available[..retained]);
+        overflowed |= retained < chunk_len;
+        let increment = u64::try_from(chunk_len)
+            .map_err(|_| std::io::Error::other("line byte count does not fit u64"))?;
+        physical_len = physical_len
+            .checked_add(increment)
+            .ok_or_else(|| std::io::Error::other("line byte count overflowed u64"))?;
+        reader.consume(chunk_len);
+        if line_ended {
+            return Ok(Some(BoundedLine {
+                physical_len,
+                overflowed,
+            }));
+        }
+    }
+}
+
+enum EvaluatedRecord {
+    Accepted(ReadEntry, ValidFlags),
+    Rejected(ReadEntry, ReadDecision),
+}
+
+fn empty_file_read_report(
+    source_id: String,
+    mut cursor: ReadCursorV1,
+) -> ReadReport<(ReadEntry, ValidFlags)> {
+    cursor.sources.insert(
+        source_id,
+        SourceCursorV1 {
+            kind: CursorKind::ByteOffset,
+            value: "0".into(),
+        },
+    );
+    ReadReport {
+        entries: Vec::new(),
+        scanned: 0,
+        yielded: 0,
+        skipped: 0,
+        cursor,
+    }
+}
+
+fn file_cursor_start(
+    cursor: Option<&ReadCursorV1>,
+    source_id: &str,
+) -> Result<(ReadCursorV1, u64)> {
+    let next_cursor = cursor.cloned().unwrap_or_default();
+    if next_cursor.version != 1 {
+        return Err(Error::InvalidConfig(format!(
+            "unsupported read cursor version {}; expected 1",
+            next_cursor.version
+        )));
+    }
+    let start = match next_cursor.sources.get(source_id) {
+        None => 0,
+        Some(source) if source.kind == CursorKind::ByteOffset => source
+            .value
+            .parse::<u64>()
+            .map_err(|_| Error::InvalidConfig("byte-offset cursor must be a u64 string".into()))?,
+        Some(_) => {
+            return Err(Error::InvalidConfig(
+                "file source cursor must use kind=byte_offset".into(),
+            ));
+        }
     };
-    let errs = match flat.remove("_decrypt_errors") {
-        Some(Value::Array(arr)) => arr
-            .into_iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-        _ => Vec::new(),
+    Ok((next_cursor, start))
+}
+
+fn invalid_record(envelope: Value) -> PreparedRecord {
+    PreparedRecord {
+        entry: ReadEntry {
+            envelope,
+            plaintext_per_group: BTreeMap::new(),
+        },
+        record: ReadRecordState {
+            record_valid: false,
+            row_hash_present: false,
+            row_hash_valid: false,
+            chain_valid: false,
+            signature_present: false,
+            signature_valid: false,
+            writer_did: None,
+            aad_valid: true,
+            recipient_groups: BTreeSet::new(),
+        },
+    }
+}
+
+fn prepare_record(
+    line: &str,
+    public_set: &HashSet<&str>,
+    configured_groups: &HashSet<&str>,
+    prev_hash_by_event: &mut HashMap<String, String>,
+) -> PreparedRecord {
+    let Ok(envelope) = serde_json::from_str::<Value>(line) else {
+        return invalid_record(serde_json::json!({"event_type": "<parse-error>"}));
+    };
+    let Some(object) = envelope.as_object() else {
+        return invalid_record(envelope);
     };
 
-    let body = raw.plaintext_per_group.get("tn.agents");
-    let Some(obj) = body.and_then(Value::as_object) else {
-        return (None, hidden, errs);
+    let string_field = |name: &str| object.get(name).and_then(Value::as_str);
+    let writer_did = string_field("device_identity").map(str::to_owned);
+    let timestamp = string_field("timestamp");
+    let event_id = string_field("event_id");
+    let event_type = string_field("event_type");
+    let level = string_field("level");
+    let prev_hash = string_field("prev_hash");
+    let row_hash = string_field("row_hash");
+    let signature = string_field("signature");
+    let sequence_present = object.get("sequence").and_then(Value::as_u64).is_some();
+    let mut record_valid = writer_did.as_deref().is_some_and(|did| !did.is_empty())
+        && timestamp.is_some()
+        && event_id.is_some_and(|id| !id.is_empty())
+        && event_type.is_some_and(|kind| !kind.is_empty())
+        && level.is_some()
+        && sequence_present;
+
+    let (groups_for_hash, recipient_groups, groups_valid) = extract_group_inputs(object);
+    record_valid &= groups_valid;
+
+    let chain_valid = match (event_type, prev_hash) {
+        (Some(kind), Some(previous)) => prev_hash_by_event
+            .get(kind)
+            .is_none_or(|last| last == previous),
+        _ => false,
     };
-    if obj.get("$no_read_key") == Some(&Value::Bool(true))
-        || obj.get("$decrypt_error") == Some(&Value::Bool(true))
-    {
-        return (None, hidden, errs);
+    if let (Some(kind), Some(hash)) = (event_type, row_hash) {
+        prev_hash_by_event.insert(kind.to_owned(), hash.to_owned());
     }
 
-    // Both fetch the field for the Instructions block AND remove it
-    // from the flat top level. flat already had these (flatten_raw_entry
-    // merges every readable group's fields).
-    let take = |flat: &mut FlatEntry, k: &str| -> String {
-        flat.remove(k);
-        obj.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+    let row_hash_present = row_hash.is_some_and(|hash| !hash.is_empty());
+    let row_hash_valid = if record_valid && row_hash_present {
+        let public_fields = recompute_public_fields(&envelope, public_set, configured_groups);
+        let expected = compute_row_hash(&RowHashInput {
+            device_identity: writer_did.as_deref().unwrap_or(""),
+            timestamp: timestamp.unwrap_or(""),
+            event_id: event_id.unwrap_or(""),
+            event_type: event_type.unwrap_or(""),
+            level: level.unwrap_or(""),
+            prev_hash: prev_hash.unwrap_or(""),
+            public_fields: &public_fields,
+            groups: &groups_for_hash,
+        });
+        row_hash == Some(expected.as_str())
+    } else {
+        false
     };
-    let instr = Instructions {
-        instruction: take(flat, "instruction"),
-        use_for: take(flat, "use_for"),
-        do_not_use_for: take(flat, "do_not_use_for"),
-        consequences: take(flat, "consequences"),
-        on_violation_or_error: take(flat, "on_violation_or_error"),
-        policy: take(flat, "policy"),
+    let signature_present = signature.is_some_and(|value| !value.is_empty());
+    let signature_valid = if record_valid && signature_present && row_hash_present {
+        signature
+            .and_then(|value| signature_from_b64(value).ok())
+            .and_then(|bytes| {
+                writer_did.as_deref().map(|did| {
+                    DeviceKey::verify_did(did, row_hash.unwrap_or("").as_bytes(), &bytes)
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    } else {
+        false
     };
-    if instr.instruction.is_empty()
-        && instr.use_for.is_empty()
-        && instr.do_not_use_for.is_empty()
-        && instr.consequences.is_empty()
-        && instr.on_violation_or_error.is_empty()
-        && instr.policy.is_empty()
-    {
-        return (None, hidden, errs);
+
+    PreparedRecord {
+        entry: ReadEntry {
+            envelope,
+            plaintext_per_group: BTreeMap::new(),
+        },
+        record: ReadRecordState {
+            record_valid,
+            row_hash_present,
+            row_hash_valid,
+            chain_valid,
+            signature_present,
+            signature_valid,
+            writer_did,
+            aad_valid: true,
+            recipient_groups,
+        },
     }
-    (Some(instr), hidden, errs)
+}
+
+fn extract_group_inputs(
+    object: &Map<String, Value>,
+) -> (BTreeMap<String, GroupInput>, BTreeSet<String>, bool) {
+    let mut groups_for_hash = BTreeMap::new();
+    let mut recipient_groups = BTreeSet::new();
+    let mut groups_valid = true;
+    for (name, value) in object {
+        let Some(group) = value.as_object() else {
+            continue;
+        };
+        if !group.contains_key("ciphertext") {
+            continue;
+        }
+        recipient_groups.insert(name.clone());
+        let Some(ciphertext) = group.get("ciphertext").and_then(Value::as_str) else {
+            groups_valid = false;
+            continue;
+        };
+        let Ok(ciphertext) = STANDARD.decode(ciphertext) else {
+            groups_valid = false;
+            continue;
+        };
+        let Some(field_hash_values) = group.get("field_hashes").and_then(Value::as_object) else {
+            groups_valid = false;
+            continue;
+        };
+        let mut field_hashes = BTreeMap::new();
+        for (field, value) in field_hash_values {
+            let Some(value) = value.as_str() else {
+                groups_valid = false;
+                continue;
+            };
+            field_hashes.insert(field.clone(), value.to_owned());
+        }
+        groups_for_hash.insert(
+            name.clone(),
+            GroupInput {
+                ciphertext,
+                field_hashes,
+            },
+        );
+    }
+    (groups_for_hash, recipient_groups, groups_valid)
+}
+
+fn seed_chain_from_line(line: &str, prev_hash_by_event: &mut HashMap<String, String>) {
+    let Ok(envelope) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    let Some(object) = envelope.as_object() else {
+        return;
+    };
+    if let (Some(event_type), Some(row_hash)) = (
+        object.get("event_type").and_then(Value::as_str),
+        object.get("row_hash").and_then(Value::as_str),
+    ) {
+        prev_hash_by_event.insert(event_type.to_owned(), row_hash.to_owned());
+    }
+}
+
+fn successfully_decrypted_groups(entry: &ReadEntry) -> BTreeSet<String> {
+    entry
+        .plaintext_per_group
+        .iter()
+        .filter(|(_, plaintext)| !is_no_read_key(plaintext) && !is_decrypt_error(plaintext))
+        .map(|(group, _)| group.clone())
+        .collect()
+}
+
+fn is_no_read_key(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.get("$no_read_key") == Some(&Value::Bool(true)))
+}
+
+fn is_decrypt_error(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.get("$decrypt_error") == Some(&Value::Bool(true)))
+}
+
+fn insert_validity_metadata(flat: &mut FlatEntry, validity: &ValidFlags) {
+    flat.insert(
+        "_valid".into(),
+        serde_json::json!({
+            "signature": validity.signature,
+            "row_hash": validity.row_hash,
+            "chain": validity.chain,
+            "writer_authenticated": validity.writer_authenticated,
+            "writer_authorized": validity.writer_authorized,
+            "reasons": validity
+                .reasons
+                .iter()
+                .map(|reason| reason.as_str())
+                .collect::<Vec<_>>(),
+        }),
+    );
+}
+
+fn secure_entry_from_flat(mut flat: FlatEntry, forensic: bool) -> SecureEntry {
+    let validity = flat.remove("_valid");
+    if forensic {
+        if let Some(validity) = validity {
+            let reasons = validity
+                .get("reasons")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new()));
+            flat.insert("_valid".into(), validity);
+            if reasons.as_array().is_some_and(|items| !items.is_empty()) {
+                flat.insert("_invalid_reasons".into(), reasons);
+            }
+        }
+    }
+
+    let hidden_groups = take_string_array(&mut flat, "_hidden_groups");
+    let decrypt_errors = take_string_array(&mut flat, "_decrypt_errors");
+    let instructions = Instructions {
+        instruction: take_string(&mut flat, "instruction"),
+        use_for: take_string(&mut flat, "use_for"),
+        do_not_use_for: take_string(&mut flat, "do_not_use_for"),
+        consequences: take_string(&mut flat, "consequences"),
+        on_violation_or_error: take_string(&mut flat, "on_violation_or_error"),
+        policy: take_string(&mut flat, "policy"),
+    };
+    let instructions = if instructions.instruction.is_empty()
+        && instructions.use_for.is_empty()
+        && instructions.do_not_use_for.is_empty()
+        && instructions.consequences.is_empty()
+        && instructions.on_violation_or_error.is_empty()
+        && instructions.policy.is_empty()
+    {
+        None
+    } else {
+        Some(instructions)
+    };
+    SecureEntry {
+        fields: flat,
+        instructions,
+        hidden_groups,
+        decrypt_errors,
+    }
+}
+
+fn take_string(flat: &mut FlatEntry, name: &str) -> String {
+    flat.remove(name)
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn take_string_array(flat: &mut FlatEntry, name: &str) -> Vec<String> {
+    flat.remove(name)
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn read_rejection_error(entry: &ReadEntry, decision: &ReadDecision) -> Error {
+    let reason = decision
+        .first_reason()
+        .map_or("record_invalid", ReadRejectReason::as_str);
+    let event_type = entry
+        .envelope
+        .get("event_type")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let event_id = entry
+        .envelope
+        .get("event_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    Error::Malformed {
+        kind: "verification",
+        reason: format!(
+            "tn.read_with_policy: envelope event_type={event_type:?} event_id={event_id:?} rejected: {reason}"
+        ),
+    }
+}
+
+fn file_source_id(path: &Path) -> Result<String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(Error::Io)?.join(path)
+    };
+    let normalized = lexical_normalize(&absolute);
+    let rendered = normalized
+        .to_str()
+        .ok_or_else(|| Error::InvalidConfig("read source path must be UTF-8".into()))?;
+    Ok(canonical_file_source_id(rendered))
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let absolute = |path: &Path| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_or_else(|_| path.to_path_buf(), |directory| directory.join(path))
+        }
+    };
+    lexical_normalize(&absolute(left)) == lexical_normalize(&absolute(right))
 }
 
 /// Project a `ReadEntry` to the flat shape used by `Runtime::read()` per
@@ -1141,19 +1796,34 @@ pub(crate) fn is_foreign_log(
         return Ok(false);
     }
 
-    // Peek the first parseable envelope's `did`.
-    let Ok(bytes) = storage.read_bytes(log_path) else {
+    // Peek the first parseable envelope's DID through the same fixed-length
+    // snapshot path used by the policy scanner. This avoids whole-file reads
+    // on native storage and prevents concurrent appends changing the peek.
+    let Ok(snapshot) = open_storage_read_snapshot(storage.as_ref(), log_path) else {
         return Ok(false);
     };
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return Ok(false);
-    };
-    for raw_line in text.split('\n') {
-        let s = raw_line.trim();
-        if s.is_empty() {
+    let snapshot_len = snapshot.len;
+    let mut reader = BufReader::new(snapshot.reader.take(snapshot_len));
+    let mut line = Vec::new();
+    loop {
+        let line_meta = match read_bounded_line(&mut reader, &mut line) {
+            Ok(Some(line_meta)) => line_meta,
+            Ok(None) => break,
+            Err(_) => return Ok(false),
+        };
+        while line
+            .last()
+            .is_some_and(|byte| matches!(byte, b'\r' | b'\n'))
+        {
+            line.pop();
+        }
+        if line_meta.overflowed || line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let Ok(env) = serde_json::from_str::<Value>(s) else {
+        let Ok(line) = std::str::from_utf8(&line) else {
+            continue;
+        };
+        let Ok(env) = serde_json::from_str::<Value>(line) else {
             continue;
         };
         if let Some(env_did) = env.get("device_identity").and_then(Value::as_str) {
