@@ -329,7 +329,7 @@ test("reader grants require proofs, seal by default, and gate ancestor paths", a
   assert.equal(subtree.idPath, "org");
 });
 
-test("proof-less and plaintext grants stay possible but warned and audited", async () => {
+test("plaintext grant delivery is a hard error unless unsafePlaintext is explicit", async () => {
   const { rt: rtAuth, admin: adminAuth } = newAuthority();
   await adminAuth.ensureGroup(GROUP, { cipher: "hibe" });
 
@@ -342,8 +342,8 @@ test("proof-less and plaintext grants stay possible but warned and audited", asy
     const readerDir = mkdtempSync(join(tmpdir(), "tn-hibe-unsafe-"));
     const rtReader = NodeRuntime.init(join(readerDir, "tn.yaml"));
 
-    // Compatibility: a proof-less grant to a real DID still seals, but is
-    // recorded as an unverified key binding.
+    // Compatibility: a proof-less grant to a REAL resolvable DID still seals,
+    // but is recorded as an unverified key binding.
     const compat = await adminAuth.grantReader(GROUP, {
       readerDid: rtReader.did,
       outPath: join(readerDir, "compat.tnpkg"),
@@ -355,9 +355,31 @@ test("proof-less and plaintext grants stay possible but warned and audited", asy
     assert.match(warnings[0]!.message, /"operation":"hibe_grant"/);
     assert.match(warnings[0]!.message, /"relaxations":\["unverified_key_binding"\]/);
 
-    // Explicit plaintext delivery is labeled as unsafe bearer delivery.
+    // There is NO implicit plaintext fallback: a grant that cannot be
+    // recipient-sealed (synthetic DID with no embedded key) is a hard error
+    // that writes no kit file and emits no warning/audit.
+    const syntheticDid = "did:key:z6Mk-plaintext-gate-reader";
+    const deniedKit = join(readerDir, "denied.tnpkg");
+    assert.equal(
+      await reasonOfAsync(
+        adminAuth.grantReader(GROUP, { readerDid: syntheticDid, outPath: deniedKit }),
+      ),
+      "binding_invalid",
+    );
+    assert.equal(existsSync(deniedKit), false, "a rejected grant must not write a kit file");
+    // A did-less grant is the same hard error.
+    await assert.rejects(
+      () => adminAuth.grantReader(GROUP, { outPath: join(readerDir, "didless.tnpkg") }),
+      (err: unknown) => err instanceof TrustError && err.reason === "binding_invalid",
+    );
+    assert.equal(existsSync(join(readerDir, "didless.tnpkg")), false);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(warnings.length, 1, "a rejected grant must not warn");
+
+    // unsafePlaintext: true is the only plaintext path — labeled, warned,
+    // audited, and available for exactly the DID that just failed closed.
     const plaintext = await adminAuth.grantReader(GROUP, {
-      readerDid: rtReader.did,
+      readerDid: syntheticDid,
       outPath: join(readerDir, "plaintext.tnpkg"),
       unsafePlaintext: true,
     });
@@ -371,7 +393,7 @@ test("proof-less and plaintext grants stay possible but warned and audited", asy
     assert.match(warnings[1]!.message, /plaintext_bearer_delivery/);
 
     const audits = auditOperations(rtAuth);
-    assert.equal(audits.length, 2, "each unsafe grant emits one audit event");
+    assert.equal(audits.length, 2, "each unsafe grant emits exactly one audit event");
   } finally {
     process.removeListener("warning", handler);
   }

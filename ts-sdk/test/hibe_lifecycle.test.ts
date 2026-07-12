@@ -44,7 +44,12 @@ test("hibe lifecycle: grant, rotate, permanent-key epochs, authority spans all",
     assert.equal((a.config() as { cipher: string }).cipher, "hibe");
     a.info("epoch.a.first", { note: "before rotation, entry 1" });
     a.info("epoch.a.second", { note: "before rotation, entry 2" });
-    await a.admin.grantReader("default", { readerDid: "did:key:z6Mk-r1", outPath: kit1 });
+    // Synthetic DID with no embedded key: plaintext delivery must be explicit.
+    await a.admin.grantReader("default", {
+      readerDid: "did:key:z6Mk-r1",
+      outPath: kit1,
+      unsafePlaintext: true,
+    });
     await a.close();
 
     // --- Act 2: reader 1 absorbs and reads the foreign log.
@@ -62,7 +67,11 @@ test("hibe lifecycle: grant, rotate, permanent-key epochs, authority spans all",
     a = await Tn.init(aYaml, { cipher: "hibe", stdout: false, link: false });
     await a.admin.rotateReaderPath("default", "policy-b");
     a.info("epoch.b.first", { note: "after rotation" });
-    await a.admin.grantReader("default", { readerDid: "did:key:z6Mk-r2", outPath: kit2 });
+    await a.admin.grantReader("default", {
+      readerDid: "did:key:z6Mk-r2",
+      outPath: kit2,
+      unsafePlaintext: true,
+    });
     await a.close();
 
     // --- Act 4: reader 1 keeps history, loses the new epoch.

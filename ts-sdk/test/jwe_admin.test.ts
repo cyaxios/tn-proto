@@ -31,7 +31,12 @@ test("jwe admin: added recipient can decrypt, revoked recipient cannot", async (
   const bobJwk = okpPrivateJwk(bobPub, bobPriv);
   const bobDid = "did:key:z6MkBobJweRecipientTest0000000000000000000";
 
-  const added = await admin.addRecipient("default", { recipientDid: bobDid, publicKey: bobPub });
+  // Raw DID-plus-key enrollment is the explicitly unverified path.
+  const added = await admin.addRecipient("default", {
+    recipientDid: bobDid,
+    publicKey: bobPub,
+    unsafeUnverified: true,
+  });
   assert.equal(added.cipher, "jwe");
   assert.equal(added.recipientDid, bobDid);
   assert.equal(added.kitPath, null, "jwe recipients carry no kit");

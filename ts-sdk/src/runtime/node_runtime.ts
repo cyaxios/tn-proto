@@ -1559,11 +1559,16 @@ export class NodeRuntime {
       createHibeGroup(keystore, opts.group, { idPath, authorityMpk: mpk });
       this._registerHibeGroupInYaml(opts.group);
     } else {
-      writeFileSync(join(keystore, `${opts.group}.hibe.mpk`), Buffer.from(mpk));
+      // Update both public sealing files via pending + rename so a crash
+      // mid-update never leaves a torn mpk or idpath behind.
+      const mpkPath = join(keystore, `${opts.group}.hibe.mpk`);
+      const mpkPending = `${mpkPath}.pending`;
+      writeFileSync(mpkPending, Buffer.from(mpk));
+      renameSync(mpkPending, mpkPath);
       const idpathPath = join(keystore, `${opts.group}.hibe.idpath`);
-      const pending = `${idpathPath}.pending`;
-      writeFileSync(pending, idPath, "utf8");
-      renameSync(pending, idpathPath);
+      const idpathPending = `${idpathPath}.pending`;
+      writeFileSync(idpathPending, idPath, "utf8");
+      renameSync(idpathPending, idpathPath);
     }
     this._refreshHibeKeystore(opts.group);
   }

@@ -42,8 +42,13 @@ test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit",
     a.info("e1", { note: "both readers admitted" });
     const aliceKit = join(ws, "alice.tnpkg");
     const bobKit = join(ws, "bob.tnpkg");
-    await a.admin.grantReader("default", { readerDid: ALICE, outPath: aliceKit });
-    await a.admin.grantReader("default", { readerDid: BOB, outPath: bobKit });
+    // Synthetic DIDs with no embedded key: plaintext delivery must be explicit.
+    await a.admin.grantReader("default", {
+      readerDid: ALICE,
+      outPath: aliceKit,
+      unsafePlaintext: true,
+    });
+    await a.admin.grantReader("default", { readerDid: BOB, outPath: bobKit, unsafePlaintext: true });
     let grants = JSON.parse(readFileSync(join(aKeystore, "default.hibe.grants"), "utf8")) as Array<{
       reader_did: string;
     }>;

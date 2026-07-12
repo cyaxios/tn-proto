@@ -53,7 +53,12 @@ test("hibe aad: per-emit + config default binding, tamper detection, btn limitat
     let a = await Tn.init(aYaml, { cipher: "hibe", stdout: false, link: false });
     const aLog = (a.config() as { logPath: string }).logPath;
     a.info("oba.filed", { note: "quarterly OBA" }, { aad: { policy: "finra-oba", v: "1" } });
-    await a.admin.grantReader("default", { readerDid: "did:key:z6Mk-aad-r1", outPath: kit });
+    // Synthetic DID with no embedded key: plaintext delivery must be explicit.
+    await a.admin.grantReader("default", {
+      readerDid: "did:key:z6Mk-aad-r1",
+      outPath: kit,
+      unsafePlaintext: true,
+    });
     await a.close();
 
     a = await Tn.init(aYaml, { cipher: "hibe", stdout: false, link: false });

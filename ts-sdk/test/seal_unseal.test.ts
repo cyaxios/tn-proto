@@ -428,6 +428,7 @@ async function twoPeer(
   await alice.admin.addRecipient(group, {
     recipientDid: bob.did,
     publicKey: x25519.getPublicKey(bobPriv),
+    unsafeUnverified: true, // raw DID-plus-key path (no enrollment proof)
   });
 
   // body -> the named group (routed), note -> default (unrouted fallback)

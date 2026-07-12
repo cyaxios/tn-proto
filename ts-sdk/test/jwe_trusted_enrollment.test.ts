@@ -279,9 +279,33 @@ test("raw JWE registration is explicit, warned, audited, and unverified", async 
   const admin = new AdminNamespace(rt);
   const rawDid = "did:key:z6MkRawUnverifiedReader00000000000000000000";
   const rawPub = new Uint8Array(32).fill(7);
+  const recipientsFile = join(rt.config.keystorePath, "default.jwe.recipients");
 
   const { warnings, stop } = collectWarnings();
   try {
+    // The flag is mandatory: omitting it is a hard parameter error that
+    // changes no state — no registry write, no warning, no audit event.
+    await assert.rejects(
+      () =>
+        admin.addRecipient("default", {
+          recipientDid: rawDid,
+          publicKey: rawPub,
+        }),
+      /unsafeUnverified/,
+    );
+    await flushWarnings();
+    assert.equal(warnings.length, 0, "a rejected raw registration must not warn");
+    assert.equal(auditEvents(rt).length, 0, "a rejected raw registration must not audit");
+    const before = JSON.parse(readFileSync(recipientsFile, "utf8")) as Array<
+      Record<string, unknown>
+    >;
+    assert.equal(
+      before.find((r) => r["recipient_identity"] === rawDid),
+      undefined,
+      "a rejected raw registration must not write the registry",
+    );
+
+    // With the explicit flag: registers unverified with one warning + one audit.
     const result = await admin.addRecipient("default", {
       recipientDid: rawDid,
       publicKey: rawPub,
@@ -298,20 +322,9 @@ test("raw JWE registration is explicit, warned, audited, and unverified", async 
     const audits = auditEvents(rt);
     assert.equal(audits.length, 1, "exactly one tn.security.unsafe_operation audit event");
 
-    const doc = JSON.parse(
-      readFileSync(join(rt.config.keystorePath, "default.jwe.recipients"), "utf8"),
-    ) as Array<Record<string, unknown>>;
+    const doc = JSON.parse(readFileSync(recipientsFile, "utf8")) as Array<Record<string, unknown>>;
     const entry = doc.find((r) => r["recipient_identity"] === rawDid);
     assert.equal(entry?.["verified"], false, "raw registration must persist as unverified");
-
-    // The legacy shape (no flag) still registers, with the same observability.
-    await admin.addRecipient("default", {
-      recipientDid: "did:key:z6MkRawLegacyShape0000000000000000000000000",
-      publicKey: new Uint8Array(32).fill(9),
-    });
-    await flushWarnings();
-    assert.equal(warnings.length, 2, "legacy raw registration warns too");
-    assert.equal(auditEvents(rt).length, 2);
   } finally {
     stop();
   }

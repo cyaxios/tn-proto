@@ -1,8 +1,9 @@
 // tn.admin.* namespace — verb surface for ceremony admin operations.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { sha256HexBytes } from "../core/chain.js";
+import { recipientKeyIsResolvable } from "../seal_bundle_producer.js";
 import type { NodeRuntime } from "../runtime/node_runtime.js";
 import type {
   AddRecipientResult,
@@ -44,9 +45,10 @@ export interface AddRecipientOptions {
    */
   acceptedOffer?: AcceptedOffer;
   /**
-   * jwe: explicit acknowledgment for the raw DID-plus-key registration. Raw
-   * registrations are never marked verified, and always emit the common
-   * unsafe-operation warning and best-effort audit event.
+   * jwe: MANDATORY acknowledgment for the raw DID-plus-key registration —
+   * omitting it is a hard parameter error. Raw registrations are never
+   * marked verified, and always emit the common unsafe-operation warning
+   * and best-effort audit event.
    */
   unsafeUnverified?: boolean;
 }
@@ -133,9 +135,10 @@ export class AdminNamespace {
       }
       // Raw jwe registration: register a DID-plus-key pair directly (no kit
       // minted; mirrors Python `_add_recipient_jwe_impl`). The binding is
-      // NOT authenticated, so it persists as `verified: false` and emits the
-      // common unsafe-operation warning/audit — pass `unsafeUnverified: true`
-      // to acknowledge explicitly.
+      // NOT authenticated: the `unsafeUnverified: true` flag is mandatory,
+      // the entry persists as `verified: false`, and the common
+      // unsafe-operation warning/audit fires. Omitting the flag is a hard
+      // parameter error before any state change.
       if (opts.publicKey === undefined) {
         throw new Error(
           `tn.admin.addRecipient: jwe group ${JSON.stringify(group)} requires publicKey ` +
@@ -145,6 +148,14 @@ export class AdminNamespace {
       if (recipientDid === undefined) {
         throw new Error(
           `tn.admin.addRecipient: jwe group ${JSON.stringify(group)} requires recipientDid.`,
+        );
+      }
+      if (opts.unsafeUnverified !== true) {
+        throw new Error(
+          `tn.admin.addRecipient: raw DID-plus-key registration on jwe group ` +
+            `${JSON.stringify(group)} does not authenticate the key binding. Register the ` +
+            `verified acceptedOffer from tn.pkg.approveAndReconcile/reconcilePending, or ` +
+            `acknowledge explicitly with unsafeUnverified: true.`,
         );
       }
       await this._rt.recordUnsafeOperation({
@@ -363,10 +374,12 @@ export class AdminNamespace {
    * The normal grant is a verified, recipient-sealed delivery: pass a
    * `hibe-reader` `proof` answering this authority's scoped challenge (or
    * rely on a retained, unexpired verified-reader record for the same
-   * scope). A proof-less grant stays available for compatibility but is
-   * recorded unverified and emits the common unsafe-operation warning and
-   * audit event; `unsafePlaintext: true` is the only plaintext path. An
-   * ancestor `idPath` additionally requires `allowSubauthority: true`.
+   * scope). An absent or unresolvable reader DID is a hard error — there is
+   * no implicit plaintext fallback; `unsafePlaintext: true` is the only
+   * plaintext compatibility path. A proof-less sealed grant stays available
+   * for compatibility but is recorded unverified and emits the common
+   * unsafe-operation warning and audit event. An ancestor `idPath`
+   * additionally requires `allowSubauthority: true`.
    */
   async grantReader(group: string, opts: GrantReaderOptions = {}): Promise<AddRecipientResult> {
     let verified = false;
@@ -409,6 +422,22 @@ export class AdminNamespace {
       }
     }
 
+    // Delivery is recipient-sealed: an unsealed kit ships the delegated
+    // `.hibe.sk` in cleartext (a bearer token). There is NO implicit
+    // plaintext fallback — a grant that cannot be sealed (absent or
+    // unresolvable reader DID) is a hard error BEFORE any kit is minted;
+    // `unsafePlaintext: true` is the only plaintext compatibility path.
+    if (opts.unsafePlaintext !== true) {
+      if (opts.readerDid === undefined || !recipientKeyIsResolvable(opts.readerDid)) {
+        throw new TrustError(
+          "binding_invalid",
+          "grant delivery requires a resolvable Ed25519 did:key to seal to; " +
+            "pass the reader's real did:key, or request explicit plaintext bearer " +
+            "delivery with unsafePlaintext: true",
+        );
+      }
+    }
+
     const mintOpts: Parameters<NodeRuntime["grantReader"]>[1] = {
       grantTrust: {
         verified,
@@ -423,9 +452,6 @@ export class AdminNamespace {
     if (opts.unsafePlaintext === true) mintOpts.unsafePlaintextLabel = true;
     const granted = this._rt.grantReader(group, mintOpts);
 
-    // Delivery: recipient-sealed by default — an unsealed kit ships the
-    // delegated `.hibe.sk` in cleartext (a bearer token). The reader unseals
-    // via absorbPkgAsync.
     let sealed = false;
     if (opts.unsafePlaintext === true) {
       await this._rt.recordUnsafeOperation({
@@ -439,18 +465,23 @@ export class AdminNamespace {
       });
     } else {
       sealed = await this._rt.sealKitForRecipient(granted.kitPath, opts.readerDid);
-      if (verified && !sealed) {
+      if (!sealed) {
+        // Defensive: the pre-mint gate above makes this unreachable, but a
+        // seal that still fails must never leave a plaintext bearer kit.
+        try {
+          unlinkSync(granted.kitPath);
+        } catch {
+          // best-effort cleanup; the error below is the primary signal
+        }
         throw new TrustError(
           "binding_invalid",
-          "verified grant delivery requires a resolvable Ed25519 did:key to seal to",
+          "grant delivery could not be recipient-sealed; no plaintext kit was retained",
         );
       }
       if (!verified) {
         await this._rt.recordUnsafeOperation({
           operation: "hibe_grant",
-          relaxations: sealed
-            ? ["unverified_key_binding"]
-            : ["plaintext_bearer_delivery", "unverified_key_binding"],
+          relaxations: ["unverified_key_binding"],
           group,
           subject_did: opts.readerDid ?? null,
           artifact_digest: null,

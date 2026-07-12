@@ -19,11 +19,13 @@ test("recipient reads a publisher's jwe log via readAsRecipientAsync", async () 
   const aDir = mkdtempSync(join(tmpdir(), "jwe-pub-"));
   const rtA = NodeRuntime.init(join(aDir, "tn.yaml"), { cipher: "jwe" });
 
-  // A mints B's recipient keypair and enrolls B by public key.
+  // A mints B's recipient keypair and enrolls B by public key (the raw
+  // DID-plus-key path, which is explicitly unverified).
   const bPriv = x25519.utils.randomPrivateKey();
   await new AdminNamespace(rtA).addRecipient("default", {
     recipientDid: "did:key:z6MkBobForeignRead000000000000000000000000",
     publicKey: x25519.getPublicKey(bPriv),
+    unsafeUnverified: true,
   });
   await rtA.emitAsync("info", "shared.record", { secret: "for-bob", amount: 500 });
 
