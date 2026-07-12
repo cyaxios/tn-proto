@@ -2,6 +2,27 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Use superpowers:test-driven-development for every behavior change and superpowers:verification-before-completion before reporting completion. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Status ledger (reconciled 2026-07-12 against local main, ahead of origin by 9)
+
+Evidence: 246-test Python arc suite green on the dirty working tree (2026-07-12); commit hashes below are local-main checkpoints.
+
+| Task | State | Evidence |
+|---|---|---|
+| 1 Fixtures/vectors | DONE | 79b8872, hardened a882209 |
+| 2 Python DID/key-binding | DONE | 47bcea1 |
+| 3 Package body signing | DONE | 8fb829a + fix f057961 (incl. ts-sdk/rust-sdk pkg parity) |
+| 4 Enrollment state | DONE | 04fd704 |
+| 5 JWE enrollment lifecycle | DONE | 04fd704 |
+| 6 HIBE fail-closed | DONE | a84c135 |
+| 7 Rust trust parity | NOT STARTED | |
+| 8 TypeScript trust parity | NOT STARTED | no enrollment surface in ts-sdk |
+| 9 Shared native/SDK bridge | NOT STARTED | ffi diff in tree is incidental (no new exports) |
+| 10 C# trust parity | NOT STARTED | |
+| 11 Ceremony docs | DONE | 288fcf9 (link checks not re-run) |
+| 12 Cross-SDK final verification | NOT STARTED | |
+
+Per-SDK: Python ahead (T1-T5 done/in-tree); Rust core in-tree (T6 crypto); rust-sdk only T3 pkg parity; TypeScript only T3 tnpkg + T1 vectors; C# only T1 vectors; browser/JS untouched (rides T9 exports + secure-read plan T6).
+
 **Goal:** Bind JWE and HIBE key material to complete Ed25519 `did:key` principals, complete the JWE reader enrollment lifecycle through first decrypt, and make normal HIBE authority/grant ceremonies fail closed.
 
 **Architecture:** One versioned canonical-statement layer defines strict DID verification, stable reasons, and deterministic fixtures. Python owns ceremony orchestration and receiver-local state. Rust owns the reusable strict verifier and FFI contract; TypeScript and C# expose equivalent typed APIs and independently consume the same vectors. Enrollment mutations occur only after complete package, scope, freshness, replay, and authorization validation.
@@ -25,6 +46,8 @@
 ---
 
 ### Task 1: Freeze canonical statements, stable reasons, and shared vectors
+
+> **Status (2026-07-12):** DONE - checkpoint 79b8872; fixture contract hardened in a882209.
 
 **Files:**
 - Create: `tools/fixtures/build_trust_v1.py`
@@ -60,7 +83,7 @@
 - Rust, TypeScript, and C# common notice types use the same five payload fields and exact operation/relaxation enums. This task freezes data types/serialization only; each SDK track wires its language warning and best-effort audit behavior.
 - The core catalog accepts `tn.security.unsafe_operation` with only those five fields. `Tn` exposes `SecurityWarning` and an internal raiser in Foundation so both C# tracks consume the same event surface.
 
-- [ ] **Step 1: Write the failing generator contract test**
+- [x] **Step 1: Write the failing generator contract test**
 
 ```python
 def test_checked_in_trust_vectors_are_deterministic() -> None:
@@ -91,7 +114,7 @@ def test_every_negative_vector_has_one_approved_reason() -> None:
             assert all(reason is None or reason in approved for reason in reasons)
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_trust_fixture_generator.py python/tests/test_security_audit_contract.py -q`
 
@@ -103,7 +126,7 @@ Run: `dotnet test csharp-sdk/TnProto.sln --filter FullyQualifiedName~UnsafeOpera
 
 Expected: fail because the generator and vectors do not exist.
 
-- [ ] **Step 3: Implement deterministic fixtures**
+- [x] **Step 3: Implement deterministic fixtures**
 
 Use fixed Ed25519/X25519 seeds, timestamps, nonces, ceremony IDs, groups, and epochs. Emit sorted-key compact JSON with a final newline. Include challenge, all three proof purposes, `EnrollmentResponseV1`, manifest body-index, unsafe-event, replay, epoch, read-policy, and multi-source read-cursor cases. For signed statements compute canonical bytes with `signature_b64` omitted; for manifests omit only `manifest_signature_b64`. `--check` renders in memory and exits nonzero with the differing paths rather than writing.
 
@@ -115,7 +138,7 @@ Implement the common notice value in all four SDKs from the same fixture. Add
 {"artifact_digest":null,"group":null,"operation":"read","relaxations":["verification_disabled"],"subject_did":null}
 ```
 
-- [ ] **Step 4: Run GREEN and inspect drift**
+- [x] **Step 4: Run GREEN and inspect drift**
 
 Run: `.\.venv\Scripts\python.exe tools/fixtures/build_trust_v1.py`
 
@@ -127,13 +150,15 @@ Run the three cross-SDK contract commands from Step 2 again.
 
 Expected: all commands exit 0.
 
-- [ ] **Step 5: Checkpoint**
+- [x] **Step 5: Checkpoint**
 
 Stage only new/baseline-clean Foundation paths and commit `test: freeze trusted principal vectors and unsafe-event contract`.
 
 ---
 
 ### Task 2: Add strict Python DID and key-binding primitives
+
+> **Status (2026-07-12):** DONE - checkpoint 47bcea1.
 
 **Files:**
 - Create: `python/tn/trust.py`
@@ -265,33 +290,35 @@ verify_enrollment_response(
 ) -> None
 ```
 
-- [ ] **Step 1: Add fixture-driven failing tests**
+- [x] **Step 1: Add fixture-driven failing tests**
 
 Assert exact canonical bytes for challenge, proof, and response; strict Ed25519 multicodec/32-byte parsing; valid signatures; mutated signatures; unknown fields; unsupported versions; wrong audience/scope; expiry; and X25519/MPK binding validation. Verify challenges against the expected publisher before a proof can be signed. Assert `TrustError.reason`, not message text.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_trusted_principals.py python/tests/test_key_binding_wire.py -q`
 
 Expected: import errors for `tn.trust` and `tn.key_binding`.
 
-- [ ] **Step 3: Implement and consolidate**
+- [x] **Step 3: Implement and consolidate**
 
 Move the strict Ed25519 DID decoder now duplicated in `recipient_seal.py` into `trust.py`. Keep `DeviceKey.verify` backward compatible, but ensure all ceremony code calls the strict helper. Parse JSON with exact allowed-field sets; validate time ordering, purpose-specific binding keys, algorithms, and decoded lengths before signature verification.
 
-- [ ] **Step 4: Run GREEN and regress recipient sealing**
+- [x] **Step 4: Run GREEN and regress recipient sealing**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_trusted_principals.py python/tests/test_key_binding_wire.py python/tests/test_sealed_tnpkg_package_contract.py -q`
 
 Expected: pass.
 
-- [ ] **Step 5: Checkpoint**
+- [x] **Step 5: Checkpoint**
 
 Commit only clean/new task paths as `feat: add strict trusted principal proofs`.
 
 ---
 
 ### Task 3: Bind every package body member into the signed manifest
+
+> **Status (2026-07-12):** DONE - checkpoint 8fb829a; non-BTN reader-bundle fix f057961.
 
 **Files:**
 - Modify: `python/tn/tnpkg.py`
@@ -343,7 +370,7 @@ Rust uses `Manifest.body_sha256: BTreeMap<String, String>`,
 `body_sha256: Record<string, string>`, `signManifestWithBody`, and
 `readTnpkgVerified` with the same snake-case wire name.
 
-- [ ] **Step 1: Write failing cross-SDK body-index tests**
+- [x] **Step 1: Write failing cross-SDK body-index tests**
 
 For the shared fixture, assert exact lowercase `sha256:` values, signing bytes,
 and signature. Add one-property failures for a substituted body, missing indexed
@@ -351,7 +378,7 @@ member, extra archive member, malformed digest, and missing index. Prove the
 manifest signature is checked before body bytes are loaded and the digest index
 is checked before any kind-specific body parser or mutation.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_manifest_contract.py python/tests/test_tnpkg_container_contract.py -q`
 
@@ -361,7 +388,7 @@ Run: `node --import tsx --import ./test/_setup_wasm.mjs --test test/manifest_con
 
 Expected: manifests do not expose or verify `body_sha256`.
 
-- [ ] **Step 3: Implement the additive v1 field and strict writer/reader checks**
+- [x] **Step 3: Implement the additive v1 field and strict writer/reader checks**
 
 Compute the map from final stored bytes before signing through the central
 builder, then migrate every producer listed above to that builder. `_write_tnpkg`,
@@ -383,7 +410,7 @@ if manifest.body_sha256 != actual:
     raise TrustError(TrustReason.BODY_DIGEST_MISMATCH, "body index mismatch")
 ```
 
-- [ ] **Step 4: Run GREEN and targeted format checks**
+- [x] **Step 4: Run GREEN and targeted format checks**
 
 Run all three Step 2 commands.
 
@@ -391,13 +418,15 @@ Run: `rustfmt --edition 2021 --check crypto/tn-core/src/tnpkg/mod.rs crypto/tn-c
 
 Expected: pass.
 
-- [ ] **Step 5: Checkpoint**
+- [x] **Step 5: Checkpoint**
 
 Commit only baseline-clean paths as `feat(tnpkg): sign package body digests`.
 
 ---
 
 ### Task 4: Implement challenge, replay, and complete pending-offer state
+
+> **Status (2026-07-12):** DONE - checkpoint 04fd704.
 
 **Files:**
 - Create: `python/tn/enrollment.py`
@@ -458,17 +487,17 @@ enrollment/v1/approvals/<offer_digest>.json
 enrollment/v1/consumed/<challenge_id>.json
 ```
 
-- [ ] **Step 1: Write failing state-machine tests**
+- [x] **Step 1: Write failing state-machine tests**
 
 Cover publisher-signed challenge issuance, exact replay as an idempotent no-op, changed body under the same nonce as `replay_conflict`, consumed challenge as `challenge_replayed`, expired challenge, two groups for one DID without collision, unsolicited offer pending until exact-digest approval, crash-safe temporary files, and no state mutation on any failure. Exercise public `admin.reconcile_enrollment`: preauthorized offers pass with `approve=False`; unsolicited offers require `approve=True`. A multiprocess test races two `approve_and_reconcile` calls: exactly one consumes the challenge, the identical contender converges on the same `AcceptedOffer`, and a conflicting contender gets `replay_conflict`. Assert the returned `offer_digest` and `artifact_digest` are derived from the same retained artifact as the binding.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_enrollment_state.py python/tests/test_reconcile.py -q`
 
 Expected: missing `EnrollmentStore` and old DID-only pending behavior failures.
 
-- [ ] **Step 3: Implement receiver-local state**
+- [x] **Step 3: Implement receiver-local state**
 
 Key artifacts by `(ceremony_id, group, reader_did, offer_digest)`. Retain the complete signed `.tnpkg`; never reduce it to DID/key JSON. Reuse/export the cross-platform advisory lock from `_keystore_backend.py` and hold `enrollment.lock` across challenge consumption, approval, and promotion. Write through same-directory temporary files, fsync file and parent directory where supported, then replace. Verify again during promotion. Record consumed challenge IDs and accepted digests separately so idempotency does not become replay authorization.
 
@@ -482,19 +511,21 @@ with AdvisoryFileLock(store.lock_path):
 return accepted
 ```
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_enrollment_state.py python/tests/test_absorb.py python/tests/test_reconcile.py -q`
 
 Expected: pass.
 
-- [ ] **Step 5: Checkpoint**
+- [x] **Step 5: Checkpoint**
 
 Review the full pre/post diffs of `absorb.py` and `reconcile.py`; commit only if their baselines were clean.
 
 ---
 
 ### Task 5: Complete authenticated JWE enrollment through first decrypt
+
+> **Status (2026-07-12):** DONE - checkpoint 04fd704.
 
 **Files:**
 - Modify: `python/tn/offer.py`
@@ -555,37 +586,39 @@ JWE rotation writes `<keystore>/<group>.jwe.reenrollment.v1.json`:
   readers: [{ reader_did, public_key_sha256, proof_digest }]
 ```
 
-- [ ] **Step 1: Write the failing lifecycle test**
+- [x] **Step 1: Write the failing lifecycle test**
 
 The test must create independent publisher and reader homes and run: publisher preauthorization/challenge -> reader verifies challenge and creates/reuses its key -> reader offer -> publisher absorb -> reconcile/approve -> signed `EnrollmentResponseV1` -> reader absorb -> publisher seal -> reader decrypt. Assert the reader's `.jwe.mykey` inode/content is unchanged and never copied to the publisher. Add failures for outer/inner signer mismatch, wrong recipient, body digest mutation, response key mismatch, raw enrollment without `unsafe_unverified=True`, and legacy unrelated signing key without `unsafe_legacy_signer=True`. Rotation tests prove active recipients reset to publisher-only, verified bindings become an inactive re-enrollment plan, and no old public key is silently restored.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_jwe_trusted_enrollment_e2e.py python/tests/test_jwe_rotation_reenrollment.py python/tests/test_package_identity_binding.py python/tests/test_offer.py python/tests/test_manifest_contract.py -q`
 
 Expected: the current offer has no signed binding/challenge and raw registration is accepted.
 
-- [ ] **Step 3: Implement fail-closed package verification**
+- [x] **Step 3: Implement fail-closed package verification**
 
 Make `packaging.verify` bind its signature to the claimed DID. In absorb, validate the outer manifest, every body digest, outer/inner signer, recipient, purpose, ceremony, group, challenge, and authorization before calling any state-mutating helper. `offer` preserves its existing return/outbox behavior; without a challenge it emits a signed unsolicited proof whose null challenge digest can only be exact-digest approved. `add_recipient` preserves BTN/HIBE polymorphism; its normal JWE branch requires one `AcceptedOffer` and cross-checks its retained audience/ceremony/group plus any supplied DID/key. Persist `verified`, `proof_digest`, and X25519 key digest with the recipient. Unsafe raw enrollment and legacy import emit the common warning plus `tn.security.unsafe_operation` payload and persist `verified: false`.
 
-- [ ] **Step 4: Bind the publisher response**
+- [x] **Step 4: Bind the publisher response**
 
 Have `compile_enrolment` accept the same `AcceptedOffer` used for registration and embed its offer/key digests in the strict `EnrollmentResponseV1`; it has no independent digest parameter. On the reader, verify publisher DID/signature, exact recipient/scope/offer/key digest and expiry, derive the public key from the existing local private key, and compare it before installing publisher metadata. Persist the authenticated publisher DID/proof source in `<keystore>/trust/verified_publishers.v1.json`, the shared read-trust adapter path. JWE rotation stores prior verified bindings only as an inactive re-enrollment plan.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_jwe_trusted_enrollment_e2e.py python/tests/test_jwe_rotation_reenrollment.py python/tests/test_package_identity_binding.py python/tests/test_offer.py python/tests/test_absorb.py python/tests/test_reconcile.py python/tests/test_manifest_contract.py -q`
 
 Expected: pass; the first decrypt succeeds without private-key transfer.
 
-- [ ] **Step 6: Checkpoint**
+- [x] **Step 6: Checkpoint**
 
 Because several paths are pre-dirty, retain a scoped diff checkpoint unless every changed hunk has been reviewed and staged explicitly.
 
 ---
 
 ### Task 6: Authenticate HIBE authorities and fail closed on reader grants
+
+> **Status (2026-07-12):** DONE - checkpoint a84c135; python + cargo suites green.
 
 **Files:**
 - Modify: `python/tn/cipher.py`
@@ -659,21 +692,21 @@ grant_reader(
 ) -> AddRecipientResult
 ```
 
-- [ ] **Step 1: Write failing authority/grant tests**
+- [x] **Step 1: Write failing authority/grant tests**
 
 Cover authority issuance and valid pin/install, wrong DID/signature, MPK substitution, encoded-depth mismatch, configured path too deep, expired assertion on seal, signed higher-epoch path update, same-epoch conflict (`epoch_conflict`), rollback (`epoch_rollback`), scoped reader challenge/proof, exact-path sealed grant, absent/abbreviated DID failure, no implicit plaintext fallback, explicit unsafe warning/audit, and ancestor grant requiring `allow_subauthority=True`. An external writer test proves it cannot seal until it accepts/pins the initial assertion and cannot use the authority's rotated sibling path until it accepts the higher-epoch assertion.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_hibe_authority_trust.py python/tests/test_hibe_grant_absorb.py python/tests/test_hibe_boundary.py python/tests/test_hibe_revoke.py python/tests/test_hibe_external_writer_rotation.py -q`
 
 Expected: missing assertion API and current plaintext fallback/ancestor behavior failures.
 
-- [ ] **Step 3: Implement pinning and sealed delivery**
+- [x] **Step 3: Implement pinning and sealed delivery**
 
 `issue_authority_assertion` signs the current MPK/depth/path/epoch; `rotate_hibe_path` rotates and returns the new signed assertion as one result. `install_authority_assertion` is the explicit external-writer accept/pin/update API. Atomically persist authority DID, MPK SHA-256, encoded maximum depth, exact path, epoch, and assertion digest. Require the already pinned authority DID for updates. Refuse new seals after assertion expiry. Normal grants require a scope-valid `hibe-reader` proof or retained verified-reader record and always use `recipient-seal-v1`. Preserve the existing `grant_reader` call shape/`AddRecipientResult`; remove only its implicit plaintext fallback. Mark unsafe plaintext packages and ancestor delegation explicitly in their manifests and common audit records.
 
-- [ ] **Step 4: Run GREEN plus walkthrough**
+- [x] **Step 4: Run GREEN plus walkthrough**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_hibe_authority_trust.py python/tests/test_hibe_grant_absorb.py python/tests/test_hibe_boundary.py python/tests/test_hibe_revoke.py python/tests/test_hibe_external_writer_rotation.py -q`
 
@@ -681,13 +714,15 @@ Run: `.\.venv\Scripts\python.exe python/tests/demo_hibe_walkthrough.py`
 
 Expected: pass; walkthrough uses `max_depth=3` and authenticated assertions.
 
-- [ ] **Step 5: Checkpoint**
+- [x] **Step 5: Checkpoint**
 
 Retain scoped diffs for pre-dirty Python files; commit new tests only if independently useful and exact paths are staged.
 
 ---
 
 ### Task 7: Implement Rust trust and complete public enrollment parity
+
+> **Status (2026-07-12):** NOT STARTED.
 
 **Files:**
 - Modify: `crypto/tn-core/src/signing.rs`
@@ -924,6 +959,8 @@ Commit clean Rust task paths as `feat(core): verify trusted principal statements
 
 ### Task 8: Add TypeScript trust and complete public enrollment parity
 
+> **Status (2026-07-12):** NOT STARTED.
+
 **Files:**
 - Create: `ts-sdk/src/core/trust.ts`
 - Modify: `ts-sdk/src/core/signing.ts`
@@ -1084,6 +1121,8 @@ Commit exact clean TS paths as `feat(ts): add trusted enrollment proofs`.
 
 ### Task 9: Integrate the one shared native and SDK bridge
 
+> **Status (2026-07-12):** NOT STARTED - working-tree ffi diff is incidental, no new exports.
+
 **Prerequisites:** Enrollment Tasks 7-8 and secure-read-plan Tasks 2, 5, and 6
 have passing track-local tests. This is the only task that edits the shared
 bridge/export files.
@@ -1238,6 +1277,8 @@ The root integration owner reviews/stages only these shared paths.
 
 ### Task 10: Expose C# trust and complete public enrollment parity
 
+> **Status (2026-07-12):** NOT STARTED.
+
 **Files:**
 - Create: `csharp-sdk/src/TnProto/Trust/TrustReason.cs`
 - Create: `csharp-sdk/src/TnProto/Trust/EnrollmentChallengeV1.cs`
@@ -1354,6 +1395,8 @@ Commit exact clean C# paths as `feat(csharp): expose trusted principal verificat
 
 ### Task 11: Document the complete safe ceremonies and compatibility boundaries
 
+> **Status (2026-07-12):** DONE - checkpoint 288fcf9; link checks not re-run.
+
 **Prerequisites:** Enrollment Task 10 and secure-read plan Task 7 are GREEN.
 This is the one joint documentation owner for both workstreams.
 
@@ -1373,17 +1416,17 @@ This is the one joint documentation owner for both workstreams.
 - Documents the exact safe APIs from Tasks 2-10 plus the secure-read plan.
 - Names `unsafe_unverified=True`, `unsafe_legacy_signer=True`, `unsafe_plaintext=True`, and `allow_subauthority=True` only as explicit migration/compatibility/delegation controls.
 
-- [ ] **Step 1: Extend the failing documentation contract**
+- [x] **Step 1: Extend the failing documentation contract**
 
 Assert the challenge/proof/response/first-decrypt sequence, complete Ed25519 DID examples, MPK assertion/pin/path epoch, fail-closed grants, rotation re-enrollment, and the unaudited warning. Also assert `read()` remains the primary surface and defaults to automatic integrity/authentication/authorization; docs distinguish authentication from authorization, list every tuning parameter, require both unsigned overrides for foreign input, explain the common warning/audit event, and describe `secure_read()` as a strict delegate.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_key_ceremony_docs.py -q`
 
 Expected: new lifecycle/API assertions fail.
 
-- [ ] **Step 3: Update docs with runnable examples**
+- [x] **Step 3: Update docs with runnable examples**
 
 Use generated full DIDs, reader-owned X25519 keys, publisher challenges, proof absorption, and a first-decrypt check. Never instruct exporting the publisher's `.jwe.mykey`. Explain that HIBE reader keys are bearer capabilities and ancestor keys are delegated subauthorities. Lead read documentation with unchanged `read()` usage, then show `verify="skip"`, explicit `verify=False`, unsigned-profile controls, `trusted_writers`, and `allow_unknown_writers`. State that disabling verification never bypasses parsing/AAD and never authenticates or authorizes the envelope DID.
 
@@ -1398,6 +1441,8 @@ Expected: pytest passes; search finds no abbreviated operational DID or false JW
 ---
 
 ### Task 12: Cross-SDK integration, compatibility, and final verification
+
+> **Status (2026-07-12):** NOT STARTED.
 
 **Files:**
 - Create: `python/tests/test_enrollment_read_trust_integration.py`

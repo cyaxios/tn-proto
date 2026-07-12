@@ -2,6 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Use superpowers:test-driven-development for every behavior change and superpowers:verification-before-completion before reporting completion. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Status ledger (reconciled 2026-07-12 against local main, ahead of origin by 9)
+
+Evidence: 246-test Python arc suite green on the dirty working tree (2026-07-12); commit hashes below are local-main checkpoints.
+
+| Task | State | Evidence |
+|---|---|---|
+| 1 Policy model + decision table | DONE | 87ad1fd (read_policy.py + matrix fixture) |
+| 2 Rust core validity/rejection metadata | DONE | 4a3384d |
+| 3 Python read() secure default | DONE | 2324cc9 |
+| 4 Python watch/MCP/weakening audit | PARTIAL | code in 2324cc9; gate confirmation pending |
+| 5 rust-sdk read/watch defaults | NOT STARTED | |
+| 6 TypeScript read equivalence (node/local/browser/CLI) | NOT STARTED | |
+| 7 C# ReadAsync secure default | NOT STARTED | |
+| 8 Perf gate + joint docs handoff | NOT STARTED | |
+
+Per-SDK: Python in-tree through T3/T4; Rust core done (T2); rust-sdk, TypeScript, C#, browser all NOT STARTED - the parity tail is entirely open.
+
 **Goal:** Keep `read()` as TN's main surface while making its default policy verify integrity, authenticate signatures where required, and authorize writers, with explicit parameters for intentional weakening and equivalent watch behavior.
 
 **Architecture:** A receiver-local `ReadTrustPolicy` resolves call parameters plus ceremony/log context into one decision engine. Rust core defines stable validity/rejection metadata; Python, Rust SDK, TypeScript, and C# preserve their existing result/iterator shapes while adopting the same policy matrix. Existing `secure_read()` delegates to strict `read()` parameters. A versioned JSON FFI entry point carries the richer C# policy without breaking the legacy native symbol.
@@ -25,6 +42,8 @@
 ---
 
 ### Task 1: Freeze the read policy model and Python decision table
+
+> **Status (2026-07-12):** DONE - checkpoint 87ad1fd.
 
 **Files:**
 - Create: `python/tn/read_policy.py`
@@ -101,7 +120,7 @@ map for constant-time lookup.
 Policy resolution freezes `verify="auto"` to `mode="raise"`; only explicit
 `verify="skip"` drops and continues.
 
-- [ ] **Step 1: Write the failing matrix test**
+- [x] **Step 1: Write the failing matrix test**
 
 ```python
 @pytest.mark.parametrize("case", load_read_policy_cases(), ids=lambda c: c["id"])
@@ -119,29 +138,31 @@ def test_read_policy_matrix(case: dict[str, object]) -> None:
 
 Include local signed, local explicitly unsigned, foreign unsigned, context-free unsigned, trusted/unknown valid DID, malformed record, row/chain/signature failures, AAD failure, non-recipient, every verify mode, and invalid `verify=False` plus `trusted_writers` combinations. Assert auto resolves to raise rather than silently skipping. Explicitly prove disabled mode may ignore integrity/authentication/authorization failures but still rejects `record_invalid`, `aad_invalid`, and required-group `not_a_recipient`.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_read_trust_policy.py -q`
 
 Expected: import failure for `tn.read_policy`.
 
-- [ ] **Step 3: Implement pure policy resolution/evaluation**
+- [x] **Step 3: Implement pure policy resolution/evaluation**
 
 Do not read global config inside the policy object. `ReadContext` supplies active/detached, local/foreign, profile signing/chaining, local device DID, requested/required group, and trust-provider output. Treat unsigned envelopes as unauthenticated even when accepted. Return an ordered de-duplicated reason array; callbacks/exceptions use its first element. `not_a_recipient` applies only to an explicitly required group/recipient mode, never to an optional hidden group. Reject impossible combinations before reading the log.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_read_trust_policy.py python/tests/test_read_trust_provider.py -q`
 
 Expected: every fixture case passes with exact reasons.
 
-- [ ] **Step 5: Checkpoint**
+- [x] **Step 5: Checkpoint**
 
 If both files were new, stage only them and commit `feat(read): define secure default trust policy`.
 
 ---
 
 ### Task 2: Make Rust core produce complete validity and stable rejection metadata
+
+> **Status (2026-07-12):** DONE - checkpoint 4a3384d.
 
 **Files:**
 - Modify: `crypto/tn-core/src/runtime/types.rs`
@@ -215,17 +236,17 @@ impl Runtime {
 
 Extend validity metadata with `writer_authenticated`, `writer_authorized`, and an ordered de-duplicated `reasons` array. Keep existing `signature`, `row_hash`, and `chain` fields for compatibility. Define `ReadDecision { accepted: bool, reasons: Vec<ReadRejectReason>, writer_authenticated: bool, writer_authorized: bool }`.
 
-- [ ] **Step 1: Write failing fixture/core tests**
+- [x] **Step 1: Write failing fixture/core tests**
 
 Load the top-level matrix and assert exact accept/reject/reason/authenticated/authorized outcomes. Add tests proving missing validity data is not silently `true`, local `sign:false` does not excuse a foreign unsigned row, policy rejection happens before plaintext is returned, and skip mode remains bounded streaming. Assert multi-source reports emit sorted canonical source IDs and lossless byte-offset/sequence/opaque cursor strings.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `cargo test -p tn-core --test secure_default_read --test secure_read --test secure_read_interop`
 
 Expected: missing policy/reason types and default-policy failures.
 
-- [ ] **Step 3: Implement one core gate**
+- [x] **Step 3: Implement one core gate**
 
 Construct `ReadContext` once from the bound runtime/config and call source, then refactor `Runtime::secure_read` and ordinary validity reads through `read_with_policy`. Perform parse/shape, row hash, chain, signature presence/DID verification, writer authorization, then decryption/AAD. Map decryption authentication failures to `aad_invalid`. Map absent recipient blocks/keys to `not_a_recipient` only when `required_group` or recipient mode demands that group; preserve optional `_hidden_groups`. Do not expose library error strings as reason codes.
 
@@ -256,7 +277,7 @@ let accepted = !transport_fatal && !policy_rejected;
 ReadDecision { accepted, reasons, writer_authenticated, writer_authorized }
 ```
 
-- [ ] **Step 4: Run GREEN and format**
+- [x] **Step 4: Run GREEN and format**
 
 Run: `cargo test -p tn-core --test secure_default_read --test secure_read --test secure_read_interop --test runtime_read`
 
@@ -264,13 +285,15 @@ Run: `rustfmt --edition 2021 --check crypto/tn-core/src/runtime/types.rs crypto/
 
 Expected: pass.
 
-- [ ] **Step 5: Checkpoint**
+- [x] **Step 5: Checkpoint**
 
 Commit baseline-clean Rust paths as `feat(core): enforce read trust policy`.
 
 ---
 
 ### Task 3: Make Python `read()` secure by default without changing its shape
+
+> **Status (2026-07-12):** DONE - checkpoint 2324cc9.
 
 **Files:**
 - Modify: `python/tn/read.py`
@@ -332,37 +355,39 @@ secure_read(
 `require_signature=True`, `allow_unauthenticated=False`, and
 `allow_unknown_writers=False`; it exposes no weakening keywords.
 
-- [ ] **Step 1: Write failing public-surface tests**
+- [x] **Step 1: Write failing public-surface tests**
 
 Assert `tn.read()` raises on the first tampered/unsigned-when-required/unknown-writer row by default, still returns `_ReadIterator` with unchanged entry shape before iteration, honors explicit `skip` stats/callbacks, accepts a local explicitly unsigned profile without claiming writer authentication, requires both unsigned overrides for foreign input, and treats `True`/`False` as compatibility aliases. Assert raw rows include stable reasons and authentication/authorization flags. Prove two simultaneous `TN` handles resolve their own DID/profile/trust state, and CLI reads use auto unless the operator passes an explicit weakening flag.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest python/tests/test_read_secure_default.py python/tests/test_handle_read_policy.py python/tests/test_cli_read_security.py python/tests/test_secure_read_tamper.py python/tests/test_read_skip_observability.py python/tests/test_verify_respects_sign_setting.py python/tests/test_verify_roundtrip.py python/tests/test_read_parse_resilience.py -q`
 
 Expected: default `verify=False` returns rows that the new tests reject.
 
-- [ ] **Step 3: Resolve context and trust once per iterator**
+- [x] **Step 3: Resolve context and trust once per iterator**
 
 Build `ReadContext` at iterator creation from the bound `TN` handle, never the process-global singleton when a handle exists. `LocalReadTrustProvider` reads the active device DID, private-state verified publisher records, and exact DIDs from `trust.writers` in that ceremony's config. Cache the exact-DID set once per iterator. Never infer signature optionality for foreign logs from the active ceremony's `sign:false`. Replace fabricated missing validity values with explicit unknown/failure handling. CLI omission calls `read()` without a `verify` keyword; `--verify`, `--verify skip`, and `--no-verify` map to raise, skip, and explicit false respectively.
 
-- [ ] **Step 4: Route all rows through the shared gate**
+- [x] **Step 4: Route all rows through the shared gate**
 
 Preserve parse resilience and skip callbacks. In raise mode, throw the existing public `VerifyError` carrying primary stable `reason`, full `reasons`, sequence, and event type. In skip mode, increment existing counters and call `on_skip` with the first stable reason while retaining the full array in raw metadata. In disabled mode, set authentication/authorization metadata false or unknown; do not populate it from envelope claims.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 Run the Step 2 command.
 
 Expected: pass.
 
-- [ ] **Step 6: Checkpoint**
+- [x] **Step 6: Checkpoint**
 
 Review every hunk in the pre-existing `read.py` diff before any staging; use a scoped diff checkpoint if it was dirty.
 
 ---
 
 ### Task 4: Apply the same policy to Python watch, MCP, and weakening audit
+
+> **Status (2026-07-12):** PARTIAL - code committed in 2324cc9; gate confirmation pending.
 
 **Files:**
 - Consume Foundation-owned: `python/tn/security_audit.py`
@@ -462,6 +487,8 @@ Commit new clean paths only; retain scoped diffs for any pre-dirty file.
 
 ### Task 5: Add Rust SDK/watch defaults and report/cursor plumbing
 
+> **Status (2026-07-12):** NOT STARTED.
+
 **Files:**
 - Modify: `crypto/tn-core/src/config.rs`
 - Modify: `rust-sdk/src/tn.rs`
@@ -547,6 +574,8 @@ Commit baseline-clean paths as `feat(rust): make read verification automatic`.
 ---
 
 ### Task 6: Make TypeScript Node, local, browser, watch, and CLI reads equivalent
+
+> **Status (2026-07-12):** NOT STARTED.
 
 **Files:**
 - Create: `ts-sdk/src/core/read_policy.ts`
@@ -667,6 +696,8 @@ Because `core_browser_contract.test.ts` is pre-dirty, review its complete diff a
 ---
 
 ### Task 7: Make C# `ReadAsync` and polling watch secure by default
+
+> **Status (2026-07-12):** NOT STARTED.
 
 **Prerequisite:** Companion enrollment plan Task 9 (joint native/SDK bridge) is
 GREEN. This task consumes those native declarations and does not edit them.
@@ -789,6 +820,8 @@ Commit exact clean C# paths as `feat(csharp): secure read by default`.
 ---
 
 ### Task 8: Verify read performance and hand off joint docs/integration
+
+> **Status (2026-07-12):** NOT STARTED.
 
 **Files:**
 - Consume joint bridge integration from companion plan Task 9: `crypto/tn-core-ffi/src/lib.rs`
