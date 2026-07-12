@@ -23,7 +23,7 @@ import base64
 import json
 import os
 import re as _re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,8 @@ from .canonical import _canonical_bytes
 from .chain import _compute_row_hash, verify_chain_link
 from .config import LoadedConfig
 from .signing import DeviceKey, _signature_from_b64
+
+PreDecryptGate = Callable[[dict[str, Any], dict[str, Any]], bool]
 
 
 def _aad_bytes_for(env: dict[str, Any], group_name: str) -> bytes:
@@ -60,6 +62,123 @@ def _aad_bytes_for(env: dict[str, Any], group_name: str) -> bytes:
     if not isinstance(group_aad, dict) or not group_aad:
         return b""
     return _canonical_bytes(group_aad)
+
+
+_HASH_RESERVED = frozenset(
+    {
+        "device_identity",
+        "timestamp",
+        "event_id",
+        "event_type",
+        "level",
+        "sequence",
+        "prev_hash",
+        "row_hash",
+        "signature",
+    },
+)
+
+
+def _scan_envelope_before_decrypt(
+    env: dict[str, Any],
+    prev_hash_by_event: dict[str, str],
+    *,
+    expect_genesis: bool = False,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Parse cryptographic inputs and verify them before opening ciphertext."""
+
+    event_type = env["event_type"]
+    prev_hash = env["prev_hash"]
+    row_hash = env["row_hash"]
+    did = env["device_identity"]
+    signature = env.get("signature", "")
+    groups: dict[str, dict[str, Any]] = {}
+    public_fields: dict[str, Any] = {}
+    for name, value in env.items():
+        if name in _HASH_RESERVED:
+            continue
+        if isinstance(value, dict) and "ciphertext" in value:
+            ciphertext_value = value["ciphertext"]
+            if not isinstance(ciphertext_value, str):
+                raise ValueError(f"group {name!r} ciphertext must be base64 text")
+            groups[name] = {
+                "ciphertext": base64.b64decode(ciphertext_value, validate=True),
+                "field_hashes": dict(value.get("field_hashes") or {}),
+            }
+        else:
+            public_fields[name] = value
+
+    chain_ok = verify_chain_link(
+        prev_hash_by_event,
+        event_type,
+        prev_hash,
+        row_hash,
+        expect_genesis=expect_genesis,
+    )
+    expected_row_hash = _compute_row_hash(
+        device_identity=did,
+        timestamp=env["timestamp"],
+        event_id=env["event_id"],
+        event_type=event_type,
+        level=env.get("level", ""),
+        prev_hash=prev_hash,
+        public_fields=public_fields,
+        groups=groups,
+    )
+    row_hash_ok = bool(row_hash) and expected_row_hash == row_hash
+    try:
+        signature_ok = bool(signature) and DeviceKey.verify(
+            did,
+            row_hash.encode("ascii"),
+            _signature_from_b64(signature),
+        )
+    except Exception:  # noqa: BLE001 - malformed signatures are invalid
+        signature_ok = False
+    return (
+        {
+            "record": True,
+            "signature": signature_ok,
+            "row_hash": row_hash_ok,
+            "chain": chain_ok,
+            "aad": True,
+        },
+        groups,
+    )
+
+
+def _parse_error_triple(error: Exception) -> dict[str, Any]:
+    return {
+        "envelope": {
+            "event_type": "<parse-error>",
+            "_parse_error": f"{type(error).__name__}: {error}",
+        },
+        "plaintext": {},
+        "valid": {
+            "record": False,
+            "signature": False,
+            "row_hash": False,
+            "chain": False,
+            "aad": True,
+        },
+    }
+
+
+def _decode_plaintext_object(payload: bytes, group: str) -> dict[str, Any]:
+    """Decode an authenticated group payload without conflating parse and AAD."""
+
+    if not isinstance(payload, bytes):
+        raise ValueError(f"group {group!r} plaintext must be bytes")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"group {group!r} plaintext is not valid UTF-8") from error
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"group {group!r} plaintext is not valid JSON") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"group {group!r} plaintext must be a JSON object")
+    return value
 
 
 # --------------------------------------------------------------------------
@@ -204,7 +323,10 @@ def flatten_raw_entry(raw: dict[str, Any], *, include_valid: bool = False) -> di
 
 
 def read(
-    log_path: str | Path | None = None, cfg: LoadedConfig | None = None
+    log_path: str | Path | None = None,
+    cfg: LoadedConfig | None = None,
+    *,
+    pre_decrypt: PreDecryptGate | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Iterate + decrypt entries from a newline-delimited-JSON log file.
 
@@ -224,7 +346,7 @@ def read(
         cfg = _lg._runtime.cfg
     if log_path is None:
         log_path = cfg.resolve_log_path()
-    return _read(log_path, cfg)
+    return _read(log_path, cfg, pre_decrypt=pre_decrypt)
 
 
 def _pel_glob_files(cfg: LoadedConfig) -> list[Path]:
@@ -331,6 +453,7 @@ def read_with_keybag(
     *,
     verify_signatures: bool = True,
     expect_genesis: bool = False,
+    pre_decrypt: PreDecryptGate | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Read a log decrypting every group whose kit lives in
     ``keystore_dir``.
@@ -360,6 +483,7 @@ def read_with_keybag(
             keystore_dir,
             verify_signatures=verify_signatures,
             expect_genesis=expect_genesis,
+            pre_decrypt=pre_decrypt,
         )
 
 
@@ -369,6 +493,7 @@ def _lines_with_keybag(
     *,
     verify_signatures: bool = True,
     expect_genesis: bool = False,
+    pre_decrypt: PreDecryptGate | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Decrypt an iterator of ``(source_label, raw_line)`` pairs against the
     key bag in ``keystore_dir``, yielding ``{envelope, plaintext, valid}``
@@ -394,18 +519,23 @@ def _lines_with_keybag(
         if not line:
             continue
         try:
-            env = json.loads(line)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"{label}: invalid JSON: {e}") from e
-
-        event_type = env["event_type"]
-        chain_ok = verify_chain_link(
-            prev_hash_by_event,
-            event_type,
-            env["prev_hash"],
-            env["row_hash"],
-            expect_genesis=expect_genesis,
-        )
+            try:
+                env = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"{label}: invalid JSON: {error}") from error
+            valid, groups_from_env = _scan_envelope_before_decrypt(
+                env,
+                prev_hash_by_event,
+                expect_genesis=expect_genesis,
+            )
+        except Exception as error:  # noqa: BLE001 - one malformed row must not end the stream
+            yield _parse_error_triple(error)
+            continue
+        if not verify_signatures:
+            valid["signature"] = False
+        if pre_decrypt is not None and not pre_decrypt(env, valid):
+            yield {"envelope": env, "plaintext": {}, "valid": valid}
+            continue
 
         # Walk every group block in the envelope; try each candidate
         # cipher the bag holds for that group — first success wins, and
@@ -413,52 +543,43 @@ def _lines_with_keybag(
         # Groups we hold no key for stay silent (no $no_read_key entry
         # — matches what an outside observer would see).
         plaintext: dict[str, dict[str, Any]] = {}
-        for key, block in env.items():
-            if not isinstance(block, dict) or "ciphertext" not in block:
-                continue
+        plaintext_error: ValueError | None = None
+        for key, group_input in groups_from_env.items():
             candidates = bag.get(key)
             if not candidates:
                 continue
-            # Decode once: a bad base64 payload fails identically for
-            # every candidate, so it is a $decrypt_error, not a retry.
-            try:
-                ct_bytes = base64.b64decode(block["ciphertext"])
-            except Exception:  # noqa: BLE001 — bad ciphertext doesn't abort the stream
-                plaintext[key] = {"$decrypt_error": True}
-                continue
+            ct_bytes = group_input["ciphertext"]
             saw_no_key = False
             for cipher in candidates:
                 try:
                     pt = cipher.decrypt(ct_bytes, _aad_bytes_for(env, key))
-                    plaintext[key] = json.loads(pt.decode("utf-8"))
-                    break
                 except _cipher.NotARecipientError:
                     saw_no_key = True
-                except Exception:  # noqa: BLE001 — bad ciphertext doesn't abort the stream
-                    pass
+                    continue
+                except Exception:  # noqa: BLE001 - authenticated open failed
+                    continue
+                try:
+                    plaintext[key] = _decode_plaintext_object(pt, key)
+                except ValueError as error:
+                    plaintext_error = error
+                break
+            if plaintext_error is not None:
+                break
             if key not in plaintext:
                 plaintext[key] = (
                     {"$no_read_key": True} if saw_no_key else {"$decrypt_error": True}
                 )
-
-        sig_ok = True
-        if verify_signatures:
-            try:
-                sig_ok = DeviceKey.verify(
-                    env["device_identity"],
-                    env["row_hash"].encode("ascii"),
-                    _signature_from_b64(env["signature"]),
-                )
-            except Exception:  # noqa: BLE001
-                sig_ok = False
+        if plaintext_error is not None:
+            yield _parse_error_triple(plaintext_error)
+            continue
+        valid["aad"] = not any(
+            body.get("$decrypt_error") is True for body in plaintext.values()
+        )
 
         yield {
             "envelope": env,
             "plaintext": plaintext,
-            "valid": {
-                "signature": sig_ok,
-                "chain": chain_ok,
-            },
+            "valid": valid,
         }
 
 
@@ -468,6 +589,7 @@ def read_as_recipient(
     *,
     group: str = "default",
     verify_signatures: bool = True,
+    pre_decrypt: PreDecryptGate | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Read a foreign log that is NOT part of this workspace's yaml.
 
@@ -534,57 +656,66 @@ def read_as_recipient(
             if not line:
                 continue
             try:
-                env = json.loads(line)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"{log_path}:{lineno}: invalid JSON: {e}") from e
-
-            event_type = env["event_type"]
-            chain_ok = verify_chain_link(
-                prev_hash_by_event, event_type, env["prev_hash"], env["row_hash"]
-            )
+                try:
+                    env = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        f"{log_path}:{lineno}: invalid JSON: {error}"
+                    ) from error
+                valid, groups_from_env = _scan_envelope_before_decrypt(
+                    env,
+                    prev_hash_by_event,
+                )
+            except Exception as error:  # noqa: BLE001 - one malformed row must not end the stream
+                yield _parse_error_triple(error)
+                continue
+            if not verify_signatures:
+                valid["signature"] = False
+            if pre_decrypt is not None and not pre_decrypt(env, valid):
+                yield {"envelope": env, "plaintext": {}, "valid": valid}
+                continue
 
             plaintext: dict[str, dict[str, Any]] = {}
-            g_block = env.get(group)
-            if isinstance(g_block, dict) and "ciphertext" in g_block:
-                ct_bytes = base64.b64decode(g_block["ciphertext"])
+            plaintext_error: ValueError | None = None
+            group_input = groups_from_env.get(group)
+            if group_input is not None:
+                ct_bytes = group_input["ciphertext"]
                 saw_no_key = False
                 aad_bytes = _aad_bytes_for(env, group)
                 for candidate in ciphers:
                     try:
                         pt = candidate.decrypt(ct_bytes, aad_bytes)
-                        plaintext[group] = json.loads(pt.decode("utf-8"))
-                        # Promote the winner so later lines try it first.
-                        if ciphers[0] is not candidate:
-                            ciphers.remove(candidate)
-                            ciphers.insert(0, candidate)
-                        break
                     except _cipher.NotARecipientError:
                         saw_no_key = True
-                    except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
-                        pass
+                        continue
+                    except Exception:  # noqa: BLE001 - authenticated open failed
+                        continue
+                    try:
+                        plaintext[group] = _decode_plaintext_object(pt, group)
+                    except ValueError as error:
+                        plaintext_error = error
+                        break
+                    # Promote the winner so later lines try it first.
+                    if ciphers[0] is not candidate:
+                        ciphers.remove(candidate)
+                        ciphers.insert(0, candidate)
+                    break
+                if plaintext_error is not None:
+                    yield _parse_error_triple(plaintext_error)
+                    continue
                 if group not in plaintext:
                     plaintext[group] = (
                         {"$no_read_key": True} if saw_no_key else {"$decrypt_error": True}
                     )
 
-            sig_ok = True
-            if verify_signatures:
-                try:
-                    sig_ok = DeviceKey.verify(
-                        env["device_identity"],
-                        env["row_hash"].encode("ascii"),
-                        _signature_from_b64(env["signature"]),
-                    )
-                except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
-                    sig_ok = False
+            valid["aad"] = not any(
+                body.get("$decrypt_error") is True for body in plaintext.values()
+            )
 
             yield {
                 "envelope": env,
                 "plaintext": plaintext,
-                "valid": {
-                    "signature": sig_ok,
-                    "chain": chain_ok,
-                },
+                "valid": valid,
             }
 
 
@@ -705,7 +836,12 @@ def parse_envelope_line(
     }
 
 
-def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
+def _read(
+    log_path: str | Path,
+    cfg: LoadedConfig,
+    *,
+    pre_decrypt: PreDecryptGate | None = None,
+) -> Iterator[dict[str, Any]]:
     """Yield one dict per log entry.
 
     Each yielded dict carries:
@@ -726,7 +862,7 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
         return
 
     with open(log_path, encoding="utf-8") as f:
-        for lineno, line in enumerate(f, 1):
+        for _lineno, line in enumerate(f, 1):
             # ``yield`` sits OUTSIDE this stage so the consumer's own work
             # between next() calls is not attributed to read:_TOTAL — the
             # stage times exactly one entry's parse/verify/decrypt.
@@ -737,98 +873,51 @@ def _read(log_path: str | Path, cfg: LoadedConfig) -> Iterator[dict[str, Any]]:
                 try:
                     with _perf_stage("read:line_parse"):
                         env = json.loads(line)
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"{log_path}:{lineno}: invalid JSON: {e}") from e
+                    with _perf_stage("read:pre_decrypt_verify"):
+                        valid, groups_from_env = _scan_envelope_before_decrypt(
+                            env,
+                            prev_hash_by_event,
+                        )
+                except Exception as error:  # noqa: BLE001 - preserve streaming after a bad row
+                    result = _parse_error_triple(error)
+                    yield result
+                    continue
 
-                event_type = env["event_type"]
+                if pre_decrypt is not None and not pre_decrypt(env, valid):
+                    result = {"envelope": env, "plaintext": {}, "valid": valid}
+                    yield result
+                    continue
 
-                # chain integrity: compare prev_hash against last row_hash
-                with _perf_stage("read:chain_verify"):
-                    chain_ok = verify_chain_link(
-                        prev_hash_by_event, event_type, env["prev_hash"], env["row_hash"]
-                    )
-
-                # row_hash recomputation
-                groups_from_env: dict[str, dict[str, Any]] = {}
                 plaintext: dict[str, dict[str, Any]] = {}
-                # Row_hash recomputation needs EVERY group from the envelope
-                # (even ones we can't decrypt). Start by collecting raw bytes.
-                for gname in env:
-                    if isinstance(env[gname], dict) and "ciphertext" in env[gname]:
-                        with _perf_stage("read:group_decode"):
-                            ct_bytes = base64.b64decode(env[gname]["ciphertext"])
-                        groups_from_env[gname] = {
-                            "ciphertext": ct_bytes,
-                            "field_hashes": env[gname].get("field_hashes", {}),
-                        }
-                # Then decrypt the ones we have keys for.
+                plaintext_error: ValueError | None = None
                 for gname, gcfg in cfg.groups.items():
-                    if gname not in groups_from_env:
+                    group_input = groups_from_env.get(gname)
+                    if group_input is None:
                         continue
-                    ct_bytes = groups_from_env[gname]["ciphertext"]
                     try:
                         with _perf_stage("read:group_decrypt"):
-                            pt = gcfg.cipher.decrypt(ct_bytes, _aad_bytes_for(env, gname))
-                        with _perf_stage("read:group_plaintext_parse"):
-                            plaintext[gname] = json.loads(pt.decode("utf-8"))
+                            pt = gcfg.cipher.decrypt(
+                                group_input["ciphertext"],
+                                _aad_bytes_for(env, gname),
+                            )
                     except _cipher.NotARecipientError:
                         plaintext[gname] = {"$no_read_key": True}
-                    except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
+                        continue
+                    except Exception:  # noqa: BLE001 - authenticated open failed
                         plaintext[gname] = {"$decrypt_error": True}
-
-                # public_out must mirror what the writer put in: envelope fields
-                # handled separately by _compute_row_hash (device_identity/
-                # timestamp/event_id/event_type/level/prev_hash/row_hash/
-                # signature/sequence) plus group names MUST NOT appear in
-                # public_out.
-                _envelope_reserved = {
-                    "device_identity",
-                    "timestamp",
-                    "event_id",
-                    "event_type",
-                    "level",
-                    "prev_hash",
-                    "row_hash",
-                    "signature",
-                    "sequence",
-                }
-                public_out = {
-                    k: v
-                    for k, v in env.items()
-                    if k in cfg.public_fields and k not in _envelope_reserved and k not in cfg.groups
-                }
-                # ``tn_aad`` is an authenticated public echo folded into the
-                # writer's row_hash; fold it back so recompute matches and so a
-                # tampered echo flips row_hash to invalid.
-                if "tn_aad" in env:
-                    public_out["tn_aad"] = env["tn_aad"]
-                with _perf_stage("read:row_hash_verify"):
-                    expected_row_hash = _compute_row_hash(
-                        device_identity=env["device_identity"],
-                        timestamp=env["timestamp"],
-                        event_id=env["event_id"],
-                        event_type=event_type,
-                        level=env["level"],
-                        prev_hash=env["prev_hash"],
-                        public_fields=public_out,
-                        groups=groups_from_env,
+                        continue
+                    try:
+                        with _perf_stage("read:group_plaintext_parse"):
+                            plaintext[gname] = _decode_plaintext_object(pt, gname)
+                    except ValueError as error:
+                        plaintext_error = error
+                        break
+                if plaintext_error is not None:
+                    result = _parse_error_triple(plaintext_error)
+                else:
+                    valid["aad"] = not any(
+                        body.get("$decrypt_error") is True
+                        for body in plaintext.values()
                     )
-                    row_hash_ok = expected_row_hash == env["row_hash"]
-
-                with _perf_stage("read:signature_verify"):
-                    sig_ok = DeviceKey.verify(
-                        env["device_identity"],
-                        env["row_hash"].encode("ascii"),
-                        _signature_from_b64(env["signature"]),
-                    )
-
-                result = {
-                    "envelope": env,
-                    "plaintext": plaintext,
-                    "valid": {
-                        "signature": sig_ok,
-                        "row_hash": row_hash_ok,
-                        "chain": chain_ok,
-                    },
-                }
+                    result = {"envelope": env, "plaintext": plaintext, "valid": valid}
             yield result

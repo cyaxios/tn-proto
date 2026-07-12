@@ -44,7 +44,10 @@ def cmd_read(args: argparse.Namespace) -> int:
         else:
             log_path = Path(args.log).resolve()
     try:
-        for entry in tn.read(log=log_path, all_runs=args.all_runs):
+        read_kwargs = {"log": log_path, "all_runs": args.all_runs}
+        if args.verify is not None:
+            read_kwargs["verify"] = args.verify
+        for entry in tn.read(**read_kwargs):
             ts = entry.timestamp.isoformat() if entry.timestamp else "?"
             level = entry.level or ""
             et = entry.event_type or "?"

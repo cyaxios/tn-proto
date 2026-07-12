@@ -59,9 +59,9 @@ def _user_entries(verify: bool = False):
 
 
 def _user_raw():
-    """tn.read(raw=True) filtered to user events. Yields envelope dicts."""
+    """Explicit unverified inspection of user envelope dicts."""
     return [
-        env for env in tn.read(raw=True)
+        env for env in tn.read(raw=True, verify=False)
         if not env.get("event_type", "").startswith("tn.")
     ]
 

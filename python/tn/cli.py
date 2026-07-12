@@ -774,6 +774,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include entries from previous runs (default: True). "
              "Pass `--no-all-runs` to restrict to this process run.",
     )
+    read_security = p_read.add_mutually_exclusive_group()
+    read_security.add_argument(
+        "--verify",
+        nargs="?",
+        const="raise",
+        choices=("raise", "skip"),
+        default=None,
+        help=(
+            "Explicit verification handling: bare --verify means raise; "
+            "--verify skip drops rejected rows with observability."
+        ),
+    )
+    read_security.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_const",
+        const=False,
+        help="Explicitly disable integrity/authentication/authorization gates.",
+    )
     p_read.set_defaults(func=cmd_read)
 
     # --- tn show env ------------------------------------------------
