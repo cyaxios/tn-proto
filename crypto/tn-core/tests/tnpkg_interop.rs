@@ -197,6 +197,8 @@ fn golden_input() -> Manifest {
         event_count: 4,
         head_row_hash: Some(format!("sha256:{}", "a".repeat(64))),
         state: Some(state),
+        body_sha256: std::collections::BTreeMap::new(),
+        body_sha256_present: false,
         manifest_signature_b64: None,
     }
 }

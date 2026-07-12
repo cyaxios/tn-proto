@@ -34,12 +34,20 @@
 // and signature fields are stripped from the AAD on both sides, so the
 // order (wrap, then sign) is correct.
 //
-// Layer note: this module touches the Node-only `writeTnpkg` / `readTnpkg`
+// Layer note: this module touches the Node-only `writeTnpkg` / `readTnpkgVerified`
 // I/O wrappers (and node:fs for the keystore install), so it lives at the
 // `src/` root rather than under `src/core/` — Layer 1 (src/core) must stay
 // browser-safe. The crypto it composes is itself browser-safe.
 
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
@@ -49,13 +57,19 @@ import { DeviceKey } from "./core/signing.js";
 import {
   type Manifest,
   newManifest,
-  signManifest,
+  prepareManifestBodyIndex,
+  signManifestWithBody,
   toWireDict,
   fromWireDict,
   isManifestSignatureValid,
 } from "./core/tnpkg.js";
-import { readTnpkg, writeTnpkg } from "./tnpkg_io.js";
-import { encryptBodyBlob, decryptBodyBlob, BODY_CIPHER_SUITE, BODY_FRAME } from "./core/body_encryption.js";
+import { readTnpkgVerified, writeTnpkg } from "./tnpkg_io.js";
+import {
+  encryptBodyBlob,
+  decryptBodyBlob,
+  BODY_CIPHER_SUITE,
+  BODY_FRAME,
+} from "./core/body_encryption.js";
 import {
   buildRecipientWraps,
   manifestAadForWrap,
@@ -132,7 +146,7 @@ export async function sealBundleForRecipient(input: SealBundleInput): Promise<Se
 
   // 1. Read the plaintext kit_bundle body + its manifest. We reuse the
   //    minting primitive's output rather than re-deriving kit bytes.
-  const { manifest: srcManifest, body: srcBody } = readTnpkg(input.unsealedBundle);
+  const { manifest: srcManifest, body: srcBody } = readTnpkgVerified(input.unsealedBundle);
   if (srcManifest.kind !== "kit_bundle") {
     throw new Error(
       `sealBundleForRecipient: expected an unsealed kit_bundle, got kind ` +
@@ -186,6 +200,11 @@ export async function sealBundleForRecipient(input: SealBundleInput): Promise<Se
   };
   manifest.state = baseState;
 
+  // The exact final encrypted body index is part of recipient-wrap AAD, so
+  // install it before deriving the preview skeleton used by the wrapper.
+  const outBody: Record<string, Uint8Array> = { "body/encrypted.bin": encrypted };
+  prepareManifestBodyIndex(manifest, outBody);
+
   // Skeleton == the exact wire shape, minus the signature. buildRecipientWraps
   // computes AAD = manifestAadForWrap(skeleton); the consumer recomputes it as
   // manifestAadForWrap(toWireDict(manifest, true)) with the signature + wraps
@@ -201,10 +220,7 @@ export async function sealBundleForRecipient(input: SealBundleInput): Promise<Se
   if (wrappedState && typeof wrappedState === "object") {
     manifest.state = wrappedState as Record<string, unknown>;
   }
-  signManifest(manifest, input.publisherKey);
-
-  // Body is the single encrypted blob (plaintext members are gone).
-  const outBody: Record<string, Uint8Array> = { "body/encrypted.bin": encrypted };
+  signManifestWithBody(manifest, outBody, input.publisherKey);
   const outPath = writeTnpkg(input.outPath, manifest, outBody);
 
   return { outPath, bek };
@@ -257,7 +273,10 @@ function _kitBodyEncryption(manifest: Manifest): Record<string, unknown> | null 
 
 // Recipient wraps addressed to `ourDid` (plural `recipient_wraps` wins over
 // singular `recipient_wrap` when both present).
-function _selectKitWraps(bodyEnc: Record<string, unknown>, ourDid: string): Record<string, unknown>[] {
+function _selectKitWraps(
+  bodyEnc: Record<string, unknown>,
+  ourDid: string,
+): Record<string, unknown>[] {
   const candidates: Record<string, unknown>[] = [];
   const wrapsArray = bodyEnc["recipient_wraps"];
   const wrapSingular = bodyEnc["recipient_wrap"];
@@ -345,7 +364,7 @@ export async function absorbSealedKitBundle(
   let manifest: Manifest;
   let body: Map<string, Uint8Array>;
   try {
-    const parsed = readTnpkg(source);
+    const parsed = readTnpkgVerified(source);
     manifest = parsed.manifest;
     body = parsed.body;
   } catch (err) {
@@ -381,7 +400,10 @@ export async function absorbSealedKitBundle(
 
   const candidates = _selectKitWraps(bodyEnc, ourDid);
   if (candidates.length === 0) {
-    return _kitReject(manifest.kind, `sealed-box wrap is not addressed to ${JSON.stringify(ourDid)}.`);
+    return _kitReject(
+      manifest.kind,
+      `sealed-box wrap is not addressed to ${JSON.stringify(ourDid)}.`,
+    );
   }
 
   // AAD over the WIRE manifest, signature + wraps stripped — must match
@@ -404,7 +426,10 @@ export async function absorbSealedKitBundle(
   try {
     decrypted = await decryptBodyBlob(encrypted, bek);
   } catch (err) {
-    return _kitReject(manifest.kind, `body decrypt with unwrapped BEK failed: ${(err as Error).message}`);
+    return _kitReject(
+      manifest.kind,
+      `body decrypt with unwrapped BEK failed: ${(err as Error).message}`,
+    );
   }
 
   const { accepted, skipped, replaced } = _installKitMembers(decrypted, opts.keystoreDir);

@@ -43,12 +43,12 @@ import {
   isManifestSignatureValid,
   newManifest,
   nowIsoMillis,
-  signManifest,
+  signManifestWithBody,
   type Manifest,
   type ManifestKind,
   type VectorClock,
 } from "../core/tnpkg.js";
-import { readTnpkg, writeTnpkg } from "../tnpkg_io.js";
+import { readTnpkgVerified, writeTnpkg } from "../tnpkg_io.js";
 import { encryptBodyBlob, BODY_CIPHER_SUITE, BODY_FRAME } from "../core/body_encryption.js";
 import {
   sealBundleForRecipient,
@@ -72,7 +72,12 @@ import {
 } from "../core/decrypt.js";
 import { jweSeal } from "../core/jwe.js";
 import { buildEnvelopeLine } from "../core/envelope.js";
-import { createJweGroup, jweAddRecipient, jweRevokeRecipient, jweRotateGroup } from "./jwe_group.js";
+import {
+  createJweGroup,
+  jweAddRecipient,
+  jweRevokeRecipient,
+  jweRotateGroup,
+} from "./jwe_group.js";
 import { deriveGroupKey, indexTokenFor } from "../core/indexing.js";
 import {
   createHibeGroup,
@@ -95,7 +100,12 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { ZERO_HASH, rowHash, sha256HexBytes, verifyChainLink } from "../core/chain.js";
 import { signatureB64, signatureFromB64, verify } from "../core/signing.js";
 import { asDid, asRowHash, asSignatureB64 } from "../core/types.js";
-import { authoritativeYamlFor, loadConfig, type CeremonyConfig, type GroupConfig } from "./config.js";
+import {
+  authoritativeYamlFor,
+  loadConfig,
+  type CeremonyConfig,
+  type GroupConfig,
+} from "./config.js";
 import { commitGroupKeys, loadJweKeys, loadKeystore, type LoadedKeystore } from "./keystore.js";
 import { scanAttestedEventRecords, yamlRecipientDids } from "./reconcile.js";
 import { createRequire } from "node:module";
@@ -267,7 +277,12 @@ function expandTemplatedLogPath(pattern: string, yamlDir: string): string[] {
     const next: string[] = [];
     if (seg.includes("*") || seg.includes("?")) {
       const re = new RegExp(
-        "^" + seg.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
+        "^" +
+          seg
+            .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+            .replace(/\*/g, ".*")
+            .replace(/\?/g, ".") +
+          "$",
       );
       for (const base of bases) {
         let entries: string[];
@@ -529,9 +544,7 @@ export class NodeRuntime {
     // Honour the session-level signing override at the TS surface.
     // Per-call `signOverride` still wins.
     const resolvedSign =
-      signOverride !== undefined && signOverride !== null
-        ? signOverride
-        : _sessionSignOverride;
+      signOverride !== undefined && signOverride !== null ? signOverride : _sessionSignOverride;
     // Non-btn ceremonies (any hibe group) run the TS-side pipeline: the
     // Rust/wasm core deliberately carries no hibe cipher (contract D1 —
     // tn-core stays scheme-free), so WasmRuntime.init would reject the
@@ -550,8 +563,7 @@ export class NodeRuntime {
     }
     // Per-emit aad is bound by the native (wasm) tn-core runtime, byte-
     // identical to the pure pipeline; an empty/absent marker binds nothing.
-    const aadArg =
-      aadOverride && Object.keys(aadOverride).length > 0 ? aadOverride : null;
+    const aadArg = aadOverride && Object.keys(aadOverride).length > 0 ? aadOverride : null;
     // SDK never crashes user space: an INFRASTRUCTURE failure in the wasm
     // boundary — the core is unavailable (edge/serverless), init fails, or a
     // Rust panic traps/aborts during the emit — is contained here and surfaced
@@ -737,7 +749,10 @@ export class NodeRuntime {
     // merged dict binds nothing and adds no echo — aad-free records stay
     // byte-identical to the pre-aad wire shape.
     const aadEcho: Record<string, Record<string, unknown>> = {};
-    const groupPayloads = new Map<string, { ct: Uint8Array; fieldHashes: Record<string, string> }>();
+    const groupPayloads = new Map<
+      string,
+      { ct: Uint8Array; fieldHashes: Record<string, string> }
+    >();
     for (const [gname, plainFields] of perGroup) {
       const gcfg = cfg.groups.get(gname)!;
       const indexKey = deriveGroupKey(
@@ -784,7 +799,8 @@ export class NodeRuntime {
       let ct: Uint8Array;
       try {
         const pre = preSealed?.get(gname);
-        ct = pre !== undefined ? pre : this._sealGroupTs(gname, gcfg.cipher, plaintextBytes, aadBytes);
+        ct =
+          pre !== undefined ? pre : this._sealGroupTs(gname, gcfg.cipher, plaintextBytes, aadBytes);
       } catch (e) {
         // Not a publisher for this group — skip it, exactly like Python's
         // NotAPublisherError branch (warn, drop the group, keep the emit).
@@ -819,8 +835,7 @@ export class NodeRuntime {
     const seq = slot.seq + 1;
     const prevHash = slot.prevHash;
     const timestamp =
-      timestampOverride ??
-      new Date().toISOString().replace(/\.(\d{3})Z$/, ".$1000Z");
+      timestampOverride ?? new Date().toISOString().replace(/\.(\d{3})Z$/, ".$1000Z");
     const eventId = eventIdOverride ?? randomUUID();
     const levelNorm = level.toLowerCase();
 
@@ -841,7 +856,10 @@ export class NodeRuntime {
     const sig = this.keystore.device.sign(new Uint8Array(Buffer.from(rh, "ascii")));
 
     // 5. build + write the envelope line.
-    const groupPayloadsWire: Record<string, { ciphertext: string; field_hashes: Record<string, string> }> = {};
+    const groupPayloadsWire: Record<
+      string,
+      { ciphertext: string; field_hashes: Record<string, string> }
+    > = {};
     for (const [gname, g] of groupPayloads) {
       groupPayloadsWire[gname] = {
         ciphertext: Buffer.from(g.ct).toString("base64"),
@@ -981,7 +999,15 @@ export class NodeRuntime {
         await jweSeal(this._jweRecipientPubs(gname), canonicalBytes(plainFields), aadBytes),
       );
     }
-    return this._emitViaTs(level, eventType, fieldsOut, undefined, undefined, aad ?? undefined, preSealed);
+    return this._emitViaTs(
+      level,
+      eventType,
+      fieldsOut,
+      undefined,
+      undefined,
+      aad ?? undefined,
+      preSealed,
+    );
   }
 
   /** jwe add_recipient: append a raw 32-byte X25519 public key to the group's
@@ -1226,7 +1252,10 @@ export class NodeRuntime {
     opts: { readerDid?: string; idPath?: string; outPath?: string } = {},
   ): { kitPath: string; idPath: string } {
     const mat = this._requireHibeGroup("grantReader", group);
-    const safeStem = (opts.readerDid ?? "reader").split(":").pop()!.replace(/[^A-Za-z0-9._-]/g, "_");
+    const safeStem = (opts.readerDid ?? "reader")
+      .split(":")
+      .pop()!
+      .replace(/[^A-Za-z0-9._-]/g, "_");
     const outPath = pathResolve(opts.outPath ?? join(process.cwd(), `${safeStem}.tnpkg`));
     const targetPath = opts.idPath ?? mat.idPath;
     const sk = hibeMintReaderKey(mat, targetPath);
@@ -1261,7 +1290,7 @@ export class NodeRuntime {
     if (opts.readerDid !== undefined) manifestArgs.toDid = opts.readerDid;
     const manifest = newManifest(manifestArgs);
     manifest.state = { kits: kitsMeta, kind: "readers-only" };
-    signManifest(manifest, this.keystore.device);
+    signManifestWithBody(manifest, body, this.keystore.device);
     writeTnpkg(outPath, manifest, body);
 
     if (opts.readerDid) {
@@ -1314,13 +1343,19 @@ export class NodeRuntime {
     this._hibeGrantsWrite(group, remaining);
     this._refreshHibeKeystore(group);
 
-    const ts = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    const ts = new Date()
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .replace(/\.\d+Z$/, "Z");
     const outDir = pathResolve(opts.outDir ?? join(process.cwd(), `hibe_regrant_${ts}`));
     mkdirSync(outDir, { recursive: true });
 
     const kitPaths: string[] = [];
     for (const g of remaining) {
-      const safeStem = g.reader_did.split(":").pop()!.replace(/[^A-Za-z0-9._-]/g, "_");
+      const safeStem = g.reader_did
+        .split(":")
+        .pop()!
+        .replace(/[^A-Za-z0-9._-]/g, "_");
       const kit = join(outDir, `${safeStem}.tnpkg`);
       this.grantReader(group, { readerDid: g.reader_did, outPath: kit });
       kitPaths.push(kit);
@@ -1678,11 +1713,10 @@ export class NodeRuntime {
     // env right before the Rust runtime sees it).
     ensureProcessRunId();
     try {
-      this.wasm = mod.WasmRuntime.initWith(
-        this.config.yamlPath,
-        nodeStorageAdapter(),
-        { skipCeremonyInitEmit: true, skipPolicyPublishedEmit: true },
-      );
+      this.wasm = mod.WasmRuntime.initWith(this.config.yamlPath, nodeStorageAdapter(), {
+        skipCeremonyInitEmit: true,
+        skipPolicyPublishedEmit: true,
+      });
     } catch (err) {
       throw new Error(
         `attachWasm: failed to initialize WasmRuntime for ${this.config.yamlPath}: ${
@@ -1906,7 +1940,7 @@ export class NodeRuntime {
         toDid: opts.runtimeDid,
       });
       manifest.state = { kits: kitsMeta, kind: "readers-only" };
-      signManifest(manifest, this.keystore.device);
+      signManifestWithBody(manifest, body, this.keystore.device);
       const out = writeTnpkg(opts.outPath, manifest, body);
 
       if (opts.label !== undefined) {
@@ -2233,7 +2267,9 @@ export class NodeRuntime {
     opts: { linkedVault?: string; linkedProjectId?: string } = {},
   ): void {
     if (mode !== "local" && mode !== "linked") {
-      throw new Error(`setCeremonyMode: mode must be 'local' or 'linked', got ${JSON.stringify(mode)}`);
+      throw new Error(
+        `setCeremonyMode: mode must be 'local' or 'linked', got ${JSON.stringify(mode)}`,
+      );
     }
     const linkedVault = opts.linkedVault;
     const linkedProjectId = opts.linkedProjectId;
@@ -2479,7 +2515,7 @@ export class NodeRuntime {
     if (extras.headRowHash !== undefined) manifest.headRowHash = extras.headRowHash;
     if (extras.state !== undefined) manifest.state = extras.state;
 
-    signManifest(manifest, this.keystore.device);
+    signManifestWithBody(manifest, body, this.keystore.device);
     return writeTnpkg(outPath, manifest, body);
   }
 
@@ -2518,7 +2554,8 @@ export class NodeRuntime {
     }
     const built = this._buildKitBundleBody({ full: true, groups: opts.groups });
     const encrypted = await encryptBodyBlob(built.body, bek);
-    const ciphertextSha = "sha256:" + createHash("sha256").update(Buffer.from(encrypted)).digest("hex");
+    const ciphertextSha =
+      "sha256:" + createHash("sha256").update(Buffer.from(encrypted)).digest("hex");
 
     // Replace the plaintext body members with the single encrypted blob and
     // merge the body_encryption descriptor into the existing state (which
@@ -2541,7 +2578,7 @@ export class NodeRuntime {
       scope: "full",
     });
     manifest.state = state;
-    signManifest(manifest, this.keystore.device);
+    signManifestWithBody(manifest, body, this.keystore.device);
     return writeTnpkg(outPath, manifest, body);
   }
 
@@ -2550,7 +2587,7 @@ export class NodeRuntime {
     let manifest: Manifest;
     let body: Map<string, Uint8Array>;
     try {
-      const parsed = readTnpkg(source);
+      const parsed = readTnpkgVerified(source);
       manifest = parsed.manifest;
       body = parsed.body;
     } catch (e) {
@@ -2633,7 +2670,7 @@ export class NodeRuntime {
   async absorbPkgAsync(source: string | Uint8Array): Promise<AbsorbReceipt> {
     let manifest: Manifest;
     try {
-      manifest = readTnpkg(source).manifest;
+      manifest = readTnpkgVerified(source).manifest;
     } catch {
       return this.absorbPkg(source); // let the sync path report the parse error
     }
@@ -2725,9 +2762,7 @@ export class NodeRuntime {
           writeFileSync(join(td, `${gname}.hibe.mpk`), Buffer.from(mat.mpk));
           writeFileSync(join(td, `${gname}.hibe.idpath`), mat.idPath, "utf8");
           writeFileSync(join(td, `${gname}.hibe.sk`), Buffer.from(sk));
-          const grants = this._hibeGrantsLoad(gname).filter(
-            (g) => g.reader_did !== recipientDid,
-          );
+          const grants = this._hibeGrantsLoad(gname).filter((g) => g.reader_did !== recipientDid);
           grants.push({ reader_did: recipientDid, id_path: mat.idPath });
           this._hibeGrantsWrite(gname, grants);
           continue;
@@ -2784,7 +2819,7 @@ export class NodeRuntime {
       toDid: runtimeDid,
     });
     manifest.state = { kits: kitsMeta, kind: "readers-only" };
-    signManifest(manifest, this.keystore.device);
+    signManifestWithBody(manifest, body, this.keystore.device);
     return writeTnpkg(outPath, manifest, body);
   }
 
@@ -3144,8 +3179,10 @@ export class NodeRuntime {
     let existingDoc: Record<string, unknown>;
     let incomingDoc: Record<string, unknown>;
     try {
-      existingDoc = (parseYaml(Buffer.from(existingYaml).toString("utf8")) as Record<string, unknown>) ?? {};
-      incomingDoc = (parseYaml(Buffer.from(incomingYaml).toString("utf8")) as Record<string, unknown>) ?? {};
+      existingDoc =
+        (parseYaml(Buffer.from(existingYaml).toString("utf8")) as Record<string, unknown>) ?? {};
+      incomingDoc =
+        (parseYaml(Buffer.from(incomingYaml).toString("utf8")) as Record<string, unknown>) ?? {};
     } catch {
       return { vaultOnly: false };
     }
@@ -3154,7 +3191,12 @@ export class NodeRuntime {
     }
     const existingVault = existingDoc["vault"] as Record<string, unknown> | undefined;
     const incomingVault = incomingDoc["vault"] as Record<string, unknown> | undefined;
-    if (!existingVault || !incomingVault || typeof existingVault !== "object" || typeof incomingVault !== "object") {
+    if (
+      !existingVault ||
+      !incomingVault ||
+      typeof existingVault !== "object" ||
+      typeof incomingVault !== "object"
+    ) {
       return { vaultOnly: false };
     }
     if (existingVault["enabled"] === false) return { vaultOnly: false };
@@ -3179,7 +3221,12 @@ export class NodeRuntime {
       }
       const ceremony = patchedDoc["ceremony"] as Record<string, unknown> | undefined;
       const incomingCeremony = incomingDoc["ceremony"] as Record<string, unknown> | undefined;
-      if (ceremony && incomingCeremony && typeof ceremony === "object" && typeof incomingCeremony === "object") {
+      if (
+        ceremony &&
+        incomingCeremony &&
+        typeof ceremony === "object" &&
+        typeof incomingCeremony === "object"
+      ) {
         if (!nonEmpty(ceremony["linked_vault"])) {
           const incomingUrl = nonEmpty(incomingCeremony["linked_vault"]);
           if (incomingUrl) ceremony["linked_vault"] = incomingUrl;
@@ -3733,10 +3780,7 @@ export class NodeRuntime {
       : {};
     const authGroups = (authDoc.groups ?? {}) as Record<string, Record<string, unknown>>;
 
-    const requested =
-      opts.groups && opts.groups.length > 0
-        ? new Set(opts.groups)
-        : null;
+    const requested = opts.groups && opts.groups.length > 0 ? new Set(opts.groups) : null;
 
     const body: Record<string, Uint8Array> = {};
     const blocks: Record<string, Record<string, unknown>> = {};
@@ -3753,13 +3797,11 @@ export class NodeRuntime {
       body[`body/keys/${group}.btn.state`] = new Uint8Array(readFileSync(statePath));
       body[`body/keys/${group}.btn.mykit`] = new Uint8Array(readFileSync(mykitPath));
       // Carry the authoritative yaml block if present, else a minimal one.
-      blocks[group] =
-        ownEntry(authGroups, group) ??
-        {
-          policy: gcfg?.policy ?? "private",
-          cipher: "btn",
-          recipients: this.did ? [{ recipient_identity: this.did }] : [],
-        };
+      blocks[group] = ownEntry(authGroups, group) ?? {
+        policy: gcfg?.policy ?? "private",
+        cipher: "btn",
+        recipients: this.did ? [{ recipient_identity: this.did }] : [],
+      };
       carried.push(group);
     }
 
@@ -3782,7 +3824,7 @@ export class NodeRuntime {
       toDid: authorDid,
     });
     manifest.state = { groups: blocks, kind: "group-keys-v1" };
-    signManifest(manifest, signKey);
+    signManifestWithBody(manifest, body, signKey);
     return writeTnpkg(outPath, manifest, body);
   }
 
@@ -4027,7 +4069,8 @@ export class NodeRuntime {
           if (typeof t === "string") ts = t;
           const s = env["sequence"];
           if (typeof s === "number") seq = s;
-          else if (typeof s === "string" && s.trim() !== "" && !Number.isNaN(Number(s))) seq = Number(s);
+          else if (typeof s === "string" && s.trim() !== "" && !Number.isNaN(Number(s)))
+            seq = Number(s);
         } catch {
           // Leave ts = "" / seq = -1 (unparseable sorts to the front).
         }
@@ -4264,7 +4307,7 @@ export class NodeRuntime {
     let rowHashOk: boolean;
     try {
       const recomputed = rowHash({
-          device_identity: asDid(envDid),
+        device_identity: asDid(envDid),
         timestamp: envTs,
         eventId: envEventId,
         eventType,
@@ -4306,7 +4349,6 @@ export class NodeRuntime {
       valid: { signature: sigOk, rowHash: rowHashOk, chain: chainOk },
     };
   }
-
 }
 
 function isGroupPayload(
@@ -4346,7 +4388,6 @@ function validateEventType(et: string): void {
     throw new Error(`invalid event_type: ${et}`);
   }
 }
-
 
 export function groupForField(_cfg: CeremonyConfig, _fieldName: string): GroupConfig | undefined {
   return undefined; // reserved for future classifier integration
@@ -4493,7 +4534,9 @@ const _CONTACT_NON_NULL_STRING_KEYS = ["account_id", "label", "claimed_at"] as c
 function _validateContactUpdateBody(doc: unknown): string[] {
   const errors: string[] = [];
   if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
-    return [`contact_update body must be a JSON object; got ${Array.isArray(doc) ? "array" : typeof doc}`];
+    return [
+      `contact_update body must be a JSON object; got ${Array.isArray(doc) ? "array" : typeof doc}`,
+    ];
   }
   const d = doc as Record<string, unknown>;
   for (const key of _CONTACT_REQUIRED_KEYS) {
@@ -4536,7 +4579,10 @@ function _canonicalContactUpdateJson(body: ContactUpdateBody): string {
 
 /** Idempotency key `(account_id, package_did)`,
  *  treating null as a valid value. */
-function _contactRowMatches(existing: Record<string, unknown>, incoming: Record<string, unknown>): boolean {
+function _contactRowMatches(
+  existing: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+): boolean {
   return (
     (existing["account_id"] ?? null) === (incoming["account_id"] ?? null) &&
     (existing["package_did"] ?? null) === (incoming["package_did"] ?? null)

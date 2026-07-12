@@ -277,6 +277,8 @@ pub fn manifest_clock_dominates_js(a: JsValue, b: JsValue) -> Result<bool, JsErr
         event_count: 0,
         head_row_hash: None,
         state: None,
+        body_sha256: std::collections::BTreeMap::new(),
+        body_sha256_present: false,
         manifest_signature_b64: None,
     };
     let mb = Manifest {
@@ -302,6 +304,8 @@ pub fn manifest_clock_merge_js(a: JsValue, b: JsValue) -> Result<JsValue, JsErro
         event_count: 0,
         head_row_hash: None,
         state: None,
+        body_sha256: std::collections::BTreeMap::new(),
+        body_sha256_present: false,
         manifest_signature_b64: None,
     };
     let Value::Object(mut obj) = manifest.to_json() else {

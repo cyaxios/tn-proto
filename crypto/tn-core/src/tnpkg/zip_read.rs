@@ -4,16 +4,18 @@
 //! `manifest.json` plus every `body/...` entry out of a `.tnpkg` archive
 //! (from a path or in-memory bytes via [`TnpkgSource`](super::TnpkgSource)),
 //! enforcing that the archive holds exactly one `manifest.json` and only
-//! well-formed body paths. It does **not** verify the signature — the caller
-//! runs [`verify_manifest`](super::verify_manifest) on the returned manifest.
+//! well-formed body paths. [`read_tnpkg_verified`] is the fail-closed boundary
+//! for consumers; [`read_tnpkg`] remains only for named legacy inspection that
+//! does not parse, decrypt, or apply body state.
 
-use std::collections::BTreeMap;
-use std::io::{Cursor, Read, Seek};
+use std::collections::{BTreeMap, HashSet};
+use std::fs::File;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use serde_json::Value;
 
 use super::zip_write::validate_tnpkg_body_name;
-use super::{Manifest, TnpkgSource};
+use super::{verify_manifest, verify_manifest_body_index, Manifest, TnpkgSource};
 use crate::{Error, Result};
 
 // --------------------------------------------------------------------------
@@ -51,13 +53,16 @@ pub const MAX_PKG_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 /// is the signature of a zip bomb: a few KiB on disk inflating to gigabytes.
 pub const MAX_PKG_COMPRESSION_RATIO: u64 = 200;
 
+const MAX_CENTRAL_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Read a `.tnpkg` and return the parsed manifest plus its body map (entry name
 /// → bytes).
 ///
 /// Parses `manifest.json` and collects every `body/...` entry, validating that
 /// the archive contains exactly one `manifest.json` and only well-formed body
-/// paths. Does **not** verify the signature — the caller runs [`verify_manifest`](super::verify_manifest)
-/// on the returned manifest (as [`crate::Runtime::absorb`] does). Inverse of
+/// paths. Does **not** verify the signature or body index and must not be used
+/// by code that parses, decrypts, or applies body state. Use
+/// [`read_tnpkg_verified`] for that trust boundary. Inverse of
 /// [`write_tnpkg`](super::write_tnpkg) / [`write_tnpkg_bytes`](super::write_tnpkg_bytes).
 ///
 /// # Errors
@@ -68,7 +73,7 @@ pub const MAX_PKG_COMPRESSION_RATIO: u64 = 200;
 /// manifest that fails [`Manifest::from_json`].
 #[allow(clippy::needless_pass_by_value)]
 pub fn read_tnpkg(source: TnpkgSource<'_>) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
-    let bytes = match source {
+    match source {
         TnpkgSource::Path(p) => {
             if !p.exists() {
                 return Err(Error::Io(std::io::Error::new(
@@ -76,70 +81,206 @@ pub fn read_tnpkg(source: TnpkgSource<'_>) -> Result<(Manifest, BTreeMap<String,
                     format!("absorb: source path does not exist: {}", p.display()),
                 )));
             }
-            std::fs::read(p)?
+            let mut file = File::open(p)?;
+            validate_zip_metadata(&mut file)?;
+            file.seek(SeekFrom::Start(0))?;
+            read_tnpkg_inner(file, false)
         }
-        TnpkgSource::Bytes(b) => b.to_vec(),
-    };
-    validate_zip_manifest_entry_count(&bytes)?;
-    read_tnpkg_inner(Cursor::new(bytes))
+        TnpkgSource::Bytes(b) => {
+            let mut cursor = Cursor::new(b);
+            validate_zip_metadata(&mut cursor)?;
+            cursor.seek(SeekFrom::Start(0))?;
+            read_tnpkg_inner(cursor, false)
+        }
+    }
 }
 
-fn validate_zip_manifest_entry_count(bytes: &[u8]) -> Result<()> {
-    let Some(eocd_offset) = find_eocd(bytes) else {
-        return Ok(());
-    };
-    if eocd_offset + 22 > bytes.len() {
-        return Ok(());
+/// Read a `.tnpkg` through the fail-closed trust boundary.
+///
+/// Central-directory limits and member names are checked first, then only the
+/// bounded manifest is read and its signature verified. Body entries are read
+/// only after that signature succeeds, and the exact body index is verified
+/// before any body bytes are returned to a caller.
+#[allow(clippy::needless_pass_by_value)]
+pub fn read_tnpkg_verified(
+    source: TnpkgSource<'_>,
+) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
+    match source {
+        TnpkgSource::Path(p) => {
+            if !p.exists() {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("absorb: source path does not exist: {}", p.display()),
+                )));
+            }
+            let mut file = File::open(p)?;
+            validate_zip_metadata(&mut file)?;
+            file.seek(SeekFrom::Start(0))?;
+            read_tnpkg_inner(file, true)
+        }
+        TnpkgSource::Bytes(b) => {
+            let mut cursor = Cursor::new(b);
+            validate_zip_metadata(&mut cursor)?;
+            cursor.seek(SeekFrom::Start(0))?;
+            read_tnpkg_inner(cursor, true)
+        }
     }
-    let entry_count = u16::from_le_bytes([bytes[eocd_offset + 10], bytes[eocd_offset + 11]]);
-    let cd_size = u32::from_le_bytes([
-        bytes[eocd_offset + 12],
-        bytes[eocd_offset + 13],
-        bytes[eocd_offset + 14],
-        bytes[eocd_offset + 15],
-    ]) as usize;
-    let cd_offset = u32::from_le_bytes([
-        bytes[eocd_offset + 16],
-        bytes[eocd_offset + 17],
-        bytes[eocd_offset + 18],
-        bytes[eocd_offset + 19],
-    ]) as usize;
-    if cd_offset
-        .checked_add(cd_size)
-        .is_none_or(|end| end > bytes.len())
+}
+
+fn validate_zip_metadata<R: Read + Seek>(reader: &mut R) -> Result<()> {
+    const EOCD_FIXED_BYTES: u64 = 22;
+    const MAX_EOCD_BYTES: u64 = EOCD_FIXED_BYTES + u16::MAX as u64;
+    const CENTRAL_HEADER_FIXED_BYTES: u64 = 46;
+
+    let file_len = reader.seek(SeekFrom::End(0))?;
+    let tail_len = file_len.min(MAX_EOCD_BYTES);
+    reader.seek(SeekFrom::End(-(tail_len as i64)))?;
+    let mut tail = vec![0u8; tail_len as usize];
+    reader.read_exact(&mut tail)?;
+    let relative_eocd = find_eocd(&tail).ok_or_else(|| Error::Malformed {
+        kind: "tnpkg zip",
+        reason: "missing EOCD with a comment that ends exactly at archive end".into(),
+    })?;
+    let eocd_offset = file_len - tail_len + relative_eocd as u64;
+
+    let disk_number = read_u16(&tail, relative_eocd + 4);
+    let central_directory_disk = read_u16(&tail, relative_eocd + 6);
+    let entries_on_disk = read_u16(&tail, relative_eocd + 8);
+    let entry_count = read_u16(&tail, relative_eocd + 10);
+    let central_directory_size = read_u32(&tail, relative_eocd + 12);
+    let central_directory_offset = read_u32(&tail, relative_eocd + 16);
+
+    if disk_number == u16::MAX
+        || central_directory_disk == u16::MAX
+        || entries_on_disk == u16::MAX
+        || entry_count == u16::MAX
+        || central_directory_size == u32::MAX
+        || central_directory_offset == u32::MAX
     {
-        return Ok(());
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: "ZIP64 sentinel metadata is unsupported for `.tnpkg` archives".into(),
+        });
+    }
+    if disk_number != 0 || central_directory_disk != 0 {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: "multi-disk ZIP metadata is unsupported for `.tnpkg` archives".into(),
+        });
+    }
+    if entries_on_disk != entry_count {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: format!(
+                "inconsistent EOCD entry counts: disk declares {entries_on_disk}, archive declares {entry_count}"
+            ),
+        });
+    }
+    if entry_count as usize > MAX_PKG_ENTRY_COUNT {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: format!(
+                "EOCD entry count declares {entry_count} entries, exceeding the limit of {MAX_PKG_ENTRY_COUNT}"
+            ),
+        });
     }
 
-    let mut cur = cd_offset;
+    let central_directory_size = u64::from(central_directory_size);
+    let central_directory_offset = u64::from(central_directory_offset);
+    if central_directory_size > MAX_CENTRAL_DIRECTORY_BYTES {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: format!(
+                "central directory size {central_directory_size} exceeds the limit of {MAX_CENTRAL_DIRECTORY_BYTES} bytes"
+            ),
+        });
+    }
+    let central_directory_end = central_directory_offset
+        .checked_add(central_directory_size)
+        .ok_or_else(|| Error::Malformed {
+            kind: "tnpkg zip",
+            reason: "central directory metadata offset and size overflow".into(),
+        })?;
+    if central_directory_end > eocd_offset {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: "central directory metadata extends past the EOCD".into(),
+        });
+    }
+    let minimum_directory_size = u64::from(entry_count) * CENTRAL_HEADER_FIXED_BYTES;
+    if central_directory_size < minimum_directory_size {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: format!(
+                "central directory metadata is truncated: {entry_count} entries require at least {minimum_directory_size} bytes, declared {central_directory_size}"
+            ),
+        });
+    }
+
+    reader.seek(SeekFrom::Start(central_directory_offset))?;
+    let mut cursor = central_directory_offset;
     let mut manifest_count = 0usize;
+    let mut names = HashSet::with_capacity(entry_count as usize);
     for _ in 0..entry_count {
-        if cur.checked_add(46).is_none_or(|end| end > bytes.len()) {
-            return Ok(());
+        let fixed_end = cursor
+            .checked_add(CENTRAL_HEADER_FIXED_BYTES)
+            .filter(|end| *end <= central_directory_end)
+            .ok_or_else(|| Error::Malformed {
+                kind: "tnpkg zip",
+                reason: "central directory metadata is truncated within an entry header".into(),
+            })?;
+        let mut fixed = [0u8; CENTRAL_HEADER_FIXED_BYTES as usize];
+        reader.read_exact(&mut fixed)?;
+        if fixed[..4] != [0x50, 0x4b, 0x01, 0x02] {
+            return Err(Error::Malformed {
+                kind: "tnpkg zip",
+                reason: "central directory metadata has an invalid entry signature".into(),
+            });
         }
-        if u32::from_le_bytes([bytes[cur], bytes[cur + 1], bytes[cur + 2], bytes[cur + 3]])
-            != 0x0201_4b50
-        {
-            return Ok(());
+
+        let name_len = u64::from(read_u16(&fixed, 28));
+        let extra_len = u64::from(read_u16(&fixed, 30));
+        let comment_len = u64::from(read_u16(&fixed, 32));
+        let record_end = fixed_end
+            .checked_add(name_len)
+            .and_then(|end| end.checked_add(extra_len))
+            .and_then(|end| end.checked_add(comment_len))
+            .filter(|end| *end <= central_directory_end)
+            .ok_or_else(|| Error::Malformed {
+                kind: "tnpkg zip",
+                reason: "central directory metadata is truncated within an entry".into(),
+            })?;
+
+        let mut name = vec![0u8; name_len as usize];
+        reader.read_exact(&mut name)?;
+        if !names.insert(name.clone()) {
+            return Err(Error::Malformed {
+                kind: "tnpkg zip",
+                reason: if name == b"manifest.json" {
+                    "zip contains duplicate manifest.json entries; the .tnpkg format requires exactly one"
+                        .into()
+                } else {
+                    format!(
+                        "duplicate package member {:?}",
+                        String::from_utf8_lossy(&name)
+                    )
+                },
+            });
         }
-        let name_len = u16::from_le_bytes([bytes[cur + 28], bytes[cur + 29]]) as usize;
-        let extra_len = u16::from_le_bytes([bytes[cur + 30], bytes[cur + 31]]) as usize;
-        let comment_len = u16::from_le_bytes([bytes[cur + 32], bytes[cur + 33]]) as usize;
-        let name_start = cur + 46;
-        let name_end = match name_start.checked_add(name_len) {
-            Some(end) if end <= bytes.len() => end,
-            _ => return Ok(()),
-        };
-        if bytes.get(name_start..name_end) == Some(b"manifest.json".as_slice()) {
+        if name == b"manifest.json" {
             manifest_count += 1;
         }
-        cur = match name_end
-            .checked_add(extra_len)
-            .and_then(|n| n.checked_add(comment_len))
-        {
-            Some(next) => next,
-            None => return Ok(()),
-        };
+        reader.seek(SeekFrom::Start(record_end))?;
+        cursor = record_end;
+    }
+    if cursor != central_directory_end {
+        return Err(Error::Malformed {
+            kind: "tnpkg zip",
+            reason: format!(
+                "central directory metadata size is inconsistent: parsed {} bytes, declared {central_directory_size}",
+                cursor - central_directory_offset
+            ),
+        });
     }
     if manifest_count > 1 {
         return Err(Error::Malformed {
@@ -152,14 +293,36 @@ fn validate_zip_manifest_entry_count(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
 fn find_eocd(bytes: &[u8]) -> Option<usize> {
-    if bytes.len() < 22 {
+    const EOCD_FIXED_BYTES: usize = 22;
+
+    if bytes.len() < EOCD_FIXED_BYTES {
         return None;
     }
-    let min_start = bytes.len().saturating_sub(22 + 0xffff);
-    (min_start..=bytes.len() - 22)
+    let min_start = bytes
+        .len()
+        .saturating_sub(EOCD_FIXED_BYTES + u16::MAX as usize);
+    (min_start..=bytes.len() - EOCD_FIXED_BYTES)
         .rev()
-        .find(|&i| bytes[i..i + 4] == [0x50, 0x4b, 0x05, 0x06])
+        .find(|&i| {
+            bytes[i..i + 4] == [0x50, 0x4b, 0x05, 0x06]
+                && i.checked_add(EOCD_FIXED_BYTES)
+                    .and_then(|end| end.checked_add(read_u16(bytes, i + 20) as usize))
+                    == Some(bytes.len())
+        })
 }
 
 /// Bound a `.tnpkg` using zip central-directory metadata **only** — reads no
@@ -238,7 +401,10 @@ fn enforce_zip_limits<R: Read + Seek>(zip_r: &mut zip::ZipArchive<R>) -> Result<
     Ok(())
 }
 
-fn read_tnpkg_inner<R: Read + Seek>(reader: R) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
+fn read_tnpkg_inner<R: Read + Seek>(
+    reader: R,
+    verified: bool,
+) -> Result<(Manifest, BTreeMap<String, Vec<u8>>)> {
     let mut zip_r = zip::ZipArchive::new(reader).map_err(|e| Error::Malformed {
         kind: "tnpkg zip",
         reason: e.to_string(),
@@ -247,9 +413,33 @@ fn read_tnpkg_inner<R: Read + Seek>(reader: R) -> Result<(Manifest, BTreeMap<Str
     // Cheap metadata-only pre-flight: reject bombs / floods before any read.
     enforce_zip_limits(&mut zip_r)?;
 
-    let names: Vec<String> = (0..zip_r.len())
-        .filter_map(|i| zip_r.by_index(i).ok().map(|f| f.name().to_string()))
-        .collect();
+    let mut names = Vec::with_capacity(zip_r.len());
+    let mut unique_names = HashSet::with_capacity(zip_r.len());
+    for i in 0..zip_r.len() {
+        let name = zip_r
+            .by_index(i)
+            .map_err(|e| Error::Malformed {
+                kind: "tnpkg zip",
+                reason: e.to_string(),
+            })?
+            .name()
+            .to_string();
+        if !unique_names.insert(name.clone()) {
+            return Err(Error::Malformed {
+                kind: "tnpkg zip",
+                reason: if name == "manifest.json" {
+                    "zip contains duplicate manifest.json entries; the .tnpkg format requires exactly one"
+                        .into()
+                } else {
+                    format!("duplicate package member {name:?}")
+                },
+            });
+        }
+        if name != "manifest.json" {
+            validate_tnpkg_body_name(&name)?;
+        }
+        names.push(name);
+    }
     let manifest_count = names
         .iter()
         .filter(|name| name.as_str() == "manifest.json")
@@ -280,10 +470,19 @@ fn read_tnpkg_inner<R: Read + Seek>(reader: R) -> Result<(Manifest, BTreeMap<Str
                 reason: e.to_string(),
             })?;
         let mut buf = Vec::new();
-        mf.take(MAX_MANIFEST_BYTES).read_to_end(&mut buf)?;
+        mf.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > MAX_MANIFEST_BYTES {
+            return Err(Error::Malformed {
+                kind: "tnpkg zip",
+                reason: "manifest.json exceeded the bounded read limit".into(),
+            });
+        }
         serde_json::from_slice(&buf)?
     };
     let manifest = Manifest::from_json(&manifest_doc)?;
+    if verified {
+        verify_manifest(&manifest)?;
+    }
 
     // Pull every other entry into the body map.
     let mut body: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -291,14 +490,22 @@ fn read_tnpkg_inner<R: Read + Seek>(reader: R) -> Result<(Manifest, BTreeMap<Str
         if name == "manifest.json" {
             continue;
         }
-        validate_tnpkg_body_name(&name)?;
         let entry = zip_r.by_name(&name).map_err(|e| Error::Malformed {
             kind: "tnpkg zip",
             reason: e.to_string(),
         })?;
         let mut buf = Vec::new();
-        entry.take(MAX_PKG_ENTRY_BYTES).read_to_end(&mut buf)?;
+        entry.take(MAX_PKG_ENTRY_BYTES + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > MAX_PKG_ENTRY_BYTES {
+            return Err(Error::Malformed {
+                kind: "tnpkg zip",
+                reason: format!("body member {name:?} exceeded the bounded read limit"),
+            });
+        }
         body.insert(name, buf);
+    }
+    if verified {
+        verify_manifest_body_index(&manifest, &body, true)?;
     }
     Ok((manifest, body))
 }

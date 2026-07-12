@@ -38,8 +38,10 @@ all three implementations handle both kinds at runtime.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -48,9 +50,12 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
 )
+
 from tn._native import core as _tn_core
 
+from .canonical import _canonical_bytes
 from .signing import DeviceKey, _b58decode
+from .trust import TrustError, TrustReason, verify_ed25519_did_signature
 
 # Manifest schema version. Bump if the manifest's required fields change in
 # a backwards-incompatible way.
@@ -81,13 +86,22 @@ class TnpkgManifest:
     event_count: int = 0
     head_row_hash: str | None = None
     state: dict[str, Any] | None = None
+    body_sha256: dict[str, str] = field(default_factory=dict)
     manifest_signature_b64: str | None = None
+    # A parsed legacy manifest can have an empty body index because the field
+    # was absent on the wire. Keep that distinction so low-level inspection
+    # can still verify the legacy signature domain when explicitly requested.
+    _body_sha256_present: bool = field(default=False, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain dict suitable for ``json.dump``. Omits ``None`` /
         unset optional fields so the canonical form is stable across tiny
         variations in caller code."""
-        return dict(_tn_core.manifest_to_dict(_manifest_doc_from_dataclass(self)))
+        candidate = _manifest_doc_from_dataclass(self)
+        normalized = dict(_tn_core.manifest_to_dict(candidate))
+        if "body_sha256" in candidate:
+            normalized["body_sha256"] = dict(self.body_sha256)
+        return normalized
 
     @classmethod
     def from_dict(cls, doc: dict[str, Any]) -> TnpkgManifest:
@@ -100,7 +114,16 @@ class TnpkgManifest:
         ]
         if missing:
             raise ValueError(f"manifest missing required keys: {missing}")
+        body_sha256_raw = doc.get("body_sha256")
+        if "body_sha256" in doc and not isinstance(body_sha256_raw, dict):
+            raise ValueError("manifest body_sha256 must be a JSON object")
         normalized = dict(_tn_core.manifest_to_dict(doc))
+        body_sha256: dict[str, str] = {}
+        if isinstance(body_sha256_raw, dict):
+            for name, digest in body_sha256_raw.items():
+                if not isinstance(name, str) or not isinstance(digest, str):
+                    raise ValueError("manifest body_sha256 keys and values must be strings")
+                body_sha256[name] = digest
         return cls(
             kind=str(normalized["kind"]),
             version=int(normalized["version"]),
@@ -121,11 +144,13 @@ class TnpkgManifest:
                 else None
             ),
             state=(normalized["state"] if normalized.get("state") is not None else None),
+            body_sha256=body_sha256,
             manifest_signature_b64=(
                 str(normalized["manifest_signature_b64"])
                 if normalized.get("manifest_signature_b64") is not None
                 else None
             ),
+            _body_sha256_present="body_sha256" in doc,
         )
 
     def signing_bytes(self) -> bytes:
@@ -144,7 +169,9 @@ class TnpkgManifest:
             :meth:`sign`: Produces ``manifest_signature_b64`` over
                 these bytes.
         """
-        return bytes(_tn_core.manifest_signing_bytes(_manifest_doc_from_dataclass(self)))
+        doc = _manifest_doc_from_dataclass(self)
+        doc.pop("manifest_signature_b64", None)
+        return _canonical_bytes(doc)
 
     def sign(self, sk: Ed25519PrivateKey) -> TnpkgManifest:
         """Sign the manifest in place and return self.
@@ -201,7 +228,18 @@ def _verify_manifest_signature(manifest: TnpkgManifest) -> bool:
     """True iff ``manifest_signature_b64`` verifies against ``from_did``'s
     Ed25519 public key. Returns False on any decode / verify error.
     """
-    return bool(_tn_core.manifest_verify_signature(_manifest_doc_from_dataclass(manifest)))
+    if manifest.manifest_signature_b64 is None:
+        return False
+    try:
+        signature = base64.b64decode(manifest.manifest_signature_b64, validate=True)
+        verify_ed25519_did_signature(
+            manifest.publisher_identity,
+            manifest.signing_bytes(),
+            signature,
+        )
+    except (TrustError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _did_key_pub(did: str) -> bytes:
@@ -241,9 +279,95 @@ def _manifest_doc_from_dataclass(manifest: TnpkgManifest) -> dict[str, Any]:
         out["head_row_hash"] = manifest.head_row_hash
     if manifest.state is not None:
         out["state"] = manifest.state
+    if manifest._body_sha256_present:
+        out["body_sha256"] = dict(manifest.body_sha256)
     if manifest.manifest_signature_b64 is not None:
         out["manifest_signature_b64"] = manifest.manifest_signature_b64
     return out
+
+
+def compute_body_sha256(body_files: Mapping[str, bytes]) -> dict[str, str]:
+    """Return the canonical digest index for final stored body bytes.
+
+    Keys must already be exact, normalized ``body/...`` archive member names.
+    Digests use the lowercase ``sha256:<64 hex>`` wire spelling.
+    """
+    out: dict[str, str] = {}
+    for name in sorted(body_files):
+        _validate_tnpkg_body_name(name)
+        data = body_files[name]
+        if not isinstance(data, bytes):
+            raise TypeError(f"tnpkg body member {name!r} must be bytes")
+        out[name] = f"sha256:{hashlib.sha256(data).hexdigest()}"
+    return out
+
+
+def prepare_manifest_body_index(
+    manifest: TnpkgManifest,
+    body_files: Mapping[str, bytes],
+) -> TnpkgManifest:
+    """Index ``body_files`` on ``manifest`` and invalidate any old signature."""
+    manifest.body_sha256 = compute_body_sha256(body_files)
+    manifest._body_sha256_present = True
+    manifest.manifest_signature_b64 = None
+    return manifest
+
+
+def sign_manifest_with_body(
+    manifest: TnpkgManifest,
+    body_files: Mapping[str, bytes],
+    signing_key: Ed25519PrivateKey,
+) -> TnpkgManifest:
+    """Index final body bytes, then sign the complete manifest domain."""
+    return prepare_manifest_body_index(manifest, body_files).sign(signing_key)
+
+
+def verify_manifest_body_index(
+    manifest: TnpkgManifest,
+    body_files: Mapping[str, bytes],
+    require_index: bool,
+) -> None:
+    """Verify exact body member names and digests against ``manifest``.
+
+    A missing index is tolerated only for an explicitly selected legacy
+    inspection boundary. A present index is always validated, even when
+    ``require_index`` is false.
+    """
+    if not manifest._body_sha256_present:
+        if require_index:
+            raise TrustError(
+                TrustReason.BODY_DIGEST_MISMATCH,
+                "manifest body_sha256 index is missing",
+            )
+        return
+
+    for name, digest in manifest.body_sha256.items():
+        try:
+            _validate_tnpkg_body_name(name)
+        except ValueError as exc:
+            raise TrustError(
+                TrustReason.BODY_DIGEST_MISMATCH,
+                f"invalid indexed body member {name!r}",
+            ) from exc
+        if (
+            len(digest) != len("sha256:") + 64
+            or not digest.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in digest[len("sha256:") :])
+        ):
+            raise TrustError(
+                TrustReason.BODY_DIGEST_MISMATCH,
+                f"malformed digest for {name!r}",
+            )
+
+    try:
+        actual = compute_body_sha256(body_files)
+    except (TypeError, ValueError) as exc:
+        raise TrustError(
+            TrustReason.BODY_DIGEST_MISMATCH,
+            "body member set contains an invalid path or value",
+        ) from exc
+    if manifest.body_sha256 != actual:
+        raise TrustError(TrustReason.BODY_DIGEST_MISMATCH, "body index mismatch")
 
 
 # --------------------------------------------------------------------------
@@ -375,16 +499,27 @@ def _write_tnpkg(
     ``body_files`` maps a logical body path (e.g. ``"body/admin.ndjson"``)
     to its raw bytes. The caller is responsible for prefixing entries with
     ``body/`` per the format. ``manifest.json`` is written automatically
-    from ``manifest.to_dict()``; the manifest must already be signed.
+    from ``manifest.to_dict()``; the manifest must already be indexed and
+    signed with :func:`sign_manifest_with_body`.
     """
+    for name in body_files:
+        _validate_tnpkg_body_name(name)
     if manifest.manifest_signature_b64 is None:
         raise ValueError(
-            "_write_tnpkg: manifest is unsigned. Call manifest.sign(sk) before "
-            "writing — the wire format requires manifest_signature_b64 to be "
-            "present."
+            "_write_tnpkg: manifest is unsigned. Call "
+            "sign_manifest_with_body(manifest, body_files, sk) before writing — "
+            "the wire format requires manifest_signature_b64 to be present."
         )
+    verify_manifest_body_index(manifest, body_files, require_index=True)
     out_path = Path(out_path).resolve()
-    _tn_core.tnpkg_write(str(out_path), manifest.to_dict(), body_files)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_bytes = (json.dumps(manifest.to_dict(), sort_keys=True, indent=2) + "\n").encode(
+        "utf-8"
+    )
+    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("manifest.json", manifest_bytes)
+        for name in sorted(body_files):
+            zf.writestr(name, body_files[name])
     return out_path
 
 
@@ -421,6 +556,78 @@ def _open_zip(source: Path | str | bytes | bytearray) -> zipfile.ZipFile:
         raise ValueError(f"absorb: {p} is not a valid `.tnpkg` zip: {exc}") from exc
 
 
+def _inspect_tnpkg_archive(
+    zf: zipfile.ZipFile,
+    *,
+    validate_body_names: bool = True,
+) -> list[str]:
+    """Validate bounded container metadata without reading any member bytes."""
+    _enforce_zip_limits(zf)
+
+    names = zf.namelist()
+    manifest_count = names.count("manifest.json")
+    if manifest_count == 0:
+        raise PackageError(
+            "absorb: zip is missing `manifest.json`. The `.tnpkg` format "
+            "requires a top-level signed manifest; this archive does not "
+            "have one. Was it produced by an old / external tool?"
+        )
+    if manifest_count != 1:
+        raise ValueError(
+            f"tnpkg: a package must carry exactly one manifest.json (found {manifest_count})"
+        )
+
+    if validate_body_names:
+        seen_body_names: set[str] = set()
+        for name in names:
+            if name == "manifest.json":
+                continue
+            if name in seen_body_names:
+                raise ValueError(f"tnpkg: duplicate package member {name!r}")
+            seen_body_names.add(name)
+            _validate_tnpkg_body_name(name)
+
+    manifest_info = zf.getinfo("manifest.json")
+    if manifest_info.file_size > MAX_MANIFEST_BYTES:
+        raise PackageError(
+            f"`.tnpkg` manifest.json declares an uncompressed size of "
+            f"{manifest_info.file_size} bytes, exceeding the manifest limit "
+            f"of {MAX_MANIFEST_BYTES} bytes "
+            f"({MAX_MANIFEST_BYTES // (1024 * 1024)} MiB). Refusing to parse "
+            f"it (possible zip bomb / malformed archive)."
+        )
+    return names
+
+
+def _read_manifest_document(zf: zipfile.ZipFile) -> dict[str, Any]:
+    """Read and JSON-decode only the already-bounded manifest member."""
+    doc = json.loads(zf.read("manifest.json").decode("utf-8"))
+    if not isinstance(doc, dict):
+        raise ValueError(f"manifest must be a JSON object; got {type(doc).__name__}")
+    return doc
+
+
+def _peek_manifest_kind(source: Path | str | bytes | bytearray) -> str:
+    """Return a bounded manifest's raw kind without loading any body member.
+
+    This is an inspection-only routing primitive. It deliberately does not
+    verify the signature or validate the complete manifest schema; callers
+    that recognize a security-sensitive kind must follow with one verified
+    package read before consuming body state.
+    """
+    with _open_zip(source) as zf:
+        # Inspect enough metadata to bound and locate the manifest, while
+        # deferring body-name validation to the recognized kind's verified
+        # read. That lets malformed bootstrap containers fail closed instead
+        # of falling through to auto-initialization.
+        _inspect_tnpkg_archive(zf, validate_body_names=False)
+        doc = _read_manifest_document(zf)
+    kind = doc.get("kind")
+    if not isinstance(kind, str):
+        raise ValueError("manifest kind must be a string")
+    return kind
+
+
 def _read_manifest(
     source: Path | str | bytes | bytearray,
     *,
@@ -438,12 +645,12 @@ def _read_manifest(
        entry / entry flood is rejected here with a :class:`PackageError`.
     2. Read and parse ``manifest.json`` (its own size is capped at
        :data:`MAX_MANIFEST_BYTES` via the zip metadata before the read).
-    3. If ``verify_signature`` is set, verify the manifest signature
-       BEFORE any body member is read. On failure raise
-       :class:`ManifestSignatureError` and read no body. This is the
-       absorb-path guarantee: do not pull untrusted body bytes into
-       memory until the manifest is proven authentic.
-    4. Only then read the body members into memory.
+    3. If ``verify_signature`` is set, verify the manifest signature and
+       require the body-index field BEFORE any body member is read. On a bad
+       signature raise :class:`ManifestSignatureError`; a missing index raises
+       :class:`TrustError`. Neither path reads body bytes.
+    4. Only then read the body members into memory and check exact digest-map
+       equality before returning them.
 
     ``verify_signature`` defaults to False to preserve the long-standing
     contract for callers that legitimately unwrap self-produced or
@@ -453,40 +660,12 @@ def _read_manifest(
     """
     with _open_zip(source) as zf:
         # (1) Metadata-only resource guard — must run before any read.
-        _enforce_zip_limits(zf)
-
-        names = zf.namelist()
-        if "manifest.json" not in names:
-            raise PackageError(
-                "absorb: zip is missing `manifest.json`. The `.tnpkg` format "
-                "requires a top-level signed manifest; this archive does not "
-                "have one. Was it produced by an old / external tool?"
-            )
-        if names.count("manifest.json") != 1:
-            raise ValueError(
-                "tnpkg: a package must carry exactly one manifest.json "
-                f"(found {names.count('manifest.json')})"
-            )
-        # Container shape: every non-manifest member must be a safe
-        # ``body/...`` POSIX-relative path (no traversal, no drive /
-        # backslash tricks). Names only — still no entry bytes read.
-        for name in names:
-            if name != "manifest.json":
-                _validate_tnpkg_body_name(name)
+        names = _inspect_tnpkg_archive(zf)
 
         # (2) Manifest first. Its uncompressed size is bounded separately
         # (and more tightly) than a body member — a multi-MiB "manifest"
         # is an attack, not an honest index.
-        manifest_info = zf.getinfo("manifest.json")
-        if manifest_info.file_size > MAX_MANIFEST_BYTES:
-            raise PackageError(
-                f"`.tnpkg` manifest.json declares an uncompressed size of "
-                f"{manifest_info.file_size} bytes, exceeding the manifest limit "
-                f"of {MAX_MANIFEST_BYTES} bytes "
-                f"({MAX_MANIFEST_BYTES // (1024 * 1024)} MiB). Refusing to parse "
-                f"it (possible zip bomb / malformed archive)."
-            )
-        manifest_doc = json.loads(zf.read("manifest.json").decode("utf-8"))
+        manifest_doc = _read_manifest_document(zf)
         manifest = TnpkgManifest.from_dict(manifest_doc)
 
         # (3) Verify the manifest signature BEFORE reading any body member.
@@ -498,12 +677,19 @@ def _read_manifest(
                 f"re-send."
             )
 
+        # A required but absent index can be rejected from authenticated
+        # manifest state alone. Do this before loading even one body member.
+        if verify_signature and not manifest._body_sha256_present:
+            verify_manifest_body_index(manifest, {}, require_index=True)
+
         # (4) Bodies last — only now do we pull entry bytes into memory.
         body: dict[str, bytes] = {}
         for name in names:
             if name == "manifest.json":
                 continue
             body[name] = zf.read(name)
+        if verify_signature:
+            verify_manifest_body_index(manifest, body, require_index=True)
         return manifest, body
 
 

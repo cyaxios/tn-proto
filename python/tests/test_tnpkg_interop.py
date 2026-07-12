@@ -205,8 +205,7 @@ def test_manifest_canonical_bytes_match_golden():
     )
     got = m.signing_bytes()
     assert got == GOLDEN_CANONICAL_BYTES, (
-        "Python signing_bytes drifted from golden. "
-        f"Got: {got!r}\nWant: {GOLDEN_CANONICAL_BYTES!r}"
+        f"Python signing_bytes drifted from golden. Got: {got!r}\nWant: {GOLDEN_CANONICAL_BYTES!r}"
     )
 
 

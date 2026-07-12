@@ -1,4 +1,3 @@
-
 # TN_TEST_CIPHER reruns this workflow under another cipher (the cipher-parity
 # sweep, tests/run_cipher_sweep.py). Unset, behavior is byte-identical.
 import os as _cipher_os
@@ -6,6 +5,7 @@ import os as _cipher_os
 
 def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
+
 
 import json
 from pathlib import Path
@@ -37,10 +37,8 @@ def test_absorb_offer_lands_in_pending_offers(tmp_path: Path):
 def test_absorb_rejects_bad_signature(tmp_path: Path):
     """A tampered offer must not get stashed.
 
-    With the new universal `.tnpkg` wrapper, the payload tampering happens
-    inside the body's package.json (the inner Package signature still has
-    to verify after dispatch). We rewrite the zip with the mutated body
-    so the inner Package signature fails.
+    The signed body index rejects the mutated package bytes before the inner
+    Package parser or signature verifier runs.
     """
     import zipfile
 
@@ -61,10 +59,12 @@ def test_absorb_rejects_bad_signature(tmp_path: Path):
         zf.writestr("manifest.json", manifest_bytes)
         zf.writestr("body/package.json", new_body)
 
-    alice_cfg = load_or_create((tmp_path / "alice_t.yaml").parent / "alice_t.yaml", cipher=_workflow_cipher("jwe"))
+    alice_cfg = load_or_create(
+        (tmp_path / "alice_t.yaml").parent / "alice_t.yaml", cipher=_workflow_cipher("jwe")
+    )
     result = absorb(alice_cfg, pkg_path)
     assert result.status == "rejected"
-    assert "signature" in result.reason.lower()
+    assert "body_digest_mismatch" in result.reason.lower()
 
 
 def test_absorb_rejects_unsupported_kind(tmp_path: Path):
@@ -126,6 +126,7 @@ def test_absorb_enrolment_makes_recipient_read(tmp_path: Path):
     tn.flush_and_close()
     tn.init(str(bob_cfg.yaml_path))
     from tn._read_impl import _read_raw_inner
+
     entries = list(_read_raw_inner(alice_dir / ".tn/tn/logs" / "tn.ndjson", bob_cfg))
     decrypted = [
         e

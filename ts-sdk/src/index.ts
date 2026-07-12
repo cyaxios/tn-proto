@@ -62,12 +62,7 @@ export type {
 // process-global toggles let callers do `import { setLevel } from
 // "tn-proto"` without needing the class.
 export { Tn } from "./tn.js";
-export type {
-  TnInitOptions,
-  ReadOptions,
-  WatchOptions,
-  VerifyMode,
-} from "./tn.js";
+export type { TnInitOptions, ReadOptions, WatchOptions, VerifyMode } from "./tn.js";
 export type { WatchSince } from "./watch.js";
 export { Entry, VerifyError } from "./Entry.js";
 // Portable sealed objects (tn.seal / tn.unseal). `SealedObjectError` is
@@ -75,24 +70,14 @@ export { Entry, VerifyError } from "./Entry.js";
 // non-colliding name — `UnsealError` below is recipient_seal's BEK
 // unwrap failure, a different animal).
 export { SealedObject, SealedObjectError } from "./seal.js";
-export type {
-  SealOptions,
-  SealedTriple,
-  UnsealOptions,
-  UnsealSource,
-} from "./seal.js";
+export type { SealOptions, SealedTriple, UnsealOptions, UnsealSource } from "./seal.js";
 export { LOG_LEVELS } from "./tn.js";
 export type {
   AddRuntimeOptions,
   AddRuntimeOptions as AdminAddAgentRuntimeOptions,
 } from "./agents/index.js";
-export type {
-  ExportOptions as PkgExportOptions,
-} from "./pkg/index.js";
-export type {
-  ChainConflict,
-  LeafReuseAttempt,
-} from "./core/admin/state.js";
+export type { ExportOptions as PkgExportOptions } from "./pkg/index.js";
+export type { ChainConflict, LeafReuseAttempt } from "./core/admin/state.js";
 
 import { Tn as _Tn } from "./tn.js";
 // Local bindings for the auto-link helper (the same symbols are re-exported
@@ -125,11 +110,15 @@ export {
   MANIFEST_VERSION,
   clockDominates,
   clockMerge,
+  computeBodySha256,
   isManifestSignatureValid,
   manifestSigningBytes,
   newManifest,
   nowIsoMillis,
+  prepareManifestBodyIndex,
   signManifest,
+  signManifestWithBody,
+  verifyManifestBodyIndex,
   verifyManifest,
   type Manifest,
   type ManifestKind,
@@ -138,7 +127,9 @@ export {
 } from "./core/tnpkg.js";
 export {
   readTnpkg,
+  readTnpkgVerified,
   writeTnpkg,
+  packTnpkgBytes,
   packTnpkg,
   parseTnpkg,
   type ZipEntry,
@@ -174,11 +165,7 @@ export {
   WRAP_FRAME,
   type RecipientWrap,
 } from "./core/recipient_seal.js";
-export {
-  awkPickupAad,
-  drainPendingAwk,
-  redeemAwkPickup,
-} from "./vault/awk_pickup.js";
+export { awkPickupAad, drainPendingAwk, redeemAwkPickup } from "./vault/awk_pickup.js";
 export { fromWireDict, toWireDict } from "./core/tnpkg.js";
 export {
   DEFAULT_VAULT_URL,
@@ -193,11 +180,7 @@ export {
 // Wallet module surface. `wallet` is the public `tn.wallet` namespace
 // (mirrors Python's `tn.wallet` module); the underlying impls remain
 // individually importable for callers that want them directly.
-export {
-  wallet,
-  type WalletStatus,
-  type WalletNamespaceSurface,
-} from "./wallet/namespace.js";
+export { wallet, type WalletStatus, type WalletNamespaceSurface } from "./wallet/namespace.js";
 
 // Auth module surface. `auth` is the public `tn.auth` namespace (account /
 // session / device enrollment); mirrors Python's `tn.auth`. Library-first -
@@ -214,12 +197,7 @@ export {
   type LoginOptions as AuthLoginOptions,
   type ConnectOptions as AuthConnectOptions,
 } from "./auth/index.js";
-export {
-  WalletNamespace,
-  readSyncQueue,
-  readLinkState,
-  type LinkResult,
-} from "./wallet/index.js";
+export { WalletNamespace, readSyncQueue, readLinkState, type LinkResult } from "./wallet/index.js";
 export {
   restoreWithBek,
   restoreViaPassphrase,
@@ -233,10 +211,7 @@ export {
   type RestoreResult,
   type RestoreViaLoopbackOptions,
 } from "./wallet/restore.js";
-export {
-  walletSyncCmd,
-  type WalletSyncCmdOptions,
-} from "./cli/wallet_sync.js";
+export { walletSyncCmd, type WalletSyncCmdOptions } from "./cli/wallet_sync.js";
 export {
   bootstrapFromApiKey,
   challengeVerify,
@@ -414,8 +389,7 @@ function _sessionPing(tn: _Tn, fetchImpl?: typeof fetch): void {
   if (isAutoLinkDisabled()) return; // TN_NO_LINK=1 hard opt-out.
   let vault: { enabled?: boolean; url?: string } | undefined;
   try {
-    vault = (tn.config() as { vault?: { enabled?: boolean; url?: string } })
-      .vault;
+    vault = (tn.config() as { vault?: { enabled?: boolean; url?: string } }).vault;
   } catch {
     return;
   }
@@ -453,12 +427,12 @@ function _inServerless(): boolean {
   const e = process.env;
   return Boolean(
     e["VERCEL"] ||
-      e["VERCEL_ENV"] ||
-      e["AWS_LAMBDA_FUNCTION_NAME"] ||
-      e["LAMBDA_TASK_ROOT"] ||
-      e["NETLIFY"] ||
-      e["K_SERVICE"] ||
-      e["FUNCTIONS_WORKER_RUNTIME"],
+    e["VERCEL_ENV"] ||
+    e["AWS_LAMBDA_FUNCTION_NAME"] ||
+    e["LAMBDA_TASK_ROOT"] ||
+    e["NETLIFY"] ||
+    e["K_SERVICE"] ||
+    e["FUNCTIONS_WORKER_RUNTIME"],
   );
 }
 
@@ -629,7 +603,6 @@ export async function unseal(
 export function scope<T>(fields: Record<string, unknown>, body: () => T): T {
   return _requireDefault("scope").scope(fields, body);
 }
-
 
 /** Flush handlers and release the default ceremony. Mirrors Python
  *  `tn.flush_and_close()`. Safe to call multiple times. */

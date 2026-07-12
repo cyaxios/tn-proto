@@ -38,10 +38,14 @@ mod zip_write;
 use clock::{clock_to_json, json_to_clock};
 
 pub use clock::{clock_dominates, clock_merge};
+pub use sign::{
+    compute_body_sha256, prepare_manifest_body_index, sign_manifest_with_body,
+    verify_manifest_body_index,
+};
 pub use sign::{sign_manifest, verify_manifest};
 pub use zip_read::{
-    read_tnpkg, MAX_MANIFEST_BYTES, MAX_PKG_COMPRESSION_RATIO, MAX_PKG_ENTRY_BYTES,
-    MAX_PKG_ENTRY_COUNT, MAX_PKG_TOTAL_BYTES,
+    read_tnpkg, read_tnpkg_verified, MAX_MANIFEST_BYTES, MAX_PKG_COMPRESSION_RATIO,
+    MAX_PKG_ENTRY_BYTES, MAX_PKG_ENTRY_COUNT, MAX_PKG_TOTAL_BYTES,
 };
 pub use zip_write::{write_tnpkg, write_tnpkg_bytes};
 
@@ -192,9 +196,9 @@ impl ManifestKind {
 ///
 /// The signature is computed over [`signing_bytes`](Self::signing_bytes) (the
 /// canonical form *minus* the signature field) so that signing and verifying
-/// agree on the exact bytes. Build a manifest, call [`sign_manifest`] with the
-/// producer's Ed25519 key, then [`write_tnpkg`]; on the read side
-/// [`read_tnpkg`] parses it and the caller runs [`verify_manifest`].
+/// agree on the exact bytes. For a complete package, build the final body, call
+/// [`sign_manifest_with_body`] with the producer's Ed25519 key, then
+/// [`write_tnpkg`]; on the secure read side use [`read_tnpkg_verified`].
 ///
 /// # Examples
 ///
@@ -218,6 +222,8 @@ impl ManifestKind {
 ///     event_count: 0,
 ///     head_row_hash: None,
 ///     state: None,
+///     body_sha256: BTreeMap::new(),
+///     body_sha256_present: false,
 ///     manifest_signature_b64: None,
 /// };
 ///
@@ -257,6 +263,13 @@ pub struct Manifest {
     pub head_row_hash: Option<String>,
     /// Materialized state (only set for snapshot kinds).
     pub state: Option<Value>,
+    /// Exact final archive body member name to lowercase tagged SHA-256.
+    pub body_sha256: BTreeMap<String, String>,
+    /// Whether `body_sha256` was present on the wire. Public only so existing
+    /// cross-crate struct literals can opt into the additive field; callers
+    /// should normally use [`prepare_manifest_body_index`].
+    #[doc(hidden)]
+    pub body_sha256_present: bool,
     /// Ed25519 signature over `canonical_bytes(manifest minus this field)`.
     pub manifest_signature_b64: Option<String>,
 }
@@ -293,6 +306,16 @@ impl Manifest {
         }
         if let Some(state) = &self.state {
             out.insert("state".into(), state.clone());
+        }
+        if self.body_sha256_present {
+            out.insert(
+                "body_sha256".into(),
+                Value::Object(Map::from_iter(
+                    self.body_sha256
+                        .iter()
+                        .map(|(name, digest)| (name.clone(), Value::String(digest.clone()))),
+                )),
+            );
         }
         if let Some(sig) = &self.manifest_signature_b64 {
             out.insert("manifest_signature_b64".into(), Value::String(sig.clone()));
@@ -376,6 +399,28 @@ impl Manifest {
             .and_then(Value::as_str)
             .map(str::to_string);
         let state = obj.get("state").cloned();
+        let body_sha256_present = obj.contains_key("body_sha256");
+        let body_sha256 = match obj.get("body_sha256") {
+            None => BTreeMap::new(),
+            Some(Value::Object(index)) => index
+                .iter()
+                .map(|(name, digest)| {
+                    digest
+                        .as_str()
+                        .map(|digest| (name.clone(), digest.to_string()))
+                        .ok_or_else(|| Error::Malformed {
+                            kind: "tnpkg manifest",
+                            reason: "body_sha256 values must be strings".into(),
+                        })
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?,
+            Some(_) => {
+                return Err(Error::Malformed {
+                    kind: "tnpkg manifest",
+                    reason: "body_sha256 must be a JSON object".into(),
+                })
+            }
+        };
         let manifest_signature_b64 = obj
             .get("manifest_signature_b64")
             .and_then(Value::as_str)
@@ -393,6 +438,8 @@ impl Manifest {
             event_count,
             head_row_hash,
             state,
+            body_sha256,
+            body_sha256_present,
             manifest_signature_b64,
         })
     }
@@ -463,6 +510,8 @@ mod tests {
             event_count: 3,
             head_row_hash: Some("sha256:abc".into()),
             state: None,
+            body_sha256: BTreeMap::new(),
+            body_sha256_present: false,
             manifest_signature_b64: None,
         }
     }

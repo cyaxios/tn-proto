@@ -210,7 +210,7 @@ def _bind_after_bootstrap_absorb(kind: str) -> None:
 
 
 def _is_bootstrap_kind_source(args: tuple, kwargs: dict) -> bool:
-    """Best-effort peek at the absorb source's manifest kind, returning
+    """Best-effort, manifest-only peek at the absorb source's kind, returning
     True iff this is an ``identity_seed`` or ``project_seed`` bundle —
     the two kinds for which absorb is allowed to bootstrap a fresh
     directory without an active runtime.
@@ -218,7 +218,7 @@ def _is_bootstrap_kind_source(args: tuple, kwargs: dict) -> bool:
     Returns False on any error (in which case the caller falls through
     to the standard load-only autoinit).
     """
-    from .absorb import _try_bootstrap_cfg  # late import; module circularity
+    from .tnpkg import _peek_manifest_kind
 
     if len(args) == 1 and not kwargs:
         source = args[0]
@@ -229,7 +229,7 @@ def _is_bootstrap_kind_source(args: tuple, kwargs: dict) -> bool:
     if source is None or not isinstance(source, (Path, str, bytes, bytearray)):
         return False
     try:
-        return _try_bootstrap_cfg(source) is not None
+        return _peek_manifest_kind(source) in ("identity_seed", "project_seed")
     except Exception:  # noqa: BLE001 — defensive: unparseable source is simply "not bootstrappable"
         return False
 

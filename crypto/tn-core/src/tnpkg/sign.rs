@@ -2,17 +2,22 @@
 //!
 //! Every `.tnpkg` manifest carries an Ed25519 signature over its own
 //! canonical bytes (the manifest minus the signature field — see
-//! [`Manifest::signing_bytes`](super::Manifest::signing_bytes)). The producer
-//! calls [`sign_manifest`] with its device key; a receiver runs
-//! [`verify_manifest`] against the producer named in
+//! [`Manifest::signing_bytes`](super::Manifest::signing_bytes)). A production
+//! package producer calls [`sign_manifest_with_body`] with its final stored
+//! body and device key; [`sign_manifest`] remains the lower-level
+//! manifest-only primitive. A receiver runs [`verify_manifest`] against the producer named in
 //! [`publisher_identity`](super::Manifest::publisher_identity) before trusting
 //! the body.
+
+use std::collections::BTreeMap;
 
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use sha2::{Digest, Sha256};
 
-use super::{Manifest, ED25519_MULTICODEC};
+use super::zip_write::validate_tnpkg_body_name;
+use super::{BodyContents, Manifest, ED25519_MULTICODEC};
 use crate::{Error, Result};
 
 /// Sign a manifest in place, populating
@@ -23,6 +28,8 @@ use crate::{Error, Result};
 /// manifest. `sk` must be the signing key whose public half is encoded in
 /// [`Manifest::publisher_identity`], or the later [`verify_manifest`] will fail.
 /// Side effect: mutates `manifest`.
+/// For a complete `.tnpkg`, prefer [`sign_manifest_with_body`] so final body
+/// bytes are indexed before this signature is computed.
 ///
 /// # Errors
 ///
@@ -33,6 +40,81 @@ pub fn sign_manifest(manifest: &mut Manifest, sk: &SigningKey) -> Result<()> {
     let sig = sk.sign(&bytes);
     manifest.manifest_signature_b64 = Some(B64_STANDARD.encode(sig.to_bytes()));
     Ok(())
+}
+
+/// Compute the exact lowercase tagged SHA-256 index for final body bytes.
+pub fn compute_body_sha256(body: &BodyContents) -> Result<BTreeMap<String, String>> {
+    body.iter()
+        .map(|(name, bytes)| {
+            validate_tnpkg_body_name(name)?;
+            Ok((
+                name.clone(),
+                format!("sha256:{}", hex::encode(Sha256::digest(bytes))),
+            ))
+        })
+        .collect()
+}
+
+/// Populate the body index and invalidate any signature over an older body.
+pub fn prepare_manifest_body_index(manifest: &mut Manifest, body: &BodyContents) -> Result<()> {
+    manifest.body_sha256 = compute_body_sha256(body)?;
+    manifest.body_sha256_present = true;
+    manifest.manifest_signature_b64 = None;
+    Ok(())
+}
+
+/// Index final stored body bytes, then sign the complete manifest domain.
+pub fn sign_manifest_with_body(
+    manifest: &mut Manifest,
+    body: &BodyContents,
+    sk: &SigningKey,
+) -> Result<()> {
+    prepare_manifest_body_index(manifest, body)?;
+    sign_manifest(manifest, sk)
+}
+
+/// Verify the manifest's exact body member set and lowercase tagged digests.
+pub fn verify_manifest_body_index(
+    manifest: &Manifest,
+    body: &BodyContents,
+    require_index: bool,
+) -> Result<()> {
+    if !manifest.body_sha256_present {
+        if require_index {
+            return Err(body_digest_error("manifest body_sha256 index is missing"));
+        }
+        return Ok(());
+    }
+
+    for (name, digest) in &manifest.body_sha256 {
+        validate_tnpkg_body_name(name)
+            .map_err(|_| body_digest_error(&format!("invalid indexed body member {name:?}")))?;
+        let hex = digest.strip_prefix("sha256:").unwrap_or_default();
+        if hex.len() != 64
+            || !hex
+                .as_bytes()
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        {
+            return Err(body_digest_error(&format!(
+                "malformed digest for body member {name:?}"
+            )));
+        }
+    }
+
+    let actual = compute_body_sha256(body)
+        .map_err(|_| body_digest_error("body member set contains an invalid path"))?;
+    if manifest.body_sha256 != actual {
+        return Err(body_digest_error("body index mismatch"));
+    }
+    Ok(())
+}
+
+fn body_digest_error(detail: &str) -> Error {
+    Error::Malformed {
+        kind: "tnpkg body index",
+        reason: format!("body_digest_mismatch: {detail}"),
+    }
 }
 
 /// Verify a manifest's signature against its declared producer.

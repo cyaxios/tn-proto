@@ -7,13 +7,13 @@
 // Mirrors ``python/tests/test_dirt_easy_flow.py``.
 
 import { strict as assert } from "node:assert";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as pathResolve } from "node:path";
 import { test } from "node:test";
 
 import { Tn } from "../src/tn.js";
-import { DeviceKey, newManifest, signManifest, writeTnpkg } from "../src/index.js";
+import { DeviceKey, newManifest, signManifestWithBody, writeTnpkg } from "../src/index.js";
 
 const FIXTURE = pathResolve(
   dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")),
@@ -50,31 +50,20 @@ function buildIdentitySeedTnpkg(outPath: string): {
   manifest.state = {
     identity: { schema: "tn-identity-seed-v1", nickname: null },
   };
-  signManifest(manifest, device);
+  signManifestWithBody(manifest, body, device);
   writeTnpkg(outPath, manifest, body);
   return { device, seed };
 }
 
-test("dirt-easy: project_seed bootstrap returns a usable Tn", async () => {
+test("dirt-easy: legacy project_seed fixture without body index fails closed", async () => {
   if (!existsSync(FIXTURE)) {
     // Real dashboard-minted fixture not checked in for this run.
     return;
   }
   const dir = mkTempDir("tn-dirt-proj-");
   try {
-    // 1. Absorb the project_seed bundle. The returned Tn is bound to
-    //    the freshly-absorbed ./tn.yaml — no separate init() needed.
-    const tn = await Tn.absorb(FIXTURE, { cwd: dir });
-    assert.equal(tn.lastAbsorbReceipt?.kind, "project_seed");
-
-    // 2. Emit — no init call required.
-    tn.info("hello.world", { who: "alice" });
-
-    // 3. Read — same Tn, same process.
-    const types: string[] = [];
-    for (const e of tn.read()) types.push(e.event_type);
-    assert.ok(types.includes("hello.world"), `saw types: ${types.join(",")}`);
-    await tn.close();
+    await assert.rejects(() => Tn.absorb(FIXTURE, { cwd: dir }), /body_digest_mismatch/);
+    assert.deepEqual(readdirSync(dir), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -191,7 +180,7 @@ test("Tn.absorb on a non-bootstrap bundle throws a helpful error", async () => {
       ceremonyId: "any",
       scope: "admin",
     });
-    signManifest(manifest, device);
+    signManifestWithBody(manifest, {}, device);
     const pkgPath = join(dir, "snap.tnpkg");
     writeTnpkg(pkgPath, manifest, {});
 

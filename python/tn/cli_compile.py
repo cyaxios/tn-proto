@@ -40,7 +40,7 @@ import sys
 from pathlib import Path
 
 from .compile import compile_kit_bundle
-from .tnpkg import _read_manifest, _write_tnpkg
+from .tnpkg import _read_manifest, _write_tnpkg, sign_manifest_with_body
 
 
 def _discover_yaml(keystore: Path) -> Path | None:
@@ -95,7 +95,7 @@ def _persist_label(out_path: Path, label: str, yaml_path: Path | None) -> None:
     state["label"] = label
     manifest.state = state
     manifest.manifest_signature_b64 = None
-    manifest.sign(cfg.device.signing_key())
+    sign_manifest_with_body(manifest, body, cfg.device.signing_key())
     _write_tnpkg(out_path, manifest, body)
 
 
