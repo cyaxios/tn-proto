@@ -32,6 +32,10 @@ For joint Task 9 / Task 12 and the python-side session:
 3. TS/PY ALIGN - same-epoch authority assertion renewal: TS `pinHibeAuthority` rejects a freshly signed assertion at an unchanged epoch (`epoch_conflict`); in-flight python accepts it as renewal. Decide one semantic in the joint task; fixtures only pin mpk-level conflict/idempotence.
 4. TS NIT - unsafe-audit recursion window: async guard can drop a second unsafe operation's warning while the first audit settles.
 5. RUST BOUNDS - fleet-wide pending-offer quotas not implemented (per-artifact 1 MiB + zip limits are); `compile_enrolment_v1` stamps `group_epoch: 1` (no live JWE epoch in rust-sdk; managed runtimes stamp real epochs).
+6. TS+PY - revoke re-issue plaintext side door: `NodeRuntime.revokeReader` mass re-issues plaintext bearer kits after path rotation (TS fix in flight: sealed-only re-kits from retained verified-reader records, skip-with-warning otherwise). The python twin behaves the same today and needs the identical change. Owner: python track / joint Task 12.
+7. RUST - exact-replay grant redelivery intentionally not implemented (stricter than python `_recover_committed_hibe_grant`): committed re-attempt = `challenge_replayed`, delivery bytes retained under `hibe-grants/` for operator recovery. Joint task decides redelivery semantics.
+8. TS - runtime-level `grantReader`/`revokeReader` stay ungated beneath the admin namespace (admin surface hard-gated); joint task owns runtime-level gating and must confirm no other public entry reaches them.
+9. RUST informational - `compile_enrolment_v1` response packages omit `publisher_identity`/`sender_pub_b64` (python includes them from the live JWE cipher); moot for the working direction (python-compiled -> rust reader), noted for Task 12 interop review.
 
 
 **Goal:** Bind JWE and HIBE key material to complete Ed25519 `did:key` principals, complete the JWE reader enrollment lifecycle through first decrypt, and make normal HIBE authority/grant ceremonies fail closed.
