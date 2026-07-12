@@ -550,6 +550,7 @@ def _lines_with_keybag(
                 continue
             ct_bytes = group_input["ciphertext"]
             saw_no_key = False
+            saw_open_failure = False
             for cipher in candidates:
                 try:
                     pt = cipher.decrypt(ct_bytes, _aad_bytes_for(env, key))
@@ -557,6 +558,7 @@ def _lines_with_keybag(
                     saw_no_key = True
                     continue
                 except Exception:  # noqa: BLE001 - authenticated open failed
+                    saw_open_failure = True
                     continue
                 try:
                     plaintext[key] = _decode_plaintext_object(pt, key)
@@ -567,7 +569,9 @@ def _lines_with_keybag(
                 break
             if key not in plaintext:
                 plaintext[key] = (
-                    {"$no_read_key": True} if saw_no_key else {"$decrypt_error": True}
+                    {"$decrypt_error": True}
+                    if saw_open_failure or not saw_no_key
+                    else {"$no_read_key": True}
                 )
         if plaintext_error is not None:
             yield _parse_error_triple(plaintext_error)
@@ -681,6 +685,7 @@ def read_as_recipient(
             if group_input is not None:
                 ct_bytes = group_input["ciphertext"]
                 saw_no_key = False
+                saw_open_failure = False
                 aad_bytes = _aad_bytes_for(env, group)
                 for candidate in ciphers:
                     try:
@@ -689,6 +694,7 @@ def read_as_recipient(
                         saw_no_key = True
                         continue
                     except Exception:  # noqa: BLE001 - authenticated open failed
+                        saw_open_failure = True
                         continue
                     try:
                         plaintext[group] = _decode_plaintext_object(pt, group)
@@ -705,7 +711,9 @@ def read_as_recipient(
                     continue
                 if group not in plaintext:
                     plaintext[group] = (
-                        {"$no_read_key": True} if saw_no_key else {"$decrypt_error": True}
+                        {"$decrypt_error": True}
+                        if saw_open_failure or not saw_no_key
+                        else {"$no_read_key": True}
                     )
 
             valid["aad"] = not any(

@@ -221,6 +221,94 @@ def _assert_authenticated_plaintext_parse_contract(result, seen, spy):
     assert spy.calls == [b"bad-plaintext", b"later-clean"]
 
 
+@pytest.fixture()
+def candidate_precedence_harness(tmp_path: Path, monkeypatch):
+    reader_module = importlib.import_module("tn.reader")
+
+    class _OutcomeCipher:
+        def __init__(self, outcome: str):
+            self.outcome = outcome
+            self.calls = 0
+
+        def decrypt(self, ciphertext: bytes, aad: bytes) -> bytes:
+            del ciphertext, aad
+            self.calls += 1
+            if self.outcome == "not-recipient":
+                raise reader_module._cipher.NotARecipientError("not enrolled")
+            if self.outcome == "failure":
+                raise RuntimeError("authenticated open failed")
+            return b'{"marker":"success"}'
+
+    def make_cipher(outcome: str):
+        return _OutcomeCipher(outcome)
+
+    device = DeviceKey.generate()
+    envelope = _sealed_envelope(
+        device,
+        event_type="candidate.precedence",
+        sequence=1,
+        ciphertext=b"candidate-ciphertext",
+    )
+    line = json.dumps(envelope)
+    log_path = tmp_path / "local.ndjson"
+    log_path.write_text(line + "\n", encoding="utf-8")
+    yaml_path = tmp_path / "tn.yaml"
+    yaml_path.write_text("{}\n", encoding="utf-8")
+    keystore = tmp_path / "keys"
+    keystore.mkdir()
+    (keystore / "default.btn.mykit").write_bytes(b"test-btn-kit")
+    (keystore / "default.jwe.mykey").write_bytes(b"test-jwe-key")
+    local_cipher = make_cipher("failure")
+    cfg = SimpleNamespace(
+        yaml_path=yaml_path,
+        keystore=keystore,
+        device=device,
+        sign=True,
+        chain=True,
+        public_fields=[],
+        groups={"default": SimpleNamespace(cipher=local_cipher)},
+        resolve_log_path=lambda: log_path,
+    )
+
+    read_module = importlib.import_module("tn.read")
+    monkeypatch.setattr(tn, "_dispatch_rt", None)
+    monkeypatch.setattr(tn, "_maybe_autoinit_load_only", lambda: None)
+    monkeypatch.setattr(tn, "current_config", lambda: cfg)
+    monkeypatch.setattr(read_module, "_resolve_read_source", lambda *args: None)
+    return SimpleNamespace(
+        cfg=cfg,
+        line=line,
+        local_cipher=local_cipher,
+        log_path=log_path,
+        make_cipher=make_cipher,
+        read_module=read_module,
+        reader_module=reader_module,
+    )
+
+
+def _assert_aad_invalid_skip(result, seen):
+    assert list(result) == []
+    assert result.stats.yielded == 0
+    assert result.stats.skipped_parse == 0
+    assert result.stats.skipped_verify == 1
+    assert result.stats.skipped_reasons == ["aad_invalid"]
+    assert [reason for _envelope, reason in seen] == ["aad_invalid"]
+    assert seen[0][0]["_valid"]["reasons"][0] == "aad_invalid"
+
+
+def _patch_recipient_candidates(monkeypatch, harness, first, second):
+    monkeypatch.setattr(
+        harness.reader_module._cipher.BtnGroupCipher,
+        "load",
+        classmethod(lambda cls, path, group: first),
+    )
+    monkeypatch.setattr(
+        harness.reader_module._cipher.JWEGroupCipher,
+        "load",
+        classmethod(lambda cls, path, group: second),
+    )
+
+
 def test_skip_yields_clean_entries_around_parse_error(
     three_entries_with_bad_middle,
 ):
@@ -391,3 +479,192 @@ def test_recipient_authenticated_bad_plaintext_is_record_invalid(
     )
 
     _assert_authenticated_plaintext_parse_contract(result, seen, harness.spy)
+
+
+def test_local_candidate_precedence_baseline_is_aad_invalid(
+    candidate_precedence_harness,
+):
+    harness = candidate_precedence_harness
+    seen = []
+    result = tn.read(
+        verify="skip",
+        raw=True,
+        on_skip=lambda env, reason: seen.append((env, reason)),
+    )
+
+    _assert_aad_invalid_skip(result, seen)
+    assert harness.local_cipher.calls == 1
+
+
+def test_explicit_keybag_candidate_failure_beats_not_recipient(
+    candidate_precedence_harness,
+    monkeypatch,
+):
+    harness = candidate_precedence_harness
+    not_recipient = harness.make_cipher("not-recipient")
+    failure = harness.make_cipher("failure")
+    monkeypatch.setattr(
+        harness.reader_module,
+        "_discover_keybag_ciphers",
+        lambda path: {"default": [not_recipient, failure]},
+    )
+    seen = []
+    result = tn.read(
+        log=harness.log_path,
+        verify="skip",
+        raw=True,
+        on_skip=lambda env, reason: seen.append((env, reason)),
+    )
+
+    _assert_aad_invalid_skip(result, seen)
+    assert (not_recipient.calls, failure.calls) == (1, 1)
+
+
+def test_network_candidate_failure_beats_later_not_recipient(
+    candidate_precedence_harness,
+    monkeypatch,
+):
+    harness = candidate_precedence_harness
+    failure = harness.make_cipher("failure")
+    not_recipient = harness.make_cipher("not-recipient")
+    monkeypatch.setattr(
+        harness.reader_module,
+        "_discover_keybag_ciphers",
+        lambda path: {"default": [failure, not_recipient]},
+    )
+
+    class _NetworkSource:
+        def reader(self, options, *, selection, filter):
+            del options, selection, filter
+            return iter([("memory://candidate/1", harness.line)])
+
+    monkeypatch.setattr(
+        harness.read_module,
+        "_resolve_read_source",
+        lambda cfg, runtime: _NetworkSource(),
+    )
+    seen = []
+    result = tn.read(
+        verify="skip",
+        raw=True,
+        on_skip=lambda env, reason: seen.append((env, reason)),
+    )
+
+    _assert_aad_invalid_skip(result, seen)
+    assert (failure.calls, not_recipient.calls) == (1, 1)
+
+
+def test_recipient_candidate_failure_beats_not_recipient(
+    candidate_precedence_harness,
+    monkeypatch,
+):
+    harness = candidate_precedence_harness
+    not_recipient = harness.make_cipher("not-recipient")
+    failure = harness.make_cipher("failure")
+    _patch_recipient_candidates(monkeypatch, harness, not_recipient, failure)
+    seen = []
+    result = tn.read(
+        log=harness.log_path,
+        as_recipient=harness.cfg.keystore,
+        group="default",
+        verify="skip",
+        raw=True,
+        on_skip=lambda env, reason: seen.append((env, reason)),
+    )
+
+    _assert_aad_invalid_skip(result, seen)
+    assert seen[0][0]["_valid"]["reasons"] == [
+        "aad_invalid",
+        "not_a_recipient",
+    ]
+    assert (not_recipient.calls, failure.calls) == (1, 1)
+
+
+def test_keybag_all_not_recipient_preserves_no_read_key(
+    candidate_precedence_harness,
+    monkeypatch,
+):
+    harness = candidate_precedence_harness
+    first = harness.make_cipher("not-recipient")
+    second = harness.make_cipher("not-recipient")
+    monkeypatch.setattr(
+        harness.reader_module,
+        "_discover_keybag_ciphers",
+        lambda path: {"default": [first, second]},
+    )
+
+    rows = list(
+        harness.reader_module._lines_with_keybag(
+            iter([("memory://candidate/1", harness.line)]),
+            harness.cfg.keystore,
+        ),
+    )
+
+    assert rows[0]["plaintext"] == {"default": {"$no_read_key": True}}
+    assert rows[0]["valid"]["aad"] is True
+
+
+def test_recipient_all_not_recipient_preserves_no_read_key(
+    candidate_precedence_harness,
+    monkeypatch,
+):
+    harness = candidate_precedence_harness
+    first = harness.make_cipher("not-recipient")
+    second = harness.make_cipher("not-recipient")
+    _patch_recipient_candidates(monkeypatch, harness, first, second)
+
+    rows = list(
+        harness.reader_module.read_as_recipient(
+            harness.log_path,
+            harness.cfg.keystore,
+            group="default",
+        ),
+    )
+
+    assert rows[0]["plaintext"] == {"default": {"$no_read_key": True}}
+    assert rows[0]["valid"]["aad"] is True
+
+
+def test_keybag_success_after_not_recipient_is_preserved(
+    candidate_precedence_harness,
+    monkeypatch,
+):
+    harness = candidate_precedence_harness
+    not_recipient = harness.make_cipher("not-recipient")
+    success = harness.make_cipher("success")
+    monkeypatch.setattr(
+        harness.reader_module,
+        "_discover_keybag_ciphers",
+        lambda path: {"default": [not_recipient, success]},
+    )
+
+    rows = list(
+        harness.reader_module._lines_with_keybag(
+            iter([("memory://candidate/1", harness.line)]),
+            harness.cfg.keystore,
+        ),
+    )
+
+    assert rows[0]["plaintext"] == {"default": {"marker": "success"}}
+    assert rows[0]["valid"]["aad"] is True
+
+
+def test_recipient_success_after_failure_is_preserved(
+    candidate_precedence_harness,
+    monkeypatch,
+):
+    harness = candidate_precedence_harness
+    failure = harness.make_cipher("failure")
+    success = harness.make_cipher("success")
+    _patch_recipient_candidates(monkeypatch, harness, failure, success)
+
+    rows = list(
+        harness.reader_module.read_as_recipient(
+            harness.log_path,
+            harness.cfg.keystore,
+            group="default",
+        ),
+    )
+
+    assert rows[0]["plaintext"] == {"default": {"marker": "success"}}
+    assert rows[0]["valid"]["aad"] is True
