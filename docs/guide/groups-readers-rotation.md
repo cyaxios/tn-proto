@@ -43,9 +43,11 @@ Python:
 import tn
 tn.init()
 
+# Complete reader DID authenticated out of band; do not use a placeholder.
+reader_did = authenticated_reader_did
 result = tn.admin.add_recipient(
     group="default",
-    recipient_did="did:key:z6MkAliceExamplePublicKey",
+    recipient_did=reader_did,
     out_path="./alice.btn.mykit",
 )
 print(result.leaf_index, result.kit_path)
@@ -63,7 +65,7 @@ $ tn add_recipient default alice
 [tn add_recipient]   recipient: did:key:zLabel-alice
 ```
 
-The CLI form synthesises a `did:key:zLabel-<name>` placeholder for friendly labels, mints the kit, and wraps it as a `.tnpkg` in one step. That `zLabel-` form is a CLI-only convenience for demos, not a valid key; a real grant binds to the reader's actual `did:key:z6Mk...`.
+The CLI form synthesises a `did:key:zLabel-<name>` placeholder for friendly labels, mints the kit, and wraps it as a `.tnpkg` in one step. That `zLabel-` form is a CLI-only convenience for local demos, not a valid key: it cannot recipient-seal the package, so the resulting kit body is plaintext bearer material. Do not deliver it as a sensitive grant. A real handoff uses the reader's authenticated, complete Ed25519 `did:key` and fails if it is not resolvable.
 
 Revoke a reader when you need to:
 
@@ -82,10 +84,16 @@ A `.tnpkg` is a signed zip containing a manifest and body files. It is the unit 
 Producer:
 
 ```python
+from tn.recipient_seal import recipient_key_is_resolvable
+
+reader_did = authenticated_reader_did
+if not recipient_key_is_resolvable(reader_did):
+    raise ValueError("reader DID cannot receive a recipient-sealed kit")
+
 tn.export(
     "alice.tnpkg",
     kind="kit_bundle",
-    to_did="did:key:z6MkAlice...",
+    to_did=reader_did,
     seal_for_recipient=True,
 )
 ```
@@ -107,9 +115,9 @@ print(receipt.kind, receipt.accepted_count, receipt.deduped_count)
 
 ---
 
-## Rotation
+## BTN rotation
 
-Revoke and rotate are different operations with different causality. Revoking a leaf stops that reader from decrypting anything written *after* the revoke; it takes effect on the next write and needs no rotation. Rotation additionally retires the whole key generation (a fresh master seed and a new epoch), so reach for it when the key material itself may be compromised, not merely to drop one reader. In both cases a revoked or pre-rotation reader keeps their old entries: neither operation reaches back and rewrites history.
+For a BTN group, revoke and rotate are different operations with different causality. Revoking a leaf stops that reader from decrypting anything written *after* the revoke; it takes effect on the next write and needs no rotation. Rotation additionally retires the whole key generation (a fresh master seed and a new epoch), so reach for it when the key material itself may be compromised, not merely to drop one reader. In both cases a revoked or pre-rotation reader keeps their old entries: neither operation reaches back and rewrites history.
 
 `tn rotate` writes a new generation of group keys and produces one per-recipient `.tnpkg` artifact for each surviving reader. The CLI runs unattended:
 
@@ -127,7 +135,22 @@ Everything the dashboard at `vault.tn-proto.org` does (invite a reader by email,
 
 ---
 
+## JWE rotation
+
+JWE does not emit those BTN survivor kits. Rotating a JWE group archives its
+active sender, self-reader, and recipient-list files, then recreates the group
+with only the publisher's self-recipient. Every external reader must generate
+or retain its own `.jwe.mykey` and re-enroll its authenticated X25519 public key
+before it appears in post-rotation seals. Never distribute the publisher's
+self-recipient private key as a substitute.
+
+---
+
 ## HIBE groups
+
+> **Security status:** `tn-bbg` and the underlying `bls12_381_plus` pairing
+> library are unaudited. External cryptographic review is required before
+> production use. Treat HIBE as evaluation-only until that review is complete.
 
 `hibe` is a third cipher option, peer to `btn` (the default) and `jwe`, selected per group the same way:
 
@@ -138,7 +161,10 @@ groups:
     fields: [decision, rationale]
 ```
 
-A hibe group encrypts to an **identity path** (like `reader-did/policy-hash`) under an authority's published master public key. That gives it two properties the other ciphers don't have:
+For a focused walkthrough of JWE and HIBE key material, package handoff, and
+the grant ceremony, see [JWE and HIBE key ceremonies](jwe-hibe-key-ceremonies.md).
+
+A hibe group encrypts to an **identity path** (like `reader-did/policy-hash`) under an authority's authenticated, pinned master public key. That gives it two properties the other ciphers don't have:
 
 - **No key exchange at write time.** Anyone holding the authority's public key can seal to a path — including a reader who doesn't hold any key yet.
 - **Hierarchical delegation.** A key for a parent path can derive keys for paths below it, locally, with no re-keying and no authority involvement.
@@ -150,14 +176,20 @@ The ceremony that mints a hibe group becomes its own authority (it runs setup an
 `grant_reader` is hibe's `add_recipient` — the generic `add_recipient` verb also routes here for hibe groups:
 
 ```python
+from tn.recipient_seal import recipient_key_is_resolvable
+
+reader_did = authenticated_reader_identity  # complete Ed25519 did:key
+if not recipient_key_is_resolvable(reader_did):
+    raise ValueError("reader DID cannot receive a recipient-sealed HIBE kit")
+
 result = tn.admin.grant_reader(
     "governed",
-    reader_did="did:key:z6MkAlice...",
+    reader_did=reader_did,
     out_path="./alice.tnpkg",
 )
 ```
 
-The bundle carries the authority's public key, the group's identity path, and a freshly minted identity key. Each grant gets independently randomized key material for the same path, and every grantee decrypts the same entries. The reader absorbs it with `tn.absorb` like any other kit bundle. The authority's master secret never rides a bundle; it only appears in a self-addressed full-keystore backup.
+The bundle carries the authority's public key, the group's identity path, and a freshly minted identity key. Each grant gets independently randomized key material for the same path, and every grantee decrypts the same entries. The `.hibe.sk` is a bearer capability, not a key bound to `reader_did`; when the DID is not a complete resolvable Ed25519 `did:key`, `grant_reader` silently falls back to a plaintext package. The reader absorbs the securely delivered kit with `tn.absorb`. The authority's master secret never rides a reader bundle; it only appears in a self-addressed full-keystore backup.
 
 ### Revocation: the honest tradeoff
 
@@ -167,7 +199,7 @@ Choose the cipher by its revocation story. **btn revokes forward**: drop a reade
 tn.admin.rotate_reader_path("governed", "policy-b")
 ```
 
-Future seals target the new path, so holders of exact old-path keys stop reading new entries; everything sealed before the rotation stays open to them forever. A grantee holding a key for an *ancestor* of the new path keeps access (ancestor keys delegate down — grant exact paths when you want rotation to cut people off). If a group genuinely needs per-reader forward revocation, use btn for that group. That's what the default is for.
+Future seals from the updated authority target the new path, so holders of exact old-path keys stop reading those new entries; everything sealed before the rotation stays open to them forever. External writers keep their own local path and must receive, authenticate, and pin the new sibling path before sealing again, or the old exact-path reader still opens their output. A grantee holding an *ancestor* key is a delegated subauthority for that subtree and cannot be cut off by rotation beneath it. Grant exact paths when rotation must cut access; if an ancestor capability has already escaped, move to a fresh authority MPK or use BTN. If a group genuinely needs routine per-reader forward revocation, use BTN for that group. That's what the default is for.
 
 ### If the authority's master secret leaks
 

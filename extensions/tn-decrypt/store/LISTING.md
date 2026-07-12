@@ -41,7 +41,7 @@ final packaging and smoke-test steps. Visibility target: **Public**.
 > - No analytics, no telemetry, no network requests beyond the vault
 >   pairing you explicitly start.
 >
-> TN Decrypt does the decryption with the same audited cryptographic core
+> TN Decrypt does the decryption with the same cryptographic core
 > (compiled to WebAssembly) used by the TN SDKs. There is no JavaScript
 > reimplementation of any crypto primitive.
 

@@ -69,7 +69,7 @@ import {
   bytesToB64,
   b64ToBytes,
   randomBytes,
-  // EMK (the audited single-source for browser-extension keystore work)
+  // EMK (the single source for browser-extension keystore work)
   importEmk,
   deriveEmkFromPassphrase,
   emkFromPrfOutput,

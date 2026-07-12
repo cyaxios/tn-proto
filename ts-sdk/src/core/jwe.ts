@@ -1,4 +1,4 @@
-// RFC 7516 JWE for `cipher: jwe` groups, via panva/jose — the production JOSE
+// RFC 7516 JWE for `cipher: jwe` groups, via the panva/jose JOSE
 // library. This is the TS peer of Python's `tn/cipher.py::JWEGroupCipher`:
 // per recipient ECDH-ES+A256KW over X25519, one shared A256GCM CEK for the
 // body, the TN marker bound as the native JWE `aad` member. Output is a JWE

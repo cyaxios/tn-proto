@@ -2,13 +2,13 @@
 
 `cipher: jwe` emits interoperable RFC 7516 JWE. A JWE group's `ciphertext` blob is
 a valid JWE **General JSON Serialization** object that any conformant JOSE
-implementation can parse, produced by each language's production JOSE library
+implementation can parse, produced by each language's JOSE library
 (Python: Authlib/joserfc, BSD-3; JS/TS: panva/jose, MIT). A record sealed by one
 SDK opens in the other by standard conformance, not by shared golden vectors.
 
 ## Non-negotiable constraints
 
-**1. No hand-rolled JOSE layer — use a production JOSE library.**
+**1. No hand-rolled JOSE layer — use a JOSE library.**
 JWE is a standard (RFC 7516) with mature, maintained libraries; use them. The one
 sanctioned exception is a thin, spec-conformant RFC 7516 serializer over
 `pyca/cryptography` as a Python fallback, and only if the permissive primary
@@ -56,24 +56,28 @@ pure engine by design.
 A JWE group's cipher output is the UTF-8 bytes of the compact JSON of a General
 JSON Serialization object (`{protected, recipients[], aad?, iv, ciphertext,
 tag}`). Those bytes ARE the group's `ciphertext` field, exactly as btn serializes
-its cover inside `ciphertext`. So `row_hash`, the chain, and the Ed25519
-signature cover the entire JWE with **zero** envelope-schema change (row_hash
-covers `ciphertext` + `field_hashes` only). **No sibling group-dict keys, ever** —
-a wrapped key, iv, or tag hoisted to a sibling of `ciphertext` sits outside
-`row_hash`/signature, a strip/swap vector. This matches protocol.md §3's opacity
-rule.
+its cover inside `ciphertext`. When row hashing is enabled, `row_hash` covers the
+entire JWE with **zero** envelope-schema change; a non-empty Ed25519 signature
+then covers that stored hash. In an unsigned and unchained profile both fields
+are empty sentinels. **No sibling group-dict keys, ever** — a wrapped key, iv, or
+tag hoisted beside `ciphertext` would fall outside the group ciphertext input, a
+strip/swap vector whenever envelope integrity is enabled. This matches
+protocol.md §3's opacity rule.
 
 **D3. Crypto profile — ECDH-ES+A256KW / A256GCM / X25519, ephemeral sender.**
 Per recipient: `alg: ECDH-ES+A256KW` (ephemeral-static ECDH-ES derives a KEK,
 AES-256 key-wrap of the shared CEK); body `enc: A256GCM` under one fresh CEK;
-recipient keys are static X25519 OKP (RFC 8037). The sender epk is ephemeral per
-seal, so there is **no long-lived sender secret** — the ephemeral key adds
-forward secrecy w.r.t. the sender, and the epk travels in each recipient's JWE
-header, so recipients don't need the sender's public key out-of-band. Sender
-authenticity comes from the TN envelope's Ed25519 signature (protocol.md §2), not
-from the cipher; ECDH-ES's lack of KEM-level sender authentication is therefore
-not a gap. (If cipher-level sender auth were ever required, the JOSE mechanism is
-ECDH-1PU — out of scope; the envelope signature already provides it.)
+recipient keys are static X25519 OKP (RFC 8037). JOSE creates a fresh ephemeral
+`epk` per recipient block, and that `epk` travels in the block's JWE header, so
+recipients need no sender public key out-of-band. There is no long-lived sender
+secret in the seal path.
+
+ECDH-ES does not authenticate the sender. TN can supply a separate authorship
+claim only when the envelope has a non-empty Ed25519 signature, the consumer
+recomputes record integrity and verifies that signature, and the verified DID is
+authorized by application policy. Successful JWE decryption alone proves none
+of those things. ECDH-1PU would be the JOSE cipher-level sender-auth mechanism;
+it is out of scope.
 
 **D4. Recipient privacy — anonymous recipient blocks by default.**
 Per-recipient headers carry **no identifying `kid`** by default, so an observer
@@ -105,9 +109,9 @@ group is jwe, btn, or hibe.
 
 btn and hibe are TN-original schemes — TN owns both ends, so cross-impl parity
 needs bespoke golden vectors of a format TN defines. JWE is the opposite: an
-**IETF standard** with independent, audited, production implementations in every
+**IETF standard** with independent, maintained implementations in every
 language. So this cipher leans on them and lets the standard carry interop —
-per-language production libraries rather than one shared Rust impl, off the
+per-language libraries rather than one shared Rust impl, off the
 native/wasm runtime (Constraint 4), and cross-impl correctness gated by a
 **Python↔TS round-trip conformance test**, not golden vectors.
 
@@ -115,7 +119,9 @@ native/wasm runtime (Constraint 4), and cross-impl correctness gated by a
 want a standards-compliant, externally-inspectable envelope; recipients already
 hold X25519 keys. **When not to:** you need btn-grade cheap forward revocation at
 scale (use btn — jwe revocation is an O(1) recipient-list edit that only affects
-future seals), or you seal to someone holding no key yet (use hibe).
+future seals), or you seal to someone holding no key yet (HIBE can model that,
+but TN's HIBE scheme/pairing implementation is unaudited and evaluation-only
+pending external cryptographic review).
 
 ## Library survey
 
@@ -169,9 +175,9 @@ A JWE group's on-disk material:
 - `<group>.jwe.mykey` — this party's static X25519 private (secret; 0600). Its
   presence is what marks a keystore as a reader of the group.
 - `<group>.jwe.sender` — a stable per-group X25519 identity anchor (secret;
-  0600). ECDH-ES uses a fresh ephemeral key per seal, so this key never seals or
-  opens; it is kept only so the ceremony / compile / absorb surface has a stable
-  group anchor to read.
+  0600). ECDH-ES uses a fresh ephemeral key for every recipient block, so this
+  key never seals or opens; it is kept only so the ceremony / compile / absorb
+  surface has a stable group anchor to read.
 
 ## Design tradeoffs
 
@@ -180,9 +186,13 @@ A JWE group's on-disk material:
   `kid` trades audience privacy for O(1) block selection.
 - **Marker location differs from btn/hibe (D5).** JWE stores the marker in the
   `aad` member (inside `ciphertext`), whereas btn/hibe reconstruct it from
-  `tn_aad` and never store it. Both are covered by `row_hash`; the reader
-  cross-checks the reconstructed `tn_aad` marker against the embedded `aad`, so a
-  tampered `tn_aad` echo fails the AEAD.
+  `tn_aad` and never store it. The reader cross-checks the reconstructed
+  `tn_aad` marker against the embedded `aad`, so a tampered echo always fails
+  decryption. When a row hash exists, recomputation also fails. In an unsigned
+  and unchained profile, `row_hash` and `signature` are empty and AEAD is the
+  applicable tamper check. A signature primitive covers the stored row hash, so
+  it may still verify while a separate row-hash recomputation detects an edited
+  public echo.
 - **No forward secrecy across a recipient's static key.** ECDH-ES gives forward
   secrecy w.r.t. the *sender* (ephemeral epk), but a recipient's static X25519
   private still opens all of their past blocks — same as any ECDH-ES deployment.
@@ -190,6 +200,9 @@ A JWE group's on-disk material:
 - **Forward-only revocation.** `revoke` is an O(1) recipient-list edit; the next
   seal omits that block. Pre-revocation records the reader already holds stay
   open. For retroactive lockout, use btn.
+- **Rotation requires re-enrollment.** Rotation archives the active JWE files
+  and recreates the group with only the publisher self-recipient. Every other
+  reader must be re-enrolled before it appears in post-rotation seals.
 
 ## Test plan
 
@@ -202,9 +215,11 @@ A JWE group's on-disk material:
   round-trip.
 - **Envelope coverage:** the JWE JSON lives inside `g["ciphertext"]`; assert
   (a) flipping any byte, (b) swapping a recipient block, (c) stripping the `aad`
-  member each break `row_hash`/signature verification; assert Python and TS
-  compute an identical `row_hash` for the same jwe envelope; assert no sibling
-  group-dict keys.
+  member each cause composite record rejection when envelope integrity is
+  enabled; assert Python and TS compute an identical `row_hash` for the same JWE
+  envelope; assert no sibling group-dict keys. In unsigned and unchained mode,
+  assert wrong AAD still breaks decryption while the empty hash/signature
+  sentinels remain empty.
 - **Multi-recipient + revocation:** seal to 3 readers; each opens; `revoke` one;
   the next seal omits their block and they can no longer open new records;
   pre-revocation records they already hold stay open.

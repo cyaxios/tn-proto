@@ -53,7 +53,7 @@ from tn import _hibe
 
 # One authority's system keypair (max_depth = deepest identity path allowed).
 mpk, msk = _hibe.setup(2)
-_hibe.mpk_fingerprint(mpk)          # 32 bytes — what a manifest pins
+_hibe.mpk_fingerprint(mpk)          # 32-byte identifier; not authentication
 _hibe.mpk_max_depth(mpk)            # 2  (also validates the mpk bytes)
 
 # Mint a reader key for an identity path from the master secret.
@@ -252,11 +252,20 @@ primitives never return incorrect plaintext.
 key for any path and read everything under that mpk. Keep it off the wire —
 only mpk, identity paths, and per-reader keys are meant to travel.
 
+An MPK fingerprint identifies exact public-key bytes; it does not prove which
+authority produced them. Before a writer seals, obtain the expected fingerprint
+through an authenticated channel or an authority statement signed by an
+already-trusted identity, then compare it with `mpk_fingerprint(mpk)`.
+
 ---
 
 ## Security status
 
 The scheme (`tn-bbg`) and the underlying `bls12_381_plus` pairing library are
-**unaudited**. An external cryptographic review is required before production
-use. Delegated keys are permanent — there is no forward revocation of an
-admitted reader at the primitive level (rotate the identity path instead).
+**unaudited**. External cryptographic review is required before production use.
+
+## Key lifecycle
+
+Delegated keys are permanent for their path. Removing a reader rotates the
+identity path for future seals; entries sealed before that rotation remain
+available to prior grantees.

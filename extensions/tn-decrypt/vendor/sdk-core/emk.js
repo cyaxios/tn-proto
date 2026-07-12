@@ -1,7 +1,7 @@
 // Extension Master Key (EMK) primitives — Web-Crypto-backed AES-GCM
 // helpers for wrapping per-keystore secrets under a user-derived master
 // key. Two derivation paths: WebAuthn PRF (no passphrase) or
-// PBKDF2-SHA256 over a passphrase. Audited single source for browser
+// PBKDF2-SHA256 over a passphrase. Single source for browser
 // extensions and dashboards that need the same EMK shape.
 //
 // Layer 1: Web Crypto only, no node:* imports. The extension at
