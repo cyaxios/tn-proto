@@ -24,6 +24,10 @@ pub mod account;
 pub mod admin;
 /// Credential-store helpers for cached vault account keys.
 pub mod credential_store;
+/// Trusted-principal enrollment: strict statements, locked receiver-local
+/// state, and unsafe-operation observability. Root re-exports are added by
+/// the shared native/SDK bridge integration.
+pub mod enrollment;
 /// Stable Rust-facing read entry type.
 pub mod entry;
 /// SDK-wide error and result types.

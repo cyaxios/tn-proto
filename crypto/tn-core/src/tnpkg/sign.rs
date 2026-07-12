@@ -17,8 +17,14 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use super::zip_write::validate_tnpkg_body_name;
-use super::{BodyContents, Manifest, ED25519_MULTICODEC};
+use super::{BodyContents, Manifest};
 use crate::{Error, Result};
+
+// Multicodec validation lives in the one strict parser
+// (`crate::trust::parse_ed25519_did_key`) now. Pin at compile time that the
+// prefix this module historically enforced is the prefix the parser enforces,
+// so the two can never drift apart silently.
+const _: () = assert!(matches!(super::ED25519_MULTICODEC, [0xed, 0x01]));
 
 /// Sign a manifest in place, populating
 /// [`manifest_signature_b64`](Manifest::manifest_signature_b64).
@@ -168,31 +174,15 @@ pub fn verify_manifest(manifest: &Manifest) -> Result<()> {
 
 /// Extract the 32-byte Ed25519 public key from a `did:key:z…` identifier.
 ///
-/// Internal helper for [`verify_manifest`]. Public callers verify `did:key`
-/// signatures through [`crate::DeviceKey::verify_did`] (behind `tn init`),
-/// not this function.
+/// Internal helper for [`verify_manifest`], routed through the one strict
+/// parser in [`crate::trust::parse_ed25519_did_key`] so package verification
+/// and enrollment ceremonies accept exactly the same identifiers. Public
+/// callers verify `did:key` signatures through
+/// [`crate::DeviceKey::verify_did`] (behind `tn init`) or the strict
+/// [`crate::trust`] API, not this function.
 pub(crate) fn did_key_pub(did: &str) -> Result<[u8; 32]> {
-    let rest = did
-        .strip_prefix("did:key:z")
-        .ok_or_else(|| Error::Malformed {
-            kind: "tnpkg manifest publisher_identity",
-            reason: format!("unsupported DID form: {did:?}"),
-        })?;
-    let multi = bs58::decode(rest)
-        .into_vec()
-        .map_err(|e| Error::Malformed {
-            kind: "tnpkg manifest publisher_identity",
-            reason: e.to_string(),
-        })?;
-    if multi.len() < 2 || multi[..2] != ED25519_MULTICODEC {
-        return Err(Error::Malformed {
-            kind: "tnpkg manifest publisher_identity",
-            reason: "manifest signing key must be Ed25519 (multicodec 0xed)".into(),
-        });
-    }
-    let pub_bytes: [u8; 32] = multi[2..].try_into().map_err(|_| Error::Malformed {
+    crate::trust::parse_ed25519_did_key(did).map_err(|error| Error::Malformed {
         kind: "tnpkg manifest publisher_identity",
-        reason: "DID pub bytes are not 32-byte Ed25519".into(),
-    })?;
-    Ok(pub_bytes)
+        reason: error.detail,
+    })
 }

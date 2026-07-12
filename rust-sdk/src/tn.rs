@@ -672,6 +672,37 @@ impl Tn {
     pub(crate) fn runtime_mut(&mut self) -> &mut Runtime {
         &mut self.runtime
     }
+
+    /// Emit the one best-effort `tn.security.unsafe_operation` audit event
+    /// for an explicitly weakened operation.
+    ///
+    /// This is the mutation-owning runtime half of the shared observability
+    /// contract (the SDK layer separately emits the one structured warning).
+    /// Emission is guarded against recursion, never fails the requested
+    /// operation, and is skipped when the active ceremony cannot attest.
+    pub(crate) fn emit_unsafe_operation_audit(&self, notice: &tn_core::UnsafeOperationNotice) {
+        thread_local! {
+            static IN_AUDIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        let entered = IN_AUDIT.with(|flag| {
+            if flag.get() {
+                false
+            } else {
+                flag.set(true);
+                true
+            }
+        });
+        if !entered {
+            return;
+        }
+        let fields = serde_json::to_value(notice)
+            .ok()
+            .and_then(|value| value.as_object().cloned());
+        if let Some(fields) = fields {
+            let _ = self.info("tn.security.unsafe_operation", Value::Object(fields));
+        }
+        IN_AUDIT.with(|flag| flag.set(false));
+    }
 }
 
 fn runtime_init_options(options: TnInitOptions) -> tn_core::RuntimeInitOptions {
