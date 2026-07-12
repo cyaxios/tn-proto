@@ -36,5 +36,11 @@ def absorb(*args: Any, **kwargs: Any) -> AbsorbReceipt | AbsorbResult:
 
 
 def bundle_for_recipient(*args: Any, **kwargs: Any) -> Path:
+    """Bundle BTN reader kits for an existing recipient.
+
+    This helper is BTN-only. JWE readers generate and retain their own
+    ``.jwe.mykey`` and enroll public material; HIBE readers use
+    :func:`tn.admin.grant_reader`.
+    """
     from . import _bundle_for_recipient_impl
     return _bundle_for_recipient_impl(*args, **kwargs)

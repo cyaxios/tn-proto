@@ -241,8 +241,12 @@ def _bundle_for_recipient_impl(
     groups: list[str] | None = None,
     seal_for_recipient: bool = False,
 ) -> Path:
-    """Mint a fresh kit for ``recipient_did`` across one or more groups and
-    bundle them into a single ``.tnpkg`` at ``out_path``.
+    """Mint fresh BTN kits for ``recipient_did`` across one or more BTN
+    groups and bundle them into a single ``.tnpkg`` at ``out_path``.
+
+    This helper is BTN-only. JWE readers generate/retain ``.jwe.mykey`` and
+    enroll only public material; HIBE readers receive bearer path grants via
+    :func:`tn.admin.grant_reader`.
 
     Closes FINDINGS #5: doing this by hand requires (a) minting each kit
     with the canonical ``<group>.btn.mykit`` filename — a non-canonical
@@ -300,6 +304,8 @@ def _bundle_for_recipient_impl(
             f"tn.ensure_group(cfg, name, fields=[...]) first."
         )
 
+    _require_btn_bundle_groups(cfg, requested)
+
     # Mint each kit into a temp dir with the canonical filename, then
     # export from that temp dir. The publisher's own keystore is never
     # the export source, which prevents the FINDINGS #5 trap (shipping
@@ -324,3 +330,18 @@ def _bundle_for_recipient_impl(
             seal_for_recipient=seal_for_recipient,
         )
     return Path(out)
+
+
+def _require_btn_bundle_groups(cfg: Any, requested: list[str]) -> None:
+    """Reject non-BTN groups before the reader-kit bundler mints anything."""
+    non_btn = {
+        group: cfg.groups[group].cipher.name
+        for group in requested
+        if cfg.groups[group].cipher.name != "btn"
+    }
+    if non_btn:
+        raise ValueError(
+            "bundle_for_recipient is BTN-only; non-BTN groups requested: "
+            f"{non_btn}. JWE readers generate their own .jwe.mykey and enroll "
+            "public material; HIBE readers use tn.admin.grant_reader."
+        )
