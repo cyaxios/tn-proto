@@ -127,7 +127,6 @@ export async function sealWithRuntime(
     indexMaster: rt.keystore.indexMaster,
     signB64: (bytes) => String(signatureB64(rt.keystore.device.sign(bytes))),
     sealGroup: (gname, cipher, plaintext, aad) => _sealGroup(rt, gname, cipher, plaintext, aad),
-    warn: (message) => process.emitWarning(message),
     emitReceipt: async (receiptFields) => {
       // Routed through the runtime's async write path (jwe groups seal
       // asynchronously in TS); errors PROPAGATE — the caller asked for

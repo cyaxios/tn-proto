@@ -555,6 +555,44 @@ test("asRecipient over a directory with no key for the group throws", async () =
 // Cipher coverage + rotation walks
 // ---------------------------------------------------------------------------
 
+test("seal fails closed when a jwe group has no publisher recipients", async () => {
+  const base = makeBase();
+  const client = await initClient(base, "jwe");
+  try {
+    rmSync(join(cfgOf(client).keystorePath, "default.jwe.recipients"));
+
+    await assert.rejects(
+      client.seal("obj.test.v1", { x: 1 }, { receipt: false }),
+      /jwe: no recipients file for group "default"/,
+    );
+  } finally {
+    await client.close();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("seal fails closed when a btn group has no publisher state", async () => {
+  const base = makeBase();
+  const client = await initClient(base, "btn");
+  try {
+    const group = (
+      client as unknown as {
+        _rt: { keystore: { groups: Map<string, { stateBytes?: Uint8Array }> } };
+      }
+    )._rt.keystore.groups.get("default");
+    assert.ok(group);
+    group.stateBytes = undefined;
+
+    await assert.rejects(
+      client.seal("obj.test.v1", { x: 1 }, { receipt: false }),
+      /btn: no state file in this keystore/,
+    );
+  } finally {
+    await client.close();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("seal/unseal round-trips on a btn ceremony alongside the wasm log path", async () => {
   const base = makeBase();
   const client = await initClient(base, "btn");
