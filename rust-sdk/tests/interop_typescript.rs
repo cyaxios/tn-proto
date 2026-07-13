@@ -24,9 +24,10 @@ struct JweInteropFixture {
 #[test]
 #[ignore = "requires local ts-sdk dependencies/build setup; run with cargo test -p tn-proto --test interop_typescript rfc7516_jwe_round_trips_between_rust_and_typescript -- --ignored --exact"]
 fn rfc7516_jwe_round_trips_between_rust_and_typescript() -> tn_proto::Result<()> {
-    if !typescript_ready() {
-        return Ok(());
-    }
+    assert!(
+        typescript_ready(),
+        "explicit Rust/TypeScript JWE interop gate requires a ready ts-sdk runtime"
+    );
     let fixture = jwe_interop_fixture();
     rust_jwe_opens_in_typescript(&fixture)?;
     typescript_jwe_opens_in_rust(&fixture)?;

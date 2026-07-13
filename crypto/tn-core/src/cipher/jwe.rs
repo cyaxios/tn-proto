@@ -703,6 +703,22 @@ mod native {
         }
 
         #[test]
+        fn wrong_but_present_alg_is_rejected() {
+            let mut jwe = sealed_jwe(1);
+            jwe["recipients"][0]["header"]["alg"] = json!("dir");
+
+            assert_parse_malformed(&jwe);
+        }
+
+        #[test]
+        fn wrong_but_present_protected_enc_is_rejected() {
+            let mut jwe = sealed_jwe(1);
+            set_protected_header(&mut jwe, json!({"enc": "A128GCM"}));
+
+            assert_parse_malformed(&jwe);
+        }
+
+        #[test]
         fn duplicate_header_names_across_components_are_rejected() {
             let base = sealed_jwe(1);
             let mut alg = base.clone();
@@ -780,6 +796,14 @@ mod native {
                 }
                 assert_parse_malformed(&jwe);
             }
+        }
+
+        #[test]
+        fn multi_recipient_rejects_one_missing_local_epk() {
+            let mut jwe = sealed_jwe(2);
+            take_recipient_member(&mut jwe, 1, "epk");
+
+            assert_parse_malformed(&jwe);
         }
 
         #[test]
