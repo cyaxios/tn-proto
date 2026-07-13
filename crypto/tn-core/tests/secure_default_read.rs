@@ -490,6 +490,74 @@ fn policy_rejection_happens_before_plaintext_is_returned() {
 }
 
 #[test]
+fn injected_root_field_invalidates_the_signed_row() {
+    let td = tempfile::tempdir().unwrap();
+    let ceremony = common::setup_minimal_btn_ceremony(td.path());
+    let rt = Runtime::init(&ceremony.yaml_path).unwrap();
+    rt.info("trusted.row", serde_json::Map::new()).unwrap();
+
+    let log_path = rt.log_path().to_owned();
+    let text = std::fs::read_to_string(&log_path).unwrap();
+    let mut lines: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let injected = lines.last_mut().unwrap();
+    injected["attacker_note"] = json!("unsigned injection");
+    injected["did"] = json!("did:key:zAttackerControlledAlias");
+    let rewritten = lines
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&log_path, rewritten).unwrap();
+
+    let error = rt
+        .read_with_policy(
+            &SecureReadOptions::default(),
+            &local_policy(&rt, VerifyMode::Raise),
+            &local_context(&rt),
+            None,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("row_hash_invalid"), "{error}");
+}
+
+#[test]
+fn injected_non_string_aad_echo_invalidates_the_signed_row() {
+    let td = tempfile::tempdir().unwrap();
+    let ceremony = common::setup_minimal_btn_ceremony(td.path());
+    let rt = Runtime::init(&ceremony.yaml_path).unwrap();
+    rt.info("trusted.aad", serde_json::Map::new()).unwrap();
+
+    let log_path = rt.log_path().to_owned();
+    let text = std::fs::read_to_string(&log_path).unwrap();
+    let mut lines: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    lines.last_mut().unwrap()["tn_aad"] = json!({"default": {"case": "injected"}});
+    let rewritten = lines
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&log_path, rewritten).unwrap();
+
+    let error = rt
+        .read_with_policy(
+            &SecureReadOptions::default(),
+            &local_policy(&rt, VerifyMode::Raise),
+            &local_context(&rt),
+            None,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("row_hash_invalid"), "{error}");
+}
+
+#[test]
 fn disabled_read_never_defaults_missing_validity_to_true() {
     let td = tempfile::tempdir().unwrap();
     let ceremony = common::setup_minimal_btn_ceremony(td.path());
@@ -634,6 +702,32 @@ fn report_cursor_resumes_after_skips_and_preserves_other_sources() {
 }
 
 #[test]
+fn missing_source_preserves_a_nonzero_cursor() {
+    let td = tempfile::tempdir().unwrap();
+    let ceremony = common::setup_minimal_btn_ceremony(td.path());
+    let rt = Runtime::init(&ceremony.yaml_path).unwrap();
+    rt.info("cursor.before_missing", serde_json::Map::new())
+        .unwrap();
+    let context = local_context(&rt);
+    let policy = local_policy(&rt, VerifyMode::Raise);
+    let options = SecureReadOptions::default();
+    let first = rt
+        .read_with_policy(&options, &policy, &context, None)
+        .unwrap();
+    let cursor = first.cursor;
+    let (source_id, source_before) = cursor.sources.iter().next().unwrap();
+    assert_ne!(source_before.value, "0");
+
+    std::fs::remove_file(rt.log_path()).unwrap();
+    let missing = rt
+        .read_with_policy(&options, &policy, &context, Some(&cursor))
+        .unwrap();
+
+    assert!(missing.entries.is_empty());
+    assert_eq!(missing.cursor.sources[source_id], *source_before);
+}
+
+#[test]
 fn relative_option_path_and_source_id_are_anchored_at_yaml_directory() {
     let td = tempfile::tempdir().unwrap();
     let ceremony = common::setup_minimal_btn_ceremony(td.path());
@@ -708,6 +802,77 @@ fn local_chain_disabled_rows_report_effective_chain_validity() {
     assert!(rows
         .iter()
         .all(|entry| entry["_valid"]["chain"] == Value::Bool(true)));
+}
+
+#[test]
+fn signed_unchained_profile_still_rejects_public_field_tampering() {
+    let td = tempfile::tempdir().unwrap();
+    let ceremony = common::setup_minimal_btn_ceremony(td.path());
+    let yaml = std::fs::read_to_string(&ceremony.yaml_path)
+        .unwrap()
+        .replace(
+            "protocol_events_location: main_log}",
+            "protocol_events_location: main_log, chain: false}",
+        )
+        .replace("public_fields: []", "public_fields: [visible]");
+    std::fs::write(&ceremony.yaml_path, yaml).unwrap();
+    let rt = Runtime::init(&ceremony.yaml_path).unwrap();
+    rt.info(
+        "signed.unchained",
+        serde_json::Map::from_iter([("visible".into(), json!("original"))]),
+    )
+    .unwrap();
+
+    let text = std::fs::read_to_string(rt.log_path()).unwrap();
+    let mut rows: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    rows.last_mut().unwrap()["visible"] = json!("tampered");
+    let rewritten = rows
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(rt.log_path(), rewritten).unwrap();
+    let mut context = local_context(&rt);
+    context.profile_chain = Some(false);
+
+    let error = rt
+        .read_with_policy(
+            &SecureReadOptions::default(),
+            &local_policy(&rt, VerifyMode::Raise),
+            &context,
+            None,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("row_hash_invalid"), "{error}");
+}
+
+#[test]
+fn full_scan_rejects_a_prefix_truncated_hash_chain() {
+    let td = tempfile::tempdir().unwrap();
+    let ceremony = common::setup_minimal_btn_ceremony(td.path());
+    let rt = Runtime::init(&ceremony.yaml_path).unwrap();
+    rt.info("chain.truncated", serde_json::Map::new()).unwrap();
+    rt.info("chain.truncated", serde_json::Map::new()).unwrap();
+
+    let text = std::fs::read_to_string(rt.log_path()).unwrap();
+    let last = text.lines().last().unwrap();
+    let envelope: Value = serde_json::from_str(last).unwrap();
+    assert_ne!(envelope["prev_hash"], tn_core::chain::ZERO_HASH);
+    std::fs::write(rt.log_path(), format!("{last}\n")).unwrap();
+
+    let error = rt
+        .read_with_policy(
+            &SecureReadOptions::default(),
+            &local_policy(&rt, VerifyMode::Raise),
+            &local_context(&rt),
+            None,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("chain_invalid"), "{error}");
 }
 
 #[test]
@@ -805,12 +970,21 @@ fn foreign_peek_uses_snapshot_reader_without_whole_source_read() {
         })
         .unwrap_err();
 
-    assert!(matches!(error, Error::NotImplemented(_)), "{error}");
+    assert!(
+        matches!(
+            error,
+            Error::Malformed {
+                kind: "verification",
+                ref reason,
+            } if reason.contains("writer_untrusted")
+        ),
+        "{error}"
+    );
     assert_eq!(
         probe
             .snapshot_opens
             .load(std::sync::atomic::Ordering::SeqCst),
-        1
+        2
     );
     assert_eq!(
         probe.whole_reads.load(std::sync::atomic::Ordering::SeqCst),

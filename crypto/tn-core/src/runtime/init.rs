@@ -646,6 +646,11 @@ impl Runtime {
         self.device.did()
     }
 
+    /// Identifier stamped on events emitted by this runtime instance.
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
     /// Path to the main ndjson log.
     pub fn log_path(&self) -> &Path {
         &self.log_path

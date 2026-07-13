@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
@@ -378,6 +378,20 @@ pub struct LlmClassifier {
     pub model: String,
 }
 
+/// Receiver-local writer trust configured for secure reads.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Trust {
+    /// Exact canonical Ed25519 `did:key` writers accepted by default.
+    #[serde(default)]
+    pub writers: Vec<String>,
+}
+
+impl Trust {
+    fn is_empty(&self) -> bool {
+        self.writers.is_empty()
+    }
+}
+
 /// Root of the parsed tn.yaml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -415,6 +429,9 @@ pub struct Config {
     /// Handler specs (opaque for the Rust side — left to the host to interpret).
     #[serde(default)]
     pub handlers: Vec<serde_yml::Value>,
+    /// Receiver-local exact-DID writer trust for secure reads.
+    #[serde(default, skip_serializing_if = "Trust::is_empty")]
+    pub trust: Trust,
 }
 
 impl Config {
@@ -577,6 +594,19 @@ pub fn parse(yaml: &str) -> Result<Config> {
             return Err(Error::ReservedGroupName {
                 name: gname.clone(),
             });
+        }
+    }
+    let mut seen_writers = BTreeSet::new();
+    for did in &cfg.trust.writers {
+        crate::trust::parse_ed25519_did_key(did).map_err(|_| {
+            Error::InvalidConfig(format!(
+                "trusted writer must be a canonical Ed25519 did:key; got {did:?}"
+            ))
+        })?;
+        if !seen_writers.insert(did.clone()) {
+            return Err(Error::InvalidConfig(format!(
+                "duplicate trust.writers entry {did:?}"
+            )));
         }
     }
     Ok(cfg)

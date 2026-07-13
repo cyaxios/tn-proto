@@ -62,7 +62,8 @@ pub use types::{
     SecureReadOptions, SourceCursorV1, ValidFlags, VerifyMode,
 };
 
-pub use read::{canonical_file_source_id, canonical_source_id, flatten_raw_entry};
+pub use read::{canonical_file_source_id, canonical_source_id, file_source_id, flatten_raw_entry};
+pub(crate) use read::{read_recipient_rows, RecipientRow};
 
 /// Internal: per-group cipher and derived index-token HMAC state held
 /// inside [`Runtime`]; backs every group on the write / read paths

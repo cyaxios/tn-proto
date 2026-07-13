@@ -209,7 +209,7 @@ fn foreign_unsigned_row_does_not_inherit_local_sign_false() {
 }
 
 #[test]
-fn secure_read_explicit_foreign_btn_remains_fail_closed_until_policy_decrypt_exists() {
+fn secure_read_explicit_foreign_btn_rejects_untrusted_writer() {
     let local_dir = tempfile::tempdir().unwrap();
     let foreign_dir = tempfile::tempdir().unwrap();
     let local_ceremony = common::setup_minimal_btn_ceremony(local_dir.path());
@@ -227,8 +227,16 @@ fn secure_read_explicit_foreign_btn_remains_fail_closed_until_policy_decrypt_exi
             log_path: Some(foreign_log),
         })
         .unwrap_err();
-    assert!(matches!(error, Error::NotImplemented(_)), "{error}");
-    assert!(error.to_string().contains("read_from_with_validity"));
+    assert!(
+        matches!(
+            error,
+            Error::Malformed {
+                kind: "verification",
+                ref reason,
+            } if reason.contains("writer_untrusted")
+        ),
+        "{error}"
+    );
 }
 
 #[test]

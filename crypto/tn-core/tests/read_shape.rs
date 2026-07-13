@@ -73,6 +73,33 @@ fn read_with_verify_adds_valid_block() {
 }
 
 #[test]
+fn everyday_runtime_read_rejects_a_tampered_row() {
+    let td = tempfile::tempdir().unwrap();
+    let cer = setup_minimal_btn_ceremony(td.path());
+    let rt = Runtime::init(&cer.yaml_path).unwrap();
+    rt.info("runtime.secure", serde_json::Map::new()).unwrap();
+
+    let text = std::fs::read_to_string(rt.log_path()).unwrap();
+    let mut rows: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    rows.last_mut().unwrap()["signature"] = json!("tampered");
+    let rewritten = rows
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(rt.log_path(), rewritten).unwrap();
+
+    let error = rt
+        .read()
+        .expect_err("Runtime::read must be secure by default");
+    assert!(error.to_string().contains("signature_invalid"), "{error}");
+}
+
+#[test]
 fn read_raw_returns_audit_shape() {
     let td = tempfile::tempdir().unwrap();
     let cer = setup_minimal_btn_ceremony(td.path());

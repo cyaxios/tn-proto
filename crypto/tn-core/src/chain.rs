@@ -18,6 +18,7 @@ pub const ZERO_HASH: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Input for a single group inside the row hash: ciphertext bytes + sorted field hashes.
+#[derive(Clone)]
 pub struct GroupInput {
     /// Raw ciphertext bytes (un-hex'd or un-base64'd).
     pub ciphertext: Vec<u8>,
