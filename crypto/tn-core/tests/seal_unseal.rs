@@ -689,12 +689,12 @@ fn unseal_keybag_two_ciphers_one_group() {
 }
 
 #[test]
+#[cfg(not(feature = "native-jwe"))]
 fn unseal_jwe_block_reported_as_sealed_candidate() {
     let td = tempfile::tempdir().unwrap();
     let cer = setup_minimal_btn_ceremony(td.path());
-    // A jwe recipient key for "default" lives in the keystore; the Rust
-    // runtime cannot use it (JWE stays out of Rust) but must surface it
-    // through the sealed-blocks seam for a managed second-pass decrypt.
+    // A jwe recipient key for "default" lives in the keystore, but this build
+    // omitted native JWE and must surface it for a managed second-pass decrypt.
     std::fs::write(cer.keystore.join("default.jwe.mykey"), b"jwe-key-stub").unwrap();
     let rt = Runtime::init(&cer.yaml_path).unwrap();
 

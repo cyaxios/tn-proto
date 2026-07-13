@@ -78,7 +78,7 @@ fn write_minimal_foreign_log(path: &std::path::Path, did: &str) {
 }
 
 #[test]
-fn read_from_foreign_log_with_jwe_material_fails_explicitly() {
+fn read_from_foreign_log_with_jwe_material_attempts_native_decrypt() {
     let td = tempfile::tempdir().unwrap();
     let cer = setup_minimal_btn_ceremony(td.path());
     std::fs::write(cer.keystore.join("default.jwe.mykey"), [0x44u8; 32]).unwrap();
@@ -86,13 +86,12 @@ fn read_from_foreign_log_with_jwe_material_fails_explicitly() {
     let foreign_log = td.path().join("foreign-jwe.ndjson");
     write_minimal_foreign_log(&foreign_log, "did:key:zForeignJwe");
 
-    let err = match rt.read_from(&foreign_log) {
-        Ok(_) => panic!("read_from should reject foreign JWE material explicitly"),
-        Err(e) => e,
-    };
-    let msg = err.to_string();
-    assert!(msg.contains("read_from"), "{msg}");
-    assert!(msg.contains("cipher=jwe"), "{msg}");
+    let entries = rt.read_from(&foreign_log).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].plaintext_per_group["default"]["$decrypt_error"],
+        true
+    );
 }
 
 #[test]
@@ -106,11 +105,15 @@ fn foreign_writer_detection_skips_a_malformed_prefix() {
     let valid = std::fs::read_to_string(&foreign_log).unwrap();
     std::fs::write(&foreign_log, format!("not-json\n{valid}")).unwrap();
 
-    let error = match rt.read_from(&foreign_log) {
-        Ok(_) => panic!("the parseable foreign row must still select JWE material"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("cipher=jwe"), "{error}");
+    let entries = rt.read_from(&foreign_log).unwrap();
+    let encrypted = entries
+        .iter()
+        .find(|entry| entry.envelope["event_type"] == "x.foreign")
+        .expect("parseable row survives malformed prefix");
+    assert_eq!(
+        encrypted.plaintext_per_group["default"]["$decrypt_error"],
+        true
+    );
 }
 
 #[test]

@@ -257,19 +257,20 @@ impl<'a> Admin<'a> {
     /// Re-checks the retained scope (this publisher, this ceremony, this
     /// group), persists the authenticated DID-to-X25519 binding into the
     /// Python-compatible `<group>.jwe.recipients` list plus the verified
-    /// trust registry, and attests `tn.recipient.added`. The Rust runtime
-    /// keeps its documented native JWE `NotImplemented` sentinel; a managed
-    /// JWE runtime consumes this registration to seal.
+    /// trust registry, refreshes the live group cipher, and attests
+    /// `tn.recipient.added`. The next Rust emit or seal includes the reader.
     ///
     /// # Errors
     ///
+    /// An argument error when `group` is missing or is not JWE;
     /// `wrong_recipient` / `scope_mismatch` for an offer accepted by another
-    /// scope, `replay_conflict` for a conflicting key under the same DID.
+    /// scope; `replay_conflict` for a conflicting key under the same DID.
     pub fn register_jwe_offer(
         &self,
         group: &str,
         accepted: &enrollment::AcceptedOffer,
     ) -> Result<AddRecipientResult> {
+        require_jwe_group(self.tn, group)?;
         let device_did = self.tn.did().to_string();
         let principal = &accepted.binding.principal;
         if principal.audience_did != device_did {
@@ -309,8 +310,9 @@ impl<'a> Admin<'a> {
     ///
     /// # Errors
     ///
-    /// A hard parameter error when `unsafe_unverified` is not `true`;
-    /// `replay_conflict` for a conflicting key under the same DID.
+    /// A hard parameter error when `unsafe_unverified` is not `true`, or when
+    /// `group` is missing or is not JWE; `replay_conflict` for a conflicting
+    /// key under the same DID.
     pub fn register_jwe_raw_unsafe(
         &self,
         group: &str,
@@ -325,6 +327,7 @@ impl<'a> Admin<'a> {
                     .into(),
             ));
         }
+        require_jwe_group(self.tn, group)?;
         enrollment::parse_ed25519_did_key(reader_did).map_err(trust_err)?;
         let notice = tn_core::UnsafeOperationNotice {
             artifact_digest: None,
@@ -431,6 +434,11 @@ impl<'a> Admin<'a> {
             &registry_path,
             &serde_json::to_vec(&registry)?,
         )?;
+
+        // JWE ciphers snapshot their recipient public keys at construction.
+        // Refresh after the durable list update so this same runtime's next
+        // emit/seal includes the newly enrolled reader.
+        self.tn.runtime().reload_group_cipher(group)?;
 
         // One attested registration event; the digest field carries the
         // registered key material digest for jwe recipients.
@@ -988,6 +996,18 @@ fn group_cipher(tn: &Tn, group: &str) -> Result<Option<String>> {
         .and_then(|spec| spec.get("cipher"))
         .and_then(serde_yml::Value::as_str)
         .map(str::to_string))
+}
+
+fn require_jwe_group(tn: &Tn, group: &str) -> Result<()> {
+    match group_cipher(tn, group)? {
+        Some(cipher) if cipher == "jwe" => Ok(()),
+        Some(cipher) => Err(Error::InvalidArgument(format!(
+            "JWE group {group:?} uses cipher {cipher:?}"
+        ))),
+        None => Err(Error::InvalidArgument(format!(
+            "JWE group {group:?} does not exist"
+        ))),
+    }
 }
 
 fn current_hibe_path(tn: &Tn, group: &str) -> Result<Option<String>> {

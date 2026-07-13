@@ -1,15 +1,16 @@
 //! JWE-specific trusted enrollment surfaces in the Rust SDK.
 //!
-//! The Rust runtime keeps its documented native JWE `NotImplemented` sentinel
-//! (managed JWE and first decrypt belong to Python, TypeScript, and C#).
-//! What Rust owns here is the trust boundary: typed recipient registration
-//! from an `AcceptedOffer`, and the mandatory-flag raw compatibility path with
-//! its warning/audit observability.
+//! Rust uses the same raw X25519 enrollment material and RFC 7516 wire as the
+//! sibling SDKs. These cases cover the trust boundary: typed recipient
+//! registration from an `AcceptedOffer`, and the mandatory-flag raw
+//! compatibility path with its warning/audit observability.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use serde_json::Value;
 use tn_proto::enrollment::{self, AbsorbOptionsV1, OfferOptionsV1};
 use tn_proto::Tn;
@@ -24,6 +25,44 @@ fn keystore_dir(tn: &Tn) -> PathBuf {
     } else {
         tn.yaml_path().parent().expect("yaml parent").join(path)
     }
+}
+
+fn jwe_publisher(root: &Path, ceremony_id: &str) -> Tn {
+    let keystore = root.join(".tn").join("keys");
+    fs::create_dir_all(&keystore).expect("keystore dir");
+    let device = tn_core::DeviceKey::generate();
+    let private = [0x51_u8; 32];
+    let public = tn_core::trusted_enrollment::x25519_public_key(&private);
+    fs::write(keystore.join("local.private"), device.private_bytes()).expect("device key");
+    fs::write(keystore.join("index_master.key"), [0x52_u8; 32]).expect("index key");
+    fs::write(keystore.join("default.jwe.mykey"), private).expect("reader key");
+    fs::write(
+        keystore.join("default.jwe.recipients"),
+        serde_json::to_vec(&serde_json::json!([{
+            "recipient_identity": device.did(),
+            "pub_b64": STANDARD.encode(public),
+        }]))
+        .expect("recipient json"),
+    )
+    .expect("recipient list");
+    let yaml = format!(
+        "ceremony: {{id: {ceremony_id}, mode: local, cipher: jwe, protocol_events_location: main_log}}\n\
+         keystore: {{path: ./.tn/keys}}\n\
+         device: {{device_identity: \"{did}\"}}\n\
+         public_fields: []\n\
+         default_policy: private\n\
+         groups:\n\
+         \x20 default:\n\
+         \x20   policy: private\n\
+         \x20   cipher: jwe\n\
+         \x20   index_epoch: 0\n\
+         fields: {{}}\n\
+         llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
+        did = device.did(),
+    );
+    let yaml_path = root.join("tn.yaml");
+    fs::write(&yaml_path, yaml).expect("ceremony yaml");
+    Tn::init(yaml_path).expect("JWE publisher")
 }
 
 fn accepted_offer_for(
@@ -53,10 +92,10 @@ fn accepted_offer_for(
 }
 
 #[test]
-fn native_jwe_group_keeps_the_documented_not_implemented_sentinel() {
-    // A ceremony declaring a jwe group cannot open in the Rust runtime; the
-    // sentinel points the operator at the managed JWE SDKs instead of
-    // pretending to seal.
+fn native_jwe_group_initializes_without_publisher_or_reader_material() {
+    // Provisioning is independent of runtime construction. An empty JWE group
+    // can initialize; seal/open report their directional capability errors
+    // only when those operations are requested.
     let td = tempfile::tempdir().expect("tempdir");
     let keystore = td.path().join(".tn").join("keys");
     fs::create_dir_all(&keystore).expect("keystore dir");
@@ -81,24 +120,35 @@ fn native_jwe_group_keeps_the_documented_not_implemented_sentinel() {
     let yaml_path = td.path().join("tn.yaml");
     fs::write(&yaml_path, yaml).expect("write yaml");
 
-    let err = Tn::init(&yaml_path).expect_err("jwe groups are not native in Rust");
-    let message = err.to_string();
-    assert!(
-        message.contains("JWE"),
-        "sentinel names the JWE boundary: {message}"
-    );
-    assert!(
-        matches!(
-            err,
-            tn_proto::Error::Core(tn_core::Error::NotImplemented(_))
-        ),
-        "documented NotImplemented sentinel: {message}"
-    );
+    let runtime = Tn::init(&yaml_path).expect("native JWE group initializes");
+    runtime.close().expect("close runtime");
+}
+
+#[test]
+fn jwe_registration_rejects_wrong_or_unknown_groups_without_persisting() {
+    for group in ["default", "missing"] {
+        let mut publisher = Tn::ephemeral().expect("ephemeral BTN publisher");
+        let reader_did = tn_core::DeviceKey::generate().did().to_string();
+        let keystore = keystore_dir(&publisher);
+
+        let error = publisher
+            .admin()
+            .register_jwe_raw_unsafe(group, &reader_did, [0x41_u8; 32], true)
+            .expect_err("JWE registration requires an existing JWE group");
+
+        assert!(
+            error.to_string().contains("JWE group"),
+            "unexpected error: {error}"
+        );
+        assert!(!keystore.join(format!("{group}.jwe.recipients")).exists());
+        publisher.close().expect("close publisher");
+    }
 }
 
 #[test]
 fn register_jwe_offer_persists_the_verified_binding() -> tn_proto::Result<()> {
-    let mut publisher = Tn::ephemeral()?;
+    let publisher_dir = tempfile::tempdir().expect("publisher dir");
+    let mut publisher = jwe_publisher(publisher_dir.path(), "cer_verified_jwe");
     let reader = Tn::ephemeral()?;
     let td = tempfile::tempdir().expect("tempdir");
     let accepted = accepted_offer_for(&publisher, &reader, td.path())?;
@@ -113,12 +163,12 @@ fn register_jwe_offer_persists_the_verified_binding() -> tn_proto::Result<()> {
         serde_json::from_str(&fs::read_to_string(&recipients_path).expect("recipients file"))
             .expect("recipients json");
     let entries = recipients.as_array().expect("recipients list");
-    assert_eq!(entries.len(), 1);
-    assert_eq!(
-        entries[0]["recipient_identity"].as_str(),
-        Some(reader.did())
-    );
-    assert!(entries[0]["pub_b64"].is_string());
+    assert_eq!(entries.len(), 2);
+    let registered = entries
+        .iter()
+        .find(|entry| entry["recipient_identity"].as_str() == Some(reader.did()))
+        .expect("registered reader");
+    assert!(registered["pub_b64"].is_string());
 
     // Verified trust registry entry with the proof and offer digests.
     let registry_path = keystore_dir(&publisher)
@@ -155,10 +205,11 @@ fn register_jwe_offer_persists_the_verified_binding() -> tn_proto::Result<()> {
     let recipients: Value =
         serde_json::from_str(&fs::read_to_string(&recipients_path).expect("recipients file"))
             .expect("recipients json");
-    assert_eq!(recipients.as_array().expect("list").len(), 1);
+    assert_eq!(recipients.as_array().expect("list").len(), 2);
 
     // Scope re-check: another ceremony's admin refuses this accepted offer.
-    let mut stranger = Tn::ephemeral()?;
+    let stranger_dir = tempfile::tempdir().expect("stranger dir");
+    let mut stranger = jwe_publisher(stranger_dir.path(), "cer_stranger_jwe");
     let err = stranger
         .admin()
         .register_jwe_offer("default", &accepted)
@@ -178,7 +229,8 @@ fn register_jwe_offer_persists_the_verified_binding() -> tn_proto::Result<()> {
 
 #[test]
 fn register_jwe_raw_unsafe_requires_the_flag_and_is_observable() -> tn_proto::Result<()> {
-    let mut publisher = Tn::ephemeral()?;
+    let publisher_dir = tempfile::tempdir().expect("publisher dir");
+    let mut publisher = jwe_publisher(publisher_dir.path(), "cer_raw_jwe");
     let reader_did = tn_core::DeviceKey::generate().did().to_string();
     let public_key = [0x42u8; 32];
 
@@ -243,7 +295,8 @@ fn register_jwe_raw_unsafe_requires_the_flag_and_is_observable() -> tn_proto::Re
 
 #[test]
 fn conflicting_key_for_a_registered_reader_is_a_replay_conflict() -> tn_proto::Result<()> {
-    let mut publisher = Tn::ephemeral()?;
+    let publisher_dir = tempfile::tempdir().expect("publisher dir");
+    let mut publisher = jwe_publisher(publisher_dir.path(), "cer_conflict_jwe");
     let reader = Tn::ephemeral()?;
     let td = tempfile::tempdir().expect("tempdir");
     let accepted = accepted_offer_for(&publisher, &reader, td.path())?;

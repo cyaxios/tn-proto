@@ -426,9 +426,9 @@ impl Runtime {
     /// `group_inputs_for_hash` is only built when `need_row_hash` is true
     /// (chain or sign consumes it); in pure-log mode (chain=F sign=F) the
     /// clones are skipped. `group_payloads` carries the pre-rendered JSON
-    /// snippet per group so `build_envelope` splices it verbatim. A field
-    /// routed to a group this runtime can't publish into is skipped, matching
-    /// Python's fall-through.
+    /// snippet per group so `build_envelope` splices it verbatim. A cipher's
+    /// `NotAPublisher` error is propagated so routed private fields cannot be
+    /// silently omitted.
     ///
     /// # Errors
     ///
@@ -474,13 +474,8 @@ impl Runtime {
                 continue;
             };
             let gstate = gstate_arc.read().expect("group state RwLock poisoned");
-            // A group this runtime can't publish into (NotAPublisher)
-            // yields None and is skipped, matching Python's fall-through.
-            let Some((maybe_input, payload_json, effective_aad)) =
-                Self::seal_one_group(&gstate, plain, aad, need_row_hash)?
-            else {
-                continue;
-            };
+            let (maybe_input, payload_json, effective_aad) =
+                Self::seal_one_group(&gstate, plain, aad, need_row_hash)?;
             if let Some(input) = maybe_input {
                 group_inputs_for_hash.insert(gname.clone(), input);
             }
@@ -500,11 +495,9 @@ impl Runtime {
     /// Index, canonicalize, encrypt, and render one group's field set.
     /// The per-group body of [`Runtime::encrypt_groups`].
     ///
-    /// Returns `Ok(None)` when the group's cipher reports
-    /// [`NotAPublisher`](crate::Error::NotAPublisher) (this runtime can't
-    /// publish into it). Otherwise returns the rendered payload JSON plus,
-    /// when `need_row_hash` is set, the `GroupInput` the row-hash compute
-    /// consumes (skipped in pure-log mode to avoid the clones).
+    /// Returns the rendered payload JSON plus, when `need_row_hash` is set,
+    /// the `GroupInput` the row-hash compute consumes (skipped in pure-log
+    /// mode to avoid the clones).
     ///
     /// # Errors
     ///
@@ -514,7 +507,7 @@ impl Runtime {
         plain: Map<String, Value>,
         per_emit_aad: &Map<String, Value>,
         need_row_hash: bool,
-    ) -> Result<Option<(Option<GroupInput>, String, Map<String, Value>)>> {
+    ) -> Result<(Option<GroupInput>, String, Map<String, Value>)> {
         // Sub-stage timing inside group_encrypt. emit:group_encrypt
         // (outer) is still the total; these four sum to it.
         let _sort_t0 = if crate::perf::enabled() {
@@ -570,19 +563,13 @@ impl Runtime {
         // plain seal). The effective map is returned so the caller echoes it.
         let effective_aad = merge_aad(&gstate.aad_default, per_emit_aad);
         let ct = if effective_aad.is_empty() {
-            match gstate.cipher.encrypt(&plaintext_bytes) {
-                Ok(ct) => ct,
-                Err(Error::NotAPublisher { .. }) => return Ok(None),
-                Err(e) => return Err(e),
-            }
+            gstate.cipher.encrypt(&plaintext_bytes)?
         } else {
             let aad_bytes =
                 crate::canonical::canonical_bytes(&Value::Object(effective_aad.clone()))?;
-            match gstate.cipher.encrypt_with_aad(&plaintext_bytes, &aad_bytes) {
-                Ok(ct) => ct,
-                Err(Error::NotAPublisher { .. }) => return Ok(None),
-                Err(e) => return Err(e),
-            }
+            gstate
+                .cipher
+                .encrypt_with_aad(&plaintext_bytes, &aad_bytes)?
         };
         if let Some(t0) = _enc_t0 {
             crate::perf::record_ns("emit:group_encrypt.cipher", t0.elapsed().as_nanos() as u64);
@@ -618,7 +605,7 @@ impl Runtime {
                 t0.elapsed().as_nanos() as u64,
             );
         }
-        Ok(Some((maybe_input, payload_json, effective_aad)))
+        Ok((maybe_input, payload_json, effective_aad))
     }
 
     /// Refresh the in-memory chain tip for `event_type` from on-disk truth

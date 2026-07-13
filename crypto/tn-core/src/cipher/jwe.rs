@@ -1,441 +1,668 @@
-//! Native TN-wrapped compact JWE group cipher.
+//! RFC 7516 General JSON JWE for native TN runtimes.
 //!
-//! Each ciphertext contains one `dir`/`A256GCM` compact JWE body and a
-//! `tn-sealed-box-v1` content-key wrap for every configured recipient DID.
-//! Runtime construction is wired separately; this module owns only the cipher.
+//! The bytes returned by this cipher are the JWE JSON object itself. The TN
+//! envelope performs the only outer encoding when it stores those bytes in a
+//! group's `ciphertext` field.
 
-#[cfg(feature = "fs")]
-use aes_gcm::aead::{AeadInPlace as _, KeyInit as _};
-#[cfg(feature = "fs")]
-use aes_gcm::{Aes256Gcm, Nonce, Tag};
-#[cfg(feature = "fs")]
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-#[cfg(feature = "fs")]
-use base64::Engine as _;
-#[cfg(feature = "fs")]
-use biscuit::jwa::{ContentEncryptionAlgorithm, KeyManagementAlgorithm};
-#[cfg(feature = "fs")]
-use biscuit::{Compact, CompactJson, CompactPart};
-#[cfg(feature = "fs")]
-use rand_core::RngCore as _;
-#[cfg(feature = "fs")]
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "fs")]
-use serde_json::{json, Map, Value};
-#[cfg(feature = "fs")]
-use zeroize::Zeroizing;
-
-#[cfg(feature = "fs")]
-use crate::canonical::canonical_bytes;
-#[cfg(feature = "fs")]
-use crate::recipient_seal::{
-    normalize_recipient_dids, seal_key_for_recipient, unseal_key_from_wrap,
-};
-#[cfg(feature = "fs")]
-use crate::{DeviceKey, Error, Result};
-
-#[cfg(feature = "fs")]
-const FRAME: &str = "tn-jwe-v1";
-#[cfg(feature = "fs")]
-const MAX_RECIPIENT_WRAPS: usize = 1_024;
-
-#[cfg(feature = "fs")]
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct JweFrame {
-    frame: String,
-    body: String,
-    recipient_wraps: Vec<Value>,
-}
-
-#[cfg(feature = "fs")]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TnProtectedHeader {
-    alg: KeyManagementAlgorithm,
-    enc: ContentEncryptionAlgorithm,
-    tn_frame: String,
-    tn_aad: String,
-}
-
-#[cfg(feature = "fs")]
-impl CompactJson for TnProtectedHeader {}
-
-/// A TN-wrapped compact JWE cipher bound to configured recipients and a device.
-#[cfg(feature = "fs")]
-pub struct JweCipher {
-    recipient_dids: Vec<String>,
-    local_did: String,
-    device_seed: Zeroizing<[u8; 32]>,
-}
-
-#[cfg(feature = "fs")]
-impl JweCipher {
-    /// Bind a cipher to normalized recipient DIDs and the local device key.
-    pub fn new(recipient_dids: &[String], device: &DeviceKey) -> Result<Self> {
-        Ok(Self {
-            recipient_dids: normalize_recipient_dids(recipient_dids)?,
-            local_did: device.did().to_owned(),
-            device_seed: Zeroizing::new(device.private_bytes()),
-        })
-    }
-}
-
-#[cfg(feature = "fs")]
-fn encrypt_body(plaintext: &[u8], key: &[u8; 32], aad: &[u8]) -> Result<String> {
-    let header = TnProtectedHeader {
-        alg: KeyManagementAlgorithm::DirectSymmetricKey,
-        enc: ContentEncryptionAlgorithm::A256GCM,
-        tn_frame: FRAME.to_owned(),
-        tn_aad: URL_SAFE_NO_PAD.encode(aad),
-    };
-    let mut compact = Compact::with_capacity(5);
-    push_compact_part(&mut compact, &header, "protected header")?;
-    let mut nonce = [0_u8; 12];
-    rand_core::OsRng.fill_bytes(&mut nonce);
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|error| Error::Cipher(format!("JWE key setup failed: {error}")))?;
-    let mut ciphertext = plaintext.to_vec();
-    let protected = protected_segment(&compact)?;
-    let tag = cipher
-        .encrypt_in_place_detached(
-            Nonce::from_slice(&nonce),
-            protected.as_bytes(),
-            &mut ciphertext,
-        )
-        .map_err(|error| Error::Cipher(format!("JWE body encryption failed: {error}")))?;
-    push_compact_part(&mut compact, &Vec::<u8>::new(), "encrypted key")?;
-    push_compact_part(&mut compact, &nonce.to_vec(), "nonce")?;
-    push_compact_part(&mut compact, &ciphertext, "ciphertext")?;
-    push_compact_part(&mut compact, &tag.to_vec(), "authentication tag")?;
-    Ok(compact.encode())
-}
-
-#[cfg(feature = "fs")]
-fn decrypt_body(body: &str, key: &[u8; 32], aad: &[u8]) -> Result<Vec<u8>> {
-    let compact = Compact::decode(body);
-    let header = validate_compact(&compact)?;
-    let nonce: Vec<u8> = compact_part(&compact, 2, "nonce")?;
-    let mut ciphertext: Vec<u8> = compact_part(&compact, 3, "ciphertext")?;
-    let tag: Vec<u8> = compact_part(&compact, 4, "authentication tag")?;
-    if nonce.len() != 12 || tag.len() != 16 {
-        return Err(malformed_body("invalid nonce or authentication tag length"));
-    }
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|error| Error::Cipher(format!("JWE key setup failed: {error}")))?;
-    cipher
-        .decrypt_in_place_detached(
-            Nonce::from_slice(&nonce),
-            protected_segment(&compact)?.as_bytes(),
-            &mut ciphertext,
-            Tag::from_slice(&tag),
-        )
-        .map_err(|error| malformed_body(format!("authentication failed: {error}")))?;
-    if header.tn_frame != FRAME {
-        return Err(malformed_body("protected tn_frame does not match"));
-    }
-    if header.tn_aad != URL_SAFE_NO_PAD.encode(aad) {
-        return Err(Error::Cipher("JWE protected AAD does not match".into()));
-    }
-    Ok(ciphertext)
-}
-
-#[cfg(feature = "fs")]
-fn push_compact_part(compact: &mut Compact, part: &dyn CompactPart, name: &str) -> Result<()> {
-    compact
-        .push(part)
-        .map_err(|error| Error::Cipher(format!("JWE {name} encoding failed: {error}")))
-}
-
-#[cfg(feature = "fs")]
-fn compact_part<T: CompactPart>(compact: &Compact, index: usize, name: &str) -> Result<T> {
-    compact
-        .part(index)
-        .map_err(|error| malformed_body(format!("invalid {name}: {error}")))
-}
-
-#[cfg(feature = "fs")]
-fn protected_segment(compact: &Compact) -> Result<&str> {
-    compact
-        .parts
-        .first()
-        .map(biscuit::Base64Url::str)
-        .ok_or_else(|| malformed_body("missing protected header"))
-}
-
-#[cfg(feature = "fs")]
-fn validate_compact(compact: &Compact) -> Result<TnProtectedHeader> {
-    if compact.len() != 5 {
-        return Err(malformed_body("compact JWE must contain five parts"));
-    }
-    let header: TnProtectedHeader = compact_part(compact, 0, "protected header")?;
-    if header.alg != KeyManagementAlgorithm::DirectSymmetricKey
-        || header.enc != ContentEncryptionAlgorithm::A256GCM
-    {
-        return Err(malformed_body("compact JWE algorithms must be dir/A256GCM"));
-    }
-    let encrypted_key: Vec<u8> = compact_part(compact, 1, "encrypted key")?;
-    if !encrypted_key.is_empty() {
-        return Err(malformed_body(
-            "dir compact JWE encrypted-key part must be empty",
-        ));
-    }
-    Ok(header)
-}
-
-#[cfg(feature = "fs")]
-fn wrap_aad(body: &str) -> Result<Vec<u8>> {
-    canonical_bytes(&json!({ "frame": FRAME, "body": body }))
-}
-
-#[cfg(feature = "fs")]
-fn parse_frame(ciphertext: &[u8]) -> Result<JweFrame> {
-    let parsed: JweFrame =
-        serde_json::from_slice(ciphertext).map_err(|error| malformed_frame(error.to_string()))?;
-    if parsed.frame != FRAME {
-        return Err(malformed_frame(format!(
-            "unsupported frame {:?}",
-            parsed.frame
-        )));
-    }
-    if parsed.recipient_wraps.len() > MAX_RECIPIENT_WRAPS {
-        return Err(malformed_frame(
-            "recipient_wraps contains more than 1,024 entries",
-        ));
-    }
-    Ok(parsed)
-}
-
-#[cfg(feature = "fs")]
-fn select_local_wrap<'a>(wraps: &'a [Value], local_did: &str) -> Result<&'a Map<String, Value>> {
-    for value in wraps {
-        let wrap = value
-            .as_object()
-            .ok_or_else(|| malformed_frame("recipient wrap must be an object"))?;
-        let recipient = wrap
-            .get("recipient_identity")
-            .and_then(Value::as_str)
-            .ok_or_else(|| malformed_frame("recipient wrap requires recipient_identity"))?;
-        if recipient == local_did {
-            return Ok(wrap);
-        }
-    }
-    Err(Error::NotEntitled {
-        group: "jwe".to_owned(),
-    })
-}
-
-#[cfg(feature = "fs")]
-fn malformed_frame(reason: impl Into<String>) -> Error {
-    Error::Malformed {
-        kind: "JWE frame",
-        reason: reason.into(),
-    }
-}
-
-#[cfg(feature = "fs")]
-fn malformed_body(reason: impl Into<String>) -> Error {
-    Error::Malformed {
-        kind: "JWE body",
-        reason: reason.into(),
-    }
-}
-
-#[cfg(feature = "fs")]
-impl super::GroupCipher for JweCipher {
-    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        self.encrypt_with_aad(plaintext, &[])
-    }
-
-    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        self.decrypt_with_aad(ciphertext, &[])
-    }
-
-    fn kind(&self) -> &'static str {
-        "jwe"
-    }
-
-    fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-        let mut content_key = Zeroizing::new([0_u8; 32]);
-        rand_core::OsRng.fill_bytes(&mut content_key[..]);
-        let body = encrypt_body(plaintext, &content_key, aad)?;
-        let wrap_aad = wrap_aad(&body)?;
-        let recipient_wraps = self
-            .recipient_dids
-            .iter()
-            .map(|did| seal_key_for_recipient(&content_key, did, &wrap_aad))
-            .collect::<Result<Vec<_>>>()?;
-        serde_json::to_vec(&JweFrame {
-            frame: FRAME.to_owned(),
-            body,
-            recipient_wraps,
-        })
-        .map_err(|error| Error::Cipher(format!("JWE frame serialization failed: {error}")))
-    }
-
-    fn decrypt_with_aad(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-        let frame = parse_frame(ciphertext)?;
-        let wrap = select_local_wrap(&frame.recipient_wraps, &self.local_did)?;
-        let wrap_aad = wrap_aad(&frame.body)?;
-        let content_key = Zeroizing::new(unseal_key_from_wrap(wrap, &self.device_seed, &wrap_aad)?);
-        decrypt_body(&frame.body, &content_key, aad)
-    }
-}
-
-#[cfg(all(test, feature = "fs"))]
-mod tests {
-    use super::*;
-    use crate::cipher::GroupCipher as _;
-    use crate::DeviceKey;
+#[cfg(all(feature = "fs", feature = "native-jwe", not(target_arch = "wasm32")))]
+mod native {
+    use aes_gcm::aead::{AeadInPlace as _, KeyInit as _};
+    use aes_gcm::{Aes256Gcm, Nonce, Tag};
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use serde_json::{json, Value};
+    use base64::Engine as _;
+    use curve25519_dalek::montgomery::MontgomeryPoint;
+    use rand_core::RngCore as _;
+    use serde::{Deserialize, Serialize};
+    use sha2::{Digest as _, Sha256};
+    use subtle::ConstantTimeEq as _;
+    use zeroize::Zeroizing;
 
-    #[test]
-    fn aes_key_schedule_zeroizes_on_drop() {
-        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    use crate::{Error, Result};
 
-        assert_zeroize_on_drop::<aes::Aes256>();
+    const ALG: &str = "ECDH-ES+A256KW";
+    const ENC: &str = "A256GCM";
+    const MAX_RECIPIENTS: usize = 1_024;
+    const MAX_READER_KEYS: usize = 1_024;
+    const MAX_JWE_BYTES: usize = 128 * 1024 * 1024;
+    const MAX_PLAINTEXT_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_AAD_BYTES: usize = 64 * 1024;
+
+    /// A native TN JWE cipher using anonymous raw-X25519 recipient blocks.
+    pub struct JweCipher {
+        group: String,
+        recipient_public_keys: Vec<[u8; 32]>,
+        reader_private_keys: Vec<Zeroizing<[u8; 32]>>,
     }
 
-    #[test]
-    fn named_recipient_round_trips_and_stranger_is_not_entitled() {
-        let writer = DeviceKey::from_private_bytes(&[1_u8; 32]).unwrap();
-        let reader = DeviceKey::from_private_bytes(&[2_u8; 32]).unwrap();
-        let stranger = DeviceKey::from_private_bytes(&[3_u8; 32]).unwrap();
-        let recipients = vec![reader.did().to_owned()];
-        let sealer = JweCipher::new(&recipients, &writer).unwrap();
-        let opener = JweCipher::new(&recipients, &reader).unwrap();
-        let denied = JweCipher::new(&recipients, &stranger).unwrap();
-        let ciphertext = sealer.encrypt_with_aad(b"secret", b"marker").unwrap();
-
-        assert_eq!(
-            opener.decrypt_with_aad(&ciphertext, b"marker").unwrap(),
-            b"secret"
-        );
-        assert!(matches!(
-            denied.decrypt_with_aad(&ciphertext, b"marker"),
-            Err(Error::NotEntitled { .. })
-        ));
-        assert!(opener.decrypt_with_aad(&ciphertext, b"wrong").is_err());
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GeneralJwe {
+        protected: String,
+        recipients: Vec<Recipient>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_aad",
+            skip_serializing_if = "Option::is_none"
+        )]
+        aad: Option<String>,
+        iv: String,
+        ciphertext: String,
+        tag: String,
     }
 
-    #[test]
-    fn frame_and_protected_header_pin_the_wire_contract() {
-        let writer = DeviceKey::from_private_bytes(&[4_u8; 32]).unwrap();
-        let reader = DeviceKey::from_private_bytes(&[5_u8; 32]).unwrap();
-        let recipients = vec![reader.did().to_owned()];
-        let cipher = JweCipher::new(&recipients, &writer).unwrap();
-        let ciphertext = cipher.encrypt_with_aad(b"secret", b"marker").unwrap();
-        let frame: Value = serde_json::from_slice(&ciphertext).unwrap();
-        let frame_object = frame.as_object().unwrap();
-        let mut frame_keys: Vec<_> = frame_object.keys().map(String::as_str).collect();
-        frame_keys.sort_unstable();
-
-        assert_eq!(frame_keys, ["body", "frame", "recipient_wraps"]);
-        assert_eq!(frame["frame"], "tn-jwe-v1");
-        assert_eq!(frame["recipient_wraps"].as_array().unwrap().len(), 1);
-
-        let body = frame["body"].as_str().unwrap();
-        assert_eq!(body.split('.').count(), 5);
-        let protected_segment = body.split('.').next().unwrap();
-        let protected_bytes = URL_SAFE_NO_PAD.decode(protected_segment).unwrap();
-        let protected: Value = serde_json::from_slice(&protected_bytes).unwrap();
-
-        assert_eq!(protected["alg"], "dir");
-        assert_eq!(protected["enc"], "A256GCM");
-        assert_eq!(protected["tn_frame"], "tn-jwe-v1");
-        assert_eq!(protected["tn_aad"], URL_SAFE_NO_PAD.encode(b"marker"));
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Recipient {
+        header: RecipientHeader,
+        encrypted_key: String,
     }
 
-    #[test]
-    fn protected_zip_is_rejected_before_body_use() {
-        let protected = serde_json::to_vec(&json!({
-            "alg": "dir",
-            "enc": "A256GCM",
-            "tn_frame": "tn-jwe-v1",
-            "tn_aad": URL_SAFE_NO_PAD.encode(b"marker"),
-            "zip": "DEF",
-        }))
-        .unwrap();
-        let mut compact = Compact::with_capacity(5);
-        push_compact_part(&mut compact, &protected, "protected header").unwrap();
-        for _ in 0..4 {
-            push_compact_part(&mut compact, &Vec::<u8>::new(), "empty test part").unwrap();
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RecipientHeader {
+        alg: String,
+        epk: EphemeralPublicKey,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct EphemeralPublicKey {
+        kty: String,
+        crv: String,
+        x: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ProtectedHeader {
+        enc: String,
+    }
+
+    struct ParsedJwe {
+        protected: String,
+        aad: Option<String>,
+        iv: [u8; 12],
+        ciphertext: Vec<u8>,
+        tag: [u8; 16],
+        recipients: Vec<ParsedRecipient>,
+    }
+
+    struct ParsedRecipient {
+        ephemeral_public: [u8; 32],
+        encrypted_key: [u8; 40],
+    }
+
+    fn deserialize_optional_aad<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<Option<String>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Some)
+    }
+
+    impl JweCipher {
+        /// Bind a group to enrolled raw X25519 publisher and reader material.
+        pub fn new(
+            group: impl Into<String>,
+            recipient_public_keys: &[[u8; 32]],
+            reader_private_keys: &[[u8; 32]],
+        ) -> Result<Self> {
+            let reader_private_keys = reader_private_keys
+                .iter()
+                .map(|key| Zeroizing::new(*key))
+                .collect();
+            Self::new_with_owned_reader_keys(group, recipient_public_keys, reader_private_keys)
         }
 
-        let error = decrypt_body(&compact.encode(), &[9_u8; 32], b"marker").unwrap_err();
-        assert!(matches!(
-            error,
-            Error::Malformed {
-                kind: "JWE body",
-                ref reason,
-            } if reason.contains("unknown field") && reason.contains("zip")
-        ));
+        pub(crate) fn new_with_owned_reader_keys(
+            group: impl Into<String>,
+            recipient_public_keys: &[[u8; 32]],
+            reader_private_keys: Vec<Zeroizing<[u8; 32]>>,
+        ) -> Result<Self> {
+            validate_key_counts(recipient_public_keys.len(), reader_private_keys.len())?;
+            Ok(Self {
+                group: group.into(),
+                recipient_public_keys: recipient_public_keys.to_vec(),
+                reader_private_keys,
+            })
+        }
+
+        fn not_entitled(&self) -> Error {
+            Error::NotEntitled {
+                group: self.group.clone(),
+            }
+        }
     }
 
-    #[test]
-    fn excessive_recipient_wraps_are_rejected_before_unwrap() {
-        let reader = DeviceKey::from_private_bytes(&[6_u8; 32]).unwrap();
-        let recipients = vec![reader.did().to_owned()];
-        let cipher = JweCipher::new(&recipients, &reader).unwrap();
-        let malformed_wrap = json!({ "recipient_identity": reader.did() });
-        let oversized = json!({
-            "frame": "tn-jwe-v1",
-            "body": "not-a-compact-jwe",
-            "recipient_wraps": vec![malformed_wrap; 1_025],
-        });
+    impl super::super::GroupCipher for JweCipher {
+        fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+            self.encrypt_with_aad(plaintext, &[])
+        }
 
-        let error = cipher
-            .decrypt(&serde_json::to_vec(&oversized).unwrap())
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            Error::Malformed {
-                kind: "JWE frame",
-                ref reason,
-            } if reason.contains("1,024")
-        ));
+        fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+            self.decrypt_with_aad(ciphertext, &[])
+        }
+
+        fn kind(&self) -> &'static str {
+            "jwe"
+        }
+
+        fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+            validate_seal_sizes(plaintext, aad)?;
+            if self.recipient_public_keys.is_empty() {
+                return Err(Error::NotAPublisher {
+                    group: self.group.clone(),
+                    reason: "no enrolled JWE recipient public keys".to_owned(),
+                });
+            }
+            let cek = random_secret();
+            let recipients = self
+                .recipient_public_keys
+                .iter()
+                .map(|public| wrap_for_recipient(public, &cek))
+                .collect::<Result<Vec<_>>>()?;
+            let protected = protected_segment()?;
+            let aad_segment = (!aad.is_empty()).then(|| URL_SAFE_NO_PAD.encode(aad));
+            let authentication_data = authentication_data(&protected, aad_segment.as_deref());
+            let (iv, ciphertext, tag) = seal_content(plaintext, &cek, &authentication_data)?;
+            serialize_jwe(&GeneralJwe {
+                protected,
+                recipients,
+                aad: aad_segment,
+                iv: URL_SAFE_NO_PAD.encode(iv),
+                ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
+                tag: URL_SAFE_NO_PAD.encode(tag),
+            })
+        }
+
+        fn decrypt_with_aad(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+            let parsed = parse_jwe(ciphertext)?;
+            if !aad_matches(parsed.aad.as_deref(), aad)? {
+                return Err(Error::Cipher("JWE AAD does not match the envelope".into()));
+            }
+            let authentication_data = authentication_data(&parsed.protected, parsed.aad.as_deref());
+            let mut unwrapped_cek = false;
+            for private in &self.reader_private_keys {
+                for recipient in &parsed.recipients {
+                    let Some(cek) = unwrap_for_reader(private, recipient) else {
+                        continue;
+                    };
+                    unwrapped_cek = true;
+                    if let Some(plaintext) = open_content(&parsed, &cek, &authentication_data) {
+                        return Ok(plaintext);
+                    }
+                }
+            }
+            if unwrapped_cek {
+                Err(Error::Cipher("JWE content authentication failed".into()))
+            } else {
+                Err(self.not_entitled())
+            }
+        }
     }
 
-    #[test]
-    fn duplicate_outer_frame_field_is_rejected() {
-        let reader = DeviceKey::from_private_bytes(&[7_u8; 32]).unwrap();
-        let recipients = vec![reader.did().to_owned()];
-        let cipher = JweCipher::new(&recipients, &reader).unwrap();
-        let duplicate = br#"{
-            "frame":"tn-jwe-v1",
-            "frame":"tn-jwe-v1",
-            "body":"not-a-compact-jwe",
-            "recipient_wraps":[]
-        }"#;
-
-        assert!(matches!(
-            cipher.decrypt(duplicate),
-            Err(Error::Malformed {
-                kind: "JWE frame",
-                ref reason,
-            }) if reason.contains("duplicate field")
-        ));
+    fn validate_key_counts(recipients: usize, readers: usize) -> Result<()> {
+        if recipients > MAX_RECIPIENTS {
+            return Err(Error::InvalidConfig(format!(
+                "JWE has {recipients} recipients; maximum is {MAX_RECIPIENTS}"
+            )));
+        }
+        if readers > MAX_READER_KEYS {
+            return Err(Error::InvalidConfig(format!(
+                "JWE has {readers} reader keys; maximum is {MAX_READER_KEYS}"
+            )));
+        }
+        Ok(())
     }
 
-    #[test]
-    fn unknown_outer_frame_field_is_rejected() {
-        let reader = DeviceKey::from_private_bytes(&[8_u8; 32]).unwrap();
-        let recipients = vec![reader.did().to_owned()];
-        let cipher = JweCipher::new(&recipients, &reader).unwrap();
-        let unknown = br#"{
-            "frame":"tn-jwe-v1",
-            "body":"not-a-compact-jwe",
-            "recipient_wraps":[],
-            "unexpected":true
-        }"#;
+    fn validate_seal_sizes(plaintext: &[u8], aad: &[u8]) -> Result<()> {
+        if plaintext.len() > MAX_PLAINTEXT_BYTES {
+            return Err(Error::Cipher(format!(
+                "JWE plaintext exceeds {MAX_PLAINTEXT_BYTES} bytes"
+            )));
+        }
+        if aad.len() > MAX_AAD_BYTES {
+            return Err(Error::Cipher(format!(
+                "JWE AAD exceeds {MAX_AAD_BYTES} bytes"
+            )));
+        }
+        Ok(())
+    }
 
-        assert!(matches!(
-            cipher.decrypt(unknown),
-            Err(Error::Malformed {
-                kind: "JWE frame",
-                ref reason,
-            }) if reason.contains("unknown field")
-        ));
+    fn random_secret() -> Zeroizing<[u8; 32]> {
+        let mut bytes = Zeroizing::new([0_u8; 32]);
+        rand_core::OsRng.fill_bytes(&mut bytes[..]);
+        bytes
+    }
+
+    fn wrap_for_recipient(public: &[u8; 32], cek: &[u8; 32]) -> Result<Recipient> {
+        let ephemeral_private = random_secret();
+        let ephemeral_public = MontgomeryPoint::mul_base_clamped(*ephemeral_private);
+        let shared = shared_secret(&MontgomeryPoint(*public), &ephemeral_private)
+            .ok_or_else(|| Error::Cipher("JWE X25519 produced an all-zero shared secret".into()))?;
+        let kek = derive_kek(&shared);
+        let mut encrypted_key = [0_u8; 40];
+        aes_kw::KekAes256::try_from(&kek[..])
+            .and_then(|wrapper| wrapper.wrap(cek, &mut encrypted_key))
+            .map_err(|error| Error::Cipher(format!("JWE AES-KW wrap failed: {error}")))?;
+        Ok(Recipient {
+            header: RecipientHeader {
+                alg: ALG.to_owned(),
+                epk: EphemeralPublicKey {
+                    kty: "OKP".to_owned(),
+                    crv: "X25519".to_owned(),
+                    x: URL_SAFE_NO_PAD.encode(ephemeral_public.as_bytes()),
+                },
+            },
+            encrypted_key: URL_SAFE_NO_PAD.encode(encrypted_key),
+        })
+    }
+
+    fn unwrap_for_reader(
+        private: &[u8; 32],
+        recipient: &ParsedRecipient,
+    ) -> Option<Zeroizing<[u8; 32]>> {
+        let shared = shared_secret(&MontgomeryPoint(recipient.ephemeral_public), private)?;
+        let kek = derive_kek(&shared);
+        let mut cek = Zeroizing::new([0_u8; 32]);
+        let wrapper = aes_kw::KekAes256::try_from(&kek[..]).ok()?;
+        wrapper
+            .unwrap(&recipient.encrypted_key, &mut cek[..])
+            .ok()?;
+        Some(cek)
+    }
+
+    fn shared_secret(public: &MontgomeryPoint, private: &[u8; 32]) -> Option<Zeroizing<[u8; 32]>> {
+        let shared = Zeroizing::new(public.mul_clamped(*private).to_bytes());
+        if bool::from(shared.ct_eq(&[0_u8; 32])) {
+            None
+        } else {
+            Some(shared)
+        }
+    }
+
+    fn derive_kek(shared: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+        let mut digest = Sha256::new();
+        digest.update(1_u32.to_be_bytes());
+        digest.update(shared);
+        update_length_prefixed(&mut digest, ALG.as_bytes());
+        update_length_prefixed(&mut digest, &[]);
+        update_length_prefixed(&mut digest, &[]);
+        digest.update(256_u32.to_be_bytes());
+        Zeroizing::new(digest.finalize().into())
+    }
+
+    fn update_length_prefixed(digest: &mut Sha256, value: &[u8]) {
+        let length = u32::try_from(value.len()).expect("fixed JOSE KDF fields fit in u32");
+        digest.update(length.to_be_bytes());
+        digest.update(value);
+    }
+
+    fn protected_segment() -> Result<String> {
+        let bytes = serde_json::to_vec(&serde_json::json!({ "enc": ENC })).map_err(|error| {
+            Error::Internal(format!("JWE header serialization failed: {error}"))
+        })?;
+        Ok(URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    fn authentication_data(protected: &str, aad: Option<&str>) -> Vec<u8> {
+        let extra = aad.map_or(0, |value| value.len() + 1);
+        let mut out = Vec::with_capacity(protected.len() + extra);
+        out.extend_from_slice(protected.as_bytes());
+        if let Some(value) = aad {
+            out.push(b'.');
+            out.extend_from_slice(value.as_bytes());
+        }
+        out
+    }
+
+    fn seal_content(
+        plaintext: &[u8],
+        cek: &[u8; 32],
+        aad: &[u8],
+    ) -> Result<([u8; 12], Vec<u8>, [u8; 16])> {
+        let mut iv = [0_u8; 12];
+        rand_core::OsRng.fill_bytes(&mut iv);
+        let cipher = Aes256Gcm::new_from_slice(cek)
+            .map_err(|error| Error::Cipher(format!("JWE CEK setup failed: {error}")))?;
+        let mut ciphertext = plaintext.to_vec();
+        let tag = cipher
+            .encrypt_in_place_detached(Nonce::from_slice(&iv), aad, &mut ciphertext)
+            .map_err(|error| Error::Cipher(format!("JWE A256GCM seal failed: {error}")))?;
+        Ok((iv, ciphertext, tag.into()))
+    }
+
+    fn open_content(parsed: &ParsedJwe, cek: &[u8; 32], aad: &[u8]) -> Option<Vec<u8>> {
+        let cipher = Aes256Gcm::new_from_slice(cek).ok()?;
+        let mut plaintext = parsed.ciphertext.clone();
+        cipher
+            .decrypt_in_place_detached(
+                Nonce::from_slice(&parsed.iv),
+                aad,
+                &mut plaintext,
+                Tag::from_slice(&parsed.tag),
+            )
+            .ok()?;
+        Some(plaintext)
+    }
+
+    fn serialize_jwe(jwe: &GeneralJwe) -> Result<Vec<u8>> {
+        serde_json::to_vec(&jwe)
+            .map_err(|error| Error::Internal(format!("JWE serialization failed: {error}")))
+    }
+
+    fn parse_jwe(ciphertext: &[u8]) -> Result<ParsedJwe> {
+        if ciphertext.len() > MAX_JWE_BYTES {
+            return Err(malformed(format!(
+                "ciphertext exceeds {MAX_JWE_BYTES} bytes"
+            )));
+        }
+        let wire: GeneralJwe = serde_json::from_slice(ciphertext)
+            .map_err(|error| malformed(format!("ciphertext is not valid profile JSON: {error}")))?;
+        validate_recipient_count(wire.recipients.len())?;
+        validate_protected(&wire.protected)?;
+        let recipients = wire
+            .recipients
+            .into_iter()
+            .map(parse_recipient)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ParsedJwe {
+            protected: wire.protected,
+            aad: validate_aad_segment(wire.aad)?,
+            iv: decode_array("iv", &wire.iv)?,
+            ciphertext: decode_b64("ciphertext", &wire.ciphertext, MAX_JWE_BYTES)?,
+            tag: decode_array("tag", &wire.tag)?,
+            recipients,
+        })
+    }
+
+    fn validate_recipient_count(count: usize) -> Result<()> {
+        if count == 0 || count > MAX_RECIPIENTS {
+            return Err(malformed(format!(
+                "recipients must contain between 1 and {MAX_RECIPIENTS} entries"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_protected(segment: &str) -> Result<()> {
+        let bytes = decode_b64("protected", segment, 256)?;
+        let header: ProtectedHeader = serde_json::from_slice(&bytes)
+            .map_err(|error| malformed(format!("protected header is invalid: {error}")))?;
+        if header.enc != ENC {
+            return Err(malformed("protected enc must be A256GCM"));
+        }
+        Ok(())
+    }
+
+    fn parse_recipient(recipient: Recipient) -> Result<ParsedRecipient> {
+        if recipient.header.alg != ALG {
+            return Err(malformed("recipient alg must be ECDH-ES+A256KW"));
+        }
+        let epk = recipient.header.epk;
+        if epk.kty != "OKP" || epk.crv != "X25519" {
+            return Err(malformed("recipient epk must be an X25519 OKP JWK"));
+        }
+        Ok(ParsedRecipient {
+            ephemeral_public: decode_array("recipient epk.x", &epk.x)?,
+            encrypted_key: decode_array("recipient encrypted_key", &recipient.encrypted_key)?,
+        })
+    }
+
+    fn validate_aad_segment(aad: Option<String>) -> Result<Option<String>> {
+        if let Some(segment) = aad.as_deref() {
+            let decoded = decode_b64("aad", segment, MAX_AAD_BYTES)?;
+            if decoded.is_empty() {
+                return Err(malformed("aad must be omitted when empty"));
+            }
+        }
+        Ok(aad)
+    }
+
+    fn aad_matches(segment: Option<&str>, expected: &[u8]) -> Result<bool> {
+        if expected.len() > MAX_AAD_BYTES {
+            return Ok(false);
+        }
+        match segment {
+            Some(value) if !expected.is_empty() => {
+                let actual = decode_b64("aad", value, MAX_AAD_BYTES)?;
+                Ok(bool::from(actual.as_slice().ct_eq(expected)))
+            }
+            None if expected.is_empty() => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    fn decode_array<const N: usize>(name: &str, value: &str) -> Result<[u8; N]> {
+        let decoded = decode_b64(name, value, N)?;
+        decoded.try_into().map_err(|bytes: Vec<u8>| {
+            malformed(format!(
+                "{name} decoded to {} bytes; expected {N}",
+                bytes.len()
+            ))
+        })
+    }
+
+    fn decode_b64(name: &str, value: &str, max_decoded: usize) -> Result<Vec<u8>> {
+        let max_encoded = max_decoded.saturating_mul(4).saturating_add(2) / 3;
+        if value.len() > max_encoded {
+            return Err(malformed(format!("{name} exceeds its size limit")));
+        }
+        let decoded = URL_SAFE_NO_PAD
+            .decode(value)
+            .map_err(|error| malformed(format!("{name} is not base64url: {error}")))?;
+        if decoded.len() > max_decoded || URL_SAFE_NO_PAD.encode(&decoded) != value {
+            return Err(malformed(format!("{name} is not canonical base64url")));
+        }
+        Ok(decoded)
+    }
+
+    fn malformed(reason: impl Into<String>) -> Error {
+        Error::Malformed {
+            kind: "JWE General JSON",
+            reason: reason.into(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::cipher::GroupCipher as _;
+        use serde_json::{json, Value};
+
+        fn key_pair(fill: u8) -> ([u8; 32], [u8; 32]) {
+            let private = [fill; 32];
+            let public = *MontgomeryPoint::mul_base_clamped(private).as_bytes();
+            (private, public)
+        }
+
+        #[test]
+        fn named_recipient_round_trips_and_stranger_is_not_entitled() {
+            let (reader_private, reader_public) = key_pair(2);
+            let (stranger_private, _) = key_pair(3);
+            let sealer = JweCipher::new("partners", &[reader_public], &[]).unwrap();
+            let opener = JweCipher::new("partners", &[], &[reader_private]).unwrap();
+            let denied = JweCipher::new("partners", &[], &[stranger_private]).unwrap();
+            let ciphertext = sealer.encrypt_with_aad(b"secret", b"marker").unwrap();
+
+            assert_eq!(
+                opener.decrypt_with_aad(&ciphertext, b"marker").unwrap(),
+                b"secret"
+            );
+            assert!(matches!(
+                denied.decrypt_with_aad(&ciphertext, b"marker"),
+                Err(Error::NotEntitled { .. })
+            ));
+            assert!(matches!(
+                opener.decrypt_with_aad(&ciphertext, b"wrong"),
+                Err(Error::Cipher(message)) if message.contains("AAD")
+            ));
+        }
+
+        #[test]
+        fn ciphertext_is_rfc7516_general_json() {
+            let (_, reader_public) = key_pair(5);
+            let cipher = JweCipher::new("partners", &[reader_public], &[]).unwrap();
+            let ciphertext = cipher.encrypt_with_aad(b"secret", b"marker").unwrap();
+            let jwe: Value = serde_json::from_slice(&ciphertext).unwrap();
+            let recipients = jwe["recipients"].as_array().unwrap();
+            let recipient = &recipients[0];
+            let protected_bytes = URL_SAFE_NO_PAD
+                .decode(jwe["protected"].as_str().unwrap())
+                .unwrap();
+            let protected: Value = serde_json::from_slice(&protected_bytes).unwrap();
+
+            assert_eq!(protected, json!({ "enc": "A256GCM" }));
+            assert_eq!(recipient["header"]["alg"], "ECDH-ES+A256KW");
+            assert_eq!(recipient["header"]["epk"]["kty"], "OKP");
+            assert_eq!(recipient["header"]["epk"]["crv"], "X25519");
+            assert!(recipient["encrypted_key"].is_string());
+            assert_eq!(jwe["aad"], URL_SAFE_NO_PAD.encode(b"marker"));
+            assert!(jwe.get("frame").is_none());
+            assert!(jwe.get("body").is_none());
+            assert!(jwe.get("recipient_wraps").is_none());
+            assert!(recipient["header"].get("kid").is_none());
+        }
+
+        #[test]
+        fn empty_aad_is_omitted() {
+            let (private, public) = key_pair(6);
+            let sealer = JweCipher::new("partners", &[public], &[]).unwrap();
+            let reader = JweCipher::new("partners", &[], &[private]).unwrap();
+            let ciphertext = sealer.encrypt(b"secret").unwrap();
+            let jwe: Value = serde_json::from_slice(&ciphertext).unwrap();
+
+            assert!(jwe.get("aad").is_none());
+            assert_eq!(reader.decrypt(&ciphertext).unwrap(), b"secret");
+        }
+
+        #[test]
+        fn null_aad_is_rejected_instead_of_treated_as_omitted() {
+            let (private, public) = key_pair(7);
+            let sealer = JweCipher::new("partners", &[public], &[]).unwrap();
+            let reader = JweCipher::new("partners", &[], &[private]).unwrap();
+            let ciphertext = sealer.encrypt(b"secret").unwrap();
+            let mut jwe: Value = serde_json::from_slice(&ciphertext).unwrap();
+            jwe["aad"] = Value::Null;
+
+            assert!(matches!(
+                reader.decrypt(&serde_json::to_vec(&jwe).unwrap()),
+                Err(Error::Malformed { .. })
+            ));
+        }
+
+        #[test]
+        fn tampered_content_tag_is_an_authentication_failure() {
+            let (private, public) = key_pair(8);
+            let sealer = JweCipher::new("partners", &[public], &[]).unwrap();
+            let reader = JweCipher::new("partners", &[], &[private]).unwrap();
+            let ciphertext = sealer.encrypt(b"secret").unwrap();
+            let mut jwe: Value = serde_json::from_slice(&ciphertext).unwrap();
+            let mut tag = URL_SAFE_NO_PAD
+                .decode(jwe["tag"].as_str().unwrap())
+                .unwrap();
+            tag[0] ^= 1;
+            jwe["tag"] = Value::String(URL_SAFE_NO_PAD.encode(tag));
+
+            assert!(matches!(
+                reader.decrypt(&serde_json::to_vec(&jwe).unwrap()),
+                Err(Error::Cipher(message)) if message.contains("authentication")
+            ));
+        }
+
+        #[test]
+        fn strict_profile_rejects_duplicate_unsupported_and_excess_input() {
+            let (_, public) = key_pair(9);
+            let cipher = JweCipher::new("partners", &[public], &[]).unwrap();
+            let ciphertext = cipher.encrypt(b"secret").unwrap();
+            let mut jwe: Value = serde_json::from_slice(&ciphertext).unwrap();
+
+            let iv_member = format!("\"iv\":\"{}\"", jwe["iv"].as_str().unwrap());
+            let duplicate_iv = String::from_utf8(ciphertext.clone()).unwrap().replacen(
+                &iv_member,
+                &format!("{iv_member},{iv_member}"),
+                1,
+            );
+            assert!(matches!(
+                cipher.decrypt(duplicate_iv.as_bytes()),
+                Err(Error::Malformed { .. })
+            ));
+
+            jwe["protected"] = Value::String(
+                URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&json!({"enc": ENC, "zip": "DEF"})).unwrap()),
+            );
+            assert_malformed(&cipher, &jwe);
+
+            let recipient = jwe["recipients"][0].clone();
+            jwe["recipients"] = Value::Array(vec![recipient; MAX_RECIPIENTS + 1]);
+            assert_malformed(&cipher, &jwe);
+        }
+
+        fn assert_malformed(cipher: &JweCipher, jwe: &Value) {
+            assert!(matches!(
+                cipher.decrypt(&serde_json::to_vec(jwe).unwrap()),
+                Err(Error::Malformed { .. })
+            ));
+        }
     }
 }
+
+#[cfg(all(feature = "fs", feature = "native-jwe", not(target_arch = "wasm32")))]
+pub use native::JweCipher;
+
+#[cfg(all(
+    feature = "fs",
+    any(not(feature = "native-jwe"), target_arch = "wasm32")
+))]
+mod unavailable {
+    use crate::cipher::GroupCipher;
+    use crate::{Error, Result};
+
+    /// Placeholder used where native JWE support is absent.
+    pub struct JweCipher;
+
+    impl JweCipher {
+        /// Return the native-JWE unavailable error for this build.
+        pub fn new(
+            _group: impl Into<String>,
+            _recipient_public_keys: &[[u8; 32]],
+            _reader_private_keys: &[[u8; 32]],
+        ) -> Result<Self> {
+            Err(unavailable())
+        }
+
+        pub(crate) fn new_with_owned_reader_keys(
+            _group: impl Into<String>,
+            _recipient_public_keys: &[[u8; 32]],
+            _reader_private_keys: Vec<zeroize::Zeroizing<[u8; 32]>>,
+        ) -> Result<Self> {
+            Err(unavailable())
+        }
+    }
+
+    impl GroupCipher for JweCipher {
+        fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>> {
+            Err(unavailable())
+        }
+
+        fn decrypt(&self, _ciphertext: &[u8]) -> Result<Vec<u8>> {
+            Err(unavailable())
+        }
+
+        fn kind(&self) -> &'static str {
+            "jwe"
+        }
+    }
+
+    fn unavailable() -> Error {
+        Error::NotImplemented("native JWE is unavailable in this build")
+    }
+}
+
+#[cfg(all(
+    feature = "fs",
+    any(not(feature = "native-jwe"), target_arch = "wasm32")
+))]
+pub use unavailable::JweCipher;

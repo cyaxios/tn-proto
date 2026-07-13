@@ -41,7 +41,7 @@ required-features = ["cli"]
 
 [features]
 default = ["fs"]
-fs = ["tn-core/fs"]
+fs = ["tn-core/fs", "tn-core/native-jwe"]
 # Passthrough for tn-core's hibe cipher. tn-core is pulled in below with
 # default-features = false, so hibe (and the pairing-crypto stack it
 # pulls in) stays off unless a downstream crate opts in explicitly here.

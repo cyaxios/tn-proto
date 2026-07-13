@@ -167,8 +167,7 @@ pub(crate) fn read_recipient_rows(
     group: &str,
 ) -> Result<Vec<RecipientRow>> {
     let storage: Arc<dyn crate::storage::Storage> = Arc::new(crate::storage::FsStorage::new());
-    let mut decryptors = load_foreign_decryptors(keystore, &storage)?;
-    load_jwe_device_decryptor(&mut decryptors, keystore, &storage, group)?;
+    let decryptors = load_foreign_decryptors(keystore, &storage)?;
     if !decryptors.contains_group(group) {
         return Err(Error::InvalidConfig(format!(
             "read_as_recipient: no recipient material for group {group:?} in {}",
@@ -176,26 +175,6 @@ pub(crate) fn read_recipient_rows(
         )));
     }
     scan_recipient_rows(log_path, &storage, &decryptors, group)
-}
-
-fn load_jwe_device_decryptor(
-    decryptors: &mut GroupDecryptors,
-    keystore: &Path,
-    storage: &Arc<dyn crate::storage::Storage>,
-    group: &str,
-) -> Result<()> {
-    let seed_path = keystore.join(crate::identity::DEVICE_SEED_FILENAME);
-    if !storage.exists(&seed_path) {
-        return Ok(());
-    }
-    let seed = storage.read_bytes(&seed_path).map_err(Error::Io)?;
-    let device = crate::DeviceKey::from_private_bytes(&seed)?;
-    let recipients = vec![device.did().to_owned()];
-    decryptors.insert(
-        group.to_owned(),
-        Arc::new(JweCipher::new(&recipients, &device)?),
-    );
-    Ok(())
 }
 
 fn scan_recipient_rows(
@@ -286,8 +265,25 @@ fn load_foreign_decryptors(
     let mut decryptors = GroupDecryptors::new();
     load_btn_decryptors(&mut decryptors, &material, keystore, storage)?;
     load_hibe_decryptors(&mut decryptors, &material, keystore, storage)?;
-    load_unavailable_decryptors(&mut decryptors, &material.jwe, "jwe");
+    load_jwe_decryptors(&mut decryptors, &material, keystore, storage)?;
     Ok(decryptors)
+}
+
+fn load_jwe_decryptors(
+    decryptors: &mut GroupDecryptors,
+    material: &ForeignReaderMaterial,
+    keystore: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<()> {
+    for group in &material.jwe {
+        let keys =
+            super::super::cipher_build::load_jwe_reader_private_keys(keystore, group, storage)?;
+        match JweCipher::new_with_owned_reader_keys(group, &[], keys) {
+            Ok(cipher) => decryptors.insert(group.clone(), Arc::new(cipher)),
+            Err(error) => insert_broken_material(decryptors, group, "jwe", &error),
+        }
+    }
+    Ok(())
 }
 
 fn load_btn_decryptors(
@@ -337,6 +333,7 @@ fn load_hibe_decryptors(
     Ok(())
 }
 
+#[cfg(not(feature = "hibe"))]
 fn load_unavailable_decryptors(
     decryptors: &mut GroupDecryptors,
     groups: &[String],
@@ -383,6 +380,8 @@ fn classify_material_name(name: &str, material: &mut ForeignReaderMaterial) {
     } else if let Some(group) = name.strip_suffix(".hibe.sk") {
         push_nonempty(&mut material.hibe, group);
     } else if let Some(group) = name.strip_suffix(".jwe.mykey") {
+        push_nonempty(&mut material.jwe, group);
+    } else if let Some((group, _)) = name.split_once(".jwe.mykey.revoked.") {
         push_nonempty(&mut material.jwe, group);
     }
 }

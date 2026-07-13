@@ -4,9 +4,8 @@
 //! The `enrollment_lifecycle.json` fixture drives the receiver-side decision
 //! procedure exactly: challenge issuance, authenticated offer absorption with
 //! every stable rejection reason, atomic exact-digest approval, and accepted
-//! enrollment-response verification. The `first_decrypt` phase is owned by the
-//! managed JWE SDKs (Python, TypeScript, C#); Rust keeps its documented native
-//! JWE `NotImplemented` sentinel and therefore skips those cases explicitly.
+//! enrollment-response verification. The `first_decrypt` vector is exercised
+//! by the runtime JWE interop suite, after this trust-state transition layer.
 
 use std::fs;
 use std::path::PathBuf;
@@ -275,10 +274,9 @@ fn enrollment_lifecycle_fixture_decides_exactly() {
                 }
             }
             "first_decrypt" => {
-                // Managed JWE first decrypt is owned by the Python,
-                // TypeScript, and C# SDKs. The Rust runtime keeps its
-                // documented `NotImplemented` sentinel for JWE groups, so
-                // this phase is intentionally not executed here.
+                // This fixture drives the trust-state machine only. Runtime
+                // JWE tests consume the resulting raw X25519 key material and
+                // exercise first decrypt against sibling-SDK ciphertext.
             }
             other => panic!("unknown lifecycle operation {other:?}"),
         }

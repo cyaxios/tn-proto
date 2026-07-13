@@ -13,9 +13,8 @@
 //! Dispatches on the kit file present in `keystore_path`:
 //!
 //! - `<group>.btn.mykit` → btn (subset-difference broadcast)
-//! - `local.private` → native TN-wrapped JWE for the requested group
+//! - `<group>.jwe.mykey` → RFC 7516 JWE with a raw X25519 reader key
 //! - `<group>.hibe.sk` plus its MPK/path → HIBE
-//! - legacy `<group>.jwe.mykey` → a precise unavailable-material error
 //!
 //! Use this verb when the calling Rust app holds a kit handed to it via
 //! a `kit_bundle` `.tnpkg` and needs to read another publisher's log.
@@ -84,7 +83,7 @@ impl Default for ReadAsRecipientOptions {
 ///
 /// # Errors
 ///
-/// - `Error::InvalidConfig` if no BTN/HIBE reader material or JWE device key
+/// - `Error::InvalidConfig` if no BTN/HIBE reader material or JWE reader key
 ///   for `opts.group` exists in `keystore_path`.
 /// - `Error::Io` for file read failures.
 /// - `Error::Json` for malformed JSON lines.

@@ -4,14 +4,22 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use zeroize::Zeroizing;
+
 use crate::cipher::{btn::BtnReaderCipher, jwe::JweCipher, GroupCipher};
-use crate::{DeviceKey, Error, Result};
+use crate::{Error, Result};
 
 use super::super::cipher_build::collect_btn_kit_bytes;
 
-pub(super) fn jwe_reader_candidate(device: &DeviceKey) -> Result<Arc<dyn GroupCipher>> {
-    let recipients = vec![device.did().to_owned()];
-    Ok(Arc::new(JweCipher::new(&recipients, device)?))
+fn jwe_reader_candidate(
+    group: &str,
+    private: Vec<Zeroizing<[u8; 32]>>,
+) -> Result<Arc<dyn GroupCipher>> {
+    Ok(Arc::new(JweCipher::new_with_owned_reader_keys(
+        group,
+        &[],
+        private,
+    )?))
 }
 
 pub(super) fn load_recipient_candidates(
@@ -19,9 +27,7 @@ pub(super) fn load_recipient_candidates(
     group: &str,
 ) -> Result<Vec<Arc<dyn GroupCipher>>> {
     let btn_kit = keystore.join(format!("{group}.btn.mykit"));
-    let legacy_jwe_key = keystore.join(format!("{group}.jwe.mykey"));
     let hibe_key = keystore.join(format!("{group}.hibe.sk"));
-    let device_key = keystore.join(crate::identity::DEVICE_SEED_FILENAME);
     let mut ciphers: Vec<Arc<dyn GroupCipher>> = Vec::new();
     let mut found_material = false;
 
@@ -30,13 +36,10 @@ pub(super) fn load_recipient_candidates(
         let kits = collect_btn_kit_bytes(keystore, group)?;
         ciphers.push(Arc::new(BtnReaderCipher::from_multi_kit_bytes(&kits)?));
     }
-    if device_key.exists() {
+    let jwe_keys = read_jwe_private_keys(keystore, group)?;
+    if !jwe_keys.is_empty() {
         found_material = true;
-        let device = crate::identity::load_device(keystore)?;
-        ciphers.push(jwe_reader_candidate(&device)?);
-    }
-    if legacy_jwe_key.exists() {
-        found_material = true;
+        ciphers.push(jwe_reader_candidate(group, jwe_keys)?);
     }
     if hibe_key.exists() {
         found_material = true;
@@ -51,7 +54,7 @@ pub(super) fn load_recipient_candidates(
 fn missing_recipient_key(keystore: &Path, group: &str) -> Error {
     Error::InvalidConfig(format!(
         "unseal: no recipient key found for group={group:?} in {}. \
-         Looked for {group}.btn.mykit (btn), local.private (jwe), and \
+         Looked for {group}.btn.mykit (btn), {group}.jwe.mykey (jwe), and \
          {group}.hibe.sk (hibe). If you absorbed a kit_bundle, the kit \
          lands in your ceremony's keystore — point as_recipient there.",
         keystore.display()
@@ -84,8 +87,55 @@ pub(super) fn discover_keybag(keystore: &Path) -> BTreeMap<String, Vec<Arc<dyn G
     let mut bag = BTreeMap::new();
     let names = keystore_file_names(keystore);
     add_btn_candidates(&mut bag, keystore, &names);
+    add_jwe_candidates(&mut bag, keystore, &names);
     add_hibe_candidates(&mut bag, keystore, &names);
     bag
+}
+
+fn add_jwe_candidates(
+    bag: &mut BTreeMap<String, Vec<Arc<dyn GroupCipher>>>,
+    keystore: &Path,
+    names: &[String],
+) {
+    let mut groups = names
+        .iter()
+        .filter_map(|name| jwe_material_group(name))
+        .collect::<Vec<_>>();
+    groups.sort_unstable();
+    groups.dedup();
+    for group in groups {
+        let Ok(private) = read_jwe_private_keys(keystore, group) else {
+            continue;
+        };
+        let Ok(cipher) = jwe_reader_candidate(group, private) else {
+            continue;
+        };
+        bag.entry(group.to_owned()).or_default().push(cipher);
+    }
+}
+
+fn jwe_material_group(name: &str) -> Option<&str> {
+    name.strip_suffix(".jwe.mykey")
+        .or_else(|| name.split_once(".jwe.mykey.revoked.").map(|item| item.0))
+        .filter(|group| !group.is_empty())
+}
+
+fn read_jwe_private_keys(keystore: &Path, group: &str) -> Result<Vec<Zeroizing<[u8; 32]>>> {
+    let storage: Arc<dyn crate::storage::Storage> = Arc::new(crate::storage::FsStorage::new());
+    super::super::cipher_build::load_jwe_reader_private_keys(keystore, group, &storage)
+}
+
+#[cfg(any(not(feature = "native-jwe"), target_arch = "wasm32"))]
+fn has_jwe_material(keystore: &Path, group: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(keystore) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| jwe_material_group(name) == Some(group))
+    })
 }
 
 fn keystore_file_names(keystore: &Path) -> Vec<String> {
@@ -152,12 +202,27 @@ fn add_hibe_candidates(
 
 pub(super) fn unusable_keystore_kinds(keystore: &Path, group: &str) -> Vec<String> {
     let mut kinds = Vec::new();
-    if keystore.join(format!("{group}.jwe.mykey")).exists() {
+    add_unavailable_jwe(&mut kinds, keystore, group);
+    add_unavailable_hibe(&mut kinds, keystore, group);
+    kinds
+}
+
+#[cfg(any(not(feature = "native-jwe"), target_arch = "wasm32"))]
+fn add_unavailable_jwe(kinds: &mut Vec<String>, keystore: &Path, group: &str) {
+    if has_jwe_material(keystore, group) {
         kinds.push("jwe".to_owned());
     }
-    #[cfg(not(feature = "hibe"))]
+}
+
+#[cfg(all(feature = "native-jwe", not(target_arch = "wasm32")))]
+fn add_unavailable_jwe(_kinds: &mut Vec<String>, _keystore: &Path, _group: &str) {}
+
+#[cfg(not(feature = "hibe"))]
+fn add_unavailable_hibe(kinds: &mut Vec<String>, keystore: &Path, group: &str) {
     if keystore.join(format!("{group}.hibe.sk")).exists() {
         kinds.push("hibe".to_owned());
     }
-    kinds
 }
+
+#[cfg(feature = "hibe")]
+fn add_unavailable_hibe(_kinds: &mut Vec<String>, _keystore: &Path, _group: &str) {}

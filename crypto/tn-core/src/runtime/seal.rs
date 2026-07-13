@@ -36,9 +36,7 @@ use crate::{Error, Result};
 
 use super::util::{current_timestamp, validate_event_type};
 use super::Runtime;
-use candidates::{
-    discover_keybag, jwe_reader_candidate, load_recipient_candidates, unusable_keystore_kinds,
-};
+use candidates::{discover_keybag, load_recipient_candidates, unusable_keystore_kinds};
 
 /// Options for [`Runtime::seal`].
 pub struct SealOptions {
@@ -295,14 +293,7 @@ impl Runtime {
                     );
                 }
             }
-            // Pass 2: the device key opens any JWE wrap naming its DID.
-            let jwe = jwe_reader_candidate(&self.device)?;
-            for (gname, block) in &blocks {
-                if !plaintext.contains_key(gname) {
-                    try_open(gname, block, jwe.as_ref(), &env_value, &mut plaintext);
-                }
-            }
-            // Pass 3: group-specific key-bag (own kits + absorbed kits).
+            // Pass 2: group-specific key-bag (own kits + absorbed kits).
             let bag = discover_keybag(&self.keystore);
             for (gname, block) in &blocks {
                 if plaintext.contains_key(gname) {
@@ -335,7 +326,7 @@ pub struct UnsealOptions {
     /// the walk proceeds.
     pub verify: bool,
     /// Bring-your-own-kit override: a directory holding recipient key
-    /// files (`<group>.btn.mykit` / `local.private` for JWE /
+    /// files (`<group>.btn.mykit` / `<group>.jwe.mykey` /
     /// `<group>.hibe.sk`). When set, only [`UnsealOptions::group`] is
     /// decrypted and the runtime's own groups/keystore are not
     /// consulted.
@@ -374,8 +365,8 @@ pub struct SealedGroupInfo {
     /// bound no marker for this group.
     pub aad_b64: String,
     /// Cipher kinds with key files on disk for this group that this
-    /// build could NOT use: a legacy `"jwe"` key file, or `"hibe"`
-    /// when the `hibe` feature is off. Native JWE uses `local.private`.
+    /// build could NOT use: `"jwe"` when native JWE is unavailable,
+    /// or `"hibe"` when the `hibe` feature is off.
     pub keystore_candidates: Vec<String>,
 }
 
