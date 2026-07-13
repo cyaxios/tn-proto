@@ -32,7 +32,7 @@ pub(crate) fn build_recipient_wraps(
     let aad = manifest_aad_for_wrap(manifest)?;
     let mut wraps = Vec::with_capacity(recipient_dids.len());
     for did in &recipient_dids {
-        wraps.push(seal_bek_for_recipient(bek, did, &aad)?);
+        wraps.push(seal_key_for_recipient(bek, did, &aad)?);
     }
     Ok(wraps)
 }
@@ -103,7 +103,7 @@ pub(crate) fn maybe_unseal_recipient_body(
     let aad = manifest_aad_for_wrap(manifest)?;
     let mut last_err = String::new();
     for wrap in wraps.candidates {
-        match unseal_bek_from_wrap(wrap, device_seed, &aad) {
+        match unseal_key_from_wrap(wrap, device_seed, &aad) {
             Ok(bek) => {
                 let encrypted = body
                     .get("body/encrypted.bin")
@@ -138,7 +138,11 @@ pub(crate) fn maybe_unseal_recipient_body(
     )))
 }
 
-fn seal_bek_for_recipient(bek: &[u8; 32], recipient_did: &str, aad: &[u8]) -> Result<Value> {
+pub(crate) fn seal_key_for_recipient(
+    key: &[u8; 32],
+    recipient_did: &str,
+    aad: &[u8],
+) -> Result<Value> {
     let recipient_ed_pub = did_key_to_ed25519_pub(recipient_did)?;
     let recipient_x_pub = ed25519_pub_to_x25519_pub(&recipient_ed_pub)?;
 
@@ -165,7 +169,7 @@ fn seal_bek_for_recipient(bek: &[u8; 32], recipient_did: &str, aad: &[u8]) -> Re
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
-                msg: bek.as_slice(),
+                msg: key.as_slice(),
                 aad,
             },
         )
@@ -192,7 +196,7 @@ fn seal_bek_for_recipient(bek: &[u8; 32], recipient_did: &str, aad: &[u8]) -> Re
     Ok(Value::Object(out))
 }
 
-fn unseal_bek_from_wrap(
+pub(crate) fn unseal_key_from_wrap(
     wrap: &Map<String, Value>,
     device_seed: &[u8; 32],
     aad: &[u8],
@@ -358,4 +362,24 @@ fn wrap_field_b64_12(wrap: &Map<String, Value>, field: &'static str) -> Result<[
     bytes
         .try_into()
         .map_err(|_| Error::Internal("12-byte recipient wrap field validated above".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_recipient_wrap_opens_only_for_the_named_device() {
+        let reader = crate::DeviceKey::from_private_bytes(&[7_u8; 32]).unwrap();
+        let stranger = crate::DeviceKey::from_private_bytes(&[8_u8; 32]).unwrap();
+        let key = [9_u8; 32];
+        let aad = b"tn-jwe-frame";
+        let value = seal_key_for_recipient(&key, reader.did(), aad).unwrap();
+        let wrap = value.as_object().unwrap();
+        assert_eq!(
+            unseal_key_from_wrap(wrap, &reader.private_bytes(), aad).unwrap(),
+            key
+        );
+        assert!(unseal_key_from_wrap(wrap, &stranger.private_bytes(), aad).is_err());
+    }
 }
