@@ -98,8 +98,13 @@ impl Runtime {
         let Some(spec) = self.cfg.groups.get(group) else {
             return Ok(());
         };
-        let (cipher, _btn_admin, _mykit) =
-            build_cipher_with_admin_with_storage(spec, &self.keystore, group, &self.storage)?;
+        let (cipher, _btn_admin, _mykit) = build_cipher_with_admin_with_storage(
+            spec,
+            &self.keystore,
+            group,
+            &self.storage,
+            &self.device,
+        )?;
         if let Some(gstate_arc) = self.groups.get(group) {
             let mut gstate = gstate_arc.write().expect("group state RwLock poisoned");
             gstate.cipher = cipher;

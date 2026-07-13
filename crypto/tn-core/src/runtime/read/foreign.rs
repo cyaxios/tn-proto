@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::cipher::btn::BtnReaderCipher;
+use crate::cipher::{btn::BtnReaderCipher, jwe::JweCipher};
 use crate::log_file::LogFileReader;
 use crate::{Error, Result};
 
@@ -167,7 +167,8 @@ pub(crate) fn read_recipient_rows(
     group: &str,
 ) -> Result<Vec<RecipientRow>> {
     let storage: Arc<dyn crate::storage::Storage> = Arc::new(crate::storage::FsStorage::new());
-    let decryptors = load_foreign_decryptors(keystore, &storage)?;
+    let mut decryptors = load_foreign_decryptors(keystore, &storage)?;
+    load_jwe_device_decryptor(&mut decryptors, keystore, &storage, group)?;
     if !decryptors.contains_group(group) {
         return Err(Error::InvalidConfig(format!(
             "read_as_recipient: no recipient material for group {group:?} in {}",
@@ -175,6 +176,26 @@ pub(crate) fn read_recipient_rows(
         )));
     }
     scan_recipient_rows(log_path, &storage, &decryptors, group)
+}
+
+fn load_jwe_device_decryptor(
+    decryptors: &mut GroupDecryptors,
+    keystore: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+    group: &str,
+) -> Result<()> {
+    let seed_path = keystore.join(crate::identity::DEVICE_SEED_FILENAME);
+    if !storage.exists(&seed_path) {
+        return Ok(());
+    }
+    let seed = storage.read_bytes(&seed_path).map_err(Error::Io)?;
+    let device = crate::DeviceKey::from_private_bytes(&seed)?;
+    let recipients = vec![device.did().to_owned()];
+    decryptors.insert(
+        group.to_owned(),
+        Arc::new(JweCipher::new(&recipients, &device)?),
+    );
+    Ok(())
 }
 
 fn scan_recipient_rows(

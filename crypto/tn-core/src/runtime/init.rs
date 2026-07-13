@@ -253,7 +253,7 @@ impl Runtime {
         // Call site 4 (inside the loop): per-group cipher construction
         // reads `<group>.btn.state` / `<group>.btn.mykit` through storage.
         let (groups, btn_admin, btn_mykit) =
-            build_group_states(&cfg, &master_index_key, &keystore, &storage)?;
+            build_group_states(&cfg, &master_index_key, &keystore, &storage, &device)?;
 
         // Honor `logs.path` from the yaml. Relative paths resolve against
         // the yaml directory; absolute paths are used as-is. Default is

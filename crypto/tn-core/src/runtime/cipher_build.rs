@@ -19,10 +19,11 @@ use uuid::Uuid;
 
 use crate::cipher::{
     btn::{BtnPublisherCipher, BtnReaderCipher},
+    jwe::JweCipher,
     GroupCipher,
 };
 use crate::config::{Config, GroupSpec};
-use crate::{Error, Result};
+use crate::{DeviceKey, Error, Result};
 
 use super::GroupState;
 
@@ -61,6 +62,7 @@ pub(crate) fn build_group_states(
     master_index_key: &[u8; 32],
     keystore: &Path,
     storage: &Arc<dyn crate::storage::Storage>,
+    device: &DeviceKey,
 ) -> Result<GroupTables> {
     let mut groups: BTreeMap<String, Arc<RwLock<GroupState>>> = BTreeMap::new();
     let mut btn_admin: BTreeMap<String, Arc<Mutex<BtnPublisherCipher>>> = BTreeMap::new();
@@ -76,7 +78,7 @@ pub(crate) fn build_group_states(
         // Call site 4: cipher construction reads `<group>.btn.state`
         // and `<group>.btn.mykit` through storage.
         let (cipher, maybe_pub_cipher, mykit_bytes) =
-            build_cipher_with_admin_with_storage(spec, keystore, name, storage)?;
+            build_cipher_with_admin_with_storage(spec, keystore, name, storage, device)?;
         let hmac_template = crate::indexing::build_hmac_template(&index_key)?;
         groups.insert(
             name.clone(),
@@ -105,12 +107,11 @@ pub(crate) fn build_cipher_with_admin(
     spec: &GroupSpec,
     keystore: &Path,
     group_name: &str,
+    device: &DeviceKey,
 ) -> Result<BuildCipherResult> {
     match spec.cipher.as_str() {
         "btn" => build_btn_cipher_with_admin(keystore, group_name),
-        "jwe" | "bearer" => Err(Error::NotImplemented(
-            "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
-        )),
+        "jwe" | "bearer" => build_jwe_cipher(spec, device),
         "hibe" => Err(Error::NotImplemented(
             "HIBE groups run through the Python runtime in this plan (tn-hibe backs them)",
         )),
@@ -135,12 +136,11 @@ pub(crate) fn build_cipher_with_admin_with_storage(
     keystore: &Path,
     group_name: &str,
     storage: &Arc<dyn crate::storage::Storage>,
+    device: &DeviceKey,
 ) -> Result<BuildCipherResult> {
     match spec.cipher.as_str() {
         "btn" => build_btn_cipher_with_admin_with_storage(keystore, group_name, storage),
-        "jwe" | "bearer" => Err(Error::NotImplemented(
-            "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
-        )),
+        "jwe" | "bearer" => build_jwe_cipher(spec, device),
         #[cfg(feature = "hibe")]
         "hibe" => build_hibe_cipher_with_storage(keystore, group_name, storage),
         #[cfg(not(feature = "hibe"))]
@@ -149,6 +149,16 @@ pub(crate) fn build_cipher_with_admin_with_storage(
         )),
         other => Err(Error::InvalidConfig(format!("unknown cipher {other:?}"))),
     }
+}
+
+fn build_jwe_cipher(spec: &GroupSpec, device: &DeviceKey) -> Result<BuildCipherResult> {
+    let recipients = spec
+        .recipients
+        .iter()
+        .map(|recipient| recipient.recipient_identity.clone())
+        .collect::<Vec<_>>();
+    let cipher = JweCipher::new(&recipients, device)?;
+    Ok((Arc::new(cipher), None, None))
 }
 
 /// Storage-aware btn cipher builder. Reads `<group>.btn.state` and
