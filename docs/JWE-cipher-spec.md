@@ -3,17 +3,18 @@
 `cipher: jwe` emits interoperable RFC 7516 JWE. A JWE group's `ciphertext` blob is
 a valid JWE **General JSON Serialization** object that any conformant JOSE
 implementation can parse, produced by each language's JOSE library
-(Python: Authlib/joserfc, BSD-3; JS/TS: panva/jose, MIT). A record sealed by one
-SDK opens in the other by standard conformance, not by shared golden vectors.
+(Python: Authlib/joserfc, BSD-3; JS/TS: panva/jose, MIT) or the Rust native
+profile implementation. A record sealed by one SDK opens in another by
+standard conformance, not by a TN-only frame.
 
 ## Non-negotiable constraints
 
-**1. No hand-rolled JOSE layer — use a JOSE library.**
-JWE is a standard (RFC 7516) with mature, maintained libraries; use them. The one
-sanctioned exception is a thin, spec-conformant RFC 7516 serializer over
-`pyca/cryptography` as a Python fallback, and only if the permissive primary
-library fails its verification spike. Assembling AES-GCM + AES-KW + a custom
-container by hand is out of bounds.
+**1. Standard JOSE wire only; no TN-specific crypto container.**
+Python and TypeScript use their maintained JOSE libraries. Rust implements only
+this fixed profile over RustCrypto AES-KW/AES-GCM, SHA-256, and Dalek X25519;
+it is not a general JOSE layer. Its release gate is bidirectional interop with
+the independent Python and C# implementations. New algorithms or header modes
+require a maintained JOSE implementation and a spec revision.
 
 **2. The output MUST be interoperable RFC 7516 JWE — the standard is the wire format.**
 A JWE group's `ciphertext` blob is a valid JWE General JSON Serialization object
@@ -26,14 +27,10 @@ bespoke golden vectors. A design choice that would make the output non-standard
 Groups that don't opt into another cipher stay pure btn. JWE and HIBE are peer
 options selected per group via `cipher:`.
 
-**4. JWE stays on the PURE engine — not in the Rust native runtime or the wasm bundle.**
-Unlike btn and hibe — native in `tn-core` because their crypto is heavy (NNL
-subset-cover, BBG pairings) — JWE's crypto is commodity (X25519 ECDH +
-AES-256-GCM), hardware-accelerated in every language's backend, so a Rust port
-buys **no** measurable speed. There is also no pure-Rust, `wasm32`-compatible
-JOSE library that encrypts. `should_use_rust` stays btn-or-hibe (it excludes
-jwe); the `JwePlaceholder` is a clean `NotImplemented` sentinel, served by the
-pure engine by design.
+**4. JWE is native in Rust and remains optional in the wasm runtime.**
+`tn-core` native builds seal and open this fixed profile using raw X25519
+enrollment material. The wasm runtime does not enable the `native-jwe` feature;
+the TypeScript JOSE path remains its JWE implementation.
 
 ## Design decisions — the contract
 
@@ -48,9 +45,10 @@ pure engine by design.
 - **JS/TS → panva `jose` (MIT, zero-dependency).** `GeneralEncrypt` +
   `.addRecipient()` + `.setAdditionalAuthenticatedData()`; `generalDecrypt`;
   native X25519 ECDH-ES.
-- **Rust → non-native (no dependency added).** JWE is not built into `tn-core` /
-  the wasm bundle (Constraint 4). If a **server-only** Rust JWE is ever needed,
-  josekit (MIT/Apache-2.0, OpenSSL) is the fallback — never in the wasm bundle.
+- **Rust → fixed native profile over audited primitives.** `curve25519-dalek`
+  supplies X25519, RustCrypto supplies SHA-256, AES-256-KW, and A256GCM, and
+  `serde_json` supplies the strict General JSON shape. No OpenSSL toolchain or
+  TN-specific framing is involved. The wasm bundle leaves this feature off.
 
 **D2. Wire format — RFC 7516 JWE General JSON Serialization, stored INSIDE `ciphertext`.**
 A JWE group's cipher output is the UTF-8 bytes of the compact JSON of a General

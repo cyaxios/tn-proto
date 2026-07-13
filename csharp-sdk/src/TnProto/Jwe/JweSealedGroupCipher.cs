@@ -12,16 +12,17 @@ namespace TnProto.Jwe;
 /// <summary>
 /// Managed RFC 7516 JWE cipher for <c>cipher: jwe</c> group blocks — the
 /// decrypt plug for the <see cref="UnsealOptions.GroupCiphers"/>
-/// second-pass seam. JWE stays out of the Rust core by design, so the
-/// native walk always leaves jwe blocks sealed; registering this cipher
-/// under the group name lets
+/// second-pass seam. The native Rust runtime opens JWE when its keystore
+/// contains the group's raw X25519 reader key. Registering this managed
+/// cipher under the group name also lets
 /// <see cref="Tn.UnsealAsync(string, UnsealOptions?, CancellationToken)"/>
 /// open them.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Opens the wire shape the Python (joserfc) and TypeScript (panva/jose)
-/// SDKs seal: a General JSON Serialization object whose recipient blocks
+/// Opens the wire shape the Rust (RustCrypto/Dalek), Python (joserfc), and
+/// TypeScript (panva/jose) runtimes seal: a General JSON Serialization object
+/// whose recipient blocks
 /// each wrap one shared A256GCM content key with <c>ECDH-ES+A256KW</c>
 /// over X25519 (RFC 8037 OKP), the sender's ephemeral public key riding
 /// in each recipient's <c>epk</c> header. Blocks are anonymous (no
@@ -34,8 +35,8 @@ namespace TnProto.Jwe;
 /// byte-match the aad bytes the seam reconstructs from the record's
 /// public <c>tn_aad</c> echo, in both directions: an empty
 /// marker requires the member to be absent, a bound marker requires it
-/// present and equal. Decrypt only — sealing jwe groups and jwe
-/// ceremonies stay in Python/TS.
+/// present and equal. This managed class is decrypt-only; the public C#
+/// <see cref="Tn"/> seal and emit paths use the native Rust runtime.
 /// </para>
 /// </remarks>
 public sealed class JweSealedGroupCipher : ISealedGroupCipher

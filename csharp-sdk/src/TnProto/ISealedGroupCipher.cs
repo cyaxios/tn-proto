@@ -5,8 +5,8 @@ namespace TnProto;
 /// </summary>
 /// <remarks>
 /// The native build leaves a group block sealed when it holds no usable
-/// cipher for it (JWE stays out of the Rust core by design; hibe only in
-/// hibe-less native builds — see <see cref="SealedBlock.KeystoreCandidates"/>).
+/// key or the cipher is unavailable in that build (for example JWE on wasm,
+/// or hibe in hibe-less builds — see <see cref="SealedBlock.KeystoreCandidates"/>).
 /// Registering an implementation under the group name in
 /// <see cref="UnsealOptions.GroupCiphers"/> lets
 /// <see cref="Tn.UnsealAsync(string, UnsealOptions?, CancellationToken)"/>
