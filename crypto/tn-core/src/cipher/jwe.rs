@@ -15,9 +15,7 @@ use base64::Engine as _;
 #[cfg(feature = "fs")]
 use biscuit::jwa::{ContentEncryptionAlgorithm, KeyManagementAlgorithm};
 #[cfg(feature = "fs")]
-use biscuit::jwe::{Header, RegisteredHeader};
-#[cfg(feature = "fs")]
-use biscuit::{Compact, CompactPart};
+use biscuit::{Compact, CompactJson, CompactPart};
 #[cfg(feature = "fs")]
 use rand_core::RngCore as _;
 #[cfg(feature = "fs")]
@@ -51,11 +49,17 @@ struct JweFrame {
 }
 
 #[cfg(feature = "fs")]
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TnProtectedHeader {
+    alg: KeyManagementAlgorithm,
+    enc: ContentEncryptionAlgorithm,
     tn_frame: String,
     tn_aad: String,
 }
+
+#[cfg(feature = "fs")]
+impl CompactJson for TnProtectedHeader {}
 
 /// A TN-wrapped compact JWE cipher bound to configured recipients and a device.
 #[cfg(feature = "fs")]
@@ -79,17 +83,11 @@ impl JweCipher {
 
 #[cfg(feature = "fs")]
 fn encrypt_body(plaintext: &[u8], key: &[u8; 32], aad: &[u8]) -> Result<String> {
-    let header = Header {
-        registered: RegisteredHeader {
-            cek_algorithm: KeyManagementAlgorithm::DirectSymmetricKey,
-            enc_algorithm: ContentEncryptionAlgorithm::A256GCM,
-            ..Default::default()
-        },
-        private: TnProtectedHeader {
-            tn_frame: FRAME.to_owned(),
-            tn_aad: URL_SAFE_NO_PAD.encode(aad),
-        },
-        ..Default::default()
+    let header = TnProtectedHeader {
+        alg: KeyManagementAlgorithm::DirectSymmetricKey,
+        enc: ContentEncryptionAlgorithm::A256GCM,
+        tn_frame: FRAME.to_owned(),
+        tn_aad: URL_SAFE_NO_PAD.encode(aad),
     };
     let mut compact = Compact::with_capacity(5);
     push_compact_part(&mut compact, &header, "protected header")?;
@@ -133,10 +131,10 @@ fn decrypt_body(body: &str, key: &[u8; 32], aad: &[u8]) -> Result<Vec<u8>> {
             Tag::from_slice(&tag),
         )
         .map_err(|error| malformed_body(format!("authentication failed: {error}")))?;
-    if header.private.tn_frame != FRAME {
+    if header.tn_frame != FRAME {
         return Err(malformed_body("protected tn_frame does not match"));
     }
-    if header.private.tn_aad != URL_SAFE_NO_PAD.encode(aad) {
+    if header.tn_aad != URL_SAFE_NO_PAD.encode(aad) {
         return Err(Error::Cipher("JWE protected AAD does not match".into()));
     }
     Ok(ciphertext)
@@ -166,13 +164,13 @@ fn protected_segment(compact: &Compact) -> Result<&str> {
 }
 
 #[cfg(feature = "fs")]
-fn validate_compact(compact: &Compact) -> Result<Header<TnProtectedHeader>> {
+fn validate_compact(compact: &Compact) -> Result<TnProtectedHeader> {
     if compact.len() != 5 {
         return Err(malformed_body("compact JWE must contain five parts"));
     }
-    let header: Header<TnProtectedHeader> = compact_part(compact, 0, "protected header")?;
-    if header.registered.cek_algorithm != KeyManagementAlgorithm::DirectSymmetricKey
-        || header.registered.enc_algorithm != ContentEncryptionAlgorithm::A256GCM
+    let header: TnProtectedHeader = compact_part(compact, 0, "protected header")?;
+    if header.alg != KeyManagementAlgorithm::DirectSymmetricKey
+        || header.enc != ContentEncryptionAlgorithm::A256GCM
     {
         return Err(malformed_body("compact JWE algorithms must be dir/A256GCM"));
     }
@@ -347,6 +345,32 @@ mod tests {
         assert_eq!(protected["enc"], "A256GCM");
         assert_eq!(protected["tn_frame"], "tn-jwe-v1");
         assert_eq!(protected["tn_aad"], URL_SAFE_NO_PAD.encode(b"marker"));
+    }
+
+    #[test]
+    fn protected_zip_is_rejected_before_body_use() {
+        let protected = serde_json::to_vec(&json!({
+            "alg": "dir",
+            "enc": "A256GCM",
+            "tn_frame": "tn-jwe-v1",
+            "tn_aad": URL_SAFE_NO_PAD.encode(b"marker"),
+            "zip": "DEF",
+        }))
+        .unwrap();
+        let mut compact = Compact::with_capacity(5);
+        push_compact_part(&mut compact, &protected, "protected header").unwrap();
+        for _ in 0..4 {
+            push_compact_part(&mut compact, &Vec::<u8>::new(), "empty test part").unwrap();
+        }
+
+        let error = decrypt_body(&compact.encode(), &[9_u8; 32], b"marker").unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Malformed {
+                kind: "JWE body",
+                ref reason,
+            } if reason.contains("unknown field") && reason.contains("zip")
+        ));
     }
 
     #[test]
