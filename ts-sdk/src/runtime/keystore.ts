@@ -8,9 +8,8 @@
 //   <keystore>/<group>.btn.mykit    self-kit bytes so the publisher can read
 //   <keystore>/<group>.hibe.*       hibe group material (see runtime/hibe_group.ts)
 //
-// We do not touch jwe layouts here. A JWE ceremony yaml loaded
-// through this module will still read the keystore parts that exist
-// but cannot emit or read.
+// JWE reader material is loaded here alongside btn/hibe so TypeScript can emit
+// and read through its async JWE paths.
 
 import { readFileSync, readdirSync, writeFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";

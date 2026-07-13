@@ -11,10 +11,10 @@
 // SDK's declared minimum — see package.json `engines`). On Node < 20 it is
 // absent and these calls throw `crypto is not defined`; run on a supported Node.
 //
-// Unlike btn/hibe (native, sealed/opened through the wasm runtime), JWE is a
-// pure-JS cipher: there is no wasm-compatible Rust JOSE, and JWE's crypto is
-// commodity, so panva/jose is the right engine. These calls are ASYNC (they use
-// WebCrypto), which is why jwe seals/opens ride the async emit/read path
+// TypeScript JWE uses panva/jose. The native Rust SDK now has its own RFC 7516
+// implementation; only the wasm path lacks a Rust JOSE surface. These calls are
+// ASYNC (they use WebCrypto), which is why jwe seals/opens ride the async
+// emit/read path
 // (`emitAsync` / `readAsync` / `decryptGroupAsync`) rather than the synchronous
 // btn/hibe loop.
 
