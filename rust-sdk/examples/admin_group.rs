@@ -23,7 +23,7 @@ fn main() -> tn_proto::Result<()> {
 
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     for entry in entries {
         if entry.get("event_type").and_then(Value::as_str) == Some("payment.created") {

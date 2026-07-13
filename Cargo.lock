@@ -2557,6 +2557,7 @@ dependencies = [
  "ed25519-dalek",
  "hkdf",
  "hmac",
+ "log",
  "notify",
  "rand_core 0.6.4",
  "reqwest",

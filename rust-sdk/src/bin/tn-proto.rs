@@ -5,13 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use tn_proto::{
     default_credential_store, list_local_invites, AbsorbReceiptExt, AccountConnectOptions,
     BundleForRecipientOptions, CompileEnrolmentOptions, MintInvitationOptions, OfferOptions,
     ReadOptions, Tn, TnProjectOptions, TnProjectVaultClaimOptions, VaultHttpProjectClient,
     VaultInitUploadOptions, VaultInstallBodyOptions, VaultLinkState,
-    VaultRestoreWithCachedAwkOptions, WalletSyncOptions,
+    VaultRestoreWithCachedAwkOptions, VerifyMode, WalletSyncOptions,
 };
 
 const HOSTED_VAULT_URL: &str = "https://vault.tn-proto.org";
@@ -113,9 +113,12 @@ struct ReadArgs {
     /// Include entries from every run instead of only this process run.
     #[arg(long)]
     all_runs: bool,
-    /// Include per-entry verification flags in a _valid block.
-    #[arg(long)]
-    verify: bool,
+    /// Verification policy (`--verify` alone means `raise`).
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "raise", conflicts_with = "no_verify")]
+    verify: Option<VerificationArg>,
+    /// Explicitly disable integrity, authentication, and writer checks.
+    #[arg(long, conflicts_with = "verify")]
+    no_verify: bool,
     /// Pretty-print JSON entries instead of newline-delimited compact JSON.
     #[arg(long)]
     pretty: bool,
@@ -146,9 +149,12 @@ struct WatchArgs {
     /// Use native file notifications. Requires building the CLI with `--features cli,watch`.
     #[arg(long)]
     native: bool,
-    /// Include per-entry verification flags in a _valid block.
-    #[arg(long)]
-    verify: bool,
+    /// Verification policy (`--verify` alone means `raise`).
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "raise", conflicts_with = "no_verify")]
+    verify: Option<VerificationArg>,
+    /// Explicitly disable integrity, authentication, and writer checks.
+    #[arg(long, conflicts_with = "verify")]
+    no_verify: bool,
     /// Pretty-print JSON entries instead of newline-delimited compact JSON.
     #[arg(long)]
     pretty: bool,
@@ -167,6 +173,24 @@ struct WatchArgs {
     /// Poll interval for the polling watcher, in milliseconds.
     #[arg(long, default_value_t = 300)]
     poll_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum VerificationArg {
+    Auto,
+    Raise,
+    Skip,
+}
+
+fn verification_mode(value: Option<VerificationArg>, disabled: bool) -> VerifyMode {
+    if disabled {
+        return VerifyMode::Disabled;
+    }
+    match value.unwrap_or(VerificationArg::Auto) {
+        VerificationArg::Auto => VerifyMode::Auto,
+        VerificationArg::Raise => VerifyMode::Raise,
+        VerificationArg::Skip => VerifyMode::Skip,
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -674,7 +698,8 @@ fn read_entries(args: ReadArgs) -> tn_proto::Result<()> {
     let tn = Tn::init(&args.yaml)?;
     let entries = tn.read(ReadOptions {
         all_runs: args.all_runs,
-        verify: args.verify,
+        verify: verification_mode(args.verify, args.no_verify) != VerifyMode::Disabled,
+        ..ReadOptions::default()
     })?;
 
     for entry in entries {
@@ -693,6 +718,7 @@ fn verify_entries(args: VerifyArgs) -> tn_proto::Result<()> {
     let entries = tn.read(ReadOptions {
         all_runs: true,
         verify: true,
+        ..ReadOptions::default()
     })?;
     let mut invalid = 0usize;
 
@@ -748,7 +774,7 @@ fn show_project(args: ShowArgs) -> tn_proto::Result<()> {
     let wallet_paths = tn.wallet().paths();
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let groups = config.groups;
 
@@ -814,7 +840,8 @@ fn watch_options(args: &WatchArgs) -> tn_proto::WatchOptions {
         },
         read: ReadOptions {
             all_runs: true,
-            verify: args.verify,
+            verify: verification_mode(args.verify, args.no_verify) != VerifyMode::Disabled,
+            ..ReadOptions::default()
         },
         poll_interval: Duration::from_millis(args.poll_interval_ms),
         event_type: args.event_type.clone(),

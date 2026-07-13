@@ -79,6 +79,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 zip = { version = "2", default-features = false, features = ["deflate"] }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 notify = { version = "6", optional = true }
+log = "0.4"
 
 [dev-dependencies]
 ed25519-dalek = { workspace = true }

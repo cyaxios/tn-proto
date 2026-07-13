@@ -82,7 +82,7 @@ impl Entry {
         self.get("sequence").and_then(Value::as_u64)
     }
 
-    /// Verification flags attached by `ReadOptions { verify: true, .. }`.
+    /// Verification flags attached by secure-default reads.
     pub fn validity(&self) -> Option<EntryValidity> {
         let valid = self.get("_valid")?.as_object()?;
         Some(EntryValidity {

@@ -39,7 +39,7 @@ tn.flush_and_close()
     let tn = Tn::init(yaml_path.trim())?;
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let entry = common::find_event(&entries, "py.created");
     assert_eq!(
