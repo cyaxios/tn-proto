@@ -496,8 +496,9 @@ fn try_open(
 /// sorted), the sealed-blocks seam, and the Entry-style `fields` merge
 /// mirroring `python/tn/_entry.py::Entry.from_raw` — opened plaintexts
 /// alphabetically (last-write-wins), then non-reserved non-block
-/// public extras with the `tn_sealed` marker dropped, then the
-/// `run_id` / `message` slots Python pops out of `fields`.
+/// public extras with the `tn_sealed` marker dropped. `run_id` and
+/// `message` remain in `fields` because this Rust outcome has no
+/// separate typed slots for them.
 fn build_outcome(
     env_value: Value,
     blocks: BTreeMap<String, GroupBlock>,
@@ -546,10 +547,10 @@ fn build_outcome(
             }
         }
     }
-    // Then non-reserved, non-block public extras. Entry.from_raw's
-    // basics set adds run_id and message to the nine reserved scalars.
+    // Then non-reserved, non-block public extras. Rust has no separate
+    // typed run_id or message slots, so those user fields stay here.
     for (k, v) in &env {
-        if ENVELOPE_RESERVED.contains(&k.as_str()) || k == "run_id" || k == "message" {
+        if ENVELOPE_RESERVED.contains(&k.as_str()) {
             continue;
         }
         if blocks.contains_key(k) {
@@ -563,12 +564,6 @@ fn build_outcome(
         }
         fields.insert(k.clone(), v.clone());
     }
-    // Entry.from_raw pops these out of fields into typed slots; the
-    // outcome has no such slots, so they are dropped from fields to
-    // keep the merge identical.
-    fields.remove("run_id");
-    fields.remove("message");
-
     UnsealOutcome {
         envelope: env,
         plaintext,
