@@ -5,17 +5,19 @@
 //! Runtime construction is wired separately; this module owns only the cipher.
 
 #[cfg(feature = "fs")]
+use aes_gcm::aead::{AeadInPlace as _, KeyInit as _};
+#[cfg(feature = "fs")]
+use aes_gcm::{Aes256Gcm, Nonce, Tag};
+#[cfg(feature = "fs")]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 #[cfg(feature = "fs")]
 use base64::Engine as _;
 #[cfg(feature = "fs")]
-use biscuit::jwa::{ContentEncryptionAlgorithm, EncryptionOptions, KeyManagementAlgorithm};
+use biscuit::jwa::{ContentEncryptionAlgorithm, KeyManagementAlgorithm};
 #[cfg(feature = "fs")]
-use biscuit::jwe::{Compact, Header, RegisteredHeader};
+use biscuit::jwe::{Header, RegisteredHeader};
 #[cfg(feature = "fs")]
-use biscuit::jwk::JWK;
-#[cfg(feature = "fs")]
-use biscuit::Empty;
+use biscuit::{Compact, CompactPart};
 #[cfg(feature = "fs")]
 use rand_core::RngCore as _;
 #[cfg(feature = "fs")]
@@ -89,46 +91,98 @@ fn encrypt_body(plaintext: &[u8], key: &[u8; 32], aad: &[u8]) -> Result<String> 
         },
         ..Default::default()
     };
-    let key: JWK<Empty> = JWK::new_octet_key(key, Empty::default());
+    let mut compact = Compact::with_capacity(5);
+    push_compact_part(&mut compact, &header, "protected header")?;
     let mut nonce = [0_u8; 12];
     rand_core::OsRng.fill_bytes(&mut nonce);
-    let options = EncryptionOptions::AES_GCM {
-        nonce: nonce.to_vec(),
-    };
-    let jwe = Compact::new_decrypted(header, plaintext.to_vec());
-    let encrypted = jwe
-        .encrypt(&key, &options)
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|error| Error::Cipher(format!("JWE key setup failed: {error}")))?;
+    let mut ciphertext = plaintext.to_vec();
+    let protected = protected_segment(&compact)?;
+    let tag = cipher
+        .encrypt_in_place_detached(
+            Nonce::from_slice(&nonce),
+            protected.as_bytes(),
+            &mut ciphertext,
+        )
         .map_err(|error| Error::Cipher(format!("JWE body encryption failed: {error}")))?;
-    encrypted
-        .encrypted()
-        .map(ToString::to_string)
-        .map_err(|error| Error::Internal(format!("Biscuit returned a decrypted JWE: {error}")))
+    push_compact_part(&mut compact, &Vec::<u8>::new(), "encrypted key")?;
+    push_compact_part(&mut compact, &nonce.to_vec(), "nonce")?;
+    push_compact_part(&mut compact, &ciphertext, "ciphertext")?;
+    push_compact_part(&mut compact, &tag.to_vec(), "authentication tag")?;
+    Ok(compact.encode())
 }
 
 #[cfg(feature = "fs")]
 fn decrypt_body(body: &str, key: &[u8; 32], aad: &[u8]) -> Result<Vec<u8>> {
-    let key: JWK<Empty> = JWK::new_octet_key(key, Empty::default());
-    let encrypted = Compact::<Vec<u8>, TnProtectedHeader>::new_encrypted(body);
-    let decrypted = encrypted
-        .decrypt(
-            &key,
-            KeyManagementAlgorithm::DirectSymmetricKey,
-            ContentEncryptionAlgorithm::A256GCM,
+    let compact = Compact::decode(body);
+    let header = validate_compact(&compact)?;
+    let nonce: Vec<u8> = compact_part(&compact, 2, "nonce")?;
+    let mut ciphertext: Vec<u8> = compact_part(&compact, 3, "ciphertext")?;
+    let tag: Vec<u8> = compact_part(&compact, 4, "authentication tag")?;
+    if nonce.len() != 12 || tag.len() != 16 {
+        return Err(malformed_body("invalid nonce or authentication tag length"));
+    }
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|error| Error::Cipher(format!("JWE key setup failed: {error}")))?;
+    cipher
+        .decrypt_in_place_detached(
+            Nonce::from_slice(&nonce),
+            protected_segment(&compact)?.as_bytes(),
+            &mut ciphertext,
+            Tag::from_slice(&tag),
         )
-        .map_err(|error| malformed_body(error.to_string()))?;
-    let header = decrypted
-        .header()
-        .map_err(|error| Error::Internal(format!("Biscuit returned an encrypted JWE: {error}")))?;
+        .map_err(|error| malformed_body(format!("authentication failed: {error}")))?;
     if header.private.tn_frame != FRAME {
         return Err(malformed_body("protected tn_frame does not match"));
     }
     if header.private.tn_aad != URL_SAFE_NO_PAD.encode(aad) {
         return Err(Error::Cipher("JWE protected AAD does not match".into()));
     }
-    decrypted
-        .payload()
-        .cloned()
-        .map_err(|error| Error::Internal(format!("Biscuit returned an encrypted JWE: {error}")))
+    Ok(ciphertext)
+}
+
+#[cfg(feature = "fs")]
+fn push_compact_part(compact: &mut Compact, part: &dyn CompactPart, name: &str) -> Result<()> {
+    compact
+        .push(part)
+        .map_err(|error| Error::Cipher(format!("JWE {name} encoding failed: {error}")))
+}
+
+#[cfg(feature = "fs")]
+fn compact_part<T: CompactPart>(compact: &Compact, index: usize, name: &str) -> Result<T> {
+    compact
+        .part(index)
+        .map_err(|error| malformed_body(format!("invalid {name}: {error}")))
+}
+
+#[cfg(feature = "fs")]
+fn protected_segment(compact: &Compact) -> Result<&str> {
+    compact
+        .parts
+        .first()
+        .map(biscuit::Base64Url::str)
+        .ok_or_else(|| malformed_body("missing protected header"))
+}
+
+#[cfg(feature = "fs")]
+fn validate_compact(compact: &Compact) -> Result<Header<TnProtectedHeader>> {
+    if compact.len() != 5 {
+        return Err(malformed_body("compact JWE must contain five parts"));
+    }
+    let header: Header<TnProtectedHeader> = compact_part(compact, 0, "protected header")?;
+    if header.registered.cek_algorithm != KeyManagementAlgorithm::DirectSymmetricKey
+        || header.registered.enc_algorithm != ContentEncryptionAlgorithm::A256GCM
+    {
+        return Err(malformed_body("compact JWE algorithms must be dir/A256GCM"));
+    }
+    let encrypted_key: Vec<u8> = compact_part(compact, 1, "encrypted key")?;
+    if !encrypted_key.is_empty() {
+        return Err(malformed_body(
+            "dir compact JWE encrypted-key part must be empty",
+        ));
+    }
+    Ok(header)
 }
 
 #[cfg(feature = "fs")]
@@ -239,6 +293,13 @@ mod tests {
     use serde_json::{json, Value};
 
     #[test]
+    fn aes_key_schedule_zeroizes_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+        assert_zeroize_on_drop::<aes::Aes256>();
+    }
+
+    #[test]
     fn named_recipient_round_trips_and_stranger_is_not_entitled() {
         let writer = DeviceKey::from_private_bytes(&[1_u8; 32]).unwrap();
         let reader = DeviceKey::from_private_bytes(&[2_u8; 32]).unwrap();
@@ -309,6 +370,48 @@ mod tests {
                 kind: "JWE frame",
                 ref reason,
             } if reason.contains("1,024")
+        ));
+    }
+
+    #[test]
+    fn duplicate_outer_frame_field_is_rejected() {
+        let reader = DeviceKey::from_private_bytes(&[7_u8; 32]).unwrap();
+        let recipients = vec![reader.did().to_owned()];
+        let cipher = JweCipher::new(&recipients, &reader).unwrap();
+        let duplicate = br#"{
+            "frame":"tn-jwe-v1",
+            "frame":"tn-jwe-v1",
+            "body":"not-a-compact-jwe",
+            "recipient_wraps":[]
+        }"#;
+
+        assert!(matches!(
+            cipher.decrypt(duplicate),
+            Err(Error::Malformed {
+                kind: "JWE frame",
+                ref reason,
+            }) if reason.contains("duplicate field")
+        ));
+    }
+
+    #[test]
+    fn unknown_outer_frame_field_is_rejected() {
+        let reader = DeviceKey::from_private_bytes(&[8_u8; 32]).unwrap();
+        let recipients = vec![reader.did().to_owned()];
+        let cipher = JweCipher::new(&recipients, &reader).unwrap();
+        let unknown = br#"{
+            "frame":"tn-jwe-v1",
+            "body":"not-a-compact-jwe",
+            "recipient_wraps":[],
+            "unexpected":true
+        }"#;
+
+        assert!(matches!(
+            cipher.decrypt(unknown),
+            Err(Error::Malformed {
+                kind: "JWE frame",
+                ref reason,
+            }) if reason.contains("unknown field")
         ));
     }
 }

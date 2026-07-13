@@ -29,7 +29,8 @@ base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yml = "0.0.12"
-aes-gcm = { version = "0.10", features = ["aes"] }
+aes = { version = "0.8", features = ["zeroize"] }
+aes-gcm = { version = "0.10", features = ["aes", "zeroize"] }
 biscuit = "0.8.0"
 uuid = { version = "1", features = ["v4", "v7"], optional = true }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
