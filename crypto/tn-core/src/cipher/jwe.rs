@@ -38,10 +38,16 @@ mod native {
     #[serde(deny_unknown_fields)]
     struct GeneralJwe {
         protected: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        unprotected: Option<JoseHeader>,
         recipients: Vec<Recipient>,
         #[serde(
             default,
-            deserialize_with = "deserialize_optional_aad",
+            deserialize_with = "deserialize_present",
             skip_serializing_if = "Option::is_none"
         )]
         aad: Option<String>,
@@ -53,15 +59,36 @@ mod native {
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Recipient {
-        header: RecipientHeader,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        header: Option<JoseHeader>,
         encrypted_key: String,
     }
 
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct RecipientHeader {
-        alg: String,
-        epk: EphemeralPublicKey,
+    struct JoseHeader {
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        alg: Option<String>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        enc: Option<String>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        epk: Option<EphemeralPublicKey>,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -70,12 +97,6 @@ mod native {
         kty: String,
         crv: String,
         x: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct ProtectedHeader {
-        enc: String,
     }
 
     struct ParsedJwe {
@@ -92,13 +113,12 @@ mod native {
         encrypted_key: [u8; 40],
     }
 
-    fn deserialize_optional_aad<'de, D>(
-        deserializer: D,
-    ) -> std::result::Result<Option<String>, D::Error>
+    fn deserialize_present<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
     where
         D: serde::Deserializer<'de>,
+        T: Deserialize<'de>,
     {
-        String::deserialize(deserializer).map(Some)
+        T::deserialize(deserializer).map(Some)
     }
 
     impl JweCipher {
@@ -168,6 +188,7 @@ mod native {
             let (iv, ciphertext, tag) = seal_content(plaintext, &cek, &authentication_data)?;
             serialize_jwe(&GeneralJwe {
                 protected,
+                unprotected: None,
                 recipients,
                 aad: aad_segment,
                 iv: URL_SAFE_NO_PAD.encode(iv),
@@ -247,14 +268,15 @@ mod native {
             .and_then(|wrapper| wrapper.wrap(cek, &mut encrypted_key))
             .map_err(|error| Error::Cipher(format!("JWE AES-KW wrap failed: {error}")))?;
         Ok(Recipient {
-            header: RecipientHeader {
-                alg: ALG.to_owned(),
-                epk: EphemeralPublicKey {
+            header: Some(JoseHeader {
+                alg: Some(ALG.to_owned()),
+                enc: None,
+                epk: Some(EphemeralPublicKey {
                     kty: "OKP".to_owned(),
                     crv: "X25519".to_owned(),
                     x: URL_SAFE_NO_PAD.encode(ephemeral_public.as_bytes()),
-                },
-            },
+                }),
+            }),
             encrypted_key: URL_SAFE_NO_PAD.encode(encrypted_key),
         })
     }
@@ -361,11 +383,14 @@ mod native {
         let wire: GeneralJwe = serde_json::from_slice(ciphertext)
             .map_err(|error| malformed(format!("ciphertext is not valid profile JSON: {error}")))?;
         validate_recipient_count(wire.recipients.len())?;
-        validate_protected(&wire.protected)?;
+        let protected_header = parse_protected(&wire.protected)?;
+        validate_protected_enc(&protected_header)?;
+        let multiple = wire.recipients.len() > 1;
+        let shared = wire.unprotected.as_ref();
         let recipients = wire
             .recipients
             .into_iter()
-            .map(parse_recipient)
+            .map(|recipient| parse_recipient(recipient, &protected_header, shared, multiple))
             .collect::<Result<Vec<_>>>()?;
         Ok(ParsedJwe {
             protected: wire.protected,
@@ -386,21 +411,36 @@ mod native {
         Ok(())
     }
 
-    fn validate_protected(segment: &str) -> Result<()> {
+    fn parse_protected(segment: &str) -> Result<JoseHeader> {
         let bytes = decode_b64("protected", segment, 256)?;
-        let header: ProtectedHeader = serde_json::from_slice(&bytes)
-            .map_err(|error| malformed(format!("protected header is invalid: {error}")))?;
-        if header.enc != ENC {
+        serde_json::from_slice(&bytes)
+            .map_err(|error| malformed(format!("protected header is invalid: {error}")))
+    }
+
+    fn validate_protected_enc(header: &JoseHeader) -> Result<()> {
+        if header.enc.as_deref() != Some(ENC) {
             return Err(malformed("protected enc must be A256GCM"));
         }
         Ok(())
     }
 
-    fn parse_recipient(recipient: Recipient) -> Result<ParsedRecipient> {
-        if recipient.header.alg != ALG {
-            return Err(malformed("recipient alg must be ECDH-ES+A256KW"));
+    fn parse_recipient(
+        recipient: Recipient,
+        protected: &JoseHeader,
+        shared: Option<&JoseHeader>,
+        multiple: bool,
+    ) -> Result<ParsedRecipient> {
+        let local = recipient.header.as_ref();
+        validate_header_union(protected, shared, local)?;
+        let alg = protected
+            .alg
+            .as_deref()
+            .or_else(|| shared.and_then(|header| header.alg.as_deref()))
+            .or_else(|| local.and_then(|header| header.alg.as_deref()));
+        if alg != Some(ALG) {
+            return Err(malformed("merged alg must be ECDH-ES+A256KW"));
         }
-        let epk = recipient.header.epk;
+        let epk = resolve_epk(protected, shared, local, multiple)?;
         if epk.kty != "OKP" || epk.crv != "X25519" {
             return Err(malformed("recipient epk must be an X25519 OKP JWK"));
         }
@@ -409,6 +449,69 @@ mod native {
             encrypted_key: decode_array("recipient encrypted_key", &recipient.encrypted_key)?,
         })
     }
+
+    fn validate_header_union(
+        protected: &JoseHeader,
+        shared: Option<&JoseHeader>,
+        recipient: Option<&JoseHeader>,
+    ) -> Result<()> {
+        let shared = shared.unwrap_or(&EMPTY_HEADER);
+        let recipient = recipient.unwrap_or(&EMPTY_HEADER);
+        let counts = [
+            (
+                "alg",
+                present(&protected.alg) + present(&shared.alg) + present(&recipient.alg),
+            ),
+            (
+                "enc",
+                present(&protected.enc) + present(&shared.enc) + present(&recipient.enc),
+            ),
+            (
+                "epk",
+                present(&protected.epk) + present(&shared.epk) + present(&recipient.epk),
+            ),
+        ];
+        for (name, count) in counts {
+            if count > 1 {
+                return Err(malformed(format!("header member {name} is duplicated")));
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_epk<'a>(
+        protected: &'a JoseHeader,
+        shared: Option<&'a JoseHeader>,
+        recipient: Option<&'a JoseHeader>,
+        multiple: bool,
+    ) -> Result<&'a EphemeralPublicKey> {
+        if multiple && (protected.epk.is_some() || shared.is_some_and(|h| h.epk.is_some())) {
+            return Err(malformed("multi-recipient epk must be per-recipient"));
+        }
+        if shared.is_some_and(|header| header.epk.is_some()) {
+            return Err(malformed("shared unprotected epk is not permitted"));
+        }
+        if multiple {
+            return recipient
+                .and_then(|header| header.epk.as_ref())
+                .ok_or_else(|| malformed("each recipient must contain epk"));
+        }
+        protected
+            .epk
+            .as_ref()
+            .or_else(|| recipient.and_then(|header| header.epk.as_ref()))
+            .ok_or_else(|| malformed("merged header must contain epk"))
+    }
+
+    fn present<T>(value: &Option<T>) -> usize {
+        usize::from(value.is_some())
+    }
+
+    static EMPTY_HEADER: JoseHeader = JoseHeader {
+        alg: None,
+        enc: None,
+        epk: None,
+    };
 
     fn validate_aad_segment(aad: Option<String>) -> Result<Option<String>> {
         if let Some(segment) = aad.as_deref() {
@@ -572,6 +675,114 @@ mod native {
         }
 
         #[test]
+        fn single_recipient_accepts_protected_epk() {
+            let mut jwe = sealed_jwe(1);
+            let epk = take_recipient_member(&mut jwe, 0, "epk");
+            set_protected_header(&mut jwe, json!({"enc": ENC, "epk": epk}));
+
+            assert!(parse_value(&jwe).is_ok());
+        }
+
+        #[test]
+        fn parser_preserves_the_transmitted_protected_segment() {
+            let mut jwe = sealed_jwe(1);
+            let epk = take_recipient_member(&mut jwe, 0, "epk");
+            set_protected_header(&mut jwe, json!({"epk": epk, "enc": ENC}));
+            let segment = jwe["protected"].as_str().unwrap().to_owned();
+
+            assert_eq!(parse_value(&jwe).unwrap().protected, segment);
+        }
+
+        #[test]
+        fn shared_unprotected_alg_is_accepted() {
+            let mut jwe = sealed_jwe(1);
+            let alg = take_recipient_member(&mut jwe, 0, "alg");
+            jwe["unprotected"] = json!({"alg": alg});
+
+            assert!(parse_value(&jwe).is_ok());
+        }
+
+        #[test]
+        fn duplicate_header_names_across_components_are_rejected() {
+            let base = sealed_jwe(1);
+            let mut alg = base.clone();
+            set_protected_header(&mut alg, json!({"enc": ENC, "alg": ALG}));
+            let mut enc = base.clone();
+            enc["unprotected"] = json!({"enc": ENC});
+            let mut epk = base;
+            let recipient_epk = epk["recipients"][0]["header"]["epk"].clone();
+            set_protected_header(&mut epk, json!({"enc": ENC, "epk": recipient_epk}));
+
+            for invalid in [alg, enc, epk] {
+                assert_parse_malformed(&invalid);
+            }
+        }
+
+        #[test]
+        fn missing_alg_or_epk_is_rejected() {
+            for member in ["alg", "epk"] {
+                let mut jwe = sealed_jwe(1);
+                take_recipient_member(&mut jwe, 0, member);
+                assert_parse_malformed(&jwe);
+            }
+        }
+
+        #[test]
+        fn enc_outside_or_duplicated_beyond_protected_is_rejected() {
+            let mut outside = sealed_jwe(1);
+            set_protected_header(&mut outside, json!({}));
+            outside["unprotected"] = json!({"enc": ENC});
+            let mut duplicate = sealed_jwe(1);
+            duplicate["recipients"][0]["header"]["enc"] = json!(ENC);
+
+            assert_parse_malformed(&outside);
+            assert_parse_malformed(&duplicate);
+        }
+
+        #[test]
+        fn explicit_null_header_objects_and_members_are_rejected() {
+            let mut shared = sealed_jwe(1);
+            shared["unprotected"] = Value::Null;
+            let mut recipient = sealed_jwe(1);
+            recipient["recipients"][0]["header"] = Value::Null;
+            let mut member = sealed_jwe(1);
+            member["unprotected"] = json!({"alg": null});
+
+            for invalid in [shared, recipient, member] {
+                assert_parse_malformed(&invalid);
+            }
+        }
+
+        #[test]
+        fn unsupported_header_members_are_rejected() {
+            let mut protected = sealed_jwe(1);
+            set_protected_header(&mut protected, json!({"enc": ENC, "zip": "DEF"}));
+            let mut shared = sealed_jwe(1);
+            shared["unprotected"] = json!({"kid": "reader"});
+            let mut recipient = sealed_jwe(1);
+            recipient["recipients"][0]["header"]["kid"] = json!("reader");
+
+            for invalid in [protected, shared, recipient] {
+                assert_parse_malformed(&invalid);
+            }
+        }
+
+        #[test]
+        fn multi_recipient_rejects_protected_or_shared_epk() {
+            for location in ["protected", "unprotected"] {
+                let mut jwe = sealed_jwe(2);
+                let epk = take_recipient_member(&mut jwe, 0, "epk");
+                take_recipient_member(&mut jwe, 1, "epk");
+                if location == "protected" {
+                    set_protected_header(&mut jwe, json!({"enc": ENC, "epk": epk}));
+                } else {
+                    jwe["unprotected"] = json!({"epk": epk});
+                }
+                assert_parse_malformed(&jwe);
+            }
+        }
+
+        #[test]
         fn strict_profile_rejects_duplicate_unsupported_and_excess_input() {
             let (_, public) = key_pair(9);
             let cipher = JweCipher::new("partners", &[public], &[]).unwrap();
@@ -605,6 +816,35 @@ mod native {
                 cipher.decrypt(&serde_json::to_vec(jwe).unwrap()),
                 Err(Error::Malformed { .. })
             ));
+        }
+
+        fn sealed_jwe(recipient_count: usize) -> Value {
+            let public_keys = (0..recipient_count)
+                .map(|index| key_pair(20 + index as u8).1)
+                .collect::<Vec<_>>();
+            let cipher = JweCipher::new("partners", &public_keys, &[]).unwrap();
+            serde_json::from_slice(&cipher.encrypt(b"secret").unwrap()).unwrap()
+        }
+
+        fn set_protected_header(jwe: &mut Value, header: Value) {
+            let bytes = serde_json::to_vec(&header).unwrap();
+            jwe["protected"] = Value::String(URL_SAFE_NO_PAD.encode(bytes));
+        }
+
+        fn take_recipient_member(jwe: &mut Value, index: usize, name: &str) -> Value {
+            jwe["recipients"][index]["header"]
+                .as_object_mut()
+                .unwrap()
+                .remove(name)
+                .unwrap()
+        }
+
+        fn parse_value(jwe: &Value) -> Result<ParsedJwe> {
+            parse_jwe(&serde_json::to_vec(jwe).unwrap())
+        }
+
+        fn assert_parse_malformed(jwe: &Value) {
+            assert!(matches!(parse_value(jwe), Err(Error::Malformed { .. })));
         }
     }
 }
