@@ -64,7 +64,7 @@ fn main() -> tn_proto::Result<()> {
 
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: true,
+        ..ReadOptions::default()
     })?;
     let admin_events = entries
         .iter()

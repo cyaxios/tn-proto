@@ -1198,6 +1198,7 @@ from .lifecycle import (  # noqa: E402
 # --------------------------------------------------------------------------
 from .read import (  # noqa: E402
     read,
+    secure_read,
     watch,
 )
 
@@ -1507,6 +1508,7 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     # Bilateral lifecycle (JWE + btn unified read)
     "offer",
     "read",
+    "secure_read",
     # sealed objects — portable standalone envelopes
     "SealedObject",
     "UnsealError",

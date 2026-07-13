@@ -14,6 +14,7 @@ if (mode === "pub") {
   await new AdminNamespace(rt).addRecipient("default", {
     recipientDid: "did:key:z6MkBproofjwe",
     publicKey: bpub,
+    unsafeUnverified: true, // raw DID-plus-key path (no enrollment proof)
   });
   await rt.emitAsync("info", "proof.rec", { secret, n: 42 });
 } else if (mode === "read") {

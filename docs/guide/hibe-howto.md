@@ -9,6 +9,12 @@ Every code block below is real code, and every output block is its actual
 stdout. The byte values (hex previews) are random per run; the sizes and
 structure are stable.
 
+> **Security status — evaluation only.** The `tn-bbg` scheme implementation
+> and its `bls12_381_plus` pairing library are **unaudited**. External
+> cryptographic review is required before production use. Correctness and
+> interoperability tests are not a substitute for that review. See
+> [The HIBE primitive library](hibe-library.md#security-status).
+
 > **When should you reach for HIBE instead of btn?** Use HIBE when you want
 > to encrypt to *someone who does not hold a key yet* — you seal to a named
 > identity path using only a public key, and hand out reader keys later or
@@ -24,7 +30,7 @@ keys minted from it**. Four things exist; keep them straight:
 
 | Name | File | Secret? | Who holds it | What it does |
 |------|------|---------|--------------|--------------|
-| **mpk** (master public key) | `<group>.hibe.mpk` | no — shareable | everyone | seal to any identity path; verify fingerprints |
+| **mpk** (master public key) | `<group>.hibe.mpk` | no — shareable | everyone | seal to any identity path; compute a byte identifier that must be authenticated before it is trusted |
 | **msk** (master secret) | `<group>.hibe.msk` | **yes — never leaves the authority** | the authority only | mint reader keys for any path |
 | **sk** (reader key) | `<group>.hibe.sk` | yes | one reader | open blobs sealed to that reader's path |
 | **idpath** (identity path) | `<group>.hibe.idpath` | no | the group | the string a group seals to, e.g. `alice` or `engineering/alice` |
@@ -41,7 +47,7 @@ from tn import _hibe
 mpk, msk = _hibe.setup(2)  # max_depth=2: paths up to 2 labels deep
 print(f"mpk (master public key, SHAREABLE) : {h(mpk)}")
 print(f"msk (master secret, AUTHORITY ONLY): {h(msk)}")
-print(f"mpk fingerprint (what a manifest pins): {_hibe.mpk_fingerprint(mpk).hex()}")
+print(f"mpk fingerprint (byte identifier only): {_hibe.mpk_fingerprint(mpk).hex()}")
 
 # From the msk the authority mints a reader key (sk) for an IDENTITY
 # PATH. The path is just a string; there is no per-reader key exchange.
@@ -66,7 +72,7 @@ PART 1 - the key material
 ======================================================================
 mpk (master public key, SHAREABLE) : 010297f1d3a73197... (482 bytes)
 msk (master secret, AUTHORITY ONLY): 018a21f09d7dad21... (97 bytes)
-mpk fingerprint (what a manifest pins): 5526e45f38deb3f9c6eae0d413844672f6b8d238044b00443afa1b414f7ad12e
+mpk fingerprint (byte identifier only): 5526e45f38deb3f9c6eae0d413844672f6b8d238044b00443afa1b414f7ad12e
 
 alice's reader key for path 'alice': 01010005616c6963... (250 bytes)
   the key knows its own path: 'alice'
@@ -80,10 +86,14 @@ Takeaways:
 
 - The **mpk is safe to publish.** Handing it out lets people seal *to* your
   identity paths; it never lets them read.
+- The **fingerprint identifies MPK bytes; it does not authenticate them.**
+  Obtain the expected fingerprint through an authenticated channel or a signed
+  statement from an already trusted authority, then compare it before sealing.
 - The **msk is the crown jewel.** Whoever holds it can mint a key for any
   path and therefore read everything. It stays with the authority.
-- A **reader key carries its own path** (`key_id_path` reads it back), and
-  only opens blobs sealed to that exact path.
+- A **reader key carries its own path** (`key_id_path` reads it back). It opens
+  that path and can derive exact descendant keys within the remaining
+  `max_depth`, so an ancestor-key holder is a delegated subtree authority.
 
 ---
 
@@ -154,9 +164,16 @@ default.hibe.idpath├─ grant_reader ──┐
                                       │                default.hibe.sk
 ```
 
-Only the **kit** crosses the wire, and a kit never contains the msk.
+Only the **kit** crosses the wire, and a kit never contains the msk. Its
+`.hibe.sk` is nevertheless a bearer capability, not a key cryptographically
+bound to the reader DID. `grant_reader` recipient-seals the body only for a
+complete, resolvable Ed25519 `did:key`; otherwise it silently writes the key
+material in plaintext. Authenticate the complete DID and fail closed before
+minting a sensitive grant.
 
 ```python
+from tn.recipient_seal import recipient_key_is_resolvable
+
 # 1. The authority starts a hibe ceremony. It becomes its OWN authority:
 #    Setup runs, the msk stays in this keystore.
 tn.init(authority_yaml, log_path=authority_log, cipher="hibe")
@@ -166,9 +183,13 @@ tn.info("decision.recorded", subject="loan-4821", outcome="approved")
 tn.info("decision.recorded", subject="loan-4822", outcome="declined")
 
 # 3. Grant a reader. This mints their key and packages it as a .tnpkg
-#    kit — the ONLY thing that crosses the wire to the reader.
+#    kit. authenticated_alice_did is the complete Ed25519 did:key obtained
+#    from Alice through an authenticated channel; never abbreviate it.
+alice_did = authenticated_alice_did
+if not recipient_key_is_resolvable(alice_did):
+    raise ValueError("Alice DID cannot receive a recipient-sealed HIBE kit")
 kit = ws / "alice.tnpkg"
-tn.admin.grant_reader("default", reader_did="did:key:z6MkAlice", out_path=kit)
+tn.admin.grant_reader("default", reader_did=alice_did, out_path=kit)
 tn.flush_and_close()
 
 # 4. The reader is a separate person with their own ceremony. They
@@ -193,7 +214,7 @@ authority ceremony cipher: hibe
 key files written: ['default.hibe.idpath', 'default.hibe.mpk', 'default.hibe.msk', 'default.hibe.sk']
 logged 2 entries under the 'default' hibe group
 granted reader; kit written to: alice.tnpkg
-kit carries: ['default.hibe.idpath', 'default.hibe.mpk', 'default.hibe.sk']
+kit body is recipient-sealed: ['encrypted.bin']
   (note: NO .hibe.msk — the master secret never leaves the authority)
 
 reader absorbed the kit: accepted=3
@@ -209,7 +230,9 @@ pass `authority_mpk=` and `id_path=` to the group's `create` — the keystore
 can then write but cannot read until a granted key arrives.)
 
 Note the kit carries three files and no msk. `accepted=3` in the absorb
-receipt is exactly those three files landing in the reader's keystore.
+receipt is exactly those three files landing in the reader's keystore. The
+recipient-sealed package protects the bearer key in transit; possession after
+absorb remains the capability.
 
 ---
 
@@ -223,19 +246,27 @@ decrypts the same entries.
 understanding. A HIBE reader key is a *permanent* key for its path: you
 cannot reach back and un-issue it. So "revoke" means **rotate the sealing
 path forward and re-issue kits to everyone who stays**. The removed reader
-keeps whatever they could already read and is locked out of everything
-sealed after.
+keeps whatever they could already read. An exact-path reader is locked out
+of later records only after every writer has adopted the authenticated new
+sibling path; an ancestor-key holder remains a delegated subauthority and can
+derive below that ancestor.
 
 ```python
+# alice_did and bob_did are complete Ed25519 did:key values authenticated
+# to the authority. Fail rather than accepting grant_reader's plaintext fallback.
+for reader_did in (alice_did, bob_did):
+    if not recipient_key_is_resolvable(reader_did):
+        raise ValueError("reader DID cannot receive a sealed HIBE grant")
+
 tn.init(a_yaml, log_path=a_log, cipher="hibe")
 tn.info("memo", text="visible to both readers")
-tn.admin.grant_reader("default", reader_did="did:key:z6MkAlice", out_path=alice_kit)
-tn.admin.grant_reader("default", reader_did="did:key:z6MkBob", out_path=bob_kit)
+tn.admin.grant_reader("default", reader_did=alice_did, out_path=alice_kit)
+tn.admin.grant_reader("default", reader_did=bob_did, out_path=bob_kit)
 
 # Remove bob. The path rotates and every SURVIVOR gets a re-issued kit.
-res = tn.admin.revoke_reader("default", "did:key:z6MkBob", out_dir=ws / "regrant")
+res = tn.admin.revoke_reader("default", bob_did, out_dir=ws / "regrant")
 print(f"revoked bob; new sealing path = {res.new_path!r}")
-print(f"survivors re-kitted: {res.remaining}")
+print(f"survivors re-kitted: {len(res.remaining)}")
 tn.info("memo", text="sealed AFTER bob was removed")
 ```
 
@@ -245,7 +276,7 @@ PART 4 - removing a reader (revoke = rotate + re-issue)
 ======================================================================
 granted alice and bob
 revoked bob; new sealing path = 'self~r1'
-survivors re-kitted: ['did:key:z6MkAlice']
+survivors re-kitted: 1
 
 bob's view after removal:
   seq 1: visible to both readers
@@ -255,14 +286,21 @@ bob's view after removal:
 
 What happened:
 
-- `revoke_reader` bumped the sealing path from `self` to `self~r1`, dropped
-  bob from the grant registry, and wrote a fresh kit for alice into
-  `out_dir`. Distribute those kits; each survivor runs `tn.absorb` on
-  theirs and keeps reading seamlessly (their superseded key stays in the
+- `revoke_reader` bumped this authority ceremony's sealing path from `self` to
+  `self~r1`, dropped bob from the grant registry, and wrote a fresh kit for
+  alice into `out_dir`. Distribute those kits; each survivor runs `tn.absorb`
+  on theirs and keeps reading seamlessly (their superseded key stays in the
   keystore for the old entries).
 - Bob still opens `seq 1` (sealed before the rotation) and gets
   `{'$no_read_key': True}` for `seq 2` (sealed to the new path he was never
-  given).
+  given) in this local-authority example.
+- Separate external writers retain their own `.hibe.idpath`. Deliver and
+  authenticate the new sibling path to every writer, pin the unchanged MPK,
+  and fence writers that have not acknowledged it before they seal again.
+  Otherwise Bob still opens their stale-path output.
+- A holder of an ancestor key can derive the new child key without the `msk`.
+  Rotation below that ancestor cannot revoke it; use a fresh authority MPK
+  outside that capability domain or BTN.
 
 `tn.admin.revoke_recipient("default", recipient_did=...)` — the same verb
 you use for btn/jwe — routes hibe groups through this exact flow.
@@ -270,8 +308,9 @@ you use for btn/jwe — routes hibe groups through this exact flow.
 > **The honest limit:** bob keeping `seq 1` is not a bug you can fix — a
 > HIBE reader key is a permanent trapdoor for its path. If you need to cut
 > an already-admitted reader off from *past* entries too, HIBE is the wrong
-> cipher; use btn, which does O(1) forward revocation. Rotation gives you
-> forward secrecy from the rotation point on, not retroactive lockout.
+> cipher; use btn, which does O(1) forward revocation. Sibling rotation gives
+> an exact-path reader a forward cutoff only after every writer updates; it is
+> neither retroactive lockout nor a way to revoke an ancestor capability.
 
 ---
 
@@ -295,7 +334,8 @@ print(f"public tn_aad echo: {env['tn_aad']!r}")
 rec = next(e for e in tn.reader.read(a_log, cfg))
 print(f"row_hash valid: {rec['valid']['row_hash']}, decrypts: {rec['plaintext']['default']}")
 
-# Tamper the marker on disk: decryption fails AND row_hash breaks.
+# This example uses a signed, chained profile. Tampering the marker makes
+# decryption and row-hash recomputation fail.
 tampered = env.copy()
 tampered["tn_aad"] = env["tn_aad"].replace("finra-oba", "swapped-policy")
 # ... write it back, reopen ...
@@ -317,11 +357,14 @@ How it works:
   open the body.
 - So the effective dict (a group's config `aad:` default merged with the
   per-emit `aad=`, per-emit winning per key) is **echoed into the public
-  `tn_aad` field** as a canonical JSON string keyed by group. That field is
-  covered by `row_hash` and the signature, so the reader reconstructs the
-  marker from it, and **tampering the marker breaks both the signature/row
-  hash and the decryption** — belt and suspenders. A record that binds no
-  marker carries no `tn_aad` field and is byte-identical to before.
+  `tn_aad` field** as a canonical JSON string keyed by group. The reader
+  reconstructs the marker from it, so changing the echo always prevents
+  decryption. When row hashing is enabled, recomputation also fails. A raw
+  signature check over the unchanged stored row hash may still pass while the
+  composite integrity check fails. In an unsigned and unchained profile,
+  `row_hash` and `signature` stay empty and the body AEAD is the applicable
+  tamper check. A record that binds no marker carries no `tn_aad` field and is
+  byte-identical to before.
 - Set a default for a whole group in the yaml:
 
   ```yaml
@@ -341,10 +384,10 @@ silently dropping the marker.
 
 | Actor | Holds | Never holds | Can |
 |-------|-------|-------------|-----|
-| Authority | msk, mpk, own sk, idpath | — | mint any reader key, seal, read everything, rotate/revoke |
-| Granted reader | mpk, idpath, own sk | msk | read the paths their sk covers (and derive children of them) |
-| A writer-only party | mpk, idpath | msk, any sk | seal to the path; **not** read |
-| The wire (a `.tnpkg` kit) | mpk, idpath, one sk | **msk** | — |
+| Authority | msk, mpk, own sk, idpath | — | mint any reader key, seal, read everything, rotate its local path and reissue exact-path grants |
+| Granted reader | mpk, idpath, one bearer sk | msk | read its path and deliberately derive descendants, making an ancestor holder a subtree subauthority |
+| A writer-only party | authenticated/pinned mpk, idpath | msk, any sk | seal to the path; **not** read, authenticate, or authorize itself |
+| The wire (a recipient-sealed `.tnpkg` kit) | mpk, idpath, one bearer sk | **msk** | protect delivery only when addressed to a resolvable Ed25519 `did:key` |
 
 Rules that hold everywhere:
 
@@ -352,6 +395,9 @@ Rules that hold everywhere:
   that is not a self-addressed backup. It only appears in the authority's
   own keystore (or a full-keystore restore of that same identity).
 - **Sealing needs only the mpk + a path.** Reading needs a key on that path
-  (or an ancestor of it).
+  (or an ancestor of it). That public sealing operation provides no writer
+  authentication or authorization.
 - **The blob rides inside the group's `ciphertext`** exactly like btn/jwe,
-  so signatures, `row_hash`, and the chain cover it with no envelope change.
+  with no envelope change. Row hashing, chaining, signing, verification, and
+  trusted-writer authorization are separate profile/consumer controls; a
+  successful HIBE open proves only possession of a suitable reader capability.

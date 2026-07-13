@@ -344,10 +344,9 @@ impl Drop for VaultPushHandler {
     }
 }
 
-/// Default no-op HTTP client. Errors on every call. Hosts must replace
-/// this with a real implementation (`with_client`) before production
-/// use; the registry leaves it in place because tn-core does not
-/// depend on a specific HTTP runtime.
+/// Default no-op HTTP client. Errors on every call. Hosts install their HTTP
+/// backend through `with_client`; the registry stays runtime-neutral because
+/// tn-core does not depend on a specific HTTP runtime.
 struct NullPostClient;
 
 impl VaultPostClient for NullPostClient {

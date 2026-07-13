@@ -46,6 +46,7 @@ use crate::tn::{ReadOptions, Tn};
 use crate::Result;
 #[cfg(feature = "watch")]
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
+use tn_core::runtime::{file_source_id, ReadCursorV1};
 
 /// Backwards-compatible alias for the SDK's v0 polling watcher.
 ///
@@ -124,48 +125,54 @@ impl Default for WatchOptions {
 /// when your application is ready to drain newly visible entries. Use
 /// [`Watch::wait_for_entries`] when you want a bounded blocking wait.
 ///
-/// The watcher tracks progress by entry count in the current
-/// [`Tn::read`](crate::Tn::read) view. If that view shrinks, the cursor resets
-/// and the next poll starts from the beginning of the visible read view.
+/// The watcher tracks progress with the read pipeline's versioned source
+/// cursor. If the underlying file is truncated behind that cursor, the next
+/// poll resets to the beginning of the source.
 pub struct Watch<'a> {
     tn: &'a Tn,
     options: WatchOptions,
-    cursor: usize,
+    read_cursor: ReadCursorV1,
 }
 
 impl<'a> Watch<'a> {
     pub(crate) fn new(tn: &'a Tn, options: WatchOptions) -> Result<Self> {
-        let cursor = match options.start {
-            WatchStart::Beginning => 0,
-            WatchStart::Latest => tn.read(options.read)?.len(),
+        tn.warn_and_audit_watch_weakening(&options.read)?;
+        let read_cursor = match options.start {
+            WatchStart::Beginning => ReadCursorV1::default(),
+            WatchStart::Latest => {
+                tn.read_with_options_from_cursor(&options.read, None)?
+                    .cursor
+            }
         };
         Ok(Self {
             tn,
             options,
-            cursor,
+            read_cursor,
         })
     }
 
     /// Return entries that became visible since the previous poll.
     ///
-    /// This calls [`Tn::read`](crate::Tn::read) every time. For high-throughput
-    /// log tailing, prefer a future file-backed watcher once one exists.
+    /// Each poll resumes the shared read pipeline at the stored source cursor;
+    /// skipped and filtered records still advance that cursor.
     ///
     /// # Errors
     ///
     /// Returns [`crate::Error`] if reading or decrypting the underlying log
     /// fails.
     pub fn poll(&mut self) -> Result<Vec<Entry>> {
-        let entries = self.tn.read(self.options.read)?;
-        if self.cursor > entries.len() {
-            self.cursor = 0;
+        if self.cursor_is_past_end() {
+            self.read_cursor = ReadCursorV1::default();
         }
-        let out = entries[self.cursor..]
-            .iter()
+        let report = self
+            .tn
+            .read_with_options_from_cursor(&self.options.read, Some(&self.read_cursor))?;
+        self.read_cursor = report.cursor;
+        let out = report
+            .entries
+            .into_iter()
             .filter(|entry| self.accepts(entry))
-            .cloned()
             .collect();
-        self.cursor = entries.len();
         Ok(out)
     }
 
@@ -212,9 +219,20 @@ impl<'a> Watch<'a> {
         }
     }
 
-    /// Return the current number of entries already consumed by this watcher.
+    /// Return the current primary-source byte position as a compatibility
+    /// scalar.
+    ///
+    /// Prefer [`Watch::read_cursor`] when persisting progress: it preserves the
+    /// versioned multi-source cursor without narrowing its coordinate.
     pub fn cursor(&self) -> usize {
-        self.cursor
+        self.primary_source_position()
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0)
+    }
+
+    /// Return the exact versioned source cursor used by the next poll.
+    pub fn read_cursor(&self) -> &ReadCursorV1 {
+        &self.read_cursor
     }
 
     /// Convert this watcher into a finite iterator.
@@ -244,6 +262,20 @@ impl<'a> Watch<'a> {
             }
         }
         true
+    }
+
+    fn primary_source_position(&self) -> Option<u64> {
+        let source_id = file_source_id(self.tn.log_path()).ok()?;
+        self.read_cursor.sources.get(&source_id)?.value.parse().ok()
+    }
+
+    fn cursor_is_past_end(&self) -> bool {
+        let Some(position) = self.primary_source_position() else {
+            return false;
+        };
+        std::fs::metadata(self.tn.log_path())
+            .map(|metadata| position > metadata.len())
+            .unwrap_or(false)
     }
 }
 
@@ -384,5 +416,10 @@ impl<'a> NativeWatch<'a> {
     /// Return the current number of entries already consumed by this watcher.
     pub fn cursor(&self) -> usize {
         self.polling.cursor()
+    }
+
+    /// Return the exact versioned source cursor used by the next poll.
+    pub fn read_cursor(&self) -> &ReadCursorV1 {
+        self.polling.read_cursor()
     }
 }

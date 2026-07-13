@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-use super::{BodyContents, Manifest};
+use super::{verify_manifest_body_index, BodyContents, Manifest};
 use crate::{Error, Result};
 
 /// Write a signed `.tnpkg` zip to `out_path`.
@@ -24,9 +24,9 @@ use crate::{Error, Result};
 /// Emits `manifest.json` (pretty-printed, sorted keys, trailing newline — byte-
 /// for-byte with Python's `json.dumps(..., sort_keys=True, indent=2) + "\n"`)
 /// followed by every `body/...` entry, all stored uncompressed. Creates parent
-/// directories as needed. The manifest must already be signed (call
-/// [`sign_manifest`](super::sign_manifest) first). Use [`write_tnpkg_bytes`] for
-/// the in-memory variant.
+/// directories as needed. The manifest must already be indexed and signed
+/// (call [`sign_manifest_with_body`](super::sign_manifest_with_body) first).
+/// Use [`write_tnpkg_bytes`] for the in-memory variant.
 ///
 /// # Errors
 ///
@@ -36,12 +36,14 @@ use crate::{Error, Result};
 pub fn write_tnpkg(out_path: &Path, manifest: &Manifest, body: &BodyContents) -> Result<()> {
     if manifest.manifest_signature_b64.is_none() {
         return Err(Error::InvalidConfig(
-            "write_tnpkg: manifest is unsigned. Call sign_manifest before writing.".into(),
+            "write_tnpkg: manifest is unsigned. Call sign_manifest_with_body before writing."
+                .into(),
         ));
     }
     for name in body.keys() {
         validate_tnpkg_body_name(name)?;
     }
+    verify_manifest_body_index(manifest, body, true)?;
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -70,7 +72,7 @@ pub fn write_tnpkg(out_path: &Path, manifest: &Manifest, body: &BodyContents) ->
 ///
 /// The filesystem-free sibling of [`write_tnpkg`], used by WASM and other
 /// bindings that operate on byte arrays rather than paths. Same zip layout and
-/// same signed-manifest precondition.
+/// same indexed-and-signed-manifest precondition.
 ///
 /// # Errors
 ///
@@ -80,12 +82,14 @@ pub fn write_tnpkg(out_path: &Path, manifest: &Manifest, body: &BodyContents) ->
 pub fn write_tnpkg_bytes(manifest: &Manifest, body: &BodyContents) -> Result<Vec<u8>> {
     if manifest.manifest_signature_b64.is_none() {
         return Err(Error::InvalidConfig(
-            "write_tnpkg_bytes: manifest is unsigned. Call sign_manifest before writing.".into(),
+            "write_tnpkg_bytes: manifest is unsigned. Call sign_manifest_with_body before writing."
+                .into(),
         ));
     }
     for name in body.keys() {
         validate_tnpkg_body_name(name)?;
     }
+    verify_manifest_body_index(manifest, body, true)?;
 
     let cursor = Cursor::new(Vec::new());
     let mut zw = zip::ZipWriter::new(cursor);

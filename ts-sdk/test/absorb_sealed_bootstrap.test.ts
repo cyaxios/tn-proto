@@ -19,12 +19,14 @@ import { test } from "node:test";
 
 import {
   DeviceKey,
+  absorbBootstrap,
   absorbSealedBootstrap,
   encryptBodyBlob,
   manifestAadForWrap,
   packTnpkg,
+  prepareManifestBodyIndex,
   sealBekForRecipient,
-  signManifest,
+  signManifestWithBody,
   toWireDict,
 } from "../src/index.js";
 import { fromWireDict, newManifest } from "../src/core/tnpkg.js";
@@ -35,6 +37,8 @@ interface BuildOpts {
   relabelWrapTo?: string; // override recipient_identity after sealing
   omitEncrypted?: boolean;
   tamperCeremonyId?: boolean; // mutate manifest after signing -> bad signature
+  tamperEncryptedBody?: boolean;
+  malformedBodyIndex?: null | string | unknown[];
 }
 
 // Build a sealed project_seed (or other-kind) tnpkg addressed to `bearer`.
@@ -77,6 +81,11 @@ async function buildSealed(
     },
   };
 
+  const finalBody: Record<string, Uint8Array> = opts.omitEncrypted
+    ? {}
+    : { "body/encrypted.bin": encrypted };
+  prepareManifestBodyIndex(baseManifest, finalBody);
+
   const manifestSkeleton = toWireDict(baseManifest, false) as Record<string, unknown>;
   const aad = manifestAadForWrap(manifestSkeleton);
   const wrapFor = opts.wrapRecipientDid ?? bearer.did;
@@ -84,13 +93,19 @@ async function buildSealed(
   if (opts.relabelWrapTo !== undefined) wrap["recipient_identity"] = opts.relabelWrapTo;
 
   const wire = JSON.parse(JSON.stringify(manifestSkeleton)) as Record<string, unknown>;
-  const wbe = (wire["state"] as Record<string, unknown>)["body_encryption"] as Record<string, unknown>;
+  const wbe = (wire["state"] as Record<string, unknown>)["body_encryption"] as Record<
+    string,
+    unknown
+  >;
   wbe["recipient_wraps"] = [wrap];
   wbe["recipient_wrap"] = wrap;
 
-  const signed = signManifest(fromWireDict(wire), publisher);
+  const signed = signManifestWithBody(fromWireDict(wire), finalBody, publisher);
   const signedWire = toWireDict(signed, true) as Record<string, unknown>;
   if (opts.tamperCeremonyId) signedWire["ceremony_id"] = "tampered_ceremony";
+  if (opts.malformedBodyIndex !== undefined || "malformedBodyIndex" in opts) {
+    signedWire["body_sha256"] = opts.malformedBodyIndex;
+  }
 
   const manifestJson =
     JSON.stringify(
@@ -106,11 +121,46 @@ async function buildSealed(
       2,
     ) + "\n";
 
-  const members = [
-    { name: "manifest.json", data: new TextEncoder().encode(manifestJson) },
-  ];
-  if (!opts.omitEncrypted) members.push({ name: "body/encrypted.bin", data: encrypted });
+  const members = [{ name: "manifest.json", data: new TextEncoder().encode(manifestJson) }];
+  if (!opts.omitEncrypted) {
+    const stored = new Uint8Array(encrypted);
+    if (opts.tamperEncryptedBody) stored[stored.length - 1] ^= 0xff;
+    members.push({ name: "body/encrypted.bin", data: stored });
+  }
   return packTnpkg(members);
+}
+
+function buildUnsealedProjectSeed(
+  publisher: DeviceKey,
+  opts: { tamperBody?: boolean; malformedBodyIndex?: null | string | unknown[] } = {},
+): Uint8Array {
+  const body: Record<string, Uint8Array> = {
+    "body/tn.yaml": new TextEncoder().encode(
+      `ceremony:\n  id: smoke_test\nkeystore:\n  path: ./.tn/keys\n`,
+    ),
+    "body/keys/local.private": new Uint8Array(publisher.seed),
+    "body/keys/local.public": new TextEncoder().encode(publisher.did),
+  };
+  const manifest = newManifest({
+    kind: "project_seed",
+    fromDid: publisher.did,
+    ceremonyId: "smoke_test",
+    scope: "project",
+    toDid: publisher.did,
+  });
+  const signed = signManifestWithBody(manifest, body, publisher);
+  const wire = toWireDict(signed, true) as Record<string, unknown>;
+  if (opts.malformedBodyIndex !== undefined || "malformedBodyIndex" in opts) {
+    wire["body_sha256"] = opts.malformedBodyIndex;
+  }
+  const storedBody = { ...body };
+  if (opts.tamperBody) {
+    storedBody["body/tn.yaml"] = new TextEncoder().encode("ceremony:\n  id: substituted\n");
+  }
+  return packTnpkg([
+    { name: "manifest.json", data: new TextEncoder().encode(JSON.stringify(wire)) },
+    ...Object.entries(storedBody).map(([name, data]) => ({ name, data })),
+  ]);
 }
 
 function withCwd<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
@@ -149,6 +199,52 @@ test("malformed zip -> kind '' rejection", async () => {
     assert.equal(r.kind, "");
     assert.match(r.rejectedReason ?? "", /absorbSealedBootstrap:/);
     assert.equal(r.acceptedCount, 0);
+  });
+});
+
+test("sync bootstrap rejects substituted body before install dispatch", () => {
+  const publisher = DeviceKey.generate();
+  const pkg = buildUnsealedProjectSeed(publisher, { tamperBody: true });
+  const cwd = mkdtempSync(join(tmpdir(), "tn-sync-index-"));
+  try {
+    assert.throws(() => absorbBootstrap(pkg, { cwd }), /body_digest_mismatch/);
+    assert.equal(readdirSync(cwd).length, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("sync bootstrap rejects malformed body index before install dispatch", () => {
+  const publisher = DeviceKey.generate();
+  const pkg = buildUnsealedProjectSeed(publisher, { malformedBodyIndex: null });
+  const cwd = mkdtempSync(join(tmpdir(), "tn-sync-index-"));
+  try {
+    assert.throws(() => absorbBootstrap(pkg, { cwd }), /body_sha256 must be a JSON object/);
+    assert.equal(readdirSync(cwd).length, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("sealed bootstrap rejects substituted encrypted body before unwrap/decrypt", async () => {
+  const publisher = DeviceKey.generate();
+  const bearer = DeviceKey.generate();
+  const pkg = await buildSealed(publisher, bearer, { tamperEncryptedBody: true });
+  await withCwd(async (cwd) => {
+    const receipt = await absorbSealedBootstrap(pkg, { seed: bearer.seed, cwd });
+    assert.match(receipt.rejectedReason ?? "", /body_digest_mismatch/);
+    assert.equal(readdirSync(cwd).length, 0);
+  });
+});
+
+test("sealed bootstrap rejects malformed body index before unwrap/decrypt", async () => {
+  const publisher = DeviceKey.generate();
+  const bearer = DeviceKey.generate();
+  const pkg = await buildSealed(publisher, bearer, { malformedBodyIndex: null });
+  await withCwd(async (cwd) => {
+    const receipt = await absorbSealedBootstrap(pkg, { seed: bearer.seed, cwd });
+    assert.match(receipt.rejectedReason ?? "", /body_sha256 must be a JSON object/);
+    assert.equal(readdirSync(cwd).length, 0);
   });
 });
 

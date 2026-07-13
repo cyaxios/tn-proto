@@ -47,10 +47,11 @@ def _setup_unsigned_ceremony(tmp_path: Path, sign_value: bool) -> Path:
     return yaml_path
 
 
-def _emit_and_read(tmp_path: Path, verify_mode: str) -> dict:
+def _emit_and_read(tmp_path: Path, verify_mode: str | None) -> dict:
     """Emit one entry then read with the chosen verify= and return
     (events, raised) in a subprocess."""
     script = tmp_path / "use.py"
+    read_call = "tn.read()" if verify_mode is None else f"tn.read(verify={verify_mode})"
     script.write_text(textwrap.dedent(f"""
         import os, json
         os.environ["TN_NO_STDOUT"] = "1"
@@ -61,7 +62,7 @@ def _emit_and_read(tmp_path: Path, verify_mode: str) -> dict:
         try:
             entries = [(e.event_type, bool(getattr(e, 'signature', None) or
                                             (e.fields or {{}}).get('signature')))
-                       for e in tn.read(verify={verify_mode})]
+                       for e in {read_call}]
             print(json.dumps({{"events": entries, "raised": None}}))
         except Exception as exc:
             print(json.dumps({{
@@ -91,6 +92,14 @@ def test_sign_false_verify_true_does_not_raise(tmp_path: Path):
     )
     event_types = [et for et, _has_sig in result["events"]]
     assert "nosign.evt" in event_types
+
+
+def test_sign_false_secure_default_does_not_claim_a_signature(tmp_path: Path):
+    _setup_unsigned_ceremony(tmp_path, sign_value=False)
+    result = _emit_and_read(tmp_path, verify_mode=None)
+    assert result["raised"] is None
+    rows = [row for row in result["events"] if row[0] == "nosign.evt"]
+    assert rows == [["nosign.evt", False]]
 
 
 def test_sign_false_verify_true_yields_entries(tmp_path: Path):

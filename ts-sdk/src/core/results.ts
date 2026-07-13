@@ -47,6 +47,16 @@ export interface AbsorbReceipt {
   /** Set when the package was rejected (signature failure, missing body,
    * unsupported kind). Otherwise undefined. */
   rejectedReason?: string;
+  /** Trusted enrollment offers only: the staged offer's exact digest
+   * (`sha256:` over the canonical signed key-binding proof). Hand this to
+   * `tn.pkg.approveAndReconcile` / `reconcilePending`. */
+  offerDigest?: string;
+  /** Enrollment responses only: the publisher DID that was verified and
+   * installed into `<keystore>/trust/verified_publishers.v1.json`. */
+  verifiedPublisherDid?: string;
+  /** True when the package entered through the explicitly named unsafe
+   * legacy-import path (`unsafeLegacySigner`). The import stays unverified. */
+  unsafeLegacyImport?: boolean;
 }
 
 /**
@@ -89,6 +99,19 @@ export interface AddRecipientResult {
   mintedAt: string;
   /** hibe only: the identity path the granted key sits on. */
   idPath?: string;
+  /** Whether the registration/grant was backed by a verified key-binding
+   * proof (JWE `acceptedOffer` / HIBE `proof`). False marks an explicitly
+   * unverified compatibility registration. */
+  verified?: boolean;
+  /** Digest of the verified key-binding proof, when one backed this call. */
+  proofDigest?: string | null;
+  /** jwe only: `sha256:` digest of the registered X25519 public key. */
+  publicKeySha256?: string | null;
+  /** hibe only: whether the kit body was recipient-sealed for delivery. */
+  sealed?: boolean;
+  /** hibe only: true for an explicit ancestor grant — the key delegates the
+   * whole subtree below `idPath` within the remaining depth. */
+  subtreeDelegation?: boolean;
 }
 
 export interface RevokeRecipientResult {
@@ -161,4 +184,8 @@ export interface OfferReceipt {
   /** Path to the offer package on disk if a file was written; null when
    * the offer was made in-memory only (e.g., bilateral over a vault). */
   packagePath: string | null;
+  /** Trusted enrollment offers only: `sha256:` digest of the canonical
+   * signed key-binding proof. The publisher approves/reconciles by this
+   * exact digest. */
+  offerDigest?: string;
 }

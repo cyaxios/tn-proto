@@ -10,7 +10,7 @@ Covers DX review #10 + #11:
   callback fires once before the raise so callers can log / alert.
 - ``tn.read(verify="skip", on_skip=...)`` also fires the callback per
   skipped row.
-- ``verify=False`` is UNCHANGED — parse errors still raise.
+- Explicit ``verify=False`` remains available as the weakening alias.
 """
 from __future__ import annotations
 
@@ -130,7 +130,7 @@ def test_verify_true_fires_callback_before_raise(ceremony):
     assert result.stats.yielded == 1  # alpha was yielded before beta failed
 
 
-def test_default_verify_false_unchanged(ceremony):
+def test_secure_default_yields_clean_rows(ceremony):
     tn, _ = ceremony
     result = tn.read()
     out = list(result)
@@ -167,7 +167,7 @@ def test_verify_false_yields_around_parse_error(ceremony):
     # tn.read() picks up the mutated file.
     tn.flush_and_close()
     tn.init()
-    result = tn.read()  # default verify=False
+    result = tn.read(verify=False)
     events = [e.event_type for e in result]
     assert "alpha" in events and "gamma" in events, (
         f"clean entries on either side of the corrupt one must both "

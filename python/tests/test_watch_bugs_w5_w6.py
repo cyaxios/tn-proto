@@ -17,6 +17,9 @@
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import subprocess
 import sys
 import textwrap
@@ -192,3 +195,50 @@ def test_entry_from_flat_still_requires_real_envelope_fields():
     bare = {"event_type": "tn.group.added", "timestamp": "2026-05-19T01:00:00.000Z"}
     with pytest.raises(ValueError, match=r"required envelope field"):
         Entry.from_flat(bare)
+
+
+def test_watch_cursor_types_consume_shared_lossless_vectors() -> None:
+    from tn._watch_impl import (
+        ReadCursorV1,
+        SourceCursorV1,
+        canonical_file_source_id,
+        canonical_source_id,
+    )
+
+    fixture_path = (
+        Path(__file__).resolve().parents[2]
+        / "tests"
+        / "fixtures"
+        / "trust"
+        / "v1"
+        / "read_cursor_vectors.json"
+    )
+    document = json.loads(fixture_path.read_text(encoding="utf-8"))
+    for case in document["cases"]:
+        expected = case["expected"]["cursor"]
+        cursor = ReadCursorV1(
+            sources={
+                source_id: SourceCursorV1(**source)
+                for source_id, source in expected["sources"].items()
+            },
+        )
+        assert cursor.to_dict() == expected
+
+        descriptor_b64 = case["expected"].get("descriptor_b64")
+        if descriptor_b64 is not None:
+            assert canonical_source_id(base64.b64decode(descriptor_b64)) == (
+                case["expected"]["source_id"]
+            )
+        if case["source_kind"] in {"file-posix", "file-windows"}:
+            separator = "\\" if case["input"]["platform"] == "windows" else "/"
+            joined = (
+                case["input"]["base_directory"]
+                + separator
+                + case["input"]["path"]
+            )
+            assert canonical_file_source_id(joined) == case["expected"]["source_id"]
+
+    # Guard the wire algorithm independently of the convenience helper.
+    assert canonical_source_id(b"file\0/example") == (
+        "source:sha256:" + hashlib.sha256(b"file\0/example").hexdigest()
+    )

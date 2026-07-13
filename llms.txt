@@ -19,8 +19,9 @@ Install: `pip install tn-proto`. Source:
 - A **group** is a cipher domain inside a ceremony. Each event
   routes into one or more groups based on yaml field rules. Each
   group has its own readers.
-- A **kit** is one reader's per-group key material. The publisher
-  mints kits; readers absorb them.
+- A **kit** is cipher-specific per-group reader material. A BTN publisher
+  mints reader kits; a JWE reader owns its `.jwe.mykey` and enrolls the
+  authenticated public key; a HIBE authority grants a path capability.
 - A **`.tnpkg`** is a signed zip wrapper for moving state between
   participants: bundles, snapshots, invites, identity seeds.
 
@@ -41,8 +42,10 @@ Install: `pip install tn-proto`. Source:
 - `tn.watch(...)` — tail the log live (async iterator).
 
 `tn.absorb(path)` and `tn.export(path, kind=...)` move `.tnpkg`
-bundles in and out. `tn.bundle_for_recipient(did, path)` mints a
-kit and bundles it in one step.
+bundles in and out. `tn.pkg.bundle_for_recipient(did, path)` is
+BTN-only: it mints and bundles a BTN kit. JWE uses a reader-owned
+`.jwe.mykey` plus authenticated public-key enrollment; HIBE uses
+`tn.admin.grant_reader`.
 
 ## Where state lives
 
@@ -102,10 +105,16 @@ Implementation: `python/tn/handlers/registry.py:454` for the gate,
 - `btn` — NNL subset-difference broadcast tree. Sub-millisecond
   encrypt for thousands of readers; selective revocation without
   rekeying survivors. The default.
-- `jwe` — per-recipient envelope. One ciphertext per reader.
-  Simpler; doesn't scale to thousands.
+- `jwe` — standards-defined JOSE for small explicit audiences. It uses
+  one fresh CEK to seal one shared encrypted body, with one wrapped-CEK
+  recipient block per reader.
+- `hibe` — evaluation-only identity-path encryption under an authority
+  public key. Writers can seal before the reader key exists, and the
+  authority later grants path keys. The `tn-bbg` scheme implementation
+  and `bls12_381_plus` pairing library are unaudited; external
+  cryptographic review is required before production use.
 
-Both modes speak the same on-disk wire format. Choose per-group in
+All three modes speak the same on-disk wire format. Choose per-group in
 `tn.yaml`. Encryption is always on; the protocol floor.
 
 ## Profiles
@@ -135,8 +144,10 @@ Manifest is Ed25519-signed by `publisher_identity`. Kinds in v1:
 - `identity_seed` — minimal "this is who I am" bundle, self-signed
 - `contact_update` — vault-emitted inbox event
 
-Verbs: `tn.export(path, kind=...)`, `tn.absorb(path)`,
-`tn.bundle_for_recipient(did, path)`.
+Verbs: `tn.export(path, kind=...)`, `tn.absorb(path)`. The
+`tn.pkg.bundle_for_recipient(did, path)` helper is BTN-only. JWE uses a
+reader-owned `.jwe.mykey` plus authenticated public-key enrollment; HIBE
+uses `tn.admin.grant_reader`.
 
 ## CLI
 

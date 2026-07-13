@@ -384,9 +384,17 @@ class TN:
         explicit_log = kwargs.get("log") is not None
         if not explicit_log and not self._has_replay_surface():
             return iter(())
-        self._activate()
-        from .read import read as _read_fn
-        return _read_fn(*args, **kwargs)
+        from .read import _read_bound
+
+        # Freeze this handle's config/runtime at iterator creation.  The
+        # generator must not consult or rebind the module-level ceremony when
+        # another TN handle is used before iteration begins.
+        return _read_bound(
+            *args,
+            _cfg=self.cfg,
+            _runtime=self._get_runtime(),
+            **kwargs,
+        )
 
     def watch(self, *args: Any, **kwargs: Any) -> Any:
         """Tail this stream's log file. See ``read`` for replay-surface
@@ -480,8 +488,10 @@ class TN:
         *,
         groups: list[str] | None = None,
     ) -> Any:
-        """Mint kits for ``recipient_did`` and bundle them into a
-        ``.tnpkg`` at ``out_path``.
+        """Mint BTN kits for ``recipient_did`` and bundle them into a
+        ``.tnpkg`` at ``out_path``. This helper is BTN-only; JWE uses
+        reader-owned key generation/public enrollment and HIBE uses
+        ``grant_reader``.
 
         For non-default ceremonies, this routes through a custom
         implementation that uses ``self.cfg`` instead of the singleton.
@@ -506,7 +516,7 @@ class TN:
         *,
         groups: list[str] | None,
     ) -> Any:
-        """Per-ceremony version of ``bundle_for_recipient``.
+        """BTN-only per-ceremony version of ``bundle_for_recipient``.
 
         Mirrors the singleton-bound impl in ``_pkg_impl.py`` but reads
         from ``self.cfg`` instead of ``current_config()``. Splitting
@@ -537,6 +547,10 @@ class TN:
                 f"ceremony declares {sorted(cfg.groups)}. Add them via "
                 f"tn.ensure_group(cfg, name, fields=[...]) first."
             )
+
+        from ._pkg_impl import _require_btn_bundle_groups
+
+        _require_btn_bundle_groups(cfg, requested)
 
         with tempfile.TemporaryDirectory(prefix="tn-bundle-") as td:
             td_path = _Path(td)

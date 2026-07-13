@@ -475,7 +475,7 @@ The wire format is identical across Node, Python, and the browser, checked on ev
 ## Documentation
 
 - [Getting started](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/getting-started.md) · [TypeScript cookbook](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/cookbook-typescript.md) · [Python cookbook](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/cookbook-python.md)
-- [Groups, readers, bundles, rotation](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/groups-readers-rotation.md) · [Running in containers and CI](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/deploy-containers.md)
+- [Groups, readers, bundles, rotation](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/groups-readers-rotation.md) · [JWE and HIBE key ceremonies](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/jwe-hibe-key-ceremonies.md) · [Running in containers and CI](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/deploy-containers.md)
 - [Profiles](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/profiles.md) · [tn.yaml reference](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/yaml-reference.md) · [protocol spec](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/protocol.md)
 
 ## License

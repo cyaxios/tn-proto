@@ -32,8 +32,8 @@ use crate::recipient_seal::{
 };
 use crate::runtime::{AdminState, Runtime};
 use crate::tnpkg::{
-    clock_dominates, read_tnpkg, sign_manifest, write_tnpkg, Manifest, ManifestKind, TnpkgSource,
-    VectorClock,
+    clock_dominates, prepare_manifest_body_index, read_tnpkg_verified, sign_manifest_with_body,
+    write_tnpkg, Manifest, ManifestKind, TnpkgSource, VectorClock,
 };
 use crate::{Error, Result};
 
@@ -382,11 +382,14 @@ impl Runtime {
             event_count,
             head_row_hash,
             state: state_value,
+            body_sha256: BTreeMap::new(),
+            body_sha256_present: false,
             manifest_signature_b64: None,
         };
 
         if !seal_for_recipients.is_empty() {
             manifest.recipient_identity = seal_for_recipients.first().cloned();
+            prepare_manifest_body_index(&mut manifest, &body)?;
             let key = body_encryption_key.ok_or_else(|| {
                 Error::Internal("recipient sealing requires a body encryption key".into())
             })?;
@@ -413,7 +416,7 @@ impl Runtime {
         // build an `ed25519_dalek::SigningKey` from its private bytes.
         let priv_bytes = self.device_private_bytes();
         let sk = ed25519_dalek::SigningKey::from_bytes(&priv_bytes);
-        sign_manifest(&mut manifest, &sk)?;
+        sign_manifest_with_body(&mut manifest, &body, &sk)?;
 
         write_tnpkg(out_path, &manifest, &body)?;
         Ok(out_path.to_path_buf())
@@ -505,11 +508,13 @@ impl Runtime {
             event_count: 0,
             head_row_hash: None,
             state: Some(state_value),
+            body_sha256: BTreeMap::new(),
+            body_sha256_present: false,
             manifest_signature_b64: None,
         };
         let priv_bytes = self.device_private_bytes();
         let sk = ed25519_dalek::SigningKey::from_bytes(&priv_bytes);
-        sign_manifest(&mut manifest, &sk)?;
+        sign_manifest_with_body(&mut manifest, &body, &sk)?;
 
         write_tnpkg(out_path, &manifest, &body)?;
         Ok(out_path.to_path_buf())
@@ -556,7 +561,7 @@ impl Runtime {
             AbsorbSource::Path(p) => TnpkgSource::Path(p),
             AbsorbSource::Bytes(b) => TnpkgSource::Bytes(b),
         };
-        let (manifest, body) = match read_tnpkg(tn_source) {
+        let (manifest, body) = match read_tnpkg_verified(tn_source) {
             Ok(v) => v,
             Err(e) => {
                 return Ok(AbsorbReceipt {
@@ -572,23 +577,6 @@ impl Runtime {
                 });
             }
         };
-
-        if let Err(e) = crate::tnpkg::verify_manifest(&manifest) {
-            return Ok(AbsorbReceipt {
-                kind: manifest.kind.as_str().into(),
-                accepted_count: 0,
-                deduped_count: 0,
-                noop: false,
-                derived_state: None,
-                conflicts: Vec::new(),
-                legacy_status: "rejected".into(),
-                legacy_reason: format!(
-                    "manifest signature does not verify against publisher_identity {:?}: {e}",
-                    manifest.publisher_identity
-                ),
-                replaced_kit_paths: Vec::new(),
-            });
-        }
 
         let body = match maybe_unseal_recipient_body(
             &manifest,

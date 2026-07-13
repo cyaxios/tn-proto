@@ -52,6 +52,8 @@ from .tnpkg import (
     TnpkgManifest,
     _validate_tnpkg_body_name,
     _write_tnpkg,
+    prepare_manifest_body_index,
+    sign_manifest_with_body,
 )
 
 # All kinds the producer side knows how to build a body for. ``recipient_invite``
@@ -460,8 +462,7 @@ def _build_identity_seed_body(
     did = str(device.did)
     if not did.startswith("did:key:z"):
         raise ValueError(
-            f"_build_identity_seed_body: device.did must be a did:key:z... "
-            f"identifier; got {did!r}"
+            f"_build_identity_seed_body: device.did must be a did:key:z... identifier; got {did!r}"
         )
 
     # tn.yaml stub. Keep this minimal — anything more would lock a fresh
@@ -602,9 +603,7 @@ def _build_export_body(
         return _build_offer_body(package), {}
     if kind == "enrolment":
         if package is None or package.package_kind != "enrolment":
-            raise ValueError(
-                "export(kind='enrolment') requires package=<signed enrolment Package>"
-            )
+            raise ValueError("export(kind='enrolment') requires package=<signed enrolment Package>")
         return _build_enrolment_body(package), {}
     if kind in ("kit_bundle", "full_keystore"):
         ks = (
@@ -630,11 +629,7 @@ def _build_export_body(
     if kind == "project_seed":
         if cfg is None:  # pragma: no cover - guarded by _validate_export_args
             raise ValueError("export(kind='project_seed') requires cfg=...")
-        ks = (
-            Path(keystore).resolve()
-            if keystore is not None
-            else Path(cfg.keystore).resolve()
-        )
+        ks = Path(keystore).resolve() if keystore is not None else Path(cfg.keystore).resolve()
         return _build_project_seed_body(cfg, ks, groups_filter=groups)
     if kind == "recipient_invite":
         raise NotImplementedError(
@@ -673,9 +668,7 @@ def _resolve_export_signer(
     return cfg.device.signing_key(), cfg.device.device_identity, cfg.ceremony_id
 
 
-def _merge_recipient_dids(
-    to_did: str | None, to_dids: list[str] | None
-) -> list[str]:
+def _merge_recipient_dids(to_did: str | None, to_dids: list[str] | None) -> list[str]:
     """Combine and validate ``to_did`` + ``to_dids`` into a deduped list.
 
     Used by the seal-for-recipient path, which can mint multiple wraps
@@ -686,16 +679,14 @@ def _merge_recipient_dids(
     if to_did is not None:
         if not str(to_did).startswith("did:key:z"):
             raise ValueError(
-                f"export(seal_for_recipient=True): to_did={to_did!r} is not a "
-                f"did:key string."
+                f"export(seal_for_recipient=True): to_did={to_did!r} is not a did:key string."
             )
         merged.append(str(to_did))
     if to_dids:
         for d in to_dids:
             if not isinstance(d, str) or not d.startswith("did:key:z"):
                 raise ValueError(
-                    f"export(seal_for_recipient=True): to_dids contains "
-                    f"non-did:key entry {d!r}."
+                    f"export(seal_for_recipient=True): to_dids contains non-did:key entry {d!r}."
                 )
             if d not in merged:
                 merged.append(d)
@@ -799,6 +790,7 @@ def _apply_seal_for_recipient(
         head_row_hash=extras.get("head_row_hash"),
         state=extras.get("state"),
     )
+    prepare_manifest_body_index(preview, body)
     aad = _aad_for_wrap(preview.to_dict())
     wraps_array = [_seal_bek(bek, did, aad) for did in merged_dids]
 
@@ -966,9 +958,7 @@ def export(
     # 4a. BYOK (init-upload pattern): caller supplies the BEK directly.
     if encrypt_body_with is not None:
         if not isinstance(encrypt_body_with, (bytes, bytearray)) or len(encrypt_body_with) != 32:
-            raise ValueError(
-                "export(encrypt_body_with=...) requires a 32-byte AES-256-GCM key"
-            )
+            raise ValueError("export(encrypt_body_with=...) requires a 32-byte AES-256-GCM key")
         body, extras = _encrypt_body_in_place(body, extras, bytes(encrypt_body_with))
 
     # 4b. Recipient-direction sealed-box wrap (second-release spec).
@@ -1001,7 +991,7 @@ def export(
         head_row_hash=extras.get("head_row_hash"),
         state=extras.get("state"),
     )
-    manifest.sign(signing_key_priv)
+    sign_manifest_with_body(manifest, body, signing_key_priv)
     return _write_tnpkg(Path(out_path), manifest, body)
 
 
@@ -1075,8 +1065,7 @@ def _encrypt_body_in_place(
         "cipher_suite": "aes-256-gcm",
         "nonce_bytes": 12,
         "frame": "tn-encrypted-body-v2-zip",
-        "ciphertext_sha256": "sha256:"
-        + hashlib.sha256(encrypted).hexdigest(),
+        "ciphertext_sha256": "sha256:" + hashlib.sha256(encrypted).hexdigest(),
     }
     new_extras["state"] = state
     return new_body, new_extras
@@ -1274,18 +1263,14 @@ def export_group_keys(
             block = {
                 "policy": getattr(gcfg, "policy", None) or "private",
                 "cipher": "btn",
-                "recipients": (
-                    [{"recipient_identity": self_did}] if self_did else []
-                ),
+                "recipients": ([{"recipient_identity": self_did}] if self_did else []),
             }
         blocks[group] = block
         carried.append(group)
 
     if not carried:
         suffix = f" matching {sorted(requested)}" if requested else ""
-        raise RuntimeError(
-            f"group_keys: no btn groups with key material in {keystore}{suffix}"
-        )
+        raise RuntimeError(f"group_keys: no btn groups with key material in {keystore}{suffix}")
 
     if sign_with is not None:
         signing_key = sign_with.signing_key()
@@ -1305,7 +1290,7 @@ def export_group_keys(
         recipient_identity=signer_did,  # self-addressed (from_did == to_did)
         state={"groups": blocks, "kind": "group-keys-v1"},
     )
-    manifest.sign(signing_key)
+    sign_manifest_with_body(manifest, body, signing_key)
     return _write_tnpkg(Path(out_path), manifest, body)
 
 

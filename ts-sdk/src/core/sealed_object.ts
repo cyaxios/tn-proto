@@ -260,8 +260,8 @@ export interface SealGroupView {
 
 /**
  * Everything `sealObjectCore` needs from a ceremony, with the
- * runtime-specific parts (key material access, receipt write, warning
- * sink) supplied as callbacks by the entry adapter.
+ * runtime-specific parts (key material access and receipt write)
+ * supplied as callbacks by the entry adapter.
  */
 export interface SealContext {
   ceremonyId: string;
@@ -281,10 +281,6 @@ export interface SealContext {
     plaintext: Uint8Array,
     aad: Uint8Array,
   ) => Promise<Uint8Array>;
-  /** Non-fatal skip notice (a group this keystore cannot publish to).
-   * Node routes it to `process.emitWarning`, the browser to
-   * `console.warn`. */
-  warn: (message: string) => void;
   /** Chain the `tn.object.sealed` receipt row through the runtime's
    * normal write path. Errors propagate to the seal caller. */
   emitReceipt: (fields: Record<string, unknown>) => void | Promise<void>;
@@ -388,19 +384,7 @@ export async function sealObjectCore(
     }
     const aadBytes = hasAad ? canonicalBytes(effectiveAad) : new Uint8Array(0);
     const plaintextBytes = canonicalBytes(plainFields);
-    let ct: Uint8Array;
-    try {
-      ct = await ctx.sealGroup(gname, gcfg.cipher, plaintextBytes, aadBytes);
-    } catch (e) {
-      // Not a publisher for this group — skip it, exactly like the
-      // write path's NotAPublisherError branch (warn, drop the group,
-      // keep the seal).
-      ctx.warn(
-        `tn-proto: skipping group ${JSON.stringify(gname)} for ${objectType}: ` +
-          `${e instanceof Error ? e.message : String(e)}`,
-      );
-      continue;
-    }
+    const ct = await ctx.sealGroup(gname, gcfg.cipher, plaintextBytes, aadBytes);
     groupPayloads.set(gname, { ct, fieldHashes });
     if (hasAad) aadEcho[gname] = effectiveAad;
   }

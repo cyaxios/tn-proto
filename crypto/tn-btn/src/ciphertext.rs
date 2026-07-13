@@ -259,7 +259,10 @@ mod tests {
         let ct = encrypt_to_cover(&s, TREE_HEIGHT, [0; 32], 0, &[], b"plain").unwrap();
         let ks = materialize_reader_keyset(&s, LeafIndex(3), TREE_HEIGHT);
         assert_eq!(decrypt_with_keyset(&ks, &ct).unwrap(), b"plain");
-        assert_eq!(decrypt_with_keyset_with_aad(&ks, &ct, &[]).unwrap(), b"plain");
+        assert_eq!(
+            decrypt_with_keyset_with_aad(&ks, &ct, &[]).unwrap(),
+            b"plain"
+        );
     }
 
     #[test]

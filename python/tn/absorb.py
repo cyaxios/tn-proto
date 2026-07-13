@@ -52,8 +52,10 @@ from .tnpkg import (
     PackageError,
     TnpkgManifest,
     _clock_dominates,
+    _peek_manifest_kind,
     _read_manifest,
 )
+from .trust import TrustError
 
 _DID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -145,6 +147,22 @@ class AbsorbResult:
     peer_did: str | None = None
 
 
+@dataclass(frozen=True)
+class _PreparedBootstrap:
+    cfg: LoadedConfig
+    manifest: TnpkgManifest
+    body: dict[str, bytes]
+
+
+class _BootstrapRejected(ValueError):
+    """A recognized bootstrap package failed its verified read."""
+
+    def __init__(self, kind: str, cause: Exception) -> None:
+        self.kind = kind
+        self.cause = cause
+        super().__init__(str(cause))
+
+
 # ---------------------------------------------------------------------------
 # Public entry — supports new (source) and legacy (cfg, source) signatures
 # ---------------------------------------------------------------------------
@@ -157,9 +175,7 @@ def absorb(cfg: LoadedConfig, source: Path | str | bytes | bytearray, /) -> Abso
 @overload
 def absorb(*, source: Path | str | bytes | bytearray) -> AbsorbReceipt: ...
 @overload
-def absorb(
-    *, cfg: LoadedConfig, source: Path | str | bytes | bytearray
-) -> AbsorbResult: ...
+def absorb(*, cfg: LoadedConfig, source: Path | str | bytes | bytearray) -> AbsorbResult: ...
 def absorb(
     *args: Any,
     **kwargs: Any,
@@ -176,6 +192,7 @@ def absorb(
     cfg: LoadedConfig | None
     source: Any
     legacy = False
+    prepared_bootstrap: _PreparedBootstrap | None = None
     if len(args) == 1 and not kwargs:
         source = args[0]
         cfg = None
@@ -206,14 +223,22 @@ def absorb(
             # everything end-to-end without a prior tn.init(). The
             # caller's subsequent tn.init() then picks up the
             # freshly-absorbed yaml.
-            cfg = _try_bootstrap_cfg(source)
-            if cfg is None:
+            try:
+                prepared_bootstrap = _try_bootstrap_cfg(source)
+            except _BootstrapRejected as rejected:
+                return AbsorbReceipt(
+                    kind=rejected.kind,
+                    legacy_status="rejected",
+                    legacy_reason=str(rejected),
+                )
+            if prepared_bootstrap is None:
                 # No bootstrap shortcut available. Auto-create a fresh
                 # ceremony in the cwd (same path tn.info(...) takes when
                 # called with no prior init). This prints the standard
                 # autoinit banner so the caller knows a new identity was
                 # minted. Then retry the config lookup.
                 from ._autoinit import maybe_autoinit as _maybe_autoinit
+
                 _maybe_autoinit()
                 try:
                     cfg = _current_config()
@@ -223,8 +248,19 @@ def absorb(
                         "tn.init(yaml_path) first, or pass cfg explicitly "
                         "via the legacy two-arg form."
                     ) from exc
+            else:
+                cfg = prepared_bootstrap.cfg
 
-    receipt = _absorb_dispatch(cfg, source)
+    if prepared_bootstrap is None:
+        if cfg is None:  # pragma: no cover - guarded by config resolution above
+            raise RuntimeError("absorb: internal error resolving package configuration")
+        receipt = _absorb_dispatch(cfg, source)
+    else:
+        receipt = _absorb_verified_package(
+            prepared_bootstrap.cfg,
+            prepared_bootstrap.manifest,
+            prepared_bootstrap.body,
+        )
 
     if legacy:
         # Translate to the older shape so existing tests keep working.
@@ -246,15 +282,18 @@ def absorb(
     return receipt
 
 
-def _try_bootstrap_cfg(source: Path | str | bytes | bytearray) -> LoadedConfig | None:
+def _try_bootstrap_cfg(
+    source: Path | str | bytes | bytearray,
+) -> _PreparedBootstrap | None:
     """If ``source`` is an ``identity_seed`` or ``project_seed`` tnpkg,
     synthesize a minimal ``LoadedConfig`` from the current working
     directory + the bundle's ``body/tn.yaml`` so absorb can install
     everything without a prior ``tn.init()``.
 
-    Returns ``None`` if the bundle is not a recognised bootstrap kind
-    (in which case the caller raises the original "call tn.init() first"
-    error).
+    Returns one verified package plus its synthetic config, or ``None`` if the
+    manifest is not a recognised bootstrap kind. Once a bootstrap kind is
+    recognized, any signature, index, or container failure raises
+    :class:`_BootstrapRejected` so the caller cannot fall through to autoinit.
 
     The synthesized cfg only needs to satisfy what the bootstrap
     handlers (`_absorb_identity_seed`, `_absorb_project_seed`) read:
@@ -264,12 +303,22 @@ def _try_bootstrap_cfg(source: Path | str | bytes | bytearray) -> LoadedConfig |
     import os as _os
 
     try:
-        manifest, body = _read_manifest(source)
-    except (ValueError, FileNotFoundError):
+        peeked_kind = _peek_manifest_kind(source)
+    except (PackageError, ValueError, FileNotFoundError):
         return None
 
-    if manifest.kind not in ("identity_seed", "project_seed"):
+    if peeked_kind not in ("identity_seed", "project_seed"):
         return None
+
+    try:
+        manifest, body = _read_manifest(source, verify_signature=True)
+    except (PackageError, ValueError, FileNotFoundError) as exc:
+        raise _BootstrapRejected(peeked_kind, exc) from exc
+    if manifest.kind != peeked_kind:
+        raise _BootstrapRejected(
+            peeked_kind,
+            ValueError("bootstrap manifest kind changed between inspection and verified read"),
+        )
 
     cwd = Path(_os.getcwd()).resolve()
     yaml_path = cwd / "tn.yaml"
@@ -312,7 +361,7 @@ def _try_bootstrap_cfg(source: Path | str | bytes | bytearray) -> LoadedConfig |
     from .signing import DeviceKey as _DeviceKey
 
     placeholder_priv = b"\x00" * 32
-    return LoadedConfig(
+    cfg = LoadedConfig(
         yaml_path=yaml_path,
         keystore=keystore,
         device=_DeviceKey.from_private_bytes(placeholder_priv),
@@ -327,6 +376,7 @@ def _try_bootstrap_cfg(source: Path | str | bytes | bytearray) -> LoadedConfig |
         admin_log_location=admin_rel,
         log_path=log_rel,
     )
+    return _PreparedBootstrap(cfg=cfg, manifest=manifest, body=body)
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +398,11 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
     # package can't exhaust memory via this path (CLI absorb or a watched
     # fs.scan inbox).
     try:
+        peeked_kind = _peek_manifest_kind(source)
+        if peeked_kind == "offer":
+            from .enrollment import validate_enrollment_archive
+
+            validate_enrollment_archive(source)
         manifest, body = _read_manifest(source, verify_signature=True)
     except ManifestSignatureError as exc:
         # Bad manifest signature — a corrupt / tampered package, NOT a
@@ -368,6 +423,12 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
             legacy_status="rejected",
             legacy_reason=str(exc),
         )
+    except TrustError as exc:
+        return AbsorbReceipt(
+            kind="offer",
+            legacy_status="rejected",
+            legacy_reason=str(exc),
+        )
     except (ValueError, FileNotFoundError) as exc:
         # Legacy fallback: the old ``dump_tnpkg`` produced a flat JSON
         # ``Package`` (no zip header). Honor it when we can; otherwise
@@ -380,6 +441,73 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
             legacy_status="rejected",
             legacy_reason=f"absorb: not a `.tnpkg` zip and not a legacy JSON Package: {exc}",
         )
+
+    try:
+        trusted_enrollment_offer = (
+            manifest.kind == "offer" and _is_trusted_enrollment_offer(body)
+        )
+    except PackageError as exc:
+        return AbsorbReceipt(
+            kind="offer",
+            legacy_status="rejected",
+            legacy_reason=str(exc),
+        )
+
+    if trusted_enrollment_offer:
+        try:
+            from .enrollment import EnrollmentStore, read_enrollment_artifact
+
+            artifact = (
+                bytes(source)
+                if isinstance(source, (bytes, bytearray))
+                else read_enrollment_artifact(Path(source))
+            )
+
+            EnrollmentStore(cfg, cfg.device).stage_offer(
+                artifact,
+                expected_publisher_did=cfg.device.device_identity,
+                now=datetime.now(_tz.utc),
+            )
+        except (OSError, TrustError, ValueError) as exc:
+            return AbsorbReceipt(
+                kind="offer",
+                legacy_status="rejected",
+                legacy_reason=str(exc),
+            )
+        return AbsorbReceipt(
+            kind="offer",
+            accepted_count=1,
+            legacy_status="offer_stashed",
+        )
+
+    return _absorb_verified_package(cfg, manifest, body)
+
+
+def _is_trusted_enrollment_offer(body: dict[str, bytes]) -> bool:
+    """Whether an offer declares the strict signed key-binding payload."""
+    raw = body.get("body/package.json")
+    if raw is None:
+        return False
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except RecursionError as exc:
+        raise PackageError(
+            "offer package JSON nesting exceeds the parser limit"
+        ) from exc
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(value, dict):
+        return False
+    payload = value.get("payload")
+    return isinstance(payload, dict) and "key_binding_proof" in payload
+
+
+def _absorb_verified_package(
+    cfg: LoadedConfig,
+    manifest: TnpkgManifest,
+    body: dict[str, bytes],
+) -> AbsorbReceipt:
+    """Dispatch one already signature- and body-index-verified package."""
 
     # Recipient-direction sealed-box unwrap. If the manifest carries
     # state.body_encryption.recipient_wrap, the body was encrypted by
@@ -563,9 +691,7 @@ def _unseal_addressees(body_encryption: dict[str, Any]) -> list:
     wrap_singular = body_encryption.get("recipient_wrap")
     if isinstance(wraps_array, list):
         return [e.get("recipient_identity") for e in wraps_array if isinstance(e, dict)]
-    return [
-        wrap_singular.get("recipient_identity") if isinstance(wrap_singular, dict) else None
-    ]
+    return [wrap_singular.get("recipient_identity") if isinstance(wrap_singular, dict) else None]
 
 
 def _unseal_first_candidate(
@@ -676,16 +802,13 @@ def _maybe_unseal_recipient_wrap(
     if encrypted is None:
         return body, _unseal_reject(
             manifest,
-            "manifest declares body_encryption but body/encrypted.bin is "
-            "missing from the zip.",
+            "manifest declares body_encryption but body/encrypted.bin is missing from the zip.",
         )
 
     try:
         decoded = decrypt_body_blob(encrypted, bek)
     except Exception as exc:  # noqa: BLE001 — wrap any decrypt error
-        return body, _unseal_reject(
-            manifest, f"body decrypt with unwrapped BEK failed: {exc}"
-        )
+        return body, _unseal_reject(manifest, f"body decrypt with unwrapped BEK failed: {exc}")
 
     # Replace body with the decrypted member dict. Keys come back as
     # body/<name> (stored zip preserves the original layout).
@@ -737,9 +860,7 @@ def _absorb_identity_seed(
         return AbsorbReceipt(
             kind=manifest.kind,
             legacy_status="rejected",
-            legacy_reason=(
-                f"identity_seed body is missing required members: {missing}"
-            ),
+            legacy_reason=(f"identity_seed body is missing required members: {missing}"),
         )
 
     if len(priv_bytes) != 32:
@@ -794,8 +915,7 @@ def _absorb_identity_seed(
                 noop=True,
                 legacy_status="no_op",
                 legacy_reason=(
-                    f"identity_seed already installed at {priv_path} (same "
-                    f"DID, bytes match)."
+                    f"identity_seed already installed at {priv_path} (same DID, bytes match)."
                 ),
             )
         # Bug 3 — UX trap. The local.private differs, but if no user events
@@ -1054,9 +1174,7 @@ def _absorb_group_keys(
                     if dest.read_bytes() == data:
                         deduped += 1
                         continue
-                    _preserve_before_overwrite(
-                        dest, dest.with_name(f"{rel}.previous.{ts}")
-                    )
+                    _preserve_before_overwrite(dest, dest.with_name(f"{rel}.previous.{ts}"))
                     replaced.append(dest)
                 dest.write_bytes(data)
                 accepted += 1
@@ -1236,9 +1354,7 @@ def _maybe_post_received_kit(
 
     import base64 as _b64
 
-    kit_blob_b64 = (
-        _b64.b64encode(kit_blob).decode("ascii") if kit_blob is not None else None
-    )
+    kit_blob_b64 = _b64.b64encode(kit_blob).decode("ascii") if kit_blob is not None else None
 
     # Identity load: we need the device key to DID-challenge auth. If
     # there's no on-disk identity, skip the vault POST entirely (the
@@ -1260,8 +1376,10 @@ def _maybe_post_received_kit(
         return
 
     publisher_did = manifest.publisher_identity
-    recipient_did = cfg.device.device_identity if cfg.device is not None else (
-        manifest.recipient_identity or ""
+    recipient_did = (
+        cfg.device.device_identity
+        if cfg.device is not None
+        else (manifest.recipient_identity or "")
     )
     label = manifest.scope or (publisher_did[:24] if publisher_did else None)
     base_url = identity.linked_vault or resolve_vault_url(None)
@@ -1276,8 +1394,7 @@ def _maybe_post_received_kit(
         exc_type = type(exc).__name__
         detail = _short_exc_detail(exc)
         _log.warning(
-            "received-kits POST skipped: vault auth failed "
-            "(account_id=%s, publisher=%s, exc=%s%s)",
+            "received-kits POST skipped: vault auth failed (account_id=%s, publisher=%s, exc=%s%s)",
             account_id,
             publisher_did,
             exc_type,
@@ -1308,8 +1425,7 @@ def _maybe_post_received_kit(
         exc_type = type(exc).__name__
         detail = _short_exc_detail(exc)
         _log.warning(
-            "received-kits POST failed (account_id=%s, publisher=%s, "
-            "exc=%s%s)",
+            "received-kits POST failed (account_id=%s, publisher=%s, exc=%s%s)",
             account_id,
             publisher_did,
             exc_type,
@@ -1665,7 +1781,10 @@ def _absorb_admin_log_snapshot(
             continue
 
         decision, conflict = _accept_admin_envelope(
-            env, seen_row_hashes, revoked_leaves, manifest.clock,
+            env,
+            seen_row_hashes,
+            revoked_leaves,
+            manifest.clock,
         )
         if decision == "drop":
             continue
@@ -2021,7 +2140,9 @@ def _project_seed_vault_yaml_patch(
             ceremony["linked_project_id"] = ""
         return clone
 
-    return None, _blank_project_seed_vault_metadata(existing_doc) == _blank_project_seed_vault_metadata(incoming_doc)
+    return None, _blank_project_seed_vault_metadata(
+        existing_doc
+    ) == _blank_project_seed_vault_metadata(incoming_doc)
 
 
 def _absorb_project_seed(
@@ -2078,9 +2199,7 @@ def _absorb_project_seed(
         return AbsorbReceipt(
             kind=manifest.kind,
             legacy_status="rejected",
-            legacy_reason=(
-                f"project_seed body is missing required members: {missing}"
-            ),
+            legacy_reason=(f"project_seed body is missing required members: {missing}"),
         )
 
     if len(priv_bytes) != 32:
@@ -2203,7 +2322,7 @@ def _absorb_project_seed(
     for name, data in body.items():
         if not name.startswith("body/keys/"):
             continue
-        rel = name[len("body/keys/"):]
+        rel = name[len("body/keys/") :]
         if not rel:
             continue
         # Reject deeper nesting — body/keys/foo/bar would smuggle a

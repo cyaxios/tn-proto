@@ -37,6 +37,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime},
 };
 
 use crate::tn::Tn;
@@ -217,6 +218,341 @@ impl<'a> Package<'a> {
             peer_did: compiled.recipient_did,
             package_sha256,
             status: "offered".into(),
+        })
+    }
+
+    /// Issue and durably retain a signed one-time enrollment challenge for
+    /// `reader_did` on `group`, pre-authorizing that exact reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::InvalidArgument`] with a stable
+    /// `"<reason>: <detail>"` message for scope or identity failures.
+    pub fn issue_enrollment_challenge(
+        &self,
+        reader_did: &str,
+        group: &str,
+        ttl: Duration,
+    ) -> Result<crate::enrollment::EnrollmentChallengeV1> {
+        let store = crate::enrollment::enrollment_store(self.tn)?;
+        let challenge = store
+            .issue_challenge(reader_did, group, ttl, SystemTime::now())
+            .map_err(crate::enrollment::trust_err)?;
+        // Issuing a challenge is the publisher's pre-authorization act: the
+        // exact reader/ceremony/group is recorded so a challenged offer can
+        // later reconcile without a second manual approval.
+        store
+            .preauthorize(reader_did, group)
+            .map_err(crate::enrollment::trust_err)?;
+        Ok(challenge)
+    }
+
+    /// Reverify and promote one retained pending offer that is already
+    /// authorized (challenged and pre-authorized, or exact-digest approved).
+    ///
+    /// # Errors
+    ///
+    /// `untrusted_principal` when nothing authorizes the offer, plus the full
+    /// verification reason set for corrupt retained state.
+    pub fn reconcile_pending(
+        &self,
+        offer_digest: &str,
+    ) -> Result<crate::enrollment::AcceptedOffer> {
+        crate::enrollment::enrollment_store(self.tn)?
+            .reconcile(offer_digest, SystemTime::now())
+            .map_err(crate::enrollment::trust_err)
+    }
+
+    /// Approve an exact offer digest and atomically reverify, consume the
+    /// challenge, and promote it to accepted state.
+    ///
+    /// # Errors
+    ///
+    /// `untrusted_principal` for an unknown digest, `replay_conflict` for
+    /// conflicting retained state, plus the verification reason set.
+    pub fn approve_and_reconcile(
+        &self,
+        offer_digest: &str,
+    ) -> Result<crate::enrollment::AcceptedOffer> {
+        crate::enrollment::enrollment_store(self.tn)?
+            .approve_and_reconcile(offer_digest, SystemTime::now())
+            .map_err(crate::enrollment::trust_err)
+    }
+
+    /// Build and sign a version-1 reader offer artifact for one group,
+    /// binding this ceremony's static X25519 reader key (created on first
+    /// use, then reused exactly) and, when supplied, the publisher challenge.
+    ///
+    /// # Errors
+    ///
+    /// `did_invalid` for a placeholder publisher DID, challenge-verification
+    /// failures, and I/O errors writing the artifact.
+    pub fn offer_v1(&self, options: crate::enrollment::OfferOptionsV1) -> Result<OfferReceipt> {
+        if options.group.trim().is_empty() {
+            return Err(Error::InvalidArgument("group must not be empty".into()));
+        }
+        let device = crate::enrollment::device_key(self.tn)?;
+        let (_private, public) = crate::enrollment::ensure_reader_mykey(self.tn, &options.group)?;
+        let ceremony_id = match &options.challenge {
+            Some(challenge) => challenge.ceremony_id.clone(),
+            None => crate::enrollment::ceremony_id(self.tn)?,
+        };
+        let artifact = tn_core::trusted_enrollment::build_offer_artifact(
+            &tn_core::trusted_enrollment::OfferArtifactSpec {
+                ceremony_id: &ceremony_id,
+                group: &options.group,
+                publisher_did: &options.publisher_did,
+                reader_key: &device,
+                reader_public_key: public,
+                challenge: options.challenge.as_ref(),
+                now: SystemTime::now(),
+            },
+        )
+        .map_err(crate::enrollment::trust_err)?;
+        if let Some(parent) = options.out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        tn_core::keystore_backend::atomic_write_bytes(&options.out_path, &artifact.tnpkg)?;
+        let package_sha256 = sha256_hex(&artifact.tnpkg);
+        self.tn.info(
+            "tn.offer.compiled",
+            json!({
+                "group": options.group,
+                "peer_identity": options.publisher_did,
+                "package_sha256": format!("sha256:{package_sha256}"),
+                "package_path": options.out_path.to_string_lossy(),
+                "offer_digest": artifact.offer_digest,
+            }),
+        )?;
+        Ok(OfferReceipt {
+            path: options.out_path,
+            group: options.group,
+            peer_did: options.publisher_did,
+            package_sha256,
+            status: "offered".into(),
+        })
+    }
+
+    /// Compile the signed version-1 enrollment response for one atomically
+    /// accepted offer and write it as an `enrolment` `.tnpkg` addressed to
+    /// the reader.
+    ///
+    /// # Errors
+    ///
+    /// Scope mismatches between the accepted offer and this ceremony/reader
+    /// surface as stable trust reasons; I/O errors surface as
+    /// [`crate::Error::Io`].
+    pub fn compile_enrolment_v1(
+        &self,
+        options: crate::enrollment::CompileEnrolmentOptionsV1,
+    ) -> Result<CompiledPackage> {
+        use crate::enrollment::{trust_err, TrustError, TrustReason};
+
+        let device = crate::enrollment::device_key(self.tn)?;
+        let ceremony_id = crate::enrollment::ceremony_id(self.tn)?;
+        let accepted = &options.accepted_offer;
+        let principal = &accepted.binding.principal;
+        if principal.audience_did != device.did() {
+            return Err(trust_err(TrustError::new(
+                TrustReason::WrongRecipient,
+                "accepted offer is addressed to a different publisher",
+            )));
+        }
+        if principal.ceremony_id != ceremony_id
+            || principal.group != options.group
+            || !self.tn.group_names().contains(&options.group)
+        {
+            return Err(trust_err(TrustError::new(
+                TrustReason::ScopeMismatch,
+                "accepted offer ceremony or group does not match",
+            )));
+        }
+        if principal.did != options.reader_did {
+            return Err(trust_err(TrustError::new(
+                TrustReason::DidSignerMismatch,
+                "accepted offer binds a different reader DID",
+            )));
+        }
+
+        let now = SystemTime::now();
+        let issued_at = crate::enrollment::canonical_utc_timestamp(now).map_err(trust_err)?;
+        let expires_at =
+            crate::enrollment::canonical_utc_timestamp(now + options.ttl).map_err(trust_err)?;
+        let response = crate::enrollment::EnrollmentResponseV1 {
+            version: 1,
+            kind: "tn-enrollment-response".into(),
+            publisher_did: device.did().to_string(),
+            reader_did: options.reader_did.clone(),
+            ceremony_id,
+            group: options.group.clone(),
+            accepted_offer_digest: accepted.offer_digest.clone(),
+            x25519_public_key_sha256: accepted.binding.public_key_sha256.clone(),
+            // The first admitted epoch for this reader. A managed-JWE
+            // publisher runtime stamps its live group epoch here.
+            group_epoch: 1,
+            issued_at,
+            expires_at,
+            signature_b64: String::new(),
+        }
+        .signed(&device)
+        .map_err(trust_err)?;
+
+        let bytes =
+            tn_core::trusted_enrollment::build_enrollment_response_artifact(&response, &device)
+                .map_err(trust_err)?;
+        if let Some(parent) = options.out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        tn_core::keystore_backend::atomic_write_bytes(&options.out_path, &bytes)?;
+        compiled_package_receipt(&options.out_path, options.reader_did, vec![options.group])
+    }
+
+    /// Absorb a `.tnpkg` with explicit version-1 trust options.
+    ///
+    /// Offers route into the locked enrollment pending state after complete
+    /// verification (`legacy_status == "offer_stashed"`), never through the
+    /// legacy import. Other kinds go through the runtime's verified absorb;
+    /// with [`AbsorbOptionsV1::unsafe_legacy_signer`] a legacy package that
+    /// fails the strict path is retained as unverified material and the one
+    /// warning plus one best-effort audit event are emitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error`] only for local I/O failures; malformed or
+    /// rejected input is reported on the returned receipt.
+    pub fn absorb_with_options(
+        &self,
+        source: tn_core::AbsorbSource<'_>,
+        options: crate::enrollment::AbsorbOptionsV1,
+    ) -> Result<AbsorbReceipt> {
+        let bytes: Vec<u8> = match source {
+            tn_core::AbsorbSource::Path(path) => fs::read(path)?,
+            tn_core::AbsorbSource::Bytes(bytes) => bytes.to_vec(),
+        };
+        let kind = tn_core::tnpkg::read_tnpkg(tn_core::tnpkg::TnpkgSource::Bytes(&bytes))
+            .ok()
+            .map(|(manifest, _)| manifest.kind);
+        if kind == Some(ManifestKind::Offer) {
+            // Security-sensitive version-1 statements always fail closed;
+            // the unsafe legacy path never applies to them.
+            return Ok(self.stage_offer_receipt(&bytes));
+        }
+        // Keep parity with `absorb_bytes`: signed contact updates apply.
+        if let Some(receipt) = self.try_absorb_contact_update_bytes(&bytes)? {
+            return Ok(receipt);
+        }
+        let receipt = self
+            .tn
+            .runtime()
+            .absorb(tn_core::AbsorbSource::Bytes(&bytes))?;
+        if receipt.legacy_status != "rejected"
+            || !options.unsafe_legacy_signer
+            || kind == Some(ManifestKind::Enrolment)
+        {
+            return Ok(receipt);
+        }
+        self.import_legacy_unverified(&bytes, kind)
+    }
+
+    fn stage_offer_receipt(&self, bytes: &[u8]) -> AbsorbReceipt {
+        let staged = crate::enrollment::enrollment_store(self.tn)
+            .map_err(|error| error.to_string())
+            .and_then(|store| {
+                store
+                    .stage_offer(bytes, SystemTime::now())
+                    .map_err(|error| error.to_string())
+            });
+        match staged {
+            Ok(pending) => AbsorbReceipt {
+                kind: ManifestKind::Offer.as_str().into(),
+                accepted_count: 0,
+                deduped_count: 0,
+                noop: false,
+                derived_state: None,
+                conflicts: Vec::new(),
+                legacy_status: "offer_stashed".into(),
+                legacy_reason: format!(
+                    "offer retained pending approval; offer_digest {}",
+                    pending.offer_digest
+                ),
+                replaced_kit_paths: Vec::new(),
+            },
+            Err(reason) => AbsorbReceipt {
+                kind: ManifestKind::Offer.as_str().into(),
+                accepted_count: 0,
+                deduped_count: 0,
+                noop: false,
+                derived_state: None,
+                conflicts: Vec::new(),
+                legacy_status: "rejected".into(),
+                legacy_reason: reason,
+                replaced_kit_paths: Vec::new(),
+            },
+        }
+    }
+
+    fn import_legacy_unverified(
+        &self,
+        bytes: &[u8],
+        kind: Option<ManifestKind>,
+    ) -> Result<AbsorbReceipt> {
+        // The named unsafe legacy-import path: the manifest signature must
+        // still verify, but the missing signed body index is tolerated. The
+        // package is retained as unverified material only — it is never
+        // applied to keystores or trusted state.
+        let (manifest, _body) =
+            match tn_core::tnpkg::read_tnpkg(tn_core::tnpkg::TnpkgSource::Bytes(bytes)) {
+                Ok(parts) => parts,
+                Err(error) => {
+                    return Ok(legacy_import_rejected(kind, &error.to_string()));
+                }
+            };
+        if let Err(error) = tn_core::tnpkg::verify_manifest(&manifest) {
+            return Ok(legacy_import_rejected(
+                Some(manifest.kind),
+                &format!("legacy import still requires a valid manifest signature: {error}"),
+            ));
+        }
+        let digest = crate::enrollment::sha256_tagged(bytes);
+        let notice = tn_core::UnsafeOperationNotice {
+            artifact_digest: Some(digest.clone()),
+            group: None,
+            operation: tn_core::UnsafeOperation::LegacyPackageImport,
+            relaxations: vec![tn_core::UnsafeRelaxation::LegacySignerMismatch],
+            subject_did: Some(manifest.publisher_identity.clone()),
+        };
+        crate::enrollment::warn_and_audit_unsafe(self.tn, &notice);
+        let stash_dir = self
+            .tn
+            .yaml_path()
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(".tn")
+            .join(
+                self.tn
+                    .yaml_path()
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("tn"),
+            )
+            .join("inbox")
+            .join("legacy");
+        let stash_path = stash_dir.join(format!("{}.tnpkg", &digest["sha256:".len()..]));
+        tn_core::keystore_backend::atomic_write_bytes(&stash_path, bytes)?;
+        Ok(AbsorbReceipt {
+            kind: manifest.kind.as_str().into(),
+            accepted_count: 0,
+            deduped_count: 0,
+            noop: false,
+            derived_state: None,
+            conflicts: Vec::new(),
+            legacy_status: "stashed".into(),
+            legacy_reason: format!(
+                "legacy package retained unverified at {}; it was not applied and is never \
+                 marked verified",
+                stash_path.display()
+            ),
+            replaced_kit_paths: Vec::new(),
         })
     }
 
@@ -1292,6 +1628,20 @@ fn save_contacts_doc(path: &Path, doc: &serde_json::Map<String, serde_json::Valu
 fn contact_row_matches(existing: &serde_json::Value, incoming: &serde_json::Value) -> bool {
     existing.get("account_id") == incoming.get("account_id")
         && existing.get("package_did") == incoming.get("package_did")
+}
+
+fn legacy_import_rejected(kind: Option<ManifestKind>, reason: &str) -> AbsorbReceipt {
+    AbsorbReceipt {
+        kind: kind.map_or_else(|| "unknown".to_string(), |kind| kind.as_str().to_string()),
+        accepted_count: 0,
+        deduped_count: 0,
+        noop: false,
+        derived_state: None,
+        conflicts: Vec::new(),
+        legacy_status: "rejected".into(),
+        legacy_reason: reason.to_string(),
+        replaced_kit_paths: Vec::new(),
+    }
 }
 
 fn contact_update_rejected(reason: impl Into<String>) -> AbsorbReceipt {

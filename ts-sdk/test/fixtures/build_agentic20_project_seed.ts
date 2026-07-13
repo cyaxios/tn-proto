@@ -1,5 +1,5 @@
-// Mint a fresh ``Agentic20.project.tnpkg`` fixture for cross-language
-// project_seed round-trip tests.
+// Mint the legacy, intentionally unindexed ``Agentic20.project.tnpkg`` fixture
+// used by fail-closed project_seed migration tests.
 //
 // The original fixture under HEAD was a real dashboard-minted bundle
 // from `tn_proto_web/static/account/project_minter.js`, but the
@@ -7,7 +7,8 @@
 // injected into the zip bytes during some past transit step). We
 // mint a fresh equivalent here using only TS SDK primitives: stand up
 // a real btn ceremony in a tempdir, harvest the resulting tn.yaml +
-// keystore, then wrap into a signed project_seed manifest.
+// keystore, then wrap into a signed project_seed manifest without
+// ``body_sha256``.
 //
 // Run with:
 //
@@ -18,18 +19,21 @@
 // `python/tests/fixtures/`) so the byte-compare tests stay in sync.
 
 import { Buffer } from "node:buffer";
-import {
-  copyFileSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { DeviceKey, newManifest, signManifest, writeTnpkg } from "../../src/index.js";
+import {
+  type BodyContents,
+  DeviceKey,
+  type Manifest,
+  newManifest,
+  packTnpkg,
+  signManifest,
+  toWireDict,
+} from "../../src/index.js";
+import { canonicalize } from "../../src/core/canonical.js";
 import { Tn } from "../../src/tn.js";
 import { BtnPublisher } from "../../src/raw.js";
 
@@ -47,6 +51,22 @@ const PY_FIXTURE = resolve(
   "fixtures",
   "Agentic20.project.tnpkg",
 );
+
+/**
+ * Test-only legacy serializer. Production writers intentionally reject this
+ * absent-index shape; this fixture preserves it so secure absorb can prove it
+ * fails closed. Do not use this helper for newly produced packages.
+ */
+function writeLegacyUnindexedTnpkg(outPath: string, manifest: Manifest, body: BodyContents): void {
+  const entries = [
+    { name: "manifest.json", data: canonicalize(toWireDict(manifest, true)) },
+    ...Object.keys(body)
+      .sort()
+      .map((name) => ({ name, data: body[name]! })),
+  ];
+  const bytes = packTnpkg(entries, { mtime: new Date("2026-05-21T00:00:00.000Z") });
+  writeFileSync(outPath, Buffer.from(bytes));
+}
 
 function makeCeremony(): { yamlPath: string; tmpDir: string; deviceSeed: Uint8Array } {
   const dir = mkdtempSync(join(tmpdir(), "tn-agentic20-mint-"));
@@ -77,10 +97,7 @@ function makeCeremony(): { yamlPath: string; tmpDir: string; deviceSeed: Uint8Ar
     for (let i = 0; i < 32; i += 1) btnSeed[i] = (i * seedFactor + 19) & 0xff;
     const pub = new BtnPublisher(btnSeed);
     const kit = pub.mint();
-    writeFileSync(
-      join(keys, `${groupName}.btn.state`),
-      Buffer.from(pub.toBytes()),
-    );
+    writeFileSync(join(keys, `${groupName}.btn.state`), Buffer.from(pub.toBytes()));
     writeFileSync(join(keys, `${groupName}.btn.mykit`), Buffer.from(kit));
   }
 
@@ -139,18 +156,10 @@ async function main(): Promise<void> {
   const body: Record<string, Uint8Array> = {
     "body/tn.yaml": new Uint8Array(readFileSync(yamlPath)),
     "body/keys/local.private": new Uint8Array(deviceSeed),
-    "body/keys/local.public": new Uint8Array(
-      readFileSync(join(keysDir, "local.public")),
-    ),
-    "body/keys/index_master.key": new Uint8Array(
-      readFileSync(join(keysDir, "index_master.key")),
-    ),
-    "body/keys/default.btn.state": new Uint8Array(
-      readFileSync(join(keysDir, "default.btn.state")),
-    ),
-    "body/keys/default.btn.mykit": new Uint8Array(
-      readFileSync(join(keysDir, "default.btn.mykit")),
-    ),
+    "body/keys/local.public": new Uint8Array(readFileSync(join(keysDir, "local.public"))),
+    "body/keys/index_master.key": new Uint8Array(readFileSync(join(keysDir, "index_master.key"))),
+    "body/keys/default.btn.state": new Uint8Array(readFileSync(join(keysDir, "default.btn.state"))),
+    "body/keys/default.btn.mykit": new Uint8Array(readFileSync(join(keysDir, "default.btn.mykit"))),
     "body/keys/tn.agents.btn.state": new Uint8Array(
       readFileSync(join(keysDir, "tn.agents.btn.state")),
     ),
@@ -178,7 +187,7 @@ async function main(): Promise<void> {
   };
   signManifest(manifest, device);
 
-  writeTnpkg(TS_FIXTURE, manifest, body);
+  writeLegacyUnindexedTnpkg(TS_FIXTURE, manifest, body);
   // eslint-disable-next-line no-console
   console.log(`wrote ${TS_FIXTURE}`);
 

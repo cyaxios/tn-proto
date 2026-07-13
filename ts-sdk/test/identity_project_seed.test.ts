@@ -18,12 +18,28 @@
 
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as pathResolve } from "node:path";
 import { test } from "node:test";
 
-import { DeviceKey, newManifest, readTnpkg, signManifest, writeTnpkg } from "../src/index.js";
+import {
+  DeviceKey,
+  newManifest,
+  packTnpkg,
+  parseTnpkg,
+  readTnpkg,
+  signManifestWithBody,
+  writeTnpkg,
+} from "../src/index.js";
 import { Tn } from "../src/tn.js";
 import { NodeRuntime } from "../src/runtime/node_runtime.js";
 
@@ -67,7 +83,7 @@ function buildProjectSeedTnpkg(outPath: string, device: DeviceKey): string {
       ceremony_id: "synthetic_proj",
     },
   };
-  signManifest(manifest, device);
+  signManifestWithBody(manifest, body, device);
   return writeTnpkg(outPath, manifest, body);
 }
 
@@ -100,7 +116,7 @@ function buildIdentitySeedTnpkg(outPath: string, device: DeviceKey, seed: Uint8A
       nickname: null,
     },
   };
-  signManifest(manifest, device);
+  signManifestWithBody(manifest, body, device);
   return writeTnpkg(outPath, manifest, body);
 }
 
@@ -108,38 +124,21 @@ function buildIdentitySeedTnpkg(outPath: string, device: DeviceKey, seed: Uint8A
 // project_seed
 // ---------------------------------------------------------------------
 
-test("project_seed real-fixture round-trip via Tn.absorb in a fresh dir", async () => {
+test("legacy project_seed fixture without body index fails closed", async () => {
   if (!existsSync(FIXTURE)) {
     // Real dashboard-minted fixture not checked in for this run.
     return;
   }
+  const { manifest } = readTnpkg(FIXTURE);
+  assert.equal(
+    manifest.bodySha256,
+    undefined,
+    "legacy fixture must remain intentionally unindexed",
+  );
   const dir = mkTempDir("tn-bootstrap-real-");
   try {
-    const tn = await Tn.absorb(FIXTURE, { cwd: dir });
-    const receipt = tn.lastAbsorbReceipt!;
-    assert.equal(receipt.kind, "project_seed");
-    assert.equal(
-      receipt.rejectedReason,
-      undefined,
-      `unexpected rejection: ${receipt.rejectedReason}`,
-    );
-    assert.ok(receipt.acceptedCount > 0);
-
-    // tn.yaml landed.
-    const yamlPath = join(dir, "tn.yaml");
-    assert.ok(existsSync(yamlPath));
-    const { body } = readTnpkg(FIXTURE);
-    assert.deepEqual(Buffer.from(readFileSync(yamlPath)), Buffer.from(body.get("body/tn.yaml")!));
-
-    // Every body/keys/<rel> entry exists in the synthetic keystore.
-    for (const [name, data] of body) {
-      if (!name.startsWith("body/keys/")) continue;
-      const rel = name.slice("body/keys/".length);
-      const dest = join(dir, ".tn", "tn", "keys", rel);
-      assert.ok(existsSync(dest), `${dest} should be installed`);
-      assert.deepEqual(Buffer.from(readFileSync(dest)), Buffer.from(data));
-    }
-    await tn.close();
+    await assert.rejects(() => Tn.absorb(FIXTURE, { cwd: dir }), /body_digest_mismatch/);
+    assert.deepEqual(readdirSync(dir), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -209,15 +208,17 @@ test("project_seed rejects swapped local.private (tamper guard)", async () => {
     buildProjectSeedTnpkg(pkgPath, device);
 
     // Re-write the zip with a swapped local.private.
-    const { manifest, body } = readTnpkg(pkgPath);
-    body.set("body/keys/local.private", otherSeed);
-    const bodyObj: Record<string, Uint8Array> = {};
-    for (const [k, v] of body) bodyObj[k] = v;
-    writeTnpkg(pkgPath, manifest, bodyObj);
+    const entries = parseTnpkg(new Uint8Array(readFileSync(pkgPath)));
+    const tampered = packTnpkg(
+      entries.map((entry) =>
+        entry.name === "body/keys/local.private" ? { name: entry.name, data: otherSeed } : entry,
+      ),
+    );
+    writeFileSync(pkgPath, tampered);
 
     const work = join(dir, "fresh");
     mkdirSync(work, { recursive: true });
-    await assert.rejects(() => Tn.absorb(pkgPath, { cwd: work }), /integrity/i);
+    await assert.rejects(() => Tn.absorb(pkgPath, { cwd: work }), /body_digest_mismatch/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

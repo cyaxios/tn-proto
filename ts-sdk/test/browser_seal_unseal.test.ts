@@ -105,6 +105,7 @@ test("a node-sealed jwe object opens in the browser as a bag recipient", async (
     await node.admin.addRecipient("default", {
       recipientDid: "did:key:z6MkBrowserBagRecipient00000000000000000000",
       publicKey: pair.publicKey,
+      unsafeUnverified: true, // raw DID-plus-key path (no enrollment proof)
     });
     const sealed = await node.seal("obj.kyc.v1", { body: "sealed for the browser" });
 

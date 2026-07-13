@@ -256,8 +256,8 @@ function _bagKitSource(bag: BrowserKeyBag): UnsealKitSource {
 }
 
 /** Seal one group's plaintext from browser storage material. Same
- * failure texts as the Node `_sealGroup` so the skip-warning reads the
- * same in both entries. */
+ * failure texts as the Node `_sealGroup` so errors propagate consistently
+ * from both entry points. */
 async function _sealGroupBrowser(
   storage: JsStorageCallbacks,
   keystorePath: string,
@@ -327,7 +327,6 @@ export async function sealWithBrowserRuntime(
     signB64: (bytes) => String(signatureB64(signMessage(seed, bytes))),
     sealGroup: (gname, cipher, plaintext, aad) =>
       _sealGroupBrowser(rt.storage, ks, gname, cipher, plaintext, aad),
-    warn: (message) => console.warn(message),
     // The runtime-level verb (not Tn.info) so the receipt carries no
     // context-stack fields — same as the Node adapter, which routes
     // through rt.emitAsync directly.

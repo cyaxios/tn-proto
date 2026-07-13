@@ -19,9 +19,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-import tn  # noqa: E402
-import tn.reader  # noqa: E402
-from tn import _hibe  # noqa: E402
+import tn
+import tn.reader
+from tn import _hibe
+from tn.recipient_seal import recipient_key_is_resolvable
 
 
 def h(b: bytes) -> str:
@@ -43,7 +44,10 @@ def part1_key_model() -> None:
     mpk, msk = _hibe.setup(2)  # max_depth=2: paths up to 2 labels deep
     print(f"mpk (master public key, SHAREABLE) : {h(mpk)}")
     print(f"msk (master secret, AUTHORITY ONLY): {h(msk)}")
-    print(f"mpk fingerprint (what a manifest pins): {_hibe.mpk_fingerprint(mpk).hex()}")
+    print(
+        "mpk fingerprint (byte identifier only): "
+        f"{_hibe.mpk_fingerprint(mpk).hex()}"
+    )
 
     # From the msk the authority mints a reader key (sk) for an IDENTITY
     # PATH. The path is just a string; there is no per-reader key exchange.
@@ -104,6 +108,15 @@ def part3_product_workflow() -> None:
     ws = Path(tempfile.mkdtemp(prefix="hibe_howto_"))
     authority_yaml = ws / "authority" / "tn.yaml"
     authority_log = ws / "authority" / "log.ndjson"
+    reader_yaml = ws / "alice" / "tn.yaml"
+    reader_log = ws / "alice" / "log.ndjson"
+
+    # Alice creates her device identity first and authenticates this complete
+    # Ed25519 did:key to the authority out of band.
+    tn.init(reader_yaml, log_path=reader_log)
+    alice_did = tn.current_config().device.device_identity
+    assert recipient_key_is_resolvable(alice_did)
+    tn.flush_and_close()
 
     # 1. The authority starts a hibe ceremony. It becomes its OWN authority:
     #    Setup runs, the msk stays in this keystore, nothing tn-hosted holds
@@ -120,23 +133,23 @@ def part3_product_workflow() -> None:
     print("logged 2 entries under the 'default' hibe group")
 
     # 3. Grant a reader. This mints their key and packages it as a .tnpkg
-    #    kit — the ONLY thing that crosses the wire to the reader.
+    #    recipient-sealed kit. The HIBE sk inside remains a bearer capability.
     kit = ws / "alice.tnpkg"
-    tn.admin.grant_reader("default", reader_did="did:key:z6MkAlice", out_path=kit)
+    tn.admin.grant_reader("default", reader_did=alice_did, out_path=kit)
     print(f"granted reader; kit written to: {kit.name}")
 
     import zipfile
 
     with zipfile.ZipFile(kit) as zf:
-        names = sorted(n.split("/")[-1] for n in zf.namelist() if n.endswith(".hibe.mpk") or n.endswith(".hibe.sk") or n.endswith(".hibe.idpath") or n.endswith(".hibe.msk"))
-    print(f"kit carries: {names}")
+        body_names = sorted(n for n in zf.namelist() if n.startswith("body/"))
+    assert body_names == ["body/encrypted.bin"]
+    print("kit body is recipient-sealed: ['encrypted.bin']")
     print("  (note: NO .hibe.msk — the master secret never leaves the authority)")
     tn.flush_and_close()
 
     # 4. The reader is a separate person with their own ceremony. They
     #    absorb the kit, and can now read the authority's log.
-    reader_yaml = ws / "alice" / "tn.yaml"
-    tn.init(reader_yaml, log_path=ws / "alice" / "log.ndjson")
+    tn.init(reader_yaml, log_path=reader_log)
     reader_cfg = tn.current_config()
     receipt = tn.absorb(kit)
     print(f"\nreader absorbed the kit: accepted={receipt.accepted_count}")
@@ -160,22 +173,36 @@ def part4_remove_reader() -> None:
     a_yaml = ws / "authority" / "tn.yaml"
     a_log = ws / "authority" / "log.ndjson"
 
+    alice_yaml = ws / "alice" / "tn.yaml"
+    alice_log = ws / "alice" / "log.ndjson"
+    tn.init(alice_yaml, log_path=alice_log)
+    alice_did = tn.current_config().device.device_identity
+    assert recipient_key_is_resolvable(alice_did)
+    tn.flush_and_close()
+
+    bob_yaml = ws / "bob" / "tn.yaml"
+    bob_log = ws / "bob" / "log.ndjson"
+    tn.init(bob_yaml, log_path=bob_log)
+    bob_did = tn.current_config().device.device_identity
+    assert recipient_key_is_resolvable(bob_did)
+    tn.flush_and_close()
+
     tn.init(a_yaml, log_path=a_log, cipher="hibe")
     tn.info("memo", text="visible to both readers")
     alice_kit, bob_kit = ws / "alice.tnpkg", ws / "bob.tnpkg"
-    tn.admin.grant_reader("default", reader_did="did:key:z6MkAlice", out_path=alice_kit)
-    tn.admin.grant_reader("default", reader_did="did:key:z6MkBob", out_path=bob_kit)
+    tn.admin.grant_reader("default", reader_did=alice_did, out_path=alice_kit)
+    tn.admin.grant_reader("default", reader_did=bob_did, out_path=bob_kit)
     print("granted alice and bob")
 
     # Remove bob. The path rotates and every SURVIVOR gets a re-issued kit.
-    res = tn.admin.revoke_reader("default", "did:key:z6MkBob", out_dir=ws / "regrant")
+    res = tn.admin.revoke_reader("default", bob_did, out_dir=ws / "regrant")
     print(f"revoked bob; new sealing path = {res.new_path!r}")
-    print(f"survivors re-kitted: {res.remaining}")
+    print(f"survivors re-kitted: {len(res.remaining)}")
     tn.info("memo", text="sealed AFTER bob was removed")
     tn.flush_and_close()
 
     # Bob keeps what he could already read, loses everything after.
-    tn.init(ws / "bob" / "tn.yaml", log_path=ws / "bob" / "log.ndjson")
+    tn.init(bob_yaml, log_path=bob_log)
     bob_ks = tn.current_config().keystore
     tn.absorb(bob_kit)
     tn.flush_and_close()
@@ -183,7 +210,7 @@ def part4_remove_reader() -> None:
         e["envelope"]["sequence"]: e["plaintext"]["default"]
         for e in tn.reader.read_as_recipient(a_log, bob_ks, group="default")
     }
-    print(f"\nbob's view after removal:")
+    print("\nbob's view after removal:")
     for seq, body in sorted(bob_sees.items()):
         shown = body.get("text", body)
         print(f"  seq {seq}: {shown}")

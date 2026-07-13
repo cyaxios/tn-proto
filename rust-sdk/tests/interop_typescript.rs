@@ -37,7 +37,7 @@ await tn.close();
     let tn = Tn::init(yaml_path.trim())?;
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let entry = common::find_event(&entries, "ts.rust_sdk_interop.created");
     assert_eq!(
@@ -771,7 +771,7 @@ await tn.close();
 
     let entries = consumer.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let absorbed = common::find_event(&entries, "tn.enrolment.absorbed");
     assert_eq!(

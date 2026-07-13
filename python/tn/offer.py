@@ -4,6 +4,10 @@ Generates an X25519 keypair for this party (if absent), emits a signed
 offer package addressed to a publisher_did. The publisher absorbs the
 package and wires the recipient's pub into their JWE group's
 recipients JSON, enabling the recipient to decrypt future entries.
+
+The package signature is self-consistent transport integrity. A publisher
+must separately authenticate that the asserted recipient DID owns the signing
+key and that the signed offer binds this X25519 enrollment before admitting it.
 """
 
 from __future__ import annotations
@@ -13,20 +17,20 @@ import base64
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from ._keystore_backend import atomic_write_bytes
 from .compile import _now_iso, _signing_key, emit_to_outbox
 from .config import LoadedConfig
 from .packaging import Package, sign
 
 
 def _ensure_mykey(cfg: LoadedConfig, group: str) -> bytes:
-    """Return recipient X25519 pub for `group`. Generate + persist if absent."""
+    """Return the reader X25519 pub, atomically persisting its secret if absent."""
     mykey_path = cfg.keystore / f"{group}.jwe.mykey"
     if mykey_path.exists():
         sk = X25519PrivateKey.from_private_bytes(mykey_path.read_bytes())
     else:
         sk = X25519PrivateKey.generate()
-        cfg.keystore.mkdir(parents=True, exist_ok=True)
-        mykey_path.write_bytes(sk.private_bytes_raw())
+        atomic_write_bytes(mykey_path, sk.private_bytes_raw())
     return sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
 

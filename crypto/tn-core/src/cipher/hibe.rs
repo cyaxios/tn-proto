@@ -176,15 +176,28 @@ mod real {
     }
 
     fn add_candidate(
+        pp: &PublicParams,
         out: &mut Vec<PrivateKey>,
         seen: &mut HashSet<String>,
         sk: PrivateKey,
     ) -> Result<()> {
         let key_path = path_of(&sk)?;
         if seen.insert(key_path) {
+            validate_key_binding(pp, &sk)?;
             out.push(sk);
         }
         Ok(())
+    }
+
+    fn validate_key_binding(pp: &PublicParams, sk: &PrivateKey) -> Result<()> {
+        const PROBE: &[u8] = b"tn.hibe.reader-key-binding.v1";
+        let sealed = seal_with_aad(pp, sk.identity(), PROBE, PROBE, OsRng).map_err(hibe_err)?;
+        if open_with_aad(pp, sk, &sealed, PROBE).is_ok_and(|opened| opened == PROBE) {
+            return Ok(());
+        }
+        Err(Error::InvalidConfig(
+            "HIBE reader key is not bound to the configured master public key".into(),
+        ))
     }
 
     /// One hibe group's key material, loaded from the keystore.
@@ -193,15 +206,12 @@ mod real {
     /// group's identity path, an optional held reader key, an optional
     /// master secret (present only in the authority's own keystore), the
     /// prior sealing paths from rotations, and superseded reader keys kept
-    /// so a survivor still opens pre-rotation entries. Secret bytes are
-    /// parsed lazily on decrypt.
+    /// so a survivor still opens pre-rotation entries. Reader material is
+    /// parsed, path-scoped, and bound to the MPK during construction.
     pub struct HibeCipher {
         pp: PublicParams,
         id_path: String,
-        sk: Option<Vec<u8>>,
-        msk: Option<Vec<u8>>,
-        prior_paths: Vec<String>,
-        prior_sks: Vec<Vec<u8>>,
+        decrypt_keys: Vec<PrivateKey>,
     }
 
     impl HibeCipher {
@@ -221,59 +231,84 @@ mod real {
             for prior_path in &prior_paths {
                 validate_identity_path(prior_path)?;
             }
+            let decrypt_keys = build_candidate_keys(
+                &pp,
+                id_path,
+                sk.as_deref(),
+                msk.as_deref(),
+                &prior_paths,
+                &prior_sks,
+            )?;
             Ok(Self {
                 pp,
                 id_path: id_path.to_string(),
-                sk,
-                msk,
-                prior_paths,
-                prior_sks,
+                decrypt_keys,
             })
         }
+    }
 
-        /// Decryption-key candidates, most likely first, without minting the
-        /// same path twice. Mirrors `HibeGroupCipher._candidate_keys`: try
-        /// held keys directly, derive ancestor keys to active and prior
-        /// sealing paths, then mint exact-path keys when this keystore is the
-        /// authority.
-        fn candidate_keys(&self) -> Result<Vec<PrivateKey>> {
-            let mut out: Vec<PrivateKey> = Vec::new();
-            let mut seen: HashSet<String> = HashSet::new();
-            let mut target_paths = vec![self.id_path.clone()];
-            target_paths.extend(self.prior_paths.iter().cloned());
-
-            if let Some(sk_bytes) = &self.sk {
-                let sk = PrivateKey::from_bytes(sk_bytes).map_err(hibe_err)?;
-                add_candidate(&mut out, &mut seen, sk.clone())?;
-                for target_path in &target_paths {
-                    if let Some(derived) = derive_from_held(&self.pp, &sk, target_path)? {
-                        add_candidate(&mut out, &mut seen, derived)?;
-                    }
-                }
-            }
-
-            for old in &self.prior_sks {
-                let sk = PrivateKey::from_bytes(old).map_err(hibe_err)?;
-                add_candidate(&mut out, &mut seen, sk.clone())?;
-                for target_path in &target_paths {
-                    if let Some(derived) = derive_from_held(&self.pp, &sk, target_path)? {
-                        add_candidate(&mut out, &mut seen, derived)?;
-                    }
-                }
-            }
-
-            if let Some(msk_bytes) = &self.msk {
-                let msk = MasterKey::from_bytes(msk_bytes).map_err(hibe_err)?;
-                for p in target_paths {
-                    if seen.insert(p.clone()) {
-                        let id = validate_identity_path(&p)?;
-                        out.push(keygen(&self.pp, &msk, &id, OsRng).map_err(hibe_err)?);
-                    }
-                }
-            }
-
-            Ok(out)
+    fn build_candidate_keys(
+        pp: &PublicParams,
+        id_path: &str,
+        sk: Option<&[u8]>,
+        msk: Option<&[u8]>,
+        prior_paths: &[String],
+        prior_sks: &[Vec<u8>],
+    ) -> Result<Vec<PrivateKey>> {
+        let targets: Vec<&str> = std::iter::once(id_path)
+            .chain(prior_paths.iter().map(String::as_str))
+            .collect();
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        if let Some(bytes) = sk {
+            add_held_candidates(pp, bytes, &targets, &mut out, &mut seen)?;
         }
+        for bytes in prior_sks {
+            add_held_candidates(pp, bytes, &targets, &mut out, &mut seen)?;
+        }
+        if let Some(bytes) = msk {
+            add_authority_candidates(pp, bytes, &targets, &mut out, &mut seen)?;
+        }
+        Ok(out)
+    }
+
+    fn add_held_candidates(
+        pp: &PublicParams,
+        bytes: &[u8],
+        targets: &[&str],
+        out: &mut Vec<PrivateKey>,
+        seen: &mut HashSet<String>,
+    ) -> Result<()> {
+        let held = PrivateKey::from_bytes(bytes).map_err(hibe_err)?;
+        for target in targets {
+            if let Some(candidate) = derive_from_held(pp, &held, target)? {
+                add_candidate(pp, out, seen, candidate)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn add_authority_candidates(
+        pp: &PublicParams,
+        bytes: &[u8],
+        targets: &[&str],
+        out: &mut Vec<PrivateKey>,
+        seen: &mut HashSet<String>,
+    ) -> Result<()> {
+        let msk = MasterKey::from_bytes(bytes).map_err(hibe_err)?;
+        for target in targets {
+            if seen.contains(*target) {
+                continue;
+            }
+            let id = validate_identity_path(target)?;
+            add_candidate(
+                pp,
+                out,
+                seen,
+                keygen(pp, &msk, &id, OsRng).map_err(hibe_err)?,
+            )?;
+        }
+        Ok(())
     }
 
     impl crate::cipher::GroupCipher for HibeCipher {
@@ -291,13 +326,12 @@ mod real {
         }
 
         fn decrypt_with_aad(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-            let candidates = self.candidate_keys()?;
-            if candidates.is_empty() {
+            if self.decrypt_keys.is_empty() {
                 return Err(Error::NotEntitled {
                     group: "hibe".into(),
                 });
             }
-            for sk in &candidates {
+            for sk in &self.decrypt_keys {
                 match open_with_aad(&self.pp, sk, ciphertext, aad) {
                     Ok(pt) => return Ok(pt),
                     Err(HibeError::Unwrap) => continue,
@@ -354,7 +388,10 @@ mod path_test {
             normalize_hibe_path("team/policy-a", "id_path", false).unwrap(),
             "team/policy-a"
         );
-        assert_eq!(normalize_hibe_path("solo", "id_path", false).unwrap(), "solo");
+        assert_eq!(
+            normalize_hibe_path("solo", "id_path", false).unwrap(),
+            "solo"
+        );
 
         // Root only with the explicit flag — same message Python raises.
         let err = normalize_hibe_path("", "id_path", false).unwrap_err();
@@ -364,7 +401,14 @@ mod path_test {
 
         // The Python-parity rejection set (test_hibe_boundary.py's
         // ambiguous-path parametrization).
-        for bad in ["/", "team//reader", "team/reader/", " team/reader", "team/reader ", "team/\nreader"] {
+        for bad in [
+            "/",
+            "team//reader",
+            "team/reader/",
+            " team/reader",
+            "team/reader ",
+            "team/\nreader",
+        ] {
             let err = normalize_hibe_path(bad, "id_path", false).unwrap_err();
             assert!(err.to_string().contains("HIBE: id_path"), "{bad:?}: {err}");
         }
@@ -479,5 +523,77 @@ mod test {
 
         assert_eq!(reader.decrypt(&old_blob).unwrap(), b"old body");
         assert_eq!(reader.decrypt(&new_blob).unwrap(), b"new body");
+    }
+
+    #[test]
+    fn ancestor_key_is_scoped_to_the_configured_target_path() {
+        let (pp, msk) = setup(2, OsRng).unwrap();
+        let mpk = pp.to_bytes();
+        let ancestor_sk = keygen(&pp, &msk, &Identity::from_str_path("reader"), OsRng)
+            .unwrap()
+            .to_bytes();
+        let reader = HibeCipher::new(
+            &mpk,
+            "reader/policy",
+            Some(ancestor_sk),
+            None,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let ancestor_writer = HibeCipher::new(&mpk, "reader", None, None, vec![], vec![]).unwrap();
+        let hostile = ancestor_writer
+            .encrypt(b"outside configured scope")
+            .unwrap();
+
+        assert!(reader.decrypt(&hostile).is_err());
+    }
+
+    #[test]
+    fn malformed_reader_key_is_rejected_during_construction() {
+        let (pp, _) = setup(2, OsRng).unwrap();
+        let result = HibeCipher::new(
+            &pp.to_bytes(),
+            "reader/policy",
+            Some(vec![0x55; 17]),
+            None,
+            vec![],
+            vec![],
+        );
+        let error = match result {
+            Ok(_) => panic!("reader material must be parsed before scanning records"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("malformed PrivateKey"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn wrong_authority_reader_key_is_rejected_during_construction() {
+        let (pp, _) = setup(2, OsRng).unwrap();
+        let (other_pp, other_msk) = setup(2, OsRng).unwrap();
+        let wrong = keygen(
+            &other_pp,
+            &other_msk,
+            &Identity::from_str_path("reader/policy"),
+            OsRng,
+        )
+        .unwrap()
+        .to_bytes();
+        let result = HibeCipher::new(
+            &pp.to_bytes(),
+            "reader/policy",
+            Some(wrong),
+            None,
+            vec![],
+            vec![],
+        );
+        let error = match result {
+            Ok(_) => panic!("reader key from another authority must fail at load time"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("master public key"), "{error}");
     }
 }

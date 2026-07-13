@@ -254,3 +254,57 @@ fn emit_rejects_catalogued_admin_event_with_bad_shape() {
         "error should mention schema or missing required field; got: {msg}",
     );
 }
+
+#[test]
+fn unsafe_operation_emit_serializes_and_replay_validates() {
+    let td = tempfile::tempdir().unwrap();
+    let cer = setup_minimal_btn_ceremony(td.path());
+
+    // Keep the five notice fields and runtime run identifier visible in the
+    // emitted envelope so this test can exercise the actual replay reducer.
+    let yaml = std::fs::read_to_string(&cer.yaml_path).unwrap();
+    let yaml = yaml.replace(
+        "public_fields: []",
+        "public_fields: [artifact_digest, group, operation, relaxations, run_id, subject_did]",
+    );
+    std::fs::write(&cer.yaml_path, yaml).unwrap();
+
+    let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
+    let fields = serde_json::json!({
+        "artifact_digest": null,
+        "group": null,
+        "operation": "read",
+        "relaxations": ["verification_disabled"],
+        "subject_did": null,
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+
+    let line = rt
+        .emit_with_override_sign_returning_line(
+            "warning",
+            "tn.security.unsafe_operation",
+            fields,
+            Some("2026-07-11T12:00:00.000000Z"),
+            Some("0198a000-0000-7000-8000-000000000001"),
+            None,
+        )
+        .unwrap()
+        .expect("warning-level event is not filtered");
+
+    let envelope: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(envelope["event_type"], "tn.security.unsafe_operation");
+    assert!(envelope["run_id"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+
+    // A serialized round trip is the replay boundary used by NDJSON readers.
+    let serialized = serde_json::to_string(&envelope).unwrap();
+    let replayed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+    assert!(matches!(
+        tn_core::admin_reduce::reduce(&replayed).unwrap(),
+        tn_core::admin_reduce::StateDelta::Unknown { event_type }
+            if event_type == "tn.security.unsafe_operation"
+    ));
+}

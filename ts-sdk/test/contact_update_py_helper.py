@@ -69,7 +69,7 @@ def _do_produce(out_path: str, yaml_path: str, json_body: str) -> int:
         as_of=export_mod._now_iso(),
         scope="admin",
     )
-    manifest.sign(cfg.device.signing_key())
+    tnpkg.sign_manifest_with_body(manifest, body, cfg.device.signing_key())
     tnpkg._write_tnpkg(Path(out_path), manifest, body)
 
     _write(

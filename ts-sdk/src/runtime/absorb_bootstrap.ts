@@ -25,7 +25,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { DeviceKey } from "../core/signing.js";
 import { isManifestSignatureValid, toWireDict, type Manifest } from "../core/tnpkg.js";
-import { readTnpkg } from "../tnpkg_io.js";
+import { readTnpkg, readTnpkgVerified } from "../tnpkg_io.js";
 import { decryptBodyBlob } from "../core/body_encryption.js";
 import { manifestAadForWrap, unsealBekFromWrap, UnsealError } from "../core/recipient_seal.js";
 import type { AbsorbReceipt } from "../core/results.js";
@@ -217,7 +217,7 @@ export function absorbBootstrap(
   opts: { cwd?: string; seed?: Uint8Array } = {},
 ): AbsorbReceipt {
   const cwd = pathResolve(opts.cwd ?? process.cwd());
-  const { manifest, body } = readTnpkg(source);
+  const { manifest, body } = readTnpkgVerified(source);
 
   if (!isManifestSignatureValid(manifest)) {
     return {
@@ -377,7 +377,7 @@ async function _unsealFirst(
  *
  * Flow:
  *
- * 1. `readTnpkg(source)` + signature verify (same as {@link absorbBootstrap}).
+ * 1. `readTnpkgVerified(source)` verifies signature + exact body index before dispatch.
  * 2. Pick the wrap whose `recipient_identity` matches the DID derived
  *    from `opts.seed`.
  * 3. {@link unsealBekFromWrap}(wrap, seed, aad) → BEK.
@@ -430,13 +430,14 @@ export async function absorbSealedBootstrap(
   opts: { seed: Uint8Array; cwd?: string },
 ): Promise<AbsorbReceipt> {
   const cwd = pathResolve(opts.cwd ?? process.cwd());
-  // readTnpkg throws on a malformed zip / missing manifest. Wrap so
+  // readTnpkgVerified throws on a malformed zip, trust failure, or missing
+  // manifest. Wrap so
   // callers get a populated rejectedReason instead — keeps the contract
   // uniform with the other rejection paths.
   let manifest: Manifest;
   let body: Map<string, Uint8Array>;
   try {
-    const parsed = readTnpkg(source);
+    const parsed = readTnpkgVerified(source);
     manifest = parsed.manifest;
     body = parsed.body;
   } catch (err) {

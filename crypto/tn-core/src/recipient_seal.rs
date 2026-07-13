@@ -19,7 +19,6 @@ use crate::canonical::canonical_bytes;
 use crate::tnpkg::Manifest;
 use crate::{Error, Result};
 
-const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
 const WRAP_FRAME: &str = "tn-sealed-box-v1";
 const WRAP_HKDF_INFO: &[u8] = b"tn-kit-seal-v1";
 
@@ -33,7 +32,7 @@ pub(crate) fn build_recipient_wraps(
     let aad = manifest_aad_for_wrap(manifest)?;
     let mut wraps = Vec::with_capacity(recipient_dids.len());
     for did in &recipient_dids {
-        wraps.push(seal_bek_for_recipient(bek, did, &aad)?);
+        wraps.push(seal_key_for_recipient(bek, did, &aad)?);
     }
     Ok(wraps)
 }
@@ -104,7 +103,7 @@ pub(crate) fn maybe_unseal_recipient_body(
     let aad = manifest_aad_for_wrap(manifest)?;
     let mut last_err = String::new();
     for wrap in wraps.candidates {
-        match unseal_bek_from_wrap(wrap, device_seed, &aad) {
+        match unseal_key_from_wrap(wrap, device_seed, &aad) {
             Ok(bek) => {
                 let encrypted = body
                     .get("body/encrypted.bin")
@@ -139,7 +138,11 @@ pub(crate) fn maybe_unseal_recipient_body(
     )))
 }
 
-fn seal_bek_for_recipient(bek: &[u8; 32], recipient_did: &str, aad: &[u8]) -> Result<Value> {
+pub(crate) fn seal_key_for_recipient(
+    key: &[u8; 32],
+    recipient_did: &str,
+    aad: &[u8],
+) -> Result<Value> {
     let recipient_ed_pub = did_key_to_ed25519_pub(recipient_did)?;
     let recipient_x_pub = ed25519_pub_to_x25519_pub(&recipient_ed_pub)?;
 
@@ -166,7 +169,7 @@ fn seal_bek_for_recipient(bek: &[u8; 32], recipient_did: &str, aad: &[u8]) -> Re
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
-                msg: bek.as_slice(),
+                msg: key.as_slice(),
                 aad,
             },
         )
@@ -193,7 +196,7 @@ fn seal_bek_for_recipient(bek: &[u8; 32], recipient_did: &str, aad: &[u8]) -> Re
     Ok(Value::Object(out))
 }
 
-fn unseal_bek_from_wrap(
+pub(crate) fn unseal_key_from_wrap(
     wrap: &Map<String, Value>,
     device_seed: &[u8; 32],
     aad: &[u8],
@@ -244,38 +247,16 @@ fn unseal_bek_from_wrap(
         .map_err(|_| Error::Internal("unwrapped BEK length was validated above".into()))
 }
 
+/// Resolve a recipient DID through the one strict parser in
+/// [`crate::trust::parse_ed25519_did_key`], so recipient sealing admits
+/// exactly the identities the enrollment trust boundary admits.
 fn did_key_to_ed25519_pub(did: &str) -> Result<[u8; 32]> {
-    let payload = did.strip_prefix("did:key:z").ok_or_else(|| {
+    crate::trust::parse_ed25519_did_key(did).map_err(|error| {
         Error::InvalidConfig(format!(
-            "recipient sealing requires a did:key:z Ed25519 recipient DID; got {did:?}"
+            "recipient sealing requires a complete Ed25519 did:key recipient; got {did:?}: {}",
+            error.detail
         ))
-    })?;
-    let decoded = bs58::decode(payload).into_vec().map_err(|e| {
-        Error::InvalidConfig(format!("recipient DID {did:?} is not valid base58btc: {e}"))
-    })?;
-    if decoded.len() < 2 {
-        return Err(Error::InvalidConfig(format!(
-            "recipient DID {did:?} payload is too short"
-        )));
-    }
-    let prefix = [decoded[0], decoded[1]];
-    if prefix != ED25519_MULTICODEC {
-        return Err(Error::InvalidConfig(format!(
-            "recipient sealing requires an Ed25519 did:key recipient; got multicodec prefix \
-             [{}, {}] for {did:?}",
-            prefix[0], prefix[1]
-        )));
-    }
-    let pub_bytes = &decoded[2..];
-    if pub_bytes.len() != 32 {
-        return Err(Error::InvalidConfig(format!(
-            "recipient DID {did:?} carries a {}-byte Ed25519 public key; expected 32 bytes",
-            pub_bytes.len()
-        )));
-    }
-    pub_bytes
-        .try_into()
-        .map_err(|_| Error::Internal("recipient DID public key length was validated above".into()))
+    })
 }
 
 fn ed25519_pub_to_x25519_pub(ed_pub: &[u8; 32]) -> Result<MontgomeryPoint> {
@@ -381,4 +362,24 @@ fn wrap_field_b64_12(wrap: &Map<String, Value>, field: &'static str) -> Result<[
     bytes
         .try_into()
         .map_err(|_| Error::Internal("12-byte recipient wrap field validated above".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_recipient_wrap_opens_only_for_the_named_device() {
+        let reader = crate::DeviceKey::from_private_bytes(&[7_u8; 32]).unwrap();
+        let stranger = crate::DeviceKey::from_private_bytes(&[8_u8; 32]).unwrap();
+        let key = [9_u8; 32];
+        let aad = b"tn-jwe-frame";
+        let value = seal_key_for_recipient(&key, reader.did(), aad).unwrap();
+        let wrap = value.as_object().unwrap();
+        assert_eq!(
+            unseal_key_from_wrap(wrap, &reader.private_bytes(), aad).unwrap(),
+            key
+        );
+        assert!(unseal_key_from_wrap(wrap, &stranger.private_bytes(), aad).is_err());
+    }
 }

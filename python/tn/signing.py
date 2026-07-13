@@ -215,14 +215,22 @@ class DeviceKey:
               interop with federated identity systems that standardised on
               secp256k1 (notably ATProto). TN itself signs only Ed25519.
         """
-        if not did.startswith("did:key:z"):
+        if not isinstance(did, str) or not did.startswith("did:key:z"):
             return False
-        multicodec = _b58decode(did[len("did:key:z") :])
-        prefix, pub_bytes = multicodec[:2], multicodec[2:]
+        # Enrollment ceremonies use this strict decoder directly.  Keep this
+        # legacy verifier boolean and multi-curve by falling back to the
+        # secp256k1 path when the DID is not a valid Ed25519 did:key.
+        from .trust import parse_ed25519_did_key
 
-        if prefix == _ED25519_MULTICODEC:
-            if len(pub_bytes) != 32:
+        try:
+            pub_bytes = parse_ed25519_did_key(did)
+        except ValueError:
+            try:
+                multicodec = _b58decode(did[len("did:key:z") :])
+            except (TypeError, ValueError):
                 return False
+            prefix, pub_bytes = multicodec[:2], multicodec[2:]
+        else:
             try:
                 Ed25519PublicKey.from_public_bytes(pub_bytes).verify(signature, message)
                 return True

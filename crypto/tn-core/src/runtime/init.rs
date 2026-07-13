@@ -253,7 +253,7 @@ impl Runtime {
         // Call site 4 (inside the loop): per-group cipher construction
         // reads `<group>.btn.state` / `<group>.btn.mykit` through storage.
         let (groups, btn_admin, btn_mykit) =
-            build_group_states(&cfg, &master_index_key, &keystore, &storage)?;
+            build_group_states(&cfg, &master_index_key, &keystore, &storage, &device)?;
 
         // Honor `logs.path` from the yaml. Relative paths resolve against
         // the yaml directory; absolute paths are used as-is. Default is
@@ -644,6 +644,11 @@ impl Runtime {
     /// This runtime's `did:key:z…`.
     pub fn did(&self) -> &str {
         self.device.did()
+    }
+
+    /// Identifier stamped on events emitted by this runtime instance.
+    pub fn run_id(&self) -> &str {
+        &self.run_id
     }
 
     /// Path to the main ndjson log.

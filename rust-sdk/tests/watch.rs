@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::time::{Duration, Instant};
-use tn_proto::{PollingWatchOptions, Tn, WatchOptions, WatchStart};
+use tn_core::runtime::{canonical_file_source_id, CursorKind};
+use tn_proto::{PollingWatchOptions, ReadOptions, Tn, TnProjectOptions, WatchOptions, WatchStart};
 
 #[test]
 fn watch_latest_polls_entries_emitted_after_start() -> tn_proto::Result<()> {
@@ -253,8 +254,15 @@ fn watch_resets_cursor_when_read_view_shrinks() -> tn_proto::Result<()> {
     tn.info("watch.cursor.one", json!({ "item": 1 }))?;
     tn.info("watch.cursor.two", json!({ "item": 2 }))?;
 
+    // The emit-side chain keeps pointing at the pre-truncation tip, so a
+    // row appended after truncation cannot chain-verify; the explicit
+    // Disabled escape hatch keeps this test about cursor mechanics.
     let mut watch = tn.watch(WatchOptions {
         start: WatchStart::Beginning,
+        read: ReadOptions {
+            verify: false,
+            ..ReadOptions::default()
+        },
         ..WatchOptions::default()
     })?;
     assert!(!watch.poll()?.is_empty());
@@ -266,18 +274,60 @@ fn watch_resets_cursor_when_read_view_shrinks() -> tn_proto::Result<()> {
     let entries = watch.poll()?;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].event_type(), Some("watch.cursor.after_truncate"));
-    assert_eq!(watch.cursor(), 1);
 
     Ok(())
 }
 
 #[test]
-fn watch_forwards_read_options_to_read() -> tn_proto::Result<()> {
-    let tn = Tn::ephemeral()?;
+fn watch_resets_a_relative_log_path_with_the_core_source_id() -> tn_proto::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let workspace = tempfile::Builder::new()
+        .prefix("tn-watch-relative-")
+        .tempdir_in(&cwd)?;
+    let created = Tn::init_project_with_options(
+        "relative-watch",
+        TnProjectOptions {
+            project_dir: Some(workspace.path().to_path_buf()),
+            ..TnProjectOptions::default()
+        },
+    )?;
+    let yaml_path = created.yaml_path().to_path_buf();
+    created.close()?;
+    let relative_yaml = yaml_path
+        .strip_prefix(&cwd)
+        .expect("test project lives below the current directory");
+    let tn = Tn::init(relative_yaml)?;
+    assert!(!tn.log_path().is_absolute());
+    tn.info("watch.relative.before", json!({ "item": 1 }))?;
+
     let mut watch = tn.watch(WatchOptions {
-        read: tn_proto::ReadOptions {
+        start: WatchStart::Beginning,
+        read: ReadOptions {
+            verify: false,
+            ..ReadOptions::default()
+        },
+        ..WatchOptions::default()
+    })?;
+    assert!(!watch.poll()?.is_empty());
+    assert!(watch.cursor() > 0);
+
+    fs::write(tn.log_path(), "")?;
+    tn.info("watch.relative.after", json!({ "item": 2 }))?;
+    let entries = watch.poll()?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].event_type(), Some("watch.relative.after"));
+    Ok(())
+}
+
+#[test]
+fn watch_forwards_read_options_to_each_poll() -> tn_proto::Result<()> {
+    let tn = Tn::ephemeral()?;
+
+    // The stable verification flag flows through the watcher into every poll.
+    let mut watch = tn.watch(WatchOptions {
+        read: ReadOptions {
             verify: true,
-            ..tn_proto::ReadOptions::default()
+            ..ReadOptions::default()
         },
         ..WatchOptions::default()
     })?;
@@ -291,11 +341,92 @@ fn watch_forwards_read_options_to_read() -> tn_proto::Result<()> {
         .expect("watch should return the emitted event");
     let validity = entry
         .validity()
-        .expect("verify=true should add an EntryValidity block");
-
+        .expect("verified reads attach an EntryValidity block");
     assert!(validity.signature);
     assert!(validity.row_hash);
     assert!(validity.chain);
+    assert_eq!(
+        entry
+            .get("_valid")
+            .and_then(Value::as_object)
+            .and_then(|valid| valid.get("writer_authorized"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn watch_cursor_advances_by_source_position_past_rejected_rows() -> tn_proto::Result<()> {
+    let tn = Tn::ephemeral()?;
+    let mut watch = tn.watch(WatchOptions {
+        start: WatchStart::Latest,
+        read: ReadOptions {
+            all_runs: true,
+            verify: false,
+            ..ReadOptions::default()
+        },
+        event_type_prefix: Some("cursor.".to_string()),
+        ..WatchOptions::default()
+    })?;
+    let source_id = canonical_file_source_id(tn.log_path().to_str().expect("utf-8 log path"));
+
+    let cursor_position = |watch: &tn_proto::Watch<'_>| -> u64 {
+        let cursor = watch.read_cursor();
+        assert_eq!(cursor.version, 1);
+        let source = cursor
+            .sources
+            .get(&source_id)
+            .expect("cursor keyed by the canonical log source id");
+        assert_eq!(source.kind, CursorKind::ByteOffset);
+        source.value.parse().expect("decimal byte offset")
+    };
+
+    // The watcher persists the shared cursor shape from construction on.
+    let start = cursor_position(&watch);
+    assert_eq!(start, fs::metadata(tn.log_path())?.len());
+    let serialized = serde_json::to_value(watch.read_cursor())?;
+    assert_eq!(serialized["version"], json!(1));
+    assert_eq!(
+        serialized["sources"][&source_id]["kind"],
+        json!("byte_offset")
+    );
+
+    tn.info("cursor.one", json!({ "n": 1 }))?;
+    let first = watch.poll()?;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].event_type(), Some("cursor.one"));
+    let after_first = cursor_position(&watch);
+    assert!(after_first > start);
+    assert_eq!(after_first, fs::metadata(tn.log_path())?.len());
+
+    // A rejected row between two accepted rows: the poll yields only the
+    // accepted rows, but the cursor covers all three source positions.
+    tn.info("cursor.two", json!({ "n": 2 }))?;
+    let mut log = fs::read_to_string(tn.log_path())?;
+    log.push_str("this-is-not-a-record\n");
+    fs::write(tn.log_path(), log)?;
+    tn.info("cursor.three", json!({ "n": 3 }))?;
+    let expected_span = fs::metadata(tn.log_path())?.len();
+
+    let second = watch.poll()?;
+    let event_types: Vec<_> = second
+        .iter()
+        .filter_map(|entry| entry.event_type().map(str::to_string))
+        .collect();
+    assert_eq!(event_types, vec!["cursor.two", "cursor.three"]);
+    let after_second = cursor_position(&watch);
+    assert!(after_second >= expected_span);
+    assert!(after_second > after_first);
+
+    // Rows that are scanned but not yielded (filtered or skipped) still
+    // advance the cursor: progress is source position, not entry count.
+    tn.info("noise.row", json!({ "n": 4 }))?;
+    let third = watch.poll()?;
+    assert!(third.is_empty());
+    let after_third = cursor_position(&watch);
+    assert!(after_third > after_second);
 
     Ok(())
 }

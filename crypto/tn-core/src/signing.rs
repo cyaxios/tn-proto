@@ -12,6 +12,12 @@
 //! Rust port defers that branch — secp256k1 DIDs return `Ok(false)` from
 //! [`DeviceKey::verify_did`] without erroring. Will be added when a fixture
 //! requires it.
+//!
+//! This module deliberately keeps its legacy multi-curve, boolean verify API.
+//! Trust-boundary code (enrollment ceremonies, package signer checks) uses
+//! the strict [`crate::trust`] module instead: only canonical Ed25519
+//! `did:key` identifiers are accepted there, and every rejection carries a
+//! stable machine-readable reason.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -169,6 +175,12 @@ impl DeviceKey {
     /// Non-Ed25519 DIDs are not an error: a DID that is not `did:key:z…`, or one
     /// whose multicodec is not Ed25519 (e.g. a secp256k1 ATProto DID, whose
     /// verify path is deferred), returns `Ok(false)`.
+    ///
+    /// This is the legacy compatibility verifier. Trust decisions (enrollment
+    /// statements, package signer identity) go through the strict
+    /// [`crate::trust::verify_ed25519_did_signature`] instead, which accepts
+    /// only canonical Ed25519 `did:key` identifiers and reports stable
+    /// [`crate::trust::TrustReason`] rejections.
     ///
     /// # Errors
     ///

@@ -19,6 +19,7 @@ import os as _cipher_os
 def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
+
 import json
 import sys
 import zipfile
@@ -88,8 +89,12 @@ def _make_admin_log(yaml_dir: Path) -> Path:
 
     out_dir = yaml_dir / "_kits"
     out_dir.mkdir(exist_ok=True)
-    tn.admin.add_recipient("default", recipient_did="did:key:zAlice", out_path=out_dir / "alice.btn.mykit")
-    tn.admin.add_recipient("default", recipient_did="did:key:zBob", out_path=out_dir / "bob.btn.mykit")
+    tn.admin.add_recipient(
+        "default", recipient_did="did:key:zAlice", out_path=out_dir / "alice.btn.mykit"
+    )
+    tn.admin.add_recipient(
+        "default", recipient_did="did:key:zBob", out_path=out_dir / "bob.btn.mykit"
+    )
     tn.flush_and_close()
     return yaml_path
 
@@ -190,9 +195,7 @@ def test_admin_log_snapshot_rejects_tampered_manifest(tmp_path: Path):
     # character of the ``as_of`` field. The signature must fail.
     with zipfile.ZipFile(snap, "r") as zf:
         manifest_doc = json.loads(zf.read("manifest.json").decode("utf-8"))
-        body_files = {
-            n: zf.read(n) for n in zf.namelist() if n != "manifest.json"
-        }
+        body_files = {n: zf.read(n) for n in zf.namelist() if n != "manifest.json"}
     manifest_doc["event_count"] = int(manifest_doc.get("event_count", 0)) + 1
     with zipfile.ZipFile(snap, "w", zipfile.ZIP_STORED) as zf:
         zf.writestr("manifest.json", json.dumps(manifest_doc, sort_keys=True, indent=2))
@@ -228,7 +231,7 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
 
     from tn.chain import _compute_row_hash
     from tn.signing import _signature_b64
-    from tn.tnpkg import TnpkgManifest, _write_tnpkg
+    from tn.tnpkg import TnpkgManifest, _write_tnpkg, sign_manifest_with_body
 
     src = tmp_path / "src"
     src.mkdir()
@@ -319,9 +322,12 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
     }
 
     # Build a snapshot body that is: real envelopes + forged add.
-    body_ndjson = "\n".join(
-        json.dumps(e, separators=(",", ":")) for e in [*envelopes, forged_env]
-    ).encode("utf-8") + b"\n"
+    body_ndjson = (
+        "\n".join(json.dumps(e, separators=(",", ":")) for e in [*envelopes, forged_env]).encode(
+            "utf-8"
+        )
+        + b"\n"
+    )
 
     manifest = TnpkgManifest(
         kind="admin_log_snapshot",
@@ -333,10 +339,10 @@ def test_admin_log_snapshot_equivocation_leaf_reuse(tmp_path: Path):
         event_count=len(envelopes) + 1,
         head_row_hash=forged_row_hash,
     )
-    manifest.sign(cfg.device.signing_key())
-
     forged_snap = tmp_path / "forged.tnpkg"
-    _write_tnpkg(forged_snap, manifest, {"body/admin.ndjson": body_ndjson})
+    body = {"body/admin.ndjson": body_ndjson}
+    sign_manifest_with_body(manifest, body, cfg.device.signing_key())
+    _write_tnpkg(forged_snap, manifest, body)
 
     # Receiver setup — fresh, must absorb the forged snapshot.
     dst = tmp_path / "dst"

@@ -98,8 +98,13 @@ impl Runtime {
         let Some(spec) = self.cfg.groups.get(group) else {
             return Ok(());
         };
-        let (cipher, _btn_admin, _mykit) =
-            build_cipher_with_admin_with_storage(spec, &self.keystore, group, &self.storage)?;
+        let (cipher, _btn_admin, _mykit) = build_cipher_with_admin_with_storage(
+            spec,
+            &self.keystore,
+            group,
+            &self.storage,
+            &self.device,
+        )?;
         if let Some(gstate_arc) = self.groups.get(group) {
             let mut gstate = gstate_arc.write().expect("group state RwLock poisoned");
             gstate.cipher = cipher;
@@ -515,8 +520,7 @@ impl Runtime {
         // embedded key can't be sealed to, so it stays plaintext.
         let seal_for_recipients = match reader_did {
             Some(did)
-                if crate::recipient_seal::normalize_recipient_dids(&[did.to_string()])
-                    .is_ok() =>
+                if crate::recipient_seal::normalize_recipient_dids(&[did.to_string()]).is_ok() =>
             {
                 vec![did.to_string()]
             }
@@ -609,9 +613,7 @@ impl Runtime {
         };
 
         let spec = self.cfg.groups.get(group).ok_or_else(|| {
-            Error::InvalidConfig(format!(
-                "tn.admin.rotate_id_path: unknown group: {group:?}"
-            ))
+            Error::InvalidConfig(format!("tn.admin.rotate_id_path: unknown group: {group:?}"))
         })?;
         if spec.cipher != "hibe" {
             return Err(Error::InvalidConfig(format!(
@@ -650,11 +652,7 @@ impl Runtime {
 
         let root_marker = self.keystore.join(format!("{group}.hibe.idpath.root"));
         let allow_root_current = self.storage.exists(&root_marker);
-        let current_path = normalize_hibe_path(
-            &idpath_raw,
-            "current id_path",
-            allow_root_current,
-        )?;
+        let current_path = normalize_hibe_path(&idpath_raw, "current id_path", allow_root_current)?;
 
         let new_path = normalize_hibe_path(new_path, "id_path", allow_root_path)?;
         if new_path == current_path {
@@ -667,9 +665,7 @@ impl Runtime {
         let mut prior_paths: Vec<String> = Vec::new();
         if let Some(bytes) = read_opt("hibe.idpath.history")? {
             let text = String::from_utf8(bytes).map_err(|_| {
-                Error::InvalidConfig(format!(
-                    "hibe group {group}: idpath history is not utf-8"
-                ))
+                Error::InvalidConfig(format!("hibe group {group}: idpath history is not utf-8"))
             })?;
             for (idx, line) in text.lines().enumerate() {
                 prior_paths.push(decode_hibe_history_line(

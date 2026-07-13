@@ -8,7 +8,7 @@ The recipient's only existing asymmetric key is the Ed25519 device key
 encoded into their ``did:key:z...`` identifier. Ed25519 is signing-only,
 but its keys can be losslessly converted to the corresponding Curve25519
 (X25519) keypair via the standard birational map. We use libsodium's
-audited ``crypto_sign_ed25519_pk_to_curve25519`` and
+``crypto_sign_ed25519_pk_to_curve25519`` and
 ``crypto_sign_ed25519_sk_to_curve25519`` for both halves.
 
 This is **not JWE.** Same primitives, smaller frame.
@@ -44,7 +44,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .canonical import _canonical_bytes
-from .signing import _ED25519_MULTICODEC, _b58decode
+from .trust import parse_ed25519_did_key
 
 WRAP_FRAME = "tn-sealed-box-v1"
 WRAP_HKDF_INFO = b"tn-kit-seal-v1"
@@ -71,8 +71,7 @@ def _ed25519_pub_to_x25519_pub(ed25519_pub: bytes) -> bytes:
     """
     if len(ed25519_pub) != 32:
         raise ValueError(
-            f"_ed25519_pub_to_x25519_pub: expected 32-byte Ed25519 pub, "
-            f"got {len(ed25519_pub)}"
+            f"_ed25519_pub_to_x25519_pub: expected 32-byte Ed25519 pub, got {len(ed25519_pub)}"
         )
     # Late import so the SDK can import without pynacl available at type
     # check time (pynacl is a hard dep at runtime).
@@ -92,8 +91,7 @@ def _ed25519_priv_to_x25519_priv(ed25519_seed: bytes) -> bytes:
     """
     if len(ed25519_seed) != 32:
         raise ValueError(
-            f"_ed25519_priv_to_x25519_priv: expected 32-byte Ed25519 seed, "
-            f"got {len(ed25519_seed)}"
+            f"_ed25519_priv_to_x25519_priv: expected 32-byte Ed25519 seed, got {len(ed25519_seed)}"
         )
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -108,31 +106,6 @@ def _ed25519_priv_to_x25519_priv(ed25519_seed: bytes) -> bytes:
     return crypto_sign_ed25519_sk_to_curve25519(expanded)
 
 
-def _did_key_to_ed25519_pub(did: str) -> bytes:
-    """Extract the raw Ed25519 public key bytes from a did:key:z... string.
-
-    Mirrors ``tnpkg._did_key_pub`` but lives here so the sealed-box
-    code path doesn't pull in the manifest-shape module.
-    """
-    if not did.startswith("did:key:z"):
-        raise ValueError(
-            f"sealed-box recipient must be a did:key Ed25519 identity; "
-            f"got {did!r}"
-        )
-    multicodec = _b58decode(did[len("did:key:z") :])
-    prefix, pub_bytes = multicodec[:2], multicodec[2:]
-    if prefix != _ED25519_MULTICODEC:
-        raise ValueError(
-            f"sealed-box requires Ed25519 (multicodec 0xed) recipient DID; "
-            f"got prefix {prefix!r} on {did!r}"
-        )
-    if len(pub_bytes) != 32:
-        raise ValueError(
-            f"DID {did!r} carries non-32-byte Ed25519 pubkey ({len(pub_bytes)} bytes)"
-        )
-    return pub_bytes
-
-
 def recipient_key_is_resolvable(did: str | None) -> bool:
     """True when ``did`` is a ``did:key`` with an embedded Ed25519 public key the
     sealed-box path can wrap the BEK under.
@@ -144,7 +117,7 @@ def recipient_key_is_resolvable(did: str | None) -> bool:
     if not did:
         return False
     try:
-        _did_key_to_ed25519_pub(did)
+        parse_ed25519_did_key(did)
         return True
     except Exception:  # noqa: BLE001 — any parse failure means "can't seal to this"
         return False
@@ -255,11 +228,9 @@ def seal_bek_for_recipient(
         :func:`manifest_aad_for_wrap`: Build the right AAD.
     """
     if len(bek) != 32:
-        raise ValueError(
-            f"seal_bek_for_recipient: BEK must be 32 bytes; got {len(bek)}"
-        )
+        raise ValueError(f"seal_bek_for_recipient: BEK must be 32 bytes; got {len(bek)}")
 
-    recipient_ed_pub = _did_key_to_ed25519_pub(recipient_did)
+    recipient_ed_pub = parse_ed25519_did_key(recipient_did)
     recipient_x_pub = _ed25519_pub_to_x25519_pub(recipient_ed_pub)
 
     # Generate ephemeral X25519 keypair via the cryptography library
@@ -346,9 +317,7 @@ def unseal_bek_from_wrap(
 
     frame = wrap.get("frame")
     if frame != WRAP_FRAME:
-        raise UnsealError(
-            f"unsupported sealed-box frame {frame!r}; expected {WRAP_FRAME!r}"
-        )
+        raise UnsealError(f"unsupported sealed-box frame {frame!r}; expected {WRAP_FRAME!r}")
 
     recipient_did = wrap.get("recipient_identity")
     if not isinstance(recipient_did, str):
@@ -366,9 +335,7 @@ def unseal_bek_from_wrap(
             f"ephemeral_x25519_pub_b64 decoded to {len(eph_pub_bytes)} bytes; expected 32"
         )
     if len(wrap_nonce) != 12:
-        raise UnsealError(
-            f"wrap_nonce_b64 decoded to {len(wrap_nonce)} bytes; expected 12"
-        )
+        raise UnsealError(f"wrap_nonce_b64 decoded to {len(wrap_nonce)} bytes; expected 12")
 
     # Convert recipient's Ed25519 priv seed to X25519 private bytes.
     try:
@@ -382,7 +349,7 @@ def unseal_bek_from_wrap(
     # malicious wrap that names a different DID than the one the
     # recipient holds.
     try:
-        recipient_ed_pub = _did_key_to_ed25519_pub(recipient_did)
+        recipient_ed_pub = parse_ed25519_did_key(recipient_did)
         recipient_x_pub = _ed25519_pub_to_x25519_pub(recipient_ed_pub)
     except Exception as exc:
         raise UnsealError(f"could not derive recipient X25519 pub: {exc}") from exc

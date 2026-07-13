@@ -30,7 +30,10 @@ fn main() {
     // Bind a marker (authenticated, not stored):
     let aad = b"policy=finra-oba";
     let gov = seal_with_aad(&pp, &id, b"governed body", aad, OsRng).unwrap();
-    assert_eq!(open_with_aad(&pp, &sk, &gov, aad).unwrap(), b"governed body");
+    assert_eq!(
+        open_with_aad(&pp, &sk, &gov, aad).unwrap(),
+        b"governed body"
+    );
     assert!(open_with_aad(&pp, &sk, &gov, b"policy=other").is_err());
     println!("seal/open (+aad)   : ok (wrong aad rejected)");
 

@@ -354,6 +354,12 @@ class LoadedConfig:
             p = (self.yaml_path.parent / p).resolve()
         return p
 
+    @property
+    def read_state_root(self) -> Path:
+        """Receiver-local private state root used by read trust adapters."""
+
+        return self.keystore.parent
+
     def group_for(self, field_name: str) -> str:
         """Return the first group a field routes into, or "default".
 

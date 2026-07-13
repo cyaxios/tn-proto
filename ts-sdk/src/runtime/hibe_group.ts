@@ -30,10 +30,12 @@ import {
   hibeKeyIdPath,
   hibeKeygen,
   hibeMpkFingerprint,
+  hibeMpkMaxDepth,
   hibeOpen,
   hibeSeal,
   hibeSetup,
 } from "../raw.js";
+import { TrustError } from "../core/trust.js";
 
 /** All on-disk hibe material for one (keystore, group). */
 export interface HibeGroupMaterial {
@@ -356,6 +358,154 @@ export function hibeRotateIdPath(
 /** SHA-256 fingerprint of the authority mpk. */
 export function hibeGroupMpkFingerprint(mat: HibeGroupMaterial): Uint8Array {
   return hibeMpkFingerprint(mat.mpk);
+}
+
+/** The maximum identity-path depth encoded in raw MPK bytes. */
+export function hibeGroupMpkMaxDepth(mpk: Uint8Array): number {
+  return Number(hibeMpkMaxDepth(mpk));
+}
+
+/**
+ * The authority's current path epoch, derived from durable state: every
+ * completed identity-path rotation records the outgoing path in
+ * `.idpath.history`, so the epoch is exactly the number of prior paths.
+ */
+export function hibeAuthorityEpoch(mat: HibeGroupMaterial): number {
+  return mat.priorPaths.length;
+}
+
+// ── Pinned external-authority trust state ───────────────────────────
+//
+// An external writer must pin WHICH real authority DID signed its MPK and
+// current path epoch before it may seal. The pinned record lives beside the
+// other receiver-local trust records under `<keystore>/trust/`.
+
+/** One pinned authority record for a hibe group. */
+export interface PinnedHibeAuthority {
+  authorityDid: string;
+  ceremonyId: string;
+  group: string;
+  mpkSha256: string;
+  maxDepth: number;
+  idPath: string;
+  pathEpoch: number;
+  assertionDigest: string;
+}
+
+/** Path of the pinned-authority trust records. */
+export function hibeAuthoritiesPath(keystorePath: string): string {
+  return join(keystorePath, "trust", "hibe_authorities.v1.json");
+}
+
+function readAuthoritiesDoc(keystorePath: string): Record<string, unknown> {
+  const path = hibeAuthoritiesPath(keystorePath);
+  if (!existsSync(path)) return { version: 1, authorities: {} };
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new TrustError("statement_invalid", "pinned hibe authority record is unreadable");
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TrustError("statement_invalid", "pinned hibe authority record must be an object");
+  }
+  return value as Record<string, unknown>;
+}
+
+/** Load one group's pinned authority record, or null when never pinned. */
+export function loadPinnedHibeAuthority(
+  keystorePath: string,
+  group: string,
+): PinnedHibeAuthority | null {
+  const doc = readAuthoritiesDoc(keystorePath);
+  const authorities = doc["authorities"];
+  if (authorities === null || typeof authorities !== "object" || Array.isArray(authorities)) {
+    return null;
+  }
+  const entry = (authorities as Record<string, unknown>)[group];
+  if (entry === undefined) return null;
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new TrustError("statement_invalid", "pinned hibe authority record is malformed");
+  }
+  const record = entry as Record<string, unknown>;
+  const str = (key: string): string => {
+    const v = record[key];
+    if (typeof v !== "string") {
+      throw new TrustError("statement_invalid", "pinned hibe authority record is malformed");
+    }
+    return v;
+  };
+  const int = (key: string): number => {
+    const v = record[key];
+    if (typeof v !== "number" || !Number.isSafeInteger(v)) {
+      throw new TrustError("statement_invalid", "pinned hibe authority record is malformed");
+    }
+    return v;
+  };
+  return {
+    authorityDid: str("authority_did"),
+    ceremonyId: str("ceremony_id"),
+    group: str("group"),
+    mpkSha256: str("mpk_sha256"),
+    maxDepth: int("max_depth"),
+    idPath: str("id_path"),
+    pathEpoch: int("path_epoch"),
+    assertionDigest: str("assertion_digest"),
+  };
+}
+
+/**
+ * Atomically pin (or monotonically update) a group's authority record.
+ *
+ * A lower incoming epoch is `epoch_rollback`. The same epoch must be the
+ * byte-identical assertion (an idempotent no-op); any difference —
+ * conflicting MPK, path, depth, or assertion digest — is `epoch_conflict`.
+ * A different authority DID can never update an existing pin.
+ */
+export function pinHibeAuthority(
+  keystorePath: string,
+  group: string,
+  record: PinnedHibeAuthority,
+): void {
+  const pinned = loadPinnedHibeAuthority(keystorePath, group);
+  if (pinned !== null) {
+    if (pinned.authorityDid !== record.authorityDid) {
+      throw new TrustError("untrusted_principal", "assertion is not from the pinned authority DID");
+    }
+    if (record.pathEpoch < pinned.pathEpoch) {
+      throw new TrustError("epoch_rollback", "assertion path epoch is lower than the pinned epoch");
+    }
+    if (record.pathEpoch === pinned.pathEpoch) {
+      const identical =
+        pinned.mpkSha256 === record.mpkSha256 &&
+        pinned.idPath === record.idPath &&
+        pinned.maxDepth === record.maxDepth &&
+        pinned.ceremonyId === record.ceremonyId &&
+        pinned.assertionDigest === record.assertionDigest;
+      if (!identical) {
+        throw new TrustError("epoch_conflict", "conflicting assertion at the already pinned epoch");
+      }
+      return; // exact idempotent repeat
+    }
+  }
+  const doc = readAuthoritiesDoc(keystorePath);
+  const authorities =
+    doc["authorities"] !== null && typeof doc["authorities"] === "object" && !Array.isArray(doc["authorities"])
+      ? (doc["authorities"] as Record<string, unknown>)
+      : {};
+  authorities[group] = {
+    authority_did: record.authorityDid,
+    ceremony_id: record.ceremonyId,
+    group: record.group,
+    mpk_sha256: record.mpkSha256,
+    max_depth: record.maxDepth,
+    id_path: record.idPath,
+    path_epoch: record.pathEpoch,
+    assertion_digest: record.assertionDigest,
+  };
+  const path = hibeAuthoritiesPath(keystorePath);
+  mkdirSync(join(keystorePath, "trust"), { recursive: true });
+  _atomicWrite(path, JSON.stringify({ version: 1, authorities }, null, 1));
 }
 
 /** Sibling successor of `path`: bump a `~r<n>` counter on the last label

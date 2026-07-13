@@ -12,19 +12,13 @@
 // writes `tn-js: <msg>\n` to stderr and `process.exit(2)`. That exact
 // behaviour is preserved via the local {@link die} helper below.
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve as pathResolve } from "node:path";
 
 import { parse as parseYaml } from "yaml";
 
 import { DeviceKey } from "../core/signing.js";
-import { newManifest, signManifest, type BodyContents } from "../core/tnpkg.js";
+import { newManifest, signManifestWithBody, type BodyContents } from "../core/tnpkg.js";
 import { writeTnpkg } from "../tnpkg_io.js";
 import { resolveYamlOrDiscover } from "./_discover.js";
 
@@ -76,7 +70,8 @@ export async function exportCmd(opts: ExportCmdOptions): Promise<number> {
   const kind = opts.kind ?? "project_seed";
   const includeSecrets = opts.includeSecrets ?? false;
   if (!outPath) die("export: --out <file> is required");
-  if (kind !== "project_seed") die(`export: unsupported kind ${JSON.stringify(kind)} (only project_seed)`);
+  if (kind !== "project_seed")
+    die(`export: unsupported kind ${JSON.stringify(kind)} (only project_seed)`);
   if (!includeSecrets) {
     die(
       "export --kind project_seed writes the device's raw private keys into " +
@@ -118,7 +113,7 @@ export async function exportCmd(opts: ExportCmdOptions): Promise<number> {
     toDid: did,
   });
   const device = DeviceKey.fromSeed(new Uint8Array(readFileSync(join(keysDir, "local.private"))));
-  const signed = signManifest(manifest, device);
+  const signed = signManifestWithBody(manifest, body, device);
   mkdirSync(dirname(pathResolve(outPath)), { recursive: true });
   const outResolved = writeTnpkg(pathResolve(outPath), signed, body);
   const bytes = statSync(outResolved).size;

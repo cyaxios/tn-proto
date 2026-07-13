@@ -24,6 +24,10 @@ pub mod account;
 pub mod admin;
 /// Credential-store helpers for cached vault account keys.
 pub mod credential_store;
+/// Trusted-principal enrollment: strict statements, locked receiver-local
+/// state, and unsafe-operation observability. Root re-exports are added by
+/// the shared native/SDK bridge integration.
+pub mod enrollment;
 /// Stable Rust-facing read entry type.
 pub mod entry;
 /// SDK-wide error and result types.
@@ -34,6 +38,9 @@ pub mod identity;
 pub mod inbox;
 /// `.tnpkg` package export and absorb helpers.
 pub mod pkg;
+/// Receiver-local exact-DID trust providers for secure reads.
+pub mod read_trust;
+mod security_warning;
 /// Main `Tn` handle and lifecycle/read/emit APIs.
 pub mod tn;
 /// Vault audit-event helpers.
@@ -76,12 +83,16 @@ pub use pkg::{
     OfferOptions, OfferReceipt, Package, PackageCategory, PackageInfo, PackageJsonPayload,
     PackageManifest, PackageSignatureStatus, SecretExportConsent,
 };
+pub use read_trust::{
+    ConfigReadTrustProvider, InMemoryReadTrustProvider, ReadTrustProvider, TrustSource,
+};
 pub use tn::{
-    ConfigView, EmitReceipt, LogLevel, ReadOptions, SealedObject, Tn, TnInitOptions, TnProfile,
-    TnProjectOptions,
+    ConfigView, EmitReceipt, LogLevel, ReadOptions, ReadPolicyOptions, ReadReport, SealedObject,
+    Tn, TnInitOptions, TnProfile, TnProjectOptions,
 };
 #[cfg(feature = "http")]
 pub use tn::{TnProjectVaultClaim, TnProjectVaultClaimOptions};
+pub use tn_core::runtime::{CursorKind, ReadCursorV1, SourceCursorV1, VerifyMode};
 pub use tn_core::{
     RecipientEntry, SealOptions, SealedGroupInfo, SealedValid, UnsealOptions, UnsealOutcome,
 };
@@ -129,23 +140,24 @@ pub mod prelude {
         AccountIdentityMetadata, AccountLogoutResult, AccountState, AccountStatus,
         AccountUseVaultResult, AccountVerdict, AddRecipientResult, Admin,
         BundleForRecipientOptions, BundleForRecipientResult, CompileEnrolmentOptions,
-        CompiledPackage, ConfigView, CredentialStore, EmitReceipt, EnsureGroupResult, Entry,
-        EntryValidity, Error, FileCredentialStore, Identity, IdentityPrefs, IdentitySaveOptions,
-        Inbox, InvitationAcceptResult, InvitationInfo, InvitationKitHash, InvitationManifest,
-        LogLevel, ManifestKind, MintInvitationOptions, MintInvitationResult, OfferOptions,
-        OfferReceipt, Package, PackageInfo, PackageManifest, PackageSignatureStatus,
-        PkgExportOptions, PollingWatch, PollingWatchOptions, ReadOptions, RecipientEntry, Result,
-        RevokeRecipientResult, SealOptions, SealedGroupInfo, SealedObject, SealedValid,
-        SecretExportConsent, SetLinkStateOptions, Tn, TnInitOptions, TnProfile, TnProjectOptions,
-        UnsealOptions, UnsealOutcome, Vault, VaultAwk, VaultBek, VaultBodyPlaintext,
-        VaultClientConnectOptions, VaultConnectOptions, VaultConnectResult,
-        VaultCredentialKdfParams, VaultCredentialWrap, VaultInstallBodyOptions,
-        VaultInstallBodyResult, VaultLinkResult, VaultLinkState, VaultLinkStateInfo,
-        VaultLinkStateResult, VaultProject, VaultProjectClient, VaultUnlinkResult, VaultWrappedBek,
-        Wallet, WalletPaths, WalletPullAbsorbResult, WalletStageInboxOptions,
-        WalletStageInboxResult, WalletSyncOptions, WalletSyncResult, Watch, WatchIter,
-        WatchOptions, WatchStart, VAULT_AWK_WRAP_AAD, VAULT_BEK_WRAP_AAD, VAULT_BODY_CIPHER_SUITE,
-        VAULT_BODY_FRAME, VAULT_MIN_PBKDF2_ITERATIONS,
+        CompiledPackage, ConfigReadTrustProvider, ConfigView, CredentialStore, EmitReceipt,
+        EnsureGroupResult, Entry, EntryValidity, Error, FileCredentialStore, Identity,
+        IdentityPrefs, IdentitySaveOptions, InMemoryReadTrustProvider, Inbox,
+        InvitationAcceptResult, InvitationInfo, InvitationKitHash, InvitationManifest, LogLevel,
+        ManifestKind, MintInvitationOptions, MintInvitationResult, OfferOptions, OfferReceipt,
+        Package, PackageInfo, PackageManifest, PackageSignatureStatus, PkgExportOptions,
+        PollingWatch, PollingWatchOptions, ReadCursorV1, ReadOptions, ReadPolicyOptions,
+        ReadReport, ReadTrustProvider, RecipientEntry, Result, RevokeRecipientResult, SealOptions,
+        SealedGroupInfo, SealedObject, SealedValid, SecretExportConsent, SetLinkStateOptions,
+        SourceCursorV1, Tn, TnInitOptions, TnProfile, TnProjectOptions, TrustSource, UnsealOptions,
+        UnsealOutcome, Vault, VaultAwk, VaultBek, VaultBodyPlaintext, VaultClientConnectOptions,
+        VaultConnectOptions, VaultConnectResult, VaultCredentialKdfParams, VaultCredentialWrap,
+        VaultInstallBodyOptions, VaultInstallBodyResult, VaultLinkResult, VaultLinkState,
+        VaultLinkStateInfo, VaultLinkStateResult, VaultProject, VaultProjectClient,
+        VaultUnlinkResult, VaultWrappedBek, VerifyMode, Wallet, WalletPaths,
+        WalletPullAbsorbResult, WalletStageInboxOptions, WalletStageInboxResult, WalletSyncOptions,
+        WalletSyncResult, Watch, WatchIter, WatchOptions, WatchStart, VAULT_AWK_WRAP_AAD,
+        VAULT_BEK_WRAP_AAD, VAULT_BODY_CIPHER_SUITE, VAULT_BODY_FRAME, VAULT_MIN_PBKDF2_ITERATIONS,
     };
     #[cfg(feature = "http")]
     pub use crate::{

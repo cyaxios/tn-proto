@@ -27,6 +27,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -41,6 +42,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -2474,7 +2476,9 @@ dependencies = [
 name = "tn-core"
 version = "0.0.1"
 dependencies = [
+ "aes",
  "aes-gcm",
+ "aes-kw",
  "base64",
  "bs58",
  "clap",
@@ -2557,6 +2561,7 @@ dependencies = [
  "ed25519-dalek",
  "hkdf",
  "hmac",
+ "log",
  "notify",
  "rand_core 0.6.4",
  "reqwest",

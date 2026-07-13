@@ -22,12 +22,15 @@ import binascii
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import yaml as _yaml
 
 from .cipher import JWEGroupCipher
 from .config import LoadedConfig
 from .conventions import pending_offers_dir
+from .enrollment import EnrollmentStore
+from .trust import AcceptedOffer, TrustError, TrustReason
 
 _DID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -49,6 +52,7 @@ class CouponIssued:
 class ReconcileResult:
     promotions: list[Promotion] = field(default_factory=list)
     coupons_issued: list[CouponIssued] = field(default_factory=list)
+    accepted_offers: list[AcceptedOffer] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
 
 
@@ -118,4 +122,29 @@ def _reconcile(cfg: LoadedConfig) -> ReconcileResult:
         # Use tn.admin_add_recipient(group, out_path, did) explicitly. The
         # previous orphan auto-mint path (_emit_missing_recipients) was
         # removed because no consumer read its output.
+
+    # Trusted offers retain their complete signed artifacts independently of
+    # the legacy DID-only pending directory above. Reverify every unaccepted
+    # artifact and auto-promote only challenged, preauthorized bindings.
+    store = EnrollmentStore(cfg, cfg.device)
+    now = datetime.now(timezone.utc)
+    try:
+        scan = store._scan_pending_offers(now=now)
+    except TrustError as exc:
+        result.conflicts.append(f"_reconcile: trusted offer state rejected: {exc}")
+        pending_offers = ()
+    else:
+        pending_offers = scan.offers
+        for conflict in scan.conflicts:
+            result.conflicts.append(
+                f"_reconcile: trusted offer {conflict.path} rejected: {conflict.error}"
+            )
+    for pending in pending_offers:
+        try:
+            result.accepted_offers.append(store.reconcile(pending, now=now))
+        except TrustError as exc:
+            if exc.reason is not TrustReason.UNTRUSTED_PRINCIPAL:
+                result.conflicts.append(
+                    f"_reconcile: trusted offer {pending.offer_digest} rejected: {exc}"
+                )
     return result

@@ -7,6 +7,7 @@
 //! Tn::init(...) -> tn.info(...) -> tn.read(...) -> tn.close()
 //! ```
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,10 +18,12 @@ use tn_core::{Runtime, SealOptions, UnsealOptions, UnsealOutcome};
 
 use crate::account::Account;
 use crate::admin::Admin;
-use crate::entry::Entry;
 use crate::identity::Identity;
 use crate::inbox::Inbox;
 use crate::pkg::Package;
+use crate::read_trust::{
+    ConfigReadTrustProvider, InMemoryReadTrustProvider, ReadTrustProvider, TrustSource,
+};
 use crate::vault::Vault;
 #[cfg(feature = "http")]
 use crate::vault::{VaultHttpProjectClient, VaultInitUploadOptions, VaultInitUploadResult};
@@ -30,14 +33,26 @@ use crate::watch::{NativeWatch, NativeWatchOptions};
 use crate::watch::{PollingWatch, PollingWatchOptions, Watch, WatchOptions};
 use crate::{Error, Result};
 
+mod read;
+pub use read::{ReadOptions, ReadPolicyOptions, ReadReport};
+
 /// Main SDK handle for one TN ceremony.
 ///
 /// A `Tn` owns one [`tn_core::Runtime`] and exposes the higher-level methods
 /// Rust users should reach for first. Protocol primitives remain available in
 /// `tn-core`; this type is the ergonomic SDK surface.
-#[derive(Debug)]
 pub struct Tn {
     runtime: Runtime,
+    read_trust_provider: Arc<dyn ReadTrustProvider>,
+}
+
+impl fmt::Debug for Tn {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Tn")
+            .field("runtime", &self.runtime)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Options used when opening a ceremony.
@@ -155,17 +170,6 @@ pub struct TnProjectVaultClaim {
     pub claim: VaultInitUploadResult,
 }
 
-/// Options for [`Tn::read`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ReadOptions {
-    /// Include entries from every run in the log instead of only this process.
-    pub all_runs: bool,
-    /// Include per-entry verification flags in a `_valid` block.
-    ///
-    /// The underlying `tn-core` verification read currently spans all runs.
-    pub verify: bool,
-}
-
 /// Standard TN log levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -267,11 +271,17 @@ impl Tn {
     ///
     /// Returns [`Error`] when `tn-core` cannot load the runtime.
     pub fn init_with_options(yaml_path: impl AsRef<Path>, options: TnInitOptions) -> Result<Self> {
+        let yaml_path = yaml_path.as_ref();
+        let read_trust_provider: Arc<dyn ReadTrustProvider> =
+            Arc::new(ConfigReadTrustProvider::load(yaml_path)?);
         let storage: Arc<dyn tn_core::storage::Storage> =
             Arc::new(tn_core::storage::FsStorage::new());
         let runtime_options = runtime_init_options(options);
-        let runtime = Runtime::init_with_options(yaml_path.as_ref(), storage, runtime_options)?;
-        Ok(Self { runtime })
+        let runtime = Runtime::init_with_options(yaml_path, storage, runtime_options)?;
+        Ok(Self {
+            runtime,
+            read_trust_provider,
+        })
     }
 
     /// Create or open a local project ceremony.
@@ -350,8 +360,15 @@ impl Tn {
     ///
     /// Returns [`Error`] if the temporary ceremony cannot be created or loaded.
     pub fn ephemeral() -> Result<Self> {
+        let runtime = Runtime::ephemeral()?;
+        let read_trust_provider: Arc<dyn ReadTrustProvider> =
+            Arc::new(InMemoryReadTrustProvider::new([(
+                runtime.did().to_string(),
+                TrustSource::LocalDevice,
+            )])?);
         Ok(Self {
-            runtime: Runtime::ephemeral()?,
+            runtime,
+            read_trust_provider,
         })
     }
 
@@ -501,22 +518,6 @@ impl Tn {
     /// (`tn_core::Error::InvalidConfig`).
     pub fn unseal(&self, source: &str, options: UnsealOptions) -> Result<UnsealOutcome> {
         Ok(self.runtime.unseal(source, &options)?)
-    }
-
-    /// Read decrypted entries from the active log.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error`] if the log cannot be read or decrypted.
-    pub fn read(&self, options: ReadOptions) -> Result<Vec<Entry>> {
-        let entries = if options.verify {
-            self.runtime.read_with_verify()?
-        } else if options.all_runs {
-            self.runtime.read_all_runs()?
-        } else {
-            self.runtime.read()?
-        };
-        Ok(entries.into_iter().map(Entry::from).collect())
     }
 
     /// Return the ceremony administration namespace.
@@ -671,6 +672,37 @@ impl Tn {
 
     pub(crate) fn runtime_mut(&mut self) -> &mut Runtime {
         &mut self.runtime
+    }
+
+    /// Emit the one best-effort `tn.security.unsafe_operation` audit event
+    /// for an explicitly weakened operation.
+    ///
+    /// This is the mutation-owning runtime half of the shared observability
+    /// contract (the SDK layer separately emits the one structured warning).
+    /// Emission is guarded against recursion, never fails the requested
+    /// operation, and is skipped when the active ceremony cannot attest.
+    pub(crate) fn emit_unsafe_operation_audit(&self, notice: &tn_core::UnsafeOperationNotice) {
+        thread_local! {
+            static IN_AUDIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        let entered = IN_AUDIT.with(|flag| {
+            if flag.get() {
+                false
+            } else {
+                flag.set(true);
+                true
+            }
+        });
+        if !entered {
+            return;
+        }
+        let fields = serde_json::to_value(notice)
+            .ok()
+            .and_then(|value| value.as_object().cloned());
+        if let Some(fields) = fields {
+            let _ = self.info("tn.security.unsafe_operation", Value::Object(fields));
+        }
+        IN_AUDIT.with(|flag| flag.set(false));
     }
 }
 

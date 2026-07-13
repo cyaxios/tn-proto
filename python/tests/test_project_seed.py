@@ -28,16 +28,20 @@ Coverage:
   cwd with no prior ``tn.init()`` succeeds and writes everything; the
   follow-up ``tn.init()`` picks up the absorbed yaml + keystore.
 """
+
 from __future__ import annotations
 
+import base64
+import json
 import os
+import zipfile
 from pathlib import Path
 
 import pytest
 import yaml
 
-from tn.absorb import _absorb_dispatch, absorb
-from tn.config import LoadedConfig, load as load_cfg
+from tn.absorb import _absorb_dispatch
+from tn.config import LoadedConfig
 from tn.signing import DeviceKey
 from tn.tnpkg import _read_manifest
 
@@ -102,7 +106,7 @@ def test_project_seed_real_fixture_round_trip(tmp_path: Path):
     for name, data in body.items():
         if not name.startswith("body/keys/"):
             continue
-        rel = name[len("body/keys/"):]
+        rel = name[len("body/keys/") :]
         dest = cfg.keystore / rel
         assert dest.exists(), f"{dest} should be installed"
         assert dest.read_bytes() == data
@@ -190,11 +194,9 @@ def _hand_built_project_seed(
     handler can be exercised on synthetic input where ``Agentic20`` is
     unavailable.
     """
-    import json
-    import zipfile
     from datetime import datetime, timezone
 
-    from tn.tnpkg import TnpkgManifest
+    from tn.tnpkg import TnpkgManifest, _write_tnpkg, sign_manifest_with_body
 
     keystore_bytes = {
         "local.private": device.private_bytes,
@@ -244,19 +246,164 @@ def _hand_built_project_seed(
             }
         },
     )
-    manifest.sign(device.signing_key())
-
     body: dict[str, bytes] = {"body/tn.yaml": yaml_text.encode("utf-8")}
     for name, data in keystore_bytes.items():
         body[f"body/keys/{name}"] = data
 
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_STORED) as zf:
-        zf.writestr(
-            "manifest.json", json.dumps(manifest.to_dict(), indent=2, sort_keys=True)
-        )
-        for k, v in body.items():
-            zf.writestr(k, v)
-    return out_path
+    sign_manifest_with_body(manifest, body, device.signing_key())
+    return _write_tnpkg(out_path, manifest, body)
+
+
+def _rewrite_project_seed_for_trust_failure(
+    package: Path,
+    device: DeviceKey,
+    failure: str,
+) -> list[str]:
+    """Rewrite a valid package into a bootstrap trust-boundary negative."""
+    from tn.tnpkg import TnpkgManifest
+
+    with zipfile.ZipFile(package, "r") as zf:
+        names = zf.namelist()
+        manifest_doc = json.loads(zf.read("manifest.json").decode("utf-8"))
+        body = {name: zf.read(name) for name in names if name != "manifest.json"}
+
+    if failure == "bad_signature":
+        manifest_doc["manifest_signature_b64"] = base64.b64encode(b"\x00" * 64).decode("ascii")
+    elif failure == "missing_index":
+        manifest_doc.pop("body_sha256")
+        manifest = TnpkgManifest.from_dict(manifest_doc)
+        manifest.manifest_signature_b64 = None
+        manifest.sign(device.signing_key())
+        manifest_doc = manifest.to_dict()
+    elif failure == "null_index":
+        manifest_doc["body_sha256"] = None
+    else:  # pragma: no cover - test helper misuse
+        raise AssertionError(f"unknown trust failure {failure!r}")
+
+    with zipfile.ZipFile(package, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("manifest.json", json.dumps(manifest_doc, sort_keys=True).encode("utf-8"))
+        for name, data in body.items():
+            zf.writestr(name, data)
+    return sorted(body)
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        ("bad_signature", "signature"),
+        ("missing_index", "body_digest_mismatch"),
+        ("null_index", "body_sha256 must be a json object"),
+    ],
+)
+def test_no_runtime_bootstrap_rejects_trust_failure_before_body_yaml_or_autoinit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    reason: str,
+):
+    """A recognized bootstrap trust failure must not derive or mutate state."""
+    import tn
+    import tn._autoinit as autoinit
+    import yaml as yaml_module
+
+    device = DeviceKey.generate()
+    package = tmp_path / f"{failure}.project.tnpkg"
+    _hand_built_project_seed(package, device)
+    _rewrite_project_seed_for_trust_failure(package, device, failure)
+
+    work = tmp_path / f"work-{failure}"
+    work.mkdir()
+    tn.flush_and_close()
+    monkeypatch.chdir(work)
+
+    reads: list[str] = []
+    yaml_calls: list[object] = []
+    autoinit_calls: list[bool] = []
+    original_read = zipfile.ZipFile.read
+    original_safe_load = yaml_module.safe_load
+
+    def tracking_read(
+        archive: zipfile.ZipFile,
+        name: str | zipfile.ZipInfo,
+        *args: object,
+        **kwargs: object,
+    ) -> bytes:
+        reads.append(name.filename if isinstance(name, zipfile.ZipInfo) else name)
+        return original_read(archive, name, *args, **kwargs)
+
+    def tracking_safe_load(value: object) -> object:
+        yaml_calls.append(value)
+        return original_safe_load(value)
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", tracking_read)
+    monkeypatch.setattr(yaml_module, "safe_load", tracking_safe_load)
+    monkeypatch.setattr(
+        autoinit,
+        "maybe_autoinit",
+        lambda: autoinit_calls.append(True),
+    )
+
+    receipt = tn.absorb(package)
+
+    assert receipt.legacy_status == "rejected"
+    assert reason in receipt.legacy_reason.lower()
+    assert reads == ["manifest.json", "manifest.json", "manifest.json"]
+    assert yaml_calls == []
+    assert autoinit_calls == []
+    assert list(work.iterdir()) == []
+
+
+def test_no_runtime_bootstrap_reuses_verified_body_without_second_dispatch_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A valid bootstrap reads its body once, after the manifest-only peek."""
+    import tn
+    import yaml as yaml_module
+
+    device = DeviceKey.generate()
+    package = tmp_path / "valid.project.tnpkg"
+    _hand_built_project_seed(package, device)
+    with zipfile.ZipFile(package, "r") as zf:
+        expected_body_names = sorted(name for name in zf.namelist() if name != "manifest.json")
+
+    work = tmp_path / "work-valid"
+    work.mkdir()
+    tn.flush_and_close()
+    monkeypatch.chdir(work)
+
+    reads: list[str] = []
+    yaml_calls: list[object] = []
+    original_read = zipfile.ZipFile.read
+    original_safe_load = yaml_module.safe_load
+
+    def tracking_read(
+        archive: zipfile.ZipFile,
+        name: str | zipfile.ZipInfo,
+        *args: object,
+        **kwargs: object,
+    ) -> bytes:
+        reads.append(name.filename if isinstance(name, zipfile.ZipInfo) else name)
+        return original_read(archive, name, *args, **kwargs)
+
+    def tracking_safe_load(value: object) -> object:
+        yaml_calls.append(value)
+        return original_safe_load(value)
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", tracking_read)
+    monkeypatch.setattr(yaml_module, "safe_load", tracking_safe_load)
+
+    try:
+        receipt = tn.absorb(package)
+
+        assert receipt.legacy_status == "enrolment_applied", receipt.legacy_reason
+        assert reads.count("manifest.json") == 3
+        body_reads = sorted(name for name in reads if name != "manifest.json")
+        assert body_reads == expected_body_names
+        assert yaml_calls
+        assert (work / "tn.yaml").exists()
+    finally:
+        tn.flush_and_close()
 
 
 def test_project_seed_hand_built_round_trip(tmp_path: Path):
@@ -325,7 +472,7 @@ def test_project_seed_rejects_swapped_private(tmp_path: Path):
     cfg = _bootstrap_cfg_for(tmp_path)
     receipt = _absorb_dispatch(cfg, out)
     assert receipt.legacy_status == "rejected"
-    assert "integrity" in receipt.legacy_reason.lower()
+    assert "body_digest_mismatch" in receipt.legacy_reason.lower()
 
 
 def test_project_seed_rejects_non_self_addressed(tmp_path: Path):
@@ -362,16 +509,14 @@ def test_project_seed_skips_nested_subpaths(tmp_path: Path):
     """body/keys/foo/bar must NOT install into <keystore>/foo/bar — the
     handler only honors flat names directly under keys/.
     """
-    import json
     import zipfile
 
     device = DeviceKey.generate()
     out = tmp_path / "smuggle.project.tnpkg"
     _hand_built_project_seed(out, device)
 
-    # Add a nested smuggled file. We need to re-sign because the
-    # canonical manifest is unaffected (manifest doesn't enumerate
-    # body), so just append to the zip.
+    # Add an unindexed nested member. The exact signed member set rejects the
+    # whole package before any kind-specific installer can see it.
     members: dict[str, bytes] = {}
     with zipfile.ZipFile(out, "r") as zf:
         for n in zf.namelist():
@@ -383,9 +528,8 @@ def test_project_seed_skips_nested_subpaths(tmp_path: Path):
 
     cfg = _bootstrap_cfg_for(tmp_path)
     receipt = _absorb_dispatch(cfg, out)
-    # The handler should accept (the legitimate flat-path entries
-    # land), and the nested entry must NOT exist anywhere under
-    # cfg.keystore.
+    assert receipt.legacy_status == "rejected"
+    assert "body_digest_mismatch" in receipt.legacy_reason
     assert not (cfg.keystore / "etc" / "passwd").exists()
     smuggled_anywhere = list(cfg.keystore.rglob("passwd"))
     assert smuggled_anywhere == [], f"nested smuggling should be skipped; found {smuggled_anywhere}"

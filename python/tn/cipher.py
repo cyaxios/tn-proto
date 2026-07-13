@@ -8,7 +8,7 @@ serialization, HMAC index tokens, chain, signature — is cipher-agnostic.
 Two implementations ship:
 
   * JWEGroupCipher — RFC 7516 JWE General JSON Serialization via a
-    production JOSE library (Authlib/joserfc): ECDH-ES+A256KW per
+    JOSE library (Authlib/joserfc): ECDH-ES+A256KW per
     recipient over X25519, A256GCM body. Per-recipient revocation is
     O(1): drop the recipient from the list, next seal omits them.
   * BtnGroupCipher — NNL subset-difference broadcast encryption (see
