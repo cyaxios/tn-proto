@@ -8,9 +8,16 @@ import {
   MalformedError,
   NotEntitledError,
   btn,
+  extractX25519KeyAgreement,
   jwe,
+  verifyJweEnrollmentSource,
 } from "../src/index.js";
-import { btn as browserBtn, jwe as browserJwe } from "../src/index.browser.js";
+import {
+  btn as browserBtn,
+  extractX25519KeyAgreement as extractBrowserX25519KeyAgreement,
+  jwe as browserJwe,
+  verifyJweEnrollmentSource as verifyBrowserJweEnrollmentSource,
+} from "../src/index.browser.js";
 
 test("package roots expose BTN and JWE as sibling namespaces", () => {
   assert.equal(typeof btn.setup, "function");
@@ -28,6 +35,13 @@ test("package root exposes stable primitive error classes", () => {
   ]) {
     assert.equal(typeof ErrorClass, "function");
   }
+});
+
+test("node and browser roots expose the authenticated JWE enrollment adapter", () => {
+  assert.equal(typeof verifyJweEnrollmentSource, "function");
+  assert.equal(typeof verifyBrowserJweEnrollmentSource, "function");
+  assert.equal(typeof extractX25519KeyAgreement, "function");
+  assert.equal(typeof extractBrowserX25519KeyAgreement, "function");
 });
 
 test("package metadata exposes direct BTN and JWE subpaths", () => {

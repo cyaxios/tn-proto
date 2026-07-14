@@ -3269,6 +3269,14 @@ export class NodeRuntime {
           `this ceremony declares ${JSON.stringify([...cfg.groups.keys()].sort())}.`,
       );
     }
+    const jweGroups = requested.filter((group) => cfg.groups.get(group)?.cipher === "jwe");
+    if (jweGroups.length > 0) {
+      throw new Error(
+        `bundleForRecipient: JWE groups ${JSON.stringify(jweGroups)} have no reader kit; ` +
+          "use tn.pkg.prepareRecipient with an accepted public-key offer. " +
+          "A reader's .jwe.mykey is private, reader-local material and is never exported.",
+      );
+    }
 
     const td = mkdtempSync(join(tmpdir(), "tn-bundle-"));
     try {

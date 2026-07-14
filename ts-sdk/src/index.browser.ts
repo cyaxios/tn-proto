@@ -581,3 +581,33 @@ export const agents: _Tn["agents"] = _makeNamespaceProxy("agents");
 /** Runtime handlers namespace on the default instance. Browser
  *  placeholder. Mirrors Node `tn.handlers.*`. */
 export const handlers: _Tn["handlers"] = _makeNamespaceProxy("handlers");
+export {
+  verifyJweEnrollmentSource,
+  type AcceptedOffer,
+  type EnrollmentChallengeV1,
+  type JweChallengeResponseSource,
+  type JweEnrollmentExpectation,
+  type JweEnrollmentSource,
+  type KeyBindingProofV1,
+  type SignedJweKeyCardSource,
+  type VerifiedJweBinding,
+} from "./core/trust.js";
+export type {
+  BrowserRuntimeSealOptions,
+  BrowserRuntimeSealResult,
+  BrowserRuntimeUnsealOptions,
+  BrowserRuntimeUnsealResult,
+} from "./browser/runtime.js";
+export {
+  extractX25519KeyAgreement,
+  jweRecipientFromAcceptedOffer,
+  jweRecipientFromAuthenticatedDidDocument,
+  jweRecipientFromDidResolution,
+  jweRecipientFromFingerprintPin,
+  type AuthenticatedDidResolution,
+  type FingerprintPin,
+  type JweBindingEvidence,
+  type JweBindingScope,
+  type ResolvedX25519KeyAgreement,
+  type VerifiedJweRecipient,
+} from "./core/jwe_binding.js";

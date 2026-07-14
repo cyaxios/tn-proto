@@ -26,6 +26,30 @@ export * as primitives from "./core/primitives.js";
 export * as btn from "./btn.js";
 export * as jwe from "./jwe.js";
 export * from "./primitive_errors.js";
+export {
+  verifyJweEnrollmentSource,
+  type AcceptedOffer,
+  type EnrollmentChallengeV1,
+  type JweChallengeResponseSource,
+  type JweEnrollmentExpectation,
+  type JweEnrollmentSource,
+  type KeyBindingProofV1,
+  type SignedJweKeyCardSource,
+  type VerifiedJweBinding,
+} from "./core/trust.js";
+export {
+  extractX25519KeyAgreement,
+  jweRecipientFromAcceptedOffer,
+  jweRecipientFromAuthenticatedDidDocument,
+  jweRecipientFromDidResolution,
+  jweRecipientFromFingerprintPin,
+  type AuthenticatedDidResolution,
+  type FingerprintPin,
+  type JweBindingEvidence,
+  type JweBindingScope,
+  type ResolvedX25519KeyAgreement,
+  type VerifiedJweRecipient,
+} from "./core/jwe_binding.js";
 // Named aggregate so `import { tn } from "tn-proto"` works (see _namespace.ts).
 export { tn } from "./_namespace.js";
 export { NodeRuntime } from "./runtime/node_runtime.js";
@@ -79,7 +103,16 @@ export type {
   AddRuntimeOptions,
   AddRuntimeOptions as AdminAddAgentRuntimeOptions,
 } from "./agents/index.js";
-export type { ExportOptions as PkgExportOptions } from "./pkg/index.js";
+export type {
+  ExportOptions as PkgExportOptions,
+  JweChallengeResponseOffer,
+  JweActivationResult,
+  JweEnrollmentOffer,
+  OfferOptions,
+  PrepareRecipientOptions,
+  PrepareRecipientResult,
+  SignedJweKeyCardOffer,
+} from "./pkg/index.js";
 export type { ChainConflict, LeafReuseAttempt } from "./core/admin/state.js";
 
 import { Tn as _Tn } from "./tn.js";

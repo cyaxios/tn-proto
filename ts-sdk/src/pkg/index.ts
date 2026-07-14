@@ -1,7 +1,7 @@
 // tn.pkg.* namespace - verb surface for tnpkg / package operations.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve as pathResolve } from "node:path";
+import { dirname, join, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
 import type { NodeRuntime } from "../runtime/node_runtime.js";
 import type { CeremonyConfig } from "../runtime/config.js";
@@ -9,6 +9,14 @@ import { sha256HexBytes } from "../core/chain.js";
 import { compileKitBundleToFile } from "../compile.js";
 import { mintAndSealBundle, recipientKeyIsResolvable } from "../seal_bundle_producer.js";
 import type { AcceptedOffer, EnrollmentChallengeV1 } from "../core/trust.js";
+import { AdminNamespace } from "../admin/index.js";
+import {
+  planRecipientPreparation,
+  resolveRequestedGroups,
+  type JweActivationResult,
+  type PrepareRecipientOptions,
+  type PrepareRecipientResult,
+} from "./recipient_preparation.js";
 import {
   buildEnrollmentResponseArtifact,
   buildJweOfferArtifact,
@@ -19,6 +27,12 @@ import type {
   BundleResult,
   OfferReceipt,
 } from "../core/results.js";
+
+export type {
+  JweActivationResult,
+  PrepareRecipientOptions,
+  PrepareRecipientResult,
+} from "./recipient_preparation.js";
 
 export interface ExportOptions {
   /** Mint a per-recipient kit and write it to outPath. */
@@ -62,7 +76,27 @@ export interface OfferOptions {
    * challenge digest is packaged for the publisher to absorb.
    */
   challenge?: EnrollmentChallengeV1;
+  /**
+   * Build a public-only JWE enrollment offer. `signed-key-card` creates an
+   * audience/scope-bound DID-signed proof without a challenge; the publisher
+   * must explicitly approve its exact digest. `challenge-response` is the
+   * typed form of the existing `challenge` option.
+   */
+  jweEnrollment?: JweEnrollmentOffer;
 }
+
+export interface SignedJweKeyCardOffer {
+  kind: "signed-key-card";
+  ceremonyId: string;
+  ttlMs?: number;
+}
+
+export interface JweChallengeResponseOffer {
+  kind: "challenge-response";
+  challenge: EnrollmentChallengeV1;
+}
+
+export type JweEnrollmentOffer = SignedJweKeyCardOffer | JweChallengeResponseOffer;
 
 export interface CompileEnrolmentOptions {
   group: string;
@@ -204,8 +238,19 @@ export class PkgNamespace {
    * (accidentally shipping the publisher's own self-kit).
    */
   async bundleForRecipient(opts: BundleForRecipientOptions): Promise<BundleResult> {
+    const requested = resolveRequestedGroups(this._rt, opts.groups);
+    const jweGroups = requested.filter(
+      (group) => this._rt.config.groups.get(group)?.cipher === "jwe",
+    );
+    if (jweGroups.length > 0) {
+      throw new Error(
+        `tn.pkg.bundleForRecipient: JWE groups ${JSON.stringify(jweGroups)} do not have ` +
+          "reader kits and must never export .jwe.mykey; use tn.pkg.prepareRecipient " +
+          "with acceptedOffers to produce a public-only JWE activation.",
+      );
+    }
     const bundleOpts: { groups?: string[] } = {};
-    if (opts.groups !== undefined) bundleOpts.groups = opts.groups;
+    bundleOpts.groups = requested;
 
     let bundlePath: string;
     if (opts.sealForRecipient) {
@@ -244,13 +289,50 @@ export class PkgNamespace {
     }
     const bundleBytes = readFileSync(bundlePath);
     const bundleSha256 = sha256HexBytes(new Uint8Array(bundleBytes));
-    const resolvedGroups = opts.groups?.slice().sort() ?? [];
+    const resolvedGroups = requested.slice().sort();
     return {
       bundlePath,
       bundleSha256,
       recipientDid: opts.recipientDid,
       groups: resolvedGroups,
       manifestPath: bundlePath,
+    };
+  }
+
+  /** Prepare BTN/HIBE kits plus separate public-only JWE activations. */
+  async prepareRecipient(opts: PrepareRecipientOptions): Promise<PrepareRecipientResult> {
+    const plan = planRecipientPreparation(this._rt, opts);
+    const outDir = pathResolve(opts.outDir);
+    mkdirSync(outDir, { recursive: true });
+    const kitBundle =
+      plan.kitGroups.length === 0
+        ? null
+        : await this.bundleForRecipient({
+            recipientDid: opts.recipientDid,
+            outPath: join(outDir, "reader-bundle.tnpkg"),
+            groups: plan.kitGroups,
+            ...(opts.sealKitBundleForRecipient === undefined
+              ? {}
+              : { sealForRecipient: opts.sealKitBundleForRecipient }),
+          });
+    const admin = new AdminNamespace(this._rt);
+    const jweActivations: JweActivationResult[] = [];
+    for (const { group, accepted } of plan.evidence) {
+      await admin.addRecipient(group, { acceptedOffer: accepted });
+      const packageResult = await this.compileEnrolment({
+        group,
+        recipientDid: opts.recipientDid,
+        outPath: join(outDir, `${group}.jwe-enrolment.tnpkg`),
+        acceptedOffer: accepted,
+        ttlMs: plan.ttlMs,
+      });
+      jweActivations.push({ group, package: packageResult });
+    }
+    return {
+      recipientDid: opts.recipientDid,
+      requestedGroups: plan.requestedGroups,
+      kitBundle,
+      jweActivations,
     };
   }
 
@@ -373,8 +455,20 @@ export class PkgNamespace {
   async offer(opts: OfferOptions): Promise<OfferReceipt> {
     // Trusted JWE enrollment offer: answer the publisher's signed challenge
     // with a signed key-binding proof over this reader's static X25519 key.
+    if (opts.challenge !== undefined && opts.jweEnrollment !== undefined) {
+      throw new Error(
+        "tn.pkg.offer: challenge and jweEnrollment are mutually exclusive; " +
+          "use jweEnrollment.kind=challenge-response for the typed form",
+      );
+    }
     if (opts.challenge !== undefined) {
-      return this._offerTrustedEnrollment(opts, opts.challenge);
+      return this._offerTrustedEnrollment(opts, {
+        kind: "challenge-response",
+        challenge: opts.challenge,
+      });
+    }
+    if (opts.jweEnrollment !== undefined) {
+      return this._offerTrustedEnrollment(opts, opts.jweEnrollment);
     }
 
     // Step 1: compile a kit_bundle for the peer.
@@ -411,15 +505,23 @@ export class PkgNamespace {
   /** Build, retain, and write the challenged trusted enrollment offer. */
   private async _offerTrustedEnrollment(
     opts: OfferOptions,
-    challenge: EnrollmentChallengeV1,
+    enrollment: JweEnrollmentOffer,
   ): Promise<OfferReceipt> {
+    const challenge = enrollment.kind === "challenge-response" ? enrollment.challenge : null;
+    const ceremonyId =
+      enrollment.kind === "challenge-response"
+        ? enrollment.challenge.ceremony_id
+        : enrollment.ceremonyId;
     const built = buildJweOfferArtifact({
       readerKey: this._rt.keystore.device,
       readerKeystoreDir: this._rt.config.keystorePath,
       publisherDid: opts.peerDid,
-      ceremonyId: challenge.ceremony_id,
+      ceremonyId,
       group: opts.group,
       challenge,
+      ...(enrollment.kind === "signed-key-card" && enrollment.ttlMs !== undefined
+        ? { ttlMs: enrollment.ttlMs }
+        : {}),
     });
     const outPath = pathResolve(opts.outPath);
     mkdirSync(dirname(outPath), { recursive: true });

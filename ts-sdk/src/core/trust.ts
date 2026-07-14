@@ -460,6 +460,30 @@ export interface AcceptedOffer {
   artifactDigest: string;
 }
 
+/** An unchallenged, audience-scoped DID-signed JWE public-key proof. */
+export interface SignedJweKeyCardSource {
+  kind: "signed-key-card";
+  proof: KeyBindingProofV1;
+}
+
+/** A DID-signed JWE public-key proof bound to one publisher challenge. */
+export interface JweChallengeResponseSource {
+  kind: "challenge-response";
+  proof: KeyBindingProofV1;
+  challenge: EnrollmentChallengeV1;
+}
+
+/** Currently supported authenticated public-key inputs for JWE enrollment. */
+export type JweEnrollmentSource = SignedJweKeyCardSource | JweChallengeResponseSource;
+
+/** Publisher scope used to verify a JWE enrollment input. */
+export interface JweEnrollmentExpectation {
+  publisherDid: string;
+  ceremonyId: string;
+  group: string;
+  now: string;
+}
+
 export interface ProofExpectation {
   purpose: ProofPurpose;
   audienceDid: string;
@@ -871,6 +895,39 @@ export function verifyJweKeyBinding(
     proofDigest: principal.proofDigest,
     challengeDigest: challengeDigest === null ? null : (challengeDigest as string),
   };
+}
+
+/**
+ * Normalize the supported signed enrollment inputs into one verified binding.
+ *
+ * A signed key card is the existing unchallenged proof (`challenge_digest`
+ * must be null). A challenge response additionally verifies the publisher's
+ * signed challenge and its exact digest binding. Both remain audience,
+ * ceremony, group, and expiry scoped.
+ */
+export function verifyJweEnrollmentSource(
+  source: JweEnrollmentSource,
+  expected: JweEnrollmentExpectation,
+): VerifiedJweBinding {
+  if (
+    source === null ||
+    typeof source !== "object" ||
+    (source.kind !== "signed-key-card" && source.kind !== "challenge-response")
+  ) {
+    throw error("statement_invalid", "unsupported JWE enrollment source");
+  }
+  const proof = parseKeyBindingProof(source.proof);
+  const common = {
+    audienceDid: expected.publisherDid,
+    ceremonyId: expected.ceremonyId,
+    group: expected.group,
+    now: expected.now,
+  };
+  if (source.kind === "signed-key-card") {
+    return verifyJweKeyBinding(proof, common);
+  }
+  const challenge = parseEnrollmentChallenge(source.challenge);
+  return verifyJweKeyBinding(proof, { ...common, challenge });
 }
 
 // ── Enrollment response ─────────────────────────────────────────────
