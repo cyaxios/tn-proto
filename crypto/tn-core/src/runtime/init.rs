@@ -613,9 +613,9 @@ impl Runtime {
     /// `TNClient.ephemeral()` for tests and one-shot scripts where the
     /// caller doesn't care about persisting the ceremony.
     ///
-    /// Always uses `cipher: btn` because (a) it's hermetic — no JWE
-    /// keypair wiring required — and (b) it's the cipher the cross-SDK
-    /// test surface targets first.
+    /// Uses `cipher: btn` as the hermetic, self-contained default for
+    /// one-shot callers and the cross-SDK baseline. Persisted ceremonies can
+    /// select BTN, JWE, or HIBE per group.
     ///
     /// # Errors
     ///

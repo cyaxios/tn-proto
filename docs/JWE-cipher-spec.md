@@ -2,9 +2,9 @@
 
 `cipher: jwe` emits interoperable RFC 7516 JWE. A JWE group's `ciphertext` blob is
 a valid JWE **General JSON Serialization** object that any conformant JOSE
-implementation can parse, produced by each language's JOSE library
-(Python: Authlib/joserfc, BSD-3; JS/TS: panva/jose, MIT) or the Rust native
-profile implementation. A record sealed by one SDK opens in another by
+implementation can parse, produced by Python's JOSE implementation or the
+fixed Rust profile exposed natively and through WebAssembly. A record sealed
+by one SDK opens in another by
 standard conformance, not by a TN-only frame.
 
 ## Non-negotiable constraints
@@ -27,10 +27,11 @@ bespoke golden vectors. A design choice that would make the output non-standard
 Groups that don't opt into another cipher stay pure btn. JWE and HIBE are peer
 options selected per group via `cipher:`.
 
-**4. JWE is native in Rust and remains optional in the wasm runtime.**
-`tn-core` native builds seal and open this fixed profile using raw X25519
-enrollment material. The wasm runtime does not enable the `native-jwe` feature;
-the TypeScript JOSE path remains its JWE implementation.
+**4. JWE is native in Rust and WebAssembly.**
+`tn-core` seals and opens this fixed profile using raw X25519 enrollment
+material. `tn-wasm` exposes the same implementation as standalone primitives
+and through the configured runtime, and TypeScript uses those Rust/Wasm
+surfaces for its public JWE primitive API.
 
 ## Design decisions — the contract
 
@@ -42,13 +43,13 @@ the TypeScript JOSE path remains its JWE implementation.
   **`jwcrypto` (LGPL-3.0) is REJECTED** — it meets every requirement but its
   copyleft posture is incompatible with the permissive-only wheel; permissive is
   a hard requirement.
-- **JS/TS → panva `jose` (MIT, zero-dependency).** `GeneralEncrypt` +
-  `.addRecipient()` + `.setAdditionalAuthenticatedData()`; `generalDecrypt`;
-  native X25519 ECDH-ES.
+- **JS/TS → Rust/Wasm fixed profile.** The public `jwe` namespace delegates
+  key generation, multi-recipient encryption, and decryption to `tn-wasm` and
+  presents synchronous methods plus backward-compatible async delegates.
 - **Rust → fixed native profile over audited primitives.** `curve25519-dalek`
   supplies X25519, RustCrypto supplies SHA-256, AES-256-KW, and A256GCM, and
   `serde_json` supplies the strict General JSON shape. No OpenSSL toolchain or
-  TN-specific framing is involved. The wasm bundle leaves this feature off.
+  TN-specific framing is involved. The same implementation builds for wasm.
 
 **D2. Wire format — RFC 7516 JWE General JSON Serialization, stored INSIDE `ciphertext`.**
 A JWE group's cipher output is the UTF-8 bytes of the compact JSON of a General

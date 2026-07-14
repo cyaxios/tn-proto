@@ -950,12 +950,13 @@ impl Runtime {
     }
 
     // ------------------------------------------------------------------
-    // Admin verbs: cipher-agnostic recipient management.
+    // Admin verbs: BTN recipient-kit management.
     //
     // Public names follow the SDK parity matrix (tn_proto/docs/sdk-parity.md):
     // `admin_add_recipient`, `admin_revoke_recipient`, `admin_revoked_count`.
-    // Today only btn ceremonies are supported; JWE support lands alongside the
-    // second cipher and reuses these same public names.
+    // JWE admission uses authenticated X25519 public-key enrollment instead of
+    // minting a transferable reader kit; its lifecycle uses the shared admin
+    // catalog without passing reader private keys through these BTN methods.
     // ------------------------------------------------------------------
 
     /// Mint a new reader kit for `group`, write it to `out_kit_path`,

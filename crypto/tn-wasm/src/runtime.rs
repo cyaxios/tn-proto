@@ -732,10 +732,11 @@ impl WasmRuntime {
     /// is optional — pass `null`/`undefined` to bundle every non-
     /// internal group declared in the active ceremony.
     ///
-    /// Cipher behavior comes from tn-core: BTN groups mint `.btn.mykit`
-    /// reader kits; native HIBE builds mint `.hibe.mpk/.idpath/.sk`
-    /// material; JWE groups return an explicit unsupported error because
-    /// JWE lives in the TypeScript pure-JS JOSE pipeline.
+    /// Cipher behavior comes from tn-core: BTN groups mint portable
+    /// `.btn.mykit` reader kits and native HIBE builds mint
+    /// `.hibe.mpk/.idpath/.sk` material. JWE intentionally has no private-key
+    /// reader kit: each reader retains its own X25519 private key and enrolls
+    /// only an authenticated public binding.
     ///
     /// Mirrors PyO3 `bundle_for_recipient` and Python
     /// `tn.bundle_for_recipient`. Returns the absolute bundle path.
@@ -814,12 +815,11 @@ impl WasmRuntime {
     /// produces; consumers who want the flat hoisted shape can post-
     /// process or call `readWithVerify` once it grows a path arg.
     ///
-    /// For this wasm runtime build, configured BTN logs are supported.
-    /// Foreign BTN recipient-kit reads are supported when BTN kits are in
-    /// the keystore. Foreign HIBE/JWE recipient-kit dispatch returns a
-    /// clear unsupported error instead of using BTN assumptions; HIBE is
-    /// exposed separately through the standalone `hibe*` primitives and
-    /// JWE through the TS pure-JS JOSE path.
+    /// Configured BTN and JWE groups use tn-core's normal runtime decryptors.
+    /// The special cross-publisher path recognizes portable BTN recipient
+    /// kits when they are present in the keystore. HIBE capabilities and JWE
+    /// reader-local private keys are provisioned through their own material
+    /// flows rather than being interpreted as BTN kits.
     #[wasm_bindgen(js_name = "readFrom")]
     pub fn read_from_js(&self, log_path: &str) -> Result<JsValue, JsError> {
         let normalized = log_path.replace('\\', "/");

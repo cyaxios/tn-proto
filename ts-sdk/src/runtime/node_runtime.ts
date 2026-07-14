@@ -2478,10 +2478,10 @@ export class NodeRuntime {
    * the `groups.<name>` block to the AUTHORITATIVE yaml so the group both
    * survives the next load and is routable. See {@link persistBtnGroup}.
    *
-   * btn/hibe mint through the wasm / tn-hibe cores; jwe mints its recipient
-   * keystore via the TS pipeline (see {@link persistJweGroup}). A ceremony that
-   * contains a jwe group runs the TS emit/read pipeline (no wasm attach), so
-   * the group persists to the yaml like the others. */
+   * btn/hibe mint through the wasm / tn-hibe cores; jwe mints its reader-local
+   * keystore through the TS lifecycle adapter (see {@link persistJweGroup}). A
+   * ceremony containing jwe uses TS orchestration backed by the Rust/Wasm JWE
+   * primitives, and persists the group to yaml like the others. */
   adminEnsureGroup(group: string, cipher: "btn" | "jwe" | "hibe", fields?: string[]): EmitReceipt {
     if (cipher === "btn") {
       this.persistBtnGroup(group, fields);

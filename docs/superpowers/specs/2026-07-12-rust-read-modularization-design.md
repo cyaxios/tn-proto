@@ -96,16 +96,15 @@ and returns one of these semantic outcomes:
 - malformed plaintext.
 
 Configured-runtime reads adapt the runtime's existing `GroupCipher` instances
-to this boundary. Consequently, BTN and feature-enabled native HIBE use the same
-pipeline today, and another cipher implementing `GroupCipher` requires no
+to this boundary. Consequently, BTN, JWE, and feature-enabled native HIBE use
+the same pipeline, and another cipher implementing `GroupCipher` requires no
 scanner or policy changes.
 
-Foreign-log reads build the same decryptor set from discovered reader material.
-This slice wires BTN and the existing feature-enabled HIBE implementation.
+Foreign-log reads build decryptors from discovered portable reader material.
 Cipher-specific file names and key construction stay inside `foreign.rs` and
-the cipher builders. JWE reader material produces a precise unsupported-cipher
-error until native Rust JWE exists; adding JWE later is a loader/backend change,
-not a read-pipeline rewrite.
+the cipher builders. JWE private keys are reader-local rather than portable
+reader kits, so they enter through a JWE-provisioned runtime instead of BTN kit
+auto-discovery; the scanner and policy pipeline remain cipher-neutral.
 
 Possessing reader material does not authorize the publisher. Signature
 verification and receiver-local exact-DID writer trust remain independent gates.
@@ -169,10 +168,11 @@ The slice is ready to land when:
    no production function exceeds 200 lines;
 3. the initial exemption list is empty;
 4. `Tn::read` and watch retain their current public shapes and secure defaults;
-5. configured BTN and native HIBE reads share the same scanner, policy, and
-   decryptor path;
+5. configured BTN, JWE, and native HIBE reads share the same scanner, policy,
+   and decryptor path;
 6. foreign cipher selection is isolated from scanning and policy;
-7. missing native JWE support is reported precisely at the loader boundary;
+7. JWE reader-local keys are handled without treating them as portable BTN
+   kits at the foreign-material loader boundary;
 8. read, trust, cursor, watch, and HIBE-focused tests pass; and
 9. only files belonging to this Rust read slice are included in its
    implementation commits.

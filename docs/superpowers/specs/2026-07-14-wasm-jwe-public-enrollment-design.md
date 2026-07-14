@@ -44,7 +44,7 @@ new cryptographic wire format.
   storage.
 
 The TN wire format and `read()` defaults do not change. JWE failure remains
-fail-closed; no JS-only fallback or alternate `tn-jwe-v1` frame is introduced.
+fail-closed and ciphertext remains RFC 7516 General JSON end to end.
 
 ## Delivery
 

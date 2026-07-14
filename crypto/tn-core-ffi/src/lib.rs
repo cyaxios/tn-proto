@@ -1142,11 +1142,11 @@ pub unsafe extern "C" fn tn_runtime_seal(
 /// {"<group>": {...}}, "valid": {"signature": bool, "row_hash": bool},
 /// "hidden_groups": [...], "sealed_blocks": [{"name", "ciphertext_b64",
 /// "field_hashes", "aad_b64", "keystore_candidates"}], "fields": {...}}`.
-/// `sealed_blocks` + `aad_b64` are the managed-cipher seam: a host holding a
-/// cipher this build lacks (jwe always; hibe when the feature is off — the
-/// FFI build itself gets hibe via feature unification from its direct
-/// tn-core dependency) can run a second-pass decrypt without reimplementing
-/// the AAD reconstruction. Holding no fitting key is NOT an error — the
+/// `sealed_blocks` + `aad_b64` are the host-managed decryptor seam: a host
+/// using an external key store or a cipher feature outside this build can run
+/// a second-pass decrypt without reimplementing AAD reconstruction. Standard
+/// JWE is also supported directly by tn-core when matching reader-local key
+/// material is provisioned. Holding no fitting key is NOT an error — the
 /// verified public frame comes back with the blocks left sealed.
 ///
 /// Error channel (see [`tn_last_error`]): failed verification is

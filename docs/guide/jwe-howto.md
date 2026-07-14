@@ -150,31 +150,38 @@ rejects the wrong key with no false-plaintext risk.
 
 ## TypeScript / JavaScript
 
-The TS SDK ships the same cipher on panva/jose, pure JS — it runs in Node,
-browsers, and edge runtimes with no wasm:
+The TS SDK exposes the same fixed RFC 7516 profile through the Rust/Wasm `jwe`
+namespace:
 
 ```ts
-import { jweSeal, jweDecrypt, okpPrivateJwk } from "@cyaxios/tn-proto/core";
+import { jwe } from "@cyaxios/tn-proto";
 
 // recipientPubs: raw 32-byte X25519 public keys
-const blob = await jweSeal([alicePub], plaintextBytes, enc("policy=finra-oba"));
+const blob = jwe.encryptSync(
+  plaintextBytes,
+  [alicePub],
+  enc("policy=finra-oba"),
+);
 
-// readerJwk: the reader's X25519 key as an OKP JWK ({kty,crv,x,d})
-const pt = await jweDecrypt(readerJwk, blob, enc("policy=finra-oba"));
-// wrong / absent marker, or a non-recipient key -> null (never plaintext)
+// The reader retains its raw 32-byte X25519 private key locally.
+const pt = jwe.subscribe([alicePrivate]).decryptSync(
+  blob,
+  enc("policy=finra-oba"),
+);
+// A wrong/absent marker or non-recipient key throws; plaintext is never returned.
 ```
 
-`jweSeal` and `jweDecrypt` are `async` (they use WebCrypto), and interoperate
-with the Python cipher — bytes sealed by one open with the other.
+`jwe.encryptSync` and `Subscriber.decryptSync` execute immediately. The
+`encrypt` and `decrypt` methods are backward-compatible async delegates. Both
+forms interoperate with the Python cipher: bytes sealed by one open with the
+other.
 
-To write and read jwe groups through the TS runtime, use the async verbs —
-`emitAsync` / `infoAsync` to seal, `readAsync` to open (the synchronous
-`emit` / `info` / `read` handle btn and hibe):
+To write and read JWE groups through the TS runtime, use the ordinary verbs:
 
 ```ts
-await tn.infoAsync("order.created", { amount: 999, currency: "USD" });
+tn.info("order.created", { amount: 999, currency: "USD" });
 
-for await (const entry of tn.readAsync()) {
+for (const entry of tn.read()) {
   console.log(entry.event_type, entry.fields);
 }
 ```

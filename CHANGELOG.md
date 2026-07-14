@@ -147,10 +147,9 @@ Python/TypeScript parity, the TypeScript recovery story, and documentation.
   first, the `added` was misread as a leaf-reuse attempt and dropped. The
   sort is now `(timestamp, sequence)` with a stable sort that preserves the
   on-disk (causal) order. Fixed identically in Python and TypeScript.
-* **Documentation.** Simplified the guides, removed all references to the
-  deprecated `jwe` cipher (btn is the only documented cipher), and stripped
-  source file paths and line numbers from the protocol reference so it stays
-  correct as the code moves.
+* **Documentation.** Simplified the guides, consolidated cipher guidance, and
+  stripped source file paths and line numbers from the protocol reference so
+  it stays correct as the code moves.
 
 ## [0.6.0a3] - 2026-06-11 -- Documentation pass + PyPI polish
 
@@ -897,10 +896,9 @@ Released in Python as `tn-protocol 0.4.2a1` and in TS as
   as documented in 0.4.2a1; the D1 white-glove finding was not
   reproducible in this build.
 
-- JWE CLI surface (offer / enrolment handshake) is intentionally
-  deferred to a later release. Today's JWE recipient onboarding still
-  flows through the Python `tn.offer(...)` + `tn.admin.add_recipient(
-  ..., public_key=...)` path.
+- JWE recipient onboarding uses the Python `tn.offer(...)` +
+  `tn.admin.add_recipient(..., public_key=...)` path, keeping the reader's
+  X25519 private key local and moving only authenticated public material.
 
 ## [0.4.1a3] - 2026-05-17
 

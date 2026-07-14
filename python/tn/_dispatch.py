@@ -39,13 +39,13 @@ _log = logging.getLogger("tn._dispatch")
 
 
 def _ceremony_is_btn_only(yaml_path: Path) -> bool:
-    """True iff every group in the yaml uses a native-capable cipher
-    (``btn`` or ``hibe``).
+    """True iff every group uses Python's direct native-runtime route.
 
     Both run on the Rust runtime: btn always, and hibe when tn-core was
-    built with the ``hibe`` feature (default). ``jwe`` stays on the pure
-    pipeline (the native runtime has no jwe cipher). Named for history;
-    the gate now admits hibe too.
+    built with the ``hibe`` feature (default). Python ceremonies containing
+    ``jwe`` use the managed dispatcher so Python's JWE keystore and lifecycle
+    adapters remain in control; tn-core supplies its own standard JWE runtime
+    and primitive surfaces. Named for history, the gate admits hibe too.
 
     Resolves ``extends:`` first so streams that inherit groups from a
     parent yaml are detected based on the parent's groups.

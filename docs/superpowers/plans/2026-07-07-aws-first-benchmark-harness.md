@@ -276,8 +276,8 @@ Create `src/runner/baseline.ts`:
 
 Create `src/runner/node-runtime.ts`:
 - For `btn`, `hibe`, and `jwe`, call `NodeRuntime.init(yamlPath, { cipher: cell.cipher })`.
-- For `jwe`, emit with `await runtime.emitAsync("info", eventType, payload)` and read with `for await (const entry of runtime.readAsync())`.
-- For `btn` and `hibe`, emit with `runtime.info(eventType, payload)` and read with `runtime.read()`.
+- For every cipher, emit with `runtime.info(eventType, payload)` and read with
+  `runtime.read()` so the benchmark measures the same application surface.
 - Emit records first, then time a full verified read pass over the same log.
 - Record `wire_bytes` from the emitted log line length.
 - Close the runtime in `finally`.

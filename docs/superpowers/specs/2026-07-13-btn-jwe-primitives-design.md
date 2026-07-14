@@ -6,7 +6,7 @@ Date: 2026-07-13
 
 Expose the same small, byte-oriented `encrypt` and `decrypt` vocabulary for BTN and JWE in Rust, Python, TypeScript, and C#. This is a standalone cryptographic surface for local applications. Existing TN `seal`, `unseal`, and `read` behavior does not change.
 
-The implementation must reuse the BTN and RFC 7516 JWE engines already in this repository. It must not introduce another ciphertext format or route JWE through Biscuit.
+The implementation reuses the BTN and RFC 7516 JWE engines already in this repository, with RFC 7516 General JSON as the sole JWE ciphertext format.
 
 ## Public shape
 

@@ -4,13 +4,13 @@
 
 **Goal:** Keep TypeScript's existing synchronous `read()` API unchanged while making standalone sealing fail closed for BTN and JWE and directly proving RFC 7516 interoperability with Rust.
 
-**Architecture:** `sealObjectCore` is the shared Node/browser sealing boundary, so cipher errors must propagate there instead of being converted into signed objects with missing private groups. Existing async TypeScript JWE APIs remain unchanged: `seal()`, `unseal()`, `emitAsync()`, and `readAsync()`. A focused Rust integration test exchanges raw RFC 7516 General JSON with `ts-sdk/src/core/jwe.ts` in both directions.
+**Architecture:** `sealObjectCore` is the shared Node/browser sealing boundary, so cipher errors must propagate there instead of being converted into signed objects with missing private groups. Ordinary synchronous logging and reading support BTN and JWE, while `seal()` and `unseal()` retain their promise-based application signatures. Focused integration tests exchange raw RFC 7516 General JSON with the Rust/Wasm JWE implementation in both directions.
 
 **Tech Stack:** TypeScript, Node 20+, `jose`, Node test runner, Rust 1.85, `tn-core` native JWE.
 
 ## Global Constraints
 
-- Synchronous TypeScript `read()` must not change; JWE log reading remains `readAsync()`.
+- Synchronous TypeScript `read()` must not change and must handle JWE groups.
 - A requested protected field must never be silently omitted from a standalone sealed object.
 - BTN and JWE group-seal failures must both reject `Tn.seal()`.
 - JWE wire bytes remain RFC 7516 General JSON with `ECDH-ES+A256KW`, `A256GCM`, and optional standard JWE AAD.
@@ -109,7 +109,7 @@ Add native Rust unit coverage that rejects duplicate header names across compone
 
 - [ ] **Step 4: Correct stale implementation comments**
 
-Update `ts-sdk/src/core/jwe.ts` to say TypeScript uses `jose` while the native Rust SDK now has its own RFC 7516 implementation; only the wasm path lacks a Rust JOSE surface. Update `ts-sdk/src/runtime/keystore.ts` so it no longer says TypeScript JWE cannot emit/read.
+Update `ts-sdk/src/core/jwe.ts` to describe the shared RFC 7516 profile and update `ts-sdk/src/runtime/keystore.ts` to describe normal TypeScript JWE emit/read behavior. The public TypeScript primitive namespace delegates to the Rust/Wasm JWE implementation.
 
 - [ ] **Step 5: Run native JWE tests and the direct gate**
 

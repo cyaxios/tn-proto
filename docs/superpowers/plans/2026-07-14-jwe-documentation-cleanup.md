@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Remove repository text that describes standard JWE as absent, pending, TypeScript-only, or outside the Rust/Wasm runtime, and replace it with the capabilities that ship today.
+**Goal:** Normalize repository text around the standard JWE capabilities that ship today.
 
-**Architecture:** Treat RFC 7516 General JSON JWE as a normal TN per-group cipher. Rust owns the normative seal/open primitives and runtime verbs; Wasm exposes those primitives and verbs; TypeScript uses the Rust/Wasm surface; Python and C# describe their actual public surfaces without implying that JWE itself is unavailable.
+**Architecture:** Treat RFC 7516 General JSON JWE as a normal TN per-group cipher. Rust owns the normative seal/open primitives and runtime verbs; Wasm exposes those primitives and verbs; TypeScript uses the Rust/Wasm surface; Python and C# describe their actual public surfaces with operation-specific boundaries.
 
 **Tech Stack:** Markdown, Rust/rustdoc, TypeScript test comments, C# test comments, GitHub CLI.
 
@@ -19,7 +19,7 @@
 - Modify: `docs/guide/jwe-hibe-key-ceremonies.md`
 - Modify: `docs/guide/jwe-howto.md`
 
-1. Replace pure-JS, async-only, or missing-Wasm claims with the standard Rust/Wasm-backed JWE behavior.
+1. State the standard Rust/Wasm-backed JWE behavior and ordinary language surfaces.
 2. Preserve concrete API limitations only when scoped to a particular operation.
 3. Search these documents for obsolete architecture names and availability language.
 
@@ -32,16 +32,16 @@
 - Modify: `csharp-sdk/tests/TnProto.Tests/JweSealedGroupCipherTests.cs`
 
 1. Rewrite comments to match implemented Rust/Wasm runtime JWE support.
-2. Distinguish unsupported reader-kit transfer or foreign-kit dispatch from JWE availability.
+2. Scope reader-kit transfer and foreign-kit dispatch rules to those operations.
 3. Run formatting checks for touched language files.
 
-### Task 3: Scrub historical absence claims
+### Task 3: Normalize historical architecture statements
 
 **Files:**
 - Modify: `CHANGELOG.md`
 - Modify: relevant tracked files under `docs/superpowers/`
 
-1. Remove obsolete names and claims that JWE was missing or planned.
+1. Phrase every historical architecture statement as the current standard JWE design.
 2. Keep useful decisions phrased as the current standard JWE architecture.
 3. Run a repository-wide negative search for every forbidden phrase and manually classify any remaining matches.
 

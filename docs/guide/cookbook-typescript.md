@@ -159,8 +159,8 @@ signature, row-hash, and chain integrity:
 
 `tn.seal` builds a signed, encrypted object and hands it back to you instead
 of writing it to the log. `tn.unseal` opens it, using whatever keys you hold.
-Both are async — the jwe cipher seals and opens through an async JOSE
-library.
+Both return promises so the same application surface works in Node and browser
+runtimes; BTN and JWE crypto are provided by the Rust/Wasm implementation.
 
 ```typescript
 import { tn } from "tn-proto";

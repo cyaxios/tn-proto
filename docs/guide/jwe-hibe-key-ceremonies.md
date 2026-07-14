@@ -303,12 +303,13 @@ publisher's `<group>.jwe.mykey`: that is the publisher's self-recipient secret,
 not the other reader's key. A JWE reader must generate and retain its own
 private key as above; enrollment moves only public material.
 
-In TypeScript, JWE uses WebCrypto through `jose`, so use the async verbs:
+In TypeScript, the ordinary synchronous logging and reading verbs support JWE
+through the Rust/Wasm implementation:
 
 ```ts
-await tn.infoAsync("request.completed", { path: "/v1/cases", status: 200 });
+tn.info("request.completed", { path: "/v1/cases", status: 200 });
 
-for await (const entry of tn.readAsync()) {
+for (const entry of tn.read()) {
   console.log(entry.event_type, entry.fields);
 }
 ```
@@ -616,8 +617,8 @@ For JWE:
 2. Have every reader generate and retain its own raw 32-byte X25519 keypair.
 3. Authenticate the binding between each reader DID and X25519 public key.
 4. Register only the verified public key in the publisher ceremony.
-5. Use async TypeScript verbs for JWE groups (`infoAsync`, `readAsync`) or the
-   normal Python verbs.
+5. Use the normal TypeScript or Python logging and reading verbs; JWE is a
+   per-group cipher choice, not a separate application workflow.
 6. Treat revocation as forward-only: it removes future recipient blocks.
 7. After rotation, re-enroll every non-publisher reader.
 8. If authorship matters, use a signing profile, enforce composite verification,
@@ -640,7 +641,7 @@ For HIBE:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | JWE group cannot seal. | `<group>.jwe.recipients` is missing or empty. | Create the group or register at least one recipient public key. |
-| JWE reader gets no plaintext. | Reader did not generate/retain the matching `<group>.jwe.mykey`, was not re-enrolled after rotation, or is using the synchronous TS read path. | Restore the reader's own key or re-enroll its authenticated public key; use `readAsync` in TypeScript. |
+| JWE reader gets no plaintext. | Reader did not generate/retain the matching `<group>.jwe.mykey`, was not enrolled for that seal, or was not re-enrolled after rotation. | Restore the reader's own key or re-enroll its authenticated public key. |
 | HIBE writer cannot seal. | The writer lacks `<group>.hibe.mpk`/`<group>.hibe.idpath`, the MPK pin fails, or the path exceeds `max_depth`. | Authenticate and pin the authority MPK, then configure a path within its encoded depth. |
 | HIBE reader cannot open. | The reader lacks `<group>.hibe.sk`, has a key for a sibling path, or the AAD marker changed. | Absorb the correct grant and verify the `tn_aad` echo was not changed. |
 | HIBE grant package is plaintext. | The reader identifier was not a complete resolvable Ed25519 `did:key`. | Stop delivery, obtain the complete DID, require `recipient_key_is_resolvable(...)`, and mint a new grant. |

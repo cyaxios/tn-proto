@@ -6,7 +6,7 @@
 // full assertion body: rotate mid-stream and verify the chain stays continuous.
 // The catch/skip branch below survives only as a guard if rotate ever throws.
 //
-// Assertion intent (for when rotation is available):
+// Assertion intent:
 //   1. Emit 200 evt.pre events.
 //   2. Call tn.admin.rotate("default") — should complete without error.
 //   3. Emit 200 evt.post events.
@@ -67,7 +67,7 @@ test("alice/s02_rotate — rotate mid-stream, chain continues", async (t) => {
       return;
     }
 
-    // If rotation somehow succeeds (future JWE support), run the full body:
+    // Rotation succeeded; run the full assertion body:
     for (let i = 0; i < 200; i++) {
       tn.info("evt.post", { seq: i });
     }
