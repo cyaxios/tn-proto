@@ -126,6 +126,12 @@ export { SealedObject, SealedObjectError } from "./core/sealed_object.js";
 export type { SealOptions, SealedTriple, UnsealSource } from "./core/sealed_object.js";
 export type { BrowserKeyBag, BrowserUnsealOptions } from "./browser/seal.js";
 
+// Small byte-oriented cipher facades. These are sibling namespaces rather
+// than additions to the stateful `tn` runtime surface.
+export * as btn from "./btn.js";
+export * as jwe from "./jwe.js";
+export * from "./primitive_errors.js";
+
 // RFC 7516 JWE for `cipher: jwe` groups — pure JS (panva/jose over
 // WebCrypto), so the browser is a first-class jwe recipient: mint a
 // keypair, get enrolled by a publisher, open your blocks.

@@ -23,6 +23,9 @@ export * from "./core/signing.js";
 // matching Python's `import tn; tn.admin.*`.
 export * as adminCatalog from "./core/admin/catalog.js";
 export * as primitives from "./core/primitives.js";
+export * as btn from "./btn.js";
+export * as jwe from "./jwe.js";
+export * from "./primitive_errors.js";
 // Named aggregate so `import { tn } from "tn-proto"` works (see _namespace.ts).
 export { tn } from "./_namespace.js";
 export { NodeRuntime } from "./runtime/node_runtime.js";
