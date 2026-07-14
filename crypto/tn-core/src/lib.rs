@@ -67,6 +67,7 @@ pub mod did_document;
 pub mod envelope;
 pub mod error;
 pub mod indexing;
+pub mod jwe_binding;
 pub mod panic_guard;
 pub mod path_template;
 pub(crate) mod pathutil;

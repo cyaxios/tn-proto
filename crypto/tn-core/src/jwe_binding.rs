@@ -1,0 +1,349 @@
+//! Normalized, public-only evidence authorizing a JWE recipient key.
+
+use serde_json::{json, Value};
+use std::time::{Duration, SystemTime};
+
+use crate::canonical::canonical_bytes;
+use crate::did_document::ResolvedX25519KeyAgreement;
+use crate::trust::{AcceptedOffer, TrustError, TrustReason};
+use crate::trusted_enrollment::{canonical_utc_timestamp, sha256_tagged};
+
+/// Publisher scope and validity assigned to non-offer binding evidence.
+#[derive(Debug, Clone)]
+pub struct JweBindingScope {
+    /// Publisher DID accepting the recipient binding.
+    pub audience_did: String,
+    /// Ceremony in which the binding is valid.
+    pub ceremony_id: String,
+    /// JWE group in which the key is authorized.
+    pub group: String,
+    /// Binding acceptance time.
+    pub now: SystemTime,
+    /// Maximum lifetime of the accepted binding.
+    pub ttl: Duration,
+}
+
+/// Evidence retained from an authenticated DID-method resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedDidResolution {
+    /// DID method/resolver authentication description.
+    pub resolver: String,
+    /// Digest of the resolver result including its verification metadata.
+    pub resolution_digest: String,
+    /// Digest of the exact DID document parsed by TN.
+    pub document_digest: String,
+}
+
+/// Explicit record of an out-of-band X25519 fingerprint comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FingerprintPin {
+    /// Expected `sha256:<hex>` digest of the raw X25519 key.
+    pub expected_fingerprint: String,
+    /// Operator or system that performed the comparison.
+    pub verified_by: String,
+    /// Out-of-band comparison method.
+    pub verification_method: String,
+    /// Evidence reference; TN retains only its digest.
+    pub evidence: String,
+}
+
+/// How a DID-to-X25519 binding was authenticated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JweBindingEvidence {
+    /// Portable subject-signed proof without a publisher challenge.
+    SignedKeyCard {
+        /// Canonical inner offer digest.
+        offer_digest: String,
+        /// Exact package digest.
+        artifact_digest: String,
+        /// Subject-signed proof digest.
+        proof_digest: String,
+    },
+    /// Subject-signed proof bound to a publisher's one-time challenge.
+    ChallengeResponse {
+        /// Canonical inner offer digest.
+        offer_digest: String,
+        /// Exact package digest.
+        artifact_digest: String,
+        /// Subject-signed proof digest.
+        proof_digest: String,
+        /// Publisher challenge digest named by the proof.
+        challenge_digest: String,
+    },
+    /// X25519 key selected from authenticated DID resolution output.
+    DidDocument {
+        /// Selected method's DID URL.
+        verification_method_id: String,
+        /// Resolver/method authentication description.
+        resolver: String,
+        /// Authenticated resolution result digest.
+        resolution_digest: String,
+        /// Parsed DID document digest.
+        document_digest: String,
+    },
+    /// Explicit out-of-band public-key fingerprint comparison.
+    FingerprintPin {
+        /// Fingerprint compared by the operator.
+        expected_fingerprint: String,
+        /// Operator or system that performed the comparison.
+        verified_by: String,
+        /// Comparison method.
+        verification_method: String,
+        /// Digest of the evidence reference.
+        evidence_digest: String,
+    },
+}
+
+impl JweBindingEvidence {
+    /// Stable source name for storage and audit records.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::SignedKeyCard { .. } => "signed-key-card",
+            Self::ChallengeResponse { .. } => "challenge-response",
+            Self::DidDocument { .. } => "did-document",
+            Self::FingerprintPin { .. } => "fingerprint-pin",
+        }
+    }
+
+    /// Canonical-ready JSON representation of the public evidence metadata.
+    pub fn to_value(&self) -> Value {
+        match self {
+            Self::SignedKeyCard {
+                offer_digest,
+                artifact_digest,
+                proof_digest,
+            } => json!({
+                "kind": self.kind(), "offer_digest": offer_digest,
+                "artifact_digest": artifact_digest, "proof_digest": proof_digest,
+            }),
+            Self::ChallengeResponse {
+                offer_digest,
+                artifact_digest,
+                proof_digest,
+                challenge_digest,
+            } => json!({
+                "kind": self.kind(), "offer_digest": offer_digest,
+                "artifact_digest": artifact_digest, "proof_digest": proof_digest,
+                "challenge_digest": challenge_digest,
+            }),
+            Self::DidDocument {
+                verification_method_id,
+                resolver,
+                resolution_digest,
+                document_digest,
+            } => json!({
+                "kind": self.kind(), "verification_method_id": verification_method_id,
+                "resolver": resolver, "resolution_digest": resolution_digest,
+                "document_digest": document_digest,
+            }),
+            Self::FingerprintPin {
+                expected_fingerprint,
+                verified_by,
+                verification_method,
+                evidence_digest,
+            } => json!({
+                "kind": self.kind(), "expected_fingerprint": expected_fingerprint,
+                "verified_by": verified_by, "verification_method": verification_method,
+                "evidence_digest": evidence_digest,
+            }),
+        }
+    }
+}
+
+/// A scoped DID-to-X25519 binding accepted through any safe enrollment route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedJweRecipient {
+    /// DID whose X25519 key was authenticated.
+    pub reader_did: String,
+    /// Publisher DID that accepted this binding.
+    pub audience_did: String,
+    /// Ceremony scope.
+    pub ceremony_id: String,
+    /// JWE group scope.
+    pub group: String,
+    /// Raw public X25519 key.
+    pub public_key: [u8; 32],
+    /// Digest of the raw public key.
+    pub public_key_sha256: String,
+    /// Digest covering key, scope, validity, and evidence.
+    pub binding_digest: String,
+    /// Canonical UTC issuance timestamp.
+    pub issued_at: String,
+    /// Canonical UTC expiry timestamp.
+    pub expires_at: String,
+    /// Authentication evidence retained for audit.
+    pub evidence: JweBindingEvidence,
+}
+
+impl VerifiedJweRecipient {
+    /// Normalize an already verified signed offer or challenge response.
+    pub fn from_accepted_offer(accepted: &AcceptedOffer) -> Self {
+        let binding = &accepted.binding;
+        let principal = &binding.principal;
+        let evidence = match &binding.challenge_digest {
+            Some(challenge_digest) => JweBindingEvidence::ChallengeResponse {
+                offer_digest: accepted.offer_digest.clone(),
+                artifact_digest: accepted.artifact_digest.clone(),
+                proof_digest: binding.proof_digest.clone(),
+                challenge_digest: challenge_digest.clone(),
+            },
+            None => JweBindingEvidence::SignedKeyCard {
+                offer_digest: accepted.offer_digest.clone(),
+                artifact_digest: accepted.artifact_digest.clone(),
+                proof_digest: binding.proof_digest.clone(),
+            },
+        };
+        Self {
+            reader_did: principal.did.clone(),
+            audience_did: principal.audience_did.clone(),
+            ceremony_id: principal.ceremony_id.clone(),
+            group: principal.group.clone(),
+            public_key: binding.public_key,
+            public_key_sha256: binding.public_key_sha256.clone(),
+            binding_digest: accepted.offer_digest.clone(),
+            issued_at: principal.issued_at.clone(),
+            expires_at: principal.expires_at.clone(),
+            evidence,
+        }
+    }
+
+    /// Normalize one key from authenticated DID-method resolution output.
+    pub fn from_did_resolution(
+        resolved: ResolvedX25519KeyAgreement,
+        scope: JweBindingScope,
+        evidence: AuthenticatedDidResolution,
+    ) -> Result<Self, TrustError> {
+        validate_scope(&scope)?;
+        require_text(&evidence.resolver, "resolver")?;
+        validate_digest(&evidence.resolution_digest, "resolution_digest")?;
+        validate_digest(&evidence.document_digest, "document_digest")?;
+        validate_public_key(&resolved.public_key, &resolved.public_key_sha256)?;
+        let source = JweBindingEvidence::DidDocument {
+            verification_method_id: resolved.verification_method_id,
+            resolver: evidence.resolver,
+            resolution_digest: evidence.resolution_digest,
+            document_digest: evidence.document_digest,
+        };
+        build_binding(resolved.did, resolved.public_key, scope, source)
+    }
+
+    /// Normalize a public key whose fingerprint was compared out of band.
+    pub fn from_fingerprint_pin(
+        reader_did: impl Into<String>,
+        public_key: [u8; 32],
+        scope: JweBindingScope,
+        pin: FingerprintPin,
+    ) -> Result<Self, TrustError> {
+        validate_scope(&scope)?;
+        validate_digest(&pin.expected_fingerprint, "expected_fingerprint")?;
+        if sha256_tagged(&public_key) != pin.expected_fingerprint {
+            return Err(binding_error(
+                "pinned fingerprint does not match the X25519 public key",
+            ));
+        }
+        require_text(&pin.verified_by, "verified_by")?;
+        require_text(&pin.verification_method, "verification_method")?;
+        require_text(&pin.evidence, "evidence")?;
+        let source = JweBindingEvidence::FingerprintPin {
+            expected_fingerprint: pin.expected_fingerprint,
+            verified_by: pin.verified_by,
+            verification_method: pin.verification_method,
+            evidence_digest: sha256_tagged(pin.evidence.as_bytes()),
+        };
+        build_binding(reader_did.into(), public_key, scope, source)
+    }
+}
+
+fn build_binding(
+    reader_did: String,
+    public_key: [u8; 32],
+    scope: JweBindingScope,
+    evidence: JweBindingEvidence,
+) -> Result<VerifiedJweRecipient, TrustError> {
+    require_did(&reader_did, "reader_did")?;
+    if public_key == [0; 32] {
+        return Err(binding_error("X25519 public key must not be all zero"));
+    }
+    let issued_at = canonical_utc_timestamp(scope.now)?;
+    let expires_at = canonical_utc_timestamp(scope.now + scope.ttl)?;
+    let public_key_sha256 = sha256_tagged(&public_key);
+    let digest_value = json!({
+        "reader_did": reader_did, "audience_did": scope.audience_did,
+        "ceremony_id": scope.ceremony_id, "group": scope.group,
+        "public_key_sha256": public_key_sha256, "issued_at": issued_at,
+        "expires_at": expires_at, "evidence": evidence.to_value(),
+    });
+    let bytes = canonical_bytes(&digest_value).map_err(|error| binding_error(error.to_string()))?;
+    Ok(VerifiedJweRecipient {
+        reader_did,
+        audience_did: scope.audience_did,
+        ceremony_id: scope.ceremony_id,
+        group: scope.group,
+        public_key,
+        public_key_sha256,
+        binding_digest: sha256_tagged(&bytes),
+        issued_at,
+        expires_at,
+        evidence,
+    })
+}
+
+fn validate_scope(scope: &JweBindingScope) -> Result<(), TrustError> {
+    require_did(&scope.audience_did, "audience_did")?;
+    require_text(&scope.ceremony_id, "ceremony_id")?;
+    require_text(&scope.group, "group")?;
+    if scope.ttl.is_zero() {
+        return Err(binding_error("binding ttl must be greater than zero"));
+    }
+    Ok(())
+}
+
+fn validate_public_key(public_key: &[u8; 32], digest: &str) -> Result<(), TrustError> {
+    if *public_key == [0; 32] {
+        return Err(binding_error("X25519 public key must not be all zero"));
+    }
+    validate_digest(digest, "public_key_sha256")?;
+    if sha256_tagged(public_key) != digest {
+        return Err(binding_error(
+            "public key digest does not match the X25519 key",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_digest(value: &str, name: &str) -> Result<(), TrustError> {
+    let hex = value
+        .strip_prefix("sha256:")
+        .ok_or_else(|| binding_error(format!("{name} must use sha256:<hex>")))?;
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(binding_error(format!(
+            "{name} must contain 64 lowercase hex characters"
+        )));
+    }
+    Ok(())
+}
+
+fn require_did(value: &str, name: &str) -> Result<(), TrustError> {
+    if !value.starts_with("did:") || value.chars().any(char::is_whitespace) {
+        return Err(TrustError::new(
+            TrustReason::DidInvalid,
+            format!("{name} must be a DID"),
+        ));
+    }
+    Ok(())
+}
+
+fn require_text(value: &str, name: &str) -> Result<(), TrustError> {
+    if value.trim().is_empty() {
+        return Err(binding_error(format!("{name} must not be empty")));
+    }
+    Ok(())
+}
+
+fn binding_error(detail: impl Into<String>) -> TrustError {
+    TrustError::new(TrustReason::BindingInvalid, detail)
+}
