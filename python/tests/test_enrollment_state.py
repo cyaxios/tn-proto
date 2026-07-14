@@ -16,6 +16,7 @@ from typing import Any, get_type_hints
 import pytest
 
 from tn import admin
+from tn._bounded_json import MAX_JSON_NESTING
 from tn.absorb import absorb
 from tn.canonical import _canonical_bytes
 from tn.config import LoadedConfig, load, load_or_create
@@ -58,8 +59,12 @@ def _flip_stored_member_byte(artifact: bytes, member: str) -> bytes:
     with zipfile.ZipFile(io.BytesIO(artifact), "r") as archive:
         info = archive.getinfo(member)
     assert info.compress_type == zipfile.ZIP_STORED
-    name_length = int.from_bytes(artifact[info.header_offset + 26 : info.header_offset + 28], "little")
-    extra_length = int.from_bytes(artifact[info.header_offset + 28 : info.header_offset + 30], "little")
+    name_length = int.from_bytes(
+        artifact[info.header_offset + 26 : info.header_offset + 28], "little"
+    )
+    extra_length = int.from_bytes(
+        artifact[info.header_offset + 28 : info.header_offset + 30], "little"
+    )
     payload_offset = info.header_offset + 30 + name_length + extra_length
     assert info.file_size > 0
     corrupted = bytearray(artifact)
@@ -70,9 +75,9 @@ def _flip_stored_member_byte(artifact: bytes, member: str) -> bytes:
 def _deeply_nested_manifest_artifact() -> bytes:
     nested_manifest = (
         b'{"kind":"offer","nested":'
-        + b"[" * 5000
+        + b"[" * (MAX_JSON_NESTING + 1)
         + b"0"
-        + b"]" * 5000
+        + b"]" * (MAX_JSON_NESTING + 1)
         + b"}"
     )
     output = io.BytesIO()
@@ -88,9 +93,9 @@ def _deeply_nested_offer_body_artifact(
 ) -> bytes:
     nested_package = (
         b'{"payload":{"nested":'
-        + b"[" * 5000
+        + b"[" * (MAX_JSON_NESTING + 1)
         + b"0"
-        + b"]" * 5000
+        + b"]" * (MAX_JSON_NESTING + 1)
         + b"}}"
     )
     body = {"body/package.json": nested_package}
@@ -191,9 +196,9 @@ def _make_offer_artifact(
     sign_manifest_with_body(manifest, body, reader.signing_key())
     path = directory / f"offer-{os.urandom(6).hex()}.tnpkg"
     if compress:
-        manifest_bytes = (
-            json.dumps(manifest.to_dict(), sort_keys=True, indent=2) + "\n"
-        ).encode("utf-8")
+        manifest_bytes = (json.dumps(manifest.to_dict(), sort_keys=True, indent=2) + "\n").encode(
+            "utf-8"
+        )
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("manifest.json", manifest_bytes)
             for name in sorted(body):
@@ -508,11 +513,7 @@ def test_direct_oversized_prefixed_offer_is_rejected_without_state(tmp_path: Pat
         issued_at=issued_at,
         expires_at=issued_at + timedelta(minutes=5),
     )
-    oversized = (
-        b"SFX"
-        * ((MAX_ENROLLMENT_ARTIFACT_BYTES - len(artifact)) // 3 + 1)
-        + artifact
-    )
+    oversized = b"SFX" * ((MAX_ENROLLMENT_ARTIFACT_BYTES - len(artifact)) // 3 + 1) + artifact
     state_root = tmp_path / "never-created-oversized"
     store = EnrollmentStore(cfg, cfg.device, state_root)
 
@@ -632,11 +633,7 @@ def test_absorb_rejects_oversized_prefixed_offer_before_unbounded_reread(
         issued_at=issued_at,
         expires_at=issued_at + timedelta(minutes=5),
     )
-    oversized = (
-        b"SFX"
-        * ((MAX_ENROLLMENT_ARTIFACT_BYTES - len(artifact)) // 3 + 1)
-        + artifact
-    )
+    oversized = b"SFX" * ((MAX_ENROLLMENT_ARTIFACT_BYTES - len(artifact)) // 3 + 1) + artifact
     source = tmp_path / "oversized-prefixed-offer.tnpkg"
     source.write_bytes(oversized)
 
@@ -926,9 +923,7 @@ def test_challenged_variant_quota_preserves_replay_and_other_challenges(
             public_key_seed=f"challenge-key-{index}".encode(),
             nonce_seed=f"challenge-proof-{index}".encode(),
         )
-        retained.append(
-            (artifact, store.stage_offer(artifact, cfg.device.device_identity, now))
-        )
+        retained.append((artifact, store.stage_offer(artifact, cfg.device.device_identity, now)))
 
     third, _ = _make_offer_artifact(
         tmp_path,
@@ -1102,8 +1097,7 @@ def test_reconcile_isolates_losing_challenge_variant_and_accepts_unrelated_offer
     result = _reconcile(cfg)
 
     assert any(
-        accepted.offer_digest == unrelated.offer_digest
-        for accepted in result.accepted_offers
+        accepted.offer_digest == unrelated.offer_digest for accepted in result.accepted_offers
     )
     assert any(
         competing[1].artifact_path.name in conflict and "replay_conflict" in conflict
@@ -1277,8 +1271,7 @@ def test_case_distinct_scope_components_do_not_alias_on_windows(tmp_path: Path) 
 
     group_components = [path.relative_to(state_root).parts[2] for path in paths]
     assert group_components == [
-        "sha256-" + hashlib.sha256(group.encode("utf-8")).hexdigest()
-        for group in groups
+        "sha256-" + hashlib.sha256(group.encode("utf-8")).hexdigest() for group in groups
     ]
     assert group_components[0] != group_components[1]
 

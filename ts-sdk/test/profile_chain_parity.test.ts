@@ -42,7 +42,7 @@ function emitAndScan(
     tn.info(eventType, { n: i });
   }
   const rows: Array<{ prevHash: string; rowHash: string; sequence: number }> = [];
-  for (const env of tn.read({ raw: true })) {
+  for (const env of tn.read({ raw: true, verify: false })) {
     const e = env as Record<string, unknown>;
     if (e["event_type"] !== eventType) continue;
     rows.push({

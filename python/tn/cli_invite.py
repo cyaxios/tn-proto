@@ -1,33 +1,25 @@
 """`tn invite` — mint a real `tn-invite-<id>.zip` from the CLI.
 
-This is the CLI-side counterpart to the server's
-``tn_proto_web/src/routes_invite.py::_make_invitation_zip``. Until this
-verb existed, the outer invitation wrapper (``manifest.json`` + the inner
-``<group>.btn.mykit`` kit entry) was produced *only* server-side by the
-web vault, so a faithful same-language round-trip
+This is the secure successor to the server's invitation wrapper. Until
+this verb existed, the outer wrapper was produced *only* server-side by
+the web vault, so a faithful same-language round-trip
 (``mint invite zip -> inbox accept``) was impossible inside ``tn_proto``.
 
 The verb is a thin shim over primitives that already exist:
 
-* the **inner kit** is minted by ``tn.admin.add_recipient(group,
-  recipient_did=..., out_path=<tmp>.btn.mykit, raw=True)`` — the exact
-  call ``allocate_worker.py`` makes server-side. We do NOT reimplement
-  kit minting.
+* the **inner package** is minted by ``tn.admin.add_recipient(group,
+  recipient_did=..., out_path=<tmp>.tnpkg)``. That canonical path signs
+  the package and recipient-seals its body to the reader's real DID key.
 * the **outer wrapper** is built by :func:`make_invitation_zip`, which
-  mirrors the server's ``_make_invitation_zip`` / ``_kit_entry_name``
-  byte-for-byte: a zip of ``{<group>.btn.mykit, manifest.json}`` where
-  the manifest carries ``kit_sha256`` + ``group_name`` + sender info.
+  wraps ``{kit.tnpkg, manifest.json}``; the outer manifest binds the
+  package hash, group, and sender metadata.
 
 Usage::
 
     tn invite <recipient> <out.zip> [--group default] [--yaml ./tn.yaml]
 
-``<recipient>`` is the recipient's device DID (``did:key:z...``). A
-friendly label is also accepted and synthesized into a placeholder DID
-(``did:key:zLabel-<label>``) for the attestation event, matching
-``cmd_add_recipient``'s behaviour — but a placeholder kit is unsealed
-shared-group material, so for a real recipient-bound round-trip pass the
-recipient's actual ``did:key:`` DID.
+``<recipient>`` must be a resolvable Ed25519 ``did:key``. Placeholder DIDs
+cannot authenticate recipient delivery and are rejected.
 """
 
 from __future__ import annotations
@@ -47,16 +39,9 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _kit_entry_name(group: str | None) -> str:
-    """The per-group kit filename inside an invitation archive.
-
-    Byte-for-byte mirror of ``tn_proto_web`` ``routes_invite._kit_entry_name``:
-    the inner kit is named ``<group>.btn.mykit`` so the recipient can drop
-    it straight into their keystore folder with no rename. The accept verb
-    (``tn.inbox._find_kit_entry``) reads this name (and the legacy
-    ``kit.tnpkg``) back.
-    """
-    return f"{group or 'default'}.btn.mykit"
+def _kit_entry_name(_group: str | None) -> str:
+    """Return the canonical signed-package entry name for a secure invite."""
+    return "kit.tnpkg"
 
 
 def make_invitation_zip(kit_bytes: bytes, manifest: dict) -> bytes:
@@ -65,8 +50,7 @@ def make_invitation_zip(kit_bytes: bytes, manifest: dict) -> bytes:
     Mirror of ``tn_proto_web`` ``routes_invite._make_invitation_zip``. The
     wrapper holds exactly two entries:
 
-    * ``<group>.btn.mykit`` — the kit bytes, named to match the
-      recipient's eventual keystore filename.
+    * ``kit.tnpkg`` — a signed package whose body is recipient-sealed.
     * ``manifest.json`` — invitation metadata (group, leaf index,
       kit_sha256, sender info), pretty-printed.
     """
@@ -84,10 +68,10 @@ def cmd_invite(args: argparse.Namespace) -> int:
     Steps (all over existing machinery — nothing hand-built):
 
     1. Resolve + init the publisher's ceremony.
-    2. Mint the bare kit via ``tn.admin.add_recipient(..., raw=True)`` to a
-       temp ``.btn.mykit`` (records the attested ``tn.recipient.added``
-       event and returns the ``leaf_index``).
-    3. Compute ``kit_sha256`` over the kit bytes.
+    2. Mint a signed, recipient-sealed package via
+       ``tn.admin.add_recipient(...)`` (records the attested
+       ``tn.recipient.added`` event and returns the ``leaf_index``).
+    3. Compute ``kit_sha256`` over the package bytes.
     4. Assemble the ``manifest.json`` and zip it next to the kit via
        :func:`make_invitation_zip`.
     """
@@ -97,14 +81,14 @@ def cmd_invite(args: argparse.Namespace) -> int:
 
     yaml_path = _resolve_yaml_or_discover(args.yaml)
 
-    label = args.recipient
-    if label.startswith("did:"):
-        recipient_did = label
-    else:
-        # Friendly-label fallback (matches cmd_add_recipient): synthesize a
-        # stable placeholder DID so the attestation records something
-        # identifiable. A placeholder kit is unsealed shared-group material.
-        recipient_did = f"did:key:zLabel-{label}"
+    recipient_did = args.recipient
+    from .recipient_seal import recipient_key_is_resolvable
+
+    if not recipient_key_is_resolvable(recipient_did):
+        raise ValueError(
+            "tn invite requires the recipient's real Ed25519 did:key so "
+            "the reader package can be recipient-sealed"
+        )
 
     group = args.group
     out_path = Path(args.out).expanduser().resolve()
@@ -112,12 +96,16 @@ def cmd_invite(args: argparse.Namespace) -> int:
     tn_init(str(yaml_path))
     try:
         cfg = current_config()
+        group_spec = cfg.groups.get(group)
+        if group_spec is None:
+            raise KeyError(f"unknown group: {group!r}")
+        if group_spec.cipher.name != "btn":
+            raise ValueError("tn invite currently supports BTN reader kits only")
 
-        # 2. Mint the bare kit to a temp .btn.mykit (raw kit bytes — the
-        #    same call allocate_worker.py makes server-side). The temp file
-        #    sits next to the final zip so it lands on the same filesystem.
+        # 2. Mint the canonical signed package. With the resolvable DID gate
+        # above, add_recipient seals the package body to this recipient.
         with tempfile.NamedTemporaryFile(
-            delete=False, suffix=".btn.mykit", dir=str(out_path.parent)
+            delete=False, suffix=".tnpkg", dir=str(out_path.parent)
         ) as tf:
             kit_path = Path(tf.name)
         try:
@@ -125,7 +113,6 @@ def cmd_invite(args: argparse.Namespace) -> int:
                 group,
                 recipient_did=recipient_did,
                 out_path=str(kit_path),
-                raw=True,
             )
             leaf_index = add_result.leaf_index
             kit_bytes = kit_path.read_bytes()
@@ -152,6 +139,8 @@ def cmd_invite(args: argparse.Namespace) -> int:
             "group_name": group,
             "leaf_index": leaf_index,
             "kit_sha256": kit_sha256,
+            "kit_format": "tnpkg",
+            "delivery": "recipient-seal-v1",
             "event_id": None,
             "created_at": _now_iso(),
             "note": getattr(args, "note", None),
@@ -186,8 +175,7 @@ def add_invite_parser(sub: argparse._SubParsersAction) -> None:
     )
     p_invite.add_argument(
         "recipient",
-        help="Recipient device DID (did:key:z...), or a friendly label "
-        "(synthesized into a placeholder DID for the attestation).",
+        help="Recipient's real Ed25519 device DID (did:key:z...).",
     )
     p_invite.add_argument("out", help="Destination tn-invite-<id>.zip path.")
     p_invite.add_argument(
@@ -198,8 +186,7 @@ def add_invite_parser(sub: argparse._SubParsersAction) -> None:
     p_invite.add_argument(
         "--yaml",
         default=None,
-        help="Path to your tn.yaml. Default: discover via "
-        "$TN_YAML / ./tn.yaml / ~/.tn/tn.yaml.",
+        help="Path to your tn.yaml. Default: discover via $TN_YAML / ./tn.yaml / ~/.tn/tn.yaml.",
     )
     p_invite.add_argument(
         "--from-email",

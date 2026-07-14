@@ -49,9 +49,9 @@ function makeCeremony(): { yamlPath: string; cleanup: () => void } {
   };
 }
 
-function readEnvs(tn: Tn): Record<string, unknown>[] {
+function readEnvs(tn: Tn, verify = true): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
-  for (const env of tn.read({ raw: true, allRuns: true })) {
+  for (const env of tn.read({ raw: true, allRuns: true, verify })) {
     out.push(env as Record<string, unknown>);
   }
   return out;
@@ -451,7 +451,7 @@ test("Tn.emitOverrideSign(false) writes an unsigned entry", async () => {
     const tn = await Tn.init(yamlPath);
     tn.emitOverrideSign("info", "evt.unsigned", { n: 1 }, false);
 
-    const envs = readEnvs(tn);
+    const envs = readEnvs(tn, false);
     const e = envs.find((x) => x["event_type"] === "evt.unsigned");
     assert.ok(e, "unsigned entry must still be readable");
     assert.equal(e!["signature"], "", "signature field must be empty");
@@ -484,7 +484,7 @@ test("Tn.setSigning(false) makes subsequent emits unsigned", async () => {
     }
     tn.info("evt.session.signed", { n: 2 });
 
-    const envs = readEnvs(tn);
+    const envs = readEnvs(tn, false);
     const skipped = envs.find((x) => x["event_type"] === "evt.session.skip");
     const signed = envs.find((x) => x["event_type"] === "evt.session.signed");
     assert.ok(skipped && signed, "both entries must be readable");

@@ -20,6 +20,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from ._bounded_json import loads_bounded
+
 
 @dataclass
 class Package:
@@ -99,5 +101,5 @@ def load_tnpkg(path: Path) -> Package:
         body_bytes = body.get("body/package.json")
         if body_bytes is None:
             raise ValueError(f"{p}: zipped `.tnpkg` missing body/package.json")
-        return Package(**json.loads(body_bytes.decode("utf-8")))
-    return Package(**json.loads(raw.decode("utf-8")))
+        return Package(**loads_bounded(body_bytes))
+    return Package(**loads_bounded(raw))

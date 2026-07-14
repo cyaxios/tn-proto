@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ._bounded_json import JsonNestingError, loads_bounded
 from ._keystore_backend import AdvisoryFileLock, atomic_write_bytes
 from .canonical import _canonical_bytes
 from .config import LoadedConfig
@@ -426,8 +427,8 @@ class EnrollmentStore:
         if raw is None:
             raise TrustError(TrustReason.STATEMENT_INVALID, "offer body is missing package.json")
         try:
-            value = json.loads(raw.decode("utf-8"))
-        except RecursionError as exc:
+            value = loads_bounded(raw)
+        except JsonNestingError as exc:
             raise TrustError(
                 TrustReason.STATEMENT_INVALID,
                 "offer package JSON nesting exceeds the parser limit",
@@ -662,11 +663,15 @@ class EnrollmentStore:
             else False
         )
         approval_exact = self._classify_approval(offer_digest, artifact_digest)
-        if consumed_exact or approval_exact or self._is_committed_replay(
-            proof=proof,
-            offer_digest=offer_digest,
-            artifact_digest=artifact_digest,
-            challenge_id=challenge_id,
+        if (
+            consumed_exact
+            or approval_exact
+            or self._is_committed_replay(
+                proof=proof,
+                offer_digest=offer_digest,
+                artifact_digest=artifact_digest,
+                challenge_id=challenge_id,
+            )
         ):
             # Freshness authorized the original promotion. Exact retained-byte
             # replay remains an idempotent no-op, but signatures/scope are
@@ -778,9 +783,7 @@ class EnrollmentStore:
                 proof.signing_bytes(),
                 proof_signature,
             )
-            offer_digest = _sha256(
-                _canonical_bytes(proof._wire_value(include_signature=True))
-            )
+            offer_digest = _sha256(_canonical_bytes(proof._wire_value(include_signature=True)))
             artifact_digest = _sha256(artifact)
             challenge_digest = proof.binding.get("challenge_digest")
             challenge_id: str | None
@@ -788,9 +791,7 @@ class EnrollmentStore:
                 challenge_id = None
             elif isinstance(challenge_digest, str):
                 _require_digest(challenge_digest, "retained challenge digest")
-                challenge_id = self._load_challenge_for_digest(
-                    challenge_digest
-                ).challenge_id
+                challenge_id = self._load_challenge_for_digest(challenge_digest).challenge_id
             else:
                 raise TrustError(
                     TrustReason.BINDING_INVALID,
@@ -855,10 +856,7 @@ class EnrollmentStore:
                     f"unsolicited pending offer count reached limit "
                     f"{MAX_UNSOLICITED_PENDING_COUNT}",
                 )
-            if (
-                usage.unsolicited_bytes + artifact_size
-                > MAX_UNSOLICITED_PENDING_BYTES
-            ):
+            if usage.unsolicited_bytes + artifact_size > MAX_UNSOLICITED_PENDING_BYTES:
                 raise TrustError(
                     TrustReason.UNTRUSTED_PRINCIPAL,
                     f"unsolicited pending offer bytes would exceed limit "
@@ -885,14 +883,12 @@ class EnrollmentStore:
         if usage.challenged_count >= MAX_CHALLENGED_PENDING_COUNT:
             raise TrustError(
                 TrustReason.UNTRUSTED_PRINCIPAL,
-                f"challenged pending offer count reached limit "
-                f"{MAX_CHALLENGED_PENDING_COUNT}",
+                f"challenged pending offer count reached limit {MAX_CHALLENGED_PENDING_COUNT}",
             )
         if usage.challenged_bytes + artifact_size > MAX_CHALLENGED_PENDING_BYTES:
             raise TrustError(
                 TrustReason.UNTRUSTED_PRINCIPAL,
-                f"challenged pending offer bytes would exceed limit "
-                f"{MAX_CHALLENGED_PENDING_BYTES}",
+                f"challenged pending offer bytes would exceed limit {MAX_CHALLENGED_PENDING_BYTES}",
             )
 
     def stage_offer(

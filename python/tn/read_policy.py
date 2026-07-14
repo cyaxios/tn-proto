@@ -156,7 +156,12 @@ class ReadTrustPolicy:
             and not context.detached
             and context.profile_chain is False
         )
-        row_hash_valid = not chain_required or (record.row_hash_present and record.row_hash_valid)
+        # A signature authenticates the row hash, so a signed record still
+        # requires that hash even when the local profile disables chaining.
+        row_hash_required = chain_required or record.signature_present
+        row_hash_valid = not row_hash_required or (
+            record.row_hash_present and record.row_hash_valid
+        )
         if not row_hash_valid:
             reject(ReadRejectReason.ROW_HASH_INVALID)
         chain_valid = not chain_required or record.chain_valid

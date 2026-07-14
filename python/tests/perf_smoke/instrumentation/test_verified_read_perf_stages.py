@@ -24,7 +24,10 @@ REQUIRED_READ_STAGES = {
 
 
 def _snapshot_by_stage(perf_module):
-    return {stage: {"count": count, "total_ns": total_ns} for stage, count, total_ns in perf_module.snapshot()}
+    return {
+        stage: {"count": count, "total_ns": total_ns}
+        for stage, count, total_ns in perf_module.snapshot()
+    }
 
 
 def _hibe_available() -> bool:
@@ -64,7 +67,8 @@ def test_verified_read_records_required_stage_vocabulary(
         tn.flush_and_close()
 
     assert len(entries) == 1
-    assert entries[0]["valid"] == {"signature": True, "row_hash": True, "chain": True}
+    required_validity = {"signature": True, "row_hash": True, "chain": True}
+    assert {key: entries[0]["valid"].get(key) for key in required_validity} == required_validity
     assert entries[0]["plaintext"]["default"]["payload"] == f"{cipher}-payload"
 
     snapshot = _snapshot_by_stage(perf)

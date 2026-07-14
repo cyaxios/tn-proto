@@ -37,6 +37,7 @@ from typing import Any, overload
 
 from tn._native import btn as _btn
 
+from ._bounded_json import JsonNestingError, loads_bounded
 from .admin.log import (
     append_admin_envelopes,
     existing_row_hashes,
@@ -46,6 +47,7 @@ from .btn_keystore import BtnKeystore
 from .config import LoadedConfig
 from .conventions import pending_offers_dir
 from .packaging import Package, verify
+from .read_trust import _record_verified_publisher
 from .signing import DeviceKey, _signature_from_b64
 from .tnpkg import (
     ManifestSignatureError,
@@ -54,8 +56,9 @@ from .tnpkg import (
     _clock_dominates,
     _peek_manifest_kind,
     _read_manifest,
+    _verify_manifest_signature,
 )
-from .trust import TrustError
+from .trust import TrustError, TrustReason
 
 _DID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -443,9 +446,7 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
         )
 
     try:
-        trusted_enrollment_offer = (
-            manifest.kind == "offer" and _is_trusted_enrollment_offer(body)
-        )
+        trusted_enrollment_offer = manifest.kind == "offer" and _is_trusted_enrollment_offer(body)
     except PackageError as exc:
         return AbsorbReceipt(
             kind="offer",
@@ -489,11 +490,9 @@ def _is_trusted_enrollment_offer(body: dict[str, bytes]) -> bool:
     if raw is None:
         return False
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except RecursionError as exc:
-        raise PackageError(
-            "offer package JSON nesting exceeds the parser limit"
-        ) from exc
+        value = loads_bounded(raw)
+    except JsonNestingError as exc:
+        raise PackageError("offer package JSON nesting exceeds the parser limit") from exc
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
     if not isinstance(value, dict):
@@ -524,14 +523,18 @@ def _absorb_verified_package(
     if kind == "offer":
         return _absorb_offer_kind(cfg, manifest, body)
     if kind == "enrolment":
-        return _absorb_enrolment_kind(cfg, manifest, body)
+        receipt = _absorb_enrolment_kind(cfg, manifest, body)
+        return _record_accepted_publisher(cfg, manifest, receipt)
     if kind == "group_keys" or manifest.scope == "group_keys":
         # group_keys rides the `full_keystore` wire kind (server-known)
         # marked with scope=group_keys; route by the marker, not just the
         # kind. Mirrors TS absorbPkg's group_keys branch.
         return _absorb_group_keys(cfg, manifest, body)
     if kind in ("kit_bundle", "full_keystore"):
-        return _absorb_kit_bundle(cfg, manifest, body)
+        receipt = _absorb_kit_bundle(cfg, manifest, body)
+        if kind == "kit_bundle":
+            return _record_accepted_publisher(cfg, manifest, receipt)
+        return receipt
     if kind == "contact_update":
         return _absorb_contact_update(cfg, manifest, body)
     if kind == "identity_seed":
@@ -554,6 +557,41 @@ def _absorb_verified_package(
     )
 
 
+def _record_accepted_publisher(
+    cfg: LoadedConfig,
+    manifest: TnpkgManifest,
+    receipt: AbsorbReceipt,
+) -> AbsorbReceipt:
+    """Persist trust only for verified material addressed to this device."""
+    if receipt.legacy_status == "rejected" or receipt.accepted_count + receipt.deduped_count == 0:
+        return receipt
+    if manifest.recipient_identity != cfg.device.device_identity:
+        return receipt
+    if not manifest._body_sha256_present or not _verify_manifest_signature(manifest):
+        raise TrustError(
+            TrustReason.UNTRUSTED_PRINCIPAL,
+            "publisher trust requires a signed, body-indexed package",
+        )
+    source = (
+        "verified-signed-kit-bundle"
+        if manifest.kind == "kit_bundle"
+        else "verified-signed-enrolment"
+    )
+    _record_verified_publisher(
+        cfg,
+        manifest.publisher_identity,
+        source=source,
+        evidence={
+            "ceremony_id": manifest.ceremony_id,
+            "installed_at": datetime.now(_tz.utc).isoformat(),
+            "kind": manifest.kind,
+            "recipient_identity": manifest.recipient_identity,
+            "scope": manifest.scope,
+        },
+    )
+    return receipt
+
+
 # ---------------------------------------------------------------------------
 # Legacy JSON fallback
 # ---------------------------------------------------------------------------
@@ -567,9 +605,15 @@ def _try_legacy_json_package(
     if the input doesn't look like a legacy package."""
     try:
         if isinstance(source, (bytes, bytearray)):
-            doc = json.loads(bytes(source).decode("utf-8"))
+            doc = loads_bounded(source)
         else:
-            doc = json.loads(Path(source).read_text(encoding="utf-8"))
+            doc = loads_bounded(Path(source).read_bytes())
+    except JsonNestingError:
+        return AbsorbReceipt(
+            kind="unknown",
+            legacy_status="rejected",
+            legacy_reason="legacy package JSON nesting exceeds the parser limit",
+        )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(doc, dict) or "package_kind" not in doc:
@@ -619,7 +663,13 @@ def _absorb_offer_kind(
             legacy_reason="offer body missing `body/package.json`",
         )
     try:
-        pkg = Package(**json.loads(pkg_bytes.decode("utf-8")))
+        pkg = Package(**loads_bounded(pkg_bytes))
+    except JsonNestingError:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason="offer package JSON nesting exceeds the parser limit",
+        )
     except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return AbsorbReceipt(
             kind=manifest.kind,
@@ -646,7 +696,13 @@ def _absorb_enrolment_kind(
             legacy_reason="enrolment body missing `body/package.json`",
         )
     try:
-        pkg = Package(**json.loads(pkg_bytes.decode("utf-8")))
+        pkg = Package(**loads_bounded(pkg_bytes))
+    except JsonNestingError:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason="enrolment package JSON nesting exceeds the parser limit",
+        )
     except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return AbsorbReceipt(
             kind=manifest.kind,
@@ -1055,7 +1111,6 @@ def _absorb_kit_bundle(
                 (manifest.publisher_identity or "?")[:24],
                 (manifest.recipient_identity or "?")[:24],
             )
-            skipped += 1
             continue
         dest = keystore / rel
         if dest.exists() and dest.read_bytes() == data:
@@ -1547,7 +1602,13 @@ def _absorb_contact_update(
             legacy_reason="contact_update body missing `body/contact_update.json`",
         )
     try:
-        doc = json.loads(pkg_bytes.decode("utf-8"))
+        doc = loads_bounded(pkg_bytes)
+    except JsonNestingError as exc:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=f"contact_update body JSON nesting exceeds the parser limit: {exc}",
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         return AbsorbReceipt(
             kind=manifest.kind,
@@ -1776,8 +1837,18 @@ def _absorb_admin_log_snapshot(
         if not line:
             continue
         try:
-            env = json.loads(line)
-        except json.JSONDecodeError:
+            env = loads_bounded(line)
+        except JsonNestingError as exc:
+            return AbsorbReceipt(
+                kind=manifest.kind,
+                legacy_status="rejected",
+                legacy_reason=(
+                    f"admin_log_snapshot envelope JSON nesting exceeds the parser limit: {exc}"
+                ),
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(env, dict):
             continue
 
         decision, conflict = _accept_admin_envelope(

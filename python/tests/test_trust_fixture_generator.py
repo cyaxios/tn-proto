@@ -320,7 +320,9 @@ def test_vectors_cover_downstream_enrollment_and_read_contracts() -> None:
     assert read_by_id["explicit_allow_unknown_writer"]["expected"]["writer_authorized"] is False
     for case_id in ("row_hash_invalid", "chain_invalid", "row_then_chain_invalid"):
         assert read_by_id[case_id]["expected"]["writer_authorized"] is False
-    assert read_by_id["row_hash_absent_not_required"]["expected"]["accepted"] is True
+    signed_without_hash = read_by_id["signed_row_hash_absent_rejected"]
+    assert signed_without_hash["expected"]["accepted"] is False
+    assert signed_without_hash["expected"]["reasons"] == ["row_hash_invalid"]
     assert read_by_id["chain_disabled"]["expected"]["accepted"] is True
     assert read_by_id["explicit_trusted_writers_override"]["expected"]["accepted"] is True
 

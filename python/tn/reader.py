@@ -79,61 +79,100 @@ _HASH_RESERVED = frozenset(
 )
 
 
+def _decode_envelope_fields(
+    env: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Split an envelope into encoded groups and public hash fields."""
+
+    groups: dict[str, dict[str, Any]] = {}
+    public_fields: dict[str, Any] = {}
+    for name, value in env.items():
+        if name in _HASH_RESERVED:
+            continue
+        if not (isinstance(value, dict) and "ciphertext" in value):
+            public_fields[name] = value
+            continue
+        ciphertext_value = value["ciphertext"]
+        if not isinstance(ciphertext_value, str):
+            raise ValueError(f"group {name!r} ciphertext must be base64 text")
+        with _perf_stage("read:group_decode"):
+            ciphertext = base64.b64decode(ciphertext_value, validate=True)
+        groups[name] = {
+            "ciphertext": ciphertext,
+            "field_hashes": dict(value.get("field_hashes") or {}),
+        }
+    return groups, public_fields
+
+
+def _verify_envelope_row_hash(
+    env: dict[str, Any],
+    public_fields: dict[str, Any],
+    groups: dict[str, dict[str, Any]],
+) -> bool:
+    """Recompute the row hash of one structurally parsed envelope."""
+
+    row_hash = env["row_hash"]
+    with _perf_stage("read:row_hash_verify"):
+        expected_row_hash = _compute_row_hash(
+            device_identity=env["device_identity"],
+            timestamp=env["timestamp"],
+            event_id=env["event_id"],
+            event_type=env["event_type"],
+            level=env.get("level", ""),
+            prev_hash=env["prev_hash"],
+            public_fields=public_fields,
+            groups=groups,
+        )
+        row_hash_ok = bool(row_hash) and expected_row_hash == row_hash
+    return row_hash_ok
+
+
+def _verify_envelope_signature(env: dict[str, Any]) -> bool:
+    """Verify the optional signature over the envelope's claimed row hash."""
+
+    row_hash = env["row_hash"]
+    with _perf_stage("read:signature_verify"):
+        try:
+            signature_ok = bool(env.get("signature", "")) and DeviceKey.verify(
+                env["device_identity"],
+                row_hash.encode("ascii"),
+                _signature_from_b64(env.get("signature", "")),
+            )
+        except Exception:  # noqa: BLE001 - malformed signatures are invalid
+            signature_ok = False
+    return signature_ok
+
+
 def _scan_envelope_before_decrypt(
     env: dict[str, Any],
     prev_hash_by_event: dict[str, str],
     *,
     expect_genesis: bool = False,
+    verify_row_hash: bool = True,
+    verify_signature: bool = True,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Parse cryptographic inputs and verify them before opening ciphertext."""
 
     event_type = env["event_type"]
     prev_hash = env["prev_hash"]
     row_hash = env["row_hash"]
-    did = env["device_identity"]
-    signature = env.get("signature", "")
-    groups: dict[str, dict[str, Any]] = {}
-    public_fields: dict[str, Any] = {}
-    for name, value in env.items():
-        if name in _HASH_RESERVED:
-            continue
-        if isinstance(value, dict) and "ciphertext" in value:
-            ciphertext_value = value["ciphertext"]
-            if not isinstance(ciphertext_value, str):
-                raise ValueError(f"group {name!r} ciphertext must be base64 text")
-            groups[name] = {
-                "ciphertext": base64.b64decode(ciphertext_value, validate=True),
-                "field_hashes": dict(value.get("field_hashes") or {}),
-            }
-        else:
-            public_fields[name] = value
-
-    chain_ok = verify_chain_link(
-        prev_hash_by_event,
-        event_type,
-        prev_hash,
-        row_hash,
-        expect_genesis=expect_genesis,
-    )
-    expected_row_hash = _compute_row_hash(
-        device_identity=did,
-        timestamp=env["timestamp"],
-        event_id=env["event_id"],
-        event_type=event_type,
-        level=env.get("level", ""),
-        prev_hash=prev_hash,
-        public_fields=public_fields,
-        groups=groups,
-    )
-    row_hash_ok = bool(row_hash) and expected_row_hash == row_hash
-    try:
-        signature_ok = bool(signature) and DeviceKey.verify(
-            did,
-            row_hash.encode("ascii"),
-            _signature_from_b64(signature),
+    groups, public_fields = _decode_envelope_fields(env)
+    with _perf_stage("read:chain_verify"):
+        chain_ok = verify_chain_link(
+            prev_hash_by_event,
+            event_type,
+            prev_hash,
+            row_hash,
+            expect_genesis=expect_genesis,
         )
-    except Exception:  # noqa: BLE001 - malformed signatures are invalid
-        signature_ok = False
+    row_hash_ok = False
+    if verify_row_hash:
+        row_hash_ok = _verify_envelope_row_hash(
+            env,
+            public_fields,
+            groups,
+        )
+    signature_ok = _verify_envelope_signature(env) if verify_signature else False
     return (
         {
             "record": True,
@@ -179,6 +218,38 @@ def _decode_plaintext_object(payload: bytes, group: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"group {group!r} plaintext must be a JSON object")
     return value
+
+
+def _ciphertext_family(ciphertext: bytes) -> str | None:
+    """Identify the three shipped wire families without parsing ciphertext."""
+
+    if ciphertext.lstrip().startswith(b"{"):
+        return "jwe"
+    if ciphertext.startswith(b"\xb7"):
+        return "btn"
+    if ciphertext.startswith(b"\x01"):
+        return "hibe"
+    return None
+
+
+def _candidate_matches_wire(candidate: _cipher.GroupCipher, ciphertext: bytes) -> bool:
+    """Keep expected cross-cipher misses out of authenticated-open failures."""
+
+    family = _ciphertext_family(ciphertext)
+    return family is None or candidate.name == family
+
+
+def _unopened_group_marker(
+    *,
+    saw_matching_candidate: bool,
+    saw_no_key: bool,
+    saw_open_failure: bool,
+) -> dict[str, bool]:
+    """Classify an unopened group without treating another cipher as tamper."""
+
+    if not saw_matching_candidate or (saw_no_key and not saw_open_failure):
+        return {"$no_read_key": True}
+    return {"$decrypt_error": True}
 
 
 # --------------------------------------------------------------------------
@@ -306,11 +377,10 @@ def flatten_raw_entry(raw: dict[str, Any], *, include_valid: bool = False) -> di
 
     # 6. _valid block (verify=True path).
     #
-    # Only surface keys the upstream raw dict actually carried. The regular
-    # `tn.read(verify=True)` path always sets all three (signature, row_hash,
-    # chain) so its surface is unchanged. `read_as_recipient` only computes
-    # signature + chain — surfacing a hardcoded `row_hash: False` there
-    # would lie about a check that never ran.
+    # Only surface keys the upstream raw dict actually carried. Current
+    # verified `tn.read` and `read_as_recipient` paths set all three; the
+    # selective guard keeps older/custom raw records from gaining invented
+    # validity results.
     if include_valid:
         v = raw.get("valid") or {}
         valid_out: dict[str, Any] = {}
@@ -452,6 +522,7 @@ def read_with_keybag(
     keystore_dir: str | Path,
     *,
     verify_signatures: bool = True,
+    verify_row_hash: bool = True,
     expect_genesis: bool = False,
     pre_decrypt: PreDecryptGate | None = None,
 ) -> Iterator[dict[str, Any]]:
@@ -472,16 +543,23 @@ def read_with_keybag(
     Single-group :func:`read_as_recipient` remains the explicit
     "use only this kit" override (the ``as_recipient=`` kwarg on
     ``tn.read``).
+
+    ``verify_signatures=False`` suppresses only signature verification.
+    ``verify_row_hash=False`` is a separate chain-only inspection control;
+    ordinary reads must leave it enabled so public and ciphertext tampering
+    remains visible.
     """
     with open(log_path, encoding="utf-8") as f:
         # `enumerate` lines so the source label in errors keeps the path.
         def _labelled() -> Iterator[tuple[str, str]]:
             for lineno, line in enumerate(f, 1):
                 yield (f"{log_path}:{lineno}", line)
+
         yield from _lines_with_keybag(
             _labelled(),
             keystore_dir,
             verify_signatures=verify_signatures,
+            verify_row_hash=verify_row_hash,
             expect_genesis=expect_genesis,
             pre_decrypt=pre_decrypt,
         )
@@ -492,6 +570,7 @@ def _lines_with_keybag(
     keystore_dir: str | Path,
     *,
     verify_signatures: bool = True,
+    verify_row_hash: bool = True,
     expect_genesis: bool = False,
     pre_decrypt: PreDecryptGate | None = None,
 ) -> Iterator[dict[str, Any]]:
@@ -527,6 +606,8 @@ def _lines_with_keybag(
                 env,
                 prev_hash_by_event,
                 expect_genesis=expect_genesis,
+                verify_row_hash=verify_row_hash,
+                verify_signature=verify_signatures,
             )
         except Exception as error:  # noqa: BLE001 - one malformed row must not end the stream
             yield _parse_error_triple(error)
@@ -549,9 +630,13 @@ def _lines_with_keybag(
             if not candidates:
                 continue
             ct_bytes = group_input["ciphertext"]
+            saw_matching_candidate = False
             saw_no_key = False
             saw_open_failure = False
             for cipher in candidates:
+                if not _candidate_matches_wire(cipher, ct_bytes):
+                    continue
+                saw_matching_candidate = True
                 try:
                     pt = cipher.decrypt(ct_bytes, _aad_bytes_for(env, key))
                 except _cipher.NotARecipientError:
@@ -568,17 +653,15 @@ def _lines_with_keybag(
             if plaintext_error is not None:
                 break
             if key not in plaintext:
-                plaintext[key] = (
-                    {"$decrypt_error": True}
-                    if saw_open_failure or not saw_no_key
-                    else {"$no_read_key": True}
+                plaintext[key] = _unopened_group_marker(
+                    saw_matching_candidate=saw_matching_candidate,
+                    saw_no_key=saw_no_key,
+                    saw_open_failure=saw_open_failure,
                 )
         if plaintext_error is not None:
             yield _parse_error_triple(plaintext_error)
             continue
-        valid["aad"] = not any(
-            body.get("$decrypt_error") is True for body in plaintext.values()
-        )
+        valid["aad"] = not any(body.get("$decrypt_error") is True for body in plaintext.values())
 
         yield {
             "envelope": env,
@@ -593,6 +676,7 @@ def read_as_recipient(
     *,
     group: str = "default",
     verify_signatures: bool = True,
+    verify_row_hash: bool = True,
     pre_decrypt: PreDecryptGate | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Read a foreign log that is NOT part of this workspace's yaml.
@@ -605,9 +689,9 @@ def read_as_recipient(
     * ``<group>.btn.mykit``  → btn cipher (subset-difference broadcast)
     * ``<group>.jwe.mykey``  → JWE cipher (per-recipient X25519)
 
-    If both are present, btn wins — kit_bundle absorbs always include the
-    btn kit on btn ceremonies. If neither is present, raises ``FileNotFoundError``
-    with the candidate paths it looked for.
+    When several are present, only candidates matching the ciphertext's wire
+    family are attempted. If none is present, raises ``FileNotFoundError`` with
+    the candidate paths it looked for.
 
     For btn ceremonies on the **publisher's own** log, use ``tn.read()``
     after ``tn.init(your_yaml)`` — your runtime is already bound to your
@@ -663,12 +747,12 @@ def read_as_recipient(
                 try:
                     env = json.loads(line)
                 except json.JSONDecodeError as error:
-                    raise ValueError(
-                        f"{log_path}:{lineno}: invalid JSON: {error}"
-                    ) from error
+                    raise ValueError(f"{log_path}:{lineno}: invalid JSON: {error}") from error
                 valid, groups_from_env = _scan_envelope_before_decrypt(
                     env,
                     prev_hash_by_event,
+                    verify_row_hash=verify_row_hash,
+                    verify_signature=verify_signatures,
                 )
             except Exception as error:  # noqa: BLE001 - one malformed row must not end the stream
                 yield _parse_error_triple(error)
@@ -684,10 +768,14 @@ def read_as_recipient(
             group_input = groups_from_env.get(group)
             if group_input is not None:
                 ct_bytes = group_input["ciphertext"]
+                saw_matching_candidate = False
                 saw_no_key = False
                 saw_open_failure = False
                 aad_bytes = _aad_bytes_for(env, group)
                 for candidate in ciphers:
+                    if not _candidate_matches_wire(candidate, ct_bytes):
+                        continue
+                    saw_matching_candidate = True
                     try:
                         pt = candidate.decrypt(ct_bytes, aad_bytes)
                     except _cipher.NotARecipientError:
@@ -710,10 +798,10 @@ def read_as_recipient(
                     yield _parse_error_triple(plaintext_error)
                     continue
                 if group not in plaintext:
-                    plaintext[group] = (
-                        {"$decrypt_error": True}
-                        if saw_open_failure or not saw_no_key
-                        else {"$no_read_key": True}
+                    plaintext[group] = _unopened_group_marker(
+                        saw_matching_candidate=saw_matching_candidate,
+                        saw_no_key=saw_no_key,
+                        saw_open_failure=saw_open_failure,
                     )
 
             valid["aad"] = not any(
@@ -794,15 +882,20 @@ def parse_envelope_line(
 
     if verify:
         _envelope_reserved = {
-            "device_identity", "timestamp", "event_id", "event_type", "level",
-            "prev_hash", "row_hash", "signature", "sequence",
+            "device_identity",
+            "timestamp",
+            "event_id",
+            "event_type",
+            "level",
+            "prev_hash",
+            "row_hash",
+            "signature",
+            "sequence",
         }
         public_out = {
             k: v
             for k, v in env.items()
-            if k in cfg.public_fields
-            and k not in _envelope_reserved
-            and k not in cfg.groups
+            if k in cfg.public_fields and k not in _envelope_reserved and k not in cfg.groups
         }
         # The ``tn_aad`` echo is an authenticated public field the writer
         # folded into the row_hash even though it is not a user-declared
@@ -924,8 +1017,7 @@ def _read(
                     result = _parse_error_triple(plaintext_error)
                 else:
                     valid["aad"] = not any(
-                        body.get("$decrypt_error") is True
-                        for body in plaintext.values()
+                        body.get("$decrypt_error") is True for body in plaintext.values()
                     )
                     result = {"envelope": env, "plaintext": plaintext, "valid": valid}
             yield result

@@ -534,7 +534,11 @@ test("seal binding: NAMED recipient absorbs + decrypts; DIFFERENT recipient cann
 
   // Read-back: R decrypts P's entry cleanly (the load-bearing proof).
   const entries = Array.from(
-    readAsRecipient(pLogPath, rKeystore, { group: "default", verifySignatures: true }),
+    readAsRecipient(pLogPath, rKeystore, {
+      group: "default",
+      verifySignatures: true,
+      trustedPublisherDids: [manifest.fromDid],
+    }),
   ).filter((e) => e.envelope["event_type"] === "user.action");
   assert.equal(entries.length, 1, "R should see P's one user.action entry");
   const pt = entries[0]!.plaintext["default"] as Record<string, unknown> | undefined;

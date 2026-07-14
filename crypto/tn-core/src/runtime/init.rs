@@ -24,9 +24,9 @@ use crate::{Error, Result};
 
 use super::cipher_build::{build_group_states, write_fresh_btn_ceremony, FreshBtnCeremonyOptions};
 use super::log_rotation::{
-    build_pel_writer, path_with_backup_suffix, read_rotation_config, resolve_pel_static,
-    rotate_log_on_session_start, rotation_first_time_this_process, scan_for_ceremony_init,
-    seed_chain_from_log, seed_chain_from_template,
+    build_pel_writer, path_with_backup_suffix, read_rotation_config, rotate_log_on_session_start,
+    rotation_first_time_this_process, scan_for_ceremony_init, seed_chain_from_log,
+    seed_chain_from_template,
 };
 use super::util::{current_timestamp, is_absolute_xplat_path, resolve};
 use super::{level_value, log_level, Runtime, RuntimeInitOptions, LOG_LEVEL_THRESHOLD};
@@ -318,6 +318,25 @@ impl Runtime {
             seed_chain_from_log(&log_path, &chain, &storage)?
         };
 
+        // Admin events have their own per-event-type chains even when they
+        // are routed away from the main log. Seed those tips before opening
+        // the writer pool so the first admin emit after a restart continues
+        // the existing chain instead of resetting to sequence 1.
+        if cfg.ceremony.protocol_events_location != "main_log" {
+            let pel_template = crate::path_template::PathTemplate::parse(
+                &cfg.ceremony.protocol_events_location,
+                &yaml_dir,
+                &cfg.ceremony.id,
+                device.did(),
+            )?;
+            let saw_admin_init = if pel_template.is_templated() {
+                seed_chain_from_template(&pel_template, &chain, &storage)?
+            } else {
+                seed_chain_from_log(&pel_template.render("", ""), &chain, &storage)?
+            };
+            saw_ceremony_init |= saw_admin_init;
+        }
+
         // Session rotation makes the current main log empty; a prior
         // `tn.ceremony.init` may live on a rotation backup. Scan the
         // shifted `<log>.1`..`.N` files so we don't re-emit
@@ -332,18 +351,6 @@ impl Runtime {
                     break;
                 }
             }
-        }
-
-        // When protocol_events_location routes tn.* events to a separate file,
-        // tn.ceremony.init never touches the main log. Check that file too.
-        if !saw_ceremony_init && cfg.ceremony.protocol_events_location != "main_log" {
-            let pel = resolve_pel_static(
-                &cfg.ceremony.protocol_events_location,
-                &yaml_dir,
-                &cfg.ceremony.id,
-                device.did(),
-            );
-            saw_ceremony_init = scan_for_ceremony_init(&pel, &storage)?;
         }
 
         // A ceremony is fresh iff no prior tn.ceremony.init exists in the log(s).

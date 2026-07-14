@@ -1266,12 +1266,16 @@ def _read_policy_matrix(materials: JsonObject) -> JsonObject:
         writer_authorized=False,
     )
 
-    row_hash_absent_input = _read_input(materials, "auto")
-    row_hash_absent_input["context"]["profile_chain"] = False
-    row_hash_absent_input["record"]["row_hash_present"] = False
-    row_hash_absent = _read_case(
-        "row_hash_absent_not_required",
-        row_hash_absent_input,
+    signed_unchained_input = _read_input(materials, "auto")
+    signed_unchained_input["context"]["profile_chain"] = False
+    signed_unchained = _read_case("signed_unchained", signed_unchained_input)
+    row_hash_absent = _read_reject(
+        signed_unchained,
+        "signed_row_hash_absent_rejected",
+        ["row_hash_invalid"],
+        lambda value: value["record"].__setitem__("row_hash_present", False),
+        writer_authenticated=True,
+        writer_authorized=False,
     )
 
     chain_disabled_input = _read_input(materials, "auto")
@@ -1310,6 +1314,7 @@ def _read_policy_matrix(materials: JsonObject) -> JsonObject:
         foreign,
         explicit_unsigned,
         allow_unknown,
+        signed_unchained,
         row_hash_absent,
         chain_disabled,
         trusted_override,

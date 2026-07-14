@@ -53,6 +53,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from tn._native import core as _tn_core
 
+from ._bounded_json import JsonNestingError, loads_bounded
 from .canonical import _canonical_bytes
 from .signing import DeviceKey, _b58decode
 from .trust import TrustError, TrustReason, verify_ed25519_did_signature
@@ -582,14 +583,9 @@ def _preflight_zip_eocd(stream: BinaryIO) -> None:
             break
         saw_signature = True
         if len(tail) - candidate >= _EOCD_MIN_BYTES:
-            candidate_comment_size = int.from_bytes(
-                tail[candidate + 20 : candidate + 22], "little"
-            )
+            candidate_comment_size = int.from_bytes(tail[candidate + 20 : candidate + 22], "little")
             candidate_offset = tail_offset + candidate
-            if (
-                candidate_offset + _EOCD_MIN_BYTES + candidate_comment_size
-                == source_size
-            ):
+            if candidate_offset + _EOCD_MIN_BYTES + candidate_comment_size == source_size:
                 eocd_in_tail = candidate
                 break
         search_end = candidate
@@ -777,31 +773,23 @@ def _read_zip_member(zf: zipfile.ZipFile, name: str) -> bytes:
     try:
         return zf.read(name)
     except (zipfile.BadZipFile, EOFError) as exc:
-        raise PackageError(
-            f"`.tnpkg` ZIP member {name!r} could not be read: {exc}"
-        ) from exc
+        raise PackageError(f"`.tnpkg` ZIP member {name!r} could not be read: {exc}") from exc
     except NotImplementedError as exc:
         # At this boundary NotImplementedError is emitted by ZipExtFile for a
         # ZIP feature/method it cannot decode, not by application dispatch.
-        raise PackageError(
-            f"`.tnpkg` ZIP member {name!r} could not be read: {exc}"
-        ) from exc
+        raise PackageError(f"`.tnpkg` ZIP member {name!r} could not be read: {exc}") from exc
     except RuntimeError as exc:
         if _zip_runtime_read_error(exc):
-            raise PackageError(
-                f"`.tnpkg` ZIP member {name!r} could not be read: {exc}"
-            ) from exc
+            raise PackageError(f"`.tnpkg` ZIP member {name!r} could not be read: {exc}") from exc
         raise
 
 
 def _read_manifest_document(zf: zipfile.ZipFile) -> dict[str, Any]:
     """Read and JSON-decode only the already-bounded manifest member."""
     try:
-        doc = json.loads(_read_zip_member(zf, "manifest.json").decode("utf-8"))
-    except RecursionError as exc:
-        raise PackageError(
-            "`.tnpkg` manifest JSON nesting exceeds the parser limit"
-        ) from exc
+        doc = loads_bounded(_read_zip_member(zf, "manifest.json"))
+    except JsonNestingError as exc:
+        raise PackageError("`.tnpkg` manifest JSON nesting exceeds the parser limit") from exc
     if not isinstance(doc, dict):
         raise ValueError(f"manifest must be a JSON object; got {type(doc).__name__}")
     return doc

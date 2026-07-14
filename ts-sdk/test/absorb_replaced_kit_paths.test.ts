@@ -12,26 +12,23 @@ import { test } from "node:test";
 import { Tn } from "../src/tn.js";
 import type { CeremonyConfig } from "../src/runtime/config.js";
 
-const PROFESSOR_DID = "did:key:z6MkBobReceiptParity";
-
 test("AbsorbReceipt.replacedKitPaths populated on overwrite (FINDINGS #6)", async () => {
   const root = mkdtempSync(join(tmpdir(), "tn-replaced-kit-"));
   const aliceDir = join(root, "alice");
   const bobDir = join(root, "bob");
   try {
-    // Alice mints a bundle for Bob.
-    const alice = await Tn.init(join(aliceDir, "alice.yaml"));
-    const bundle = join(aliceDir, "bob.tnpkg");
-    await alice.pkg.bundleForRecipient({ recipientDid: PROFESSOR_DID, outPath: bundle });
-    await alice.close();
-
-    // Bob inits — has his own default.btn.mykit. Capture original
-    // bytes so we can verify the .previous.* sidecar got the right
-    // content after absorb's rename.
+    // Bob inits first so Alice can bind the bundle to Bob's real device DID.
+    // Capture Bob's original self-kit so we can verify absorb preserves it.
     const bob = await Tn.init(join(bobDir, "bob.yaml"));
     const bobKeystore = (bob.config() as CeremonyConfig).keystorePath;
     const ownKitPath = join(bobKeystore, "default.btn.mykit");
     const originalBytes = readFileSync(ownKitPath);
+
+    // Alice mints a bundle for that exact Bob device.
+    const alice = await Tn.init(join(aliceDir, "alice.yaml"));
+    const bundle = join(aliceDir, "bob.tnpkg");
+    await alice.pkg.bundleForRecipient({ recipientDid: bob.did, outPath: bundle });
+    await alice.close();
 
     const receipt = await bob.pkg.absorb(bundle);
     await bob.close();

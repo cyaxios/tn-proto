@@ -11,6 +11,7 @@ import os as _cipher_os
 def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
+
 import sys
 import zipfile
 from pathlib import Path
@@ -121,6 +122,7 @@ POST https://example.com/escalate
     )
 
     tn.init(pub_yaml, cipher=_workflow_cipher("btn"))
+    publisher_did = tn.current_config().device.device_identity
     runtime_did = "did:key:zRuntimeAlice"
     bundle = tn.admin.add_agent_runtime(
         runtime_did,
@@ -148,9 +150,15 @@ POST https://example.com/escalate
 
     # Re-init so the runtime picks up the new kits.
     tn.init(rt_yaml, cipher=_workflow_cipher("btn"))
-    # Now read the publisher's log file.
+    # The reader kit grants confidentiality access; it does not authorize
+    # the publisher as a writer. Pin the publisher DID explicitly so this
+    # foreign read still verifies its authenticated signature.
     payments = []
-    for entry in tn.read(log=pub_log, verify="skip"):
+    for entry in tn.read(
+        log=pub_log,
+        verify="skip",
+        trusted_writers={publisher_did},
+    ):
         if entry.event_type == "payment.completed":
             payments.append(entry)
     assert len(payments) == 1

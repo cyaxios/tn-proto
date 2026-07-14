@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, cast, runtime_ch
 
 import yaml
 
+from ._keystore_backend import AdvisoryFileLock, atomic_write_bytes
 from .config import LoadedConfig
 from .signing import _ED25519_MULTICODEC, _b58decode, _b58encode
 
@@ -154,6 +155,37 @@ def _verified_publisher_dids(path: Path) -> frozenset[str]:
         except ValueError as error:
             raise ValueError(f"invalid verified publisher record in {path}: {error}") from error
     return frozenset(dids)
+
+
+def _record_verified_publisher(
+    cfg: LoadedConfig,
+    publisher_did: str,
+    *,
+    source: str,
+    evidence: Mapping[str, object],
+) -> Path:
+    """Atomically merge one authenticated publisher into private read trust."""
+    exact_did = validate_ed25519_did(publisher_did)
+    path = Path(cfg.keystore) / "trust" / "verified_publishers.v1.json"
+    with AdvisoryFileLock(path.with_suffix(".lock")):
+        if path.exists():
+            _verified_publisher_dids(path)
+            document = json.loads(path.read_text(encoding="utf-8"))
+            if "publishers" not in document:
+                document = {"version": 1, "publishers": document}
+        else:
+            document = {"version": 1, "publishers": {}}
+        publishers = dict(document["publishers"])
+        prior = dict(publishers.get(exact_did, {}))
+        prior.setdefault("source", source)
+        prior["verified_package"] = dict(evidence)
+        publishers[exact_did] = prior
+        document["publishers"] = publishers
+        atomic_write_bytes(
+            path,
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        )
+    return path
 
 
 __all__ = [

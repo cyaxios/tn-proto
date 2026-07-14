@@ -157,6 +157,7 @@ test("alice/s09_multi_recipient — Bob decrypts default group; CANNOT decrypt p
       readAsRecipient(aliceLogPath, ceremony.bobKeystorePath, {
         group: "default",
         verifySignatures: true,
+        trustedPublisherDids: [rt.did],
       }),
     ).filter((e) => e.envelope["event_type"] === "user.action");
 
@@ -195,6 +196,7 @@ test("alice/s09_multi_recipient — Bob decrypts default group; CANNOT decrypt p
         const gen = readAsRecipient(aliceLogPath, ceremony.bobKeystorePath, {
           group: "private",
           verifySignatures: false,
+          trustedPublisherDids: [rt.did],
         });
         // Consume the generator to trigger the error.
         Array.from(gen);

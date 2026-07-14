@@ -12,12 +12,18 @@ from pathlib import Path
 
 import pytest
 
-from tn.absorb import _absorb_kit_bundle, absorb
+from tn._bounded_json import MAX_JSON_NESTING
+from tn.absorb import (
+    _absorb_admin_log_snapshot,
+    _absorb_contact_update,
+    _absorb_kit_bundle,
+    absorb,
+)
 from tn.config import load_or_create
 from tn.conventions import outbox_dir, pending_offers_dir
 from tn.offer import offer
 from tn.signing import DeviceKey
-from tn.tnpkg import TnpkgManifest
+from tn.tnpkg import TnpkgManifest, _write_tnpkg, sign_manifest_with_body
 
 
 def test_absorb_offer_lands_in_pending_offers(tmp_path: Path):
@@ -34,6 +40,22 @@ def test_absorb_offer_lands_in_pending_offers(tmp_path: Path):
     assert result.status == "offer_stashed"
     safe = bob_cfg.device.device_identity.replace(":", "_")
     assert (pending_offers_dir(alice_dir) / f"{safe}.json").exists()
+
+
+def test_absorb_rejects_legacy_json_over_the_nesting_limit(tmp_path: Path):
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    wire = (
+        b'{"package_kind":"offer","nested":'
+        + b"[" * (MAX_JSON_NESTING + 1)
+        + b"0"
+        + b"]" * (MAX_JSON_NESTING + 1)
+        + b"}"
+    )
+
+    result = absorb(cfg, wire)
+
+    assert result.status == "rejected"
+    assert "JSON nesting" in result.reason
 
 
 def test_absorb_rejects_bad_signature(tmp_path: Path):
@@ -121,6 +143,12 @@ def test_absorb_enrolment_makes_recipient_read(tmp_path: Path):
 
     result = absorb(bob_cfg, pkg_path)
     assert result.status == "enrolment_applied", f"reason: {result.reason}"
+    trust_doc = json.loads(
+        (bob_cfg.keystore / "trust" / "verified_publishers.v1.json").read_text(encoding="utf-8")
+    )
+    assert trust_doc["publishers"][alice_cfg.device.device_identity]["source"] == (
+        "verified-signed-enrolment"
+    )
 
     # Alice writes, Bob reads with tn.read().
     tn.init(str(alice_cfg.yaml_path))
@@ -196,9 +224,7 @@ def _patch_zip_member_metadata(
     raw = bytearray(path.read_bytes())
     if flag_bits:
         local_flags = int.from_bytes(raw[local_offset + 6 : local_offset + 8], "little")
-        raw[local_offset + 6 : local_offset + 8] = (local_flags | flag_bits).to_bytes(
-            2, "little"
-        )
+        raw[local_offset + 6 : local_offset + 8] = (local_flags | flag_bits).to_bytes(2, "little")
     if file_size is not None:
         raw[local_offset + 22 : local_offset + 26] = file_size.to_bytes(4, "little")
 
@@ -213,9 +239,7 @@ def _patch_zip_member_metadata(
         if name == member:
             if flag_bits:
                 flags = int.from_bytes(raw[cursor + 8 : cursor + 10], "little")
-                raw[cursor + 8 : cursor + 10] = (flags | flag_bits).to_bytes(
-                    2, "little"
-                )
+                raw[cursor + 8 : cursor + 10] = (flags | flag_bits).to_bytes(2, "little")
             if file_size is not None:
                 raw[cursor + 24 : cursor + 28] = file_size.to_bytes(4, "little")
             path.write_bytes(raw)
@@ -272,7 +296,10 @@ def _raw_eocd(
     ("fields", "message"),
     [
         ({"entries_on_disk": 2001, "total_entries": 2001}, "entries"),
-        ({"entries_on_disk": 1, "total_entries": 1, "central_size": 2**21 + 1}, "central directory"),
+        (
+            {"entries_on_disk": 1, "total_entries": 1, "central_size": 2**21 + 1},
+            "central directory",
+        ),
         ({"entries_on_disk": 0xFFFF, "total_entries": 0xFFFF}, "ZIP64"),
         ({"central_size": 0xFFFFFFFF}, "ZIP64"),
         ({"central_offset": 0xFFFFFFFF}, "ZIP64"),
@@ -789,10 +816,77 @@ def test_kit_bundle_cannot_overwrite_device_identity_from_counterparty(tmp_path:
         as_of="2026-06-10T00:00:00Z",
     )
 
-    _absorb_kit_bundle(cfg, manifest, body)
+    receipt = _absorb_kit_bundle(cfg, manifest, body)
 
     # The device identity must be UNTOUCHED.
     assert (cfg.keystore / "local.private").read_bytes() == victim_priv
     assert (cfg.keystore / "local.public").read_text(encoding="utf-8").strip() == victim.did
     # ...and the ordinary kit file still installs (the guard is surgical).
     assert (cfg.keystore / "legit.kit").read_bytes() == b"ordinary kit material"
+    assert receipt.accepted_count == 1
+    assert receipt.deduped_count == 0
+
+
+def test_refused_kit_material_does_not_grant_publisher_trust(tmp_path: Path):
+    victim = DeviceKey.generate()
+    cfg = load_or_create(
+        tmp_path / "victim" / "tn.yaml",
+        cipher=_workflow_cipher("btn"),
+        device_private_bytes=victim.private_bytes,
+    )
+    attacker = DeviceKey.generate()
+    body = {"body/local.private": bytes(attacker.private_bytes)}
+    manifest = TnpkgManifest(
+        kind="kit_bundle",
+        publisher_identity=attacker.did,
+        recipient_identity=victim.did,
+        ceremony_id="refused-trust",
+        as_of="2026-06-10T00:00:00Z",
+    )
+    sign_manifest_with_body(manifest, body, attacker.signing_key())
+    package = _write_tnpkg(tmp_path / "refused.tnpkg", manifest, body)
+
+    result = absorb(cfg, package)
+
+    assert result.status == "no_op"
+    trust_path = cfg.keystore / "trust" / "verified_publishers.v1.json"
+    assert not trust_path.exists()
+
+
+def test_contact_update_rejects_excessive_json_nesting(tmp_path: Path):
+    cfg = load_or_create(tmp_path / "contact" / "tn.yaml", cipher=_workflow_cipher("btn"))
+    manifest = TnpkgManifest(
+        kind="contact_update",
+        publisher_identity=cfg.device.device_identity,
+        recipient_identity=cfg.device.device_identity,
+        ceremony_id="nested-contact",
+        as_of="2026-06-10T00:00:00Z",
+    )
+    wire = (
+        b'{"nested":' + b"[" * (MAX_JSON_NESTING + 1) + b"0" + b"]" * (MAX_JSON_NESTING + 1) + b"}"
+    )
+
+    receipt = _absorb_contact_update(cfg, manifest, {"body/contact_update.json": wire})
+
+    assert receipt.legacy_status == "rejected"
+    assert "JSON nesting" in receipt.legacy_reason
+
+
+def test_admin_snapshot_rejects_excessive_json_nesting(tmp_path: Path):
+    cfg = load_or_create(tmp_path / "admin" / "tn.yaml", cipher=_workflow_cipher("btn"))
+    manifest = TnpkgManifest(
+        kind="admin_log_snapshot",
+        publisher_identity=cfg.device.device_identity,
+        recipient_identity=cfg.device.device_identity,
+        ceremony_id="nested-admin",
+        as_of="2026-06-10T00:00:00Z",
+        clock={cfg.device.device_identity: {"tn.key.rotate": 1}},
+    )
+    wire = (
+        b'{"nested":' + b"[" * (MAX_JSON_NESTING + 1) + b"0" + b"]" * (MAX_JSON_NESTING + 1) + b"}"
+    )
+
+    receipt = _absorb_admin_log_snapshot(cfg, manifest, {"body/admin.ndjson": wire})
+
+    assert receipt.legacy_status == "rejected"
+    assert "JSON nesting" in receipt.legacy_reason
