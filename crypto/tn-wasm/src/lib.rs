@@ -825,6 +825,32 @@ impl BtnPublisher {
         Ok(ct.to_bytes())
     }
 
+    #[wasm_bindgen(js_name = "encryptWithAad")]
+    pub fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, JsError> {
+        let ciphertext = self
+            .inner
+            .encrypt_with_aad(plaintext, aad)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+        Ok(ciphertext.to_bytes())
+    }
+
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, JsError> {
+        let ciphertext = BtnCiphertext::from_bytes(ciphertext)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+        self.inner
+            .decrypt(&ciphertext)
+            .map_err(|error| JsError::new(&error.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = "decryptWithAad")]
+    pub fn decrypt_with_aad(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, JsError> {
+        let ciphertext = BtnCiphertext::from_bytes(ciphertext)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+        self.inner
+            .decrypt_with_aad(&ciphertext, aad)
+            .map_err(|error| JsError::new(&error.to_string()))
+    }
+
     /// Serialize this publisher state for persistence. Treat as secret.
     #[wasm_bindgen(js_name = "toBytes")]
     pub fn to_bytes(&self) -> Vec<u8> {
