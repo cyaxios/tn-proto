@@ -9,12 +9,17 @@ import {
   NotEntitledError,
   btn,
   extractX25519KeyAgreement,
+  jweActivationReferenceDigest,
+  jweRecipientFromAuthenticatedDidDocument,
+  jweRecipientFromFingerprintPin,
   jwe,
+  validateVerifiedJweRecipient,
   verifyJweEnrollmentSource,
 } from "../src/index.js";
 import {
   btn as browserBtn,
   extractX25519KeyAgreement as extractBrowserX25519KeyAgreement,
+  jweActivationReferenceDigest as browserJweActivationReferenceDigest,
   jwe as browserJwe,
   verifyJweEnrollmentSource as verifyBrowserJweEnrollmentSource,
 } from "../src/index.browser.js";
@@ -42,6 +47,11 @@ test("node and browser roots expose the authenticated JWE enrollment adapter", (
   assert.equal(typeof verifyBrowserJweEnrollmentSource, "function");
   assert.equal(typeof extractX25519KeyAgreement, "function");
   assert.equal(typeof extractBrowserX25519KeyAgreement, "function");
+  assert.equal(typeof jweRecipientFromAuthenticatedDidDocument, "function");
+  assert.equal(typeof jweRecipientFromFingerprintPin, "function");
+  assert.equal(typeof validateVerifiedJweRecipient, "function");
+  assert.equal(typeof jweActivationReferenceDigest, "function");
+  assert.equal(typeof browserJweActivationReferenceDigest, "function");
 });
 
 test("package metadata exposes direct BTN and JWE subpaths", () => {

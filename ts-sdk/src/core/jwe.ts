@@ -1,25 +1,17 @@
-// RFC 7516 JWE for `cipher: jwe` groups, via the panva/jose JOSE
-// library. This is the TS peer of Python's `tn/cipher.py::JWEGroupCipher`:
-// per recipient ECDH-ES+A256KW over X25519, one shared A256GCM CEK for the
-// body, the TN marker bound as the native JWE `aad` member. Output is a JWE
-// General JSON Serialization object — the same standard the Python side emits,
-// so a record sealed by either impl opens in the other (see
-// docs/JWE-cipher-spec.md).
-//
-// Runtime: panva/jose leans on the WebCrypto global (`globalThis.crypto`),
-// which is present in browsers, Deno, Cloudflare Workers, and Node >= 20 (the
-// SDK's declared minimum — see package.json `engines`). On Node < 20 it is
-// absent and these calls throw `crypto is not defined`; run on a supported Node.
-//
-// TypeScript JWE uses panva/jose. The native Rust SDK now has its own RFC 7516
-// implementation; only the wasm path lacks a Rust JOSE surface. These calls are
-// ASYNC (they use WebCrypto), which is why jwe seals/opens ride the async
-// emit/read path
-// (`emitAsync` / `readAsync` / `decryptGroupAsync`) rather than the synchronous
-// btn/hibe loop.
+// RFC 7516 General JSON JWE for `cipher: jwe` groups. Cryptography and strict
+// wire parsing run in the shared Rust implementation through tn-wasm; this
+// module keeps the established JWK-oriented TypeScript API and failure markers.
 
-import { GeneralEncrypt, generalDecrypt, importJWK, type GeneralJWE, type JWK } from "jose";
 import { x25519 } from "@noble/curves/ed25519";
+import type { JWK } from "jose";
+
+import { encryptSync, keygen, subscribe } from "../jwe.js";
+import {
+  AuthenticationFailedError,
+  LimitExceededError,
+  MalformedError,
+  NotEntitledError,
+} from "../primitive_errors.js";
 
 /** Per-recipient key-management algorithm: ECDH-ES derives a KEK, A256KW wraps
  * the shared CEK. Body content-encryption is A256GCM. */
@@ -46,8 +38,7 @@ function requireRawX25519(bytes: Uint8Array, label: string): Uint8Array {
  * {@link okpPrivateJwk} for {@link jweDecrypt}, or store it under
  * `<group>.jwe.mykey` in a recipient keystore / key bag for `unseal`. */
 export function generateX25519KeyPair(): { publicKey: Uint8Array; privateKey: Uint8Array } {
-  const privateKey = x25519.utils.randomPrivateKey();
-  return { publicKey: x25519.getPublicKey(privateKey), privateKey };
+  return keygen();
 }
 
 /** A raw 32-byte X25519 public key as an RFC 8037 OKP JWK. */
@@ -132,12 +123,6 @@ export function isUsableX25519PublicKey(value: Uint8Array): boolean {
   }
 }
 
-function aadMatches(segment: string | undefined, expected: Uint8Array | undefined): boolean {
-  const actual = segment === undefined ? new Uint8Array(0) : b64uDecode(segment);
-  const wanted = expected ?? new Uint8Array(0);
-  return actual.length === wanted.length && actual.every((value, index) => value === wanted[index]);
-}
-
 function decodeProtectedHeader(value: unknown): JsonObject | null {
   if (typeof value !== "string" || value.length === 0 || !isCanonicalB64u(value, 256)) {
     return null;
@@ -219,7 +204,7 @@ function isProfileRecipient(
   return multiple || protectedEpk || localEpk;
 }
 
-function isTnJweProfile(value: unknown): value is GeneralJWE {
+function isTnJweProfile(value: unknown): value is JsonObject {
   const doc = asObject(value);
   if (doc === null || !hasOnlyMembers(doc, JWE_MEMBERS)) return false;
   if (!["protected", "recipients", "iv", "ciphertext", "tag"].every((key) => hasMember(doc, key))) {
@@ -253,24 +238,30 @@ function isTnJweProfile(value: unknown): value is GeneralJWE {
  * Returns the UTF-8 JSON bytes that become the group's opaque `ciphertext`.
  * An empty/absent `aad` omits the JWE `aad` member so the no-marker path stays
  * a plain seal, byte-compatible in shape with the Python side. */
+export function jweSealSync(
+  recipientPubs: Uint8Array[],
+  plaintext: Uint8Array,
+  aad?: Uint8Array,
+): Uint8Array {
+  if (recipientPubs.length === 0) {
+    throw new Error("jwe: cannot seal with zero recipients");
+  }
+  for (const pub of recipientPubs) {
+    requireRawX25519(pub, "recipient public key");
+    if (!isUsableX25519PublicKey(pub)) {
+      throw new Error("jwe: recipient public key is not a usable X25519 point");
+    }
+  }
+  return encryptSync(plaintext, recipientPubs, aad);
+}
+
+/** Backward-compatible async delegate to {@link jweSealSync}. */
 export async function jweSeal(
   recipientPubs: Uint8Array[],
   plaintext: Uint8Array,
   aad?: Uint8Array,
 ): Promise<Uint8Array> {
-  if (recipientPubs.length === 0) {
-    throw new Error("jwe: cannot seal with zero recipients");
-  }
-  const enc = new GeneralEncrypt(plaintext).setProtectedHeader({ enc: JWE_ENC });
-  if (aad && aad.length > 0) {
-    enc.setAdditionalAuthenticatedData(aad);
-  }
-  for (const pub of recipientPubs) {
-    const key = await importJWK(okpPublicJwk(pub), JWE_ALG);
-    enc.addRecipient(key).setUnprotectedHeader({ alg: JWE_ALG });
-  }
-  const obj = await enc.encrypt();
-  return new TextEncoder().encode(JSON.stringify(obj));
+  return jweSealSync(recipientPubs, plaintext, aad);
 }
 
 export type JweDecryptOutcome =
@@ -279,9 +270,7 @@ export type JweDecryptOutcome =
   | { status: "authentication_failed" }
   | { status: "not_entitled" };
 
-type ImportedJweKey = Awaited<ReturnType<typeof importJWK>>;
-
-function parseTnJwe(blob: Uint8Array): GeneralJWE | null {
+function parseTnJwe(blob: Uint8Array): JsonObject | null {
   if (blob.length > MAX_JWE_BYTES) return null;
   let parsed: unknown;
   try {
@@ -292,70 +281,118 @@ function parseTnJwe(blob: Uint8Array): GeneralJWE | null {
   return isTnJweProfile(parsed) ? parsed : null;
 }
 
-async function importReaderKeys(readerJwks: readonly JWK[]): Promise<ImportedJweKey[]> {
-  const keys: ImportedJweKey[] = [];
-  for (const readerJwk of readerJwks) {
-    try {
-      keys.push(await importJWK(readerJwk, JWE_ALG));
-    } catch (err) {
-      throw new Error("jwe: failed to import reader key for TN profile", { cause: err });
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function importReaderKey(readerJwk: JWK): Uint8Array {
+  try {
+    const key = asObject(readerJwk);
+    if (key === null || key.kty !== "OKP" || key.crv !== "X25519") {
+      throw new Error("reader key must be an X25519 OKP JWK");
     }
+    if (
+      typeof key.x !== "string" ||
+      typeof key.d !== "string" ||
+      !isCanonicalB64u(key.x, 32, 32) ||
+      !isCanonicalB64u(key.d, 32, 32)
+    ) {
+      throw new Error("reader key must contain canonical 32-byte x and d members");
+    }
+    const publicKey = b64uDecode(key.x);
+    const privateKey = b64uDecode(key.d);
+    if (!isUsableX25519PublicKey(publicKey)) {
+      throw new Error("reader public key is not a usable X25519 point");
+    }
+    if (!sameBytes(x25519.getPublicKey(privateKey), publicKey)) {
+      throw new Error("reader JWK public and private key material do not match");
+    }
+    return privateKey;
+  } catch (error) {
+    throw new Error("jwe: failed to import reader key for TN profile", { cause: error });
+  }
+}
+
+function importReaderKeys(readerJwks: readonly JWK[]): Uint8Array[] {
+  const keys: Uint8Array[] = [];
+  for (const readerJwk of readerJwks) {
+    keys.push(importReaderKey(readerJwk));
   }
   return keys;
 }
 
-async function decryptWithReaderKeys(
-  obj: GeneralJWE,
-  keys: readonly ImportedJweKey[],
-  aad: Uint8Array | undefined,
-): Promise<JweDecryptOutcome> {
-  for (const key of keys) {
-    try {
-      const result = await generalDecrypt(obj, key, {
-        keyManagementAlgorithms: [JWE_ALG],
-        contentEncryptionAlgorithms: [JWE_ENC],
-      });
-      const got = result.additionalAuthenticatedData ?? new Uint8Array(0);
-      const want = aad ?? new Uint8Array(0);
-      if (got.length !== want.length || !got.every((value, index) => value === want[index])) {
-        return { status: "authentication_failed" };
-      }
-      return { status: "opened", plaintext: result.plaintext };
-    } catch {
-      continue;
-    }
+function decryptFailure(error: unknown): JweDecryptOutcome {
+  if (error instanceof AuthenticationFailedError) {
+    return { status: "authentication_failed" };
   }
-  return { status: "not_entitled" };
+  if (error instanceof NotEntitledError) {
+    return { status: "not_entitled" };
+  }
+  if (error instanceof MalformedError || error instanceof LimitExceededError) {
+    return { status: "malformed" };
+  }
+  throw error;
 }
 
 /** Open a General JSON JWE with multiple reader JWKs after one strict parse. */
+export function jweDecryptManyDetailedSync(
+  readerJwks: readonly JWK[],
+  blob: Uint8Array,
+  aad?: Uint8Array,
+): JweDecryptOutcome {
+  if (parseTnJwe(blob) === null) return { status: "malformed" };
+  const stableBlob = new Uint8Array(blob);
+  const keys = importReaderKeys(readerJwks);
+  if (keys.length === 0) return { status: "not_entitled" };
+  try {
+    return { status: "opened", plaintext: subscribe(keys).decryptSync(stableBlob, aad) };
+  } catch (error) {
+    return decryptFailure(error);
+  }
+}
+
+/** Backward-compatible async delegate to {@link jweDecryptManyDetailedSync}. */
 export async function jweDecryptManyDetailed(
   readerJwks: readonly JWK[],
   blob: Uint8Array,
   aad?: Uint8Array,
 ): Promise<JweDecryptOutcome> {
-  const obj = parseTnJwe(blob);
-  if (obj === null) return { status: "malformed" };
-  const keys = await importReaderKeys(readerJwks);
-  if (!aadMatches(obj.aad, aad)) return { status: "authentication_failed" };
-  return decryptWithReaderKeys(obj, keys, aad);
+  return jweDecryptManyDetailedSync(readerJwks, blob, aad);
 }
 
 /** Open a General JSON JWE and retain its stable failure classification. */
+export function jweDecryptDetailedSync(
+  readerJwk: JWK,
+  blob: Uint8Array,
+  aad?: Uint8Array,
+): JweDecryptOutcome {
+  return jweDecryptManyDetailedSync([readerJwk], blob, aad);
+}
+
+/** Backward-compatible async delegate to {@link jweDecryptDetailedSync}. */
 export async function jweDecryptDetailed(
   readerJwk: JWK,
   blob: Uint8Array,
   aad?: Uint8Array,
 ): Promise<JweDecryptOutcome> {
-  return jweDecryptManyDetailed([readerJwk], blob, aad);
+  return jweDecryptDetailedSync(readerJwk, blob, aad);
 }
 
 /** Open a General JSON JWE, preserving the legacy plaintext-or-null contract. */
+export function jweDecryptSync(
+  readerJwk: JWK,
+  blob: Uint8Array,
+  aad?: Uint8Array,
+): Uint8Array | null {
+  const outcome = jweDecryptDetailedSync(readerJwk, blob, aad);
+  return outcome.status === "opened" ? outcome.plaintext : null;
+}
+
+/** Backward-compatible async delegate to {@link jweDecryptSync}. */
 export async function jweDecrypt(
   readerJwk: JWK,
   blob: Uint8Array,
   aad?: Uint8Array,
 ): Promise<Uint8Array | null> {
-  const outcome = await jweDecryptDetailed(readerJwk, blob, aad);
-  return outcome.status === "opened" ? outcome.plaintext : null;
+  return jweDecryptSync(readerJwk, blob, aad);
 }

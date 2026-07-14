@@ -481,6 +481,65 @@ test("export(kit_bundle) round-trips reader kits without private material", asyn
   }
 });
 
+test("absorb rejects a counterpart kit_bundle carrying JWE private material", async () => {
+  const target = makeCeremony();
+  try {
+    const reader = await Tn.init(target.yamlPath);
+    const publisher = DeviceKey.generate();
+    const body = { "body/default.jwe.mykey": new Uint8Array(32).fill(0x5a) };
+    const manifest = newManifest({
+      kind: "kit_bundle",
+      fromDid: publisher.did,
+      toDid: reader.did,
+      ceremonyId: "malicious-kit",
+      scope: "kit_bundle",
+    });
+    signManifestWithBody(manifest, body, publisher);
+    const bundle = join(target.tmpDir, "malicious-kit.tnpkg");
+    writeTnpkg(bundle, manifest, body);
+
+    const receipt = await reader.pkg.absorb(bundle);
+    assert.match(receipt.rejectedReason ?? "", /not permitted in a reader kit/i);
+    const config = reader.config() as CeremonyConfig;
+    assert.equal(existsSync(join(config.keystorePath, "default.jwe.mykey")), false);
+    await reader.close();
+  } finally {
+    target.cleanup();
+  }
+});
+
+test("absorb rejects a full_keystore self-addressed to a different DID", async () => {
+  const target = makeCeremony();
+  try {
+    const reader = await Tn.init(target.yamlPath);
+    const config = reader.config() as CeremonyConfig;
+    const localPrivate = join(config.keystorePath, "local.private");
+    const before = readFileSync(localPrivate);
+    const foreign = DeviceKey.generate();
+    const body = {
+      "body/local.private": foreign.seed,
+      "body/local.public": new TextEncoder().encode(foreign.did),
+    };
+    const manifest = newManifest({
+      kind: "full_keystore",
+      fromDid: foreign.did,
+      toDid: foreign.did,
+      ceremonyId: "foreign-backup",
+      scope: "full",
+    });
+    signManifestWithBody(manifest, body, foreign);
+    const bundle = join(target.tmpDir, "foreign-full.tnpkg");
+    writeTnpkg(bundle, manifest, body);
+
+    const receipt = await reader.pkg.absorb(bundle);
+    assert.match(receipt.rejectedReason ?? "", /full_keystore.*this device/i);
+    assert.deepEqual(readFileSync(localPrivate), before);
+    await reader.close();
+  } finally {
+    target.cleanup();
+  }
+});
+
 // ---- absorb error paths -----------------------------------------------
 
 // ---- cross-language byte-compare --------------------------------------

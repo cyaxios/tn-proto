@@ -1,9 +1,13 @@
 // tn.admin.* namespace — verb surface for ceremony admin operations.
 
-import { readFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve as pathResolve } from "node:path";
 import { sha256HexBytes } from "../core/chain.js";
-import { recipientKeyIsResolvable } from "../seal_bundle_producer.js";
+import {
+  recipientKeyIsResolvable,
+  sealBundleForRecipient,
+} from "../seal_bundle_producer.js";
 import type { NodeRuntime } from "../runtime/node_runtime.js";
 import type {
   AddRecipientResult,
@@ -15,13 +19,22 @@ import type {
 import {
   TrustError,
   formatTrustTimestamp,
+  parseEd25519DidKey,
   sha256Digest,
   verifyKeyBindingProof,
   type AcceptedOffer,
   type EnrollmentChallengeV1,
   type KeyBindingProofV1,
 } from "../core/trust.js";
+import {
+  jweActivationReferenceDigest,
+  jweRecipientFromAcceptedOffer,
+  validateVerifiedJweRecipient,
+  type VerifiedJweRecipient,
+} from "../core/jwe_binding.js";
 import type { AdminState, RecipientEntry } from "../core/types.js";
+import { assertReconciledAcceptedOffer } from "../runtime/enrollment.js";
+import { storeVerifiedJweRecipient } from "../runtime/jwe_trust.js";
 import type { AdminStateCache } from "./cache.js";
 import { resolveRecipient, type RecipientInput } from "./recipient.js";
 
@@ -44,6 +57,8 @@ export interface AddRecipientOptions {
    * any explicitly supplied `recipientDid`/`publicKey` must match it.
    */
   acceptedOffer?: AcceptedOffer;
+  /** A normalized DID-document or fingerprint binding. */
+  verifiedRecipient?: VerifiedJweRecipient;
   /**
    * jwe: MANDATORY acknowledgment for the raw DID-plus-key registration —
    * omitting it is a hard parameter error. Raw registrations are never
@@ -108,30 +123,29 @@ export class AdminNamespace {
             `group ${JSON.stringify(group)}. For hibe, pass outKitPath.`,
         );
       }
-      const grantOpts: { readerDid?: string; outPath?: string } = {};
+      const grantOpts: GrantReaderOptions = {};
       if (recipientDid !== undefined) grantOpts.readerDid = recipientDid;
       if (opts.outKitPath !== undefined) grantOpts.outPath = opts.outKitPath;
-      const granted = this._rt.grantReader(group, grantOpts);
-      // Seal the kit to the reader's device key when known — an unsealed kit
-      // ships the delegated `.hibe.sk` in cleartext (a bearer token). No-op for
-      // a did-less hand-off; the reader unseals via absorbPkgAsync.
-      await this._rt.sealKitForRecipient(granted.kitPath, recipientDid);
-      const kitSha256 = sha256HexBytes(new Uint8Array(readFileSync(granted.kitPath)));
-      return {
-        group,
-        cipher: "hibe",
-        leafIndex: null,
-        recipientDid: recipientDid ?? null,
-        kitPath: granted.kitPath,
-        kitSha256,
-        mintedAt: new Date().toISOString(),
-        idPath: granted.idPath,
-      };
+      return this.grantReader(group, grantOpts);
     }
 
     if (cipher === "jwe") {
       if (opts.acceptedOffer !== undefined) {
-        return this._addRecipientJweAccepted(group, opts.acceptedOffer, recipientDid, opts.publicKey);
+        return this._addRecipientJweAccepted(
+          group,
+          opts.acceptedOffer,
+          recipientDid,
+          opts.publicKey,
+          opts.verifiedRecipient,
+        );
+      }
+      if (opts.verifiedRecipient !== undefined) {
+        return this._addRecipientJweVerified(
+          group,
+          opts.verifiedRecipient,
+          recipientDid,
+          opts.publicKey,
+        );
       }
       // Raw jwe registration: register a DID-plus-key pair directly (no kit
       // minted; mirrors Python `_add_recipient_jwe_impl`). The binding is
@@ -222,51 +236,78 @@ export class AdminNamespace {
     accepted: AcceptedOffer,
     recipientDid?: string,
     publicKey?: Uint8Array,
+    prepared?: VerifiedJweRecipient,
   ): AddRecipientResult {
-    const binding = accepted.binding;
-    const principal = binding.principal;
-    if (principal.purpose !== "jwe-reader") {
-      throw new TrustError("binding_invalid", "accepted offer is not a jwe-reader binding");
+    assertReconciledAcceptedOffer(accepted);
+    const current = validateVerifiedJweRecipient(jweRecipientFromAcceptedOffer(accepted));
+    const binding = prepared ?? current;
+    if (prepared !== undefined && prepared.bindingDigest !== current.bindingDigest) {
+      throw new TrustError("replay_conflict", "accepted offer changed after preparation");
     }
-    if (principal.audienceDid !== this._rt.did) {
-      throw new TrustError("wrong_recipient", "accepted offer names a different publisher");
-    }
-    if (principal.ceremonyId !== this._rt.config.ceremonyId || principal.group !== group) {
-      throw new TrustError("scope_mismatch", "accepted offer ceremony or group does not match");
-    }
-    if (recipientDid !== undefined && recipientDid !== principal.did) {
+    return this._addRecipientJweVerified(group, binding, recipientDid, publicKey, true);
+  }
+
+  private _addRecipientJweVerified(
+    group: string,
+    value: VerifiedJweRecipient,
+    recipientDid?: string,
+    publicKey?: Uint8Array,
+    allowSignedEvidence = false,
+  ): AddRecipientResult {
+    const binding = validateVerifiedJweRecipient(value, formatTrustTimestamp(Date.now() * 1000));
+    parseEd25519DidKey(binding.readerDid);
+    if (
+      !allowSignedEvidence &&
+      (binding.evidence.kind === "signed-key-card" ||
+        binding.evidence.kind === "challenge-response")
+    ) {
       throw new TrustError(
-        "did_signer_mismatch",
-        "recipientDid does not match the accepted offer's verified reader",
+        "untrusted_principal",
+        "signed JWE evidence requires a reconciled acceptedOffer",
       );
     }
-    if (sha256Digest(binding.publicKey) !== binding.publicKeySha256) {
-      throw new TrustError("binding_invalid", "accepted offer key digest does not match its bytes");
+    if (binding.audienceDid !== this._rt.did) {
+      throw new TrustError("wrong_recipient", "JWE binding names a different publisher");
+    }
+    if (binding.ceremonyId !== this._rt.config.ceremonyId || binding.group !== group) {
+      throw new TrustError("scope_mismatch", "JWE binding ceremony or group does not match");
+    }
+    if (recipientDid !== undefined && recipientDid !== binding.readerDid) {
+      throw new TrustError(
+        "did_signer_mismatch",
+        "recipientDid does not match the verified JWE reader",
+      );
     }
     if (publicKey !== undefined) {
       if (
         publicKey.length !== binding.publicKey.length ||
         publicKey.some((byte, index) => byte !== binding.publicKey[index])
       ) {
-        throw new TrustError("binding_invalid", "publicKey does not match the accepted offer binding");
+        throw new TrustError(
+          "binding_invalid",
+          "publicKey does not match the verified JWE binding",
+        );
       }
     }
-    this._rt.addRecipientJwe(group, principal.did, binding.publicKey, {
+    const referenceDigest = jweActivationReferenceDigest(binding);
+    storeVerifiedJweRecipient(this._rt.config.keystorePath, binding);
+    this._rt.addRecipientJwe(group, binding.readerDid, binding.publicKey, {
       verified: true,
-      proof_digest: binding.proofDigest,
+      proof_digest: referenceDigest,
       public_key_sha256: binding.publicKeySha256,
     });
     return {
       group,
       cipher: "jwe",
       leafIndex: null,
-      recipientDid: principal.did,
+      recipientDid: binding.readerDid,
       kitPath: null,
       kitSha256: null,
       mintedAt: new Date().toISOString(),
       verified: true,
-      proofDigest: binding.proofDigest,
+      proofDigest: referenceDigest,
       publicKeySha256: binding.publicKeySha256,
+      bindingDigest: binding.bindingDigest,
     };
   }
 
@@ -447,13 +488,13 @@ export class AdminNamespace {
     };
     if (opts.readerDid !== undefined) mintOpts.readerDid = opts.readerDid;
     if (opts.idPath !== undefined) mintOpts.idPath = opts.idPath;
-    if (opts.outPath !== undefined) mintOpts.outPath = opts.outPath;
     if (opts.allowSubauthority !== undefined) mintOpts.allowSubauthority = opts.allowSubauthority;
-    if (opts.unsafePlaintext === true) mintOpts.unsafePlaintextLabel = true;
-    const granted = this._rt.grantReader(group, mintOpts);
-
+    let granted: ReturnType<NodeRuntime["grantReader"]>;
     let sealed = false;
     if (opts.unsafePlaintext === true) {
+      if (opts.outPath !== undefined) mintOpts.outPath = opts.outPath;
+      mintOpts.unsafePlaintextLabel = true;
+      granted = this._rt.grantReader(group, mintOpts);
       await this._rt.recordUnsafeOperation({
         operation: "hibe_grant",
         relaxations: verified
@@ -464,19 +505,24 @@ export class AdminNamespace {
         artifact_digest: null,
       });
     } else {
-      sealed = await this._rt.sealKitForRecipient(granted.kitPath, opts.readerDid);
-      if (!sealed) {
-        // Defensive: the pre-mint gate above makes this unreachable, but a
-        // seal that still fails must never leave a plaintext bearer kit.
-        try {
-          unlinkSync(granted.kitPath);
-        } catch {
-          // best-effort cleanup; the error below is the primary signal
-        }
-        throw new TrustError(
-          "binding_invalid",
-          "grant delivery could not be recipient-sealed; no plaintext kit was retained",
-        );
+      const safeStem = opts.readerDid!.split(":").pop()!.replace(/[^A-Za-z0-9._-]/g, "_");
+      const finalPath = pathResolve(opts.outPath ?? join(process.cwd(), `${safeStem}.tnpkg`));
+      const stagingDir = mkdtempSync(join(tmpdir(), "tn-hibe-grant-"));
+      try {
+        mintOpts.outPath = join(stagingDir, "reader.tnpkg");
+        mintOpts.recipientSealStaging = true;
+        const staged = this._rt.grantReader(group, mintOpts);
+        const result = await sealBundleForRecipient({
+          unsealedBundle: staged.kitPath,
+          recipientDid: opts.readerDid!,
+          publisherKey: this._rt.keystore.device,
+          outPath: finalPath,
+        });
+        result.bek.fill(0);
+        granted = { ...staged, kitPath: finalPath };
+        sealed = true;
+      } finally {
+        rmSync(stagingDir, { recursive: true, force: true });
       }
       if (!verified) {
         await this._rt.recordUnsafeOperation({

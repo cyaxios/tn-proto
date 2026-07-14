@@ -37,7 +37,15 @@ import {
 } from "../src/runtime/enrollment.js";
 import { loadPinnedHibeAuthority, pinHibeAuthority } from "../src/runtime/hibe_group.js";
 
-const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "tests", "fixtures", "trust", "v1");
+const FIXTURES = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "tests",
+  "fixtures",
+  "trust",
+  "v1",
+);
 
 type JsonObject = Record<string, unknown>;
 
@@ -88,7 +96,10 @@ interface StoreHome {
   dir: string;
 }
 
-function makeStore(publisher: DeviceKey, opts: { ceremonyId?: string; groups?: string[] } = {}): StoreHome {
+function makeStore(
+  publisher: DeviceKey,
+  opts: { ceremonyId?: string; groups?: string[] } = {},
+): StoreHome {
   const dir = mkdtempSync(join(tmpdir(), "tn-enroll-"));
   const ceremony: EnrollmentCeremony = {
     ceremonyId: opts.ceremonyId ?? "ts-enroll-test-ceremony",
@@ -148,7 +159,10 @@ test("issueChallenge is signed, scoped, persisted, and preauthorized", () => {
   assert.equal(persisted["challenge_digest"], enrollmentChallengeDigest(challenge));
   assert.equal((persisted["challenge"] as JsonObject)["signature_b64"], challenge.signature_b64);
 
-  assert.equal(reasonOf(() => store.issueChallenge(reader.did, "nope", 60_000)), "scope_mismatch");
+  assert.equal(
+    reasonOf(() => store.issueChallenge(reader.did, "nope", 60_000)),
+    "scope_mismatch",
+  );
 });
 
 test("stage + reconcile retain the exact artifact; exact replay is idempotent", () => {
@@ -223,7 +237,10 @@ test("the same challenge with a changed signed body is a replay conflict", () =>
     now,
   });
   assert.notEqual(second.offerDigest, first.offerDigest);
-  assert.equal(reasonOf(() => store.stageOffer(second.artifact, publisher.did, now)), "replay_conflict");
+  assert.equal(
+    reasonOf(() => store.stageOffer(second.artifact, publisher.did, now)),
+    "replay_conflict",
+  );
 });
 
 test("an unsolicited offer stays pending until its exact digest is approved", () => {
@@ -241,7 +258,10 @@ test("an unsolicited offer stays pending until its exact digest is approved", ()
     now: NOW,
   });
   const pending = store.stageOffer(built.artifact, publisher.did, NOW);
-  assert.equal(reasonOf(() => store.reconcile(pending, NOW)), "untrusted_principal");
+  assert.equal(
+    reasonOf(() => store.reconcile(pending, NOW)),
+    "untrusted_principal",
+  );
 
   // A wrong digest is not found; the exact digest promotes atomically.
   assert.equal(
@@ -258,7 +278,10 @@ test("stage rejects an oversized artifact without creating state", () => {
   const publisher = DeviceKey.generate();
   const { store, stateRoot } = makeStore(publisher);
   const oversized = new Uint8Array(MAX_ENROLLMENT_ARTIFACT_BYTES + 1);
-  assert.equal(reasonOf(() => store.stageOffer(oversized, publisher.did, NOW)), "statement_invalid");
+  assert.equal(
+    reasonOf(() => store.stageOffer(oversized, publisher.did, NOW)),
+    "statement_invalid",
+  );
   assert.throws(() => readFileSync(join(stateRoot, "enrollment.lock")), /ENOENT/);
 });
 
@@ -312,7 +335,10 @@ function runOfferCase(c: JsonObject): { offerDigest: string; artifactDigest: str
   const localDid = String(validation["local_recipient_did"]);
   const pending = store.stageOffer(artifact, localDid, now);
   if (pending.verified.publicKeySha256 !== validation["expected_public_key_sha256"]) {
-    throw new TrustError("binding_invalid", "X25519 public key digest does not match the expected binding");
+    throw new TrustError(
+      "binding_invalid",
+      "X25519 public key digest does not match the expected binding",
+    );
   }
   const accepted = store.reconcile(pending, now);
   return { offerDigest: accepted.offerDigest, artifactDigest: accepted.artifactDigest };
@@ -341,7 +367,11 @@ test("fixture: rejected offers map to stable reasons", () => {
   for (const caseId of rejected) {
     const c = lifecycleCase(caseId);
     const expected = (c["expected"] as JsonObject)["reason"] as TrustReason;
-    assert.equal(reasonOf(() => runOfferCase(c)), expected, caseId);
+    assert.equal(
+      reasonOf(() => runOfferCase(c)),
+      expected,
+      caseId,
+    );
   }
 });
 
@@ -443,9 +473,13 @@ test("fixture: a response naming an unknown offer digest is out of scope", () =>
 
 // ── Fixture-driven first decrypt ────────────────────────────────────
 
-async function firstDecrypt(c: JsonObject): Promise<{ plaintext: Uint8Array; sharedSha256: string }> {
+async function firstDecrypt(
+  c: JsonObject,
+): Promise<{ plaintext: Uint8Array; sharedSha256: string }> {
   const input = c["input"] as JsonObject;
-  const jwe = JSON.parse(new TextDecoder().decode(b64ToBytes(String(input["jwe_b64"])))) as JsonObject;
+  const jwe = JSON.parse(
+    new TextDecoder().decode(b64ToBytes(String(input["jwe_b64"]))),
+  ) as JsonObject;
   const seed = b64ToBytes(String(input["reader_private_seed_b64"]));
   const recipient = (jwe["recipients"] as JsonObject[])[0]!;
   const header = recipient["header"] as JsonObject;
@@ -531,7 +565,11 @@ test("fixture: consume_challenge transitions match the frozen table", () => {
     const run = (): string =>
       evaluateConsumedChallenge(prior, { artifactDigest: String(input["artifact_digest"]) });
     if (expected["accepted"] === true) {
-      assert.equal(run(), expected["idempotent"] === true ? "idempotent" : "fresh", String(c["id"]));
+      assert.equal(
+        run(),
+        expected["idempotent"] === true ? "idempotent" : "fresh",
+        String(c["id"]),
+      );
     } else {
       assert.equal(reasonOf(run), expected["reason"], String(c["id"]));
     }
@@ -572,7 +610,11 @@ test("fixture: install_hibe_assertion epoch transitions match the frozen table",
       const pinned = loadPinnedHibeAuthority(keystoreDir, "default");
       assert.equal(pinned?.pathEpoch, expected["next_epoch"], String(c["id"]));
     } else {
-      assert.equal(reasonOf(() => pinHibeAuthority(keystoreDir, "default", incoming)), expected["reason"], String(c["id"]));
+      assert.equal(
+        reasonOf(() => pinHibeAuthority(keystoreDir, "default", incoming)),
+        expected["reason"],
+        String(c["id"]),
+      );
     }
   }
 });
@@ -587,6 +629,7 @@ test("the reader key is created once and reused byte-for-byte", () => {
   const second = ensureJweReaderKey(dir, "default");
   assert.deepEqual(second, first);
   assert.deepEqual(new Uint8Array(readFileSync(join(dir, "default.jwe.mykey"))), privBytes);
+  assert.notDeepEqual(ensureJweReaderKey(dir, "other"), first);
 });
 
 test("a challenged offer binds the exact challenge digest and verifies end to end", () => {
@@ -640,7 +683,10 @@ test("stage rejects an offer whose payload key differs from the signed binding",
     now: NOW,
     unsignedPayloadPublicKey: x25519.getPublicKey(x25519.utils.randomSecretKey()),
   });
-  assert.equal(reasonOf(() => store.stageOffer(built.artifact, publisher.did, NOW)), "binding_invalid");
+  assert.equal(
+    reasonOf(() => store.stageOffer(built.artifact, publisher.did, NOW)),
+    "binding_invalid",
+  );
 });
 
 test("a proof with a digest for an unretained challenge is challenge_missing", () => {
@@ -668,6 +714,12 @@ test("a proof with a digest for an unretained challenge is challenge_missing", (
 test("signKeyBindingProof refuses a signer that is not the subject", () => {
   const publisher = deviceFor("publisher");
   const c = statementCase("valid_jwe_reader_proof");
-  const proof = { ...parseKeyBindingProof((c["input"] as JsonObject)["statement"]), signature_b64: "" };
-  assert.equal(reasonOf(() => signKeyBindingProof(proof, publisher)), "did_signer_mismatch");
+  const proof = {
+    ...parseKeyBindingProof((c["input"] as JsonObject)["statement"]),
+    signature_b64: "",
+  };
+  assert.equal(
+    reasonOf(() => signKeyBindingProof(proof, publisher)),
+    "did_signer_mismatch",
+  );
 });

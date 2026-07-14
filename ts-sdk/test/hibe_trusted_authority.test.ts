@@ -398,3 +398,39 @@ test("plaintext grant delivery is a hard error unless unsafePlaintext is explici
     process.removeListener("warning", handler);
   }
 });
+
+test("HIBE addRecipient requires a real DID and delivers a sealed working reader kit", async () => {
+  const { rt: authority, admin } = newAuthority();
+  await admin.ensureGroup(GROUP, { cipher: "hibe" });
+  const readerDir = mkdtempSync(join(tmpdir(), "tn-hibe-add-reader-"));
+  const reader = NodeRuntime.init(join(readerDir, "tn.yaml"));
+  const fakeKit = join(readerDir, "fake.tnpkg");
+
+  await assert.rejects(
+    () =>
+      admin.addRecipient(GROUP, {
+        recipientDid: "did:key:z6MkAbbreviated",
+        outKitPath: fakeKit,
+      }),
+    (error: unknown) => error instanceof TrustError && error.reason === "binding_invalid",
+  );
+  assert.equal(existsSync(fakeKit), false);
+
+  const kitPath = join(readerDir, "reader.tnpkg");
+  const added = await admin.addRecipient(GROUP, {
+    recipientDid: reader.did,
+    outKitPath: kitPath,
+  });
+  assert.equal(added.sealed, true);
+  assert.ok(
+    ((readTnpkgVerified(kitPath).manifest.state ?? {}) as Record<string, unknown>)[
+      "body_encryption"
+    ],
+  );
+
+  const receipt = await reader.absorbPkgAsync(kitPath);
+  assert.equal(receipt.rejectedReason, undefined);
+  const plaintext = new TextEncoder().encode("add-recipient-opened");
+  const ciphertext = hibeEncrypt(loadHibeGroup(authority.config.keystorePath, GROUP)!, plaintext);
+  assert.deepEqual(hibeDecrypt(loadHibeGroup(reader.config.keystorePath, GROUP)!, ciphertext), plaintext);
+});

@@ -600,11 +600,17 @@ export type {
 } from "./browser/runtime.js";
 export {
   extractX25519KeyAgreement,
+  jweActivationReferenceDigest,
+  jweBindingEvidenceValue,
   jweRecipientFromAcceptedOffer,
   jweRecipientFromAuthenticatedDidDocument,
   jweRecipientFromDidResolution,
+  jweRecipientFromExternallyAuthenticatedDidDocument,
+  jweRecipientFromExternallyAuthenticatedDidResolution,
   jweRecipientFromFingerprintPin,
+  validateVerifiedJweRecipient,
   type AuthenticatedDidResolution,
+  type ExternallyAuthenticatedDidResolution,
   type FingerprintPin,
   type JweBindingEvidence,
   type JweBindingScope,

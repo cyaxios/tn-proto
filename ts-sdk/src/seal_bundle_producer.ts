@@ -46,7 +46,6 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve } from "node:path";
@@ -77,6 +76,11 @@ import {
   didKeyToEd25519Pub,
   UnsealError,
 } from "./core/recipient_seal.js";
+import {
+  atomicWriteKitMember,
+  kitBundleInstallRejection,
+  kitMemberIsSecret,
+} from "./runtime/kit_bundle_members.js";
 
 /** Inputs to {@link sealBundleForRecipient}. */
 export interface SealBundleInput {
@@ -323,6 +327,7 @@ async function _unsealFirstKit(
 function _installKitMembers(
   decrypted: Map<string, Uint8Array>,
   keystoreDir: string,
+  opts: { kind: string; yamlPath?: string },
 ): { accepted: number; skipped: number; replaced: string[] } {
   const keystore = pathResolve(keystoreDir);
   if (!existsSync(keystore)) mkdirSync(keystore, { recursive: true });
@@ -335,23 +340,20 @@ function _installKitMembers(
     const rel = name.slice("body/".length);
     if (!rel) continue;
     if (rel.includes("/") || rel.includes("\\")) continue;
-    const dest = pathResolve(keystore, rel);
+    const dest =
+      opts.kind === "full_keystore" && rel === "tn.yaml" && opts.yamlPath !== undefined
+        ? pathResolve(opts.yamlPath)
+        : pathResolve(keystore, rel);
     if (existsSync(dest)) {
       const existing = readFileSync(dest);
       if (existing.length === data.length && Buffer.from(existing).equals(Buffer.from(data))) {
         skipped += 1;
         continue;
       }
-      renameSync(dest, pathResolve(keystore, `${rel}.previous.${ts}`));
+      renameSync(dest, `${dest}.previous.${ts}`);
       replaced.push(dest);
     }
-    // Secret key material lands owner-only (0600), matching how the keystore
-    // writes it at creation; public members (mpk, recipients index) keep the
-    // default. mode only bites on file creation, so this is the fresh-file path.
-    const secret =
-      rel === "local.private" ||
-      /\.(hibe\.sk|hibe\.msk|jwe\.mykey|jwe\.sender|btn\.mykit|btn\.state)$/.test(rel);
-    writeFileSync(dest, Buffer.from(data), secret ? { mode: 0o600 } : undefined);
+    atomicWriteKitMember(dest, data, kitMemberIsSecret(rel));
     accepted += 1;
   }
   return { accepted, skipped, replaced };
@@ -359,7 +361,7 @@ function _installKitMembers(
 
 export async function absorbSealedKitBundle(
   source: string | Uint8Array,
-  opts: { seed: Uint8Array; keystoreDir: string },
+  opts: { seed: Uint8Array; keystoreDir: string; yamlPath?: string },
 ): Promise<SealedKitBundleReceipt> {
   let manifest: Manifest;
   let body: Map<string, Uint8Array>;
@@ -432,7 +434,24 @@ export async function absorbSealedKitBundle(
     );
   }
 
-  const { accepted, skipped, replaced } = _installKitMembers(decrypted, opts.keystoreDir);
+  const rejectedReason = kitBundleInstallRejection({
+    kind: manifest.kind,
+    fromDid: manifest.fromDid,
+    ...(manifest.toDid === undefined ? {} : { toDid: manifest.toDid }),
+    localDid: ourDid,
+    names: decrypted.keys(),
+  });
+  if (rejectedReason !== null) return _kitReject(manifest.kind, rejectedReason);
+
+  const installOpts = {
+    kind: manifest.kind,
+    ...(opts.yamlPath === undefined ? {} : { yamlPath: opts.yamlPath }),
+  };
+  const { accepted, skipped, replaced } = _installKitMembers(
+    decrypted,
+    opts.keystoreDir,
+    installOpts,
+  );
   return {
     kind: manifest.kind,
     acceptedCount: accepted,

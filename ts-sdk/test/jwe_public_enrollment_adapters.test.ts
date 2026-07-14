@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { x25519 } from "@noble/curves/ed25519";
 
 import { bytesToB64 } from "../src/core/encoding.js";
+import { jweRecipientFromAcceptedOffer } from "../src/core/jwe_binding.js";
 import { DeviceKey } from "../src/core/signing.js";
 import {
   enrollmentChallengeDigest,
@@ -148,6 +149,45 @@ test("pkg.offer emits a public-only signed JWE key card and retains the private 
   await assert.rejects(publisherPkg.reconcilePending(offered.offerDigest!), /untrusted_principal/);
   const accepted = await publisherPkg.approveAndReconcile(offered.offerDigest!);
   assert.equal(accepted.binding.principal.did, reader.did);
+
+  const structuralCopy = {
+    ...accepted,
+    binding: {
+      ...accepted.binding,
+      principal: { ...accepted.binding.principal },
+      publicKey: new Uint8Array(accepted.binding.publicKey),
+    },
+  };
+  await assert.rejects(
+    new AdminNamespace(publisher).addRecipient("default", { acceptedOffer: structuralCopy }),
+    /exact value returned by reconciliation/,
+  );
+  await assert.rejects(
+    publisherPkg.compileEnrolment({
+      group: "default",
+      recipientDid: reader.did,
+      outPath: join(publisherDir, "forged-enrolment.tnpkg"),
+      acceptedOffer: structuralCopy,
+      ttlMs: 60_000,
+    }),
+    /exact value returned by reconciliation/,
+  );
+  const originalPublicKeyByte = accepted.binding.publicKey[0]!;
+  accepted.binding.publicKey[0] = originalPublicKeyByte ^ 1;
+  await assert.rejects(
+    new AdminNamespace(publisher).addRecipient("default", { acceptedOffer: accepted }),
+    /remain unchanged/,
+  );
+  accepted.binding.publicKey[0] = originalPublicKeyByte;
+  await assert.rejects(
+    publisherPkg.prepareRecipient({
+      recipientDid: reader.did,
+      outDir: join(publisherDir, "signed-structural-bypass"),
+      groups: ["default"],
+      jweRecipients: [jweRecipientFromAcceptedOffer(accepted)],
+    }),
+    /signed JWE bindings must enter through acceptedOffers/,
+  );
 
   await assert.rejects(
     publisherPkg.bundleForRecipient({

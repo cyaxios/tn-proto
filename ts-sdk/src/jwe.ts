@@ -101,11 +101,12 @@ function mapJweError(error: unknown, operation: string): PrimitiveError {
   return new MalformedError(`JWE ${operation} failed: ${message || "invalid input"}`);
 }
 
-export async function encrypt(
+/** Encrypt immediately through the Rust/WASM RFC 7516 implementation. */
+export function encryptSync(
   plaintext: Uint8Array,
   recipients: Iterable<Uint8Array>,
   aad?: Uint8Array,
-): Promise<Uint8Array> {
+): Uint8Array {
   requireBytes(plaintext, "plaintext", MAX_PLAINTEXT_BYTES);
   if (aad !== undefined) requireBytes(aad, "additional authenticated data", MAX_AAD_BYTES);
   const recipientKeys = collectBoundedKeys(recipients, "recipients");
@@ -116,6 +117,15 @@ export async function encrypt(
   }
 }
 
+/** Backward-compatible async delegate to {@link encryptSync}. */
+export async function encrypt(
+  plaintext: Uint8Array,
+  recipients: Iterable<Uint8Array>,
+  aad?: Uint8Array,
+): Promise<Uint8Array> {
+  return encryptSync(plaintext, recipients, aad);
+}
+
 export class Subscriber {
   readonly #privateKeys: Uint8Array[];
 
@@ -123,7 +133,8 @@ export class Subscriber {
     this.#privateKeys = collectBoundedKeys(privateKeys, "private keys");
   }
 
-  async decrypt(ciphertext: Uint8Array, aad?: Uint8Array): Promise<Uint8Array> {
+  /** Decrypt immediately through the Rust/WASM RFC 7516 implementation. */
+  decryptSync(ciphertext: Uint8Array, aad?: Uint8Array): Uint8Array {
     requireBytes(ciphertext, "ciphertext", MAX_CIPHERTEXT_BYTES);
     if (aad !== undefined) requireBytes(aad, "additional authenticated data", MAX_AAD_BYTES);
     try {
@@ -131,6 +142,11 @@ export class Subscriber {
     } catch (error) {
       throw mapJweError(error, "decryption");
     }
+  }
+
+  /** Backward-compatible async delegate to {@link decryptSync}. */
+  async decrypt(ciphertext: Uint8Array, aad?: Uint8Array): Promise<Uint8Array> {
+    return this.decryptSync(ciphertext, aad);
   }
 }
 

@@ -215,9 +215,9 @@ test("forged signature with valid row_hash is rejected (isolates the signature p
       "forged-signature row must be skipped",
     );
 
-    // 4) Plain read (no verify) must STILL surface it — proves verify is what
+    // 4) Explicitly weakened read must STILL surface it — proves verification
     //    rejects it, not the parser.
-    const plain = [...client.read({ allRuns: true })];
+    const plain = [...client.read({ allRuns: true, verify: false })];
     assert.ok(
       plain.some(
         (e) => "event_type" in e && (e as { event_type: string }).event_type === "order.created",
@@ -328,7 +328,7 @@ test("tampered row_hash is rejected; plain read still surfaces it", async () => 
       ),
     );
 
-    const plain = [...client.read({ allRuns: true })];
+    const plain = [...client.read({ allRuns: true, verify: false })];
     assert.ok(
       plain.some(
         (e) => "event_type" in e && (e as { event_type: string }).event_type === "order.created",

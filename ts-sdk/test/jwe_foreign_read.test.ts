@@ -36,7 +36,10 @@ test("recipient reads a publisher's jwe log via readAsRecipientAsync", async () 
 
   const aLog = join(aDir, ".tn", "tn", "logs", "tn.ndjson");
   const opened: Record<string, unknown>[] = [];
-  for await (const e of readAsRecipientAsync(aLog, bKeys, { group: "default" })) {
+  for await (const e of readAsRecipientAsync(aLog, bKeys, {
+    group: "default",
+    unsafeAllowUnverifiedPublisher: true,
+  })) {
     if (e.envelope["event_type"] !== "shared.record") continue;
     assert.equal(e.valid.signature, true);
     assert.equal(e.valid.chain, true);
@@ -52,11 +55,7 @@ test("absorbPkg installs a jwe reader key from a kit_bundle body", async () => {
   const rtA = NodeRuntime.init(join(aDir, "tn.yaml"), { cipher: "jwe" });
   await rtA.emitAsync("info", "e", { a: 1 });
 
-  // A exports a self-addressed kit_bundle (carries A's keystore files incl.
-  // default.jwe.mykey) and a fresh device B absorbs it.
-  const bundlePath = join(mkdtempSync(join(tmpdir(), "jwe-bundle-")), "kit.tnpkg");
-  rtA.exportPkg({ kind: "kit_bundle", toDid: rtA.did }, bundlePath);
-
+  // A exports a kit_bundle addressed to the exact device that absorbs it.
   const bDir = mkdtempSync(join(tmpdir(), "jwe-abs-"));
   mkdirSync(join(bDir, ".tn", "tn", "keys"), { recursive: true });
   // Minimal B ceremony to host the absorb (btn default is fine as the shell).
@@ -64,6 +63,9 @@ test("absorbPkg installs a jwe reader key from a kit_bundle body", async () => {
     cipher: "btn",
     devicePrivateBytes: undefined,
   } as { cipher: "btn" });
+  const bundlePath = join(mkdtempSync(join(tmpdir(), "jwe-bundle-")), "kit.tnpkg");
+  rtA.exportPkg({ kind: "kit_bundle", toDid: rtB.did }, bundlePath);
   const receipt = rtB.absorbPkg(bundlePath);
   assert.ok(receipt.acceptedCount >= 1, `absorb installed nothing: ${JSON.stringify(receipt)}`);
+  assert.equal(receipt.verifiedPublisherDid, rtA.did);
 });

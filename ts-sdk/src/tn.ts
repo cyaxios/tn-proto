@@ -361,7 +361,7 @@ export interface ReadOptions {
   filter?: ReadFilter;
   /** Predicate applied per entry; rejected entries are skipped. */
   where?: (entry: Entry | Record<string, unknown>) => boolean;
-  /** Integrity-check policy. Default: `false`. */
+  /** Integrity-check policy. Default: `true`; pass false to inspect unverified rows. */
   verify?: VerifyMode;
   /** Yield the on-disk envelope dict instead of an `Entry`. */
   raw?: boolean;
@@ -369,8 +369,12 @@ export interface ReadOptions {
   log?: string;
   /** Read using a foreign-publisher kit from this keystore directory. */
   asRecipient?: string;
-  /** Group whose plaintext to surface (only with `asRecipient`). Default: `"default"`. */
+  /** Foreign group override; omit to surface every locally keyed group. */
   group?: string;
+  /** Foreign-read writer allowlist; defaults to installed verified publishers. */
+  trustedPublisherDids?: string[];
+  /** Explicit weakening: permit foreign rows from a writer not in trustedPublisherDids. */
+  unsafeAllowUnverifiedPublisher?: boolean;
   /** Scan across all runs in the file. Default: false (current run only). */
   allRuns?: boolean;
   /**
@@ -1385,10 +1389,11 @@ export class Tn {
    *
    * Mirrors Python `tn.read`. Kwargs:
    * - `where`        — predicate `(Entry) -> bool`; non-matching skipped.
-   * - `verify`       — `false` (default), `true` / `"raise"` (throw
+   * - `verify`       — `true` (default) / `"raise"` (throw
    *                    `VerifyError` on first failure), `"skip"` (drop
    *                    validation failures and emit a
-   *                    `tn.read.tampered_row_skipped` admin event).
+   *                    `tn.read.tampered_row_skipped` admin event), or
+   *                    explicit `false` to disable verification.
    * - `raw`          — yield envelope dict instead of `Entry`.
    * - `log`          — alternate log path.
    * - `asRecipient`  — keystore directory to decrypt with (foreign-log mode).
@@ -1402,12 +1407,12 @@ export class Tn {
     // to the reader.
     if (!this._hasReplaySurface()) return;
 
-    const verify = opts.verify ?? false;
+    const verify = opts.verify ?? true;
     _checkVerifyKwarg(verify);
     const raw = opts.raw ?? false;
     const logPath = opts.log;
     const asRecipient = opts.asRecipient;
-    const group = opts.group ?? "default";
+    const group = opts.group;
     const allRuns = opts.allRuns ?? true;
     const expectGenesis = opts.expectGenesis ?? false;
     const where = opts.where;
@@ -1423,9 +1428,15 @@ export class Tn {
       const path = logPath ?? this._rt.config.logPath;
       usingRecipient = true;
       const foreignIter = readAsRecipient(path, keystorePath, {
-        group,
+        ...(group === undefined ? {} : { group }),
         verifySignatures: verify !== false,
         expectGenesis,
+        ...(opts.trustedPublisherDids === undefined
+          ? {}
+          : { trustedPublisherDids: opts.trustedPublisherDids }),
+        ...(opts.unsafeAllowUnverifiedPublisher === undefined
+          ? {}
+          : { unsafeAllowUnverifiedPublisher: opts.unsafeAllowUnverifiedPublisher }),
       });
       triples = (function* () {
         for (const entry of foreignIter) {
@@ -1434,7 +1445,7 @@ export class Tn {
             plaintext: entry.plaintext,
             valid: {
               signature: entry.valid.signature,
-              rowHash: true,
+              rowHash: entry.valid.rowHash,
               chain: entry.valid.chain,
             },
           };
@@ -1501,7 +1512,7 @@ export class Tn {
     opts: ReadOptions = {},
   ): AsyncIterableIterator<Entry | Record<string, unknown>> {
     if (!this._hasReplaySurface()) return;
-    const verify = opts.verify ?? false;
+    const verify = opts.verify ?? true;
     _checkVerifyKwarg(verify);
     const raw = opts.raw ?? false;
     const allRuns = opts.allRuns ?? true;
@@ -1518,17 +1529,27 @@ export class Tn {
       usingRecipient = true;
       const keystorePath = opts.asRecipient ?? this._rt.config.keystorePath;
       const path = opts.log ?? this._rt.config.logPath;
-      const group = opts.group ?? "default";
+      const group = opts.group;
       source = (async function* () {
         for await (const fe of readAsRecipientAsync(path, keystorePath, {
-          group,
+          ...(group === undefined ? {} : { group }),
           verifySignatures: verify !== false,
           expectGenesis,
+          ...(opts.trustedPublisherDids === undefined
+            ? {}
+            : { trustedPublisherDids: opts.trustedPublisherDids }),
+          ...(opts.unsafeAllowUnverifiedPublisher === undefined
+            ? {}
+            : { unsafeAllowUnverifiedPublisher: opts.unsafeAllowUnverifiedPublisher }),
         })) {
           yield {
             envelope: fe.envelope,
             plaintext: fe.plaintext,
-            valid: { signature: fe.valid.signature, rowHash: true, chain: fe.valid.chain },
+            valid: {
+              signature: fe.valid.signature,
+              rowHash: fe.valid.rowHash,
+              chain: fe.valid.chain,
+            },
           } as ReadEntry;
         }
       })();

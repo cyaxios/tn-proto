@@ -7,6 +7,7 @@ import { isManifestSignatureValid, readTnpkg } from "../src/index.js";
 import { Tn } from "../src/tn.js";
 import { DeviceKey } from "../src/core/signing.js";
 import { absorbSealedKitBundle } from "../src/seal_bundle_producer.js";
+import { Entry } from "../src/Entry.js";
 
 test("tn.pkg.export adminLogSnapshot writes a tnpkg and returns its path", async () => {
   const tn = await Tn.ephemeral({ stdout: false });
@@ -154,6 +155,48 @@ test("tn.pkg.bundleForRecipient sealForRecipient rejects a keyless recipient DID
     );
   } finally {
     await tn.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("tn.pkg.prepareRecipient seals by default and canonical absorb opens only for the reader", async () => {
+  const publisher = await Tn.ephemeral({ stdout: false });
+  const reader = await Tn.ephemeral({ stdout: false });
+  const stranger = await Tn.ephemeral({ stdout: false });
+  const tmp = mkdtempSync(join(tmpdir(), "tn-pkg-prepare-sealed-"));
+  try {
+    const prepared = await publisher.pkg.prepareRecipient({
+      recipientDid: reader.did,
+      outDir: tmp,
+      groups: ["default"],
+    });
+    assert.ok(prepared.kitBundle);
+    const bundlePath = prepared.kitBundle.bundlePath;
+    const { manifest, body } = readTnpkg(bundlePath);
+    assert.ok(
+      (manifest.state as { body_encryption?: unknown }).body_encryption,
+      "prepareRecipient must recipient-seal bearer kits by default",
+    );
+    assert.deepEqual([...body.keys()], ["body/encrypted.bin"]);
+
+    const rejected = await stranger.pkg.absorb(bundlePath);
+    assert.equal(rejected.acceptedCount, 0);
+    assert.match(rejected.rejectedReason ?? "", /recipient.*(?:match|wrap)/i);
+
+    const installed = await reader.pkg.absorb(bundlePath);
+    assert.equal(installed.rejectedReason, undefined);
+    assert.ok(installed.acceptedCount >= 1);
+
+    publisher.info("prepared.secret", { value: "opened" });
+    const rows = [...reader.read({ log: (publisher.config() as { logPath: string }).logPath })];
+    const entry = rows.find(
+      (row): row is Entry => row instanceof Entry && row.event_type === "prepared.secret",
+    );
+    assert.deepEqual(entry?.fields, { value: "opened" });
+  } finally {
+    await publisher.close();
+    await reader.close();
+    await stranger.close();
     rmSync(tmp, { recursive: true, force: true });
   }
 });

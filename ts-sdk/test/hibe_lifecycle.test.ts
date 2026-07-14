@@ -38,22 +38,27 @@ test("hibe lifecycle: grant, rotate, permanent-key epochs, authority spans all",
   const kit1 = join(ws, "reader1.tnpkg");
   const kit2 = join(ws, "reader2.tnpkg");
   try {
+    const r1 = await Tn.init(join(ws, "reader1", "tn.yaml"), {
+      stdout: false,
+      link: false,
+    });
+    const r2 = await Tn.init(join(ws, "reader2", "tn.yaml"), {
+      stdout: false,
+      link: false,
+    });
     // --- Act 1: authority bootstraps, seals epoch-a, grants reader 1.
     let a = await Tn.init(aYaml, { cipher: "hibe", stdout: false, link: false });
     const aLog = (a.config() as { logPath: string }).logPath;
     assert.equal((a.config() as { cipher: string }).cipher, "hibe");
     a.info("epoch.a.first", { note: "before rotation, entry 1" });
     a.info("epoch.a.second", { note: "before rotation, entry 2" });
-    // Synthetic DID with no embedded key: plaintext delivery must be explicit.
     await a.admin.grantReader("default", {
-      readerDid: "did:key:z6Mk-r1",
+      readerDid: r1.did,
       outPath: kit1,
-      unsafePlaintext: true,
     });
     await a.close();
 
     // --- Act 2: reader 1 absorbs and reads the foreign log.
-    const r1 = await Tn.init(join(ws, "reader1", "tn.yaml"), { stdout: false, link: false });
     const r1Keystore = (r1.config() as { keystorePath: string }).keystorePath;
     const receipt1 = await r1.pkg.absorb(kit1);
     assert.equal(receipt1.rejectedReason, undefined);
@@ -68,9 +73,8 @@ test("hibe lifecycle: grant, rotate, permanent-key epochs, authority spans all",
     await a.admin.rotateReaderPath("default", "policy-b");
     a.info("epoch.b.first", { note: "after rotation" });
     await a.admin.grantReader("default", {
-      readerDid: "did:key:z6Mk-r2",
+      readerDid: r2.did,
       outPath: kit2,
-      unsafePlaintext: true,
     });
     await a.close();
 
@@ -80,7 +84,6 @@ test("hibe lifecycle: grant, rotate, permanent-key epochs, authority spans all",
     assert.deepEqual(got["epoch.b.first"], { $no_read_key: true });
 
     // --- Act 5: reader 2 sees exactly the inverse.
-    const r2 = await Tn.init(join(ws, "reader2", "tn.yaml"), { stdout: false, link: false });
     const r2Keystore = (r2.config() as { keystorePath: string }).keystorePath;
     await r2.pkg.absorb(kit2);
     await r2.close();

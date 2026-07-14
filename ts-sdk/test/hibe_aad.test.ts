@@ -49,15 +49,14 @@ test("hibe aad: per-emit + config default binding, tamper detection, btn limitat
   const aYaml = join(ws, "authority", "tn.yaml");
   const kit = join(ws, "reader.tnpkg");
   try {
+    const r = await Tn.init(join(ws, "reader", "tn.yaml"), { stdout: false, link: false });
     // --- (a) emit with a per-emit aad; authority reads it back.
     let a = await Tn.init(aYaml, { cipher: "hibe", stdout: false, link: false });
     const aLog = (a.config() as { logPath: string }).logPath;
     a.info("oba.filed", { note: "quarterly OBA" }, { aad: { policy: "finra-oba", v: "1" } });
-    // Synthetic DID with no embedded key: plaintext delivery must be explicit.
     await a.admin.grantReader("default", {
-      readerDid: "did:key:z6Mk-aad-r1",
+      readerDid: r.did,
       outPath: kit,
-      unsafePlaintext: true,
     });
     await a.close();
 
@@ -74,7 +73,6 @@ test("hibe aad: per-emit + config default binding, tamper detection, btn limitat
     await a.close();
 
     // --- (b) a granted reader reconstructs the aad from the public echo.
-    const r = await Tn.init(join(ws, "reader", "tn.yaml"), { stdout: false, link: false });
     const rKeystore = (r.config() as { keystorePath: string }).keystorePath;
     await r.pkg.absorb(kit);
     await r.close();

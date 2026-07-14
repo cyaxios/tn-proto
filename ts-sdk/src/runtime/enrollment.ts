@@ -29,10 +29,18 @@ import { x25519 } from "@noble/curves/ed25519";
 
 import { canonicalize } from "../core/canonical.js";
 import { b64ToBytes, bytesToB64, randomBytes } from "../core/encoding.js";
+import { didKeyToX25519Pub, ed25519SeedToX25519Priv } from "../core/recipient_seal.js";
+import {
+  jweActivationReferenceDigest,
+  jweRecipientFromAcceptedOffer,
+  validateVerifiedJweRecipient,
+  type VerifiedJweRecipient,
+} from "../core/jwe_binding.js";
 import { type DeviceKey } from "../core/signing.js";
 import {
   type Manifest,
   type TnPackage,
+  isManifestSignatureValid,
   newManifest,
   parseTnPackage,
   signManifestWithBody,
@@ -68,6 +76,7 @@ import {
 import { sha256HexBytes } from "../core/chain.js";
 import { packTnpkgBytes, readTnpkgVerified } from "../tnpkg_io.js";
 import type { CeremonyConfig } from "./config.js";
+import { loadJweActivationExpectation } from "./jwe_trust.js";
 
 /** The common cross-SDK audit event type for explicit security weakening. */
 export const UNSAFE_OPERATION_EVENT_TYPE = "tn.security.unsafe_operation";
@@ -408,7 +417,10 @@ export function evaluateConsumedChallenge(
   incoming: { artifactDigest: string; offerDigest?: string },
 ): "fresh" | "idempotent" {
   if (prior === null) return "fresh";
-  if (prior.artifactDigest === undefined || (prior.offerDigest === undefined && incoming.offerDigest !== undefined)) {
+  if (
+    prior.artifactDigest === undefined ||
+    (prior.offerDigest === undefined && incoming.offerDigest !== undefined)
+  ) {
     throw error("challenge_replayed", "challenge has already been consumed");
   }
   const offerMatches =
@@ -471,7 +483,10 @@ export class EnrollmentStore {
 
   constructor(ceremony: EnrollmentCeremony, publisherKey: DeviceKey, stateRoot?: string) {
     if (publisherKey.did !== ceremony.deviceIdentity) {
-      throw error("did_signer_mismatch", "publisher key does not match the loaded ceremony identity");
+      throw error(
+        "did_signer_mismatch",
+        "publisher key does not match the loaded ceremony identity",
+      );
     }
     parseEd25519DidKey(publisherKey.did);
     this.ceremony = ceremony;
@@ -497,7 +512,10 @@ export class EnrollmentStore {
       throw error("scope_mismatch", "group must be non-empty");
     }
     if (!this.ceremony.groups.has(group)) {
-      throw error("scope_mismatch", `group ${JSON.stringify(group)} is not present in this ceremony`);
+      throw error(
+        "scope_mismatch",
+        `group ${JSON.stringify(group)} is not present in this ceremony`,
+      );
     }
   }
 
@@ -536,7 +554,11 @@ export class EnrollmentStore {
     const path = this._preauthorizationPath(readerDid, group);
     if (!existsSync(path)) return false;
     const record = readJsonObject(path, "preauthorization record");
-    exactRecordFields(record, ["version", "ceremony_id", "group", "reader_did"], "preauthorization record");
+    exactRecordFields(
+      record,
+      ["version", "ceremony_id", "group", "reader_did"],
+      "preauthorization record",
+    );
     if (
       record["version"] !== 1 ||
       record["ceremony_id"] !== this.ceremony.ceremonyId ||
@@ -549,7 +571,12 @@ export class EnrollmentStore {
   }
 
   /** Issue and durably retain a one-time publisher-signed challenge. */
-  issueChallenge(readerDid: string, group: string, ttlMs: number, now?: string): EnrollmentChallengeV1 {
+  issueChallenge(
+    readerDid: string,
+    group: string,
+    ttlMs: number,
+    now?: string,
+  ): EnrollmentChallengeV1 {
     this._validateScope(readerDid, group);
     if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
       throw error("statement_invalid", "challenge ttl must be positive");
@@ -605,14 +632,22 @@ export class EnrollmentStore {
       const actual = enrollmentChallengeDigest(challenge);
       const stem = (path.split(/[\\/]/).pop() ?? "").replace(/\.json$/, "");
       if (actual !== challengeDigest || stem !== challenge.challenge_id) {
-        throw error("replay_conflict", "retained challenge digest or identifier conflicts with its bytes");
+        throw error(
+          "replay_conflict",
+          "retained challenge digest or identifier conflicts with its bytes",
+        );
       }
       return challenge;
     }
     throw error("challenge_missing", "challenge digest is not retained");
   }
 
-  private _offerPath(ceremonyId: string, group: string, readerDid: string, offerDigest: string): string {
+  private _offerPath(
+    ceremonyId: string,
+    group: string,
+    readerDid: string,
+    offerDigest: string,
+  ): string {
     return join(
       this.offersDir,
       scopeComponent(ceremonyId),
@@ -649,7 +684,8 @@ export class EnrollmentStore {
     const record = this._loadConsumed(challengeId);
     if (record === null) return false;
     const prior: { artifactDigest?: string; offerDigest?: string } = {};
-    if (typeof record["artifact_digest"] === "string") prior.artifactDigest = record["artifact_digest"];
+    if (typeof record["artifact_digest"] === "string")
+      prior.artifactDigest = record["artifact_digest"];
     if (typeof record["offer_digest"] === "string") prior.offerDigest = record["offer_digest"];
     return evaluateConsumedChallenge(prior, { artifactDigest, offerDigest }) === "idempotent";
   }
@@ -659,7 +695,11 @@ export class EnrollmentStore {
     const path = this._approvalPath(offerDigest);
     if (!existsSync(path)) return false;
     const record = readJsonObject(path, "offer approval");
-    exactRecordFields(record, ["version", "offer_digest", "artifact_digest", "approved_at"], "offer approval");
+    exactRecordFields(
+      record,
+      ["version", "offer_digest", "artifact_digest", "approved_at"],
+      "offer approval",
+    );
     if (record["version"] !== 1 || record["offer_digest"] !== offerDigest) {
       throw error("replay_conflict", "approval does not match the exact offer digest");
     }
@@ -737,7 +777,11 @@ export class EnrollmentStore {
     );
   }
 
-  private _verifyArtifact(artifact: Uint8Array, expectedPublisherDid: string, now: string): VerifiedArtifact {
+  private _verifyArtifact(
+    artifact: Uint8Array,
+    expectedPublisherDid: string,
+    now: string,
+  ): VerifiedArtifact {
     if (!(artifact instanceof Uint8Array)) {
       throw error("statement_invalid", "offer artifact must be bytes");
     }
@@ -758,7 +802,10 @@ export class EnrollmentStore {
     } catch (err) {
       if (err instanceof TrustError) throw err;
       const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("signature does not verify") || message.includes("manifest is unsigned")) {
+      if (
+        message.includes("signature does not verify") ||
+        message.includes("manifest is unsigned")
+      ) {
         throw error("signature_invalid", message);
       }
       throw error("statement_invalid", `offer artifact is malformed: ${message}`);
@@ -768,9 +815,15 @@ export class EnrollmentStore {
     }
     const pkg = this._parseInnerPackage(body);
     if (manifest.fromDid !== pkg.device_identity) {
-      throw error("outer_inner_signer_mismatch", "outer manifest and inner offer name different signers");
+      throw error(
+        "outer_inner_signer_mismatch",
+        "outer manifest and inner offer name different signers",
+      );
     }
-    if (manifest.toDid !== expectedPublisherDid || pkg.recipient_identity !== expectedPublisherDid) {
+    if (
+      manifest.toDid !== expectedPublisherDid ||
+      pkg.recipient_identity !== expectedPublisherDid
+    ) {
       throw error("wrong_recipient", "offer names a different publisher");
     }
     if (
@@ -866,7 +919,12 @@ export class EnrollmentStore {
         group: proof.group,
         readerDid: proof.subject_did,
         offerDigest,
-        artifactPath: this._offerPath(proof.ceremony_id, proof.group, proof.subject_did, offerDigest),
+        artifactPath: this._offerPath(
+          proof.ceremony_id,
+          proof.group,
+          proof.subject_did,
+          offerDigest,
+        ),
         verified: binding,
       }),
       artifactDigest,
@@ -903,7 +961,10 @@ export class EnrollmentStore {
       } catch (err) {
         if (err instanceof TrustError) throw err;
         const message = err instanceof Error ? err.message : String(err);
-        if (message.includes("signature does not verify") || message.includes("manifest is unsigned")) {
+        if (
+          message.includes("signature does not verify") ||
+          message.includes("manifest is unsigned")
+        ) {
           throw error("signature_invalid", message);
         }
         throw error("statement_invalid", `retained offer is malformed: ${message}`);
@@ -919,7 +980,10 @@ export class EnrollmentStore {
       }
       const proof = parseKeyBindingProof(proofValue);
       if (proof.subject_did !== pkg.device_identity) {
-        throw error("outer_inner_signer_mismatch", "retained offer package and proof signers differ");
+        throw error(
+          "outer_inner_signer_mismatch",
+          "retained offer package and proof signers differ",
+        );
       }
       verifyEd25519DidSignature(
         proof.subject_did,
@@ -935,7 +999,8 @@ export class EnrollmentStore {
       const challengeId =
         challengeDigest === null
           ? null
-          : this.challengeForDigest(requireDigest(challengeDigest, "retained challenge digest")).challenge_id;
+          : this.challengeForDigest(requireDigest(challengeDigest, "retained challenge digest"))
+              .challenge_id;
 
       const acceptedPath = this._acceptedPath(offerDigest);
       if (existsSync(acceptedPath)) {
@@ -964,7 +1029,10 @@ export class EnrollmentStore {
           publicKey.length === 0 ||
           JSON.stringify(canonicalOrder(accepted)) !== JSON.stringify(canonicalOrder(expected))
         ) {
-          throw error("replay_conflict", "accepted offer record conflicts with retained artifact bytes");
+          throw error(
+            "replay_conflict",
+            "accepted offer record conflicts with retained artifact bytes",
+          );
         }
         continue;
       }
@@ -974,7 +1042,10 @@ export class EnrollmentStore {
       } else {
         usage.challengedCount += 1;
         usage.challengedBytes += artifact.length;
-        usage.challengeVariants.set(challengeDigest, (usage.challengeVariants.get(challengeDigest) ?? 0) + 1);
+        usage.challengeVariants.set(
+          challengeDigest,
+          (usage.challengeVariants.get(challengeDigest) ?? 0) + 1,
+        );
       }
     }
     return usage;
@@ -1008,7 +1079,9 @@ export class EnrollmentStore {
       throw error("binding_invalid", "challenged offer is missing its verified challenge digest");
     }
     const usage = this._pendingUsage();
-    if ((usage.challengeVariants.get(challengeDigest) ?? 0) >= MAX_CHALLENGED_VARIANTS_PER_CHALLENGE) {
+    if (
+      (usage.challengeVariants.get(challengeDigest) ?? 0) >= MAX_CHALLENGED_VARIANTS_PER_CHALLENGE
+    ) {
       throw error(
         "untrusted_principal",
         `challenged offer variants for challenge reached limit ${MAX_CHALLENGED_VARIANTS_PER_CHALLENGE}`,
@@ -1039,7 +1112,10 @@ export class EnrollmentStore {
       if (bytesEqual(readEnrollmentArtifact(preexistingPath), artifact)) {
         return preverified.pending;
       }
-      throw error("replay_conflict", "offer digest already names different retained artifact bytes");
+      throw error(
+        "replay_conflict",
+        "offer digest already names different retained artifact bytes",
+      );
     }
     if (preverified.challengeId === null) {
       if (artifact.length > MAX_UNSOLICITED_OFFER_BYTES || !existsSync(this.stateRoot)) {
@@ -1052,7 +1128,10 @@ export class EnrollmentStore {
       const path = verified.pending.artifactPath;
       if (existsSync(path)) {
         if (!bytesEqual(readEnrollmentArtifact(path), artifact)) {
-          throw error("replay_conflict", "offer digest already names different retained artifact bytes");
+          throw error(
+            "replay_conflict",
+            "offer digest already names different retained artifact bytes",
+          );
         }
       } else {
         this._assertPendingQuota(verified, artifact.length);
@@ -1089,7 +1168,10 @@ export class EnrollmentStore {
       verified.pending.ceremonyId !== pending.ceremonyId ||
       verified.pending.group !== pending.group
     ) {
-      throw error("replay_conflict", "retained artifact no longer matches the pending verified value");
+      throw error(
+        "replay_conflict",
+        "retained artifact no longer matches the pending verified value",
+      );
     }
     return verified;
   }
@@ -1114,17 +1196,22 @@ export class EnrollmentStore {
     const record = readJsonObject(path, "accepted offer record");
     const expected = this._acceptedRecord(verified);
     if (JSON.stringify(canonicalOrder(record)) !== JSON.stringify(canonicalOrder(expected))) {
-      throw error("replay_conflict", "accepted offer record conflicts with retained artifact bytes");
+      throw error(
+        "replay_conflict",
+        "accepted offer record conflicts with retained artifact bytes",
+      );
     }
     return true;
   }
 
   private _accepted(verified: VerifiedArtifact): AcceptedOffer {
-    return {
+    const accepted: AcceptedOffer = {
       binding: verified.pending.verified,
       offerDigest: verified.pending.offerDigest,
       artifactDigest: verified.artifactDigest,
     };
+    RECONCILED_ACCEPTED_OFFERS.set(accepted, jweRecipientFromAcceptedOffer(accepted).bindingDigest);
+    return accepted;
   }
 
   private _promoteLocked(verified: VerifiedArtifact): AcceptedOffer {
@@ -1138,7 +1225,10 @@ export class EnrollmentStore {
         offer_digest: verified.pending.offerDigest,
         artifact_digest: verified.artifactDigest,
       };
-      atomicWriteBytes(this._consumedPath(verified.challengeId), canonicalJsonBytes(consumedRecord));
+      atomicWriteBytes(
+        this._consumedPath(verified.challengeId),
+        canonicalJsonBytes(consumedRecord),
+      );
     }
     if (!acceptedExact) {
       atomicWriteBytes(
@@ -1161,9 +1251,13 @@ export class EnrollmentStore {
       if (consumedExact && this._isAcceptedExact(verified)) {
         return this._accepted(verified);
       }
-      let authorized = this._classifyApproval(verified.pending.offerDigest, verified.artifactDigest);
+      let authorized = this._classifyApproval(
+        verified.pending.offerDigest,
+        verified.artifactDigest,
+      );
       if (verified.challengeId !== null) {
-        authorized = authorized || this._isPreauthorized(verified.pending.readerDid, verified.pending.group);
+        authorized =
+          authorized || this._isPreauthorized(verified.pending.readerDid, verified.pending.group);
       }
       if (!authorized) {
         throw error("untrusted_principal", "offer requires exact-digest administrator approval");
@@ -1324,34 +1418,106 @@ function validateGroupFileName(group: string): string {
     group.includes("\\") ||
     group.includes("\0")
   ) {
-    throw new Error(`enrollment: invalid group name ${JSON.stringify(group)} for keystore filenames`);
+    throw new Error(
+      `enrollment: invalid group name ${JSON.stringify(group)} for keystore filenames`,
+    );
   }
   return group;
 }
 
 /**
- * Return the reader's static X25519 public key for `group`, atomically
- * persisting a fresh private key (owner-only) when absent. Re-running reuses
- * the exact existing key; the private key never leaves the keystore.
+ * Return a random, per-group JWE reader public key, atomically persisting the
+ * private key owner-only when absent. This is the default signed/fingerprint
+ * enrollment path and preserves key separation from the device identity.
  */
 export function ensureJweReaderKey(keystoreDir: string, group: string): Uint8Array {
   validateGroupFileName(group);
   const path = join(keystoreDir, `${group}.jwe.mykey`);
-  let priv: Uint8Array;
-  if (existsSync(path)) {
-    priv = new Uint8Array(readFileSync(path));
-    if (priv.length !== 32) {
-      throw error("binding_invalid", `reader key at ${path} must be 32 bytes, got ${priv.length}`);
+  const exists = existsSync(path);
+  const privateKey = exists ? new Uint8Array(readFileSync(path)) : x25519.utils.randomSecretKey();
+  try {
+    if (privateKey.length !== 32) {
+      throw error(
+        "binding_invalid",
+        `reader key at ${path} must be 32 bytes, got ${privateKey.length}`,
+      );
     }
-  } else {
-    priv = x25519.utils.randomSecretKey();
-    atomicWriteBytes(path, priv);
+    if (!exists) atomicWriteBytes(path, privateKey);
+    return x25519.getPublicKey(privateKey);
+  } finally {
+    privateKey.fill(0);
   }
-  return x25519.getPublicKey(priv);
+}
+
+/**
+ * Explicit identity-key adapter for DID-document enrollment. This deliberately
+ * reuses the device identity key across every group that opts in, coupling JWE
+ * rotation to identity rotation; callers should prefer the random default.
+ */
+export function ensureDidKeyBoundJweReaderKey(
+  keystoreDir: string,
+  group: string,
+  readerKey: DeviceKey,
+): Uint8Array {
+  validateGroupFileName(group);
+  const path = join(keystoreDir, `${group}.jwe.mykey`);
+  const privateKey = ed25519SeedToX25519Priv(readerKey.seed);
+  try {
+    const publicKey = x25519.getPublicKey(privateKey);
+    const expected = didKeyToX25519Pub(readerKey.did);
+    if (publicKey.some((byte, index) => byte !== expected[index])) {
+      throw error("binding_invalid", "local Ed25519 seed and did:key conversion disagree");
+    }
+    if (!existsSync(path)) {
+      atomicWriteBytes(path, privateKey);
+      return publicKey;
+    }
+    const retained = new Uint8Array(readFileSync(path));
+    try {
+      if (
+        retained.length !== privateKey.length ||
+        retained.some((byte, index) => byte !== privateKey[index])
+      ) {
+        throw error(
+          "binding_invalid",
+          `reader key at ${path} is not bound to local did:key; remove or migrate it explicitly`,
+        );
+      }
+      return publicKey;
+    } finally {
+      retained.fill(0);
+    }
+  } finally {
+    privateKey.fill(0);
+  }
 }
 
 const SENT_OFFERS_FILENAME = "enrollment_offers.v1.json";
 const VERIFIED_PUBLISHERS_FILENAME = "verified_publishers.v1.json";
+const RECONCILED_ACCEPTED_OFFERS = new WeakMap<object, string>();
+
+/** Reject structural lookalikes that never passed this process's reconciliation store. */
+export function assertReconciledAcceptedOffer(accepted: AcceptedOffer): void {
+  if (accepted === null || typeof accepted !== "object") {
+    throw error(
+      "untrusted_principal",
+      "accepted JWE offer must be the exact value returned by reconciliation",
+    );
+  }
+  const expectedDigest = RECONCILED_ACCEPTED_OFFERS.get(accepted);
+  let actualDigest: string | undefined;
+  try {
+    actualDigest = jweRecipientFromAcceptedOffer(accepted).bindingDigest;
+  } catch {
+    // Use the same provenance error for malformed and structurally forged values.
+  }
+  if (expectedDigest === undefined || actualDigest !== expectedDigest) {
+    throw error(
+      "untrusted_principal",
+      "accepted JWE offer must be the exact value returned by reconciliation and remain unchanged",
+    );
+  }
+}
 
 function trustDir(keystoreDir: string): string {
   return join(keystoreDir, "trust");
@@ -1367,6 +1533,56 @@ export function verifiedPublishersPath(keystoreDir: string): string {
   return join(trustDir(keystoreDir), VERIFIED_PUBLISHERS_FILENAME);
 }
 
+/**
+ * Admit the exact signer of a body-indexed, signature-verified kit bundle.
+ * The caller must have already verified the package body digest index; this
+ * function independently rechecks the manifest signature before persisting.
+ */
+export function recordVerifiedKitBundlePublisher(opts: {
+  keystoreDir: string;
+  manifest: Manifest;
+  artifactDigest: string;
+  installedAt?: string;
+}): void {
+  if (opts.manifest.kind !== "kit_bundle" || !isManifestSignatureValid(opts.manifest)) {
+    throw error("untrusted_principal", "publisher trust requires a verified kit_bundle manifest");
+  }
+  parseEd25519DidKey(opts.manifest.fromDid);
+  requireDigest(opts.artifactDigest, "artifact digest");
+  const path = verifiedPublishersPath(opts.keystoreDir);
+  const doc = existsSync(path)
+    ? readJsonObject(path, "verified publisher record")
+    : { version: 1, publishers: {} };
+  const value = doc["publishers"];
+  if (doc["version"] !== 1 || value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw error("statement_invalid", "verified publisher registry is malformed");
+  }
+  const publishers = value as Record<string, unknown>;
+  const prior = publishers[opts.manifest.fromDid];
+  if (
+    prior !== undefined &&
+    (prior === null || typeof prior !== "object" || Array.isArray(prior))
+  ) {
+    throw error("statement_invalid", "verified publisher record is malformed");
+  }
+  const kit = {
+    artifact_digest: opts.artifactDigest,
+    ceremony_id: opts.manifest.ceremonyId,
+    installed_at: opts.installedAt ?? nowTimestamp(),
+    recipient_identity: opts.manifest.toDid ?? null,
+    scope: opts.manifest.scope,
+  };
+  publishers[opts.manifest.fromDid] = {
+    ...(prior as Record<string, unknown> | undefined),
+    ...((prior === undefined ? { source: "verified-signed-kit-bundle" } : {}) as object),
+    verified_kit_bundle: kit,
+  };
+  atomicWriteBytes(
+    path,
+    canonicalJsonBytes({ version: 1, publishers: canonicalOrder(publishers) }),
+  );
+}
+
 export interface SentOfferRecord {
   offerDigest: string;
   publisherDid: string;
@@ -1380,7 +1596,9 @@ export interface SentOfferRecord {
 export function recordSentOffer(keystoreDir: string, record: SentOfferRecord): void {
   requireDigest(record.offerDigest, "offer digest");
   const path = sentOffersPath(keystoreDir);
-  const doc = existsSync(path) ? readJsonObject(path, "sent offer record") : { version: 1, offers: {} };
+  const doc = existsSync(path)
+    ? readJsonObject(path, "sent offer record")
+    : { version: 1, offers: {} };
   const offers =
     doc["offers"] !== null && typeof doc["offers"] === "object" && !Array.isArray(doc["offers"])
       ? (doc["offers"] as Record<string, unknown>)
@@ -1570,6 +1788,44 @@ export interface InstalledPublisher {
   responseDigest: string;
 }
 
+interface EnrollmentInstallExpectation {
+  publisherDid: string;
+  readerDid: string;
+  ceremonyId: string;
+  group: string;
+  publicKeySha256: string;
+  referenceDigest: string;
+  bindingDigest: string;
+}
+
+function enrollmentInstallExpectation(
+  keystoreDir: string,
+  referenceDigest: string,
+  now: string,
+): EnrollmentInstallExpectation | null {
+  const retained = loadSentOffer(keystoreDir, referenceDigest);
+  if (retained !== null) {
+    return { ...retained, referenceDigest, bindingDigest: referenceDigest };
+  }
+  const direct = loadJweActivationExpectation(keystoreDir, referenceDigest);
+  if (direct === null) return null;
+  if (
+    parseTrustTimestamp(direct.expiresAt, "expectation expires_at") <=
+    parseTrustTimestamp(now, "now")
+  ) {
+    throw error("statement_expired", "JWE activation expectation has expired");
+  }
+  return {
+    publisherDid: direct.publisherDid,
+    readerDid: direct.readerDid,
+    ceremonyId: direct.ceremonyId,
+    group: direct.group,
+    publicKeySha256: direct.x25519PublicKeySha256,
+    referenceDigest,
+    bindingDigest: direct.bindingDigest,
+  };
+}
+
 /**
  * Reader-side verification and installation of an accepted-enrollment
  * response. The response must name a retained sent offer, the local
@@ -1588,41 +1844,55 @@ export function installEnrollmentResponse(opts: {
   if (response.reader_did !== opts.readerDid) {
     throw error("wrong_recipient", "response names a different reader");
   }
-  const retained = loadSentOffer(opts.keystoreDir, response.accepted_offer_digest);
-  if (retained === null) {
-    throw error("scope_mismatch", "response does not match any retained sent offer");
+  const expected = enrollmentInstallExpectation(
+    opts.keystoreDir,
+    response.accepted_offer_digest,
+    now,
+  );
+  if (expected === null) {
+    throw error(
+      "scope_mismatch",
+      "response matches neither a retained sent offer nor an approved activation expectation",
+    );
   }
-  if (retained.readerDid !== opts.readerDid) {
+  if (expected.readerDid !== opts.readerDid) {
     throw error("wrong_recipient", "retained offer names a different reader");
   }
-  const myKeyPath = join(opts.keystoreDir, `${validateGroupFileName(retained.group)}.jwe.mykey`);
+  const myKeyPath = join(opts.keystoreDir, `${validateGroupFileName(expected.group)}.jwe.mykey`);
   if (!existsSync(myKeyPath)) {
     throw error("binding_invalid", "local reader key is missing for the enrolled group");
   }
   const priv = new Uint8Array(readFileSync(myKeyPath));
-  if (priv.length !== 32) {
-    throw error("binding_invalid", "local reader key is malformed");
+  let derivedDigest: string;
+  try {
+    if (priv.length !== 32) {
+      throw error("binding_invalid", "local reader key is malformed");
+    }
+    derivedDigest = sha256Digest(x25519.getPublicKey(priv));
+    if (derivedDigest !== expected.publicKeySha256) {
+      throw error("binding_invalid", "local reader key does not derive the offered public key");
+    }
+    verifyEnrollmentResponse(response, {
+      publisherDid: expected.publisherDid,
+      readerDid: opts.readerDid,
+      ceremonyId: expected.ceremonyId,
+      group: expected.group,
+      offerDigest: expected.referenceDigest,
+      publicKeySha256: derivedDigest,
+      now,
+    });
+  } finally {
+    priv.fill(0);
   }
-  const derivedDigest = sha256Digest(x25519.getPublicKey(priv));
-  if (derivedDigest !== retained.publicKeySha256) {
-    throw error("binding_invalid", "local reader key does not derive the offered public key");
-  }
-  verifyEnrollmentResponse(response, {
-    publisherDid: retained.publisherDid,
-    readerDid: opts.readerDid,
-    ceremonyId: retained.ceremonyId,
-    group: retained.group,
-    offerDigest: retained.offerDigest,
-    publicKeySha256: derivedDigest,
-    now,
-  });
 
   const path = verifiedPublishersPath(opts.keystoreDir);
   const doc = existsSync(path)
     ? readJsonObject(path, "verified publisher record")
     : { version: 1, publishers: {} };
   const publishers =
-    doc["publishers"] !== null && typeof doc["publishers"] === "object" && !Array.isArray(doc["publishers"])
+    doc["publishers"] !== null &&
+    typeof doc["publishers"] === "object" &&
+    !Array.isArray(doc["publishers"])
       ? (doc["publishers"] as Record<string, unknown>)
       : {};
   const responseDigest = enrollmentResponseDigest(response);
@@ -1631,12 +1901,16 @@ export function installEnrollmentResponse(opts: {
     ceremony_id: response.ceremony_id,
     group: response.group,
     group_epoch: response.group_epoch,
+    binding_digest: expected.bindingDigest,
     installed_at: now,
     response_digest: responseDigest,
     source: "enrollment-response",
     x25519_public_key_sha256: response.x25519_public_key_sha256,
   };
-  atomicWriteBytes(path, canonicalJsonBytes({ version: 1, publishers: canonicalOrder(publishers) }));
+  atomicWriteBytes(
+    path,
+    canonicalJsonBytes({ version: 1, publishers: canonicalOrder(publishers) }),
+  );
   return {
     publisherDid: response.publisher_did,
     group: response.group,
@@ -1646,49 +1920,45 @@ export function installEnrollmentResponse(opts: {
   };
 }
 
-/**
- * Publisher-side compilation of the signed accepted-enrollment response
- * `.tnpkg`. Consumes one {@link AcceptedOffer}; the caller cannot pair a
- * binding with a different offer's digest.
- */
-export function buildEnrollmentResponseArtifact(opts: {
+export interface BuildJweActivationArtifactOptions {
   publisherKey: DeviceKey;
   ceremonyId: string;
   group: string;
   groupEpoch: number;
-  accepted: AcceptedOffer;
+  recipient: VerifiedJweRecipient;
   ttlMs: number;
   now?: string;
-}): { artifact: Uint8Array; response: EnrollmentResponseV1 } {
-  const now = opts.now ?? nowTimestamp();
-  const principal = opts.accepted.binding.principal;
-  if (principal.audienceDid !== opts.publisherKey.did) {
-    throw error("wrong_recipient", "accepted offer names a different publisher");
-  }
-  if (principal.ceremonyId !== opts.ceremonyId || principal.group !== opts.group) {
-    throw error("scope_mismatch", "accepted offer ceremony or group does not match");
-  }
-  if (typeof opts.ttlMs !== "number" || !Number.isFinite(opts.ttlMs) || opts.ttlMs <= 0) {
-    throw error("statement_invalid", "response ttl must be positive");
-  }
-  const nowMicros = parseTrustTimestamp(now, "now");
-  const response = signEnrollmentResponse(
+}
+
+function activationResponse(
+  opts: BuildJweActivationArtifactOptions,
+  recipient: VerifiedJweRecipient,
+  nowMicros: number,
+): EnrollmentResponseV1 {
+  return signEnrollmentResponse(
     {
       version: 1,
       kind: "tn-enrollment-response",
       publisher_did: opts.publisherKey.did,
-      reader_did: principal.did,
+      reader_did: recipient.readerDid,
       ceremony_id: opts.ceremonyId,
       group: opts.group,
-      accepted_offer_digest: opts.accepted.offerDigest,
-      x25519_public_key_sha256: opts.accepted.binding.publicKeySha256,
+      accepted_offer_digest: jweActivationReferenceDigest(recipient),
+      x25519_public_key_sha256: recipient.publicKeySha256,
       group_epoch: opts.groupEpoch,
       issued_at: formatTrustTimestamp(nowMicros),
-      expires_at: formatTrustTimestamp(nowMicros + Math.round(opts.ttlMs) * 1000),
+      expires_at: formatTrustTimestamp(nowMicros + opts.ttlMs * 1000),
       signature_b64: "",
     },
     opts.publisherKey,
   );
+}
+
+function packActivationArtifact(
+  opts: BuildJweActivationArtifactOptions,
+  recipient: VerifiedJweRecipient,
+  response: EnrollmentResponseV1,
+): Uint8Array {
   const pkg = signTnPackage(
     {
       package_version: 1,
@@ -1698,9 +1968,9 @@ export function buildEnrollmentResponseArtifact(opts: {
       group_epoch: opts.groupEpoch,
       device_identity: opts.publisherKey.did,
       signer_verify_pub_b64: "",
-      recipient_identity: principal.did,
+      recipient_identity: recipient.readerDid,
       payload: { enrollment_response: { ...response } },
-      compiled_at: formatTrustTimestamp(nowMicros),
+      compiled_at: response.issued_at,
     },
     opts.publisherKey,
   );
@@ -1710,9 +1980,69 @@ export function buildEnrollmentResponseArtifact(opts: {
     fromDid: opts.publisherKey.did,
     ceremonyId: opts.ceremonyId,
     scope: opts.group,
-    toDid: principal.did,
+    toDid: recipient.readerDid,
   });
   manifest.eventCount = 1;
   signManifestWithBody(manifest, body, opts.publisherKey);
-  return { artifact: packTnpkgBytes(manifest, body), response };
+  return packTnpkgBytes(manifest, body);
+}
+
+function buildJweActivationArtifactCore(
+  opts: BuildJweActivationArtifactOptions,
+  allowSignedEvidence: boolean,
+): { artifact: Uint8Array; response: EnrollmentResponseV1 } {
+  const now = opts.now ?? nowTimestamp();
+  const recipient = validateVerifiedJweRecipient(opts.recipient, now);
+  if (
+    !allowSignedEvidence &&
+    (recipient.evidence.kind === "signed-key-card" ||
+      recipient.evidence.kind === "challenge-response")
+  ) {
+    throw error("untrusted_principal", "signed JWE evidence requires a reconciled accepted offer");
+  }
+  if (recipient.audienceDid !== opts.publisherKey.did) {
+    throw error("wrong_recipient", "JWE binding names a different publisher");
+  }
+  if (recipient.ceremonyId !== opts.ceremonyId || recipient.group !== opts.group) {
+    throw error("scope_mismatch", "JWE binding ceremony or group does not match");
+  }
+  if (!Number.isSafeInteger(opts.ttlMs) || opts.ttlMs <= 0) {
+    throw error("statement_invalid", "response ttl must be a positive safe integer");
+  }
+  const nowMicros = parseTrustTimestamp(now, "now");
+  const response = activationResponse(opts, recipient, nowMicros);
+  return { artifact: packActivationArtifact(opts, recipient, response), response };
+}
+
+/** Build one direct DID-document/fingerprint activation. */
+export function buildJweActivationArtifact(opts: BuildJweActivationArtifactOptions): {
+  artifact: Uint8Array;
+  response: EnrollmentResponseV1;
+} {
+  return buildJweActivationArtifactCore(opts, false);
+}
+
+/** Compatibility adapter for the reconciled AcceptedOffer surface. */
+export function buildEnrollmentResponseArtifact(opts: {
+  publisherKey: DeviceKey;
+  ceremonyId: string;
+  group: string;
+  groupEpoch: number;
+  accepted: AcceptedOffer;
+  ttlMs: number;
+  now?: string;
+}): { artifact: Uint8Array; response: EnrollmentResponseV1 } {
+  assertReconciledAcceptedOffer(opts.accepted);
+  return buildJweActivationArtifactCore(
+    {
+      publisherKey: opts.publisherKey,
+      ceremonyId: opts.ceremonyId,
+      group: opts.group,
+      groupEpoch: opts.groupEpoch,
+      recipient: jweRecipientFromAcceptedOffer(opts.accepted),
+      ttlMs: opts.ttlMs,
+      ...(opts.now === undefined ? {} : { now: opts.now }),
+    },
+    true,
+  );
 }

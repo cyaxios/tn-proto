@@ -2,21 +2,42 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { bytesToB64 } from "../core/encoding.js";
+import {
+  jweActivationReferenceDigest,
+  jweRecipientFromAcceptedOffer,
+  validateVerifiedJweRecipient,
+  type VerifiedJweRecipient,
+} from "../core/jwe_binding.js";
 import type { BundleResult } from "../core/results.js";
-import { TrustError, parseEd25519DidKey, sha256Digest, type AcceptedOffer } from "../core/trust.js";
+import {
+  TrustError,
+  formatTrustTimestamp,
+  parseEd25519DidKey,
+  type AcceptedOffer,
+} from "../core/trust.js";
 import type { NodeRuntime } from "../runtime/node_runtime.js";
+import { assertReconciledAcceptedOffer } from "../runtime/enrollment.js";
 
 export interface PrepareRecipientOptions {
   recipientDid: string;
   outDir: string;
   groups?: string[];
-  sealKitBundleForRecipient?: boolean;
-  acceptedOffers: AcceptedOffer[];
+  /**
+   * Explicitly deliver BTN/HIBE bearer keys as plaintext package members.
+   * The normal preparation path recipient-seals them to `recipientDid`.
+   */
+  unsafePlaintextKitBundle?: boolean;
+  acceptedOffers?: AcceptedOffer[];
+  /** Direct authenticated bindings. Signed proof routes must use acceptedOffers. */
+  jweRecipients?: VerifiedJweRecipient[];
   activationTtlMs?: number;
 }
 
 export interface JweActivationResult {
   group: string;
+  bindingDigest: string;
+  activationReferenceDigest: string;
+  publicKeySha256: string;
   package: { outPath: string; manifestSha256: string };
 }
 
@@ -29,7 +50,9 @@ export interface PrepareRecipientResult {
 
 export interface RecipientPreparationEvidence {
   group: string;
-  accepted: AcceptedOffer;
+  binding: VerifiedJweRecipient;
+  activationReferenceDigest: string;
+  acceptedOffer?: AcceptedOffer;
 }
 
 export interface RecipientPreparationPlan {
@@ -79,42 +102,80 @@ function assertCompatibleRecipient(
   }
 }
 
-function acceptedOfferFor(
+function assertBindingScope(
   rt: NodeRuntime,
-  offers: AcceptedOffer[],
+  binding: VerifiedJweRecipient,
   recipientDid: string,
   group: string,
-): AcceptedOffer {
-  const matches = offers.filter(
-    (offer) =>
-      offer.binding.principal.did === recipientDid && offer.binding.principal.group === group,
-  );
-  if (matches.length !== 1) {
-    const detail = matches.length === 0 ? "requires an" : "received multiple";
-    throw new Error(
-      `tn.pkg.prepareRecipient ${detail} accepted JWE offer for reader ` +
-        `${JSON.stringify(recipientDid)} in group ${JSON.stringify(group)}`,
-    );
+): void {
+  if (binding.readerDid !== recipientDid) {
+    throw new TrustError("did_signer_mismatch", "JWE binding names a different reader");
   }
-  const accepted = matches[0]!;
-  const binding = accepted.binding;
-  if (binding.principal.purpose !== "jwe-reader") {
-    throw new TrustError("binding_invalid", "accepted offer is not a jwe-reader binding");
+  if (binding.audienceDid !== rt.did) {
+    throw new TrustError("wrong_recipient", "JWE binding names a different publisher");
   }
-  if (binding.principal.audienceDid !== rt.did) {
-    throw new TrustError("wrong_recipient", "accepted offer names a different publisher");
-  }
-  if (binding.principal.ceremonyId !== rt.config.ceremonyId) {
-    throw new TrustError("scope_mismatch", "accepted offer ceremony does not match");
-  }
-  if (
-    accepted.offerDigest !== binding.proofDigest ||
-    sha256Digest(binding.publicKey) !== binding.publicKeySha256
-  ) {
-    throw new TrustError("binding_invalid", "accepted offer digest or X25519 key is inconsistent");
+  if (binding.ceremonyId !== rt.config.ceremonyId || binding.group !== group) {
+    throw new TrustError("scope_mismatch", "JWE binding ceremony or group does not match");
   }
   assertCompatibleRecipient(rt, group, recipientDid, binding.publicKey);
-  return accepted;
+}
+
+interface NormalizedPreparationSource {
+  binding: VerifiedJweRecipient;
+  acceptedOffer?: AcceptedOffer;
+}
+
+function normalizedSources(
+  opts: PrepareRecipientOptions,
+  now: string,
+): NormalizedPreparationSource[] {
+  const accepted = (opts.acceptedOffers ?? []).map((offer) => {
+    assertReconciledAcceptedOffer(offer);
+    return {
+      binding: validateVerifiedJweRecipient(jweRecipientFromAcceptedOffer(offer), now),
+      acceptedOffer: offer,
+    };
+  });
+  const direct = (opts.jweRecipients ?? []).map((source) => {
+    const binding = validateVerifiedJweRecipient(source, now);
+    if (
+      binding.evidence.kind === "signed-key-card" ||
+      binding.evidence.kind === "challenge-response"
+    ) {
+      throw new TrustError(
+        "binding_invalid",
+        "signed JWE bindings must enter through acceptedOffers after reconciliation",
+      );
+    }
+    return { binding };
+  });
+  return [...accepted, ...direct];
+}
+
+function sourceForGroup(
+  rt: NodeRuntime,
+  sources: NormalizedPreparationSource[],
+  recipientDid: string,
+  group: string,
+): RecipientPreparationEvidence {
+  const matches = sources.filter(
+    (source) => source.binding.readerDid === recipientDid && source.binding.group === group,
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `tn.pkg.prepareRecipient requires exactly one verified JWE source for reader ` +
+        `${JSON.stringify(recipientDid)} in group ${JSON.stringify(group)}; got ${matches.length}`,
+    );
+  }
+  const source = matches[0]!;
+  const binding = source.binding;
+  assertBindingScope(rt, binding, recipientDid, group);
+  return {
+    group,
+    binding,
+    activationReferenceDigest: jweActivationReferenceDigest(binding),
+    ...(source.acceptedOffer === undefined ? {} : { acceptedOffer: source.acceptedOffer }),
+  };
 }
 
 export function planRecipientPreparation(
@@ -133,9 +194,10 @@ export function planRecipientPreparation(
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
     throw new Error("tn.pkg.prepareRecipient: activationTtlMs must be a positive safe integer");
   }
-  const evidence = jweGroups.map((group) => ({
-    group,
-    accepted: acceptedOfferFor(rt, opts.acceptedOffers, opts.recipientDid, group),
-  }));
+  const now = formatTrustTimestamp(Date.now() * 1000);
+  const sources = normalizedSources(opts, now);
+  const evidence = jweGroups.map((group) =>
+    sourceForGroup(rt, sources, opts.recipientDid, group),
+  );
   return { requestedGroups, kitGroups, evidence, ttlMs };
 }

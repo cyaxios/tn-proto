@@ -61,7 +61,7 @@ import {
   isAdminEventType,
   resolveAdminLogPath,
 } from "../admin/log.js";
-import { BtnPublisher, btnKitLeaf, canonicalBytes } from "../raw.js";
+import { BtnPublisher, btnKitLeaf, canonicalBytes, computeRowHash } from "../raw.js";
 import { ensureProcessRunId } from "../_run_id.js";
 import {
   aadBytesFor,
@@ -99,6 +99,7 @@ import {
   UNSAFE_OPERATION_EVENT_TYPE,
   enrollmentCeremonyFromConfig,
   installEnrollmentResponse,
+  recordVerifiedKitBundlePublisher,
 } from "./enrollment.js";
 import { reconcileTrustedOffers } from "./reconcile.js";
 import {
@@ -124,6 +125,11 @@ import type { TNHandler } from "../handlers/index.js";
 function readKitLeaf(kitBytes: Uint8Array): bigint {
   return btnKitLeaf(kitBytes);
 }
+
+function packageArtifactDigest(source: string | Uint8Array): string {
+  const bytes = typeof source === "string" ? new Uint8Array(readFileSync(source)) : source;
+  return sha256Digest(bytes);
+}
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { ZERO_HASH, rowHash, sha256HexBytes, verifyChainLink } from "../core/chain.js";
 import { signatureB64, signatureFromB64, verify } from "../core/signing.js";
@@ -140,6 +146,11 @@ import { createRequire } from "node:module";
 import type { WasmRuntime } from "tn-wasm";
 import { nodeStorageAdapter } from "./storage_node.js";
 import { lastEmitReceipt, receiptFromLine } from "./wasm_shim.js";
+import {
+  atomicWriteKitMember,
+  kitBundleInstallRejection,
+  kitMemberIsSecret,
+} from "./kit_bundle_members.js";
 
 // ── tn-wasm lazy loader (SDK never crashes user space) ──────────────────────
 // The nodejs-target tn-wasm module self-instantiates its .wasm on require,
@@ -1293,8 +1304,18 @@ export class NodeRuntime {
       grantTrust?: { verified: boolean; proofDigest?: string; proofExpiresAt?: string };
       /** Label the kit manifest as explicit unsafe plaintext delivery. */
       unsafePlaintextLabel?: boolean;
+      /** Internal staging only: the Admin surface will recipient-seal this
+       * temporary package before exposing the requested final path. */
+      recipientSealStaging?: boolean;
     } = {},
   ): { kitPath: string; idPath: string; subtreeDelegation: boolean } {
+    if (opts.unsafePlaintextLabel !== true && opts.recipientSealStaging !== true) {
+      throw new TrustError(
+        "binding_invalid",
+        "NodeRuntime.grantReader only mints plaintext staging artifacts; use " +
+          "tn.admin.grantReader for sealed delivery or mark explicit unsafe plaintext delivery",
+      );
+    }
     const mat = this._requireHibeGroup("grantReader", group);
     const safeStem = (opts.readerDid ?? "reader")
       .split(":")
@@ -1360,7 +1381,8 @@ export class NodeRuntime {
       const entry: Record<string, unknown> = { reader_did: opts.readerDid, id_path: targetPath };
       if (opts.grantTrust !== undefined) {
         entry["verified"] = opts.grantTrust.verified;
-        if (opts.grantTrust.proofDigest !== undefined) entry["proof_digest"] = opts.grantTrust.proofDigest;
+        if (opts.grantTrust.proofDigest !== undefined)
+          entry["proof_digest"] = opts.grantTrust.proofDigest;
         if (opts.grantTrust.proofExpiresAt !== undefined) {
           entry["proof_expires_at"] = opts.grantTrust.proofExpiresAt;
         }
@@ -1536,7 +1558,10 @@ export class NodeRuntime {
       throw new TrustError("binding_invalid", "MPK bytes are not a valid authority public key");
     }
     if (encodedDepth !== assertion.binding["max_depth"]) {
-      throw new TrustError("binding_invalid", "encoded MPK depth does not match the asserted max_depth");
+      throw new TrustError(
+        "binding_invalid",
+        "encoded MPK depth does not match the asserted max_depth",
+      );
     }
     const idPath = String(assertion.binding["id_path"]);
     const pathEpoch = Number(assertion.binding["path_epoch"]);
@@ -1616,7 +1641,11 @@ export class NodeRuntime {
     const mat = this._requireHibeGroup("rotateHibePathWithAssertion", group);
     const assertionOpts: { audienceDid?: string } = {};
     if (opts.audienceDid !== undefined) assertionOpts.audienceDid = opts.audienceDid;
-    const assertion = this.issueHibeAuthorityAssertion(group, opts.ttlMs ?? 10 * 60_000, assertionOpts);
+    const assertion = this.issueHibeAuthorityAssertion(
+      group,
+      opts.ttlMs ?? 10 * 60_000,
+      assertionOpts,
+    );
     return { group, idPath: mat.idPath, pathEpoch: hibeAuthorityEpoch(mat), assertion };
   }
 
@@ -1633,7 +1662,10 @@ export class NodeRuntime {
     if (typeof expiresAt === "string") {
       const nowText = now ?? formatTrustTimestamp(Date.now() * 1000);
       try {
-        if (Date.parse(nowText.replace(/\.\d+Z$/, "Z")) >= Date.parse(expiresAt.replace(/\.\d+Z$/, "Z"))) {
+        if (
+          Date.parse(nowText.replace(/\.\d+Z$/, "Z")) >=
+          Date.parse(expiresAt.replace(/\.\d+Z$/, "Z"))
+        ) {
           return null;
         }
       } catch {
@@ -1686,7 +1718,11 @@ export class NodeRuntime {
         .pop()!
         .replace(/[^A-Za-z0-9._-]/g, "_");
       const kit = join(outDir, `${safeStem}.tnpkg`);
-      this.grantReader(group, { readerDid: g.reader_did, outPath: kit });
+      this.grantReader(group, {
+        readerDid: g.reader_did,
+        outPath: kit,
+        unsafePlaintextLabel: true,
+      });
       kitPaths.push(kit);
     }
 
@@ -2831,7 +2867,7 @@ export class NodeRuntime {
       ceremonyId: extras.ceremonyId ?? this.config.ceremonyId,
       scope: opts.scope ?? extras.scope ?? _defaultScope(kind),
     };
-    if (kind === "project_seed" || kind === "identity_seed") {
+    if (kind === "project_seed" || kind === "identity_seed" || kind === "full_keystore") {
       // Self-addressed: from_did == to_did. The absorb side rejects a
       // bundle whose from/to disagree (tamper guard).
       manifestArgs.toDid = this.config.device.device_identity;
@@ -2912,7 +2948,10 @@ export class NodeRuntime {
   }
 
   /** Apply a `.tnpkg` to local state. Idempotent. Mirrors Python `tn.absorb`. */
-  absorbPkg(source: string | Uint8Array, opts: { unsafeLegacySigner?: boolean } = {}): AbsorbReceipt {
+  absorbPkg(
+    source: string | Uint8Array,
+    opts: { unsafeLegacySigner?: boolean } = {},
+  ): AbsorbReceipt {
     let manifest: Manifest;
     let body: Map<string, Uint8Array>;
     let unsafeLegacyImport = false;
@@ -2982,7 +3021,18 @@ export class NodeRuntime {
       // with scope=group_keys; route by the marker, not just the kind.
       receipt = this._absorbGroupKeys(manifest, body);
     } else if (kind === "kit_bundle" || kind === "full_keystore") {
-      receipt = this._absorbKitBundle(manifest, body);
+      receipt =
+        kind === "kit_bundle" && manifest.toDid !== undefined && manifest.toDid !== this.did
+          ? {
+              kind,
+              acceptedCount: 0,
+              dedupedCount: 0,
+              noop: false,
+              derivedState: null,
+              conflicts: [],
+              rejectedReason: "kit_bundle recipient_identity does not match this device",
+            }
+          : this._absorbKitBundle(manifest, body);
     } else if (kind === "identity_seed") {
       receipt = this._absorbIdentitySeed(manifest, body);
     } else if (kind === "project_seed") {
@@ -3021,9 +3071,24 @@ export class NodeRuntime {
       };
     }
 
+    if (
+      kind === "kit_bundle" &&
+      !unsafeLegacyImport &&
+      manifest.toDid === this.did &&
+      receipt.rejectedReason === undefined &&
+      receipt.acceptedCount + receipt.dedupedCount > 0
+    ) {
+      recordVerifiedKitBundlePublisher({
+        keystoreDir: this.config.keystorePath,
+        manifest,
+        artifactDigest: packageArtifactDigest(source),
+      });
+      receipt.verifiedPublisherDid = manifest.fromDid;
+    }
     if (unsafeLegacyImport) {
       receipt.unsafeLegacyImport = true;
-      const artifactBytes = typeof source === "string" ? new Uint8Array(readFileSync(source)) : source;
+      const artifactBytes =
+        typeof source === "string" ? new Uint8Array(readFileSync(source)) : source;
       // Best-effort from this sync path; async callers can await the audit
       // via recordUnsafeOperation directly.
       void this.recordUnsafeOperation({
@@ -3054,7 +3119,10 @@ export class NodeRuntime {
 
   /** Stage a trusted key-binding offer into pending enrollment state. A
    * legacy offer without a signed proof keeps the historical stub receipt. */
-  private _absorbTrustedOffer(source: string | Uint8Array, body: Map<string, Uint8Array>): AbsorbReceipt {
+  private _absorbTrustedOffer(
+    source: string | Uint8Array,
+    body: Map<string, Uint8Array>,
+  ): AbsorbReceipt {
     let pkg: TnPackage | null = null;
     const raw = body.get("body/package.json");
     if (raw !== undefined) {
@@ -3199,9 +3267,25 @@ export class NodeRuntime {
       be !== undefined &&
       (be["recipient_wraps"] !== undefined || be["recipient_wrap"] !== undefined);
     if (sealed && (manifest.kind === "kit_bundle" || manifest.kind === "full_keystore")) {
+      if (
+        manifest.kind === "kit_bundle" &&
+        manifest.toDid !== undefined &&
+        manifest.toDid !== this.did
+      ) {
+        return {
+          kind: manifest.kind,
+          acceptedCount: 0,
+          dedupedCount: 0,
+          noop: false,
+          derivedState: null,
+          conflicts: [],
+          rejectedReason: "kit_bundle recipient_identity does not match this device",
+        };
+      }
       const r = await absorbSealedKitBundle(source, {
         seed: this.keystore.device.seed,
         keystoreDir: this.config.keystorePath,
+        yamlPath: this.config.yamlPath,
       });
       const receipt: AbsorbReceipt = {
         kind: r.kind,
@@ -3212,6 +3296,19 @@ export class NodeRuntime {
         conflicts: [],
       };
       if (r.rejectedReason !== undefined) receipt.rejectedReason = r.rejectedReason;
+      if (
+        manifest.kind === "kit_bundle" &&
+        manifest.toDid === this.did &&
+        r.rejectedReason === undefined &&
+        r.acceptedCount + r.dedupedCount > 0
+      ) {
+        recordVerifiedKitBundlePublisher({
+          keystoreDir: this.config.keystorePath,
+          manifest,
+          artifactDigest: packageArtifactDigest(source),
+        });
+        receipt.verifiedPublisherDid = manifest.fromDid;
+      }
       if (this._adminCache !== null) this._adminCache.refresh();
       return receipt;
     }
@@ -3418,6 +3515,7 @@ export class NodeRuntime {
     // full_keystore (self-addressed backup), mirroring the local.private
     // posture. Mirrors Python export.py `_HIBE_KIT_RE`.
     const hibeKitRe = /^(.+?)\.hibe\.(mpk|idpath|sk)$/;
+    const jweFullRe = /^(.+?)\.jwe\.(mykey|sender|recipients)(?:\.revoked\..+)?$/;
     const body: Record<string, Uint8Array> = {};
     const kitsMeta: Array<{ name: string; sha256: string; bytes: number }> = [];
 
@@ -3437,9 +3535,22 @@ export class NodeRuntime {
         if (entry === "local.private" || entry === "local.public" || entry === "index_master.key") {
           body[`body/${entry}`] = new Uint8Array(readFileSync(join(keystore, entry)));
         } else {
+          const jwe = jweFullRe.exec(entry);
+          if (jwe !== null) {
+            const group = jwe[1]!;
+            if (!groupFilter || groupFilter.has(group)) {
+              const data = new Uint8Array(readFileSync(join(keystore, entry)));
+              body[`body/${entry}`] = data;
+              kitsMeta.push({
+                name: entry,
+                sha256: "sha256:" + createHash("sha256").update(Buffer.from(data)).digest("hex"),
+                bytes: data.length,
+              });
+            }
+            continue;
+          }
           // Private/per-group material packed only for full_keystore:
-          // btn publisher state, the hibe master secret, and the hibe
-          // idpath rotation history (mirrors Python `_collect_kit_files`).
+          // btn publisher state, HIBE authority state, and JWE current/history.
           for (const suffix of [".btn.state", ".hibe.msk", ".hibe.idpath.history"]) {
             if (entry.endsWith(suffix)) {
               const group = entry.slice(0, -suffix.length);
@@ -3455,7 +3566,9 @@ export class NodeRuntime {
 
     if (kitsMeta.length === 0) {
       const suffix = groupFilter ? ` matching groups [${[...groupFilter].sort().join(", ")}]` : "";
-      throw new Error(`kit_bundle: no *.btn.mykit or *.hibe.* kit files in ${keystore}${suffix}`);
+      throw new Error(
+        `kit_bundle: no BTN/HIBE reader kits or full-backup JWE material in ${keystore}${suffix}`,
+      );
     }
 
     if (opts.full) {
@@ -4205,46 +4318,46 @@ export class NodeRuntime {
   private _absorbKitBundle(manifest: Manifest, body: Map<string, Uint8Array>): AbsorbReceipt {
     const keystore = this.config.keystorePath;
     if (!existsSync(keystore)) mkdirSync(keystore, { recursive: true });
+    const rejectedReason = kitBundleInstallRejection({
+      kind: manifest.kind,
+      fromDid: manifest.fromDid,
+      ...(manifest.toDid === undefined ? {} : { toDid: manifest.toDid }),
+      localDid: this.did,
+      names: body.keys(),
+    });
+    if (rejectedReason !== null) {
+      return {
+        kind: manifest.kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason,
+      };
+    }
     const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15) + "Z";
     let accepted = 0;
     let skipped = 0;
     const replaced: string[] = [];
-    // SECURITY: a kit_bundle / full_keystore from a COUNTERPARTY must never
-    // install the recipient's device identity secret, and `.hibe.msk` is a
-    // HIBE authority master secret with the same posture — it can mint a
-    // reader key for ANY path under that authority. Installing either is
-    // legitimate ONLY in a self-addressed restore of one's own backup
-    // (from_did === to_did). Mirrors Python `_absorb_kit_bundle`.
-    const selfAddressed = manifest.toDid !== undefined && manifest.fromDid === manifest.toDid;
     for (const [name, data] of body) {
       if (!name.startsWith("body/")) continue;
       const rel = name.slice("body/".length);
-      if (!rel) continue;
-      if (rel.includes("/") || rel.includes("\\")) continue;
-      if (
-        (rel === "local.private" || rel === "local.public" || rel.endsWith(".hibe.msk")) &&
-        !selfAddressed
-      ) {
-        process.emitWarning(
-          `tn-proto: refusing to install device secret ${JSON.stringify(rel)} from a ` +
-            `non-self-addressed ${manifest.kind} package (from=${manifest.fromDid} ` +
-            `to=${manifest.toDid ?? "<unset>"}); the device identity is restore-self only`,
-        );
-        skipped += 1;
-        continue;
-      }
-      const dest = pathResolve(keystore, rel);
+      const dest =
+        manifest.kind === "full_keystore" && rel === "tn.yaml"
+          ? this.config.yamlPath
+          : pathResolve(keystore, rel);
       if (existsSync(dest)) {
         const existing = readFileSync(dest);
         if (existing.length === data.length && Buffer.from(existing).equals(Buffer.from(data))) {
           skipped += 1;
           continue;
         }
-        const backup = pathResolve(keystore, `${rel}.previous.${ts}`);
+        const backup = `${dest}.previous.${ts}`;
         renameSync(dest, backup);
         replaced.push(dest);
       }
-      writeFileSync(dest, Buffer.from(data));
+      atomicWriteKitMember(dest, data, kitMemberIsSecret(rel));
       accepted += 1;
     }
     return {
@@ -4668,20 +4781,26 @@ export class NodeRuntime {
       publicFields["tn_aad"] = env["tn_aad"];
     }
 
-    const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
+    const groupsForHash: Record<
+      string,
+      { ciphertext_b64: string; field_hashes: Record<string, string> }
+    > = {};
     for (const [gname, g] of groupRaw) {
-      groupsForHash[gname] = { ciphertext: g.ct, fieldHashes: g.fieldHashes };
+      groupsForHash[gname] = {
+        ciphertext_b64: Buffer.from(g.ct).toString("base64"),
+        field_hashes: g.fieldHashes,
+      };
     }
     let rowHashOk: boolean;
     try {
-      const recomputed = rowHash({
-        device_identity: asDid(envDid),
+      const recomputed = computeRowHash({
+        device_identity: envDid,
         timestamp: envTs,
-        eventId: envEventId,
-        eventType,
+        event_id: envEventId,
+        event_type: eventType,
         level: envLevel,
-        prevHash: asRowHash(envPrevHash),
-        publicFields,
+        prev_hash: envPrevHash,
+        public_fields: publicFields,
         groups: groupsForHash,
       });
       rowHashOk = recomputed === envRowHash;
@@ -4799,7 +4918,7 @@ export class NodeRuntime {
     }
 
     const eventType = String(env["event_type"] ?? "");
-    const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH);
+    const envPrevHash = String(env["prev_hash"] ?? ZERO_HASH());
     const envRowHash = String(env["row_hash"] ?? "");
     const envSig = String(env["signature"] ?? "");
     const envDid = String(env["device_identity"] ?? "");
@@ -4837,20 +4956,26 @@ export class NodeRuntime {
     }
 
     // Recompute row_hash.
-    const groupsForHash: Record<string, import("../core/types.js").GroupHashInput> = {};
+    const groupsForHash: Record<
+      string,
+      { ciphertext_b64: string; field_hashes: Record<string, string> }
+    > = {};
     for (const [gname, g] of groupRaw) {
-      groupsForHash[gname] = { ciphertext: g.ct, fieldHashes: g.fieldHashes };
+      groupsForHash[gname] = {
+        ciphertext_b64: Buffer.from(g.ct).toString("base64"),
+        field_hashes: g.fieldHashes,
+      };
     }
     let rowHashOk: boolean;
     try {
-      const recomputed = rowHash({
-        device_identity: asDid(envDid),
+      const recomputed = computeRowHash({
+        device_identity: envDid,
         timestamp: envTs,
-        eventId: envEventId,
-        eventType,
+        event_id: envEventId,
+        event_type: eventType,
         level: envLevel,
-        prevHash: asRowHash(envPrevHash),
-        publicFields,
+        prev_hash: envPrevHash,
+        public_fields: publicFields,
         groups: groupsForHash,
       });
       rowHashOk = recomputed === envRowHash;

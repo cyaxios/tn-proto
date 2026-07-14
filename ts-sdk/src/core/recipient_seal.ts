@@ -60,14 +60,16 @@ export function didKeyToEd25519Pub(did: string): Uint8Array {
   return parseEd25519DidKey(did);
 }
 
-function ed25519PubToX25519Pub(edPub: Uint8Array): Uint8Array {
+/** Convert a raw Ed25519 public key to its X25519 Montgomery public key. */
+export function ed25519PubToX25519Pub(edPub: Uint8Array): Uint8Array {
   if (edPub.length !== 32) {
     throw new Error(`ed25519PubToX25519Pub: expected 32-byte pub, got ${edPub.length}`);
   }
   return edwardsToMontgomeryPub(edPub);
 }
 
-function ed25519SeedToX25519Priv(seed: Uint8Array): Uint8Array {
+/** Convert a 32-byte Ed25519 seed to its X25519 private scalar. */
+export function ed25519SeedToX25519Priv(seed: Uint8Array): Uint8Array {
   if (seed.length !== 32) {
     throw new Error(`ed25519SeedToX25519Priv: expected 32-byte seed, got ${seed.length}`);
   }
@@ -77,6 +79,11 @@ function ed25519SeedToX25519Priv(seed: Uint8Array): Uint8Array {
   // output as libsodium's crypto_sign_ed25519_sk_to_curve25519 over the
   // 64-byte expanded secret key.
   return edwardsToMontgomeryPriv(seed);
+}
+
+/** Strictly decode an Ed25519 did:key and convert it to its X25519 public key. */
+export function didKeyToX25519Pub(did: string): Uint8Array {
+  return ed25519PubToX25519Pub(didKeyToEd25519Pub(did));
 }
 
 // ── AAD: manifest minus signature minus recipient_wrap[s] ───────────
@@ -126,13 +133,9 @@ async function aesGcmEncrypt(
   plaintext: Uint8Array,
   aad: Uint8Array,
 ): Promise<Uint8Array> {
-  const k = await globalThis.crypto.subtle.importKey(
-    "raw",
-    key,
-    { name: "AES-GCM" },
-    false,
-    ["encrypt"],
-  );
+  const k = await globalThis.crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, [
+    "encrypt",
+  ]);
   const ct = await globalThis.crypto.subtle.encrypt(
     { name: "AES-GCM", iv: nonce, additionalData: aad },
     k,
@@ -147,13 +150,9 @@ async function aesGcmDecrypt(
   ciphertext: Uint8Array,
   aad: Uint8Array,
 ): Promise<Uint8Array> {
-  const k = await globalThis.crypto.subtle.importKey(
-    "raw",
-    key,
-    { name: "AES-GCM" },
-    false,
-    ["decrypt"],
-  );
+  const k = await globalThis.crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, [
+    "decrypt",
+  ]);
   const pt = await globalThis.crypto.subtle.decrypt(
     { name: "AES-GCM", iv: nonce, additionalData: aad },
     k,
@@ -188,8 +187,7 @@ export async function sealBekForRecipient(
     throw new Error(`sealBekForRecipient: BEK must be 32 bytes; got ${bek.length}`);
   }
 
-  const recipientEdPub = didKeyToEd25519Pub(recipientDid);
-  const recipientXPub = ed25519PubToX25519Pub(recipientEdPub);
+  const recipientXPub = didKeyToX25519Pub(recipientDid);
 
   const ephPriv = x25519.utils.randomSecretKey();
   const ephPub = x25519.getPublicKey(ephPriv);
@@ -289,7 +287,9 @@ export async function buildRecipientWraps(
       ? (manifest.state as JsonObject)
       : ({} as JsonObject);
   const bodyEnc =
-    state.body_encryption && typeof state.body_encryption === "object" && !Array.isArray(state.body_encryption)
+    state.body_encryption &&
+    typeof state.body_encryption === "object" &&
+    !Array.isArray(state.body_encryption)
       ? (state.body_encryption as JsonObject)
       : ({} as JsonObject);
   bodyEnc.recipient_wraps = wraps;
@@ -317,7 +317,9 @@ export async function unsealBekFromWrap(
   }
   const w = wrap as Partial<RecipientWrap>;
   if (w.frame !== WRAP_FRAME) {
-    throw new UnsealError(`unsupported sealed-box frame ${JSON.stringify(w.frame)}; expected ${WRAP_FRAME}`);
+    throw new UnsealError(
+      `unsupported sealed-box frame ${JSON.stringify(w.frame)}; expected ${WRAP_FRAME}`,
+    );
   }
   if (typeof w.recipient_identity !== "string") {
     throw new UnsealError("recipient_wrap.recipient_identity missing or not a string");
@@ -335,7 +337,9 @@ export async function unsealBekFromWrap(
   }
 
   if (ephPub.length !== 32) {
-    throw new UnsealError(`ephemeral_x25519_pub_b64 decoded to ${ephPub.length} bytes; expected 32`);
+    throw new UnsealError(
+      `ephemeral_x25519_pub_b64 decoded to ${ephPub.length} bytes; expected 32`,
+    );
   }
   if (nonce.length !== 12) {
     throw new UnsealError(`wrap_nonce_b64 decoded to ${nonce.length} bytes; expected 12`);
@@ -353,8 +357,7 @@ export async function unsealBekFromWrap(
   // a different DID than the device holds.
   let recipientXPub: Uint8Array;
   try {
-    const edPub = didKeyToEd25519Pub(w.recipient_identity);
-    recipientXPub = ed25519PubToX25519Pub(edPub);
+    recipientXPub = didKeyToX25519Pub(w.recipient_identity);
   } catch (e) {
     throw new UnsealError(`could not derive recipient X25519 pub: ${(e as Error).message}`);
   }

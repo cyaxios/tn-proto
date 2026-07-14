@@ -51,8 +51,8 @@ export interface AbsorbReceipt {
    * (`sha256:` over the canonical signed key-binding proof). Hand this to
    * `tn.pkg.approveAndReconcile` / `reconcilePending`. */
   offerDigest?: string;
-  /** Enrollment responses only: the publisher DID that was verified and
-   * installed into `<keystore>/trust/verified_publishers.v1.json`. */
+  /** Publisher DID admitted from a verified enrollment response or a signed,
+   * body-indexed kit bundle and installed into the local trust registry. */
   verifiedPublisherDid?: string;
   /** True when the package entered through the explicitly named unsafe
    * legacy-import path (`unsafeLegacySigner`). The import stays unverified. */
@@ -107,6 +107,8 @@ export interface AddRecipientResult {
   proofDigest?: string | null;
   /** jwe only: `sha256:` digest of the registered X25519 public key. */
   publicKeySha256?: string | null;
+  /** jwe only: canonical digest of the normalized identity/scope/key/evidence binding. */
+  bindingDigest?: string | null;
   /** hibe only: whether the kit body was recipient-sealed for delivery. */
   sealed?: boolean;
   /** hibe only: true for an explicit ancestor grant — the key delegates the

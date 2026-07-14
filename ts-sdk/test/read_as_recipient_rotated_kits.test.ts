@@ -22,8 +22,6 @@ import { readAsRecipient, readAsRecipientAsync } from "../src/read_as_recipient.
 import type { CeremonyConfig } from "../src/runtime/config.js";
 import { Tn } from "../src/tn.js";
 
-const BOB_DID = "did:key:z6MkBobKeepsPreRotationReadAccess";
-
 /** Publisher side: OLD row → rotate → NEW row → export a kit_bundle (which
  *  carries the rotation-preserved kit). Recipient side: absorb it. Returns
  *  the publisher's log path and the recipient's keystore dir. */
@@ -31,20 +29,22 @@ async function rotatedPublisherAbsorbedByBob(root: string): Promise<{
   aliceLog: string;
   bobKeystore: string;
 }> {
+  const bob = await Tn.init(join(root, "bob", "bob.yaml"), { stdout: false });
   const alice = await Tn.init(join(root, "alice", "alice.yaml"), { stdout: false });
   alice.info("order.created", { order_id: "OLD" });
   await alice.admin.rotate("default");
   alice.info("order.created", { order_id: "NEW" });
   const aliceLog = alice.logPath;
+  const aliceDid = alice.did;
   const bundle = join(root, "bob.tnpkg");
-  await alice.pkg.export({ kit: { recipientDid: BOB_DID } }, bundle);
+  await alice.pkg.export({ kit: { recipientDid: bob.did } }, bundle);
   await alice.close();
 
-  const bob = await Tn.init(join(root, "bob", "bob.yaml"), { stdout: false });
   const receipt = await bob.pkg.absorb(bundle);
   const bobKeystore = (bob.config() as CeremonyConfig).keystorePath;
   await bob.close();
   assert.ok(receipt.acceptedCount >= 1, `absorb installed nothing: ${JSON.stringify(receipt)}`);
+  assert.equal(receipt.verifiedPublisherDid, aliceDid);
 
   // Honesty guards: the scenario only exercises the multi-kit walk if absorb
   // left Bob holding the publisher's current kit PLUS the rotation archive,
@@ -66,7 +66,9 @@ async function rotatedPublisherAbsorbedByBob(root: string): Promise<{
  *  marker has no order_id, so a lost row simply doesn't show up here). */
 function openedOrderIds(aliceLog: string, bobKeystore: string): Set<string> {
   const ids = new Set<string>();
-  for (const e of readAsRecipient(aliceLog, bobKeystore, { group: "default" })) {
+  for (const e of readAsRecipient(aliceLog, bobKeystore, {
+    group: "default",
+  })) {
     if (e.envelope["event_type"] !== "order.created") continue;
     const id = e.plaintext["default"]?.["order_id"];
     if (typeof id === "string") ids.add(id);
@@ -109,7 +111,9 @@ test("readAsRecipientAsync walks the same archived-kit list", async () => {
   try {
     const { aliceLog, bobKeystore } = await rotatedPublisherAbsorbedByBob(root);
     const ids = new Set<string>();
-    for await (const e of readAsRecipientAsync(aliceLog, bobKeystore, { group: "default" })) {
+    for await (const e of readAsRecipientAsync(aliceLog, bobKeystore, {
+      group: "default",
+    })) {
       if (e.envelope["event_type"] !== "order.created") continue;
       const id = e.plaintext["default"]?.["order_id"];
       if (typeof id === "string") ids.add(id);
