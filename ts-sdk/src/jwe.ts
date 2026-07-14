@@ -1,13 +1,8 @@
-import { x25519 } from "@noble/curves/ed25519";
-import type { JWK } from "jose";
-
 import {
-  generateX25519KeyPair,
-  isUsableX25519PublicKey,
-  jweDecryptManyDetailed,
-  jweSeal,
-  okpPrivateJwk,
-} from "./core/jwe.js";
+  jweDecrypt as rustJweDecrypt,
+  jweEncrypt as rustJweEncrypt,
+  jweKeygen as rustJweKeygen,
+} from "./raw.js";
 import {
   AuthenticationFailedError,
   LimitExceededError,
@@ -27,7 +22,21 @@ export interface KeyPair {
 }
 
 export function keygen(): KeyPair {
-  return generateX25519KeyPair();
+  try {
+    const generated = rustJweKeygen() as unknown;
+    if (generated === null || typeof generated !== "object") {
+      throw new Error("invalid keygen result");
+    }
+    const value = generated as Record<string, unknown>;
+    requireRawKey(value["publicKey"], "generated public key");
+    requireRawKey(value["privateKey"], "generated private key");
+    return {
+      publicKey: new Uint8Array(value["publicKey"]),
+      privateKey: new Uint8Array(value["privateKey"]),
+    };
+  } catch (error) {
+    throw mapJweError(error, "key generation");
+  }
 }
 
 function requireBytes(
@@ -63,12 +72,33 @@ function collectBoundedKeys(keys: Iterable<Uint8Array>, label: string): Uint8Arr
   return collected;
 }
 
-function validateRecipientKeys(recipients: Uint8Array[]): void {
-  for (const recipient of recipients) {
-    if (!isUsableX25519PublicKey(recipient)) {
-      throw new MalformedError("recipient key material is invalid");
-    }
+function requireRawKey(value: unknown, label: string): asserts value is Uint8Array {
+  if (!(value instanceof Uint8Array) || value.length !== 32) {
+    throw new MalformedError(`${label} must be a raw 32-byte X25519 key`);
   }
+}
+
+function nativeMessage(error: unknown): string {
+  return error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+}
+
+function mapJweError(error: unknown, operation: string): PrimitiveError {
+  if (error instanceof PrimitiveError) return error;
+  const message = nativeMessage(error);
+  if (
+    message.includes("exceeds") ||
+    message.includes("maximum is") ||
+    message.includes("size limit")
+  ) {
+    return new LimitExceededError(`JWE ${operation} exceeded a configured limit`);
+  }
+  if (message.includes("aad does not match") || message.includes("authentication failed")) {
+    return new AuthenticationFailedError(`JWE ${operation} failed authentication`);
+  }
+  if (message.includes("not entitled")) {
+    return new NotEntitledError("subscriber keys cannot open ciphertext");
+  }
+  return new MalformedError(`JWE ${operation} failed: ${message || "invalid input"}`);
 }
 
 export async function encrypt(
@@ -79,31 +109,28 @@ export async function encrypt(
   requireBytes(plaintext, "plaintext", MAX_PLAINTEXT_BYTES);
   if (aad !== undefined) requireBytes(aad, "additional authenticated data", MAX_AAD_BYTES);
   const recipientKeys = collectBoundedKeys(recipients, "recipients");
-  validateRecipientKeys(recipientKeys);
-  return jweSeal(recipientKeys, plaintext, aad);
+  try {
+    return rustJweEncrypt(plaintext, recipientKeys, aad);
+  } catch (error) {
+    throw mapJweError(error, "encryption");
+  }
 }
 
 export class Subscriber {
-  readonly #readerJwks: JWK[];
+  readonly #privateKeys: Uint8Array[];
 
   constructor(privateKeys: Iterable<Uint8Array>) {
-    this.#readerJwks = collectBoundedKeys(privateKeys, "private keys").map((privateKey) =>
-      okpPrivateJwk(x25519.getPublicKey(privateKey), privateKey),
-    );
+    this.#privateKeys = collectBoundedKeys(privateKeys, "private keys");
   }
 
   async decrypt(ciphertext: Uint8Array, aad?: Uint8Array): Promise<Uint8Array> {
     requireBytes(ciphertext, "ciphertext", MAX_CIPHERTEXT_BYTES);
     if (aad !== undefined) requireBytes(aad, "additional authenticated data", MAX_AAD_BYTES);
-    const outcome = await jweDecryptManyDetailed(this.#readerJwks, ciphertext, aad);
-    if (outcome.status === "opened") return outcome.plaintext;
-    if (outcome.status === "malformed") {
-      throw new MalformedError("ciphertext is not a supported JWE General JSON value");
+    try {
+      return rustJweDecrypt(ciphertext, this.#privateKeys, aad);
+    } catch (error) {
+      throw mapJweError(error, "decryption");
     }
-    if (outcome.status === "authentication_failed") {
-      throw new AuthenticationFailedError("ciphertext or additional data failed authentication");
-    }
-    throw new NotEntitledError("subscriber keys cannot open ciphertext");
   }
 }
 

@@ -14,6 +14,11 @@ import {
 } from "../src/core/jwe.js";
 import * as jwe from "../src/jwe.js";
 import {
+  jweDecrypt as rustJweDecrypt,
+  jweEncrypt as rustJweEncrypt,
+  jweKeygen as rustJweKeygen,
+} from "../src/raw.js";
+import {
   AuthenticationFailedError,
   LimitExceededError,
   MalformedError,
@@ -95,6 +100,23 @@ test("JWE facade encrypts and decrypts for one subscriber", async () => {
   const reader = jwe.subscribe([keys.privateKey]);
 
   assert.deepEqual(await reader.decrypt(ciphertext), bytes("hello"));
+});
+
+test("public JWE facade interoperates with the Rust/WASM primitives in both directions", async () => {
+  const rawKeys = rustJweKeygen() as { publicKey: Uint8Array; privateKey: Uint8Array };
+  const aad = bytes("rust wasm aad");
+
+  const facadeCiphertext = await jwe.encrypt(bytes("facade to rust"), [rawKeys.publicKey], aad);
+  assert.deepEqual(
+    rustJweDecrypt(facadeCiphertext, [rawKeys.privateKey], aad),
+    bytes("facade to rust"),
+  );
+
+  const rustCiphertext = rustJweEncrypt(bytes("rust to facade"), [rawKeys.publicKey], aad);
+  assert.deepEqual(
+    await jwe.subscribe([rawKeys.privateKey]).decrypt(rustCiphertext, aad),
+    bytes("rust to facade"),
+  );
 });
 
 test("detailed decrypt outcomes preserve the legacy null-returning API", async () => {
