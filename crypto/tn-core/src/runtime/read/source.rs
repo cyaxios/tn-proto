@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::{Error, Result};
+use crate::{pathutil::is_absolute_xplat_path, Error, Result};
 
 use super::super::{
     CursorKind, ReadContext, ReadCursorV1, ReadEntry, ReadReport, ReadTrustPolicy, Runtime,
@@ -423,7 +423,7 @@ fn file_cursor_start(
 /// Build the stable source ID for a file path after making it absolute and
 /// applying the same lexical normalization used by the read scanner.
 pub fn file_source_id(path: &Path) -> Result<String> {
-    let absolute = if path.is_absolute() {
+    let absolute = if is_absolute_xplat_path(path) {
         path.to_path_buf()
     } else {
         std::env::current_dir().map_err(Error::Io)?.join(path)
@@ -456,7 +456,7 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
         return true;
     }
     let absolute = |path: &Path| {
-        if path.is_absolute() {
+        if is_absolute_xplat_path(path) {
             path.to_path_buf()
         } else {
             std::env::current_dir()
