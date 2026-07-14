@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::time::{Duration, SystemTime};
 
 use crate::canonical::canonical_bytes;
-use crate::did_document::ResolvedX25519KeyAgreement;
+use crate::did_document::{extract_x25519_key_agreement, ResolvedX25519KeyAgreement};
 use crate::trust::{AcceptedOffer, TrustError, TrustReason};
 use crate::trusted_enrollment::{
     canonical_utc_timestamp, sha256_tagged, validate_statement_freshness,
@@ -222,6 +222,36 @@ impl VerifiedJweRecipient {
             expires_at: principal.expires_at.clone(),
             evidence,
         }
+    }
+
+    /// Extract and bind a key from the exact authenticated DID document.
+    ///
+    /// The caller remains responsible for DID-method resolution security;
+    /// this adapter hashes the exact document it parses so the retained
+    /// evidence cannot accidentally describe different bytes.
+    pub fn from_authenticated_did_document(
+        document: &Value,
+        expected_did: &str,
+        verification_method_id: Option<&str>,
+        scope: JweBindingScope,
+        resolver: &str,
+        resolution_digest: &str,
+    ) -> Result<Self, TrustError> {
+        require_text(resolver, "resolver")?;
+        validate_digest(resolution_digest, "resolution_digest")?;
+        let resolved =
+            extract_x25519_key_agreement(document, expected_did, verification_method_id)?;
+        let document_bytes =
+            canonical_bytes(document).map_err(|error| binding_error(error.to_string()))?;
+        Self::from_did_resolution(
+            resolved,
+            scope,
+            AuthenticatedDidResolution {
+                resolver: resolver.to_string(),
+                resolution_digest: resolution_digest.to_string(),
+                document_digest: sha256_tagged(&document_bytes),
+            },
+        )
     }
 
     /// Normalize one key from authenticated DID-method resolution output.

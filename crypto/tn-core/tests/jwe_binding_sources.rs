@@ -1,5 +1,6 @@
 use std::time::{Duration, SystemTime};
 
+use serde_json::json;
 use tn_core::did_document::ResolvedX25519KeyAgreement;
 use tn_core::jwe_binding::{
     AuthenticatedDidResolution, FingerprintPin, JweBindingEvidence, JweBindingExpectation,
@@ -201,4 +202,49 @@ fn normalized_binding_rechecks_reader_publisher_scope_and_freshness() {
         })
         .unwrap_err();
     assert_eq!(expired.reason, tn_core::TrustReason::StatementExpired);
+}
+
+#[test]
+fn authenticated_document_adapter_hashes_the_exact_document_it_extracts() {
+    let reader_did = "did:example:reader";
+    let key = [0x77; 32];
+    let mut encoded = vec![0xec, 0x01];
+    encoded.extend_from_slice(&key);
+    let method_id = format!("{reader_did}#jwe-1");
+    let document = json!({
+        "id": reader_did,
+        "keyAgreement": [{
+            "id": method_id,
+            "type": "Multikey",
+            "controller": reader_did,
+            "publicKeyMultibase": format!("z{}", bs58::encode(encoded).into_string())
+        }]
+    });
+    let resolution_digest = tn_core::trusted_enrollment::sha256_tagged(b"resolution-result");
+
+    let binding = VerifiedJweRecipient::from_authenticated_did_document(
+        &document,
+        reader_did,
+        Some(&method_id),
+        scope(),
+        "did:web resolver with TLS and method verification",
+        &resolution_digest,
+    )
+    .unwrap();
+
+    let canonical = tn_core::canonical::canonical_bytes(&document).unwrap();
+    match binding.evidence {
+        JweBindingEvidence::DidDocument {
+            document_digest,
+            resolution_digest: retained_resolution,
+            ..
+        } => {
+            assert_eq!(
+                document_digest,
+                tn_core::trusted_enrollment::sha256_tagged(&canonical)
+            );
+            assert_eq!(retained_resolution, resolution_digest);
+        }
+        other => panic!("unexpected evidence: {other:?}"),
+    }
 }
