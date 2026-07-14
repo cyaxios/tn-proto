@@ -32,7 +32,7 @@ pub fn encrypt_js(
     aad: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsError> {
     let recipients = parse_keys(recipient_public_keys, "recipient public keys")?;
-    let cipher = JweCipher::new("wasm", &recipients, &[]).map_err(to_js_error)?;
+    let cipher = JweCipher::new("wasm", recipients.as_slice(), &[]).map_err(to_js_error)?;
     cipher
         .encrypt_with_aad(plaintext, aad.as_deref().unwrap_or(&[]))
         .map_err(to_js_error)
@@ -45,19 +45,17 @@ pub fn decrypt_js(
     reader_private_keys: Vec<JsValue>,
     aad: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsError> {
-    let readers =
-        protect_reader_private_keys(parse_keys(reader_private_keys, "reader private keys")?);
+    let readers = parse_keys(reader_private_keys, "reader private keys")?;
     let cipher = JweCipher::new("wasm", &[], readers.as_slice()).map_err(to_js_error)?;
     cipher
         .decrypt_with_aad(ciphertext, aad.as_deref().unwrap_or(&[]))
         .map_err(to_js_error)
 }
 
-fn protect_reader_private_keys(keys: Vec<[u8; KEY_BYTES]>) -> Zeroizing<Vec<[u8; KEY_BYTES]>> {
-    Zeroizing::new(keys)
-}
-
-fn parse_keys(values: Vec<JsValue>, label: &str) -> Result<Vec<[u8; KEY_BYTES]>, JsError> {
+fn parse_keys(
+    values: Vec<JsValue>,
+    label: &str,
+) -> Result<Zeroizing<Vec<[u8; KEY_BYTES]>>, JsError> {
     if values.is_empty() {
         return Err(JsError::new(&format!("{label} cannot be empty")));
     }
@@ -66,27 +64,30 @@ fn parse_keys(values: Vec<JsValue>, label: &str) -> Result<Vec<[u8; KEY_BYTES]>,
             "{label} cannot contain more than {MAX_KEYS} keys"
         )));
     }
-    values
-        .into_iter()
-        .map(|value| parse_key(value, label))
-        .collect()
+    let mut keys = Zeroizing::new(Vec::with_capacity(values.len()));
+    for value in values {
+        let key = parse_key(value, label)?;
+        keys.push(*key);
+    }
+    Ok(keys)
 }
 
-fn parse_key(value: JsValue, label: &str) -> Result<[u8; KEY_BYTES], JsError> {
+fn parse_key(value: JsValue, label: &str) -> Result<Zeroizing<[u8; KEY_BYTES]>, JsError> {
     if !value.is_instance_of::<js_sys::Uint8Array>() {
         return Err(JsError::new(&format!(
             "{label} must contain Uint8Array values"
         )));
     }
-    js_sys::Uint8Array::new(&value)
-        .to_vec()
-        .try_into()
-        .map_err(|bytes: Vec<u8>| {
-            JsError::new(&format!(
-                "{label} must contain raw {KEY_BYTES}-byte X25519 keys, got {}",
-                bytes.len()
-            ))
-        })
+    let bytes = Zeroizing::new(js_sys::Uint8Array::new(&value).to_vec());
+    let mut key = Zeroizing::new([0_u8; KEY_BYTES]);
+    if bytes.len() != KEY_BYTES {
+        return Err(JsError::new(&format!(
+            "{label} must contain raw {KEY_BYTES}-byte X25519 keys, got {}",
+            bytes.len()
+        )));
+    }
+    key.copy_from_slice(&bytes);
+    Ok(key)
 }
 
 fn set_bytes(target: &js_sys::Object, name: &str, bytes: &[u8]) -> Result<(), JsError> {
@@ -107,8 +108,7 @@ mod tests {
 
     #[test]
     fn reader_private_key_boundary_uses_zeroizing_owner() {
-        let readers: Zeroizing<Vec<[u8; KEY_BYTES]>> =
-            protect_reader_private_keys(vec![[0xA5; KEY_BYTES]]);
+        let readers = Zeroizing::new(vec![[0xA5; KEY_BYTES]]);
 
         fn assert_zeroize_on_drop<T: ZeroizeOnDrop>(_: &T) {}
         assert_zeroize_on_drop(&readers);

@@ -4,12 +4,11 @@ use aes_gcm::aead::{Aead as _, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit as _, Nonce};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
-use curve25519_dalek::edwards::CompressedEdwardsY;
 use curve25519_dalek::montgomery::MontgomeryPoint;
 use hkdf::Hkdf;
 use rand_core::RngCore;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256, Sha512};
+use sha2::Sha256;
 use std::collections::BTreeMap;
 
 use crate::body_encryption::{
@@ -143,8 +142,9 @@ pub(crate) fn seal_key_for_recipient(
     recipient_did: &str,
     aad: &[u8],
 ) -> Result<Value> {
-    let recipient_ed_pub = did_key_to_ed25519_pub(recipient_did)?;
-    let recipient_x_pub = ed25519_pub_to_x25519_pub(&recipient_ed_pub)?;
+    let recipient_x_pub = crate::trust::ed25519_did_to_x25519_public(recipient_did)
+        .map(MontgomeryPoint)
+        .map_err(|error| Error::InvalidConfig(error.detail))?;
 
     let mut eph_secret = [0_u8; 32];
     rand_core::OsRng.fill_bytes(&mut eph_secret);
@@ -212,9 +212,9 @@ pub(crate) fn unseal_key_from_wrap(
     let eph_pub = MontgomeryPoint(wrap_field_b64_32(wrap, "ephemeral_x25519_pub_b64")?);
     let nonce = wrap_field_b64_12(wrap, "wrap_nonce_b64")?;
     let wrapped = wrap_field_b64(wrap, "wrapped_bek_b64")?;
-    let recipient_x_secret = ed25519_seed_to_x25519_secret(device_seed);
-    let recipient_x_pub = MontgomeryPoint::mul_base_clamped(recipient_x_secret);
-    let shared = eph_pub.mul_clamped(recipient_x_secret);
+    let recipient_x_secret = crate::trust::ed25519_seed_to_x25519_private(device_seed);
+    let recipient_x_pub = MontgomeryPoint::mul_base_clamped(*recipient_x_secret);
+    let shared = eph_pub.mul_clamped(*recipient_x_secret);
 
     let mut salt = Vec::with_capacity(64);
     salt.extend_from_slice(eph_pub.as_bytes());
@@ -257,27 +257,6 @@ fn did_key_to_ed25519_pub(did: &str) -> Result<[u8; 32]> {
             error.detail
         ))
     })
-}
-
-fn ed25519_pub_to_x25519_pub(ed_pub: &[u8; 32]) -> Result<MontgomeryPoint> {
-    CompressedEdwardsY(*ed_pub)
-        .decompress()
-        .map(|point| point.to_montgomery())
-        .ok_or_else(|| {
-            Error::InvalidConfig(
-                "recipient DID Ed25519 public key could not be converted to X25519".into(),
-            )
-        })
-}
-
-fn ed25519_seed_to_x25519_secret(seed: &[u8; 32]) -> [u8; 32] {
-    let digest = Sha512::digest(seed);
-    let mut out = [0_u8; 32];
-    out.copy_from_slice(&digest[..32]);
-    out[0] &= 248;
-    out[31] &= 127;
-    out[31] |= 64;
-    out
 }
 
 struct WrapSelection<'a> {

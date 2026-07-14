@@ -14,8 +14,6 @@ const DEFAULT_ACTIVATION_TTL: Duration = Duration::from_secs(600);
 pub struct PrepareRecipientOptions {
     /// Optional group subset. Defaults to all non-internal groups.
     pub groups: Option<Vec<String>>,
-    /// Seal the BTN/HIBE kit bundle body to the recipient DID.
-    pub seal_kit_bundle_for_recipient: bool,
     /// Atomically accepted JWE offers available as verified enrollment evidence.
     pub accepted_offers: Vec<AcceptedOffer>,
     /// Safe normalized JWE bindings from DID resolution or fingerprint pinning.
@@ -28,7 +26,6 @@ impl Default for PrepareRecipientOptions {
     fn default() -> Self {
         Self {
             groups: None,
-            seal_kit_bundle_for_recipient: false,
             accepted_offers: Vec::new(),
             verified_bindings: Vec::new(),
             activation_ttl: DEFAULT_ACTIVATION_TTL,
@@ -103,10 +100,12 @@ struct ActivationEvidence {
 impl Package<'_> {
     /// Prepare BTN/HIBE reader kits and public-only JWE activations.
     ///
-    /// JWE private keys remain reader-local. Each requested JWE group requires
-    /// exactly one atomically accepted offer or authenticated direct binding
-    /// for the recipient's public X25519 key. The resulting artifact is a
-    /// signed enrollment response that the reader must approve and absorb.
+    /// BTN/HIBE bearer kits are always recipient-sealed to the complete
+    /// Ed25519 `did:key`. JWE private keys remain reader-local. Each requested
+    /// JWE group requires exactly one atomically accepted offer or
+    /// authenticated direct binding for the recipient's public X25519 key.
+    /// The resulting artifact is a signed enrollment response that the reader
+    /// must approve and absorb.
     pub fn prepare_recipient(
         &self,
         recipient_did: impl Into<String>,
@@ -132,12 +131,8 @@ impl Package<'_> {
             &options.verified_bindings,
         )?;
         fs::create_dir_all(out_dir.as_ref())?;
-        let kit_bundle = self.prepare_kit_bundle(
-            &recipient_did,
-            out_dir.as_ref(),
-            &plan.kit_groups,
-            options.seal_kit_bundle_for_recipient,
-        )?;
+        let kit_bundle =
+            self.prepare_kit_bundle(&recipient_did, out_dir.as_ref(), &plan.kit_groups)?;
         let jwe_activations =
             self.write_jwe_activations(out_dir.as_ref(), options.activation_ttl, evidence)?;
         Ok(PrepareRecipientResult {
@@ -152,12 +147,28 @@ impl Package<'_> {
     pub fn prepare_jwe_reader_key(&self, group: &str) -> Result<JweReaderKeyInfo> {
         require_jwe_group(self, group)?;
         let public_key = crate::enrollment::ensure_reader_mykey(self.tn, group)?;
-        Ok(JweReaderKeyInfo {
-            reader_did: self.tn.did().to_string(),
-            group: group.to_string(),
-            public_key,
-            public_key_sha256: crate::enrollment::sha256_tagged(&public_key),
-        })
+        Ok(reader_key_info(self, group, public_key))
+    }
+
+    /// Create or reuse the X25519 key deterministically bound to this
+    /// Ed25519 `did:key` for authenticated DID-document enrollment.
+    ///
+    /// # Security
+    ///
+    /// Unlike [`Self::prepare_jwe_reader_key`], this opt-in key is shared by
+    /// every group that uses it and by recipient-sealed package delivery. It
+    /// therefore does not provide independent per-group key separation or
+    /// rotation. Use it only when a writer must verify the standard
+    /// `did:key` keyAgreement expansion; prefer the random per-group method
+    /// for fingerprint, challenge, and other authenticated binding routes.
+    pub fn prepare_jwe_did_key_agreement_key(&self, group: &str) -> Result<JweReaderKeyInfo> {
+        require_jwe_group(self, group)?;
+        log::warn!(
+            target: "tn.security",
+            "using identity-derived JWE keyAgreement material for group {group:?}; the key is shared across groups and recipient-sealed package delivery"
+        );
+        let public_key = crate::enrollment::ensure_did_key_reader_mykey(self.tn, group)?;
+        Ok(reader_key_info(self, group, public_key))
     }
 
     /// Approve one exact direct activation before its signed package is absorbed.
@@ -171,7 +182,6 @@ impl Package<'_> {
         recipient_did: &str,
         out_dir: &Path,
         groups: &[String],
-        seal_for_recipient: bool,
     ) -> Result<Option<BundleForRecipientResult>> {
         if groups.is_empty() {
             return Ok(None);
@@ -181,7 +191,7 @@ impl Package<'_> {
             out_dir.join("reader-bundle.tnpkg"),
             BundleForRecipientOptions {
                 groups: Some(groups.to_vec()),
-                seal_for_recipient,
+                seal_for_recipient: true,
             },
         )
         .map(Some)
@@ -219,6 +229,15 @@ impl Package<'_> {
             x25519_public_key_sha256: evidence.binding.public_key_sha256,
             package,
         })
+    }
+}
+
+fn reader_key_info(package: &Package<'_>, group: &str, public_key: [u8; 32]) -> JweReaderKeyInfo {
+    JweReaderKeyInfo {
+        reader_did: package.tn.did().to_string(),
+        group: group.to_string(),
+        public_key,
+        public_key_sha256: crate::enrollment::sha256_tagged(&public_key),
     }
 }
 

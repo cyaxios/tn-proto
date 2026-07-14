@@ -281,13 +281,52 @@ fn mixed_preparation_returns_btn_bundle_and_separate_jwe_activation() -> tn_prot
     assert_eq!(result.requested_groups, vec!["partners", "broadcast"]);
     let bundle = result.kit_bundle.expect("BTN/HIBE kit bundle");
     assert_eq!(bundle.groups, vec!["broadcast"]);
-    let (_, body) = tn_core::tnpkg::read_tnpkg_verified(TnpkgSource::Path(&bundle.path))?;
-    assert!(body.contains_key("body/broadcast.btn.mykit"));
+    let (manifest, body) = tn_core::tnpkg::read_tnpkg_verified(TnpkgSource::Path(&bundle.path))?;
+    assert!(manifest
+        .state
+        .as_ref()
+        .and_then(|state| state.get("body_encryption"))
+        .is_some());
+    assert!(body.contains_key("body/encrypted.bin"));
+    assert!(!body.contains_key("body/broadcast.btn.mykit"));
     assert_public_only(&bundle.path, &reader_private);
     assert_eq!(result.jwe_activations.len(), 1);
     assert_public_only(&result.jwe_activations[0].package.path, &reader_private);
     publisher.close()?;
     reader.close()?;
+    Ok(())
+}
+
+#[test]
+fn mixed_preparation_seals_btn_bundle_by_default_for_only_the_reader() -> tn_proto::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let publisher = mixed_publisher(&temp.path().join("publisher"));
+    let reader = Tn::ephemeral()?;
+    let stranger = Tn::ephemeral()?;
+    let accepted = accepted_offer(&publisher, &reader, temp.path())?;
+
+    let result = publisher.pkg().prepare_recipient(
+        reader.did(),
+        temp.path().join("secure-default"),
+        PrepareRecipientOptions {
+            groups: Some(vec!["partners".into(), "broadcast".into()]),
+            accepted_offers: vec![accepted],
+            ..PrepareRecipientOptions::default()
+        },
+    )?;
+    let bundle = result.kit_bundle.expect("BTN kit bundle");
+    let (manifest, body) = tn_core::tnpkg::read_tnpkg_verified(TnpkgSource::Path(&bundle.path))?;
+
+    assert!(manifest
+        .state
+        .as_ref()
+        .and_then(|state| state.get("body_encryption"))
+        .is_some());
+    assert!(body.contains_key("body/encrypted.bin"));
+    assert!(!body.contains_key("body/broadcast.btn.mykit"));
+    let rejected = stranger.pkg().absorb_path(&bundle.path)?;
+    assert_eq!(rejected.legacy_status, "rejected");
+    assert!(rejected.legacy_reason.contains("sealed-box wrap"));
     Ok(())
 }
 

@@ -142,9 +142,9 @@ impl<'a> Admin<'a> {
     ///
     /// `id_path: None` keys the reader to the group's current sealing path;
     /// pass an ancestor path to hand out a key the reader can delegate
-    /// further down. The kit body is sealed to `reader_did` when the DID
-    /// resolves to a real `did:key:z...` key. The authority master secret
-    /// never rides a kit.
+    /// further down. `reader_did` must be a complete Ed25519 `did:key`, and
+    /// the kit body is always sealed to it. Missing or abbreviated DIDs fail
+    /// closed; the authority master secret never rides a kit.
     ///
     /// # Errors
     ///
@@ -734,12 +734,21 @@ impl<'a> Admin<'a> {
         // Mint to a sibling staging path so nothing lands at out_path before
         // verification, labeling, and one-time consumption complete.
         let staging_path = staging_grant_path(&options.out_path);
-        let minted = self.tn.runtime().admin_grant_reader(
-            &options.group,
-            Some(options.reader_did.as_str()),
-            &staging_path,
-            options.id_path.as_deref(),
-        );
+        let minted = if options.unsafe_plaintext {
+            self.tn.runtime().admin_grant_reader_unsafe_plaintext(
+                &options.group,
+                Some(options.reader_did.as_str()),
+                &staging_path,
+                options.id_path.as_deref(),
+            )
+        } else {
+            self.tn.runtime().admin_grant_reader(
+                &options.group,
+                Some(options.reader_did.as_str()),
+                &staging_path,
+                options.id_path.as_deref(),
+            )
+        };
         let minted = match minted {
             Ok(result) => result,
             Err(error) => {

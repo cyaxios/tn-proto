@@ -7,6 +7,13 @@ use tn_core::jwe_binding::{
     JweBindingScope, VerifiedJweRecipient,
 };
 
+fn did_reader(seed: [u8; 32]) -> (tn_core::DeviceKey, [u8; 32]) {
+    let device = tn_core::DeviceKey::from_private_bytes(&seed).unwrap();
+    let private = tn_core::trust::ed25519_seed_to_x25519_private(&seed);
+    let public = tn_core::trusted_enrollment::x25519_public_key(&private);
+    (device, public)
+}
+
 fn scope() -> JweBindingScope {
     JweBindingScope {
         audience_did: tn_core::DeviceKey::generate().did().to_string(),
@@ -19,12 +26,13 @@ fn scope() -> JweBindingScope {
 
 #[test]
 fn authenticated_did_resolution_normalizes_to_scoped_binding() {
-    let reader_did = "did:example:reader";
+    let (reader, public_key) = did_reader([0x31; 32]);
+    let reader_did = reader.did();
     let resolved = ResolvedX25519KeyAgreement {
         did: reader_did.into(),
         verification_method_id: format!("{reader_did}#jwe-1"),
-        public_key: [0x32; 32],
-        public_key_sha256: tn_core::trusted_enrollment::sha256_tagged(&[0x32; 32]),
+        public_key,
+        public_key_sha256: tn_core::trusted_enrollment::sha256_tagged(&public_key),
     };
     let evidence = AuthenticatedDidResolution {
         resolver: "did:web resolver with TLS and method verification".into(),
@@ -34,7 +42,7 @@ fn authenticated_did_resolution_normalizes_to_scoped_binding() {
 
     let binding = VerifiedJweRecipient::from_did_resolution(resolved, scope(), evidence).unwrap();
     assert_eq!(binding.reader_did, reader_did);
-    assert_eq!(binding.public_key, [0x32; 32]);
+    assert_eq!(binding.public_key, public_key);
     assert!(binding.binding_digest.starts_with("sha256:"));
     assert!(matches!(
         binding.evidence,
@@ -91,11 +99,12 @@ fn fingerprint_pin_rejects_nonzero_low_order_x25519_key() {
 
 #[test]
 fn evidence_metadata_is_mandatory() {
+    let (reader, public_key) = did_reader([0x54; 32]);
     let resolved = ResolvedX25519KeyAgreement {
-        did: "did:example:reader".into(),
-        verification_method_id: "did:example:reader#jwe-1".into(),
-        public_key: [0x55; 32],
-        public_key_sha256: tn_core::trusted_enrollment::sha256_tagged(&[0x55; 32]),
+        did: reader.did().into(),
+        verification_method_id: format!("{}#jwe-1", reader.did()),
+        public_key,
+        public_key_sha256: tn_core::trusted_enrollment::sha256_tagged(&public_key),
     };
     let missing_resolver = AuthenticatedDidResolution {
         resolver: String::new(),
@@ -204,8 +213,8 @@ fn normalized_binding_rechecks_reader_publisher_scope_and_freshness() {
 
 #[test]
 fn authenticated_document_adapter_hashes_the_exact_document_it_extracts() {
-    let reader_did = "did:example:reader";
-    let key = [0x77; 32];
+    let (reader, key) = did_reader([0x76; 32]);
+    let reader_did = reader.did();
     let mut encoded = vec![0xec, 0x01];
     encoded.extend_from_slice(&key);
     let method_id = format!("{reader_did}#jwe-1");
@@ -245,4 +254,40 @@ fn authenticated_document_adapter_hashes_the_exact_document_it_extracts() {
         }
         other => panic!("unexpected evidence: {other:?}"),
     }
+}
+
+#[test]
+fn authenticated_did_document_rejects_key_unrelated_to_ed25519_did() {
+    let device = tn_core::DeviceKey::from_private_bytes(&[0x27; 32]).unwrap();
+    let unrelated = [0x78; 32];
+    let method_id = format!("{}#unrelated", device.did());
+    let document = json!({
+        "id": device.did(),
+        "keyAgreement": [{
+            "id": method_id,
+            "type": "JsonWebKey2020",
+            "controller": device.did(),
+            "publicKeyJwk": {
+                "kty": "OKP",
+                "crv": "X25519",
+                "x": base64::Engine::encode(
+                    &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                    unrelated,
+                ),
+            }
+        }]
+    });
+
+    let error = VerifiedJweRecipient::from_authenticated_did_document(
+        &document,
+        device.did(),
+        Some(&method_id),
+        scope(),
+        "authenticated did:key expansion",
+        &tn_core::trusted_enrollment::sha256_tagged(b"resolution-result"),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.reason, tn_core::TrustReason::BindingInvalid);
+    assert!(error.detail.contains("does not match"));
 }

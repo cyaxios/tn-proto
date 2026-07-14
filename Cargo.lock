@@ -2557,6 +2557,7 @@ dependencies = [
  "aes-gcm",
  "base64",
  "bip39",
+ "bs58",
  "clap",
  "ed25519-dalek",
  "hkdf",

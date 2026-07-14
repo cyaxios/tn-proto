@@ -7,7 +7,7 @@ use subtle::ConstantTimeEq as _;
 
 use crate::canonical::canonical_bytes;
 use crate::did_document::{extract_x25519_key_agreement, ResolvedX25519KeyAgreement};
-use crate::trust::{AcceptedOffer, TrustError, TrustReason};
+use crate::trust::{ed25519_did_to_x25519_public, AcceptedOffer, TrustError, TrustReason};
 use crate::trusted_enrollment::{
     canonical_utc_timestamp, sha256_tagged, validate_statement_freshness,
 };
@@ -300,6 +300,12 @@ impl VerifiedJweRecipient {
         validate_digest(&evidence.resolution_digest, "resolution_digest")?;
         validate_digest(&evidence.document_digest, "document_digest")?;
         validate_public_key(&resolved.public_key, &resolved.public_key_sha256)?;
+        let did_key_agreement = ed25519_did_to_x25519_public(&resolved.did)?;
+        if resolved.public_key != did_key_agreement {
+            return Err(binding_error(
+                "DID document X25519 key does not match the reader's Ed25519 did:key",
+            ));
+        }
         let source = JweBindingEvidence::DidDocument {
             verification_method_id: resolved.verification_method_id,
             resolver: evidence.resolver,

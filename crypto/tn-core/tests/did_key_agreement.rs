@@ -50,6 +50,38 @@ fn resolves_referenced_x25519_jwk() {
 }
 
 #[test]
+fn resolves_2019_raw_base58_key_agreement() {
+    let key = [0x51; 32];
+    let document = json!({
+        "id": DID,
+        "keyAgreement": [{
+            "id": METHOD,
+            "type": "X25519KeyAgreementKey2019",
+            "controller": DID,
+            "publicKeyBase58": bs58::encode(key).into_string(),
+        }]
+    });
+
+    let resolved = extract_x25519_key_agreement(&document, DID, None).unwrap();
+    assert_eq!(resolved.public_key, key);
+}
+
+#[test]
+fn refuses_2019_multibase_instead_of_raw_base58() {
+    let document = json!({
+        "id": DID,
+        "keyAgreement": [{
+            "id": METHOD,
+            "type": "X25519KeyAgreementKey2019",
+            "controller": DID,
+            "publicKeyMultibase": x25519_multibase([0x51; 32]),
+        }]
+    });
+
+    assert!(extract_x25519_key_agreement(&document, DID, None).is_err());
+}
+
+#[test]
 fn skips_well_formed_non_x25519_key_agreement_methods() {
     let x25519 = [0x53; 32];
     let x = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, x25519);
@@ -114,6 +146,56 @@ fn skips_well_formed_unsupported_key_agreement_encoding() {
     let resolved = extract_x25519_key_agreement(&document, DID, None).unwrap();
     assert_eq!(resolved.verification_method_id, METHOD);
     assert_eq!(resolved.public_key, x25519);
+}
+
+#[test]
+fn explicit_selection_ignores_unrelated_malformed_method() {
+    let key = [0x58; 32];
+    let x = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, key);
+    let document = json!({
+        "id": DID,
+        "keyAgreement": [
+            {
+                "id": "did:example:reader#broken",
+                "type": "JsonWebKey2020",
+                "controller": "did:example:attacker",
+                "publicKeyJwk": {"kty": "OKP", "crv": "X25519", "x": "not-base64url"}
+            },
+            {
+                "id": METHOD,
+                "type": "JsonWebKey2020",
+                "controller": DID,
+                "publicKeyJwk": {"kty": "OKP", "crv": "X25519", "x": x}
+            }
+        ]
+    });
+
+    let resolved = extract_x25519_key_agreement(&document, DID, Some(METHOD)).unwrap();
+    assert_eq!(resolved.public_key, key);
+}
+
+#[test]
+fn explicit_selection_rejects_duplicate_relationship_id() {
+    let document = json!({
+        "id": DID,
+        "keyAgreement": [
+            {
+                "id": METHOD,
+                "type": "Multikey",
+                "controller": DID,
+                "publicKeyMultibase": x25519_multibase([0x59; 32])
+            },
+            {
+                "id": METHOD,
+                "type": "Multikey",
+                "controller": DID,
+                "publicKeyMultibase": x25519_multibase([0x5a; 32])
+            }
+        ]
+    });
+
+    let error = extract_x25519_key_agreement(&document, DID, Some(METHOD)).unwrap_err();
+    assert!(error.detail.contains("duplicate"));
 }
 
 #[test]

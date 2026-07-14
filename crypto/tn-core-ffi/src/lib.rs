@@ -1360,9 +1360,10 @@ pub unsafe extern "C" fn tn_runtime_admin_rotate_group(
 /// export it as an absorbable `.tnpkg` kit, returning a JSON receipt
 /// (`{"group", "reader_did", "id_path", "path"}`).
 ///
-/// `reader_did` may be null or empty (no grant recorded, plaintext kit).
-/// `id_path` may be null or empty to key the reader to the group's current
-/// sealing path; pass an ancestor path to hand out a delegatable key.
+/// `reader_did` must be a complete Ed25519 `did:key`; the package is always
+/// recipient-sealed and null, empty, abbreviated, or non-canonical values are
+/// rejected. `id_path` may be null or empty to key the reader to the group's
+/// current sealing path; pass an ancestor path to hand out a delegatable key.
 /// hibe groups only — btn/jwe groups use `tn_runtime_admin_add_recipient`.
 /// The returned string is owned by the caller and must be released with
 /// [`tn_string_free`]. Returns null on error. Use [`tn_last_error`] for

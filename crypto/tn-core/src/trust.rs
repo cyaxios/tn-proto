@@ -7,10 +7,12 @@
 //! decision-for-decision so the two SDKs accept and reject the same
 //! identities.
 
+use curve25519_dalek::edwards::CompressedEdwardsY;
 use ed25519_dalek::{Verifier as _, VerifyingKey};
 use serde_json::json;
-use sha2::{Digest as _, Sha256};
+use sha2::{Digest as _, Sha256, Sha512};
 use subtle::ConstantTimeEq as _;
+use zeroize::Zeroizing;
 
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
 
@@ -278,6 +280,30 @@ pub fn parse_ed25519_did_key(did: &str) -> Result<[u8; 32], TrustError> {
     Ok(out)
 }
 
+/// Convert a canonical Ed25519 `did:key` to its deterministic X25519
+/// `keyAgreement` public key using the same birational map as `did:key`.
+pub fn ed25519_did_to_x25519_public(did: &str) -> Result<[u8; 32], TrustError> {
+    let ed25519 = parse_ed25519_did_key(did)?;
+    CompressedEdwardsY(ed25519)
+        .decompress()
+        .map(|point| point.to_montgomery().to_bytes())
+        .ok_or_else(|| did_error("Ed25519 did:key cannot be converted to X25519"))
+}
+
+/// Derive the X25519 `keyAgreement` private scalar for an Ed25519 seed.
+///
+/// This is the deterministic `did:key` conversion also used for recipient
+/// sealing. The returned owner zeroizes the derived secret on drop.
+pub fn ed25519_seed_to_x25519_private(seed: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    let digest = Sha512::digest(seed);
+    let mut private = Zeroizing::new([0_u8; 32]);
+    private.copy_from_slice(&digest[..32]);
+    private[0] &= 248;
+    private[31] &= 127;
+    private[31] |= 64;
+    private
+}
+
 /// Strictly verify a 64-byte Ed25519 signature for `did`.
 ///
 /// The verification key is always the one embedded in the asserted DID; an
@@ -320,6 +346,7 @@ pub fn verify_ed25519_did_signature(
 mod tests {
     use super::*;
     use crate::DeviceKey;
+    use curve25519_dalek::montgomery::MontgomeryPoint;
 
     #[test]
     fn parse_rejects_non_canonical_payloads() {
@@ -360,5 +387,15 @@ mod tests {
                 .reason,
             TrustReason::SignatureInvalid
         );
+    }
+
+    #[test]
+    fn did_public_and_seed_private_convert_to_the_same_x25519_key() {
+        let seed = [3_u8; 32];
+        let device = DeviceKey::from_private_bytes(&seed).unwrap();
+        let private = ed25519_seed_to_x25519_private(&seed);
+        let public = MontgomeryPoint::mul_base_clamped(*private).to_bytes();
+
+        assert_eq!(ed25519_did_to_x25519_public(device.did()).unwrap(), public);
     }
 }

@@ -46,7 +46,8 @@ pub fn extract_x25519_key_agreement(
         .ok_or_else(|| binding_error("DID document has no keyAgreement relationship"))?;
     let mut found = Vec::new();
     let mut ids = HashSet::new();
-    for relation in relations {
+    let selected = selected_relationships(relations, verification_method_id)?;
+    for relation in selected {
         let method = resolve_relationship(object, relation)?;
         let Some(parsed) = parse_method(&method, expected_did)? else {
             continue;
@@ -59,6 +60,29 @@ pub fn extract_x25519_key_agreement(
         }
     }
     select_method(found, verification_method_id)
+}
+
+fn selected_relationships<'a>(
+    relations: &'a [Value],
+    requested: Option<&str>,
+) -> Result<Vec<&'a Value>, TrustError> {
+    let Some(requested) = requested else {
+        return Ok(relations.iter().collect());
+    };
+    let selected = relations
+        .iter()
+        .filter(|relation| relationship_id(relation) == Some(requested))
+        .collect::<Vec<_>>();
+    if selected.len() > 1 {
+        return Err(binding_error("duplicate keyAgreement verification method"));
+    }
+    Ok(selected)
+}
+
+fn relationship_id(relationship: &Value) -> Option<&str> {
+    relationship
+        .as_str()
+        .or_else(|| relationship.get("id").and_then(Value::as_str))
 }
 
 fn resolve_relationship(
@@ -126,16 +150,20 @@ fn decode_method_key(
     method: &Map<String, Value>,
     method_type: &str,
 ) -> Result<Option<[u8; 32]>, TrustError> {
-    let encodings = (method.get("publicKeyJwk"), method.get("publicKeyMultibase"));
+    let jwk = method.get("publicKeyJwk");
+    let multibase = method.get("publicKeyMultibase");
+    let base58 = method.get("publicKeyBase58");
     if !is_jwk_type(method_type) && !is_multikey_type(method_type) {
         return Ok(None);
     }
-    match encodings {
-        (Some(_), Some(_)) => Err(binding_error("keyAgreement method has two key encodings")),
-        (Some(jwk), None) if is_jwk_type(method_type) => decode_jwk(jwk),
-        (None, Some(multibase)) if is_multikey_type(method_type) => {
-            decode_multibase(multibase, method_type != "Multikey")
-        }
+    if [jwk, multibase, base58].into_iter().flatten().count() > 1 {
+        return Err(binding_error("keyAgreement method has two key encodings"));
+    }
+    match (method_type, jwk, multibase, base58) {
+        ("JsonWebKey" | "JsonWebKey2020", Some(value), None, None) => decode_jwk(value),
+        ("Multikey", None, Some(value), None) => decode_multibase(value, false),
+        ("X25519KeyAgreementKey2020", None, Some(value), None) => decode_multibase(value, true),
+        ("X25519KeyAgreementKey2019", None, None, Some(value)) => decode_base58(value).map(Some),
         _ => Err(binding_error(
             "unsupported X25519 keyAgreement method encoding",
         )),
@@ -218,6 +246,23 @@ fn decode_multibase(value: &Value, require_x25519: bool) -> Result<Option<[u8; 3
     bytes[2..]
         .try_into()
         .map(Some)
+        .map_err(|_| binding_error("invalid X25519 key length"))
+}
+
+fn decode_base58(value: &Value) -> Result<[u8; 32], TrustError> {
+    let encoded = value
+        .as_str()
+        .ok_or_else(|| binding_error("publicKeyBase58 must be a string"))?;
+    let bytes = bs58::decode(encoded)
+        .into_vec()
+        .map_err(|_| binding_error("publicKeyBase58 is not base58btc"))?;
+    if bs58::encode(&bytes).into_string() != encoded || bytes.len() != 32 {
+        return Err(binding_error(
+            "publicKeyBase58 must canonically encode exactly 32 raw bytes",
+        ));
+    }
+    bytes
+        .try_into()
         .map_err(|_| binding_error("invalid X25519 key length"))
 }
 

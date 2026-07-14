@@ -489,11 +489,11 @@ impl Runtime {
     /// (independently randomized) identity key — the authority master secret
     /// NEVER rides a kit. `id_path: None` keys the reader to the group's own
     /// sealing path; pass an ancestor path to hand out a key the reader can
-    /// delegate further down. When `reader_did` resolves to a real
-    /// `did:key:z...` Ed25519 DID the bundle body is sealed to it (a
-    /// plaintext kit is a bearer token); a placeholder DID stays plaintext by
-    /// necessity, exactly like Python's `recipient_key_is_resolvable` gate.
-    /// A supplied DID is recorded in `<group>.hibe.grants`.
+    /// delegate further down. `reader_did` must resolve to a real
+    /// `did:key:z...` Ed25519 DID, and the bundle body is always sealed to it
+    /// (a plaintext kit is a bearer token). Missing, abbreviated, and
+    /// non-canonical DIDs fail before any material is staged. A supplied DID
+    /// is recorded in `<group>.hibe.grants`.
     ///
     /// Granting is native to the cipher — no re-keying, no envelope rewrite,
     /// and no forward revocation of an admitted reader (rotate the identity
@@ -504,8 +504,8 @@ impl Runtime {
     ///
     /// - [`InvalidConfig`](crate::Error::InvalidConfig) if the group is
     ///   unknown, is not a hibe group (grant_reader is hibe-only — use
-    ///   add_recipient for btn/jwe groups), or `id_path` fails the boundary
-    ///   validation.
+    ///   add_recipient for btn/jwe groups), `reader_did` is not a complete
+    ///   convertible Ed25519 `did:key`, or `id_path` fails validation.
     /// - [`Cipher`](crate::Error::Cipher) when the scheme rejects the key
     ///   material or path, plus I/O errors from staging or writing the kit.
     #[cfg(feature = "hibe")]
@@ -516,6 +516,46 @@ impl Runtime {
         out_path: &Path,
         id_path: Option<&str>,
     ) -> Result<GrantReaderResult> {
+        self.validate_hibe_grant_group(group)?;
+        let reader_did = reader_did.ok_or_else(|| {
+            Error::InvalidConfig(
+                "tn.admin.grant_reader requires a complete Ed25519 did:key reader".into(),
+            )
+        })?;
+        crate::trust::ed25519_did_to_x25519_public(reader_did).map_err(|error| {
+            Error::InvalidConfig(format!(
+                "tn.admin.grant_reader requires a complete Ed25519 did:key reader: {}",
+                error.detail
+            ))
+        })?;
+        self.admin_grant_reader_inner(
+            group,
+            Some(reader_did),
+            out_path,
+            id_path,
+            vec![reader_did.to_string()],
+        )
+    }
+
+    /// Explicit compatibility path for an unsealed HIBE bearer kit.
+    ///
+    /// This method is intentionally named unsafe: anyone holding the package
+    /// can use the delegated HIBE key. Normal callers must use
+    /// [`Self::admin_grant_reader`].
+    #[cfg(feature = "hibe")]
+    pub fn admin_grant_reader_unsafe_plaintext(
+        &self,
+        group: &str,
+        reader_did: Option<&str>,
+        out_path: &Path,
+        id_path: Option<&str>,
+    ) -> Result<GrantReaderResult> {
+        self.validate_hibe_grant_group(group)?;
+        self.admin_grant_reader_inner(group, reader_did, out_path, id_path, Vec::new())
+    }
+
+    #[cfg(feature = "hibe")]
+    fn validate_hibe_grant_group(&self, group: &str) -> Result<()> {
         let spec = self.cfg.groups.get(group).ok_or_else(|| {
             Error::InvalidConfig(format!("tn.admin.grant_reader: unknown group: {group:?}"))
         })?;
@@ -526,25 +566,24 @@ impl Runtime {
                 spec.cipher
             )));
         }
+        Ok(())
+    }
 
+    #[cfg(feature = "hibe")]
+    fn admin_grant_reader_inner(
+        &self,
+        group: &str,
+        reader_did: Option<&str>,
+        out_path: &Path,
+        id_path: Option<&str>,
+        seal_for_recipients: Vec<String>,
+    ) -> Result<GrantReaderResult> {
         let td = tempfile::Builder::new()
             .prefix("tn-grant-reader-")
             .tempdir()
             .map_err(Error::Io)?;
         let target_path =
             self.stage_hibe_reader_bundle_material(group, reader_did, td.path(), id_path)?;
-
-        // Seal the bundle body to the reader's device key when the DID
-        // resolves (Python: recipient_key_is_resolvable). A stub DID with no
-        // embedded key can't be sealed to, so it stays plaintext.
-        let seal_for_recipients = match reader_did {
-            Some(did)
-                if crate::recipient_seal::normalize_recipient_dids(&[did.to_string()]).is_ok() =>
-            {
-                vec![did.to_string()]
-            }
-            _ => Vec::new(),
-        };
 
         let opts = crate::runtime_export::ExportOptions {
             kind: Some(crate::tnpkg::ManifestKind::KitBundle),
@@ -576,6 +615,20 @@ impl Runtime {
     /// Always returns [`NotImplemented`](crate::Error::NotImplemented).
     #[cfg(not(feature = "hibe"))]
     pub fn admin_grant_reader(
+        &self,
+        _group: &str,
+        _reader_did: Option<&str>,
+        _out_path: &Path,
+        _id_path: Option<&str>,
+    ) -> Result<GrantReaderResult> {
+        Err(Error::NotImplemented(
+            "admin_grant_reader: cipher=hibe kit minting requires tn-core's hibe feature",
+        ))
+    }
+
+    /// Explicit plaintext compatibility grant — unavailable without HIBE.
+    #[cfg(not(feature = "hibe"))]
+    pub fn admin_grant_reader_unsafe_plaintext(
         &self,
         _group: &str,
         _reader_did: Option<&str>,

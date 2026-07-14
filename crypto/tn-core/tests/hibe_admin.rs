@@ -106,6 +106,26 @@ fn write_reader_dir(root: &Path, cer: &HibeCeremony, idpath: &str, key_path: &st
 // ---------------------------------------------------------------------------
 
 #[test]
+fn grant_reader_rejects_missing_or_noncanonical_did_before_staging() {
+    let td = tempfile::tempdir().unwrap();
+    let cer = setup_hibe_authority(td.path(), "acme/objects");
+    let rt = Runtime::init(&cer.yaml_path).unwrap();
+
+    for (name, did) in [
+        ("missing", None),
+        ("abbreviated", Some("did:key:z6Mk-reader")),
+    ] {
+        let out = td.path().join(format!("{name}.tnpkg"));
+        let error = rt
+            .admin_grant_reader("default", did, &out, None)
+            .expect_err("normal grants require a complete Ed25519 did:key");
+        assert!(error.to_string().contains("Ed25519 did:key"), "{error}");
+        assert!(!out.exists());
+    }
+    assert!(!cer.keystore.join("default.hibe.grants").exists());
+}
+
+#[test]
 fn grant_reader_kit_absorbs_and_opens_sealed_content() {
     let td_a = tempfile::tempdir().unwrap();
     let cer = setup_hibe_authority(td_a.path(), "acme/objects");
@@ -145,6 +165,15 @@ fn grant_reader_kit_absorbs_and_opens_sealed_content() {
 
     // The authority master secret never rides a kit.
     let bytes = std::fs::read(&kit_path).unwrap();
+    let (manifest, body) =
+        tn_core::tnpkg::read_tnpkg_verified(tn_core::tnpkg::TnpkgSource::Bytes(&bytes)).unwrap();
+    assert!(manifest
+        .state
+        .as_ref()
+        .and_then(|state| state.get("body_encryption"))
+        .is_some());
+    assert!(body.contains_key("body/encrypted.bin"));
+    assert!(!body.contains_key("body/default.hibe.sk"));
     let mut zf = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let names: Vec<String> = (0..zf.len())
         .map(|i| zf.by_index(i).unwrap().name().to_string())
@@ -153,6 +182,14 @@ fn grant_reader_kit_absorbs_and_opens_sealed_content() {
         !names.iter().any(|n| n.ends_with(".hibe.msk")),
         "msk must never ride a kit: {names:?}"
     );
+
+    // A different device cannot unwrap or install the bearer capability.
+    let td_c = tempfile::tempdir().unwrap();
+    let cer_c = setup_minimal_btn_ceremony(td_c.path());
+    let rt_c = Runtime::init(&cer_c.yaml_path).unwrap();
+    let rejected = rt_c.absorb(AbsorbSource::Path(&kit_path)).unwrap();
+    assert_eq!(rejected.legacy_status, "rejected");
+    assert!(rejected.legacy_reason.contains("sealed-box wrap"));
 
     // Reader absorbs the kit and opens the sealed object via the key bag.
     let rt_b = Runtime::init(&cer_b.yaml_path).unwrap();
@@ -179,11 +216,11 @@ fn grant_reader_custom_ancestor_id_path_derives_down() {
         )
         .unwrap();
 
-    // Grant the ANCESTOR path to a stub (non-resolvable) DID: the bundle
-    // stays plaintext by necessity, so the staged files are inspectable.
+    // Use the explicitly unsafe compatibility path for a stub DID so the
+    // delegated ancestor key remains inspectable in this boundary test.
     let stub_kit = td_a.path().join("dept-stub.tnpkg");
     let result = rt
-        .admin_grant_reader(
+        .admin_grant_reader_unsafe_plaintext(
             "default",
             Some("did:key:z6Mk-dept"),
             &stub_kit,
@@ -245,7 +282,7 @@ fn grant_reader_rejects_invalid_custom_id_path() {
     let cer = setup_hibe_authority(td.path(), "acme/objects");
     let rt = Runtime::init(&cer.yaml_path).unwrap();
     let err = rt
-        .admin_grant_reader(
+        .admin_grant_reader_unsafe_plaintext(
             "default",
             Some("did:key:zR"),
             &td.path().join("x.tnpkg"),
@@ -292,14 +329,14 @@ fn grant_records_match_python_grants_file_format() {
     let cer = setup_hibe_authority(td.path(), "acme/objects");
     let rt = Runtime::init(&cer.yaml_path).unwrap();
 
-    rt.admin_grant_reader(
+    rt.admin_grant_reader_unsafe_plaintext(
         "default",
         Some("did:key:z6Mk-reader-one"),
         &td.path().join("one.tnpkg"),
         None,
     )
     .unwrap();
-    rt.admin_grant_reader(
+    rt.admin_grant_reader_unsafe_plaintext(
         "default",
         Some("did:key:z6Mk-reader-two"),
         &td.path().join("two.tnpkg"),
@@ -308,7 +345,7 @@ fn grant_records_match_python_grants_file_format() {
     .unwrap();
     // Re-granting an existing reader replaces their row (moves to the end),
     // exactly like Python's _hibe_grants_update.
-    rt.admin_grant_reader(
+    rt.admin_grant_reader_unsafe_plaintext(
         "default",
         Some("did:key:z6Mk-reader-one"),
         &td.path().join("one-again.tnpkg"),
@@ -566,7 +603,7 @@ fn rotated_keystore_grants_fresh_reader_on_new_path() {
     let cer = setup_hibe_authority(td.path(), "acme/objects");
     let rt = Runtime::init(&cer.yaml_path).unwrap();
 
-    rt.admin_grant_reader(
+    rt.admin_grant_reader_unsafe_plaintext(
         "default",
         Some("did:key:z6Mk-old"),
         &td.path().join("old.tnpkg"),
@@ -575,7 +612,7 @@ fn rotated_keystore_grants_fresh_reader_on_new_path() {
     .unwrap();
     rt.admin_rotate_id_path("default", "acme/objects~r1", false)
         .unwrap();
-    rt.admin_grant_reader(
+    rt.admin_grant_reader_unsafe_plaintext(
         "default",
         Some("did:key:z6Mk-new"),
         &td.path().join("new.tnpkg"),

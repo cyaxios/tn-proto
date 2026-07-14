@@ -4,8 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
+use sha2::{Digest as _, Sha512};
 use tn_core::tnpkg::TnpkgSource;
 use tn_proto::enrollment::{self, AbsorbOptionsV1};
 use tn_proto::{
@@ -71,6 +70,12 @@ fn jwe_yaml(ceremony: &str, did: &str, log: &str) -> String {
          \x20   recipients: []\n\
          \x20   fields: [message]\n\
          \x20   index_epoch: 0\n\
+         \x20 secondary:\n\
+         \x20   policy: private\n\
+         \x20   cipher: jwe\n\
+         \x20   recipients: []\n\
+         \x20   fields: []\n\
+         \x20   index_epoch: 0\n\
          fields: {{}}\n\
          llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n"
     )
@@ -107,14 +112,19 @@ fn did_document_binding(
     key: &JweReaderKeyInfo,
     scope: JweBindingScope,
 ) -> VerifiedJweRecipient {
-    let method = format!("{}#jwe-key-1", reader.did());
+    let expected_public = did_key_agreement_public(reader);
+    assert_eq!(key.public_key, expected_public);
+    let mut multicodec = vec![0xec, 0x01];
+    multicodec.extend_from_slice(&expected_public);
+    let multibase = format!("z{}", bs58::encode(multicodec).into_string());
+    let method = format!("{}#{multibase}", reader.did());
     let document = serde_json::json!({
         "id": reader.did(),
         "verificationMethod": [{
             "id": method,
-            "type": "JsonWebKey2020",
+            "type": "Multikey",
             "controller": reader.did(),
-            "publicKeyJwk": {"kty": "OKP", "crv": "X25519", "x": URL_SAFE_NO_PAD.encode(key.public_key)},
+            "publicKeyMultibase": multibase,
         }],
         "keyAgreement": [method],
     });
@@ -127,6 +137,20 @@ fn did_document_binding(
         &enrollment::sha256_tagged(b"authenticated resolution result"),
     )
     .expect("DID-document binding")
+}
+
+fn did_key_agreement_public(reader: &Tn) -> [u8; 32] {
+    let seed: [u8; 32] = fs::read(keystore(reader).join("local.private"))
+        .expect("device seed")
+        .try_into()
+        .expect("32-byte device seed");
+    let digest = Sha512::digest(seed);
+    let mut private = [0_u8; 32];
+    private.copy_from_slice(&digest[..32]);
+    private[0] &= 248;
+    private[31] &= 127;
+    private[31] |= 64;
+    enrollment::x25519_public_key(&private)
 }
 
 fn fingerprint_binding(
@@ -166,7 +190,10 @@ fn assert_round_trip(route: DirectRoute) -> tn_proto::Result<()> {
     let temp = tempfile::tempdir()?;
     let publisher = publisher(&temp.path().join("publisher"));
     let reader = reader(&temp.path().join("reader"), &publisher);
-    let key = reader.pkg().prepare_jwe_reader_key("partners")?;
+    let key = match route {
+        DirectRoute::DidDocument => reader.pkg().prepare_jwe_did_key_agreement_key("partners")?,
+        DirectRoute::Fingerprint => reader.pkg().prepare_jwe_reader_key("partners")?,
+    };
     let binding = binding(route, &publisher, &reader, &key);
     let out = temp.path().join("activation");
     let prepared = publisher.pkg().prepare_recipient(
@@ -205,7 +232,10 @@ fn assert_activation(
     );
     assert_registry(publisher, binding)?;
     approve(reader, publisher, binding);
+    let expectation_path = keystore(reader).join("trust/jwe_activation_expectations.v1.json");
+    let first_approval = fs::read(&expectation_path)?;
     approve(reader, publisher, binding);
+    assert_eq!(fs::read(expectation_path)?, first_approval);
     let receipt = reader.pkg().absorb_with_options(
         tn_core::AbsorbSource::Path(&activation.package.path),
         AbsorbOptionsV1::default(),
@@ -427,5 +457,53 @@ fn zero_activation_ttl_fails_before_output_writes() -> tn_proto::Result<()> {
 
     assert!(result.is_err());
     assert!(!out.exists());
+    Ok(())
+}
+
+#[test]
+fn existing_non_did_derived_reader_key_fails_closed() -> tn_proto::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let publisher = publisher(&temp.path().join("publisher"));
+    let reader = reader(&temp.path().join("reader"), &publisher);
+    fs::write(keystore(&reader).join("partners.jwe.mykey"), [0x99_u8; 32])?;
+
+    let error = reader
+        .pkg()
+        .prepare_jwe_did_key_agreement_key("partners")
+        .expect_err("unrelated existing JWE key must not impersonate the reader DID");
+
+    assert!(error.to_string().contains("does not match"));
+    Ok(())
+}
+
+#[test]
+fn default_reader_keys_are_independent_per_group() -> tn_proto::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let publisher = publisher(&temp.path().join("publisher"));
+    let reader = reader(&temp.path().join("reader"), &publisher);
+
+    let partners = reader.pkg().prepare_jwe_reader_key("partners")?;
+    let secondary = reader.pkg().prepare_jwe_reader_key("secondary")?;
+
+    assert_ne!(partners.public_key, secondary.public_key);
+    Ok(())
+}
+
+#[test]
+fn did_key_agreement_preparation_reuses_exact_derived_key() -> tn_proto::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let publisher = publisher(&temp.path().join("publisher"));
+    let reader = reader(&temp.path().join("reader"), &publisher);
+
+    let first = reader.pkg().prepare_jwe_did_key_agreement_key("partners")?;
+    let stored = fs::read(keystore(&reader).join("partners.jwe.mykey"))?;
+    let second = reader.pkg().prepare_jwe_did_key_agreement_key("partners")?;
+
+    assert_eq!(first, second);
+    assert_eq!(
+        fs::read(keystore(&reader).join("partners.jwe.mykey"))?,
+        stored
+    );
+    assert_eq!(first.public_key, did_key_agreement_public(&reader));
     Ok(())
 }

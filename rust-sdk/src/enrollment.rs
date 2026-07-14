@@ -267,6 +267,33 @@ pub(crate) fn ensure_reader_mykey(tn: &Tn, group: &str) -> Result<[u8; 32]> {
     Ok(x25519_public_key(&private))
 }
 
+/// Prepare the deterministic X25519 keyAgreement key for this Ed25519
+/// `did:key`, refusing to overwrite an independently generated group key.
+pub(crate) fn ensure_did_key_reader_mykey(tn: &Tn, group: &str) -> Result<[u8; 32]> {
+    let device = device_key(tn)?;
+    let seed = Zeroizing::new(device.private_bytes());
+    let private = tn_core::trust::ed25519_seed_to_x25519_private(&seed);
+    let public = x25519_public_key(&private);
+    let did_public = tn_core::trust::ed25519_did_to_x25519_public(tn.did()).map_err(trust_err)?;
+    if public != did_public {
+        return Err(Error::InvalidArgument(
+            "derived JWE keyAgreement key does not match the configured reader DID".into(),
+        ));
+    }
+    let path = keystore_dir(tn)?.join(format!("{group}.jwe.mykey"));
+    if path.exists() {
+        if *read_x25519_private(&path)? != *private {
+            return Err(Error::InvalidArgument(format!(
+                "{} does not match the reader DID keyAgreement key; use a different group or remove it only after preserving any data encrypted to the existing key",
+                path.display()
+            )));
+        }
+    } else {
+        write_secret_file(&path, &private[..])?;
+    }
+    Ok(public)
+}
+
 fn read_x25519_private(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     let bytes = Zeroizing::new(fs::read(path)?);
     bytes
@@ -523,15 +550,14 @@ fn persist_activation_expectation(
 ) -> Result<()> {
     let now = SystemTime::now();
     let mut document = read_activation_expectations(tn)?;
-    if document
-        .expectations
-        .get(&options.binding_digest)
-        .is_some_and(|existing| !same_activation_scope(existing, tn, options))
-    {
-        return Err(trust_err(TrustError::new(
-            TrustReason::ReplayConflict,
-            "binding digest already has a different direct activation approval",
-        )));
+    if let Some(existing) = document.expectations.get(&options.binding_digest) {
+        if !same_activation_scope(existing, tn, options) {
+            return Err(trust_err(TrustError::new(
+                TrustReason::ReplayConflict,
+                "binding digest already has a different direct activation approval",
+            )));
+        }
+        return Ok(());
     }
     let incoming = ActivationExpectationRecordV1 {
         publisher_did: options.publisher_did.clone(),
