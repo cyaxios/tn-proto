@@ -106,7 +106,7 @@ fn export_kit_bundle_only() {
 }
 
 #[test]
-fn export_kit_bundle_includes_jwe_and_hibe_reader_material() {
+fn export_kit_bundle_excludes_jwe_private_key_and_keeps_transferable_kits() {
     let td = tempfile::tempdir().unwrap();
     let cer = common::setup_minimal_btn_ceremony(td.path());
     let rt = Runtime::init(&cer.yaml_path).unwrap();
@@ -127,7 +127,8 @@ fn export_kit_bundle_includes_jwe_and_hibe_reader_material() {
     let (_manifest, body) = read_tnpkg(TnpkgSource::Path(&out)).unwrap();
 
     assert!(body.contains_key("body/default.btn.mykit"));
-    assert!(body.contains_key("body/default.jwe.mykey"));
+    assert!(!body.contains_key("body/default.jwe.mykey"));
+    assert!(body.values().all(|bytes| bytes.as_slice() != [0x33u8; 32]));
     assert!(body.contains_key("body/default.hibe.mpk"));
     assert!(body.contains_key("body/default.hibe.idpath"));
     assert!(body.contains_key("body/default.hibe.sk"));

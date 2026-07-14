@@ -8,6 +8,9 @@
 //! identities.
 
 use ed25519_dalek::{Verifier as _, VerifyingKey};
+use serde_json::json;
+use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq as _;
 
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
 
@@ -170,6 +173,64 @@ pub struct AcceptedOffer {
     pub offer_digest: String,
     /// `sha256:<hex>` over the exact retained `.tnpkg` bytes.
     pub artifact_digest: String,
+    /// Construction seal set only by the verified enrollment store.
+    integrity_digest: String,
+}
+
+impl AcceptedOffer {
+    pub(crate) fn new_verified(
+        binding: VerifiedJweBinding,
+        offer_digest: String,
+        artifact_digest: String,
+    ) -> Self {
+        let mut accepted = Self {
+            binding,
+            offer_digest,
+            artifact_digest,
+            integrity_digest: String::new(),
+        };
+        accepted.integrity_digest = accepted_offer_integrity(&accepted);
+        accepted
+    }
+
+    /// Reject mutation of any field after verified store promotion.
+    pub fn validate_integrity(&self) -> Result<(), TrustError> {
+        let expected = accepted_offer_integrity(self);
+        if expected.len() == self.integrity_digest.len()
+            && bool::from(expected.as_bytes().ct_eq(self.integrity_digest.as_bytes()))
+        {
+            Ok(())
+        } else {
+            Err(TrustError::new(
+                TrustReason::BindingInvalid,
+                "accepted offer no longer matches its verified promotion",
+            ))
+        }
+    }
+}
+
+fn accepted_offer_integrity(accepted: &AcceptedOffer) -> String {
+    let binding = &accepted.binding;
+    let principal = &binding.principal;
+    let value = json!({
+        "reader_did": principal.did,
+        "purpose": principal.purpose,
+        "audience_did": principal.audience_did,
+        "ceremony_id": principal.ceremony_id,
+        "group": principal.group,
+        "principal_proof_digest": principal.proof_digest,
+        "issued_at": principal.issued_at,
+        "expires_at": principal.expires_at,
+        "public_key_hex": hex::encode(binding.public_key),
+        "public_key_sha256": binding.public_key_sha256,
+        "binding_proof_digest": binding.proof_digest,
+        "challenge_digest": binding.challenge_digest,
+        "offer_digest": accepted.offer_digest,
+        "artifact_digest": accepted.artifact_digest,
+    });
+    let bytes = crate::canonical::canonical_bytes(&value)
+        .expect("accepted offer integrity contains only canonical JSON values");
+    format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
 fn did_error(detail: impl Into<String>) -> TrustError {

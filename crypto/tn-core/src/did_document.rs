@@ -48,7 +48,9 @@ pub fn extract_x25519_key_agreement(
     let mut ids = HashSet::new();
     for relation in relations {
         let method = resolve_relationship(object, relation)?;
-        let parsed = parse_method(&method, expected_did)?;
+        let Some(parsed) = parse_method(&method, expected_did)? else {
+            continue;
+        };
         if !ids.insert(parsed.verification_method_id.clone()) {
             return Err(binding_error("duplicate keyAgreement verification method"));
         }
@@ -92,7 +94,7 @@ fn resolve_relationship(
 fn parse_method(
     method: &Map<String, Value>,
     expected_did: &str,
-) -> Result<ResolvedX25519KeyAgreement, TrustError> {
+) -> Result<Option<ResolvedX25519KeyAgreement>, TrustError> {
     let id = required_string(method, "id")?;
     if !id.starts_with(&format!("{expected_did}#")) {
         return Err(binding_error(
@@ -105,30 +107,42 @@ fn parse_method(
         ));
     }
     let method_type = required_string(method, "type")?;
-    let public_key = match (method.get("publicKeyJwk"), method.get("publicKeyMultibase")) {
-        (Some(jwk), None) if is_jwk_type(method_type) => decode_jwk(jwk)?,
-        (None, Some(multibase)) if is_multikey_type(method_type) => decode_multibase(multibase)?,
-        (Some(_), Some(_)) => {
-            return Err(binding_error("keyAgreement method has two key encodings"))
-        }
-        _ => {
-            return Err(binding_error(
-                "unsupported X25519 keyAgreement method encoding",
-            ))
-        }
+    let public_key = decode_method_key(method, method_type)?;
+    let Some(public_key) = public_key else {
+        return Ok(None);
     };
     if public_key == [0; 32] {
         return Err(binding_error("X25519 public key must not be all zero"));
     }
-    Ok(ResolvedX25519KeyAgreement {
+    Ok(Some(ResolvedX25519KeyAgreement {
         did: expected_did.to_string(),
         verification_method_id: id.to_string(),
         public_key,
         public_key_sha256: sha256_tagged(&public_key),
-    })
+    }))
 }
 
-fn decode_jwk(value: &Value) -> Result<[u8; 32], TrustError> {
+fn decode_method_key(
+    method: &Map<String, Value>,
+    method_type: &str,
+) -> Result<Option<[u8; 32]>, TrustError> {
+    let encodings = (method.get("publicKeyJwk"), method.get("publicKeyMultibase"));
+    if !is_jwk_type(method_type) && !is_multikey_type(method_type) {
+        return Ok(None);
+    }
+    match encodings {
+        (Some(_), Some(_)) => Err(binding_error("keyAgreement method has two key encodings")),
+        (Some(jwk), None) if is_jwk_type(method_type) => decode_jwk(jwk),
+        (None, Some(multibase)) if is_multikey_type(method_type) => {
+            decode_multibase(multibase, method_type != "Multikey")
+        }
+        _ => Err(binding_error(
+            "unsupported X25519 keyAgreement method encoding",
+        )),
+    }
+}
+
+fn decode_jwk(value: &Value) -> Result<Option<[u8; 32]>, TrustError> {
     let jwk = value
         .as_object()
         .ok_or_else(|| binding_error("publicKeyJwk must be an object"))?;
@@ -137,11 +151,14 @@ fn decode_jwk(value: &Value) -> Result<[u8; 32], TrustError> {
             "publicKeyJwk must not contain private key material",
         ));
     }
-    if jwk.get("kty").and_then(Value::as_str) != Some("OKP")
-        || jwk.get("crv").and_then(Value::as_str) != Some("X25519")
-    {
-        return Err(binding_error("publicKeyJwk must be an OKP X25519 key"));
-    }
+    let kty = jwk
+        .get("kty")
+        .and_then(Value::as_str)
+        .ok_or_else(|| binding_error("publicKeyJwk.kty must be a string"))?;
+    let crv = jwk
+        .get("crv")
+        .and_then(Value::as_str)
+        .ok_or_else(|| binding_error("publicKeyJwk.crv must be a string"))?;
     let encoded = jwk
         .get("x")
         .and_then(Value::as_str)
@@ -152,15 +169,22 @@ fn decode_jwk(value: &Value) -> Result<[u8; 32], TrustError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(encoded)
         .map_err(|_| binding_error("publicKeyJwk.x is not canonical base64url"))?;
-    if URL_SAFE_NO_PAD.encode(&bytes) != encoded || bytes.len() != 32 {
+    if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
+        return Err(binding_error("publicKeyJwk.x is not canonical base64url"));
+    }
+    if kty != "OKP" || crv != "X25519" {
+        return Ok(None);
+    }
+    if bytes.len() != 32 {
         return Err(binding_error("publicKeyJwk.x must encode exactly 32 bytes"));
     }
     bytes
         .try_into()
+        .map(Some)
         .map_err(|_| binding_error("invalid X25519 key length"))
 }
 
-fn decode_multibase(value: &Value) -> Result<[u8; 32], TrustError> {
+fn decode_multibase(value: &Value, require_x25519: bool) -> Result<Option<[u8; 32]>, TrustError> {
     let encoded = value
         .as_str()
         .ok_or_else(|| binding_error("publicKeyMultibase must be a string"))?;
@@ -175,13 +199,25 @@ fn decode_multibase(value: &Value) -> Result<[u8; 32], TrustError> {
             "publicKeyMultibase is not canonical base58btc",
         ));
     }
-    if bytes.len() != 34 || bytes[..2] != [0xec, 0x01] {
+    if bytes.len() < 2 {
+        return Err(binding_error("publicKeyMultibase has no multicodec prefix"));
+    }
+    if bytes[..2] != [0xec, 0x01] {
+        if require_x25519 {
+            return Err(binding_error(
+                "publicKeyMultibase must contain x25519-pub bytes",
+            ));
+        }
+        return Ok(None);
+    }
+    if bytes.len() != 34 {
         return Err(binding_error(
             "publicKeyMultibase must contain x25519-pub bytes",
         ));
     }
     bytes[2..]
         .try_into()
+        .map(Some)
         .map_err(|_| binding_error("invalid X25519 key length"))
 }
 

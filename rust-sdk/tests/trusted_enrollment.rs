@@ -106,11 +106,38 @@ fn device_key(tn: &Tn) -> tn_core::DeviceKey {
     tn_core::DeviceKey::from_private_bytes(&seed).expect("device key")
 }
 
+fn jwe_tn(root: &Path) -> Tn {
+    let keystore = root.join(".tn/keys");
+    fs::create_dir_all(&keystore).expect("keystore dir");
+    let device = tn_core::DeviceKey::generate();
+    fs::write(keystore.join("local.private"), device.private_bytes()).expect("device key");
+    fs::write(keystore.join("index_master.key"), [0x31_u8; 32]).expect("index key");
+    let yaml = format!(
+        "ceremony: {{id: cer_jwe_enrollment, mode: local, cipher: jwe}}\n\
+         keystore: {{path: ./.tn/keys}}\n\
+         device: {{device_identity: \"{}\"}}\n\
+         public_fields: []\n\
+         default_policy: private\n\
+         groups:\n\
+         \x20 default:\n\
+         \x20   policy: private\n\
+         \x20   cipher: jwe\n\
+         \x20   recipients: []\n\
+         \x20   index_epoch: 0\n\
+         fields: {{}}\n\
+         llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
+        device.did()
+    );
+    let yaml_path = root.join("tn.yaml");
+    fs::write(&yaml_path, yaml).expect("yaml");
+    Tn::init(yaml_path).expect("JWE ceremony")
+}
+
 #[test]
 fn jwe_enrollment_lifecycle_completes_through_response_install() -> tn_proto::Result<()> {
-    let publisher = Tn::ephemeral()?;
-    let reader = Tn::ephemeral()?;
     let td = tempfile::tempdir().expect("tempdir");
+    let publisher = jwe_tn(&td.path().join("publisher"));
+    let reader = jwe_tn(&td.path().join("reader"));
 
     // 1. Publisher pre-authorizes the exact reader and issues a signed
     //    one-time challenge. The challenge is durably retained.

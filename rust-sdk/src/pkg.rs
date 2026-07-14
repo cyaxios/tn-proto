@@ -47,7 +47,8 @@ use sha2::{Digest, Sha256};
 
 mod recipient_preparation;
 pub use recipient_preparation::{
-    JweActivationResult, PrepareRecipientOptions, PrepareRecipientResult,
+    ApproveJweActivationOptions, JweActivationResult, JweReaderKeyInfo, PrepareRecipientOptions,
+    PrepareRecipientResult,
 };
 
 /// Runtime package namespace for a [`Tn`] handle.
@@ -297,7 +298,7 @@ impl<'a> Package<'a> {
             return Err(Error::InvalidArgument("group must not be empty".into()));
         }
         let device = crate::enrollment::device_key(self.tn)?;
-        let (_private, public) = crate::enrollment::ensure_reader_mykey(self.tn, &options.group)?;
+        let public = crate::enrollment::ensure_reader_mykey(self.tn, &options.group)?;
         let ceremony_id = match &options.challenge {
             Some(challenge) => challenge.ceremony_id.clone(),
             None => crate::enrollment::ceremony_id(self.tn)?,
@@ -361,64 +362,79 @@ impl<'a> Package<'a> {
         options: crate::enrollment::CompileEnrolmentOptionsV1,
     ) -> Result<CompiledPackage> {
         use crate::enrollment::{trust_err, TrustError, TrustReason};
-
-        let device = crate::enrollment::device_key(self.tn)?;
-        let ceremony_id = crate::enrollment::ceremony_id(self.tn)?;
-        let accepted = &options.accepted_offer;
-        let principal = &accepted.binding.principal;
-        if principal.audience_did != device.did() {
-            return Err(trust_err(TrustError::new(
-                TrustReason::WrongRecipient,
-                "accepted offer is addressed to a different publisher",
-            )));
-        }
-        if principal.ceremony_id != ceremony_id
-            || principal.group != options.group
-            || !self.tn.group_names().contains(&options.group)
-        {
-            return Err(trust_err(TrustError::new(
-                TrustReason::ScopeMismatch,
-                "accepted offer ceremony or group does not match",
-            )));
-        }
-        if principal.did != options.reader_did {
+        let binding = tn_core::jwe_binding::VerifiedJweRecipient::from_accepted_offer(
+            &options.accepted_offer,
+        )
+        .map_err(trust_err)?;
+        if binding.reader_did != options.reader_did {
             return Err(trust_err(TrustError::new(
                 TrustReason::DidSignerMismatch,
                 "accepted offer binds a different reader DID",
             )));
         }
+        if binding.group != options.group {
+            return Err(trust_err(TrustError::new(
+                TrustReason::ScopeMismatch,
+                "accepted offer group does not match",
+            )));
+        }
+        let activation_reference = binding.activation_reference_digest().to_string();
+        self.compile_jwe_activation_v1(
+            &binding,
+            &activation_reference,
+            options.out_path,
+            options.ttl,
+        )
+    }
 
+    pub(crate) fn compile_jwe_activation_v1(
+        &self,
+        binding: &tn_core::jwe_binding::VerifiedJweRecipient,
+        activation_reference_digest: &str,
+        out_path: PathBuf,
+        ttl: Duration,
+    ) -> Result<CompiledPackage> {
+        crate::admin::validate_jwe_binding_for_tn(self.tn, &binding.group, binding)?;
+        if ttl.is_zero() {
+            return Err(Error::InvalidArgument(
+                "JWE activation ttl must be greater than zero".into(),
+            ));
+        }
+        let device = crate::enrollment::device_key(self.tn)?;
         let now = SystemTime::now();
-        let issued_at = crate::enrollment::canonical_utc_timestamp(now).map_err(trust_err)?;
-        let expires_at =
-            crate::enrollment::canonical_utc_timestamp(now + options.ttl).map_err(trust_err)?;
+        let issued_at = crate::enrollment::canonical_utc_timestamp(now)
+            .map_err(crate::enrollment::trust_err)?;
+        let expires_at = crate::enrollment::canonical_utc_timestamp(now + ttl)
+            .map_err(crate::enrollment::trust_err)?;
         let response = crate::enrollment::EnrollmentResponseV1 {
             version: 1,
             kind: "tn-enrollment-response".into(),
             publisher_did: device.did().to_string(),
-            reader_did: options.reader_did.clone(),
-            ceremony_id,
-            group: options.group.clone(),
-            accepted_offer_digest: accepted.offer_digest.clone(),
-            x25519_public_key_sha256: accepted.binding.public_key_sha256.clone(),
-            // The first admitted epoch for this reader. A managed-JWE
-            // publisher runtime stamps its live group epoch here.
-            group_epoch: 1,
+            reader_did: binding.reader_did.clone(),
+            ceremony_id: binding.ceremony_id.clone(),
+            group: binding.group.clone(),
+            accepted_offer_digest: activation_reference_digest.to_string(),
+            x25519_public_key_sha256: binding.public_key_sha256.clone(),
+            group_epoch: self.tn.runtime().group_index_epoch(&binding.group)?,
             issued_at,
             expires_at,
             signature_b64: String::new(),
         }
         .signed(&device)
-        .map_err(trust_err)?;
+        .map_err(crate::enrollment::trust_err)?;
 
         let bytes =
             tn_core::trusted_enrollment::build_enrollment_response_artifact(&response, &device)
-                .map_err(trust_err)?;
-        if let Some(parent) = options.out_path.parent() {
+                .map_err(crate::enrollment::trust_err)?;
+        if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        tn_core::keystore_backend::atomic_write_bytes(&options.out_path, &bytes)?;
-        compiled_package_receipt(&options.out_path, options.reader_did, vec![options.group])
+        tn_core::keystore_backend::atomic_write_bytes(&out_path, &bytes)?;
+        compiled_package_receipt(
+            &out_path,
+            binding.reader_did.clone(),
+            vec![binding.group.clone()],
+        )
     }
 
     /// Absorb a `.tnpkg` with explicit version-1 trust options.

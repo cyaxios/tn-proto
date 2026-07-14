@@ -1153,7 +1153,8 @@ pub struct EnrollmentResponseV1 {
     pub ceremony_id: String,
     /// Group scope.
     pub group: String,
-    /// Digest of the accepted canonical offer statement.
+    /// Enrollment correlation digest: the accepted offer digest for offer
+    /// routes, or the verified binding digest for direct routes.
     pub accepted_offer_digest: String,
     /// Digest of the admitted X25519 public key.
     pub x25519_public_key_sha256: String,
@@ -1310,7 +1311,7 @@ pub struct ResponseExpectation {
     pub ceremony_id: String,
     /// Expected group scope.
     pub group: String,
-    /// The reader's retained offer digest.
+    /// Expected enrollment correlation digest (offer or direct binding).
     pub offer_digest: String,
     /// Digest of the reader's own X25519 public key.
     pub public_key_sha256: String,
@@ -1361,7 +1362,9 @@ pub fn verify_enrollment_response(
         TrustReason::BindingInvalid,
     )?;
     if response.accepted_offer_digest != expected.offer_digest {
-        return Err(binding_invalid("response names a different accepted offer"));
+        return Err(binding_invalid(
+            "response names a different enrollment correlation digest",
+        ));
     }
     if response.x25519_public_key_sha256 != expected.public_key_sha256 {
         return Err(binding_invalid("response names a different X25519 key"));
@@ -1378,9 +1381,8 @@ pub fn verify_enrollment_response(
 
 /// Match an incoming response to the reader's retained enrollment scope.
 ///
-/// A response naming a different accepted offer belongs to another enrollment
-/// entirely; install-level classification reports that as `scope_mismatch`
-/// before per-field verification runs.
+/// The correlation digest names either a retained offer or an explicitly
+/// approved direct binding. A mismatch belongs to another enrollment entirely.
 ///
 /// # Errors
 ///
@@ -1394,7 +1396,7 @@ pub fn match_response_to_retained_offer(
     } else {
         Err(err(
             TrustReason::ScopeMismatch,
-            "response names an offer outside this enrollment scope",
+            "response names a correlation digest outside this enrollment scope",
         ))
     }
 }
@@ -2969,11 +2971,11 @@ mod store {
                     &canonical_json_line(&self.accepted_record(verified))?,
                 )?;
             }
-            Ok(AcceptedOffer {
-                binding: verified.binding.clone(),
-                offer_digest: verified.offer_digest.clone(),
-                artifact_digest: verified.artifact_digest.clone(),
-            })
+            Ok(AcceptedOffer::new_verified(
+                verified.binding.clone(),
+                verified.offer_digest.clone(),
+                verified.artifact_digest.clone(),
+            ))
         }
 
         fn is_approved_exact(&self, verified: &VerifiedOffer) -> Result<bool, TrustError> {

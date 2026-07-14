@@ -81,12 +81,13 @@ pub use inbox::{
     MintInvitationOptions, MintInvitationResult,
 };
 pub use pkg::{
-    AbsorbReceipt, AbsorbReceiptExt, AbsorbStatus, BundleForRecipientOptions,
-    BundleForRecipientResult, CompileEnrolmentOptions, CompiledPackage, ContactUpdateApplyResult,
-    ContactUpdateBody, ContactUpdatePackage, ExportOptions as PkgExportOptions,
-    JweActivationResult, ManifestKind, OfferOptions, OfferReceipt, Package, PackageCategory,
-    PackageInfo, PackageJsonPayload, PackageManifest, PackageSignatureStatus,
-    PrepareRecipientOptions, PrepareRecipientResult, SecretExportConsent,
+    AbsorbReceipt, AbsorbReceiptExt, AbsorbStatus, ApproveJweActivationOptions,
+    BundleForRecipientOptions, BundleForRecipientResult, CompileEnrolmentOptions, CompiledPackage,
+    ContactUpdateApplyResult, ContactUpdateBody, ContactUpdatePackage,
+    ExportOptions as PkgExportOptions, JweActivationResult, JweReaderKeyInfo, ManifestKind,
+    OfferOptions, OfferReceipt, Package, PackageCategory, PackageInfo, PackageJsonPayload,
+    PackageManifest, PackageSignatureStatus, PrepareRecipientOptions, PrepareRecipientResult,
+    SecretExportConsent,
 };
 pub use read_trust::{
     ConfigReadTrustProvider, InMemoryReadTrustProvider, ReadTrustProvider, TrustSource,
@@ -97,6 +98,10 @@ pub use tn::{
 };
 #[cfg(feature = "http")]
 pub use tn::{TnProjectVaultClaim, TnProjectVaultClaimOptions};
+pub use tn_core::jwe_binding::{
+    AuthenticatedDidResolution, FingerprintPin, JweBindingEvidence, JweBindingScope,
+    VerifiedJweRecipient,
+};
 pub use tn_core::runtime::{CursorKind, ReadCursorV1, SourceCursorV1, VerifyMode};
 pub use tn_core::{
     RecipientEntry, SealOptions, SealedGroupInfo, SealedValid, UnsealOptions, UnsealOutcome,
@@ -144,26 +149,28 @@ pub mod prelude {
         wrap_bek_under_awk_with_nonce, AbsorbReceipt, AbsorbReceiptExt, AbsorbStatus, Account,
         AccountIdentityMetadata, AccountLogoutResult, AccountState, AccountStatus,
         AccountUseVaultResult, AccountVerdict, AddRecipientResult, Admin,
-        BundleForRecipientOptions, BundleForRecipientResult, CompileEnrolmentOptions,
-        CompiledPackage, ConfigReadTrustProvider, ConfigView, CredentialStore, EmitReceipt,
-        EnsureGroupResult, Entry, EntryValidity, Error, FileCredentialStore, Identity,
-        IdentityPrefs, IdentitySaveOptions, InMemoryReadTrustProvider, Inbox,
-        InvitationAcceptResult, InvitationInfo, InvitationKitHash, InvitationManifest,
-        JweActivationResult, LogLevel, ManifestKind, MintInvitationOptions, MintInvitationResult,
-        OfferOptions, OfferReceipt, Package, PackageInfo, PackageManifest, PackageSignatureStatus,
-        PkgExportOptions, PollingWatch, PollingWatchOptions, PrepareRecipientOptions,
-        PrepareRecipientResult, ReadCursorV1, ReadOptions, ReadPolicyOptions, ReadReport,
-        ReadTrustProvider, RecipientEntry, Result, RevokeRecipientResult, SealOptions,
-        SealedGroupInfo, SealedObject, SealedValid, SecretExportConsent, SetLinkStateOptions,
-        SourceCursorV1, Tn, TnInitOptions, TnProfile, TnProjectOptions, TrustSource, UnsealOptions,
-        UnsealOutcome, Vault, VaultAwk, VaultBek, VaultBodyPlaintext, VaultClientConnectOptions,
-        VaultConnectOptions, VaultConnectResult, VaultCredentialKdfParams, VaultCredentialWrap,
-        VaultInstallBodyOptions, VaultInstallBodyResult, VaultLinkResult, VaultLinkState,
-        VaultLinkStateInfo, VaultLinkStateResult, VaultProject, VaultProjectClient,
-        VaultUnlinkResult, VaultWrappedBek, VerifyMode, Wallet, WalletPaths,
-        WalletPullAbsorbResult, WalletStageInboxOptions, WalletStageInboxResult, WalletSyncOptions,
-        WalletSyncResult, Watch, WatchIter, WatchOptions, WatchStart, VAULT_AWK_WRAP_AAD,
-        VAULT_BEK_WRAP_AAD, VAULT_BODY_CIPHER_SUITE, VAULT_BODY_FRAME, VAULT_MIN_PBKDF2_ITERATIONS,
+        ApproveJweActivationOptions, AuthenticatedDidResolution, BundleForRecipientOptions,
+        BundleForRecipientResult, CompileEnrolmentOptions, CompiledPackage,
+        ConfigReadTrustProvider, ConfigView, CredentialStore, EmitReceipt, EnsureGroupResult,
+        Entry, EntryValidity, Error, FileCredentialStore, FingerprintPin, Identity, IdentityPrefs,
+        IdentitySaveOptions, InMemoryReadTrustProvider, Inbox, InvitationAcceptResult,
+        InvitationInfo, InvitationKitHash, InvitationManifest, JweActivationResult,
+        JweBindingEvidence, JweBindingScope, JweReaderKeyInfo, LogLevel, ManifestKind,
+        MintInvitationOptions, MintInvitationResult, OfferOptions, OfferReceipt, Package,
+        PackageInfo, PackageManifest, PackageSignatureStatus, PkgExportOptions, PollingWatch,
+        PollingWatchOptions, PrepareRecipientOptions, PrepareRecipientResult, ReadCursorV1,
+        ReadOptions, ReadPolicyOptions, ReadReport, ReadTrustProvider, RecipientEntry, Result,
+        RevokeRecipientResult, SealOptions, SealedGroupInfo, SealedObject, SealedValid,
+        SecretExportConsent, SetLinkStateOptions, SourceCursorV1, Tn, TnInitOptions, TnProfile,
+        TnProjectOptions, TrustSource, UnsealOptions, UnsealOutcome, Vault, VaultAwk, VaultBek,
+        VaultBodyPlaintext, VaultClientConnectOptions, VaultConnectOptions, VaultConnectResult,
+        VaultCredentialKdfParams, VaultCredentialWrap, VaultInstallBodyOptions,
+        VaultInstallBodyResult, VaultLinkResult, VaultLinkState, VaultLinkStateInfo,
+        VaultLinkStateResult, VaultProject, VaultProjectClient, VaultUnlinkResult, VaultWrappedBek,
+        VerifiedJweRecipient, VerifyMode, Wallet, WalletPaths, WalletPullAbsorbResult,
+        WalletStageInboxOptions, WalletStageInboxResult, WalletSyncOptions, WalletSyncResult,
+        Watch, WatchIter, WatchOptions, WatchStart, VAULT_AWK_WRAP_AAD, VAULT_BEK_WRAP_AAD,
+        VAULT_BODY_CIPHER_SUITE, VAULT_BODY_FRAME, VAULT_MIN_PBKDF2_ITERATIONS,
     };
     #[cfg(feature = "http")]
     pub use crate::{

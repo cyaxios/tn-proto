@@ -1,7 +1,9 @@
 //! Normalized, public-only evidence authorizing a JWE recipient key.
 
+use curve25519_dalek::montgomery::MontgomeryPoint;
 use serde_json::{json, Value};
 use std::time::{Duration, SystemTime};
+use subtle::ConstantTimeEq as _;
 
 use crate::canonical::canonical_bytes;
 use crate::did_document::{extract_x25519_key_agreement, ResolvedX25519KeyAgreement};
@@ -190,13 +192,42 @@ pub struct VerifiedJweRecipient {
     pub expires_at: String,
     /// Authentication evidence retained for audit.
     pub evidence: JweBindingEvidence,
+    /// Construction seal covering every public field.
+    integrity_digest: String,
 }
 
 impl VerifiedJweRecipient {
     /// Normalize an already verified signed offer or challenge response.
-    pub fn from_accepted_offer(accepted: &AcceptedOffer) -> Self {
+    pub fn from_accepted_offer(accepted: &AcceptedOffer) -> Result<Self, TrustError> {
+        accepted.validate_integrity()?;
         let binding = &accepted.binding;
         let principal = &binding.principal;
+        if principal.purpose != "jwe-reader" {
+            return Err(binding_error(
+                "accepted offer proof purpose must be jwe-reader",
+            ));
+        }
+        if principal.proof_digest != binding.proof_digest {
+            return Err(binding_error(
+                "accepted offer principal and key binding name different proofs",
+            ));
+        }
+        if accepted.offer_digest != binding.proof_digest {
+            return Err(binding_error(
+                "accepted offer digest does not name the verified proof",
+            ));
+        }
+        validate_public_key(&binding.public_key, &binding.public_key_sha256)?;
+        for (digest, name) in [
+            (&principal.proof_digest, "principal proof_digest"),
+            (&accepted.offer_digest, "offer_digest"),
+            (&accepted.artifact_digest, "artifact_digest"),
+        ] {
+            validate_digest(digest, name)?;
+        }
+        if let Some(challenge_digest) = &binding.challenge_digest {
+            validate_digest(challenge_digest, "challenge_digest")?;
+        }
         let evidence = match &binding.challenge_digest {
             Some(challenge_digest) => JweBindingEvidence::ChallengeResponse {
                 offer_digest: accepted.offer_digest.clone(),
@@ -210,18 +241,22 @@ impl VerifiedJweRecipient {
                 proof_digest: binding.proof_digest.clone(),
             },
         };
-        Self {
+        let mut result = Self {
             reader_did: principal.did.clone(),
             audience_did: principal.audience_did.clone(),
             ceremony_id: principal.ceremony_id.clone(),
             group: principal.group.clone(),
             public_key: binding.public_key,
             public_key_sha256: binding.public_key_sha256.clone(),
-            binding_digest: accepted.offer_digest.clone(),
+            binding_digest: String::new(),
             issued_at: principal.issued_at.clone(),
             expires_at: principal.expires_at.clone(),
             evidence,
-        }
+            integrity_digest: String::new(),
+        };
+        result.binding_digest = normalized_binding_digest(&result);
+        result.integrity_digest = binding_integrity_digest(&result);
+        Ok(result)
     }
 
     /// Extract and bind a key from the exact authenticated DID document.
@@ -239,12 +274,12 @@ impl VerifiedJweRecipient {
     ) -> Result<Self, TrustError> {
         require_text(resolver, "resolver")?;
         validate_digest(resolution_digest, "resolution_digest")?;
-        let resolved =
+        let key_agreement =
             extract_x25519_key_agreement(document, expected_did, verification_method_id)?;
         let document_bytes =
             canonical_bytes(document).map_err(|error| binding_error(error.to_string()))?;
         Self::from_did_resolution(
-            resolved,
+            key_agreement,
             scope,
             AuthenticatedDidResolution {
                 resolver: resolver.to_string(),
@@ -324,7 +359,31 @@ impl VerifiedJweRecipient {
         }
         validate_public_key(&self.public_key, &self.public_key_sha256)?;
         validate_digest(&self.binding_digest, "binding_digest")?;
+        if !digest_matches(&normalized_binding_digest(self), &self.binding_digest) {
+            return Err(binding_error(
+                "JWE binding digest does not cover its current fields and evidence",
+            ));
+        }
+        if !digest_matches(&binding_integrity_digest(self), &self.integrity_digest) {
+            return Err(binding_error(
+                "JWE binding fields no longer match their verified construction",
+            ));
+        }
         validate_statement_freshness(&self.issued_at, &self.expires_at, expected.now)
+    }
+
+    /// Digest named by the signed activation response.
+    ///
+    /// Offer routes retain their original offer digest for wire compatibility;
+    /// direct routes use the normalized binding digest itself.
+    pub fn activation_reference_digest(&self) -> &str {
+        match &self.evidence {
+            JweBindingEvidence::SignedKeyCard { offer_digest, .. }
+            | JweBindingEvidence::ChallengeResponse { offer_digest, .. } => offer_digest,
+            JweBindingEvidence::DidDocument { .. } | JweBindingEvidence::FingerprintPin { .. } => {
+                &self.binding_digest
+            }
+        }
     }
 }
 
@@ -335,31 +394,65 @@ fn build_binding(
     evidence: JweBindingEvidence,
 ) -> Result<VerifiedJweRecipient, TrustError> {
     require_did(&reader_did, "reader_did")?;
-    if public_key == [0; 32] {
-        return Err(binding_error("X25519 public key must not be all zero"));
-    }
     let issued_at = canonical_utc_timestamp(scope.now)?;
     let expires_at = canonical_utc_timestamp(scope.now + scope.ttl)?;
     let public_key_sha256 = sha256_tagged(&public_key);
-    let digest_value = json!({
-        "reader_did": reader_did, "audience_did": scope.audience_did,
-        "ceremony_id": scope.ceremony_id, "group": scope.group,
-        "public_key_sha256": public_key_sha256, "issued_at": issued_at,
-        "expires_at": expires_at, "evidence": evidence.to_value(),
-    });
-    let bytes = canonical_bytes(&digest_value).map_err(|error| binding_error(error.to_string()))?;
-    Ok(VerifiedJweRecipient {
+    validate_public_key(&public_key, &public_key_sha256)?;
+    let mut result = VerifiedJweRecipient {
         reader_did,
         audience_did: scope.audience_did,
         ceremony_id: scope.ceremony_id,
         group: scope.group,
         public_key,
         public_key_sha256,
-        binding_digest: sha256_tagged(&bytes),
+        binding_digest: String::new(),
         issued_at,
         expires_at,
         evidence,
-    })
+        integrity_digest: String::new(),
+    };
+    result.binding_digest = normalized_binding_digest(&result);
+    result.integrity_digest = binding_integrity_digest(&result);
+    Ok(result)
+}
+
+fn normalized_binding_digest(binding: &VerifiedJweRecipient) -> String {
+    let value = json!({
+        "reader_did": binding.reader_did,
+        "audience_did": binding.audience_did,
+        "ceremony_id": binding.ceremony_id,
+        "group": binding.group,
+        "public_key_sha256": binding.public_key_sha256,
+        "issued_at": binding.issued_at,
+        "expires_at": binding.expires_at,
+        "evidence": binding.evidence.to_value(),
+    });
+    canonical_value_digest(&value)
+}
+
+fn binding_integrity_digest(binding: &VerifiedJweRecipient) -> String {
+    let value = json!({
+        "reader_did": binding.reader_did,
+        "audience_did": binding.audience_did,
+        "ceremony_id": binding.ceremony_id,
+        "group": binding.group,
+        "public_key_sha256": binding.public_key_sha256,
+        "binding_digest": binding.binding_digest,
+        "issued_at": binding.issued_at,
+        "expires_at": binding.expires_at,
+        "evidence": binding.evidence.to_value(),
+    });
+    canonical_value_digest(&value)
+}
+
+fn canonical_value_digest(value: &Value) -> String {
+    let bytes = canonical_bytes(value)
+        .expect("verified JWE binding integrity contains only canonical JSON values");
+    sha256_tagged(&bytes)
+}
+
+fn digest_matches(left: &str, right: &str) -> bool {
+    left.len() == right.len() && bool::from(left.as_bytes().ct_eq(right.as_bytes()))
 }
 
 fn validate_scope(scope: &JweBindingScope) -> Result<(), TrustError> {
@@ -381,6 +474,13 @@ fn validate_public_key(public_key: &[u8; 32], digest: &str) -> Result<(), TrustE
         return Err(binding_error(
             "public key digest does not match the X25519 key",
         ));
+    }
+    let validation_private = [1_u8; 32];
+    let shared = MontgomeryPoint(*public_key)
+        .mul_clamped(validation_private)
+        .to_bytes();
+    if shared == [0_u8; 32] {
+        return Err(binding_error("X25519 public key is a low-order encoding"));
     }
     Ok(())
 }
@@ -420,4 +520,40 @@ fn require_text(value: &str, name: &str) -> Result<(), TrustError> {
 
 fn binding_error(detail: impl Into<String>) -> TrustError {
     TrustError::new(TrustReason::BindingInvalid, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VerifiedJweRecipient;
+    use crate::trust::{AcceptedOffer, VerifiedJweBinding, VerifiedPrincipal};
+    use crate::trusted_enrollment::sha256_tagged;
+
+    #[test]
+    fn accepted_offer_digest_must_name_the_verified_proof() {
+        let public_key = [0x42; 32];
+        let proof_digest = sha256_tagged(b"verified offer proof");
+        let accepted = AcceptedOffer::new_verified(
+            VerifiedJweBinding {
+                principal: VerifiedPrincipal {
+                    did: "did:example:reader".into(),
+                    purpose: "jwe-reader".into(),
+                    audience_did: "did:example:publisher".into(),
+                    ceremony_id: "ceremony-1".into(),
+                    group: "partners".into(),
+                    proof_digest: proof_digest.clone(),
+                    issued_at: "2030-01-01T00:00:00Z".into(),
+                    expires_at: "2030-01-01T00:10:00Z".into(),
+                },
+                public_key,
+                public_key_sha256: sha256_tagged(&public_key),
+                proof_digest,
+                challenge_digest: None,
+            },
+            sha256_tagged(b"different offer"),
+            sha256_tagged(b"artifact"),
+        );
+
+        let error = VerifiedJweRecipient::from_accepted_offer(&accepted).unwrap_err();
+        assert!(error.detail.contains("offer digest"));
+    }
 }

@@ -6,7 +6,6 @@ use tn_core::jwe_binding::{
     AuthenticatedDidResolution, FingerprintPin, JweBindingEvidence, JweBindingExpectation,
     JweBindingScope, VerifiedJweRecipient,
 };
-use tn_core::{AcceptedOffer, VerifiedJweBinding, VerifiedPrincipal};
 
 fn scope() -> JweBindingScope {
     JweBindingScope {
@@ -16,46 +15,6 @@ fn scope() -> JweBindingScope {
         now: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
         ttl: Duration::from_secs(600),
     }
-}
-
-fn accepted(challenge_digest: Option<&str>) -> AcceptedOffer {
-    AcceptedOffer {
-        binding: VerifiedJweBinding {
-            principal: VerifiedPrincipal {
-                did: tn_core::DeviceKey::generate().did().to_string(),
-                purpose: "jwe-reader".into(),
-                audience_did: scope().audience_did,
-                ceremony_id: "ceremony-1".into(),
-                group: "partners".into(),
-                proof_digest: "sha256:proof".into(),
-                issued_at: "2027-01-15T08:00:00.000000Z".into(),
-                expires_at: "2027-01-15T08:10:00.000000Z".into(),
-            },
-            public_key: [0x21; 32],
-            public_key_sha256: tn_core::trusted_enrollment::sha256_tagged(&[0x21; 32]),
-            proof_digest: "sha256:proof".into(),
-            challenge_digest: challenge_digest.map(str::to_string),
-        },
-        offer_digest: "sha256:offer".into(),
-        artifact_digest: "sha256:artifact".into(),
-    }
-}
-
-#[test]
-fn accepted_offer_normalizes_key_card_and_challenge_sources() {
-    let card = VerifiedJweRecipient::from_accepted_offer(&accepted(None));
-    assert!(matches!(
-        card.evidence,
-        JweBindingEvidence::SignedKeyCard { .. }
-    ));
-    assert_eq!(card.binding_digest, "sha256:offer");
-
-    let challenged = VerifiedJweRecipient::from_accepted_offer(&accepted(Some("sha256:challenge")));
-    assert!(matches!(
-        challenged.evidence,
-        JweBindingEvidence::ChallengeResponse { .. }
-    ));
-    assert_eq!(challenged.public_key, [0x21; 32]);
 }
 
 #[test]
@@ -111,6 +70,23 @@ fn fingerprint_pin_requires_an_exact_public_key_fingerprint() {
     assert!(
         VerifiedJweRecipient::from_fingerprint_pin(reader_did, key, scope(), mismatch).is_err()
     );
+}
+
+#[test]
+fn fingerprint_pin_rejects_nonzero_low_order_x25519_key() {
+    let mut low_order = [0_u8; 32];
+    low_order[0] = 1;
+    let pin = FingerprintPin {
+        expected_fingerprint: tn_core::trusted_enrollment::sha256_tagged(&low_order),
+        verified_by: "operator:alice".into(),
+        verification_method: "authenticated call".into(),
+        evidence: "ticket-17".into(),
+    };
+    let error =
+        VerifiedJweRecipient::from_fingerprint_pin("did:example:reader", low_order, scope(), pin)
+            .unwrap_err();
+    assert_eq!(error.reason, tn_core::TrustReason::BindingInvalid);
+    assert!(error.detail.contains("low-order"));
 }
 
 #[test]
@@ -202,6 +178,28 @@ fn normalized_binding_rechecks_reader_publisher_scope_and_freshness() {
         })
         .unwrap_err();
     assert_eq!(expired.reason, tn_core::TrustReason::StatementExpired);
+
+    let expected = JweBindingExpectation {
+        reader_did,
+        audience_did: &publisher_did,
+        ceremony_id: "ceremony-1",
+        group: "partners",
+        now,
+    };
+    let mut mutated_evidence = binding.clone();
+    if let JweBindingEvidence::FingerprintPin { verified_by, .. } = &mut mutated_evidence.evidence {
+        *verified_by = "operator:mallory".into();
+    }
+    assert_eq!(
+        mutated_evidence.validate_for(&expected).unwrap_err().reason,
+        tn_core::TrustReason::BindingInvalid
+    );
+    let mut mutated_digest = binding;
+    mutated_digest.binding_digest = tn_core::trusted_enrollment::sha256_tagged(b"other binding");
+    assert_eq!(
+        mutated_digest.validate_for(&expected).unwrap_err().reason,
+        tn_core::TrustReason::BindingInvalid
+    );
 }
 
 #[test]

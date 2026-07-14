@@ -59,3 +59,20 @@ fn plan_partitions_kit_groups_from_public_only_jwe_groups() {
     assert_eq!(plan.jwe_groups, vec!["partners"]);
     assert!(!temp.path().join(".tn/keys/partners.jwe.mykey").exists());
 }
+
+#[test]
+fn legacy_mixed_bundle_rejects_jwe_before_consuming_btn_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let runtime = mixed_runtime(temp.path());
+    let state_path = temp.path().join(".tn/keys/broadcast.btn.state");
+    let before = fs::read(&state_path).expect("state before");
+    let out = temp.path().join("legacy-mixed.tnpkg");
+
+    let error = runtime
+        .bundle_for_recipient("did:key:zReader", &out, Some(&["broadcast", "partners"]))
+        .expect_err("legacy bundler must reject JWE");
+
+    assert!(error.to_string().contains("cipher=jwe"));
+    assert_eq!(fs::read(state_path).expect("state after"), before);
+    assert!(!out.exists());
+}

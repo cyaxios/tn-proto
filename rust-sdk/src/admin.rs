@@ -12,6 +12,7 @@ use crate::enrollment::{
 };
 use crate::tn::Tn;
 use crate::{Error, Result};
+use tn_core::jwe_binding::{JweBindingEvidence, JweBindingExpectation, VerifiedJweRecipient};
 
 pub use tn_core::{EnsureGroupResult, GrantReaderResult, RotateIdPathResult};
 
@@ -273,6 +274,15 @@ impl<'a> Admin<'a> {
         register_jwe_offer_for_tn(self.tn, group, accepted)
     }
 
+    /// Register a JWE recipient from any safe normalized public-key binding.
+    pub fn register_jwe_binding(
+        &self,
+        group: &str,
+        binding: &VerifiedJweRecipient,
+    ) -> Result<AddRecipientResult> {
+        register_jwe_binding_for_tn(self.tn, group, binding)
+    }
+
     /// Register a raw DID-plus-key JWE recipient WITHOUT a verified binding.
     ///
     /// This is the explicitly named legacy compatibility path. The mandatory
@@ -324,9 +334,9 @@ impl<'a> Admin<'a> {
         group: &str,
         reader_did: &str,
         public_key: &[u8; 32],
-        accepted: Option<&enrollment::AcceptedOffer>,
+        binding: Option<&VerifiedJweRecipient>,
     ) -> Result<()> {
-        persist_jwe_recipient(self.tn, group, reader_did, public_key, accepted)
+        persist_jwe_recipient(self.tn, group, reader_did, public_key, binding)
     }
 
     // -----------------------------------------------------------------
@@ -843,50 +853,58 @@ pub(crate) fn register_jwe_offer_for_tn(
     group: &str,
     accepted: &enrollment::AcceptedOffer,
 ) -> Result<AddRecipientResult> {
-    validate_jwe_offer_for_tn(tn, group, accepted)?;
-    let principal = &accepted.binding.principal;
+    let binding = VerifiedJweRecipient::from_accepted_offer(accepted).map_err(trust_err)?;
+    register_jwe_binding_for_tn(tn, group, &binding)
+}
+
+pub(crate) fn register_jwe_binding_for_tn(
+    tn: &Tn,
+    group: &str,
+    binding: &VerifiedJweRecipient,
+) -> Result<AddRecipientResult> {
+    validate_jwe_binding_for_tn(tn, group, binding)?;
     persist_jwe_recipient(
         tn,
         group,
-        &principal.did,
-        &accepted.binding.public_key,
-        Some(accepted),
+        &binding.reader_did,
+        &binding.public_key,
+        Some(binding),
     )?;
     Ok(AddRecipientResult {
         group: group.to_string(),
-        recipient_did: Some(principal.did.clone()),
+        recipient_did: Some(binding.reader_did.clone()),
         leaf_index: 0,
         kit_path: PathBuf::new(),
     })
 }
 
-pub(crate) fn validate_jwe_offer_for_tn(
+pub(crate) fn validate_jwe_binding_for_tn(
     tn: &Tn,
     group: &str,
-    accepted: &enrollment::AcceptedOffer,
+    binding: &VerifiedJweRecipient,
 ) -> Result<()> {
     require_jwe_group(tn, group)?;
-    let principal = &accepted.binding.principal;
-    if principal.audience_did != tn.did() {
-        return Err(trust_err(TrustError::new(
-            TrustReason::WrongRecipient,
-            "accepted offer is addressed to a different publisher",
-        )));
-    }
-    if principal.ceremony_id != enrollment::ceremony_id(tn)? || principal.group != group {
-        return Err(trust_err(TrustError::new(
-            TrustReason::ScopeMismatch,
-            "accepted offer ceremony or group does not match",
-        )));
-    }
+    let ceremony_id = enrollment::ceremony_id(tn)?;
+    binding
+        .validate_for(&JweBindingExpectation {
+            reader_did: &binding.reader_did,
+            audience_did: tn.did(),
+            ceremony_id: &ceremony_id,
+            group,
+            now: SystemTime::now(),
+        })
+        .map_err(trust_err)?;
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine as _;
-    let recipients_path = enrollment::keystore_dir(tn)?.join(format!("{group}.jwe.recipients"));
+    let keystore = enrollment::keystore_dir(tn)?;
+    let recipients_path = keystore.join(format!("{group}.jwe.recipients"));
     load_compatible_jwe_recipients(
         &recipients_path,
-        &principal.did,
-        &B64.encode(accepted.binding.public_key),
+        &binding.reader_did,
+        &B64.encode(binding.public_key),
     )?;
+    let mut registry = load_jwe_trust_registry(&keystore.join("trust/jwe_recipients.v1.json"))?;
+    let _ = jwe_trust_group(&mut registry, group)?;
     Ok(())
 }
 
@@ -895,27 +913,26 @@ fn persist_jwe_recipient(
     group: &str,
     reader_did: &str,
     public_key: &[u8; 32],
-    accepted: Option<&enrollment::AcceptedOffer>,
+    binding: Option<&VerifiedJweRecipient>,
 ) -> Result<()> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine as _;
 
     let keystore = enrollment::keystore_dir(tn)?;
     let public_key_sha256 = enrollment::sha256_tagged(public_key);
-    store_jwe_recipient_list(
-        &keystore.join(format!("{group}.jwe.recipients")),
-        reader_did,
-        &B64.encode(public_key),
-    )?;
+    let recipient_path = keystore.join(format!("{group}.jwe.recipients"));
+    let public_b64 = B64.encode(public_key);
+    load_compatible_jwe_recipients(&recipient_path, reader_did, &public_b64)?;
     if !store_jwe_trust_entry(
         &keystore.join("trust").join("jwe_recipients.v1.json"),
         group,
         reader_did,
         &public_key_sha256,
-        accepted,
+        binding,
     )? {
         return Ok(());
     }
+    store_jwe_recipient_list(&recipient_path, reader_did, &public_b64)?;
     tn.runtime().reload_group_cipher(group)?;
     attest_jwe_recipient(tn, group, reader_did, &public_key_sha256);
     Ok(())
@@ -966,26 +983,38 @@ fn store_jwe_trust_entry(
     group: &str,
     reader_did: &str,
     public_key_sha256: &str,
-    accepted: Option<&enrollment::AcceptedOffer>,
+    binding: Option<&VerifiedJweRecipient>,
 ) -> Result<bool> {
-    let mut registry: Value = if path.exists() {
-        serde_json::from_str(&fs::read_to_string(path)?)?
-    } else {
-        json!({ "version": 1, "recipients": {} })
-    };
+    let mut registry = load_jwe_trust_registry(path)?;
     let group_map = jwe_trust_group(&mut registry, group)?;
     if group_map.get(reader_did).is_some_and(|previous| {
-        previous.get("verified").and_then(Value::as_bool) == Some(true) && accepted.is_none()
+        previous.get("verified").and_then(Value::as_bool) == Some(true) && binding.is_none()
     }) {
         return Ok(false);
     }
-    let entry = match accepted {
-        Some(accepted) => verified_jwe_trust_entry(accepted),
+    let entry = match binding {
+        Some(binding) => verified_jwe_trust_entry(binding),
         None => json!({ "verified": false, "public_key_sha256": public_key_sha256 }),
     };
     group_map.insert(reader_did.to_string(), entry);
     tn_core::keystore_backend::atomic_write_bytes(path, &serde_json::to_vec(&registry)?)?;
     Ok(true)
+}
+
+fn load_jwe_trust_registry(path: &Path) -> Result<Value> {
+    let registry: Value = if path.exists() {
+        serde_json::from_str(&fs::read_to_string(path)?)?
+    } else {
+        json!({ "version": 1, "recipients": {} })
+    };
+    if registry.get("version").and_then(Value::as_u64) != Some(1)
+        || !registry.get("recipients").is_some_and(Value::is_object)
+    {
+        return Err(Error::InvalidArgument(
+            "jwe recipient trust registry is malformed".into(),
+        ));
+    }
+    Ok(registry)
 }
 
 fn jwe_trust_group<'a>(
@@ -1005,14 +1034,41 @@ fn jwe_trust_group<'a>(
         })
 }
 
-fn verified_jwe_trust_entry(accepted: &enrollment::AcceptedOffer) -> Value {
-    json!({
+fn verified_jwe_trust_entry(binding: &VerifiedJweRecipient) -> Value {
+    let mut entry = json!({
         "verified": true,
-        "public_key_sha256": accepted.binding.public_key_sha256,
-        "proof_digest": accepted.binding.proof_digest,
-        "offer_digest": accepted.offer_digest,
-        "artifact_digest": accepted.artifact_digest,
-    })
+        "public_key_sha256": binding.public_key_sha256,
+        "binding_digest": binding.binding_digest,
+        "issued_at": binding.issued_at,
+        "expires_at": binding.expires_at,
+        "evidence_kind": binding.evidence.kind(),
+        "evidence": binding.evidence.to_value(),
+    });
+    let Some(object) = entry.as_object_mut() else {
+        return entry;
+    };
+    match &binding.evidence {
+        JweBindingEvidence::SignedKeyCard {
+            offer_digest,
+            artifact_digest,
+            proof_digest,
+        }
+        | JweBindingEvidence::ChallengeResponse {
+            offer_digest,
+            artifact_digest,
+            proof_digest,
+            ..
+        } => {
+            object.insert("proof_digest".into(), Value::from(proof_digest.clone()));
+            object.insert("offer_digest".into(), Value::from(offer_digest.clone()));
+            object.insert(
+                "artifact_digest".into(),
+                Value::from(artifact_digest.clone()),
+            );
+        }
+        JweBindingEvidence::DidDocument { .. } | JweBindingEvidence::FingerprintPin { .. } => {}
+    }
+    entry
 }
 
 fn attest_jwe_recipient(tn: &Tn, group: &str, reader_did: &str, key_digest: &str) {

@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use zeroize::Zeroizing;
 
 use crate::tn::Tn;
 use crate::{Error, Result};
@@ -249,29 +250,39 @@ fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Return the reader's static X25519 keypair for `group`, minting and
+/// Return the reader's static X25519 public key for `group`, minting and
 /// atomically persisting the private key on first use. Re-running reuses the
-/// exact existing key; it is never exported.
-pub(crate) fn ensure_reader_mykey(tn: &Tn, group: &str) -> Result<([u8; 32], [u8; 32])> {
+/// exact existing key; private bytes remain zeroized outside storage.
+pub(crate) fn ensure_reader_mykey(tn: &Tn, group: &str) -> Result<[u8; 32]> {
     let path = keystore_dir(tn)?.join(format!("{group}.jwe.mykey"));
-    let private: [u8; 32] = if path.exists() {
-        fs::read(&path)?.as_slice().try_into().map_err(|_| {
+    let private = if path.exists() {
+        read_x25519_private(&path)?
+    } else {
+        use rand_core::RngCore as _;
+        let mut fresh = Zeroizing::new([0u8; 32]);
+        rand_core::OsRng.fill_bytes(&mut fresh[..]);
+        write_secret_file(&path, &fresh[..])?;
+        fresh
+    };
+    Ok(x25519_public_key(&private))
+}
+
+fn read_x25519_private(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
+    let bytes = Zeroizing::new(fs::read(path)?);
+    bytes
+        .as_slice()
+        .try_into()
+        .map(Zeroizing::new)
+        .map_err(|_| {
             Error::InvalidArgument(format!(
                 "{} is not a raw 32-byte X25519 private key",
                 path.display()
             ))
-        })?
-    } else {
-        use rand_core::RngCore as _;
-        let mut fresh = [0u8; 32];
-        rand_core::OsRng.fill_bytes(&mut fresh);
-        write_secret_file(&path, &fresh)?;
-        fresh
-    };
-    Ok((private, x25519_public_key(&private)))
+        })
 }
 
 const SENT_OFFERS_FILENAME: &str = "enrollment_offers.v1.json";
+const ACTIVATION_EXPECTATIONS_FILENAME: &str = "jwe_activation_expectations.v1.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -291,8 +302,33 @@ struct SentOffersV1 {
     offers: BTreeMap<String, SentOfferRecordV1>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivationExpectationRecordV1 {
+    publisher_did: String,
+    reader_did: String,
+    ceremony_id: String,
+    group: String,
+    x25519_public_key_sha256: String,
+    issued_at: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivationExpectationsV1 {
+    version: u32,
+    expectations: BTreeMap<String, ActivationExpectationRecordV1>,
+}
+
 fn sent_offers_path(tn: &Tn) -> Result<PathBuf> {
     Ok(keystore_dir(tn)?.join("trust").join(SENT_OFFERS_FILENAME))
+}
+
+fn activation_expectations_path(tn: &Tn) -> Result<PathBuf> {
+    Ok(keystore_dir(tn)?
+        .join("trust")
+        .join(ACTIVATION_EXPECTATIONS_FILENAME))
 }
 
 fn read_sent_offers(tn: &Tn) -> Result<SentOffersV1> {
@@ -317,6 +353,33 @@ fn read_sent_offers(tn: &Tn) -> Result<SentOffersV1> {
         )));
     }
     Ok(document)
+}
+
+fn read_activation_expectations(tn: &Tn) -> Result<ActivationExpectationsV1> {
+    let path = activation_expectations_path(tn)?;
+    if !path.exists() {
+        return Ok(ActivationExpectationsV1 {
+            version: 1,
+            expectations: BTreeMap::new(),
+        });
+    }
+    let document: ActivationExpectationsV1 = read_trust_document(&path)?;
+    if document.version != 1 {
+        return Err(trust_err(TrustError::new(
+            TrustReason::StatementInvalid,
+            "JWE activation expectation record has an unsupported version",
+        )));
+    }
+    Ok(document)
+}
+
+fn read_trust_document<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    serde_json::from_str(&fs::read_to_string(path)?).map_err(|_| {
+        trust_err(TrustError::new(
+            TrustReason::StatementInvalid,
+            format!("private trust record in {} is malformed", path.display()),
+        ))
+    })
 }
 
 pub(crate) fn retain_sent_offer(
@@ -357,15 +420,23 @@ pub(crate) fn retained_response_expectation(
     now: SystemTime,
 ) -> Result<ResponseExpectation> {
     let document = read_sent_offers(tn)?;
-    let retained = document
-        .offers
+    if let Some(retained) = document.offers.get(&response.accepted_offer_digest) {
+        return sent_offer_expectation(tn, response, retained, now);
+    }
+    let direct = read_activation_expectations(tn)?;
+    let retained = direct
+        .expectations
         .get(&response.accepted_offer_digest)
-        .ok_or_else(|| {
-            trust_err(TrustError::new(
-                TrustReason::ScopeMismatch,
-                "response does not match any retained sent offer",
-            ))
-        })?;
+        .ok_or_else(unsolicited_activation_error)?;
+    direct_activation_expectation(tn, response, retained, now)
+}
+
+fn sent_offer_expectation(
+    tn: &Tn,
+    response: &EnrollmentResponseV1,
+    retained: &SentOfferRecordV1,
+    now: SystemTime,
+) -> Result<ResponseExpectation> {
     if retained.reader_did != tn.did() {
         return Err(trust_err(TrustError::new(
             TrustReason::WrongRecipient,
@@ -383,26 +454,152 @@ pub(crate) fn retained_response_expectation(
     })
 }
 
-/// Select exactly one accepted JWE offer for a reader/group preparation step.
-pub(crate) fn accepted_offer_for_preparation<'a>(
-    offers: &'a [AcceptedOffer],
-    reader_did: &str,
-    group: &str,
-) -> Result<&'a AcceptedOffer> {
-    let mut matching = offers.iter().filter(|offer| {
-        offer.binding.principal.did == reader_did && offer.binding.principal.group == group
-    });
-    let Some(accepted) = matching.next() else {
-        return Err(Error::InvalidArgument(format!(
-            "prepare_recipient requires an accepted JWE offer for reader {reader_did:?} in group {group:?}"
-        )));
-    };
-    if matching.next().is_some() {
-        return Err(Error::InvalidArgument(format!(
-            "prepare_recipient received multiple accepted JWE offers for reader {reader_did:?} in group {group:?}"
+fn direct_activation_expectation(
+    tn: &Tn,
+    response: &EnrollmentResponseV1,
+    retained: &ActivationExpectationRecordV1,
+    now: SystemTime,
+) -> Result<ResponseExpectation> {
+    if retained.reader_did != tn.did() {
+        return Err(trust_err(TrustError::new(
+            TrustReason::WrongRecipient,
+            "JWE activation approval names a different reader",
         )));
     }
-    Ok(accepted)
+    tn_core::trusted_enrollment::validate_statement_freshness(
+        &retained.issued_at,
+        &retained.expires_at,
+        now,
+    )
+    .map_err(trust_err)?;
+    Ok(ResponseExpectation {
+        publisher_did: retained.publisher_did.clone(),
+        reader_did: retained.reader_did.clone(),
+        ceremony_id: retained.ceremony_id.clone(),
+        group: retained.group.clone(),
+        offer_digest: response.accepted_offer_digest.clone(),
+        public_key_sha256: retained.x25519_public_key_sha256.clone(),
+        now,
+    })
+}
+
+fn unsolicited_activation_error() -> Error {
+    trust_err(TrustError::new(
+        TrustReason::ScopeMismatch,
+        "response matches neither a retained sent offer nor an approved direct activation",
+    ))
+}
+
+pub(crate) fn approve_jwe_activation(
+    tn: &Tn,
+    options: &crate::pkg::ApproveJweActivationOptions,
+) -> Result<()> {
+    parse_ed25519_did_key(&options.publisher_did).map_err(trust_err)?;
+    require_nonempty(&options.ceremony_id, "ceremony_id")?;
+    require_nonempty(&options.group, "group")?;
+    require_sha256_digest(&options.binding_digest, "binding_digest")?;
+    require_sha256_digest(
+        &options.x25519_public_key_sha256,
+        "x25519_public_key_sha256",
+    )?;
+    if options.ttl.is_zero() {
+        return Err(Error::InvalidArgument(
+            "JWE activation approval ttl must be greater than zero".into(),
+        ));
+    }
+    let local_digest = local_jwe_public_key_digest(tn, &options.group)?;
+    if local_digest != options.x25519_public_key_sha256 {
+        return Err(trust_err(TrustError::new(
+            TrustReason::BindingInvalid,
+            "approved activation does not name this reader's local JWE key",
+        )));
+    }
+    persist_activation_expectation(tn, options)
+}
+
+fn persist_activation_expectation(
+    tn: &Tn,
+    options: &crate::pkg::ApproveJweActivationOptions,
+) -> Result<()> {
+    let now = SystemTime::now();
+    let mut document = read_activation_expectations(tn)?;
+    if document
+        .expectations
+        .get(&options.binding_digest)
+        .is_some_and(|existing| !same_activation_scope(existing, tn, options))
+    {
+        return Err(trust_err(TrustError::new(
+            TrustReason::ReplayConflict,
+            "binding digest already has a different direct activation approval",
+        )));
+    }
+    let incoming = ActivationExpectationRecordV1 {
+        publisher_did: options.publisher_did.clone(),
+        reader_did: tn.did().to_string(),
+        ceremony_id: options.ceremony_id.clone(),
+        group: options.group.clone(),
+        x25519_public_key_sha256: options.x25519_public_key_sha256.clone(),
+        issued_at: canonical_utc_timestamp(now).map_err(trust_err)?,
+        expires_at: canonical_utc_timestamp(now + options.ttl).map_err(trust_err)?,
+    };
+    document
+        .expectations
+        .insert(options.binding_digest.clone(), incoming);
+    write_secret_file(
+        &activation_expectations_path(tn)?,
+        &serde_json::to_vec(&document)?,
+    )
+}
+
+fn same_activation_scope(
+    record: &ActivationExpectationRecordV1,
+    tn: &Tn,
+    options: &crate::pkg::ApproveJweActivationOptions,
+) -> bool {
+    record.publisher_did == options.publisher_did
+        && record.reader_did == tn.did()
+        && record.ceremony_id == options.ceremony_id
+        && record.group == options.group
+        && record.x25519_public_key_sha256 == options.x25519_public_key_sha256
+}
+
+fn require_nonempty(value: &str, name: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        Err(Error::InvalidArgument(format!("{name} must not be empty")))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_sha256_digest(value: &str, name: &str) -> Result<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(Error::InvalidArgument(format!(
+            "{name} must use sha256:<hex>"
+        )));
+    };
+    if hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        Ok(())
+    } else {
+        Err(Error::InvalidArgument(format!(
+            "{name} must contain 64 lowercase hex characters"
+        )))
+    }
+}
+
+fn local_jwe_public_key_digest(tn: &Tn, group: &str) -> Result<String> {
+    let mykey_path = keystore_dir(tn)?.join(format!("{group}.jwe.mykey"));
+    if !mykey_path.exists() {
+        return Err(trust_err(TrustError::new(
+            TrustReason::BindingInvalid,
+            format!("no {group}.jwe.mykey in this keystore"),
+        )));
+    }
+    let private = read_x25519_private(&mykey_path)?;
+    Ok(sha256_tagged(&x25519_public_key(&private)))
 }
 
 // ---------------------------------------------------------------------------
@@ -553,23 +750,7 @@ pub fn install_publisher_response(
     match_response_to_retained_offer(response, &expected.offer_digest).map_err(trust_err)?;
     verify_enrollment_response(response, expected).map_err(trust_err)?;
 
-    let mykey_path = keystore_dir(tn)?.join(format!("{}.jwe.mykey", response.group));
-    if !mykey_path.exists() {
-        return Err(trust_err(TrustError::new(
-            TrustReason::BindingInvalid,
-            format!(
-                "no {}.jwe.mykey in this keystore; the response cannot bind a reader key",
-                response.group
-            ),
-        )));
-    }
-    let private: [u8; 32] = fs::read(&mykey_path)?.as_slice().try_into().map_err(|_| {
-        Error::InvalidArgument(format!(
-            "{} is not a raw 32-byte X25519 private key",
-            mykey_path.display()
-        ))
-    })?;
-    let derived = sha256_tagged(&x25519_public_key(&private));
+    let derived = local_jwe_public_key_digest(tn, &response.group)?;
     if derived != response.x25519_public_key_sha256 {
         return Err(trust_err(TrustError::new(
             TrustReason::BindingInvalid,
@@ -610,6 +791,7 @@ pub fn install_publisher_response(
             "group": response.group,
             "group_epoch": response.group_epoch,
             "accepted_offer_digest": response.accepted_offer_digest,
+            "activation_reference_digest": response.accepted_offer_digest,
             "x25519_public_key_sha256": response.x25519_public_key_sha256,
             "response_digest": response.digest().map_err(trust_err)?,
             "installed_at": canonical_utc_timestamp(SystemTime::now()).map_err(trust_err)?,

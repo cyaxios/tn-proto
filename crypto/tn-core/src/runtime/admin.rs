@@ -281,6 +281,7 @@ impl Runtime {
                 )));
             }
         }
+        self.validate_legacy_bundle_ciphers(&requested)?;
 
         let td = tempfile::Builder::new()
             .prefix("tn-bundle-")
@@ -305,15 +306,10 @@ impl Runtime {
                         None,
                     )?;
                 }
-                "jwe" | "bearer" => {
-                    return Err(Error::NotImplemented(
-                        "bundle_for_recipient: cipher=jwe kit minting is not implemented in \
-                         tn-core; use the Python runtime or pure JS JWE pipeline",
-                    ));
-                }
                 other => {
                     return Err(Error::InvalidConfig(format!(
-                        "bundle_for_recipient: group {gname:?} uses unknown cipher {other:?}"
+                        "bundle_for_recipient: group {gname:?} changed to unsupported cipher \
+                         {other:?} after validation"
                     )));
                 }
             }
@@ -337,6 +333,26 @@ impl Runtime {
         let out = self.export(out_path, opts)?;
         drop(td);
         Ok(out)
+    }
+
+    fn validate_legacy_bundle_ciphers(&self, requested: &[String]) -> Result<()> {
+        for group in requested {
+            match self.cfg.groups[group].cipher.as_str() {
+                "btn" | "hibe" => {}
+                "jwe" | "bearer" => {
+                    return Err(Error::NotImplemented(
+                        "bundle_for_recipient: cipher=jwe has no transferable reader kit; \
+                         use prepare_recipient with a verified public binding",
+                    ));
+                }
+                other => {
+                    return Err(Error::InvalidConfig(format!(
+                        "bundle_for_recipient: group {group:?} uses unknown cipher {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Mint and stage one hibe reader's kit files into `out_dir`, and record

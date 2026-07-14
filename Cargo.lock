@@ -2574,6 +2574,7 @@ dependencies = [
  "time",
  "tn-btn",
  "tn-core",
+ "zeroize",
  "zip",
 ]
 

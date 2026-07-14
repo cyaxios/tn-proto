@@ -661,6 +661,15 @@ impl Runtime {
         self.cfg.groups.keys().cloned().collect()
     }
 
+    /// Current configured index/key epoch for one group.
+    pub fn group_index_epoch(&self, group: &str) -> Result<u64> {
+        self.cfg
+            .groups
+            .get(group)
+            .map(|spec| spec.index_epoch)
+            .ok_or_else(|| Error::InvalidConfig(format!("unknown group {group:?}")))
+    }
+
     /// Borrow the `.tn/config/agents.md` policy document loaded at init.
     ///
     /// `None` when the ceremony has no policy file. This is the same

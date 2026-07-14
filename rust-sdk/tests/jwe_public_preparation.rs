@@ -168,6 +168,11 @@ fn activation_absorb_makes_reader_ready_for_jwe_seal_unseal_and_read() -> tn_pro
             ..PrepareRecipientOptions::default()
         },
     )?;
+    assert_eq!(
+        prepared.jwe_activations[0].activation_reference_digest,
+        offer_digest
+    );
+    assert_ne!(prepared.jwe_activations[0].binding_digest, offer_digest);
     let activation = &prepared.jwe_activations[0].package.path;
     let receipt = reader.pkg().absorb_with_options(
         tn_core::AbsorbSource::Path(activation),
@@ -310,7 +315,7 @@ fn mixed_preparation_rejects_wrong_scope_before_writing_the_btn_bundle() -> tn_p
 
     assert!(error
         .to_string()
-        .starts_with("invalid argument: wrong_recipient:"));
+        .starts_with("invalid argument: binding_invalid:"));
     assert!(!out_dir.join("reader-bundle.tnpkg").exists());
     publisher.close()?;
     reader.close()?;
