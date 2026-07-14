@@ -2,8 +2,8 @@ use std::time::{Duration, SystemTime};
 
 use tn_core::did_document::ResolvedX25519KeyAgreement;
 use tn_core::jwe_binding::{
-    AuthenticatedDidResolution, FingerprintPin, JweBindingEvidence, JweBindingScope,
-    VerifiedJweRecipient,
+    AuthenticatedDidResolution, FingerprintPin, JweBindingEvidence, JweBindingExpectation,
+    JweBindingScope, VerifiedJweRecipient,
 };
 use tn_core::{AcceptedOffer, VerifiedJweBinding, VerifiedPrincipal};
 
@@ -142,4 +142,63 @@ fn evidence_metadata_is_mandatory() {
         missing_pin_method,
     )
     .is_err());
+}
+
+#[test]
+fn normalized_binding_rechecks_reader_publisher_scope_and_freshness() {
+    let reader_did = "did:example:reader";
+    let publisher_did = tn_core::DeviceKey::generate().did().to_string();
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let key = [0x66; 32];
+    let binding = VerifiedJweRecipient::from_fingerprint_pin(
+        reader_did,
+        key,
+        JweBindingScope {
+            audience_did: publisher_did.clone(),
+            ceremony_id: "ceremony-1".into(),
+            group: "partners".into(),
+            now,
+            ttl: Duration::from_secs(600),
+        },
+        FingerprintPin {
+            expected_fingerprint: tn_core::trusted_enrollment::sha256_tagged(&key),
+            verified_by: "operator:alice".into(),
+            verification_method: "in-person QR".into(),
+            evidence: "ticket-1234".into(),
+        },
+    )
+    .unwrap();
+
+    binding
+        .validate_for(&JweBindingExpectation {
+            reader_did,
+            audience_did: &publisher_did,
+            ceremony_id: "ceremony-1",
+            group: "partners",
+            now: now + Duration::from_secs(300),
+        })
+        .unwrap();
+
+    let stranger = tn_core::DeviceKey::generate().did().to_string();
+    let wrong_publisher = binding
+        .validate_for(&JweBindingExpectation {
+            reader_did,
+            audience_did: &stranger,
+            ceremony_id: "ceremony-1",
+            group: "partners",
+            now,
+        })
+        .unwrap_err();
+    assert_eq!(wrong_publisher.reason, tn_core::TrustReason::WrongRecipient);
+
+    let expired = binding
+        .validate_for(&JweBindingExpectation {
+            reader_did,
+            audience_did: &publisher_did,
+            ceremony_id: "ceremony-1",
+            group: "partners",
+            now: now + Duration::from_secs(600),
+        })
+        .unwrap_err();
+    assert_eq!(expired.reason, tn_core::TrustReason::StatementExpired);
 }

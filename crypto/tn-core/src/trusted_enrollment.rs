@@ -262,6 +262,18 @@ fn validate_freshness(
     Ok(())
 }
 
+/// Validate a canonical statement interval at `now`.
+///
+/// This is the shared freshness gate for normalized trust evidence that is
+/// not itself one of the versioned enrollment statements in this module.
+pub fn validate_statement_freshness(
+    issued_at: &str,
+    expires_at: &str,
+    now: SystemTime,
+) -> Result<(), TrustError> {
+    validate_freshness(issued_at, expires_at, now)
+}
+
 // ---------------------------------------------------------------------------
 // Strict field extraction
 // ---------------------------------------------------------------------------

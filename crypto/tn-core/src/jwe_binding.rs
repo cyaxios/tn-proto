@@ -6,7 +6,9 @@ use std::time::{Duration, SystemTime};
 use crate::canonical::canonical_bytes;
 use crate::did_document::ResolvedX25519KeyAgreement;
 use crate::trust::{AcceptedOffer, TrustError, TrustReason};
-use crate::trusted_enrollment::{canonical_utc_timestamp, sha256_tagged};
+use crate::trusted_enrollment::{
+    canonical_utc_timestamp, sha256_tagged, validate_statement_freshness,
+};
 
 /// Publisher scope and validity assigned to non-offer binding evidence.
 #[derive(Debug, Clone)]
@@ -21,6 +23,21 @@ pub struct JweBindingScope {
     pub now: SystemTime,
     /// Maximum lifetime of the accepted binding.
     pub ttl: Duration,
+}
+
+/// Receiver expectations rechecked immediately before recipient registration.
+#[derive(Debug, Clone)]
+pub struct JweBindingExpectation<'a> {
+    /// Exact reader DID being enrolled.
+    pub reader_did: &'a str,
+    /// Exact publisher DID accepting the binding.
+    pub audience_did: &'a str,
+    /// Exact ceremony scope.
+    pub ceremony_id: &'a str,
+    /// Exact JWE group scope.
+    pub group: &'a str,
+    /// Registration instant used for expiry checking.
+    pub now: SystemTime,
 }
 
 /// Evidence retained from an authenticated DID-method resolution.
@@ -251,6 +268,33 @@ impl VerifiedJweRecipient {
             evidence_digest: sha256_tagged(pin.evidence.as_bytes()),
         };
         build_binding(reader_did.into(), public_key, scope, source)
+    }
+
+    /// Recheck identity, scope, key digest, and freshness before registration.
+    pub fn validate_for(&self, expected: &JweBindingExpectation<'_>) -> Result<(), TrustError> {
+        require_did(expected.reader_did, "expected reader_did")?;
+        require_did(expected.audience_did, "expected audience_did")?;
+        if self.reader_did != expected.reader_did {
+            return Err(TrustError::new(
+                TrustReason::WrongRecipient,
+                "JWE binding names a different reader",
+            ));
+        }
+        if self.audience_did != expected.audience_did {
+            return Err(TrustError::new(
+                TrustReason::WrongRecipient,
+                "JWE binding names a different publisher",
+            ));
+        }
+        if self.ceremony_id != expected.ceremony_id || self.group != expected.group {
+            return Err(TrustError::new(
+                TrustReason::ScopeMismatch,
+                "JWE binding ceremony or group does not match",
+            ));
+        }
+        validate_public_key(&self.public_key, &self.public_key_sha256)?;
+        validate_digest(&self.binding_digest, "binding_digest")?;
+        validate_statement_freshness(&self.issued_at, &self.expires_at, expected.now)
     }
 }
 
