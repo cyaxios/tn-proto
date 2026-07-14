@@ -236,8 +236,8 @@ def test_forged_signature_with_valid_row_hash_is_rejected(tmp_path: Path) -> Non
     try:
         with pytest.raises(VerifyError) as ei:
             list(tn.read(verify="raise", all_runs=True))
-        assert "signature" in ei.value.failed_checks
-        assert "row_hash" not in ei.value.failed_checks
+        assert "signature_invalid" in ei.value.failed_checks
+        assert "row_hash_invalid" not in ei.value.failed_checks
     finally:
         tn.flush_and_close()
 
@@ -251,13 +251,13 @@ def test_forged_signature_with_valid_row_hash_is_rejected(tmp_path: Path) -> Non
     finally:
         tn.flush_and_close()
 
-    # 4) Plain read (no verify) must STILL surface it — proves it's the verify
-    #    check that catches it, not the parser.
+    # 4) Explicitly disabled verification must STILL surface it — proves it is
+    #    the secure gate that catches it, not the parser.
     tn.init(yaml_path)
     try:
-        out = list(tn.read(all_runs=True))
+        out = list(tn.read(verify=False, all_runs=True))
         assert [e for e in out if e.event_type == "order.created"], (
-            "plain read must still surface the row (verify is what rejects it)"
+            "verify=False must still surface the row"
         )
     finally:
         tn.flush_and_close()
@@ -332,7 +332,7 @@ def test_broken_prev_hash_chain_is_rejected(tmp_path: Path) -> None:
     try:
         with pytest.raises(VerifyError) as ei:
             list(tn.read(verify="raise", all_runs=True))
-        assert "chain" in ei.value.failed_checks
+        assert "chain_invalid" in ei.value.failed_checks
     finally:
         tn.flush_and_close()
 
@@ -357,7 +357,7 @@ def test_broken_prev_hash_chain_is_rejected(tmp_path: Path) -> None:
 
 def test_tampered_row_hash_is_rejected(tmp_path: Path) -> None:
     """Flip ``row_hash`` to a clearly-wrong value. secure_read MUST reject it;
-    plain read MUST still surface it."""
+    explicit verify=False MUST still surface it."""
     yaml_path, log_path = _emit(
         tmp_path, [("order.created", {"amount": 100, "order_id": "A100"})]
     )
@@ -370,7 +370,7 @@ def test_tampered_row_hash_is_rejected(tmp_path: Path) -> None:
     try:
         with pytest.raises(VerifyError) as ei:
             list(tn.read(verify="raise", all_runs=True))
-        assert "row_hash" in ei.value.failed_checks
+        assert "row_hash_invalid" in ei.value.failed_checks
     finally:
         tn.flush_and_close()
 
@@ -383,7 +383,7 @@ def test_tampered_row_hash_is_rejected(tmp_path: Path) -> None:
 
     tn.init(yaml_path)
     try:
-        out = list(tn.read(all_runs=True))
+        out = list(tn.read(verify=False, all_runs=True))
         assert [e for e in out if e.event_type == "order.created"], (
             "plain read must still surface the tampered row"
         )

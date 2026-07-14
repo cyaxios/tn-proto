@@ -48,7 +48,7 @@ dependencies = [
     # RFC 7516 JWE for `cipher: jwe` groups. joserfc (Authlib's standalone
     # JOSE library) is BSD-3-Clause and built on `cryptography`; it produces
     # standards-compliant General JSON Serialization that interoperates with
-    # the TS SDK's panva/jose. See docs/JWE-cipher-spec.md.
+    # tn-core and the TS SDK's Rust/Wasm surface. See docs/JWE-cipher-spec.md.
     "joserfc>=1.0",
     "typing_extensions>=4.0",
     # Handler infrastructure

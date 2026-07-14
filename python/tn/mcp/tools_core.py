@@ -179,10 +179,10 @@ def tn_status_impl() -> dict[str, Any]:
 def tn_read_impl(inp: ReadInput) -> dict[str, Any]:
     """Read the ceremony's log through ``tn.read`` with structured filters.
 
-    ``verify`` passes through to ``tn.read`` unchanged. Under
-    ``verify=True`` / ``"raise"`` a failing row surfaces as a one-line
-    RuntimeError (built from ``errors.map_exception``), never a raw
-    traceback.
+    Every trust-policy option passes through to ``tn.read`` unchanged. Under
+    the default ``verify="auto"`` (or ``True`` / ``"raise"``) a failing row
+    surfaces as a one-line RuntimeError (built from ``errors.map_exception``),
+    never a raw traceback.
     """
     since = _parse_iso(inp.since, "since")
     until = _parse_iso(inp.until, "until")
@@ -204,6 +204,10 @@ def tn_read_impl(inp: ReadInput) -> dict[str, Any]:
             selector,
             filter=read_filter,
             verify=inp.verify,
+            require_signature=inp.require_signature,
+            allow_unauthenticated=inp.allow_unauthenticated,
+            trusted_writers=inp.trusted_writers,
+            allow_unknown_writers=inp.allow_unknown_writers,
             log=inp.log,
         ):
             total_scanned += 1

@@ -131,8 +131,9 @@ smoke and adds a sufficiency failure if the read pass is not verified.
 
 Risk:
 
-BTN may use the Rust dispatch runtime while JWE/HIBE use Python fallback. If the
-local runner accidentally uses a different BTN path from production, the
+BTN may use whole-runtime Rust dispatch while Python orchestrates JWE/HIBE
+through their managed routes (with JWE remaining wire-compatible with tn-core).
+If the local runner accidentally uses a different path from production, the
 comparison may be invalid or at least need rerunning.
 
 Required design control:

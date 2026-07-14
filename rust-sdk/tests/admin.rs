@@ -56,7 +56,7 @@ fn ensure_group_creates_new_btn_group_and_routes_fields() -> tn_proto::Result<()
 
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let added = common::find_event(&entries, "tn.group.added");
     assert_eq!(added.get("group").and_then(Value::as_str), Some("payments"));

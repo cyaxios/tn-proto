@@ -40,6 +40,17 @@ fn field_type_str(t: FieldType) -> &'static str {
         FieldType::Int => "int",
         FieldType::OptionalInt => "optional_int",
         FieldType::Iso8601 => "iso8601",
+        FieldType::StringArray => "string_array",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{field_type_str, FieldType};
+
+    #[test]
+    fn string_array_field_type_has_stable_wire_label() {
+        assert_eq!(field_type_str(FieldType::StringArray), "string_array");
     }
 }
 

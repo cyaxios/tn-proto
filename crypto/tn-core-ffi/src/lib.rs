@@ -1142,11 +1142,11 @@ pub unsafe extern "C" fn tn_runtime_seal(
 /// {"<group>": {...}}, "valid": {"signature": bool, "row_hash": bool},
 /// "hidden_groups": [...], "sealed_blocks": [{"name", "ciphertext_b64",
 /// "field_hashes", "aad_b64", "keystore_candidates"}], "fields": {...}}`.
-/// `sealed_blocks` + `aad_b64` are the managed-cipher seam: a host holding a
-/// cipher this build lacks (jwe always; hibe when the feature is off — the
-/// FFI build itself gets hibe via feature unification from its direct
-/// tn-core dependency) can run a second-pass decrypt without reimplementing
-/// the AAD reconstruction. Holding no fitting key is NOT an error — the
+/// `sealed_blocks` + `aad_b64` are the host-managed decryptor seam: a host
+/// using an external key store or a cipher feature outside this build can run
+/// a second-pass decrypt without reimplementing AAD reconstruction. Standard
+/// JWE is also supported directly by tn-core when matching reader-local key
+/// material is provisioned. Holding no fitting key is NOT an error — the
 /// verified public frame comes back with the blocks left sealed.
 ///
 /// Error channel (see [`tn_last_error`]): failed verification is
@@ -1360,10 +1360,12 @@ pub unsafe extern "C" fn tn_runtime_admin_rotate_group(
 /// export it as an absorbable `.tnpkg` kit, returning a JSON receipt
 /// (`{"group", "reader_did", "id_path", "path"}`).
 ///
-/// `reader_did` may be null or empty (no grant recorded, plaintext kit).
-/// `id_path` may be null or empty to key the reader to the group's current
-/// sealing path; pass an ancestor path to hand out a delegatable key.
-/// hibe groups only — btn/jwe groups use `tn_runtime_admin_add_recipient`.
+/// `reader_did` must be a complete Ed25519 `did:key`; the package is always
+/// recipient-sealed and null, empty, abbreviated, or non-canonical values are
+/// rejected. `id_path` may be null or empty to key the reader to the group's
+/// current sealing path; pass an ancestor path to hand out a delegatable key.
+/// HIBE groups only. BTN uses `tn_runtime_admin_add_recipient`; JWE uses a
+/// verified X25519 public-binding enrollment flow at the SDK surface.
 /// The returned string is owned by the caller and must be released with
 /// [`tn_string_free`]. Returns null on error. Use [`tn_last_error`] for
 /// details.
@@ -2679,9 +2681,8 @@ mod tests {
                 "receipt:false must not write a receipt row"
             );
 
-            let outcome: Value =
-                serde_json::from_str(&consume(unseal_raw(handle, &wire, None)))
-                    .expect("unseal outcome is not JSON");
+            let outcome: Value = serde_json::from_str(&consume(unseal_raw(handle, &wire, None)))
+                .expect("unseal outcome is not JSON");
             assert_eq!(outcome["valid"]["signature"], json!(true));
             assert_eq!(outcome["valid"]["row_hash"], json!(true));
             assert_eq!(
@@ -2724,7 +2725,10 @@ mod tests {
                 Some(r#"{"receipt":false}"#),
             );
             let tampered = wire.replace("\"tn_sealed\":1", "\"tn_sealed\":2");
-            assert_ne!(wire, tampered, "wire must carry the compact marker to tamper");
+            assert_ne!(
+                wire, tampered,
+                "wire must carry the compact marker to tamper"
+            );
 
             // Tampering a public value flips the recomputed row hash but
             // leaves the signature (over the untouched row_hash string)
@@ -2749,7 +2753,10 @@ mod tests {
                 Some(r#"{"verify":false}"#),
             )))
             .expect("unseal outcome is not JSON");
-            assert_eq!(outcome["valid"], json!({"signature": false, "row_hash": false}));
+            assert_eq!(
+                outcome["valid"],
+                json!({"signature": false, "row_hash": false})
+            );
 
             // Malformed input is the UnsealError: prefix, not a verify
             // failure and not a plain message.
@@ -2792,17 +2799,14 @@ mod tests {
             assert!(granted.is_null(), "btn group must reject grant_reader");
             let message = last_error_message().expect("guard must set tn_last_error");
             assert!(
-                message.contains("grant_reader is hibe-only. Use add_recipient for btn/jwe groups."),
+                message
+                    .contains("grant_reader is hibe-only. BTN uses admin_add_recipient; JWE uses authenticated public-key enrollment."),
                 "unexpected error: {message}"
             );
 
             let new_path = c("team/policy-b");
-            let rotated = tn_runtime_admin_rotate_id_path(
-                handle,
-                group.as_ptr(),
-                new_path.as_ptr(),
-                0,
-            );
+            let rotated =
+                tn_runtime_admin_rotate_id_path(handle, group.as_ptr(), new_path.as_ptr(), 0);
             assert!(rotated.is_null(), "btn group must reject rotate_id_path");
             let message = last_error_message().expect("guard must set tn_last_error");
             assert!(

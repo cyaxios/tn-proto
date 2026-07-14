@@ -47,4 +47,7 @@ export {
   hibeOpen,
   hibeMpkFingerprint,
   hibeMpkMaxDepth,
+  jweDecrypt,
+  jweEncrypt,
+  jweKeygen,
 } from "tn-wasm";

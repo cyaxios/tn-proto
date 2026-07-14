@@ -17,7 +17,7 @@ fn main() -> tn_proto::Result<()> {
 
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: true,
+        ..ReadOptions::default()
     })?;
 
     for entry in entries {

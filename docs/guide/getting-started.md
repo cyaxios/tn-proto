@@ -513,12 +513,12 @@ function each verb calls.
 | show env | `tn show env [--format]` | `tn-js show env` | Print the resolved config. | (CLI) | (CLI) |
 | show profiles | `tn show profiles [--format]` | `tn-js show profiles` | Print the profile catalog. | `tn._profiles.get(name)` | (CLI) |
 | group add | `tn group add <name> [--fields]` | `tn-js group add <name>` | Add a group to a project. | `tn.ensure_group(cfg, "name", fields=[...])` | `tn.admin.ensureGroup("name", {})` |
-| add_recipient | `tn add_recipient <group> <did>` | `tn-js add_recipient <group> <did>` | Mint a kit and write a `.tnpkg`. | `tn.pkg.bundle_for_recipient(did, out, groups=["g"])` | `tn.pkg.bundleForRecipient({...})` |
-| admin add-recipient | code / `tn add_recipient` | `tn-js admin add-recipient --out <kit>` | Mint a reader kit for a recipient. | `tn.admin.add_recipient("g", recipient_did=did)` | `tn.admin.addRecipient("g", {...})` |
-| admin revoke-recipient | code / `python` | `tn-js admin revoke-recipient --leaf <n>` | Revoke a recipient leaf in a group. | `tn.admin.revoke_recipient("g", recipient_did=did)` | `tn.admin.revokeRecipient("g", {...})` |
+| add_recipient | `tn add_recipient <group> <did>` (BTN only) | `tn-js add_recipient <group> <did>` | The Python CLI mints a BTN kit. In Python code, JWE enrolls an authenticated public key and HIBE uses `grant_reader`; neither is a JWE private-kit export. | `tn.admin.add_recipient(...)` / `tn.admin.grant_reader(...)` | `tn.admin.addRecipient("g", {...})` |
+| admin add-recipient | `tn admin add-recipient` (BTN/HIBE) | `tn-js admin add-recipient --out <kit>` | Routes BTN to a reader kit and HIBE to `grant_reader`; a sensitive HIBE grant needs a complete resolvable Ed25519 DID. JWE public-key enrollment is code-only because this CLI has no `public_key` input. | `tn.admin.add_recipient("g", ...)` / `tn.admin.grant_reader("g", ...)` | `tn.admin.addRecipient("g", {...})` |
+| admin revoke-recipient | code / `python` | `tn-js admin revoke-recipient --leaf <n>` | Cipher-specific removal: BTN revokes a leaf, JWE drops a recipient, and HIBE rotates/reissues with its documented limitations. | `tn.admin.revoke_recipient("g", recipient_did=did)` | `tn.admin.revokeRecipient("g", {...})` |
 | admin revoked-count | code | `tn-js admin revoked-count` | Count revoked leaves in a group. | `tn.admin.revoked_count("g")` | `tn.admin.revokedCount("g")` |
-| rotate | `tn rotate <group>` | `tn-js admin rotate` | Re-key a group, issue fresh kits to survivors. | `tn.admin.rotate("g")` | `tn.admin.rotateGroup("g")` |
-| bundle | `tn bundle <did> <out>` | `tn-js bundle <recipient> <out>` | Package a kit for an existing recipient. | `tn.pkg.bundle_for_recipient(did, out)` | `tn.pkg.bundleForRecipient({...})` |
+| rotate | `tn rotate <group>` (BTN/JWE) | `tn-js admin rotate` | BTN issues survivor kits; JWE resets to publisher-only and requires re-enrollment. For HIBE use `revoke_reader(...)` (sibling path + survivor grants) or `rotate_reader_path(...)` (path only). | `tn.admin.rotate("g")` (BTN/JWE) | `tn.admin.rotateGroup("g")` |
+| bundle | `tn bundle <did> <out>` (BTN only) | `tn-js bundle <recipient> <out>` | BTN-only reader-kit packaging in Python. JWE exchanges reader-owned public enrollment; HIBE uses `grant_reader`. | `tn.pkg.bundle_for_recipient(did, out)` (BTN only) | `tn.pkg.bundleForRecipient({...})` |
 | invite | `tn invite <did> <out.zip>` | (none) | Mint a `tn-invite-<id>.zip` (kit + manifest). | `tn.admin.add_recipient(..., raw=True)` + zip | (none) |
 | compile | `tn compile --keystore <d> --out <f>` | `tn-js compile --keystore <d> --out <f>` | Package `.btn.mykit` files into a `.tnpkg`. | `tn.compile.compile_kit_bundle(...)` | `compileKitBundle(...)` |
 | absorb | `tn absorb <pkg>` | `tn-js absorb <pkg>` | Install a `.tnpkg` into the active project. | `tn.absorb(path)` | `tn.pkg.absorb(src)` |
@@ -592,5 +592,6 @@ log.
 - [cookbook-typescript.md](cookbook-typescript.md) - the same for TypeScript.
 - [protocol.md](protocol.md) - the on-the-wire record format and the BTN cipher.
 - [groups-readers-rotation.md](groups-readers-rotation.md) - encrypted groups, granting/revoking readers, `.tnpkg` bundles, and key rotation.
+- [jwe-hibe-key-ceremonies.md](jwe-hibe-key-ceremonies.md) - how JWE and HIBE keys enter a ceremony, how grants work, and what each important key can do.
 - [deploy-containers.md](deploy-containers.md) - the `TN_API_KEY` bootstrap for containers/CI, disk-wins-over-env, and identity paths.
 - [advanced-usage.md](advanced-usage.md) - reading modes (`all_runs`), scoped lifecycles (`tn.session`), templated log paths, and the cross-language guarantee.

@@ -33,7 +33,8 @@ const {
   encryptBodyBlob,
   sealBekForRecipient,
   manifestAadForWrap,
-  signManifest,
+  prepareManifestBodyIndex,
+  signManifestWithBody,
   packTnpkg,
   toWireDict,
   absorbSealedBootstrap,
@@ -75,6 +76,7 @@ for (const [k, v] of bodyMap) console.log(`  ${k} (${v.length}B)`);
 const bek = new Uint8Array(32);
 crypto.getRandomValues(bek);
 const encrypted = await encryptBodyBlob(bodyMap, bek);
+const finalBody = { "body/encrypted.bin": encrypted };
 assert(encrypted.length > 12 + 16, `encrypted body is non-trivial (${encrypted.length}B)`);
 
 // ----- Step 4: build the recipient wrap + signed manifest -------------
@@ -112,6 +114,7 @@ baseManifest.state = {
         .join(""),
   },
 };
+prepareManifestBodyIndex(baseManifest, finalBody);
 
 // Convert to wire shape for the recipient_seal helpers.
 const manifestSkeleton = toWireDict(baseManifest, false);
@@ -140,7 +143,7 @@ const { fromWireDict } = await import("../dist/core/tnpkg.js");
 const manifestWithWraps = fromWireDict(manifestWithWrapsWire);
 
 // Sign with the publisher's device key.
-const signed = signManifest(manifestWithWraps, publisher);
+const signed = signManifestWithBody(manifestWithWraps, finalBody, publisher);
 assert(typeof signed.manifestSignatureB64 === "string" && signed.manifestSignatureB64.length > 0,
   "manifest signed");
 

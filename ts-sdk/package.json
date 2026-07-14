@@ -24,6 +24,14 @@
       "types": "./dist/raw.d.ts",
       "import": "./dist/raw.js"
     },
+    "./btn": {
+      "types": "./dist/btn.d.ts",
+      "import": "./dist/btn.js"
+    },
+    "./jwe": {
+      "types": "./dist/jwe.d.ts",
+      "import": "./dist/jwe.js"
+    },
     "./core": {
       "types": "./dist/core/index.d.ts",
       "import": "./dist/core/index.js"

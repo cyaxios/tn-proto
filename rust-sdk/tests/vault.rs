@@ -43,7 +43,7 @@ fn vault_link_is_idempotent_for_active_same_project() -> tn_proto::Result<()> {
 
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let linked_count = entries
         .iter()
@@ -75,7 +75,7 @@ fn vault_unlink_records_reason_and_allows_relink() -> tn_proto::Result<()> {
     tn.vault().link("did:web:vault.example", "proj_123")?;
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let linked_count = entries
         .iter()
@@ -97,7 +97,7 @@ fn vault_unlink_without_reason_writes_null_reason() -> tn_proto::Result<()> {
 
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let unlink = entries
         .iter()
@@ -831,7 +831,7 @@ fn vault_connect_can_skip_audit_event() -> tn_proto::Result<()> {
 
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     assert!(entries
         .iter()

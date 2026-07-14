@@ -13,9 +13,10 @@
 //! Mirrors `python/tn/seal.py::seal` step-for-step; the pure shape /
 //! verify helpers live in [`crate::sealed_object`].
 
+mod candidates;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -23,7 +24,7 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::chain::{compute_row_hash, RowHashInput};
-use crate::cipher::{btn::BtnReaderCipher, GroupCipher};
+use crate::cipher::GroupCipher;
 use crate::envelope::{build_envelope, EnvelopeInput};
 use crate::sealed_object::{
     aad_bytes_for, extract_group_blocks, parse_sealed_source, reject_fragile_public,
@@ -33,9 +34,9 @@ use crate::sealed_object::{
 use crate::signing::signature_b64;
 use crate::{Error, Result};
 
-use super::cipher_build::collect_btn_kit_bytes;
 use super::util::{current_timestamp, validate_event_type};
 use super::Runtime;
+use candidates::{discover_keybag, load_recipient_candidates, unusable_keystore_kinds};
 
 /// Options for [`Runtime::seal`].
 pub struct SealOptions {
@@ -246,7 +247,11 @@ impl Runtime {
     /// # Panics
     ///
     /// Panics if an internal group-state lock is poisoned.
-    pub fn unseal_env(&self, env: Map<String, Value>, opts: &UnsealOptions) -> Result<UnsealOutcome> {
+    pub fn unseal_env(
+        &self,
+        env: Map<String, Value>,
+        opts: &UnsealOptions,
+    ) -> Result<UnsealOutcome> {
         let env = require_envelope_shape(env)?;
         let blocks = extract_group_blocks(&env)?;
         let valid = verify_gate(&env, &blocks, opts.verify)?;
@@ -261,8 +266,13 @@ impl Runtime {
             if blocks.contains_key(&opts.group) {
                 if let Some(block) = blocks.get(&opts.group) {
                     for cipher in load_recipient_candidates(dir, &opts.group)? {
-                        if try_open(&opts.group, block, cipher.as_ref(), &env_value, &mut plaintext)
-                        {
+                        if try_open(
+                            &opts.group,
+                            block,
+                            cipher.as_ref(),
+                            &env_value,
+                            &mut plaintext,
+                        ) {
                             break;
                         }
                     }
@@ -274,10 +284,16 @@ impl Runtime {
             for (gname, block) in &blocks {
                 if let Some(gstate_arc) = self.groups.get(gname) {
                     let gstate = gstate_arc.read().expect("group state RwLock poisoned");
-                    try_open(gname, block, gstate.cipher.as_ref(), &env_value, &mut plaintext);
+                    try_open(
+                        gname,
+                        block,
+                        gstate.cipher.as_ref(),
+                        &env_value,
+                        &mut plaintext,
+                    );
                 }
             }
-            // Pass 2: keystore key-bag (own kits + everything absorbed).
+            // Pass 2: group-specific key-bag (own kits + absorbed kits).
             let bag = discover_keybag(&self.keystore);
             for (gname, block) in &blocks {
                 if plaintext.contains_key(gname) {
@@ -292,7 +308,13 @@ impl Runtime {
             &self.keystore
         };
 
-        Ok(build_outcome(env_value, blocks, plaintext, valid, walk_keystore))
+        Ok(build_outcome(
+            env_value,
+            blocks,
+            plaintext,
+            valid,
+            walk_keystore,
+        ))
     }
 }
 
@@ -326,7 +348,7 @@ impl Default for UnsealOptions {
 }
 
 /// One group block [`Runtime::unseal`] could not open, with everything
-/// a managed cipher needs for a second-pass decrypt (the jwe seam):
+/// a managed cipher needs for a second-pass decrypt:
 /// the wire ciphertext, the reconstructed AAD bytes, and which cipher
 /// kinds have key files on disk that this build could not use.
 #[derive(Debug, Clone)]
@@ -342,9 +364,9 @@ pub struct SealedGroupInfo {
     /// AAD a second-pass decrypt must supply. `""` when the object
     /// bound no marker for this group.
     pub aad_b64: String,
-    /// Cipher kinds with key files on disk for this group that this
-    /// build could NOT use: `"jwe"` always (JWE stays out of Rust),
-    /// `"hibe"` when the `hibe` feature is off.
+    /// Cipher kinds with key files on disk for this group whose compile-time
+    /// feature is disabled: `"jwe"` without `native-jwe`, or `"hibe"`
+    /// without `hibe`.
     pub keystore_candidates: Vec<String>,
 }
 
@@ -461,143 +483,13 @@ fn try_open(
     true
 }
 
-/// Every usable cipher candidate for `group` in `keystore_dir`, btn
-/// first. Mirrors `seal.py::_load_recipient_candidates`: the keystore
-/// can hold keys for the SAME group name under several ciphers at
-/// once, and the envelope doesn't say which cipher sealed it, so the
-/// caller tries each candidate and keeps the first that opens.
-///
-/// Deliberate divergences from Python, both surfaced through the
-/// [`SealedGroupInfo::keystore_candidates`] seam instead of erroring:
-/// a `<group>.jwe.mykey` is unusable in Rust (JWE stays Python/C#
-/// side), and a `<group>.hibe.sk` is unusable when the `hibe` feature
-/// is off. Load failures for present key files propagate (as in
-/// Python).
-fn load_recipient_candidates(
-    keystore_dir: &Path,
-    group: &str,
-) -> Result<Vec<Arc<dyn GroupCipher>>> {
-    let btn_kit = keystore_dir.join(format!("{group}.btn.mykit"));
-    let jwe_key = keystore_dir.join(format!("{group}.jwe.mykey"));
-    let hibe_key = keystore_dir.join(format!("{group}.hibe.sk"));
-
-    let mut ciphers: Vec<Arc<dyn GroupCipher>> = Vec::new();
-    let mut any_key_file = false;
-    if btn_kit.exists() {
-        any_key_file = true;
-        let kits = collect_btn_kit_bytes(keystore_dir, group)?;
-        ciphers.push(Arc::new(BtnReaderCipher::from_multi_kit_bytes(&kits)?));
-    }
-    if jwe_key.exists() {
-        // Present but unusable in Rust — reported via keystore_candidates.
-        any_key_file = true;
-    }
-    if hibe_key.exists() {
-        any_key_file = true;
-        #[cfg(feature = "hibe")]
-        {
-            let storage: Arc<dyn crate::storage::Storage> =
-                Arc::new(crate::storage::FsStorage::new());
-            let (cipher, _, _) =
-                super::cipher_build::build_hibe_cipher_with_storage(keystore_dir, group, &storage)?;
-            ciphers.push(cipher);
-        }
-        // feature off: present but unusable — reported via keystore_candidates.
-    }
-    if !any_key_file {
-        return Err(Error::InvalidConfig(format!(
-            "unseal: no recipient key found for group={group:?} in \
-             {}. Looked for {group}.btn.mykit (btn), \
-             {group}.jwe.mykey (jwe), and {group}.hibe.sk (hibe). If you \
-             absorbed a kit_bundle, the kit lands in your ceremony's \
-             keystore — point as_recipient there.",
-            keystore_dir.display()
-        )));
-    }
-    Ok(ciphers)
-}
-
-/// Load every kit in `keystore` as `{group_name: [cipher candidates]}`.
-/// Mirrors `reader._discover_keybag_ciphers`: per group, candidates in
-/// order btn (`.btn.mykit`, multi-kit incl. retired/revoked archives),
-/// jwe (`.jwe.mykey` — skipped in Rust, surfaced via
-/// `keystore_candidates`), hibe (`.hibe.sk` — requires the `.hibe.mpk`
-/// + `.hibe.idpath` sidecars; feature-gated). Single-kit load failures
-/// are silently skipped — the bag is best-effort.
-fn discover_keybag(keystore: &Path) -> BTreeMap<String, Vec<Arc<dyn GroupCipher>>> {
-    let mut bag: BTreeMap<String, Vec<Arc<dyn GroupCipher>>> = BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(keystore) else {
-        return bag;
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter(|e| e.path().is_file())
-        .filter_map(|e| e.file_name().to_str().map(String::from))
-        .collect();
-    names.sort();
-
-    // btn candidates first (the suffix order Python walks).
-    for name in &names {
-        let Some(group) = name.strip_suffix(".btn.mykit") else {
-            continue;
-        };
-        let Ok(kits) = collect_btn_kit_bytes(keystore, group) else {
-            continue;
-        };
-        if kits.is_empty() {
-            continue;
-        }
-        let Ok(cipher) = BtnReaderCipher::from_multi_kit_bytes(&kits) else {
-            continue;
-        };
-        bag.entry(group.to_string())
-            .or_default()
-            .push(Arc::new(cipher));
-    }
-
-    // jwe (.jwe.mykey) deliberately skipped: unusable in Rust, surfaced
-    // through the SealedGroupInfo::keystore_candidates seam instead.
-
-    #[cfg(feature = "hibe")]
-    for name in &names {
-        let Some(group) = name.strip_suffix(".hibe.sk") else {
-            continue;
-        };
-        let storage: Arc<dyn crate::storage::Storage> = Arc::new(crate::storage::FsStorage::new());
-        let Ok((cipher, _, _)) =
-            super::cipher_build::build_hibe_cipher_with_storage(keystore, group, &storage)
-        else {
-            continue;
-        };
-        bag.entry(group.to_string()).or_default().push(cipher);
-    }
-
-    bag
-}
-
-/// Cipher kinds with a key file for `group` in `keystore` that this
-/// build cannot use: `"jwe"` always (JWE stays out of Rust), `"hibe"`
-/// when the feature is off. Fills
-/// [`SealedGroupInfo::keystore_candidates`] so a host with a managed
-/// cipher can run a second-pass decrypt.
-fn unusable_keystore_kinds(keystore: &Path, group: &str) -> Vec<String> {
-    let mut kinds: Vec<String> = Vec::new();
-    if keystore.join(format!("{group}.jwe.mykey")).exists() {
-        kinds.push("jwe".to_string());
-    }
-    #[cfg(not(feature = "hibe"))]
-    if keystore.join(format!("{group}.hibe.sk")).exists() {
-        kinds.push("hibe".to_string());
-    }
-    kinds
-}
-
 /// Assemble the [`UnsealOutcome`]: hidden groups (blocks not opened,
 /// sorted), the sealed-blocks seam, and the Entry-style `fields` merge
 /// mirroring `python/tn/_entry.py::Entry.from_raw` — opened plaintexts
 /// alphabetically (last-write-wins), then non-reserved non-block
-/// public extras with the `tn_sealed` marker dropped, then the
-/// `run_id` / `message` slots Python pops out of `fields`.
+/// public extras with the `tn_sealed` marker dropped. `run_id` and
+/// `message` remain in `fields` because this Rust outcome has no
+/// separate typed slots for them.
 fn build_outcome(
     env_value: Value,
     blocks: BTreeMap<String, GroupBlock>,
@@ -646,10 +538,10 @@ fn build_outcome(
             }
         }
     }
-    // Then non-reserved, non-block public extras. Entry.from_raw's
-    // basics set adds run_id and message to the nine reserved scalars.
+    // Then non-reserved, non-block public extras. Rust has no separate
+    // typed run_id or message slots, so those user fields stay here.
     for (k, v) in &env {
-        if ENVELOPE_RESERVED.contains(&k.as_str()) || k == "run_id" || k == "message" {
+        if ENVELOPE_RESERVED.contains(&k.as_str()) {
             continue;
         }
         if blocks.contains_key(k) {
@@ -663,12 +555,6 @@ fn build_outcome(
         }
         fields.insert(k.clone(), v.clone());
     }
-    // Entry.from_raw pops these out of fields into typed slots; the
-    // outcome has no such slots, so they are dropped from fields to
-    // keep the merge identical.
-    fields.remove("run_id");
-    fields.remove("message");
-
     UnsealOutcome {
         envelope: env,
         plaintext,

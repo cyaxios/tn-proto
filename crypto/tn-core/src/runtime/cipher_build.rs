@@ -11,18 +11,22 @@
 //!
 //! [`GroupCipher`]: crate::cipher::GroupCipher
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::cipher::{
     btn::{BtnPublisherCipher, BtnReaderCipher},
+    jwe::JweCipher,
     GroupCipher,
 };
 use crate::config::{Config, GroupSpec};
-use crate::{Error, Result};
+use crate::{DeviceKey, Error, Result};
 
 use super::GroupState;
 
@@ -61,6 +65,7 @@ pub(crate) fn build_group_states(
     master_index_key: &[u8; 32],
     keystore: &Path,
     storage: &Arc<dyn crate::storage::Storage>,
+    device: &DeviceKey,
 ) -> Result<GroupTables> {
     let mut groups: BTreeMap<String, Arc<RwLock<GroupState>>> = BTreeMap::new();
     let mut btn_admin: BTreeMap<String, Arc<Mutex<BtnPublisherCipher>>> = BTreeMap::new();
@@ -76,7 +81,7 @@ pub(crate) fn build_group_states(
         // Call site 4: cipher construction reads `<group>.btn.state`
         // and `<group>.btn.mykit` through storage.
         let (cipher, maybe_pub_cipher, mykit_bytes) =
-            build_cipher_with_admin_with_storage(spec, keystore, name, storage)?;
+            build_cipher_with_admin_with_storage(spec, keystore, name, storage, device)?;
         let hmac_template = crate::indexing::build_hmac_template(&index_key)?;
         groups.insert(
             name.clone(),
@@ -105,12 +110,11 @@ pub(crate) fn build_cipher_with_admin(
     spec: &GroupSpec,
     keystore: &Path,
     group_name: &str,
+    _device: &DeviceKey,
 ) -> Result<BuildCipherResult> {
     match spec.cipher.as_str() {
         "btn" => build_btn_cipher_with_admin(keystore, group_name),
-        "jwe" | "bearer" => Err(Error::NotImplemented(
-            "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
-        )),
+        "jwe" | "bearer" => build_jwe_cipher(spec, keystore, group_name),
         "hibe" => Err(Error::NotImplemented(
             "HIBE groups run through the Python runtime in this plan (tn-hibe backs them)",
         )),
@@ -135,12 +139,11 @@ pub(crate) fn build_cipher_with_admin_with_storage(
     keystore: &Path,
     group_name: &str,
     storage: &Arc<dyn crate::storage::Storage>,
+    _device: &DeviceKey,
 ) -> Result<BuildCipherResult> {
     match spec.cipher.as_str() {
         "btn" => build_btn_cipher_with_admin_with_storage(keystore, group_name, storage),
-        "jwe" | "bearer" => Err(Error::NotImplemented(
-            "JWE groups run through the Python runtime in this plan; migrate to btn for Rust",
-        )),
+        "jwe" | "bearer" => build_jwe_cipher_with_storage(spec, keystore, group_name, storage),
         #[cfg(feature = "hibe")]
         "hibe" => build_hibe_cipher_with_storage(keystore, group_name, storage),
         #[cfg(not(feature = "hibe"))]
@@ -149,6 +152,137 @@ pub(crate) fn build_cipher_with_admin_with_storage(
         )),
         other => Err(Error::InvalidConfig(format!("unknown cipher {other:?}"))),
     }
+}
+
+fn build_jwe_cipher(spec: &GroupSpec, keystore: &Path, group: &str) -> Result<BuildCipherResult> {
+    let storage: Arc<dyn crate::storage::Storage> = Arc::new(crate::storage::FsStorage::new());
+    build_jwe_cipher_with_storage(spec, keystore, group, &storage)
+}
+
+pub(crate) fn build_jwe_cipher_with_storage(
+    spec: &GroupSpec,
+    keystore: &Path,
+    group: &str,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<BuildCipherResult> {
+    let recipient_public_keys = load_jwe_recipient_public_keys(spec, keystore, group, storage)?;
+    let reader_private_keys = load_jwe_reader_private_keys(keystore, group, storage)?;
+    let cipher =
+        JweCipher::new_with_owned_reader_keys(group, &recipient_public_keys, reader_private_keys)?;
+    Ok((Arc::new(cipher), None, None))
+}
+
+fn load_jwe_recipient_public_keys(
+    spec: &GroupSpec,
+    keystore: &Path,
+    group: &str,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<Vec<[u8; 32]>> {
+    let path = keystore.join(format!("{group}.jwe.recipients"));
+    if storage.exists(&path) {
+        let bytes = storage.read_bytes(&path).map_err(Error::Io)?;
+        let entries: Vec<crate::config::GroupRecipient> = serde_json::from_slice(&bytes)?;
+        return decode_jwe_public_keys(&entries, group);
+    }
+    decode_jwe_public_keys(&spec.recipients, group)
+}
+
+fn decode_jwe_public_keys(
+    recipients: &[crate::config::GroupRecipient],
+    group: &str,
+) -> Result<Vec<[u8; 32]>> {
+    let mut seen = BTreeSet::new();
+    let mut keys = Vec::with_capacity(recipients.len());
+    for recipient in recipients {
+        crate::trust::parse_ed25519_did_key(&recipient.recipient_identity).map_err(|error| {
+            Error::InvalidConfig(format!(
+                "jwe group {group}: recipient identity is not a valid Ed25519 did:key: {error}"
+            ))
+        })?;
+        if !seen.insert(recipient.recipient_identity.as_str()) {
+            return Err(Error::InvalidConfig(format!(
+                "jwe group {group}: duplicate recipient {:?}",
+                recipient.recipient_identity
+            )));
+        }
+        let encoded = recipient.pub_b64.as_deref().ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "jwe group {group}: recipient {:?} has no authenticated pub_b64",
+                recipient.recipient_identity
+            ))
+        })?;
+        keys.push(decode_jwe_key(encoded, group, "recipient public key")?);
+    }
+    Ok(keys)
+}
+
+pub(crate) fn load_jwe_reader_private_keys(
+    keystore: &Path,
+    group: &str,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<Vec<Zeroizing<[u8; 32]>>> {
+    let path = keystore.join(format!("{group}.jwe.mykey"));
+    let mut keys = Vec::new();
+    if storage.exists(&path) {
+        let bytes = storage.read_bytes(&path).map_err(Error::Io)?;
+        keys.push(raw_jwe_private_key(bytes, group, &path)?);
+    }
+    let prefix = format!("{group}.jwe.mykey.revoked.");
+    let mut archives = storage
+        .list(keystore)
+        .map_err(Error::Io)?
+        .into_iter()
+        .filter(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect::<Vec<_>>();
+    archives.sort();
+    archives.reverse();
+    for archive in archives {
+        let Ok(bytes) = storage.read_bytes(&archive) else {
+            continue;
+        };
+        if let Ok(key) = raw_jwe_private_key(bytes, group, &archive) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+fn raw_jwe_private_key(bytes: Vec<u8>, group: &str, path: &Path) -> Result<Zeroizing<[u8; 32]>> {
+    let bytes = Zeroizing::new(bytes);
+    if bytes.len() != 32 {
+        return Err(Error::InvalidConfig(format!(
+            "jwe group {group}: {} must be 32 raw bytes, got {}",
+            path.display(),
+            bytes.len()
+        )));
+    }
+    let mut key = Zeroizing::new([0_u8; 32]);
+    key.copy_from_slice(&bytes);
+    Ok(key)
+}
+
+fn decode_jwe_key(encoded: &str, group: &str, label: &str) -> Result<[u8; 32]> {
+    let bytes = STANDARD.decode(encoded).map_err(|error| {
+        Error::InvalidConfig(format!(
+            "jwe group {group}: invalid {label} base64: {error}"
+        ))
+    })?;
+    if STANDARD.encode(&bytes) != encoded {
+        return Err(Error::InvalidConfig(format!(
+            "jwe group {group}: {label} must use canonical standard base64"
+        )));
+    }
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        Error::InvalidConfig(format!(
+            "jwe group {group}: {label} must decode to 32 bytes, got {}",
+            bytes.len()
+        ))
+    })
 }
 
 /// Storage-aware btn cipher builder. Reads `<group>.btn.state` and

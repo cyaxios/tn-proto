@@ -2,12 +2,144 @@ mod common;
 
 use std::process::Command;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use serde_json::{json, Value};
 use tempfile::TempDir;
+use tn_core::cipher::{jwe::JweCipher, GroupCipher};
 use tn_proto::{
     AbsorbReceiptExt, BundleForRecipientOptions, MintInvitationOptions, ReadOptions,
     SecretExportConsent, Tn,
 };
+
+struct JweInteropFixture {
+    public: [u8; 32],
+    private: [u8; 32],
+    public_b64: String,
+    private_b64: String,
+    plaintext: String,
+    aad: String,
+}
+
+#[test]
+#[ignore = "requires local ts-sdk dependencies/build setup; run with cargo test -p tn-proto --test interop_typescript rfc7516_jwe_round_trips_between_rust_and_typescript -- --ignored --exact"]
+fn rfc7516_jwe_round_trips_between_rust_and_typescript() -> tn_proto::Result<()> {
+    assert!(
+        typescript_ready(),
+        "explicit Rust/TypeScript JWE interop gate requires a ready ts-sdk runtime"
+    );
+    let fixture = jwe_interop_fixture();
+    rust_jwe_opens_in_typescript(&fixture)?;
+    typescript_jwe_opens_in_rust(&fixture)?;
+    Ok(())
+}
+
+fn jwe_interop_fixture() -> JweInteropFixture {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../ts-sdk/test/fixtures/jwe_from_python.json"
+    ))
+    .expect("existing JWE fixture should be valid JSON");
+    let reader = fixture["reader_jwk"].as_object().expect("reader_jwk");
+    let public_b64 = reader["x"].as_str().expect("reader x").to_owned();
+    let private_b64 = reader["d"].as_str().expect("reader d").to_owned();
+    let public = URL_SAFE_NO_PAD
+        .decode(&public_b64)
+        .expect("fixture reader public key should be base64url")
+        .try_into()
+        .expect("fixture reader public key should be 32 bytes");
+    let private = URL_SAFE_NO_PAD
+        .decode(&private_b64)
+        .expect("fixture reader private key should be base64url")
+        .try_into()
+        .expect("fixture reader private key should be 32 bytes");
+    JweInteropFixture {
+        public,
+        private,
+        public_b64,
+        private_b64,
+        plaintext: fixture["plaintext"].as_str().expect("plaintext").to_owned(),
+        aad: fixture["aad"].as_str().expect("aad").to_owned(),
+    }
+}
+
+fn rust_jwe_opens_in_typescript(fixture: &JweInteropFixture) -> tn_proto::Result<()> {
+    let sealer = JweCipher::new("typescript-interop", &[fixture.public], &[])?;
+    let rust_jwe = sealer.encrypt_with_aad(fixture.plaintext.as_bytes(), fixture.aad.as_bytes())?;
+    let rust_jwe_json: Value =
+        serde_json::from_slice(&rust_jwe).expect("Rust should emit JSON JWE");
+    assert_rfc7516_general_jwe(&rust_jwe_json);
+    let rust_jwe_arg = String::from_utf8(rust_jwe).expect("Rust JWE should be UTF-8 JSON");
+    let opened_by_typescript = last_json_object(&run_node(
+        r#"
+import { jweDecrypt, okpPrivateJwk } from "./src/core/jwe.ts";
+const decodeB64u = (value) => new Uint8Array(Buffer.from(value, "base64url"));
+const blob = new TextEncoder().encode(process.argv[1]);
+const aad = new TextEncoder().encode(process.argv[4]);
+const key = okpPrivateJwk(decodeB64u(process.argv[2]), decodeB64u(process.argv[3]));
+const opened = await jweDecrypt(key, blob, aad);
+if (opened === null) throw new Error("TypeScript could not open Rust JWE");
+console.log(JSON.stringify({ plaintext: new TextDecoder().decode(opened), aad: process.argv[4] }));
+"#,
+        &[
+            &rust_jwe_arg,
+            &fixture.public_b64,
+            &fixture.private_b64,
+            &fixture.aad,
+        ],
+    ));
+    assert_eq!(opened_by_typescript["plaintext"], fixture.plaintext);
+    assert_eq!(opened_by_typescript["aad"], fixture.aad);
+    Ok(())
+}
+
+fn typescript_jwe_opens_in_rust(fixture: &JweInteropFixture) -> tn_proto::Result<()> {
+    let sealed_by_typescript = last_json_object(&run_node(
+        r#"
+import { jweSeal } from "./src/core/jwe.ts";
+const publicKey = new Uint8Array(Buffer.from(process.argv[1], "base64url"));
+const plaintext = new TextEncoder().encode(process.argv[2]);
+const aad = new TextEncoder().encode(process.argv[3]);
+const sealed = await jweSeal([publicKey], plaintext, aad);
+console.log(JSON.stringify({ jwe: new TextDecoder().decode(sealed), plaintext: process.argv[2], aad: process.argv[3] }));
+"#,
+        &[&fixture.public_b64, &fixture.plaintext, &fixture.aad],
+    ));
+    assert_eq!(sealed_by_typescript["plaintext"], fixture.plaintext);
+    assert_eq!(sealed_by_typescript["aad"], fixture.aad);
+    let typescript_jwe = sealed_by_typescript["jwe"]
+        .as_str()
+        .expect("TypeScript should return UTF-8 JSON JWE");
+    let typescript_jwe_json: Value =
+        serde_json::from_str(typescript_jwe).expect("TypeScript should emit JSON JWE");
+    assert_rfc7516_general_jwe(&typescript_jwe_json);
+    let opener = JweCipher::new("typescript-interop", &[], &[fixture.private])?;
+    let opened = opener.decrypt_with_aad(typescript_jwe.as_bytes(), fixture.aad.as_bytes())?;
+    assert_eq!(opened, fixture.plaintext.as_bytes());
+    Ok(())
+}
+
+fn assert_rfc7516_general_jwe(jwe: &Value) {
+    let object = jwe.as_object().expect("JWE should be a JSON object");
+    for member in ["protected", "aad", "iv", "ciphertext", "tag"] {
+        assert!(
+            object.get(member).and_then(Value::as_str).is_some(),
+            "JWE should contain string member {member}: {jwe}"
+        );
+    }
+    assert!(
+        object
+            .get("recipients")
+            .and_then(Value::as_array)
+            .is_some_and(|recipients| !recipients.is_empty()),
+        "General JSON JWE should contain recipients: {jwe}"
+    );
+    for legacy in ["frame", "body", "recipient_wraps"] {
+        assert!(
+            !object.contains_key(legacy),
+            "RFC 7516 JWE must not contain legacy member {legacy}: {jwe}"
+        );
+    }
+}
 
 #[test]
 #[ignore = "requires local ts-sdk dependencies/build setup; run with cargo test -p tn-proto --test interop_typescript -- --ignored"]
@@ -37,7 +169,7 @@ await tn.close();
     let tn = Tn::init(yaml_path.trim())?;
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let entry = common::find_event(&entries, "ts.rust_sdk_interop.created");
     assert_eq!(
@@ -771,7 +903,7 @@ await tn.close();
 
     let entries = consumer.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let absorbed = common::find_event(&entries, "tn.enrolment.absorbed");
     assert_eq!(

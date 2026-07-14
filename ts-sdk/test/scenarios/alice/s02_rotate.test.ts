@@ -6,7 +6,7 @@
 // full assertion body: rotate mid-stream and verify the chain stays continuous.
 // The catch/skip branch below survives only as a guard if rotate ever throws.
 //
-// Assertion intent (for when rotation is available):
+// Assertion intent:
 //   1. Emit 200 evt.pre events.
 //   2. Call tn.admin.rotate("default") — should complete without error.
 //   3. Emit 200 evt.post events.
@@ -14,9 +14,8 @@
 //      - every entry's valid.chain is true (chain is continuous across rotation)
 //      - every entry's valid.signature is true
 //      - post-rotation entries decrypt cleanly (seq 0..199 in evt.post)
-//   5. Record whether pre-rotation entries decrypt (Python finding: they may
-//      not, because the old cipher state is discarded after rotation; that is
-//      acceptable and documented, not a bug).
+//   5. Record whether this BTN scenario's pre-rotation entries decrypt. JWE
+//      archive/read behavior is covered separately by jwe_rotation_read.test.ts.
 
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
@@ -60,14 +59,14 @@ test("alice/s02_rotate — rotate mid-stream, chain continues", async (t) => {
       // ctx.assertInvariant("signature_verified", entries.every(e => e.valid.signature));
       // ctx.assertInvariant("post_rotation_decryption_verified",
       //   post.every((e, idx) => (e.plaintext["default"] as Record<string,unknown>)?.["seq"] === idx));
-      // // pre-rotation: may not decrypt (acceptable; see Python finding above)
+      // // BTN pre-rotation state may be unavailable after rotation.
       // ctx.record("pre_count", pre.length);
       // ctx.record("post_count", post.length);
 
       return;
     }
 
-    // If rotation somehow succeeds (future JWE support), run the full body:
+    // Rotation succeeded; run the full assertion body:
     for (let i = 0; i < 200; i++) {
       tn.info("evt.post", { seq: i });
     }

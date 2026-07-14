@@ -177,21 +177,28 @@ pub fn decrypt_with_keyset_with_aad(
     ct: &Ciphertext,
     aad: &[u8],
 ) -> Result<Vec<u8>> {
+    decrypt_with_resolver(ct, aad, |label| keyset.try_subset_key(label))
+}
+
+/// Open a ciphertext with subset keys supplied by `resolve`.
+pub(crate) fn decrypt_with_resolver<F>(
+    ct: &Ciphertext,
+    aad: &[u8],
+    mut resolve: F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(&SubsetLabel) -> Option<Zeroizing<[u8; KEY_LEN]>>,
+{
     for entry in &ct.cover {
-        if let Some(sk) = keyset.try_subset_key(&entry.label) {
-            // Reader is entitled (at least per path-key lookup). Try the
-            // unwrap; if integrity fails here, it means the subset key
-            // was for a different publisher's seed — treat as not entitled.
-            let Ok(cek) = unwrap(&sk, &entry.wrapped_cek) else {
-                continue;
-            };
-            let cek = Zeroizing::new(cek);
-            // Open the body. If AEAD fails, same logic: wrong publisher, or the
-            // supplied `aad` doesn't match what the body was sealed under.
-            let Ok(pt) = open(&cek, &ct.body_nonce, &ct.body, aad) else {
-                continue;
-            };
-            return Ok(pt);
+        let Some(subset_key) = resolve(&entry.label) else {
+            continue;
+        };
+        let Ok(cek) = unwrap(&subset_key, &entry.wrapped_cek) else {
+            continue;
+        };
+        let cek = Zeroizing::new(cek);
+        if let Ok(plaintext) = open(&cek, &ct.body_nonce, &ct.body, aad) {
+            return Ok(plaintext);
         }
     }
     Err(Error::NotEntitled)
@@ -259,7 +266,10 @@ mod tests {
         let ct = encrypt_to_cover(&s, TREE_HEIGHT, [0; 32], 0, &[], b"plain").unwrap();
         let ks = materialize_reader_keyset(&s, LeafIndex(3), TREE_HEIGHT);
         assert_eq!(decrypt_with_keyset(&ks, &ct).unwrap(), b"plain");
-        assert_eq!(decrypt_with_keyset_with_aad(&ks, &ct, &[]).unwrap(), b"plain");
+        assert_eq!(
+            decrypt_with_keyset_with_aad(&ks, &ct, &[]).unwrap(),
+            b"plain"
+        );
     }
 
     #[test]

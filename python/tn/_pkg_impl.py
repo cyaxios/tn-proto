@@ -210,7 +210,7 @@ def _bind_after_bootstrap_absorb(kind: str) -> None:
 
 
 def _is_bootstrap_kind_source(args: tuple, kwargs: dict) -> bool:
-    """Best-effort peek at the absorb source's manifest kind, returning
+    """Best-effort, manifest-only peek at the absorb source's kind, returning
     True iff this is an ``identity_seed`` or ``project_seed`` bundle —
     the two kinds for which absorb is allowed to bootstrap a fresh
     directory without an active runtime.
@@ -218,7 +218,7 @@ def _is_bootstrap_kind_source(args: tuple, kwargs: dict) -> bool:
     Returns False on any error (in which case the caller falls through
     to the standard load-only autoinit).
     """
-    from .absorb import _try_bootstrap_cfg  # late import; module circularity
+    from .tnpkg import _peek_manifest_kind
 
     if len(args) == 1 and not kwargs:
         source = args[0]
@@ -229,7 +229,7 @@ def _is_bootstrap_kind_source(args: tuple, kwargs: dict) -> bool:
     if source is None or not isinstance(source, (Path, str, bytes, bytearray)):
         return False
     try:
-        return _try_bootstrap_cfg(source) is not None
+        return _peek_manifest_kind(source) in ("identity_seed", "project_seed")
     except Exception:  # noqa: BLE001 — defensive: unparseable source is simply "not bootstrappable"
         return False
 
@@ -241,8 +241,12 @@ def _bundle_for_recipient_impl(
     groups: list[str] | None = None,
     seal_for_recipient: bool = False,
 ) -> Path:
-    """Mint a fresh kit for ``recipient_did`` across one or more groups and
-    bundle them into a single ``.tnpkg`` at ``out_path``.
+    """Mint fresh BTN kits for ``recipient_did`` across one or more BTN
+    groups and bundle them into a single ``.tnpkg`` at ``out_path``.
+
+    This helper is BTN-only. JWE readers generate/retain ``.jwe.mykey`` and
+    enroll only public material; HIBE readers receive bearer path grants via
+    :func:`tn.admin.grant_reader`.
 
     Closes FINDINGS #5: doing this by hand requires (a) minting each kit
     with the canonical ``<group>.btn.mykit`` filename — a non-canonical
@@ -300,6 +304,8 @@ def _bundle_for_recipient_impl(
             f"tn.ensure_group(cfg, name, fields=[...]) first."
         )
 
+    _require_btn_bundle_groups(cfg, requested)
+
     # Mint each kit into a temp dir with the canonical filename, then
     # export from that temp dir. The publisher's own keystore is never
     # the export source, which prevents the FINDINGS #5 trap (shipping
@@ -324,3 +330,18 @@ def _bundle_for_recipient_impl(
             seal_for_recipient=seal_for_recipient,
         )
     return Path(out)
+
+
+def _require_btn_bundle_groups(cfg: Any, requested: list[str]) -> None:
+    """Reject non-BTN groups before the reader-kit bundler mints anything."""
+    non_btn = {
+        group: cfg.groups[group].cipher.name
+        for group in requested
+        if cfg.groups[group].cipher.name != "btn"
+    }
+    if non_btn:
+        raise ValueError(
+            "bundle_for_recipient is BTN-only; non-BTN groups requested: "
+            f"{non_btn}. JWE readers generate their own .jwe.mykey and enroll "
+            "public material; HIBE readers use tn.admin.grant_reader."
+        )

@@ -303,8 +303,8 @@ export interface TnInitOptions {
    * an existing yaml — the cipher is read from the yaml). `"btn"` (default),
    * `"hibe"` (BBG hierarchical identity-based encryption; the fresh keystore
    * becomes its own HIBE authority), or `"jwe"` (per-recipient ECDH-ES; the
-   * creator becomes publisher and sole reader — seal/open with the async
-   * emitAsync/readAsync verbs). Mirrors Python's `tn.init(..., cipher=...)`.
+   * creator becomes publisher and sole reader, using the ordinary emit/read
+   * and seal/unseal surfaces). Mirrors Python's `tn.init(..., cipher=...)`.
    */
   cipher?: "btn" | "hibe" | "jwe";
 }
@@ -361,7 +361,7 @@ export interface ReadOptions {
   filter?: ReadFilter;
   /** Predicate applied per entry; rejected entries are skipped. */
   where?: (entry: Entry | Record<string, unknown>) => boolean;
-  /** Integrity-check policy. Default: `false`. */
+  /** Integrity-check policy. Default: `true`; pass false to inspect unverified rows. */
   verify?: VerifyMode;
   /** Yield the on-disk envelope dict instead of an `Entry`. */
   raw?: boolean;
@@ -369,8 +369,12 @@ export interface ReadOptions {
   log?: string;
   /** Read using a foreign-publisher kit from this keystore directory. */
   asRecipient?: string;
-  /** Group whose plaintext to surface (only with `asRecipient`). Default: `"default"`. */
+  /** Foreign group override; omit to surface every locally keyed group. */
   group?: string;
+  /** Foreign-read writer allowlist; defaults to installed verified publishers. */
+  trustedPublisherDids?: string[];
+  /** Explicit weakening: permit foreign rows from a writer not in trustedPublisherDids. */
+  unsafeAllowUnverifiedPublisher?: boolean;
   /** Scan across all runs in the file. Default: false (current run only). */
   allRuns?: boolean;
   /**
@@ -1098,10 +1102,10 @@ export class Tn {
     return new ScopeBuilder({ groups: cfg.groups, keystorePath: cfg.keystorePath }, dids);
   }
 
-  /** True iff this ceremony's runtime has an attached Rust/WASM core
-   *  servicing the emit path. False before the first emit (wasm attaches
-   *  lazily) and after an admin-driven runtime reset. Mirrors Python's
-   *  `using_rust`. The read path remains pure-TS today. */
+  /** True iff this ceremony has attached the complete `WasmRuntime` for
+   *  whole-envelope emit ownership. False before lazy attachment and after an
+   *  admin-driven reset. This flag does not indicate whether an individual
+   *  cipher primitive is Rust/Wasm-backed. Mirrors Python's `using_rust`. */
   usingRust(): boolean {
     return this._rt.isWasmActive();
   }
@@ -1312,12 +1316,8 @@ export class Tn {
     return this._rt.emit(level, eventType, this._mergeForEmit(fields));
   }
 
-  /**
-   * Async sibling of {@link emit} that can seal `cipher: jwe` groups. jwe seals
-   * through panva/jose (async), so the synchronous `emit`/`info` cannot publish
-   * to a jwe group — use this (and {@link readAsync} to read them back). btn and
-   * hibe groups seal synchronously within the same pipeline.
-   */
+  /** Async-compatible sibling of {@link emit}. All cipher operations use the
+   * same implementation as the synchronous write verbs. */
   async emitAsync(
     level: string,
     eventType: string,
@@ -1327,7 +1327,7 @@ export class Tn {
     return this._rt.emitAsync(level, eventType, this._mergeForEmit(fields), aad ?? undefined);
   }
 
-  /** Async `info` for jwe ceremonies (see {@link emitAsync}). */
+  /** Async-compatible `info` (see {@link emitAsync}). */
   infoAsync(
     eventType: string,
     fields: Record<string, unknown> = {},
@@ -1385,10 +1385,11 @@ export class Tn {
    *
    * Mirrors Python `tn.read`. Kwargs:
    * - `where`        — predicate `(Entry) -> bool`; non-matching skipped.
-   * - `verify`       — `false` (default), `true` / `"raise"` (throw
+   * - `verify`       — `true` (default) / `"raise"` (throw
    *                    `VerifyError` on first failure), `"skip"` (drop
    *                    validation failures and emit a
-   *                    `tn.read.tampered_row_skipped` admin event).
+   *                    `tn.read.tampered_row_skipped` admin event), or
+   *                    explicit `false` to disable verification.
    * - `raw`          — yield envelope dict instead of `Entry`.
    * - `log`          — alternate log path.
    * - `asRecipient`  — keystore directory to decrypt with (foreign-log mode).
@@ -1402,12 +1403,12 @@ export class Tn {
     // to the reader.
     if (!this._hasReplaySurface()) return;
 
-    const verify = opts.verify ?? false;
+    const verify = opts.verify ?? true;
     _checkVerifyKwarg(verify);
     const raw = opts.raw ?? false;
     const logPath = opts.log;
     const asRecipient = opts.asRecipient;
-    const group = opts.group ?? "default";
+    const group = opts.group;
     const allRuns = opts.allRuns ?? true;
     const expectGenesis = opts.expectGenesis ?? false;
     const where = opts.where;
@@ -1423,9 +1424,15 @@ export class Tn {
       const path = logPath ?? this._rt.config.logPath;
       usingRecipient = true;
       const foreignIter = readAsRecipient(path, keystorePath, {
-        group,
+        ...(group === undefined ? {} : { group }),
         verifySignatures: verify !== false,
         expectGenesis,
+        ...(opts.trustedPublisherDids === undefined
+          ? {}
+          : { trustedPublisherDids: opts.trustedPublisherDids }),
+        ...(opts.unsafeAllowUnverifiedPublisher === undefined
+          ? {}
+          : { unsafeAllowUnverifiedPublisher: opts.unsafeAllowUnverifiedPublisher }),
       });
       triples = (function* () {
         for (const entry of foreignIter) {
@@ -1434,7 +1441,7 @@ export class Tn {
             plaintext: entry.plaintext,
             valid: {
               signature: entry.valid.signature,
-              rowHash: true,
+              rowHash: entry.valid.rowHash,
               chain: entry.valid.chain,
             },
           };
@@ -1488,20 +1495,11 @@ export class Tn {
     }
   }
 
-  /**
-   * Async sibling of {@link read} that also decrypts `cipher: jwe` groups.
-   *
-   * The synchronous `read()` cannot open jwe groups because the JOSE library
-   * (panva/jose) is async; this generator awaits it. Same options and per-row
-   * verify / raw / where / selector / filter / run-id behavior as `read()`,
-   * and `asRecipient` foreign-log reads decrypt btn/hibe/jwe alike (through
-   * readAsRecipientAsync).
-   */
-  async *readAsync(
-    opts: ReadOptions = {},
-  ): AsyncIterableIterator<Entry | Record<string, unknown>> {
+  /** Async-compatible sibling of {@link read}. It has the same cipher support,
+   * verification, filtering, and foreign-recipient behavior as `read()`. */
+  async *readAsync(opts: ReadOptions = {}): AsyncIterableIterator<Entry | Record<string, unknown>> {
     if (!this._hasReplaySurface()) return;
-    const verify = opts.verify ?? false;
+    const verify = opts.verify ?? true;
     _checkVerifyKwarg(verify);
     const raw = opts.raw ?? false;
     const allRuns = opts.allRuns ?? true;
@@ -1514,21 +1512,34 @@ export class Tn {
     // absorbed reader kit via readAsRecipientAsync (handles btn/hibe/jwe).
     let usingRecipient = false;
     let source: AsyncIterable<ReadEntry>;
-    if (opts.asRecipient !== undefined || (opts.log !== undefined && _isForeignLog(opts.log, this.did))) {
+    if (
+      opts.asRecipient !== undefined ||
+      (opts.log !== undefined && _isForeignLog(opts.log, this.did))
+    ) {
       usingRecipient = true;
       const keystorePath = opts.asRecipient ?? this._rt.config.keystorePath;
       const path = opts.log ?? this._rt.config.logPath;
-      const group = opts.group ?? "default";
+      const group = opts.group;
       source = (async function* () {
         for await (const fe of readAsRecipientAsync(path, keystorePath, {
-          group,
+          ...(group === undefined ? {} : { group }),
           verifySignatures: verify !== false,
           expectGenesis,
+          ...(opts.trustedPublisherDids === undefined
+            ? {}
+            : { trustedPublisherDids: opts.trustedPublisherDids }),
+          ...(opts.unsafeAllowUnverifiedPublisher === undefined
+            ? {}
+            : { unsafeAllowUnverifiedPublisher: opts.unsafeAllowUnverifiedPublisher }),
         })) {
           yield {
             envelope: fe.envelope,
             plaintext: fe.plaintext,
-            valid: { signature: fe.valid.signature, rowHash: true, chain: fe.valid.chain },
+            valid: {
+              signature: fe.valid.signature,
+              rowHash: fe.valid.rowHash,
+              chain: fe.valid.chain,
+            },
           } as ReadEntry;
         }
       })();
@@ -1562,7 +1573,8 @@ export class Tn {
    * would; the object is always signed; the ceremony's chain state is
    * never touched. By default one `tn.object.sealed` receipt row is
    * chained through the normal write path (`receipt: false` skips it).
-   * Async because jwe groups seal through panva/jose.
+   * Promise-shaped for API compatibility; every cipher uses the same core
+   * primitives as the ordinary write/read surfaces.
    */
   async seal(
     objectType: string,

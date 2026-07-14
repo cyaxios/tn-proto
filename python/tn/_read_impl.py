@@ -428,13 +428,45 @@ def _replay_rotated_backups(rt, target_path: Path, where):
             continue
 
 
-def _read_raw_inner(log_path=None, cfg=None, *, all_runs: bool = False, where=None):
+def _read_raw_inner(
+    log_path=None,
+    cfg=None,
+    *,
+    all_runs: bool = False,
+    where=None,
+    pre_decrypt=None,
+    runtime=None,
+):
     """Internal implementation of read_raw without surface-log entry."""
     import tn
 
     from . import current_config
-    tn._maybe_autoinit_load_only()
-    rt = tn._dispatch_rt
+    if cfg is None:
+        tn._maybe_autoinit_load_only()
+        cfg = current_config()
+    rt = runtime if runtime is not None else tn._dispatch_rt
+
+    # Secure-default reads need the Python scanner's two-phase contract:
+    # parse/hash/chain/signature plus receiver-local writer policy first,
+    # group decrypt only when that early gate accepts.  The legacy native
+    # read_raw binding returns already-decrypted plaintext, so it cannot
+    # satisfy that ordering until the policy-aware binding lands.
+    if pre_decrypt is not None:
+        from .reader import read as _legacy_read_fn
+
+        target = Path(log_path) if log_path is not None else cfg.resolve_log_path()
+        if all_runs:
+            for backup in _rotated_backup_paths(target):
+                yield from _where_only(
+                    _legacy_read_fn(backup, cfg, pre_decrypt=pre_decrypt),
+                    where,
+                )
+        yield from _filtered_run_entries(
+            _legacy_read_fn(target, cfg, pre_decrypt=pre_decrypt),
+            all_runs=all_runs,
+            where=where,
+        )
+        return
 
     if all_runs and rt is not None and rt.using_rust:
         own_log = _resolve_own_log(cfg, current_config)
@@ -450,11 +482,9 @@ def _read_raw_inner(log_path=None, cfg=None, *, all_runs: bool = False, where=No
         yield from _filtered_run_entries(rt.read(log_path), all_runs=all_runs, where=where)
         return
 
-    # Legacy reader path — pure-Python, unchanged behavior for JWE.
+    # Python-managed reader path; JWE opens through the independent joserfc
+    # implementation of the same fixed tn-core/tn-wasm wire profile.
     from .reader import read as _legacy_read_fn
-
-    if cfg is None:
-        cfg = current_config()
     yield from _filtered_run_entries(
         _legacy_read_fn(log_path, cfg), all_runs=all_runs, where=where
     )

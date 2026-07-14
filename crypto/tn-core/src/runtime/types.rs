@@ -9,9 +9,10 @@
 //! row types). The `Runtime` methods that build them live in the sibling
 //! submodules.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 // Imported for the `[`Runtime::…`]` intra-doc links throughout this
@@ -63,7 +64,8 @@ pub type FlatEntry = Map<String, Value>;
 
 /// Per-entry validity flags surfaced by [`Runtime::read_raw_with_validity`]
 /// and the `_valid` block of [`Runtime::read_with_verify`].
-#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ValidFlags {
     /// Signature verifies against the envelope's `did`.
     pub signature: bool,
@@ -71,6 +73,203 @@ pub struct ValidFlags {
     pub row_hash: bool,
     /// Per-event_type chain `prev_hash` lines up with the previous row.
     pub chain: bool,
+    /// True only when a present signature verifies for the writer DID.
+    pub writer_authenticated: bool,
+    /// True only when the authenticated writer is trusted and integrity holds.
+    pub writer_authorized: bool,
+    /// Stable, ordered, de-duplicated rejection metadata.
+    pub reasons: Vec<ReadRejectReason>,
+}
+
+/// Public verification mode before receiver-local context is resolved.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyMode {
+    /// Secure default. Resolves to [`VerifyMode::Raise`].
+    Auto,
+    /// Stop on the first rejected record.
+    Raise,
+    /// Continue scanning and omit rejected records.
+    Skip,
+    /// Ignore integrity, authentication, and writer-authorization gates only.
+    Disabled,
+}
+
+/// Receiver-side policy inputs, snapshotted for one read.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReadTrustPolicy {
+    /// Verification action, with `Auto` resolved once at scan start.
+    pub verify: VerifyMode,
+    /// Explicit signature requirement, or `None` for context inference.
+    pub require_signature: Option<bool>,
+    /// Explicit absent-signature allowance, or `None` for the complement.
+    pub allow_unauthenticated: Option<bool>,
+    /// Immutable exact-DID writer allowlist for this read.
+    pub trusted_writers: BTreeSet<String>,
+    /// Whether the caller explicitly supplied the writer allowlist.
+    pub trusted_writers_supplied: bool,
+    /// Permit unknown writers without claiming writer authorization.
+    pub allow_unknown_writers: bool,
+}
+
+/// Immutable receiver/source facts used to resolve a read policy.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReadContext {
+    /// Whether this context belongs to a live bound runtime.
+    pub active: bool,
+    /// Whether the selected source is the runtime's own attached log.
+    pub local_log: bool,
+    /// Whether the source is detached bytes rather than an attached log.
+    pub detached: bool,
+    /// Whether skip-mode audit callbacks may write through this runtime.
+    pub writable: bool,
+    /// Bound profile signature setting, when known.
+    pub profile_sign: Option<bool>,
+    /// Bound profile chain setting, when known.
+    pub profile_chain: Option<bool>,
+    /// Bound runtime device DID, when one exists.
+    pub local_device_did: Option<String>,
+    /// Group the caller explicitly requires recipient access to.
+    pub required_group: Option<String>,
+}
+
+/// Stable wire reasons emitted by every read adapter.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadRejectReason {
+    /// The record cannot be parsed or fails its required shape.
+    RecordInvalid,
+    /// A required row hash is absent or does not recompute.
+    RowHashInvalid,
+    /// Per-event chain continuity failed.
+    ChainInvalid,
+    /// A required signature is absent.
+    SignatureRequired,
+    /// A present signature does not verify.
+    SignatureInvalid,
+    /// The exact writer DID is outside the frozen allowlist.
+    WriterUntrusted,
+    /// Authenticated decryption/AAD validation failed.
+    AadInvalid,
+    /// The explicitly required group is unavailable to this recipient.
+    NotARecipient,
+}
+
+impl ReadRejectReason {
+    /// Frozen snake-case wire value used in errors and callbacks.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RecordInvalid => "record_invalid",
+            Self::RowHashInvalid => "row_hash_invalid",
+            Self::ChainInvalid => "chain_invalid",
+            Self::SignatureRequired => "signature_required",
+            Self::SignatureInvalid => "signature_invalid",
+            Self::WriterUntrusted => "writer_untrusted",
+            Self::AadInvalid => "aad_invalid",
+            Self::NotARecipient => "not_a_recipient",
+        }
+    }
+}
+
+/// Already-scanned facts for the pure policy evaluator.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReadRecordState {
+    /// Whether parsing and required envelope shape validation succeeded.
+    pub record_valid: bool,
+    /// Whether the envelope carries a non-empty row hash.
+    pub row_hash_present: bool,
+    /// Whether the row hash recomputes from canonical inputs.
+    pub row_hash_valid: bool,
+    /// Whether this row continues its per-event chain.
+    pub chain_valid: bool,
+    /// Whether the envelope carries a non-empty signature.
+    pub signature_present: bool,
+    /// Whether the present signature verifies for `writer_did`.
+    pub signature_valid: bool,
+    /// Exact writer DID extracted from the envelope.
+    pub writer_did: Option<String>,
+    /// Whether authenticated decryption accepted the bound AAD.
+    pub aad_valid: bool,
+    /// Groups for which recipient access succeeded.
+    pub recipient_groups: BTreeSet<String>,
+}
+
+/// Result of applying one resolved policy to one scanned record.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReadDecision {
+    /// Whether the record passes transport and policy gates.
+    pub accepted: bool,
+    /// Stable ordered and de-duplicated reason codes.
+    pub reasons: Vec<ReadRejectReason>,
+    /// Whether a present writer signature verified.
+    pub writer_authenticated: bool,
+    /// Whether the authenticated writer is trusted with intact integrity.
+    pub writer_authorized: bool,
+}
+
+impl ReadDecision {
+    /// Stable first reason used by raise and callback adapters.
+    #[must_use]
+    pub fn first_reason(&self) -> Option<ReadRejectReason> {
+        self.reasons.first().copied()
+    }
+}
+
+/// Cursor coordinate representation for one canonical source.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorKind {
+    /// Decimal byte position in a file-like source.
+    ByteOffset,
+    /// Decimal sequence position in an ordered handler source.
+    Sequence,
+    /// Source-defined token preserved without interpretation.
+    Opaque,
+}
+
+/// Version-one cursor coordinate for one source.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SourceCursorV1 {
+    /// Coordinate interpretation.
+    pub kind: CursorKind,
+    /// Lossless string coordinate; never coerced through a floating number.
+    pub value: String,
+}
+
+/// Versioned, canonical multi-source cursor.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReadCursorV1 {
+    /// Cursor schema version. Version one is currently supported.
+    pub version: u8,
+    /// Canonical source ID to source-specific cursor, sorted by ID.
+    pub sources: BTreeMap<String, SourceCursorV1>,
+}
+
+impl Default for ReadCursorV1 {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            sources: BTreeMap::new(),
+        }
+    }
+}
+
+/// Materialized page plus scan accounting and the next lossless cursor.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReadReport<T> {
+    /// Accepted entries in source order.
+    pub entries: Vec<T>,
+    /// Non-empty records examined after the supplied cursor.
+    pub scanned: usize,
+    /// Accepted records returned in `entries`.
+    pub yielded: usize,
+    /// Rejected records omitted from `entries`.
+    pub skipped: usize,
+    /// Next versioned cursor, preserving unrelated source coordinates.
+    pub cursor: ReadCursorV1,
 }
 
 /// What [`Runtime::secure_read`] does on a non-verifying entry. Per spec §3.1.

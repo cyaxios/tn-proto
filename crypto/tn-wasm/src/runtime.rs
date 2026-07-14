@@ -36,6 +36,8 @@ use ::tn_core::{OnInvalid, Runtime, RuntimeInitOptions, SecureReadOptions};
 use crate::storage::JsStorageAdapter;
 use crate::{js_to_json, json_to_js};
 
+mod seal;
+
 /// JS-side wrapper around a single `tn-core` `Runtime` instance.
 ///
 /// Owns an `Arc<Runtime>` so the JS handle can be cloned-by-reference
@@ -730,13 +732,17 @@ impl WasmRuntime {
     /// is optional — pass `null`/`undefined` to bundle every non-
     /// internal group declared in the active ceremony.
     ///
-    /// Cipher behavior comes from tn-core: BTN groups mint `.btn.mykit`
-    /// reader kits; native HIBE builds mint `.hibe.mpk/.idpath/.sk`
-    /// material; JWE groups return an explicit unsupported error because
-    /// JWE lives in the TypeScript pure-JS JOSE pipeline.
+    /// Cipher behavior comes from tn-core: BTN groups mint portable
+    /// `.btn.mykit` reader kits and native HIBE builds mint
+    /// `.hibe.mpk/.idpath/.sk` material. JWE intentionally has no private-key
+    /// reader kit: each reader retains its own X25519 private key and enrolls
+    /// only an authenticated public binding. If any selected group is JWE,
+    /// this kit-bundle operation rejects the request before minting; use the
+    /// TypeScript `tn.pkg.prepareRecipient` public-activation flow instead.
     ///
     /// Mirrors PyO3 `bundle_for_recipient` and Python
-    /// `tn.bundle_for_recipient`. Returns the absolute bundle path.
+    /// `tn.bundle_for_recipient`. Returns the absolute bundle path when every
+    /// selected group produces transferable kit material.
     #[wasm_bindgen(js_name = "bundleForRecipient")]
     pub fn bundle_for_recipient_js(
         &self,
@@ -812,12 +818,11 @@ impl WasmRuntime {
     /// produces; consumers who want the flat hoisted shape can post-
     /// process or call `readWithVerify` once it grows a path arg.
     ///
-    /// For this wasm runtime build, configured BTN logs are supported.
-    /// Foreign BTN recipient-kit reads are supported when BTN kits are in
-    /// the keystore. Foreign HIBE/JWE recipient-kit dispatch returns a
-    /// clear unsupported error instead of using BTN assumptions; HIBE is
-    /// exposed separately through the standalone `hibe*` primitives and
-    /// JWE through the TS pure-JS JOSE path.
+    /// Configured BTN and JWE groups use tn-core's normal runtime decryptors.
+    /// For a foreign log, tn-core discovers portable BTN kits and reader-local
+    /// JWE private keys in this runtime's keystore and builds the matching
+    /// decryptors. HIBE material participates when that runtime feature is
+    /// enabled; standalone HIBE primitives remain available in this bundle.
     #[wasm_bindgen(js_name = "readFrom")]
     pub fn read_from_js(&self, log_path: &str) -> Result<JsValue, JsError> {
         let normalized = log_path.replace('\\', "/");
@@ -859,9 +864,8 @@ impl WasmRuntime {
     /// explicit `logPath`. Mirrors Python
     /// `tn.read_raw_with_validity(log_path=…)`.
     ///
-    /// The explicit-path validity path handles configured-runtime reads.
-    /// Foreign recipient-kit reads with validity fail clearly today rather
-    /// than reporting BTN-shaped validity for HIBE/JWE material.
+    /// Configured and foreign sources use the same policy scanner and the
+    /// cipher-appropriate decryptors discovered from this runtime's keystore.
     #[wasm_bindgen(js_name = "readFromWithValidity")]
     pub fn read_from_with_validity_js(&self, log_path: &str) -> Result<JsValue, JsError> {
         let normalized = log_path.replace('\\', "/");

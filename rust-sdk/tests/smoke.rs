@@ -228,7 +228,7 @@ fn init_project_creates_persistent_ceremony_project() -> tn_proto::Result<()> {
     assert_eq!(reopened.did(), did);
     let entries = reopened.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     let entry = common::find_event(&entries, "project.created");
     assert_eq!(entry.get("ok").and_then(Value::as_bool), Some(true));
@@ -538,7 +538,7 @@ fn init_project_forwards_init_options() -> tn_proto::Result<()> {
 
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        verify: false,
+        ..ReadOptions::default()
     })?;
     assert!(entries
         .iter()

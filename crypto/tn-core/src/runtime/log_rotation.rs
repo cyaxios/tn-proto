@@ -13,14 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
-use time::OffsetDateTime;
 
 use crate::chain::ChainState;
 use crate::log_file::{LogFileReader, LogFileWriter, LogWriters};
 use crate::path_template::PathTemplate;
 use crate::Result;
-
-use super::util::is_absolute_xplat_path;
 
 /// Process-scoped rotation guard.
 ///
@@ -310,47 +307,6 @@ pub(crate) fn scan_for_ceremony_init(
         }
     }
     Ok(false)
-}
-
-/// Resolve the protocol-events-location template without a Runtime instance.
-///
-/// Only expands `{event_class}` to `"ceremony"` (the class of `tn.ceremony.init`),
-/// plus `{yaml_dir}`, `{ceremony_id}`, and `{did}`. `{event_type}` becomes
-/// `"tn.ceremony.init"`. `{date}` is not required for fresh-detection purposes;
-/// the file either exists or it doesn't regardless of date.
-pub(crate) fn resolve_pel_static(
-    tmpl: &str,
-    yaml_dir: &Path,
-    ceremony_id: &str,
-    did: &str,
-) -> PathBuf {
-    let date_fmt = time::macros::format_description!("[year]-[month]-[day]");
-    let date = OffsetDateTime::now_utc()
-        .format(&date_fmt)
-        .unwrap_or_else(|_| "1970-01-01".to_string());
-    let yaml_dir_s = yaml_dir.to_string_lossy().into_owned();
-    // `{event_class}` is the first dotted segment of `tn.ceremony.init`
-    // = `tn` (matches Python/PathTemplate, not the prior `nth(1)`
-    // shorthand which would yield `ceremony`). The init-time fresh-
-    // detection scan and the emit-time write must agree on the
-    // rendered path, otherwise restart re-emits `tn.ceremony.init`.
-    let filled = tmpl
-        .replace("{event_type}", "tn.ceremony.init")
-        .replace("{event_class}", "tn")
-        .replace("{date}", &date)
-        .replace("{yaml_dir}", &yaml_dir_s)
-        .replace("{ceremony_id}", ceremony_id)
-        .replace("{did}", did);
-    // Anchor relative templates at the yaml dir — same fix as
-    // ``Runtime::resolve_pel``. Without it, fresh-detection scans the
-    // wrong file (process cwd) and we end up emitting tn.ceremony.init
-    // twice on a re-init.
-    let p = PathBuf::from(filled);
-    if is_absolute_xplat_path(&p) {
-        p
-    } else {
-        yaml_dir.join(p)
-    }
 }
 
 /// Build the protocol-event-location writer pool that mirrors the main

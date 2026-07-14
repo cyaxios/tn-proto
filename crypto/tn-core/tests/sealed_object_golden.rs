@@ -58,8 +58,7 @@ fn load_fixture() -> Fixture {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/sealed_object_vectors.json"
     );
-    serde_json::from_slice(&fs::read(path).expect("fixture file present"))
-        .expect("fixture parses")
+    serde_json::from_slice(&fs::read(path).expect("fixture file present")).expect("fixture parses")
 }
 
 #[test]
@@ -112,7 +111,11 @@ fn python_sealed_objects_verify_and_open() {
         for (group, expected) in &case.open_groups {
             let out = unseal_as_recipient(&case.wire, td.path(), group, true)
                 .unwrap_or_else(|e| panic!("case={} group={group}: unseal failed: {e}", case.name));
-            assert!(out.valid.signature && out.valid.row_hash, "case={}", case.name);
+            assert!(
+                out.valid.signature && out.valid.row_hash,
+                "case={}",
+                case.name
+            );
             assert_eq!(
                 out.plaintext.get(group),
                 Some(expected),
@@ -126,7 +129,10 @@ fn python_sealed_objects_verify_and_open() {
 #[test]
 fn python_tampered_objects_fail_expected_checks() {
     let fixture = load_fixture();
-    assert!(!fixture.tampered.is_empty(), "fixture must carry tampered cases");
+    assert!(
+        !fixture.tampered.is_empty(),
+        "fixture must carry tampered cases"
+    );
 
     for t in &fixture.tampered {
         // Empty keystore: the verify gate fires before any key loading.
@@ -139,7 +145,10 @@ fn python_tampered_objects_fail_expected_checks() {
                 "case={}: failed-check set and ORDER must match Python's",
                 t.name
             ),
-            other => panic!("case={}: expected SealedObjectVerify, got {other:?}", t.name),
+            other => panic!(
+                "case={}: expected SealedObjectVerify, got {other:?}",
+                t.name
+            ),
         }
     }
 }

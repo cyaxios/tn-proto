@@ -1,13 +1,11 @@
 // Pure envelope-decrypt helper. Browser-safe — no fs, no Node imports.
 // Branches on the kit's declared cipher, then wraps the cipher's primitive
-// (today: `btnDecrypt` from `../raw.js`; soon: `jweDecrypt`) with per-group
+// (`btnDecrypt`, Rust/WASM JWE, or HIBE) with per-group
 // kit-trying and plaintext markers, so callers don't duplicate the
 // bookkeeping.
 
-import { x25519 } from "@noble/curves/ed25519";
-
+import { subscribe as subscribeJwe } from "../jwe.js";
 import { btnDecrypt, canonicalBytes, hibeOpen } from "../raw.js";
-import { jweDecrypt, okpPrivateJwk } from "./jwe.js";
 
 /** Reconstruct a group's additional-authenticated-data bytes from a record's
  * public ``tn_aad`` echo. The writer bound ``canonicalBytes(effectiveAad)``
@@ -88,16 +86,13 @@ export type DecryptMarker =
   | { $unsupported_cipher: true; cipher: string };
 
 /** Run one kit against the ciphertext for the given cipher. Throws if the
- * kit doesn't match (caller catches and tries the next kit). Returns
- * `null` if the cipher is recognized but its primitive isn't wired yet
- * (e.g., JWE pre-implementation), so callers can surface
- * `$unsupported_cipher` instead of mistaking it for `$no_read_key`. */
+ * kit doesn't match so the caller can try the next rotated kit. */
 function _runKit(
   kits: GroupKits,
   kit: Uint8Array,
   ct: Uint8Array,
   aad: Uint8Array | undefined,
-): Uint8Array | null {
+): Uint8Array {
   const aadArg = aad && aad.length > 0 ? aad : undefined;
   switch (kits.cipher) {
     case "btn":
@@ -115,12 +110,7 @@ function _runKit(
       return hibeOpen(kits.mpk, kit, ct, aadArg);
     }
     case "jwe":
-      // jwe seals/opens through panva/jose, which is async (WebCrypto). This
-      // SYNCHRONOUS path handles btn/hibe only; jwe is opened by the async
-      // sibling `decryptGroupAsync` (used by `readAsync` / `tn.readAsync`).
-      // Returning null here surfaces $unsupported_cipher on the sync path so a
-      // caller knows to use the async read verb, never a silent mis-read.
-      return null;
+      return subscribeJwe([kit]).decryptSync(ct, aadArg);
   }
 }
 
@@ -136,22 +126,13 @@ function _tryDecryptKits(
     return { $no_read_key: true };
   }
   let pt: Uint8Array | null = null;
-  let cipherUnsupported = false;
   for (const kit of kits.kits) {
     try {
-      const result = _runKit(kits, kit, cipher.ct, cipher.aad);
-      if (result === null) {
-        cipherUnsupported = true;
-        break;
-      }
-      pt = result;
+      pt = _runKit(kits, kit, cipher.ct, cipher.aad);
       break;
     } catch {
       /* try next kit */
     }
-  }
-  if (cipherUnsupported) {
-    return { $unsupported_cipher: true, cipher: kits.cipher };
   }
   if (!pt) {
     return { $no_read_key: true };
@@ -162,9 +143,8 @@ function _tryDecryptKits(
 /** Try each kit in `kits.kits` against `cipher.ct`. Return the JSON-parsed
  * plaintext if one succeeds; `{$decrypt_error: true}` if a kit decrypts
  * but JSON.parse fails; `{$no_read_key: true}` if no kit decrypts;
- * `{$unsupported_cipher, cipher}` if the cipher kind is recognized but
- * the wasm primitive for it isn't wired yet (e.g., jwe before its
- * decrypter lands).
+ * `{$unsupported_cipher, cipher}` if a future recognized cipher has no
+ * synchronous primitive yet.
  *
  * Layer 1: no fs, no global state. The caller is responsible for
  * assembling `kits` from its own keystore (Layer 2 work).
@@ -214,40 +194,10 @@ export function decryptAllGroups(
   return out;
 }
 
-/** Async sibling of {@link decryptGroup} that also opens `cipher: jwe` groups
- * (panva/jose is async). btn/hibe resolve synchronously; jwe uses the reader's
- * raw 32-byte X25519 private (`kits.kits[i]`), deriving the public half to form
- * the OKP JWK. Used by the async read path (`tn.readAsync`). The sync
- * {@link decryptGroup} stays untouched for btn/hibe callers. */
+/** Backward-compatible async delegate to {@link decryptGroup}. */
 export async function decryptGroupAsync(
   cipher: GroupCiphertext,
   kits: GroupKits,
 ): Promise<Record<string, unknown> | DecryptMarker> {
-  if (kits.kits.length === 0) {
-    return { $no_read_key: true };
-  }
-  for (const kit of kits.kits) {
-    const aadArg = cipher.aad && cipher.aad.length > 0 ? cipher.aad : undefined;
-    try {
-      let pt: Uint8Array;
-      if (kits.cipher === "jwe") {
-        const opened = await jweDecrypt(okpPrivateJwk(x25519.getPublicKey(kit), kit), cipher.ct, aadArg);
-        if (opened === null) throw new Error("jwe: this key opens no recipient block");
-        pt = opened;
-      } else if (kits.cipher === "hibe") {
-        if (kits.mpk === undefined) throw new Error("hibe: GroupKits.mpk is required");
-        pt = hibeOpen(kits.mpk, kit, cipher.ct, aadArg);
-      } else {
-        pt = btnDecrypt(kit, cipher.ct, aadArg);
-      }
-      try {
-        return JSON.parse(new TextDecoder("utf-8").decode(pt)) as Record<string, unknown>;
-      } catch {
-        return { $decrypt_error: true };
-      }
-    } catch {
-      /* try next kit */
-    }
-  }
-  return { $no_read_key: true };
+  return decryptGroup(cipher, kits);
 }

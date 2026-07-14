@@ -8,9 +8,8 @@
 //   <keystore>/<group>.btn.mykit    self-kit bytes so the publisher can read
 //   <keystore>/<group>.hibe.*       hibe group material (see runtime/hibe_group.ts)
 //
-// We do not touch jwe layouts here. A JWE ceremony yaml loaded
-// through this module will still read the keystore parts that exist
-// but cannot emit or read.
+// JWE reader material is loaded here alongside btn/hibe for the ordinary
+// TypeScript emit, read, seal, and unseal paths.
 
 import { readFileSync, readdirSync, writeFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -43,8 +42,8 @@ export interface GroupKeystore {
   /** jwe reader keys: the raw 32-byte X25519 privates, current
    * (`<group>.jwe.mykey`) first, then any rotation-archived
    * `.jwe.mykey.revoked.<ts>` keys newest first — so pre-rotation entries
-   * stay readable, mirroring btn's `kits` list. The async read path derives
-   * each public half to open. */
+   * stay readable, mirroring btn's `kits` list. Read paths derive each public
+   * half to open. */
   jweKeys?: Uint8Array[];
 }
 

@@ -60,7 +60,8 @@ def _fresh_runtime():
 def ident_and_yaml(tmp_path: Path) -> tuple[Identity, Path]:
     """Mint a fresh identity + minimal jwe ceremony bound to acct_test."""
     yaml_path = tmp_path / "tn.yaml"
-    # jwe is the no-rust cipher; keeps the fixture light.
+    # Use Python's managed joserfc route to keep this CLI fixture isolated from
+    # whole-runtime dispatch; the wire interoperates with tn-core/tn-wasm.
     tn.init(yaml_path, cipher=_workflow_cipher("jwe"))
     tn.flush_and_close()
     identity = Identity.create_new()

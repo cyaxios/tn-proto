@@ -18,8 +18,6 @@ import type { ScopeBuilder, ScopedTn } from "../src/scope.js";
 import type { CeremonyConfig } from "../src/runtime/config.js";
 import { Tn } from "../src/tn.js";
 
-const BOB_DID = "did:key:z6MkBobScopedReaderKeepsPreRotation";
-
 /** Publisher side: OLD row → rotate → NEW row → export a kit_bundle (which
  *  carries the rotation-preserved kit). Recipient side: absorb it, then hand
  *  back a ScopeBuilder over Bob's own ceremony — Bob's device DID is a
@@ -31,17 +29,17 @@ async function rotatedPublisherScopedForBob(root: string): Promise<{
   bobKeystore: string;
   scope: ScopeBuilder;
 }> {
+  const bob = await Tn.init(join(root, "bob", "bob.yaml"), { stdout: false });
   const alice = await Tn.init(join(root, "alice", "alice.yaml"), { stdout: false });
   alice.info("order.created", { order_id: "OLD" });
   await alice.admin.rotate("default");
   alice.info("order.created", { order_id: "NEW" });
   const aliceLog = alice.logPath;
   const bundle = join(root, "bob.tnpkg");
-  await alice.pkg.export({ kit: { recipientDid: BOB_DID } }, bundle);
+  await alice.pkg.export({ kit: { recipientDid: bob.did } }, bundle);
   await alice.close();
   const aliceLogText = readFileSync(aliceLog, "utf8");
 
-  const bob = await Tn.init(join(root, "bob", "bob.yaml"), { stdout: false });
   const receipt = await bob.pkg.absorb(bundle);
   const bobKeystore = (bob.config() as CeremonyConfig).keystorePath;
   const scope = bob.scopeTo(bob.did);

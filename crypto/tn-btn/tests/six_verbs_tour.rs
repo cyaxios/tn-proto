@@ -97,3 +97,32 @@ fn many_reader_fan_out() {
         }
     }
 }
+
+#[test]
+fn producer_decrypts_without_minting_a_reader() {
+    let state = PublisherState::setup(Config).unwrap();
+    assert_eq!(state.issued_count(), 0);
+    let ciphertext = state.encrypt(b"producer copy").unwrap();
+
+    assert_eq!(state.decrypt(&ciphertext).unwrap(), b"producer copy");
+    assert_eq!(state.issued_count(), 0, "decrypt must not consume a leaf");
+}
+
+#[test]
+fn producer_decrypt_requires_matching_aad() {
+    let state = PublisherState::setup(Config).unwrap();
+    let ciphertext = state
+        .encrypt_with_aad(b"bound body", b"purpose=local")
+        .unwrap();
+
+    assert_eq!(
+        state
+            .decrypt_with_aad(&ciphertext, b"purpose=local")
+            .unwrap(),
+        b"bound body"
+    );
+    assert!(matches!(
+        state.decrypt_with_aad(&ciphertext, b"purpose=changed"),
+        Err(Error::NotEntitled)
+    ));
+}

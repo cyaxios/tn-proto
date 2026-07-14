@@ -17,10 +17,24 @@ import { x25519 } from "@noble/curves/ed25519";
 
 /** One entry in a `<group>.jwe.recipients` file. `pub_b64` is standard base64
  *  (matching Python's `base64.b64encode`) of the recipient's raw 32-byte
- *  X25519 public key. */
+ *  X25519 public key. The optional trust metadata records HOW the binding was
+ *  admitted: `verified: true` entries came through a verified key-binding
+ *  proof (`proof_digest` + `public_key_sha256` retained); `verified: false`
+ *  marks an explicitly unsafe raw registration that can never be silently
+ *  promoted to trusted state. */
 export interface JweRecipientEntry {
   recipient_identity: string;
   pub_b64: string;
+  verified?: boolean;
+  proof_digest?: string | null;
+  public_key_sha256?: string | null;
+}
+
+/** Trust metadata persisted alongside a jwe recipient registration. */
+export interface JweRecipientTrust {
+  verified: boolean;
+  proof_digest?: string | null;
+  public_key_sha256?: string | null;
 }
 
 const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
@@ -107,10 +121,20 @@ function readRecipients(path: string): JweRecipientEntry[] {
       throw new Error(`jwe: recipient_identity at index ${index} must be a string`);
     }
     validateRecipientDid(e.recipient_identity);
-    return {
+    const out: JweRecipientEntry = {
       recipient_identity: e.recipient_identity,
       pub_b64: b64(decodeRecipientPublicKey(e.pub_b64, index)),
     };
+    // Preserve the trust metadata written by verified/unsafe registrations;
+    // absent fields stay absent so legacy files round-trip byte-stable.
+    if (typeof e.verified === "boolean") out.verified = e.verified;
+    if (typeof e.proof_digest === "string" || e.proof_digest === null) {
+      out.proof_digest = e.proof_digest as string | null;
+    }
+    if (typeof e.public_key_sha256 === "string" || e.public_key_sha256 === null) {
+      out.public_key_sha256 = e.public_key_sha256 as string | null;
+    }
+    return out;
   });
 }
 
@@ -168,19 +192,28 @@ export function createJweGroup(keysDir: string, group: string, selfDid: string):
  * Append `did` with its raw 32-byte X25519 public key to the recipient list;
  * the next seal wraps a CEK for it. Idempotent — re-adding a DID replaces its
  * entry rather than duplicating. Mirrors `JWEGroupCipher.add_recipient`.
+ * `trust` records how the binding was admitted (verified proof vs explicitly
+ * unsafe raw registration); omitted for legacy callers.
  */
 export function jweAddRecipient(
   keysDir: string,
   group: string,
   did: string,
   pub: Uint8Array,
+  trust?: JweRecipientTrust,
 ): void {
   validateJweGroupName(group);
   validateRecipientDid(did);
   validateRecipientPublicKey(pub);
   const path = recipientsPath(keysDir, group);
   const doc = readRecipients(path).filter((e) => e.recipient_identity !== did);
-  doc.push({ recipient_identity: did, pub_b64: b64(pub) });
+  const entry: JweRecipientEntry = { recipient_identity: did, pub_b64: b64(pub) };
+  if (trust !== undefined) {
+    entry.verified = trust.verified;
+    if (trust.proof_digest !== undefined) entry.proof_digest = trust.proof_digest;
+    if (trust.public_key_sha256 !== undefined) entry.public_key_sha256 = trust.public_key_sha256;
+  }
+  doc.push(entry);
   atomicWriteJson(path, doc);
 }
 

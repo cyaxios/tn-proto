@@ -1,18 +1,59 @@
 // tn.pkg.* namespace - verb surface for tnpkg / package operations.
 
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
 import type { NodeRuntime } from "../runtime/node_runtime.js";
 import type { CeremonyConfig } from "../runtime/config.js";
 import { sha256HexBytes } from "../core/chain.js";
 import { compileKitBundleToFile } from "../compile.js";
 import { mintAndSealBundle, recipientKeyIsResolvable } from "../seal_bundle_producer.js";
-import type {
-  AbsorbReceipt,
-  AbsorbResult,
-  BundleResult,
-  OfferReceipt,
-} from "../core/results.js";
+import { sha256Digest, type AcceptedOffer, type EnrollmentChallengeV1 } from "../core/trust.js";
+import {
+  jweRecipientFromAcceptedOffer,
+  validateVerifiedJweRecipient,
+  type VerifiedJweRecipient,
+} from "../core/jwe_binding.js";
+import { AdminNamespace } from "../admin/index.js";
+import {
+  planRecipientPreparation,
+  resolveRequestedGroups,
+  type JweActivationResult,
+  type PrepareRecipientOptions,
+  type PrepareRecipientResult,
+} from "./recipient_preparation.js";
+import {
+  buildEnrollmentResponseArtifact,
+  buildJweActivationArtifact,
+  buildJweOfferArtifact,
+  ensureDidKeyBoundJweReaderKey,
+  ensureJweReaderKey,
+} from "../runtime/enrollment.js";
+import {
+  recordJweActivationExpectation,
+  type ExpectJweActivationOptions as RuntimeExpectJweActivationOptions,
+  type JweActivationExpectation,
+} from "../runtime/jwe_trust.js";
+import type { AbsorbReceipt, AbsorbResult, BundleResult, OfferReceipt } from "../core/results.js";
+
+export type {
+  JweActivationResult,
+  PrepareRecipientOptions,
+  PrepareRecipientResult,
+} from "./recipient_preparation.js";
+
+export type ExpectJweActivationOptions = Omit<
+  RuntimeExpectJweActivationOptions,
+  "readerDid" | "now"
+>;
+
+export type { JweActivationExpectation } from "../runtime/jwe_trust.js";
+
+export interface PreparedJweReaderKey {
+  group: string;
+  publicKey: Uint8Array;
+  publicKeySha256: string;
+}
 
 export interface ExportOptions {
   /** Mint a per-recipient kit and write it to outPath. */
@@ -48,12 +89,46 @@ export interface OfferOptions {
   group: string;
   peerDid: string;
   outPath: string;
+  /**
+   * A publisher-signed enrollment challenge. When present, the offer becomes
+   * a trusted JWE enrollment offer: the challenge is verified against
+   * `peerDid` first, this reader's static X25519 key is created (or reused)
+   * for the group, and a signed `KeyBindingProofV1` bound to the exact
+   * challenge digest is packaged for the publisher to absorb.
+   */
+  challenge?: EnrollmentChallengeV1;
+  /**
+   * Build a public-only JWE enrollment offer. `signed-key-card` creates an
+   * audience/scope-bound DID-signed proof without a challenge; the publisher
+   * must explicitly approve its exact digest. `challenge-response` is the
+   * typed form of the existing `challenge` option.
+   */
+  jweEnrollment?: JweEnrollmentOffer;
 }
+
+export interface SignedJweKeyCardOffer {
+  kind: "signed-key-card";
+  ceremonyId: string;
+  ttlMs?: number;
+}
+
+export interface JweChallengeResponseOffer {
+  kind: "challenge-response";
+  challenge: EnrollmentChallengeV1;
+}
+
+export type JweEnrollmentOffer = SignedJweKeyCardOffer | JweChallengeResponseOffer;
 
 export interface CompileEnrolmentOptions {
   group: string;
   recipientDid: string;
   outPath: string;
+}
+
+/** Trusted-enrollment response compilation consumes one AcceptedOffer. */
+export interface CompileEnrolmentResponseOptions extends CompileEnrolmentOptions {
+  acceptedOffer: AcceptedOffer;
+  ttlMs: number;
 }
 
 export interface CompiledPackage {
@@ -115,10 +190,7 @@ export class PkgNamespace {
       return this._rt.exportPkg({ kind: "admin_log_snapshot" }, outPath);
     }
     if (opts.selfKit) {
-      return this._rt.exportPkg(
-        { kind: "full_keystore", confirmIncludesSecrets: true },
-        outPath,
-      );
+      return this._rt.exportPkg({ kind: "full_keystore", confirmIncludesSecrets: true }, outPath);
     }
     if (opts.bundle) {
       const b = opts.bundle;
@@ -140,7 +212,8 @@ export class PkgNamespace {
 
   /**
    * Apply a `.tnpkg` file or raw bytes to local state. Idempotent.
-   * Delegates to `NodeRuntime.absorbPkg`.
+   * Delegates to `NodeRuntime.absorbPkgAsync`, which also handles the normal
+   * recipient-sealed reader bundle produced by `prepareRecipient`.
    *
    * Two call shapes, mirroring Python `tn.pkg.absorb`:
    *
@@ -155,19 +228,23 @@ export class PkgNamespace {
    * config, so the absorb uses the bound runtime either way. The new
    * one-arg form is the canonical surface and is unchanged.
    */
-  async absorb(source: string | Uint8Array): Promise<AbsorbReceipt>;
+  async absorb(
+    source: string | Uint8Array,
+    opts?: { unsafeLegacySigner?: boolean },
+  ): Promise<AbsorbReceipt>;
   async absorb(cfg: CeremonyConfig, source: string | Uint8Array): Promise<AbsorbResult>;
   async absorb(
     a: CeremonyConfig | string | Uint8Array,
-    b?: string | Uint8Array,
+    b?: string | Uint8Array | { unsafeLegacySigner?: boolean },
   ): Promise<AbsorbReceipt | AbsorbResult> {
-    if (b === undefined) {
-      // New one-arg form: a is the source.
-      return this._rt.absorbPkg(a as string | Uint8Array);
+    if (typeof a === "string" || a instanceof Uint8Array) {
+      // New form: a is the source, b (when present) is the options object.
+      const opts = b !== undefined && !(b instanceof Uint8Array) && typeof b !== "string" ? b : {};
+      return this._rt.absorbPkgAsync(a, opts);
     }
     // Legacy two-arg form: a is the cfg (accepted for parity), b is the
     // source. Run the absorb and translate to the flat AbsorbResult shape.
-    const receipt = this._rt.absorbPkg(b);
+    const receipt = this._rt.absorbPkg(b as string | Uint8Array);
     return _toLegacyAbsorbResult(receipt);
   }
 
@@ -180,8 +257,19 @@ export class PkgNamespace {
    * (accidentally shipping the publisher's own self-kit).
    */
   async bundleForRecipient(opts: BundleForRecipientOptions): Promise<BundleResult> {
+    const requested = resolveRequestedGroups(this._rt, opts.groups);
+    const jweGroups = requested.filter(
+      (group) => this._rt.config.groups.get(group)?.cipher === "jwe",
+    );
+    if (jweGroups.length > 0) {
+      throw new Error(
+        `tn.pkg.bundleForRecipient: JWE groups ${JSON.stringify(jweGroups)} do not have ` +
+          "reader kits and must never export .jwe.mykey; use tn.pkg.prepareRecipient " +
+          "with acceptedOffers to produce a public-only JWE activation.",
+      );
+    }
     const bundleOpts: { groups?: string[] } = {};
-    if (opts.groups !== undefined) bundleOpts.groups = opts.groups;
+    bundleOpts.groups = requested;
 
     let bundlePath: string;
     if (opts.sealForRecipient) {
@@ -212,21 +300,98 @@ export class PkgNamespace {
       });
       bundlePath = sealed.outPath;
     } else {
-      bundlePath = this._rt.bundleForRecipient(
-        opts.recipientDid,
-        opts.outPath,
-        bundleOpts,
-      );
+      bundlePath = this._rt.bundleForRecipient(opts.recipientDid, opts.outPath, bundleOpts);
     }
     const bundleBytes = readFileSync(bundlePath);
     const bundleSha256 = sha256HexBytes(new Uint8Array(bundleBytes));
-    const resolvedGroups = opts.groups?.slice().sort() ?? [];
+    const resolvedGroups = requested.slice().sort();
     return {
       bundlePath,
       bundleSha256,
       recipientDid: opts.recipientDid,
       groups: resolvedGroups,
       manifestPath: bundlePath,
+    };
+  }
+
+  /** Prepare BTN/HIBE kits plus separate public-only JWE activations. */
+  async prepareRecipient(opts: PrepareRecipientOptions): Promise<PrepareRecipientResult> {
+    const plan = planRecipientPreparation(this._rt, opts);
+    const outDir = pathResolve(opts.outDir);
+    mkdirSync(outDir, { recursive: true });
+    const kitBundle =
+      plan.kitGroups.length === 0
+        ? null
+        : await this.bundleForRecipient({
+            recipientDid: opts.recipientDid,
+            outPath: join(outDir, "reader-bundle.tnpkg"),
+            groups: plan.kitGroups,
+            sealForRecipient: opts.unsafePlaintextKitBundle !== true,
+          });
+    const admin = new AdminNamespace(this._rt);
+    const jweActivations: JweActivationResult[] = [];
+    for (const source of plan.evidence) {
+      const packageResult = await this._compileJweActivation({
+        binding: source.binding,
+        group: source.group,
+        recipientDid: opts.recipientDid,
+        outPath: join(outDir, `${source.group}.jwe-enrolment.tnpkg`),
+        ttlMs: plan.ttlMs,
+        ...(source.acceptedOffer === undefined ? {} : { acceptedOffer: source.acceptedOffer }),
+      });
+      await admin.addRecipient(source.group, {
+        verifiedRecipient: source.binding,
+        ...(source.acceptedOffer === undefined ? {} : { acceptedOffer: source.acceptedOffer }),
+      });
+      jweActivations.push({
+        group: source.group,
+        bindingDigest: source.binding.bindingDigest,
+        activationReferenceDigest: source.activationReferenceDigest,
+        publicKeySha256: source.binding.publicKeySha256,
+        package: packageResult,
+      });
+    }
+    return {
+      recipientDid: opts.recipientDid,
+      requestedGroups: plan.requestedGroups,
+      kitBundle,
+      jweActivations,
+    };
+  }
+
+  /** Pin one direct activation to this reader's existing local JWE key. */
+  expectJweActivation(opts: ExpectJweActivationOptions): JweActivationExpectation {
+    return recordJweActivationExpectation(this._rt.config.keystorePath, {
+      ...opts,
+      readerDid: this._rt.did,
+    });
+  }
+
+  /** Create or reuse a random, per-group JWE reader key. */
+  prepareJweReaderKey(group: string): PreparedJweReaderKey {
+    const publicKey = ensureJweReaderKey(this._rt.config.keystorePath, group);
+    return {
+      group,
+      publicKey: new Uint8Array(publicKey),
+      publicKeySha256: sha256Digest(publicKey),
+    };
+  }
+
+  /**
+   * Explicit DID-document adapter: derive JWE material from the device key.
+   * This couples JWE compromise/rotation across every opted-in group and the
+   * recipient-sealed-bundle identity; prefer prepareJweReaderKey otherwise.
+   */
+  prepareDidKeyBoundJweReaderKey(group: string): PreparedJweReaderKey {
+    const publicKey = ensureDidKeyBoundJweReaderKey(
+      this._rt.config.keystorePath,
+      group,
+      this._rt.keystore.device,
+    );
+    return {
+      group,
+      publicKey: new Uint8Array(publicKey),
+      publicKeySha256: sha256Digest(publicKey),
     };
   }
 
@@ -237,7 +402,14 @@ export class PkgNamespace {
    *
    * Returns `CompiledPackage` with the resolved output path and manifest sha256.
    */
-  async compileEnrolment(opts: CompileEnrolmentOptions): Promise<CompiledPackage> {
+  async compileEnrolment(opts: CompileEnrolmentOptions): Promise<CompiledPackage>;
+  async compileEnrolment(opts: CompileEnrolmentResponseOptions): Promise<CompiledPackage>;
+  async compileEnrolment(
+    opts: CompileEnrolmentOptions & { acceptedOffer?: AcceptedOffer; ttlMs?: number },
+  ): Promise<CompiledPackage> {
+    if (opts.acceptedOffer !== undefined) {
+      return this._compileEnrolmentResponse(opts as CompileEnrolmentResponseOptions);
+    }
     const result = compileKitBundleToFile({
       keystoreDir: this._rt.config.keystorePath,
       groups: [opts.group],
@@ -252,6 +424,111 @@ export class PkgNamespace {
       outPath: result.outPath,
       manifestSha256,
     };
+  }
+
+  /**
+   * Compile the publisher's signed `EnrollmentResponseV1` package for an
+   * accepted JWE offer. Consumes exactly one {@link AcceptedOffer} — the
+   * response embeds ITS offer and X25519 key digests, so a valid binding can
+   * never be paired with another offer's digest. The reader absorbs the
+   * resulting `.tnpkg` to install this publisher as a verified writer.
+   */
+  private async _compileEnrolmentResponse(
+    opts: CompileEnrolmentResponseOptions,
+  ): Promise<CompiledPackage> {
+    const principal = opts.acceptedOffer.binding.principal;
+    if (opts.recipientDid !== principal.did) {
+      throw new Error(
+        `tn.pkg.compileEnrolment: did_signer_mismatch: recipientDid ` +
+          `${JSON.stringify(opts.recipientDid)} does not match the accepted offer's reader ` +
+          `${JSON.stringify(principal.did)}`,
+      );
+    }
+    const groupEpoch = this._rt.config.groups.get(opts.group)?.indexEpoch ?? 0;
+    const { artifact } = buildEnrollmentResponseArtifact({
+      publisherKey: this._rt.keystore.device,
+      ceremonyId: this._rt.config.ceremonyId,
+      group: opts.group,
+      groupEpoch,
+      accepted: opts.acceptedOffer,
+      ttlMs: opts.ttlMs,
+    });
+    const outPath = pathResolve(opts.outPath);
+    mkdirSync(dirname(outPath), { recursive: true });
+    writeFileSync(outPath, Buffer.from(artifact));
+    return { outPath, manifestSha256: sha256HexBytes(artifact) };
+  }
+
+  private async _compileJweActivation(opts: {
+    group: string;
+    recipientDid: string;
+    outPath: string;
+    binding: VerifiedJweRecipient;
+    ttlMs: number;
+    acceptedOffer?: AcceptedOffer;
+  }): Promise<CompiledPackage> {
+    if (opts.binding.readerDid !== opts.recipientDid) {
+      throw new Error("tn.pkg.prepareRecipient: binding names a different reader");
+    }
+    const common = {
+      publisherKey: this._rt.keystore.device,
+      ceremonyId: this._rt.config.ceremonyId,
+      group: opts.group,
+      groupEpoch: this._rt.config.groups.get(opts.group)?.indexEpoch ?? 0,
+      ttlMs: opts.ttlMs,
+    };
+    let artifact: Uint8Array;
+    if (opts.acceptedOffer === undefined) {
+      ({ artifact } = buildJweActivationArtifact({ ...common, recipient: opts.binding }));
+    } else {
+      const current = validateVerifiedJweRecipient(
+        jweRecipientFromAcceptedOffer(opts.acceptedOffer),
+      );
+      if (current.bindingDigest !== opts.binding.bindingDigest) {
+        throw new Error("tn.pkg.prepareRecipient: accepted offer changed after preflight");
+      }
+      ({ artifact } = buildEnrollmentResponseArtifact({
+        ...common,
+        accepted: opts.acceptedOffer,
+      }));
+    }
+    const outPath = pathResolve(opts.outPath);
+    mkdirSync(dirname(outPath), { recursive: true });
+    writeFileSync(outPath, artifact);
+    return { outPath, manifestSha256: sha256HexBytes(artifact) };
+  }
+
+  /**
+   * Publisher pre-authorization: record `readerDid` as the expected reader
+   * for `group` and issue a signed one-time enrollment challenge with a
+   * `ttlMs` acceptance window. The reader answers via `offer({ challenge })`.
+   */
+  async issueEnrollmentChallenge(
+    readerDid: string,
+    group: string,
+    ttlMs: number,
+  ): Promise<EnrollmentChallengeV1> {
+    return this._rt.issueEnrollmentChallenge(readerDid, group, ttlMs);
+  }
+
+  /**
+   * Reverify one retained pending offer and promote it when authorized —
+   * a challenged offer from a preauthorized reader, or an offer whose exact
+   * digest was already approved. Unsolicited offers stay pending until
+   * {@link approveAndReconcile}.
+   */
+  async reconcilePending(digest: string): Promise<AcceptedOffer> {
+    const store = this._rt.enrollmentStore();
+    return store.reconcile(store.pendingOffer(digest));
+  }
+
+  /**
+   * Approve the exact retained offer digest, then reverify, consume the
+   * challenge, promote, and register the acceptance atomically under the
+   * enrollment lock. Idempotent for the exact same bytes.
+   */
+  async approveAndReconcile(digest: string): Promise<AcceptedOffer> {
+    return this._rt.enrollmentStore().approveAndReconcile(digest);
   }
 
   /**
@@ -274,6 +551,24 @@ export class PkgNamespace {
    * (the outbox pattern is not yet implemented in the TS SDK).
    */
   async offer(opts: OfferOptions): Promise<OfferReceipt> {
+    // Trusted JWE enrollment offer: answer the publisher's signed challenge
+    // with a signed key-binding proof over this reader's static X25519 key.
+    if (opts.challenge !== undefined && opts.jweEnrollment !== undefined) {
+      throw new Error(
+        "tn.pkg.offer: challenge and jweEnrollment are mutually exclusive; " +
+          "use jweEnrollment.kind=challenge-response for the typed form",
+      );
+    }
+    if (opts.challenge !== undefined) {
+      return this._offerTrustedEnrollment(opts, {
+        kind: "challenge-response",
+        challenge: opts.challenge,
+      });
+    }
+    if (opts.jweEnrollment !== undefined) {
+      return this._offerTrustedEnrollment(opts, opts.jweEnrollment);
+    }
+
     // Step 1: compile a kit_bundle for the peer.
     const compiled = await this.compileEnrolment({
       group: opts.group,
@@ -302,6 +597,48 @@ export class PkgNamespace {
       packageSha256,
       status: "offered",
       packagePath: compiled.outPath,
+    };
+  }
+
+  /** Build, retain, and write the challenged trusted enrollment offer. */
+  private async _offerTrustedEnrollment(
+    opts: OfferOptions,
+    enrollment: JweEnrollmentOffer,
+  ): Promise<OfferReceipt> {
+    const challenge = enrollment.kind === "challenge-response" ? enrollment.challenge : null;
+    const ceremonyId =
+      enrollment.kind === "challenge-response"
+        ? enrollment.challenge.ceremony_id
+        : enrollment.ceremonyId;
+    const built = buildJweOfferArtifact({
+      readerKey: this._rt.keystore.device,
+      readerKeystoreDir: this._rt.config.keystorePath,
+      publisherDid: opts.peerDid,
+      ceremonyId,
+      group: opts.group,
+      challenge,
+      ...(enrollment.kind === "signed-key-card" && enrollment.ttlMs !== undefined
+        ? { ttlMs: enrollment.ttlMs }
+        : {}),
+    });
+    const outPath = pathResolve(opts.outPath);
+    mkdirSync(dirname(outPath), { recursive: true });
+    writeFileSync(outPath, Buffer.from(built.artifact));
+    const packageSha256 = sha256HexBytes(built.artifact);
+    this._rt.emit("info", "tn.offer.compiled", {
+      group: opts.group,
+      peer_identity: opts.peerDid,
+      package_sha256: `sha256:${packageSha256}`,
+      package_path: outPath,
+      offer_digest: built.offerDigest,
+    });
+    return {
+      group: opts.group,
+      peerDid: opts.peerDid,
+      packageSha256,
+      status: "offered",
+      packagePath: outPath,
+      offerDigest: built.offerDigest,
     };
   }
 }

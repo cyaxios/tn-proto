@@ -24,9 +24,9 @@ use crate::{Error, Result};
 
 use super::cipher_build::{build_group_states, write_fresh_btn_ceremony, FreshBtnCeremonyOptions};
 use super::log_rotation::{
-    build_pel_writer, path_with_backup_suffix, read_rotation_config, resolve_pel_static,
-    rotate_log_on_session_start, rotation_first_time_this_process, scan_for_ceremony_init,
-    seed_chain_from_log, seed_chain_from_template,
+    build_pel_writer, path_with_backup_suffix, read_rotation_config, rotate_log_on_session_start,
+    rotation_first_time_this_process, scan_for_ceremony_init, seed_chain_from_log,
+    seed_chain_from_template,
 };
 use super::util::{current_timestamp, is_absolute_xplat_path, resolve};
 use super::{level_value, log_level, Runtime, RuntimeInitOptions, LOG_LEVEL_THRESHOLD};
@@ -130,10 +130,10 @@ impl Runtime {
     /// yaml, a keystore DID that disagrees with `device.device_identity`,
     /// a wrong-length master key, or a group that can't be built (e.g. a
     /// btn group with neither state nor kit on disk). [`Error::Yaml`](crate::Error::Yaml)
-    /// on a yaml parse failure. [`Error::NotImplemented`](crate::Error::NotImplemented)
-    /// for a JWE group (those run through the Python runtime in this
-    /// plan). The ceremony-init / policy-published attestations are
-    /// best-effort and never fail the load.
+    /// on a yaml parse failure. A group whose compile-time cipher feature was
+    /// explicitly disabled reports [`Error::NotImplemented`](crate::Error::NotImplemented).
+    /// The ceremony-init / policy-published attestations are best-effort and
+    /// never fail the load.
     ///
     /// # Examples
     ///
@@ -253,7 +253,7 @@ impl Runtime {
         // Call site 4 (inside the loop): per-group cipher construction
         // reads `<group>.btn.state` / `<group>.btn.mykit` through storage.
         let (groups, btn_admin, btn_mykit) =
-            build_group_states(&cfg, &master_index_key, &keystore, &storage)?;
+            build_group_states(&cfg, &master_index_key, &keystore, &storage, &device)?;
 
         // Honor `logs.path` from the yaml. Relative paths resolve against
         // the yaml directory; absolute paths are used as-is. Default is
@@ -318,6 +318,25 @@ impl Runtime {
             seed_chain_from_log(&log_path, &chain, &storage)?
         };
 
+        // Admin events have their own per-event-type chains even when they
+        // are routed away from the main log. Seed those tips before opening
+        // the writer pool so the first admin emit after a restart continues
+        // the existing chain instead of resetting to sequence 1.
+        if cfg.ceremony.protocol_events_location != "main_log" {
+            let pel_template = crate::path_template::PathTemplate::parse(
+                &cfg.ceremony.protocol_events_location,
+                &yaml_dir,
+                &cfg.ceremony.id,
+                device.did(),
+            )?;
+            let saw_admin_init = if pel_template.is_templated() {
+                seed_chain_from_template(&pel_template, &chain, &storage)?
+            } else {
+                seed_chain_from_log(&pel_template.render("", ""), &chain, &storage)?
+            };
+            saw_ceremony_init |= saw_admin_init;
+        }
+
         // Session rotation makes the current main log empty; a prior
         // `tn.ceremony.init` may live on a rotation backup. Scan the
         // shifted `<log>.1`..`.N` files so we don't re-emit
@@ -332,18 +351,6 @@ impl Runtime {
                     break;
                 }
             }
-        }
-
-        // When protocol_events_location routes tn.* events to a separate file,
-        // tn.ceremony.init never touches the main log. Check that file too.
-        if !saw_ceremony_init && cfg.ceremony.protocol_events_location != "main_log" {
-            let pel = resolve_pel_static(
-                &cfg.ceremony.protocol_events_location,
-                &yaml_dir,
-                &cfg.ceremony.id,
-                device.did(),
-            );
-            saw_ceremony_init = scan_for_ceremony_init(&pel, &storage)?;
         }
 
         // A ceremony is fresh iff no prior tn.ceremony.init exists in the log(s).
@@ -606,9 +613,9 @@ impl Runtime {
     /// `TNClient.ephemeral()` for tests and one-shot scripts where the
     /// caller doesn't care about persisting the ceremony.
     ///
-    /// Always uses `cipher: btn` because (a) it's hermetic — no JWE
-    /// keypair wiring required — and (b) it's the cipher the cross-SDK
-    /// test surface targets first.
+    /// Uses `cipher: btn` as the hermetic, self-contained default for
+    /// one-shot callers and the cross-SDK baseline. Persisted ceremonies can
+    /// select BTN, JWE, or HIBE per group.
     ///
     /// # Errors
     ///
@@ -646,6 +653,11 @@ impl Runtime {
         self.device.did()
     }
 
+    /// Identifier stamped on events emitted by this runtime instance.
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
     /// Path to the main ndjson log.
     pub fn log_path(&self) -> &Path {
         &self.log_path
@@ -654,6 +666,15 @@ impl Runtime {
     /// Names of groups declared in the active config.
     pub fn group_names(&self) -> Vec<String> {
         self.cfg.groups.keys().cloned().collect()
+    }
+
+    /// Current configured index/key epoch for one group.
+    pub fn group_index_epoch(&self, group: &str) -> Result<u64> {
+        self.cfg
+            .groups
+            .get(group)
+            .map(|spec| spec.index_epoch)
+            .ok_or_else(|| Error::InvalidConfig(format!("unknown group {group:?}")))
     }
 
     /// Borrow the `.tn/config/agents.md` policy document loaded at init.

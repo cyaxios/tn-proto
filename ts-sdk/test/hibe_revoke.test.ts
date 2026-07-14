@@ -20,9 +20,6 @@ import { Tn } from "../src/tn.js";
 import { readAsRecipient } from "../src/read_as_recipient.js";
 import { readTnpkg } from "../src/tnpkg_io.js";
 
-const ALICE = "did:key:z6Mk-alice";
-const BOB = "did:key:z6Mk-bob";
-
 function byType(logPath: string, keystore: string): Record<string, Record<string, unknown>> {
   const out: Record<string, Record<string, unknown>> = {};
   for (const e of readAsRecipient(logPath, keystore, { group: "default" })) {
@@ -35,6 +32,10 @@ test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit",
   const ws = mkdtempSync(join(tmpdir(), "ts-hibe-revoke-"));
   const aYaml = join(ws, "authority", "tn.yaml");
   try {
+    const alice = await Tn.init(join(ws, "alice", "tn.yaml"), { stdout: false, link: false });
+    const bob = await Tn.init(join(ws, "bob", "tn.yaml"), { stdout: false, link: false });
+    const aliceDid = alice.did;
+    const bobDid = bob.did;
     // --- Add two readers, seal epoch 1.
     let a = await Tn.init(aYaml, { cipher: "hibe", stdout: false, link: false });
     const aLog = (a.config() as { logPath: string }).logPath;
@@ -42,23 +43,26 @@ test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit",
     a.info("e1", { note: "both readers admitted" });
     const aliceKit = join(ws, "alice.tnpkg");
     const bobKit = join(ws, "bob.tnpkg");
-    await a.admin.grantReader("default", { readerDid: ALICE, outPath: aliceKit });
-    await a.admin.grantReader("default", { readerDid: BOB, outPath: bobKit });
+    await a.admin.grantReader("default", {
+      readerDid: aliceDid,
+      outPath: aliceKit,
+    });
+    await a.admin.grantReader("default", { readerDid: bobDid, outPath: bobKit });
     let grants = JSON.parse(readFileSync(join(aKeystore, "default.hibe.grants"), "utf8")) as Array<{
       reader_did: string;
     }>;
-    assert.deepEqual(new Set(grants.map((g) => g.reader_did)), new Set([ALICE, BOB]));
+    assert.deepEqual(new Set(grants.map((g) => g.reader_did)), new Set([aliceDid, bobDid]));
 
     // --- Remove bob: rotate + re-issue alice's kit.
-    const res = await a.admin.revokeReader("default", BOB, { outDir: join(ws, "regrant") });
+    const res = await a.admin.revokeReader("default", bobDid, { outDir: join(ws, "regrant") });
     assert.ok(res.revoked);
     assert.equal(res.newPath, "self~r1");
-    assert.deepEqual(res.remaining, [ALICE]);
+    assert.deepEqual(res.remaining, [aliceDid]);
     assert.equal(res.kitPaths.length, 1);
     grants = JSON.parse(readFileSync(join(aKeystore, "default.hibe.grants"), "utf8")) as Array<{
       reader_did: string;
     }>;
-    assert.deepEqual(new Set(grants.map((g) => g.reader_did)), new Set([ALICE]));
+    assert.deepEqual(new Set(grants.map((g) => g.reader_did)), new Set([aliceDid]));
     a.info("e2", { note: "after bob was removed" });
     await a.close();
 
@@ -73,7 +77,6 @@ test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit",
     }
 
     // --- Bob: keeps e1 (honest limit), locked out of e2.
-    const bob = await Tn.init(join(ws, "bob", "tn.yaml"), { stdout: false, link: false });
     const bobKs = (bob.config() as { keystorePath: string }).keystorePath;
     await bob.pkg.absorb(bobKit);
     await bob.close();
@@ -83,7 +86,6 @@ test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit",
 
     // --- Alice: absorbs original + re-issued kit, reads across the
     // rotation without any special handling.
-    const alice = await Tn.init(join(ws, "alice", "tn.yaml"), { stdout: false, link: false });
     const aliceKs = (alice.config() as { keystorePath: string }).keystorePath;
     await alice.pkg.absorb(aliceKit);
     await alice.pkg.absorb(res.kitPaths[0]!);
@@ -106,7 +108,7 @@ test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit",
     process.chdir(ws);
     let r2;
     try {
-      r2 = await a.admin.revokeRecipient("default", { recipientDid: ALICE });
+      r2 = await a.admin.revokeRecipient("default", { recipientDid: aliceDid });
     } finally {
       process.chdir(cwd);
     }

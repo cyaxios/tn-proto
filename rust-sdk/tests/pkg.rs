@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use tn_core::tnpkg::{
-    read_tnpkg, sign_manifest, verify_manifest, write_tnpkg, ManifestKind, TnpkgSource,
+    prepare_manifest_body_index, read_tnpkg, sign_manifest_with_body, verify_manifest, write_tnpkg,
+    ManifestKind, TnpkgSource,
 };
 use tn_proto::{
     AbsorbReceiptExt, AbsorbStatus, BundleForRecipientOptions, CompileEnrolmentOptions,
@@ -641,7 +642,7 @@ fn write_reserved_package(
     recipient_did: Option<&str>,
     package_json: &[u8],
 ) -> tn_proto::Result<()> {
-    let manifest = tn_core::Manifest {
+    let mut manifest = tn_core::Manifest {
         kind,
         version: 1,
         publisher_identity: publisher_did.to_string(),
@@ -653,10 +654,14 @@ fn write_reserved_package(
         event_count: 1,
         head_row_hash: None,
         state: None,
-        manifest_signature_b64: Some("not-a-valid-signature".to_string()),
+        body_sha256: BTreeMap::new(),
+        body_sha256_present: false,
+        manifest_signature_b64: None,
     };
     let mut body = tn_core::tnpkg::BodyContents::new();
     body.insert("body/package.json".to_string(), package_json.to_vec());
+    prepare_manifest_body_index(&mut manifest, &body)?;
+    manifest.manifest_signature_b64 = Some("not-a-valid-signature".to_string());
     write_tnpkg(path, &manifest, &body)?;
     Ok(())
 }
@@ -677,7 +682,7 @@ fn write_contact_update_package_raw(
     recipient_did: Option<&str>,
     body: &[u8],
 ) -> tn_proto::Result<()> {
-    let manifest = tn_core::Manifest {
+    let mut manifest = tn_core::Manifest {
         kind: ManifestKind::ContactUpdate,
         version: 1,
         publisher_identity: publisher_did.to_string(),
@@ -689,10 +694,14 @@ fn write_contact_update_package_raw(
         event_count: 1,
         head_row_hash: None,
         state: None,
-        manifest_signature_b64: Some("not-a-valid-signature".to_string()),
+        body_sha256: BTreeMap::new(),
+        body_sha256_present: false,
+        manifest_signature_b64: None,
     };
     let mut contents = tn_core::tnpkg::BodyContents::new();
     contents.insert("body/contact_update.json".to_string(), body.to_vec());
+    prepare_manifest_body_index(&mut manifest, &contents)?;
+    manifest.manifest_signature_b64 = Some("not-a-valid-signature".to_string());
     write_tnpkg(path, &manifest, &contents)?;
     Ok(())
 }
@@ -715,15 +724,17 @@ fn write_signed_contact_update_package(
         event_count: 1,
         head_row_hash: None,
         state: None,
+        body_sha256: BTreeMap::new(),
+        body_sha256_present: false,
         manifest_signature_b64: None,
     };
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&signer.private_bytes());
-    sign_manifest(&mut manifest, &signing_key)?;
     let mut contents = tn_core::tnpkg::BodyContents::new();
     contents.insert(
         "body/contact_update.json".to_string(),
         serde_json::to_vec(body)?,
     );
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&signer.private_bytes());
+    sign_manifest_with_body(&mut manifest, &contents, &signing_key)?;
     write_tnpkg(path, &manifest, &contents)?;
     Ok(())
 }

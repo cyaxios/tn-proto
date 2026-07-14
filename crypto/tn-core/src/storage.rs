@@ -27,6 +27,18 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Fixed-length reader captured when a storage source is opened.
+///
+/// Consumers must read at most `len` bytes from `reader`. A native file may
+/// continue growing after this snapshot is created; the captured length keeps
+/// one scan from observing records appended by its own callbacks.
+pub struct StorageReadSnapshot {
+    /// Reader positioned at byte zero of the captured source.
+    pub reader: Box<dyn io::Read + Send>,
+    /// Source length observed from the same opened handle.
+    pub len: u64,
+}
+
 /// The synchronous byte-storage extension point used by [`crate::Runtime`].
 ///
 /// Every place the runtime touches durable bytes — log files, keystore blobs,
@@ -41,7 +53,7 @@ use std::path::{Path, PathBuf};
 /// thread and expect the bytes to be there on return. Several methods carry
 /// performance- or correctness-critical contracts ([`cas_write`](Self::cas_write)'s
 /// compare-and-swap, [`with_advisory_lock`](Self::with_advisory_lock)'s
-/// cross-process exclusion) — implementors must honor them, and three methods
+/// cross-process exclusion) — implementors must honor them, and four methods
 /// ship correct-but-slow default bodies that fast backends override.
 ///
 /// All methods take `&self` so a single `Arc<dyn Storage>` can be shared across
@@ -61,6 +73,22 @@ pub trait Storage: Send + Sync {
     /// Returns [`io::ErrorKind::NotFound`] if no such entry exists, or any other
     /// [`io::Error`] the backend raises.
     fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>>;
+
+    /// Open a fixed-length streaming snapshot of `path` when supported.
+    ///
+    /// Returning `Ok(None)` asks callers to retain the compatible
+    /// [`read_bytes`](Self::read_bytes) fallback. Native filesystem backends
+    /// should return a reader and length captured from the same open handle;
+    /// callers cap reads at that length so concurrent appends are not included.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the backend supports snapshot readers but
+    /// cannot open or inspect `path`.
+    fn open_read_snapshot(&self, path: &Path) -> io::Result<Option<StorageReadSnapshot>> {
+        let _ = path;
+        Ok(None)
+    }
 
     /// Overwrite `path` with `data`, creating parent directories as needed
     /// (fs-backed impls).
@@ -286,6 +314,15 @@ impl FsStorage {
 impl Storage for FsStorage {
     fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
         std::fs::read(path)
+    }
+
+    fn open_read_snapshot(&self, path: &Path) -> io::Result<Option<StorageReadSnapshot>> {
+        let file = std::fs::OpenOptions::new().read(true).open(path)?;
+        let len = file.metadata()?.len();
+        Ok(Some(StorageReadSnapshot {
+            reader: Box::new(file),
+            len,
+        }))
     }
 
     fn write_bytes(&self, path: &Path, data: &[u8]) -> io::Result<()> {

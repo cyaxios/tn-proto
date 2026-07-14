@@ -576,10 +576,11 @@ of one line is documented in [§1, the record](#1-the-record-on-the-wire-envelop
 Each group's plaintext fields are sealed by a **group cipher**, chosen per group
 by the `cipher:` policy. The cipher is a pluggable slot: the record envelope is
 cipher-agnostic. Whatever cipher a group uses, its output is one opaque `ciphertext`
-byte string base64-encoded into the group payload (§1), and `row_hash`, the chain,
-and the signature cover those raw ciphertext bytes identically (§2). Nothing outside
-the cipher parses the `ciphertext`; nothing about the record shape changes when the
-cipher changes.
+byte string base64-encoded into the group payload (§1). When row hashing is enabled,
+those raw ciphertext bytes enter `row_hash` identically for every cipher; chaining
+and a non-empty signature are separate profile-controlled layers (§2). Nothing
+outside the cipher parses the `ciphertext`; nothing about the record shape changes
+when the cipher changes.
 
 Three ciphers are defined. A group selects exactly one:
 
@@ -587,14 +588,14 @@ Three ciphers are defined. A group selects exactly one:
 |---|---|---|---|
 | `btn` (default) | Broadcast: one sealed block, N readers, subset-difference cover | Cheap forward revocation of an admitted reader (§3, rotation and revocation) | the audience is a set that shrinks over time |
 | `jwe` | Per-recipient wrap: one wrapped key per reader | Drop the recipient from the list; next seal omits them | the audience is small and enumerated at seal time |
-| `hibe` | Identity-path: seal to a named path under an authority's public key ([§3.1](#31-hibe-the-identity-path-cipher)) | Rotate the sealing path forward and re-issue; no retroactive lockout | you seal to someone who holds no key yet, or want hierarchical delegation |
+| `hibe` (**evaluation only; unaudited — see [§3.1](#31-hibe-the-identity-path-cipher)**) | Identity-path: seal to a named path under an authority's public key | For exact-path keys, authenticate a sibling path to every writer and re-issue; ancestor capabilities survive rotation below them | you seal to someone who holds no key yet, or want hierarchical delegation |
 
 An implementation MUST treat `ciphertext` as opaque outside the selected cipher.
 It MUST NOT hoist any cipher-internal field (a wrapped key, a nonce, a cover
 entry) to a sibling key of the group payload: a sibling key would sit outside the
-`ciphertext` bytes and therefore outside `row_hash`, the chain, and the signature,
-so it would be silently unauthenticated. All cipher state that a reader needs
-lives INSIDE the `ciphertext` blob.
+`ciphertext` bytes and therefore outside the cipher's opaque integrity unit (and,
+when enabled, its row-hash/chain/signature coverage). All cipher state that a
+reader needs lives INSIDE the `ciphertext` blob.
 
 The rest of this section documents `btn` in full (it is the default and the
 richest), then `hibe` ([§3.1](#31-hibe-the-identity-path-cipher)), then the
@@ -815,30 +816,47 @@ a **named identity path** using only a public key. A writer needs no key for the
 recipient: knowing the authority's master public key and the path is enough to
 seal. Reader keys are handed out later, or never.
 
+> **Security status:** the `tn-bbg` scheme implementation and underlying
+> `bls12_381_plus` pairing library are **unaudited**. External cryptographic
+> review is required before production use. Treat this cipher as
+> evaluation-only until that review is complete.
+
 A hibe group's on-wire payload is the same shape as any other group (§1):
 `{ "ciphertext": <base64>, "field_hashes": { ... } }`. Everything the cipher
 needs is inside `ciphertext`; there is no sibling key and no envelope-schema
-change, so `row_hash`, the chain, and the signature cover a hibe group exactly as
-they cover a btn group.
+change. When the configured profile enables row hashing, the hash covers the
+opaque HIBE ciphertext exactly as it covers a btn group; chaining and a
+non-empty signature remain separate, profile-controlled controls.
 
 #### Trust root: per-authority
 
 There is no global trust root. Each authority runs its own **Setup**, producing a
 master public key (`mpk`) and a master secret (`msk`); the authority holds the
 `msk` and never transmits it. A group either seals under the authority's own
-freshly generated `mpk`, or under an external authority's published `mpk`. A
-manifest pins an authority by the **SHA-256 fingerprint of its `mpk`**. Because
-the trust root is per-authority, a compromise is bounded to the one authority's
-groups.
+freshly generated `mpk`, or under an external authority's published `mpk`.
+
+The **SHA-256 fingerprint of the `mpk` identifies exact MPK bytes; it does not
+authenticate the authority**. The current external-writer setup accepts raw MPK
+bytes and validates their encoding, but does not know an expected fingerprint.
+Before sealing, a writer must obtain the expected fingerprint through an
+authenticated channel or verify a signed authority statement against an
+already-trusted signer, then compare it with the loaded MPK. A package manifest
+or self-consistent signature is not an authority trust root unless its signer is
+authenticated separately. A compromise of an authenticated authority root is
+then bounded to groups that deliberately trust that MPK.
 
 #### Identity paths
 
-A path is a sequence of labels written root-first and joined with `/`
-(`<label>/<label>`). Empty segments are dropped, so `a//b/` equals `a/b` and the
-empty string is the root identity. Each label maps to a scheme scalar by the
-pinned rule `SHA-256(label) mod p`, with the 32-byte digest read as a big-endian
-integer and reduced modulo the group order `p`. This mapping is part of the wire
-contract: changing it invalidates every existing sealed blob.
+A non-root path is a sequence of validated labels written root-first and joined
+with `/` (`<label>/<label>`). Empty segments, leading/trailing separators,
+traversal labels, delimiters, and leading/trailing label whitespace are rejected;
+paths are never trimmed or slash-collapsed because that would create ambiguous
+authorization identities. The depth-zero root exists at the primitive layer,
+but the product boundary accepts an empty path only through its explicit
+`allow_root_path` opt-in. Each label maps to a scheme scalar by the pinned rule
+`SHA-256(label) mod p`, with the 32-byte digest read as a big-endian integer and
+reduced modulo the group order `p`. This mapping is part of the wire contract:
+changing it invalidates every existing sealed blob.
 
 Admission is by path containment. A key sealed to a path opens a blob sealed to
 **that path or any descendant of it**: a key for `engineering` opens
@@ -893,36 +911,44 @@ Four artifacts exist per hibe group. Keep them straight:
 
 | Artifact | Secret? | Who holds it | What it does |
 |---|---|---|---|
-| `mpk` (master public key) | no | anyone | seal to any path; publish its fingerprint |
+| `mpk` (master public key) | no | anyone | seal to any path; compute a fingerprint that must be authenticated before trust |
 | `msk` (master secret) | **yes** | the authority only | mint a reader key for any path |
-| reader key | yes | one reader | open blobs sealed to its path (and descendants) |
+| reader key | yes | one capability holder | bearer capability: open its path and derive exact descendant keys within the depth budget |
 | identity path | no | the group | the path a group seals to |
 
 The readable output of a grant is a **reader key for a path**, delivered inside
-the standard signed `.tnpkg` kit bundle — the same absorb ceremony that btn and
-jwe kits use. A kit carries the `mpk`, the identity path, and exactly one reader
-key. A kit **MUST NOT** carry the master secret. An implementation **MUST** refuse
-to install a master secret from any package that is not a self-addressed backup;
-the `msk` appears only in its own authority's keystore (or a full-keystore
-restore of that same identity).
+the standard `.tnpkg` kit bundle — the same private-reader-kit ceremony BTN uses.
+Python JWE instead uses reader-generated private keys plus public offer/enrollment
+packages; it does not export `.jwe.mykey` in an ordinary reader kit. A HIBE kit
+carries the `mpk`, identity path, and exactly one bearer reader key. Its body is
+recipient-sealed only when the addressed DID is a complete resolvable Ed25519
+`did:key`; otherwise current `grant_reader` behavior falls back to plaintext. A
+kit **MUST NOT** carry the master secret. An implementation **MUST** refuse to
+install a master secret from any package that is not a self-addressed backup; the
+`msk` appears only in its own authority's keystore (or a full-keystore restore of
+that same identity).
 
 #### Revocation semantics
 
 Stated plainly: **a delegated reader key is permanent for its path.** There is no
 forward revocation of an already-admitted reader. "Removing" a reader means
 **rotating the group's sealing path forward** to a new sibling path and re-issuing
-keys to the survivors. Entries sealed before the rotation remain readable by prior
-grantees — rotation gives forward secrecy from the rotation point on, not
-retroactive lockout. A group that needs btn-grade forward revocation of an
-admitted reader uses `btn`. This is a property of the cipher, documented rather
-than hidden.
+keys to the survivors. `revoke_reader` changes the authority ceremony's local
+path; every external writer retains its own path and must authenticate and adopt
+the new sibling before its next seal. Forward cutoff for an exact-path reader
+begins only after all writers update. A holder of an ancestor key can derive the
+new descendant key without the `msk`, so rotation beneath that ancestor cannot
+revoke it. Entries sealed before a successful cutoff remain readable by prior
+grantees. A group that needs routine BTN-grade forward revocation uses `btn`.
 
 ### 3.2 AAD binding: welding a marker to a group body
 
-A group cipher's body encryption MAY bind an **additional-authenticated-data
-(AAD)** string to the ciphertext. AAD is authenticated by the body's AES-GCM tag
-but is **NOT encrypted** and is **NOT stored** in the ciphertext — a reader must
-supply the identical AAD out of band to open the body.
+The current JWE and HIBE group ciphers MAY bind an
+**additional-authenticated-data (AAD)** string to the ciphertext. AAD is
+authenticated by the body encryption and is **NOT encrypted**. HIBE does not
+store it inside its ciphertext, while JWE stores it in the RFC 7516 `aad` member
+inside the opaque JWE object. The current BTN product surface rejects `aad=`
+rather than silently dropping it.
 
 The integrity property: opening with a different AAD, or with absent (empty) AAD
 when a non-empty AAD was bound, fails the tag and the read is rejected — the same
@@ -932,25 +958,25 @@ inseparable from the sealed value.
 
 AAD is an OPTIONAL binding, **empty by default**. The no-AAD path is exactly the
 empty-AAD case and is byte-identical to a seal with no AAD argument, so every
-record sealed without an AAD is unaffected and reads back unchanged. This binding
-rides the body AEAD and is therefore orthogonal to which cipher is used: btn,
-jwe, and hibe all body-seal with AES-256-GCM and can each carry an AAD. Its
-intended use is to weld a public, tamper-evident marker — for example a governed
-/ policy string — onto a group body ([§4](#4-the-tnagents-policy-group)).
+record sealed without an AAD is unaffected and reads back unchanged. Its intended
+use is to weld a public, tamper-evident marker — for example a governed/policy
+string — onto a JWE or HIBE group body
+([§4](#4-the-tnagents-policy-group)).
 
 #### The marker and its public echo
 
 A marker is a mapping of string keys to scalar values. A group may carry a
 default marker (from its configuration), and a write may supply a per-write
 marker; the **effective marker** for a group is the default overlaid by the
-per-write map (per-write wins per key). Since the AAD is not stored in the
-ciphertext, the reader must be able to reconstruct the exact bytes that were
-bound. The effective markers are therefore echoed into a **reserved public
-field** named `tn_aad`, whose value is the **canonical string** (§2, canonical
-bytes) of the object `{ "<group>": { <marker> }, … }`, containing only the
-groups that bound a non-empty marker. When no group binds a marker, the field
-is absent and the record is byte-identical to a record from before this
-feature.
+per-write map (per-write wins per key). A reader must reconstruct the exact
+canonical bytes that were bound. The effective markers are therefore echoed
+into a **reserved public field** named `tn_aad`, whose value is the **canonical
+string** (§2, canonical bytes) of the object
+`{ "<group>": { <marker> }, … }`, containing only groups that bound a non-empty
+marker. HIBE supplies the reconstructed bytes to its body open. JWE compares
+them with its embedded `aad` member before opening. When no group binds a marker,
+the field is absent and the record is byte-identical to a record from before
+this feature.
 
 The bytes bound into a group's body AEAD are the canonical bytes of that
 group's marker object. The reader recovers them by reading `tn_aad`, parsing
@@ -959,13 +985,15 @@ it, and re-canonicalizing the entry for the group being opened.
 The echo MUST be a canonical **string**, not a nested object: a public field
 whose value is a string contributes to `row_hash` identically in every
 implementation, whereas a nested object would be rendered inconsistently
-across implementations (§2) and a recomputed `row_hash` would diverge. Because
-`tn_aad` is a public field it is covered by `row_hash` and the signature (§2),
-so altering the marker breaks the record's integrity **and** — via the AAD —
-its decryption. An implementation MUST bind the group's canonical marker bytes
-as the body AAD and MUST echo the effective markers as the canonical string
-under `tn_aad`; the two MUST be derived from the same marker so a faithful
-reader always reconstructs a matching AAD.
+across implementations (§2) and a recomputed `row_hash` would diverge. Altering
+`tn_aad` always breaks group decryption via the AAD. When row hashing is enabled,
+recomputation also fails. A signature covers the stored row hash rather than
+`tn_aad` directly, so its primitive check can still pass while composite record
+integrity fails. In an unsigned and unchained profile, `row_hash` and `signature`
+are empty sentinels and body AEAD is the applicable check. An implementation MUST
+bind the group's canonical marker bytes as the body AAD and MUST echo the
+effective markers as the canonical string under `tn_aad`; the two MUST be derived
+from the same marker so a faithful reader always reconstructs a matching AAD.
 
 
 ---
@@ -1070,9 +1098,10 @@ group shape:
 The six field values are canonicalized and sealed under the group cipher
 (readable only by a holder of the `tn.agents` key), and each is indexed as an
 equality-search token in `field_hashes` exactly like any group (§2). Because the
-block is sealed, the rules are confidential and audience-scoped; because
-`row_hash` commits the group payloads and is signed (§2), the rules cannot be
-altered or stripped without invalidating the signature.
+block is sealed, the rules are confidential and audience-scoped. When the profile
+enables row hashing and signing and the consumer enforces composite verification,
+the group payload is committed and stripping it is rejected. Unsigned/unchained
+profiles do not make that record-level signature claim.
 
 ### Binding a policy string to a governed body
 
@@ -1082,7 +1111,7 @@ group's body. A publisher may bind a governance marker — a governing DID and a
 content-addressed policy reference, for example — as the body AEAD's AAD. Because
 AAD is authenticated into the tag, that marker cannot be stripped or swapped
 without the body failing to open: it is inseparable from the sealed value, on top
-of the record-level protection that `row_hash` and the signature already give.
+of any row-hash/signature protection enabled and enforced for the record.
 
 This mechanism rides the body AEAD, so it works for any cipher (§3) — a governed
 group may be `btn`, `jwe`, or `hibe`. It is one consumer of the AAD binding, not

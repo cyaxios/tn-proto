@@ -54,7 +54,7 @@ export function verifyChainLink(
 }
 
 /** Hex-encoded SHA-256 of the UTF-8 bytes of a string. Browser-safe via
- * @noble/hashes (audited, pure-JS). Used by core/agents_policy.ts to
+ * @noble/hashes (pure-JS). Used by core/agents_policy.ts to
  * compute policy contentHash without reaching for `node:crypto`. */
 export function sha256Hex(text: string): string {
   return bytesToHex(sha256(new TextEncoder().encode(text)));

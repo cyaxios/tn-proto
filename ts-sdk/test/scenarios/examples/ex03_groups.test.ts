@@ -213,6 +213,7 @@ test("ex03/partner-reads-default-only — partner holds only default kit, cannot
       readAsRecipient(c.logPath, c.partnerKeystorePath, {
         group: "default",
         verifySignatures: true,
+        trustedPublisherDids: [rt.did],
       }),
     ).filter((e) => e.envelope["event_type"] === "page.view");
 
@@ -235,6 +236,7 @@ test("ex03/partner-reads-default-only — partner holds only default kit, cannot
           readAsRecipient(c.logPath, c.partnerKeystorePath, {
             group: "pii",
             verifySignatures: false,
+            trustedPublisherDids: [rt.did],
           }),
         );
       },
@@ -256,6 +258,7 @@ test("ex03/partner-reads-default-only — partner holds only default kit, cannot
           readAsRecipient(c.logPath, c.partnerKeystorePath, {
             group: "internal",
             verifySignatures: false,
+            trustedPublisherDids: [rt.did],
           }),
         );
       },

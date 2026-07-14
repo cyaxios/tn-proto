@@ -48,6 +48,9 @@ pub(super) fn build_kit_bundle_body(
         let Some(name_str) = name.to_str() else {
             continue;
         };
+        if !full && is_jwe_private_material(name_str) {
+            continue;
+        }
         if let Some(group) = reader_material_group(name_str) {
             if let Some(filter) = &group_set {
                 if !filter.contains(group) {
@@ -68,14 +71,11 @@ pub(super) fn build_kit_bundle_body(
             }
             body.insert(format!("body/{name_str}"), data);
         } else if full
-            && (name_str == "local.private"
-                || name_str == "local.public"
-                || name_str == "index_master.key")
-        {
-            body.insert(format!("body/{name_str}"), std::fs::read(entry.path())?);
-        } else if full
-            && full_group_material_group(name_str)
-                .is_some_and(|group| group_set.as_ref().map_or(true, |f| f.contains(group)))
+            && (matches!(
+                name_str,
+                "local.private" | "local.public" | "index_master.key"
+            ) || full_group_material_group(name_str)
+                .is_some_and(|group| group_set.as_ref().is_none_or(|f| f.contains(group))))
         {
             body.insert(format!("body/{name_str}"), std::fs::read(entry.path())?);
         }
@@ -83,7 +83,7 @@ pub(super) fn build_kit_bundle_body(
 
     if !saw_reader_secret {
         return Err(Error::InvalidConfig(format!(
-            "kit_bundle: no reader kit material (*.btn.mykit, *.jwe.mykey, \
+            "kit_bundle: no transferable reader kit material (*.btn.mykit, \
              *.hibe.mpk/*.hibe.idpath/*.hibe.sk) in {}",
             keystore.display()
         )));
@@ -117,6 +117,11 @@ fn is_reader_secret_material(name: &str) -> bool {
     [".btn.mykit", ".jwe.mykey", ".hibe.sk"]
         .iter()
         .any(|suffix| name.strip_suffix(suffix).is_some_and(|g| !g.is_empty()))
+}
+
+fn is_jwe_private_material(name: &str) -> bool {
+    name.strip_suffix(".jwe.mykey")
+        .is_some_and(|group| !group.is_empty())
 }
 
 fn full_group_material_group(name: &str) -> Option<&str> {

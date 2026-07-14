@@ -78,6 +78,7 @@ test('ensureGroup("toString") persists, survives re-init, routes addRecipient + 
   const added = await admin2.addRecipient("toString", {
     recipientDid: bobDid,
     publicKey: bobPub,
+    unsafeUnverified: true, // raw DID-plus-key path (no enrollment proof)
   });
   assert.equal(added.cipher, "jwe");
 

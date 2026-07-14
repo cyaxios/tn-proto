@@ -29,8 +29,15 @@ fn seal_unseal_roundtrip() -> tn_proto::Result<()> {
     assert_eq!(sealed.envelope["sequence"], json!(0));
     assert_eq!(sealed.envelope["prev_hash"], json!(""));
     assert_eq!(sealed.envelope["tn_sealed"], json!(1));
-    assert!(!sealed.wire.ends_with('\n'), "wire must have no trailing newline");
-    assert_eq!(sealed.to_string(), sealed.wire, "Display must print the wire line");
+    assert!(
+        !sealed.wire.ends_with('\n'),
+        "wire must have no trailing newline"
+    );
+    assert_eq!(
+        sealed.to_string(),
+        sealed.wire,
+        "Display must print the wire line"
+    );
 
     let out = tn.unseal(&sealed.wire, UnsealOptions::default())?;
     assert!(out.valid.signature && out.valid.row_hash);
@@ -61,7 +68,8 @@ fn unseal_verify_error_variant() -> tn_proto::Result<()> {
     )?;
     let mut env = sealed.envelope.clone();
     env.insert("tn_sealed".to_string(), json!(2));
-    let tampered = serde_json::to_string(&Value::Object(env)).expect("re-serialize tampered envelope");
+    let tampered =
+        serde_json::to_string(&Value::Object(env)).expect("re-serialize tampered envelope");
 
     let err = tn
         .unseal(&tampered, UnsealOptions::default())

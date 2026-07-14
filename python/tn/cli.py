@@ -159,8 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
             "'laptop-dev', 'ci', 'prod'). Defaults to <project>."
         ),
     )
-    # ``btn`` is the shipping default cipher; ``jwe`` is the pure-Python
-    # RFC 7516 alternative; ``hibe`` is the identity-path (BBG) cipher.
+    # ``btn`` is the shipping default; Python's ``jwe`` route uses joserfc and
+    # interoperates with tn-core/tn-wasm; ``hibe`` is the identity-path cipher.
     p_init.add_argument("--cipher", default="btn", choices=["btn", "jwe", "hibe"])
     p_init.add_argument("--words", type=int, default=12, choices=[12, 15, 18, 21, 24])
     p_init.add_argument(
@@ -773,6 +773,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Include entries from previous runs (default: True). "
              "Pass `--no-all-runs` to restrict to this process run.",
+    )
+    read_security = p_read.add_mutually_exclusive_group()
+    read_security.add_argument(
+        "--verify",
+        nargs="?",
+        const="raise",
+        choices=("raise", "skip"),
+        default=None,
+        help=(
+            "Explicit verification handling: bare --verify means raise; "
+            "--verify skip drops rejected rows with observability."
+        ),
+    )
+    read_security.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_const",
+        const=False,
+        help="Explicitly disable integrity/authentication/authorization gates.",
     )
     p_read.set_defaults(func=cmd_read)
 

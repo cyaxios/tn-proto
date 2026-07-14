@@ -153,7 +153,7 @@ test("absorbing a foreign bundle over an existing kit prints the replaced-kit WA
   const a = await freshCeremony("ts-absorb-warnA-");
   const b = await freshCeremony("ts-absorb-warnB-");
   const pkg = join(a.dir, "bundle.tnpkg");
-  await exportKitBundle(a.yamlPath, pkg, "did:key:zSomeReader");
+  await exportKitBundle(a.yamlPath, pkg, b.did);
   const s = sinks();
   try {
     const code = await absorbCmd({
@@ -341,11 +341,20 @@ async function writeEntryAndBundle(
 
 /** Read the publisher's log AS the recipient (foreign-log + the
  *  recipient's keystore). Returns the decoded `Entry[]`. */
-async function recipientRead(rec: FullCeremony, publisherLog: string): Promise<Entry[]> {
+async function recipientRead(
+  rec: FullCeremony,
+  publisherLog: string,
+  trustedPublisherDid: string,
+): Promise<Entry[]> {
   const tn = await Tn.init(rec.yamlPath);
   try {
     const out: Entry[] = [];
-    for (const e of tn.read({ log: publisherLog, asRecipient: rec.keystore, group: "default" })) {
+    for (const e of tn.read({
+      log: publisherLog,
+      asRecipient: rec.keystore,
+      group: "default",
+      trustedPublisherDids: [trustedPublisherDid],
+    })) {
       out.push(e as Entry);
     }
     return out;
@@ -365,7 +374,7 @@ test("round-trip: kit installs on disk AND the recipient decrypts the publisher'
   // group key and CANNOT decrypt P's payload. event_type is public; the
   // field is hidden.
   const kit = await writeEntryAndBundle(p, b.did, { amount: 4200 });
-  const pre = await recipientRead(b, p.logPath);
+  const pre = await recipientRead(b, p.logPath, p.did);
   assert.equal(pre.length, 1, "B should see P's one entry (envelope is public)");
   assert.equal(pre[0]!.event_type, "payday");
   assert.deepEqual(pre[0]!.fields, {}, "B must NOT decrypt P's payload pre-absorb");
@@ -402,7 +411,7 @@ test("round-trip: kit installs on disk AND the recipient decrypts the publisher'
     );
 
     // PASS #4 (load-bearing): B now decrypts P's entry.
-    const post = await recipientRead(b, p.logPath);
+    const post = await recipientRead(b, p.logPath, p.did);
     assert.equal(post.length, 1);
     assert.deepEqual(post[0]!.fields, { amount: 4200 }, "read-back failed: B should decrypt P's entry");
     assert.deepEqual(post[0]!.hidden_groups, [], "no hidden groups once the right kit is installed");
@@ -433,45 +442,27 @@ test("idempotent re-absorb: the second absorb of the same kit dedupes (accepted=
   }
 });
 
-test("wrong-recipient unsealed btn kit still decrypts (DOCUMENTED GAP for FAIL #6)", async () => {
-  // The contract's FAIL #6 ("a kit minted for a DIFFERENT recipient
-  // cannot be decrypted by this one") does NOT hold for the unsealed btn
-  // kit_bundle — a genuine protocol property, not a test bug. The kit zip
-  // is just {manifest.json, body/default.btn.mykit}; the group read-key
-  // ships in the clear and `recipient_identity` is attestation metadata
-  // only. Cryptographic recipient-binding requires the sealed-box path
-  // (`--seal-for-recipient` / recipient_wrap), a different originate route
-  // not exercised here. Per the plan's HARD RULE we do NOT assert a
-  // can't-decrypt outcome we know is false; instead we pin the two things
-  // that ARE true so the gap is explicit and a future sealing-by-default
-  // flip trips this test:
-  //
-  //   1. A ceremony that absorbed NO kit for P's group cannot decrypt
-  //      (the negative that genuinely holds).
-  //   2. A kit minted for THIRD, absorbed by W, currently DOES decrypt
-  //      P's entry (documents the unsealed reality).
+test("wrong-recipient kit is rejected and does not grant decryption", async () => {
   const p = await freshCeremonyFull("ts-wrong-P-");
   const third = await freshCeremonyFull("ts-wrong-T-");
   const w = await freshCeremonyFull("ts-wrong-W-");
   const kit = await writeEntryAndBundle(p, third.did, { amount: 4200 });
   try {
     // (1) W has no P-kit yet: cannot decrypt.
-    const pre = await recipientRead(w, p.logPath);
+    const pre = await recipientRead(w, p.logPath, p.did);
     assert.equal(pre.length, 1);
     assert.deepEqual(pre[0]!.fields, {}, "fresh ceremony must not decrypt P's payload");
 
-    // (2) W absorbs a kit addressed to THIRD, and (gap) decrypts anyway.
+    // W cannot install a package addressed to THIRD.
+    const wKitPath = join(w.keystore, "default.btn.mykit");
+    const before = readFileSync(wKitPath);
     const s = sinks();
     const code = await absorbCmd({ packagePath: kit, yaml: w.yamlPath, stdout: s.stdout, stderr: s.stderr });
     assert.equal(code, 0, s.err);
-    const post = await recipientRead(w, p.logPath);
-    assert.deepEqual(
-      post[0]!.fields,
-      { amount: 4200 },
-      "DOCUMENTED GAP changed: an unsealed btn kit minted for a DIFFERENT recipient " +
-        "no longer decrypts. FAIL #6 may now be enforceable — revisit " +
-        "the absorb contract and add the real can't-decrypt assertion.",
-    );
+    assert.match(s.out, /kind=kit_bundle accepted=0 skipped=0/);
+    assert.ok(readFileSync(wKitPath).equals(before), "wrong-recipient absorb changed W's kit");
+    const post = await recipientRead(w, p.logPath, p.did);
+    assert.deepEqual(post[0]!.fields, {}, "wrong-recipient package must not grant decryption");
   } finally {
     rmSync(p.dir, { recursive: true, force: true });
     rmSync(third.dir, { recursive: true, force: true });

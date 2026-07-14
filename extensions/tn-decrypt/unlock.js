@@ -1,5 +1,5 @@
 // extensions/tn-decrypt/unlock.js — thin re-export wrapper around the
-// SDK's audited EMK module. The actual implementations live at
+// SDK's EMK module. The actual implementations live at
 // ts-sdk/src/core/emk.ts (compiled and vendored into
 // ./vendor/sdk-core/emk.js by tools/build-extension.sh).
 //

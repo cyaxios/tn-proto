@@ -23,6 +23,10 @@ pub enum Error {
     #[error(transparent)]
     Core(tn_core::Error),
 
+    /// Error returned by the lower-level BTN broadcast-encryption engine.
+    #[error(transparent)]
+    Btn(#[from] tn_btn::Error),
+
     /// Filesystem error surfaced by SDK-level helpers.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -56,6 +60,22 @@ pub enum Error {
     /// Invalid input caught at the SDK boundary before calling `tn-core`.
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+
+    /// Supplied reader material cannot open the ciphertext.
+    #[error("not entitled: {0}")]
+    NotEntitled(String),
+
+    /// State, key material, or ciphertext is structurally invalid.
+    #[error("malformed cryptographic input: {0}")]
+    Malformed(String),
+
+    /// Ciphertext or additional authenticated data failed authentication.
+    #[error("authentication failed: {0}")]
+    AuthenticationFailed(String),
+
+    /// A cryptographic input or state limit was exceeded.
+    #[error("cryptographic limit exceeded: {0}")]
+    LimitExceeded(String),
 
     /// A sealed object failed verification on [`crate::Tn::unseal`] with
     /// `options.verify` set (the default). First-class rust-sdk mirror of

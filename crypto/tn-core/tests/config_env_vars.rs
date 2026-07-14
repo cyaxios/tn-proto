@@ -12,6 +12,8 @@ use std::sync::Mutex;
 
 use tn_core::{config::substitute_env_vars, Error};
 
+mod common;
+
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_env<F>(vars: &[(&str, Option<&str>)], f: F)
@@ -168,5 +170,20 @@ fn line_number_tracked_across_newlines() {
             Error::ConfigEnvVarMissing { line, .. } => assert_eq!(line, 3),
             other => panic!("expected missing, got {other:?}"),
         }
+    });
+}
+
+#[test]
+fn runtime_read_uses_the_substituted_trust_snapshot() {
+    let trusted = tn_core::DeviceKey::generate().did().to_string();
+    with_env(&[("TN_RS_TEST_TRUSTED_DID", Some(&trusted))], || {
+        let td = tempfile::tempdir().unwrap();
+        let ceremony = common::setup_minimal_btn_ceremony(td.path());
+        let mut yaml = std::fs::read_to_string(&ceremony.yaml_path).unwrap();
+        yaml.push_str("trust:\n  writers:\n    - \"${TN_RS_TEST_TRUSTED_DID}\"\n");
+        std::fs::write(&ceremony.yaml_path, yaml).unwrap();
+
+        let runtime = tn_core::Runtime::init(&ceremony.yaml_path).unwrap();
+        assert!(!runtime.read().unwrap().is_empty());
     });
 }

@@ -126,9 +126,15 @@ export { SealedObject, SealedObjectError } from "./core/sealed_object.js";
 export type { SealOptions, SealedTriple, UnsealSource } from "./core/sealed_object.js";
 export type { BrowserKeyBag, BrowserUnsealOptions } from "./browser/seal.js";
 
-// RFC 7516 JWE for `cipher: jwe` groups — pure JS (panva/jose over
-// WebCrypto), so the browser is a first-class jwe recipient: mint a
-// keypair, get enrolled by a publisher, open your blocks.
+// Small byte-oriented cipher facades. These are sibling namespaces rather
+// than additions to the stateful `tn` runtime surface.
+export * as btn from "./btn.js";
+export * as jwe from "./jwe.js";
+export * from "./primitive_errors.js";
+
+// RFC 7516 JWE for `cipher: jwe` groups through Rust/WASM, so the browser is a
+// first-class jwe recipient: mint a keypair, get enrolled by a publisher,
+// and open your blocks.
 export {
   JWE_ALG,
   JWE_ENC,
@@ -575,3 +581,39 @@ export const agents: _Tn["agents"] = _makeNamespaceProxy("agents");
 /** Runtime handlers namespace on the default instance. Browser
  *  placeholder. Mirrors Node `tn.handlers.*`. */
 export const handlers: _Tn["handlers"] = _makeNamespaceProxy("handlers");
+export {
+  verifyJweEnrollmentSource,
+  type AcceptedOffer,
+  type EnrollmentChallengeV1,
+  type JweChallengeResponseSource,
+  type JweEnrollmentExpectation,
+  type JweEnrollmentSource,
+  type KeyBindingProofV1,
+  type SignedJweKeyCardSource,
+  type VerifiedJweBinding,
+} from "./core/trust.js";
+export type {
+  BrowserRuntimeSealOptions,
+  BrowserRuntimeSealResult,
+  BrowserRuntimeUnsealOptions,
+  BrowserRuntimeUnsealResult,
+} from "./browser/runtime.js";
+export {
+  extractX25519KeyAgreement,
+  jweActivationReferenceDigest,
+  jweBindingEvidenceValue,
+  jweRecipientFromAcceptedOffer,
+  jweRecipientFromAuthenticatedDidDocument,
+  jweRecipientFromDidResolution,
+  jweRecipientFromExternallyAuthenticatedDidDocument,
+  jweRecipientFromExternallyAuthenticatedDidResolution,
+  jweRecipientFromFingerprintPin,
+  validateVerifiedJweRecipient,
+  type AuthenticatedDidResolution,
+  type ExternallyAuthenticatedDidResolution,
+  type FingerprintPin,
+  type JweBindingEvidence,
+  type JweBindingScope,
+  type ResolvedX25519KeyAgreement,
+  type VerifiedJweRecipient,
+} from "./core/jwe_binding.js";

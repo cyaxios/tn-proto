@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import tn
+import tn.mcp.tools_core as tools_core
+from tn.security_audit import TnSecurityWarning
 from tn.mcp.schemas import DecryptInput, ReadInput
 from tn.mcp.tools_core import tn_decrypt_impl, tn_read_impl, tn_status_impl
 
@@ -192,10 +195,17 @@ def test_read_bad_timestamp_is_one_clear_line(ceremony):
 
 
 def test_read_verify_false_returns_tampered_rows(ceremony, tmp_path):
-    """The default mode is honest about what it is: no checks, all rows."""
+    """Only the explicit compatibility switch disables checks."""
     _tamper_second_row(tmp_path)
-    out = tn_read_impl(ReadInput())
+    with pytest.warns(TnSecurityWarning):
+        out = tn_read_impl(ReadInput(verify=False))
     assert out["returned"] == 3
+
+
+def test_read_default_auto_rejects_tampered_rows(ceremony, tmp_path):
+    _tamper_second_row(tmp_path)
+    with pytest.raises(RuntimeError, match=r"tn_read failed \(-32001\)"):
+        tn_read_impl(ReadInput())
 
 
 def test_read_verify_raise_surfaces_one_line(ceremony, tmp_path):
@@ -219,6 +229,41 @@ def test_read_verify_skip_drops_tampered_row(ceremony, tmp_path):
     seen = {(e["event_type"], e["sequence"]) for e in out["entries"]}
     assert ("order.created", 2) not in seen
     assert seen == {("order.created", 1), ("user.signed_in", 1)}
+
+
+def test_read_forwards_every_trust_policy_parameter(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_read(selector, **kwargs):
+        captured["selector"] = selector
+        captured.update(kwargs)
+        return iter(())
+
+    monkeypatch.setattr(tools_core, "_tn_read", fake_read)
+    out = tn_read_impl(
+        ReadInput(
+            verify=False,
+            require_signature=False,
+            allow_unauthenticated=True,
+            trusted_writers=["did:key:z6MkhDA92BRnspkcBZVVMhfdRVhZSHWejjYqUipaj8zvXUs5"],
+            allow_unknown_writers=True,
+            log="admin",
+        ),
+    )
+
+    assert out["returned"] == 0
+    assert captured == {
+        "selector": None,
+        "filter": None,
+        "verify": False,
+        "require_signature": False,
+        "allow_unauthenticated": True,
+        "trusted_writers": [
+            "did:key:z6MkhDA92BRnspkcBZVVMhfdRVhZSHWejjYqUipaj8zvXUs5",
+        ],
+        "allow_unknown_writers": True,
+        "log": "admin",
+    }
 
 
 # --------------------------------------------------------------------- #

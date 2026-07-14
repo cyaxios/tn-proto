@@ -41,7 +41,7 @@ required-features = ["cli"]
 
 [features]
 default = ["fs"]
-fs = ["tn-core/fs"]
+fs = ["tn-core/fs", "tn-core/native-jwe"]
 # Passthrough for tn-core's hibe cipher. tn-core is pulled in below with
 # default-features = false, so hibe (and the pairing-crypto stack it
 # pulls in) stays off unless a downstream crate opts in explicitly here.
@@ -74,12 +74,15 @@ hkdf = { workspace = true }
 aes-gcm = { version = "0.10", features = ["aes"] }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+zeroize = { workspace = true }
 bip39 = { version = "2", features = ["rand"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 notify = { version = "6", optional = true }
+log = "0.4"
 
 [dev-dependencies]
+bs58 = "0.5"
 ed25519-dalek = { workspace = true }
 tempfile = "3"

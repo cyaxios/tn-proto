@@ -23,6 +23,7 @@ import json
 import sys
 import tempfile
 import zipfile
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
@@ -33,7 +34,7 @@ _TN_PY = Path(__file__).parent.parent
 if str(_TN_PY) not in sys.path:
     sys.path.insert(0, str(_TN_PY))
 
-from tn.inbox import InboxError, accept, list_local
+from tn.inbox import InboxError, _read_inner_manifest, accept, list_local
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -59,6 +60,15 @@ def _make_zip(
 
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def test_secure_inner_package_uses_bounded_tnpkg_reader() -> None:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as package:
+        package.writestr("manifest.json", "{}")
+
+    with pytest.raises(InboxError, match="ZIP compression"):
+        _read_inner_manifest(buffer.getvalue())
 
 
 def _minimal_tn_yaml(keystore_dir: Path) -> dict:
@@ -105,6 +115,18 @@ def test_accept_missing_manifest(tmp_path):
     _write_yaml(yaml_path, tmp_path / ".tn/tn/keys")
 
     with pytest.raises(InboxError, match="manifest.json"):
+        accept(zip_path, yaml_path=yaml_path)
+
+
+def test_accept_rejects_outer_archive_bomb_before_member_read(tmp_path):
+    zip_path = tmp_path / "tn-invite-bomb.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("kit.tnpkg", b"0" * (1024 * 1024))
+        zf.writestr("manifest.json", "{}")
+    yaml_path = tmp_path / "tn.yaml"
+    _write_yaml(yaml_path, tmp_path / ".tn/tn/keys")
+
+    with pytest.raises(InboxError, match="compression ratio"):
         accept(zip_path, yaml_path=yaml_path)
 
 

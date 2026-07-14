@@ -25,6 +25,7 @@ import os as _cipher_os
 def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
+
 import base64
 import json
 import zipfile
@@ -206,7 +207,7 @@ def test_sealed_kit_bundle_tampered_wrap_rejected(tmp_path: Path):
 
 
 def test_sealed_kit_bundle_tampered_body_rejected(tmp_path: Path):
-    """Mutating body/encrypted.bin fails AEAD even with the right key."""
+    """Mutating body/encrypted.bin fails the signed index before AEAD."""
     alice_cfg = _make_publisher_with_btn_group(tmp_path)
     frank_device = DeviceKey.generate()
     frank_cfg = _install_fresh_recipient(tmp_path, frank_device)
@@ -230,7 +231,7 @@ def test_sealed_kit_bundle_tampered_body_rejected(tmp_path: Path):
 
     receipt = _absorb_dispatch(frank_cfg, out)
     assert receipt.legacy_status == "rejected"
-    assert "decrypt" in receipt.legacy_reason.lower()
+    assert "body_digest_mismatch" in receipt.legacy_reason.lower()
 
 
 def test_sealed_wrap_aad_lift_attack_rejected(tmp_path: Path):
@@ -281,9 +282,7 @@ def test_sealed_wrap_aad_lift_attack_rejected(tmp_path: Path):
         decoy_encrypted = zf.read("body/encrypted.bin")
 
     decoy_manifest["state"]["body_encryption"]["recipient_wrap"] = real_wrap
-    new_manifest = (json.dumps(decoy_manifest, sort_keys=True, indent=2) + "\n").encode(
-        "utf-8"
-    )
+    new_manifest = (json.dumps(decoy_manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
     out_lifted = tmp_path / "lifted.tnpkg"
     with zipfile.ZipFile(out_lifted, "w", zipfile.ZIP_STORED) as zf:
         zf.writestr("manifest.json", new_manifest)

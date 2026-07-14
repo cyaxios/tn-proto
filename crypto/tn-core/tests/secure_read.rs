@@ -156,7 +156,87 @@ fn secure_read_forensic_surfaces_invalid_reasons() {
         .as_array()
         .unwrap();
     let s: Vec<&str> = reasons.iter().filter_map(Value::as_str).collect();
-    assert!(s.contains(&"row_hash") || s.contains(&"signature"));
+    assert_eq!(s.first().copied(), Some("row_hash_invalid"));
+}
+
+#[test]
+fn foreign_unsigned_row_does_not_inherit_local_sign_false() {
+    use std::collections::BTreeSet;
+    use tn_core::runtime::{
+        ReadContext, ReadRecordState, ReadRejectReason, ReadTrustPolicy, VerifyMode,
+    };
+
+    let local = tn_core::DeviceKey::generate();
+    let foreign = tn_core::DeviceKey::generate();
+    let context = ReadContext {
+        active: true,
+        local_log: false,
+        detached: false,
+        writable: true,
+        profile_sign: Some(false),
+        profile_chain: Some(true),
+        local_device_did: Some(local.did().to_owned()),
+        required_group: None,
+    };
+    let policy = ReadTrustPolicy {
+        verify: VerifyMode::Auto,
+        require_signature: None,
+        allow_unauthenticated: None,
+        trusted_writers: BTreeSet::from([foreign.did().to_owned()]),
+        trusted_writers_supplied: false,
+        allow_unknown_writers: false,
+    }
+    .resolve(&context)
+    .unwrap();
+    let decision = policy.evaluate(
+        &ReadRecordState {
+            record_valid: true,
+            row_hash_present: true,
+            row_hash_valid: true,
+            chain_valid: true,
+            signature_present: false,
+            signature_valid: false,
+            writer_did: Some(foreign.did().to_owned()),
+            aad_valid: true,
+            recipient_groups: BTreeSet::from(["default".into()]),
+        },
+        &context,
+    );
+    assert!(!decision.accepted);
+    assert_eq!(decision.reasons, [ReadRejectReason::SignatureRequired]);
+    assert!(!decision.writer_authenticated);
+    assert!(!decision.writer_authorized);
+}
+
+#[test]
+fn secure_read_explicit_foreign_btn_rejects_untrusted_writer() {
+    let local_dir = tempfile::tempdir().unwrap();
+    let foreign_dir = tempfile::tempdir().unwrap();
+    let local_ceremony = common::setup_minimal_btn_ceremony(local_dir.path());
+    let foreign_ceremony = common::setup_minimal_btn_ceremony(foreign_dir.path());
+    let foreign = Runtime::init(&foreign_ceremony.yaml_path).unwrap();
+    foreign
+        .info("foreign.signed", serde_json::Map::new())
+        .unwrap();
+    let foreign_log = foreign.log_path().to_owned();
+    let local = Runtime::init(&local_ceremony.yaml_path).unwrap();
+
+    let error = local
+        .secure_read(SecureReadOptions {
+            on_invalid: OnInvalid::Raise,
+            log_path: Some(foreign_log),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Malformed {
+                kind: "verification",
+                ref reason,
+            } if reason.contains("writer_untrusted")
+        ),
+        "{error}"
+    );
 }
 
 #[test]

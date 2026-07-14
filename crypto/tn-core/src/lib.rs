@@ -63,9 +63,11 @@ pub mod chain;
 pub mod cipher;
 pub mod classifier;
 pub mod config;
+pub mod did_document;
 pub mod envelope;
 pub mod error;
 pub mod indexing;
+pub mod jwe_binding;
 pub mod panic_guard;
 pub mod path_template;
 pub(crate) mod pathutil;
@@ -74,6 +76,9 @@ pub mod sealed_object;
 pub mod signing;
 pub mod storage;
 pub mod tnpkg;
+pub mod trust;
+pub mod trusted_enrollment;
+pub mod unsafe_operation;
 
 #[cfg(feature = "fs")]
 pub mod admin_cache;
@@ -112,3 +117,5 @@ pub use runtime::{
 #[cfg(feature = "fs")]
 pub use runtime_export::{AbsorbReceipt, AbsorbSource, ExportOptions};
 pub use tnpkg::{Manifest, ManifestKind, VectorClock};
+pub use trust::{AcceptedOffer, TrustError, TrustReason, VerifiedJweBinding, VerifiedPrincipal};
+pub use unsafe_operation::{UnsafeOperation, UnsafeOperationNotice, UnsafeRelaxation};

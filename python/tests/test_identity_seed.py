@@ -29,6 +29,7 @@ import os as _cipher_os
 def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
+
 import zipfile
 from pathlib import Path
 
@@ -139,7 +140,9 @@ def test_identity_seed_rejects_cross_identity_after_user_events(tmp_path: Path):
     # yaml minted by load_or_create so tn.init can reload it later).
     yaml_path = tmp_path / "agent" / "tn.yaml"
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg = load_or_create(yaml_path, cipher=_workflow_cipher("btn"), device_private_bytes=device_a.private_bytes)
+    cfg = load_or_create(
+        yaml_path, cipher=_workflow_cipher("btn"), device_private_bytes=device_a.private_bytes
+    )
 
     # Emit a real user event so local.private's signature trail is
     # load-bearing (B would orphan it).
@@ -180,8 +183,7 @@ def test_identity_seed_overwrites_fresh_install(tmp_path: Path):
 
     r2 = _absorb_dispatch(cfg, pkg_b)
     assert r2.legacy_status == "enrolment_applied", (
-        f"fresh-state overwrite should succeed; got {r2.legacy_status} "
-        f"({r2.legacy_reason})"
+        f"fresh-state overwrite should succeed; got {r2.legacy_status} ({r2.legacy_reason})"
     )
     assert (cfg.keystore / "local.private").read_bytes() == device_b.private_bytes
 
@@ -189,10 +191,8 @@ def test_identity_seed_overwrites_fresh_install(tmp_path: Path):
 def test_identity_seed_rejects_swapped_private(tmp_path: Path):
     """Tampered body (swap local.private without re-signing) is rejected.
 
-    Even though the manifest signature still verifies (we don't touch
-    the manifest), the body/local.private no longer derives to
-    manifest.publisher_identity. The integrity check in _absorb_identity_seed
-    catches this.
+    The signed body index catches the substituted bytes before the
+    kind-specific identity parser can inspect or install them.
     """
     device_a = DeviceKey.generate()
     device_b = DeviceKey.generate()
@@ -215,7 +215,7 @@ def test_identity_seed_rejects_swapped_private(tmp_path: Path):
     cfg = _fresh_keystore(tmp_path, name="agent")
     receipt = _absorb_dispatch(cfg, out)
     assert receipt.legacy_status == "rejected"
-    assert "integrity" in receipt.legacy_reason.lower()
+    assert "body_digest_mismatch" in receipt.legacy_reason.lower()
 
 
 def test_identity_seed_rejects_missing_body_member(tmp_path: Path):
@@ -237,7 +237,7 @@ def test_identity_seed_rejects_missing_body_member(tmp_path: Path):
     cfg = _fresh_keystore(tmp_path, name="agent")
     receipt = _absorb_dispatch(cfg, out)
     assert receipt.legacy_status == "rejected"
-    assert "local.private" in receipt.legacy_reason
+    assert "body_digest_mismatch" in receipt.legacy_reason
 
 
 def test_identity_seed_signature_verification(tmp_path: Path):

@@ -27,6 +27,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -41,6 +42,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -2474,7 +2476,9 @@ dependencies = [
 name = "tn-core"
 version = "0.0.1"
 dependencies = [
+ "aes",
  "aes-gcm",
+ "aes-kw",
  "base64",
  "bs58",
  "clap",
@@ -2553,10 +2557,12 @@ dependencies = [
  "aes-gcm",
  "base64",
  "bip39",
+ "bs58",
  "clap",
  "ed25519-dalek",
  "hkdf",
  "hmac",
+ "log",
  "notify",
  "rand_core 0.6.4",
  "reqwest",
@@ -2569,6 +2575,7 @@ dependencies = [
  "time",
  "tn-btn",
  "tn-core",
+ "zeroize",
  "zip",
 ]
 
@@ -2588,6 +2595,7 @@ version = "0.0.1"
 dependencies = [
  "base64",
  "bs58",
+ "curve25519-dalek",
  "getrandom 0.2.17",
  "js-sys",
  "rand_core 0.6.4",
@@ -2598,6 +2606,7 @@ dependencies = [
  "tn-core",
  "tn-hibe",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]

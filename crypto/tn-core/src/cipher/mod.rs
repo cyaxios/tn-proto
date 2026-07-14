@@ -6,9 +6,8 @@
 //! when writing an attested event and opens ciphertext when reading one back.
 //! The selection is driven by the group's `cipher:` field in `tn.yaml`.
 //!
-//! `btn` is first-class in tn-core (see [`btn`]). `jwe` stays Python-owned for
-//! this plan — a JWE group configured in a yaml yields a clear
-//! [`crate::Error::NotImplemented`] from the Rust runtime.
+//! `btn` is first-class in tn-core (see [`btn`]). Native builds also support
+//! RFC 7516 General JSON JWE with raw X25519 enrollment keys (see [`jwe`]).
 
 pub mod btn;
 pub mod hibe;
@@ -67,9 +66,10 @@ pub trait GroupCipher: Send + Sync {
     fn kind(&self) -> &'static str;
 
     /// Seal `plaintext` binding `aad` (additional authenticated data) into
-    /// the body's authentication tag. `aad` is authenticated, not encrypted,
-    /// and not stored in the ciphertext — the reader must supply byte-
-    /// identical `aad` to [`decrypt_with_aad`](Self::decrypt_with_aad).
+    /// the body's authentication tag. `aad` is authenticated, not encrypted.
+    /// A cipher may carry it in its standard wire form (JWE does); the reader
+    /// must still supply byte-identical `aad` to
+    /// [`decrypt_with_aad`](Self::decrypt_with_aad).
     ///
     /// The default delegates to [`encrypt`](Self::encrypt) for an EMPTY
     /// `aad` (so the no-marker path stays byte-identical) and rejects a

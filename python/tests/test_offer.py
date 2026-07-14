@@ -8,6 +8,7 @@ def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
 import base64
+import importlib
 from pathlib import Path
 
 from tn.config import load_or_create
@@ -35,3 +36,23 @@ def test_offer_reuses_existing_mykey(tmp_path: Path):
     pkg2 = offer(cfg, publisher_did="did:key:z6MkBob")
     pub2 = pkg2.payload["x25519_pub_b64"]
     assert pub1 == pub2, "the same mykey should back both offers; one pub per group is the design"
+
+
+def test_offer_persists_reader_key_with_secret_writer(tmp_path: Path, monkeypatch):
+    offer_module = importlib.import_module("tn.offer")
+    writes: list[tuple[Path, bytes]] = []
+
+    def secret_write(path: Path, data: bytes) -> None:
+        writes.append((Path(path), data))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    monkeypatch.setattr(offer_module, "atomic_write_bytes", secret_write, raising=False)
+
+    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    (cfg.keystore / "default.jwe.mykey").unlink(missing_ok=True)
+    offer_module.offer(cfg, publisher_did="did:key:z6MkAlice")
+
+    assert len(writes) == 1
+    assert writes[0][0] == cfg.keystore / "default.jwe.mykey"
+    assert len(writes[0][1]) == 32

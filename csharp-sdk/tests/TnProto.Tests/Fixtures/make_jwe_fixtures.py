@@ -1,8 +1,8 @@
 """Regenerate the committed JWE fixtures for JweSealedGroupCipherTests.
 
-Each fixture is a real RFC 7516 General JSON JWE produced by the repo's
-normative sealer (python/tn/cipher.py::_jwe_seal via joserfc), so the C#
-cipher decrypts actual Python wire bytes rather than a C# re-encoding.
+Each fixture is a real RFC 7516 General JSON JWE produced by the independent
+Python/joserfc implementation, so the C# managed cipher opens actual Python
+wire bytes rather than a C# re-encoding.
 Key material is minted fresh on every run; the committed fixtures only
 need to stay internally consistent, not stable across regenerations.
 

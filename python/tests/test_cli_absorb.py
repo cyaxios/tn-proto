@@ -40,8 +40,10 @@ this one" does NOT hold for unsealed btn and is intentionally NOT
 asserted here — see ``test_wrong_recipient_*`` for the documented gap
 plus the negative that genuinely holds (no kit absorbed => no decrypt).
 """
+
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -109,8 +111,13 @@ class Party:
         self.idir = self.cwd / ".id"
         self.cwd.mkdir(parents=True, exist_ok=True)
         res = _run_cli(
-            "init", name, "--no-link", "--skip-confirm",
-            cwd=self.cwd, home=self.home, idir=self.idir,
+            "init",
+            name,
+            "--no-link",
+            "--skip-confirm",
+            cwd=self.cwd,
+            home=self.home,
+            idir=self.idir,
         )
         assert res.returncode == 0, f"init {name} failed:\n{res.stdout}\n{res.stderr}"
         yamls = list(self.cwd.glob("**/tn.yaml"))
@@ -134,10 +141,7 @@ class Party:
     def write_entry(self, event: str = "payday", **fields) -> None:
         """Publisher writes one ``default``-group entry via the library API."""
         kw = ", ".join(f"{k}={v!r}" for k, v in fields.items())
-        code = (
-            f"import tn; tn.init(r'{self.yaml}'); "
-            f"tn.info({event!r}, {kw}); tn.flush_and_close()"
-        )
+        code = f"import tn; tn.init(r'{self.yaml}'); tn.info({event!r}, {kw}); tn.flush_and_close()"
         res = _run_py(code, cwd=self.cwd, home=self.home, idir=self.idir)
         assert res.returncode == 0, f"write_entry failed:\n{res.stdout}\n{res.stderr}"
 
@@ -181,12 +185,25 @@ def test_round_trip_install_and_readback(tmp_path: Path):
     R = Party(tmp_path, "rec")
     assert P.did != R.did, "two isolated ceremonies must have distinct DIDs"
 
+    prior_publisher = "did:key:z6MkhDA92BRnspkcBZVVMhfdRVhZSHWejjYqUipaj8zvXUs5"
+    trust_path = R.keystore / "trust" / "verified_publishers.v1.json"
+    trust_path.parent.mkdir(parents=True)
+    trust_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "publishers": {prior_publisher: {"source": "existing-verification"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
     P.write_entry("payday", amount=4200)
 
     # --- Negative complement (proves the kit is load-bearing): before R
     # absorbs P's kit, R holds only its OWN group key, so it CANNOT
     # decrypt P's payload. The event_type is public, the field is not.
-    pre = R.cli("read", str(P.main_log), "--yaml", str(R.yaml))
+    pre = R.cli("read", str(P.main_log), "--yaml", str(R.yaml), "--no-verify")
     assert pre.returncode == 0, pre.stderr
     assert "payday" in pre.stdout, f"event_type should be visible:\n{pre.stdout}"
     assert "amount=4200" not in pre.stdout, (
@@ -199,9 +216,7 @@ def test_round_trip_install_and_readback(tmp_path: Path):
     r_self_bytes = r_self_kit.read_bytes()
 
     kit = tmp_path / "for_rec.tnpkg"
-    res = P.cli(
-        "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
-    )
+    res = P.cli("add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml))
     assert res.returncode == 0, f"add_recipient failed:\n{res.stdout}\n{res.stderr}"
     assert kit.exists(), "add_recipient did not write the kit .tnpkg"
     kit_bytes = _kit_blob_bytes(kit)
@@ -213,6 +228,10 @@ def test_round_trip_install_and_readback(tmp_path: Path):
     m = re.search(r"\[tn absorb\] kind=kit_bundle accepted=(\d+) skipped=(\d+)", res.stdout)
     assert m, f"receipt line missing:\n{res.stdout}"
     assert int(m.group(1)) >= 1, f"expected accepted>=1:\n{res.stdout}"
+
+    trust_doc = json.loads(trust_path.read_text(encoding="utf-8"))
+    assert trust_doc["publishers"][prior_publisher]["source"] == "existing-verification"
+    assert trust_doc["publishers"][P.did]["source"] == "verified-signed-kit-bundle"
 
     # PASS #3: the kit really installed, with the KIT's bytes (not R's
     # original self-kit). The displaced original is preserved sidecar.
@@ -239,9 +258,12 @@ def test_re_absorb_is_idempotent(tmp_path: Path):
     P = Party(tmp_path, "pub")
     R = Party(tmp_path, "rec")
     kit = tmp_path / "k.tnpkg"
-    assert P.cli(
-        "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
-    ).returncode == 0
+    assert (
+        P.cli(
+            "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
+        ).returncode
+        == 0
+    )
 
     first = R.cli("absorb", str(kit), "--yaml", str(R.yaml))
     assert first.returncode == 0, first.stderr
@@ -274,7 +296,7 @@ def test_bundle_verb_round_trip_install_and_readback(tmp_path: Path):
 
     # Negative complement: before R absorbs P's bundle it holds only its own
     # group key, so the public event_type is visible but the field is not.
-    pre = R.cli("read", str(P.main_log), "--yaml", str(R.yaml))
+    pre = R.cli("read", str(P.main_log), "--yaml", str(R.yaml), "--no-verify")
     assert pre.returncode == 0, pre.stderr
     assert "payday" in pre.stdout, f"event_type should be visible:\n{pre.stdout}"
     assert "amount=4200" not in pre.stdout, (
@@ -285,9 +307,7 @@ def test_bundle_verb_round_trip_install_and_readback(tmp_path: Path):
     r_self_bytes = r_self_kit.read_bytes()
 
     kit = tmp_path / "bundle.tnpkg"
-    res = P.cli(
-        "bundle", R.did, str(kit), "--groups", "default", "--yaml", str(P.yaml)
-    )
+    res = P.cli("bundle", R.did, str(kit), "--groups", "default", "--yaml", str(P.yaml))
     assert res.returncode == 0, f"tn bundle failed:\n{res.stdout}\n{res.stderr}"
     assert kit.exists(), "bundle should have written the kit .tnpkg"
     kit_bytes = _kit_blob_bytes(kit)
@@ -329,9 +349,12 @@ def test_overwrite_with_backup_warn_block(tmp_path: Path):
     prior = (R.keystore / "default.btn.mykit").read_bytes()
 
     kit = tmp_path / "for_rec.tnpkg"
-    assert P.cli(
-        "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
-    ).returncode == 0
+    assert (
+        P.cli(
+            "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
+        ).returncode
+        == 0
+    )
 
     res = R.cli("absorb", str(kit), "--yaml", str(R.yaml))
     assert res.returncode == 0, res.stderr
@@ -355,9 +378,12 @@ def test_self_absorb_refused_exit_2(tmp_path: Path):
     P = Party(tmp_path, "pub")
     R = Party(tmp_path, "rec")  # a real foreign recipient to bundle *for*
     kit = tmp_path / "self.tnpkg"
-    assert P.cli(
-        "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
-    ).returncode == 0
+    assert (
+        P.cli(
+            "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
+        ).returncode
+        == 0
+    )
 
     # P (the minter) tries to absorb its own kit.
     res = P.cli("absorb", str(kit), "--yaml", str(P.yaml))
@@ -373,9 +399,12 @@ def test_allow_self_absorb_override_exit_0(tmp_path: Path):
     P = Party(tmp_path, "pub")
     R = Party(tmp_path, "rec")
     kit = tmp_path / "self.tnpkg"
-    assert P.cli(
-        "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
-    ).returncode == 0
+    assert (
+        P.cli(
+            "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
+        ).returncode
+        == 0
+    )
 
     res = P.cli("absorb", str(kit), "--allow-self-absorb", "--yaml", str(P.yaml))
     assert res.returncode == 0, f"--allow-self-absorb must exit 0:\n{res.stderr}"
@@ -410,9 +439,12 @@ def test_missing_yaml_exit_1(tmp_path: Path):
     P = Party(tmp_path, "pub")
     R = Party(tmp_path, "rec")
     kit = tmp_path / "k.tnpkg"
-    assert P.cli(
-        "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
-    ).returncode == 0
+    assert (
+        P.cli(
+            "add_recipient", "default", R.did, "--out", str(kit), "--yaml", str(P.yaml)
+        ).returncode
+        == 0
+    )
     res = R.cli("absorb", str(kit), "--yaml", str(tmp_path / "missing.yaml"))
     assert res.returncode == 1, f"missing yaml must exit 1:\n{res.stdout}"
     assert "yaml not found:" in res.stderr, res.stderr
@@ -451,12 +483,12 @@ def test_wrong_recipient_kit_unsealed_btn_still_decrypts_DOCUMENTED_GAP(
          re-asserted minimally here for a fresh ceremony).
     """
     P = Party(tmp_path, "pub")
-    T = Party(tmp_path, "third")   # the DID the kit is minted FOR
-    W = Party(tmp_path, "wrong")   # absorbs a kit not addressed to it
+    T = Party(tmp_path, "third")  # the DID the kit is minted FOR
+    W = Party(tmp_path, "wrong")  # absorbs a kit not addressed to it
     P.write_entry("payday", amount=4200)
 
     # Genuine negative: W with NO P-kit cannot decrypt P's payload.
-    pre = W.cli("read", str(P.main_log), "--yaml", str(W.yaml))
+    pre = W.cli("read", str(P.main_log), "--yaml", str(W.yaml), "--no-verify")
     assert pre.returncode == 0, pre.stderr
     assert "payday" in pre.stdout and "amount=4200" not in pre.stdout, (
         f"fresh ceremony must not decrypt P's payload:\n{pre.stdout}"
@@ -465,20 +497,26 @@ def test_wrong_recipient_kit_unsealed_btn_still_decrypts_DOCUMENTED_GAP(
     # Kit minted for T, absorbed by W. Documents the unsealed-btn gap:
     # W decrypts even though the manifest names T.
     kit = tmp_path / "for_third.tnpkg"
-    assert P.cli(
-        "add_recipient", "default", T.did, "--out", str(kit), "--yaml", str(P.yaml)
-    ).returncode == 0
+    assert (
+        P.cli(
+            "add_recipient", "default", T.did, "--out", str(kit), "--yaml", str(P.yaml)
+        ).returncode
+        == 0
+    )
     # Cross-check the kit is unsealed (no body_encryption) so the gap
     # rationale above is anchored to the actual artifact, not an assumption.
     with zipfile.ZipFile(kit) as zf:
         import json
+
         manifest = json.loads(zf.read("manifest.json"))
     assert (manifest.get("state") or {}).get("body_encryption") is None, (
         "kit unexpectedly sealed; the unsealed-btn gap rationale no longer holds"
     )
 
     assert W.cli("absorb", str(kit), "--yaml", str(W.yaml)).returncode == 0
-    post = W.cli("read", str(P.main_log), "--yaml", str(W.yaml))
+    # This assertion isolates the documented bearer-key cipher gap. The
+    # wrong-recipient package must not also grant publisher authenticity.
+    post = W.cli("read", str(P.main_log), "--yaml", str(W.yaml), "--no-verify")
     assert post.returncode == 0, post.stderr
     assert "amount=4200" in post.stdout, (
         "DOCUMENTED GAP changed: an unsealed btn kit minted for a DIFFERENT "

@@ -19,6 +19,7 @@ import {
   newManifest,
   readTnpkg,
   signManifest,
+  signManifestWithBody,
   verifyManifest,
   writeTnpkg,
 } from "../src/index.js";
@@ -107,12 +108,13 @@ test("zip round-trip preserves manifest fields and body bytes", async () => {
     m.eventCount = 1;
     m.clock = { [dk.did]: { "tn.recipient.added": 1 } };
     m.headRowHash = "sha256:" + "b".repeat(64);
-    signManifest(m, dk);
+    const roundBody = {
+      "body/admin.ndjson": new TextEncoder().encode("hello world\n"),
+    };
+    signManifestWithBody(m, roundBody, dk);
 
     const out = join(tmpDir, "round.tnpkg");
-    writeTnpkg(out, m, {
-      "body/admin.ndjson": new TextEncoder().encode("hello world\n"),
-    });
+    writeTnpkg(out, m, roundBody);
     assert.ok(existsSync(out));
 
     const { manifest, body } = readTnpkg(out);
@@ -148,7 +150,7 @@ test("admin_log_snapshot absorb rejects when body/admin.ndjson is missing", asyn
     // Non-empty clock so a fresh consumer does NOT dominate it — we reach
     // the body-presence check instead of the noop short-circuit.
     m.clock = { [dk.did]: { "tn.recipient.added": 1 } };
-    signManifest(m, dk);
+    signManifestWithBody(m, {}, dk);
 
     const out = join(b.tmpDir, "nobody.tnpkg");
     writeTnpkg(out, m, {}); // pack the signed manifest with NO body member
@@ -406,6 +408,8 @@ test("absorb(project_seed) adopts empty vault project id without overwriting", a
     (tn as any)._rt.exportPkg({ kind: "project_seed", confirmIncludesSecrets: true }, basePkg);
 
     const { manifest, body } = readTnpkg(basePkg);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const signingKey = (tn as any)._rt.keystore.device as DeviceKey;
     const linkedBody = new Map(body);
     linkedBody.set(
       "body/tn.yaml",
@@ -413,7 +417,9 @@ test("absorb(project_seed) adopts empty vault project id without overwriting", a
         emptyYaml.replaceAll("linked_project_id: ''", "linked_project_id: proj_remote"),
       ),
     );
-    writeTnpkg(linkedPkg, manifest, Object.fromEntries(linkedBody));
+    const linkedContents = Object.fromEntries(linkedBody);
+    signManifestWithBody(manifest, linkedContents, signingKey);
+    writeTnpkg(linkedPkg, manifest, linkedContents);
     const otherBody = new Map(body);
     otherBody.set(
       "body/tn.yaml",
@@ -421,7 +427,9 @@ test("absorb(project_seed) adopts empty vault project id without overwriting", a
         emptyYaml.replaceAll("linked_project_id: ''", "linked_project_id: proj_other"),
       ),
     );
-    writeTnpkg(otherPkg, manifest, Object.fromEntries(otherBody));
+    const otherContents = Object.fromEntries(otherBody);
+    signManifestWithBody(manifest, otherContents, signingKey);
+    writeTnpkg(otherPkg, manifest, otherContents);
 
     writeFileSync(join(a.tmpDir, ".tn/logs/tn.ndjson"), '{"event_type":"app.event"}\n');
 
@@ -470,6 +478,65 @@ test("export(kit_bundle) round-trips reader kits without private material", asyn
     await tn.close();
   } finally {
     a.cleanup();
+  }
+});
+
+test("absorb rejects a counterpart kit_bundle carrying JWE private material", async () => {
+  const target = makeCeremony();
+  try {
+    const reader = await Tn.init(target.yamlPath);
+    const publisher = DeviceKey.generate();
+    const body = { "body/default.jwe.mykey": new Uint8Array(32).fill(0x5a) };
+    const manifest = newManifest({
+      kind: "kit_bundle",
+      fromDid: publisher.did,
+      toDid: reader.did,
+      ceremonyId: "malicious-kit",
+      scope: "kit_bundle",
+    });
+    signManifestWithBody(manifest, body, publisher);
+    const bundle = join(target.tmpDir, "malicious-kit.tnpkg");
+    writeTnpkg(bundle, manifest, body);
+
+    const receipt = await reader.pkg.absorb(bundle);
+    assert.match(receipt.rejectedReason ?? "", /not permitted in a reader kit/i);
+    const config = reader.config() as CeremonyConfig;
+    assert.equal(existsSync(join(config.keystorePath, "default.jwe.mykey")), false);
+    await reader.close();
+  } finally {
+    target.cleanup();
+  }
+});
+
+test("absorb rejects a full_keystore self-addressed to a different DID", async () => {
+  const target = makeCeremony();
+  try {
+    const reader = await Tn.init(target.yamlPath);
+    const config = reader.config() as CeremonyConfig;
+    const localPrivate = join(config.keystorePath, "local.private");
+    const before = readFileSync(localPrivate);
+    const foreign = DeviceKey.generate();
+    const body = {
+      "body/local.private": foreign.seed,
+      "body/local.public": new TextEncoder().encode(foreign.did),
+    };
+    const manifest = newManifest({
+      kind: "full_keystore",
+      fromDid: foreign.did,
+      toDid: foreign.did,
+      ceremonyId: "foreign-backup",
+      scope: "full",
+    });
+    signManifestWithBody(manifest, body, foreign);
+    const bundle = join(target.tmpDir, "foreign-full.tnpkg");
+    writeTnpkg(bundle, manifest, body);
+
+    const receipt = await reader.pkg.absorb(bundle);
+    assert.match(receipt.rejectedReason ?? "", /full_keystore.*this device/i);
+    assert.deepEqual(readFileSync(localPrivate), before);
+    await reader.close();
+  } finally {
+    target.cleanup();
   }
 });
 

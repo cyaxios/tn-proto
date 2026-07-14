@@ -11,7 +11,8 @@ later checkpoint-based rotation/resume distinction.
 The chain check reads only ``event_type``/``prev_hash``/``row_hash`` from each
 envelope, independent of decryption, so these tests drive the reader with
 hand-built envelopes and ``verify_signatures=False`` — deterministic and with
-no crypto setup.
+no crypto setup. They explicitly disable both signature and row-hash checks;
+normal ``verify_signatures=False`` reads still recompute row hashes.
 """
 
 from __future__ import annotations
@@ -41,7 +42,11 @@ def _chain_entries(tmp_path: Path, envelopes: list[dict], *, expect_genesis: boo
     return [
         e["valid"]["chain"]
         for e in read_with_keybag(
-            log, keystore, verify_signatures=False, expect_genesis=expect_genesis
+            log,
+            keystore,
+            verify_signatures=False,
+            verify_row_hash=False,
+            expect_genesis=expect_genesis,
         )
     ]
 

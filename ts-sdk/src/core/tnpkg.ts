@@ -11,7 +11,7 @@
 // the canonical bytes of the manifest minus the signature field. The
 // internal TS object uses camelCase (`fromDid`, `toDid`, ...) but the
 // wire form is snake_case so Python and Rust readers see byte-identical
-// JSON — see `_toWireDict` below.
+// JSON — see `toWireDict` below.
 //
 // Body shape varies by `kind`. Producer / consumer dispatch lives in the
 // TNClient `export` / `absorb` methods.
@@ -19,12 +19,13 @@
 import {
   manifestClockDominates as rawClockDominates,
   manifestClockMerge as rawClockMerge,
-  manifestSigningBytes as rawManifestSigningBytes,
-  manifestToWireDict,
-  manifestVerifySignature,
 } from "../raw.js";
-import { bytesToB64 } from "./encoding.js";
-import type { DeviceKey } from "./signing.js";
+import { canonicalize } from "./canonical.js";
+import { sha256HexBytes } from "./chain.js";
+import { b64ToBytes, bytesToB64 } from "./encoding.js";
+import { type DeviceKey, verify as verifySignature } from "./signing.js";
+import { TrustError, parseEd25519DidKey, verifyEd25519DidSignature } from "./trust.js";
+import { asDid } from "./types.js";
 
 /** Manifest schema version. Bump if required fields change incompatibly. */
 export const MANIFEST_VERSION = 1;
@@ -88,6 +89,8 @@ export interface Manifest {
   eventCount: number;
   headRowHash?: string;
   state?: Record<string, unknown> | null;
+  /** Exact final archive member name to lowercase tagged SHA-256 digest. */
+  bodySha256?: Record<string, string>;
   manifestSignatureB64?: string;
 }
 
@@ -99,7 +102,10 @@ export type BodyContents = Record<string, Uint8Array>;
 
 /** Build the snake-case wire dict from a TS Manifest. Optional fields are
  * omitted when null/undefined so the canonical form stays stable. */
-function manifestToCandidateWireDict(m: Manifest, includeSignature: boolean): Record<string, unknown> {
+function manifestToCandidateWireDict(
+  m: Manifest,
+  includeSignature: boolean,
+): Record<string, unknown> {
   const out: Record<string, unknown> = {
     kind: m.kind,
     version: m.version,
@@ -115,6 +121,7 @@ function manifestToCandidateWireDict(m: Manifest, includeSignature: boolean): Re
     out["head_row_hash"] = m.headRowHash;
   }
   if (m.state !== undefined && m.state !== null) out["state"] = m.state;
+  if (m.bodySha256 !== undefined) out["body_sha256"] = { ...m.bodySha256 };
   if (includeSignature && m.manifestSignatureB64) {
     out["manifest_signature_b64"] = m.manifestSignatureB64;
   }
@@ -122,10 +129,7 @@ function manifestToCandidateWireDict(m: Manifest, includeSignature: boolean): Re
 }
 
 function toWireDict(m: Manifest, includeSignature: boolean): Record<string, unknown> {
-  return manifestToWireDict(manifestToCandidateWireDict(m, includeSignature)) as Record<
-    string,
-    unknown
-  >;
+  return manifestToCandidateWireDict(m, includeSignature);
 }
 
 /** Parse a snake-case JSON dict into a TS Manifest. Throws on missing
@@ -140,16 +144,30 @@ function fromWireDict(doc: unknown): Manifest {
   if (missing.length > 0) {
     throw new Error(`manifest missing required keys: ${JSON.stringify(missing)}`);
   }
-  let normalized: Record<string, unknown>;
-  try {
-    normalized = manifestToWireDict(d) as Record<string, unknown>;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(msg, { cause: e });
+  if (typeof d["kind"] !== "string") {
+    throw new Error("manifest kind must be a string");
+  }
+  const kind = d["kind"];
+  if (!KNOWN_KINDS.has(kind as ManifestKind)) {
+    throw new Error(`manifest unknown kind: ${JSON.stringify(kind)}`);
+  }
+  const requiredString = (key: "publisher_identity" | "ceremony_id" | "as_of"): string => {
+    const value = d[key];
+    if (typeof value !== "string") {
+      throw new Error(`manifest ${key} must be a string`);
+    }
+    return value;
+  };
+  const publisherIdentity = requiredString("publisher_identity");
+  const ceremonyId = requiredString("ceremony_id");
+  const asOf = requiredString("as_of");
+  const version = Number(d["version"]);
+  if (!Number.isSafeInteger(version)) {
+    throw new Error("manifest version must be an integer");
   }
 
   const clock: VectorClock = {};
-  const rawClock = normalized["clock"];
+  const rawClock = d["clock"];
   if (rawClock && typeof rawClock === "object" && !Array.isArray(rawClock)) {
     for (const [did, etMap] of Object.entries(rawClock as Record<string, unknown>)) {
       if (!etMap || typeof etMap !== "object" || Array.isArray(etMap)) continue;
@@ -163,29 +181,41 @@ function fromWireDict(doc: unknown): Manifest {
   }
 
   const m: Manifest = {
-    kind: String(normalized["kind"]),
-    version: Math.trunc(Number(normalized["version"])),
-    fromDid: String(normalized["publisher_identity"]),
-    ceremonyId: String(normalized["ceremony_id"]),
-    asOf: String(normalized["as_of"]),
-    scope: typeof normalized["scope"] === "string" ? (normalized["scope"] as string) : "admin",
+    kind,
+    version,
+    fromDid: publisherIdentity,
+    ceremonyId,
+    asOf,
+    scope: typeof d["scope"] === "string" ? d["scope"] : "admin",
     clock,
     eventCount:
-      typeof normalized["event_count"] === "number"
-        ? (normalized["event_count"] as number)
-        : Number(normalized["event_count"] ?? 0) || 0,
+      typeof d["event_count"] === "number" ? d["event_count"] : Number(d["event_count"] ?? 0) || 0,
   };
-  if (typeof normalized["recipient_identity"] === "string") {
-    m.toDid = normalized["recipient_identity"] as string;
+  if (typeof d["recipient_identity"] === "string") {
+    m.toDid = d["recipient_identity"];
   }
-  if (typeof normalized["head_row_hash"] === "string") {
-    m.headRowHash = normalized["head_row_hash"] as string;
+  if (typeof d["head_row_hash"] === "string") {
+    m.headRowHash = d["head_row_hash"];
   }
-  if (normalized["state"] !== undefined && normalized["state"] !== null) {
-    m.state = normalized["state"] as Record<string, unknown>;
+  if (d["state"] !== undefined && d["state"] !== null) {
+    m.state = d["state"] as Record<string, unknown>;
   }
-  if (typeof normalized["manifest_signature_b64"] === "string") {
-    m.manifestSignatureB64 = normalized["manifest_signature_b64"] as string;
+  if (d["body_sha256"] !== undefined) {
+    const rawBodyIndex = d["body_sha256"];
+    if (!rawBodyIndex || typeof rawBodyIndex !== "object" || Array.isArray(rawBodyIndex)) {
+      throw new Error("manifest body_sha256 must be a JSON object");
+    }
+    const bodySha256: Record<string, string> = {};
+    for (const [name, digest] of Object.entries(rawBodyIndex as Record<string, unknown>)) {
+      if (typeof digest !== "string") {
+        throw new Error("manifest body_sha256 keys and values must be strings");
+      }
+      bodySha256[name] = digest;
+    }
+    m.bodySha256 = bodySha256;
+  }
+  if (typeof d["manifest_signature_b64"] === "string") {
+    m.manifestSignatureB64 = d["manifest_signature_b64"];
   }
   return m;
 }
@@ -198,7 +228,106 @@ function fromWireDict(doc: unknown): Manifest {
  * excluded — the exact domain over which the producer signs. Matches
  * Python `TnpkgManifest.signing_bytes`. */
 export function manifestSigningBytes(m: Manifest): Uint8Array {
-  return rawManifestSigningBytes(manifestToCandidateWireDict(m, false));
+  return canonicalize(manifestToCandidateWireDict(m, false));
+}
+
+/** Validate an exact normalized non-manifest archive member path. */
+export function validateTnpkgBodyName(name: string): void {
+  if (!name.startsWith("body/") || name === "body/") {
+    throw new Error(
+      `tnpkg: invalid package member ${JSON.stringify(name)}; expected manifest.json or body/...`,
+    );
+  }
+  if (name.startsWith("/") || name.includes("\\") || name.includes("\0")) {
+    throw new Error(
+      `tnpkg: invalid package member ${JSON.stringify(name)}; only POSIX relative paths are allowed`,
+    );
+  }
+  if (name.split("/").some((part) => part === "" || part === "." || part === "..")) {
+    throw new Error(
+      `tnpkg: invalid package member ${JSON.stringify(name)}; path traversal is forbidden`,
+    );
+  }
+}
+
+/** Compute the canonical index over the exact final bytes stored in `body/...`. */
+export function computeBodySha256(body: BodyContents): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of Object.keys(body).sort()) {
+    validateTnpkgBodyName(name);
+    const bytes = body[name];
+    if (!(bytes instanceof Uint8Array)) {
+      throw new TypeError(`tnpkg body member ${JSON.stringify(name)} must be a Uint8Array`);
+    }
+    out[name] = `sha256:${sha256HexBytes(bytes)}`;
+  }
+  return out;
+}
+
+/** Populate the body index and invalidate any signature over an older body. */
+export function prepareManifestBodyIndex(m: Manifest, body: BodyContents): Manifest {
+  m.bodySha256 = computeBodySha256(body);
+  delete m.manifestSignatureB64;
+  return m;
+}
+
+/** Index final stored body bytes, then sign the complete manifest domain. */
+export function signManifestWithBody(
+  m: Manifest,
+  body: BodyContents,
+  deviceKey: DeviceKey,
+): Manifest {
+  prepareManifestBodyIndex(m, body);
+  return signManifest(m, deviceKey);
+}
+
+function bodyDigestMismatch(detail: string): Error {
+  // A TrustError so enrollment/absorb boundaries surface the stable
+  // `body_digest_mismatch` reason; the message shape (`body_digest_mismatch:
+  // <detail>`) is unchanged for existing string-matching callers.
+  return new TrustError("body_digest_mismatch", detail);
+}
+
+/** Verify exact member names and lowercase tagged digests against the manifest. */
+export function verifyManifestBodyIndex(
+  m: Manifest,
+  body: BodyContents,
+  requireIndex = true,
+): void {
+  if (m.bodySha256 === undefined) {
+    if (requireIndex) throw bodyDigestMismatch("manifest body_sha256 index is missing");
+    return;
+  }
+  if (!m.bodySha256 || typeof m.bodySha256 !== "object" || Array.isArray(m.bodySha256)) {
+    throw bodyDigestMismatch("manifest body_sha256 index is malformed");
+  }
+  for (const [name, digest] of Object.entries(m.bodySha256)) {
+    try {
+      validateTnpkgBodyName(name);
+    } catch {
+      throw bodyDigestMismatch(`invalid indexed body member ${JSON.stringify(name)}`);
+    }
+    if (!/^sha256:[0-9a-f]{64}$/.test(digest)) {
+      throw bodyDigestMismatch(`malformed digest for body member ${JSON.stringify(name)}`);
+    }
+  }
+
+  let actual: Record<string, string>;
+  try {
+    actual = computeBodySha256(body);
+  } catch {
+    throw bodyDigestMismatch("body member set contains an invalid path or value");
+  }
+  const expectedNames = Object.keys(m.bodySha256).sort();
+  const actualNames = Object.keys(actual).sort();
+  if (
+    expectedNames.length !== actualNames.length ||
+    expectedNames.some(
+      (name, index) => name !== actualNames[index] || m.bodySha256![name] !== actual[name],
+    )
+  ) {
+    throw bodyDigestMismatch("body index mismatch");
+  }
 }
 
 /** Sign a manifest in place. Returns the same object with
@@ -215,7 +344,16 @@ export function verifyManifest(m: Manifest): void {
   if (!m.manifestSignatureB64) {
     throw new Error("verifyManifest: manifest is unsigned (manifest_signature_b64 missing)");
   }
-  const ok = manifestVerifySignature(toWireDict(m, true));
+  let ok: boolean;
+  try {
+    const signature = b64ToBytes(m.manifestSignatureB64);
+    ok =
+      bytesToB64(signature) === m.manifestSignatureB64 &&
+      signature.length === 64 &&
+      verifySignature(asDid(m.fromDid), manifestSigningBytes(m), signature);
+  } catch {
+    ok = false;
+  }
   if (!ok) {
     throw new Error(
       `verifyManifest: signature does not verify against publisher_identity ${JSON.stringify(m.fromDid)}`,
@@ -302,6 +440,161 @@ export function nowIsoMillis(): string {
   // Node's Date.toISOString already yields ms precision. Convert the
   // trailing "Z" to "+00:00" to match Python's isoformat output.
   return new Date().toISOString().replace(/Z$/, "+00:00");
+}
+
+// -----------------------------------------------------------------------
+// Inner signed Package — the `body/package.json` member of offer/enrolment
+// `.tnpkg` archives. Mirrors `python/tn/packaging.py` byte-for-byte: the
+// signature covers `json.dumps(asdict(pkg) minus sig_b64, sort_keys,
+// separators=(",", ":"))`, which the shared canonical serializer reproduces.
+// -----------------------------------------------------------------------
+
+/** Wire shape of the inner bilateral lifecycle package. */
+export interface TnPackage {
+  package_version: number;
+  package_kind: string;
+  ceremony_id: string;
+  group: string;
+  group_epoch: number;
+  device_identity: string;
+  signer_verify_pub_b64: string;
+  recipient_identity: string | null;
+  payload: Record<string, unknown>;
+  compiled_at: string;
+  sig_b64?: string | null;
+}
+
+const TN_PACKAGE_REQUIRED_FIELDS = [
+  "package_version",
+  "package_kind",
+  "ceremony_id",
+  "group",
+  "group_epoch",
+  "device_identity",
+  "signer_verify_pub_b64",
+  "recipient_identity",
+  "payload",
+  "compiled_at",
+] as const;
+
+/**
+ * Parse the inner package with the same strictness as Python's
+ * `Package(**value)`: unknown fields and missing fields are rejected before
+ * any signature work (`sig_b64` is the only optional member).
+ */
+export function parseTnPackage(value: unknown): TnPackage {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TrustError("statement_invalid", "offer package must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  const allowed = new Set<string>([...TN_PACKAGE_REQUIRED_FIELDS, "sig_b64"]);
+  const unknown = Object.keys(record).filter((key) => !allowed.has(key));
+  const missing = TN_PACKAGE_REQUIRED_FIELDS.filter((key) => !(key in record));
+  if (unknown.length > 0 || missing.length > 0) {
+    throw new TrustError("statement_invalid", "offer package shape is invalid");
+  }
+  if (
+    typeof record["package_version"] !== "number" ||
+    !Number.isSafeInteger(record["package_version"])
+  ) {
+    throw new TrustError("statement_invalid", "unsupported offer package version");
+  }
+  const requireStr = (key: string): string => {
+    const v = record[key];
+    if (typeof v !== "string") {
+      throw new TrustError("statement_invalid", "offer package shape is invalid");
+    }
+    return v;
+  };
+  const payload = record["payload"];
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TrustError("statement_invalid", "offer payload must be an object");
+  }
+  const recipient = record["recipient_identity"];
+  if (recipient !== null && typeof recipient !== "string") {
+    throw new TrustError("statement_invalid", "offer package shape is invalid");
+  }
+  const groupEpoch = record["group_epoch"];
+  if (typeof groupEpoch !== "number" || !Number.isSafeInteger(groupEpoch)) {
+    throw new TrustError("statement_invalid", "offer package shape is invalid");
+  }
+  const sig = record["sig_b64"];
+  if (sig !== undefined && sig !== null && typeof sig !== "string") {
+    throw new TrustError("statement_invalid", "offer package shape is invalid");
+  }
+  return {
+    package_version: record["package_version"] as number,
+    package_kind: requireStr("package_kind"),
+    ceremony_id: requireStr("ceremony_id"),
+    group: requireStr("group"),
+    group_epoch: groupEpoch,
+    device_identity: requireStr("device_identity"),
+    signer_verify_pub_b64: requireStr("signer_verify_pub_b64"),
+    recipient_identity: recipient as string | null,
+    payload: { ...(payload as Record<string, unknown>) },
+    compiled_at: requireStr("compiled_at"),
+    sig_b64: sig === undefined ? null : (sig as string | null),
+  };
+}
+
+/** The complete wire dict of a package (including its signature slot). */
+export function tnPackageWireValue(pkg: TnPackage): Record<string, unknown> {
+  return {
+    package_version: pkg.package_version,
+    package_kind: pkg.package_kind,
+    ceremony_id: pkg.ceremony_id,
+    group: pkg.group,
+    group_epoch: pkg.group_epoch,
+    device_identity: pkg.device_identity,
+    signer_verify_pub_b64: pkg.signer_verify_pub_b64,
+    recipient_identity: pkg.recipient_identity,
+    payload: pkg.payload,
+    compiled_at: pkg.compiled_at,
+    sig_b64: pkg.sig_b64 ?? null,
+  };
+}
+
+/** Deterministic serialization over every field EXCEPT `sig_b64`. */
+export function tnPackageSigningBytes(pkg: TnPackage): Uint8Array {
+  const wire = tnPackageWireValue(pkg);
+  delete wire["sig_b64"];
+  return canonicalize(wire);
+}
+
+/** Sign the package with an Ed25519 device key: sets both the raw
+ * verification key mirror and the signature, like Python `packaging.sign`. */
+export function signTnPackage(pkg: TnPackage, key: DeviceKey): TnPackage {
+  const signed: TnPackage = { ...pkg, signer_verify_pub_b64: bytesToB64(key.publicKey) };
+  signed.sig_b64 = bytesToB64(key.sign(tnPackageSigningBytes(signed)));
+  return signed;
+}
+
+/**
+ * Fail-closed inner-package signature verification. The declared raw
+ * verification key must equal the key embedded in the asserted DID, and the
+ * signature must verify under that DID — an unrelated raw key never
+ * establishes identity. Throws {@link TrustError} on failure.
+ */
+export function verifyTnPackageSignature(pkg: TnPackage): void {
+  if (typeof pkg.sig_b64 !== "string" || typeof pkg.signer_verify_pub_b64 !== "string") {
+    throw new TrustError("signature_invalid", "offer signature is missing");
+  }
+  let signature: Uint8Array;
+  let declaredPublicKey: Uint8Array;
+  try {
+    signature = b64ToBytes(pkg.sig_b64);
+    declaredPublicKey = b64ToBytes(pkg.signer_verify_pub_b64);
+  } catch {
+    throw new TrustError("signature_invalid", "offer signature is malformed");
+  }
+  const didPublicKey = parseEd25519DidKey(pkg.device_identity);
+  if (
+    declaredPublicKey.length !== didPublicKey.length ||
+    declaredPublicKey.some((byte, index) => byte !== didPublicKey[index])
+  ) {
+    throw new TrustError("did_signer_mismatch", "offer verification key does not match its asserted DID");
+  }
+  verifyEd25519DidSignature(pkg.device_identity, tnPackageSigningBytes(pkg), signature);
 }
 
 // Internal helpers re-exported for the tnpkg_io layer (Layer 2).

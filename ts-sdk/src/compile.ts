@@ -24,16 +24,21 @@
 //
 // The manifest is Ed25519-signed by the keystore's device key so
 // `absorb` accepts it (absorb rejects unsigned / mis-signed manifests).
-// All wire-format work (canonical signing bytes, the signature, and the
-// zip packing) goes through the Rust core via wasm; this module only
-// reads the keystore and assembles the body.
+// Generic canonical/signature primitives still come from the shared core;
+// the TS layer builds the complete body index and serializes the full manifest
+// document so additive wire fields cannot be dropped by stale schema glue.
 
 import { Buffer } from "node:buffer";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { DeviceKey } from "./core/signing.js";
-import { type BodyContents, type Manifest, newManifest, signManifest } from "./core/tnpkg.js";
+import {
+  type BodyContents,
+  type Manifest,
+  newManifest,
+  signManifestWithBody,
+} from "./core/tnpkg.js";
 import { packTnpkgBytes } from "./tnpkg_io.js";
 import { loadConfig } from "./runtime/config.js";
 
@@ -206,7 +211,8 @@ function collectKitBundleBody(
  * Build a canonical signed `.tnpkg` kit bundle in memory: read kits from
  * the keystore, build + sign a canonical manifest (kind `kit_bundle`, or
  * `full_keystore` with `full`), and pack under `body/`. Pure w.r.t. disk:
- * reads only. Signing + zip packing run in the Rust core via wasm.
+ * reads only. The shared primitives sign canonical bytes; the TS container
+ * layer serializes the complete manifest and final body index.
  */
 export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage {
   const { keystoreDir, fromDid, ceremonyId, yamlPath, deviceKey } = resolveSigningMaterial(opts);
@@ -219,7 +225,7 @@ export function compileKitBundle(opts: CompileKitBundleOptions): CompiledPackage
     scope: opts.full ? "full" : "kit_bundle",
   });
   manifest.state = { kits: kitsMeta, kind: opts.full ? "full-keystore" : "readers-only" };
-  signManifest(manifest, deviceKey);
+  signManifestWithBody(manifest, body, deviceKey);
 
   return { manifest, zipBytes: packTnpkgBytes(manifest, body) };
 }

@@ -10,7 +10,7 @@ output.
 PASS: genuine seal output verifies ``ok:true`` for every line; ``row_hash``
 and ``sequence`` are echoed back.
 
-FAIL cases (a correct verify MUST catch): tampered public field, tampered
+FAIL cases (the public verification gate MUST catch): tampered public field, tampered
 scalar, corrupted signature, broken prev_hash chain, malformed JSON.
 """
 

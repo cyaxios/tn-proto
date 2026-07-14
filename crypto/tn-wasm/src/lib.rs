@@ -1,10 +1,9 @@
 //! WebAssembly bindings for tn-core.
 //!
 //! Exported surface: canonical, chain, signing, indexing, envelope, the
-//! admin catalog, plus btn encrypt/decrypt. The default `WasmRuntime`
-//! supports tn-core's BTN runtime path; HIBE is exposed as standalone
-//! `hibe*` primitives for the TS/Python-compatible HIBE pipeline, and
-//! JWE remains pure JS/JOSE rather than a Rust/wasm runtime cipher.
+//! admin catalog, plus BTN/JWE encrypt/decrypt. The default `WasmRuntime`
+//! supports tn-core's BTN and standard RFC 7516 JWE runtime paths; HIBE is
+//! also exposed as standalone `hibe*` primitives.
 //!
 //! Invariants:
 //! - JSON outputs must match what tn_core (via PyO3) produces in Python,
@@ -38,6 +37,8 @@ use tn_btn::{
     Ciphertext as BtnCiphertext, Config as BtnConfig, LeafIndex,
     PublisherState as BtnPublisherState, ReaderKit as BtnReaderKit,
 };
+
+mod jwe;
 
 // Phase B1: `WasmRuntime` exposes the tn-core `Runtime` to JS. Lives
 // in its own module to keep the lib.rs surface readable; the helpers
@@ -117,7 +118,7 @@ pub fn admin_reduce_js(envelope: JsValue) -> Result<JsValue, JsError> {
 ///
 /// Returns `[{event_type, sign, sync, schema: [[name, type], ...]}, ...]`.
 /// Schema types are strings: `string`, `optional_string`, `int`,
-/// `optional_int`, `iso8601`.
+/// `optional_int`, `iso8601`, `string_array`.
 #[wasm_bindgen(js_name = "adminCatalogKinds")]
 pub fn admin_catalog_kinds_js() -> Result<JsValue, JsError> {
     let mut out = Vec::with_capacity(admin_catalog::CATALOG.len());
@@ -157,6 +158,20 @@ fn field_type_str(t: admin_catalog::FieldType) -> &'static str {
         FieldType::Int => "int",
         FieldType::OptionalInt => "optional_int",
         FieldType::Iso8601 => "iso8601",
+        FieldType::StringArray => "string_array",
+    }
+}
+
+#[cfg(test)]
+mod admin_catalog_tests {
+    use super::{admin_catalog, field_type_str};
+
+    #[test]
+    fn string_array_field_type_has_stable_wire_label() {
+        assert_eq!(
+            field_type_str(admin_catalog::FieldType::StringArray),
+            "string_array"
+        );
     }
 }
 
@@ -263,6 +278,8 @@ pub fn manifest_clock_dominates_js(a: JsValue, b: JsValue) -> Result<bool, JsErr
         event_count: 0,
         head_row_hash: None,
         state: None,
+        body_sha256: std::collections::BTreeMap::new(),
+        body_sha256_present: false,
         manifest_signature_b64: None,
     };
     let mb = Manifest {
@@ -288,6 +305,8 @@ pub fn manifest_clock_merge_js(a: JsValue, b: JsValue) -> Result<JsValue, JsErro
         event_count: 0,
         head_row_hash: None,
         state: None,
+        body_sha256: std::collections::BTreeMap::new(),
+        body_sha256_present: false,
         manifest_signature_b64: None,
     };
     let Value::Object(mut obj) = manifest.to_json() else {
@@ -805,6 +824,32 @@ impl BtnPublisher {
             .encrypt(plaintext)
             .map_err(|e| JsError::new(&format!("{e}")))?;
         Ok(ct.to_bytes())
+    }
+
+    #[wasm_bindgen(js_name = "encryptWithAad")]
+    pub fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, JsError> {
+        let ciphertext = self
+            .inner
+            .encrypt_with_aad(plaintext, aad)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+        Ok(ciphertext.to_bytes())
+    }
+
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, JsError> {
+        let ciphertext = BtnCiphertext::from_bytes(ciphertext)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+        self.inner
+            .decrypt(&ciphertext)
+            .map_err(|error| JsError::new(&error.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = "decryptWithAad")]
+    pub fn decrypt_with_aad(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, JsError> {
+        let ciphertext = BtnCiphertext::from_bytes(ciphertext)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+        self.inner
+            .decrypt_with_aad(&ciphertext, aad)
+            .map_err(|error| JsError::new(&error.to_string()))
     }
 
     /// Serialize this publisher state for persistence. Treat as secret.

@@ -10,6 +10,7 @@ import os as _cipher_os
 def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
+import base64
 import json
 import sys
 from datetime import datetime
@@ -217,8 +218,11 @@ def test_verify_true_passes_clean_log(tmp_path):
     assert n >= 2  # admin events + 2 user events
 
 
-def test_verify_true_raises_on_tampered_ciphertext(tmp_path):
-    yaml = _setup(tmp_path)
+def test_verify_true_rejects_noncanonical_ciphertext_base64(tmp_path):
+    yaml = tmp_path / "tn.yaml"
+    # BTN's frame length gives this payload one padded Base64 quantum, where
+    # non-zero unused tail bits can spell the same decoded ciphertext bytes.
+    tn.init(yaml, cipher="btn")
     tn.info("v.x", payload="orig")
     tn.flush_and_close()
 
@@ -227,7 +231,14 @@ def test_verify_true_raises_on_tampered_ciphertext(tmp_path):
     victim_idx = next(i for i, ln in enumerate(lines) if "v.x" in ln)
     obj = json.loads(lines[victim_idx])
     ct = obj["default"]["ciphertext"]
-    obj["default"]["ciphertext"] = ct[:-2] + ("Z" if ct[-2] != "Z" else "Y") + ct[-1]
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    assert ct.endswith("=") and not ct.endswith("==")
+    tail_index = alphabet.index(ct[-2])
+    assert tail_index % 4 == 0
+    alias = ct[:-2] + alphabet[tail_index + 1] + ct[-1]
+    assert alias != ct
+    assert base64.b64decode(alias, validate=True) == base64.b64decode(ct, validate=True)
+    obj["default"]["ciphertext"] = alias
     lines[victim_idx] = json.dumps(obj, separators=(",", ":")) + "\n"
     log.write_text("".join(lines), encoding="utf-8")
 

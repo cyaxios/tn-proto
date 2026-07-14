@@ -153,7 +153,7 @@ Args:
         group sealed on this row, merged OVER any per-group ``aad``
         default declared in the yaml. Echoed into the record's public
         ``tn_aad`` block so a reader reconstructs it. Bound identically
-        on the native (btn/hibe) runtime and the pure pipeline (jwe).
+        on the whole-runtime route and Python's managed joserfc JWE route.
         Default ``None`` (bind nothing).
     **fields: Plaintext fields to encrypt into the configured groups
         and chain into the log. Values are JSON-shaped: str, int,

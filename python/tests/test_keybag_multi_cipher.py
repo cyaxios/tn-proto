@@ -16,6 +16,7 @@ keystore can legitimately open:
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -131,15 +132,12 @@ def test_hibe_grant_joins_the_keybag(tmp_path):
     tn.flush_and_close()
     assert (r_keystore / "default.hibe.sk").exists()
     assert (r_keystore / "default.btn.mykit").exists(), (
-        "setup broken: the reader's own btn ceremony should hold a kit "
-        "for the same group name"
+        "setup broken: the reader's own btn ceremony should hold a kit for the same group name"
     )
 
     rows = _default_plaintexts(a_log, r_keystore, "governed.entry")["governed.entry"]
     assert len(rows) == 1, rows
-    assert isinstance(rows[0], dict) and rows[0].get("secret") == (
-        "for-granted-readers-only"
-    ), rows
+    assert isinstance(rows[0], dict) and rows[0].get("secret") == ("for-granted-readers-only"), rows
 
 
 def test_two_ciphers_one_group_bag_opens_both(tmp_path):
@@ -173,6 +171,44 @@ def test_two_ciphers_one_group_bag_opens_both(tmp_path):
     got = _default_plaintexts(combined, bag_dir, "btn.row", "jwe.row")
     assert got["btn.row"] and got["btn.row"][0].get("x") == 1, got
     assert got["jwe.row"] and got["jwe.row"][0].get("y") == 2, got
+
+
+def test_disabling_signature_verification_still_checks_row_hash(tmp_path):
+    """Signature policy must not silently disable ciphertext/public integrity."""
+
+    yaml = tmp_path / "tn.yaml"
+    log = tmp_path / "log.ndjson"
+    tn.init(yaml, log_path=log, cipher="btn")
+    keystore = tn.current_config().keystore
+    tn.info("order.created", order_id="A-1")
+    tn.flush_and_close()
+
+    pristine = list(read_with_keybag(log, keystore, verify_signatures=False))[0]
+    assert pristine["valid"]["signature"] is False
+    assert pristine["valid"]["row_hash"] is True
+
+    envelope = json.loads(log.read_text(encoding="utf-8"))
+    envelope["level"] = "error"
+    log.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+    tampered = list(read_with_keybag(log, keystore, verify_signatures=False))[0]
+    assert tampered["valid"]["row_hash"] is False
+
+
+def test_recognized_wire_without_matching_cipher_is_no_read_key(tmp_path):
+    """A key for another cipher family is absence, not an authenticated-open error."""
+
+    authority_log = tmp_path / "authority" / "log.ndjson"
+    tn.init(tmp_path / "authority" / "tn.yaml", log_path=authority_log, cipher="hibe")
+    tn.info("governed.entry", secret="authority-only")
+    tn.flush_and_close()
+
+    tn.init(tmp_path / "reader" / "tn.yaml", cipher="btn")
+    reader_keystore = tn.current_config().keystore
+    tn.flush_and_close()
+
+    row = list(read_with_keybag(authority_log, reader_keystore))[0]
+    assert row["plaintext"]["default"] == {"$no_read_key": True}
+    assert row["valid"]["aad"] is True
 
 
 if __name__ == "__main__":

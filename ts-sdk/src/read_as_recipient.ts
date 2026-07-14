@@ -10,28 +10,32 @@
 //
 //   <group>.btn.mykit   → btn cipher (subset-difference broadcast)
 //   <group>.hibe.sk     → hibe cipher (BBG hierarchical IBE reader key)
-//   <group>.jwe.mykey   → JWE cipher  (async JOSE — read via readAsync)
+//   <group>.jwe.mykey   → JWE cipher (Rust/WASM JWE)
 //
 // The keystore can hold keys for the SAME group name under several ciphers
 // at once (e.g. the reader's own btn ceremony plus an absorbed hibe
 // grant). The log line doesn't say which cipher sealed it, so every
 // candidate is tried per entry — same posture as Python's
-// tn.reader.read_as_recipient. This synchronous foreign-read path covers btn
-// and hibe; jwe groups (async JOSE) are opened through readAsync.
+// tn.reader.read_as_recipient. Both iterator surfaces cover btn, hibe, and jwe
+// with the same trust and integrity checks.
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
-import { join } from "node:path";
 
 import { verifyChainLink } from "./core/chain.js";
 import { aadBytesFor, decryptGroup, decryptGroupAsync, type GroupKits } from "./core/decrypt.js";
+import { TrustError } from "./core/trust.js";
 import { hibeCandidateKeys, loadHibeGroup } from "./runtime/hibe_group.js";
 import { loadBtnKits, loadJweKeys } from "./runtime/keystore.js";
-import { signatureFromB64, verify } from "./core/signing.js";
-import { asDid, asSignatureB64 } from "./core/types.js";
+import {
+  assertForeignPublisherTrusted,
+  foreignReadTrustedPublishers,
+  verifyForeignRowIntegrity,
+} from "./foreign_read_security.js";
+import { discoverRecipientGroups } from "./recipient_group_discovery.js";
 
 export interface ReadAsRecipientOptions {
-  /** Group name to decrypt. Default: "default". */
+  /** Group name to decrypt. Omit to discover every locally keyed group. */
   group?: string;
   /** Verify per-row signatures (slower but catches forgery). Default: true. */
   verifySignatures?: boolean;
@@ -42,12 +46,16 @@ export interface ReadAsRecipientOptions {
    * {@link verifyChainLink}.
    */
   expectGenesis?: boolean;
+  /** Explicitly trusted writer DIDs; defaults to installed verified publishers. */
+  trustedPublisherDids?: string[];
+  /** Explicit weakening: decrypt rows whose writer has not been admitted. */
+  unsafeAllowUnverifiedPublisher?: boolean;
 }
 
 export interface ForeignReadEntry {
   envelope: Record<string, unknown>;
   plaintext: Record<string, Record<string, unknown>>;
-  valid: { signature: boolean; chain: boolean };
+  valid: { signature: boolean; rowHash: boolean; chain: boolean };
 }
 
 /**
@@ -62,8 +70,8 @@ export interface ForeignReadEntry {
  * `client.read({raw: true})`: `envelope`, `plaintext[group]`, and a
  * `valid` block with per-row sig + chain booleans.
  *
- * Decryption happens only for `group` (default `"default"`). Other groups
- * the publisher used appear in `envelope` but not `plaintext`.
+ * When `group` is omitted, every group with local reader material is tried.
+ * Passing `group` explicitly narrows decryption to that one group.
  */
 /** Assemble btn + hibe reader-kit candidates a keystore holds for a foreign
  *  group's log (each is tried per line; the first that opens wins). The btn
@@ -74,15 +82,14 @@ export interface ForeignReadEntry {
  *  `src/seal.ts`. */
 function btnHibeCandidates(keystorePath: string, group: string): GroupKits[] {
   const candidates: GroupKits[] = [];
-  const hibeSkPath = join(keystorePath, `${group}.hibe.sk`);
   const btnKits = loadBtnKits(keystorePath, group);
   if (btnKits.length > 0) {
     candidates.push({ cipher: "btn", kits: btnKits });
   }
-  if (existsSync(hibeSkPath)) {
-    const mat = loadHibeGroup(keystorePath, group);
-    if (mat !== null)
-      candidates.push({ cipher: "hibe", kits: hibeCandidateKeys(mat), mpk: mat.mpk });
+  const mat = loadHibeGroup(keystorePath, group);
+  if (mat !== null) {
+    const kits = hibeCandidateKeys(mat);
+    if (kits.length > 0) candidates.push({ cipher: "hibe", kits, mpk: mat.mpk });
   }
   return candidates;
 }
@@ -94,23 +101,78 @@ function jweReaderKit(keystorePath: string, group: string): GroupKits | null {
   return keys.length > 0 ? { cipher: "jwe", kits: keys } : null;
 }
 
-/** Verify a foreign envelope's Ed25519 signature over its row_hash. */
-function verifyForeignSig(env: Record<string, unknown>): boolean {
-  const envDid = env["device_identity"];
-  const envSig = env["signature"];
-  const envRow = env["row_hash"];
-  if (typeof envDid !== "string" || typeof envSig !== "string" || typeof envRow !== "string") {
-    return false;
+function selectedGroups(keystorePath: string, group?: string): string[] {
+  const groups = group === undefined ? discoverRecipientGroups(keystorePath) : [group];
+  if (groups.length === 0) throw new Error(`readAsRecipient: no reader keys in ${keystorePath}`);
+  return groups;
+}
+
+function candidateMap(keystorePath: string, groups: string[]): Map<string, GroupKits[]> {
+  const out = new Map<string, GroupKits[]>();
+  for (const group of groups) {
+    const candidates = btnHibeCandidates(keystorePath, group);
+    const jwe = jweReaderKit(keystorePath, group);
+    if (jwe !== null) candidates.push(jwe);
+    if (candidates.length === 0) {
+      throw new Error(`readAsRecipient: no recipient kit for group ${JSON.stringify(group)}`);
+    }
+    out.set(group, candidates);
   }
-  try {
-    return verify(
-      asDid(envDid),
-      new Uint8Array(Buffer.from(envRow, "utf8")),
-      signatureFromB64(asSignatureB64(envSig)),
-    );
-  } catch {
-    return false;
+  return out;
+}
+
+function ciphertext(env: Record<string, unknown>, group: string): Uint8Array | null {
+  const block = env[group];
+  if (block === null || typeof block !== "object" || Array.isArray(block)) return null;
+  const value = (block as Record<string, unknown>)["ciphertext"];
+  return typeof value === "string" ? new Uint8Array(Buffer.from(value, "base64")) : null;
+}
+
+function requiredEventType(env: Record<string, unknown>): string {
+  const value = env["event_type"];
+  if (typeof value !== "string") {
+    throw new TrustError("statement_invalid", "foreign row event_type must be a string");
   }
+  return value;
+}
+
+function decryptSelected(
+  env: Record<string, unknown>,
+  candidates: Map<string, GroupKits[]>,
+): Record<string, Record<string, unknown>> {
+  const plaintext: Record<string, Record<string, unknown>> = {};
+  for (const [group, kitsList] of candidates) {
+    const ct = ciphertext(env, group);
+    if (ct === null) continue;
+    let result: Record<string, unknown> = { $no_read_key: true };
+    for (const kits of kitsList) {
+      result = decryptGroup({ ct, aad: aadBytesFor(env, group) }, kits) as Record<string, unknown>;
+      if (!("$no_read_key" in result) && !("$unsupported_cipher" in result)) break;
+    }
+    plaintext[group] = result;
+  }
+  return plaintext;
+}
+
+async function decryptSelectedAsync(
+  env: Record<string, unknown>,
+  candidates: Map<string, GroupKits[]>,
+): Promise<Record<string, Record<string, unknown>>> {
+  const plaintext: Record<string, Record<string, unknown>> = {};
+  for (const [group, kitsList] of candidates) {
+    const ct = ciphertext(env, group);
+    if (ct === null) continue;
+    let result: Record<string, unknown> = { $no_read_key: true };
+    for (const kits of kitsList) {
+      result = (await decryptGroupAsync({ ct, aad: aadBytesFor(env, group) }, kits)) as Record<
+        string,
+        unknown
+      >;
+      if (!("$no_read_key" in result) && !("$unsupported_cipher" in result)) break;
+    }
+    plaintext[group] = result;
+  }
+  return plaintext;
 }
 
 export function* readAsRecipient(
@@ -118,27 +180,11 @@ export function* readAsRecipient(
   keystorePath: string,
   opts: ReadAsRecipientOptions = {},
 ): Generator<ForeignReadEntry, void, void> {
-  const group = opts.group ?? "default";
+  const groups = selectedGroups(keystorePath, opts.group);
   const verifySigs = opts.verifySignatures ?? true;
   const expectGenesis = opts.expectGenesis ?? false;
-
-  // jwe is async-only, so this sync path rejects a jwe-only keystore.
-  const candidates = btnHibeCandidates(keystorePath, group);
-  if (candidates.length === 0) {
-    if (jweReaderKit(keystorePath, group) !== null) {
-      throw new Error(
-        `readAsRecipient is synchronous and cannot open jwe groups (the JOSE ` +
-          `library is async). Use readAsRecipientAsync() (or tn.readAsync({asRecipient})).`,
-      );
-    }
-    throw new Error(
-      `readAsRecipient: no recipient kit for group ${JSON.stringify(group)} ` +
-        `in ${keystorePath}. Looked for ${group}.btn.mykit (btn), ` +
-        `${group}.hibe.sk (hibe), and ${group}.jwe.mykey (jwe). If you ` +
-        `absorbed a kit_bundle, the kit lands in your ceremony's keystore ` +
-        `(cfg.keystorePath) — point keystorePath there.`,
-    );
-  }
+  const trusted = foreignReadTrustedPublishers(keystorePath, opts);
+  const candidates = candidateMap(keystorePath, groups);
 
   const text = readFileSync(logPath, "utf8");
   const prevHashByType = new Map<string, string>();
@@ -153,8 +199,8 @@ export function* readAsRecipient(
       throw new Error(`readAsRecipient: invalid JSON line: ${rawLine.slice(0, 120)}`);
     }
 
-    const eventType = env["event_type"];
-    if (typeof eventType !== "string") continue;
+    const eventType = requiredEventType(env);
+    assertForeignPublisherTrusted(env, trusted);
 
     // Per-event-type chain check: each event_type maintains its own
     // prev_hash continuity. Mirrors Python's reader.read_as_recipient.
@@ -168,67 +214,37 @@ export function* readAsRecipient(
       expectGenesis,
     );
 
-    // Decrypt the requested group, if its ciphertext is present.
-    const plaintext: Record<string, Record<string, unknown>> = {};
-    const gBlock = env[group];
-    if (gBlock && typeof gBlock === "object" && !Array.isArray(gBlock)) {
-      const gObj = gBlock as Record<string, unknown>;
-      const ct = gObj["ciphertext"];
-      if (typeof ct === "string") {
-        const ctBytes = new Uint8Array(Buffer.from(ct, "base64"));
-        const aadBytes = aadBytesFor(env, group);
-        // Try each cipher's kit set; keep the first real plaintext. When
-        // nothing opens, surface the last marker ($no_read_key etc.).
-        let result: Record<string, unknown> | undefined;
-        for (const kits of candidates) {
-          const attempt = decryptGroup({ ct: ctBytes, aad: aadBytes }, kits) as Record<
-            string,
-            unknown
-          >;
-          result = attempt;
-          if (!("$no_read_key" in attempt) && !("$unsupported_cipher" in attempt)) break;
-        }
-        plaintext[group] = result ?? { $no_read_key: true };
-      }
-    }
+    const plaintext = decryptSelected(env, candidates);
 
     // Signature verification (optional but on by default).
-    const sigOk = verifySigs ? verifyForeignSig(env) : true;
+    const integrity = verifyForeignRowIntegrity(env);
+    const sigOk = verifySigs ? integrity.signature : true;
 
     yield {
       envelope: env,
       plaintext,
-      valid: { signature: sigOk, chain: chainOk },
+      valid: { signature: sigOk, rowHash: integrity.rowHash, chain: chainOk },
     };
   }
 }
 
 /**
- * Async sibling of {@link readAsRecipient} that also decrypts `cipher: jwe`
- * foreign logs (panva/jose is async). Dispatches on the reader kit files a
+ * Async-compatible sibling of {@link readAsRecipient}. Dispatches on the
+ * reader kit files a
  * keystore holds — `.btn.mykit` (btn), `.hibe.sk` (hibe), `.jwe.mykey` (jwe) —
  * and tries each per line, so a party who absorbed any of them can read the
- * publisher's log. This is the path an absorbed jwe recipient uses.
+ * publisher's log. Both iterator surfaces can open every supported cipher.
  */
 export async function* readAsRecipientAsync(
   logPath: string,
   keystorePath: string,
   opts: ReadAsRecipientOptions = {},
 ): AsyncGenerator<ForeignReadEntry, void, void> {
-  const group = opts.group ?? "default";
+  const groups = selectedGroups(keystorePath, opts.group);
   const verifySigs = opts.verifySignatures ?? true;
   const expectGenesis = opts.expectGenesis ?? false;
-
-  const candidates = btnHibeCandidates(keystorePath, group);
-  const jweKit = jweReaderKit(keystorePath, group);
-  if (jweKit !== null) candidates.push(jweKit);
-  if (candidates.length === 0) {
-    throw new Error(
-      `readAsRecipientAsync: no recipient kit for group ${JSON.stringify(group)} in ` +
-        `${keystorePath}. Looked for ${group}.btn.mykit (btn), ${group}.hibe.sk (hibe), ` +
-        `and ${group}.jwe.mykey (jwe). Absorb a kit for this group first.`,
-    );
-  }
+  const trusted = foreignReadTrustedPublishers(keystorePath, opts);
+  const candidates = candidateMap(keystorePath, groups);
 
   const text = readFileSync(logPath, "utf8");
   const prevHashByType = new Map<string, string>();
@@ -241,8 +257,8 @@ export async function* readAsRecipientAsync(
     } catch {
       throw new Error(`readAsRecipientAsync: invalid JSON line: ${rawLine.slice(0, 120)}`);
     }
-    const eventType = env["event_type"];
-    if (typeof eventType !== "string") continue;
+    const eventType = requiredEventType(env);
+    assertForeignPublisherTrusted(env, trusted);
     const envPrev = env["prev_hash"];
     const envRow = env["row_hash"];
     const chainOk = verifyChainLink(
@@ -253,28 +269,15 @@ export async function* readAsRecipientAsync(
       expectGenesis,
     );
 
-    const plaintext: Record<string, Record<string, unknown>> = {};
-    const gBlock = env[group];
-    if (gBlock && typeof gBlock === "object" && !Array.isArray(gBlock)) {
-      const ct = (gBlock as Record<string, unknown>)["ciphertext"];
-      if (typeof ct === "string") {
-        const ctBytes = new Uint8Array(Buffer.from(ct, "base64"));
-        const aadBytes = aadBytesFor(env, group);
-        let result: Record<string, unknown> | undefined;
-        for (const kits of candidates) {
-          const attempt = (await decryptGroupAsync({ ct: ctBytes, aad: aadBytes }, kits)) as Record<
-            string,
-            unknown
-          >;
-          result = attempt;
-          if (!("$no_read_key" in attempt) && !("$unsupported_cipher" in attempt)) break;
-        }
-        plaintext[group] = result ?? { $no_read_key: true };
-      }
-    }
+    const plaintext = await decryptSelectedAsync(env, candidates);
 
-    const sigOk = verifySigs ? verifyForeignSig(env) : true;
+    const integrity = verifyForeignRowIntegrity(env);
+    const sigOk = verifySigs ? integrity.signature : true;
 
-    yield { envelope: env, plaintext, valid: { signature: sigOk, chain: chainOk } };
+    yield {
+      envelope: env,
+      plaintext,
+      valid: { signature: sigOk, rowHash: integrity.rowHash, chain: chainOk },
+    };
   }
 }

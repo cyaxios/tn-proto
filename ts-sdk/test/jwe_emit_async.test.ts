@@ -1,5 +1,5 @@
-// End-to-end write path: the TS runtime seals a `cipher: jwe` group via
-// emitAsync (panva/jose is async) and reads it back with readAsync. Uses a
+// End-to-end compatibility path: the TS runtime seals a `cipher: jwe` group
+// via emitAsync and reads it back with readAsync. Uses a
 // temp copy of the committed jwe ceremony so the fixture is never mutated.
 import { strict as assert } from "node:assert";
 import { cpSync, mkdtempSync } from "node:fs";
@@ -24,7 +24,10 @@ test("emitAsync seals a jwe group and readAsync reads it back", async () => {
   for await (const e of rt.readAsync()) {
     if (e.envelope["event_type"] !== "order.created") continue;
     const body = e.plaintext["default"];
-    assert.ok(body && !("$no_read_key" in body) && !("$decrypt_error" in body), "jwe group did not open");
+    assert.ok(
+      body && !("$no_read_key" in body) && !("$decrypt_error" in body),
+      "jwe group did not open",
+    );
     assert.equal(e.valid.signature, true);
     assert.equal(e.valid.rowHash, true);
     opened.push(body);

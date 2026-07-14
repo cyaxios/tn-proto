@@ -32,6 +32,9 @@ use super::{
     AdminRotation, AdminState, AdminVaultLink, RecipientEntry, Runtime, RuntimeInitOptions,
 };
 
+mod recipient_preparation;
+pub use recipient_preparation::RecipientPreparationPlan;
+
 /// Result from [`Runtime::admin_ensure_group`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnsureGroupResult {
@@ -98,8 +101,13 @@ impl Runtime {
         let Some(spec) = self.cfg.groups.get(group) else {
             return Ok(());
         };
-        let (cipher, _btn_admin, _mykit) =
-            build_cipher_with_admin_with_storage(spec, &self.keystore, group, &self.storage)?;
+        let (cipher, _btn_admin, _mykit) = build_cipher_with_admin_with_storage(
+            spec,
+            &self.keystore,
+            group,
+            &self.storage,
+            &self.device,
+        )?;
         if let Some(gstate_arc) = self.groups.get(group) {
             let mut gstate = gstate_arc.write().expect("group state RwLock poisoned");
             gstate.cipher = cipher;
@@ -273,6 +281,7 @@ impl Runtime {
                 )));
             }
         }
+        self.validate_legacy_bundle_ciphers(&requested)?;
 
         let td = tempfile::Builder::new()
             .prefix("tn-bundle-")
@@ -297,15 +306,10 @@ impl Runtime {
                         None,
                     )?;
                 }
-                "jwe" | "bearer" => {
-                    return Err(Error::NotImplemented(
-                        "bundle_for_recipient: cipher=jwe kit minting is not implemented in \
-                         tn-core; use the Python runtime or pure JS JWE pipeline",
-                    ));
-                }
                 other => {
                     return Err(Error::InvalidConfig(format!(
-                        "bundle_for_recipient: group {gname:?} uses unknown cipher {other:?}"
+                        "bundle_for_recipient: group {gname:?} changed to unsupported cipher \
+                         {other:?} after validation"
                     )));
                 }
             }
@@ -329,6 +333,26 @@ impl Runtime {
         let out = self.export(out_path, opts)?;
         drop(td);
         Ok(out)
+    }
+
+    fn validate_legacy_bundle_ciphers(&self, requested: &[String]) -> Result<()> {
+        for group in requested {
+            match self.cfg.groups[group].cipher.as_str() {
+                "btn" | "hibe" => {}
+                "jwe" | "bearer" => {
+                    return Err(Error::NotImplemented(
+                        "bundle_for_recipient: cipher=jwe has no transferable reader kit; \
+                         use prepare_recipient with a verified public binding",
+                    ));
+                }
+                other => {
+                    return Err(Error::InvalidConfig(format!(
+                        "bundle_for_recipient: group {group:?} uses unknown cipher {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Mint and stage one hibe reader's kit files into `out_dir`, and record
@@ -465,11 +489,11 @@ impl Runtime {
     /// (independently randomized) identity key — the authority master secret
     /// NEVER rides a kit. `id_path: None` keys the reader to the group's own
     /// sealing path; pass an ancestor path to hand out a key the reader can
-    /// delegate further down. When `reader_did` resolves to a real
-    /// `did:key:z...` Ed25519 DID the bundle body is sealed to it (a
-    /// plaintext kit is a bearer token); a placeholder DID stays plaintext by
-    /// necessity, exactly like Python's `recipient_key_is_resolvable` gate.
-    /// A supplied DID is recorded in `<group>.hibe.grants`.
+    /// delegate further down. `reader_did` must resolve to a real
+    /// `did:key:z...` Ed25519 DID, and the bundle body is always sealed to it
+    /// (a plaintext kit is a bearer token). Missing, abbreviated, and
+    /// non-canonical DIDs fail before any material is staged. A supplied DID
+    /// is recorded in `<group>.hibe.grants`.
     ///
     /// Granting is native to the cipher — no re-keying, no envelope rewrite,
     /// and no forward revocation of an admitted reader (rotate the identity
@@ -479,8 +503,9 @@ impl Runtime {
     /// # Errors
     ///
     /// - [`InvalidConfig`](crate::Error::InvalidConfig) if the group is
-    ///   unknown, is not a hibe group (grant_reader is hibe-only — use
-    ///   add_recipient for btn/jwe groups), or `id_path` fails the boundary
+    ///   unknown, is not a hibe group (BTN uses `admin_add_recipient`; JWE
+    ///   uses authenticated X25519 public-binding enrollment), `reader_did`
+    ///   is not a complete convertible Ed25519 `did:key`, or `id_path` fails
     ///   validation.
     /// - [`Cipher`](crate::Error::Cipher) when the scheme rejects the key
     ///   material or path, plus I/O errors from staging or writing the kit.
@@ -492,36 +517,75 @@ impl Runtime {
         out_path: &Path,
         id_path: Option<&str>,
     ) -> Result<GrantReaderResult> {
+        self.validate_hibe_grant_group(group)?;
+        let reader_did = reader_did.ok_or_else(|| {
+            Error::InvalidConfig(
+                "tn.admin.grant_reader requires a complete Ed25519 did:key reader".into(),
+            )
+        })?;
+        crate::trust::ed25519_did_to_x25519_public(reader_did).map_err(|error| {
+            Error::InvalidConfig(format!(
+                "tn.admin.grant_reader requires a complete Ed25519 did:key reader: {}",
+                error.detail
+            ))
+        })?;
+        self.admin_grant_reader_inner(
+            group,
+            Some(reader_did),
+            out_path,
+            id_path,
+            vec![reader_did.to_string()],
+        )
+    }
+
+    /// Explicit compatibility path for an unsealed HIBE bearer kit.
+    ///
+    /// This method is intentionally named unsafe: anyone holding the package
+    /// can use the delegated HIBE key. Normal callers must use
+    /// [`Self::admin_grant_reader`].
+    #[cfg(feature = "hibe")]
+    pub fn admin_grant_reader_unsafe_plaintext(
+        &self,
+        group: &str,
+        reader_did: Option<&str>,
+        out_path: &Path,
+        id_path: Option<&str>,
+    ) -> Result<GrantReaderResult> {
+        self.validate_hibe_grant_group(group)?;
+        self.admin_grant_reader_inner(group, reader_did, out_path, id_path, Vec::new())
+    }
+
+    #[cfg(feature = "hibe")]
+    fn validate_hibe_grant_group(&self, group: &str) -> Result<()> {
         let spec = self.cfg.groups.get(group).ok_or_else(|| {
             Error::InvalidConfig(format!("tn.admin.grant_reader: unknown group: {group:?}"))
         })?;
         if spec.cipher != "hibe" {
             return Err(Error::InvalidConfig(format!(
                 "tn.admin.grant_reader: group {group:?} uses cipher {:?}; \
-                 grant_reader is hibe-only. Use add_recipient for btn/jwe groups.",
+                 grant_reader is hibe-only. BTN uses admin_add_recipient; \
+                 JWE uses authenticated public-key enrollment.",
                 spec.cipher
             )));
         }
+        Ok(())
+    }
 
+    #[cfg(feature = "hibe")]
+    fn admin_grant_reader_inner(
+        &self,
+        group: &str,
+        reader_did: Option<&str>,
+        out_path: &Path,
+        id_path: Option<&str>,
+        seal_for_recipients: Vec<String>,
+    ) -> Result<GrantReaderResult> {
         let td = tempfile::Builder::new()
             .prefix("tn-grant-reader-")
             .tempdir()
             .map_err(Error::Io)?;
         let target_path =
             self.stage_hibe_reader_bundle_material(group, reader_did, td.path(), id_path)?;
-
-        // Seal the bundle body to the reader's device key when the DID
-        // resolves (Python: recipient_key_is_resolvable). A stub DID with no
-        // embedded key can't be sealed to, so it stays plaintext.
-        let seal_for_recipients = match reader_did {
-            Some(did)
-                if crate::recipient_seal::normalize_recipient_dids(&[did.to_string()])
-                    .is_ok() =>
-            {
-                vec![did.to_string()]
-            }
-            _ => Vec::new(),
-        };
 
         let opts = crate::runtime_export::ExportOptions {
             kind: Some(crate::tnpkg::ManifestKind::KitBundle),
@@ -553,6 +617,20 @@ impl Runtime {
     /// Always returns [`NotImplemented`](crate::Error::NotImplemented).
     #[cfg(not(feature = "hibe"))]
     pub fn admin_grant_reader(
+        &self,
+        _group: &str,
+        _reader_did: Option<&str>,
+        _out_path: &Path,
+        _id_path: Option<&str>,
+    ) -> Result<GrantReaderResult> {
+        Err(Error::NotImplemented(
+            "admin_grant_reader: cipher=hibe kit minting requires tn-core's hibe feature",
+        ))
+    }
+
+    /// Explicit plaintext compatibility grant — unavailable without HIBE.
+    #[cfg(not(feature = "hibe"))]
+    pub fn admin_grant_reader_unsafe_plaintext(
         &self,
         _group: &str,
         _reader_did: Option<&str>,
@@ -609,9 +687,7 @@ impl Runtime {
         };
 
         let spec = self.cfg.groups.get(group).ok_or_else(|| {
-            Error::InvalidConfig(format!(
-                "tn.admin.rotate_id_path: unknown group: {group:?}"
-            ))
+            Error::InvalidConfig(format!("tn.admin.rotate_id_path: unknown group: {group:?}"))
         })?;
         if spec.cipher != "hibe" {
             return Err(Error::InvalidConfig(format!(
@@ -650,11 +726,7 @@ impl Runtime {
 
         let root_marker = self.keystore.join(format!("{group}.hibe.idpath.root"));
         let allow_root_current = self.storage.exists(&root_marker);
-        let current_path = normalize_hibe_path(
-            &idpath_raw,
-            "current id_path",
-            allow_root_current,
-        )?;
+        let current_path = normalize_hibe_path(&idpath_raw, "current id_path", allow_root_current)?;
 
         let new_path = normalize_hibe_path(new_path, "id_path", allow_root_path)?;
         if new_path == current_path {
@@ -667,9 +739,7 @@ impl Runtime {
         let mut prior_paths: Vec<String> = Vec::new();
         if let Some(bytes) = read_opt("hibe.idpath.history")? {
             let text = String::from_utf8(bytes).map_err(|_| {
-                Error::InvalidConfig(format!(
-                    "hibe group {group}: idpath history is not utf-8"
-                ))
+                Error::InvalidConfig(format!("hibe group {group}: idpath history is not utf-8"))
             })?;
             for (idx, line) in text.lines().enumerate() {
                 prior_paths.push(decode_hibe_history_line(
@@ -882,12 +952,13 @@ impl Runtime {
     }
 
     // ------------------------------------------------------------------
-    // Admin verbs: cipher-agnostic recipient management.
+    // Admin verbs: BTN recipient-kit management.
     //
     // Public names follow the SDK parity matrix (tn_proto/docs/sdk-parity.md):
     // `admin_add_recipient`, `admin_revoke_recipient`, `admin_revoked_count`.
-    // Today only btn ceremonies are supported; JWE support lands alongside the
-    // second cipher and reuses these same public names.
+    // JWE admission uses authenticated X25519 public-key enrollment instead of
+    // minting a transferable reader kit; its lifecycle uses the shared admin
+    // catalog without passing reader private keys through these BTN methods.
     // ------------------------------------------------------------------
 
     /// Mint a new reader kit for `group`, write it to `out_kit_path`,

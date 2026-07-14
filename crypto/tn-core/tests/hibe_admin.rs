@@ -106,6 +106,26 @@ fn write_reader_dir(root: &Path, cer: &HibeCeremony, idpath: &str, key_path: &st
 // ---------------------------------------------------------------------------
 
 #[test]
+fn grant_reader_rejects_missing_or_noncanonical_did_before_staging() {
+    let td = tempfile::tempdir().unwrap();
+    let cer = setup_hibe_authority(td.path(), "acme/objects");
+    let rt = Runtime::init(&cer.yaml_path).unwrap();
+
+    for (name, did) in [
+        ("missing", None),
+        ("abbreviated", Some("did:key:z6Mk-reader")),
+    ] {
+        let out = td.path().join(format!("{name}.tnpkg"));
+        let error = rt
+            .admin_grant_reader("default", did, &out, None)
+            .expect_err("normal grants require a complete Ed25519 did:key");
+        assert!(error.to_string().contains("Ed25519 did:key"), "{error}");
+        assert!(!out.exists());
+    }
+    assert!(!cer.keystore.join("default.hibe.grants").exists());
+}
+
+#[test]
 fn grant_reader_kit_absorbs_and_opens_sealed_content() {
     let td_a = tempfile::tempdir().unwrap();
     let cer = setup_hibe_authority(td_a.path(), "acme/objects");
@@ -124,30 +144,36 @@ fn grant_reader_kit_absorbs_and_opens_sealed_content() {
     let cer_b = setup_minimal_btn_ceremony(td_b.path());
     let kit_path = td_a.path().join("reader.tnpkg");
     let result = rt
-        .admin_grant_reader(
-            "default",
-            Some(&cer_b.device_identity),
-            &kit_path,
-            None,
-        )
+        .admin_grant_reader("default", Some(&cer_b.device_identity), &kit_path, None)
         .unwrap();
     assert_eq!(result.group, "default");
-    assert_eq!(result.reader_did.as_deref(), Some(cer_b.device_identity.as_str()));
+    assert_eq!(
+        result.reader_did.as_deref(),
+        Some(cer_b.device_identity.as_str())
+    );
     assert_eq!(result.id_path, "acme/objects");
     assert!(kit_path.exists());
     assert_eq!(result.path, kit_path);
 
     // The grant registry records who was granted which path.
-    let grants: Vec<Value> = serde_json::from_slice(
-        &std::fs::read(cer.keystore.join("default.hibe.grants")).unwrap(),
-    )
-    .unwrap();
+    let grants: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(cer.keystore.join("default.hibe.grants")).unwrap())
+            .unwrap();
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0]["reader_did"], json!(cer_b.device_identity));
     assert_eq!(grants[0]["id_path"], json!("acme/objects"));
 
     // The authority master secret never rides a kit.
     let bytes = std::fs::read(&kit_path).unwrap();
+    let (manifest, body) =
+        tn_core::tnpkg::read_tnpkg_verified(tn_core::tnpkg::TnpkgSource::Bytes(&bytes)).unwrap();
+    assert!(manifest
+        .state
+        .as_ref()
+        .and_then(|state| state.get("body_encryption"))
+        .is_some());
+    assert!(body.contains_key("body/encrypted.bin"));
+    assert!(!body.contains_key("body/default.hibe.sk"));
     let mut zf = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let names: Vec<String> = (0..zf.len())
         .map(|i| zf.by_index(i).unwrap().name().to_string())
@@ -157,12 +183,22 @@ fn grant_reader_kit_absorbs_and_opens_sealed_content() {
         "msk must never ride a kit: {names:?}"
     );
 
+    // A different device cannot unwrap or install the bearer capability.
+    let td_c = tempfile::tempdir().unwrap();
+    let cer_c = setup_minimal_btn_ceremony(td_c.path());
+    let rt_c = Runtime::init(&cer_c.yaml_path).unwrap();
+    let rejected = rt_c.absorb(AbsorbSource::Path(&kit_path)).unwrap();
+    assert_eq!(rejected.legacy_status, "rejected");
+    assert!(rejected.legacy_reason.contains("sealed-box wrap"));
+
     // Reader absorbs the kit and opens the sealed object via the key bag.
     let rt_b = Runtime::init(&cer_b.yaml_path).unwrap();
     let receipt = rt_b.absorb(AbsorbSource::Path(&kit_path)).unwrap();
     assert_eq!(receipt.kind, "kit_bundle", "{receipt:?}");
     assert!(cer_b.keystore.join("default.hibe.sk").exists());
-    let out = rt_b.unseal(&sealed.wire, &UnsealOptions::default()).unwrap();
+    let out = rt_b
+        .unseal(&sealed.wire, &UnsealOptions::default())
+        .unwrap();
     assert_eq!(out.fields["secret"], json!("granted-only"));
     assert!(out.hidden_groups.is_empty());
 }
@@ -180,11 +216,16 @@ fn grant_reader_custom_ancestor_id_path_derives_down() {
         )
         .unwrap();
 
-    // Grant the ANCESTOR path to a stub (non-resolvable) DID: the bundle
-    // stays plaintext by necessity, so the staged files are inspectable.
+    // Use the explicitly unsafe compatibility path for a stub DID so the
+    // delegated ancestor key remains inspectable in this boundary test.
     let stub_kit = td_a.path().join("dept-stub.tnpkg");
     let result = rt
-        .admin_grant_reader("default", Some("did:key:z6Mk-dept"), &stub_kit, Some("acme"))
+        .admin_grant_reader_unsafe_plaintext(
+            "default",
+            Some("did:key:z6Mk-dept"),
+            &stub_kit,
+            Some("acme"),
+        )
         .unwrap();
     assert_eq!(result.id_path, "acme");
 
@@ -204,13 +245,15 @@ fn grant_reader_custom_ancestor_id_path_derives_down() {
         }
     }
     let staged_key = tn_hibe::PrivateKey::from_bytes(&staged_sk).unwrap();
-    assert_eq!(staged_key.identity(), &tn_hibe::Identity::from_str_path("acme"));
+    assert_eq!(
+        staged_key.identity(),
+        &tn_hibe::Identity::from_str_path("acme")
+    );
     assert_eq!(staged_idpath, b"acme/objects");
 
-    let grants: Vec<Value> = serde_json::from_slice(
-        &std::fs::read(cer.keystore.join("default.hibe.grants")).unwrap(),
-    )
-    .unwrap();
+    let grants: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(cer.keystore.join("default.hibe.grants")).unwrap())
+            .unwrap();
     assert_eq!(grants[0]["id_path"], json!("acme"));
 
     // Same custom-path grant, recipient-sealed to a real reader ceremony:
@@ -227,7 +270,9 @@ fn grant_reader_custom_ancestor_id_path_derives_down() {
     .unwrap();
     let rt_b = Runtime::init(&cer_b.yaml_path).unwrap();
     rt_b.absorb(AbsorbSource::Path(&kit_path)).unwrap();
-    let out = rt_b.unseal(&sealed.wire, &UnsealOptions::default()).unwrap();
+    let out = rt_b
+        .unseal(&sealed.wire, &UnsealOptions::default())
+        .unwrap();
     assert_eq!(out.fields["secret"], json!("s3"));
 }
 
@@ -237,7 +282,7 @@ fn grant_reader_rejects_invalid_custom_id_path() {
     let cer = setup_hibe_authority(td.path(), "acme/objects");
     let rt = Runtime::init(&cer.yaml_path).unwrap();
     let err = rt
-        .admin_grant_reader(
+        .admin_grant_reader_unsafe_plaintext(
             "default",
             Some("did:key:zR"),
             &td.path().join("x.tnpkg"),
@@ -245,7 +290,10 @@ fn grant_reader_rejects_invalid_custom_id_path() {
         )
         .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("must not contain empty path segments"), "{msg}");
+    assert!(
+        msg.contains("must not contain empty path segments"),
+        "{msg}"
+    );
     // Nothing staged, nothing recorded.
     assert!(!cer.keystore.join("default.hibe.grants").exists());
 }
@@ -265,7 +313,7 @@ fn grant_reader_is_hibe_only() {
         .unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("grant_reader is hibe-only. Use add_recipient for btn/jwe groups."),
+        msg.contains("grant_reader is hibe-only. BTN uses admin_add_recipient; JWE uses authenticated public-key enrollment."),
         "{msg}"
     );
 
@@ -281,14 +329,14 @@ fn grant_records_match_python_grants_file_format() {
     let cer = setup_hibe_authority(td.path(), "acme/objects");
     let rt = Runtime::init(&cer.yaml_path).unwrap();
 
-    rt.admin_grant_reader(
+    rt.admin_grant_reader_unsafe_plaintext(
         "default",
         Some("did:key:z6Mk-reader-one"),
         &td.path().join("one.tnpkg"),
         None,
     )
     .unwrap();
-    rt.admin_grant_reader(
+    rt.admin_grant_reader_unsafe_plaintext(
         "default",
         Some("did:key:z6Mk-reader-two"),
         &td.path().join("two.tnpkg"),
@@ -297,7 +345,7 @@ fn grant_records_match_python_grants_file_format() {
     .unwrap();
     // Re-granting an existing reader replaces their row (moves to the end),
     // exactly like Python's _hibe_grants_update.
-    rt.admin_grant_reader(
+    rt.admin_grant_reader_unsafe_plaintext(
         "default",
         Some("did:key:z6Mk-reader-one"),
         &td.path().join("one-again.tnpkg"),
@@ -555,7 +603,7 @@ fn rotated_keystore_grants_fresh_reader_on_new_path() {
     let cer = setup_hibe_authority(td.path(), "acme/objects");
     let rt = Runtime::init(&cer.yaml_path).unwrap();
 
-    rt.admin_grant_reader(
+    rt.admin_grant_reader_unsafe_plaintext(
         "default",
         Some("did:key:z6Mk-old"),
         &td.path().join("old.tnpkg"),
@@ -564,7 +612,7 @@ fn rotated_keystore_grants_fresh_reader_on_new_path() {
     .unwrap();
     rt.admin_rotate_id_path("default", "acme/objects~r1", false)
         .unwrap();
-    rt.admin_grant_reader(
+    rt.admin_grant_reader_unsafe_plaintext(
         "default",
         Some("did:key:z6Mk-new"),
         &td.path().join("new.tnpkg"),
@@ -572,10 +620,9 @@ fn rotated_keystore_grants_fresh_reader_on_new_path() {
     )
     .unwrap();
 
-    let grants: Vec<Value> = serde_json::from_slice(
-        &std::fs::read(cer.keystore.join("default.hibe.grants")).unwrap(),
-    )
-    .unwrap();
+    let grants: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(cer.keystore.join("default.hibe.grants")).unwrap())
+            .unwrap();
     assert_eq!(grants.len(), 2);
     assert_eq!(grants[0]["id_path"], json!("acme/objects"));
     assert_eq!(grants[1]["id_path"], json!("acme/objects~r1"));

@@ -28,6 +28,7 @@ import os as _cipher_os
 def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
+
 import io
 import json
 import sys
@@ -57,6 +58,7 @@ from tn.tnpkg import (
     TnpkgManifest,
     _read_manifest,
     _verify_manifest_signature,
+    sign_manifest_with_body,
 )
 
 
@@ -83,16 +85,16 @@ def _signed_contact_update_zip(
         clock={},
         event_count=1,
     )
-    manifest.sign(signer.signing_key())
-
     body_bytes = json.dumps(body, sort_keys=True).encode("utf-8")
+    body_members = {"body/contact_update.json": body_bytes}
+    sign_manifest_with_body(manifest, body_members, signer.signing_key())
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
         zf.writestr(
             "manifest.json",
             json.dumps(manifest.to_dict(), sort_keys=True, indent=2) + "\n",
         )
-        zf.writestr("body/contact_update.json", body_bytes)
+        zf.writestr("body/contact_update.json", body_members["body/contact_update.json"])
     return buf.getvalue()
 
 
@@ -146,7 +148,14 @@ def test_validate_body_happy_path():
 
 
 def test_validate_body_rejects_missing_required_keys():
-    for missing in ("account_id", "label", "claimed_at", "package_did", "x25519_pub_b64", "source_link_id"):
+    for missing in (
+        "account_id",
+        "label",
+        "claimed_at",
+        "package_did",
+        "x25519_pub_b64",
+        "source_link_id",
+    ):
         body = _valid_body()
         body.pop(missing)
         errors = _validate_contact_update_body(body)

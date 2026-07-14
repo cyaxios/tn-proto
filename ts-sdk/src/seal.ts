@@ -11,10 +11,9 @@
 // the browser entry wraps the same core around its storage adapter).
 // This module is the Node adapter: it sources group material from the
 // keystore directory on disk and chains receipts through the
-// NodeRuntime's async write path. Mirrors python/tn/seal.py (the
-// normative reference). Async-first: jwe seals and opens through
-// panva/jose, which is async-only in TS, so both verbs return promises
-// for every cipher.
+// NodeRuntime's async-compatible write path. Mirrors python/tn/seal.py
+// (the normative reference). The public verbs remain Promise-shaped for
+// compatibility; jwe crypto itself runs through the Rust/WASM bridge.
 
 import { Buffer } from "node:buffer";
 import { readFileSync, existsSync } from "node:fs";
@@ -57,7 +56,7 @@ export interface UnsealOptions extends UnsealCoreOptions {
 
 /** Seal one group's plaintext under its declared cipher — the same
  * publisher material the runtime's write pipeline uses
- * (`_sealGroupTs` + the async jwe pre-seal), sourced from the loaded
+ * (`_sealGroupTs` and its Rust-backed jwe primitive), sourced from the loaded
  * keystore. Throws when this keystore holds no publisher-side
  * material for the group. */
 async function _sealGroup(
@@ -127,10 +126,9 @@ export async function sealWithRuntime(
     indexMaster: rt.keystore.indexMaster,
     signB64: (bytes) => String(signatureB64(rt.keystore.device.sign(bytes))),
     sealGroup: (gname, cipher, plaintext, aad) => _sealGroup(rt, gname, cipher, plaintext, aad),
-    warn: (message) => process.emitWarning(message),
     emitReceipt: async (receiptFields) => {
-      // Routed through the runtime's async write path (jwe groups seal
-      // asynchronously in TS); errors PROPAGATE — the caller asked for
+      // Routed through the runtime's Promise-compatible write path; errors
+      // PROPAGATE — the caller asked for
       // a receipt, so a silently missing one would break the guarantee.
       await rt.emitAsync("info", "tn.object.sealed", receiptFields);
     },

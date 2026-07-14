@@ -17,13 +17,15 @@ crate-type = ["cdylib", "rlib"]
 # only as a fallback — every `Runtime::init` path goes through
 # `Storage` injection instead) without pulling in `fs4 → rustix →
 # errno`. The `runtime` feature below turns on `fs`.
-tn-core = { path = "../tn-core", default-features = false }
+tn-core = { path = "../tn-core", default-features = false, features = ["native-jwe"] }
 tn-btn = { path = "../tn-btn" }
 # tn-hibe (→ the Apache-2.0/MIT tn-bbg scheme) provides the standalone
 # hibe* wasm exports the TS SDK's hibe pipeline calls. Permissively
 # licensed — hohibe was removed.
 tn-hibe = { path = "../tn-hibe" }
 rand_core = { workspace = true }
+curve25519-dalek = "4"
+zeroize = { workspace = true }
 wasm-bindgen = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -51,9 +53,9 @@ default = ["runtime"]
 # `std::fs` directly, so the absence of cross-process advisory locks
 # is a non-issue: single-process, single-threaded.
 # NOTE: tn-core/hibe is deliberately NOT enabled for the wasm runtime yet.
-# The TS SDK runs hibe ceremonies on its own pipeline (which still seals via
-# the tn-hibe wasm exports — Rust crypto), so the wasm WasmRuntime only needs
-# btn. Pulling tn-core/hibe (→ tn-hibe → bls12_381_plus) into the wasm
+# WasmRuntime handles BTN and standard JWE through tn-core. The TS SDK runs
+# HIBE ceremonies on its own pipeline (which still seals via the tn-hibe wasm
+# exports — Rust crypto). Pulling tn-core/hibe (→ tn-hibe → bls12_381_plus) into the wasm
 # runtime currently traps WasmRuntime init ("unreachable"); routing TS hibe
 # through the native wasm runtime is a tracked follow-up.
 runtime = ["tn-core/fs"]

@@ -9,9 +9,9 @@ namespace TnProto.Tests;
 /// <summary>
 /// The managed JWE cipher against real wire bytes: the committed
 /// fixtures under <c>Fixtures/</c> are RFC 7516 General JSON JWEs sealed
-/// by the repo's normative Python cipher (see
-/// <c>Fixtures/README.md</c>), and the env-gated interop cases run whole
-/// jwe ceremonies through the live Python SDK.
+/// by the independent Python/joserfc implementation (see
+/// <c>Fixtures/README.md</c>), and the env-gated cases prove managed C# open
+/// interoperability with live Python ceremonies.
 /// </summary>
 public sealed class JweSealedGroupCipherTests
 {
@@ -347,8 +347,8 @@ public sealed class JweSealedGroupCipherTests
             "interop_jwe_reader",
             new TnProjectOptions { ProjectDirectory = NewTempDir() });
 
-        // Native-only first: the envelope verifies but the jwe block
-        // stays sealed — JWE is out of the Rust core by design.
+        // The fresh reader ceremony has no matching JWE private key, so this
+        // first pass verifies the envelope while leaving the group sealed.
         var nativeOnly = await reader.UnsealAsync(sealedLine);
         Assert.True(nativeOnly.Valid.Signature);
         Assert.True(nativeOnly.Valid.RowHash);

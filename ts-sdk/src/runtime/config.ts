@@ -1,7 +1,6 @@
 // Ceremony yaml loader. Mirrors the minimum shape that tn.logger.build_runtime
-// consumes in Python. Loads btn, hibe, and jwe ceremonies: btn/hibe seal and
-// open through the wasm Rust core, jwe through the async TS pipeline
-// (emitAsync / readAsync).
+// consumes in Python. Loads btn, hibe, and jwe ceremonies; jwe cryptography
+// uses the Rust/WASM cipher bridge from both sync and async-compatible verbs.
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";

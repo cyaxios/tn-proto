@@ -209,7 +209,10 @@ fn verify_self_describing_includes_unknown_public_keys() {
     let env = build_sealed_env(&[("note", json!("hello")), ("pv", json!([1, 2, 3]))]);
     let blocks = extract_group_blocks(&env).unwrap();
     let valid = verify_sealed(&env, &blocks);
-    assert!(valid.row_hash, "row_hash must recompute over ALL public keys");
+    assert!(
+        valid.row_hash,
+        "row_hash must recompute over ALL public keys"
+    );
     assert!(valid.signature, "signature must verify");
 }
 
@@ -331,5 +334,8 @@ fn aad_bytes_reconstruct_from_echo() {
     // Absent group, absent echo, malformed echo: empty bytes.
     assert_eq!(aad_bytes_for(&env, "other"), b"");
     assert_eq!(aad_bytes_for(&json!({}), "default"), b"");
-    assert_eq!(aad_bytes_for(&json!({"tn_aad": "not json"}), "default"), b"");
+    assert_eq!(
+        aad_bytes_for(&json!({"tn_aad": "not json"}), "default"),
+        b""
+    );
 }

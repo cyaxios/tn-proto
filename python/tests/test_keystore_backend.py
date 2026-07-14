@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+import tn._keystore_backend as backend_module
 from tn._keystore_backend import (
+    AdvisoryFileLock,
     KeystoreConflictError,
     LocalFileKeystoreBackend,
 )
@@ -52,6 +54,7 @@ def test_local_backend_tear_resistant(
     def boom(fd: int) -> None:
         raise OSError("simulated fsync failure")
 
+    monkeypatch.setattr(backend_module, "_fsync_directory", lambda _path: None)
     monkeypatch.setattr(os, "fsync", boom)
     with pytest.raises(OSError, match="simulated fsync failure"):
         b.write_state("payments", prior=b"v1", new=b"v2")
@@ -107,3 +110,70 @@ def test_concurrent_writers_serialise_via_lock(tmp_path: Path) -> None:
     assert len(final) == 2 + n, (
         f"expected every concurrent write to land; got len={len(final)}"
     )
+
+
+def test_advisory_lock_releases_process_lock_when_open_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / "open-failure.lock"
+    failed_lock = AdvisoryFileLock(lock_path)
+    real_open = os.open
+
+    def fail_lock_file_open(path: os.PathLike[str] | str, *args: object, **kwargs: object) -> int:
+        if Path(path) == lock_path:
+            raise OSError("simulated lock open failure")
+        return real_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(os, "open", fail_lock_file_open)
+        with pytest.raises(OSError, match="simulated lock open failure"):
+            failed_lock.__enter__()
+
+    assert failed_lock._fd is None
+    assert failed_lock._os_lock_held is False
+    assert failed_lock._proc_lock_held is False
+    assert failed_lock._proc_lock.acquire(blocking=False)
+    failed_lock._proc_lock.release()
+    with AdvisoryFileLock(lock_path):
+        pass
+
+
+def test_advisory_lock_releases_fd_and_process_lock_when_os_lock_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / "os-lock-failure.lock"
+    failed_lock = AdvisoryFileLock(lock_path)
+
+    with monkeypatch.context() as patcher:
+        if os.name == "nt":
+            import msvcrt
+
+            patcher.setattr(
+                msvcrt,
+                "locking",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    OSError("simulated OS lock failure")
+                ),
+            )
+        else:
+            import fcntl
+
+            patcher.setattr(
+                fcntl,
+                "flock",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    OSError("simulated OS lock failure")
+                ),
+            )
+        with pytest.raises(OSError, match="simulated OS lock failure"):
+            failed_lock.__enter__()
+
+    assert failed_lock._fd is None
+    assert failed_lock._os_lock_held is False
+    assert failed_lock._proc_lock_held is False
+    assert failed_lock._proc_lock.acquire(blocking=False)
+    failed_lock._proc_lock.release()
+    with AdvisoryFileLock(lock_path):
+        pass

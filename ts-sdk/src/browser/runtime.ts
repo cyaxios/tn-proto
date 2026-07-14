@@ -116,6 +116,34 @@ export interface BrowserRuntimeFromSeedOptions extends CreateFromSeedOptions {
   http?: string | HttpHandlerOptions;
 }
 
+/** Options forwarded to Rust/WASM portable-object sealing. */
+export interface BrowserRuntimeSealOptions {
+  receipt?: boolean;
+  aad?: Record<string, unknown>;
+}
+
+/** Exact transport result from Rust/WASM portable-object sealing. */
+export interface BrowserRuntimeSealResult {
+  envelope: Record<string, unknown>;
+  wire: string;
+}
+
+/** Options forwarded to Rust/WASM portable-object unsealing. */
+export interface BrowserRuntimeUnsealOptions {
+  verify?: boolean;
+  group?: string;
+}
+
+/** Rust/WASM portable-object unseal result, preserving wire field names. */
+export interface BrowserRuntimeUnsealResult {
+  envelope: Record<string, unknown>;
+  plaintext: Record<string, Record<string, unknown>>;
+  valid: { signature: boolean; row_hash: boolean };
+  hidden_groups: string[];
+  sealed_blocks: Array<Record<string, unknown>>;
+  fields: Record<string, unknown>;
+}
+
 /**
  * Wraps a single wasm `WasmRuntime` handle plus the JS-side console +
  * HTTP sinks. Construct via the static {@link BrowserRuntime.init} or
@@ -388,6 +416,20 @@ export class BrowserRuntime {
   /** Audit-grade read returning `{envelope, plaintext}` per entry. */
   readRaw(): Array<Record<string, unknown>> {
     return this._wasm.readRaw() as Array<Record<string, unknown>>;
+  }
+
+  /** Seal one portable TN object through the Rust/WASM runtime. */
+  seal(
+    objectType: string,
+    fields: Record<string, unknown> = {},
+    options: BrowserRuntimeSealOptions = {},
+  ): BrowserRuntimeSealResult {
+    return this._wasm.seal(objectType, fields, options) as BrowserRuntimeSealResult;
+  }
+
+  /** Verify and open one portable TN object with configured reader material. */
+  unseal(source: string, options: BrowserRuntimeUnsealOptions = {}): BrowserRuntimeUnsealResult {
+    return this._wasm.unseal(source, options) as BrowserRuntimeUnsealResult;
   }
 
   /** Process-wide level threshold as a name (`debug` / `info` / `warning` / `error`). */

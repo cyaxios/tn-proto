@@ -16,7 +16,7 @@ import yaml as _yaml
 
 from tn import admin
 from tn.config import load_or_create
-from tn.conventions import pending_offers_dir
+from tn.conventions import enrollment_dir, pending_offers_dir
 from tn.reconcile import _reconcile
 
 
@@ -59,9 +59,13 @@ def test_reconcile_idempotent(tmp_path: Path):
     """Running reconcile twice on a clean state should produce no further
     actions."""
     cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    assert not enrollment_dir(cfg.yaml_path).exists()
     result1 = _reconcile(cfg)
     assert result1.promotions == []
     assert result1.coupons_issued == []
+    assert result1.accepted_offers == []
     result2 = _reconcile(cfg)
     assert result2.promotions == []
     assert result2.coupons_issued == []
+    assert result2.accepted_offers == []
+    assert not enrollment_dir(cfg.yaml_path).exists()

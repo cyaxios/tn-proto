@@ -31,20 +31,34 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class VerifyError(Exception):
-    """Raised when ``tn.read(verify=True)`` hits an entry that fails one or
-    more of (signature, row_hash, chain).
+    """Stable public rejection raised by secure-default ``tn.read``.
 
-    Use ``verify="skip"`` to drop invalid rows silently, or ``verify=False``
-    (the default) to read without integrity checks.
+    ``reason`` is the first stable machine-readable reason and ``reasons``
+    retains the complete ordered, de-duplicated array.  ``failed_checks`` is
+    kept as a compatibility alias for callers written against the older
+    integrity-only exception.
     """
 
-    def __init__(self, sequence: int, event_type: str, failed_checks: list[str]):
+    def __init__(
+        self,
+        sequence: int,
+        event_type: str,
+        failed_checks: list[str] | None = None,
+        *,
+        reason: str | None = None,
+        reasons: list[str] | None = None,
+    ) -> None:
+        resolved = list(reasons if reasons is not None else failed_checks or [])
+        if reason is not None and reason not in resolved:
+            resolved.insert(0, reason)
         self.sequence = sequence
         self.event_type = event_type
-        self.failed_checks = failed_checks
+        self.reasons = resolved
+        self.reason = reason if reason is not None else (resolved[0] if resolved else "record_invalid")
+        self.failed_checks = self.reasons
         super().__init__(
             f"entry seq={sequence} event={event_type!r} failed: "
-            f"{', '.join(failed_checks)}"
+            f"{', '.join(self.reasons)}"
         )
 
 

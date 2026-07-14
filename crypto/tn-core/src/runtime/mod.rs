@@ -52,15 +52,20 @@ mod seal;
 mod types;
 mod util;
 
-pub use admin::{EnsureGroupResult, GrantReaderResult, RotateIdPathResult};
+pub use admin::{
+    EnsureGroupResult, GrantReaderResult, RecipientPreparationPlan, RotateIdPathResult,
+};
 pub use seal::{unseal_as_recipient, SealOptions, SealedGroupInfo, UnsealOptions, UnsealOutcome};
 pub use types::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
-    AdminRotation, AdminState, AdminVaultLink, FlatEntry, Instructions, OnInvalid, ReadEntry,
-    RecipientEntry, RuntimeInitOptions, SecureEntry, SecureReadOptions, ValidFlags,
+    AdminRotation, AdminState, AdminVaultLink, CursorKind, FlatEntry, Instructions, OnInvalid,
+    ReadContext, ReadCursorV1, ReadDecision, ReadEntry, ReadRecordState, ReadRejectReason,
+    ReadReport, ReadTrustPolicy, RecipientEntry, RuntimeInitOptions, SecureEntry,
+    SecureReadOptions, SourceCursorV1, ValidFlags, VerifyMode,
 };
 
-pub use read::flatten_raw_entry;
+pub use read::{canonical_file_source_id, canonical_source_id, file_source_id, flatten_raw_entry};
+pub(crate) use read::{read_recipient_rows, RecipientRow};
 
 /// Internal: per-group cipher and derived index-token HMAC state held
 /// inside [`Runtime`]; backs every group on the write / read paths

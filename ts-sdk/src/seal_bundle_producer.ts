@@ -34,12 +34,19 @@
 // and signature fields are stripped from the AAD on both sides, so the
 // order (wrap, then sign) is correct.
 //
-// Layer note: this module touches the Node-only `writeTnpkg` / `readTnpkg`
+// Layer note: this module touches the Node-only `writeTnpkg` / `readTnpkgVerified`
 // I/O wrappers (and node:fs for the keystore install), so it lives at the
 // `src/` root rather than under `src/core/` — Layer 1 (src/core) must stay
 // browser-safe. The crypto it composes is itself browser-safe.
 
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
@@ -49,13 +56,19 @@ import { DeviceKey } from "./core/signing.js";
 import {
   type Manifest,
   newManifest,
-  signManifest,
+  prepareManifestBodyIndex,
+  signManifestWithBody,
   toWireDict,
   fromWireDict,
   isManifestSignatureValid,
 } from "./core/tnpkg.js";
-import { readTnpkg, writeTnpkg } from "./tnpkg_io.js";
-import { encryptBodyBlob, decryptBodyBlob, BODY_CIPHER_SUITE, BODY_FRAME } from "./core/body_encryption.js";
+import { readTnpkgVerified, writeTnpkg } from "./tnpkg_io.js";
+import {
+  encryptBodyBlob,
+  decryptBodyBlob,
+  BODY_CIPHER_SUITE,
+  BODY_FRAME,
+} from "./core/body_encryption.js";
 import {
   buildRecipientWraps,
   manifestAadForWrap,
@@ -63,6 +76,11 @@ import {
   didKeyToEd25519Pub,
   UnsealError,
 } from "./core/recipient_seal.js";
+import {
+  atomicWriteKitMember,
+  kitBundleInstallRejection,
+  kitMemberIsSecret,
+} from "./runtime/kit_bundle_members.js";
 
 /** Inputs to {@link sealBundleForRecipient}. */
 export interface SealBundleInput {
@@ -132,7 +150,7 @@ export async function sealBundleForRecipient(input: SealBundleInput): Promise<Se
 
   // 1. Read the plaintext kit_bundle body + its manifest. We reuse the
   //    minting primitive's output rather than re-deriving kit bytes.
-  const { manifest: srcManifest, body: srcBody } = readTnpkg(input.unsealedBundle);
+  const { manifest: srcManifest, body: srcBody } = readTnpkgVerified(input.unsealedBundle);
   if (srcManifest.kind !== "kit_bundle") {
     throw new Error(
       `sealBundleForRecipient: expected an unsealed kit_bundle, got kind ` +
@@ -186,6 +204,11 @@ export async function sealBundleForRecipient(input: SealBundleInput): Promise<Se
   };
   manifest.state = baseState;
 
+  // The exact final encrypted body index is part of recipient-wrap AAD, so
+  // install it before deriving the preview skeleton used by the wrapper.
+  const outBody: Record<string, Uint8Array> = { "body/encrypted.bin": encrypted };
+  prepareManifestBodyIndex(manifest, outBody);
+
   // Skeleton == the exact wire shape, minus the signature. buildRecipientWraps
   // computes AAD = manifestAadForWrap(skeleton); the consumer recomputes it as
   // manifestAadForWrap(toWireDict(manifest, true)) with the signature + wraps
@@ -201,10 +224,7 @@ export async function sealBundleForRecipient(input: SealBundleInput): Promise<Se
   if (wrappedState && typeof wrappedState === "object") {
     manifest.state = wrappedState as Record<string, unknown>;
   }
-  signManifest(manifest, input.publisherKey);
-
-  // Body is the single encrypted blob (plaintext members are gone).
-  const outBody: Record<string, Uint8Array> = { "body/encrypted.bin": encrypted };
+  signManifestWithBody(manifest, outBody, input.publisherKey);
   const outPath = writeTnpkg(input.outPath, manifest, outBody);
 
   return { outPath, bek };
@@ -257,7 +277,10 @@ function _kitBodyEncryption(manifest: Manifest): Record<string, unknown> | null 
 
 // Recipient wraps addressed to `ourDid` (plural `recipient_wraps` wins over
 // singular `recipient_wrap` when both present).
-function _selectKitWraps(bodyEnc: Record<string, unknown>, ourDid: string): Record<string, unknown>[] {
+function _selectKitWraps(
+  bodyEnc: Record<string, unknown>,
+  ourDid: string,
+): Record<string, unknown>[] {
   const candidates: Record<string, unknown>[] = [];
   const wrapsArray = bodyEnc["recipient_wraps"];
   const wrapSingular = bodyEnc["recipient_wrap"];
@@ -304,6 +327,7 @@ async function _unsealFirstKit(
 function _installKitMembers(
   decrypted: Map<string, Uint8Array>,
   keystoreDir: string,
+  opts: { kind: string; yamlPath?: string },
 ): { accepted: number; skipped: number; replaced: string[] } {
   const keystore = pathResolve(keystoreDir);
   if (!existsSync(keystore)) mkdirSync(keystore, { recursive: true });
@@ -316,23 +340,20 @@ function _installKitMembers(
     const rel = name.slice("body/".length);
     if (!rel) continue;
     if (rel.includes("/") || rel.includes("\\")) continue;
-    const dest = pathResolve(keystore, rel);
+    const dest =
+      opts.kind === "full_keystore" && rel === "tn.yaml" && opts.yamlPath !== undefined
+        ? pathResolve(opts.yamlPath)
+        : pathResolve(keystore, rel);
     if (existsSync(dest)) {
       const existing = readFileSync(dest);
       if (existing.length === data.length && Buffer.from(existing).equals(Buffer.from(data))) {
         skipped += 1;
         continue;
       }
-      renameSync(dest, pathResolve(keystore, `${rel}.previous.${ts}`));
+      renameSync(dest, `${dest}.previous.${ts}`);
       replaced.push(dest);
     }
-    // Secret key material lands owner-only (0600), matching how the keystore
-    // writes it at creation; public members (mpk, recipients index) keep the
-    // default. mode only bites on file creation, so this is the fresh-file path.
-    const secret =
-      rel === "local.private" ||
-      /\.(hibe\.sk|hibe\.msk|jwe\.mykey|jwe\.sender|btn\.mykit|btn\.state)$/.test(rel);
-    writeFileSync(dest, Buffer.from(data), secret ? { mode: 0o600 } : undefined);
+    atomicWriteKitMember(dest, data, kitMemberIsSecret(rel));
     accepted += 1;
   }
   return { accepted, skipped, replaced };
@@ -340,12 +361,12 @@ function _installKitMembers(
 
 export async function absorbSealedKitBundle(
   source: string | Uint8Array,
-  opts: { seed: Uint8Array; keystoreDir: string },
+  opts: { seed: Uint8Array; keystoreDir: string; yamlPath?: string },
 ): Promise<SealedKitBundleReceipt> {
   let manifest: Manifest;
   let body: Map<string, Uint8Array>;
   try {
-    const parsed = readTnpkg(source);
+    const parsed = readTnpkgVerified(source);
     manifest = parsed.manifest;
     body = parsed.body;
   } catch (err) {
@@ -381,7 +402,10 @@ export async function absorbSealedKitBundle(
 
   const candidates = _selectKitWraps(bodyEnc, ourDid);
   if (candidates.length === 0) {
-    return _kitReject(manifest.kind, `sealed-box wrap is not addressed to ${JSON.stringify(ourDid)}.`);
+    return _kitReject(
+      manifest.kind,
+      `sealed-box wrap is not addressed to ${JSON.stringify(ourDid)}.`,
+    );
   }
 
   // AAD over the WIRE manifest, signature + wraps stripped — must match
@@ -404,10 +428,30 @@ export async function absorbSealedKitBundle(
   try {
     decrypted = await decryptBodyBlob(encrypted, bek);
   } catch (err) {
-    return _kitReject(manifest.kind, `body decrypt with unwrapped BEK failed: ${(err as Error).message}`);
+    return _kitReject(
+      manifest.kind,
+      `body decrypt with unwrapped BEK failed: ${(err as Error).message}`,
+    );
   }
 
-  const { accepted, skipped, replaced } = _installKitMembers(decrypted, opts.keystoreDir);
+  const rejectedReason = kitBundleInstallRejection({
+    kind: manifest.kind,
+    fromDid: manifest.fromDid,
+    ...(manifest.toDid === undefined ? {} : { toDid: manifest.toDid }),
+    localDid: ourDid,
+    names: decrypted.keys(),
+  });
+  if (rejectedReason !== null) return _kitReject(manifest.kind, rejectedReason);
+
+  const installOpts = {
+    kind: manifest.kind,
+    ...(opts.yamlPath === undefined ? {} : { yamlPath: opts.yamlPath }),
+  };
+  const { accepted, skipped, replaced } = _installKitMembers(
+    decrypted,
+    opts.keystoreDir,
+    installOpts,
+  );
   return {
     kind: manifest.kind,
     acceptedCount: accepted,

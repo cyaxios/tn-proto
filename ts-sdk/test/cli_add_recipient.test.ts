@@ -286,7 +286,11 @@ test("add_recipient --seal-for-recipient (REAL did:key) seals; named recipient d
     assert.ok(existsSync(join(rKeystore, "default.btn.mykit")), "R gets default.btn.mykit");
 
     const entries = Array.from(
-      readAsRecipient(pLogPath, rKeystore, { group: "default", verifySignatures: true }),
+      readAsRecipient(pLogPath, rKeystore, {
+        group: "default",
+        verifySignatures: true,
+        trustedPublisherDids: [manifest.fromDid],
+      }),
     ).filter((e) => e.envelope["event_type"] === "user.action");
     assert.ok(entries.length >= 1, `R should see P's info entry; got ${entries.length}`);
     const pt = entries[0]!.plaintext["default"] as Record<string, unknown> | undefined;

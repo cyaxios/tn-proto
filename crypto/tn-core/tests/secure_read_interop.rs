@@ -289,3 +289,28 @@ fn ts_admin_events_byte_compare() {
          which event_type drifted."
     );
 }
+
+#[test]
+fn accepted_read_cursor_fixture_is_canonical_rust_json() {
+    let path = fixture_path(&[
+        "tests",
+        "fixtures",
+        "trust",
+        "v1",
+        "read_cursor_vectors.json",
+    ]);
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read cursor fixture"))
+            .expect("parse cursor fixture");
+    for case in document["cases"].as_array().expect("cursor cases") {
+        let cursor = &case["expected"]["cursor"];
+        let parsed: tn_core::runtime::ReadCursorV1 =
+            serde_json::from_value(cursor.clone()).expect("parse Rust cursor");
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            *cursor,
+            "{}",
+            case["id"]
+        );
+    }
+}

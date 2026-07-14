@@ -79,6 +79,9 @@ def test_verify_rejects_missing_sig():
 
 from pathlib import Path
 
+import pytest
+
+from tn._bounded_json import JsonNestingError, MAX_JSON_NESTING
 from tn.packaging import dump_tnpkg, load_tnpkg
 
 
@@ -91,3 +94,17 @@ def test_tnpkg_round_trip(tmp_path: Path):
     assert loaded.sig_b64 == pkg.sig_b64
     assert loaded.payload == pkg.payload
     assert verify(loaded) is True
+
+
+def test_load_tnpkg_rejects_json_over_the_nesting_limit(tmp_path: Path):
+    path = tmp_path / "nested.tnpkg"
+    path.write_bytes(
+        b'{"package_kind":"offer","nested":'
+        + b"[" * (MAX_JSON_NESTING + 1)
+        + b"0"
+        + b"]" * (MAX_JSON_NESTING + 1)
+        + b"}"
+    )
+
+    with pytest.raises(JsonNestingError):
+        load_tnpkg(path)

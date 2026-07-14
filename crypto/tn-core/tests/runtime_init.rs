@@ -363,3 +363,39 @@ fn init_seeds_chain_from_existing_log() {
     let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
     assert_eq!(rt.did(), cer.device_identity);
 }
+
+#[test]
+fn init_seeds_chain_from_dedicated_admin_log() {
+    let td = tempfile::tempdir().unwrap();
+    let cer = common::setup_minimal_btn_ceremony(td.path());
+
+    let yaml = std::fs::read_to_string(&cer.yaml_path).unwrap();
+    let routed = yaml.replace(
+        "protocol_events_location: main_log",
+        "admin_log_location: \"./.tn/admin/admin.ndjson\"",
+    );
+    std::fs::write(&cer.yaml_path, routed).unwrap();
+
+    {
+        let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
+        rt.emit("info", "tn.key.rotate", serde_json::Map::new())
+            .unwrap();
+    }
+    {
+        let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
+        rt.emit("info", "tn.key.rotate", serde_json::Map::new())
+            .unwrap();
+    }
+
+    let admin_log = td.path().join(".tn/admin/admin.ndjson");
+    let events: Vec<serde_json::Value> = std::fs::read_to_string(admin_log)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter(|event: &serde_json::Value| event["event_type"] == "tn.key.rotate")
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["sequence"], 1);
+    assert_eq!(events[1]["sequence"], 2);
+    assert_eq!(events[1]["prev_hash"], events[0]["row_hash"]);
+}

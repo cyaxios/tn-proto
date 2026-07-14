@@ -72,6 +72,9 @@ auth.info("ts.aad", { note: "typescript sealed with aad" }, { aad: { policy: "so
 await auth.admin.grantReader("default", {
   readerDid: "did:key:z6Mk-py-reader",
   outPath: join(ws, "ts_to_py.tnpkg"),
+  // Synthetic cross-impl DID with no embedded key: the python side absorbs a
+  // plaintext kit, so plaintext delivery is requested explicitly.
+  unsafePlaintext: true,
 });
 const tsLog = (auth.config() as { logPath: string }).logPath;
 await auth.close();

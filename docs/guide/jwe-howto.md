@@ -9,18 +9,22 @@ conformance, not by any TN-specific format.
 Under the hood: one fresh `A256GCM` content key encrypts the body; that key is
 wrapped **per recipient** with `ECDH-ES+A256KW` over the recipient's X25519
 key. The output is a JWE *General JSON Serialization* object (a `recipients`
-array), which becomes the group's opaque `ciphertext` — so `row_hash`, the
-chain, and the record signature cover it with no envelope change.
+array), which becomes the group's opaque `ciphertext`. When row hashing is
+enabled it covers that complete object; a non-empty record signature covers the
+stored hash. Unsigned and unchained profiles use empty hash/signature sentinels.
 
 **When to reach for `jwe`:** the audience is small and enumerated at seal time;
 you want an externally-inspectable, standards-compliant envelope; recipients
 already hold X25519 keys. **When not to:** you need cheap forward revocation of
 an already-admitted reader at scale (use `btn` — jwe revocation is forward-only,
-below), or you seal to someone who holds no key yet (use `hibe`).
+below), or you seal to someone who holds no key yet (HIBE can model that, but
+its TN scheme/pairing implementation is unaudited and evaluation-only pending
+external cryptographic review; see
+[the security warning](jwe-hibe-key-ceremonies.md#choose-the-cipher-first)).
 
-The cipher is produced by production JOSE libraries — **Authlib/joserfc**
-(BSD-3) in Python, **panva/jose** (MIT) in TypeScript/JS. TN does not hand-roll
-the crypto.
+The cipher is produced by **Authlib/joserfc** (BSD-3) in Python and the fixed
+RustCrypto/Dalek profile in `tn-core`, exposed to TypeScript through `tn-wasm`.
+Independent implementations are kept interoperable by RFC 7516 fixtures.
 
 ---
 
@@ -32,8 +36,14 @@ the crypto.
   sender key per recipient, carried in the recipient's JWE header (`epk`). There
   is no long-lived sender decryption key to leak. (A `<group>.jwe.sender` file
   is kept only as an inert group identity anchor for the ceremony; the crypto
-  never uses it. Sender *authenticity* comes from the record's Ed25519
-  signature, not the cipher.)
+  never uses it.) The cipher does not authenticate its sender. A separate
+  authorship claim exists only when the TN signature is non-empty, composite
+  record verification is enforced, and the verified DID is authorized.
+
+Readers generate and retain their own `<group>.jwe.mykey`; publishers enroll
+only an authenticated DID-to-X25519 public-key binding. Python's ordinary
+reader-kit exporter does not transport JWE private keys. See
+[JWE and HIBE key ceremonies](jwe-hibe-key-ceremonies.md#provision-and-enroll-a-jwe-reader).
 - **Marker** — an optional string welded to the body via the native JWE `aad`
   member: authenticated, not encrypted. A reader must supply the identical bytes
   to open; a plain seal omits it entirely.
@@ -44,8 +54,8 @@ the crypto.
 
 Configure a group with `cipher: jwe` (`tn.init(..., cipher="jwe")`, or per-group
 in `tn.yaml`) and the normal `tn.info` / `tn.read` pipeline seals with JWE —
-signature, chain, `row_hash`, and decrypt all work identically to any other
-cipher. The cipher surface itself:
+profile-controlled signature/chain/`row_hash` behavior stays separate from
+decryption, as with every cipher. The cipher surface itself:
 
 ```python
 from tn.cipher import JWEGroupCipher
@@ -140,31 +150,38 @@ rejects the wrong key with no false-plaintext risk.
 
 ## TypeScript / JavaScript
 
-The TS SDK ships the same cipher on panva/jose, pure JS — it runs in Node,
-browsers, and edge runtimes with no wasm:
+The TS SDK exposes the same fixed RFC 7516 profile through the Rust/Wasm `jwe`
+namespace:
 
 ```ts
-import { jweSeal, jweDecrypt, okpPrivateJwk } from "@cyaxios/tn-proto/core";
+import { jwe } from "@cyaxios/tn-proto";
 
 // recipientPubs: raw 32-byte X25519 public keys
-const blob = await jweSeal([alicePub], plaintextBytes, enc("policy=finra-oba"));
+const blob = jwe.encryptSync(
+  plaintextBytes,
+  [alicePub],
+  enc("policy=finra-oba"),
+);
 
-// readerJwk: the reader's X25519 key as an OKP JWK ({kty,crv,x,d})
-const pt = await jweDecrypt(readerJwk, blob, enc("policy=finra-oba"));
-// wrong / absent marker, or a non-recipient key -> null (never plaintext)
+// The reader retains its raw 32-byte X25519 private key locally.
+const pt = jwe.subscribe([alicePrivate]).decryptSync(
+  blob,
+  enc("policy=finra-oba"),
+);
+// A wrong/absent marker or non-recipient key throws; plaintext is never returned.
 ```
 
-`jweSeal` and `jweDecrypt` are `async` (they use WebCrypto), and interoperate
-with the Python cipher — bytes sealed by one open with the other.
+`jwe.encryptSync` and `Subscriber.decryptSync` execute immediately. The
+`encrypt` and `decrypt` methods are backward-compatible async delegates. Both
+forms interoperate with the Python cipher: bytes sealed by one open with the
+other.
 
-To write and read jwe groups through the TS runtime, use the async verbs —
-`emitAsync` / `infoAsync` to seal, `readAsync` to open (the synchronous
-`emit` / `info` / `read` handle btn and hibe):
+To write and read JWE groups through the TS runtime, use the ordinary verbs:
 
 ```ts
-await tn.infoAsync("order.created", { amount: 999, currency: "USD" });
+tn.info("order.created", { amount: 999, currency: "USD" });
 
-for await (const entry of tn.readAsync()) {
+for (const entry of tn.read()) {
   console.log(entry.event_type, entry.fields);
 }
 ```
@@ -187,15 +204,21 @@ included.
   stays open to them (shown above: bob opens the pre-revocation seal, not the
   post-revocation one). For retroactive lockout of an admitted reader, use
   `btn`.
+- **Group rotation resets the audience.** Rotation archives the active JWE
+  files and recreates the group with only the publisher's self-recipient.
+  Every external reader must re-enroll an authenticated X25519 public key
+  before receiving a post-rotation recipient block.
 - **Fail-closed.** A wrong marker, a non-recipient key, or a tampered/garbage
-  blob yields an error (Python) or `null` (TS) — never wrong plaintext, and the
-  SDK never throws into host space.
+  blob never yields plaintext. The public `jwe` subscriber throws a stable
+  `PrimitiveError` subtype, the JWK compatibility helper offers a detailed
+  outcome or legacy `null`, and ordinary readers leave a group hidden when the
+  caller holds no fitting key.
 - **Marker is public-inspectable.** The marker is authenticated but not
   encrypted; a proxy can read and check it (via the record's `tn_aad` echo)
   without decrypting the body.
 - **Recipient-key rotation is the forward-secrecy lever.** ECDH-ES gives forward
   secrecy against the sender (ephemeral epk), but a recipient's static X25519
   key opens all of their past blocks — rotate recipient keys to bound that.
-- **Libraries.** joserfc (BSD-3) and panva/jose (MIT) are permissive and
-  maintained; keep them current for JOSE DoS advisories. Neither is vendored —
-  the wheel and npm package stay Apache-2.0.
+- **Implementations.** Keep `joserfc`, RustCrypto, and Dalek dependencies
+  current, retain envelope size limits, and run the cross-language fixtures at
+  release time.

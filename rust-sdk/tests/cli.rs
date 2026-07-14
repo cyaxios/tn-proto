@@ -172,6 +172,7 @@ fn cli_read_prints_entries_all_runs_and_verify_flags() -> tn_proto::Result<()> {
         .arg("--yaml")
         .arg(&yaml_path)
         .arg("--verify")
+        .arg("--all-runs")
         .arg("--pretty")
         .output()?;
     assert!(
