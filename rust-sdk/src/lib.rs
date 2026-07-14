@@ -22,6 +22,8 @@
 pub mod account;
 /// Ceremony administration helpers.
 pub mod admin;
+/// Byte-oriented BTN broadcast-encryption primitives.
+pub mod btn;
 /// Credential-store helpers for cached vault account keys.
 pub mod credential_store;
 /// Trusted-principal enrollment: strict statements, locked receiver-local
@@ -36,6 +38,8 @@ pub mod error;
 pub mod identity;
 /// Local invitation inbox helpers.
 pub mod inbox;
+/// Byte-oriented RFC 7516 JWE primitives.
+pub mod jwe;
 /// `.tnpkg` package export and absorb helpers.
 pub mod pkg;
 /// Receiver-local exact-DID trust providers for secure reads.
