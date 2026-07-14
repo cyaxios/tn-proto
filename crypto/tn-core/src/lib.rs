@@ -63,6 +63,7 @@ pub mod chain;
 pub mod cipher;
 pub mod classifier;
 pub mod config;
+pub mod did_document;
 pub mod envelope;
 pub mod error;
 pub mod indexing;
