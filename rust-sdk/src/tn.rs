@@ -9,7 +9,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use rand_core::{OsRng, RngCore};
 use serde::Serialize;
@@ -43,7 +43,7 @@ pub use read::{ReadOptions, ReadPolicyOptions, ReadReport};
 /// `tn-core`; this type is the ergonomic SDK surface.
 pub struct Tn {
     runtime: Runtime,
-    read_trust_provider: Arc<dyn ReadTrustProvider>,
+    read_trust_provider: RwLock<Arc<dyn ReadTrustProvider>>,
 }
 
 impl fmt::Debug for Tn {
@@ -280,7 +280,7 @@ impl Tn {
         let runtime = Runtime::init_with_options(yaml_path, storage, runtime_options)?;
         Ok(Self {
             runtime,
-            read_trust_provider,
+            read_trust_provider: RwLock::new(read_trust_provider),
         })
     }
 
@@ -368,7 +368,7 @@ impl Tn {
             )])?);
         Ok(Self {
             runtime,
-            read_trust_provider,
+            read_trust_provider: RwLock::new(read_trust_provider),
         })
     }
 

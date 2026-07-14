@@ -238,6 +238,42 @@ fn jwe_enrollment_lifecycle_completes_through_response_install() -> tn_proto::Re
         Some(reader.did())
     );
 
+    let (_, response_body) =
+        tn_core::tnpkg::read_tnpkg(tn_core::tnpkg::TnpkgSource::Bytes(&response_artifact))?;
+    let attacker = tn_core::DeviceKey::generate();
+    let mut wrong_outer_signer = response_manifest.clone();
+    wrong_outer_signer.publisher_identity = attacker.did().to_string();
+    let attacker_signing = ed25519_dalek::SigningKey::from_bytes(&attacker.private_bytes());
+    tn_core::tnpkg::sign_manifest_with_body(
+        &mut wrong_outer_signer,
+        &response_body,
+        &attacker_signing,
+    )?;
+    let wrong_outer_signer =
+        tn_core::tnpkg::write_tnpkg_bytes(&wrong_outer_signer, &response_body)?;
+    let signer_error = enrollment::read_enrollment_response(&wrong_outer_signer)
+        .expect_err("outer and inner publishers must match");
+    assert!(signer_error
+        .to_string()
+        .starts_with("invalid argument: outer_inner_signer_mismatch:"));
+
+    let mut wrong_outer_reader = response_manifest.clone();
+    wrong_outer_reader.recipient_identity = Some(attacker.did().to_string());
+    let publisher_key = device_key(&publisher);
+    let publisher_signing = ed25519_dalek::SigningKey::from_bytes(&publisher_key.private_bytes());
+    tn_core::tnpkg::sign_manifest_with_body(
+        &mut wrong_outer_reader,
+        &response_body,
+        &publisher_signing,
+    )?;
+    let wrong_outer_reader =
+        tn_core::tnpkg::write_tnpkg_bytes(&wrong_outer_reader, &response_body)?;
+    let reader_error = enrollment::read_enrollment_response(&wrong_outer_reader)
+        .expect_err("outer and inner readers must match");
+    assert!(reader_error
+        .to_string()
+        .starts_with("invalid argument: wrong_recipient:"));
+
     // 6. Reader verifies the accepted response against its retained offer and
     //    installs the publisher into its private trust record.
     let response = enrollment::read_enrollment_response(&response_artifact)?;

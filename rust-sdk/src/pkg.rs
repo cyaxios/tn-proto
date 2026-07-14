@@ -45,6 +45,11 @@ use crate::{Error, Result};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+mod recipient_preparation;
+pub use recipient_preparation::{
+    JweActivationResult, PrepareRecipientOptions, PrepareRecipientResult,
+};
+
 /// Runtime package namespace for a [`Tn`] handle.
 pub struct Package<'a> {
     tn: &'a Tn,
@@ -313,8 +318,17 @@ impl<'a> Package<'a> {
             fs::create_dir_all(parent)?;
         }
         tn_core::keystore_backend::atomic_write_bytes(&options.out_path, &artifact.tnpkg)?;
+        crate::enrollment::retain_sent_offer(
+            self.tn,
+            &options.publisher_did,
+            &ceremony_id,
+            &options.group,
+            &artifact.offer_digest,
+            &crate::enrollment::sha256_tagged(&public),
+            &artifact.proof.expires_at,
+        )?;
         let package_sha256 = sha256_hex(&artifact.tnpkg);
-        self.tn.info(
+        let _ = self.tn.info(
             "tn.offer.compiled",
             json!({
                 "group": options.group,
@@ -323,7 +337,7 @@ impl<'a> Package<'a> {
                 "package_path": options.out_path.to_string_lossy(),
                 "offer_digest": artifact.offer_digest,
             }),
-        )?;
+        );
         Ok(OfferReceipt {
             path: options.out_path,
             group: options.group,
@@ -437,6 +451,9 @@ impl<'a> Package<'a> {
             // the unsafe legacy path never applies to them.
             return Ok(self.stage_offer_receipt(&bytes));
         }
+        if kind == Some(ManifestKind::Enrolment) && carries_enrollment_response(&bytes) {
+            return Ok(self.absorb_enrollment_response(&bytes));
+        }
         // Keep parity with `absorb_bytes`: signed contact updates apply.
         if let Some(receipt) = self.try_absorb_contact_update_bytes(&bytes)? {
             return Ok(receipt);
@@ -452,6 +469,21 @@ impl<'a> Package<'a> {
             return Ok(receipt);
         }
         self.import_legacy_unverified(&bytes, kind)
+    }
+
+    fn absorb_enrollment_response(&self, bytes: &[u8]) -> AbsorbReceipt {
+        let installed = crate::enrollment::read_enrollment_response(bytes).and_then(|response| {
+            let expected = crate::enrollment::retained_response_expectation(
+                self.tn,
+                &response,
+                SystemTime::now(),
+            )?;
+            crate::enrollment::install_publisher_response(self.tn, &response, &expected)
+        });
+        match installed {
+            Ok(outcome) => enrollment_response_accepted(&outcome.publisher_did),
+            Err(error) => enrollment_response_rejected(error.to_string()),
+        }
     }
 
     fn stage_offer_receipt(&self, bytes: &[u8]) -> AbsorbReceipt {
@@ -909,6 +941,49 @@ impl<'a> Package<'a> {
             legacy_reason: String::new(),
             replaced_kit_paths: Vec::new(),
         }))
+    }
+}
+
+fn carries_enrollment_response(bytes: &[u8]) -> bool {
+    let Ok((manifest, body)) =
+        tn_core::tnpkg::read_tnpkg(tn_core::tnpkg::TnpkgSource::Bytes(bytes))
+    else {
+        return false;
+    };
+    if manifest.kind != ManifestKind::Enrolment {
+        return false;
+    }
+    body.get("body/package.json")
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(raw).ok())
+        .and_then(|package| package.get("payload").cloned())
+        .is_some_and(|payload| payload.get("enrollment_response").is_some())
+}
+
+fn enrollment_response_accepted(publisher_did: &str) -> AbsorbReceipt {
+    AbsorbReceipt {
+        kind: ManifestKind::Enrolment.as_str().into(),
+        accepted_count: 1,
+        deduped_count: 0,
+        noop: false,
+        derived_state: None,
+        conflicts: Vec::new(),
+        legacy_status: "enrolment_applied".into(),
+        legacy_reason: format!("verified publisher {publisher_did} installed"),
+        replaced_kit_paths: Vec::new(),
+    }
+}
+
+fn enrollment_response_rejected(reason: String) -> AbsorbReceipt {
+    AbsorbReceipt {
+        kind: ManifestKind::Enrolment.as_str().into(),
+        accepted_count: 0,
+        deduped_count: 0,
+        noop: false,
+        derived_state: None,
+        conflicts: Vec::new(),
+        legacy_status: "rejected".into(),
+        legacy_reason: reason,
+        replaced_kit_paths: Vec::new(),
     }
 }
 

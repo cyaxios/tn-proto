@@ -172,10 +172,12 @@ impl Tn {
     }
 
     fn read_policy(&self, options: &ReadPolicyOptions, context: &ReadContext) -> ReadTrustPolicy {
-        let trusted_writers = options
-            .trusted_writers
-            .clone()
-            .unwrap_or_else(|| self.read_trust_provider.trusted_writer_dids(context));
+        let trusted_writers = options.trusted_writers.clone().unwrap_or_else(|| {
+            self.read_trust_provider
+                .read()
+                .expect("read-trust provider lock poisoned")
+                .trusted_writer_dids(context)
+        });
         ReadTrustPolicy {
             verify: options.verify,
             require_signature: options.require_signature,
@@ -217,7 +219,22 @@ impl Tn {
 
     /// Replace this handle's receiver-local writer-trust provider.
     pub fn set_read_trust_provider(&mut self, provider: Arc<dyn ReadTrustProvider>) {
-        self.read_trust_provider = provider;
+        *self
+            .read_trust_provider
+            .write()
+            .expect("read-trust provider lock poisoned") = provider;
+    }
+
+    /// Atomically refresh config and installed-publisher trust between reads.
+    pub(crate) fn reload_read_trust_provider(&self) -> Result<()> {
+        let provider: Arc<dyn ReadTrustProvider> = Arc::new(
+            crate::read_trust::ConfigReadTrustProvider::load(self.yaml_path())?,
+        );
+        *self
+            .read_trust_provider
+            .write()
+            .expect("read-trust provider lock poisoned") = provider;
+        Ok(())
     }
 }
 

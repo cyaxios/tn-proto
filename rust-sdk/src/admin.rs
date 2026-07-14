@@ -270,34 +270,7 @@ impl<'a> Admin<'a> {
         group: &str,
         accepted: &enrollment::AcceptedOffer,
     ) -> Result<AddRecipientResult> {
-        require_jwe_group(self.tn, group)?;
-        let device_did = self.tn.did().to_string();
-        let principal = &accepted.binding.principal;
-        if principal.audience_did != device_did {
-            return Err(trust_err(TrustError::new(
-                TrustReason::WrongRecipient,
-                "accepted offer is addressed to a different publisher",
-            )));
-        }
-        let ceremony_id = enrollment::ceremony_id(self.tn)?;
-        if principal.ceremony_id != ceremony_id || principal.group != group {
-            return Err(trust_err(TrustError::new(
-                TrustReason::ScopeMismatch,
-                "accepted offer ceremony or group does not match",
-            )));
-        }
-        self.persist_jwe_recipient(
-            group,
-            &principal.did,
-            &accepted.binding.public_key,
-            Some(accepted),
-        )?;
-        Ok(AddRecipientResult {
-            group: group.to_string(),
-            recipient_did: Some(principal.did.clone()),
-            leaf_index: 0,
-            kit_path: PathBuf::new(),
-        })
+        register_jwe_offer_for_tn(self.tn, group, accepted)
     }
 
     /// Register a raw DID-plus-key JWE recipient WITHOUT a verified binding.
@@ -353,106 +326,7 @@ impl<'a> Admin<'a> {
         public_key: &[u8; 32],
         accepted: Option<&enrollment::AcceptedOffer>,
     ) -> Result<()> {
-        use base64::engine::general_purpose::STANDARD as B64;
-        use base64::Engine as _;
-
-        let keystore = enrollment::keystore_dir(self.tn)?;
-        let pub_b64 = B64.encode(public_key);
-
-        // Python-compatible recipients list:
-        // [{recipient_identity, pub_b64}, ...]
-        let recipients_path = keystore.join(format!("{group}.jwe.recipients"));
-        let mut recipients: Vec<Value> = if recipients_path.exists() {
-            serde_json::from_str(&fs::read_to_string(&recipients_path)?)?
-        } else {
-            Vec::new()
-        };
-        let existing = recipients.iter().find(|entry| {
-            entry.get("recipient_identity").and_then(Value::as_str) == Some(reader_did)
-        });
-        if let Some(existing) = existing {
-            if existing.get("pub_b64").and_then(Value::as_str) != Some(pub_b64.as_str()) {
-                return Err(trust_err(TrustError::new(
-                    TrustReason::ReplayConflict,
-                    "a different X25519 key is already registered for this reader DID",
-                )));
-            }
-        } else {
-            recipients.push(json!({
-                "recipient_identity": reader_did,
-                "pub_b64": pub_b64,
-            }));
-            tn_core::keystore_backend::atomic_write_bytes(
-                &recipients_path,
-                &serde_json::to_vec(&recipients)?,
-            )?;
-        }
-
-        // Verified trust registry keyed group -> DID.
-        let registry_path = keystore.join("trust").join("jwe_recipients.v1.json");
-        let mut registry: Value = if registry_path.exists() {
-            serde_json::from_str(&fs::read_to_string(&registry_path)?)?
-        } else {
-            json!({ "version": 1, "recipients": {} })
-        };
-        let public_key_sha256 = enrollment::sha256_tagged(public_key);
-        let entry = match accepted {
-            Some(accepted) => json!({
-                "verified": true,
-                "public_key_sha256": accepted.binding.public_key_sha256,
-                "proof_digest": accepted.binding.proof_digest,
-                "offer_digest": accepted.offer_digest,
-                "artifact_digest": accepted.artifact_digest,
-            }),
-            None => json!({
-                "verified": false,
-                "public_key_sha256": public_key_sha256,
-            }),
-        };
-        let recipients_map = registry
-            .get_mut("recipients")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| Error::InvalidArgument("jwe recipient registry is malformed".into()))?;
-        let group_map = recipients_map
-            .entry(group.to_string())
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
-        let Some(group_map) = group_map.as_object_mut() else {
-            return Err(Error::InvalidArgument(
-                "jwe recipient registry group entry is malformed".into(),
-            ));
-        };
-        if let Some(previous) = group_map.get(reader_did) {
-            let previous_verified = previous.get("verified").and_then(Value::as_bool) == Some(true);
-            let incoming_verified = accepted.is_some();
-            // An unverified raw registration never displaces a verified one.
-            if previous_verified && !incoming_verified {
-                return Ok(());
-            }
-        }
-        group_map.insert(reader_did.to_string(), entry);
-        tn_core::keystore_backend::atomic_write_bytes(
-            &registry_path,
-            &serde_json::to_vec(&registry)?,
-        )?;
-
-        // JWE ciphers snapshot their recipient public keys at construction.
-        // Refresh after the durable list update so this same runtime's next
-        // emit/seal includes the newly enrolled reader.
-        self.tn.runtime().reload_group_cipher(group)?;
-
-        // One attested registration event; the digest field carries the
-        // registered key material digest for jwe recipients.
-        let _ = self.tn.info(
-            "tn.recipient.added",
-            json!({
-                "group": group,
-                "leaf_index": Value::Null,
-                "recipient_identity": reader_did,
-                "kit_sha256": public_key_sha256,
-                "cipher": "jwe",
-            }),
-        );
-        Ok(())
+        persist_jwe_recipient(self.tn, group, reader_did, public_key, accepted)
     }
 
     // -----------------------------------------------------------------
@@ -962,6 +836,196 @@ impl<'a> Admin<'a> {
             path: options.out_path.clone(),
         })
     }
+}
+
+pub(crate) fn register_jwe_offer_for_tn(
+    tn: &Tn,
+    group: &str,
+    accepted: &enrollment::AcceptedOffer,
+) -> Result<AddRecipientResult> {
+    validate_jwe_offer_for_tn(tn, group, accepted)?;
+    let principal = &accepted.binding.principal;
+    persist_jwe_recipient(
+        tn,
+        group,
+        &principal.did,
+        &accepted.binding.public_key,
+        Some(accepted),
+    )?;
+    Ok(AddRecipientResult {
+        group: group.to_string(),
+        recipient_did: Some(principal.did.clone()),
+        leaf_index: 0,
+        kit_path: PathBuf::new(),
+    })
+}
+
+pub(crate) fn validate_jwe_offer_for_tn(
+    tn: &Tn,
+    group: &str,
+    accepted: &enrollment::AcceptedOffer,
+) -> Result<()> {
+    require_jwe_group(tn, group)?;
+    let principal = &accepted.binding.principal;
+    if principal.audience_did != tn.did() {
+        return Err(trust_err(TrustError::new(
+            TrustReason::WrongRecipient,
+            "accepted offer is addressed to a different publisher",
+        )));
+    }
+    if principal.ceremony_id != enrollment::ceremony_id(tn)? || principal.group != group {
+        return Err(trust_err(TrustError::new(
+            TrustReason::ScopeMismatch,
+            "accepted offer ceremony or group does not match",
+        )));
+    }
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    let recipients_path = enrollment::keystore_dir(tn)?.join(format!("{group}.jwe.recipients"));
+    load_compatible_jwe_recipients(
+        &recipients_path,
+        &principal.did,
+        &B64.encode(accepted.binding.public_key),
+    )?;
+    Ok(())
+}
+
+fn persist_jwe_recipient(
+    tn: &Tn,
+    group: &str,
+    reader_did: &str,
+    public_key: &[u8; 32],
+    accepted: Option<&enrollment::AcceptedOffer>,
+) -> Result<()> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+
+    let keystore = enrollment::keystore_dir(tn)?;
+    let public_key_sha256 = enrollment::sha256_tagged(public_key);
+    store_jwe_recipient_list(
+        &keystore.join(format!("{group}.jwe.recipients")),
+        reader_did,
+        &B64.encode(public_key),
+    )?;
+    if !store_jwe_trust_entry(
+        &keystore.join("trust").join("jwe_recipients.v1.json"),
+        group,
+        reader_did,
+        &public_key_sha256,
+        accepted,
+    )? {
+        return Ok(());
+    }
+    tn.runtime().reload_group_cipher(group)?;
+    attest_jwe_recipient(tn, group, reader_did, &public_key_sha256);
+    Ok(())
+}
+
+fn store_jwe_recipient_list(path: &Path, reader_did: &str, public_b64: &str) -> Result<()> {
+    let mut recipients = load_compatible_jwe_recipients(path, reader_did, public_b64)?;
+    if recipients
+        .iter()
+        .any(|entry| entry.get("recipient_identity").and_then(Value::as_str) == Some(reader_did))
+    {
+        return Ok(());
+    }
+    recipients.push(json!({
+        "recipient_identity": reader_did,
+        "pub_b64": public_b64,
+    }));
+    tn_core::keystore_backend::atomic_write_bytes(path, &serde_json::to_vec(&recipients)?)?;
+    Ok(())
+}
+
+fn load_compatible_jwe_recipients(
+    path: &Path,
+    reader_did: &str,
+    public_b64: &str,
+) -> Result<Vec<Value>> {
+    let recipients: Vec<Value> = if path.exists() {
+        serde_json::from_str(&fs::read_to_string(path)?)?
+    } else {
+        Vec::new()
+    };
+    let existing = recipients
+        .iter()
+        .find(|entry| entry.get("recipient_identity").and_then(Value::as_str) == Some(reader_did));
+    if existing
+        .is_some_and(|entry| entry.get("pub_b64").and_then(Value::as_str) != Some(public_b64))
+    {
+        return Err(trust_err(TrustError::new(
+            TrustReason::ReplayConflict,
+            "a different X25519 key is already registered for this reader DID",
+        )));
+    }
+    Ok(recipients)
+}
+
+fn store_jwe_trust_entry(
+    path: &Path,
+    group: &str,
+    reader_did: &str,
+    public_key_sha256: &str,
+    accepted: Option<&enrollment::AcceptedOffer>,
+) -> Result<bool> {
+    let mut registry: Value = if path.exists() {
+        serde_json::from_str(&fs::read_to_string(path)?)?
+    } else {
+        json!({ "version": 1, "recipients": {} })
+    };
+    let group_map = jwe_trust_group(&mut registry, group)?;
+    if group_map.get(reader_did).is_some_and(|previous| {
+        previous.get("verified").and_then(Value::as_bool) == Some(true) && accepted.is_none()
+    }) {
+        return Ok(false);
+    }
+    let entry = match accepted {
+        Some(accepted) => verified_jwe_trust_entry(accepted),
+        None => json!({ "verified": false, "public_key_sha256": public_key_sha256 }),
+    };
+    group_map.insert(reader_did.to_string(), entry);
+    tn_core::keystore_backend::atomic_write_bytes(path, &serde_json::to_vec(&registry)?)?;
+    Ok(true)
+}
+
+fn jwe_trust_group<'a>(
+    registry: &'a mut Value,
+    group: &str,
+) -> Result<&'a mut serde_json::Map<String, Value>> {
+    let recipients = registry
+        .get_mut("recipients")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| Error::InvalidArgument("jwe recipient registry is malformed".into()))?;
+    recipients
+        .entry(group.to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| {
+            Error::InvalidArgument("jwe recipient registry group entry is malformed".into())
+        })
+}
+
+fn verified_jwe_trust_entry(accepted: &enrollment::AcceptedOffer) -> Value {
+    json!({
+        "verified": true,
+        "public_key_sha256": accepted.binding.public_key_sha256,
+        "proof_digest": accepted.binding.proof_digest,
+        "offer_digest": accepted.offer_digest,
+        "artifact_digest": accepted.artifact_digest,
+    })
+}
+
+fn attest_jwe_recipient(tn: &Tn, group: &str, reader_did: &str, key_digest: &str) {
+    let _ = tn.info(
+        "tn.recipient.added",
+        json!({
+            "group": group,
+            "leaf_index": Value::Null,
+            "recipient_identity": reader_did,
+            "kit_sha256": key_digest,
+            "cipher": "jwe",
+        }),
+    );
 }
 
 fn staging_grant_path(out_path: &Path) -> PathBuf {

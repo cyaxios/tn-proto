@@ -32,6 +32,9 @@ use super::{
     AdminRotation, AdminState, AdminVaultLink, RecipientEntry, Runtime, RuntimeInitOptions,
 };
 
+mod recipient_preparation;
+pub use recipient_preparation::RecipientPreparationPlan;
+
 /// Result from [`Runtime::admin_ensure_group`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnsureGroupResult {

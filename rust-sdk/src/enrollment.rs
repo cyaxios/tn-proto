@@ -13,10 +13,12 @@
 //! message is exactly `"<stable reason>: <detail>"`, so the machine-readable
 //! reason survives the SDK boundary unchanged.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::tn::Tn;
@@ -269,6 +271,140 @@ pub(crate) fn ensure_reader_mykey(tn: &Tn, group: &str) -> Result<([u8; 32], [u8
     Ok((private, x25519_public_key(&private)))
 }
 
+const SENT_OFFERS_FILENAME: &str = "enrollment_offers.v1.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SentOfferRecordV1 {
+    ceremony_id: String,
+    group: String,
+    publisher_did: String,
+    reader_did: String,
+    x25519_public_key_sha256: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SentOffersV1 {
+    version: u32,
+    offers: BTreeMap<String, SentOfferRecordV1>,
+}
+
+fn sent_offers_path(tn: &Tn) -> Result<PathBuf> {
+    Ok(keystore_dir(tn)?.join("trust").join(SENT_OFFERS_FILENAME))
+}
+
+fn read_sent_offers(tn: &Tn) -> Result<SentOffersV1> {
+    let path = sent_offers_path(tn)?;
+    if !path.exists() {
+        return Ok(SentOffersV1 {
+            version: 1,
+            offers: BTreeMap::new(),
+        });
+    }
+    let document: SentOffersV1 =
+        serde_json::from_str(&fs::read_to_string(&path)?).map_err(|_| {
+            trust_err(TrustError::new(
+                TrustReason::StatementInvalid,
+                "retained sent-offer record is malformed",
+            ))
+        })?;
+    if document.version != 1 {
+        return Err(trust_err(TrustError::new(
+            TrustReason::StatementInvalid,
+            "retained sent-offer record has an unsupported version",
+        )));
+    }
+    Ok(document)
+}
+
+pub(crate) fn retain_sent_offer(
+    tn: &Tn,
+    publisher_did: &str,
+    ceremony_id: &str,
+    group: &str,
+    offer_digest: &str,
+    public_key_sha256: &str,
+    expires_at: &str,
+) -> Result<()> {
+    let mut document = read_sent_offers(tn)?;
+    let incoming = SentOfferRecordV1 {
+        ceremony_id: ceremony_id.to_string(),
+        group: group.to_string(),
+        publisher_did: publisher_did.to_string(),
+        reader_did: tn.did().to_string(),
+        x25519_public_key_sha256: public_key_sha256.to_string(),
+        expires_at: expires_at.to_string(),
+    };
+    if document
+        .offers
+        .get(offer_digest)
+        .is_some_and(|existing| existing != &incoming)
+    {
+        return Err(trust_err(TrustError::new(
+            TrustReason::ReplayConflict,
+            "offer digest is already retained with different enrollment scope",
+        )));
+    }
+    document.offers.insert(offer_digest.to_string(), incoming);
+    write_secret_file(&sent_offers_path(tn)?, &serde_json::to_vec(&document)?)
+}
+
+pub(crate) fn retained_response_expectation(
+    tn: &Tn,
+    response: &EnrollmentResponseV1,
+    now: SystemTime,
+) -> Result<ResponseExpectation> {
+    let document = read_sent_offers(tn)?;
+    let retained = document
+        .offers
+        .get(&response.accepted_offer_digest)
+        .ok_or_else(|| {
+            trust_err(TrustError::new(
+                TrustReason::ScopeMismatch,
+                "response does not match any retained sent offer",
+            ))
+        })?;
+    if retained.reader_did != tn.did() {
+        return Err(trust_err(TrustError::new(
+            TrustReason::WrongRecipient,
+            "retained offer names a different reader",
+        )));
+    }
+    Ok(ResponseExpectation {
+        publisher_did: retained.publisher_did.clone(),
+        reader_did: retained.reader_did.clone(),
+        ceremony_id: retained.ceremony_id.clone(),
+        group: retained.group.clone(),
+        offer_digest: response.accepted_offer_digest.clone(),
+        public_key_sha256: retained.x25519_public_key_sha256.clone(),
+        now,
+    })
+}
+
+/// Select exactly one accepted JWE offer for a reader/group preparation step.
+pub(crate) fn accepted_offer_for_preparation<'a>(
+    offers: &'a [AcceptedOffer],
+    reader_did: &str,
+    group: &str,
+) -> Result<&'a AcceptedOffer> {
+    let mut matching = offers.iter().filter(|offer| {
+        offer.binding.principal.did == reader_did && offer.binding.principal.group == group
+    });
+    let Some(accepted) = matching.next() else {
+        return Err(Error::InvalidArgument(format!(
+            "prepare_recipient requires an accepted JWE offer for reader {reader_did:?} in group {group:?}"
+        )));
+    };
+    if matching.next().is_some() {
+        return Err(Error::InvalidArgument(format!(
+            "prepare_recipient received multiple accepted JWE offers for reader {reader_did:?} in group {group:?}"
+        )));
+    }
+    Ok(accepted)
+}
+
 // ---------------------------------------------------------------------------
 // Offer / response artifact helpers
 // ---------------------------------------------------------------------------
@@ -289,6 +425,51 @@ fn package_payload(body: &std::collections::BTreeMap<String, Vec<u8>>) -> Result
         .get("body/package.json")
         .ok_or_else(|| Error::InvalidArgument("package is missing body/package.json".into()))?;
     Ok(serde_json::from_slice(raw)?)
+}
+
+fn enrollment_package_string<'a>(package: &'a Value, field: &str) -> Result<&'a str> {
+    package.get(field).and_then(Value::as_str).ok_or_else(|| {
+        trust_err(TrustError::new(
+            TrustReason::StatementInvalid,
+            format!("enrolment package is missing {field}"),
+        ))
+    })
+}
+
+fn verify_enrollment_package_scope(
+    manifest: &tn_core::Manifest,
+    package: &Value,
+    response: &EnrollmentResponseV1,
+) -> Result<()> {
+    let inner_publisher = enrollment_package_string(package, "device_identity")?;
+    if manifest.publisher_identity != inner_publisher || inner_publisher != response.publisher_did {
+        return Err(trust_err(TrustError::new(
+            TrustReason::OuterInnerSignerMismatch,
+            "outer manifest, inner enrolment, and response name different publishers",
+        )));
+    }
+    let inner_reader = enrollment_package_string(package, "recipient_identity")?;
+    if manifest.recipient_identity.as_deref() != Some(inner_reader)
+        || inner_reader != response.reader_did
+    {
+        return Err(trust_err(TrustError::new(
+            TrustReason::WrongRecipient,
+            "outer manifest, inner enrolment, and response name different readers",
+        )));
+    }
+    let ceremony = enrollment_package_string(package, "ceremony_id")?;
+    let group = enrollment_package_string(package, "group")?;
+    if manifest.ceremony_id != ceremony
+        || manifest.scope != group
+        || ceremony != response.ceremony_id
+        || group != response.group
+    {
+        return Err(trust_err(TrustError::new(
+            TrustReason::ScopeMismatch,
+            "outer manifest, inner enrolment, and response have different scope",
+        )));
+    }
+    Ok(())
 }
 
 /// Recompute the stable offer digest from exact offer artifact bytes: the
@@ -326,13 +507,23 @@ pub fn read_enrollment_response(bytes: &[u8]) -> Result<EnrollmentResponseV1> {
         ));
     }
     let package = package_payload(&body)?;
+    if package.get("package_version").and_then(Value::as_u64) != Some(1)
+        || package.get("package_kind").and_then(Value::as_str) != Some("enrolment")
+    {
+        return Err(trust_err(TrustError::new(
+            TrustReason::StatementInvalid,
+            "package is not a version-1 enrolment response",
+        )));
+    }
     let response = package
         .get("payload")
         .and_then(|payload| payload.get("enrollment_response"))
         .ok_or_else(|| {
             Error::InvalidArgument("enrolment package lacks an enrollment_response".into())
         })?;
-    EnrollmentResponseV1::from_value(response).map_err(trust_err)
+    let response = EnrollmentResponseV1::from_value(response).map_err(trust_err)?;
+    verify_enrollment_package_scope(&manifest, &package, &response)?;
+    Ok(response)
 }
 
 /// The reader's private verified-publisher record:
@@ -426,6 +617,8 @@ pub fn install_publisher_response(
     );
     let bytes = serde_json::to_vec(&Value::Object(document))?;
     tn_core::keystore_backend::atomic_write_bytes(&record_path, &bytes)?;
+    tn.runtime().reload_group_cipher(&response.group)?;
+    tn.reload_read_trust_provider()?;
     Ok(InstallResponseOutcome {
         publisher_did: response.publisher_did.clone(),
         record_path,
