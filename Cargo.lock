@@ -2593,6 +2593,7 @@ version = "0.0.1"
 dependencies = [
  "base64",
  "bs58",
+ "curve25519-dalek",
  "getrandom 0.2.17",
  "js-sys",
  "rand_core 0.6.4",
@@ -2603,6 +2604,7 @@ dependencies = [
  "tn-core",
  "tn-hibe",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]

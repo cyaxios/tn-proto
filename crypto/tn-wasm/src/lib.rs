@@ -1,10 +1,9 @@
 //! WebAssembly bindings for tn-core.
 //!
 //! Exported surface: canonical, chain, signing, indexing, envelope, the
-//! admin catalog, plus btn encrypt/decrypt. The default `WasmRuntime`
-//! supports tn-core's BTN runtime path; HIBE is exposed as standalone
-//! `hibe*` primitives for the TS/Python-compatible HIBE pipeline, and
-//! JWE remains pure JS/JOSE rather than a Rust/wasm runtime cipher.
+//! admin catalog, plus BTN/JWE encrypt/decrypt. The default `WasmRuntime`
+//! supports tn-core's BTN and standard RFC 7516 JWE runtime paths; HIBE is
+//! also exposed as standalone `hibe*` primitives.
 //!
 //! Invariants:
 //! - JSON outputs must match what tn_core (via PyO3) produces in Python,
@@ -38,6 +37,8 @@ use tn_btn::{
     Ciphertext as BtnCiphertext, Config as BtnConfig, LeafIndex,
     PublisherState as BtnPublisherState, ReaderKit as BtnReaderKit,
 };
+
+mod jwe;
 
 // Phase B1: `WasmRuntime` exposes the tn-core `Runtime` to JS. Lives
 // in its own module to keep the lib.rs surface readable; the helpers

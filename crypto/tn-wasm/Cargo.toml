@@ -17,13 +17,15 @@ crate-type = ["cdylib", "rlib"]
 # only as a fallback — every `Runtime::init` path goes through
 # `Storage` injection instead) without pulling in `fs4 → rustix →
 # errno`. The `runtime` feature below turns on `fs`.
-tn-core = { path = "../tn-core", default-features = false }
+tn-core = { path = "../tn-core", default-features = false, features = ["native-jwe"] }
 tn-btn = { path = "../tn-btn" }
 # tn-hibe (→ the Apache-2.0/MIT tn-bbg scheme) provides the standalone
 # hibe* wasm exports the TS SDK's hibe pipeline calls. Permissively
 # licensed — hohibe was removed.
 tn-hibe = { path = "../tn-hibe" }
 rand_core = { workspace = true }
+curve25519-dalek = "4"
+zeroize = { workspace = true }
 wasm-bindgen = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }

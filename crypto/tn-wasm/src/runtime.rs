@@ -36,6 +36,8 @@ use ::tn_core::{OnInvalid, Runtime, RuntimeInitOptions, SecureReadOptions};
 use crate::storage::JsStorageAdapter;
 use crate::{js_to_json, json_to_js};
 
+mod seal;
+
 /// JS-side wrapper around a single `tn-core` `Runtime` instance.
 ///
 /// Owns an `Arc<Runtime>` so the JS handle can be cloned-by-reference

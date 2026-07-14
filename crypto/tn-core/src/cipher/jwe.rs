@@ -4,7 +4,7 @@
 //! envelope performs the only outer encoding when it stores those bytes in a
 //! group's `ciphertext` field.
 
-#[cfg(all(feature = "fs", feature = "native-jwe", not(target_arch = "wasm32")))]
+#[cfg(feature = "native-jwe")]
 mod native {
     use aes_gcm::aead::{AeadInPlace as _, KeyInit as _};
     use aes_gcm::{Aes256Gcm, Nonce, Tag};
@@ -444,10 +444,22 @@ mod native {
         if epk.kty != "OKP" || epk.crv != "X25519" {
             return Err(malformed("recipient epk must be an X25519 OKP JWK"));
         }
+        let ephemeral_public = decode_array("recipient epk.x", &epk.x)?;
+        validate_ephemeral_public(&ephemeral_public)?;
         Ok(ParsedRecipient {
-            ephemeral_public: decode_array("recipient epk.x", &epk.x)?,
+            ephemeral_public,
             encrypted_key: decode_array("recipient encrypted_key", &recipient.encrypted_key)?,
         })
+    }
+
+    fn validate_ephemeral_public(public: &[u8; 32]) -> Result<()> {
+        let validation_private = [1_u8; 32];
+        if shared_secret(&MontgomeryPoint(*public), &validation_private).is_none() {
+            return Err(malformed(
+                "recipient epk.x is a low-order X25519 public key",
+            ));
+        }
+        Ok(())
     }
 
     fn validate_header_union(
@@ -675,6 +687,24 @@ mod native {
         }
 
         #[test]
+        fn low_order_epk_in_any_recipient_is_malformed() {
+            let (_, first_public) = key_pair(9);
+            let (second_private, second_public) = key_pair(10);
+            let sealer = JweCipher::new("partners", &[first_public, second_public], &[]).unwrap();
+            let reader = JweCipher::new("partners", &[], &[second_private]).unwrap();
+            let mut jwe: Value =
+                serde_json::from_slice(&sealer.encrypt(b"secret").unwrap()).unwrap();
+            jwe["recipients"][0]["header"]["epk"]["x"] =
+                Value::String(URL_SAFE_NO_PAD.encode([0_u8; 32]));
+
+            assert!(matches!(
+                reader.decrypt(&serde_json::to_vec(&jwe).unwrap()),
+                Err(Error::Malformed { kind, reason })
+                    if kind == "JWE General JSON" && reason.contains("low-order")
+            ));
+        }
+
+        #[test]
         fn single_recipient_accepts_protected_epk() {
             let mut jwe = sealed_jwe(1);
             let epk = take_recipient_member(&mut jwe, 0, "epk");
@@ -873,13 +903,10 @@ mod native {
     }
 }
 
-#[cfg(all(feature = "fs", feature = "native-jwe", not(target_arch = "wasm32")))]
+#[cfg(feature = "native-jwe")]
 pub use native::JweCipher;
 
-#[cfg(all(
-    feature = "fs",
-    any(not(feature = "native-jwe"), target_arch = "wasm32")
-))]
+#[cfg(not(feature = "native-jwe"))]
 mod unavailable {
     use crate::cipher::GroupCipher;
     use crate::{Error, Result};
@@ -925,8 +952,5 @@ mod unavailable {
     }
 }
 
-#[cfg(all(
-    feature = "fs",
-    any(not(feature = "native-jwe"), target_arch = "wasm32")
-))]
+#[cfg(not(feature = "native-jwe"))]
 pub use unavailable::JweCipher;
