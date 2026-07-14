@@ -97,6 +97,10 @@ def _decode_envelope_fields(
             raise ValueError(f"group {name!r} ciphertext must be base64 text")
         with _perf_stage("read:group_decode"):
             ciphertext = base64.b64decode(ciphertext_value, validate=True)
+            if base64.b64encode(ciphertext).decode("ascii") != ciphertext_value:
+                raise ValueError(
+                    f"group {name!r} ciphertext must use canonical padded base64"
+                )
         groups[name] = {
             "ciphertext": ciphertext,
             "field_hashes": dict(value.get("field_hashes") or {}),
