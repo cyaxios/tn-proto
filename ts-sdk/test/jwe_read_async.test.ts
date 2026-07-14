@@ -1,7 +1,6 @@
 // End-to-end: the TS runtime opens a `cipher: jwe` ceremony emitted by the
-// Python SDK (checked-in fixture) and decrypts it through `readAsync()`. This
-// is the production read path for jwe groups — panva/jose is async, so the
-// sync `read()` cannot open them, but `readAsync()` awaits the JOSE decrypt.
+// Python SDK (checked-in fixture) and decrypts it through `readAsync()`.
+// The async iterator is a compatibility sibling of ordinary synchronous read.
 import { strict as assert } from "node:assert";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,7 +18,10 @@ test("readAsync decrypts a Python-emitted jwe log", async () => {
     if (e.envelope["event_type"] !== "order.created") continue;
     // jwe group opened: the default group's plaintext is real, not a marker.
     const body = e.plaintext["default"];
-    assert.ok(body && !("$no_read_key" in body) && !("$decrypt_error" in body), "jwe group did not open");
+    assert.ok(
+      body && !("$no_read_key" in body) && !("$decrypt_error" in body),
+      "jwe group did not open",
+    );
     orders.push(body);
     // full pipeline verified alongside decrypt
     assert.equal(e.valid.signature, true, "signature");

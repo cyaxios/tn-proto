@@ -10,14 +10,14 @@
 //
 //   <group>.btn.mykit   → btn cipher (subset-difference broadcast)
 //   <group>.hibe.sk     → hibe cipher (BBG hierarchical IBE reader key)
-//   <group>.jwe.mykey   → JWE cipher  (async JOSE — read via readAsync)
+//   <group>.jwe.mykey   → JWE cipher (Rust/WASM JWE)
 //
 // The keystore can hold keys for the SAME group name under several ciphers
 // at once (e.g. the reader's own btn ceremony plus an absorbed hibe
 // grant). The log line doesn't say which cipher sealed it, so every
 // candidate is tried per entry — same posture as Python's
-// tn.reader.read_as_recipient. This synchronous foreign-read path covers btn
-// and hibe; jwe groups (async JOSE) are opened through readAsync.
+// tn.reader.read_as_recipient. Both iterator surfaces cover btn, hibe, and jwe
+// with the same trust and integrity checks.
 
 import { readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
@@ -107,19 +107,12 @@ function selectedGroups(keystorePath: string, group?: string): string[] {
   return groups;
 }
 
-function candidateMap(
-  keystorePath: string,
-  groups: string[],
-  includeJwe: boolean,
-): Map<string, GroupKits[]> {
+function candidateMap(keystorePath: string, groups: string[]): Map<string, GroupKits[]> {
   const out = new Map<string, GroupKits[]>();
   for (const group of groups) {
     const candidates = btnHibeCandidates(keystorePath, group);
     const jwe = jweReaderKit(keystorePath, group);
-    if (includeJwe && jwe !== null) candidates.push(jwe);
-    if (!includeJwe && jwe !== null) {
-      throw new Error("readAsRecipient cannot open JWE; use readAsRecipientAsync");
-    }
+    if (jwe !== null) candidates.push(jwe);
     if (candidates.length === 0) {
       throw new Error(`readAsRecipient: no recipient kit for group ${JSON.stringify(group)}`);
     }
@@ -191,7 +184,7 @@ export function* readAsRecipient(
   const verifySigs = opts.verifySignatures ?? true;
   const expectGenesis = opts.expectGenesis ?? false;
   const trusted = foreignReadTrustedPublishers(keystorePath, opts);
-  const candidates = candidateMap(keystorePath, groups, false);
+  const candidates = candidateMap(keystorePath, groups);
 
   const text = readFileSync(logPath, "utf8");
   const prevHashByType = new Map<string, string>();
@@ -236,11 +229,11 @@ export function* readAsRecipient(
 }
 
 /**
- * Async sibling of {@link readAsRecipient} that also decrypts `cipher: jwe`
- * foreign logs (panva/jose is async). Dispatches on the reader kit files a
+ * Async-compatible sibling of {@link readAsRecipient}. Dispatches on the
+ * reader kit files a
  * keystore holds — `.btn.mykit` (btn), `.hibe.sk` (hibe), `.jwe.mykey` (jwe) —
  * and tries each per line, so a party who absorbed any of them can read the
- * publisher's log. This is the path an absorbed jwe recipient uses.
+ * publisher's log. Both iterator surfaces can open every supported cipher.
  */
 export async function* readAsRecipientAsync(
   logPath: string,
@@ -251,7 +244,7 @@ export async function* readAsRecipientAsync(
   const verifySigs = opts.verifySignatures ?? true;
   const expectGenesis = opts.expectGenesis ?? false;
   const trusted = foreignReadTrustedPublishers(keystorePath, opts);
-  const candidates = candidateMap(keystorePath, groups, true);
+  const candidates = candidateMap(keystorePath, groups);
 
   const text = readFileSync(logPath, "utf8");
   const prevHashByType = new Map<string, string>();

@@ -1316,12 +1316,8 @@ export class Tn {
     return this._rt.emit(level, eventType, this._mergeForEmit(fields));
   }
 
-  /**
-   * Async sibling of {@link emit} that can seal `cipher: jwe` groups. jwe seals
-   * through panva/jose (async), so the synchronous `emit`/`info` cannot publish
-   * to a jwe group — use this (and {@link readAsync} to read them back). btn and
-   * hibe groups seal synchronously within the same pipeline.
-   */
+  /** Async-compatible sibling of {@link emit}. All cipher operations use the
+   * same implementation as the synchronous write verbs. */
   async emitAsync(
     level: string,
     eventType: string,
@@ -1331,7 +1327,7 @@ export class Tn {
     return this._rt.emitAsync(level, eventType, this._mergeForEmit(fields), aad ?? undefined);
   }
 
-  /** Async `info` for jwe ceremonies (see {@link emitAsync}). */
+  /** Async-compatible `info` (see {@link emitAsync}). */
   infoAsync(
     eventType: string,
     fields: Record<string, unknown> = {},
@@ -1499,18 +1495,9 @@ export class Tn {
     }
   }
 
-  /**
-   * Async sibling of {@link read} that also decrypts `cipher: jwe` groups.
-   *
-   * The synchronous `read()` cannot open jwe groups because the JOSE library
-   * (panva/jose) is async; this generator awaits it. Same options and per-row
-   * verify / raw / where / selector / filter / run-id behavior as `read()`,
-   * and `asRecipient` foreign-log reads decrypt btn/hibe/jwe alike (through
-   * readAsRecipientAsync).
-   */
-  async *readAsync(
-    opts: ReadOptions = {},
-  ): AsyncIterableIterator<Entry | Record<string, unknown>> {
+  /** Async-compatible sibling of {@link read}. It has the same cipher support,
+   * verification, filtering, and foreign-recipient behavior as `read()`. */
+  async *readAsync(opts: ReadOptions = {}): AsyncIterableIterator<Entry | Record<string, unknown>> {
     if (!this._hasReplaySurface()) return;
     const verify = opts.verify ?? true;
     _checkVerifyKwarg(verify);
@@ -1525,7 +1512,10 @@ export class Tn {
     // absorbed reader kit via readAsRecipientAsync (handles btn/hibe/jwe).
     let usingRecipient = false;
     let source: AsyncIterable<ReadEntry>;
-    if (opts.asRecipient !== undefined || (opts.log !== undefined && _isForeignLog(opts.log, this.did))) {
+    if (
+      opts.asRecipient !== undefined ||
+      (opts.log !== undefined && _isForeignLog(opts.log, this.did))
+    ) {
       usingRecipient = true;
       const keystorePath = opts.asRecipient ?? this._rt.config.keystorePath;
       const path = opts.log ?? this._rt.config.logPath;
@@ -1583,7 +1573,8 @@ export class Tn {
    * would; the object is always signed; the ceremony's chain state is
    * never touched. By default one `tn.object.sealed` receipt row is
    * chained through the normal write path (`receipt: false` skips it).
-   * Async because jwe groups seal through panva/jose.
+   * Promise-shaped for API compatibility; every cipher uses the same core
+   * primitives as the ordinary write/read surfaces.
    */
   async seal(
     objectType: string,

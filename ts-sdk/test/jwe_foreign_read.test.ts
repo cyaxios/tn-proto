@@ -1,6 +1,6 @@
 // Cross-party jwe: a publisher adds a recipient, emits, and the recipient reads
-// the publisher's log with an absorbed key via the async foreign-read path
-// (readAsRecipientAsync). Also proves the cipher-agnostic kit_bundle absorb
+// the publisher's log with an absorbed key via the async-compatible foreign
+// read path. Also proves the cipher-agnostic kit_bundle absorb
 // installs a jwe reader key, so the recipient's keystore is set up by absorb.
 import { strict as assert } from "node:assert";
 import { Buffer } from "node:buffer";
@@ -12,10 +12,10 @@ import { test } from "node:test";
 import { x25519 } from "@noble/curves/ed25519";
 
 import { AdminNamespace } from "../src/admin/index.js";
-import { readAsRecipientAsync } from "../src/read_as_recipient.js";
+import { readAsRecipient } from "../src/read_as_recipient.js";
 import { NodeRuntime } from "../src/runtime/node_runtime.js";
 
-test("recipient reads a publisher's jwe log via readAsRecipientAsync", async () => {
+test("recipient reads a publisher's jwe log via ordinary readAsRecipient", async () => {
   const aDir = mkdtempSync(join(tmpdir(), "jwe-pub-"));
   const rtA = NodeRuntime.init(join(aDir, "tn.yaml"), { cipher: "jwe" });
 
@@ -27,7 +27,7 @@ test("recipient reads a publisher's jwe log via readAsRecipientAsync", async () 
     publicKey: x25519.getPublicKey(bPriv),
     unsafeUnverified: true,
   });
-  await rtA.emitAsync("info", "shared.record", { secret: "for-bob", amount: 500 });
+  rtA.emit("info", "shared.record", { secret: "for-bob", amount: 500 });
 
   // B's keystore holds B's reader key — exactly what _absorbKitBundle installs
   // from a kit_bundle body (`body/default.jwe.mykey`).
@@ -36,7 +36,7 @@ test("recipient reads a publisher's jwe log via readAsRecipientAsync", async () 
 
   const aLog = join(aDir, ".tn", "tn", "logs", "tn.ndjson");
   const opened: Record<string, unknown>[] = [];
-  for await (const e of readAsRecipientAsync(aLog, bKeys, {
+  for (const e of readAsRecipient(aLog, bKeys, {
     group: "default",
     unsafeAllowUnverifiedPublisher: true,
   })) {

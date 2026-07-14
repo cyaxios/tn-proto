@@ -3,9 +3,9 @@
 // that match the Python tn.logger flow byte-for-byte (modulo the random CEK/nonce
 // inside each ciphertext).
 //
-// All three ciphers are first-class: btn and hibe seal/open through the wasm Rust
-// core; jwe seals/opens through the async TS pipeline (emitAsync / readAsync,
-// since panva/jose is async).
+// All three ciphers are first-class. btn runs through the complete wasm Rust
+// runtime; hibe uses the TS ceremony adapter; jwe cryptography runs through
+// the synchronous Rust/WASM bridge from both the sync and async verb surfaces.
 
 // tn-wasm is loaded LAZILY (see `loadWasm()` below), not via a static
 // side-effect import. The nodejs target self-instantiates its .wasm at
@@ -70,7 +70,7 @@ import {
   type CipherKind,
   type GroupKits,
 } from "../core/decrypt.js";
-import { jweSeal } from "../core/jwe.js";
+import { jweSeal, jweSealSync } from "../core/jwe.js";
 import { buildEnvelopeLine } from "../core/envelope.js";
 import {
   createJweGroup,
@@ -443,8 +443,7 @@ export class NodeRuntime {
       }
     }
     // btn is the default cipher; hibe and jwe are first-class options. jwe
-    // seals/opens through panva/jose (async), so its read path is `readAsync`
-    // and its emit path is `emitJweAsync` — see below.
+    // seal/open operations run through the synchronous Rust/WASM bridge.
     const keystore = loadKeystore(config.keystorePath);
     if (keystore.device.did !== config.device.device_identity) {
       throw new Error(
@@ -741,8 +740,8 @@ export class NodeRuntime {
     timestampOverride: string | undefined,
     eventIdOverride: string | undefined,
     aadOverride: Record<string, unknown> | undefined,
-    // Pre-sealed group ciphertexts (jwe seals asynchronously off the sync
-    // pipeline; `emitAsync` seals jwe groups first and injects them here).
+    // Optional pre-sealed group ciphertexts retained for the async-compatible
+    // emit surface. Ordinary synchronous emit seals jwe groups inline.
     preSealed?: Map<string, Uint8Array>,
   ): EmitReceipt {
     const cfg = this.config;
@@ -821,26 +820,17 @@ export class NodeRuntime {
       }
       const aadBytes = hasAad ? canonicalBytes(effectiveAad) : new Uint8Array(0);
       const plaintextBytes = canonicalBytes(plainFields);
-      // A jwe group seals asynchronously (panva/jose uses WebCrypto), so the
-      // async emit path pre-seals into `preSealed`. Reaching the SYNC seal for
-      // a jwe group with nothing pre-sealed means the caller used sync emit()/
-      // info() — which cannot seal jwe. Fail loudly BEFORE the try/catch below
-      // (which would otherwise swallow the throw as a "not a publisher" skip and
-      // write a signed record with the group's payload silently dropped).
-      if (gcfg.cipher === "jwe" && preSealed?.get(gname) === undefined) {
-        throw new Error(
-          `group ${JSON.stringify(gname)} uses cipher "jwe", which seals ` +
-            `asynchronously; use the async emit path (emitAsync, or the async ` +
-            `tn.info/tn.log/read) for this ceremony. The synchronous emit() ` +
-            `cannot seal jwe and must not silently drop the payload.`,
-        );
-      }
       let ct: Uint8Array;
       try {
         const pre = preSealed?.get(gname);
         ct =
           pre !== undefined ? pre : this._sealGroupTs(gname, gcfg.cipher, plaintextBytes, aadBytes);
       } catch (e) {
+        // JWE recipient configuration is the publisher's access-control list.
+        // A missing/malformed list or a Rust seal failure must abort the write;
+        // emitting a signed row without this private group would lose data and
+        // falsely attest that the requested record was published.
+        if (gcfg.cipher === "jwe") throw e;
         // Not a publisher for this group — skip it, exactly like Python's
         // NotAPublisherError branch (warn, drop the group, keep the emit).
         process.emitWarning(
@@ -986,11 +976,18 @@ export class NodeRuntime {
       }
       return pub.encrypt(plaintext);
     }
+    if (cipher === "jwe") {
+      return jweSealSync(
+        this._jweRecipientPubs(gname),
+        plaintext,
+        aad.length > 0 ? aad : undefined,
+      );
+    }
     throw new Error(`cipher ${JSON.stringify(cipher)} has no TS publisher path`);
   }
 
   /** Load a jwe group's recipient X25519 public keys (raw 32-byte) from
-   *  `<group>.jwe.recipients` in the keystore, for async sealing. */
+   *  `<group>.jwe.recipients` in the keystore. */
   private _jweRecipientPubs(gname: string): Uint8Array[] {
     const path = join(this.config.keystorePath, `${gname}.jwe.recipients`);
     if (!existsSync(path)) {
@@ -1000,10 +997,9 @@ export class NodeRuntime {
     return doc.map((e) => new Uint8Array(Buffer.from(e.pub_b64, "base64")));
   }
 
-  /** Async emit that can seal `cipher: jwe` groups (panva/jose is async). btn
-   *  and hibe groups seal synchronously inside the shared pipeline; jwe groups
-   *  are sealed here first and injected. Same validate / agent-policy splice /
-   *  envelope / signature / chain as `emit`. */
+  /** Async-compatible sibling of {@link emit}. jwe groups are sealed through
+   *  the same Rust/WASM primitive, then injected into the shared envelope /
+   *  signature / chain pipeline. */
   async emitAsync(
     level: string,
     eventType: string,
@@ -4845,16 +4841,14 @@ export class NodeRuntime {
       return kits;
     }
     if (cipherKind === "jwe") {
-      // Current reader key first, then rotation-archived `.revoked.<ts>` keys
-      // — the async trial-decrypt loop tries each until one opens.
+      // Current reader key first, then rotation-archived `.revoked.<ts>` keys.
       return { cipher: "jwe", kits: gk?.jweKeys ?? [] };
     }
     return { cipher: cipherKind, kits: gk?.kits ?? [] };
   }
 
-  /** Async sibling of {@link read} that also opens `cipher: jwe` groups
-   * (panva/jose is async). Signature/row_hash/chain and btn/hibe decrypt reuse
-   * the synchronous decode; only jwe groups are (re)opened asynchronously. */
+  /** Async-compatible sibling of {@link read}. Signature/row_hash/chain and
+   * cipher opening use the same Rust-backed primitives as synchronous read. */
   async *readAsync(logPath?: string, expectGenesis = false): AsyncGenerator<ReadEntry, void, void> {
     const sources = this._collectReadSources(logPath);
     const prevHashByType = new Map<string, string>();
@@ -4880,9 +4874,8 @@ export class NodeRuntime {
     }
   }
 
-  /** Decode one envelope, opening jwe groups asynchronously. Reuses the
-   * synchronous decode for everything (verify + btn/hibe decrypt), then
-   * overlays each `cipher: jwe` group's plaintext via {@link decryptGroupAsync}. */
+  /** Decode one envelope for the async iterator. Reuses the synchronous decode,
+   * then overlays jwe plaintext through the compatibility async delegate. */
   private async _decodeReadEnvelopeAsync(
     env: Record<string, unknown>,
     chainOk: boolean,

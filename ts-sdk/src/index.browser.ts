@@ -132,9 +132,9 @@ export * as btn from "./btn.js";
 export * as jwe from "./jwe.js";
 export * from "./primitive_errors.js";
 
-// RFC 7516 JWE for `cipher: jwe` groups — pure JS (panva/jose over
-// WebCrypto), so the browser is a first-class jwe recipient: mint a
-// keypair, get enrolled by a publisher, open your blocks.
+// RFC 7516 JWE for `cipher: jwe` groups through Rust/WASM, so the browser is a
+// first-class jwe recipient: mint a keypair, get enrolled by a publisher,
+// and open your blocks.
 export {
   JWE_ALG,
   JWE_ENC,
