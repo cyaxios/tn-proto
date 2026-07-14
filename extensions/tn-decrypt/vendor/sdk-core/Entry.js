@@ -19,8 +19,8 @@ const NODE_INSPECT_CUSTOM = Symbol.for("nodejs.util.inspect.custom");
  * entry that fails one or more of (signature, row_hash, chain).
  *
  * Use `verify: "skip"` to drop invalid rows silently and emit a
- * `tn.read.tampered_row_skipped` admin event, or omit `verify` (default
- * `false`) to read without integrity checks.
+ * `tn.read.tampered_row_skipped` admin event, or pass `verify: false` to
+ * inspect rows without enforcing integrity checks.
  */
 export class VerifyError extends Error {
     sequence;
