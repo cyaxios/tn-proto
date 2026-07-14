@@ -1,0 +1,3 @@
+# Keep local dev and test builds from accumulating large rustc incremental caches.
+[build]
+incremental = false
