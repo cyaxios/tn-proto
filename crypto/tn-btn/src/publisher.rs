@@ -18,7 +18,7 @@
 //! the leaf and then un-revoking would silently restore the old
 //! reader's access. We sidestep the footgun entirely.
 
-use crate::ciphertext::{Ciphertext, CoverEntry};
+use crate::ciphertext::{decrypt_with_resolver, Ciphertext, CoverEntry};
 use crate::config::{Config, TREE_HEIGHT};
 use crate::crypto::aead::{random_nonce, seal};
 use crate::crypto::kw::wrap;
@@ -341,6 +341,27 @@ impl PublisherState {
             body_nonce,
             body,
         })
+    }
+
+    /// Decrypt using publisher master state without minting a reader.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotEntitled`] for another publisher or epoch, an empty
+    /// cover, or failed key/body authentication.
+    pub fn decrypt(&self, ciphertext: &Ciphertext) -> Result<Vec<u8>> {
+        self.decrypt_with_aad(ciphertext, &[])
+    }
+
+    /// Decrypt with byte-identical additional authenticated data.
+    ///
+    /// # Errors
+    /// Returns [`Error::NotEntitled`] for another publisher or epoch, an empty
+    /// cover, failed key/body authentication, or non-matching AAD.
+    pub fn decrypt_with_aad(&self, ciphertext: &Ciphertext, aad: &[u8]) -> Result<Vec<u8>> {
+        if ciphertext.publisher_id != self.publisher_id || ciphertext.epoch != self.epoch {
+            return Err(Error::NotEntitled);
+        }
+        decrypt_with_resolver(ciphertext, aad, |label| Some(self.subset_key_cached(label)))
     }
 
     /// Cache-aware subset key derivation. FullTree goes through HKDF;

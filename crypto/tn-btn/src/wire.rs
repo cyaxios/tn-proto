@@ -35,6 +35,7 @@
 //! ```
 
 use crate::ciphertext::{Ciphertext, CoverEntry};
+use crate::config::TREE_HEIGHT;
 use crate::crypto::aead::NONCE_LEN;
 use crate::crypto::kw::WRAPPED_LEN;
 use crate::crypto::prg::KEY_LEN;
@@ -42,7 +43,7 @@ use crate::error::{Error, Result};
 use crate::reader::ReaderKit;
 use crate::tree::cover::SubsetLabel;
 use crate::tree::subset::{PathKey, ReaderKeyset};
-use crate::tree::{LeafIndex, NodePos};
+use crate::tree::{is_ancestor, LeafIndex, NodePos};
 
 /// Magic byte identifying any `btn` wire artifact.
 pub const WIRE_MAGIC: u8 = 0xB7;
@@ -189,9 +190,20 @@ fn write_node(w: &mut Writer, n: NodePos) {
 }
 
 fn read_node(r: &mut Reader<'_>) -> Result<NodePos> {
-    let depth = r.u8()?;
-    let index = r.u64()?;
-    Ok(NodePos { depth, index })
+    let node = NodePos {
+        depth: r.u8()?,
+        index: r.u64()?,
+    };
+    if node.depth > TREE_HEIGHT || node.index >= (1_u64 << node.depth) {
+        return Err(Error::Malformed {
+            kind: r.kind,
+            reason: format!(
+                "invalid tree node depth={} index={} for height {TREE_HEIGHT}",
+                node.depth, node.index
+            ),
+        });
+    }
+    Ok(node)
 }
 
 fn write_subset_label(w: &mut Writer, label: &SubsetLabel) {
@@ -206,12 +218,19 @@ fn write_subset_label(w: &mut Writer, label: &SubsetLabel) {
 }
 
 fn read_subset_label(r: &mut Reader<'_>) -> Result<SubsetLabel> {
-    let tag = r.u8()?;
-    match tag {
+    match r.u8()? {
         SUBSET_FULLTREE => Ok(SubsetLabel::FullTree),
         SUBSET_DIFFERENCE => {
             let outer = read_node(r)?;
             let inner = read_node(r)?;
+            if outer.depth >= inner.depth || !is_ancestor(outer, inner) {
+                return Err(Error::Malformed {
+                    kind: r.kind,
+                    reason: format!(
+                        "subset inner {inner:?} must be a strict descendant of outer {outer:?}"
+                    ),
+                });
+            }
             Ok(SubsetLabel::Difference { outer, inner })
         }
         other => Err(Error::Malformed {
@@ -550,5 +569,39 @@ mod tests {
         //   + 12 (nonce) + 4 (body_len) + 16 (GCM tag, body is empty but tag is there)
         // = 3+32+4+2+1+40+12+4+16 = 114
         assert_eq!(bytes.len(), 114);
+    }
+
+    #[test]
+    fn malformed_subset_coordinates_are_rejected() {
+        use crate::tree::cover::SubsetLabel;
+
+        let cases = [
+            SubsetLabel::Difference {
+                outer: NodePos { depth: 9, index: 0 },
+                inner: NodePos {
+                    depth: 10,
+                    index: 0,
+                },
+            },
+            SubsetLabel::Difference {
+                outer: NodePos { depth: 1, index: 2 },
+                inner: NodePos { depth: 2, index: 4 },
+            },
+            SubsetLabel::Difference {
+                outer: NodePos { depth: 2, index: 1 },
+                inner: NodePos { depth: 2, index: 1 },
+            },
+        ];
+
+        for label in cases {
+            let mut writer = Writer::with_capacity(19);
+            write_subset_label(&mut writer, &label);
+            let bytes = writer.into_vec();
+            let mut reader = Reader::new(&bytes, "ciphertext");
+            assert!(matches!(
+                read_subset_label(&mut reader),
+                Err(Error::Malformed { .. })
+            ));
+        }
     }
 }
