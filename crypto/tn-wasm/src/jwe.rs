@@ -45,11 +45,16 @@ pub fn decrypt_js(
     reader_private_keys: Vec<JsValue>,
     aad: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsError> {
-    let readers = parse_keys(reader_private_keys, "reader private keys")?;
-    let cipher = JweCipher::new("wasm", &[], &readers).map_err(to_js_error)?;
+    let readers =
+        protect_reader_private_keys(parse_keys(reader_private_keys, "reader private keys")?);
+    let cipher = JweCipher::new("wasm", &[], readers.as_slice()).map_err(to_js_error)?;
     cipher
         .decrypt_with_aad(ciphertext, aad.as_deref().unwrap_or(&[]))
         .map_err(to_js_error)
+}
+
+fn protect_reader_private_keys(keys: Vec<[u8; KEY_BYTES]>) -> Zeroizing<Vec<[u8; KEY_BYTES]>> {
+    Zeroizing::new(keys)
 }
 
 fn parse_keys(values: Vec<JsValue>, label: &str) -> Result<Vec<[u8; KEY_BYTES]>, JsError> {
@@ -93,4 +98,20 @@ fn set_bytes(target: &js_sys::Object, name: &str, bytes: &[u8]) -> Result<(), Js
 
 fn to_js_error(error: tn_core::Error) -> JsError {
     JsError::new(&error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroize::ZeroizeOnDrop;
+
+    #[test]
+    fn reader_private_key_boundary_uses_zeroizing_owner() {
+        let readers: Zeroizing<Vec<[u8; KEY_BYTES]>> =
+            protect_reader_private_keys(vec![[0xA5; KEY_BYTES]]);
+
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>(_: &T) {}
+        assert_zeroize_on_drop(&readers);
+        assert_eq!(readers.as_slice(), &[[0xA5; KEY_BYTES]]);
+    }
 }
