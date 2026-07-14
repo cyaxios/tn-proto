@@ -736,10 +736,13 @@ impl WasmRuntime {
     /// `.btn.mykit` reader kits and native HIBE builds mint
     /// `.hibe.mpk/.idpath/.sk` material. JWE intentionally has no private-key
     /// reader kit: each reader retains its own X25519 private key and enrolls
-    /// only an authenticated public binding.
+    /// only an authenticated public binding. If any selected group is JWE,
+    /// this kit-bundle operation rejects the request before minting; use the
+    /// TypeScript `tn.pkg.prepareRecipient` public-activation flow instead.
     ///
     /// Mirrors PyO3 `bundle_for_recipient` and Python
-    /// `tn.bundle_for_recipient`. Returns the absolute bundle path.
+    /// `tn.bundle_for_recipient`. Returns the absolute bundle path when every
+    /// selected group produces transferable kit material.
     #[wasm_bindgen(js_name = "bundleForRecipient")]
     pub fn bundle_for_recipient_js(
         &self,
@@ -816,10 +819,10 @@ impl WasmRuntime {
     /// process or call `readWithVerify` once it grows a path arg.
     ///
     /// Configured BTN and JWE groups use tn-core's normal runtime decryptors.
-    /// The special cross-publisher path recognizes portable BTN recipient
-    /// kits when they are present in the keystore. HIBE capabilities and JWE
-    /// reader-local private keys are provisioned through their own material
-    /// flows rather than being interpreted as BTN kits.
+    /// For a foreign log, tn-core discovers portable BTN kits and reader-local
+    /// JWE private keys in this runtime's keystore and builds the matching
+    /// decryptors. HIBE material participates when that runtime feature is
+    /// enabled; standalone HIBE primitives remain available in this bundle.
     #[wasm_bindgen(js_name = "readFrom")]
     pub fn read_from_js(&self, log_path: &str) -> Result<JsValue, JsError> {
         let normalized = log_path.replace('\\', "/");
@@ -861,9 +864,8 @@ impl WasmRuntime {
     /// explicit `logPath`. Mirrors Python
     /// `tn.read_raw_with_validity(log_path=…)`.
     ///
-    /// The explicit-path validity path handles configured-runtime reads.
-    /// Foreign recipient-kit reads with validity fail clearly today rather
-    /// than reporting BTN-shaped validity for HIBE/JWE material.
+    /// Configured and foreign sources use the same policy scanner and the
+    /// cipher-appropriate decryptors discovered from this runtime's keystore.
     #[wasm_bindgen(js_name = "readFromWithValidity")]
     pub fn read_from_with_validity_js(&self, log_path: &str) -> Result<JsValue, JsError> {
         let normalized = log_path.replace('\\', "/");

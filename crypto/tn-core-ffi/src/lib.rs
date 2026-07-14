@@ -1364,7 +1364,8 @@ pub unsafe extern "C" fn tn_runtime_admin_rotate_group(
 /// recipient-sealed and null, empty, abbreviated, or non-canonical values are
 /// rejected. `id_path` may be null or empty to key the reader to the group's
 /// current sealing path; pass an ancestor path to hand out a delegatable key.
-/// hibe groups only — btn/jwe groups use `tn_runtime_admin_add_recipient`.
+/// HIBE groups only. BTN uses `tn_runtime_admin_add_recipient`; JWE uses a
+/// verified X25519 public-binding enrollment flow at the SDK surface.
 /// The returned string is owned by the caller and must be released with
 /// [`tn_string_free`]. Returns null on error. Use [`tn_last_error`] for
 /// details.
@@ -2799,7 +2800,7 @@ mod tests {
             let message = last_error_message().expect("guard must set tn_last_error");
             assert!(
                 message
-                    .contains("grant_reader is hibe-only. Use add_recipient for btn/jwe groups."),
+                    .contains("grant_reader is hibe-only. BTN uses admin_add_recipient; JWE uses authenticated public-key enrollment."),
                 "unexpected error: {message}"
             );
 

@@ -159,8 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
             "'laptop-dev', 'ci', 'prod'). Defaults to <project>."
         ),
     )
-    # ``btn`` is the shipping default cipher; ``jwe`` is the pure-Python
-    # RFC 7516 alternative; ``hibe`` is the identity-path (BBG) cipher.
+    # ``btn`` is the shipping default; Python's ``jwe`` route uses joserfc and
+    # interoperates with tn-core/tn-wasm; ``hibe`` is the identity-path cipher.
     p_init.add_argument("--cipher", default="btn", choices=["btn", "jwe", "hibe"])
     p_init.add_argument("--words", type=int, default=12, choices=[12, 15, 18, 21, 24])
     p_init.add_argument(

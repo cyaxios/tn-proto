@@ -31,7 +31,7 @@ For joint Task 9 / Task 12 and the python-side session:
 2. PYTHON GAP - both-expired challenge corner: TS store pre-check yields `challenge_expired` when challenge and proof are both lapsed (fixture-conformant); python order yields `statement_expired` for the same artifact. No fixture pins the corner; python needs the same pre-check when it wires the `offer_challenge_expired` fixture case.
 3. TS/PY ALIGN - same-epoch authority assertion renewal: TS `pinHibeAuthority` rejects a freshly signed assertion at an unchanged epoch (`epoch_conflict`); in-flight python accepts it as renewal. Decide one semantic in the joint task; fixtures only pin mpk-level conflict/idempotence.
 4. TS NIT - unsafe-audit recursion window: async guard can drop a second unsafe operation's warning while the first audit settles.
-5. RUST BOUNDS - fleet-wide pending-offer quotas not implemented (per-artifact 1 MiB + zip limits are); `compile_enrolment_v1` stamps `group_epoch: 1` (no live JWE epoch in rust-sdk; managed runtimes stamp real epochs).
+5. RUST BOUNDS - pending-offer limits are per-artifact (1 MiB + zip limits), and `compile_enrolment_v1` stamps the live JWE group epoch from the runtime.
 6. TS+PY - revoke re-issue plaintext side door: `NodeRuntime.revokeReader` mass re-issues plaintext bearer kits after path rotation (TS fix in flight: sealed-only re-kits from retained verified-reader records, skip-with-warning otherwise). The python twin behaves the same today and needs the identical change. Owner: python track / joint Task 12.
 7. RUST - exact-replay grant redelivery intentionally not implemented (stricter than python `_recover_committed_hibe_grant`): committed re-attempt = `challenge_replayed`, delivery bytes retained under `hibe-grants/` for operator recovery. Joint task decides redelivery semantics.
 8. TS - runtime-level `grantReader`/`revokeReader` stay ungated beneath the admin namespace (admin surface hard-gated); joint task owns runtime-level gating and must confirm no other public entry reaches them.
@@ -941,7 +941,7 @@ impl Admin<'_> {
 
 - [ ] **Step 1: Add failing shared-vector tests**
 
-Load `../../tests/fixtures/trust/v1/did_key_vectors.json`, `signed_statements.json`, `enrollment_lifecycle.json`, and `state_transitions.json`. Reconstruct canonical bytes independently and assert exact decision/reason for every key binding, challenge, and accepted response. At the Rust SDK surface run challenge, offer, atomic approval/reconcile, accepted response, and artifact absorption/interop; retain the established documented native JWE `NotImplemented` sentinel. Run native HIBE assertion pin/update, fail-closed grant, unsafe warning/audit capture, reader challenge/proof, signed path rotation, and ancestor opt-in. Python, TypeScript, and C# managed JWE tests own first decrypt.
+Load `../../tests/fixtures/trust/v1/did_key_vectors.json`, `signed_statements.json`, `enrollment_lifecycle.json`, and `state_transitions.json`. Reconstruct canonical bytes independently and assert exact decision/reason for every key binding, challenge, and accepted response. At the Rust SDK surface run challenge, offer, atomic approval/reconcile, accepted response, artifact absorption/interop, and standard JWE first decrypt. Run native HIBE assertion pin/update, fail-closed grant, unsafe warning/audit capture, reader challenge/proof, signed path rotation, and ancestor opt-in. Python, TypeScript, and C# independently cover the same JWE wire profile.
 
 - [ ] **Step 2: Run RED**
 

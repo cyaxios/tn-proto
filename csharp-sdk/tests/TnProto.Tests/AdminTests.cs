@@ -467,10 +467,9 @@ public sealed class AdminTests
                 "did:key:zReader",
                 Path.Combine(projectDir, "kit.tnpkg")));
 
-        Assert.Contains(
-            "grant_reader is hibe-only. Use add_recipient for btn/jwe groups.",
-            error.Message,
-            StringComparison.Ordinal);
+        // The stable contract is the HIBE-only guard. Native binaries built
+        // from current source add cipher-specific enrollment guidance.
+        Assert.Contains("grant_reader is hibe-only.", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

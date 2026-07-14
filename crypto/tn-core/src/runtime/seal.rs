@@ -364,9 +364,9 @@ pub struct SealedGroupInfo {
     /// AAD a second-pass decrypt must supply. `""` when the object
     /// bound no marker for this group.
     pub aad_b64: String,
-    /// Cipher kinds with key files on disk for this group that this
-    /// build could NOT use: `"jwe"` when native JWE is unavailable,
-    /// or `"hibe"` when the `hibe` feature is off.
+    /// Cipher kinds with key files on disk for this group whose compile-time
+    /// feature is disabled: `"jwe"` without `native-jwe`, or `"hibe"`
+    /// without `hibe`.
     pub keystore_candidates: Vec<String>,
 }
 

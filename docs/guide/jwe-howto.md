@@ -22,9 +22,9 @@ its TN scheme/pairing implementation is unaudited and evaluation-only pending
 external cryptographic review; see
 [the security warning](jwe-hibe-key-ceremonies.md#choose-the-cipher-first)).
 
-The cipher is produced by JOSE libraries — **Authlib/joserfc**
-(BSD-3) in Python, **panva/jose** (MIT) in TypeScript/JS. TN does not hand-roll
-the crypto.
+The cipher is produced by **Authlib/joserfc** (BSD-3) in Python and the fixed
+RustCrypto/Dalek profile in `tn-core`, exposed to TypeScript through `tn-wasm`.
+Independent implementations are kept interoperable by RFC 7516 fixtures.
 
 ---
 
@@ -209,14 +209,16 @@ included.
   Every external reader must re-enroll an authenticated X25519 public key
   before receiving a post-rotation recipient block.
 - **Fail-closed.** A wrong marker, a non-recipient key, or a tampered/garbage
-  blob yields an error (Python) or `null` (TS) — never wrong plaintext, and the
-  SDK never throws into host space.
+  blob never yields plaintext. The public `jwe` subscriber throws a stable
+  `PrimitiveError` subtype, the JWK compatibility helper offers a detailed
+  outcome or legacy `null`, and ordinary readers leave a group hidden when the
+  caller holds no fitting key.
 - **Marker is public-inspectable.** The marker is authenticated but not
   encrypted; a proxy can read and check it (via the record's `tn_aad` echo)
   without decrypting the body.
 - **Recipient-key rotation is the forward-secrecy lever.** ECDH-ES gives forward
   secrecy against the sender (ephemeral epk), but a recipient's static X25519
   key opens all of their past blocks — rotate recipient keys to bound that.
-- **Libraries.** joserfc (BSD-3) and panva/jose (MIT) are permissive and
-  maintained; keep them current for JOSE DoS advisories. Neither is vendored —
-  the wheel and npm package stay Apache-2.0.
+- **Implementations.** Keep `joserfc`, RustCrypto, and Dalek dependencies
+  current, retain envelope size limits, and run the cross-language fixtures at
+  release time.

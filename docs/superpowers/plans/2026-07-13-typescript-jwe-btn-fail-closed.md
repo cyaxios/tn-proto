@@ -6,7 +6,7 @@
 
 **Architecture:** `sealObjectCore` is the shared Node/browser sealing boundary, so cipher errors must propagate there instead of being converted into signed objects with missing private groups. Ordinary synchronous logging and reading support BTN and JWE, while `seal()` and `unseal()` retain their promise-based application signatures. Focused integration tests exchange raw RFC 7516 General JSON with the Rust/Wasm JWE implementation in both directions.
 
-**Tech Stack:** TypeScript, Node 20+, `jose`, Node test runner, Rust 1.85, `tn-core` native JWE.
+**Tech Stack:** TypeScript, Node 20+, tn-wasm, Node test runner, Rust 1.85, `tn-core` native JWE.
 
 ## Global Constraints
 
@@ -95,7 +95,10 @@ Run:
 cargo test -p tn-proto --test interop_typescript rfc7516_jwe_round_trips_between_rust_and_typescript -- --ignored --exact --nocapture
 ```
 
-Expected RED before the parser fix: Rust-to-TypeScript succeeds, then TypeScript-to-Rust fails because `jose` places the sole recipient's `epk` in the protected header while Rust requires `recipients[0].header.epk`.
+The interop regression covers both allowed single-recipient layouts: an
+independent implementation may place `epk` in the protected header, while Rust
+emission places it in `recipients[0].header`. Rust must accept both and continue
+to emit its canonical layout.
 
 - [ ] **Step 2: Merge the three JOSE header components without weakening the TN profile**
 

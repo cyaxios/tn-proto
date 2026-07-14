@@ -495,10 +495,9 @@ export class NodeRuntime {
     return true;
   }
 
-  /** Append one log entry. Routes through `WasmRuntime.emit` so the
-   *  full envelope build / sign / chain / write happens inside the
-   *  Rust core. The TS-side `emitInternal` is dead (kept only until
-   *  the slim-down deletion pass lands). See `_emitViaWasm` below. */
+  /** Append one log entry through the shared cipher dispatcher. BTN-only
+   *  ceremonies use the complete `WasmRuntime.emit` path; JWE/HIBE ceremonies
+   *  use TS envelope orchestration with their Rust/Wasm cipher primitives. */
   emit(
     level: string,
     eventType: string,
@@ -553,13 +552,13 @@ export class NodeRuntime {
     );
   }
 
-  /** Single dispatch point that delegates to `WasmRuntime.emit*` and
-   *  synthesizes an `EmitReceipt` from the resulting on-disk envelope.
+  /** Single dispatch point for the public synchronous emit verbs.
    *
-   *  This is the ONLY emit path the four public verbs route through.
-   *  The wasm runtime owns the envelope build, sign, chain advance,
-   *  multi-group encrypt, row_hash, handler fan-out, and file append.
-   *  TS-side concerns kept here: agents-policy splice (so PoliCy
+   *  BTN-only ceremonies delegate the complete envelope build, signing,
+   *  chaining, encryption, row hash, handler fan-out, and append to
+   *  `WasmRuntime`. Mixed/JWE/HIBE ceremonies use the TS orchestration path;
+   *  JWE encryption itself still delegates to the Rust/Wasm primitive.
+   *  Shared TS-side concerns kept here include the agents-policy splice (so PoliCy
    *  templates work even when the wasm runtime doesn't have its own
    *  copy of the policy doc), session-level sign override resolution,
    *  and PEL path resolution for the `lastEmitReceipt` shim. */
@@ -583,12 +582,9 @@ export class NodeRuntime {
     // Per-call `signOverride` still wins.
     const resolvedSign =
       signOverride !== undefined && signOverride !== null ? signOverride : _sessionSignOverride;
-    // Non-btn ceremonies (any hibe group) run the TS-side pipeline: the
-    // Rust/wasm core deliberately carries no hibe cipher (contract D1 —
-    // tn-core stays scheme-free), so WasmRuntime.init would reject the
-    // ceremony. Mirrors Python's dispatch rule (`should_use_rust` is true
-    // only for btn-only ceremonies; everything else runs the pure-Python
-    // TNRuntime pipeline).
+    // Whole-runtime delegation is reserved for BTN-only ceremonies. Mixed,
+    // JWE, and HIBE ceremonies keep envelope/key-lifecycle orchestration in
+    // TypeScript; JWE group encryption still uses the Rust/Wasm fixed profile.
     if (!this._ceremonyIsBtnOnly()) {
       return this._emitViaTs(
         level,
@@ -655,9 +651,9 @@ export class NodeRuntime {
     }
   }
 
-  /** True iff every declared group uses `cipher: btn` — the precondition
-   *  for routing emits through the Rust/wasm core. Mirrors Python's
-   *  `tn._dispatch._ceremony_is_btn_only`. */
+  /** True iff every declared group uses `cipher: btn` — the local dispatch
+   *  condition for whole-envelope `WasmRuntime` ownership. This does not
+   *  describe which cipher primitives Rust/Wasm supports. */
   private _ceremonyIsBtnOnly(): boolean {
     for (const [, g] of this.config.groups) {
       if (g.cipher !== "btn") return false;
@@ -717,22 +713,22 @@ export class NodeRuntime {
     return chain;
   }
 
-  /** TS-side emit pipeline for ceremonies the wasm core cannot run (any
-   *  non-btn group — today: hibe). Byte-faithful port of Python's
-   *  `TNRuntime._emit_locked` (python/tn/logger.py):
+  /** TS-side envelope orchestration for ceremonies not delegated wholesale to
+   *  `WasmRuntime` (mixed, JWE, or HIBE). Cipher operations still use their
+   *  Rust/Wasm primitives. The pipeline follows the TN envelope contract:
    *
    *    1. classify each field public vs group-routed (multi-group aware,
    *       unrouted fields fall back to the `default` group);
    *    2. HMAC index token per private field under the group's index key;
    *    3. seal each group's canonical plaintext with the group's cipher
-   *       (hibe: hibeSeal under mpk+idpath; btn: the group's publisher) —
+   *       (JWE fixed profile, HIBE under mpk+idpath, or BTN publisher) —
    *       a group this party can't seal is skipped with a warning;
    *    4. advance the per-event-type chain, compute row_hash, sign;
    *    5. route `tn.*` events to the admin log when configured, else
    *       append to the main log and fan out to the registered handlers.
    *
-   *  Note: the pure pipeline always signs (matching Python's TNRuntime,
-   *  which carries no per-emit sign override at this layer). */
+   *  Note: this orchestration path always signs because it carries no
+   *  per-emit sign override at this layer. */
   private _emitViaTs(
     level: string,
     eventType: string,
@@ -1418,9 +1414,9 @@ export class NodeRuntime {
    * Emit the common unsafe-operation observability pair: exactly one
    * structured `TnSecurityWarning` language warning (synchronous) plus one
    * best-effort `tn.security.unsafe_operation` admin audit event. The audit
-   * rides the async emit pipeline so it works on every ceremony cipher
-   * (jwe seals cannot run on the sync path); audit failure never changes
-   * the result of the requested operation. Callers that can await the
+   * uses the promise-compatible emit path so callers can await durable append
+   * across every ceremony cipher; audit failure never changes the result of
+   * the requested operation. Callers that can await the
    * returned promise get a durably appended event; fire-and-forget callers
    * stay best-effort.
    */
@@ -4874,8 +4870,8 @@ export class NodeRuntime {
     }
   }
 
-  /** Decode one envelope for the async iterator. Reuses the synchronous decode,
-   * then overlays jwe plaintext through the compatibility async delegate. */
+  /** Decode one envelope for the async iterator. Reuses the synchronous JWE
+   * result while preserving the compatibility async delegate's output shape. */
   private async _decodeReadEnvelopeAsync(
     env: Record<string, unknown>,
     chainOk: boolean,

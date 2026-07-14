@@ -1,7 +1,9 @@
-"""Runtime dispatch: Rust tn_core for btn-only ceremonies, pure-Python otherwise.
+"""Runtime dispatch across the configured Rust and Python-managed routes.
 
-Import-time safe: if the tn_core extension is unavailable, we silently fall back
-to the pure-Python implementation (current behavior unchanged).
+BTN/HIBE ceremonies use the configured tn-core runtime. Python JWE ceremonies
+use the managed joserfc orchestration path while remaining wire-compatible with
+tn-core/tn-wasm. If the extension cannot load, the compatibility Python route
+keeps import-time behavior safe.
 """
 
 from __future__ import annotations

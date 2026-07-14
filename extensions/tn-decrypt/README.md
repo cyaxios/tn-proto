@@ -112,7 +112,9 @@ the decrypted fields.
 
 ## Scope
 
-- Reads btn ciphertexts. JWE groups would need Rust JWE first.
+- This extension imports BTN reader kits. Standard JWE is available through
+  tn-core, tn-wasm, and the SDK runtime surfaces; reader-local X25519 keys are
+  outside this extension's key-import contract.
 - Does not send anything over the network. No telemetry.
 - Does not write to the page's forms or inputs; purely visual.
 - Treats `ciphertext` in JSON contexts as the extraction point. More

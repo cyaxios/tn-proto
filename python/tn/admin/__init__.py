@@ -4,9 +4,9 @@ These are the code-level equivalents of the admin CLI commands. Exposing
 them as functions means library users can drive ceremony changes from
 their own scripts / admin tools without shelling out.
 
-Ciphers: `jwe` (static-ECDH + AES-KW + AES-GCM, pure Python), `btn`
-(NNL subset-difference broadcast, via the Rust `tn_core` extension), and
-`hibe` (identity-path delegation, via `tn-hibe`).
+Ciphers: `jwe` (Python's joserfc implementation of the interoperable tn-core
+RFC 7516 profile), `btn` (NNL subset-difference broadcast via the Rust
+`tn_core` extension), and `hibe` (identity-path delegation via `tn-hibe`).
 """
 
 from __future__ import annotations

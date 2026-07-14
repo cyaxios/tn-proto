@@ -10,11 +10,12 @@ standard conformance, not by a TN-only frame.
 ## Non-negotiable constraints
 
 **1. Standard JOSE wire only; no TN-specific crypto container.**
-Python and TypeScript use their maintained JOSE libraries. Rust implements only
-this fixed profile over RustCrypto AES-KW/AES-GCM, SHA-256, and Dalek X25519;
-it is not a general JOSE layer. Its release gate is bidirectional interop with
-the independent Python and C# implementations. New algorithms or header modes
-require a maintained JOSE implementation and a spec revision.
+Python uses its maintained JOSE library. Rust implements this fixed profile over
+RustCrypto AES-KW/AES-GCM, SHA-256, and Dalek X25519, and TypeScript consumes it
+through WebAssembly; it is deliberately not a general JOSE layer. Its release
+gate includes bidirectional Rust/Wasm↔Python seal/open and independent managed
+C# opening of the same wire bytes. New algorithms or header modes require a
+maintained implementation and a spec revision.
 
 **2. The output MUST be interoperable RFC 7516 JWE — the standard is the wire format.**
 A JWE group's `ciphertext` blob is a valid JWE General JSON Serialization object
@@ -35,7 +36,7 @@ surfaces for its public JWE primitive API.
 
 ## Design decisions — the contract
 
-**D1. Library per language — permissive JOSE libraries.**
+**D1. Implementation per surface — permissive dependencies.**
 - **Python → Authlib / `joserfc` (BSD-3-Clause).** Permissive, actively
   maintained; does multi-recipient General-JSON JWE (`encrypt_json` /
   `decrypt_json`) and RFC 8037 X25519 (OKP). Profile: `alg: ECDH-ES+A256KW`,
@@ -78,12 +79,12 @@ authorized by application policy. Successful JWE decryption alone proves none
 of those things. ECDH-1PU would be the JOSE cipher-level sender-auth mechanism;
 it is out of scope.
 
-**D4. Recipient privacy — anonymous recipient blocks by default.**
-Per-recipient headers carry **no identifying `kid`** by default, so an observer
-cannot enumerate the audience from the envelope. Readers **trial-decrypt** the
-small recipient list (bounded N; the AEAD tag rejects wrong CEKs with no
-false-plaintext risk). A group MAY opt into `kid = recipient DID` for direct
-block selection — a privacy tradeoff (it leaks the audience), off by default.
+**D4. Recipient privacy — recipient blocks are anonymous.**
+Per-recipient headers carry **no identifying `kid`**, so an observer cannot
+enumerate the audience from the envelope. Readers **trial-decrypt** the bounded
+recipient list; AES-KW integrity and the AEAD tag reject wrong keys with no
+false-plaintext risk. Adding a `kid` mode would require a profile and spec
+revision because the fixed TN header allowlist is `alg`, `enc`, and `epk`.
 
 **D5. AAD marker — bind via JWE's native `aad` member.**
 The TN marker (the AAD "governed flag": authenticated, not encrypted) binds
@@ -94,25 +95,23 @@ JWE the marker rides inside the JWE JSON (inside `ciphertext`, so covered by
 `row_hash`). This keeps JWE library-native and spec-pure. The public `tn_aad`
 echo is unchanged (cross-cipher uniform, publicly inspectable by a proxy without
 decrypting); at read the reader reconstructs the marker from `tn_aad` and the
-JOSE library verifies it against the embedded `aad` member (mismatch fails the
-tag). Empty marker ⇒ omit the `aad` member (byte-clean no-marker path).
+JWE implementation verifies it against the embedded `aad` member (mismatch
+fails the tag). Empty marker ⇒ omit the `aad` member (byte-clean no-marker path).
 
 ## Framing — JWE is a general-purpose cipher, and it is a *standard*
 
 JWE is a first-class `GroupCipher` peer to `btn` (the default) and `hibe`,
-selected per group with `cipher: jwe`. Nothing else about the flow changes — a
-caller writes to and reads from a `jwe` group through the identical verb surface
-(seal/encrypt, open/decrypt, add-recipient, revoke, rotate, absorb) as btn/hibe.
-Interchangeability is the deliverable: a caller should not have to know whether a
-group is jwe, btn, or hibe.
+selected per group with `cipher: jwe`. Ordinary emit/read and seal/unseal use the
+same application surface for every cipher. Reader enrollment, revocation, and
+rotation retain their cipher-specific semantics because JWE enrolls public
+X25519 keys rather than minting BTN kits or HIBE path capabilities.
 
-btn and hibe are TN-original schemes — TN owns both ends, so cross-impl parity
-needs bespoke golden vectors of a format TN defines. JWE is the opposite: an
-**IETF standard** with independent, maintained implementations in every
-language. So this cipher leans on them and lets the standard carry interop —
-per-language libraries rather than one shared Rust impl, off the
-native/wasm runtime (Constraint 4), and cross-impl correctness gated by a
-**Python↔TS round-trip conformance test**, not golden vectors.
+btn and hibe are TN-original schemes, while JWE is an **IETF standard**. TN's
+fixed JWE profile is implemented in Rust and exposed through WebAssembly to
+TypeScript. Python independently seals and opens the profile. C# ordinary verbs
+use the Rust runtime, while its managed second-pass cipher independently opens
+recipient blocks. Cross-language fixtures prove every supported direction uses
+the same RFC 7516 General JSON wire format.
 
 **When to choose jwe:** the audience is small and enumerated at seal time; you
 want a standards-compliant, externally-inspectable envelope; recipients already
@@ -122,22 +121,17 @@ future seals), or you seal to someone holding no key yet (HIBE can model that,
 but TN's HIBE scheme/pairing implementation is unaudited and evaluation-only
 pending external cryptographic review).
 
-## Library survey
+## Implementation inventory
 
-| Lang | Library | License | Multi-recipient General JSON | ECDH-ES+A256KW · X25519(OKP) · A256GCM · `aad` | wasm | Verdict |
-|---|---|---|---|---|---|---|
-| Python | **Authlib / joserfc** | **BSD-3** | Yes (`encrypt_json`/`decrypt_json`) | X25519/RFC 8037 ✓ | n/a | **CHOSEN** (D1) |
-| Python | jwcrypto | **LGPL-3.0** | Yes | All ✓ | n/a | **REJECTED** — copyleft |
-| Python | python-jose | MIT | No | — | n/a | Rejected — unmaintained |
-| Python | pyca/cryptography + thin serializer | Apache/BSD | (in-house) | in-house | n/a | Fallback only (D1) |
-| JS/TS | **panva `jose`** | **MIT** | Yes (`GeneralEncrypt`/`generalDecrypt`) | All ✓ (native X25519) | Node/browser/Workers/Deno/Bun | **CHOSEN** (D1) |
-| Rust | josekit | MIT/Apache-2.0 | Yes | All ✓ | **No (OpenSSL C dep)** | server-only fallback; never wasm |
-| Rust | RustCrypto `jose` | Apache/MIT | (structural) | Encryption not implemented | pure-Rust | Not usable |
+| Surface | Implementation | Multi-recipient General JSON | Fixed profile | Runtime |
+|---|---|---|---|---|
+| Rust | `tn-core` over RustCrypto + Dalek | Yes | `ECDH-ES+A256KW`, X25519, `A256GCM`, optional `aad` | Native |
+| WebAssembly / TypeScript | `tn-wasm` exports backed by `tn-core` | Yes | Same Rust profile | Node and browser hosts |
+| Python | Authlib / `joserfc` (BSD-3) | Yes | Same interoperable profile | Python |
+| C# | Managed platform cryptography | Opens General JSON recipient blocks | Same interoperable profile | .NET |
 
-Keep the JOSE library pins current: joserfc and panva/jose have both had DoS
-advisories (oversized-segment / compressed-JWE); TN envelopes are size-bounded
-upstream, but track the pins. panva/jose is the most scrutinized (reference impl
-for many OIDC libraries).
+Keep cryptographic dependencies current and retain strict envelope size limits.
+Cross-implementation fixtures are the release gate for profile compatibility.
 
 ## The wire object
 
@@ -180,9 +174,9 @@ A JWE group's on-disk material:
 
 ## Design tradeoffs
 
-- **Recipient enumeration vs. direct selection (D4).** Default anonymity means
-  readers trial-decrypt. At small N this is microseconds; a group opting into
-  `kid` trades audience privacy for O(1) block selection.
+- **Recipient anonymity (D4).** Readers trial-decrypt the bounded recipient
+  list. The fixed profile intentionally omits `kid`; direct block selection
+  would require a new profile because it exposes audience identity.
 - **Marker location differs from btn/hibe (D5).** JWE stores the marker in the
   `aad` member (inside `ciphertext`), whereas btn/hibe reconstruct it from
   `tn_aad` and never store it. The reader cross-checks the reconstructed

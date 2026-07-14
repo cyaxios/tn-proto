@@ -53,9 +53,9 @@ default = ["runtime"]
 # `std::fs` directly, so the absence of cross-process advisory locks
 # is a non-issue: single-process, single-threaded.
 # NOTE: tn-core/hibe is deliberately NOT enabled for the wasm runtime yet.
-# The TS SDK runs hibe ceremonies on its own pipeline (which still seals via
-# the tn-hibe wasm exports — Rust crypto), so the wasm WasmRuntime only needs
-# btn. Pulling tn-core/hibe (→ tn-hibe → bls12_381_plus) into the wasm
+# WasmRuntime handles BTN and standard JWE through tn-core. The TS SDK runs
+# HIBE ceremonies on its own pipeline (which still seals via the tn-hibe wasm
+# exports — Rust crypto). Pulling tn-core/hibe (→ tn-hibe → bls12_381_plus) into the wasm
 # runtime currently traps WasmRuntime init ("unreachable"); routing TS hibe
 # through the native wasm runtime is a tracked follow-up.
 runtime = ["tn-core/fs"]

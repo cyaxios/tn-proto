@@ -482,7 +482,8 @@ def _read_raw_inner(
         yield from _filtered_run_entries(rt.read(log_path), all_runs=all_runs, where=where)
         return
 
-    # Legacy reader path — pure-Python, unchanged behavior for JWE.
+    # Python-managed reader path; JWE opens through the independent joserfc
+    # implementation of the same fixed tn-core/tn-wasm wire profile.
     from .reader import read as _legacy_read_fn
     yield from _filtered_run_entries(
         _legacy_read_fn(log_path, cfg), all_runs=all_runs, where=where

@@ -35,8 +35,8 @@ public sealed class UnsealValidity
 /// One group block <see cref="Tn.UnsealAsync(string, UnsealOptions?, CancellationToken)"/>
 /// could not open, with everything a managed cipher needs for a second-pass
 /// decrypt: the wire ciphertext, the reconstructed AAD bytes (both base64),
-/// and which cipher kinds have key files on disk the native build could not
-/// use (<c>"jwe"</c> always; <c>"hibe"</c> only in hibe-less native builds).
+/// and any cipher kinds whose on-disk material is available to a host-managed
+/// decryptor. Native JWE opens directly when matching reader keys are loaded.
 /// </summary>
 public sealed record SealedBlock(
     string Name,

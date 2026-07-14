@@ -9,9 +9,9 @@ namespace TnProto.Tests;
 /// <summary>
 /// The managed JWE cipher against real wire bytes: the committed
 /// fixtures under <c>Fixtures/</c> are RFC 7516 General JSON JWEs sealed
-/// by the repo's normative Python cipher (see
-/// <c>Fixtures/README.md</c>), and the env-gated interop cases run whole
-/// jwe ceremonies through the live Python SDK.
+/// by the independent Python/joserfc implementation (see
+/// <c>Fixtures/README.md</c>), and the env-gated cases prove managed C# open
+/// interoperability with live Python ceremonies.
 /// </summary>
 public sealed class JweSealedGroupCipherTests
 {

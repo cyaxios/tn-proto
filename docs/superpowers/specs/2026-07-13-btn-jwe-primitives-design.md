@@ -67,9 +67,11 @@ The JWE surface has these semantics:
 - The existing TN JWE profile remains the wire contract: protected `enc` is `A256GCM`; each recipient block has `alg: ECDH-ES+A256KW`, its own X25519 `epk`, and a wrapped copy of the shared content-encryption key.
 - Rust provides explicit `encrypt_with_aad` and `decrypt_with_aad`; the other languages accept optional AAD.
 - AAD is authenticated exactly as transmitted by the RFC 7516 representation. Missing or changed AAD fails closed.
-- TypeScript methods remain asynchronous because the existing `jose` implementation is asynchronous.
+- TypeScript exposes immediate Rust/Wasm-backed methods plus compatible async delegates.
 
-Rust uses the native `tn-core` JWE engine. Python, TypeScript, and C# wrap their existing interoperable JWE engines; they are not forced through Rust FFI.
+Rust uses the native `tn-core` JWE engine, TypeScript delegates its public
+primitive surface through tn-wasm, and Python and C# retain independent
+interoperable implementations for cross-language coverage.
 
 ## Identity and authenticity boundary
 

@@ -557,7 +557,8 @@ def create_fresh(
     "btn" (NNL subset-difference broadcast — default; uses the Rust
     tn_core extension when available, with a Python fallback for emit)
     or "jwe" (standard RFC 7516 JWE — ECDH-ES+A256KW per recipient via
-    the joserfc JOSE library; a pure-Python cipher with no Rust dependency).
+    Python's independent joserfc implementation, interoperable with the
+    tn-core/tn-wasm fixed profile).
     Once chosen, the whole ceremony uses that cipher. Change it by
     creating a new ceremony.
 

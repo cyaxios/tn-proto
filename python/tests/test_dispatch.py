@@ -1,4 +1,4 @@
-"""Verify btn ceremonies route through Rust; JWE falls back to Python."""
+"""Verify whole-runtime BTN routing and Python-managed JWE dispatch."""
 
 from __future__ import annotations
 

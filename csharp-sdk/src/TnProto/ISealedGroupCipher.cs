@@ -4,9 +4,9 @@ namespace TnProto;
 /// A managed group cipher for the sealed-object second-pass decrypt seam.
 /// </summary>
 /// <remarks>
-/// The native build leaves a group block sealed when it holds no usable
-/// key or the cipher is unavailable in that build (for example JWE on wasm,
-/// or hibe in hibe-less builds — see <see cref="SealedBlock.KeystoreCandidates"/>).
+/// The native call leaves a group block sealed when it holds no usable key or
+/// a compile-time cipher feature is disabled. A host may also use this seam
+/// with an external key store; see <see cref="SealedBlock.KeystoreCandidates"/>.
 /// Registering an implementation under the group name in
 /// <see cref="UnsealOptions.GroupCiphers"/> lets
 /// <see cref="Tn.UnsealAsync(string, UnsealOptions?, CancellationToken)"/>

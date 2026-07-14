@@ -14,8 +14,9 @@ main API, preserves its secure defaults and tuning parameters, and makes the
 read pipeline accept cipher implementations through a narrow internal boundary.
 
 This design refines Rust Workstream B from the 2026-07-11 trusted-enrollment and
-secure-read design. It does not broaden this slice into JWE cryptography,
-enrollment, HIBE authority management, rotation, or revocation.
+secure-read design. BTN, JWE, and HIBE plug into the resulting read boundary;
+the slice does not change enrollment, authority management, rotation, or
+revocation behavior.
 
 ## Production-code constraints
 

@@ -21,7 +21,7 @@ namespace TnProto.Jwe;
 /// <remarks>
 /// <para>
 /// Opens the wire shape the Rust (RustCrypto/Dalek), Python (joserfc), and
-/// TypeScript (panva/jose) runtimes seal: a General JSON Serialization object
+/// TypeScript (Rust/Wasm) runtimes seal: a General JSON Serialization object
 /// whose recipient blocks
 /// each wrap one shared A256GCM content key with <c>ECDH-ES+A256KW</c>
 /// over X25519 (RFC 8037 OKP), the sender's ephemeral public key riding

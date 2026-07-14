@@ -82,7 +82,7 @@ test("ensureGroup(jwe) adds a jwe group to a btn ceremony (mixed, both open)", a
   let opened = false;
   for await (const e of rt.readAsync()) {
     if (e.envelope["event_type"] !== "kyc.done") continue;
-    // jwe group (async) and btn default group (sync-in-async) both decrypt
+    // The JWE group and BTN default group both decrypt through the same read.
     assert.deepEqual(e.plaintext["secrets"], { ssn: "123-45-6789" });
     assert.deepEqual(e.plaintext["default"], { note: "ok" });
     opened = true;

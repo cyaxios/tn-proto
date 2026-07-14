@@ -911,11 +911,11 @@ mod unavailable {
     use crate::cipher::GroupCipher;
     use crate::{Error, Result};
 
-    /// Placeholder used where native JWE support is absent.
+    /// Compile-time placeholder for builds that disable `native-jwe`.
     pub struct JweCipher;
 
     impl JweCipher {
-        /// Return the native-JWE unavailable error for this build.
+        /// Report that this build disabled the `native-jwe` feature.
         pub fn new(
             _group: impl Into<String>,
             _recipient_public_keys: &[[u8; 32]],
@@ -948,7 +948,7 @@ mod unavailable {
     }
 
     fn unavailable() -> Error {
-        Error::NotImplemented("native JWE is unavailable in this build")
+        Error::NotImplemented("tn-core was compiled without the native-jwe feature")
     }
 }
 

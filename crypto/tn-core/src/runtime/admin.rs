@@ -503,9 +503,10 @@ impl Runtime {
     /// # Errors
     ///
     /// - [`InvalidConfig`](crate::Error::InvalidConfig) if the group is
-    ///   unknown, is not a hibe group (grant_reader is hibe-only — use
-    ///   add_recipient for btn/jwe groups), `reader_did` is not a complete
-    ///   convertible Ed25519 `did:key`, or `id_path` fails validation.
+    ///   unknown, is not a hibe group (BTN uses `admin_add_recipient`; JWE
+    ///   uses authenticated X25519 public-binding enrollment), `reader_did`
+    ///   is not a complete convertible Ed25519 `did:key`, or `id_path` fails
+    ///   validation.
     /// - [`Cipher`](crate::Error::Cipher) when the scheme rejects the key
     ///   material or path, plus I/O errors from staging or writing the kit.
     #[cfg(feature = "hibe")]
@@ -562,7 +563,8 @@ impl Runtime {
         if spec.cipher != "hibe" {
             return Err(Error::InvalidConfig(format!(
                 "tn.admin.grant_reader: group {group:?} uses cipher {:?}; \
-                 grant_reader is hibe-only. Use add_recipient for btn/jwe groups.",
+                 grant_reader is hibe-only. BTN uses admin_add_recipient; \
+                 JWE uses authenticated public-key enrollment.",
                 spec.cipher
             )));
         }

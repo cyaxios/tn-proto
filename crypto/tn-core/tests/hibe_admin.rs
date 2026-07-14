@@ -313,7 +313,7 @@ fn grant_reader_is_hibe_only() {
         .unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("grant_reader is hibe-only. Use add_recipient for btn/jwe groups."),
+        msg.contains("grant_reader is hibe-only. BTN uses admin_add_recipient; JWE uses authenticated public-key enrollment."),
         "{msg}"
     );
 

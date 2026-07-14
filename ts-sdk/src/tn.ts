@@ -303,8 +303,8 @@ export interface TnInitOptions {
    * an existing yaml — the cipher is read from the yaml). `"btn"` (default),
    * `"hibe"` (BBG hierarchical identity-based encryption; the fresh keystore
    * becomes its own HIBE authority), or `"jwe"` (per-recipient ECDH-ES; the
-   * creator becomes publisher and sole reader — seal/open with the async
-   * emitAsync/readAsync verbs). Mirrors Python's `tn.init(..., cipher=...)`.
+   * creator becomes publisher and sole reader, using the ordinary emit/read
+   * and seal/unseal surfaces). Mirrors Python's `tn.init(..., cipher=...)`.
    */
   cipher?: "btn" | "hibe" | "jwe";
 }
@@ -1102,10 +1102,10 @@ export class Tn {
     return new ScopeBuilder({ groups: cfg.groups, keystorePath: cfg.keystorePath }, dids);
   }
 
-  /** True iff this ceremony's runtime has an attached Rust/WASM core
-   *  servicing the emit path. False before the first emit (wasm attaches
-   *  lazily) and after an admin-driven runtime reset. Mirrors Python's
-   *  `using_rust`. The read path remains pure-TS today. */
+  /** True iff this ceremony has attached the complete `WasmRuntime` for
+   *  whole-envelope emit ownership. False before lazy attachment and after an
+   *  admin-driven reset. This flag does not indicate whether an individual
+   *  cipher primitive is Rust/Wasm-backed. Mirrors Python's `using_rust`. */
   usingRust(): boolean {
     return this._rt.isWasmActive();
   }
