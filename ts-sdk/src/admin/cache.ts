@@ -83,6 +83,7 @@ function _parseState(stateRaw: unknown): AdminState {
   if (Array.isArray(s["coupons"])) state.coupons = s["coupons"] as AdminState["coupons"];
   if (Array.isArray(s["enrolments"])) state.enrolments = s["enrolments"] as AdminState["enrolments"];
   if (Array.isArray(s["vaultLinks"])) state.vaultLinks = s["vaultLinks"] as AdminState["vaultLinks"];
+  if (Array.isArray(s["jwksPins"])) state.jwksPins = s["jwksPins"] as AdminState["jwksPins"];
   return state;
 }
 

@@ -25,6 +25,7 @@ const ADMIN_PREFIXES = [
   "tn.coupon.",
   "tn.enrolment.",
   "tn.vault.",
+  "tn.jwks.",
   // `tn.agents.policy_published` carries the inline markdown text + hash
   // of the active policy file at init time (per 2026-04-25 spec §2.7).
   // Belongs in the admin log so policy version history is replayable.

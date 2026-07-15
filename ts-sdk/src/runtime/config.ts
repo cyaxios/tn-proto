@@ -94,8 +94,16 @@ export interface VaultConfig {
   enabled: boolean;
   url?: string;
   linkedProjectId?: string;
+  jwks?: VaultJwksConfig;
   autosync: boolean;
   syncIntervalSeconds: number;
+}
+
+export interface VaultJwksConfig {
+  issuer: string;
+  url: string;
+  fingerprint: string;
+  pinnedAt?: string;
 }
 
 function pathFromYaml(yamlDir: string, raw: string): string {
@@ -702,6 +710,42 @@ function nonEmptyString(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
 }
 
+function normalizeVaultJwksConfig(
+  yamlPath: string,
+  raw: unknown,
+): VaultJwksConfig | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`${yamlPath}: vault.jwks must be an object when present`);
+  }
+  const jwks = raw as Record<string, unknown>;
+  const issuer = nonEmptyString(jwks.issuer);
+  const url = nonEmptyString(jwks.url);
+  const fingerprint = nonEmptyString(jwks.fingerprint);
+  const pinnedAt = nonEmptyString(jwks.pinned_at);
+  if (issuer === undefined) {
+    throw new Error(`${yamlPath}: vault.jwks.issuer must be a non-empty string`);
+  }
+  if (url === undefined) {
+    throw new Error(`${yamlPath}: vault.jwks.url must be a non-empty string`);
+  }
+  if (fingerprint === undefined) {
+    throw new Error(`${yamlPath}: vault.jwks.fingerprint must be a non-empty string`);
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(fingerprint)) {
+    throw new Error(`${yamlPath}: vault.jwks.fingerprint must be sha256:<64 lowercase hex chars>`);
+  }
+  if (pinnedAt !== undefined && !Number.isFinite(Date.parse(pinnedAt))) {
+    throw new Error(`${yamlPath}: vault.jwks.pinned_at must be an ISO timestamp when present`);
+  }
+  return {
+    issuer,
+    url,
+    fingerprint,
+    ...(pinnedAt === undefined ? {} : { pinnedAt }),
+  };
+}
+
 // Exported for the cross-language vault-normalization contract test
 // (ts-sdk/test/vault_normalize_contract.test.ts). Internal primitive,
 // not part of the public SDK surface.
@@ -727,6 +771,7 @@ export function normalizeVaultConfig(
   const enabled = (vault.enabled as boolean | undefined) ?? true;
   const url = nonEmptyString(vault.url);
   const linkedProjectId = nonEmptyString(vault.linked_project_id);
+  const jwks = normalizeVaultJwksConfig(yamlPath, vault.jwks);
   const autosync = (vault.autosync as boolean | undefined) ?? enabled;
   const intervalRaw = vault.sync_interval_seconds ?? 600;
   const syncIntervalSeconds = Number(intervalRaw);
@@ -740,6 +785,7 @@ export function normalizeVaultConfig(
     enabled,
     ...(enabled && url !== undefined ? { url } : {}),
     ...(enabled && linkedProjectId !== undefined ? { linkedProjectId } : {}),
+    ...(jwks === undefined ? {} : { jwks }),
     autosync: enabled ? autosync : false,
     syncIntervalSeconds,
   };

@@ -133,6 +133,59 @@ test("vault.linked then vault.unlinked links then stamps unlinkedAt", () => {
   assert.equal(r.state.vaultLinks[0]!.unlinkedAt, "t2");
 });
 
+test("jwks.pinned records signed JWKS trust state", () => {
+  const r = new AdminStateReducer();
+  r.apply(
+    env("tn.jwks.pinned", {
+      issuer: "did:key:zVault",
+      jwks_url: "https://vault.example/.well-known/tn/jwks.json",
+      jwks_fingerprint: "sha256:" + "a".repeat(64),
+      pinned_at: "2026-07-14T00:00:00Z",
+      signing_kid: "vault-signing-2026-07",
+      signing_key_fingerprint: "sha256:" + "b".repeat(64),
+    }),
+  );
+
+  assert.equal(r.state.jwksPins.length, 1);
+  assert.deepEqual(r.state.jwksPins[0], {
+    issuer: "did:key:zVault",
+    jwksUrl: "https://vault.example/.well-known/tn/jwks.json",
+    jwksFingerprint: "sha256:" + "a".repeat(64),
+    pinnedAt: "2026-07-14T00:00:00Z",
+    rotatedAt: null,
+    previousJwksFingerprint: null,
+    signingKid: "vault-signing-2026-07",
+    signingKeyFingerprint: "sha256:" + "b".repeat(64),
+  });
+});
+
+test("jwks.rotated updates the active signed JWKS trust state", () => {
+  const r = new AdminStateReducer();
+  r.apply(
+    env("tn.jwks.pinned", {
+      issuer: "did:key:zVault",
+      jwks_url: "https://vault.example/.well-known/tn/jwks.json",
+      jwks_fingerprint: "sha256:" + "a".repeat(64),
+      pinned_at: "2026-07-14T00:00:00Z",
+    }),
+  );
+  r.apply(
+    env("tn.jwks.rotated", {
+      issuer: "did:key:zVault",
+      jwks_url: "https://vault.example/.well-known/tn/jwks.json",
+      previous_jwks_fingerprint: "sha256:" + "a".repeat(64),
+      jwks_fingerprint: "sha256:" + "c".repeat(64),
+      rotated_at: "2026-07-15T00:00:00Z",
+    }),
+  );
+
+  assert.equal(r.state.jwksPins.length, 1);
+  assert.equal(r.state.jwksPins[0]!.jwksFingerprint, "sha256:" + "c".repeat(64));
+  assert.equal(r.state.jwksPins[0]!.previousJwksFingerprint, "sha256:" + "a".repeat(64));
+  assert.equal(r.state.jwksPins[0]!.pinnedAt, "2026-07-14T00:00:00Z");
+  assert.equal(r.state.jwksPins[0]!.rotatedAt, "2026-07-15T00:00:00Z");
+});
+
 test("duplicate row_hash is applied only once", () => {
   const r = new AdminStateReducer();
   const e = env("tn.recipient.added", { group: "g", leaf_index: 9, recipient_identity: "did:key:zR" }, { rh: "dupRH" });

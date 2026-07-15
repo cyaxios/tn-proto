@@ -1,0 +1,24 @@
+{
+  "issuer": "did:key:zVaultBrowserExample",
+  "issued_at": "2026-07-14T00:00:00Z",
+  "keys": [
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "kid": "vault-signing-2026-07",
+      "use": "sig",
+      "alg": "EdDSA",
+      "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "tn_status": "active"
+    },
+    {
+      "kty": "OKP",
+      "crv": "X25519",
+      "kid": "vault-enc-2026-07",
+      "use": "enc",
+      "alg": "ECDH-ES+A256KW",
+      "x": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+      "tn_status": "active"
+    }
+  ]
+}

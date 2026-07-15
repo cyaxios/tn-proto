@@ -3,6 +3,19 @@
 
 import type { NodeRuntime } from "../runtime/node_runtime.js";
 import type { EmitReceipt } from "../core/results.js";
+import {
+  jwksPinnedEventFields,
+  jwksRotatedEventFields,
+  TN_JWKS_PINNED_EVENT,
+  TN_JWKS_ROTATED_EVENT,
+  writeVaultJwksConfig,
+  type WriteVaultJwksConfigResult,
+} from "./jwks.js";
+import type { VaultJwksConfig } from "../runtime/config.js";
+
+export interface VaultJwksWriteResult extends WriteVaultJwksConfigResult {
+  receipt: EmitReceipt;
+}
 
 export class VaultNamespace {
   private readonly _merge: (f: Record<string, unknown>) => Record<string, unknown>;
@@ -76,5 +89,42 @@ export class VaultNamespace {
     if (opts.linkedVault !== undefined) mutateOpts.linkedVault = opts.linkedVault;
     if (opts.linkedProjectId !== undefined) mutateOpts.linkedProjectId = opts.linkedProjectId;
     this._rt.setCeremonyMode(mode, mutateOpts);
+  }
+
+  /**
+   * Pin a trusted JWKS in the ceremony YAML and emit the signed
+   * `tn.jwks.pinned` admin event. This is the normal path for accepting a
+   * JWKS pin: YAML becomes the local operating cache, while admin replay is
+   * the tamper-evident source of truth.
+   */
+  async pinJwks(
+    jwks: VaultJwksConfig,
+    opts: { signingKid?: string; signingKeyFingerprint?: string } = {},
+  ): Promise<VaultJwksWriteResult> {
+    const write = writeVaultJwksConfig(this._rt.config.yamlPath, jwks);
+    const receipt = this._rt.emit(
+      "info",
+      TN_JWKS_PINNED_EVENT,
+      this._merge({ ...jwksPinnedEventFields(write.jwks, opts) }),
+    );
+    return { ...write, receipt };
+  }
+
+  /**
+   * Rotate a pinned JWKS in the ceremony YAML and emit the signed
+   * `tn.jwks.rotated` admin event.
+   */
+  async rotateJwks(
+    next: VaultJwksConfig,
+    previousJwksFingerprint: string,
+    opts: { signingKid?: string; signingKeyFingerprint?: string; rotatedAt?: string } = {},
+  ): Promise<VaultJwksWriteResult> {
+    const write = writeVaultJwksConfig(this._rt.config.yamlPath, next);
+    const receipt = this._rt.emit(
+      "info",
+      TN_JWKS_ROTATED_EVENT,
+      this._merge({ ...jwksRotatedEventFields(write.jwks, previousJwksFingerprint, opts) }),
+    );
+    return { ...write, receipt };
   }
 }

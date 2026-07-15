@@ -18,6 +18,11 @@ import {
 export const JWE_ALG = "ECDH-ES+A256KW";
 export const JWE_ENC = "A256GCM";
 
+export interface JweSealRecipient {
+  publicKey: Uint8Array;
+  kid?: string;
+}
+
 /** base64url (no padding) — browser- and Node-safe (no Buffer). */
 function b64u(bytes: Uint8Array): string {
   let bin = "";
@@ -60,7 +65,7 @@ const MAX_PROFILE_RECIPIENTS = 1_024;
 const MAX_JWE_BYTES = 128 * 1024 * 1024;
 const MAX_AAD_BYTES = 64 * 1024;
 const X25519_VALIDATION_SCALAR = new Uint8Array(32).fill(1);
-const HEADER_MEMBERS = new Set(["alg", "enc", "epk"]);
+const HEADER_MEMBERS = new Set(["alg", "enc", "epk", "kid"]);
 const EPK_MEMBERS = new Set(["kty", "crv", "x"]);
 const RECIPIENT_MEMBERS = new Set(["header", "encrypted_key"]);
 const JWE_MEMBERS = new Set([
@@ -152,6 +157,7 @@ function isJoseHeader(header: JsonObject): boolean {
   if (!hasOnlyMembers(header, HEADER_MEMBERS)) return false;
   if (hasMember(header, "alg") && typeof header.alg !== "string") return false;
   if (hasMember(header, "enc") && typeof header.enc !== "string") return false;
+  if (hasMember(header, "kid") && typeof header.kid !== "string") return false;
   if (hasMember(header, "epk") && !isEphemeralPublicKey(header.epk)) return false;
   return true;
 }
@@ -233,31 +239,71 @@ function isTnJweProfile(value: unknown): value is JsonObject {
   );
 }
 
+function normalizeSealRecipient(recipient: Uint8Array | JweSealRecipient): JweSealRecipient {
+  if (recipient instanceof Uint8Array) return { publicKey: recipient };
+  return recipient;
+}
+
+function validateKid(kid: string | undefined): string | undefined {
+  if (kid === undefined) return undefined;
+  if (kid.length === 0) throw new Error("jwe: recipient kid must be non-empty when present");
+  return kid;
+}
+
+function attachRecipientKids(ciphertext: Uint8Array, recipients: readonly JweSealRecipient[]): Uint8Array {
+  if (!recipients.some((recipient) => recipient.kid !== undefined)) return ciphertext;
+  const doc = asObject(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(ciphertext)));
+  if (doc === null || !Array.isArray(doc.recipients)) {
+    throw new Error("jwe: native encrypt returned malformed JWE");
+  }
+  doc.recipients = doc.recipients.map((rawRecipient, index) => {
+    const recipient = asObject(rawRecipient);
+    if (recipient === null) throw new Error("jwe: native encrypt returned malformed recipient");
+    const kid = recipients[index]?.kid;
+    if (kid === undefined) return recipient;
+    const header = asObject(recipient.header) ?? {};
+    return {
+      ...recipient,
+      header: {
+        ...header,
+        kid,
+      },
+    };
+  });
+  return new TextEncoder().encode(JSON.stringify(doc));
+}
+
 /** Seal `plaintext` to N X25519 recipients as an RFC 7516 General JSON JWE.
  *
  * Returns the UTF-8 JSON bytes that become the group's opaque `ciphertext`.
  * An empty/absent `aad` omits the JWE `aad` member so the no-marker path stays
  * a plain seal, byte-compatible in shape with the Python side. */
 export function jweSealSync(
-  recipientPubs: Uint8Array[],
+  recipientPubs: Array<Uint8Array | JweSealRecipient>,
   plaintext: Uint8Array,
   aad?: Uint8Array,
 ): Uint8Array {
   if (recipientPubs.length === 0) {
     throw new Error("jwe: cannot seal with zero recipients");
   }
-  for (const pub of recipientPubs) {
+  const recipients = recipientPubs.map((rawRecipient) => {
+    const recipient = normalizeSealRecipient(rawRecipient);
+    validateKid(recipient.kid);
+    return recipient;
+  });
+  const publicKeys = recipients.map((recipient) => recipient.publicKey);
+  for (const pub of publicKeys) {
     requireRawX25519(pub, "recipient public key");
     if (!isUsableX25519PublicKey(pub)) {
       throw new Error("jwe: recipient public key is not a usable X25519 point");
     }
   }
-  return encryptSync(plaintext, recipientPubs, aad);
+  return attachRecipientKids(encryptSync(plaintext, publicKeys, aad), recipients);
 }
 
 /** Backward-compatible async delegate to {@link jweSealSync}. */
 export async function jweSeal(
-  recipientPubs: Uint8Array[],
+  recipientPubs: Array<Uint8Array | JweSealRecipient>,
   plaintext: Uint8Array,
   aad?: Uint8Array,
 ): Promise<Uint8Array> {
@@ -279,6 +325,35 @@ function parseTnJwe(blob: Uint8Array): JsonObject | null {
     return null;
   }
   return isTnJweProfile(parsed) ? parsed : null;
+}
+
+function stripKidFromHeader(value: unknown): JsonObject | undefined {
+  const header = asObject(value);
+  if (header === null) return undefined;
+  const next: JsonObject = { ...header };
+  delete next.kid;
+  return Object.keys(next).length === 0 ? undefined : next;
+}
+
+function nativeDecryptBlob(profile: JsonObject): Uint8Array {
+  const doc = JSON.parse(JSON.stringify(profile)) as JsonObject;
+  const sharedHeader = stripKidFromHeader(doc.unprotected);
+  if (sharedHeader === undefined) delete doc.unprotected;
+  else doc.unprotected = sharedHeader;
+
+  if (Array.isArray(doc.recipients)) {
+    doc.recipients = doc.recipients.map((rawRecipient) => {
+      const recipient = asObject(rawRecipient);
+      if (recipient === null) return rawRecipient;
+      const header = stripKidFromHeader(recipient.header);
+      if (header === undefined) {
+        const { header: _header, ...rest } = recipient;
+        return rest;
+      }
+      return { ...recipient, header };
+    });
+  }
+  return new TextEncoder().encode(JSON.stringify(doc));
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
@@ -340,8 +415,9 @@ export function jweDecryptManyDetailedSync(
   blob: Uint8Array,
   aad?: Uint8Array,
 ): JweDecryptOutcome {
-  if (parseTnJwe(blob) === null) return { status: "malformed" };
-  const stableBlob = new Uint8Array(blob);
+  const profile = parseTnJwe(blob);
+  if (profile === null) return { status: "malformed" };
+  const stableBlob = nativeDecryptBlob(profile);
   const keys = importReaderKeys(readerJwks);
   if (keys.length === 0) return { status: "not_entitled" };
   try {

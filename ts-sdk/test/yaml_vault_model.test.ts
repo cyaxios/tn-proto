@@ -56,6 +56,69 @@ test("vault block normalizes with 600 second default", () => {
   assert.equal(cfg.vault.syncIntervalSeconds, 600);
 });
 
+test("vault.jwks pin normalizes as local operating trust config", () => {
+  const cfg = loadConfig(
+    writeYaml(
+      BASE +
+        `vault:
+  enabled: true
+  url: https://vault.example
+  jwks:
+    issuer: did:key:zVaultExample
+    url: https://vault.example/.well-known/tn/jwks.json
+    fingerprint: sha256:${"a".repeat(64)}
+    pinned_at: 2026-07-14T00:00:00Z
+`,
+    ),
+  );
+
+  assert.deepEqual(cfg.vault.jwks, {
+    issuer: "did:key:zVaultExample",
+    url: "https://vault.example/.well-known/tn/jwks.json",
+    fingerprint: "sha256:" + "a".repeat(64),
+    pinnedAt: "2026-07-14T00:00:00Z",
+  });
+});
+
+test("vault.jwks pin validates fingerprint and timestamp", () => {
+  assert.throws(
+    () =>
+      loadConfig(
+        writeYaml(
+          BASE +
+            `vault:
+  enabled: true
+  url: https://vault.example
+  jwks:
+    issuer: did:key:zVaultExample
+    url: https://vault.example/.well-known/tn/jwks.json
+    fingerprint: nope
+`,
+        ),
+      ),
+    /vault\.jwks\.fingerprint must be sha256/,
+  );
+
+  assert.throws(
+    () =>
+      loadConfig(
+        writeYaml(
+          BASE +
+            `vault:
+  enabled: true
+  url: https://vault.example
+  jwks:
+    issuer: did:key:zVaultExample
+    url: https://vault.example/.well-known/tn/jwks.json
+    fingerprint: sha256:${"a".repeat(64)}
+    pinned_at: not-a-date
+`,
+        ),
+      ),
+    /vault\.jwks\.pinned_at must be an ISO timestamp/,
+  );
+});
+
 test("legacy ceremony link fields still populate vault view", () => {
   const cfg = loadConfig(
     writeYaml(`

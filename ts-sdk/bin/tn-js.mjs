@@ -52,6 +52,7 @@ import { watchCmd } from "../dist/cli/watch.js";
 import { adminCmd } from "../dist/cli/admin.js";
 import { initCmd } from "../dist/cli/init.js";
 import { vaultCmd } from "../dist/cli/vault.js";
+import { jwksCmd } from "../dist/cli/jwks.js";
 import { showCmd } from "../dist/cli/show.js";
 import { walletCmd } from "../dist/cli/wallet.js";
 import { accountCmd } from "../dist/cli/account.js";
@@ -396,6 +397,9 @@ switch (cmd) {
   case "vault":
     process.exitCode = await vaultCmd(argv);
     break;
+  case "jwks":
+    process.exitCode = await jwksCmd(argv);
+    break;
   case "wallet":
     process.exitCode = await walletCmd(argv);
     break;
@@ -474,7 +478,7 @@ switch (cmd) {
     // firehose is gated like Python: only listed when TN_FIREHOSE_ENABLED=1.
     const fhEnabled = firehoseEnabled();
     const topVerbs =
-      "tn-js <init|wallet|account|vault|show|seal|verify|canonical|info|read|watch|streams|validate|compile|admin|bundle|add_recipient|absorb|export|import|group|" +
+      "tn-js <init|wallet|account|vault|jwks|show|seal|verify|canonical|info|read|watch|streams|validate|compile|admin|bundle|add_recipient|absorb|export|import|group|" +
       (fhEnabled ? "firehose|" : "") +
       "inbox>\n";
     const firehoseHelp = fhEnabled
@@ -510,6 +514,15 @@ switch (cmd) {
         "             emit tn.vault.linked event into the ceremony's log\n" +
         "  vault unlink <vault-did> <project-id> [--reason <text>] [--yaml <path>]\n" +
         "             emit tn.vault.unlinked event into the ceremony's log\n" +
+        "  vault jwks inspect --url <jwks-url>\n" +
+        "             fetch a JWKS and print issuer/fingerprints without trusting it\n" +
+        "  vault jwks pin --yaml <path> --issuer <did> --url <jwks-url> --fingerprint <sha256:...>\n" +
+        "             verify the fetched JWKS against the explicit pin, then record trust\n" +
+        "  vault jwks rotate --yaml <path> --issuer <did> --url <jwks-url> --fingerprint <sha256:...> --previous <sha256:...>\n" +
+        "             verify and record a pinned JWKS rotation\n" +
+        "  jwks export [--yaml <path>] [--out <path>] [--issuer <did>] [--kid <kid>] [--json]\n" +
+        "             [--include-encryption] [--group <name>[,<name>...]]\n" +
+        "             export local public signing keys, and optionally JWE encryption public keys, as TN JWKS\n" +
         "  show env   [--yaml <path>] [--format human|json] [--json] — print resolved ceremony config (human default)\n" +
         "  show profiles [--format human|json] — print the curated profile catalog\n" +
         "  seal       stdin JSON -> ndjson envelope line on stdout\n" +

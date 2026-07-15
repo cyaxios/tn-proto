@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TN JWKS Trust Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --ink: #2a3333;
+      --ink-soft: #4d4d4d;
+      --ink-mid: #666666;
+      --muted: #8d96a0;
+      --hair: #e6e8ec;
+      --hair-soft: #f0f1f4;
+      --accent: #2a3333;
+      --accent-soft: #eef1f3;
+      --good: #3d8b5a;
+      --warn: #a0783d;
+      --danger: #b6475d;
+      --mono: "SF Mono", "Fira Code", Consolas, monospace;
+      --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --radius: 4px;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--hair);
+      padding: 36px 40px 28px;
+    }
+    .wordmark {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      font-weight: 500;
+    }
+    header p {
+      margin: 0;
+      color: var(--ink-mid);
+      max-width: 760px;
+    }
+    main {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 28px 24px 72px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.8fr);
+      gap: 20px;
+      align-items: start;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--hair);
+      border-radius: var(--radius);
+      box-shadow: 0 0 6px rgba(168, 178, 209, 0.28);
+      overflow: hidden;
+      margin-bottom: 20px;
+    }
+    .card-header {
+      padding: 14px 18px 12px;
+      border-bottom: 1px solid var(--hair-soft);
+    }
+    .card-header h2 {
+      margin: 0 0 4px;
+      font-size: 13px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .card-header p {
+      margin: 0;
+      color: var(--ink-mid);
+      font-size: 13px;
+    }
+    .body {
+      padding: 16px 18px 18px;
+    }
+    label {
+      display: block;
+      color: var(--ink-mid);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin: 0 0 6px;
+    }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--hair);
+      border-radius: var(--radius);
+      background: var(--bg);
+      color: var(--ink-soft);
+      font: 12px/1.65 var(--mono);
+      padding: 10px 12px;
+      outline: none;
+    }
+    textarea {
+      min-height: 300px;
+      resize: vertical;
+    }
+    input:focus, textarea:focus {
+      border-color: var(--ink-mid);
+      background: #fff;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 160px;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 14px;
+    }
+    .stack { display: grid; gap: 14px; }
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    button {
+      border: 1px solid var(--hair);
+      border-radius: var(--radius);
+      background: var(--surface);
+      color: var(--ink-soft);
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      padding: 7px 12px;
+      text-transform: uppercase;
+    }
+    button:hover { border-color: var(--ink-mid); color: var(--ink); }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .output {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.7 var(--mono);
+      color: var(--ink-soft);
+      background: var(--bg);
+      border-top: 1px solid var(--hair-soft);
+      padding: 14px 18px;
+      min-height: 72px;
+    }
+    .status {
+      display: inline-block;
+      font: 11px/1.4 var(--mono);
+      color: var(--muted);
+      margin-top: 10px;
+    }
+    .status.ok { color: var(--good); }
+    .status.warn { color: var(--warn); }
+    .status.err { color: var(--danger); }
+    .kv {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 8px 12px;
+      font: 12px/1.55 var(--mono);
+    }
+    .kv .k { color: var(--muted); }
+    .kv .v { color: var(--ink-soft); word-break: break-all; }
+    .pill {
+      display: inline-block;
+      border: 1px solid var(--hair);
+      border-radius: 3px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      padding: 1px 5px;
+      font: 10px/1.5 var(--mono);
+      margin-left: 6px;
+    }
+    .flow-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--ink-soft);
+    }
+    .flow-list li { margin: 5px 0; }
+    .good { color: var(--good); }
+    .danger { color: var(--danger); }
+    .muted { color: var(--muted); }
+    @media (max-width: 860px) {
+      header { padding: 28px 20px 22px; }
+      main { padding: 20px 16px 48px; }
+      .grid { grid-template-columns: 1fr; }
+      .row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div class="wordmark">TN Protocol</div>
+  <h1>JWKS Trust Demo</h1>
+  <p>Simulate how a service verifies public encryption keys before sending vault-bound or project-to-project TN packages.</p>
+</header>
+
+<main>
+  <div class="grid">
+    <section>
+      <div class="card">
+        <div class="card-header">
+          <h2>Real-World Workflow</h2>
+          <p>A finance audit service needs to send encrypted nightly reports to a company vault.</p>
+        </div>
+        <div class="body">
+          <ol class="flow-list">
+            <li>The audit service asks the vault for its public key set.</li>
+            <li>An admin compares the vault issuer and fingerprint against the value shown in the dashboard.</li>
+            <li>The project pins that exact issuer and fingerprint in `vault.jwks` and records `tn.jwks.pinned`.</li>
+            <li>When the service sends a nightly report, it seals the payload to the vault's active encryption key.</li>
+            <li>The report log records `tn.jwks.key_selected`, so an auditor can prove which vault key protected that report.</li>
+            <li>If the vault rotates keys, the service records the previous fingerprint in `tn.jwks.rotated` before trusting the new set.</li>
+          </ol>
+          <div class="button-row">
+            <button id="run-vault-flow" class="primary">Run audit report flow</button>
+          </div>
+          <span id="flow-status" class="status">This simulation uses the local sample vault JWKS.</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Project-to-Project Sharing</h2>
+          <p>AuditCo publishes a public JWKS so a partner service can encrypt a handoff package back to AuditCo.</p>
+        </div>
+        <div class="body">
+          <ol class="flow-list">
+            <li>AuditCo exports a public JWKS from its local TN project, including the JWE encryption public key.</li>
+            <li>The partner receives the JWKS URL or file through an authenticated channel.</li>
+            <li>The partner checks the issuer and fingerprint with AuditCo before trusting the key set.</li>
+            <li>The partner seals a package to AuditCo's active encryption key and records the selected `kid`.</li>
+            <li>AuditCo can decrypt with its local private `<group>.jwe.mykey`; the private key never leaves AuditCo.</li>
+          </ol>
+          <div class="button-row">
+            <button id="run-sharing-flow" class="primary">Run sharing flow</button>
+          </div>
+          <span id="sharing-status" class="status">Uses the current JWKS input as AuditCo's published key set.</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>JWKS Input</h2>
+          <p>Use a local dev endpoint, a hosted endpoint, or the built-in sample key set.</p>
+        </div>
+        <div class="body">
+          <div class="row">
+            <div>
+              <label for="jwks-url">JWKS URL</label>
+              <input id="jwks-url" value="./sample-jwks.json" spellcheck="false">
+            </div>
+            <button id="fetch-jwks" class="primary">Fetch</button>
+          </div>
+          <label for="jwks-json">JWKS JSON</label>
+          <textarea id="jwks-json" spellcheck="false"></textarea>
+          <div class="button-row">
+            <button id="load-sample">Load sample</button>
+            <button id="inspect-jwks" class="primary">Inspect</button>
+            <button id="clear-output">Clear output</button>
+          </div>
+          <span id="input-status" class="status">Load the sample or fetch ./sample-jwks.json from the local examples server.</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Pin Verification</h2>
+          <p>The strongest local policy is explicit pinning: issuer and JWKS fingerprint must both match.</p>
+        </div>
+        <div class="body stack">
+          <div>
+            <label for="pin-issuer">Pinned issuer</label>
+            <input id="pin-issuer" spellcheck="false" placeholder="did:key:zVault...">
+          </div>
+          <div>
+            <label for="pin-fingerprint">Pinned JWKS fingerprint</label>
+            <input id="pin-fingerprint" spellcheck="false" placeholder="sha256:...">
+          </div>
+          <div class="button-row">
+            <button id="copy-current-pin">Use current as pin</button>
+            <button id="verify-pin" class="primary">Verify pin</button>
+            <button id="simulate-rotation">Simulate rotation</button>
+          </div>
+          <span id="pin-status" class="status">Inspect a JWKS first.</span>
+        </div>
+      </div>
+    </section>
+
+    <aside>
+      <div class="card">
+        <div class="card-header">
+          <h2>Inspection Result</h2>
+          <p>Equivalent to the read-only `vault jwks inspect` decision surface.</p>
+        </div>
+        <div class="body">
+          <div id="summary" class="kv">
+            <div class="k">issuer</div><div class="v muted">not inspected</div>
+            <div class="k">jwks fingerprint</div><div class="v muted">not inspected</div>
+            <div class="k">active enc kid</div><div class="v muted">not inspected</div>
+            <div class="k">active key fp</div><div class="v muted">not inspected</div>
+          </div>
+        </div>
+        <div id="inspect-output" class="output">No inspection yet.</div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>CLI Shape</h2>
+          <p>Use the same issuer and fingerprint in the TypeScript CLI.</p>
+        </div>
+        <div id="cli-output" class="output">Inspect a JWKS to generate a command.</div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Simulated Vault Flow</h2>
+          <p>Shows the trust decisions for an encrypted nightly audit report.</p>
+        </div>
+        <div id="flow-output" class="output">Run the audit report flow to see the vault/JWKS handoff.</div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Simulated Sharing Flow</h2>
+          <p>Shows the public-key export and recipient encryption handoff.</p>
+        </div>
+        <div id="sharing-output" class="output">Run the sharing flow to see the project-to-project handoff.</div>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<script type="module">
+  const SAMPLE_JWKS = {
+    issuer: "did:key:zVaultBrowserExample",
+    issued_at: "2026-07-14T00:00:00Z",
+    keys: [
+      {
+        kty: "OKP",
+        crv: "Ed25519",
+        kid: "vault-signing-2026-07",
+        use: "sig",
+        alg: "EdDSA",
+        x: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        tn_status: "active",
+      },
+      {
+        kty: "OKP",
+        crv: "X25519",
+        kid: "vault-enc-2026-07",
+        use: "enc",
+        alg: "ECDH-ES+A256KW",
+        x: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+        tn_status: "active",
+      },
+    ],
+  };
+
+  let current = null;
+
+  const $ = (id) => document.getElementById(id);
+
+  function setStatus(id, message, kind = "") {
+    const el = $(id);
+    el.textContent = message;
+    el.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function esc(value) {
+    return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function canonical(value) {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+    const entries = Object.entries(value).filter(([, v]) => v !== undefined);
+    entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+    return "{" + entries.map(([k, v]) => JSON.stringify(k) + ":" + canonical(v)).join(",") + "}";
+  }
+
+  async function sha256Hex(text) {
+    const bytes = new TextEncoder().encode(text);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  function b64uToBytes(value) {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+    const raw = atob(padded);
+    return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+  }
+
+  function publicJwkForFingerprint(key) {
+    return {
+      alg: key.alg,
+      crv: key.crv,
+      kid: key.kid,
+      kty: key.kty,
+      use: key.use,
+      x: key.x,
+    };
+  }
+
+  function parseTnJwks(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("JWKS must be an object");
+    }
+    if (typeof value.issuer !== "string" || value.issuer.length === 0) {
+      throw new Error("JWKS issuer must be a non-empty string");
+    }
+    if (!Array.isArray(value.keys) || value.keys.length === 0) {
+      throw new Error("JWKS keys must be a non-empty array");
+    }
+
+    const kids = new Set();
+    for (const key of value.keys) {
+      if (!key || typeof key !== "object" || Array.isArray(key)) throw new Error("each key must be an object");
+      for (const field of ["kty", "crv", "kid", "use", "alg", "x"]) {
+        if (typeof key[field] !== "string" || key[field].length === 0) {
+          throw new Error(`key.${field} must be a non-empty string`);
+        }
+      }
+      if (kids.has(key.kid)) throw new Error(`duplicate kid: ${key.kid}`);
+      kids.add(key.kid);
+      if (key.kty !== "OKP") throw new Error(`unsupported kty for ${key.kid}: ${key.kty}`);
+      if (key.use === "enc") {
+        if (key.crv !== "X25519") throw new Error(`encryption key ${key.kid} must use X25519`);
+        if (key.alg !== "ECDH-ES+A256KW") throw new Error(`encryption key ${key.kid} has unsupported alg`);
+      }
+      if (key.use === "sig") {
+        if (key.crv !== "Ed25519") throw new Error(`signing key ${key.kid} must use Ed25519`);
+        if (key.alg !== "EdDSA") throw new Error(`signing key ${key.kid} has unsupported alg`);
+      }
+      const publicBytes = b64uToBytes(key.x);
+      if (publicBytes.length !== 32) throw new Error(`key ${key.kid} public key must be 32 bytes`);
+    }
+    return value;
+  }
+
+  function selectActiveEncryptionKey(jwks) {
+    const active = jwks.keys.filter((key) =>
+      key.use === "enc" &&
+      key.crv === "X25519" &&
+      key.alg === "ECDH-ES+A256KW" &&
+      (key.tn_status === undefined || key.tn_status === "active")
+    );
+    if (active.length === 0) throw new Error("no active encryption key");
+    if (active.length > 1) throw new Error("multiple active encryption keys");
+    return active[0];
+  }
+
+  async function inspect(value, sourceUrl = $("jwks-url").value.trim()) {
+    const jwks = parseTnJwks(value);
+    const selected = selectActiveEncryptionKey(jwks);
+    const result = {
+      issuer: jwks.issuer,
+      url: sourceUrl,
+      jwksFingerprint: "sha256:" + await sha256Hex(canonical(jwks)),
+      activeEncryptionKid: selected.kid,
+      activeEncryptionKeyFingerprint: "sha256:" + await sha256Hex(canonical(publicJwkForFingerprint(selected))),
+      activeEncryptionKey: selected,
+    };
+    current = result;
+    renderInspection(result);
+    return result;
+  }
+
+  function renderInspection(result) {
+    $("summary").innerHTML = `
+      <div class="k">issuer</div><div class="v">${esc(result.issuer)}</div>
+      <div class="k">jwks fingerprint</div><div class="v">${esc(result.jwksFingerprint)}</div>
+      <div class="k">active enc kid</div><div class="v">${esc(result.activeEncryptionKid)}<span class="pill">use: enc</span></div>
+      <div class="k">active key fp</div><div class="v">${esc(result.activeEncryptionKeyFingerprint)}</div>
+    `;
+    $("inspect-output").innerHTML = esc(JSON.stringify({
+      ok: true,
+      verb: "vault.jwks.inspect",
+      issuer: result.issuer,
+      jwks_url: result.url,
+      jwks_fingerprint: result.jwksFingerprint,
+      active_encryption_kid: result.activeEncryptionKid,
+      active_encryption_key_fingerprint: result.activeEncryptionKeyFingerprint,
+    }, null, 2));
+    $("cli-output").innerHTML = esc([
+      "tn-js vault jwks pin \\",
+      "  --yaml .tn/demo/tn.yaml \\",
+      `  --issuer ${result.issuer} \\`,
+      `  --url ${result.url || "https://vault.example/.well-known/tn/jwks.json"} \\`,
+      `  --fingerprint ${result.jwksFingerprint}`,
+    ].join("\n"));
+  }
+
+  function renderFlow(result) {
+    const selectedAt = new Date().toISOString();
+    const pinnedEvent = {
+      event_type: "tn.jwks.pinned",
+      issuer: result.issuer,
+      jwks_url: result.url,
+      jwks_fingerprint: result.jwksFingerprint,
+      pinned_at: selectedAt,
+    };
+    const keySelectedEvent = {
+      event_type: "tn.jwks.key_selected",
+      issuer: result.issuer,
+      jwks_url: result.url,
+      jwks_fingerprint: result.jwksFingerprint,
+      encryption_kid: result.activeEncryptionKid,
+      encryption_key_fingerprint: result.activeEncryptionKeyFingerprint,
+      trust_policy: "pinned",
+      trust_reason: "pin-match",
+      selected_at: selectedAt,
+    };
+    $("flow-output").innerHTML = esc([
+      "Scenario: AuditCo sends a nightly finance report to the company vault.",
+      "",
+      "1. AuditCo discovers the vault key set",
+      `   GET ${result.url}`,
+      "",
+      "2. The SDK inspects the key set without trusting it yet",
+      `   issuer: ${result.issuer}`,
+      `   jwks:   ${result.jwksFingerprint}`,
+      "",
+      "3. The admin-approved pin matches, so the project records trust",
+      JSON.stringify(pinnedEvent, null, 2),
+      "",
+      "4. The nightly report is sealed to the active vault encryption key",
+      JSON.stringify(keySelectedEvent, null, 2),
+      "",
+      "Result: the vault can decrypt the report with its private key, and the TN log explains exactly which public key was used.",
+    ].join("\n"));
+  }
+
+  function renderSharingFlow(result) {
+    const selectedAt = new Date().toISOString();
+    const publisherCommand = [
+      "tn-js jwks export \\",
+      "  --yaml .tn/auditco/tn.yaml \\",
+      "  --include-encryption \\",
+      "  --group default \\",
+      "  --out auditco-public-jwks.json \\",
+      "  --json",
+    ].join("\n");
+    const partnerPin = {
+      issuer: result.issuer,
+      jwks_fingerprint: result.jwksFingerprint,
+      received_from: "AuditCo security portal",
+      verified_by: "out-of-band approval",
+      verified_at: selectedAt,
+    };
+    const packageSeal = {
+      package: "partner-ledger-handoff.tnpkg",
+      recipient_issuer: result.issuer,
+      encryption_kid: result.activeEncryptionKid,
+      encryption_key_fingerprint: result.activeEncryptionKeyFingerprint,
+      sealed_at: selectedAt,
+      private_key_location: "AuditCo local keystore only",
+    };
+
+    $("sharing-output").innerHTML = esc([
+      "Scenario: A partner service needs to send an encrypted ledger handoff back to AuditCo.",
+      "",
+      "1. AuditCo exports only public key material",
+      publisherCommand,
+      "",
+      "2. AuditCo shares auditco-public-jwks.json or hosts it at a stable JWKS URL",
+      `   issuer: ${result.issuer}`,
+      `   jwks:   ${result.jwksFingerprint}`,
+      "",
+      "3. The partner pins the exact issuer and fingerprint after out-of-band verification",
+      JSON.stringify(partnerPin, null, 2),
+      "",
+      "4. The partner seals the handoff package to AuditCo's active encryption key",
+      JSON.stringify(packageSeal, null, 2),
+      "",
+      "Result: the partner can encrypt to AuditCo, but cannot decrypt AuditCo's data; AuditCo's private JWE key never leaves its keystore.",
+    ].join("\n"));
+  }
+
+  function parseTextarea() {
+    const raw = $("jwks-json").value.trim();
+    if (!raw) throw new Error("JWKS JSON is empty");
+    return JSON.parse(raw);
+  }
+
+  $("load-sample").addEventListener("click", async () => {
+    $("jwks-json").value = JSON.stringify(SAMPLE_JWKS, null, 2);
+    setStatus("input-status", "sample loaded", "ok");
+    try {
+      await inspect(SAMPLE_JWKS, "sample://browser");
+      setStatus("input-status", "sample inspected", "ok");
+    } catch (err) {
+      const message = String(err).replace("Error: ", "");
+      setStatus(
+        "input-status",
+        message.includes("Failed to fetch")
+          ? "fetch failed: start the examples server, use a same-origin URL, or enable CORS on the JWKS endpoint"
+          : message,
+        "err",
+      );
+    }
+  });
+
+  $("fetch-jwks").addEventListener("click", async () => {
+    const url = $("jwks-url").value.trim();
+    if (!url) {
+      setStatus("input-status", "enter a JWKS URL", "err");
+      return;
+    }
+    setStatus("input-status", "fetching...");
+    try {
+      const response = await fetch(url, { headers: { accept: "application/json" } });
+      if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+      const json = await response.json();
+      $("jwks-json").value = JSON.stringify(json, null, 2);
+      await inspect(json, url);
+      setStatus("input-status", "fetched and inspected", "ok");
+    } catch (err) {
+      const message = String(err).replace("Error: ", "");
+      setStatus(
+        "input-status",
+        message.includes("Failed to fetch")
+          ? "fetch failed: start the examples server, use a same-origin URL, or enable CORS on the JWKS endpoint"
+          : message,
+        "err",
+      );
+    }
+  });
+
+  $("inspect-jwks").addEventListener("click", async () => {
+    setStatus("input-status", "inspecting...");
+    try {
+      await inspect(parseTextarea());
+      setStatus("input-status", "inspection complete", "ok");
+    } catch (err) {
+      setStatus("input-status", String(err).replace("Error: ", ""), "err");
+    }
+  });
+
+  $("copy-current-pin").addEventListener("click", () => {
+    if (!current) {
+      setStatus("pin-status", "inspect a JWKS first", "err");
+      return;
+    }
+    $("pin-issuer").value = current.issuer;
+    $("pin-fingerprint").value = current.jwksFingerprint;
+    setStatus("pin-status", "current issuer/fingerprint copied", "ok");
+  });
+
+  $("verify-pin").addEventListener("click", async () => {
+    if (!current) {
+      setStatus("pin-status", "inspect a JWKS first", "err");
+      return;
+    }
+    const issuer = $("pin-issuer").value.trim();
+    const fingerprint = $("pin-fingerprint").value.trim();
+    if (issuer === current.issuer && fingerprint === current.jwksFingerprint) {
+      setStatus("pin-status", "pin-match: trusted for local use", "ok");
+      renderFlow(current);
+    } else {
+      setStatus("pin-status", "pin mismatch: do not use this key set", "err");
+    }
+  });
+
+  $("run-vault-flow").addEventListener("click", async () => {
+    setStatus("flow-status", "running...");
+    try {
+      const url = $("jwks-url").value.trim() || "./sample-jwks.json";
+      let json;
+      try {
+        const response = await fetch(url, { headers: { accept: "application/json" } });
+        if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+        json = await response.json();
+      } catch {
+        json = SAMPLE_JWKS;
+      }
+      $("jwks-json").value = JSON.stringify(json, null, 2);
+      const result = await inspect(json, url);
+      $("pin-issuer").value = result.issuer;
+      $("pin-fingerprint").value = result.jwksFingerprint;
+      renderFlow(result);
+      setStatus("pin-status", "pin-match: trusted for local use", "ok");
+      setStatus("flow-status", "flow complete", "ok");
+    } catch (err) {
+      setStatus("flow-status", String(err).replace("Error: ", ""), "err");
+    }
+  });
+
+  $("run-sharing-flow").addEventListener("click", async () => {
+    setStatus("sharing-status", "running...");
+    try {
+      let result = current;
+      if (!result) {
+        const json = parseTextarea();
+        result = await inspect(json, $("jwks-url").value.trim() || "sample://sharing");
+      }
+      $("pin-issuer").value = result.issuer;
+      $("pin-fingerprint").value = result.jwksFingerprint;
+      renderSharingFlow(result);
+      setStatus("sharing-status", "sharing flow complete", "ok");
+    } catch (err) {
+      setStatus("sharing-status", String(err).replace("Error: ", ""), "err");
+    }
+  });
+
+  $("simulate-rotation").addEventListener("click", async () => {
+    if (!current) {
+      setStatus("pin-status", "inspect a JWKS first", "err");
+      return;
+    }
+    const next = structuredClone(parseTextarea());
+    next.issued_at = new Date().toISOString();
+    next.keys = next.keys.map((key) =>
+      key.use === "enc" ? { ...key, kid: key.kid + "-next", x: "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM" } : key
+    );
+    $("jwks-json").value = JSON.stringify(next, null, 2);
+    const previous = current.jwksFingerprint;
+    const result = await inspect(next, $("jwks-url").value.trim() || "sample://rotated");
+    $("cli-output").innerHTML = esc([
+      "tn-js vault jwks rotate \\",
+      "  --yaml .tn/demo/tn.yaml \\",
+      `  --issuer ${result.issuer} \\`,
+      `  --url ${result.url || "https://vault.example/.well-known/tn/jwks.json"} \\`,
+      `  --fingerprint ${result.jwksFingerprint} \\`,
+      `  --previous ${previous}`,
+    ].join("\n"));
+    setStatus("pin-status", "rotation simulated; previous fingerprint preserved in CLI command", "warn");
+  });
+
+  $("clear-output").addEventListener("click", () => {
+    current = null;
+    $("inspect-output").textContent = "No inspection yet.";
+    $("cli-output").textContent = "Inspect a JWKS to generate a command.";
+    $("flow-output").textContent = "Run the audit report flow to see the vault/JWKS handoff.";
+    $("sharing-output").textContent = "Run the sharing flow to see the project-to-project handoff.";
+    $("summary").innerHTML = `
+      <div class="k">issuer</div><div class="v muted">not inspected</div>
+      <div class="k">jwks fingerprint</div><div class="v muted">not inspected</div>
+      <div class="k">active enc kid</div><div class="v muted">not inspected</div>
+      <div class="k">active key fp</div><div class="v muted">not inspected</div>
+    `;
+    setStatus("input-status", "cleared");
+    setStatus("pin-status", "inspect a JWKS first");
+    setStatus("flow-status", "This simulation uses the local sample vault JWKS.");
+    setStatus("sharing-status", "Uses the current JWKS input as AuditCo's published key set.");
+  });
+
+  $("load-sample").click();
+</script>
+</body>
+</html>

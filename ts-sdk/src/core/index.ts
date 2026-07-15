@@ -25,6 +25,7 @@ export * from "./admin/catalog.js";
 export * from "./decrypt.js";
 export * from "./results.js";
 export * from "./recipient_seal.js";
+export * from "./jwks.js";
 // The body half of the sealed-tnpkg flow. recipient_seal (the BEK-wrap
 // half) has always been here; omitting this one left bundle consumers
 // able to unwrap a BEK but unable to open body/encrypted.bin — the gap

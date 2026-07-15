@@ -2728,6 +2728,13 @@ export class NodeRuntime {
     linkedAt: "linked_at",
     unlinkedAt: "unlinked_at",
     vaultLinks: "vault_links",
+    jwksPins: "jwks_pins",
+    jwksUrl: "jwks_url",
+    jwksFingerprint: "jwks_fingerprint",
+    pinnedAt: "pinned_at",
+    previousJwksFingerprint: "previous_jwks_fingerprint",
+    signingKid: "signing_kid",
+    signingKeyFingerprint: "signing_key_fingerprint",
   };
 
   private static readonly _ADMIN_STATE_FIELD_MAP_REVERSE: Record<string, string> =

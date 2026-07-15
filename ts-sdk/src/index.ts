@@ -17,6 +17,7 @@ export * from "./core/chain.js";
 export * from "./core/envelope.js";
 export * from "./core/indexing.js";
 export * from "./core/signing.js";
+export * from "./core/jwks.js";
 // The static admin-event catalog (reduce / catalogKinds / validateEmit).
 // Exported as `adminCatalog` so the module-level `admin` name is free for
 // the RUNTIME admin namespace (tn.admin.addRecipient(...)) further down,
@@ -188,6 +189,11 @@ export {
   resolveAdminLogPath,
 } from "./admin/log.js";
 export { loadConfig } from "./runtime/config.js";
+export type {
+  CeremonyConfig,
+  VaultConfig,
+  VaultJwksConfig,
+} from "./runtime/config.js";
 export { loadKeystore } from "./runtime/keystore.js";
 export {
   absorbBootstrap,
@@ -221,6 +227,28 @@ export {
   resolveDidEndpoint,
   isAutoLinkDisabled,
 } from "./vault/url.js";
+export {
+  TN_JWKS_PINNED_EVENT,
+  TN_JWKS_ROTATED_EVENT,
+  checkVaultJwksPinAgainstAdminState,
+  inspectVaultJwks,
+  jwksPinnedEventFields,
+  jwksRotatedEventFields,
+  pinnedTrustFromVaultJwksConfig,
+  sealForTrustedVaultJwks,
+  trustedVaultJwksRecipient,
+  type JwksPinnedEventFields,
+  type JwksRotatedEventFields,
+  type JwksSelectionRecorder,
+  type VaultJwksInspectOptions,
+  type VaultJwksInspectResult,
+  type VaultJwksPinCheck,
+  type VaultJwksPinCheckStatus,
+  type VaultJwksFetchOptions,
+  type VaultJwksRecipientResult,
+  type VaultJwksSealOptions,
+  type VaultJwksSealResult,
+} from "./vault/jwks.js";
 
 // Wallet module surface. `wallet` is the public `tn.wallet` namespace
 // (mirrors Python's `tn.wallet` module); the underlying impls remain

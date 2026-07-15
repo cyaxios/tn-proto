@@ -53,6 +53,26 @@ test("jwe: multi-recipient — each opens, a non-recipient does not", async () =
   assert.equal(await jweDecrypt(okpPrivateJwk(stranger.pub, stranger.priv), blob), null);
 });
 
+test("jwe: recipient kid is carried in the recipient header", async () => {
+  const r = keypair();
+  const pt = enc('{"v":7}');
+  const blob = await jweSeal([{ publicKey: r.pub, kid: "vault-enc-2026-07" }], pt);
+  const parsed = JSON.parse(dec(blob)) as {
+    recipients: Array<{ header?: { kid?: string } }>;
+  };
+
+  assert.equal(parsed.recipients[0]?.header?.kid, "vault-enc-2026-07");
+  assert.deepEqual(await jweDecrypt(okpPrivateJwk(r.pub, r.priv), blob), pt);
+});
+
+test("jwe: recipient kid must be non-empty when present", async () => {
+  const r = keypair();
+  await assert.rejects(
+    () => jweSeal([{ publicKey: r.pub, kid: "" }], enc("{}")),
+    /recipient kid must be non-empty/,
+  );
+});
+
 test("jwe: opens a record sealed by the Python SDK (cross-impl gate)", async () => {
   const fx = JSON.parse(readFileSync(join(HERE, "fixtures", "jwe_from_python.json"), "utf8"));
   const blob = enc(JSON.stringify(fx.jwe));

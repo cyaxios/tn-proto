@@ -166,6 +166,17 @@ export interface AdminVaultLinkState {
   unlinkedAt: string | null;
 }
 
+export interface AdminJwksPinState {
+  issuer: string;
+  jwksUrl: string;
+  jwksFingerprint: string;
+  pinnedAt: string;
+  rotatedAt: string | null;
+  previousJwksFingerprint: string | null;
+  signingKid: string | null;
+  signingKeyFingerprint: string | null;
+}
+
 export interface AdminState {
   ceremony: AdminCeremonyState | null;
   groups: AdminGroupState[];
@@ -174,4 +185,5 @@ export interface AdminState {
   coupons: AdminCouponState[];
   enrolments: AdminEnrolmentState[];
   vaultLinks: AdminVaultLinkState[];
+  jwksPins: AdminJwksPinState[];
 }
