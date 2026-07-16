@@ -130,6 +130,7 @@ POST https://example.com/escalate
     )
     tn.info("payment.completed", order_id="ord_42", amount=4999)
     pub_log = tn.current_config().resolve_log_path()
+    pub_did = tn.current_config().device.did
     tn.flush_and_close()
 
     # Runtime side: spin up a fresh ceremony and absorb the bundle.
@@ -148,9 +149,11 @@ POST https://example.com/escalate
 
     # Re-init so the runtime picks up the new kits.
     tn.init(rt_yaml, cipher=_workflow_cipher("btn"))
-    # Now read the publisher's log file.
+    # Now read the publisher's log file. A secure read that trusts the
+    # publisher's writer DID verifies and returns the row; without the new
+    # no-verify default doing the work, verification is opted into explicitly.
     payments = []
-    for entry in tn.read(log=pub_log, verify="skip"):
+    for entry in tn.read(log=pub_log, verify="raise", trusted_writers={pub_did}):
         if entry.event_type == "payment.completed":
             payments.append(entry)
     assert len(payments) == 1

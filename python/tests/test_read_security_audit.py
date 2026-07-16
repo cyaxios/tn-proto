@@ -109,7 +109,7 @@ def _security_warnings(caught: list[warnings.WarningMessage]) -> list[TnSecurity
     ]
 
 
-def test_read_weakening_warns_once_and_emits_exact_writable_event(
+def test_read_weakening_warns_once_and_writes_no_admin_event(
     read_audit_harness: Any,
 ) -> None:
     runtime = _AuditRuntime()
@@ -134,13 +134,9 @@ def test_read_weakening_warns_once_and_emits_exact_writable_event(
         "relaxations": ["verification_disabled"],
         "subject_did": None,
     }
-    assert runtime.events == [
-        (
-            "warning",
-            "tn.security.unsafe_operation",
-            security[0].notice.to_fields(),
-        ),
-    ]
+    # A no-verify read warns on stderr only; it does NOT write a
+    # tn.security.unsafe_operation event into the admin log.
+    assert runtime.events == []
 
 
 def test_read_post_gate_entry_shape_failure_uses_record_invalid_policy(
@@ -151,6 +147,7 @@ def test_read_post_gate_entry_shape_failure_uses_record_invalid_policy(
     with pytest.raises(VerifyError) as raised:
         list(
             read_audit_harness.read_module._read_bound(
+                verify="raise",
                 _cfg=read_audit_harness.cfg,
                 _runtime=_AuditRuntime(),
             ),
@@ -199,23 +196,26 @@ def test_detached_read_warns_without_admin_event(read_audit_harness: Any, tmp_pa
     assert runtime.events == []
 
 
-def test_admin_read_excludes_only_its_own_new_unsafe_audit_row(tmp_path: Path) -> None:
+def test_default_read_writes_no_unsafe_audit_row(tmp_path: Path) -> None:
     tn.init(tmp_path / "tn.yaml", cipher="jwe")
-    before = list(tn.read(log="admin"))
+    before = list(tn.read(log="admin", verify="raise"))
     before_ids = [entry.event_id for entry in before]
 
+    # A no-verify read warns on stderr but writes nothing to the admin log,
+    # so it neither adds an unsafe-operation row nor needs to exclude one of
+    # its own — the weakened read sees exactly the pre-existing rows.
     with pytest.warns(TnSecurityWarning):
         weakened = list(tn.read(log="admin", verify=False))
 
     assert [entry.event_id for entry in weakened] == before_ids
-    after = list(tn.read(log="admin"))
+    after = list(tn.read(log="admin", verify="raise"))
     unsafe = [
         entry
         for entry in after
         if entry.event_type == "tn.security.unsafe_operation"
     ]
-    assert len(unsafe) == 1
-    assert len(after) == len(before) + 1
+    assert unsafe == []
+    assert len(after) == len(before)
 
 
 def test_audit_failure_never_changes_read_results(read_audit_harness: Any) -> None:
@@ -259,14 +259,22 @@ def test_read_audit_recursion_guard_is_task_local_and_single_shot(
             ),
         )
 
+    # The weakening warning still fires exactly once. A no-verify read no
+    # longer emits an admin event, so runtime.emit is never called and the
+    # nested-read recursion path stays inert (nothing to re-enter or guard).
     assert len(_security_warnings(caught)) == 1
-    assert len(runtime.events) == 1
+    assert len(runtime.events) == 0
 
 
 def test_explicit_unsigned_settings_do_not_warn_for_automatic_unsigned_local_profile(
     read_audit_harness: Any,
 ) -> None:
+    # A genuinely unsigned local profile (telemetry: neither signing nor
+    # chaining). It does not expect verification, so a no-verify read raises
+    # no `verification_disabled` warning, and require_signature=False /
+    # allow_unauthenticated=True are not weaker than the profile already is.
     read_audit_harness.cfg.sign = False
+    read_audit_harness.cfg.chain = False
     runtime = _AuditRuntime()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -289,6 +297,7 @@ def test_read_unsigned_and_unknown_writer_notice_composes_exact_relaxations(
         warnings.simplefilter("always")
         list(
             read_audit_harness.read_module._read_bound(
+                verify="raise",
                 require_signature=False,
                 allow_unauthenticated=True,
                 allow_unknown_writers=True,
@@ -311,13 +320,8 @@ def test_read_unsigned_and_unknown_writer_notice_composes_exact_relaxations(
         ],
         "subject_did": None,
     }
-    assert runtime.events == [
-        (
-            "warning",
-            "tn.security.unsafe_operation",
-            security[0].notice.to_fields(),
-        ),
-    ]
+    # Stderr warning only — no admin event is written for the weakening.
+    assert runtime.events == []
 
 
 def test_contextvar_guard_in_one_task_does_not_suppress_independent_task() -> None:
@@ -369,7 +373,7 @@ def test_contextvar_guard_in_one_task_does_not_suppress_independent_task() -> No
     ]
 
 
-def test_watch_weakening_warns_once_and_emits_one_admin_event(tmp_path: Path) -> None:
+def test_watch_weakening_warns_once_and_writes_no_admin_event(tmp_path: Path) -> None:
     yaml_path = tmp_path / "tn.yaml"
     tn.init(yaml_path, cipher="jwe")
     tn.info("watch.audit", marker="visible")
@@ -403,13 +407,14 @@ def test_watch_weakening_warns_once_and_emits_one_admin_event(tmp_path: Path) ->
         ],
         "subject_did": None,
     }
+    # The watch weakening warns on stderr only — the admin log carries no
+    # tn.security.unsafe_operation row for it.
     audit_events = [
         item
         for item in tn.read(log="admin")
         if item.event_type == "tn.security.unsafe_operation"
     ]
-    assert len(audit_events) == 1
-    assert audit_events[0].fields == security[0].notice.to_fields()
+    assert audit_events == []
 
 
 def test_watch_audit_failure_does_not_change_yielded_result(
@@ -460,11 +465,11 @@ def test_detached_watch_warns_without_admin_event(
     assert runtime.events == []
 
 
-def test_admin_watch_excludes_its_own_audit_row_and_keeps_later_chain_valid(
+def test_admin_watch_no_verify_writes_no_audit_row_and_keeps_later_chain_valid(
     tmp_path: Path,
 ) -> None:
     tn.init(tmp_path / "tn.yaml", cipher="jwe")
-    before = list(tn.read(log="admin"))
+    before = list(tn.read(log="admin", verify="raise"))
     before_ids = [entry.event_id for entry in before]
 
     async def run() -> tuple[list[str], str]:
@@ -488,6 +493,13 @@ def test_admin_watch_excludes_its_own_audit_row_and_keeps_later_chain_valid(
 
     assert seen_ids == before_ids
     assert later_type == "tn.audit.after_unsafe_watch"
-    # A strict replay validates the audit row and the later append's chains.
-    after = list(tn.read(log="admin"))
-    assert len(after) == len(before) + 2
+    # A no-verify watch writes no audit row, so the admin log grows only by
+    # the single explicit later append. A strict replay validates that
+    # append's chain, and no unsafe-operation row is present.
+    after = list(tn.read(log="admin", verify="raise"))
+    assert len(after) == len(before) + 1
+    assert not [
+        entry
+        for entry in after
+        if entry.event_type == "tn.security.unsafe_operation"
+    ]

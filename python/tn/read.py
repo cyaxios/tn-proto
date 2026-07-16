@@ -192,8 +192,11 @@ def record_policy_weakening(
         and not context.detached
         and context.profile_sign is False
     )
+    profile_expects_verification = (
+        context.profile_sign is True or context.profile_chain is True
+    )
     relaxations: list[UnsafeRelaxation] = []
-    if policy.mode == "disabled":
+    if policy.mode == "disabled" and profile_expects_verification:
         relaxations.append(UnsafeRelaxation.VERIFICATION_DISABLED)
     if not automatic_unsigned and not policy.require_signature:
         relaxations.append(UnsafeRelaxation.SIGNATURE_NOT_REQUIRED)
@@ -211,10 +214,10 @@ def record_policy_weakening(
         subject_did=None,
         artifact_digest=None,
     )
-    audit_context = _RuntimeAuditContext(
-        runtime=runtime,
-        writable=context.writable and runtime is not None,
-    )
+    # A read weakening warns on stderr only (TnSecurityWarning); it is not
+    # written into the admin log. No-verify is the normal default and must
+    # not spam the admin surface, so this audit context is never writable.
+    audit_context = _RuntimeAuditContext(runtime=runtime, writable=False)
     record_unsafe_operation(notice, audit_context)
     return audit_context.emitted_event_id
 
@@ -564,7 +567,7 @@ def read(
     filter: dict[str, Any] | None = None,
     reader_options: dict[str, Any] | None = None,
     where: Callable[[Any], bool] | None = None,
-    verify: Literal["auto", "raise", "skip"] | bool = "auto",
+    verify: Literal["auto", "raise", "skip"] | bool = False,
     require_signature: bool | None = None,
     allow_unauthenticated: bool | None = None,
     trusted_writers: Collection[str] | None = None,
@@ -603,7 +606,7 @@ def _read_bound(
     filter: dict[str, Any] | None = None,
     reader_options: dict[str, Any] | None = None,
     where: Callable[[Any], bool] | None = None,
-    verify: VerifyMode = "auto",
+    verify: VerifyMode = False,
     require_signature: bool | None = None,
     allow_unauthenticated: bool | None = None,
     trusted_writers: Collection[str] | None = None,
@@ -1188,7 +1191,7 @@ def _secure_read_bound(
 def watch(
     *,
     where: Callable[[Any], bool] | None = None,
-    verify: VerifyMode = "auto",
+    verify: VerifyMode = False,
     require_signature: bool | None = None,
     allow_unauthenticated: bool | None = None,
     trusted_writers: Collection[str] | None = None,

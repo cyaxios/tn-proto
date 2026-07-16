@@ -82,6 +82,7 @@ def test_foreign_log_does_not_inherit_local_sign_or_chain_false(tmp_path: Path) 
         list(
             local.read(
                 log=foreign_log,
+                verify="raise",
                 trusted_writers={foreign.cfg.device.did},
             ),
         )
@@ -120,6 +121,7 @@ def test_foreign_unsigned_requires_both_explicit_unsigned_overrides(tmp_path: Pa
     rows = list(
         local.read(
             log=foreign_log,
+            verify="raise",
             require_signature=False,
             allow_unauthenticated=True,
             trusted_writers={foreign.cfg.device.did},
