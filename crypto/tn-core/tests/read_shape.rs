@@ -9,7 +9,7 @@ mod common;
 
 use common::setup_minimal_btn_ceremony;
 use serde_json::{json, Value};
-use tn_core::Runtime;
+use tn_core::{OnInvalid, Runtime, SecureReadOptions};
 
 #[test]
 fn read_default_flat_shape_has_envelope_basics() {
@@ -73,7 +73,7 @@ fn read_with_verify_adds_valid_block() {
 }
 
 #[test]
-fn everyday_runtime_read_rejects_a_tampered_row() {
+fn secure_read_rejects_a_tampered_row() {
     let td = tempfile::tempdir().unwrap();
     let cer = setup_minimal_btn_ceremony(td.path());
     let rt = Runtime::init(&cer.yaml_path).unwrap();
@@ -93,9 +93,18 @@ fn everyday_runtime_read_rejects_a_tampered_row() {
         + "\n";
     std::fs::write(rt.log_path(), rewritten).unwrap();
 
+    // A plain read() is no-verify and returns the tampered row without
+    // raising; explicit verification via secure_read rejects it.
+    assert!(
+        !rt.read().unwrap().is_empty(),
+        "plain read returns rows without raising"
+    );
     let error = rt
-        .read()
-        .expect_err("Runtime::read must be secure by default");
+        .secure_read(SecureReadOptions {
+            on_invalid: OnInvalid::Raise,
+            log_path: None,
+        })
+        .expect_err("secure_read must reject a tampered row");
     assert!(error.to_string().contains("signature_invalid"), "{error}");
 }
 
