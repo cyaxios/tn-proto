@@ -1,101 +1,65 @@
-# Read-verification consistency — progress (overnight 2026-07-16)
+# Read model — progress (overnight 2026-07-16)
 
 Branch: `sdk-read-verification-consistency` (off `btn-python-surface`).
-Spec: `2026-07-16-sdk-read-verification-consistency-design.md`.
 
-## HEADLINE DISCOVERY — the C# read-verify "consistency" IS the deferred posture decision
+## The decision that landed: plain `read` is no-verify by default, everywhere
 
-Working the C# slice surfaced that "make C# reads consistent" is **not** a
-mechanical fix. It collides head-on with the telemetry-vs-transaction posture
-that was explicitly deferred.
+Secure-read (the fail-closed "check sign / check chain / check valid by default"
+posture) is **pushed aside** in favor of the simpler model: **`read` decrypts and
+returns the values.** One verb, one knob:
 
-Evidence, in code:
-- **C# SDK design = attach-flags (telemetry/forensic).** `ReadOptions.Verify`
-  is documented *"Include verification metadata"*
-  (`csharp-sdk/src/TnProto/ReadOptions.cs:14`). `EmitReadTests` expects
-  `ReadAsync(Verify=true)` to **return** rows with a populated `Validity` block
-  — valid rows `IsValid=true` (passes), tampered rows `IsValid=false`
-  (`EmitReadTests.cs:201-208, 234-238`). i.e. attach flags, never raise.
-- **Core/FFI = raise (transaction).** `tn_runtime_read(verify=1)` maps to
-  `Tn::read(verify:true)` → `VerifyMode::Auto` → `Raise`, which raises on the
-  first rejected record. This was true at base commit `95d40f1` (verified),
-  unchanged by this branch.
-- **Result:** `EmitReadTests.ReadAsyncVerifyFlagsTamperedRows` is a
-  **pre-existing failure** (red at base): the SDK expects attach-flags, the
-  core raises. Full C# suite is 321 pass / 1 fail, that one test, both at base
-  and now.
+- `read()` with no `verify` → **no verification**: no signature check, no chain
+  check, no writer-trust, no raise. Just the values.
+- `verify` is the only control. `verify=true`/`"raise"` opts into verification
+  (raise on rejection, enforce the writer-trust allowlist) — unchanged behavior,
+  now opt-in. `verify="skip"` drops rejected rows.
+- A read weakening (a no-verify read under a *signing/chaining profile*) emits a
+  **stderr warning only** — `TnSecurityWarning` (Python) / `emit_unsafe_warning`
+  (Rust). It is **not** written into the admin log, so a plain read never spams
+  it. Under a telemetry profile (no sign/chain) a plain read is silent.
 
-**This is the telemetry vs transaction/audit decision the user deferred.** It
-cannot be settled here.
+## What landed (committed, verified green)
 
-### The decision, and the (small) implementation each way
-
-The C# default is `Verify=false` and is **not** in question. The question is
-only what `Verify=true` should do:
-
-- **Telemetry / forensic (matches the C# SDK's documented design + the
-  telemetry-first lean):** `tn_runtime_read(verify=1)` should call
-  `read_with_verify()` (attach the `_valid` block, no raise). One-line FFI
-  change. Fixes `ReadAsyncVerifyFlagsTamperedRows`. Reads never raise; the
-  caller inspects `entry.Validity`.
-- **Transaction / audit:** keep `tn_runtime_read(verify=1)` raising, and update
-  `EmitReadTests.ReadAsyncVerifyFlagsTamperedRows` to expect a
-  `TnVerifyException` (the typed error this branch already produces).
-
-I did **not** pick a side. A C# test that presumed the raise side was written
-and then reverted (`46e4bc0`) so nothing pre-decides it.
-
-## What landed (committed, verified, posture-agnostic)
-
-| commit | what | verification |
+| commit | surface | verification |
 | --- | --- | --- |
-| `12ecb1c` | design spec | — |
-| `338090b` | typed read-policy rejection in core + FFI (+ rust-sdk mapping) | `cargo test -p tn-core -p tn-core-ffi -p tn-proto` green; `cargo check --workspace` green |
-| `3115ba4` | C# managed read-verify test | (superseded) |
-| `46e4bc0` | revert of `3115ba4` — it pre-decided the deferred posture | — |
+| `bc8cdb6` | **Rust SDK** — `ReadOptions::default().verify=false`; `security_warning` stderr-only + profile-gated; `secure_default_read.rs` + `verify.rs` reworked | `cargo test -p tn-proto -p tn-core` green |
+| `02f2c80` | **Rust core (browser/WASM)** — `Runtime::read()`/`read_all_runs()` no-verify (`VerifyMode::Disabled`), `read_verified_flat`→`read_flat`; `read_shape.rs` reworked | `cargo test -p tn-core` green |
+| `c718e3f` | **Python** — `tn.read`/`tn.watch` default `verify=False`; `record_policy_weakening` stderr-only (non-writable audit ctx) + profile-gated; 7 test files reworked | 113 read/verify/watch tests green |
+| (already compliant) | **C#** — `ReadOptions.Verify` defaults `false` → native `verify=0` → `Disabled` → returns values | prior C# suite 321/1 (1 pre-existing) |
+| (already compliant) | **TS-node** — `read` default `verify ?? false` → returns values | — |
 
-`338090b` is kept because it only sharpens the **existing** raise path: a
-rejected `secure_read(OnInvalid::Raise)` / `Tn::read(verify:true)` now raises
-`Error::ReadRejected` carrying the stable snake-case reasons
-(`writer_untrusted`, `signature_invalid`, `row_hash_invalid`,
-`signature_required`, `chain_invalid`), the rust-sdk promotes it to
-`Error::Verify`, and the FFI renders it on the shared `VerifyError:` channel
-(so IF a read raises, it raises typed — same as unseal). It changes **no
-default** and does not decide whether reads raise. `tn-core` tests that assert
-the rejection error were updated to the new variant and prove `writer_untrusted`
-end-to-end.
+Earlier, posture-agnostic: `338090b` typed read-rejection across FFI + C# (only
+sharpens the *explicit* `verify=true` raise path). `12ecb1c` spec.
 
-Files (all outside the in-flight WIP set):
-- `crypto/tn-core/src/error.rs`, `crypto/tn-core/src/runtime/read.rs`
-- `crypto/tn-core/tests/{secure_read,secure_default_read}.rs`
-- `rust-sdk/src/error.rs`
-- `crypto/tn-core-ffi/src/lib.rs` (+ `ffi_read_rejection_verifyerror_prefix` test)
-- `csharp-sdk/src/TnProto/Native/NativeBridge.cs` (shared `MapVerbError`)
+## Per-surface model
 
-## Consistency status by SDK
+`verify=true` still verifies + enforces + raises identically across SDKs (that
+machinery is unchanged). Only the **default** flipped to no-verify. The
+writer-trust allowlist and the fail-closed engine are intact behind `verify=true`
+/ `secure_read`.
 
-- **Rust core / FFI / C#** — share one engine; can't diverge on the *decision*
-  once the posture is set. The raise path now carries typed reasons.
-- **Browser / WASM / Python** — already route through the core / already
-  fail-closed (reference). Unaffected.
-- **TypeScript (Node)** — **DEFERRED.** Pure-TS reader has no writer-trust
-  allowlist, and `node_runtime.ts` is under active edit by the enrollment/HIBE
-  WIP (uncommitted). Rewiring now would collide. Also blocked on the same
-  posture decision above.
+## Follow-ups flagged (out of tonight's scope — pre-existing or cross-SDK)
 
-## Nothing here changes a default
+- **Perf-smoke staleness (pre-existing):** an earlier secure-read commit
+  (`2324cc9`) deleted the `read:group_decode` perf stage from `reader.py`, but
+  the benchmark sufficiency gate (`tools/bench_artifact_py/tn_bench/*`) and
+  `python/tests/perf_smoke/instrumentation/test_verified_read_perf_stages.py`
+  (3 failing) still reference it. The artifact test was worked around in-test;
+  the real fix is in the bench tool.
+- **Cross-SDK fixture staleness:** `tests/fixtures/trust/v1/read_policy_matrix.json`
+  marks `signed_row_hash_absent_rejected` as rejected, but current `read_policy.py`
+  accepts an absent row_hash under `profile_chain=false` (consistent with
+  `chain_disabled`). A per-case override was added in the Python test; the frozen
+  fixture + any Rust/TS consumers need reconciliation.
+- **Pyright lint** in the reworked Python test files (unused pytest fixtures =
+  false positives; a couple of Optional-subscript warnings in the added override
+  map). Runtime-green; cosmetic.
+- **Browser/WASM** inherits no-verify from the core on the next `wasm-pack`
+  rebuild; the wasm artifact was not rebuilt/published tonight.
+- **C# native rebuild:** the C# source is already compliant; the stderr-only
+  warning reaches C# on the next `tn_core_ffi` rebuild.
 
-Per the spec's non-goal. `Verify`/`verify` defaults are untouched. The posture
-decision (what `verify=true` *does*, and the global default) is still open.
-
-## Next steps
-1. **User decides the posture** (telemetry attach-flags vs transaction raise).
-   The C# fix is one line either way (above).
-2. TS-node rewire, once WIP contention on `node_runtime.ts` clears and the
-   posture is set: route reads through the wasm companion (`read()` /
-   `secureRead()` already enforce the allowlist), delete the pure-TS reader.
-
-## Guardrails re-confirmed
-- `seal`/`unseal` never verifies chain and can raise no chain error (all four
-  SDKs). Do not route `unseal` through the read policy engine; do not dedupe the
-  `as_recipient` candidate-loaders across the read/seal boundary.
+## Guardrails intact
+`seal`/`unseal` unchanged: confidentiality only, never verifies chain, never
+raises a chain error (verified all four SDKs). `verify=true`/`secure_read` remain
+the full fail-closed path for evidence/audit use cases.
