@@ -15,7 +15,9 @@ use crate::{Error, Result};
 pub struct ReadOptions {
     /// Include entries from every run in the log instead of only this process.
     pub all_runs: bool,
-    /// Verify integrity and writer trust. The secure default is `true`.
+    /// Verify integrity and writer trust. The default is `false`: a plain
+    /// `read` returns the values with no signature or chain checks. Set
+    /// `verify: true` to opt into verification.
     pub verify: bool,
 }
 
@@ -23,7 +25,7 @@ impl Default for ReadOptions {
     fn default() -> Self {
         Self {
             all_runs: false,
-            verify: true,
+            verify: false,
         }
     }
 }
@@ -169,6 +171,15 @@ impl Tn {
 
     fn read_context(&self) -> ReadContext {
         self.runtime.local_read_context()
+    }
+
+    /// Whether the active profile expects verification — a signing or
+    /// chaining profile. Reading without verification is the normal
+    /// default and warrants a stderr warning only under such a profile;
+    /// under a telemetry profile it is simply the default and stays silent.
+    pub(crate) fn profile_expects_verification(&self) -> bool {
+        let context = self.read_context();
+        context.profile_sign == Some(true) || context.profile_chain == Some(true)
     }
 
     fn read_policy(&self, options: &ReadPolicyOptions, context: &ReadContext) -> ReadTrustPolicy {
