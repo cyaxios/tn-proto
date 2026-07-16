@@ -57,10 +57,13 @@ pub enum Error {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
-    /// A sealed object failed verification on [`crate::Tn::unseal`] with
-    /// `options.verify` set (the default). First-class rust-sdk mirror of
-    /// `tn_core::Error::SealedObjectVerify`; `failed_checks` values are
-    /// `"signature"` / `"row_hash"`.
+    /// Verification rejected a record: a sealed object on
+    /// [`crate::Tn::unseal`] (`failed_checks` are `"signature"` /
+    /// `"row_hash"`), or a log record on [`crate::Tn::read`] under an
+    /// enforcing verify setting (`failed_checks` are read-policy reasons
+    /// such as `"writer_untrusted"` / `"signature_invalid"`). First-class
+    /// rust-sdk mirror of `tn_core::Error::SealedObjectVerify` and
+    /// `tn_core::Error::ReadRejected`.
     ///
     /// Malformed unseal input is [`Error::Core`] (wrapping
     /// `tn_core::Error::Malformed`) instead, and holding no key that fits
@@ -90,6 +93,17 @@ impl From<tn_core::Error> for Error {
             } => Error::Verify {
                 failed_checks,
                 sequence,
+                event_type,
+            },
+            // A rejected `read` record surfaces as the same typed
+            // verification failure as a rejected `unseal`; reads have no
+            // meaningful sequence, so it is reported as 0.
+            tn_core::Error::ReadRejected {
+                failed_checks,
+                event_type,
+            } => Error::Verify {
+                failed_checks,
+                sequence: 0,
                 event_type,
             },
             other => Error::Core(other),

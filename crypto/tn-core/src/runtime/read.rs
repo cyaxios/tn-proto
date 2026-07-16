@@ -256,15 +256,22 @@ fn envelope_string<'a>(entry: &'a ReadEntry, name: &str) -> &'a str {
 }
 
 pub(super) fn read_rejection_error(entry: &ReadEntry, decision: &ReadDecision) -> Error {
-    let reason = decision
-        .first_reason()
-        .map_or("record_invalid", ReadRejectReason::as_str);
-    Error::Malformed {
-        kind: "verification",
-        reason: format!(
-            "tn.read_with_policy: envelope event_type={:?} event_id={:?} rejected: {reason}",
-            envelope_string(entry, "event_type"),
-            envelope_string(entry, "event_id")
-        ),
+    let failed_checks = collect_reject_reasons(decision);
+    Error::ReadRejected {
+        failed_checks,
+        event_type: envelope_string(entry, "event_type").to_string(),
     }
+}
+
+/// Stable snake-case reject reasons for a rejected decision, never empty
+/// (an unexplained rejection reports `record_invalid`).
+fn collect_reject_reasons(decision: &ReadDecision) -> Vec<String> {
+    if decision.reasons.is_empty() {
+        return vec![ReadRejectReason::RecordInvalid.as_str().to_string()];
+    }
+    decision
+        .reasons
+        .iter()
+        .map(|&reason| reason.as_str().to_string())
+        .collect()
 }

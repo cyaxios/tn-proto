@@ -196,16 +196,17 @@ public static class NativeBridge
             return outcome;
         }
 
-        throw MapUnsealError(LastError() ?? "native unseal returned a null result");
+        throw MapVerbError(LastError() ?? "native unseal returned a null result");
     }
 
     /// <summary>
-    /// Map the native unseal error channel onto the typed exceptions:
+    /// Map a native verb error channel onto the typed exceptions, shared
+    /// by <c>unseal</c> and <c>read</c>:
     /// <c>VerifyError:{json}</c> becomes <see cref="TnVerifyException"/>,
     /// <c>UnsealError: reason</c> becomes <see cref="TnUnsealException"/>,
     /// anything else stays a plain <see cref="TnException"/>.
     /// </summary>
-    private static TnException MapUnsealError(string message)
+    private static TnException MapVerbError(string message)
     {
         const string verifyPrefix = "VerifyError:";
         const string unsealPrefix = "UnsealError: ";
@@ -252,7 +253,7 @@ public static class NativeBridge
     internal static string Read(TnNativeHandle handle, bool allRuns, bool verify)
     {
         return NativeString.Consume(NativeMethods.RuntimeRead(handle.RawHandle, allRuns ? 1 : 0, verify ? 1 : 0))
-            ?? throw new TnException(LastError() ?? "native read returned null entries");
+            ?? throw MapVerbError(LastError() ?? "native read returned null entries");
     }
 
     internal static string AdminEnsureGroup(TnNativeHandle handle, string group, string fieldsJson)

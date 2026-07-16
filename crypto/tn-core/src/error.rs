@@ -160,6 +160,20 @@ pub enum Error {
         event_type: String,
     },
 
+    /// A log record was rejected by the read policy under an enforcing
+    /// verify setting. Carries the stable snake-case reject reasons
+    /// (`"signature_invalid"`, `"row_hash_invalid"`, `"writer_untrusted"`,
+    /// `"signature_required"`, `"chain_invalid"`, ...). The rust-sdk
+    /// promotes this to `Error::Verify`, so FFI and SDK consumers see one
+    /// typed verification failure across both `read` and `unseal`.
+    #[error("entry event={event_type:?} rejected: {}", failed_checks.join(", "))]
+    ReadRejected {
+        /// Which read-policy checks rejected the record.
+        failed_checks: Vec<String>,
+        /// The record's `event_type`.
+        event_type: String,
+    },
+
     /// Publisher state file on disk has diverged from the caller's
     /// `prior` snapshot. Another writer (process or thread) committed
     /// a state mutation between the caller's read and the caller's
