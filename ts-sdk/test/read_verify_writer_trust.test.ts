@@ -89,3 +89,51 @@ test("read({verify:true}) rejects a chain-valid row from an untrusted writer", a
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('read({verify:"skip"}) drops an untrusted writer\'s rows, keeps own rows', async () => {
+  const root = mkdtempSync(join(tmpdir(), "tn-verify-skip-"));
+  const aliceDir = join(root, "alice");
+  const bobDir = join(root, "bob");
+  mkdirSync(aliceDir, { recursive: true });
+  mkdirSync(bobDir, { recursive: true });
+
+  try {
+    const alice = await Tn.init(join(aliceDir, "alice.yaml"));
+    alice.info("evt.ok", { marker: "alpha" });
+    alice.info("evt.ok", { marker: "beta" });
+    const aliceLog = alice.logPath;
+
+    // Same untrusted-writer splice as the raise test — a genesis evt.intruder
+    // row that passes sig/row_hash/chain, so only the writer-trust allowlist
+    // can catch it.
+    const bob = await Tn.init(join(bobDir, "bob.yaml"));
+    bob.info("evt.intruder", { marker: "forged" });
+    const bobLog = bob.logPath;
+    await bob.close();
+
+    const intruderLine = readFileSync(bobLog, "utf8")
+      .split("\n")
+      .find((l) => l.includes('"evt.intruder"'));
+    assert.ok(intruderLine, "expected an evt.intruder row in Bob's log");
+    appendFileSync(aliceLog, intruderLine + "\n");
+
+    // Skip drops the untrusted-writer row without throwing, and leaves Alice's
+    // own rows untouched.
+    const events = [...alice.read({ verify: "skip" })]
+      .filter((e): e is Entry => e instanceof Entry)
+      .map((e) => e.event_type);
+    assert.ok(
+      !events.includes("evt.intruder"),
+      `skip should drop the intruder row, got ${JSON.stringify(events)}`,
+    );
+    assert.equal(
+      events.filter((t) => t === "evt.ok").length,
+      2,
+      "Alice's own rows must survive skip",
+    );
+
+    await alice.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

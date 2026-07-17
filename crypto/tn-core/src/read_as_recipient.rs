@@ -92,7 +92,12 @@ pub fn read_as_recipient(
     keystore_path: &Path,
     opts: ReadAsRecipientOptions,
 ) -> Result<Vec<ForeignReadEntry>> {
-    let rows = crate::runtime::read_recipient_rows(log_path, keystore_path, &opts.group)?;
+    // This native verb deliberately runs without a ceremony, so it owns the
+    // storage choice: the `std::fs`-backed adapter. `read_recipient_rows` takes
+    // the adapter as a parameter, so a future wasm binding can pass a JS one.
+    let storage: std::sync::Arc<dyn crate::storage::Storage> =
+        std::sync::Arc::new(crate::storage::FsStorage::new());
+    let rows = crate::runtime::read_recipient_rows(log_path, keystore_path, &opts.group, &storage)?;
     Ok(rows
         .into_iter()
         .filter_map(|row| adapt_recipient_row(row, &opts))

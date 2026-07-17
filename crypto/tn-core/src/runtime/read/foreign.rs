@@ -165,16 +165,19 @@ pub(crate) fn read_recipient_rows(
     log_path: &Path,
     keystore: &Path,
     group: &str,
+    storage: &Arc<dyn crate::storage::Storage>,
 ) -> Result<Vec<RecipientRow>> {
-    let storage: Arc<dyn crate::storage::Storage> = Arc::new(crate::storage::FsStorage::new());
-    let decryptors = load_foreign_decryptors(keystore, &storage)?;
+    // Storage is injected by the caller rather than hardcoded to `FsStorage`,
+    // so the recipient decrypt path can run on any backend — including the
+    // wasm JS-callback adapter, where a native `FsStorage` would trap.
+    let decryptors = load_foreign_decryptors(keystore, storage)?;
     if !decryptors.contains_group(group) {
         return Err(Error::InvalidConfig(format!(
             "read_as_recipient: no recipient material for group {group:?} in {}",
             keystore.display()
         )));
     }
-    scan_recipient_rows(log_path, &storage, &decryptors, group)
+    scan_recipient_rows(log_path, storage, &decryptors, group)
 }
 
 fn scan_recipient_rows(
