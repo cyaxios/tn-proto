@@ -4525,6 +4525,26 @@ export class NodeRuntime {
   }
 
   /**
+   * Verified read routed through the wasm core. The wasm `secureRead` applies
+   * the full signature + row_hash + chain checks AND the writer-trust
+   * allowlist (own DID + `trust.writers` + verified publishers). The pure-TS
+   * `read()` below has neither the allowlist nor a place to apply it, so an
+   * enforcing `tn.read({verify: true})` uses this as a fail-closed gate:
+   * `onInvalid: "raise"` throws on the first row an untrusted writer authored
+   * (or any tampered row) before the reader yields anything.
+   *
+   * `onInvalid` mirrors the read verb's enforcing verify modes — "raise"
+   * throws, "skip" returns only the rows that passed, "forensic" keeps every
+   * row with validity markers. Returns the flat rows the core produced.
+   * Throws when the wasm core is unavailable: an enforcing read must fail
+   * closed rather than silently return unverified data.
+   */
+  secureRead(onInvalid: "raise" | "skip" | "forensic"): Array<Record<string, unknown>> {
+    const rows = this.attachWasm().secureRead(onInvalid);
+    return Array.isArray(rows) ? (rows as Array<Record<string, unknown>>) : [];
+  }
+
+  /**
    * Iterate decoded entries. Mirrors Python tn.reader._read() exactly:
    *   - Verifies Ed25519 signature against the DID's public key
    *   - Recomputes row_hash and checks it matches the envelope

@@ -268,6 +268,27 @@ function _checkVerifyKwarg(v: unknown): asserts v is VerifyMode {
   throw new Error(`verify must be false | true | 'skip' | 'raise'; got ${JSON.stringify(v)}`);
 }
 
+// Rebuild a VerifyError from the wasm core's ReadRejected error. The wasm
+// binding surfaces the Rust `Error` Display: `entry event="<type>" rejected:
+// <check>, <check>`. Parsing the event type + reject reasons back out lets an
+// enforcing read throw the same typed VerifyError the pure-TS path throws
+// rather than a raw wasm Error. Sequence is 0 — ReadRejected carries only the
+// checks and event type, matching the rust-sdk + FFI, which also promote it
+// with sequence 0.
+function _verifyErrorFromWasm(err: unknown): VerifyError {
+  const msg = err instanceof Error ? err.message : String(err);
+  const m = /entry event=(?:"([^"]*)"|(\S+)) rejected:\s*(.*)$/.exec(msg);
+  if (m) {
+    const eventType = m[1] ?? m[2] ?? "";
+    const reasons = (m[3] ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return new VerifyError(0, eventType, reasons.length > 0 ? reasons : ["verify"]);
+  }
+  return new VerifyError(0, "", ["verify"]);
+}
+
 /** Sentinel receipt returned when a level-filtered emit short-circuits. */
 function _nullReceipt(): EmitReceipt {
   return {
@@ -1475,6 +1496,21 @@ export class Tn {
       }
     }.call(this);
 
+    // Writer-trust gate for enforcing local reads. The pure-TS reader above
+    // checks signature/row_hash/chain but not the writer-trust allowlist; the
+    // wasm core's secureRead is the single source of truth for that. Under
+    // `verify: true | "raise"` a row an untrusted writer authored (or any
+    // tampered row) fails the whole read closed here, before the first yield.
+    // Recipient/foreign-log reads cross publishers and carry their own
+    // verify handling, so the local-only gate does not apply to them.
+    if (!usingRecipient && (verify === true || verify === "raise")) {
+      try {
+        rt.secureRead("raise");
+      } catch (err) {
+        throw _verifyErrorFromWasm(err);
+      }
+    }
+
     for (const r of safeIter) {
       const out = this._finishReadRow(r, usingRecipient, {
         allRuns,
@@ -1534,6 +1570,18 @@ export class Tn {
       })();
     } else {
       source = this._rt.readAsync(opts.log, expectGenesis);
+    }
+
+    // Writer-trust gate for enforcing local reads — see `read()` for the
+    // rationale. The wasm core's secureRead owns the writer-trust allowlist;
+    // under `verify: true | "raise"` an untrusted-writer (or tampered) row
+    // fails the whole read closed before the first yield.
+    if (!usingRecipient && (verify === true || verify === "raise")) {
+      try {
+        this._rt.secureRead("raise");
+      } catch (err) {
+        throw _verifyErrorFromWasm(err);
+      }
     }
 
     for await (const r of source) {
