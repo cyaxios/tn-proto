@@ -1023,15 +1023,19 @@ export function verifyEnrollmentResponse(
 export async function createHibeReaderProof(
   challenge: EnrollmentChallengeV1,
   reader: DeviceKey,
-  opts: { now?: string } = {},
+  opts: { expectedAuthorityDid: string; now?: string },
 ): Promise<KeyBindingProofV1> {
   const now = opts.now ?? formatTrustTimestamp(Date.now() * 1000);
   validateChallenge(challenge, false);
+  validateDid(opts.expectedAuthorityDid, "expected_authority_did");
+  if (challenge.publisher_did !== opts.expectedAuthorityDid) {
+    throw error("did_signer_mismatch", "challenge publisher does not match the expected HIBE authority");
+  }
   if (challenge.expected_reader_did !== reader.did) {
     throw error("wrong_recipient", "challenge names a different reader");
   }
   verifyEnrollmentChallenge(challenge, {
-    publisherDid: challenge.publisher_did,
+    publisherDid: opts.expectedAuthorityDid,
     readerDid: reader.did,
     ceremonyId: challenge.ceremony_id,
     group: challenge.group,

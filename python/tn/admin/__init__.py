@@ -11,22 +11,39 @@ Ciphers: `jwe` (static-ECDH + AES-KW + AES-GCM, pure Python), `btn`
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
+import secrets
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from ..canonical import _canonical_bytes
 from ..config import (
     DEFAULT_POOL_SIZE,
     LoadedConfig,
     _create_group,
 )
-from ..trust import AcceptedOffer
+from ..key_binding import (
+    EnrollmentChallengeV1,
+    KeyBindingProofV1,
+    verify_enrollment_challenge,
+    verify_key_binding_proof,
+)
+from ..trust import (
+    AcceptedOffer,
+    TrustError,
+    TrustReason,
+    VerifiedPrincipal,
+    parse_ed25519_did_key,
+    verify_ed25519_did_signature,
+)
 
 _log = logging.getLogger("tn.admin")
 
@@ -565,28 +582,15 @@ def _add_recipient_jwe_impl(
             "tn.recipient.added",
             {"group": group, "recipient_identity": did},
         )
-    # Auto-emit enrolment package to outbox so the recipient has
-    # something to absorb. Non-fatal: yaml mutation has already
-    # succeeded; compile failure is logged and execution continues.
-    try:
-        from ..compile import compile_enrolment, emit_to_outbox
-
-        emit_to_outbox(cfg, compile_enrolment(cfg, group, did))
-    except Exception as e:  # noqa: BLE001 — preserve broad swallow; see body of handler
-        import logging
-
-        logging.getLogger("tn.admin").warning(
-            "add_recipient: compile_enrolment failed for %s in %s: %s. "
-            "Recipient state was wired into the cipher successfully; only "
-            "the enrolment package emission failed. Retry by calling "
-            "tn.compile.compile_enrolment(cfg, %r, %r) directly, or let "
-            "the next tn.init() _reconcile retry.",
-            did,
-            group,
-            e,
-            group,
-            did,
-        )
+    # No enrolment package is emitted here. Post trusted-enrollment refactor an
+    # enrolment package is a publisher-signed *response to a reader's proven
+    # offer*: tn.compile.compile_enrolment requires a durable AcceptedOffer
+    # (tn.enrollment.require_accepted_offer), which only exists after the reader
+    # sends an offer carrying a KeyBindingProof. Directly wiring a caller-
+    # supplied pubkey here registers the recipient (they can now be encrypted
+    # to), but there is no such proven offer, so there is nothing to compile.
+    # The recipient obtains a proof-backed enrolment through the reader-driven
+    # offer -> absorb -> reconcile flow, not from this admin call.
     _maybe_autosync(cfg)
     return cfg
 
@@ -1161,6 +1165,8 @@ class AddRecipientResult:
     leaf_index: int | None = None
     kit_path: Path | None = None
     updated_cfg: LoadedConfig | None = None
+    unsafe: bool = False
+    delegated_subauthority: bool = False
 
 
 def add_recipient(
@@ -1172,6 +1178,9 @@ def add_recipient(
     public_key: bytes | None = None,
     raw: bool = False,
     cfg: Any | None = None,
+    proof: KeyBindingProofV1 | VerifiedPrincipal | None = None,
+    allow_subauthority: bool = False,
+    unsafe_plaintext: bool = False,
 ) -> AddRecipientResult:
     """Register a new recipient on `group` and mint their reader kit.
 
@@ -1198,10 +1207,10 @@ def add_recipient(
         and ignored on JWE.
 
     HIBE ceremonies:
-        Routes to `grant_reader`. The API permits a missing or unresolvable
-        DID for local/plaintext workflows, but a sensitive grant requires a
-        complete resolvable Ed25519 `did:key`; otherwise the bearer key is
-        written in a plaintext package.
+        Routes to `grant_reader`. Normal delivery requires a complete
+        Ed25519 `did:key` and scoped reader proof and is always recipient-
+        sealed. Plaintext bearer delivery requires the explicit audited
+        `unsafe_plaintext=True` compatibility switch.
 
     For re-distributing BTN kit material to an already-known recipient
     WITHOUT a new attestation event, use
@@ -1209,9 +1218,9 @@ def add_recipient(
     readers generate and retain their own `.jwe.mykey`, and HIBE readers
     receive grants through `grant_reader`.
 
-    `recipient_did` is optional only for BTN's low-level metadata path. It is
-    required for JWE enrollment and operationally required for secure HIBE
-    grant delivery as described above.
+    `recipient_did` is optional only for BTN's low-level metadata path and an
+    explicitly unsafe HIBE plaintext hand-off. It is required for JWE
+    enrollment and normal HIBE grant delivery.
 
     `cfg` defaults to the runtime singleton's cfg.
 
@@ -1340,13 +1349,796 @@ def add_recipient(
                 f"passed to a hibe group {group!r}. For hibe, pass out_path."
             )
         return grant_reader(
-            group, reader_did=recipient_did, out_path=out_path, cfg=cfg
+            group,
+            reader_did=recipient_did,
+            out_path=out_path,
+            cfg=cfg,
+            proof=proof,
+            allow_subauthority=allow_subauthority,
+            unsafe_plaintext=unsafe_plaintext,
         )
 
     else:
         raise NotImplementedError(
             f"tn.admin.add_recipient: cipher {cipher!r} not yet supported."
         )
+
+
+def _require_hibe_cipher(
+    group: str,
+    cfg: Any,
+    *,
+    require_authority: bool = False,
+):
+    from ..enrollment import validate_enrollment_group
+
+    validate_enrollment_group(group)
+    group_spec = cfg.groups.get(group)
+    if group_spec is None:
+        raise KeyError(f"unknown group: {group!r}")
+    cipher_inst = group_spec.cipher
+    if cipher_inst.name != "hibe":
+        raise ValueError(
+            f"group {group!r} uses cipher {cipher_inst.name!r}; this operation is hibe-only"
+        )
+    if require_authority and not cipher_inst.is_authority():
+        raise ValueError(
+            f"HIBE: group {group!r} has no master secret; only its authority can issue this statement"
+        )
+    return cipher_inst
+
+
+def _now_utc(now: datetime | None) -> datetime:
+    value = datetime.now(timezone.utc) if now is None else now
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise TrustError(TrustReason.STATEMENT_INVALID, "now must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _proof_digest(proof: KeyBindingProofV1) -> str:
+    value = proof._wire_value(include_signature=True)
+    return "sha256:" + hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _build_hibe_authority_assertion(
+    group: str,
+    *,
+    audience_did: str,
+    id_path: str,
+    path_epoch: int,
+    ttl: timedelta,
+    cfg: LoadedConfig,
+    issued_at: datetime,
+) -> KeyBindingProofV1:
+    """Sign an exact HIBE authority state, including a staged next epoch."""
+    cipher_inst = _require_hibe_cipher(group, cfg, require_authority=True)
+    mpk = cipher_inst.mpk()
+    return KeyBindingProofV1(
+        version=1,
+        purpose="hibe-authority",
+        subject_did=cfg.device.device_identity,
+        audience_did=audience_did,
+        ceremony_id=cfg.ceremony_id,
+        group=group,
+        issued_at=issued_at,
+        expires_at=issued_at + ttl,
+        nonce_b64=base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+        binding={
+            "algorithm": "TN-BBG-HIBE-BLS12-381",
+            "mpk_sha256": "sha256:" + hashlib.sha256(mpk).hexdigest(),
+            "max_depth": cipher_inst.max_depth(),
+            "id_path": id_path,
+            "path_epoch": path_epoch,
+        },
+        signature_b64="",
+    ).sign(cfg.device)
+
+
+def issue_authority_assertion(
+    group: str,
+    *,
+    audience_did: str | None = None,
+    ttl: timedelta = timedelta(minutes=10),
+    cfg: LoadedConfig | None = None,
+    now: datetime | None = None,
+) -> KeyBindingProofV1:
+    """Sign the current evaluation-only HIBE authority/path state.
+
+    Assertions are audience-specific. Omitting ``audience_did`` is only a
+    self-authority convenience; an external writer's complete Ed25519 DID must
+    be supplied explicitly.
+    """
+    if cfg is None:
+        from .. import current_config
+
+        cfg = current_config()
+    cipher_inst = _require_hibe_cipher(group, cfg, require_authority=True)
+    if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "authority assertion ttl must be positive")
+    issued_at = _now_utc(now)
+    audience = audience_did or cfg.device.device_identity
+    parse_ed25519_did_key(audience)
+    return _build_hibe_authority_assertion(
+        group,
+        audience_did=audience,
+        id_path=cipher_inst.id_path(),
+        path_epoch=cipher_inst.path_epoch(),
+        ttl=ttl,
+        cfg=cfg,
+        issued_at=issued_at,
+    )
+
+
+def install_authority_assertion(
+    group: str,
+    *,
+    mpk: bytes,
+    assertion: KeyBindingProofV1,
+    expected_authority_did: str,
+    cfg: LoadedConfig | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Verify and atomically pin/update one external HIBE writer authority.
+
+    A successful return is that writer's durable local acknowledgement of the
+    exact signed path epoch. Fleet orchestration must collect this ACK from
+    every writer before allowing writes to resume after a cutoff rotation.
+    """
+    if cfg is None:
+        from .. import current_config
+
+        cfg = current_config()
+    parse_ed25519_did_key(expected_authority_did)
+    cipher_inst = _require_hibe_cipher(group, cfg)
+    if cipher_inst.is_authority():
+        raise ValueError("HIBE: install_authority_assertion is for external writers")
+    if not isinstance(assertion, KeyBindingProofV1):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "authority assertion has the wrong type")
+    if assertion.subject_did != expected_authority_did:
+        raise TrustError(
+            TrustReason.DID_SIGNER_MISMATCH,
+            "authority assertion signer does not match expected_authority_did",
+        )
+    verified_at = _now_utc(now)
+    verify_key_binding_proof(
+        assertion,
+        expected_purpose="hibe-authority",
+        expected_audience_did=cfg.device.device_identity,
+        expected_ceremony_id=cfg.ceremony_id,
+        expected_group=group,
+        now=verified_at,
+        challenge=None,
+    )
+    if not isinstance(mpk, bytes):
+        raise TrustError(TrustReason.BINDING_INVALID, "HIBE authority MPK must be bytes")
+    from .. import _hibe
+
+    encoded_depth = int(_hibe.mpk_max_depth(mpk))
+    binding = assertion.binding
+    expected_mpk_sha256 = "sha256:" + hashlib.sha256(mpk).hexdigest()
+    if binding["mpk_sha256"] != expected_mpk_sha256:
+        raise TrustError(
+            TrustReason.BINDING_INVALID,
+            "HIBE authority MPK bytes do not match the signed fingerprint",
+        )
+    if binding["max_depth"] != encoded_depth:
+        raise TrustError(
+            TrustReason.BINDING_INVALID,
+            "HIBE authority MPK encoded depth does not match the signed max_depth",
+        )
+    from ..cipher import _normalize_hibe_path
+
+    try:
+        id_path = _normalize_hibe_path(
+            str(binding["id_path"]),
+            what="signed authority id_path",
+        )
+    except ValueError as exc:
+        raise TrustError(
+            TrustReason.BINDING_INVALID,
+            "HIBE authority assertion contains a noncanonical identity path",
+        ) from exc
+    if len(id_path.split("/")) > encoded_depth:
+        raise TrustError(
+            TrustReason.BINDING_INVALID,
+            "HIBE writer path exceeds the authority MPK max_depth",
+        )
+    incoming_epoch = int(binding["path_epoch"])
+    assertion_digest = _proof_digest(assertion)
+
+    from .._keystore_backend import AdvisoryFileLock, atomic_write_bytes
+    from ..cipher import (
+        HibeGroupCipher,
+        _hibe_authority_state_path,
+        _hibe_path_epoch_path,
+        _load_hibe_authority_state,
+    )
+
+    lock_path = Path(cfg.keystore) / f"{group}.hibe.authority.lock"
+    with AdvisoryFileLock(lock_path):
+        current = _load_hibe_authority_state(Path(cfg.keystore), group)
+        if current is not None:
+            if current["authority_did"] != expected_authority_did:
+                raise TrustError(
+                    TrustReason.UNTRUSTED_PRINCIPAL,
+                    "HIBE update is not signed by the already pinned authority",
+                )
+            if current["audience_did"] != cfg.device.device_identity:
+                raise TrustError(
+                    TrustReason.UNTRUSTED_PRINCIPAL,
+                    "installed HIBE authority pin names another writer",
+                )
+            current_epoch = int(current["path_epoch"])
+            if incoming_epoch < current_epoch:
+                raise TrustError(TrustReason.EPOCH_ROLLBACK, "HIBE path epoch moved backwards")
+            if incoming_epoch == current_epoch:
+                material_matches = (
+                    current["mpk_sha256"] == expected_mpk_sha256
+                    and current["max_depth"] == encoded_depth
+                    and current["id_path"] == id_path
+                )
+                if not material_matches:
+                    raise TrustError(
+                        TrustReason.EPOCH_CONFLICT,
+                        "different HIBE authority material reuses the installed path epoch",
+                    )
+                if current["assertion_digest"] == assertion_digest:
+                    try:
+                        disk_matches = (
+                            (Path(cfg.keystore) / f"{group}.hibe.mpk").read_bytes() == mpk
+                            and (Path(cfg.keystore) / f"{group}.hibe.idpath").read_text(
+                                encoding="utf-8"
+                            )
+                            == id_path
+                            and (Path(cfg.keystore) / f"{group}.hibe.path_epoch").read_text(
+                                encoding="ascii"
+                            )
+                            == f"{incoming_epoch}\n"
+                        )
+                    except (OSError, UnicodeDecodeError):
+                        disk_matches = False
+                    if disk_matches:
+                        return
+                # A fresh assertion over identical material renews expiry at
+                # the same path epoch. An exact repeat also repairs drifted
+                # public files instead of trusting only the commit record.
+
+        state = {
+            "version": 1,
+            "authority_did": expected_authority_did,
+            "audience_did": cfg.device.device_identity,
+            "mpk_sha256": expected_mpk_sha256,
+            "max_depth": encoded_depth,
+            "id_path": id_path,
+            "path_epoch": incoming_epoch,
+            "assertion_digest": assertion_digest,
+            "expires_at": assertion.expires_at.astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        # Public material first, signed commit record last. A crash before the
+        # final replace leaves a mismatch that the cipher fences fail closed.
+        atomic_write_bytes(Path(cfg.keystore) / f"{group}.hibe.mpk", mpk)
+        atomic_write_bytes(
+            Path(cfg.keystore) / f"{group}.hibe.idpath",
+            id_path.encode("utf-8"),
+        )
+        atomic_write_bytes(
+            _hibe_path_epoch_path(Path(cfg.keystore), group),
+            f"{incoming_epoch}\n".encode("ascii"),
+        )
+        atomic_write_bytes(
+            _hibe_authority_state_path(Path(cfg.keystore), group),
+            json.dumps(state, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+                "utf-8"
+            ),
+        )
+        cfg.groups[group].cipher = HibeGroupCipher.load(Path(cfg.keystore), group)
+
+
+def _hibe_admission_generation_path(store: Any, group: str) -> Path:
+    component = hashlib.sha256(group.encode("utf-8")).hexdigest()
+    return store.state_root / "hibe-admission-generations" / f"{component}.json"
+
+
+def _hibe_challenge_generation_path(store: Any, challenge_id: str) -> Path:
+    component = hashlib.sha256(challenge_id.encode("utf-8")).hexdigest()
+    return store.state_root / "hibe-challenges" / f"{component}.json"
+
+
+def _load_hibe_admission_generation_locked(store: Any, group: str) -> int:
+    path = _hibe_admission_generation_path(store, group)
+    if not path.exists():
+        return 0
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            "HIBE admission generation is unreadable",
+        ) from exc
+    expected = {
+        "version": 1,
+        "authority_did": store.cfg.device.device_identity,
+        "ceremony_id": store.cfg.ceremony_id,
+        "group": group,
+    }
+    if (
+        not isinstance(record, dict)
+        or set(record) != {*expected, "generation"}
+        or any(record.get(key) != value for key, value in expected.items())
+        or type(record.get("generation")) is not int
+        or record["generation"] < 0
+    ):
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            "HIBE admission generation has an invalid scope or shape",
+        )
+    return int(record["generation"])
+
+
+def _advance_hibe_admission_generation(store: Any, group: str) -> int:
+    from .._keystore_backend import atomic_write_bytes
+
+    with store._lock():
+        generation = _load_hibe_admission_generation_locked(store, group) + 1
+        record = {
+            "version": 1,
+            "authority_did": store.cfg.device.device_identity,
+            "ceremony_id": store.cfg.ceremony_id,
+            "group": group,
+            "generation": generation,
+        }
+        atomic_write_bytes(
+            _hibe_admission_generation_path(store, group),
+            json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+        )
+        return generation
+
+
+def _current_hibe_admission_generation(store: Any, group: str) -> int:
+    with store._lock():
+        return _load_hibe_admission_generation_locked(store, group)
+
+
+def _record_hibe_challenge_generation(store: Any, challenge: EnrollmentChallengeV1) -> None:
+    from .._keystore_backend import atomic_write_bytes
+
+    challenge_doc = challenge._wire_value(include_signature=True)
+    challenge_digest = "sha256:" + hashlib.sha256(_canonical_bytes(challenge_doc)).hexdigest()
+    with store._lock():
+        generation = _load_hibe_admission_generation_locked(store, challenge.group)
+        record = {
+            "version": 1,
+            "authority_did": store.cfg.device.device_identity,
+            "ceremony_id": store.cfg.ceremony_id,
+            "group": challenge.group,
+            "reader_did": challenge.expected_reader_did,
+            "challenge_id": challenge.challenge_id,
+            "challenge_digest": challenge_digest,
+            "generation": generation,
+        }
+        atomic_write_bytes(
+            _hibe_challenge_generation_path(store, challenge.challenge_id),
+            json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+        )
+
+
+def _assert_hibe_challenge_generation_locked(
+    store: Any,
+    challenge: EnrollmentChallengeV1,
+) -> None:
+    path = _hibe_challenge_generation_path(store, challenge.challenge_id)
+    if not path.exists():
+        raise TrustError(
+            TrustReason.CHALLENGE_MISSING,
+            "HIBE reader challenge lacks retained admission-generation state",
+        )
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            "HIBE challenge generation record is unreadable",
+        ) from exc
+    challenge_digest = "sha256:" + hashlib.sha256(
+        _canonical_bytes(challenge._wire_value(include_signature=True))
+    ).hexdigest()
+    expected = {
+        "version": 1,
+        "authority_did": store.cfg.device.device_identity,
+        "ceremony_id": store.cfg.ceremony_id,
+        "group": challenge.group,
+        "reader_did": challenge.expected_reader_did,
+        "challenge_id": challenge.challenge_id,
+        "challenge_digest": challenge_digest,
+    }
+    if (
+        not isinstance(record, dict)
+        or set(record) != {*expected, "generation"}
+        or any(record.get(key) != value for key, value in expected.items())
+        or type(record.get("generation")) is not int
+        or record["generation"] < 0
+    ):
+        raise TrustError(
+            TrustReason.REPLAY_CONFLICT,
+            "HIBE challenge generation record conflicts with the signed challenge",
+        )
+    current = _load_hibe_admission_generation_locked(store, challenge.group)
+    if record["generation"] != current:
+        raise TrustError(
+            TrustReason.CHALLENGE_REPLAYED,
+            "HIBE challenge predates the authority's reader-admission cutoff",
+        )
+
+
+def _assert_hibe_challenge_generation(store: Any, challenge: EnrollmentChallengeV1) -> None:
+    with store._lock():
+        _assert_hibe_challenge_generation_locked(store, challenge)
+
+
+def issue_hibe_reader_challenge(
+    group: str,
+    reader_did: str,
+    *,
+    ttl: timedelta = timedelta(minutes=10),
+    cfg: LoadedConfig | None = None,
+) -> EnrollmentChallengeV1:
+    """Issue and retain an authority-scoped challenge for one HIBE reader."""
+    if cfg is None:
+        from .. import current_config
+
+        cfg = current_config()
+    _require_hibe_cipher(group, cfg, require_authority=True)
+    parse_ed25519_did_key(reader_did)
+    if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "challenge ttl must be positive")
+    from .._keystore_backend import AdvisoryFileLock
+    from ..enrollment import EnrollmentStore
+
+    with AdvisoryFileLock(_hibe_lifecycle_lock_path(cfg, group)):
+        _require_hibe_cipher(group, cfg, require_authority=True)
+        if _hibe_revocation_active_path(cfg, group).exists():
+            raise TrustError(
+                TrustReason.EPOCH_CONFLICT,
+                "HIBE reader lifecycle has an incomplete revocation; retry it before "
+                "issuing another reader challenge",
+            )
+        store = EnrollmentStore(cfg, cfg.device)
+        challenge = store.issue_challenge(reader_did, group, ttl)
+        _record_hibe_challenge_generation(store, challenge)
+        return challenge
+
+
+def create_hibe_reader_proof(
+    challenge: EnrollmentChallengeV1,
+    *,
+    expected_authority_did: str,
+    cfg: LoadedConfig,
+    now: datetime | None = None,
+) -> KeyBindingProofV1:
+    """Prove control of the reader DID named by an authority challenge."""
+    if not isinstance(challenge, EnrollmentChallengeV1):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "HIBE reader challenge has the wrong type")
+    parse_ed25519_did_key(expected_authority_did)
+    if challenge.publisher_did != expected_authority_did:
+        raise TrustError(
+            TrustReason.DID_SIGNER_MISMATCH,
+            "HIBE challenge signer does not match the expected authority DID",
+        )
+    issued_at = _now_utc(now)
+    verify_enrollment_challenge(
+        challenge,
+        expected_publisher_did=expected_authority_did,
+        expected_reader_did=cfg.device.device_identity,
+        expected_ceremony_id=challenge.ceremony_id,
+        expected_group=challenge.group,
+        now=issued_at,
+    )
+    challenge_digest = "sha256:" + hashlib.sha256(
+        _canonical_bytes(challenge._wire_value(include_signature=True))
+    ).hexdigest()
+    return KeyBindingProofV1(
+        version=1,
+        purpose="hibe-reader",
+        subject_did=cfg.device.device_identity,
+        audience_did=challenge.publisher_did,
+        ceremony_id=challenge.ceremony_id,
+        group=challenge.group,
+        issued_at=issued_at,
+        expires_at=challenge.expires_at,
+        nonce_b64=base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+        binding={
+            "algorithm": "Ed25519-did-key",
+            "delivery": "recipient-seal-v1",
+            "challenge_digest": challenge_digest,
+        },
+        signature_b64="",
+    ).sign(cfg.device)
+
+
+@dataclass(frozen=True)
+class HibeAuthorityUpdateResult:
+    group: str
+    id_path: str
+    path_epoch: int
+    assertion: KeyBindingProofV1
+
+
+def rotate_hibe_path(
+    group: str,
+    new_path: str,
+    *,
+    audience_did: str | None = None,
+    ttl: timedelta = timedelta(minutes=10),
+    cfg: LoadedConfig | None = None,
+    now: datetime | None = None,
+) -> HibeAuthorityUpdateResult:
+    """Rotate one HIBE path while excluding grants and durable revocations."""
+    if cfg is None:
+        from .. import current_config
+
+        cfg = current_config()
+    _require_hibe_cipher(group, cfg, require_authority=True)
+    from .._keystore_backend import AdvisoryFileLock
+
+    with AdvisoryFileLock(_hibe_lifecycle_lock_path(cfg, group)):
+        _require_hibe_cipher(group, cfg, require_authority=True)
+        if _hibe_revocation_active_path(cfg, group).exists():
+            raise TrustError(
+                TrustReason.EPOCH_CONFLICT,
+                "HIBE reader lifecycle has an incomplete revocation; retry that exact "
+                "revoke_reader operation before rotating the authority path",
+            )
+        return _rotate_hibe_path_locked(
+            group,
+            new_path,
+            audience_did=audience_did,
+            ttl=ttl,
+            cfg=cfg,
+            now=now,
+        )
+
+
+def _rotate_hibe_path_locked(
+    group: str,
+    new_path: str,
+    *,
+    audience_did: str | None = None,
+    ttl: timedelta = timedelta(minutes=10),
+    cfg: LoadedConfig | None = None,
+    now: datetime | None = None,
+) -> HibeAuthorityUpdateResult:
+    """Rotate the authority path and return its writer-scoped signed update."""
+    if cfg is None:
+        from .. import current_config
+
+        cfg = current_config()
+    cipher_inst = _require_hibe_cipher(group, cfg, require_authority=True)
+    resolved_audience = audience_did or cfg.device.device_identity
+    parse_ed25519_did_key(resolved_audience)
+    if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "authority assertion ttl must be positive")
+    issued_at = _now_utc(now)
+    cipher_inst.rotate_id_path(new_path)
+    _reload_native_group_cipher(group)
+    assertion = issue_authority_assertion(
+        group,
+        audience_did=resolved_audience,
+        ttl=ttl,
+        cfg=cfg,
+        now=issued_at,
+    )
+    return HibeAuthorityUpdateResult(
+        group=group,
+        id_path=cipher_inst.id_path(),
+        path_epoch=cipher_inst.path_epoch(),
+        assertion=assertion,
+    )
+
+
+def _hibe_grant_digests(
+    proof: KeyBindingProofV1,
+    *,
+    reader_did: str,
+    group: str,
+    id_path: str,
+) -> tuple[str, str]:
+    proof_digest = _proof_digest(proof)
+    grant_digest = _hibe_grant_digest_from_fields(
+        proof_digest=proof_digest,
+        reader_did=reader_did,
+        ceremony_id=proof.ceremony_id,
+        group=group,
+        id_path=id_path,
+    )
+    return proof_digest, grant_digest
+
+
+def _hibe_grant_digest_from_fields(
+    *,
+    proof_digest: str,
+    reader_did: str,
+    ceremony_id: str,
+    group: str,
+    id_path: str,
+) -> str:
+    return "sha256:" + hashlib.sha256(
+        _canonical_bytes(
+            {
+                "version": 1,
+                "purpose": "hibe-reader-grant",
+                "proof_digest": proof_digest,
+                "reader_did": reader_did,
+                "ceremony_id": ceremony_id,
+                "group": group,
+                "id_path": id_path,
+            }
+        )
+    ).hexdigest()
+
+
+def _retained_hibe_grant_path(store: Any, grant_digest: str) -> Path:
+    return store.state_root / "hibe-grants" / f"{grant_digest.removeprefix('sha256:')}.tnpkg"
+
+
+def _recover_committed_hibe_grant(
+    store: Any,
+    challenge: EnrollmentChallengeV1,
+    proof: KeyBindingProofV1,
+    *,
+    reader_did: str,
+    group: str,
+    id_path: str,
+) -> Path | None:
+    proof_digest, grant_digest = _hibe_grant_digests(
+        proof,
+        reader_did=reader_did,
+        group=group,
+        id_path=id_path,
+    )
+    with store._lock():
+        _assert_hibe_challenge_generation_locked(store, challenge)
+        current = store._load_consumed(challenge.challenge_id)
+        if current is None:
+            return None
+        if current.get("kind") != "hibe-reader-grant":
+            raise TrustError(
+                TrustReason.CHALLENGE_REPLAYED,
+                "HIBE reader challenge has already been consumed",
+            )
+        if (
+            current.get("proof_digest") != proof_digest
+            or current.get("grant_digest") != grant_digest
+        ):
+            raise TrustError(
+                TrustReason.REPLAY_CONFLICT,
+                "HIBE reader challenge was consumed by a different signed proof or grant",
+            )
+        artifact_digest = current.get("artifact_digest")
+        retained_path = _retained_hibe_grant_path(store, grant_digest)
+        if not isinstance(artifact_digest, str) or not retained_path.exists():
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                "committed HIBE grant is missing its retained delivery artifact",
+            )
+        retained_bytes = retained_path.read_bytes()
+        actual_digest = "sha256:" + hashlib.sha256(retained_bytes).hexdigest()
+        if actual_digest != artifact_digest:
+            raise TrustError(
+                TrustReason.BODY_DIGEST_MISMATCH,
+                "retained HIBE grant artifact does not match committed digest",
+            )
+        registry = [
+            item
+            for item in _hibe_grants_load(store.cfg, group)
+            if item.get("reader_did") == reader_did
+        ]
+        if len(registry) != 1 or any(
+            registry[0].get(key) != expected
+            for key, expected in (
+                ("proof_digest", proof_digest),
+                ("grant_digest", grant_digest),
+                ("artifact_digest", artifact_digest),
+            )
+        ):
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                "committed HIBE grant does not match retained verified-reader state",
+            )
+        return retained_path
+
+
+def _commit_hibe_grant(
+    store: Any,
+    challenge: EnrollmentChallengeV1,
+    proof: KeyBindingProofV1,
+    *,
+    reader_did: str,
+    group: str,
+    id_path: str,
+    package_bytes: bytes,
+    principal: VerifiedPrincipal,
+    delegated_subauthority: bool,
+) -> Path:
+    proof_digest, grant_digest = _hibe_grant_digests(
+        proof,
+        reader_did=reader_did,
+        group=group,
+        id_path=id_path,
+    )
+    artifact_digest = "sha256:" + hashlib.sha256(package_bytes).hexdigest()
+    retained_path = _retained_hibe_grant_path(store, grant_digest)
+    from .._keystore_backend import atomic_write_bytes
+
+    with store._lock():
+        _assert_hibe_challenge_generation_locked(store, challenge)
+        current = store._load_consumed(challenge.challenge_id)
+        if current is not None:
+            # Release/reacquire through the recovery helper would deadlock, so
+            # classify the concurrent winner directly here.
+            if (
+                current.get("kind") == "hibe-reader-grant"
+                and current.get("proof_digest") == proof_digest
+                and current.get("grant_digest") == grant_digest
+            ):
+                return retained_path
+            raise TrustError(
+                TrustReason.REPLAY_CONFLICT,
+                "HIBE reader challenge was concurrently consumed by another grant",
+            )
+        atomic_write_bytes(retained_path, package_bytes)
+        _hibe_grants_update(
+            store.cfg,
+            group,
+            reader_did,
+            id_path,
+            principal=principal,
+            unsafe=False,
+            delegated_subauthority=delegated_subauthority,
+            grant_digest=grant_digest,
+            artifact_digest=artifact_digest,
+        )
+        record = {
+            "version": 1,
+            "kind": "hibe-reader-grant",
+            "challenge_id": challenge.challenge_id,
+            "proof_digest": proof_digest,
+            "grant_digest": grant_digest,
+            "artifact_digest": artifact_digest,
+        }
+        atomic_write_bytes(
+            store._consumed_path(challenge.challenge_id),
+            json.dumps(
+                record,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8"),
+        )
+    return retained_path
+
+
+def _deliver_hibe_grant(source: Path, destination: Path) -> None:
+    from .._keystore_backend import atomic_write_bytes
+
+    atomic_write_bytes(destination, source.read_bytes())
+
+
+def _hibe_lifecycle_lock_path(cfg: Any, group: str) -> Path:
+    lock_root = (Path(cfg.keystore).resolve() / ".hibe-lifecycle").resolve()
+    component = hashlib.sha256(group.encode("utf-8")).hexdigest()
+    candidate = (lock_root / f"{component}.lock").resolve()
+    if not candidate.is_relative_to(lock_root):
+        raise TrustError(
+            TrustReason.SCOPE_MISMATCH,
+            "HIBE lifecycle lock escaped the keystore lock root",
+        )
+    return candidate
+
+
+def _hibe_revocation_active_path(cfg: Any, group: str) -> Path:
+    return Path(cfg.keystore) / f"{group}.hibe.revocation.active.json"
 
 
 def grant_reader(
@@ -1356,44 +2148,204 @@ def grant_reader(
     id_path: str | None = None,
     out_path: Path | str | None = None,
     cfg: Any | None = None,
+    proof: KeyBindingProofV1 | VerifiedPrincipal | None = None,
+    allow_subauthority: bool = False,
+    unsafe_plaintext: bool = False,
 ) -> AddRecipientResult:
-    """HIBE's add_recipient: mint a delegated identity key and package it
-    as an absorbable ``.tnpkg`` kit.
+    """Mint and deliver one HIBE reader capability under the lifecycle lock."""
+    if cfg is None:
+        from .. import current_config
 
-    The kit carries the authority mpk, the group's identity path, and a
-    fresh (independently randomized) identity key — BBG re-randomizes
-    KeyGen, so each grantee holds distinct key material for the same path.
-    ``id_path`` defaults to the group's own sealing path; pass an ancestor
-    path to hand out a key the reader can delegate further down. The
-    authority master secret NEVER rides a kit (export skips ``.hibe.msk``;
-    absorb refuses it from non-self-addressed packages).
+        cfg = current_config()
+    _require_hibe_cipher(group, cfg, require_authority=True)
+    from .._keystore_backend import AdvisoryFileLock
 
-    The ``.hibe.sk`` is a bearer capability and is not cryptographically
-    bound to ``reader_did``. That DID is registry/package-addressing
-    metadata. The package body is recipient-sealed only for a complete
-    resolvable Ed25519 ``did:key``; otherwise this API falls back to a
-    plaintext kit.
+    with AdvisoryFileLock(_hibe_lifecycle_lock_path(cfg, group)):
+        _require_hibe_cipher(group, cfg, require_authority=True)
+        if _hibe_revocation_active_path(cfg, group).exists():
+            raise TrustError(
+                TrustReason.EPOCH_CONFLICT,
+                "HIBE reader lifecycle has an incomplete revocation; retry that exact "
+                "revoke_reader operation before granting another reader",
+            )
+        return _grant_reader_locked(
+            group,
+            reader_did=reader_did,
+            id_path=id_path,
+            out_path=out_path,
+            cfg=cfg,
+            proof=proof,
+            allow_subauthority=allow_subauthority,
+            unsafe_plaintext=unsafe_plaintext,
+        )
 
-    Granting is native to the cipher — no re-keying, no envelope rewrite.
-    A delegated key is permanent for its path: there is no forward
-    revocation of an admitted reader (rotate the policy-hash path for new
-    seals, or use btn for groups that need real forward revocation).
+
+def _grant_reader_locked(
+    group: str,
+    *,
+    reader_did: str | None = None,
+    id_path: str | None = None,
+    out_path: Path | str | None = None,
+    cfg: Any | None = None,
+    proof: KeyBindingProofV1 | VerifiedPrincipal | None = None,
+    allow_subauthority: bool = False,
+    unsafe_plaintext: bool = False,
+) -> AddRecipientResult:
+    """Mint and recipient-seal one HIBE bearer capability.
+
+    Normal delivery requires a real Ed25519 ``did:key`` and an unexpired,
+    exact-scope ``hibe-reader`` proof (or its retained verified record).
+    Plaintext bearer delivery exists only behind ``unsafe_plaintext=True``.
+    An ancestor grant is a delegated subauthority and additionally requires
+    ``allow_subauthority=True``.
     """
     if cfg is None:
         from .. import current_config
 
         cfg = current_config()
+    cipher_inst = _require_hibe_cipher(group, cfg, require_authority=True)
 
-    group_spec = cfg.groups.get(group)
-    if group_spec is None:
-        raise KeyError(f"unknown group: {group!r}")
-    cipher_inst = group_spec.cipher
-    if cipher_inst.name != "hibe":
+    target_path = id_path or cipher_inst.id_path()
+    # Let the cipher boundary perform the complete canonical-path validation
+    # before any package or registry write.
+    from ..cipher import _normalize_hibe_path
+
+    target_path = _normalize_hibe_path(target_path, what="id_path")
+    active_parts = cipher_inst.id_path().split("/")
+    target_parts = target_path.split("/")
+    delegated_subauthority = (
+        len(target_parts) < len(active_parts)
+        and target_parts == active_parts[: len(target_parts)]
+    )
+    if target_path != cipher_inst.id_path() and not delegated_subauthority:
         raise ValueError(
-            f"tn.admin.grant_reader: group {group!r} uses cipher "
-            f"{cipher_inst.name!r}; grant_reader is hibe-only. Use "
-            f"add_recipient for btn/jwe groups."
+            "tn.admin.grant_reader: id_path must be the active exact path or one of its ancestors"
         )
+    if delegated_subauthority and not allow_subauthority:
+        raise ValueError(
+            "tn.admin.grant_reader: ancestor grants create a delegated subauthority; "
+            "pass allow_subauthority=True explicitly"
+        )
+
+    verified: VerifiedPrincipal | None = None
+    challenge_store: Any | None = None
+    verified_challenge: EnrollmentChallengeV1 | None = None
+    signed_proof: KeyBindingProofV1 | None = None
+    recovery_path: Path | None = None
+    verified_at = _now_utc(None)
+    if reader_did is None:
+        raise TrustError(TrustReason.DID_INVALID, "HIBE reader_did is required")
+    parse_ed25519_did_key(reader_did)
+    if unsafe_plaintext:
+        from ..security_audit import (
+            UnsafeOperation,
+            UnsafeOperationNotice,
+            UnsafeRelaxation,
+            record_unsafe_operation,
+        )
+
+        class _AuditContext:
+            writable = True
+
+            @staticmethod
+            def emit_admin(event_type: str, fields: dict[str, object]) -> None:
+                from .. import info
+
+                info(event_type, **fields)
+
+        record_unsafe_operation(
+            UnsafeOperationNotice(
+                operation=UnsafeOperation.HIBE_GRANT,
+                relaxations=(UnsafeRelaxation.PLAINTEXT_BEARER_DELIVERY,),
+                group=group,
+                subject_did=reader_did,
+                artifact_digest=None,
+            ),
+            _AuditContext(),
+        )
+    else:
+        if isinstance(proof, KeyBindingProofV1):
+            challenge_digest = proof.binding.get("challenge_digest")
+            if not isinstance(challenge_digest, str):
+                raise TrustError(
+                    TrustReason.CHALLENGE_MISSING,
+                    "HIBE reader proof must bind an authority-issued challenge",
+                )
+            from ..enrollment import EnrollmentStore
+
+            store = EnrollmentStore(cfg, cfg.device)
+            challenge = store._load_challenge_for_digest(challenge_digest)
+            _assert_hibe_challenge_generation(store, challenge)
+            freshness_error: TrustError | None = None
+            try:
+                verified = verify_key_binding_proof(
+                    proof,
+                    expected_purpose="hibe-reader",
+                    expected_audience_did=cfg.device.device_identity,
+                    expected_ceremony_id=cfg.ceremony_id,
+                    expected_group=group,
+                    now=verified_at,
+                    challenge=challenge,
+                )
+            except TrustError as exc:
+                if exc.reason not in {
+                    TrustReason.STATEMENT_EXPIRED,
+                    TrustReason.CHALLENGE_EXPIRED,
+                }:
+                    raise
+                freshness_error = exc
+                # Authenticate the historical statement at its signed issue
+                # time solely so an already committed exact artifact can be
+                # recovered after a crash. This never authorizes a new grant.
+                verified = verify_key_binding_proof(
+                    proof,
+                    expected_purpose="hibe-reader",
+                    expected_audience_did=cfg.device.device_identity,
+                    expected_ceremony_id=cfg.ceremony_id,
+                    expected_group=group,
+                    now=proof.issued_at,
+                    challenge=challenge,
+                )
+            challenge_store = store
+            verified_challenge = challenge
+            signed_proof = proof
+            recovery_path = _recover_committed_hibe_grant(
+                store,
+                challenge,
+                proof,
+                reader_did=reader_did,
+                group=group,
+                id_path=target_path,
+            )
+            if recovery_path is None and freshness_error is not None:
+                raise freshness_error
+        elif isinstance(proof, VerifiedPrincipal):
+            retained = _retained_hibe_principal(
+                cfg,
+                group,
+                reader_did,
+                now=verified_at,
+            )
+            if retained != proof:
+                raise TrustError(
+                    TrustReason.UNTRUSTED_PRINCIPAL,
+                    "caller-supplied VerifiedPrincipal does not match retained verified state",
+                )
+            verified = retained
+        elif proof is None:
+            verified = _retained_hibe_principal(
+                cfg,
+                group,
+                reader_did,
+                now=verified_at,
+            )
+        else:
+            raise TrustError(TrustReason.STATEMENT_INVALID, "unsupported HIBE reader proof type")
+        if verified.did != reader_did:
+            raise TrustError(
+                TrustReason.DID_SIGNER_MISMATCH,
+                "HIBE reader proof signer does not match reader_did",
+            )
 
     import re as _re
 
@@ -1404,8 +2356,16 @@ def grant_reader(
         )
         out_path = Path.cwd() / f"{safe_stem}.tnpkg"
     out_path = Path(out_path)
-
-    target_path = id_path or cipher_inst.id_path()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if recovery_path is not None:
+        _deliver_hibe_grant(recovery_path, out_path)
+        return AddRecipientResult(
+            leaf_index=None,
+            kit_path=out_path,
+            updated_cfg=None,
+            unsafe=False,
+            delegated_subauthority=delegated_subauthority,
+        )
     sk = cipher_inst.mint_reader_key(target_path)
 
     import tempfile as _tempfile
@@ -1414,35 +2374,75 @@ def grant_reader(
 
     with _tempfile.TemporaryDirectory(prefix="tn-grant-reader-") as td:
         td_path = Path(td)
-        (td_path / f"{group}.hibe.mpk").write_bytes(cipher_inst.mpk())
-        (td_path / f"{group}.hibe.idpath").write_text(
-            cipher_inst.id_path(), encoding="utf-8"
+        temp_package = td_path / "grant.tnpkg"
+        key_dir = td_path / "keys"
+        key_dir.mkdir()
+        (key_dir / f"{group}.hibe.mpk").write_bytes(cipher_inst.mpk())
+        (key_dir / f"{group}.hibe.idpath").write_text(
+            target_path, encoding="utf-8"
         )
-        (td_path / f"{group}.hibe.sk").write_bytes(sk)
-        # Seal the body to the reader's device key when we know who they are:
-        # the kit carries a delegated HIBE `sk` (read access to everything
-        # under this path), so a plaintext bundle is a bearer token anyone who
-        # intercepts it can absorb. seal_for_recipient wraps the body BEK to
-        # `reader_did`; only that DID's keystore can unseal on absorb. A DID
-        # with no embedded key (placeholder / did-less hand-off) can't be sealed
-        # to, so it stays plaintext by necessity.
-        from ..recipient_seal import recipient_key_is_resolvable
-
+        (key_dir / f"{group}.hibe.sk").write_bytes(sk)
         _export_impl(
-            out_path,
+            temp_package,
             kind="kit_bundle",
             cfg=cfg,
             to_did=reader_did,
-            keystore=td_path,
+            keystore=key_dir,
             groups=[group],
-            seal_for_recipient=recipient_key_is_resolvable(reader_did),
+            seal_for_recipient=not unsafe_plaintext,
+            _manifest_state={
+                "hibe_grant": {
+                    "delivery": (
+                        "unsafe-plaintext-bearer"
+                        if unsafe_plaintext
+                        else "recipient-seal-v1"
+                    ),
+                    "delegated_subauthority": delegated_subauthority,
+                    "id_path": target_path,
+                    "unsafe": unsafe_plaintext,
+                }
+            },
         )
-    if reader_did:
-        _hibe_grants_update(cfg, group, reader_did, target_path)
+        package_bytes = temp_package.read_bytes()
+        if (
+            challenge_store is not None
+            and verified_challenge is not None
+            and signed_proof is not None
+            and reader_did is not None
+            and verified is not None
+        ):
+            retained_path = _commit_hibe_grant(
+                challenge_store,
+                verified_challenge,
+                signed_proof,
+                reader_did=reader_did,
+                group=group,
+                id_path=target_path,
+                package_bytes=package_bytes,
+                principal=verified,
+                delegated_subauthority=delegated_subauthority,
+            )
+            _deliver_hibe_grant(retained_path, out_path)
+        else:
+            if reader_did:
+                _hibe_grants_update(
+                    cfg,
+                    group,
+                    reader_did,
+                    target_path,
+                    principal=verified,
+                    unsafe=unsafe_plaintext,
+                    delegated_subauthority=delegated_subauthority,
+                )
+            from .._keystore_backend import atomic_write_bytes
+
+            atomic_write_bytes(out_path, package_bytes)
     return AddRecipientResult(
         leaf_index=None,
         kit_path=out_path,
         updated_cfg=None,
+        unsafe=unsafe_plaintext,
+        delegated_subauthority=delegated_subauthority,
     )
 
 
@@ -1455,19 +2455,912 @@ def _hibe_grants_path(cfg: Any, group: str) -> Path:
     return Path(cfg.keystore) / f"{group}.hibe.grants"
 
 
-def _hibe_grants_load(cfg: Any, group: str) -> list[dict[str, str]]:
+def _hibe_grants_load(cfg: Any, group: str) -> list[dict[str, Any]]:
     path = _hibe_grants_path(cfg, group)
     if not path.exists():
         return []
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TrustError(TrustReason.STATEMENT_INVALID, "HIBE grant registry is unreadable") from exc
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "HIBE grant registry must be a list")
+    return value
 
 
-def _hibe_grants_update(cfg: Any, group: str, reader_did: str, id_path: str) -> None:
-    grants = [g for g in _hibe_grants_load(cfg, group) if g.get("reader_did") != reader_did]
-    grants.append({"reader_did": reader_did, "id_path": id_path})
-    _hibe_grants_path(cfg, group).write_text(
-        json.dumps(grants, indent=1), encoding="utf-8"
+def _format_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_utc(value: object, field_name: str) -> datetime:
+    if not isinstance(value, str):
+        raise TrustError(TrustReason.STATEMENT_INVALID, f"{field_name} must be an RFC 3339 string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise TrustError(TrustReason.STATEMENT_INVALID, f"{field_name} is not RFC 3339") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise TrustError(TrustReason.STATEMENT_INVALID, f"{field_name} must include a UTC offset")
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_retained_hibe_principal(
+    principal: VerifiedPrincipal,
+    *,
+    cfg: Any,
+    group: str,
+    reader_did: str,
+    now: datetime | None,
+) -> VerifiedPrincipal:
+    parse_ed25519_did_key(principal.did)
+    if principal.did != reader_did:
+        raise TrustError(TrustReason.DID_SIGNER_MISMATCH, "retained HIBE principal DID differs")
+    if principal.purpose != "hibe-reader":
+        raise TrustError(TrustReason.BINDING_INVALID, "retained principal is not a HIBE reader")
+    if principal.audience_did != cfg.device.device_identity:
+        raise TrustError(TrustReason.WRONG_RECIPIENT, "retained HIBE principal names another authority")
+    if principal.ceremony_id != cfg.ceremony_id or principal.group != group:
+        raise TrustError(TrustReason.SCOPE_MISMATCH, "retained HIBE principal scope differs")
+    if now is not None and (
+        now < principal.issued_at.astimezone(timezone.utc)
+        or now >= principal.expires_at.astimezone(timezone.utc)
+    ):
+        raise TrustError(TrustReason.STATEMENT_EXPIRED, "retained HIBE reader proof has expired")
+    return principal
+
+
+def _new_hibe_accepted_admission(
+    cfg: Any,
+    principal: VerifiedPrincipal,
+) -> dict[str, object]:
+    unsigned: dict[str, object] = {
+        "version": 1,
+        "purpose": "hibe-reader-admission",
+        "authority_did": cfg.device.device_identity,
+        "reader_did": principal.did,
+        "audience_did": principal.audience_did,
+        "ceremony_id": principal.ceremony_id,
+        "group": principal.group,
+        "proof_digest": principal.proof_digest,
+        "proof_issued_at": _format_utc(principal.issued_at),
+        "proof_expires_at": _format_utc(principal.expires_at),
+        "accepted_at": _format_utc(_now_utc(None)),
+    }
+    return {
+        **unsigned,
+        "signature_b64": base64.b64encode(
+            cfg.device.sign(_canonical_bytes(unsigned))
+        ).decode("ascii"),
+    }
+
+
+def _accepted_hibe_principal(
+    cfg: Any,
+    group: str,
+    reader_did: str,
+    record: dict[str, Any],
+) -> VerifiedPrincipal:
+    admission = record.get("accepted_admission")
+    expected_fields = {
+        "version",
+        "purpose",
+        "authority_did",
+        "reader_did",
+        "audience_did",
+        "ceremony_id",
+        "group",
+        "proof_digest",
+        "proof_issued_at",
+        "proof_expires_at",
+        "accepted_at",
+        "signature_b64",
+    }
+    if not isinstance(admission, dict) or set(admission) != expected_fields:
+        raise TrustError(
+            TrustReason.UNTRUSTED_PRINCIPAL,
+            "HIBE survivor lacks a durable accepted-admission statement",
+        )
+    if (
+        record.get("verified") is not True
+        or record.get("unsafe") is not False
+        or admission.get("version") != 1
+        or admission.get("purpose") != "hibe-reader-admission"
+    ):
+        raise TrustError(
+            TrustReason.UNTRUSTED_PRINCIPAL,
+            "HIBE survivor admission was not accepted through the verified ceremony",
+        )
+    if admission.get("authority_did") != cfg.device.device_identity:
+        raise TrustError(
+            TrustReason.DID_SIGNER_MISMATCH,
+            "HIBE accepted admission is not signed by this authority",
+        )
+    if admission.get("reader_did") != reader_did:
+        raise TrustError(
+            TrustReason.DID_SIGNER_MISMATCH,
+            "HIBE accepted admission names another reader",
+        )
+    if admission.get("audience_did") != cfg.device.device_identity:
+        raise TrustError(
+            TrustReason.WRONG_RECIPIENT,
+            "HIBE accepted admission names another authority audience",
+        )
+    if admission.get("ceremony_id") != cfg.ceremony_id or admission.get("group") != group:
+        raise TrustError(
+            TrustReason.SCOPE_MISMATCH,
+            "HIBE accepted admission ceremony or group differs",
+        )
+    for record_field in (
+        "reader_did",
+        "audience_did",
+        "ceremony_id",
+        "group",
+        "proof_digest",
+        "proof_issued_at",
+        "proof_expires_at",
+    ):
+        if record.get(record_field) != admission.get(record_field):
+            raise TrustError(
+                TrustReason.BINDING_INVALID,
+                f"HIBE accepted admission differs from registry field {record_field}",
+            )
+    accepted_at = _parse_utc(admission["accepted_at"], "accepted_at")
+    proof_issued_at = _parse_utc(admission["proof_issued_at"], "proof_issued_at")
+    proof_expires_at = _parse_utc(admission["proof_expires_at"], "proof_expires_at")
+    if proof_expires_at <= proof_issued_at or accepted_at < proof_issued_at:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            "HIBE accepted admission timestamps are inconsistent",
+        )
+    signature_b64 = admission["signature_b64"]
+    if not isinstance(signature_b64, str):
+        raise TrustError(TrustReason.SIGNATURE_INVALID, "HIBE admission signature is missing")
+    try:
+        signature = base64.b64decode(signature_b64, validate=True)
+    except (TypeError, ValueError) as exc:
+        raise TrustError(
+            TrustReason.SIGNATURE_INVALID,
+            "HIBE admission signature is malformed",
+        ) from exc
+    if len(signature) != 64 or base64.b64encode(signature).decode("ascii") != signature_b64:
+        raise TrustError(
+            TrustReason.SIGNATURE_INVALID,
+            "HIBE admission signature is not canonical Ed25519",
+        )
+    unsigned = {key: value for key, value in admission.items() if key != "signature_b64"}
+    verify_ed25519_did_signature(
+        str(admission["authority_did"]),
+        _canonical_bytes(unsigned),
+        signature,
     )
+    principal = VerifiedPrincipal(
+        did=reader_did,
+        purpose="hibe-reader",
+        audience_did=str(admission["audience_did"]),
+        ceremony_id=str(admission["ceremony_id"]),
+        group=str(admission["group"]),
+        proof_digest=str(admission["proof_digest"]),
+        issued_at=proof_issued_at,
+        expires_at=proof_expires_at,
+    )
+    return _validate_retained_hibe_principal(
+        principal,
+        cfg=cfg,
+        group=group,
+        reader_did=reader_did,
+        now=None,
+    )
+
+
+def _retained_hibe_principal(
+    cfg: Any,
+    group: str,
+    reader_did: str,
+    *,
+    now: datetime,
+) -> VerifiedPrincipal:
+    matches = [
+        item
+        for item in _hibe_grants_load(cfg, group)
+        if item.get("reader_did") == reader_did
+    ]
+    if len(matches) != 1 or matches[0].get("verified") is not True:
+        raise TrustError(
+            TrustReason.UNTRUSTED_PRINCIPAL,
+            "HIBE reader requires a valid scoped proof or retained verified-reader record",
+        )
+    record = matches[0]
+    try:
+        principal = VerifiedPrincipal(
+            did=str(record["reader_did"]),
+            purpose="hibe-reader",
+            audience_did=str(record["audience_did"]),
+            ceremony_id=str(record["ceremony_id"]),
+            group=str(record["group"]),
+            proof_digest=str(record["proof_digest"]),
+            issued_at=_parse_utc(record["proof_issued_at"], "proof_issued_at"),
+            expires_at=_parse_utc(record["proof_expires_at"], "proof_expires_at"),
+        )
+    except KeyError as exc:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            "verified HIBE grant registry record is incomplete",
+        ) from exc
+    return _validate_retained_hibe_principal(
+        principal,
+        cfg=cfg,
+        group=group,
+        reader_did=reader_did,
+        now=now,
+    )
+
+
+def _hibe_grants_update(
+    cfg: Any,
+    group: str,
+    reader_did: str,
+    id_path: str,
+    *,
+    principal: VerifiedPrincipal | None,
+    unsafe: bool,
+    delegated_subauthority: bool,
+    grant_digest: str | None = None,
+    artifact_digest: str | None = None,
+) -> None:
+    from .._keystore_backend import AdvisoryFileLock, atomic_write_bytes
+
+    path = _hibe_grants_path(cfg, group)
+    with AdvisoryFileLock(path.with_suffix(path.suffix + ".lock")):
+        grants = [
+            item
+            for item in _hibe_grants_load(cfg, group)
+            if item.get("reader_did") != reader_did
+        ]
+        record: dict[str, Any] = {
+            "reader_did": reader_did,
+            "id_path": id_path,
+            "verified": principal is not None,
+            "unsafe": unsafe,
+            "delegated_subauthority": delegated_subauthority,
+            "audience_did": principal.audience_did if principal is not None else None,
+            "ceremony_id": principal.ceremony_id if principal is not None else cfg.ceremony_id,
+            "group": group,
+            "proof_digest": principal.proof_digest if principal is not None else None,
+            "grant_digest": grant_digest,
+            "artifact_digest": artifact_digest,
+            "proof_issued_at": _format_utc(principal.issued_at) if principal is not None else None,
+            "proof_expires_at": _format_utc(principal.expires_at) if principal is not None else None,
+            "accepted_admission": (
+                _new_hibe_accepted_admission(cfg, principal)
+                if principal is not None
+                else None
+            ),
+        }
+        grants.append(record)
+        atomic_write_bytes(
+            path,
+            json.dumps(grants, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+                "utf-8"
+            ),
+        )
+
+
+def _hibe_grants_replace(cfg: Any, group: str, grants: list[dict[str, Any]]) -> None:
+    from .._keystore_backend import AdvisoryFileLock, atomic_write_bytes
+
+    path = _hibe_grants_path(cfg, group)
+    with AdvisoryFileLock(path.with_suffix(path.suffix + ".lock")):
+        atomic_write_bytes(
+            path,
+            json.dumps(grants, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+                "utf-8"
+            ),
+        )
+
+
+def _hibe_registry_digest(grants: list[dict[str, Any]]) -> str:
+    return "sha256:" + hashlib.sha256(_canonical_bytes(grants)).hexdigest()
+
+
+def _hibe_revocation_completed_path(cfg: Any, group: str, reader_did: str) -> Path:
+    reader_hash = hashlib.sha256(reader_did.encode("utf-8")).hexdigest()
+    return Path(cfg.keystore) / f"{group}.hibe.revocation.completed.{reader_hash}.json"
+
+
+def _hibe_revocation_root(cfg: Any, operation_id: str) -> Path:
+    return Path(cfg.keystore) / ".hibe-revocations" / operation_id.removeprefix("sha256:")
+
+
+def _load_hibe_revocation_record(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            f"HIBE revocation record {path.name} is unreadable",
+        ) from exc
+    required = {
+        "version",
+        "operation_id",
+        "group",
+        "reader_did",
+        "authority_did",
+        "audience_did",
+        "ceremony_id",
+        "start_path",
+        "start_epoch",
+        "target_path",
+        "target_epoch",
+        "start_registry_digest",
+        "target_registry_digest",
+        "admission_generation",
+        "assertion",
+        "survivors",
+        "rotation",
+    }
+    if not isinstance(value, dict) or set(value) != required or value.get("version") != 1:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            f"HIBE revocation record {path.name} has an invalid shape",
+        )
+    return value
+
+
+def _write_hibe_revocation_record(path: Path, value: dict[str, Any]) -> None:
+    from .._keystore_backend import atomic_write_bytes
+
+    atomic_write_bytes(
+        path,
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        ),
+    )
+
+
+def _validate_hibe_revocation_record(
+    intent: dict[str, Any],
+    *,
+    group: str,
+    reader_did: str,
+    requested_path: str | None,
+    audience_did: str,
+    cfg: LoadedConfig,
+) -> KeyBindingProofV1:
+    scalar_matches = (
+        intent["group"] == group
+        and intent["reader_did"] == reader_did
+        and intent["authority_did"] == cfg.device.device_identity
+        and intent["audience_did"] == audience_did
+        and intent["ceremony_id"] == cfg.ceremony_id
+    )
+    if not scalar_matches or (
+        requested_path is not None and intent["target_path"] != requested_path
+    ):
+        raise TrustError(
+            TrustReason.EPOCH_CONFLICT,
+            "HIBE revocation retry does not match the retained lifecycle operation",
+        )
+    if (
+        type(intent["start_epoch"]) is not int
+        or type(intent["target_epoch"]) is not int
+        or intent["target_epoch"] != intent["start_epoch"] + 1
+        or type(intent["admission_generation"]) is not int
+        or intent["admission_generation"] < 1
+        or not isinstance(intent["start_path"], str)
+        or not isinstance(intent["target_path"], str)
+        or not isinstance(intent["survivors"], list)
+        or not isinstance(intent["rotation"], dict)
+    ):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "HIBE revocation record is invalid")
+    operation_key = {
+        "version": 1,
+        "group": group,
+        "reader_did": reader_did,
+        "ceremony_id": cfg.ceremony_id,
+        "authority_did": cfg.device.device_identity,
+        "audience_did": audience_did,
+        "start_epoch": intent["start_epoch"],
+        "target_path": intent["target_path"],
+    }
+    expected_operation_id = "sha256:" + hashlib.sha256(
+        _canonical_bytes(operation_key)
+    ).hexdigest()
+    if intent["operation_id"] != expected_operation_id:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            "HIBE revocation operation identifier does not match its scope",
+        )
+    try:
+        assertion = KeyBindingProofV1.from_dict(intent["assertion"])
+    except (TypeError, TrustError) as exc:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            "HIBE revocation retained authority assertion is invalid",
+        ) from exc
+    if (
+        assertion.subject_did != cfg.device.device_identity
+        or assertion.subject_did != intent["authority_did"]
+    ):
+        raise TrustError(
+            TrustReason.DID_SIGNER_MISMATCH,
+            "HIBE revocation assertion signer is not the retained authority",
+        )
+    verify_key_binding_proof(
+        assertion,
+        expected_purpose="hibe-authority",
+        expected_audience_did=audience_did,
+        expected_ceremony_id=cfg.ceremony_id,
+        expected_group=group,
+        now=assertion.issued_at,
+        challenge=None,
+    )
+    cipher_inst = _require_hibe_cipher(group, cfg, require_authority=True)
+    expected_binding = {
+        "algorithm": "TN-BBG-HIBE-BLS12-381",
+        "mpk_sha256": "sha256:" + hashlib.sha256(cipher_inst.mpk()).hexdigest(),
+        "max_depth": cipher_inst.max_depth(),
+        "id_path": intent["target_path"],
+        "path_epoch": intent["target_epoch"],
+    }
+    if dict(assertion.binding) != expected_binding:
+        raise TrustError(
+            TrustReason.BINDING_INVALID,
+            "HIBE revocation assertion does not bind the retained target state",
+        )
+    return assertion
+
+
+def _renew_hibe_revocation_assertion_if_needed(
+    intent: dict[str, Any],
+    assertion: KeyBindingProofV1,
+    *,
+    record_path: Path,
+    ttl: timedelta,
+    cfg: LoadedConfig,
+    checked_at: datetime,
+) -> KeyBindingProofV1:
+    if checked_at < assertion.expires_at.astimezone(timezone.utc):
+        return assertion
+    renewed = _build_hibe_authority_assertion(
+        str(intent["group"]),
+        audience_did=str(intent["audience_did"]),
+        id_path=str(intent["target_path"]),
+        path_epoch=int(intent["target_epoch"]),
+        ttl=ttl,
+        cfg=cfg,
+        issued_at=checked_at,
+    )
+    intent["assertion"] = renewed._wire_value(include_signature=True)
+    _write_hibe_revocation_record(record_path, intent)
+    return renewed
+
+
+def _build_hibe_revocation_package(
+    *,
+    cfg: LoadedConfig,
+    group: str,
+    reader_did: str,
+    id_path: str,
+    sk: bytes,
+    delegated_subauthority: bool,
+) -> bytes:
+    import tempfile as _tempfile
+
+    from .._pkg_impl import _export_impl
+
+    cipher_inst = _require_hibe_cipher(group, cfg, require_authority=True)
+    with _tempfile.TemporaryDirectory(prefix="tn-hibe-revoke-stage-") as td:
+        td_path = Path(td)
+        package = td_path / "survivor.tnpkg"
+        key_dir = td_path / "keys"
+        key_dir.mkdir()
+        (key_dir / f"{group}.hibe.mpk").write_bytes(cipher_inst.mpk())
+        (key_dir / f"{group}.hibe.idpath").write_text(id_path, encoding="utf-8")
+        (key_dir / f"{group}.hibe.sk").write_bytes(sk)
+        _export_impl(
+            package,
+            kind="kit_bundle",
+            cfg=cfg,
+            to_did=reader_did,
+            keystore=key_dir,
+            groups=[group],
+            seal_for_recipient=True,
+            _manifest_state={
+                "hibe_grant": {
+                    "delivery": "recipient-seal-v1",
+                    "delegated_subauthority": delegated_subauthority,
+                    "id_path": id_path,
+                    "unsafe": False,
+                }
+            },
+        )
+        return package.read_bytes()
+
+
+def _prepare_hibe_revocation(
+    *,
+    cfg: LoadedConfig,
+    group: str,
+    reader_did: str,
+    grants: list[dict[str, Any]],
+    remaining: list[dict[str, Any]],
+    principals: dict[str, VerifiedPrincipal],
+    admission_generation: int,
+    target_path: str,
+    audience_did: str,
+    ttl: timedelta,
+    issued_at: datetime,
+) -> dict[str, Any]:
+    from .._keystore_backend import atomic_write_bytes
+    from ..cipher import _encode_hibe_history_path
+
+    cipher_inst = _require_hibe_cipher(group, cfg, require_authority=True)
+    start_path = cipher_inst.id_path()
+    start_epoch = cipher_inst.path_epoch()
+    target_epoch = start_epoch + 1
+    operation_key = {
+        "version": 1,
+        "group": group,
+        "reader_did": reader_did,
+        "ceremony_id": cfg.ceremony_id,
+        "authority_did": cfg.device.device_identity,
+        "audience_did": audience_did,
+        "start_epoch": start_epoch,
+        "target_path": target_path,
+    }
+    operation_id = "sha256:" + hashlib.sha256(_canonical_bytes(operation_key)).hexdigest()
+    root = _hibe_revocation_root(cfg, operation_id)
+
+    current_sk_path = Path(cfg.keystore) / f"{group}.hibe.sk"
+    if not current_sk_path.exists():
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            "HIBE authority is missing its current identity key",
+        )
+    prior_sk = current_sk_path.read_bytes()
+    target_sk = cipher_inst.mint_reader_key(target_path)
+    history_path = Path(cfg.keystore) / f"{group}.hibe.idpath.history"
+    old_history = history_path.read_bytes() if history_path.exists() else b""
+    staged_history = _encode_hibe_history_path(start_path).encode("utf-8") + b"\n" + old_history
+    rotation_files = {
+        "target_sk": "target.sk",
+        "prior_sk": "prior.sk",
+        "start_history": "start-history.txt",
+        "history": "history.txt",
+    }
+    rotation_bytes = {
+        "target_sk": target_sk,
+        "prior_sk": prior_sk,
+        "start_history": old_history,
+        "history": staged_history,
+    }
+    rotation: dict[str, Any] = {}
+    for key, filename in rotation_files.items():
+        data = rotation_bytes[key]
+        atomic_write_bytes(root / filename, data)
+        rotation[key] = {
+            "file": filename,
+            "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+        }
+
+    survivors: list[dict[str, Any]] = []
+    target_grants: list[dict[str, Any]] = []
+    import re as _re
+
+    for record in remaining:
+        did = str(record["reader_did"])
+        delegated = bool(record.get("delegated_subauthority", False))
+        survivor_path = str(record["id_path"]) if delegated else target_path
+        survivor_sk = cipher_inst.mint_reader_key(survivor_path)
+        package_bytes = _build_hibe_revocation_package(
+            cfg=cfg,
+            group=group,
+            reader_did=did,
+            id_path=survivor_path,
+            sk=survivor_sk,
+            delegated_subauthority=delegated,
+        )
+        reader_hash = hashlib.sha256(did.encode("utf-8")).hexdigest()
+        artifact_file = f"reader-{reader_hash}.tnpkg"
+        atomic_write_bytes(root / artifact_file, package_bytes)
+        artifact_digest = "sha256:" + hashlib.sha256(package_bytes).hexdigest()
+        updated_record = dict(record)
+        updated_record.update(
+            id_path=survivor_path,
+            verified=True,
+            unsafe=False,
+            artifact_digest=artifact_digest,
+            audience_did=principals[did].audience_did,
+            ceremony_id=principals[did].ceremony_id,
+            group=group,
+            proof_digest=principals[did].proof_digest,
+            proof_issued_at=_format_utc(principals[did].issued_at),
+            proof_expires_at=_format_utc(principals[did].expires_at),
+        )
+        updated_record["grant_digest"] = _hibe_grant_digest_from_fields(
+            proof_digest=principals[did].proof_digest,
+            reader_did=did,
+            ceremony_id=principals[did].ceremony_id,
+            group=group,
+            id_path=survivor_path,
+        )
+        target_grants.append(updated_record)
+        safe_stem = _re.sub(r"[^A-Za-z0-9._-]", "_", did.split(":")[-1])
+        survivors.append(
+            {
+                "reader_did": did,
+                "artifact_file": artifact_file,
+                "artifact_digest": artifact_digest,
+                "output_name": f"{safe_stem}.tnpkg",
+                "registry_record": updated_record,
+            }
+        )
+
+    assertion = _build_hibe_authority_assertion(
+        group,
+        audience_did=audience_did,
+        id_path=target_path,
+        path_epoch=target_epoch,
+        ttl=ttl,
+        cfg=cfg,
+        issued_at=issued_at,
+    )
+    intent = {
+        "version": 1,
+        "operation_id": operation_id,
+        "group": group,
+        "reader_did": reader_did,
+        "authority_did": cfg.device.device_identity,
+        "audience_did": audience_did,
+        "ceremony_id": cfg.ceremony_id,
+        "start_path": start_path,
+        "start_epoch": start_epoch,
+        "target_path": target_path,
+        "target_epoch": target_epoch,
+        "start_registry_digest": _hibe_registry_digest(grants),
+        "target_registry_digest": _hibe_registry_digest(target_grants),
+        "admission_generation": admission_generation,
+        "assertion": assertion._wire_value(include_signature=True),
+        "survivors": survivors,
+        "rotation": rotation,
+    }
+    _write_hibe_revocation_record(_hibe_revocation_active_path(cfg, group), intent)
+    return intent
+
+
+def _read_retained_hibe_revocation_bytes(
+    *,
+    cfg: LoadedConfig,
+    intent: dict[str, Any],
+    filename: str,
+    expected_digest: str,
+) -> bytes:
+    if (
+        not isinstance(filename, str)
+        or Path(filename).name != filename
+        or not isinstance(expected_digest, str)
+    ):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "HIBE revocation artifact is invalid")
+    path = _hibe_revocation_root(cfg, str(intent["operation_id"])) / filename
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            "HIBE revocation retained artifact is missing",
+        ) from exc
+    actual = "sha256:" + hashlib.sha256(data).hexdigest()
+    if actual != expected_digest:
+        raise TrustError(
+            TrustReason.BODY_DIGEST_MISMATCH,
+            "HIBE revocation retained artifact digest differs",
+        )
+    return data
+
+
+def _commit_hibe_revocation(
+    *,
+    cfg: LoadedConfig,
+    group: str,
+    intent: dict[str, Any],
+) -> None:
+    from .._keystore_backend import atomic_write_bytes
+    from ..cipher import HibeGroupCipher, _hibe_path_epoch_path, _hibe_root_marker_path
+    from ..enrollment import EnrollmentStore
+
+    store = EnrollmentStore(cfg, cfg.device)
+    if _current_hibe_admission_generation(store, group) != intent["admission_generation"]:
+        raise TrustError(
+            TrustReason.EPOCH_CONFLICT,
+            "HIBE admission generation moved outside the retained revocation transaction",
+        )
+
+    current_grants = _hibe_grants_load(cfg, group)
+    current_digest = _hibe_registry_digest(current_grants)
+    allowed_registry_digests = {
+        str(intent["start_registry_digest"]),
+        str(intent["target_registry_digest"]),
+    }
+    if current_digest not in allowed_registry_digests:
+        raise TrustError(
+            TrustReason.EPOCH_CONFLICT,
+            "HIBE grant registry changed outside the retained revocation transaction",
+        )
+    rotation = intent["rotation"]
+    if not isinstance(rotation, dict) or set(rotation) != {
+        "target_sk",
+        "prior_sk",
+        "start_history",
+        "history",
+    }:
+        raise TrustError(TrustReason.STATEMENT_INVALID, "HIBE revocation rotation state is invalid")
+    retained: dict[str, bytes] = {}
+    for key in ("target_sk", "prior_sk", "start_history", "history"):
+        descriptor = rotation[key]
+        if not isinstance(descriptor, dict) or set(descriptor) != {"file", "sha256"}:
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                "HIBE revocation rotation artifact is invalid",
+            )
+        retained[key] = _read_retained_hibe_revocation_bytes(
+            cfg=cfg,
+            intent=intent,
+            filename=str(descriptor["file"]),
+            expected_digest=str(descriptor["sha256"]),
+        )
+
+    operation_hex = str(intent["operation_id"]).removeprefix("sha256:")
+    keystore = Path(cfg.keystore)
+    prior_archive_path = keystore / f"{group}.hibe.sk.previous.revocation.{operation_hex}"
+    current_sk_path = keystore / f"{group}.hibe.sk"
+    history_path = keystore / f"{group}.hibe.idpath.history"
+    id_path_path = keystore / f"{group}.hibe.idpath"
+    epoch_path = _hibe_path_epoch_path(keystore, group)
+
+    def reject_foreign(
+        path: Path,
+        actual: bytes | None,
+        allowed: set[bytes | None],
+    ) -> None:
+        if actual not in allowed:
+            raise TrustError(
+                TrustReason.EPOCH_CONFLICT,
+                f"HIBE revocation found foreign bytes in {path.name}",
+            )
+
+    archive_bytes = prior_archive_path.read_bytes() if prior_archive_path.exists() else None
+    reject_foreign(prior_archive_path, archive_bytes, {None, retained["prior_sk"]})
+    try:
+        current_sk_bytes = current_sk_path.read_bytes()
+        id_path_bytes = id_path_path.read_bytes()
+        epoch_bytes = epoch_path.read_bytes()
+    except OSError as exc:
+        raise TrustError(
+            TrustReason.EPOCH_CONFLICT,
+            "HIBE revocation live authority state is incomplete",
+        ) from exc
+    reject_foreign(
+        current_sk_path,
+        current_sk_bytes,
+        {retained["prior_sk"], retained["target_sk"]},
+    )
+    reject_foreign(
+        id_path_path,
+        id_path_bytes,
+        {
+            str(intent["start_path"]).encode("utf-8"),
+            str(intent["target_path"]).encode("utf-8"),
+        },
+    )
+    reject_foreign(
+        epoch_path,
+        epoch_bytes,
+        {
+            f"{int(intent['start_epoch'])}\n".encode("ascii"),
+            f"{int(intent['target_epoch'])}\n".encode("ascii"),
+        },
+    )
+    history_bytes = history_path.read_bytes() if history_path.exists() else None
+    allowed_history: set[bytes | None] = {retained["start_history"], retained["history"]}
+    if retained["start_history"] == b"":
+        allowed_history.add(None)
+    reject_foreign(history_path, history_bytes, allowed_history)
+
+    cipher_inst = _require_hibe_cipher(group, cfg, require_authority=True)
+    if cipher_inst.path_epoch() not in {
+        int(intent["start_epoch"]),
+        int(intent["target_epoch"]),
+    } or cipher_inst.id_path() not in {
+        str(intent["start_path"]),
+        str(intent["target_path"]),
+    }:
+        raise TrustError(
+            TrustReason.EPOCH_CONFLICT,
+            "HIBE authority state moved outside the retained revocation transaction",
+        )
+
+    atomic_write_bytes(
+        prior_archive_path,
+        retained["prior_sk"],
+    )
+    atomic_write_bytes(history_path, retained["history"])
+    atomic_write_bytes(current_sk_path, retained["target_sk"])
+    atomic_write_bytes(
+        id_path_path,
+        str(intent["target_path"]).encode("utf-8"),
+    )
+    atomic_write_bytes(
+        epoch_path,
+        f"{int(intent['target_epoch'])}\n".encode("ascii"),
+    )
+    _hibe_root_marker_path(keystore, group).unlink(missing_ok=True)
+    cfg.groups[group].cipher = HibeGroupCipher.load(keystore, group)
+    _reload_native_group_cipher(group)
+
+    if current_digest == intent["start_registry_digest"]:
+        target_grants = []
+        for survivor in intent["survivors"]:
+            if not isinstance(survivor, dict) or not isinstance(
+                survivor.get("registry_record"), dict
+            ):
+                raise TrustError(
+                    TrustReason.STATEMENT_INVALID,
+                    "HIBE revocation survivor record is invalid",
+                )
+            target_grants.append(dict(survivor["registry_record"]))
+        if _hibe_registry_digest(target_grants) != intent["target_registry_digest"]:
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                "HIBE revocation target registry digest differs",
+            )
+        _hibe_grants_replace(cfg, group, target_grants)
+
+
+def _deliver_hibe_revocation(
+    *,
+    cfg: LoadedConfig,
+    intent: dict[str, Any],
+    out_dir: Path,
+) -> list[Path]:
+    from .._keystore_backend import atomic_write_bytes
+
+    delivered: list[Path] = []
+    for survivor in intent["survivors"]:
+        if not isinstance(survivor, dict):
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                "HIBE revocation survivor artifact is invalid",
+            )
+        data = _read_retained_hibe_revocation_bytes(
+            cfg=cfg,
+            intent=intent,
+            filename=str(survivor.get("artifact_file")),
+            expected_digest=str(survivor.get("artifact_digest")),
+        )
+        output_name = survivor.get("output_name")
+        if not isinstance(output_name, str) or Path(output_name).name != output_name:
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                "HIBE revocation survivor output name is invalid",
+            )
+        destination = out_dir / output_name
+        atomic_write_bytes(destination, data)
+        delivered.append(destination)
+    return delivered
+
+
+def _finish_hibe_revocation(
+    *,
+    cfg: LoadedConfig,
+    group: str,
+    reader_did: str,
+    intent: dict[str, Any],
+) -> None:
+    completed_path = _hibe_revocation_completed_path(cfg, group, reader_did)
+    _write_hibe_revocation_record(completed_path, intent)
+    _hibe_revocation_active_path(cfg, group).unlink(missing_ok=True)
 
 
 @dataclass
@@ -1476,12 +3369,16 @@ class RevokeReaderResult:
 
     ``kit_paths`` are the re-issued ``.tnpkg`` kits for the surviving
     grantees — distribute them and have each survivor ``tn.absorb`` theirs.
-    ``new_path`` is the identity path future seals use."""
+    ``new_path`` is the identity path future seals use. External writers must
+    remain quiesced until each has installed and durably acknowledged
+    ``assertion`` at ``path_epoch``."""
 
     revoked: bool
     new_path: str
     kit_paths: list[Path]
     remaining: list[str]
+    path_epoch: int
+    assertion: KeyBindingProofV1 | None
 
 
 def _bump_path(path: str) -> str:
@@ -1505,6 +3402,9 @@ def revoke_reader(
     new_path: str | None = None,
     out_dir: Path | str | None = None,
     cfg: Any | None = None,
+    audience_did: str | None = None,
+    ttl: timedelta = timedelta(minutes=10),
+    now: datetime | None = None,
 ) -> RevokeReaderResult:
     """Remove a hibe reader going FORWARD: rotate the group's identity path
     and re-issue kits to every other granted reader.
@@ -1520,62 +3420,157 @@ def revoke_reader(
     ancestor of the new path remains able to delegate down and is not
     revoked by this operation. Distribute the returned survivor kits and
     writer path update; use btn when routine per-reader cutoff is required.
+
+    Operational cutoff invariant: quiesce every external writer before this
+    call and do not resume fleet writes until every writer has successfully
+    returned from ``install_authority_assertion`` for the returned exact epoch.
+    The local writer fence enforces its persisted ACK; this process cannot
+    remotely stop an offline/stale writer, so fleet coordination is mandatory.
     """
     if cfg is None:
         from .. import current_config
 
         cfg = current_config()
-    group_spec = cfg.groups.get(group)
-    if group_spec is None:
-        raise KeyError(f"unknown group: {group!r}")
-    cipher_inst = group_spec.cipher
-    if cipher_inst.name != "hibe":
-        raise ValueError(
-            f"tn.admin.revoke_reader: group {group!r} uses cipher "
-            f"{cipher_inst.name!r}; this verb is hibe-only. Use "
-            f"revoke_recipient for btn/jwe groups."
+    _require_hibe_cipher(group, cfg, require_authority=True)
+    parse_ed25519_did_key(reader_did)
+    resolved_audience = audience_did or cfg.device.device_identity
+    parse_ed25519_did_key(resolved_audience)
+    if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "authority assertion ttl must be positive")
+    checked_at = _now_utc(now)
+    from ..cipher import _normalize_hibe_path
+
+    requested_path = (
+        None if new_path is None else _normalize_hibe_path(new_path, what="new_path")
+    )
+    from .._keystore_backend import AdvisoryFileLock
+
+    with AdvisoryFileLock(_hibe_lifecycle_lock_path(cfg, group)):
+        cipher_inst = _require_hibe_cipher(group, cfg, require_authority=True)
+        active_path = _hibe_revocation_active_path(cfg, group)
+        intent = _load_hibe_revocation_record(active_path)
+        record_path = active_path
+        completed_retry = False
+
+        if intent is None:
+            grants = _hibe_grants_load(cfg, group)
+            matching = [item for item in grants if item.get("reader_did") == reader_did]
+            if len(matching) != 1:
+                completed_path = _hibe_revocation_completed_path(cfg, group, reader_did)
+                intent = _load_hibe_revocation_record(completed_path)
+                if intent is None:
+                    raise ValueError(
+                        f"tn.admin.revoke_reader: {reader_did!r} has no recorded grant on "
+                        f"group {group!r}. Grants made through tn.admin.grant_reader are "
+                        f"recorded in {_hibe_grants_path(cfg, group).name}."
+                    )
+                record_path = completed_path
+                completed_retry = True
+            else:
+                remaining = [g for g in grants if g.get("reader_did") != reader_did]
+                target = requested_path or _bump_path(cipher_inst.id_path())
+                target = _normalize_hibe_path(target, what="new_path")
+                granted_path = _normalize_hibe_path(
+                    str(matching[0].get("id_path")),
+                    what="grant path",
+                )
+                grant_parts = granted_path.split("/")
+                target_parts = target.split("/")
+                if grant_parts == target_parts[: len(grant_parts)]:
+                    # An ancestor capability derives into the target namespace;
+                    # report the honest no-op without creating an intent.
+                    return RevokeReaderResult(
+                        revoked=False,
+                        new_path=cipher_inst.id_path(),
+                        kit_paths=[],
+                        remaining=[str(item["reader_did"]) for item in grants],
+                        path_epoch=cipher_inst.path_epoch(),
+                        assertion=None,
+                    )
+
+                verified_survivors: dict[str, VerifiedPrincipal] = {}
+                for item in remaining:
+                    did = str(item.get("reader_did"))
+                    verified_survivors[did] = _accepted_hibe_principal(
+                        cfg,
+                        group,
+                        did,
+                        item,
+                    )
+                from ..enrollment import EnrollmentStore
+
+                admission_generation = _advance_hibe_admission_generation(
+                    EnrollmentStore(cfg, cfg.device),
+                    group,
+                )
+                intent = _prepare_hibe_revocation(
+                    cfg=cfg,
+                    group=group,
+                    reader_did=reader_did,
+                    grants=grants,
+                    remaining=remaining,
+                    principals=verified_survivors,
+                    admission_generation=admission_generation,
+                    target_path=target,
+                    audience_did=resolved_audience,
+                    ttl=ttl,
+                    issued_at=checked_at,
+                )
+
+        assertion = _validate_hibe_revocation_record(
+            intent,
+            group=group,
+            reader_did=reader_did,
+            requested_path=requested_path,
+            audience_did=resolved_audience,
+            cfg=cfg,
+        )
+        assertion = _renew_hibe_revocation_assertion_if_needed(
+            intent,
+            assertion,
+            record_path=record_path,
+            ttl=ttl,
+            cfg=cfg,
+            checked_at=checked_at,
         )
 
-    grants = _hibe_grants_load(cfg, group)
-    if not any(g.get("reader_did") == reader_did for g in grants):
-        raise ValueError(
-            f"tn.admin.revoke_reader: {reader_did!r} has no recorded grant on "
-            f"group {group!r}. Grants made through tn.admin.grant_reader are "
-            f"recorded in {_hibe_grants_path(cfg, group).name}."
+        if completed_retry:
+            if (
+                cipher_inst.path_epoch() != intent["target_epoch"]
+                or cipher_inst.id_path() != intent["target_path"]
+            ):
+                raise TrustError(
+                    TrustReason.EPOCH_CONFLICT,
+                    "completed HIBE revocation is no longer the active authority epoch",
+                )
+        else:
+            _commit_hibe_revocation(cfg=cfg, group=group, intent=intent)
+
+        if out_dir is None:
+            ts = checked_at.strftime("%Y%m%dT%H%M%SZ")
+            resolved_out_dir = Path.cwd() / f"hibe_regrant_{ts}"
+        else:
+            resolved_out_dir = Path(out_dir)
+        kit_paths = _deliver_hibe_revocation(
+            cfg=cfg,
+            intent=intent,
+            out_dir=resolved_out_dir,
         )
-    remaining = [g for g in grants if g.get("reader_did") != reader_did]
-
-    target = new_path or _bump_path(cipher_inst.id_path())
-    cipher_inst.rotate_id_path(target)
-    _reload_native_group_cipher(group)
-    _hibe_grants_path(cfg, group).write_text(
-        json.dumps(remaining, indent=1), encoding="utf-8"
-    )
-
-    import re as _re
-    from datetime import datetime as _dt
-    from datetime import timezone as _tz
-
-    if out_dir is None:
-        ts = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
-        out_dir = Path.cwd() / f"hibe_regrant_{ts}"
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    kit_paths: list[Path] = []
-    for g in remaining:
-        did = str(g["reader_did"])
-        safe_stem = _re.sub(r"[^A-Za-z0-9._-]", "_", did.split(":")[-1])
-        kit = out_dir / f"{safe_stem}.tnpkg"
-        grant_reader(group, reader_did=did, out_path=kit, cfg=cfg)
-        kit_paths.append(kit)
-
-    return RevokeReaderResult(
-        revoked=True,
-        new_path=target,
-        kit_paths=kit_paths,
-        remaining=[str(g["reader_did"]) for g in remaining],
-    )
+        if not completed_retry:
+            _finish_hibe_revocation(
+                cfg=cfg,
+                group=group,
+                reader_did=reader_did,
+                intent=intent,
+            )
+        return RevokeReaderResult(
+            revoked=True,
+            new_path=str(intent["target_path"]),
+            kit_paths=kit_paths,
+            remaining=[str(item["reader_did"]) for item in intent["survivors"]],
+            path_epoch=int(intent["target_epoch"]),
+            assertion=assertion,
+        )
 
 
 def rotate_reader_path(group: str, new_path: str, *, cfg: Any | None = None) -> str:
@@ -1600,19 +3595,7 @@ def rotate_reader_path(group: str, new_path: str, *, cfg: Any | None = None) -> 
         from .. import current_config
 
         cfg = current_config()
-    group_spec = cfg.groups.get(group)
-    if group_spec is None:
-        raise KeyError(f"unknown group: {group!r}")
-    cipher_inst = group_spec.cipher
-    if cipher_inst.name != "hibe":
-        raise ValueError(
-            f"tn.admin.rotate_reader_path: group {group!r} uses cipher "
-            f"{cipher_inst.name!r}; this rotation is hibe-only (btn groups "
-            f"rotate via tn rotate)."
-        )
-    cipher_inst.rotate_id_path(new_path)
-    _reload_native_group_cipher(group)
-    return new_path
+    return rotate_hibe_path(group, new_path, cfg=cfg).id_path
 
 
 def _reload_native_group_cipher(group: str) -> None:
@@ -1654,11 +3637,15 @@ def _reload_native_group_cipher(group: str) -> None:
 class RevokeRecipientResult:
     """Structured return from `tn.admin.revoke_recipient`.
 
-    `revoked` is always True on a successful return (failures raise).
+    `revoked` is True on a successful cutoff. HIBE can return False when the
+    recorded capability is an ancestor and therefore still derives into the
+    proposed sibling path.
     `cipher` is the group's cipher. JWE revocations return the mutated
     `updated_cfg`; btn revocations don't. hibe revocations rotate the
     identity path and re-issue survivor kits — `new_path` and `kit_paths`
-    carry that outcome (see ``revoke_reader`` for the honest semantics).
+    carry that outcome; `path_epoch` and `authority_assertion` let external
+    writers authenticate and pin the update (see ``revoke_reader`` for the
+    honest semantics).
     """
 
     revoked: bool
@@ -1666,6 +3653,8 @@ class RevokeRecipientResult:
     updated_cfg: LoadedConfig | None = None
     new_path: str | None = None
     kit_paths: list[Path] | None = None
+    path_epoch: int | None = None
+    authority_assertion: KeyBindingProofV1 | None = None
 
 
 def revoke_recipient(
@@ -1674,6 +3663,7 @@ def revoke_recipient(
     recipient: Any | None = None,
     leaf_index: int | None = None,
     recipient_did: str | None = None,
+    audience_did: str | None = None,
     cfg: Any | None = None,
 ) -> RevokeRecipientResult:
     """Revoke a recipient.
@@ -1682,9 +3672,11 @@ def revoke_recipient(
     to its active leaf via the admin log).
     JWE: pass ``recipient_did``.
     HIBE: pass ``recipient_did``. This routes to ``revoke_reader`` and only
-    rotates the authority ceremony's local path. External writers must
-    authenticate/adopt the new sibling path before sealing, and an ancestor
-    capability remains effective below its path.
+    rotates the authority ceremony's local path. Pass an external writer's
+    complete ``audience_did`` to make the returned authority assertion
+    installable by that writer. External writers must authenticate/adopt the
+    new sibling path before sealing, and an ancestor capability remains
+    effective below its path.
 
     ``recipient=`` is the polymorphic shortcut — accepts a DID str, an
     int leaf, an ``AddRecipientResult`` from the matching add call, a
@@ -1710,6 +3702,10 @@ def revoke_recipient(
     cipher = group_spec.cipher.name
 
     if cipher == "btn":
+        if audience_did is not None:
+            raise ValueError(
+                "tn.admin.revoke_recipient: audience_did is hibe-only."
+            )
         if leaf_index is None and recipient_did is None:
             raise ValueError(
                 "tn.admin.revoke_recipient: btn group requires leaf_index "
@@ -1733,6 +3729,10 @@ def revoke_recipient(
         return RevokeRecipientResult(revoked=True, cipher="btn", updated_cfg=None)
 
     elif cipher == "jwe":
+        if audience_did is not None:
+            raise ValueError(
+                "tn.admin.revoke_recipient: audience_did is hibe-only."
+            )
         if recipient_did is None:
             raise ValueError(
                 "tn.admin.revoke_recipient: recipient_did required for JWE group."
@@ -1755,13 +3755,20 @@ def revoke_recipient(
                 "tn.admin.revoke_recipient: leaf_index is btn-only; "
                 "for hibe use recipient_did."
             )
-        res = revoke_reader(group, recipient_did, cfg=cfg)
+        res = revoke_reader(
+            group,
+            recipient_did,
+            cfg=cfg,
+            audience_did=audience_did,
+        )
         return RevokeRecipientResult(
-            revoked=True,
+            revoked=res.revoked,
             cipher="hibe",
             updated_cfg=None,
             new_path=res.new_path,
             kit_paths=res.kit_paths,
+            path_epoch=res.path_epoch,
+            authority_assertion=res.assertion,
         )
 
     else:

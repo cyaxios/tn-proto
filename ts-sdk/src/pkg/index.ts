@@ -142,16 +142,21 @@ export class PkgNamespace {
     }
     if (opts.bundle) {
       const b = opts.bundle;
-      const exportOpts: Parameters<typeof this._rt.exportPkg>[0] = {
-        kind: "kit_bundle",
-        toDid: b.recipientDid,
+      const bundleOpts: BundleForRecipientOptions = {
+        recipientDid: b.recipientDid,
+        outPath,
       };
-      if (b.groups !== undefined) exportOpts.groups = b.groups;
-      return this._rt.exportPkg(exportOpts, outPath);
+      if (b.groups !== undefined) bundleOpts.groups = b.groups;
+      if (b.includeAdminLog !== undefined) {
+        bundleOpts.includeAdminLog = b.includeAdminLog;
+      }
+      return (await this.bundleForRecipient(bundleOpts)).bundlePath;
     }
     if (opts.kit) {
       const k = opts.kit;
-      return this._rt.exportPkg({ kind: "kit_bundle", toDid: k.recipientDid }, outPath);
+      return (
+        await this.bundleForRecipient({ recipientDid: k.recipientDid, outPath })
+      ).bundlePath;
     }
     throw new Error(
       "tn.pkg.export: must supply one of opts.kit, opts.bundle, opts.adminLogSnapshot, or opts.selfKit",
@@ -187,11 +192,11 @@ export class PkgNamespace {
     if (typeof a === "string" || a instanceof Uint8Array) {
       // New form: a is the source, b (when present) is the options object.
       const opts = b !== undefined && !(b instanceof Uint8Array) && typeof b !== "string" ? b : {};
-      return this._rt.absorbPkg(a, opts);
+      return this._rt.absorbPkgAsync(a, opts);
     }
     // Legacy two-arg form: a is the cfg (accepted for parity), b is the
     // source. Run the absorb and translate to the flat AbsorbResult shape.
-    const receipt = this._rt.absorbPkg(b as string | Uint8Array);
+    const receipt = await this._rt.absorbPkgAsync(b as string | Uint8Array);
     return _toLegacyAbsorbResult(receipt);
   }
 
@@ -204,6 +209,26 @@ export class PkgNamespace {
    * (accidentally shipping the publisher's own self-kit).
    */
   async bundleForRecipient(opts: BundleForRecipientOptions): Promise<BundleResult> {
+    // A BTN kit_bundle's recipient DID is attestation-only metadata, so it is
+    // not validated here; the seal path below rejects a keyless recipient via
+    // `recipientKeyIsResolvable` before it wraps a body key to that DID.
+    const requestedGroups =
+      opts.groups?.slice() ?? [...this._rt.config.groups.keys()].filter((group) => group !== "tn.agents");
+    for (const group of requestedGroups) {
+      const cipher = this._rt.config.groups.get(group)?.cipher;
+      if (cipher === "jwe") {
+        throw new Error(
+          `tn.pkg.bundleForRecipient: reader packages are BTN-only; JWE group ${JSON.stringify(group)} ` +
+            "requires authenticated challenge/offer enrollment and never exports a private reader key.",
+        );
+      }
+      if (cipher !== "btn") {
+        throw new Error(
+          `tn.pkg.bundleForRecipient: reader packages are BTN-only; HIBE group ${JSON.stringify(group)} ` +
+            "uses tn.admin.grantReader with a consumed reader proof.",
+        );
+      }
+    }
     const bundleOpts: { groups?: string[] } = {};
     if (opts.groups !== undefined) bundleOpts.groups = opts.groups;
 
@@ -244,7 +269,7 @@ export class PkgNamespace {
     }
     const bundleBytes = readFileSync(bundlePath);
     const bundleSha256 = sha256HexBytes(new Uint8Array(bundleBytes));
-    const resolvedGroups = opts.groups?.slice().sort() ?? [];
+    const resolvedGroups = requestedGroups.sort();
     return {
       bundlePath,
       bundleSha256,
@@ -269,19 +294,14 @@ export class PkgNamespace {
     if (opts.acceptedOffer !== undefined) {
       return this._compileEnrolmentResponse(opts as CompileEnrolmentResponseOptions);
     }
-    const result = compileKitBundleToFile({
-      keystoreDir: this._rt.config.keystorePath,
+    const result = await this.bundleForRecipient({
+      recipientDid: opts.recipientDid,
       groups: [opts.group],
       outPath: opts.outPath,
     });
-    // Hash the manifest JSON bytes for the receipt.
-    const manifestBytes = new Uint8Array(
-      Buffer.from(JSON.stringify(result.manifest, null, 2) + "\n"),
-    );
-    const manifestSha256 = sha256HexBytes(manifestBytes);
     return {
-      outPath: result.outPath,
-      manifestSha256,
+      outPath: result.bundlePath,
+      manifestSha256: result.bundleSha256,
     };
   }
 
@@ -295,7 +315,8 @@ export class PkgNamespace {
   private async _compileEnrolmentResponse(
     opts: CompileEnrolmentResponseOptions,
   ): Promise<CompiledPackage> {
-    const principal = opts.acceptedOffer.binding.principal;
+    const acceptedOffer = this._rt.enrollmentStore().validateAcceptedOffer(opts.acceptedOffer);
+    const principal = acceptedOffer.binding.principal;
     if (opts.recipientDid !== principal.did) {
       throw new Error(
         `tn.pkg.compileEnrolment: did_signer_mismatch: recipientDid ` +
@@ -309,7 +330,7 @@ export class PkgNamespace {
       ceremonyId: this._rt.config.ceremonyId,
       group: opts.group,
       groupEpoch,
-      accepted: opts.acceptedOffer,
+      accepted: acceptedOffer,
       ttlMs: opts.ttlMs,
     });
     const outPath = pathResolve(opts.outPath);

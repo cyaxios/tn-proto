@@ -20,6 +20,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from .trust import parse_ed25519_did_key
+
 
 @dataclass
 class Package:
@@ -53,14 +55,33 @@ def sign(pkg: Package, sk: Ed25519PrivateKey) -> Package:
     return pkg
 
 
-def verify(pkg: Package) -> bool:
+def _verify_signature_unbound(pkg: Package) -> bool:
+    """Verify only the raw package signature for explicit legacy import.
+
+    Normal callers must use :func:`verify`, which additionally binds the raw
+    signer key to ``device_identity``.  Keeping this helper private makes an
+    identity-unbound verification decision an intentional compatibility step.
+    """
     if not pkg.sig_b64 or not pkg.signer_verify_pub_b64:
         return False
     try:
-        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(pkg.signer_verify_pub_b64))
-        pub.verify(base64.b64decode(pkg.sig_b64), _canonical_bytes(pkg))
+        public_key = base64.b64decode(pkg.signer_verify_pub_b64, validate=True)
+        signature = base64.b64decode(pkg.sig_b64, validate=True)
+        pub = Ed25519PublicKey.from_public_bytes(public_key)
+        pub.verify(signature, _canonical_bytes(pkg))
         return True
     except Exception:  # noqa: BLE001 — preserve broad swallow; see body of handler
+        return False
+
+
+def verify(pkg: Package) -> bool:
+    """Verify the signature and bind its Ed25519 key to ``device_identity``."""
+    if not _verify_signature_unbound(pkg):
+        return False
+    try:
+        signer_key = base64.b64decode(pkg.signer_verify_pub_b64, validate=True)
+        return signer_key == parse_ed25519_did_key(pkg.device_identity)
+    except Exception:  # noqa: BLE001 — bool compatibility API fails closed
         return False
 
 

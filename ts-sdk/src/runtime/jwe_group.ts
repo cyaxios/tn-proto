@@ -14,6 +14,7 @@ import { Buffer } from "node:buffer";
 import { join } from "node:path";
 
 import { x25519 } from "@noble/curves/ed25519";
+import { durableAtomicWrite } from "./durable_state.js";
 
 /** One entry in a `<group>.jwe.recipients` file. `pub_b64` is standard base64
  *  (matching Python's `base64.b64encode`) of the recipient's raw 32-byte
@@ -138,6 +139,12 @@ function readRecipients(path: string): JweRecipientEntry[] {
   });
 }
 
+/** Full recipient records, including retained trust metadata. */
+export function jweRecipientEntries(keysDir: string, group: string): JweRecipientEntry[] {
+  validateJweGroupName(group);
+  return readRecipients(recipientsPath(keysDir, group));
+}
+
 /** Write JSON via write-temp-then-rename so a crash can't tear the file. */
 function atomicWriteJson(path: string, doc: unknown): void {
   const tmp = `${path}.tmp`;
@@ -248,7 +255,13 @@ export function jweRecipients(keysDir: string, group: string): string[] {
  * New material is staged to `.pending` files before any active file is archived,
  * so a failed mint leaves the currently usable group files in place.
  */
-export function jweRotateGroup(keysDir: string, group: string, selfDid: string, ts: string): void {
+export function jweRotateGroup(
+  keysDir: string,
+  group: string,
+  selfDid: string,
+  ts: string,
+  previousEpoch = 0,
+): void {
   validateJweGroupName(group);
   validateRecipientDid(selfDid);
   validateTimestamp(ts);
@@ -261,7 +274,35 @@ export function jweRotateGroup(keysDir: string, group: string, selfDid: string, 
       throw new Error(`jwe: recipients file/group material is missing at ${path}`);
     }
   }
-  readRecipients(recipients);
+  const priorRecipients = readRecipients(recipients);
+
+  const readers = priorRecipients
+    .filter(
+      (entry) =>
+        entry.recipient_identity !== selfDid &&
+        entry.verified === true &&
+        typeof entry.proof_digest === "string" &&
+        typeof entry.public_key_sha256 === "string",
+    )
+    .map((entry) => ({
+      reader_did: entry.recipient_identity,
+      public_key_sha256: entry.public_key_sha256 as string,
+      proof_digest: entry.proof_digest as string,
+    }));
+  durableAtomicWrite(
+    join(keysDir, `${group}.jwe.reenrollment.v1.json`),
+    JSON.stringify(
+      {
+        version: 1,
+        group,
+        previous_epoch: previousEpoch,
+        rotated_at: new Date().toISOString(),
+        readers,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
 
   const senderPriv = x25519.utils.randomPrivateKey();
   const myPriv = x25519.utils.randomPrivateKey();

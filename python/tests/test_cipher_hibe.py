@@ -22,6 +22,7 @@ from tn.cipher import (
     JWEGroupCipher,
     NotARecipientError,
 )
+from tn.trust import TrustError, TrustReason
 
 
 def _hibe_available() -> bool:
@@ -63,45 +64,79 @@ def test_hibe_load_roundtrip() -> None:
         assert loaded.mpk_fingerprint() == created.mpk_fingerprint()
 
 
-def test_hibe_external_authority_write_only_then_granted() -> None:
-    """Sealing to an external authority: writable at once, readable only
-    after the granted identity key lands (what absorb will install)."""
-    mpk, msk = _hibe.setup(2)
+def test_hibe_external_authority_is_fenced_until_authenticated() -> None:
+    """Raw external public material is not sufficient writer authority."""
+    mpk, _msk = _hibe.setup(2)
     with tempfile.TemporaryDirectory() as td:
         ks = Path(td)
         c = HibeGroupCipher.create(ks, "g1", authority_mpk=mpk, id_path="reader-did/policy-1")
-        blob = c.encrypt(b"governed")
-        try:
-            c.decrypt(blob)
-            raise AssertionError("decrypt must fail before a key is granted")
-        except NotARecipientError:
-            pass
-        # The authority grants the exact-path key (Phase 5 ships this as a
-        # hibe-id-key kit; installing the file is what absorb will do).
-        (ks / "g1.hibe.sk").write_bytes(_hibe.keygen(mpk, msk, "reader-did/policy-1"))
-        assert HibeGroupCipher.load(ks, "g1").decrypt(blob) == b"governed"
+        with pytest.raises(TrustError) as unpinned:
+            c.encrypt(b"governed")
+        assert unpinned.value.reason is TrustReason.UNTRUSTED_PRINCIPAL
+
+
+def test_hibe_external_restage_removes_stale_local_authority_secrets() -> None:
+    """Reloading a restaged group must not recover an old authority bypass."""
+    external_mpk, _external_msk = _hibe.setup(2)
+    with tempfile.TemporaryDirectory() as td:
+        ks = Path(td)
+        HibeGroupCipher.create(ks, "g1")
+        HibeGroupCipher.create(
+            ks,
+            "g1",
+            authority_mpk=external_mpk,
+            id_path="reader-did/policy-1",
+        )
+
+        assert not (ks / "g1.hibe.msk").exists()
+        assert not (ks / "g1.hibe.sk").exists()
+        reloaded = HibeGroupCipher.load(ks, "g1")
+        assert not reloaded.is_authority()
+        with pytest.raises(TrustError) as unpinned:
+            reloaded.encrypt(b"must remain fenced")
+        assert unpinned.value.reason is TrustReason.UNTRUSTED_PRINCIPAL
 
 
 def test_hibe_ancestor_key_derives_down() -> None:
     """A key for a PARENT path opens the group by delegating down locally."""
-    mpk, msk = _hibe.setup(2)
     with tempfile.TemporaryDirectory() as td:
-        ks = Path(td)
-        c = HibeGroupCipher.create(ks, "g1", authority_mpk=mpk, id_path="reader-did/policy-1")
-        blob = c.encrypt(b"delegated read")
-        (ks / "g1.hibe.sk").write_bytes(_hibe.keygen(mpk, msk, "reader-did"))
-        assert HibeGroupCipher.load(ks, "g1").decrypt(blob) == b"delegated read"
+        root = Path(td)
+        authority = HibeGroupCipher.create(
+            root / "authority", "g1", id_path="reader-did/policy-1"
+        )
+        blob = authority.encrypt(b"delegated read")
+        reader_keystore = root / "reader"
+        HibeGroupCipher.create(
+            reader_keystore,
+            "g1",
+            authority_mpk=authority.mpk(),
+            id_path="reader-did/policy-1",
+        )
+        (reader_keystore / "g1.hibe.sk").write_bytes(
+            authority.mint_reader_key("reader-did")
+        )
+        assert HibeGroupCipher.load(reader_keystore, "g1").decrypt(blob) == b"delegated read"
 
 
 def test_hibe_wrong_path_key_cannot_decrypt() -> None:
-    mpk, msk = _hibe.setup(2)
     with tempfile.TemporaryDirectory() as td:
-        ks = Path(td)
-        c = HibeGroupCipher.create(ks, "g1", authority_mpk=mpk, id_path="reader-did/policy-1")
-        blob = c.encrypt(b"not for you")
-        (ks / "g1.hibe.sk").write_bytes(_hibe.keygen(mpk, msk, "other-did/policy-1"))
+        root = Path(td)
+        authority = HibeGroupCipher.create(
+            root / "authority", "g1", id_path="reader-did/policy-1"
+        )
+        blob = authority.encrypt(b"not for you")
+        reader_keystore = root / "reader"
+        HibeGroupCipher.create(
+            reader_keystore,
+            "g1",
+            authority_mpk=authority.mpk(),
+            id_path="reader-did/policy-1",
+        )
+        (reader_keystore / "g1.hibe.sk").write_bytes(
+            authority.mint_reader_key("other-did/policy-1")
+        )
         try:
-            HibeGroupCipher.load(ks, "g1").decrypt(blob)
+            HibeGroupCipher.load(reader_keystore, "g1").decrypt(blob)
             raise AssertionError("wrong-path key must not decrypt")
         except NotARecipientError:
             pass
@@ -167,7 +202,8 @@ def main() -> int:
     tests = [
         test_hibe_solo_mint_roundtrip,
         test_hibe_load_roundtrip,
-        test_hibe_external_authority_write_only_then_granted,
+        test_hibe_external_authority_is_fenced_until_authenticated,
+        test_hibe_external_restage_removes_stale_local_authority_secrets,
         test_hibe_ancestor_key_derives_down,
         test_hibe_wrong_path_key_cannot_decrypt,
         test_hibe_grant_helpers,

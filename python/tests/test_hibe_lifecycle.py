@@ -58,12 +58,33 @@ def test_hibe_lifecycle(tmp_path):
     kit1 = ws / "reader1.tnpkg"
     kit2 = ws / "reader2.tnpkg"
 
+    tn.init(ws / "reader1" / "tn.yaml", log_path=ws / "reader1" / "log.ndjson")
+    reader1_cfg = tn.current_config()
+    tn.flush_and_close()
+    tn.init(ws / "reader2" / "tn.yaml", log_path=ws / "reader2" / "log.ndjson")
+    reader2_cfg = tn.current_config()
+    tn.flush_and_close()
+
     # --- Act 1: authority bootstraps, seals epoch-a, grants reader 1.
     tn.init(a_yaml, log_path=a_log, cipher="hibe")
+    authority_cfg = tn.current_config()
     assert tn.current_config().cipher_name == "hibe"
     tn.info("epoch.a.first", note="before rotation, entry 1")
     tn.info("epoch.a.second", note="before rotation, entry 2")
-    tn.admin.grant_reader("default", reader_did="did:key:z6Mk-r1", out_path=kit1)
+    challenge1 = tn.admin.issue_hibe_reader_challenge(
+        "default", reader1_cfg.device.device_identity, cfg=authority_cfg
+    )
+    proof1 = tn.admin.create_hibe_reader_proof(
+        challenge1,
+        expected_authority_did=authority_cfg.device.device_identity,
+        cfg=reader1_cfg,
+    )
+    tn.admin.grant_reader(
+        "default",
+        reader_did=reader1_cfg.device.device_identity,
+        out_path=kit1,
+        proof=proof1,
+    )
     tn.flush_and_close()
 
     # --- Act 2: reader 1 absorbs and reads the foreign log.
@@ -77,9 +98,23 @@ def test_hibe_lifecycle(tmp_path):
 
     # --- Act 3: rotation, epoch-b, a post-rotation grant.
     tn.init(a_yaml, log_path=a_log, cipher="hibe")
+    authority_cfg = tn.current_config()
     tn.admin.rotate_reader_path("default", "policy-b")
     tn.info("epoch.b.first", note="after rotation")
-    tn.admin.grant_reader("default", reader_did="did:key:z6Mk-r2", out_path=kit2)
+    challenge2 = tn.admin.issue_hibe_reader_challenge(
+        "default", reader2_cfg.device.device_identity, cfg=authority_cfg
+    )
+    proof2 = tn.admin.create_hibe_reader_proof(
+        challenge2,
+        expected_authority_did=authority_cfg.device.device_identity,
+        cfg=reader2_cfg,
+    )
+    tn.admin.grant_reader(
+        "default",
+        reader_did=reader2_cfg.device.device_identity,
+        out_path=kit2,
+        proof=proof2,
+    )
     tn.flush_and_close()
 
     # --- Act 4: reader 1 keeps history, loses the new epoch.

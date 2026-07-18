@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -11,9 +12,12 @@ from tn import UnsealError, VerifyError, admin
 from tn.absorb import absorb
 from tn.chain import ZERO_HASH, _compute_row_hash
 from tn.compile import compile_enrolment, emit_to_outbox
-from tn.config import load_or_create
-from tn.offer import _ensure_mykey
+from tn.config import LoadedConfig, load_or_create
+from tn.conventions import outbox_dir
+from tn.enrollment import EnrollmentStore
+from tn.offer import _ensure_mykey, offer
 from tn.signing import DeviceKey, _signature_from_b64
+from tn.trust import AcceptedOffer
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +28,29 @@ def _cleanup():
 
 def _workflow_cipher(default: str) -> str:
     return os.environ.get("TN_TEST_CIPHER", default)
+
+
+# Enrolment now requires a durably reconciled AcceptedOffer obtained through the
+# real trusted-offer ceremony (a hand-built one is rejected with
+# TrustReason.UNTRUSTED_PRINCIPAL). This helper drives that ceremony end to end
+# for an arbitrary group, mirroring tests/test_jwe_trusted_enrollment_e2e.py.
+def _only_outbox_artifact(cfg: LoadedConfig):
+    artifacts = list(outbox_dir(cfg.yaml_path).glob("*.tnpkg"))
+    assert len(artifacts) == 1
+    return artifacts[0]
+
+
+def _accepted_flow(
+    publisher: LoadedConfig, reader: LoadedConfig, group: str = "default"
+) -> AcceptedOffer:
+    store = EnrollmentStore(publisher, publisher.device)
+    store.preauthorize(reader.device.did, group)
+    challenge = store.issue_challenge(reader.device.did, group, timedelta(minutes=10))
+    offer(reader, publisher.device.did, challenge=challenge, group=group)
+    receipt = absorb(publisher, _only_outbox_artifact(reader))
+    assert receipt.offer_digest is not None
+    now = datetime.now(timezone.utc)
+    return store.reconcile(store.pending_offer(receipt.offer_digest, now=now), now=now)
 
 
 def test_seal_returns_sealed_object(tmp_path):
@@ -261,10 +288,17 @@ def _two_peer(tmp_path):
     bob_dir.mkdir()
     bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher="jwe")
     bob_pub = _ensure_mykey(bob_cfg, "partners")
+    # Bob enrolls into 'partners' through the real trusted-offer ceremony so
+    # compile_enrolment has a durably reconciled AcceptedOffer to bind. The
+    # offer reuses the partners mykey minted just above, so its bound public
+    # key matches the one wired in via _add_recipient_jwe_impl.
+    accepted = _accepted_flow(alice_cfg, bob_cfg, group="partners")
     admin._add_recipient_jwe_impl(
         alice_cfg, "partners", bob_cfg.device.device_identity, bob_pub
     )
-    pkg = compile_enrolment(alice_cfg, "partners", bob_cfg.device.device_identity)
+    pkg = compile_enrolment(
+        alice_cfg, "partners", bob_cfg.device.device_identity, accepted_offer=accepted
+    )
     pkg_path = emit_to_outbox(alice_cfg, pkg)
 
     tn.init(str(alice_cfg.yaml_path))

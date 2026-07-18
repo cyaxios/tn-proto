@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 import tn
-from tn import admin
 from tn.config import load_or_create
 from tn.conventions import inbox_dir
 from tn.offer import offer
@@ -40,6 +39,10 @@ def _clean_tn():  # noqa: PT004
 
 
 def test_init_absorbs_inbox_and_reconciles(tmp_path: Path):
+    from datetime import timedelta
+
+    from tn.enrollment import EnrollmentStore
+
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
     alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
@@ -48,17 +51,24 @@ def test_init_absorbs_inbox_and_reconciles(tmp_path: Path):
     bob_dir.mkdir()
     bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     tn.init(str(bob_cfg.yaml_path))
-    offer(bob_cfg, publisher_did=alice_cfg.device.device_identity)
+
+    # Post trusted-enrollment refactor, only a *challenged + preauthorized* offer
+    # auto-promotes at reconcile (an unsolicited offer needs explicit approval).
+    # So Alice preauthorizes Bob and issues him a scoped challenge, and Bob
+    # answers with a challenged offer carrying his key-binding proof.
+    store = EnrollmentStore(alice_cfg, alice_cfg.device)
+    store.preauthorize(bob_cfg.device.did, "default")
+    challenge = store.issue_challenge(bob_cfg.device.did, "default", timedelta(minutes=10))
+    offer(bob_cfg, alice_cfg.device.did, challenge=challenge)
     tn.flush_and_close()
+
     # Per-stem outbox layout: <yaml_dir>/.tn/<yaml_stem>/outbox/
     pkg_path = next((bob_dir / ".tn" / bob_cfg.yaml_path.stem / "outbox").glob("*.tnpkg"))
     inbox_dir(alice_dir).mkdir(parents=True, exist_ok=True)
     (inbox_dir(alice_dir) / pkg_path.name).write_bytes(pkg_path.read_bytes())
 
-    # Alice declared intent for Bob (pending).
-    admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity)
-
-    # Alice's init should: absorb Bob's offer, reconcile promote Bob.
+    # Alice's init should: absorb Bob's challenged offer, reconcile-promote Bob,
+    # and wire his verified pubkey into the group.
     tn.init(str(alice_cfg.yaml_path))
     import yaml as _yaml
 
@@ -67,7 +77,7 @@ def test_init_absorbs_inbox_and_reconciles(tmp_path: Path):
     bob = next(
         r
         for r in doc["groups"]["default"]["recipients"]
-        if r["recipient_identity"] == bob_cfg.device.device_identity
+        if r["recipient_identity"] == bob_cfg.device.did
     )
     assert "pub_b64" in bob, f"reconcile should have promoted Bob; yaml: {doc}"
     tn.flush_and_close()

@@ -14,26 +14,30 @@ import pytest
 
 from tn.absorb import _absorb_kit_bundle, absorb
 from tn.config import load_or_create
-from tn.conventions import outbox_dir, pending_offers_dir
+from tn.conventions import outbox_dir
 from tn.offer import offer
 from tn.signing import DeviceKey
 from tn.tnpkg import TnpkgManifest
 
 
 def test_absorb_offer_lands_in_pending_offers(tmp_path: Path):
-    bob_dir = tmp_path / "bob"
-    bob_dir.mkdir()
-    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
-    offer(bob_cfg, publisher_did="did:key:z6MkAlice")
-    pkg_path = next(outbox_dir(bob_dir).glob("*.tnpkg"))
-
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
     alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    bob_dir = tmp_path / "bob"
+    bob_dir.mkdir()
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    offer(
+        bob_cfg,
+        publisher_did=alice_cfg.device.did,
+        ceremony_id=alice_cfg.ceremony_id,
+    )
+    pkg_path = next(outbox_dir(bob_dir).glob("*.tnpkg"))
+
     result = absorb(alice_cfg, pkg_path)
     assert result.status == "offer_stashed"
-    safe = bob_cfg.device.device_identity.replace(":", "_")
-    assert (pending_offers_dir(alice_dir) / f"{safe}.json").exists()
+    assert result.reader_did == bob_cfg.device.device_identity
+    assert result.offer_digest is not None
 
 
 def test_absorb_rejects_bad_signature(tmp_path: Path):
@@ -47,7 +51,12 @@ def test_absorb_rejects_bad_signature(tmp_path: Path):
     bob_dir = tmp_path / "bob"
     bob_dir.mkdir()
     bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
-    offer(bob_cfg, publisher_did="did:key:z6MkAlice")
+    alice_cfg = load_or_create(tmp_path / "alice_t.yaml", cipher=_workflow_cipher("jwe"))
+    offer(
+        bob_cfg,
+        publisher_did=alice_cfg.device.did,
+        ceremony_id=alice_cfg.ceremony_id,
+    )
     pkg_path = next(outbox_dir(bob_dir).glob("*.tnpkg"))
 
     # Mutate body/package.json inside the zip to break the inner sig.
@@ -61,9 +70,6 @@ def test_absorb_rejects_bad_signature(tmp_path: Path):
         zf.writestr("manifest.json", manifest_bytes)
         zf.writestr("body/package.json", new_body)
 
-    alice_cfg = load_or_create(
-        (tmp_path / "alice_t.yaml").parent / "alice_t.yaml", cipher=_workflow_cipher("jwe")
-    )
     result = absorb(alice_cfg, pkg_path)
     assert result.status == "rejected"
     assert "body_digest_mismatch" in result.reason.lower()
@@ -71,9 +77,9 @@ def test_absorb_rejects_bad_signature(tmp_path: Path):
 
 def test_absorb_rejects_unsupported_kind(tmp_path: Path):
     """An unknown package_kind must be rejected (not stashed, not crashed)."""
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
     from tn.packaging import Package, dump_tnpkg, sign
+
+    signer = DeviceKey.generate()
 
     bogus = Package(
         package_version=1,
@@ -81,14 +87,13 @@ def test_absorb_rejects_unsupported_kind(tmp_path: Path):
         ceremony_id="c",
         group="g",
         group_epoch=0,
-        device_identity="did:key:x",
+        device_identity=signer.did,
         signer_verify_pub_b64="",
         recipient_identity="did:key:y",
         payload={},
         compiled_at="2026-04-21T00:00:00Z",
     )
-    sk = Ed25519PrivateKey.generate()
-    pkg = sign(bogus, sk)
+    pkg = sign(bogus, signer.signing_key())
     path = tmp_path / "pkg.tnpkg"
     dump_tnpkg(pkg, path)
 
@@ -98,9 +103,12 @@ def test_absorb_rejects_unsupported_kind(tmp_path: Path):
     assert "future_thing" in result.reason
 
 
+from datetime import datetime, timedelta, timezone
+
 import tn
 from tn import admin
 from tn.compile import compile_enrolment, emit_to_outbox
+from tn.enrollment import EnrollmentStore
 from tn.offer import _ensure_mykey
 
 
@@ -115,8 +123,31 @@ def test_absorb_enrolment_makes_recipient_read(tmp_path: Path):
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
     alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
-    admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity, bob_pub)
-    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.device_identity)
+
+    # Enrolment now requires a durably reconciled AcceptedOffer, so Bob first
+    # enrolls through the real trusted-offer ceremony: Alice preauthorizes and
+    # challenges Bob, Bob offers under that challenge (reusing the mykey he made
+    # above), Alice absorbs Bob's offer and reconciles it into an AcceptedOffer.
+    store = EnrollmentStore(alice_cfg, alice_cfg.device)
+    store.preauthorize(bob_cfg.device.did, "default")
+    challenge = store.issue_challenge(bob_cfg.device.did, "default", timedelta(minutes=10))
+    offer(bob_cfg, alice_cfg.device.did, challenge=challenge)
+    offer_artifact = next(outbox_dir(bob_dir).glob("*.tnpkg"))
+    offer_receipt = absorb(alice_cfg, offer_artifact)
+    assert offer_receipt.offer_digest is not None
+    now = datetime.now(timezone.utc)
+    accepted = store.reconcile(
+        store.pending_offer(offer_receipt.offer_digest, now=now), now=now
+    )
+
+    # Wire Bob's public key into Alice's cipher so her writes encrypt to him,
+    # then compile the enrolment that tells Bob how to decrypt them.
+    admin._add_recipient_jwe_impl(
+        alice_cfg, "default", bob_cfg.device.device_identity, bob_pub
+    )
+    pkg = compile_enrolment(
+        alice_cfg, "default", bob_cfg.device.device_identity, accepted_offer=accepted
+    )
     pkg_path = emit_to_outbox(alice_cfg, pkg)
 
     result = absorb(bob_cfg, pkg_path)
@@ -148,20 +179,24 @@ def test_absorb_enrolment_makes_recipient_read(tmp_path: Path):
 def test_absorb_accepts_bytes_input(tmp_path: Path):
     """Bytes inputs are allowed: absorb spills to a temp .tnpkg, processes,
     then unlinks. End-to-end through the offer kind path."""
-    bob_dir = tmp_path / "bob"
-    bob_dir.mkdir()
-    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
-    offer(bob_cfg, publisher_did="did:key:z6MkAlice")
-    pkg_path = next(outbox_dir(bob_dir).glob("*.tnpkg"))
-    pkg_bytes = pkg_path.read_bytes()
-
     alice_dir = tmp_path / "alice"
     alice_dir.mkdir()
     alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    bob_dir = tmp_path / "bob"
+    bob_dir.mkdir()
+    bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    offer(
+        bob_cfg,
+        publisher_did=alice_cfg.device.did,
+        ceremony_id=alice_cfg.ceremony_id,
+    )
+    pkg_path = next(outbox_dir(bob_dir).glob("*.tnpkg"))
+    pkg_bytes = pkg_path.read_bytes()
+
     result = absorb(alice_cfg, pkg_bytes)
     assert result.status == "offer_stashed", f"reason: {result.reason}"
-    safe = bob_cfg.device.device_identity.replace(":", "_")
-    assert (pending_offers_dir(alice_dir) / f"{safe}.json").exists()
+    assert result.reader_did == bob_cfg.device.device_identity
+    assert result.offer_digest is not None
 
 
 # ---------------------------------------------------------------------------
@@ -172,13 +207,21 @@ def test_absorb_accepts_bytes_input(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def _make_valid_offer_tnpkg(tmp_path: Path) -> Path:
+def _make_valid_offer_tnpkg(tmp_path: Path):
     """Produce a real, signed offer `.tnpkg` that absorbs cleanly."""
+    publisher_cfg = load_or_create(
+        tmp_path / "publisher_target" / "tn.yaml",
+        cipher=_workflow_cipher("jwe"),
+    )
     bob_dir = tmp_path / "bob_src"
     bob_dir.mkdir()
     bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
-    offer(bob_cfg, publisher_did="did:key:z6MkAlice")
-    return next(outbox_dir(bob_dir).glob("*.tnpkg"))
+    offer(
+        bob_cfg,
+        publisher_did=publisher_cfg.device.did,
+        ceremony_id=publisher_cfg.ceremony_id,
+    )
+    return next(outbox_dir(bob_dir).glob("*.tnpkg")), publisher_cfg
 
 
 def _patch_zip_member_metadata(
@@ -750,12 +793,8 @@ def test_absorb_rejects_oversized_manifest(tmp_path: Path):
 def test_absorb_normal_package_still_absorbs_after_limits(tmp_path: Path):
     """The limit guard must NOT reject a legitimate package. A real signed
     offer `.tnpkg` (well within every bound) absorbs cleanly."""
-    pkg_path = _make_valid_offer_tnpkg(tmp_path)
-
-    alice_dir = tmp_path / "alice"
-    alice_dir.mkdir()
-    alice_cfg = load_or_create(alice_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
-    result = absorb(alice_cfg, pkg_path)
+    pkg_path, publisher_cfg = _make_valid_offer_tnpkg(tmp_path)
+    result = absorb(publisher_cfg, pkg_path)
     assert result.status == "offer_stashed", f"reason: {result.reason}"
 
 

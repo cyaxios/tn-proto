@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 from tn import cipher as cipher_mod
-from tn.cipher import HibeGroupCipher
+from tn.cipher import BtnGroupCipher, HibeGroupCipher, NotARecipientError
 
 
 def _load_hibe_with_native(native: types.ModuleType):
@@ -112,6 +113,9 @@ class _FakeHibe:
     def mpk_fingerprint(self, mpk: bytes) -> bytes:
         return b"\x01" * 32
 
+    def mpk_max_depth(self, mpk: bytes) -> int:
+        return 3
+
 
 @pytest.fixture
 def fake_hibe(monkeypatch: pytest.MonkeyPatch) -> _FakeHibe:
@@ -200,3 +204,73 @@ def test_hibe_prior_ancestor_key_derives_to_current_and_prior_paths(
 
     assert b"sk:team/policy-b" in candidates
     assert b"sk:team/policy-a" in candidates
+
+
+def test_btn_candidate_classifies_a_hibe_wire_frame_as_another_cipher(
+    tmp_path: Path,
+) -> None:
+    hibe = HibeGroupCipher.create(tmp_path / "hibe", "g", id_path="reader")
+    btn = BtnGroupCipher.create(tmp_path / "btn", "g")
+    hibe_ciphertext = hibe.encrypt(b"governed")
+
+    with pytest.raises(NotARecipientError, match="cipher frame"):
+        btn.decrypt(hibe_ciphertext)
+
+
+def test_grant_manifest_state_augmentation_is_additive_and_rejects_collisions() -> None:
+    from tn.export import _merge_manifest_state
+
+    original = {"kind": "readers-only", "kits": []}
+    augmented = _merge_manifest_state(
+        original,
+        {
+            "hibe_grant": {
+                "delivery": "recipient-seal-v1",
+                "delegated_subauthority": False,
+                "id_path": "team/policy",
+                "unsafe": False,
+            }
+        },
+    )
+
+    assert augmented["kind"] == "readers-only"
+    assert augmented["hibe_grant"]["id_path"] == "team/policy"
+    assert original == {"kind": "readers-only", "kits": []}
+    with pytest.raises(ValueError, match="collision"):
+        _merge_manifest_state(original, {"kind": "overwritten"})
+
+
+def test_export_without_internal_augmentation_preserves_absent_manifest_state(
+    tmp_path: Path,
+) -> None:
+    import tn
+    from tn.export import export
+    from tn.packaging import Package
+    from tn.tnpkg import _read_manifest
+
+    try:
+        tn.flush_and_close()
+    except Exception:
+        pass
+    tn.init(tmp_path / "publisher" / "tn.yaml")
+    cfg = tn.current_config()
+    package = Package(
+        package_version=1,
+        package_kind="enrolment",
+        ceremony_id=cfg.ceremony_id,
+        group="default",
+        group_epoch=0,
+        device_identity=cfg.device.device_identity,
+        signer_verify_pub_b64="",
+        recipient_identity=None,
+        payload={},
+        compiled_at=datetime.now(UTC).isoformat(),
+        sig_b64=None,
+    )
+    out = tmp_path / "enrolment.tnpkg"
+
+    export(out, kind="enrolment", cfg=cfg, package=package)
+    manifest, _ = _read_manifest(out, verify_signature=True)
+
+    assert manifest.state is None
+    tn.flush_and_close()

@@ -45,7 +45,7 @@ from .admin.log import (
 from .btn_keystore import BtnKeystore
 from .config import LoadedConfig
 from .conventions import pending_offers_dir
-from .packaging import Package, verify
+from .packaging import Package, _verify_signature_unbound, verify
 from .signing import DeviceKey, _signature_from_b64
 from .tnpkg import (
     ManifestSignatureError,
@@ -55,7 +55,7 @@ from .tnpkg import (
     _peek_manifest_kind,
     _read_manifest,
 )
-from .trust import TrustError
+from .trust import TrustError, TrustReason, parse_ed25519_did_key
 
 _DID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -136,6 +136,9 @@ class AbsorbReceipt:
     legacy_status: str = ""
     legacy_reason: str = ""
     replaced_kit_paths: list[Path] = field(default_factory=list)
+    offer_digest: str | None = None
+    artifact_digest: str | None = None
+    reader_did: str | None = None
 
 
 # Legacy result shape kept for back-compat with existing tests / callers
@@ -145,6 +148,9 @@ class AbsorbResult:
     status: str  # offer_stashed | enrolment_applied | coupon_applied | no_op | rejected
     reason: str = ""
     peer_did: str | None = None
+    offer_digest: str | None = None
+    artifact_digest: str | None = None
+    reader_did: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +195,12 @@ def absorb(
     and returns the original ``AbsorbResult`` shape. The new one-arg form
     is the canonical surface and always returns an ``AbsorbReceipt``.
     """
+    unsafe_legacy_signer = kwargs.pop("unsafe_legacy_signer", False)
+    if type(unsafe_legacy_signer) is not bool:
+        raise TypeError("absorb: unsafe_legacy_signer must be a bool")
+    unsafe_legacy_enrollment = kwargs.pop("unsafe_legacy_enrollment", False)
+    if type(unsafe_legacy_enrollment) is not bool:
+        raise TypeError("absorb: unsafe_legacy_enrollment must be a bool")
     cfg: LoadedConfig | None
     source: Any
     legacy = False
@@ -196,14 +208,16 @@ def absorb(
     if len(args) == 1 and not kwargs:
         source = args[0]
         cfg = None
-    elif len(args) == 2:
+    elif len(args) == 2 and not kwargs:
         cfg = args[0]
         source = args[1]
         legacy = True
-    elif "source" in kwargs:
+    elif not args and "source" in kwargs:
         source = kwargs.pop("source")
         cfg = kwargs.pop("cfg", None)
         legacy = cfg is not None
+        if kwargs:
+            raise TypeError(f"absorb: unexpected keyword arguments: {sorted(kwargs)!r}")
     else:
         raise TypeError(
             "absorb: call as absorb(source) or absorb(cfg, source). "
@@ -254,7 +268,12 @@ def absorb(
     if prepared_bootstrap is None:
         if cfg is None:  # pragma: no cover - guarded by config resolution above
             raise RuntimeError("absorb: internal error resolving package configuration")
-        receipt = _absorb_dispatch(cfg, source)
+        receipt = _absorb_dispatch(
+            cfg,
+            source,
+            unsafe_legacy_signer=unsafe_legacy_signer,
+            unsafe_legacy_enrollment=unsafe_legacy_enrollment,
+        )
     else:
         receipt = _absorb_verified_package(
             prepared_bootstrap.cfg,
@@ -273,6 +292,9 @@ def absorb(
                 status=receipt.legacy_status,
                 reason=receipt.legacy_reason,
                 peer_did=None,
+                offer_digest=receipt.offer_digest,
+                artifact_digest=receipt.artifact_digest,
+                reader_did=receipt.reader_did,
             )
         # Default mapping for snapshot kinds the old callers never saw.
         if receipt.kind == "admin_log_snapshot":
@@ -384,7 +406,13 @@ def _try_bootstrap_cfg(
 # ---------------------------------------------------------------------------
 
 
-def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) -> AbsorbReceipt:
+def _absorb_dispatch(
+    cfg: LoadedConfig,
+    source: Path | str | bytes | bytearray,
+    *,
+    unsafe_legacy_signer: bool = False,
+    unsafe_legacy_enrollment: bool = False,
+) -> AbsorbReceipt:
     """Open the zip, verify the manifest, and dispatch on ``manifest.kind``.
 
     Falls back to the legacy ``Package`` JSON path when the source is not
@@ -397,13 +425,27 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
     # metadata before reading a single entry, so a malicious or malformed
     # package can't exhaust memory via this path (CLI absorb or a watched
     # fs.scan inbox).
+    enrollment_artifact: bytes | None = None
     try:
         peeked_kind = _peek_manifest_kind(source)
-        if peeked_kind == "offer":
-            from .enrollment import validate_enrollment_archive
+        if peeked_kind in {"offer", "enrolment"}:
+            from .enrollment import read_enrollment_artifact, validate_enrollment_archive
 
-            validate_enrollment_archive(source)
-        manifest, body = _read_manifest(source, verify_signature=True)
+            enrollment_artifact = (
+                bytes(source)
+                if isinstance(source, (bytes, bytearray))
+                else read_enrollment_artifact(Path(source))
+            )
+            validate_enrollment_archive(enrollment_artifact)
+        manifest, body = _read_manifest(
+            enrollment_artifact if enrollment_artifact is not None else source,
+            verify_signature=True,
+        )
+        if enrollment_artifact is not None and manifest.kind != peeked_kind:
+            raise TrustError(
+                TrustReason.REPLAY_CONFLICT,
+                "enrollment package kind changed during bounded inspection",
+            )
     except ManifestSignatureError as exc:
         # Bad manifest signature — a corrupt / tampered package, NOT a
         # legacy JSON one. Surface it directly; do not fall through to the
@@ -433,7 +475,12 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
         # Legacy fallback: the old ``dump_tnpkg`` produced a flat JSON
         # ``Package`` (no zip header). Honor it when we can; otherwise
         # surface the error.
-        legacy = _try_legacy_json_package(cfg, source)
+        legacy = _try_legacy_json_package(
+            cfg,
+            source,
+            unsafe_legacy_signer=unsafe_legacy_signer,
+            unsafe_legacy_enrollment=unsafe_legacy_enrollment,
+        )
         if legacy is not None:
             return legacy
         return AbsorbReceipt(
@@ -455,16 +502,16 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
 
     if trusted_enrollment_offer:
         try:
-            from .enrollment import EnrollmentStore, read_enrollment_artifact
+            from .enrollment import EnrollmentStore
 
-            artifact = (
-                bytes(source)
-                if isinstance(source, (bytes, bytearray))
-                else read_enrollment_artifact(Path(source))
-            )
+            if enrollment_artifact is None:
+                raise TrustError(
+                    TrustReason.STATEMENT_INVALID,
+                    "verified enrollment offer bytes were not retained",
+                )
 
-            EnrollmentStore(cfg, cfg.device).stage_offer(
-                artifact,
+            pending = EnrollmentStore(cfg, cfg.device).stage_offer(
+                enrollment_artifact,
                 expected_publisher_did=cfg.device.device_identity,
                 now=datetime.now(_tz.utc),
             )
@@ -478,9 +525,22 @@ def _absorb_dispatch(cfg: LoadedConfig, source: Path | str | bytes | bytearray) 
             kind="offer",
             accepted_count=1,
             legacy_status="offer_stashed",
+            offer_digest=pending.offer_digest,
+            artifact_digest=pending.artifact_digest,
+            reader_did=pending.reader_did,
         )
 
-    return _absorb_verified_package(cfg, manifest, body)
+    return _absorb_verified_package(
+        cfg,
+        manifest,
+        body,
+        unsafe_legacy_enrollment=unsafe_legacy_enrollment,
+        artifact_digest=(
+            "sha256:" + _hashlib.sha256(enrollment_artifact).hexdigest()
+            if enrollment_artifact is not None
+            else None
+        ),
+    )
 
 
 def _is_trusted_enrollment_offer(body: dict[str, bytes]) -> bool:
@@ -506,6 +566,9 @@ def _absorb_verified_package(
     cfg: LoadedConfig,
     manifest: TnpkgManifest,
     body: dict[str, bytes],
+    *,
+    unsafe_legacy_enrollment: bool = False,
+    artifact_digest: str | None = None,
 ) -> AbsorbReceipt:
     """Dispatch one already signature- and body-index-verified package."""
 
@@ -524,7 +587,13 @@ def _absorb_verified_package(
     if kind == "offer":
         return _absorb_offer_kind(cfg, manifest, body)
     if kind == "enrolment":
-        return _absorb_enrolment_kind(cfg, manifest, body)
+        return _absorb_enrolment_kind(
+            cfg,
+            manifest,
+            body,
+            unsafe_legacy_enrollment=unsafe_legacy_enrollment,
+            artifact_digest=artifact_digest,
+        )
     if kind == "group_keys" or manifest.scope == "group_keys":
         # group_keys rides the `full_keystore` wire kind (server-known)
         # marked with scope=group_keys; route by the marker, not just the
@@ -560,16 +629,35 @@ def _absorb_verified_package(
 
 
 def _try_legacy_json_package(
-    cfg: LoadedConfig, source: Path | str | bytes | bytearray
+    cfg: LoadedConfig,
+    source: Path | str | bytes | bytearray,
+    *,
+    unsafe_legacy_signer: bool = False,
+    unsafe_legacy_enrollment: bool = False,
 ) -> AbsorbReceipt | None:
     """If ``source`` is a flat ``Package`` JSON (the pre-manifest layout),
     parse it and route to the offer / enrolment handlers. Returns None
     if the input doesn't look like a legacy package."""
     try:
+        from .enrollment import MAX_ENROLLMENT_ARTIFACT_BYTES, read_enrollment_artifact
+
         if isinstance(source, (bytes, bytearray)):
-            doc = json.loads(bytes(source).decode("utf-8"))
+            artifact = bytes(source)
+            if len(artifact) > MAX_ENROLLMENT_ARTIFACT_BYTES:
+                raise TrustError(
+                    TrustReason.STATEMENT_INVALID,
+                    f"enrollment artifact size {len(artifact)} exceeds the maximum "
+                    f"enrollment artifact size of {MAX_ENROLLMENT_ARTIFACT_BYTES} bytes",
+                )
         else:
-            doc = json.loads(Path(source).read_text(encoding="utf-8"))
+            artifact = read_enrollment_artifact(Path(source))
+        doc = json.loads(artifact.decode("utf-8"))
+    except TrustError as exc:
+        return AbsorbReceipt(
+            kind="unknown",
+            legacy_status="rejected",
+            legacy_reason=str(exc),
+        )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(doc, dict) or "package_kind" not in doc:
@@ -578,20 +666,54 @@ def _try_legacy_json_package(
         pkg = Package(**doc)
     except TypeError:
         return None
-    if not verify(pkg):
-        return AbsorbReceipt(
-            kind=pkg.package_kind,
-            legacy_status="rejected",
-            legacy_reason=(
-                f"signature verification failed for {source}: the package "
-                f"claims signer {pkg.device_identity!r} but its Ed25519 sig does "
-                f"not verify against its signer_verify_pub_b64."
-            ),
-        )
+    did_bound = verify(pkg)
+    relaxations: list[str] = []
+    if not did_bound:
+        if not unsafe_legacy_signer or not _verify_signature_unbound(pkg):
+            return AbsorbReceipt(
+                kind=pkg.package_kind,
+                legacy_status="rejected",
+                legacy_reason=(
+                    f"signature verification failed for {source}: the package "
+                    f"claims signer {pkg.device_identity!r} but its Ed25519 sig does "
+                    f"not verify against its signer_verify_pub_b64."
+                ),
+            )
+        relaxations.append("legacy_signer_mismatch")
     if pkg.package_kind == "offer":
-        return _stash_offer(cfg, pkg)
+        if relaxations:
+            _record_unsafe_legacy_import(
+                pkg,
+                artifact_digest="sha256:" + _hashlib.sha256(artifact).hexdigest(),
+                relaxations=tuple(relaxations),
+            )
+        return _stash_offer(cfg, pkg, verified=did_bound)
     if pkg.package_kind == "enrolment":
-        return _apply_enrolment(cfg, pkg)
+        if not unsafe_legacy_enrollment:
+            return AbsorbReceipt(
+                kind="enrolment",
+                legacy_status="rejected",
+                legacy_reason=(
+                    "response-less legacy enrollment is disabled by default; "
+                    "pass unsafe_legacy_enrollment=True to import an explicitly "
+                    "unverified key binding"
+                ),
+            )
+        try:
+            _validate_legacy_enrollment(cfg, pkg)
+        except TrustError as exc:
+            return AbsorbReceipt(
+                kind="enrolment",
+                legacy_status="rejected",
+                legacy_reason=str(exc),
+            )
+        relaxations.append("unverified_key_binding")
+        _record_unsafe_legacy_import(
+            pkg,
+            artifact_digest="sha256:" + _hashlib.sha256(artifact).hexdigest(),
+            relaxations=tuple(relaxations),
+        )
+        return _apply_enrolment(cfg, pkg, verified=False)
     return AbsorbReceipt(
         kind=pkg.package_kind,
         legacy_status="rejected",
@@ -599,6 +721,41 @@ def _try_legacy_json_package(
             f"unsupported package_kind: {pkg.package_kind!r}. Known kinds in "
             f"this TN version: offer, enrolment."
         ),
+    )
+
+
+def _record_unsafe_legacy_import(
+    pkg: Package,
+    *,
+    artifact_digest: str,
+    relaxations: tuple[str, ...],
+) -> None:
+    """Emit the shared warning/audit contract for one signer-mismatch import."""
+    from .security_audit import (
+        UnsafeOperation,
+        UnsafeOperationNotice,
+        UnsafeRelaxation,
+        record_unsafe_operation,
+    )
+
+    class _AuditContext:
+        writable = True
+
+        @staticmethod
+        def emit_admin(event_type: str, fields: dict[str, object]) -> None:
+            from . import info
+
+            info(event_type, **fields)
+
+    record_unsafe_operation(
+        UnsafeOperationNotice(
+            operation=UnsafeOperation.LEGACY_PACKAGE_IMPORT,
+            relaxations=tuple(UnsafeRelaxation(value) for value in relaxations),
+            group=pkg.group,
+            subject_did=pkg.device_identity,
+            artifact_digest=artifact_digest,
+        ),
+        _AuditContext(),
     )
 
 
@@ -635,8 +792,76 @@ def _absorb_offer_kind(
     return _stash_offer(cfg, pkg)
 
 
+def _validate_legacy_enrollment(
+    cfg: LoadedConfig,
+    pkg: Package,
+    manifest: TnpkgManifest | None = None,
+) -> None:
+    """Validate the minimum safe envelope around an explicitly unsafe import."""
+    from .enrollment import validate_enrollment_group
+
+    if type(pkg.package_version) is not int or pkg.package_version != 1:
+        raise TrustError(TrustReason.STATEMENT_INVALID, "unsupported enrollment package version")
+    if pkg.package_kind != "enrolment":
+        raise TrustError(TrustReason.STATEMENT_INVALID, "package is not an enrollment")
+    parse_ed25519_did_key(pkg.device_identity)
+    if pkg.recipient_identity != cfg.device.device_identity:
+        raise TrustError(
+            TrustReason.WRONG_RECIPIENT,
+            "legacy enrollment package is addressed to a different reader",
+        )
+    if not isinstance(pkg.ceremony_id, str) or not pkg.ceremony_id:
+        raise TrustError(TrustReason.SCOPE_MISMATCH, "legacy enrollment ceremony is invalid")
+    validate_enrollment_group(pkg.group)
+    if type(pkg.group_epoch) is not int or pkg.group_epoch < 0:
+        raise TrustError(TrustReason.BINDING_INVALID, "legacy enrollment epoch is invalid")
+    if not isinstance(pkg.payload, dict):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "legacy enrollment payload is invalid")
+    if pkg.payload.get("publisher_identity") != pkg.device_identity:
+        raise TrustError(
+            TrustReason.DID_SIGNER_MISMATCH,
+            "legacy enrollment publisher does not match its package signer",
+        )
+    sender_pub_b64 = pkg.payload.get("sender_pub_b64")
+    if not isinstance(sender_pub_b64, str):
+        raise TrustError(TrustReason.BINDING_INVALID, "legacy sender public key is missing")
+    try:
+        sender_pub = base64.b64decode(sender_pub_b64, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise TrustError(
+            TrustReason.BINDING_INVALID,
+            "legacy sender public key is not canonical base64",
+        ) from exc
+    if len(sender_pub) != 32 or base64.b64encode(sender_pub).decode("ascii") != sender_pub_b64:
+        raise TrustError(
+            TrustReason.BINDING_INVALID,
+            "legacy sender public key must be 32 canonical base64 bytes",
+        )
+    if manifest is not None:
+        if manifest.publisher_identity != pkg.device_identity:
+            raise TrustError(
+                TrustReason.OUTER_INNER_SIGNER_MISMATCH,
+                "outer manifest signer does not match the inner enrollment signer",
+            )
+        if manifest.recipient_identity != pkg.recipient_identity:
+            raise TrustError(
+                TrustReason.WRONG_RECIPIENT,
+                "outer manifest recipient does not match the inner enrollment recipient",
+            )
+        if manifest.ceremony_id != pkg.ceremony_id or manifest.scope != pkg.group:
+            raise TrustError(
+                TrustReason.SCOPE_MISMATCH,
+                "outer manifest ceremony or group does not match the inner enrollment",
+            )
+
+
 def _absorb_enrolment_kind(
-    cfg: LoadedConfig, manifest: TnpkgManifest, body: dict[str, bytes]
+    cfg: LoadedConfig,
+    manifest: TnpkgManifest,
+    body: dict[str, bytes],
+    *,
+    unsafe_legacy_enrollment: bool = False,
+    artifact_digest: str | None = None,
 ) -> AbsorbReceipt:
     pkg_bytes = body.get("body/package.json")
     if pkg_bytes is None:
@@ -659,7 +884,147 @@ def _absorb_enrolment_kind(
             legacy_status="rejected",
             legacy_reason="inner Package signature failed verification",
         )
-    return _apply_enrolment(cfg, pkg)
+    try:
+        _validate_legacy_enrollment(cfg, pkg, manifest)
+    except TrustError as exc:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=str(exc),
+        )
+    response_value = pkg.payload.get("enrollment_response")
+    if response_value is None:
+        if not unsafe_legacy_enrollment:
+            return AbsorbReceipt(
+                kind=manifest.kind,
+                legacy_status="rejected",
+                legacy_reason=(
+                    "response-less legacy enrollment is disabled by default; "
+                    "pass unsafe_legacy_enrollment=True to import an explicitly "
+                    "unverified key binding"
+                ),
+            )
+        if artifact_digest is None:
+            return AbsorbReceipt(
+                kind=manifest.kind,
+                legacy_status="rejected",
+                legacy_reason="legacy enrollment artifact digest is unavailable",
+            )
+        _record_unsafe_legacy_import(
+            pkg,
+            artifact_digest=artifact_digest,
+            relaxations=("unverified_key_binding",),
+        )
+        return _apply_enrolment(cfg, pkg, verified=False)
+    try:
+        from .enrollment import install_enrollment_response
+        from .key_binding import EnrollmentResponseV1
+
+        if manifest.publisher_identity != pkg.device_identity:
+            raise TrustError(
+                TrustReason.OUTER_INNER_SIGNER_MISMATCH,
+                "outer manifest signer does not match the inner enrollment signer",
+            )
+        if manifest.recipient_identity != pkg.recipient_identity:
+            raise TrustError(
+                TrustReason.WRONG_RECIPIENT,
+                "outer manifest recipient does not match the inner enrollment recipient",
+            )
+        if pkg.recipient_identity != cfg.device.device_identity:
+            raise TrustError(
+                TrustReason.WRONG_RECIPIENT,
+                "enrollment package is addressed to a different reader",
+            )
+        if manifest.ceremony_id != pkg.ceremony_id or manifest.scope != pkg.group:
+            raise TrustError(
+                TrustReason.SCOPE_MISMATCH,
+                "outer manifest ceremony or group does not match the inner enrollment",
+            )
+        if not isinstance(response_value, dict):
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                "enrollment_response must be an object",
+            )
+        response = EnrollmentResponseV1.from_dict(response_value)
+        if (
+            response.publisher_did != pkg.device_identity
+            or pkg.payload.get("publisher_identity") != response.publisher_did
+        ):
+            raise TrustError(
+                TrustReason.DID_SIGNER_MISMATCH,
+                "enrollment response publisher does not match its package signer",
+            )
+        if response.reader_did != pkg.recipient_identity:
+            raise TrustError(
+                TrustReason.WRONG_RECIPIENT,
+                "enrollment response reader does not match its package recipient",
+            )
+        if response.ceremony_id != pkg.ceremony_id or response.group != pkg.group:
+            raise TrustError(
+                TrustReason.SCOPE_MISMATCH,
+                "enrollment response scope does not match its package",
+            )
+        if response.group_epoch != pkg.group_epoch:
+            raise TrustError(
+                TrustReason.BINDING_INVALID,
+                "enrollment response epoch does not match its package",
+            )
+        sender_pub_b64 = pkg.payload.get("sender_pub_b64")
+        if not isinstance(sender_pub_b64, str):
+            raise TrustError(
+                TrustReason.BINDING_INVALID,
+                "enrollment package sender_pub_b64 is missing",
+            )
+        installed = install_enrollment_response(
+            cfg,
+            response,
+            sender_pub_b64=sender_pub_b64,
+            now=datetime.now(_tz.utc),
+        )
+    except (OSError, TrustError, ValueError) as exc:
+        return AbsorbReceipt(
+            kind=manifest.kind,
+            legacy_status="rejected",
+            legacy_reason=str(exc),
+        )
+    # Attest the absorb on the modern enrollment-response path too. The legacy
+    # `_apply_enrolment` branch emits `tn.enrolment.absorbed`, but that branch is
+    # unreachable once a package carries an `enrollment_response`; without this
+    # the admin catalog reducer (`_on_enrolment_absorbed`) never fires. Same
+    # event shape as the legacy emit; best-effort, never fails the absorb.
+    from . import logger as _lg
+
+    if installed.applied and _lg._runtime is not None:
+        from .packaging import _canonical_bytes as _pkg_canonical
+
+        try:
+            pkg_sha = "sha256:" + _hashlib.sha256(_pkg_canonical(pkg)).hexdigest()
+            _lg._require_init().emit(
+                "info",
+                "tn.enrolment.absorbed",
+                {
+                    "group": pkg.group,
+                    "publisher_identity": pkg.device_identity,
+                    "package_sha256": pkg_sha,
+                    "absorbed_at": datetime.now(_tz.utc).isoformat(),
+                },
+            )
+        except Exception as _emit_err:  # noqa: BLE001 — attestation is best-effort
+            _logging.getLogger("tn.absorb").warning(
+                "enrolment.absorbed attestation failed for group=%s from=%s: %s",
+                pkg.group,
+                pkg.device_identity,
+                _emit_err,
+            )
+    return AbsorbReceipt(
+        kind="enrolment",
+        accepted_count=1 if installed.applied else 0,
+        deduped_count=0 if installed.applied else 1,
+        noop=not installed.applied,
+        legacy_status="enrolment_applied" if installed.applied else "no_op",
+        legacy_reason=installed.publisher_did,
+        offer_digest=installed.offer_digest,
+    )
 
 
 def _unseal_reject(manifest: TnpkgManifest, reason: str) -> AbsorbReceipt:
@@ -1877,7 +2242,12 @@ def _verify_envelope_signature(env: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _stash_offer(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
+def _stash_offer(
+    cfg: LoadedConfig,
+    pkg: Package,
+    *,
+    verified: bool = True,
+) -> AbsorbReceipt:
     """Stash the offer in pending_offers/<signer_did>.json. Idempotent."""
     pending = pending_offers_dir(cfg.yaml_path.parent)
     pending.mkdir(parents=True, exist_ok=True)
@@ -1888,6 +2258,7 @@ def _stash_offer(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
         "group": pkg.group,
         "x25519_pub_b64": pkg.payload.get("x25519_pub_b64"),
         "compiled_at": pkg.compiled_at,
+        "verified": verified,
     }
     (pending / f"{safe}.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
     return AbsorbReceipt(
@@ -1898,7 +2269,12 @@ def _stash_offer(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
     )
 
 
-def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
+def _apply_enrolment(
+    cfg: LoadedConfig,
+    pkg: Package,
+    *,
+    verified: bool,
+) -> AbsorbReceipt:
     """Merge an enrolment package into local state. Same logic as the
     pre-manifest `_absorb_enrolment`, retained here for the new
     dispatcher. Replays the same _canonical_bytes-driven attestation so
@@ -1907,6 +2283,7 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+    _validate_legacy_enrollment(cfg, pkg)
     yaml_path = cfg.yaml_path
     doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
 
@@ -1941,6 +2318,7 @@ def _apply_enrolment(cfg: LoadedConfig, pkg: Package) -> AbsorbReceipt:
     g["group_epoch"] = pkg.group_epoch
     g["publisher_identity"] = pkg.payload["publisher_identity"]
     g["sender_pub_b64"] = pkg.payload["sender_pub_b64"]
+    g["verified"] = verified
 
     mykey_path = cfg.keystore / f"{pkg.group}.jwe.mykey"
     if not mykey_path.exists():

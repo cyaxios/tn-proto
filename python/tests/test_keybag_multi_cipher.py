@@ -27,6 +27,8 @@ sys.path.insert(0, str(HERE.parent))
 
 import tn
 from tn.reader import read_with_keybag
+from tn.security_audit import TnSecurityWarning
+from tn.signing import DeviceKey
 
 
 @pytest.fixture(autouse=True)
@@ -117,11 +119,14 @@ def test_hibe_grant_joins_the_keybag(tmp_path):
     tn.init(a_yaml, log_path=a_log, cipher="hibe")
     tn.info("governed.entry", secret="for-granted-readers-only")
     kit_path = tmp_path / "reader.tnpkg"
-    tn.admin.grant_reader(
-        "default",
-        reader_did="did:key:z6Mk-reader-stub",
-        out_path=kit_path,
-    )
+    reader_did = DeviceKey.generate().device_identity
+    with pytest.warns(TnSecurityWarning):
+        tn.admin.grant_reader(
+            "default",
+            reader_did=reader_did,
+            out_path=kit_path,
+            unsafe_plaintext=True,
+        )
     tn.flush_and_close()
 
     r_yaml = tmp_path / "reader" / "tn.yaml"

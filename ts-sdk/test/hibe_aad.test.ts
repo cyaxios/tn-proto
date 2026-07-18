@@ -23,6 +23,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { Tn } from "../src/tn.js";
 import { readAsRecipient } from "../src/read_as_recipient.js";
+import { DeviceKey } from "../src/core/signing.js";
 import type { NodeRuntime } from "../src/runtime/node_runtime.js";
 import type { ReadEntry } from "../src/runtime/node_runtime.js";
 
@@ -53,9 +54,10 @@ test("hibe aad: per-emit + config default binding, tamper detection, btn limitat
     let a = await Tn.init(aYaml, { cipher: "hibe", stdout: false, link: false });
     const aLog = (a.config() as { logPath: string }).logPath;
     a.info("oba.filed", { note: "quarterly OBA" }, { aad: { policy: "finra-oba", v: "1" } });
-    // Synthetic DID with no embedded key: plaintext delivery must be explicit.
+    // Real Ed25519 did:key, but no verified proof: plaintext delivery must be
+    // explicit (grantReader validates the did:key even under unsafePlaintext).
     await a.admin.grantReader("default", {
-      readerDid: "did:key:z6Mk-aad-r1",
+      readerDid: DeviceKey.generate().did,
       outPath: kit,
       unsafePlaintext: true,
     });

@@ -9,14 +9,23 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
+import json
 import logging
-from datetime import datetime, timezone
+import zipfile
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ._keystore_backend import atomic_write_bytes
 from .cipher import JWEGroupCipher
 from .config import LoadedConfig
 from .conventions import outbox_dir, tnpkg_filename
+from .enrollment import EnrollmentStore
+from .key_binding import EnrollmentResponseV1
 from .packaging import Package, _canonical_bytes, sign
+from .tnpkg import TnpkgManifest, sign_manifest_with_body, verify_manifest_body_index
+from .trust import AcceptedOffer, TrustError, TrustReason
 
 
 def _now_iso() -> str:
@@ -28,7 +37,14 @@ def _signing_key(cfg: LoadedConfig):
     return cfg.device.signing_key()
 
 
-def compile_enrolment(cfg: LoadedConfig, group: str, peer_did: str) -> Package:
+def compile_enrolment(
+    cfg: LoadedConfig,
+    group: str,
+    peer_did: str,
+    *,
+    accepted_offer: AcceptedOffer,
+    ttl: timedelta = timedelta(minutes=10),
+) -> Package:
     """Build and sign an `enrolment` package addressed to peer_did.
 
     Raises RuntimeError with a pointed message if the group isn't JWE or
@@ -54,6 +70,38 @@ def compile_enrolment(cfg: LoadedConfig, group: str, peer_did: str) -> Package:
             f"JWE cipher — this party isn't the publisher. Only the "
             f"ceremony creator can compile enrolment packages."
         )
+    if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
+        raise TrustError(TrustReason.STATEMENT_INVALID, "enrollment response ttl must be positive")
+    issued_at = datetime.now(timezone.utc)
+    accepted = EnrollmentStore(cfg, cfg.device).require_accepted_offer(
+        accepted_offer,
+        now=issued_at,
+    )
+    principal = accepted.binding.principal
+    if (
+        principal.did != peer_did
+        or principal.audience_did != cfg.device.device_identity
+        or principal.ceremony_id != cfg.ceremony_id
+        or principal.group != group
+    ):
+        raise TrustError(
+            TrustReason.SCOPE_MISMATCH,
+            "accepted offer does not match response reader, publisher, ceremony, and group",
+        )
+    response = EnrollmentResponseV1(
+        version=1,
+        kind="tn-enrollment-response",
+        publisher_did=cfg.device.device_identity,
+        reader_did=peer_did,
+        ceremony_id=cfg.ceremony_id,
+        group=group,
+        accepted_offer_digest=accepted.offer_digest,
+        x25519_public_key_sha256=accepted.binding.public_key_sha256,
+        group_epoch=gcfg.index_epoch,
+        issued_at=issued_at,
+        expires_at=issued_at + ttl,
+        signature_b64="",
+    ).sign(cfg.device)
     pkg = Package(
         package_version=1,
         package_kind="enrolment",
@@ -66,6 +114,7 @@ def compile_enrolment(cfg: LoadedConfig, group: str, peer_did: str) -> Package:
         payload={
             "publisher_identity": cfg.device.device_identity,
             "sender_pub_b64": base64.b64encode(sender_pub).decode("ascii"),
+            "enrollment_response": response._wire_value(include_signature=True),
         },
         compiled_at=_now_iso(),
     )
@@ -103,27 +152,49 @@ def compile_enrolment(cfg: LoadedConfig, group: str, peer_did: str) -> Package:
     return signed_pkg
 
 
-def emit_to_outbox(cfg: LoadedConfig, pkg: Package) -> Path:
-    """Write pkg to <yaml_dir>/.tn/outbox/ with the conventional filename.
+def _build_outbox_artifact(cfg: LoadedConfig, pkg: Package) -> tuple[Path, bytes]:
+    """Build exact target-aware `.tnpkg` bytes without publishing them.
 
-    Now wraps the package in the universal `.tnpkg` manifest header by
-    routing through ``tn.export``. The package_kind on the inner Package
-    drives the manifest kind on the outer wrapper.
+    The target ceremony and group come from the signed inner package. This
+    matters for reader-generated offers: the reader's local bootstrap
+    ceremony is not the publisher ceremony it is asking to join.
     """
-    from .export import export as _export
-
-    out = outbox_dir(cfg.yaml_path.parent) / tnpkg_filename(
+    out = outbox_dir(cfg.yaml_path) / tnpkg_filename(
         pkg.recipient_identity,
         pkg.package_kind,
         pkg.package_version,
     )
-    return _export(
-        out,
-        kind=pkg.package_kind,  # "offer" or "enrolment"
-        cfg=cfg,
-        to_did=pkg.recipient_identity,
-        package=pkg,
+    body = {
+        "body/package.json": (
+            json.dumps(asdict(pkg), sort_keys=True, indent=2) + "\n"
+        ).encode("utf-8")
+    }
+    manifest = TnpkgManifest(
+        kind=pkg.package_kind,
+        publisher_identity=cfg.device.device_identity,
+        ceremony_id=pkg.ceremony_id,
+        as_of=_now_iso(),
+        scope=pkg.group,
+        recipient_identity=pkg.recipient_identity,
     )
+    sign_manifest_with_body(manifest, body, cfg.device.signing_key())
+    verify_manifest_body_index(manifest, body, require_index=True)
+    manifest_bytes = (
+        json.dumps(manifest.to_dict(), sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("manifest.json", manifest_bytes)
+        for name in sorted(body):
+            archive.writestr(name, body[name])
+    return out, buffer.getvalue()
+
+
+def emit_to_outbox(cfg: LoadedConfig, pkg: Package) -> Path:
+    """Atomically publish a target-aware package to the conventional outbox."""
+    out, artifact = _build_outbox_artifact(cfg, pkg)
+    atomic_write_bytes(out, artifact)
+    return out
 
 
 # --------------------------------------------------------------------------

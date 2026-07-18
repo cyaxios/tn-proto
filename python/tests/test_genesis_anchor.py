@@ -8,10 +8,15 @@ through ``read_with_keybag(..., expect_genesis=True)`` for callers that know
 they hold a whole log from byte zero (an audit), and is the foundation for a
 later checkpoint-based rotation/resume distinction.
 
-The chain check reads only ``event_type``/``prev_hash``/``row_hash`` from each
-envelope, independent of decryption, so these tests drive the reader with
-hand-built envelopes and ``verify_signatures=False`` — deterministic and with
-no crypto setup.
+The chain check itself reads only ``event_type``/``prev_hash``/``row_hash``,
+independent of decryption. The reader's secure-by-default pass parses the
+mandatory envelope basics (``device_identity``/``timestamp``/``event_id``) on
+every row before it reaches that check, so these tests drive it with
+hand-built envelopes that carry those basics plus fake ``row_hash`` values
+and ``verify_signatures=False`` — deterministic and with no crypto setup. The
+fake ``row_hash`` values fail the reader's row-hash recompute (which the
+tests do not inspect); the chain check compares ``prev_hash``/``row_hash`` by
+value, so it is unaffected.
 """
 
 from __future__ import annotations
@@ -46,11 +51,32 @@ def _chain_entries(tmp_path: Path, envelopes: list[dict], *, expect_genesis: boo
     ]
 
 
+# The mandatory envelope basics the reader parses on every row before the
+# chain check runs. These synthetic rows never decrypt or verify signatures,
+# so the values only need to be present and well-formed strings.
+_DID = "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"
+_TS = "2026-05-22T00:00:00.000000Z"
+_EVENT_ID = "00000000-0000-4000-8000-000000000000"
+
+
+def _row(event_type: str, prev_hash: str, row_hash: str) -> dict:
+    """A well-formed envelope carrying the fields the reader parses before
+    decryption: the chain fields plus the mandatory envelope basics."""
+    return {
+        "device_identity": _DID,
+        "timestamp": _TS,
+        "event_id": _EVENT_ID,
+        "event_type": event_type,
+        "prev_hash": prev_hash,
+        "row_hash": row_hash,
+    }
+
+
 # A valid 3-link chain for one event_type: ZERO_HASH -> H1 -> H2 -> H3.
 _FULL = [
-    {"event_type": "order.created", "prev_hash": ZERO_HASH, "row_hash": "sha256:h1"},
-    {"event_type": "order.created", "prev_hash": "sha256:h1", "row_hash": "sha256:h2"},
-    {"event_type": "order.created", "prev_hash": "sha256:h2", "row_hash": "sha256:h3"},
+    _row("order.created", ZERO_HASH, "sha256:h1"),
+    _row("order.created", "sha256:h1", "sha256:h2"),
+    _row("order.created", "sha256:h2", "sha256:h3"),
 ]
 # The same chain with the genesis row lopped off (front-truncation): the new
 # first entry's prev_hash points at h1, a row that is no longer present.
@@ -85,11 +111,11 @@ def test_genesis_optin_is_per_event_type(tmp_path):
     """The genesis requirement is per (publisher, event_type) chain: each
     distinct event_type's first entry must anchor at ZERO_HASH independently."""
     envelopes = [
-        {"event_type": "a", "prev_hash": ZERO_HASH, "row_hash": "sha256:a1"},
-        {"event_type": "b", "prev_hash": ZERO_HASH, "row_hash": "sha256:b1"},
-        {"event_type": "a", "prev_hash": "sha256:a1", "row_hash": "sha256:a2"},
+        _row("a", ZERO_HASH, "sha256:a1"),
+        _row("b", ZERO_HASH, "sha256:b1"),
+        _row("a", "sha256:a1", "sha256:a2"),
         # `b`'s second link is broken (points at a row that never existed).
-        {"event_type": "b", "prev_hash": "sha256:nope", "row_hash": "sha256:b2"},
+        _row("b", "sha256:nope", "sha256:b2"),
     ]
     assert _chain_entries(tmp_path, envelopes, expect_genesis=True) == [
         True,  # a1 anchors at ZERO_HASH

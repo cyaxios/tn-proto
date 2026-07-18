@@ -8,49 +8,92 @@ def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
 import base64
-import os
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from tn import admin
+from tn.absorb import absorb
 from tn.compile import compile_enrolment, compile_kit_bundle, emit_to_outbox
-from tn.config import load_or_create
+from tn.config import LoadedConfig, load_or_create
 from tn.conventions import outbox_dir
+from tn.enrollment import EnrollmentStore
+from tn.offer import offer
 from tn.packaging import verify
+from tn.trust import AcceptedOffer
+
+
+# Enrolment packages require a durably reconciled AcceptedOffer obtained through
+# the real trusted-offer ceremony (a hand-built one is rejected with
+# TrustReason.UNTRUSTED_PRINCIPAL). These helpers drive that ceremony end to
+# end, mirroring tests/test_jwe_trusted_enrollment_e2e.py: the publisher issues
+# a preauthorized challenge, the reader offers under it, the publisher absorbs
+# the reader's outbox artifact and reconciles the retained offer into an
+# AcceptedOffer the publisher can compile against.
+def _homes(tmp_path: Path) -> tuple[LoadedConfig, LoadedConfig]:
+    publisher = load_or_create(tmp_path / "publisher" / "tn.yaml", cipher="jwe")
+    reader = load_or_create(tmp_path / "reader" / "tn.yaml", cipher="jwe")
+    assert publisher.device.did != reader.device.did
+    return publisher, reader
+
+
+def _only_outbox_artifact(cfg: LoadedConfig) -> Path:
+    artifacts = list(outbox_dir(cfg.yaml_path).glob("*.tnpkg"))
+    assert len(artifacts) == 1
+    return artifacts[0]
+
+
+def _accepted_flow(publisher: LoadedConfig, reader: LoadedConfig) -> AcceptedOffer:
+    store = EnrollmentStore(publisher, publisher.device)
+    store.preauthorize(reader.device.did, "default")
+    challenge = store.issue_challenge(reader.device.did, "default", timedelta(minutes=10))
+    offer(reader, publisher.device.did, challenge=challenge)
+    receipt = absorb(publisher, _only_outbox_artifact(reader))
+    assert receipt.offer_digest is not None
+    now = datetime.now(timezone.utc)
+    return store.reconcile(store.pending_offer(receipt.offer_digest, now=now), now=now)
 
 
 def test_compile_enrolment_produces_signed_package(tmp_path: Path):
-    yaml_path = tmp_path / "tn.yaml"
-    cfg = load_or_create(yaml_path, cipher=_workflow_cipher("jwe"))
-    admin._add_recipient_jwe_impl(cfg, "default", "did:key:z6MkBob", os.urandom(32))
-    pkg = compile_enrolment(cfg, "default", "did:key:z6MkBob")
+    publisher, reader = _homes(tmp_path)
+    accepted = _accepted_flow(publisher, reader)
+    pkg = compile_enrolment(
+        publisher, "default", reader.device.did, accepted_offer=accepted
+    )
     assert pkg.package_kind == "enrolment"
-    assert pkg.recipient_identity == "did:key:z6MkBob"
-    assert pkg.ceremony_id == cfg.ceremony_id
+    assert pkg.recipient_identity == reader.device.did
+    assert pkg.ceremony_id == publisher.ceremony_id
     assert "sender_pub_b64" in pkg.payload
     assert len(base64.b64decode(pkg.payload["sender_pub_b64"])) == 32
     assert verify(pkg) is True
 
 
 def test_emit_to_outbox_writes_file(tmp_path: Path):
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
-    admin._add_recipient_jwe_impl(cfg, "default", "did:key:z6MkBob", os.urandom(32))
-    pkg = compile_enrolment(cfg, "default", "did:key:z6MkBob")
-    path = emit_to_outbox(cfg, pkg)
+    publisher, reader = _homes(tmp_path)
+    accepted = _accepted_flow(publisher, reader)
+    pkg = compile_enrolment(
+        publisher, "default", reader.device.did, accepted_offer=accepted
+    )
+    path = emit_to_outbox(publisher, pkg)
     assert path.exists()
-    assert path.parent == outbox_dir(tmp_path)
+    assert path.parent == outbox_dir(publisher.yaml_path)
     assert path.suffix == ".tnpkg"
 
 
 def test_compile_enrolment_rejects_btn_group(tmp_path: Path):
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
-    admin.ensure_group(cfg, "press", cipher=_workflow_cipher("btn"))
-    import pytest
-
+    publisher, reader = _homes(tmp_path)
+    admin.ensure_group(publisher, "press", cipher=_workflow_cipher("btn"))
+    # A valid AcceptedOffer for the default JWE group is still required to
+    # satisfy the keyword-only argument, but the btn/JWE-only guard fires
+    # first — before the offer is reverified — so compiling against the btn
+    # group raises the pointed RuntimeError.
+    accepted = _accepted_flow(publisher, reader)
     with pytest.raises(RuntimeError) as e:
-        compile_enrolment(cfg, "press", "did:key:z6MkBob")
+        compile_enrolment(
+            publisher, "press", reader.device.did, accepted_offer=accepted
+        )
     msg = str(e.value)
     assert "press" in msg
     assert "jwe" in msg.lower()

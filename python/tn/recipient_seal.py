@@ -110,9 +110,10 @@ def recipient_key_is_resolvable(did: str | None) -> bool:
     """True when ``did`` is a ``did:key`` with an embedded Ed25519 public key the
     sealed-box path can wrap the BEK under.
 
-    Synthetic / placeholder DIDs (no embedded key) return False so a caller can
-    seal ONLY when there is a real key to seal to, and fall back to a plaintext
-    hand-off otherwise. Mirrors TS ``recipientKeyIsResolvable``.
+    Synthetic / placeholder DIDs (no embedded key) return False so a
+    fail-closed caller can reject delivery before writing a bearer capability.
+    Plaintext hand-off is never implied by this predicate; a compatibility
+    surface must require and audit its own explicit unsafe switch.
     """
     if not did:
         return False

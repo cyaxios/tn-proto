@@ -12,6 +12,7 @@ import { x25519 } from "@noble/curves/ed25519";
 
 import { AdminNamespace } from "../src/admin/index.js";
 import { jweDecrypt, okpPrivateJwk } from "../src/core/jwe.js";
+import { DeviceKey } from "../src/core/signing.js";
 import { NodeRuntime } from "../src/runtime/node_runtime.js";
 
 /** Pull group `g`'s raw ciphertext bytes from a decoded envelope. */
@@ -29,7 +30,7 @@ test("jwe admin: added recipient can decrypt, revoked recipient cannot", async (
   const bobPriv = x25519.utils.randomPrivateKey();
   const bobPub = x25519.getPublicKey(bobPriv);
   const bobJwk = okpPrivateJwk(bobPub, bobPriv);
-  const bobDid = "did:key:z6MkBobJweRecipientTest0000000000000000000";
+  const bobDid = DeviceKey.generate().did;
 
   // Raw DID-plus-key enrollment is the explicitly unverified path.
   const added = await admin.addRecipient("default", {

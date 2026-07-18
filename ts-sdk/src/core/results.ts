@@ -10,6 +10,7 @@
 import type { RowHash } from "./types.js";
 import type { AdminState } from "./types.js";
 import type { ChainConflict } from "./admin/state.js";
+import type { KeyBindingProofV1 } from "./trust.js";
 
 // ---------------------------------------------------------------------------
 // Lifted from runtime/node_runtime.ts — canonical definition now lives here.
@@ -144,6 +145,10 @@ export interface RevokeReaderResult {
   kitPaths: string[];
   /** DIDs still granted after the revocation. */
   remaining: string[];
+  /** Durable authority path epoch after the operation. */
+  pathEpoch: number;
+  /** Writer-addressed authenticated path update for external publishers. */
+  authorityAssertion: KeyBindingProofV1;
 }
 
 export interface RotateGroupResult {

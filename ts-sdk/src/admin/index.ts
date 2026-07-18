@@ -1,9 +1,8 @@
 // tn.admin.* namespace — verb surface for ceremony admin operations.
 
-import { readFileSync, unlinkSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { sha256HexBytes } from "../core/chain.js";
-import { recipientKeyIsResolvable } from "../seal_bundle_producer.js";
 import type { NodeRuntime } from "../runtime/node_runtime.js";
 import type {
   AddRecipientResult,
@@ -14,9 +13,8 @@ import type {
 } from "../core/results.js";
 import {
   TrustError,
-  formatTrustTimestamp,
+  parseEd25519DidKey,
   sha256Digest,
-  verifyKeyBindingProof,
   type AcceptedOffer,
   type EnrollmentChallengeV1,
   type KeyBindingProofV1,
@@ -51,6 +49,12 @@ export interface AddRecipientOptions {
    * and best-effort audit event.
    */
   unsafeUnverified?: boolean;
+  /** hibe: verified response to the authority's scoped reader challenge. */
+  proof?: KeyBindingProofV1;
+  /** hibe: explicit acknowledgement when granting an ancestor path. */
+  allowSubauthority?: boolean;
+  /** hibe: explicit unsafe plaintext bearer delivery. */
+  unsafePlaintext?: boolean;
 }
 
 export interface GrantReaderOptions {
@@ -108,14 +112,15 @@ export class AdminNamespace {
             `group ${JSON.stringify(group)}. For hibe, pass outKitPath.`,
         );
       }
-      const grantOpts: { readerDid?: string; outPath?: string } = {};
+      const grantOpts: GrantReaderOptions = {};
       if (recipientDid !== undefined) grantOpts.readerDid = recipientDid;
       if (opts.outKitPath !== undefined) grantOpts.outPath = opts.outKitPath;
-      const granted = this._rt.grantReader(group, grantOpts);
-      // Seal the kit to the reader's device key when known — an unsealed kit
-      // ships the delegated `.hibe.sk` in cleartext (a bearer token). No-op for
-      // a did-less hand-off; the reader unseals via absorbPkgAsync.
-      await this._rt.sealKitForRecipient(granted.kitPath, recipientDid);
+      if (opts.proof !== undefined) grantOpts.proof = opts.proof;
+      if (opts.allowSubauthority !== undefined) {
+        grantOpts.allowSubauthority = opts.allowSubauthority;
+      }
+      if (opts.unsafePlaintext !== undefined) grantOpts.unsafePlaintext = opts.unsafePlaintext;
+      const granted = await this._rt.grantReader(group, grantOpts);
       const kitSha256 = sha256HexBytes(new Uint8Array(readFileSync(granted.kitPath)));
       return {
         group,
@@ -126,6 +131,10 @@ export class AdminNamespace {
         kitSha256,
         mintedAt: new Date().toISOString(),
         idPath: granted.idPath,
+        verified: granted.verified,
+        proofDigest: granted.proofDigest,
+        sealed: granted.sealed,
+        subtreeDelegation: granted.subtreeDelegation,
       };
     }
 
@@ -158,6 +167,7 @@ export class AdminNamespace {
             `acknowledge explicitly with unsafeUnverified: true.`,
         );
       }
+      parseEd25519DidKey(recipientDid);
       await this._rt.recordUnsafeOperation({
         operation: "jwe_add_recipient",
         relaxations: ["unverified_key_binding"],
@@ -223,7 +233,8 @@ export class AdminNamespace {
     recipientDid?: string,
     publicKey?: Uint8Array,
   ): AddRecipientResult {
-    const binding = accepted.binding;
+    const retained = this._rt.enrollmentStore().validateAcceptedOffer(accepted);
+    const binding = retained.binding;
     const principal = binding.principal;
     if (principal.purpose !== "jwe-reader") {
       throw new TrustError("binding_invalid", "accepted offer is not a jwe-reader binding");
@@ -306,7 +317,7 @@ export class AdminNamespace {
           "tn.admin.revokeRecipient: leafIndex is btn-only; for hibe use recipientDid.",
         );
       }
-      const res = this._rt.revokeReader(group, recipientDid);
+      const res = await this._rt.revokeReader(group, recipientDid);
       return {
         group,
         cipher: "hibe",
@@ -382,112 +393,7 @@ export class AdminNamespace {
    * additionally requires `allowSubauthority: true`.
    */
   async grantReader(group: string, opts: GrantReaderOptions = {}): Promise<AddRecipientResult> {
-    let verified = false;
-    let proofDigest: string | null = null;
-    let proofExpiresAt: string | undefined;
-
-    if (opts.proof !== undefined) {
-      if (opts.readerDid === undefined) {
-        throw new TrustError("untrusted_principal", "a proof-backed grant requires readerDid");
-      }
-      if (opts.proof.subject_did !== opts.readerDid) {
-        throw new TrustError(
-          "did_signer_mismatch",
-          "proof subject does not match the grant's readerDid",
-        );
-      }
-      const boundDigest = opts.proof.binding["challenge_digest"];
-      let challenge: EnrollmentChallengeV1 | undefined;
-      if (typeof boundDigest === "string") {
-        challenge = this._rt.enrollmentStore().challengeForDigest(boundDigest);
-      }
-      const principal = verifyKeyBindingProof(opts.proof, {
-        purpose: "hibe-reader",
-        audienceDid: this._rt.did,
-        ceremonyId: this._rt.config.ceremonyId,
-        group,
-        now: formatTrustTimestamp(Date.now() * 1000),
-        ...(challenge === undefined ? {} : { challenge }),
-      });
-      verified = true;
-      proofDigest = principal.proofDigest;
-      proofExpiresAt = principal.expiresAt;
-    } else if (opts.readerDid !== undefined) {
-      // A previously verified reader record may satisfy the requirement for
-      // the exact same authority, ceremony, and group scope.
-      const retained = this._rt.retainedVerifiedGrant(group, opts.readerDid);
-      if (retained !== null) {
-        verified = true;
-        proofDigest = retained.proofDigest;
-      }
-    }
-
-    // Delivery is recipient-sealed: an unsealed kit ships the delegated
-    // `.hibe.sk` in cleartext (a bearer token). There is NO implicit
-    // plaintext fallback — a grant that cannot be sealed (absent or
-    // unresolvable reader DID) is a hard error BEFORE any kit is minted;
-    // `unsafePlaintext: true` is the only plaintext compatibility path.
-    if (opts.unsafePlaintext !== true) {
-      if (opts.readerDid === undefined || !recipientKeyIsResolvable(opts.readerDid)) {
-        throw new TrustError(
-          "binding_invalid",
-          "grant delivery requires a resolvable Ed25519 did:key to seal to; " +
-            "pass the reader's real did:key, or request explicit plaintext bearer " +
-            "delivery with unsafePlaintext: true",
-        );
-      }
-    }
-
-    const mintOpts: Parameters<NodeRuntime["grantReader"]>[1] = {
-      grantTrust: {
-        verified,
-        ...(proofDigest === null ? {} : { proofDigest }),
-        ...(proofExpiresAt === undefined ? {} : { proofExpiresAt: proofExpiresAt }),
-      },
-    };
-    if (opts.readerDid !== undefined) mintOpts.readerDid = opts.readerDid;
-    if (opts.idPath !== undefined) mintOpts.idPath = opts.idPath;
-    if (opts.outPath !== undefined) mintOpts.outPath = opts.outPath;
-    if (opts.allowSubauthority !== undefined) mintOpts.allowSubauthority = opts.allowSubauthority;
-    if (opts.unsafePlaintext === true) mintOpts.unsafePlaintextLabel = true;
-    const granted = this._rt.grantReader(group, mintOpts);
-
-    let sealed = false;
-    if (opts.unsafePlaintext === true) {
-      await this._rt.recordUnsafeOperation({
-        operation: "hibe_grant",
-        relaxations: verified
-          ? ["plaintext_bearer_delivery"]
-          : ["plaintext_bearer_delivery", "unverified_key_binding"],
-        group,
-        subject_did: opts.readerDid ?? null,
-        artifact_digest: null,
-      });
-    } else {
-      sealed = await this._rt.sealKitForRecipient(granted.kitPath, opts.readerDid);
-      if (!sealed) {
-        // Defensive: the pre-mint gate above makes this unreachable, but a
-        // seal that still fails must never leave a plaintext bearer kit.
-        try {
-          unlinkSync(granted.kitPath);
-        } catch {
-          // best-effort cleanup; the error below is the primary signal
-        }
-        throw new TrustError(
-          "binding_invalid",
-          "grant delivery could not be recipient-sealed; no plaintext kit was retained",
-        );
-      }
-      if (!verified) {
-        await this._rt.recordUnsafeOperation({
-          operation: "hibe_grant",
-          relaxations: ["unverified_key_binding"],
-          group,
-          subject_did: opts.readerDid ?? null,
-          artifact_digest: null,
-        });
-      }
-    }
+    const granted = await this._rt.grantReader(group, opts);
 
     const kitSha256 = sha256HexBytes(new Uint8Array(readFileSync(granted.kitPath)));
     return {
@@ -499,9 +405,9 @@ export class AdminNamespace {
       kitSha256,
       mintedAt: new Date().toISOString(),
       idPath: granted.idPath,
-      verified,
-      proofDigest,
-      sealed,
+      verified: granted.verified,
+      proofDigest: granted.proofDigest,
+      sealed: granted.sealed,
       subtreeDelegation: granted.subtreeDelegation,
     };
   }
@@ -579,7 +485,7 @@ export class AdminNamespace {
   async revokeReader(
     group: string,
     readerDid: string,
-    opts: { newPath?: string; outDir?: string } = {},
+    opts: { newPath?: string; outDir?: string; audienceDid?: string } = {},
   ): Promise<RevokeReaderResult> {
     return this._rt.revokeReader(group, readerDid, opts);
   }
