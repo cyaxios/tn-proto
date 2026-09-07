@@ -1,45 +1,26 @@
-//! # tn-core — TN protocol Rust runtime
+//! # TN governed data protocol
 //!
-//! Re-implements the TN Python hot path with byte-for-byte wire
-//! compatibility. tn-core is the shared substrate the language SDKs wrap
-//! (Python via PyO3, TS/browser via WASM); the user-facing surface is the
-//! `tn.*` SDK verbs and the `tn` CLI, which call into the types below.
+//! TN carries encrypted data and its use contract in one signed envelope.
+//! The Rust core owns policy selection, group encryption, governance AAD,
+//! row hashing, signing, verification, selected opening, and derivation.
 //!
-//! ## Where to start (primary interfaces)
+//! Start with [`governed`]: supply a [`DeviceKey`], group cipher material,
+//! and a contract; receive a verified object ready for transport or retention.
+//! The reader exposes governance before application admission and selected
+//! business plaintext. Derivation binds a fresh object to its signed source.
 //!
-//! Reach for these; most other modules are internal primitives these
-//! compose.
-//!
-//! - [`Runtime`] — the front door: open a ceremony, write
-//!   attested events (the write family, behind `tn.info()` / `tn log`),
-//!   read them back (behind `tn.read()` / `tn read`), and run admin verbs
-//!   (behind `tn.admin.*` / `tn rotate`). Configured by
-//!   [`RuntimeInitOptions`]; reads yield [`ReadEntry`] / [`SecureEntry`] /
-//!   [`FlatEntry`]; admin state is [`AdminState`].
-//! - [`Manifest`] / [`ManifestKind`] — the `.tnpkg` package manifest
-//!   (canonical bytes, sign/verify, kind catalog), behind `tn export` /
-//!   `tn absorb`; see [`ExportOptions`] and [`AbsorbReceipt`].
-//! - [`DeviceKey`] — the Ed25519 device identity (`did:key:z…`), behind
-//!   `tn init`.
-//! - [`Error`] / [`Result`] — the error taxonomy every fallible API returns.
-//! - Pluggable extension points (traits): the [`cipher`], [`handlers`], and
-//!   [`storage`] modules.
-//!
-//! Everything else (canonical bytes, chain hashing, indexing, envelope
-//! assembly, log files, and so on) is an internal primitive. If you find
-//! yourself reaching for one directly, first check whether [`Runtime`]
-//! already does what you need.
+//! With `fs`, [`runtime::Objects`] loads configured object material directly.
+//! [`Runtime`] supports event streams, administration, and packages; its
+//! [`Runtime::objects`] method shares that runtime's groups with the governed
+//! interface. Python and TypeScript use this same protocol substrate.
 //!
 //! ## Feature flags
 //!
-//! - `fs` (default): enables filesystem-backed modules — `log_file`, `identity`,
-//!   `FsStorage`, and the `Runtime` struct that composes them. Also builds the
-//!   `tn-core-cli` binary.
-//! - Without `fs`: only pure-compute modules compile — `canonical`, `chain`,
-//!   `indexing`, `signing`, `envelope`, `cipher`, `config`, `classifier`.
-//!   Useful for `wasm32-unknown-unknown` targets (browser / TS wrappers), which
-//!   will provide their own storage-equivalent via the `Storage` trait.
-
+//! - Without `fs`: the governed object API and protocol primitives operate
+//!   directly on supplied identity and cipher material.
+//! - `fs` (default): configured objects, filesystem storage, event runtime,
+//!   administration, and the `tn-core-cli` binary.
+//! - `fs-locking` (default): advisory locking for native filesystem operations.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
@@ -65,6 +46,7 @@ pub mod classifier;
 pub mod config;
 pub mod envelope;
 pub mod error;
+pub mod governed;
 pub mod indexing;
 pub mod panic_guard;
 pub mod path_template;

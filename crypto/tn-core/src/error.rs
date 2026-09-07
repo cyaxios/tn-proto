@@ -52,6 +52,12 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// retry) — see the module docs for the pattern.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// The application refused the named use of an authenticated contract.
+    #[error("application refused operation {operation:?}")]
+    UseDenied {
+        /// Operation evaluated by the application's policy callback.
+        operation: String,
+    },
     /// Configuration value is missing or invalid.
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),

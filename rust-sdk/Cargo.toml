@@ -4,16 +4,17 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-description = "Idiomatic Rust SDK for tn-proto attested logging"
+description = "TN governed data objects: encrypted use contracts, signatures, selective access, and derivation"
 repository = "https://github.com/cyaxios/tn-proto"
 homepage = "https://github.com/cyaxios/tn-proto"
 readme = "README.md"
-keywords = ["cryptography", "attestation", "audit-log", "logging"]
-categories = ["cryptography", "development-tools::debugging"]
+keywords = ["cryptography", "attestation", "governance", "data"]
+categories = ["cryptography"]
 include = [
     "Cargo.toml",
     "README.md",
     "SDK_REFERENCE.md",
+    "GOVERNED_OBJECTS.md",
     "src/**/*.rs",
     "examples/**/*.rs",
     "tests/**/*.rs",

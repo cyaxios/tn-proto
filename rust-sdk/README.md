@@ -1,17 +1,26 @@
 # tn-proto
 
-Idiomatic Rust SDK for `tn-proto` attested logging.
+Rust interface for signed data objects carrying encrypted use contracts.
 
 `tn-proto` is the Rust-facing wrapper around the shared `tn-core` runtime used by
-the Python and TypeScript SDKs. It provides a compact Rust API for creating TN
-projects, writing signed events, reading verified entries, managing recipients,
-exchanging `.tnpkg` artifacts, and syncing project bodies with a TN vault.
+the Python and TypeScript SDKs. The governed flow creates an object from policy
+and explicitly assigned data groups, seals and signs it, opens governance for
+application review, and releases selected plaintext. Derivation carries the
+contract and source references into a new signed object.
+
+Start with the [governed-object guide](GOVERNED_OBJECTS.md) and the runnable
+[example](examples/governed_objects.rs). Group material is supplied through the
+shared cipher interface or loaded from an existing configuration.
 
 > Status: this crate is developed in-repo and is not published to crates.io yet.
 > `Cargo.toml` currently has `publish = false` while the public API settles.
 
 ## Features
 
+- Governed objects: `Governance`, `GovernedDraft`, `GovernedObject`
+- Configured creation: `Tn::open_objects`, `tn.objects`, `draft`, `seal`
+- Governed use: `governance`, application `authorize`, selected `open`
+- Forwarding and derivation: exact `wire`, continuing `derive`, explicit `derive_under`
 - Project lifecycle: `Tn::init_project`, `Tn::init`, `Tn::ephemeral`, `Tn::close`
 - Event writing: `log`, `debug`, `info`, `warning`, `error`
 - Event reading: stable `Entry` values with optional verification
@@ -43,7 +52,36 @@ tn-proto = { path = "rust-sdk", features = ["http"] }
 
 The crate name is `tn-proto`; the Rust module path is `tn_proto`.
 
-## Quickstart
+## Governed objects
+
+```rust
+use serde_json::json;
+use tn_proto::Tn;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let objects = Tn::open_objects("tn.yaml")?;
+    let source = objects.seal(
+        objects.draft("research.sample")?
+            .group("observations", json!({"counts": [12, 18]}))?
+    )?;
+    // Transport or retain the complete signed object.
+    println!("{}", source.wire());
+    Ok(())
+}
+```
+
+The configuration supplies the signing identity and group material. Its policy
+document supplies the `research.sample` contract. Sealing automatically fills
+`tn.agents`, binds every group with governance AAD, and signs the envelope.
+`open_objects` initializes only the object context. The guide shows verification,
+application admission, selected opening, and derivation; the example runs
+without a configuration file:
+
+```sh
+cargo run -p tn-proto --example governed_objects
+```
+
+## Event streams and project setup
 
 ```rust
 use serde_json::json;

@@ -1,45 +1,40 @@
 # tn-core
 
-The TN protocol runtime, in Rust. This is the shared substrate every
-language SDK wraps: Python via PyO3, Node and the browser via WASM. The
-user-facing surface is the `tn.*` verbs and the `tn` CLI, which call
-into the types here.
+The shared Rust implementation of the TN governed data protocol. TN carries
+encrypted data and its use contract in one signed envelope. Applications use
+that binding to admit input, select data, mediate computation, and sign derived
+output with its contract and source references.
 
-## What it does
+## Governed objects are the primary data interface
 
-tn-core owns the protocol hot path and the wire format:
+- `Governance` selects the use contract from parsed policy content.
+- `GovernedDraft` assigns typed JSON fields to encrypted groups.
+- `GovernedWriter` constructs `tn.agents`, common governance AAD, and a signature.
+- `GovernedObject` verifies and retains the complete wire envelope.
+- `GovernedReader` opens governance, then selected groups after application admission.
+- `OpenedObject` keeps plaintext with its source and contract and starts derivatives.
 
-- Canonical JSON encoding (deterministic bytes for hashing and signing).
-- The row-hash chain that links each event to its predecessor.
-- The HMAC equality index that lets a reader match a field without
-  decrypting it.
-- Ed25519 signing and verification over the row hash.
-- Envelope assembly: public fields plus per-group ciphertext blocks.
-- Cipher dispatch (btn is first class; JWE and HIBE are pluggable).
-- Log file I/O, ceremony config loading, and `.tnpkg` package read/write.
+These types live in `tn_core::governed` and work with default features disabled.
+The caller supplies an existing signing identity and group cipher material;
+transport, storage, and application use remain explicit choices.
 
-## Key surface
+See the [Rust governed-object guide](../../rust-sdk/GOVERNED_OBJECTS.md) and
+[runnable example](../../rust-sdk/examples/governed_objects.rs).
 
-Reach for `Runtime` first. It opens or creates a ceremony, writes
-attested events (the `tn.info()` / `tn log` family), reads them back
-(`tn.read()` / `tn read`), and runs admin verbs (`tn.admin.*` /
-`tn rotate`). Other top-level exports: `Manifest` / `ManifestKind` for
-`.tnpkg` packages, `DeviceKey` for the Ed25519 identity, and
-`Error` / `Result` for the error taxonomy. The `cipher`, `handlers`, and
-`storage` modules are the extension-point traits. Everything else
-(canonical bytes, chain, indexing, envelope) is an internal primitive
-that `Runtime` composes.
+## Configured objects and event streams share the wire construction
 
-## Feature flags
+`runtime::Objects::open` loads configuration, policy, identity, and group
+material directly. `Runtime::objects` adapts an already loaded event runtime.
+The `Runtime` event, read, administration, and package methods continue to use
+the shared canonicalization, HMAC indexing, Ed25519 signing, envelope, and
+cipher implementations. BTN, JWE, and HIBE implement the group cipher trait.
 
-- `fs` (default): filesystem-backed modules and the `tn-core-cli` binary.
-- without `fs`: pure-compute modules only, for `wasm32-unknown-unknown`
-  targets that inject their own storage via the `Storage` trait.
-- `fs-locking` (default): cross-process advisory file locks; omitted on
-  wasm where there is no other writer.
+## Feature flags select runtime facilities
 
-## How it is consumed
+- `fs` (default): configured objects, filesystem storage, event runtime, CLI.
+- Without `fs`: governed objects and protocol primitives with supplied material.
+- `fs-locking` (default): native cross-process advisory locks.
+- `hibe` (default): the native hierarchical cipher implementation.
 
-Not consumed directly by users. `tn-core-py` and `tn-btn-py` bind it for
-Python (the `tn-proto` wheel), `tn-wasm` binds it for Node and the
-browser (the TypeScript SDK).
+The Rust SDK exposes these operations ergonomically. Python wraps the shared
+core through PyO3; Node and browser integrations use WASM.

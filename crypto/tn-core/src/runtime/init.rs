@@ -19,7 +19,6 @@ use uuid::Uuid;
 
 use crate::chain::ChainState;
 use crate::log_file::LogFileWriter;
-use crate::signing::DeviceKey;
 use crate::{Error, Result};
 
 use super::cipher_build::{build_group_states, write_fresh_btn_ceremony, FreshBtnCeremonyOptions};
@@ -28,7 +27,7 @@ use super::log_rotation::{
     rotate_log_on_session_start, rotation_first_time_this_process, scan_for_ceremony_init,
     seed_chain_from_log, seed_chain_from_template,
 };
-use super::util::{current_timestamp, is_absolute_xplat_path, resolve};
+use super::util::{current_timestamp, is_absolute_xplat_path};
 use super::{level_value, log_level, Runtime, RuntimeInitOptions, LOG_LEVEL_THRESHOLD};
 
 impl Runtime {
@@ -214,41 +213,13 @@ impl Runtime {
         storage: Arc<dyn crate::storage::Storage>,
         opts: RuntimeInitOptions,
     ) -> Result<Self> {
-        // Call site 1: yaml read. Routes through Storage so a wasm
-        // `JsStorageAdapter` can satisfy the request from its JS-side
-        // callback rather than `std::fs::read_to_string`.
-        let yaml_bytes = storage.read_bytes(yaml_path).map_err(Error::Io)?;
-        let yaml_str = std::str::from_utf8(&yaml_bytes)
-            .map_err(|e| Error::InvalidConfig(format!("yaml is not valid UTF-8: {e}")))?;
-        let expanded = crate::config::substitute_env_vars(yaml_str, yaml_path)?;
-        // Resolve `extends:` chain through the same Storage backend so
-        // stream yamls written by `createFreshCeremony` (which carry
-        // `extends: ../default/tn.yaml`) load correctly under wasm too.
-        // Matches Python `_resolve_extends` semantics.
-        let cfg = crate::config::parse_with_extends(&expanded, yaml_path, storage.as_ref())?;
-        let yaml_dir = yaml_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let keystore = resolve(&yaml_dir, Path::new(&cfg.keystore.path));
-
-        // Call site 2: device-key load (32-byte seed at <keystore>/local.private).
-        let seed_path = keystore.join(crate::identity::DEVICE_SEED_FILENAME);
-        let seed_bytes = storage.read_bytes(&seed_path).map_err(Error::Io)?;
-        let device = DeviceKey::from_private_bytes(&seed_bytes)?;
-        if device.did() != cfg.device.device_identity {
-            return Err(Error::InvalidConfig(format!(
-                "keystore DID {} does not match yaml device.device_identity {}",
-                device.did(),
-                cfg.device.device_identity
-            )));
-        }
-
-        // Call site 3: master index key (32 raw bytes at <keystore>/index_master.key).
-        // Filename matches Python tn/config.py.
-        let master_path = keystore.join("index_master.key");
-        let master_index_key: [u8; 32] = storage
-            .read_bytes(&master_path)
-            .map_err(Error::Io)?
-            .try_into()
-            .map_err(|_| Error::InvalidConfig("index_master.key must be 32 bytes".into()))?;
+        let super::material::Material {
+            cfg,
+            device,
+            master_index_key,
+            yaml_dir,
+            keystore,
+        } = super::material::Material::load(yaml_path, &storage)?;
 
         // Call site 4 (inside the loop): per-group cipher construction
         // reads `<group>.btn.state` / `<group>.btn.mykit` through storage.

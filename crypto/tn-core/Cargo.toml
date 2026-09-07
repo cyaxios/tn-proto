@@ -4,7 +4,7 @@ version = "0.0.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "TN protocol runtime: canonical JSON, row-hash chain, HMAC index, Ed25519 signing, envelope build, cipher dispatch, log I/O."
+description = "TN governed data protocol: encrypted contracts, signed envelopes, selected opening, derivation, and event chains."
 readme = "README.md"
 
 [dependencies]
@@ -32,7 +32,7 @@ serde_yml = "0.0.12"
 aes = { version = "0.8", features = ["zeroize"] }
 aes-gcm = { version = "0.10", features = ["aes", "zeroize"] }
 aes-kw = { version = "0.2.1", features = ["std"] }
-uuid = { version = "1", features = ["v4", "v7"], optional = true }
+uuid = { version = "1", features = ["v4", "v7"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 bs58 = "0.5"
 clap = { version = "4", features = ["derive"], optional = true }
@@ -63,7 +63,7 @@ fs4 = { version = "0.13", optional = true }
 # the std-backed path. Without this, every `Runtime::emit` from
 # `WasmRuntime` traps the moment it tries to stamp a timestamp.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-uuid = { version = "1", features = ["v4", "v7", "js"], optional = true }
+uuid = { version = "1", features = ["v4", "v7", "js"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "wasm-bindgen"] }
 
 [dev-dependencies]
@@ -84,7 +84,7 @@ native-jwe = []
 # FsStorage, Runtime, CLI bin). On its own it does NOT pull in
 # `fs4`, so wasm consumers can opt in to `fs` without the
 # advisory-lock dep that won't compile for wasm32-unknown-unknown.
-fs = ["dep:uuid", "dep:clap", "dep:tempfile"]
+fs = ["dep:clap", "dep:tempfile"]
 # `fs-locking` adds cross-process advisory file locks (flock /
 # LockFileEx) to `FsStorage`'s `with_advisory_lock` + the
 # `keystore_backend::LocalKeystore` write path. Required on native

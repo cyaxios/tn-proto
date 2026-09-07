@@ -1,8 +1,8 @@
-//! Markdown loader for `.tn/config/agents.md` policy files. Internal
-//! primitive: most readers want the high-level API instead — see
-//! [`crate::Runtime`], which loads and enforces agent policy as part of the
-//! write path (behind `tn.info()` / `tn log`). Reach here directly only to
-//! parse an `agents.md` file on its own.
+//! Markdown loader for `.tn/config/agents.md` use contracts.
+//!
+//! [`crate::governed::Governance`] selects a typed contract from this parser.
+//! The governed writer encrypts it with the data and binds it through AAD and
+//! the row signature. The receiving application applies permitted-use rules.
 //!
 //! Mirrors `tn_proto/python/tn/_agents_policy.py` byte-for-byte. Each
 //! event type is a `## <event_type>` section; each section MUST have all
@@ -47,8 +47,8 @@ pub struct PolicyTemplate {
     pub consequences: String,
     /// Body of `### on_violation_or_error`.
     pub on_violation_or_error: String,
-    /// `sha256:<hex>` of canonical-bytes(per_event_dict). Same value for
-    /// every template loaded from the same file (file-level signature).
+    /// `sha256:<hex>` of canonical version, schema, and per-event payloads.
+    /// Every template from the same parsed policy document shares this hash.
     pub content_hash: String,
     /// Top-level `version` from frontmatter.
     pub version: String,
@@ -68,7 +68,7 @@ pub struct PolicyDocument {
     pub schema: String,
     /// Repository-relative path (`POLICY_RELATIVE_PATH`).
     pub path: String,
-    /// Raw markdown text (after frontmatter).
+    /// Original Markdown text, including frontmatter.
     pub body: String,
     /// `sha256:<hex>` covering version+schema+per-event payloads.
     pub content_hash: String,
