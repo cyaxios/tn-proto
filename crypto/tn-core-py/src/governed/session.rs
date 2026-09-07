@@ -67,6 +67,17 @@ impl PySession {
     ) -> PyResult<super::data::PyData> {
         super::data::create(self, py, fields, policy, object_type, group)
     }
+    #[pyo3(signature=(groups, policy, *, object_type, primary_group="default"))]
+    fn create_obj_with_groups(
+        &self,
+        py: Python<'_>,
+        groups: &Bound<'_, pyo3::types::PyDict>,
+        policy: &PyGovernance,
+        object_type: &str,
+        primary_group: &str,
+    ) -> PyResult<super::data::PyData> {
+        super::data::create_with_groups(self, py, groups, policy, object_type, primary_group)
+    }
     #[pyo3(signature=(sealed, *, purpose, decide, groups=None))]
     fn receive(
         &self,

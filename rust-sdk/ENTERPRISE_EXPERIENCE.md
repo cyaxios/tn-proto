@@ -1,10 +1,27 @@
 # Enterprise consumer experience
 
-The six completed examples in `tn-enterprise-patterns` are concrete consumers of the governed-object API. They cover a modular monolith, request/reply over loopback TCP, pub/sub, a saga, SQLite outbox/inbox recovery, and CQRS replay. They produced fourteen complaints. This note connects each complaint to the current API or an application integration recipe.
+The companion `tn-enterprise-patterns` corpus evaluates the governed-object API through fifteen enterprise architecture patterns. Each assignment produces running code, fault tests, a chapter and concrete consumer feedback. The corpus retains separate source pins and evidence for the mutable API and its subsequent complaint remedies. Its `PATTERNS-BOOK.md` connects those results to ownership, coupling, transactions, delivery, change and recovery.
 
-The larger fifteen-pattern exercise is paused. Six patterns are complete and nine are outside this regression run. In the source ledger, three of those nine are marked `paused` and six remain `pending`; their placeholder implementations are not evidence of working integrations.
+The original six-pattern consumer check remains a historical baseline: corpus commit `9e8a0d2`, original SDK commit `243b3d2bd1b6f55ad1149c562b7bdbf6be8e77d3`, fourteen complaints, and 72 compatibility checks. The baseline harness below takes that corpus version. The fifteen-pattern rounds use the corpus's `scripts/evaluate_round.py` and separate `rounds/01` and `rounds/02` records.
 
-## Reproduce the consumer check
+## Consumer operations preserve the governed workflow
+
+| Observed consumer task | Rust and Python convenience | Application decision |
+|---|---|---|
+| Originate several business groups together (P01, P03, P09) | `create_obj_with_groups` validates the collection and creates one complete initial signed snapshot. | Select the origin's applicable policy and group routing. |
+| Associate a result with an exact accepted source revision (P02) | `SourceReference.references_with_policy` compares object identity and the accepted authority, policy reference and revision. | Admit that source policy; check groups, operation and business correlation. |
+| Inspect edits after a refused or pending release (P05, P08) | `has_unreleased_changes` is available on working data and Python callback snapshots. | Persist the explicit successful release; track database commit and delivery separately. |
+| Publish an explicit reduced group set (P07, P09) | `retain_groups` selects plaintext and opaque groups atomically while retaining policies and historical snapshots. Python `DataState.hidden_groups` supports release inspection. | Approve the resulting representation and its permitted destination/use. |
+| Read an authority-issued policy publication (P10) | A policy adapter verifies, admits, opens `policy_revision`, then calls `PolicyRevision::from_opened` on the immutable source. | Admit every DAG parent/edge, scope and exact revision applicability. |
+
+The mutable path is `create_obj` or `create_obj_with_groups`, `receive`, ordinary
+data changes, optional policy attachment or input inclusion, and `release`.
+Callers retain policy automatically. The following recipes place business
+transactions and recovery around that path. The Rust workflow guide and Python
+`GOVERNED_WORKFLOW.md` document the convenience methods; the native Python
+example `governed_data.py` executes them together.
+
+## Reproduce the six-pattern baseline
 
 Run from the SDK repository with Python 3.11 or later, Cargo, and a populated Cargo dependency cache:
 
@@ -20,7 +37,7 @@ Expected coverage is 70 pattern tests plus 2 shared-fixture tests: P01 13, P02 1
 
 Observed on 2026-09-07 with Rust/Cargo 1.94.0: all 72 tests passed offline with the exact counts above. SDK/core/BTN source hashes stayed unchanged during the final run. Corpus input hashes stayed unchanged, and all 1,587 frozen vendor files matched baseline commit `243b3d2bd1b6f55ad1149c562b7bdbf6be8e77d3` before and after execution. The evidence report contains the source hashes, copied-test patch, compiler output, and effective lockfile for that run.
 
-## All fourteen complaints
+## The fourteen baseline complaints
 
 | Complaint | Current API or application recipe | Responsibility that remains with the application |
 |---|---|---|

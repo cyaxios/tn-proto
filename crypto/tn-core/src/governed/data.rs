@@ -8,7 +8,7 @@ use crate::sealed_object::GroupBlock;
 use crate::{Error, Result};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A mutable working object. Policy attachment is append-only; releases retain snapshots.
 #[derive(Clone)]
@@ -20,6 +20,7 @@ pub struct DataObject {
     sources: Vec<SourceReference>,
     history: Vec<GovernedObject>,
     revision: u64,
+    unreleased_changes: bool,
     register_error: Option<String>,
 }
 
@@ -31,6 +32,20 @@ impl DataObject {
         group: &str,
         fields: impl Serialize,
     ) -> Result<Self> {
+        Self::new_with_groups(object_type, policy, [(group, fields)])
+    }
+    /// Originate all business groups together before creating a signed snapshot.
+    /// An empty collection, duplicate names, or reserved governance group is refused.
+    pub fn new_with_groups<I, S, V>(
+        object_type: &str,
+        policy: Governance,
+        groups: I,
+    ) -> Result<Self>
+    where
+        I: IntoIterator<Item = (S, V)>,
+        S: AsRef<str>,
+        V: Serialize,
+    {
         validate_name(object_type)?;
         policy.policies()?;
         let sources = policy.source_references()?;
@@ -42,9 +57,19 @@ impl DataObject {
             sources,
             history: Vec::new(),
             revision: 0,
+            unreleased_changes: true,
             register_error: None,
         };
-        data.set_group(group, fields)?;
+        for (name, fields) in groups {
+            let name = name.as_ref();
+            if data.groups.contains_key(name) {
+                return Err(invalid(format!("duplicate business group {name:?}")));
+            }
+            data.set_group(name, fields)?;
+        }
+        if data.groups.is_empty() {
+            return Err(invalid("creation requires at least one business group"));
+        }
         Ok(data)
     }
     /// Use admitted selected plaintext while retaining every unopened source group.
@@ -76,6 +101,7 @@ impl DataObject {
             sources: vec![source],
             history: vec![opened.object().clone()],
             revision: 0,
+            unreleased_changes: false,
             register_error: None,
         })
     }
@@ -119,6 +145,13 @@ impl DataObject {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+    /// Whether a successful mutation occurred since the latest signed snapshot.
+    /// A newly constructed unsaved object is also pending. Refused operations
+    /// preserve this state; successful release records the current state.
+    /// This describes local working data, independently of delivery or database commit.
+    pub fn has_unreleased_changes(&self) -> bool {
+        self.unreleased_changes
+    }
     /// Most recent optional register I/O error; the sealed snapshot remains available.
     pub fn register_error(&self) -> Option<&str> {
         self.register_error.as_deref()
@@ -129,6 +162,7 @@ impl DataObject {
     }
     fn changed(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+        self.unreleased_changes = true;
     }
 
     /// Set a complete plaintext group. Governance names are reserved.
@@ -157,6 +191,32 @@ impl DataObject {
             return Err(invalid(format!("no group {name:?}")));
         }
         self.changed();
+        Ok(())
+    }
+    /// Keep only the named business groups in the next output, including any
+    /// explicitly selected opaque groups. Policies and signed history remain.
+    /// Every name must exist; all validation precedes any mutation. An empty
+    /// selection removes every business group. Repeating a name is harmless.
+    pub fn retain_groups<I, S>(&mut self, names: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut selected = BTreeSet::new();
+        for name in names {
+            let name = name.as_ref();
+            business_group(name)?;
+            if !self.groups.contains_key(name) && !self.opaque.contains_key(name) {
+                return Err(invalid(format!("no group {name:?}")));
+            }
+            selected.insert(name.to_owned());
+        }
+        let before = self.groups.len() + self.opaque.len();
+        self.groups.retain(|name, _| selected.contains(name));
+        self.opaque.retain(|name, _| selected.contains(name));
+        if before != self.groups.len() + self.opaque.len() {
+            self.changed();
+        }
         Ok(())
     }
     /// Copy a selected JSON value. Path elements are dictionary keys or list indices.
@@ -344,6 +404,7 @@ impl DataObject {
         self.history.push(snapshot);
         self.sources = vec![reference];
         self.changed();
+        self.unreleased_changes = false;
         Ok(())
     }
 }
@@ -481,7 +542,23 @@ impl GovernedWriter<'_> {
         group: &str,
         fields: impl Serialize,
     ) -> Result<DataObject> {
-        let mut data = DataObject::new(object_type, policy, group, fields)?;
+        self.create_obj_with_groups(object_type, policy, [(group, fields)])
+    }
+
+    /// Originate a complete group collection in one signed initial version.
+    /// Group routing remains explicit; `tn.agents` comes from the required policy.
+    pub fn create_obj_with_groups<I, S, V>(
+        &self,
+        object_type: &str,
+        policy: Governance,
+        groups: I,
+    ) -> Result<DataObject>
+    where
+        I: IntoIterator<Item = (S, V)>,
+        S: AsRef<str>,
+        V: Serialize,
+    {
+        let mut data = DataObject::new_with_groups(object_type, policy, groups)?;
         let sealed = self.seal(data.draft(object_type, "create", "origin")?)?;
         data.record_snapshot(sealed, "create")?;
         Ok(data)

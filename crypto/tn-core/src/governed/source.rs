@@ -80,13 +80,28 @@ impl SourceReference {
     pub fn operation(&self) -> &str {
         &self.operation
     }
-    /// Match a pending source without assembling lineage JSON by hand.
+    /// Match the source identity and public governance marker. The encrypted
+    /// policy revision requires [`Self::references_with_policy`] with the policy
+    /// accepted when opening the source. Groups and operation are separate checks.
     pub fn references(&self, object: &GovernedObject) -> bool {
         self.object_id == object.id()
             && self.object_type == object.object_type()
             && self.writer == object.writer()
             && object.marker.get("governed_by").and_then(Value::as_str) == Some(&self.governed_by)
             && object.marker.get("policy").and_then(Value::as_str) == Some(&self.policy)
+    }
+    /// Match a pending source and its previously accepted policy identity/revision.
+    /// The caller supplies governance accepted from that source; this helper
+    /// does not perform policy admission, compare text, or approve an operation.
+    pub fn references_with_policy(
+        &self,
+        object: &GovernedObject,
+        accepted_policy: &Governance,
+    ) -> bool {
+        self.references(object)
+            && self.governed_by == accepted_policy.governed_by()
+            && self.policy == accepted_policy.policy_ref()
+            && self.revision_id() == accepted_policy.revision_id()
     }
     fn validate(&self) -> Result<()> {
         super::revision::validate_revision_id(&self.object_id)?;

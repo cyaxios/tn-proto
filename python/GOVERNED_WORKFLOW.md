@@ -44,6 +44,24 @@ hashes all groups, and signs with the session's identity. `governed_by` is the
 writer-authenticated authority declaration. Endpoint admission checks the
 writer's accepted relationship to that authority.
 
+For several business groups, originate the complete initial shape in one call:
+
+```python
+with tn.Session(policy_text, groups=["balances", "identities"]) as origin:
+    account = origin.create_obj_with_groups(
+        {"balances": {"balance": 1200}, "identities": {"owner": "Ada"}},
+        origin.policy("finance.account"), object_type="finance.account",
+        primary_group="balances",
+    )
+    assert len(account.history) == 1
+    assert account.data["balance"] == 1200
+```
+
+`primary_group` selects the live `.data` view and must name a supplied group;
+it defaults to `default`. `.groups` exposes every opened group. Rust validates
+the complete collection before signing one initial snapshot and recording one
+optional creation entry. The existing single-group `create_obj` stays available.
+
 ## A receiver admits the complete source and contract
 
 ```python
@@ -94,6 +112,14 @@ values at that moment; `pop()` and `popitem()` return detached removed values.
 `account.state` is a detached inspection snapshot. Its dictionaries can be read
 or edited locally without changing the working object. The same owned state is
 supplied to decision callbacks so they evaluate a consistent version.
+`state.hidden_groups` lists the retained opaque groups in that same snapshot.
+
+`account.retain_groups(["report"])` keeps only the named business groups for the
+next release. It applies to both opened and opaque groups, preserves every policy
+and historical snapshot, and validates all requested names before changing data.
+Unknown names and reserved `tn.agents` raise `ValueError`. An empty list removes
+all business groups. The primary `.data` view keeps its configured path; use
+`.groups` when selecting a differently named output group.
 
 ## Authority-approved attachment only adds policy
 
@@ -113,6 +139,11 @@ For computations with multiple admitted inputs, call `account.include(other)`.
 It retains the other input's contracts and causal references. The application
 assigns computed values normally. Source references identify data inputs;
 policy-revision DAG parents identify policy history.
+For a pending request, `source.references_with_policy(request, accepted_policy)`
+also compares the selected revision with the policy already accepted from that
+request. `references(request)` checks identity and the public governance marker.
+The application separately checks source groups, admitted operation and business
+correlation.
 
 ## Release signs the current result for a destination and purpose
 
@@ -143,6 +174,12 @@ Unopened groups retain their exact ciphertext under the continuing primary AAD
 marker. Explicitly deleting a business group removes it from the next output;
 its earlier signed versions remain in `history`. Each new release becomes the
 next working version's immediate source.
+
+`account.has_unreleased_changes` is true after successful mutation, attachment
+or inclusion since the last signed snapshot. It is false after creation, receipt
+and successful release. Refusal preserves the current flag and prior snapshot.
+The same property is available on `DataState` inside release decisions. It tracks
+local edits; database commitment and delivery are application-owned facts.
 
 Transport retries use the stored `outbox_bytes`. Another `release()` intentionally
 creates another signed version. Application transactions store business effects,

@@ -122,9 +122,23 @@ impl Objects<'_> {
         group: &str,
         fields: impl serde::Serialize,
     ) -> Result<DataObject> {
+        self.create_obj_with_groups(object_type, policy, [(group, fields)])
+    }
+    /// Originate every business group in one snapshot and one optional creation entry.
+    pub fn create_obj_with_groups<I, S, V>(
+        &self,
+        object_type: &str,
+        policy: Governance,
+        groups: I,
+    ) -> Result<DataObject>
+    where
+        I: IntoIterator<Item = (S, V)>,
+        S: AsRef<str>,
+        V: serde::Serialize,
+    {
         let mut data = self
             .writer()?
-            .create_obj(object_type, policy, group, fields)?;
+            .create_obj_with_groups(object_type, policy, groups)?;
         self.record(&mut data, "create", "create", "origin");
         Ok(data)
     }

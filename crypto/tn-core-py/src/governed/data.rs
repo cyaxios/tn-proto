@@ -91,6 +91,10 @@ impl PySource {
     fn references(&self, object: &PyObject) -> bool {
         self.inner.references(&object.inner)
     }
+    fn references_with_policy(&self, object: &PyObject, accepted_policy: &PyGovernance) -> bool {
+        self.inner
+            .references_with_policy(&object.inner, &accepted_policy.inner)
+    }
 }
 
 /// Frozen owned view: dictionaries returned here are detached copies.
@@ -100,6 +104,14 @@ pub(super) struct PyDataState {
 }
 #[pymethods]
 impl PyDataState {
+    #[getter]
+    fn hidden_groups(&self) -> Vec<String> {
+        self.inner
+            .hidden_groups()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
     #[getter]
     fn object_type(&self) -> &str {
         self.inner.object_type()
@@ -121,6 +133,10 @@ impl PyDataState {
     #[getter]
     fn revision(&self) -> u64 {
         self.inner.revision()
+    }
+    #[getter]
+    fn has_unreleased_changes(&self) -> bool {
+        self.inner.has_unreleased_changes()
     }
     #[getter]
     fn groups<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -342,6 +358,9 @@ impl PyData {
 }
 #[pymethods]
 impl PyData {
+    fn retain_groups(&self, groups: Vec<String>) -> PyResult<()> {
+        guard(|| self.mutate(|data| data.retain_groups(groups)))
+    }
     #[getter]
     fn object_type(&self) -> PyResult<String> {
         Ok(self.read()?.object_type().to_owned())
@@ -396,6 +415,10 @@ impl PyData {
     #[getter]
     fn revision(&self) -> PyResult<u64> {
         Ok(self.read()?.revision())
+    }
+    #[getter]
+    fn has_unreleased_changes(&self) -> PyResult<bool> {
+        Ok(self.read()?.has_unreleased_changes())
     }
     #[getter]
     fn state(&self) -> PyResult<PyDataState> {
@@ -688,6 +711,33 @@ pub(super) fn create(
             inner,
             session.context.clone(),
             group.to_owned(),
+        ))
+    })
+}
+pub(super) fn create_with_groups(
+    session: &PySession,
+    py: Python<'_>,
+    groups: &Bound<'_, PyDict>,
+    policy: &PyGovernance,
+    object_type: &str,
+    primary_group: &str,
+) -> PyResult<PyData> {
+    guard(|| {
+        let context = session.context()?;
+        let groups = codec::fields(groups)?;
+        if !groups.contains_key(primary_group) {
+            return Err(PyValueError::new_err(
+                "primary_group must name a supplied business group",
+            ));
+        }
+        let policy = policy.inner.clone();
+        let inner = py
+            .allow_threads(|| context.create_obj_with_groups(object_type, policy, groups))
+            .map_err(to_py)?;
+        Ok(PyData::new(
+            inner,
+            session.context.clone(),
+            primary_group.to_owned(),
         ))
     })
 }

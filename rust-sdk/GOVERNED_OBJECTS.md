@@ -43,6 +43,27 @@ fn aggregate(objects: &Objects<'_>, incoming: &str, accepted_writer: &str,
 
 Origination calls `create_obj(object_type, policy, group, fields)` with the
 contract selected by its policy authority. It retains the first signed snapshot.
+For an origin with several groups, `create_obj_with_groups` validates and signs
+the whole collection at once:
+
+```rust,no_run
+# use tn_proto::{Governance, Objects};
+# use serde_json::json;
+# fn origin(objects: &Objects<'_>, policy: Governance) -> tn_core::Result<()> {
+let account = objects.create_obj_with_groups("finance.account", policy, [
+    ("balances", json!({"balance": 1200})),
+    ("identities", json!({"owner": "Ada"})),
+])?;
+assert_eq!(account.history().len(), 1);
+assert!(!account.has_unreleased_changes());
+# Ok(()) }
+```
+
+Its first snapshot contains all supplied groups and `tn.agents`, without an
+intermediate partial object. Empty collections, duplicate or reserved group
+names, non-object fields, and missing publication material are refused. The
+configured context records one optional creation entry after successful sealing.
+
 `Objects` loads configured material; `GovernedWriter` and `GovernedReader` expose
 the same workflow with supplied ciphers. `tn-proto` with
 `default-features = false` supports that direct workflow without a filesystem
@@ -69,6 +90,12 @@ publications can supply accepted authority-issued rules.
 references. Computation remains application code. Distinct machine rules remain
 distinct contracts even when the five standard text fields match. Source
 references describe computation; `PolicyDag` parents describe policy history.
+When associating a reply with an admitted input, use
+`source.references_with_policy(&input, &accepted_policy)` to compare source
+identity, authority, policy reference and exact selected revision. Supply the
+policy already accepted from that input. Check selected groups, operation and
+business correlation separately. `references(&input)` compares the identity and
+public marker; the selected revision is encrypted and needs the accepted policy.
 
 ## Release preserves history and selective access
 
@@ -78,11 +105,25 @@ policies, and causal references. Applications may remove business groups from a
 new output; earlier signed versions remain intact. Data mutation reserves
 `tn.agents` and cannot set or delete it.
 
+`data.retain_groups(["report"])` keeps an explicit set of business groups for the
+next release and removes all other plaintext and opaque groups. Every requested
+name must already exist; unknown and reserved names fail before any mutation.
+An explicitly retained opaque group keeps its ciphertext. Policies and historical
+snapshots always remain. The application approves the resulting group selection
+in its release callback.
+
 Release asks the application to admit the current state for its purpose and
 destination. Refusal or encryption failure preserves current data and the prior
 snapshot. Success becomes the next immutable snapshot. Retain its exact `wire()`
 alongside business effects when retries must return the same result. Another
 release intentionally creates another signed version.
+
+`has_unreleased_changes()` reports successful mutation since the last signed
+snapshot, including policy attachment or additional inputs. It is false after
+creation, receipt or successful release; refusal preserves its current value.
+It describes local working state. A successful signature and a committed business
+transaction are separately recorded facts. For delivery, persist the explicit
+successful release return with the application's business changes.
 
 `check_groups()` reports publishing readiness for every requested group and
 `tn.agents`; `require_groups()` makes this a startup requirement. Both inspect
@@ -216,6 +257,15 @@ The example uses independent in-memory BTN group material and explicitly
 approved policy content. The revision/DAG API is exported by the Rust SDK; the
 native Python session binding continues to use the underlying governed-object
 operations.
+
+Policy publications are decoded from their admitted immutable `OpenedObject`.
+An authority adapter uses `parse`, `governance`, `authorize_with`, `open` of
+`POLICY_REVISION_GROUP`, then `PolicyRevision::from_opened`. It stores the original
+wire with the revision identity and admits each DAG parent before its child.
+This keeps the decoded policy publication tied to the exact signed source.
+Ordinary business computation uses the mutable `receive` flow. The catalog and
+durable-workflow patterns package the publication-reading sequence in their
+policy adapters so business callers select an already accepted contract.
 
 ## An application supplies the policy and assigns data to groups
 
