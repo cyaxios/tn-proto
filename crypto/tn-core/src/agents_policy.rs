@@ -78,7 +78,7 @@ pub struct PolicyDocument {
 ///
 /// Matches Python `_canonical_bytes` in `tn/_agents_policy.py`:
 /// `json.dumps(obj, sort_keys=True, separators=(",", ":"))`.
-fn canonical_bytes_for_hash(
+pub(crate) fn canonical_bytes_for_hash(
     version: &str,
     schema: &str,
     events: &BTreeMap<String, BTreeMap<String, String>>,

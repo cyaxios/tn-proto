@@ -51,6 +51,9 @@ impl Governance {
         for name in REQUIRED_FIELDS {
             string_field(&fields, name)?;
         }
+        if fields.contains_key("policy_revision") {
+            super::revision::validate_revision_id(string_field(&fields, "policy_revision")?)?;
+        }
         Ok(Self {
             governed_by: governed_by.to_owned(),
             fields,
@@ -71,6 +74,12 @@ impl Governance {
         self.fields["policy"]
             .as_str()
             .expect("validated policy string")
+    }
+
+    /// Exact signed policy revision selected by an application, when supplied.
+    /// `PolicyDag::resolve` checks this binding against accepted revision content.
+    pub fn revision_id(&self) -> Option<&str> {
+        self.fields.get("policy_revision").and_then(Value::as_str)
     }
 
     /// Contract fields as carried in the encrypted governance group.

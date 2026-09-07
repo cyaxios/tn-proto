@@ -218,18 +218,21 @@ impl OpenedObject {
         mut governance: Governance,
     ) -> Result<GovernedDraft> {
         let names: Vec<&str> = self.groups.keys().map(String::as_str).collect();
-        governance.fields.insert(
-            "source_lineage".to_owned(),
-            json!([{
-                "object_id": self.object().id(),
-                "object_type": self.object().object_type(),
-                "writer": self.object().writer(),
-                "governed_by": self.governance().governed_by(),
-                "policy": self.governance().policy_ref(),
-                "groups": names,
-                "operation": self.admitted.operation(),
-            }]),
-        );
+        let mut source = json!({
+            "object_id": self.object().id(),
+            "object_type": self.object().object_type(),
+            "writer": self.object().writer(),
+            "governed_by": self.governance().governed_by(),
+            "policy": self.governance().policy_ref(),
+            "groups": names,
+            "operation": self.admitted.operation(),
+        });
+        if let Some(revision_id) = self.governance().revision_id() {
+            source["policy_revision"] = Value::String(revision_id.to_owned());
+        }
+        governance
+            .fields
+            .insert("source_lineage".to_owned(), json!([source]));
         GovernedDraft::new(object_type, governance)
     }
 }

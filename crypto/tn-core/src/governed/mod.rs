@@ -7,12 +7,19 @@
 
 mod object;
 mod policy;
+mod policy_dag;
 mod reader;
+mod revision;
 mod writer;
 
 pub use object::GovernedObject;
 pub use policy::Governance;
+pub use policy_dag::PolicyDag;
 pub use reader::{AdmittedObject, GovernanceView, GovernedReader, OpenedObject};
+pub use revision::{
+    PolicyParent, PolicyRelation, PolicyRevision, PolicyRevisionDraft, POLICY_REVISION_GROUP,
+    POLICY_REVISION_TYPE,
+};
 pub use writer::{GovernedDraft, GovernedWriter};
 
 /// Reserved encrypted group carrying the use contract.

@@ -20,6 +20,106 @@ encrypted group to the carried `tn.agents` policy. Event profiles such as
 sent in an API call, stored as an artifact, forwarded between programs, or
 retained as exhaust.
 
+## Policy revisions carry authenticated update history
+
+`PolicyRevisionDraft` creates a revision containing the complete normalized
+policy document, selected event, content reference, governing authority, scope,
+and parent revision identities. `into_draft(administration_contract)` puts this
+record in the encrypted `policy_revision` group of a `tn.policy.revision`
+object. Seal it with the existing object writer. Its `tn.agents` describes the
+contract for administering that publication; its revision payload describes
+the effective policy being published.
+
+After signature verification, administration-policy admission, and opening
+`policy_revision`, `PolicyRevision::from_opened` checks the typed record and
+recomputes its policy reference using TN's existing normalized-document hash.
+It checks every event in that document, including events other than the
+selected section. The original signed envelope stays attached to the revision.
+
+There are two identities:
+
+- `revision.governance().policy_ref()` identifies the policy content and selected
+  section using the established policy-reference format.
+- `revision.id()` is the TN row hash of the complete signed publication,
+  including its parents, scope, and publisher identity. Identical effective
+  policy content can occur in distinct authenticated revision histories.
+
+`PolicyRelation` defines the relationship recorded for each parent:
+
+| Relationship | Parent count | Application meaning |
+|---|---|---|
+| Root | Zero | Establish policy through the application's accepted root authority. |
+| `Revise` | One | Succeed an earlier revision within an authorized scope. |
+| `Extend` | One | Carry applicable parent obligations and add requirements. |
+| `Combine` | At least two; every edge is `Combine` | Record an explicit effective contract incorporating the named parents. |
+
+`PolicyDag::admit` first resolves every parent against its accepted history. It
+then requires an application authority callback to approve the root, or each
+parent edge separately. The callback receives the candidate and either `None`
+for a root or `Some((edge, accepted_parent))`. It checks the writer, governing
+authority, scope, and the allowed policy change. The application evaluates the
+effective policy text and how obligations continue through an extension or
+merge. A refusal or callback error leaves the DAG unchanged.
+
+Accepted revisions are immutable. Parents must already be admitted, so a
+revision can refer only to earlier accepted nodes. This makes the history
+acyclic by construction. Unknown parents and attempts to replace an admitted
+identity are refused before authority callbacks run. Retain the signed objects
+and rebuild the in-memory DAG by reopening and admitting them in parent-first
+order under the application's trust configuration.
+
+```rust,no_run
+use tn_proto::{Governance, PolicyDag, PolicyRevision};
+
+fn accept_and_select(
+    dag: &mut PolicyDag,
+    revision: PolicyRevision,
+    accepted_writer: &str,
+    accepted_authority: &str,
+    approved_policy: &str,
+) -> tn_core::Result<Governance> {
+    let id = revision.id().to_owned();
+    dag.admit(revision, |candidate, parent| {
+        Ok(candidate.writer() == accepted_writer
+            && candidate.governance().governed_by() == accepted_authority
+            && candidate.governance().policy_ref() == approved_policy
+            && candidate.scope() == "research"
+            && parent.is_none_or(|(_, p)| p.scope() == "research"
+                && p.governance().governed_by() == accepted_authority))
+    })?;
+    dag.select(&id, "research", |candidate| {
+        Ok(candidate.governance().policy_ref() == approved_policy)
+    })
+}
+```
+
+Selection requires an exact admitted revision identity, exact scope, and an
+application applicability decision. It does not choose a revision by timestamp,
+version label, or branch tip. The returned `Governance` carries `policy_revision`
+inside encrypted, signed `tn.agents`. Every group's AAD remains the existing
+two-field `governed_by` / `policy` marker. The row signature binds the selected
+revision identity together with all encrypted data and governance.
+
+A receiver calls `dag.resolve(carried_contract, scope)` during application
+admission. This checks the revision identity against accepted history and
+compares the governing authority, policy reference, and all five policy fields
+with the selected revision. The ordinary operation callback still decides
+permitted use. Possessing a revision record or admitting an update does not
+grant a reader key.
+
+`opened.derive(...)` continues the selected revision. `derive_under(...)` can use
+a separately selected revision for the result. Both record the input revision
+in `source_lineage` when one is present. The source envelope and its earlier
+policy remain intact. This keeps policy history and computation history
+connected while preserving their distinct meanings.
+
+Run `cargo run --offline -p tn-proto --example policy_revisions` for a complete
+root, two branches, a merge, and a data result under the selected merged policy.
+The example uses independent in-memory BTN group material and explicitly
+approved policy content. The revision/DAG API is exported by the Rust SDK; the
+native Python session binding continues to use the underlying governed-object
+operations.
+
 ## An application supplies the policy and assigns data to groups
 
 Open an existing TN configuration with:

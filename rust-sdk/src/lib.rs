@@ -83,7 +83,8 @@ pub use inbox::{
 };
 pub use objects::{
     AdmittedObject, Governance, GovernanceView, GovernedDraft, GovernedObject, GovernedReader,
-    GovernedWriter, Objects, OpenedObject, GOVERNANCE_GROUP,
+    GovernedWriter, Objects, OpenedObject, PolicyDag, PolicyParent, PolicyRelation, PolicyRevision,
+    PolicyRevisionDraft, GOVERNANCE_GROUP, POLICY_REVISION_GROUP, POLICY_REVISION_TYPE,
 };
 pub use pkg::{
     AbsorbReceipt, AbsorbReceiptExt, AbsorbStatus, BundleForRecipientOptions,

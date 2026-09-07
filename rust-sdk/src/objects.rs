@@ -4,7 +4,8 @@ use std::path::Path;
 
 pub use tn_core::governed::{
     AdmittedObject, Governance, GovernanceView, GovernedDraft, GovernedObject, GovernedReader,
-    GovernedWriter, OpenedObject, GOVERNANCE_GROUP,
+    GovernedWriter, OpenedObject, PolicyDag, PolicyParent, PolicyRelation, PolicyRevision,
+    PolicyRevisionDraft, GOVERNANCE_GROUP, POLICY_REVISION_GROUP, POLICY_REVISION_TYPE,
 };
 pub use tn_core::runtime::Objects;
 
