@@ -21,7 +21,7 @@ Maintain a straightforward, developer-friendly voice. Avoid parameter-heavy expl
 [![Keys](https://img.shields.io/badge/keys-non--custodial%20vault-brightgreen.svg?style=flat-square)](#non-custodial-vault-backup)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](#license)
 
-**`tn-proto` keeps every record readable only by the people you've authorized - and leaves cryptographic proof that it did.** Fields are encrypted per reader, so the wrong people simply can't decrypt them; each entry is signed by your device and hash-chained, so anyone can verify offline - from the log file alone - who was allowed to read what, and that nothing was altered after the fact.
+**TN-Proto moves data and a use-contract together.** Group keys control access, signatures authenticate the object, and applications decide permitted use. The governed Python SDK carries that binding through creation, selective opening, computation, and signed release.
 
 ## Installation
 
@@ -29,7 +29,56 @@ Maintain a straightforward, developer-friendly voice. Avoid parameter-heavy expl
 pip install tn-proto
 ```
 
-## Quickstart
+## Governed sessions own their context
+
+`tn.Session` is an independent native Rust context. Create several sessions in one
+Python process; each owns its identity, policy, and groups and closes separately.
+The governed workflow is `draft → seal → governance → authorize → open → derive`.
+
+```python
+from pathlib import Path
+import tn
+
+policy = Path("agents.md").read_text(encoding="utf-8")
+with tn.Session(policy, groups=["observations"]) as source_session:
+    with tn.Session(policy, groups=["reports"]) as output_session:
+        source = source_session.seal(
+            source_session.draft("research.sample")
+            .group("observations", {"counts": [12, 18]})
+        )
+        approved_policy = source_session.policy("research.sample").policy_ref
+        admitted = source_session.governance(source).authorize(
+            "aggregate",
+            lambda contract, operation: (
+                operation == "aggregate"
+                and contract.governed_by == source_session.did
+                and contract.policy_ref == approved_policy
+            ),
+        )
+        opened = source_session.open(admitted, ["observations"])
+        result = output_session.seal(
+            opened.derive("report.generated")
+            .group("reports", {"total": sum(opened.groups["observations"]["counts"])})
+        )
+        assert result.writer == output_session.did
+```
+
+The `research.sample` section in `agents.md` supplies the contract. Governed
+sealing inserts the encrypted `tn.agents` group, binds every group's AAD to its
+governing authority and policy reference, and signs the complete object. The
+application's callback admits an operation before business groups are opened.
+Derivation carries the source contract and lineage into a new signed result.
+
+Fresh sessions create their material in memory. Use
+`tn.Session.from_config("project/tn.yaml")` to load existing identity, policy, and
+group material. These sessions operate without creating an event stream.
+
+See the [governed workflow guide](GOVERNED_WORKFLOW.md) for a complete policy,
+scoped readers, configuration loading, and object lifetimes, or run the
+[two-session example](examples/governed_sessions.py). The classes are also
+available from `tn.governed`, with typing stubs included in the wheel.
+
+## Event streams use the same protocol
 
 The first run mints a ceremony under `./.tn/` - nothing to configure.
 
@@ -87,7 +136,7 @@ TN does two jobs at once: it keeps each record from reaching the wrong eyes, and
 
 **Control who can read what**
 - **Private by default** - field values are encrypted on disk. The wrong people don't get a redacted view; they get ciphertext they can't open.
-- **Per-reader** - one entry can be sealed for several named parties, each with their own key, so each sees only what they're authorized to.
+- **Group access** - fields are routed into encryption groups. Assigned reader material opens the corresponding groups, so one object can carry data for several authorized audiences.
 - **Revocable** - cut a reader off and the next entry is already beyond their reach; everyone else keeps reading, no rekeying.
 
 **Prove you did**

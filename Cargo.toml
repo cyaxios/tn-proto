@@ -41,7 +41,7 @@ thiserror = "1"
 hex = "0.4"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
 [profile.release]
 lto = true

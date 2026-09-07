@@ -21,7 +21,8 @@ enum Identity<'a> {
 /// [`Objects::open`] owns its identity and opens only configuration, policies,
 /// and key material. [`Runtime::objects`] borrows the active runtime identity
 /// and shares its group states, including subsequent in-process rotations.
-/// Both paths always sign governed objects and return their wire bytes.
+/// [`Objects::ephemeral`] creates an independent in-memory identity and groups.
+/// Every path signs governed objects and returns their wire bytes.
 pub struct Objects<'a> {
     identity: Identity<'a>,
     groups: BTreeMap<String, Arc<RwLock<GroupState>>>,
@@ -30,6 +31,50 @@ pub struct Objects<'a> {
 }
 
 impl Objects<'static> {
+    /// Create an independent in-memory identity, policy, and BTN group context.
+    /// The governance group is supplied automatically. No files are created.
+    pub fn ephemeral(policy: &str, policy_id: &str, business_groups: &[&str]) -> Result<Self> {
+        use crate::cipher::btn::BtnPublisherCipher;
+        use crate::governed::{validate_group, GOVERNANCE_GROUP};
+        use rand_core::RngCore as _;
+
+        let policies = crate::agents_policy::parse_policy_text(policy, policy_id)?;
+        let mut names = BTreeSet::from([GOVERNANCE_GROUP.to_owned()]);
+        for name in business_groups {
+            validate_group(name)?;
+            if !names.insert((*name).to_owned()) {
+                return Err(Error::InvalidConfig(format!(
+                    "duplicate or reserved group {name:?}"
+                )));
+            }
+        }
+        let device = DeviceKey::generate();
+        let namespace = uuid::Uuid::new_v4().to_string();
+        let mut master = zeroize::Zeroizing::new([0u8; 32]);
+        rand_core::OsRng.fill_bytes(master.as_mut());
+        let mut groups = BTreeMap::new();
+        for name in &names {
+            let mut state = tn_btn::PublisherState::setup(tn_btn::Config)?;
+            let kit = state.mint()?;
+            let cipher = BtnPublisherCipher::from_state(state).with_reader_kit(&kit.to_bytes())?;
+            let index = crate::indexing::derive_group_index_key(&master[..], &namespace, name, 0)?;
+            groups.insert(
+                name.clone(),
+                Arc::new(RwLock::new(GroupState {
+                    cipher: Arc::new(cipher),
+                    hmac_template: crate::indexing::build_hmac_template(&index)?,
+                    aad_default: serde_json::Map::new(),
+                })),
+            );
+        }
+        Ok(Self {
+            identity: Identity::Owned(Box::new(device)),
+            groups,
+            private_groups: names,
+            policies: Some(policies),
+        })
+    }
+
     /// Load object configuration without initializing event handlers or logs.
     /// Reopen this context to load external changes to configuration or keys.
     pub fn open(yaml_path: &Path) -> Result<Self> {
@@ -117,8 +162,25 @@ impl Objects<'_> {
     /// Build a reader from current and retained material in configured groups. It opens only
     /// governance until an application admits use and selects business groups.
     pub fn reader(&self) -> Result<GovernedReader> {
+        self.reader_for(&self.private_groups)
+    }
+
+    /// Create a reader containing only the named configured groups.
+    /// The returned reader owns its cipher snapshot independently of this context.
+    pub fn reader_for<I, S>(&self, names: I) -> Result<GovernedReader>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let mut reader = GovernedReader::new();
-        for name in &self.private_groups {
+        let mut selected = BTreeSet::new();
+        for name in names {
+            let name = name.as_ref();
+            if !self.private_groups.contains(name) || !selected.insert(name.to_owned()) {
+                return Err(Error::InvalidConfig(format!(
+                    "select each configured private group once: {name:?}"
+                )));
+            }
             if let Some(group) = self.groups.get(name) {
                 let state = group
                     .read()

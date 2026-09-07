@@ -21,7 +21,16 @@ Maintain a straightforward, developer-friendly voice. Avoid parameter-heavy expl
 [![Keys](https://img.shields.io/badge/keys-non--custodial%20vault-brightgreen.svg?style=flat-square)](#non-custodial-vault-backup)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](#license)
 
-**`tn-proto` keeps every record readable only by the people you've authorized - and leaves cryptographic proof that it did.** Fields are encrypted per reader, so the wrong people simply can't decrypt them; each entry is signed by your device and hash-chained, so anyone can verify offline - from the log file alone - who was allowed to read what, and that nothing was altered after the fact.
+**TN-Proto moves data and a use-contract together.** Group keys control access,
+signatures authenticate the object, and applications decide permitted use. The
+governed object interface carries that binding through creation, selective
+opening, computation, and signed release.
+
+The [Python governed SDK](python/GOVERNED_WORKFLOW.md) exposes independent native
+`tn.Session` objects: `draft → seal → governance → authorize → open → derive`.
+Each session owns its identity, policy, and groups. See the
+[two-session example](python/examples/governed_sessions.py) and the
+[Rust governed interface](rust-sdk/GOVERNED_OBJECTS.md).
 
 ## Installation
 
@@ -32,7 +41,7 @@ npm install @cyaxios/tn-proto   # Node / TypeScript
 
 The Rust core ships compiled into each package (a wheel for Python, bundled WebAssembly for Node): one install, no native toolchain.
 
-## Quickstart
+## Event streams use the same protocol
 
 The first run mints a ceremony under `./.tn/` - nothing to configure.
 

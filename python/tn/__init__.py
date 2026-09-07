@@ -1,19 +1,20 @@
-"""tn-proto: TN protocol Python SDK.
+"""TN-Proto carries signed data and its use-contract through computation.
 
-Lifecycle (the four-line dirt-easy summary):
+Governed workflow:
+    Session(policy, groups=[...])  # independent in-memory identity and groups
+    Session.from_config(path)     # load existing identity, policy, and keys
+    session.draft(type).group(...) # assign fields to encryption groups
+    session.seal(draft)            # bind encrypted tn.agents and sign
+    session.governance(object)     # authenticate and open the contract
+    view.authorize(op, decision)   # application admits permitted use
+    session.open(admitted, groups) # open selected business groups
+    opened.derive(type)            # carry contract and lineage into a draft
 
-    1. tn.absorb('Agentic20.project.tnpkg')   # install layout from dashboard
-    2. tn.info('hello.world', who='alice')    # emit an attested entry
-    3. for e in tn.read(): print(e)           # iterate + decrypt
-    4. tn.flush_and_close()                   # drain handlers (optional)
+Several Session instances can operate and close independently. Native immutable
+types are exported through ``tn.governed``. See ``GOVERNED_WORKFLOW.md`` for the
+complete two-session flow and application contract.
 
-Step 1 is optional once a Project is on disk; ``tn.info`` will discover
-``./tn.yaml`` (legacy), legacy ``./.tn/default/tn.yaml``, or an existing
-project-root ``./.tn/<project>/tn.yaml`` on first use. Fresh auto-init
-creates ``./.tn/<cwd-name>/tn.yaml``. Step 4 is optional in short scripts
-but recommended in long-running processes.
-
-Public API:
+Event and administration API:
     tn.init(yaml_path)          # load or create ceremony + open log file
     tn.absorb(source)           # install a .tnpkg (alias for tn.pkg.absorb)
     tn.export(...)              # produce a .tnpkg (alias for tn.pkg.export)
@@ -60,6 +61,8 @@ except ImportError:  # pragma: no cover — importlib.metadata is stdlib on 3.10
 # failures, so check the message string when distinguishing
 # divergence-retry from other faults: see `is_keystore_diverged()`.
 from tn._native.core import TnRuntimeError as KeystoreConflictError
+from . import governed
+from .governed import Governance, GovernedDraft, GovernedObject, Session
 
 from . import (
     _agents_policy,
@@ -1449,6 +1452,11 @@ def scope_to(*dids: str) -> ScopeBuilder:
 
 
 __all__ = [  # noqa: RUF022 — intentional category grouping (see inline comments)
+    "Session",
+    "Governance",
+    "GovernedDraft",
+    "GovernedObject",
+    "governed",
     "AbsorbReceipt",
     "AbsorbResult",
     "absorb",
