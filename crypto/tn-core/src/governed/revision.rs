@@ -3,11 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
-use crate::agents_policy::{
-    canonical_bytes_for_hash, parse_policy_text, PolicyDocument, PolicyTemplate, REQUIRED_FIELDS,
-};
+use crate::agents_policy::{parse_policy_text, PolicyDocument, PolicyTemplate, REQUIRED_FIELDS};
 use crate::{Error, Result};
 
 use super::{validate_name, Governance, GovernedDraft, GovernedObject, OpenedObject};
@@ -128,25 +125,18 @@ impl NormalizedPolicy {
                 ));
             }
         }
-        let fields = self.events.get(event_type).ok_or_else(|| {
-            invalid_revision("selected policy event must occur in the normalized document")
-        })?;
-        let digest = Sha256::digest(canonical_bytes_for_hash(
+        if !self.events.contains_key(event_type) {
+            return Err(invalid_revision(
+                "selected policy event must occur in the normalized document",
+            ));
+        }
+        let template = PolicyTemplate::from_normalized_document(
+            event_type,
             &self.version,
             &self.schema,
-            &self.events,
-        ));
-        let template = PolicyTemplate {
-            event_type: event_type.to_owned(),
-            instruction: fields["instruction"].clone(),
-            use_for: fields["use_for"].clone(),
-            do_not_use_for: fields["do_not_use_for"].clone(),
-            consequences: fields["consequences"].clone(),
-            on_violation_or_error: fields["on_violation_or_error"].clone(),
-            content_hash: format!("sha256:{}", hex::encode(digest)),
-            version: self.version.clone(),
-            path: policy_id.to_owned(),
-        };
+            self.events.clone(),
+            policy_id,
+        )?;
         Governance::from_template(authority, &template)
     }
 }

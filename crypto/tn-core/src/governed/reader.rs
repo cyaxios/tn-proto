@@ -19,6 +19,26 @@ pub struct GovernedReader {
 }
 
 impl GovernedReader {
+    /// Verify a source, admit its full contract and identity, then open selected data.
+    pub fn receive<I, S, F>(
+        &self,
+        wire: &str,
+        operation: &str,
+        groups: I,
+        decide: F,
+    ) -> Result<super::DataObject>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        F: FnOnce(&super::AdmissionContext<'_>) -> Result<bool>,
+    {
+        let object = GovernedObject::parse(wire)?;
+        let admitted = self
+            .governance(&object)?
+            .authorize_with(operation, decide)?;
+        super::DataObject::from_opened(self.open(&admitted, groups)?)
+    }
+
     /// Start a reader with no group material.
     pub fn new() -> Self {
         Self::default()
@@ -35,6 +55,8 @@ impl GovernedReader {
     pub fn governance(&self, object: &GovernedObject) -> Result<GovernanceView> {
         let body = self.open_group(object, GOVERNANCE_GROUP)?;
         let governance = Governance::from_body(string_field(&object.marker, "governed_by")?, body)?;
+        governance.policies()?;
+        governance.source_references()?;
         if governance.policy_ref() != string_field(&object.marker, "policy")? {
             return Err(invalid(
                 "opened policy must match its authenticated AAD reference",
@@ -123,6 +145,29 @@ pub struct GovernanceView {
 }
 
 impl GovernanceView {
+    /// Admit use with verified writer, object type, contract and source context together.
+    pub fn authorize_with<F>(self, operation: &str, decide: F) -> Result<AdmittedObject>
+    where
+        F: FnOnce(&super::AdmissionContext<'_>) -> Result<bool>,
+    {
+        if operation.trim().is_empty() {
+            return Err(invalid("operation must be nonempty"));
+        }
+        let context = super::AdmissionContext {
+            object: &self.object,
+            governance: &self.governance,
+            operation,
+        };
+        if !decide(&context)? {
+            return Err(Error::UseDenied {
+                operation: operation.to_owned(),
+            });
+        }
+        Ok(AdmittedObject {
+            view: self,
+            operation: operation.to_owned(),
+        })
+    }
     /// The authenticated contract the application is to evaluate.
     pub fn governance(&self) -> &Governance {
         &self.governance
@@ -184,6 +229,14 @@ pub struct OpenedObject {
 }
 
 impl OpenedObject {
+    /// Application operation for which these source groups were opened.
+    pub fn operation(&self) -> &str {
+        self.admitted.operation()
+    }
+    /// Typed causal reference for this admitted input.
+    pub fn source_reference(&self) -> Result<super::SourceReference> {
+        super::SourceReference::from_opened(self)
+    }
     /// Selected business plaintext, separated by group.
     pub fn groups(&self) -> &BTreeMap<String, Value> {
         &self.groups
@@ -217,19 +270,7 @@ impl OpenedObject {
         object_type: &str,
         mut governance: Governance,
     ) -> Result<GovernedDraft> {
-        let names: Vec<&str> = self.groups.keys().map(String::as_str).collect();
-        let mut source = json!({
-            "object_id": self.object().id(),
-            "object_type": self.object().object_type(),
-            "writer": self.object().writer(),
-            "governed_by": self.governance().governed_by(),
-            "policy": self.governance().policy_ref(),
-            "groups": names,
-            "operation": self.admitted.operation(),
-        });
-        if let Some(revision_id) = self.governance().revision_id() {
-            source["policy_revision"] = Value::String(revision_id.to_owned());
-        }
+        let source = self.source_reference()?;
         governance
             .fields
             .insert("source_lineage".to_owned(), json!([source]));

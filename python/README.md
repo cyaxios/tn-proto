@@ -31,52 +31,45 @@ pip install tn-proto
 
 ## Governed sessions own their context
 
-`tn.Session` is an independent native Rust context. Create several sessions in one
-Python process; each owns its identity, policy, and groups and closes separately.
-The governed workflow is `draft → seal → governance → authorize → open → derive`.
+`tn.Session` is an independent native Rust context. Several sessions can work in
+one Python process, each with its own identity, policy, and groups. The governed
+workflow is `create_obj → receive → mutate / attach / include → release`.
 
 ```python
 from pathlib import Path
 import tn
 
-policy = Path("agents.md").read_text(encoding="utf-8")
-with tn.Session(policy, groups=["observations"]) as source_session:
-    with tn.Session(policy, groups=["reports"]) as output_session:
-        source = source_session.seal(
-            source_session.draft("research.sample")
-            .group("observations", {"counts": [12, 18]})
-        )
-        approved_policy = source_session.policy("research.sample").policy_ref
-        admitted = source_session.governance(source).authorize(
-            "aggregate",
-            lambda contract, operation: (
-                operation == "aggregate"
-                and contract.governed_by == source_session.did
-                and contract.policy_ref == approved_policy
-            ),
-        )
-        opened = source_session.open(admitted, ["observations"])
-        result = output_session.seal(
-            opened.derive("report.generated")
-            .group("reports", {"total": sum(opened.groups["observations"]["counts"])})
-        )
-        assert result.writer == output_session.did
+with tn.Session(Path("agents.md").read_text(encoding="utf-8")) as session:
+    policy = session.policy("research.sample")
+    data = session.create_obj(
+        {"counts": [12, 18]}, policy, object_type="research.sample"
+    )
+    data.data["total"] = sum(data.data["counts"])
+    del data.data["counts"]
+    result = data.release(
+        to="reports", purpose="aggregate",
+        decide=lambda ctx: (
+            ctx.destination == "reports"
+            and all(p.matches_contract(policy) for p in ctx.policies)
+        ),
+    )
+    outbox_bytes = bytes(result)
 ```
 
-The `research.sample` section in `agents.md` supplies the contract. Governed
-sealing inserts the encrypted `tn.agents` group, binds every group's AAD to its
-governing authority and policy reference, and signs the complete object. The
-application's callback admits an operation before business groups are opened.
-Derivation carries the source contract and lineage into a new signed result.
+The working object retains its policies and causal inputs. Release encrypts the
+current data and `tn.agents`, binds every group with governance AAD, signs the
+complete object, and retains the sealed version. The application's callback
+admits the current result; governed adapters can provide that decision internally.
+Transport retries reuse the retained bytes.
 
-Fresh sessions create their material in memory. Use
-`tn.Session.from_config("project/tn.yaml")` to load existing identity, policy, and
-group material. These sessions operate without creating an event stream.
+Fresh sessions own in-memory material. `tn.Session.from_config("service/tn.yaml")`
+loads an existing service identity, policy, and group material. Optional creation
+and release registers are configured per session through environment variables.
 
-See the [governed workflow guide](GOVERNED_WORKFLOW.md) for a complete policy,
-scoped readers, configuration loading, and object lifetimes, or run the
-[two-session example](examples/governed_sessions.py). The classes are also
-available from `tn.governed`, with typing stubs included in the wheel.
+See the [governed workflow guide](GOVERNED_WORKFLOW.md) for receiving sources,
+authority-approved attachment, multiple inputs, snapshots, and service registers.
+Run [the mutable-object example](examples/governed_data.py) for a complete local
+workflow. Native classes and typing stubs are also exported from `tn.governed`.
 
 ## Event streams use the same protocol
 

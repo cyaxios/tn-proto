@@ -12,16 +12,16 @@ use super::{codec, guard, to_py, GovernedError, SessionClosed};
 /// from_config loads an existing object context. Each instance closes separately.
 #[pyclass(frozen, module = "tn.governed", name = "Session")]
 pub(super) struct PySession {
-    context: Mutex<Option<Arc<Objects<'static>>>>,
+    pub(super) context: Arc<Mutex<Option<Arc<Objects<'static>>>>>,
 }
 
 impl PySession {
     fn from_context(context: Objects<'static>) -> Self {
         Self {
-            context: Mutex::new(Some(Arc::new(context))),
+            context: Arc::new(Mutex::new(Some(Arc::new(context)))),
         }
     }
-    fn context(&self) -> PyResult<Arc<Objects<'static>>> {
+    pub(super) fn context(&self) -> PyResult<Arc<Objects<'static>>> {
         self.context
             .lock()
             .map_err(|_| GovernedError::new_err("session lock poisoned"))?
@@ -53,6 +53,54 @@ impl PySession {
         guard(|| {
             py.allow_threads(|| Objects::open(&path))
                 .map(Self::from_context)
+                .map_err(to_py)
+        })
+    }
+    #[pyo3(signature=(fields, policy, *, object_type, group="default"))]
+    fn create_obj(
+        &self,
+        py: Python<'_>,
+        fields: &Bound<'_, pyo3::types::PyDict>,
+        policy: &PyGovernance,
+        object_type: &str,
+        group: &str,
+    ) -> PyResult<super::data::PyData> {
+        super::data::create(self, py, fields, policy, object_type, group)
+    }
+    #[pyo3(signature=(sealed, *, purpose, decide, groups=None))]
+    fn receive(
+        &self,
+        py: Python<'_>,
+        sealed: &Bound<'_, PyAny>,
+        purpose: &str,
+        decide: &Bound<'_, PyAny>,
+        groups: Option<Vec<String>>,
+    ) -> PyResult<super::data::PyData> {
+        super::data::receive(
+            self,
+            py,
+            sealed,
+            purpose,
+            groups.unwrap_or_else(|| vec!["default".to_owned()]),
+            decide,
+        )
+    }
+    fn check_groups(
+        &self,
+        py: Python<'_>,
+        groups: Vec<String>,
+    ) -> PyResult<super::data::PyPublication> {
+        guard(|| {
+            let context = self.context()?;
+            py.allow_threads(|| context.check_groups(groups))
+                .map(|inner| super::data::PyPublication { inner })
+                .map_err(to_py)
+        })
+    }
+    fn require_groups(&self, py: Python<'_>, groups: Vec<String>) -> PyResult<()> {
+        guard(|| {
+            let context = self.context()?;
+            py.allow_threads(|| context.require_groups(groups))
                 .map_err(to_py)
         })
     }

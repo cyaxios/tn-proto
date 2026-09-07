@@ -2,12 +2,13 @@
 //!
 //! TN carries encrypted data and its use contract in one signed envelope.
 //! The Rust core owns policy selection, group encryption, governance AAD,
-//! row hashing, signing, verification, selected opening, and derivation.
+//! row hashing, signing, verification, selected opening, mutation, and release.
 //!
 //! Start with [`governed`]: supply a [`DeviceKey`], group cipher material,
 //! and a contract; receive a verified object ready for transport or retention.
 //! The reader exposes governance before application admission and selected
-//! business plaintext. Derivation binds a fresh object to its signed source.
+//! business plaintext. Mutable objects retain their policies; each release
+//! binds a signed version to its causal inputs.
 //!
 //! With `fs`, [`runtime::Objects`] loads configured object material directly.
 //! [`Runtime`] supports event streams, administration, and packages; its

@@ -1,6 +1,7 @@
 //! PyO3 governed objects and independent, instance-owned sessions.
 
 mod codec;
+mod data;
 mod objects;
 mod reader;
 mod session;
@@ -52,6 +53,7 @@ pub fn populate(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<reader::PyGovernanceView>()?;
     m.add_class::<reader::PyAdmitted>()?;
     m.add_class::<reader::PyOpened>()?;
+    data::populate(m)?;
     for (name, exception) in [
         ("GovernedError", py.get_type::<GovernedError>()),
         ("NotEntitled", py.get_type::<NotEntitled>()),

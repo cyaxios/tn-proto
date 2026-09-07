@@ -1,17 +1,22 @@
 //! Governed data objects: signed envelopes carrying encrypted data and rules.
 //!
-//! [`Governance`] selects a contract, [`GovernedDraft`] assigns values to
-//! groups, and [`GovernedWriter`] seals both into a [`GovernedObject`]. The
+//! [`Governance`] selects a contract and [`DataObject`] retains it through
+//! mutation. [`GovernedWriter`] signs each release as a [`GovernedObject`]. The
 //! object retains its exact wire representation for transport and exhaust.
 //! These operations use no logger, receipt sink, ceremony, or filesystem.
 
+mod admission;
+mod data;
 mod object;
 mod policy;
 mod policy_dag;
 mod reader;
 mod revision;
+mod source;
 mod writer;
 
+pub use admission::{AdmissionContext, AttachmentContext, ReleaseContext};
+pub use data::DataObject;
 pub use object::GovernedObject;
 pub use policy::Governance;
 pub use policy_dag::PolicyDag;
@@ -20,7 +25,8 @@ pub use revision::{
     PolicyParent, PolicyRelation, PolicyRevision, PolicyRevisionDraft, POLICY_REVISION_GROUP,
     POLICY_REVISION_TYPE,
 };
-pub use writer::{GovernedDraft, GovernedWriter};
+pub use source::SourceReference;
+pub use writer::{GovernedDraft, GovernedWriter, PublicationReport};
 
 /// Reserved encrypted group carrying the use contract.
 pub const GOVERNANCE_GROUP: &str = "tn.agents";

@@ -9,7 +9,8 @@ use crate::governed::{Governance, GovernedDraft, GovernedObject, GovernedReader,
 use crate::{DeviceKey, Error, Result};
 
 use super::material::Material;
-use super::{GroupState, Runtime};
+use super::{GroupState, ObjectRegisters, Runtime};
+use crate::governed::{AdmissionContext, AttachmentContext, DataObject, ReleaseContext};
 
 enum Identity<'a> {
     Owned(Box<DeviceKey>),
@@ -28,6 +29,7 @@ pub struct Objects<'a> {
     groups: BTreeMap<String, Arc<RwLock<GroupState>>>,
     private_groups: BTreeSet<String>,
     policies: Option<PolicyDocument>,
+    registers: ObjectRegisters,
 }
 
 impl Objects<'static> {
@@ -72,6 +74,7 @@ impl Objects<'static> {
             groups,
             private_groups: names,
             policies: Some(policies),
+            registers: ObjectRegisters::from_env()?,
         })
     }
 
@@ -105,11 +108,109 @@ impl Objects<'static> {
             groups,
             private_groups,
             policies,
+            registers: ObjectRegisters::from_env()?,
         })
     }
 }
 
 impl Objects<'_> {
+    /// Originate governed data and its initial signed snapshot from a required policy.
+    pub fn create_obj(
+        &self,
+        object_type: &str,
+        policy: Governance,
+        group: &str,
+        fields: impl serde::Serialize,
+    ) -> Result<DataObject> {
+        let mut data = self
+            .writer()?
+            .create_obj(object_type, policy, group, fields)?;
+        self.record(&mut data, "create", "create", "origin");
+        Ok(data)
+    }
+    /// Verify, admit and open a source directly into a mutable governed object.
+    pub fn receive<I, S, F>(
+        &self,
+        wire: &str,
+        operation: &str,
+        groups: I,
+        decide: F,
+    ) -> Result<DataObject>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        F: FnOnce(&AdmissionContext<'_>) -> Result<bool>,
+    {
+        self.reader()?.receive(wire, operation, groups, decide)
+    }
+    /// Add an authority-approved policy while retaining the existing policy set.
+    pub fn attach<F>(&self, data: &mut DataObject, policy: Governance, decide: F) -> Result<()>
+    where
+        F: FnOnce(&AttachmentContext<'_>) -> Result<bool>,
+    {
+        data.attach(self.did(), policy, decide)
+    }
+    /// Check the current output for its purpose/destination, then seal a signed version.
+    pub fn release<F>(
+        &self,
+        data: &mut DataObject,
+        object_type: &str,
+        purpose: &str,
+        destination: &str,
+        decide: F,
+    ) -> Result<GovernedObject>
+    where
+        F: FnOnce(&ReleaseContext<'_>) -> Result<bool>,
+    {
+        let sealed = self
+            .writer()?
+            .release(data, object_type, purpose, destination, decide)?;
+        self.record(data, "release", purpose, destination);
+        Ok(sealed)
+    }
+    /// Choose this service's optional creation and release registers explicitly.
+    pub fn with_registers(mut self, registers: ObjectRegisters) -> Self {
+        self.registers = registers;
+        self
+    }
+    fn record(&self, data: &mut DataObject, action: &str, purpose: &str, destination: &str) {
+        let result = data.policies().and_then(|policies| {
+            let refs = policies
+                .iter()
+                .map(|policy| policy.policy_ref().to_owned())
+                .collect::<Vec<_>>();
+            match data.snapshot() {
+                Some(object) => self.registers.record(
+                    self.device(),
+                    action,
+                    object,
+                    purpose,
+                    destination,
+                    &refs,
+                ),
+                None => Err(Error::InvalidConfig(
+                    "registration requires a sealed snapshot".into(),
+                )),
+            }
+        });
+        data.set_register_error(result.err().map(|error| error.to_string()));
+    }
+    /// Check configured publication material for every declared output group.
+    pub fn check_groups<I, S>(&self, groups: I) -> Result<crate::governed::PublicationReport>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.writer()?.check_groups(groups)
+    }
+    /// Require declared groups to have known publication capability before work begins.
+    pub fn require_groups<I, S>(&self, groups: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.writer()?.require_groups(groups)
+    }
     fn device(&self) -> &DeviceKey {
         match &self.identity {
             Identity::Owned(key) => key,
@@ -143,6 +244,10 @@ impl Objects<'_> {
     /// Encrypt the explicitly assigned groups, bind their contract, and sign.
     /// Configured event profiles and receipt settings do not change this flow.
     pub fn seal(&self, draft: GovernedDraft) -> Result<GovernedObject> {
+        self.writer()?.seal(draft)
+    }
+
+    fn writer(&self) -> Result<GovernedWriter<'_>> {
         let mut writer = GovernedWriter::new(self.device());
         for name in &self.private_groups {
             if let Some(group) = self.groups.get(name) {
@@ -156,7 +261,7 @@ impl Objects<'_> {
                 )?;
             }
         }
-        writer.seal(draft)
+        Ok(writer)
     }
 
     /// Build a reader from current and retained material in configured groups. It opens only
@@ -206,6 +311,7 @@ impl Runtime {
                 .map(|(name, _)| name.clone())
                 .collect(),
             policies: self.agent_policies.clone(),
+            registers: ObjectRegisters::from_env().unwrap_or_default(),
         }
     }
 }

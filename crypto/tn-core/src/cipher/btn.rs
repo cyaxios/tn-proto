@@ -110,6 +110,10 @@ impl BtnPublisherCipher {
 }
 
 impl super::GroupCipher for BtnPublisherCipher {
+    fn publication_capability(&self) -> super::PublicationCapability {
+        super::PublicationCapability::Supported
+    }
+
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let ct: Ciphertext = self.state.encrypt(plaintext)?;
         Ok(ct.to_bytes())
@@ -202,6 +206,10 @@ impl BtnReaderCipher {
 }
 
 impl super::GroupCipher for BtnReaderCipher {
+    fn publication_capability(&self) -> super::PublicationCapability {
+        super::PublicationCapability::Unsupported
+    }
+
     fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>> {
         Err(Error::NotAPublisher {
             group: "btn".into(),

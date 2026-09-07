@@ -26,7 +26,7 @@ Refuse release.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = DeviceKey::generate();
     let policy = Governance::from_markdown(device.did(), POLICY, "agents.md", "research.sample")?;
-    let expected_policy = policy.policy_ref().to_owned();
+
     let rules = example_group()?;
     let observations = example_group()?;
     let identities = example_group()?;
@@ -37,29 +37,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Policy is an input to construction. The writer fills and encrypts
     // tn.agents, supplies matching AAD, hashes every group, and signs.
+    writer.require_groups(["observations", "identities"])?;
     let source = writer.seal(
-        GovernedDraft::new("research.sample", policy)?
+        GovernedDraft::new("research.sample", policy.clone())?
             .group("observations", json!({"counts": [12, 18]}))?
             .group("identities", json!({"participants": ["Alice", "Bob"]}))?,
     )?;
 
     // Send or retain these exact bytes. Parsing verifies the signature and
     // group binding before the receiving application opens the contract.
-    let received = GovernedObject::parse(source.wire())?;
     let reader = GovernedReader::new()
         .with_group("tn.agents", rules)?
         .with_group("observations", observations)?;
-    let view = reader.governance(&received)?;
-    let accepted_writer = view.object().writer() == device.did();
-    let admitted = view.authorize("aggregate", |contract, operation| {
-        Ok(accepted_writer
-            && contract.governed_by() == device.did()
-            && contract.policy_ref() == expected_policy
-            && contract.get("use_for") == Some(&json!("Aggregate research."))
-            && operation == "aggregate")
+    let mut data = reader.receive(source.wire(), "aggregate", ["observations"], |ctx| {
+        Ok(ctx.object().writer() == device.did()
+            && ctx.object().object_type() == "research.sample"
+            && ctx.governance().matches_contract(&policy)
+            && ctx.policies()?.len() == 1
+            && ctx.operation() == "aggregate")
     })?;
-    let opened = reader.open(&admitted, ["observations"])?;
-    let counts = opened.groups()["observations"]["counts"]
+    let counts = data.group("observations").ok_or("observations missing")?["counts"]
         .as_array()
         .ok_or("counts must be an array")?;
     let total = counts.iter().try_fold(0u64, |sum, count| {
@@ -67,20 +64,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("aggregate overflow")
     })?;
 
-    // The application computes a permitted result. Sealing a derivative
-    // carries the contract and signs the source reference with the output.
-    let result = writer.seal(
-        opened
-            .derive("research.aggregate")?
-            .group("observations", json!({"total": total}))?,
+    // Mutate the working data. The object keeps its contract, source, and
+    // unopened groups; release asks the application to admit this output.
+    data.set_group("observations", json!({"total": total}))?;
+    let result = writer.release(
+        &mut data,
+        "research.aggregate",
+        "aggregate",
+        "reports",
+        |ctx| {
+            Ok(ctx.purpose() == "aggregate"
+                && ctx.destination() == "reports"
+                && ctx
+                    .data()
+                    .policies()?
+                    .iter()
+                    .all(|p| p.matches_contract(&policy)))
+        },
     )?;
-    assert_eq!(opened.hidden_groups(), ["identities"]);
-    assert_eq!(opened.object().wire(), source.wire());
+    assert_eq!(data.hidden_groups(), ["identities"]);
+    assert_eq!(data.history()[0].wire(), source.wire());
     assert_ne!(source.id(), result.id());
     GovernedObject::parse(result.wire())?;
     println!("Verified source: {}", source.id());
     println!("Aggregate: {total}; identities retained as ciphertext");
-    println!("Signed derivative: {}", result.id());
+    println!("Signed release: {}", result.id());
     Ok(())
 }
 

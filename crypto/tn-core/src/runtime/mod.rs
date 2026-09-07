@@ -50,6 +50,7 @@ mod init;
 mod log_rotation;
 mod material;
 mod objects;
+mod object_registers;
 mod read;
 mod seal;
 mod types;
@@ -57,6 +58,7 @@ mod util;
 
 pub use admin::{EnsureGroupResult, GrantReaderResult, RotateIdPathResult};
 pub use objects::Objects;
+pub use object_registers::ObjectRegisters;
 pub use seal::{unseal_as_recipient, SealOptions, SealedGroupInfo, UnsealOptions, UnsealOutcome};
 pub use types::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,

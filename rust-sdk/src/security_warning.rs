@@ -13,8 +13,7 @@ pub(crate) fn warn_and_audit_read_weakening(
     // No-verify is the normal default: a plain read stays silent. It is a
     // weakening — worth a stderr warning — only when the active profile
     // expects verification (a signing or chaining profile).
-    if options.verify == tn_core::runtime::VerifyMode::Disabled
-        && tn.profile_expects_verification()
+    if options.verify == tn_core::runtime::VerifyMode::Disabled && tn.profile_expects_verification()
     {
         relaxations.push(UnsafeRelaxation::VerificationDisabled);
     }

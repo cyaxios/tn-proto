@@ -1,16 +1,21 @@
-//! Governed data objects: contract, signing, selected opening, and derivation.
+//! Mutable governed data, retained policies, and signed releases.
 
+#[cfg(feature = "fs")]
 use std::path::Path;
 
 pub use tn_core::governed::{
-    AdmittedObject, Governance, GovernanceView, GovernedDraft, GovernedObject, GovernedReader,
-    GovernedWriter, OpenedObject, PolicyDag, PolicyParent, PolicyRelation, PolicyRevision,
-    PolicyRevisionDraft, GOVERNANCE_GROUP, POLICY_REVISION_GROUP, POLICY_REVISION_TYPE,
+    AdmissionContext, AdmittedObject, AttachmentContext, DataObject, Governance, GovernanceView,
+    GovernedDraft, GovernedObject, GovernedReader, GovernedWriter, OpenedObject, PolicyDag,
+    PolicyParent, PolicyRelation, PolicyRevision, PolicyRevisionDraft, PublicationReport,
+    ReleaseContext, SourceReference, GOVERNANCE_GROUP, POLICY_REVISION_GROUP, POLICY_REVISION_TYPE,
 };
-pub use tn_core::runtime::Objects;
+#[cfg(feature = "fs")]
+pub use tn_core::runtime::{ObjectRegisters, Objects};
 
+#[cfg(feature = "fs")]
 use crate::{Result, Tn};
 
+#[cfg(feature = "fs")]
 impl Tn {
     /// Open the configured governed-object interface without event handlers,
     /// log files, lifecycle emissions, or chain initialization.

@@ -33,7 +33,9 @@ impl Governance {
     }
 
     /// Use a selected policy template, including its normalized-document hash.
+    /// Rejects public fields changed since parsing or validated reconstruction.
     pub fn from_template(governed_by: &str, template: &PolicyTemplate) -> Result<Self> {
+        template.validate_binding()?;
         let fields = json!({
             "instruction": template.instruction,
             "use_for": template.use_for,
@@ -82,6 +84,18 @@ impl Governance {
         self.fields.get("policy_revision").and_then(Value::as_str)
     }
 
+    /// Compare authority, policy reference, selected revision, and all five
+    /// effective rules. Carried extensions such as source lineage are ignored.
+    /// Applications evaluate source context and any attached policies separately.
+    pub fn matches_contract(&self, expected: &Governance) -> bool {
+        self.governed_by == expected.governed_by
+            && self.policy_ref() == expected.policy_ref()
+            && self.revision_id() == expected.revision_id()
+            && REQUIRED_FIELDS
+                .iter()
+                .all(|name| self.fields.get(*name) == expected.fields.get(*name))
+    }
+
     /// Contract fields as carried in the encrypted governance group.
     pub fn fields(&self) -> &Map<String, Value> {
         &self.fields
@@ -122,4 +136,84 @@ pub(super) fn validate_marker(governed_by: &str, policy: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contract() -> Governance {
+        Governance::from_markdown(
+            crate::DeviceKey::generate().did(),
+            "## sample\n### instruction\nCompute the aggregate.\n### use_for\nResearch.\n### do_not_use_for\nDisclosure.\n### consequences\nReview.\n### on_violation_or_error\nRefuse.\n",
+            "agents.md",
+            "sample",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn contract_match_checks_each_effective_rule_even_with_the_same_reference() {
+        let expected = contract();
+        for name in REQUIRED_FIELDS {
+            let mut carried = expected.fields().clone();
+            carried.insert(name.into(), json!("A different rule."));
+            let received = Governance::from_body(expected.governed_by(), carried).unwrap();
+            assert_eq!(received.policy_ref(), expected.policy_ref());
+            assert!(!received.matches_contract(&expected), "changed {name}");
+            assert!(!expected.matches_contract(&received), "changed {name}");
+        }
+    }
+
+    #[test]
+    fn contract_match_requires_the_same_authority_and_reference() {
+        let expected = contract();
+        let other_authority = Governance::from_body(
+            crate::DeviceKey::generate().did(),
+            expected.fields().clone(),
+        )
+        .unwrap();
+        assert!(!other_authority.matches_contract(&expected));
+
+        let mut fields = expected.fields().clone();
+        fields.insert(
+            "policy".into(),
+            json!(expected.policy_ref().replace("agents.md", "different.md")),
+        );
+        let other_reference = Governance::from_body(expected.governed_by(), fields).unwrap();
+        assert!(!other_reference.matches_contract(&expected));
+    }
+
+    #[test]
+    fn contract_match_distinguishes_missing_equal_and_different_revisions() {
+        let unversioned = contract();
+        let revised = |digit: &str| {
+            let mut fields = unversioned.fields().clone();
+            fields.insert(
+                "policy_revision".into(),
+                json!(format!("sha256:{}", digit.repeat(64))),
+            );
+            Governance::from_body(unversioned.governed_by(), fields).unwrap()
+        };
+        let first = revised("1");
+        assert!(!first.matches_contract(&unversioned));
+        assert!(!unversioned.matches_contract(&first));
+        assert!(first.matches_contract(&revised("1")));
+        assert!(!first.matches_contract(&revised("2")));
+    }
+
+    #[test]
+    fn contract_match_ignores_carried_lineage_extensions() {
+        let expected = contract();
+        let mut fields = expected.fields().clone();
+        fields.insert(
+            "derived_from".into(),
+            json!(format!("sha256:{}", "3".repeat(64))),
+        );
+        fields.insert("operation".into(), json!("approved aggregate"));
+        let received = Governance::from_body(expected.governed_by(), fields).unwrap();
+        assert_ne!(received, expected);
+        assert!(received.matches_contract(&expected));
+        assert!(expected.matches_contract(&received));
+    }
 }

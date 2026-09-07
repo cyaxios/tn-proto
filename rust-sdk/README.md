@@ -5,8 +5,8 @@ Rust interface for signed data objects carrying encrypted use contracts.
 `tn-proto` is the Rust-facing wrapper around the shared `tn-core` runtime used by
 the Python and TypeScript SDKs. The governed flow creates an object from policy
 and explicitly assigned data groups, seals and signs it, opens governance for
-application review, and releases selected plaintext. Derivation carries the
-contract and source references into a new signed object.
+application review, and opens selected plaintext. Mutable data retains its
+contracts and causal inputs; release signs each resulting version.
 
 Start with the [governed-object guide](GOVERNED_OBJECTS.md) and the runnable
 [example](examples/governed_objects.rs). Group material is supplied through the
@@ -17,10 +17,11 @@ shared cipher interface or loaded from an existing configuration.
 
 ## Features
 
-- Governed objects: `Governance`, `GovernedDraft`, `GovernedObject`
-- Configured creation: `Tn::open_objects`, `tn.objects`, `draft`, `seal`
-- Governed use: `governance`, application `authorize`, selected `open`
-- Forwarding and derivation: exact `wire`, continuing `derive`, explicit `derive_under`
+- Governed objects: `Governance`, mutable `DataObject`, signed `GovernedObject`
+- Configured creation: `Tn::open_objects`, `tn.objects`, `create_obj`
+- Governed use: `receive`, full admission context, selected data mutation
+- Governed release: `attach`, `include`, `release`, exact `wire` and retained snapshots
+- Service startup: publisher `check_groups` / `require_groups`; optional local registers
 - Project lifecycle: `Tn::init_project`, `Tn::init`, `Tn::ephemeral`, `Tn::close`
 - Event writing: `log`, `debug`, `info`, `warning`, `error`
 - Event reading: stable `Entry` values with optional verification
@@ -56,26 +57,20 @@ The crate name is `tn-proto`; the Rust module path is `tn_proto`.
 
 ```rust
 use serde_json::json;
-use tn_proto::Tn;
+use tn_proto::{DataObject, Governance, Objects};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let objects = Tn::open_objects("tn.yaml")?;
-    let source = objects.seal(
-        objects.draft("research.sample")?
-            .group("observations", json!({"counts": [12, 18]}))?
-    )?;
-    // Transport or retain the complete signed object.
-    println!("{}", source.wire());
-    Ok(())
+fn get_data(objects: &Objects<'_>, policy: Governance) -> tn_core::Result<DataObject> {
+    objects.create_obj(
+        "research.sample", policy, "observations", json!({"counts": [12, 18]})
+    )
 }
 ```
 
-The configuration supplies the signing identity and group material. Its policy
-document supplies the `research.sample` contract. Sealing automatically fills
-`tn.agents`, binds every group with governance AAD, and signs the envelope.
-`open_objects` initializes only the object context. The guide shows verification,
-application admission, selected opening, and derivation; the example runs
-without a configuration file:
+The origin supplies the policy selected for its context and purpose. The object
+context supplies identity and group material, fills `tn.agents`, binds every
+group with governance AAD, and retains the first signed snapshot.
+`Tn::open_objects("tn.yaml")` loads an existing context. The guide shows receiving,
+mutating, attaching policy, and releasing. The example runs directly with ciphers:
 
 ```sh
 cargo run -p tn-proto --example governed_objects

@@ -5,7 +5,11 @@ instance owns its context; calls never select a module-global runtime.
 """
 
 from tn._native.governed import (
+    AdmissionContext,
     AdmittedObject,
+    AttachmentContext,
+    DataObject,
+    DataState,
     Governance,
     GovernanceView,
     GovernedDraft,
@@ -15,14 +19,21 @@ from tn._native.governed import (
     NotAPublisher,
     NotEntitled,
     OpenedObject,
+    PublicationReport,
+    ReleaseContext,
     Session,
     SessionClosed,
+    SourceReference,
     UseDenied,
     VerificationError,
 )
 
 __all__ = [
+    "AdmissionContext",
     "AdmittedObject",
+    "AttachmentContext",
+    "DataObject",
+    "DataState",
     "Governance",
     "GovernanceView",
     "GovernedDraft",
@@ -32,8 +43,11 @@ __all__ = [
     "NotAPublisher",
     "NotEntitled",
     "OpenedObject",
+    "PublicationReport",
+    "ReleaseContext",
     "Session",
     "SessionClosed",
+    "SourceReference",
     "UseDenied",
     "VerificationError",
 ]

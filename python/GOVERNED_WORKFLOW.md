@@ -1,24 +1,19 @@
-# Python sessions carry governed data through computation
+# Python carries governed data through mutation and release
 
-TN-Proto moves data and a use-contract together. Group keys control access,
-signatures authenticate the object, and the application decides whether to carry
-out a requested operation. The Python SDK exposes this workflow through native
-Rust objects in `tn.governed`, with `tn.Session` as its entry point.
+TN-Proto moves data and a use contract together. Keys control which groups open.
+Signatures authenticate the object. Applications check permitted use at admission
+and release. The Python SDK uses the Rust core for that whole object lifecycle.
 
-## Each session owns its identity and groups
+## A service originates data with its policy
 
 ```python
 import tn
 
-policy = """---
-version: 1
-schema: tn-agents-policy@v1
----
-## research.sample
+policy_text = """## finance.account
 ### instruction
-Create an aggregate report.
+Prepare aggregate analysis.
 ### use_for
-Aggregate research.
+Analysis.
 ### do_not_use_for
 Individual disclosure.
 ### consequences
@@ -27,187 +22,199 @@ Contract review.
 Refuse release.
 """
 
-source_session = tn.Session(policy, groups=["observations", "identities"])
-output_session = tn.Session(policy, groups=["reports"])
-assert source_session.did != output_session.did
-```
-
-Each constructor creates an independent Ed25519 signing identity, parsed policy
-tree, and BTN group material in memory. `groups` names the business groups;
-`tn.agents` is supplied automatically. Omitting `groups` supplies a business group
-named `default`. The constructor creates no files and starts no event runtime.
-
-Both sessions can remain active, work in parallel, and close independently.
-Their methods always use their own context. The existing lowercase `tn.session()`
-continues to manage the module's event runtime; the uppercase `tn.Session` is the
-instance API for governed objects.
-
-## Sealing binds the contract to every group
-
-```python
-source = source_session.seal(
-    source_session.draft("research.sample")
-    .group("observations", {"counts": [12, 18]})
-    .group("identities", {"names": ["Alice", "Bob"]})
+session = tn.Session(policy_text)
+policy = session.policy("finance.account")
+account = session.create_obj(
+    {"rows": [{"amount": 12}, {"amount": 18}]},
+    policy,
+    object_type="finance.account",
 )
-wire = source.wire
+wire = bytes(account.snapshot)
 ```
 
-`draft()` selects the named policy section. It fills the typed contract from
-`instruction`, `use_for`, `do_not_use_for`, `consequences`, and
-`on_violation_or_error`, together with its parsed-content policy reference.
-`seal()` inserts that contract into the reserved encrypted `tn.agents` group.
-It supplies the same `governed_by` and `policy` markers in every group's AAD,
-encrypts each assigned group, and signs the complete object with the session's
-identity. This governed sealing path always supplies governance and a signature.
+`create_obj` requires an explicit `Governance` contract and retains the initial
+signed snapshot. At a service origin, a Unity adapter supplies the applicable
+contract for the service context and purpose. The runnable local example selects
+it from the session's parsed policy tree. `Governance.from_markdown(authority,
+text, policy_id, object_type)` is also available to policy adapters.
 
-Groups are the access unit. `.group("observations", fields)` routes those fields
-into one encryption group. A reader assigned that group's material can open its
-fields. The wire contains group names and field-index names; field values and the
-contract travel encrypted. `governed_by` is the writer-authenticated declaration
-of the governing authority. The object's signature is made by `source.writer`.
+Rust fills the reserved encrypted `tn.agents` group with the contract. It binds
+each group through the governance AAD marker, encrypts the assigned fields,
+hashes all groups, and signs with the session's identity. `governed_by` is the
+writer-authenticated authority declaration. Endpoint admission checks the
+writer's accepted relationship to that authority.
 
-`source.id` is its signed row hash. `source.wire` and `bytes(source)` preserve the
-transport representation. Forward those bytes to carry the existing object.
-
-## Applications inspect governance before opening business data
+## A receiver admits the complete source and contract
 
 ```python
-# The application obtains these expectations from its accepted source/contract.
-trusted_writer = source_session.did
-approved_policy = source_session.policy("research.sample").policy_ref
+accepted_writer = session.did
+expected_policy = policy
 
-received = tn.GovernedObject.parse(wire)
-if received.writer != trusted_writer:
-    raise ValueError("source writer is outside this application's accepted writers")
-
-reader = source_session.reader(groups=["tn.agents", "observations"])
-view = reader.governance(received)
-admitted = view.authorize(
-    "aggregate",
-    lambda contract, operation: (
-        operation == "aggregate"
-        and contract.governed_by == trusted_writer
-        and contract.policy_ref == approved_policy
-    ),
-)
-opened = reader.open(admitted, ["observations"])
-counts = opened.groups["observations"]["counts"]
-assert opened.hidden_groups == ["identities"]
-```
-
-`parse()` verifies the envelope, row hash, and writer signature. The application
-checks whether that writer belongs to its accepted set. `governance()` opens
-`tn.agents` and checks its binding to the authenticated markers. The decision
-callback then evaluates a named operation against the contract. It must return a
-Python `bool`: `True` creates an `AdmittedObject`; `False` raises `UseDenied`.
-An exception from the callback propagates to the caller.
-
-`open()` requires that admitted object and an explicit group selection. It
-returns selected plaintext together with the admitted governance and the complete
-source envelope. The group reader determines cryptographic access. The callback
-is the application's permitted-use decision; the application carries that
-decision through its computation and release steps.
-
-The example approves a known contract reference for one operation. A service can
-make its callback consult its own contract registry or policy engine. The policy
-reference hashes parsed policy content, so applications compare the authenticated
-contract content rather than the Markdown file's byte layout.
-
-For a session using all its own reader material, the equivalent convenience calls
-are `session.governance(source)` and `session.open(admitted, ["observations"])`.
-An explicit `session.reader(groups=[...])` lets the application pass a smaller
-set of group capabilities to the code performing the operation.
-
-## A derived result is a new signed object
-
-```python
-result = output_session.seal(
-    opened.derive("report.generated")
-    .group("reports", {"total": sum(counts)})
-)
-assert result.writer == output_session.did
-contract = output_session.governance(result).governance
-assert contract.governed_by == trusted_writer
-assert contract.policy_ref == approved_policy
-assert contract.fields["source_lineage"][0]["object_id"] == source.id
-```
-
-`derive()` retains the input contract and adds an immediate source record with the
-input object ID, writer, type, governing authority, policy reference, opened
-groups, and admitted operation. The output session supplies its own encryption
-groups and signs the new result. The original object remains available unchanged
-as `opened.object`.
-
-When the application chooses an approved output contract, use
-`opened.derive_under("report.generated", output_contract)`. The source record
-still identifies the input contract. Obtain a contract from
-`session.policy(object_type)` or
-`tn.Governance.from_markdown(authority, markdown, policy_id, object_type)`.
-An explicit contract can also be supplied to `session.draft(..., governance=...)`.
-
-## Existing configuration supplies persistent identities and access
-
-```python
-from pathlib import Path
-
-with tn.Session.from_config(Path("project/tn.yaml")) as session:
-    source = session.seal(
-        session.draft("research.sample").group("default", {"count": 30})
+def admit(context):
+    return (
+        context.writer == accepted_writer
+        and context.object_type == "finance.account"
+        and context.purpose == "analysis"
+        and len(context.policies) == 1
+        and context.governance.matches_contract(expected_policy)
     )
+
+account = session.receive(wire, purpose="analysis", decide=admit)
 ```
 
-`from_config()` uses the Rust object loader to read the existing configuration,
-device identity, group material, and `agents.md` tree. It creates its own context
-without opening or emitting an event log. The configuration must provide
-`tn.agents` and the business groups used by the workflow. Configured cipher
-selection stays with the existing Rust loader. Reopening the configuration loads
-its current material; retained reader material supports historical exhaust.
+`receive` accepts a sealed object, UTF-8 wire text, or bytes. It verifies the
+signature and row hash, opens governance, presents `AdmissionContext`, and opens
+selected business groups after approval. `groups=["observations"]` selects a
+named group; the default is `["default"]`. Production receiving sessions load
+their own assigned material with `Session.from_config(...)`.
 
-Fresh `Session(policy)` contexts are in memory. Use `from_config()` when identity
-and access material should survive the process. Supplying an explicit reader to
-another component is an application choice, separate from constructing a session.
+The context includes the verified object, writer, type, requested operation,
+primary governance, all attached contracts, and typed source references. A
+contract match compares authority, content reference, optional revision, and all
+five standard rule fields. Applications additionally evaluate machine-readable
+extensions and every attached policy. Normalized policy content determines the
+policy hash; Markdown formatting is not part of that identity.
 
-## Closing releases one session's ownership
+## Ordinary data edits retain governance
 
-`with tn.Session(...) as session:` closes that session on exit. `close()` is
-idempotent, and `closed` reports its state. Subsequent operations on that session
-raise `SessionClosed`; other sessions continue operating.
+```python
+account.data["total"] = sum(row["amount"] for row in account.data["rows"])
+del account.data["rows"]
+```
 
-Native operations capture their context before releasing the Python GIL for
-cryptographic work. An operation already started can complete while another
-thread closes its session. Explicit readers own their selected material and
-remain usable after the creating session closes. Sealed, admitted, and opened
-objects likewise retain their own state.
+`account.data` is a live dictionary view of its primary group. Nested dictionaries
+and lists also write through to Rust. `account.groups` exposes all opened groups,
+for example `account.groups["report"] = {"total": 30}`. The object preserves its
+policy set, causal inputs, unopened ciphertext, and earlier signed snapshots.
+`tn.agents` cannot be assigned or removed through these views.
 
-Draft methods return new drafts. Envelope, policy, and plaintext dictionaries
-returned to Python are copies. Editing them does not modify the native object.
-JSON fields accept strings, booleans, `None`, finite floats, integers from
-`-2**63` through `2**64 - 1`, lists, tuples, and dictionaries with string keys.
-Integers and finite floats round-trip exactly; tuples return as JSON lists.
-Unsupported values and excessive nesting are rejected before sealing.
+A saved view follows its group/key/index path. Use `.copy()` to capture the
+values at that moment; `pop()` and `popitem()` return detached removed values.
 
-## The native types identify each workflow step
+`account.state` is a detached inspection snapshot. Its dictionaries can be read
+or edited locally without changing the working object. The same owned state is
+supplied to decision callbacks so they evaluate a consistent version.
 
-| Type | State it carries |
-|---|---|
-| `Session` | Independent signing identity, policy tree, and group context |
-| `Governance` | Governing authority, policy reference, and contract fields |
-| `GovernedDraft` | Contract and assigned plaintext groups ready to seal |
-| `GovernedObject` | Verified signed envelope and exact wire representation |
-| `GovernedReader` | Selected group-reading material |
-| `GovernanceView` | Authenticated contract and source awaiting a use decision |
-| `AdmittedObject` | Source and contract admitted for a named operation |
-| `OpenedObject` | Selected plaintext, governance, and complete source |
+## Authority-approved attachment only adds policy
 
-All types are native PyO3 classes exported through `tn.governed`. `Session`,
-`Governance`, `GovernedDraft`, and `GovernedObject` also have top-level `tn` names.
-Typing stubs are included with the package.
+```python
+# additional_policy comes from the application's accepted policy authority.
+# authority_check examines context.authority, context.policy and context.data.
+# account.attach(additional_policy, decide=authority_check)
+```
 
-The workflow exceptions live in `tn.governed`: `UseDenied`, `NotEntitled`,
-`NotAPublisher`, `VerificationError`, and `SessionClosed` derive from
-`GovernedError`. Invalid inputs raise the corresponding Python `ValueError`,
-`TypeError`, or `OverflowError`; configuration I/O errors raise `OSError`.
+`attach` asks the authority callback whether this session may add the proposed
+contract. Approval retains every existing contract and adds the new one. Each
+contract keeps its own authority and optional revision. Repeated identical
+contracts are deduplicated; contracts with different machine rules remain
+separate. The next release signs the whole set with the current data.
 
-Run [the complete two-session example](examples/governed_sessions.py) to inspect
-the transition from signed source through selected access to signed aggregate.
+For computations with multiple admitted inputs, call `account.include(other)`.
+It retains the other input's contracts and causal references. The application
+assigns computed values normally. Source references identify data inputs;
+policy-revision DAG parents identify policy history.
+
+## Release signs the current result for a destination and purpose
+
+```python
+def admit_release(context):
+    return (
+        context.destination == "llm"
+        and context.purpose == "analysis"
+        and context.data.groups["default"]["total"] == 30
+        and all(p.matches_contract(expected_policy) for p in context.policies)
+    )
+
+result = account.release(
+    to="llm", purpose="analysis", decide=admit_release,
+    object_type="finance.summary",
+)
+outbox_bytes = bytes(result)
+assert account.snapshot.wire == result.wire
+```
+
+`ReleaseContext` contains current data, all policies, causal sources, writer,
+output type, purpose, and destination. Approval seals the current state and
+retains the signed version. Its governance records the immediate source
+references and release context. Refusal or a sealing error preserves the prior
+snapshot. The caller never copies policy or calls `derive()`.
+
+Unopened groups retain their exact ciphertext under the continuing primary AAD
+marker. Explicitly deleting a business group removes it from the next output;
+its earlier signed versions remain in `history`. Each new release becomes the
+next working version's immediate source.
+
+Transport retries use the stored `outbox_bytes`. Another `release()` intentionally
+creates another signed version. Application transactions store business effects,
+source identity, and response/outbox bytes together. The
+[enterprise recipes](../rust-sdk/ENTERPRISE_EXPERIENCE.md) describe this for
+request/reply, saga, outbox, and projection consumers.
+
+[governed_outbox.py](examples/governed_outbox.py) implements a small SQLite
+service with this API. It commits the inbox, credit, signed receipt, and outbox
+together, reuses the exact receipt after reopening the database, and applies a
+separate uniqueness rule to the business sale ID.
+
+## Adapters own admission and release decisions
+
+A governed Polars helper holds the `DataObject` while dataframe operations update
+selected data. Its `release(to=..., purpose=...)` puts the dataframe result back
+into that object and invokes the application's policy decision. A governed LLM
+wrapper admits the input for its request, opens the selected prompt data, and
+releases the model result with the retained contracts. These adapters encapsulate
+the decision callbacks; application callers work with data and destinations.
+
+The SDK supplies the object lifecycle and callback contexts. Unity resolution,
+OPA decisions, Polars operations, and LLM transport belong to their adapters.
+[governed_data.py](examples/governed_data.py) is an executable example of the
+SDK lifecycle with local application decisions and real TN encryption/signing.
+
+## Sessions own independent contexts
+
+Each `Session(policy_text, groups=[...])` creates independent in-memory identity
+and BTN material. Several sessions can work in one process and close separately.
+`Session.from_config("service/tn.yaml")` loads existing identity, policy, and
+assigned group material. `session.require_groups([...])` checks every intended
+output group and `tn.agents` at startup. `check_groups` provides the full report.
+
+`close()` is idempotent. Closing a session prevents subsequent bound attachment
+or release; other sessions continue. Explicit readers own their selected
+material and remain usable after that session closes. Sealed history and working
+data remain inspectable. An operation already admitted and started may complete
+while another thread closes its session.
+
+Decision callbacks must return a literal Python `bool`. Their original errors
+propagate. Callbacks run without Rust locks and may call other session methods.
+If a callback changes the same working object, the outer decision is refused as
+stale. The changed working data remains available for a new decision. This also
+covers concurrent mutation while a release decision is running.
+
+## Services optionally record creations and releases
+
+Set `TN_OBJECT_CREATION_REGISTER` and `TN_OBJECT_RELEASE_REGISTER` before
+constructing a session. Each captures its own paths; an unset or empty value
+disables that register. Successful operations append signed, hash-chained TN
+metadata rows containing object identity, action, policy references, purpose,
+and destination. Business plaintext stays in the governed object.
+
+`account.register_error` reports an optional register write failure while
+`account.snapshot` retains the completed signed object. Exact signed bytes remain
+available for storage and retry. These service registers accompany the workflow;
+business transaction and outbox state remain under application ownership.
+
+## The envelope primitives remain available
+
+`GovernedDraft`, `seal`, `GovernanceView.authorize`, `GovernedReader.open`, and
+`OpenedObject.derive` remain available for existing adapters. Their dictionaries
+are detached copies. `DataObject.data` and `.groups` are the live mutation views.
+
+JSON values support strings, booleans, `None`, finite floats, integers from
+`-2**63` through `2**64 - 1`, lists, tuples, and string-keyed dictionaries.
+Tuples become JSON lists. Invalid values are rejected before state mutation.
+
+The native classes and typing stubs are exported through `tn.governed`.
+`Session`, `DataObject`, `Governance`, `GovernedDraft`, and `GovernedObject` also
+have top-level `tn` names. Workflow exceptions are `GovernedError` subclasses:
+`UseDenied`, `NotEntitled`, `NotAPublisher`, `VerificationError`, and
+`SessionClosed`. Invalid Python inputs use `ValueError`, `TypeError`, or
+`OverflowError`; configuration I/O errors use `OSError`.

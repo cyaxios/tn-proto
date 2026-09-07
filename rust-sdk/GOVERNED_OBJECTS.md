@@ -5,14 +5,111 @@ opens. A signature authenticates the complete envelope. The application checks
 the contract, performs the permitted operation, and signs its output with the
 continuing policy and a reference to its source.
 
-The Rust interface follows that order:
+The application surface follows the data's lifetime:
 
 ```text
-Governance + explicitly assigned groups
-    → GovernedDraft → seal → GovernedObject
-    → verify → governance → application approval → selected plaintext
-    → compute → derive → seal → new GovernedObject
+create_obj(data, policy) → receive → mutate / attach / include → release
+                       → retain or forward the exact signed snapshot
 ```
+
+`DataObject` owns mutable data and retained contracts. `GovernedObject` owns an
+immutable signed version. Edits preserve earlier versions through `history()`
+and `snapshot()`. Callers never copy policies or invoke `derive()` in this flow.
+
+## Applications mutate data and release signed versions
+
+```rust,no_run
+use serde_json::json;
+use tn_proto::{Governance, Objects};
+
+fn aggregate(objects: &Objects<'_>, incoming: &str, accepted_writer: &str,
+             expected: &Governance) -> tn_core::Result<String> {
+    objects.require_groups(["observations"])?;
+    let mut data = objects.receive(incoming, "aggregate", ["observations"], |ctx| {
+        Ok(ctx.object().writer() == accepted_writer
+            && ctx.object().object_type() == "research.sample"
+            && ctx.policies()?.len() == 1
+            && ctx.governance().matches_contract(expected))
+    })?;
+    // The application computes and assigns the result.
+    data.set_group("observations", json!({"total": 30}))?;
+    let result = objects.release(&mut data, "research.aggregate", "aggregate", "llm", |ctx| {
+        Ok(ctx.destination() == "llm"
+            && ctx.data().policies()?.iter().all(|p| p.matches_contract(expected)))
+    })?;
+    Ok(result.wire().to_owned())
+}
+```
+
+Origination calls `create_obj(object_type, policy, group, fields)` with the
+contract selected by its policy authority. It retains the first signed snapshot.
+`Objects` loads configured material; `GovernedWriter` and `GovernedReader` expose
+the same workflow with supplied ciphers. `tn-proto` with
+`default-features = false` supports that direct workflow without a filesystem
+runtime. The runnable example uses real BTN ciphers.
+
+Admission receives the verified source, operation, primary contract, complete
+policy set, and typed causal references together. `matches_contract` compares
+the authority, content reference, optional signed revision, and all five required
+rule fields. Applications also evaluate machine-readable extensions and all
+attached contracts. Template construction validates its normalized policy
+content before creating the contract.
+
+## Policy attachment preserves existing contracts
+
+`writer.attach(&mut data, policy, decision)` passes the writer identity, current
+object, and proposed policy to an authority decision. Approval adds the policy;
+it cannot replace the primary contract or remove earlier policies. Release
+encrypts the whole set in `tn.agents` and signs it with the data. `governed_by`
+is the writer-authenticated authority declaration. Application admission checks
+whether that writer may act for the authority. Signed `PolicyRevision`
+publications can supply accepted authority-issued rules.
+
+`data.include(&other)` retains the other input's policies and typed causal
+references. Computation remains application code. Distinct machine rules remain
+distinct contracts even when the five standard text fields match. Source
+references describe computation; `PolicyDag` parents describe policy history.
+
+## Release preserves history and selective access
+
+Unopened groups remain as their original ciphertext. The new release signs them
+together with changed groups, the continuing primary governance marker, attached
+policies, and causal references. Applications may remove business groups from a
+new output; earlier signed versions remain intact. Data mutation reserves
+`tn.agents` and cannot set or delete it.
+
+Release asks the application to admit the current state for its purpose and
+destination. Refusal or encryption failure preserves current data and the prior
+snapshot. Success becomes the next immutable snapshot. Retain its exact `wire()`
+alongside business effects when retries must return the same result. Another
+release intentionally creates another signed version.
+
+`check_groups()` reports publishing readiness for every requested group and
+`tn.agents`; `require_groups()` makes this a startup requirement. Both inspect
+loaded capabilities without trial encryption. Retained opaque groups need no
+publishing material until the application replaces their contents.
+
+## Each service can keep creation and release registers
+
+`Objects` captures `TN_OBJECT_CREATION_REGISTER` and
+`TN_OBJECT_RELEASE_REGISTER` at construction. Unset or empty values disable their
+register. `with_registers(ObjectRegisters::new(...))` sets explicit paths. The
+default native SDK enables `fs-locking` for concurrent append safety.
+
+Successful creation and release append ordinary signed, hash-chained TN rows
+with object identity, action, policy references, purpose, and destination.
+Business values stay in the governed object. `register_error()` reports a
+register write failure while preserving the completed signed snapshot. Each
+service owns its registers; business inbox/outbox transactions retain their own
+atomicity contract.
+
+The [enterprise experience](ENTERPRISE_EXPERIENCE.md) maps the consumer complaints
+to these APIs and gives transaction and replay recipes.
+
+## Envelope primitives support adapters and policy publications
+
+The following sections retain the lower-level draft/seal/admit/open interface
+and signed policy publication model for adapter authors.
 
 `governed` is the contract of these types: sealing always signs and binds every
 encrypted group to the carried `tn.agents` policy. Event profiles such as

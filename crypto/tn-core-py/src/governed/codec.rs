@@ -13,7 +13,7 @@ pub(super) fn fields(dict: &Bound<'_, PyDict>) -> PyResult<Map<String, Value>> {
     }
 }
 
-fn to_json(value: &Bound<'_, PyAny>, depth: usize) -> PyResult<Value> {
+pub(super) fn to_json(value: &Bound<'_, PyAny>, depth: usize) -> PyResult<Value> {
     if depth > 64 {
         return Err(PyValueError::new_err(
             "governed JSON nesting exceeds 64 levels",

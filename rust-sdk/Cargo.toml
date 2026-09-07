@@ -15,6 +15,7 @@ include = [
     "README.md",
     "SDK_REFERENCE.md",
     "GOVERNED_OBJECTS.md",
+    "ENTERPRISE_EXPERIENCE.md",
     "src/**/*.rs",
     "examples/**/*.rs",
     "tests/**/*.rs",
@@ -41,8 +42,10 @@ path = "src/bin/tn-proto.rs"
 required-features = ["cli"]
 
 [features]
-default = ["fs"]
+default = ["fs", "fs-locking"]
 fs = ["tn-core/fs", "tn-core/native-jwe"]
+# Native creation/release register concurrency.
+fs-locking = ["fs", "tn-core/fs-locking"]
 # Passthrough for tn-core's hibe cipher. tn-core is pulled in below with
 # default-features = false, so hibe (and the pairing-crypto stack it
 # pulls in) stays off unless a downstream crate opts in explicitly here.
@@ -51,12 +54,12 @@ fs = ["tn-core/fs", "tn-core/native-jwe"]
 # features across a workspace build.
 hibe = ["tn-core/hibe"]
 # Enable native file notification support for the sync watcher.
-watch = ["dep:notify"]
+watch = ["fs", "dep:notify"]
 # Reserved for future async watch support. Empty until an async public API is
 # added with concrete runtime/cancellation/backpressure decisions.
 async = []
 # Enable the blocking HTTP vault project client.
-http = ["dep:reqwest"]
+http = ["fs", "dep:reqwest"]
 # Build the small developer/user CLI. The first CLI commands include hosted
 # vault claim-link onboarding, so this feature also enables HTTP support.
 cli = ["dep:clap", "http"]

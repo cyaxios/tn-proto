@@ -15,6 +15,22 @@ pub mod jwe;
 
 use crate::Result;
 
+/// Whether a group's loaded cipher material supports publication.
+///
+/// This reports the direction supported by the material, without encrypting a
+/// trial payload. It does not guarantee that every subsequent encryption will
+/// succeed (for example, a plaintext may exceed a cipher's size limit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationCapability {
+    /// The cipher has publication material for its configured group.
+    Supported,
+    /// The cipher is reader-only, unavailable in this build, or lacks usable
+    /// publication material for its configured group.
+    Unsupported,
+    /// The implementation does not declare its publication capability.
+    Unknown,
+}
+
 /// The pluggable per-group encryption surface.
 ///
 /// An implementor binds a concrete cipher to a concrete party — a btn
@@ -31,6 +47,15 @@ use crate::Result;
 /// ciphertext produced by a group's publisher opens for any entitled reader of
 /// that group.
 pub trait GroupCipher: Send + Sync {
+    /// Describe publication capability without performing encryption.
+    ///
+    /// Existing external implementations default to `Unknown` and retain their
+    /// existing encryption behavior. Override this for explicit publisher
+    /// preflight; `Supported` means usable publication material is present.
+    fn publication_capability(&self) -> PublicationCapability {
+        PublicationCapability::Unknown
+    }
+
     /// Seal `plaintext` into ciphertext for the envelope's `ciphertext` field.
     ///
     /// The publisher-side direction. Returns the raw cipher output bytes (no

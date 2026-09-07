@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover — importlib.metadata is stdlib on 3.10
 # divergence-retry from other faults: see `is_keystore_diverged()`.
 from tn._native.core import TnRuntimeError as KeystoreConflictError
 from . import governed
-from .governed import Governance, GovernedDraft, GovernedObject, Session
+from .governed import DataObject, Governance, GovernedDraft, GovernedObject, Session
 
 from . import (
     _agents_policy,
@@ -1453,6 +1453,7 @@ def scope_to(*dids: str) -> ScopeBuilder:
 
 __all__ = [  # noqa: RUF022 — intentional category grouping (see inline comments)
     "Session",
+    "DataObject",
     "Governance",
     "GovernedDraft",
     "GovernedObject",

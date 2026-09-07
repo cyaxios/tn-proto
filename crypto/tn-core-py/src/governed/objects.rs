@@ -41,6 +41,32 @@ impl PyGovernance {
     fn get<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
         guard(|| codec::to_python(py, self.inner.get(name).unwrap_or(&Value::Null)))
     }
+    fn matches_contract(&self, expected: &Self) -> bool {
+        self.inner.matches_contract(&expected.inner)
+    }
+    #[getter]
+    fn revision_id(&self) -> Option<&str> {
+        self.inner.revision_id()
+    }
+    #[getter]
+    fn policies(&self) -> PyResult<Vec<Self>> {
+        self.inner
+            .policies()
+            .map(|items| items.into_iter().map(|inner| Self { inner }).collect())
+            .map_err(to_py)
+    }
+    #[getter]
+    fn sources(&self) -> PyResult<Vec<super::data::PySource>> {
+        self.inner
+            .source_references()
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|inner| super::data::PySource { inner })
+                    .collect()
+            })
+            .map_err(to_py)
+    }
 }
 
 /// An immutable draft; adding a business group returns a new draft.

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use hmac::Hmac;
@@ -8,7 +8,7 @@ use sha2::Sha256;
 
 use crate::canonical::canonical_bytes;
 use crate::chain::{compute_row_hash, GroupInput, RowHashInput};
-use crate::cipher::GroupCipher;
+use crate::cipher::{GroupCipher, PublicationCapability};
 use crate::envelope::{build_envelope, EnvelopeInput, GroupPayload};
 use crate::indexing::{build_hmac_template, index_token_with_template};
 use crate::{DeviceKey, Result};
@@ -21,6 +21,7 @@ pub struct GovernedDraft {
     pub(super) object_type: String,
     pub(super) governance: Governance,
     groups: BTreeMap<String, Map<String, Value>>,
+    pub(super) retained: BTreeMap<String, crate::sealed_object::GroupBlock>,
 }
 
 impl GovernedDraft {
@@ -31,6 +32,7 @@ impl GovernedDraft {
             object_type: object_type.to_owned(),
             governance,
             groups: BTreeMap::new(),
+            retained: BTreeMap::new(),
         })
     }
 
@@ -65,6 +67,52 @@ struct GroupSealer {
     index: Hmac<Sha256>,
 }
 
+/// Publication readiness for a set of output groups, including `tn.agents`.
+///
+/// Every list is sorted and deduplicated. Missing groups have no writer
+/// material; unavailable groups explicitly cannot publish; unknown groups use
+/// cipher implementations that do not declare their publication capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationReport {
+    required: Vec<String>,
+    supported: Vec<String>,
+    missing: Vec<String>,
+    unavailable: Vec<String>,
+    unknown: Vec<String>,
+}
+
+impl PublicationReport {
+    /// Requested groups plus the automatically required governance group.
+    pub fn required_groups(&self) -> &[String] {
+        &self.required
+    }
+
+    /// Groups whose loaded cipher material explicitly supports publication.
+    pub fn supported_groups(&self) -> &[String] {
+        &self.supported
+    }
+
+    /// Groups for which this writer has no material.
+    pub fn missing_groups(&self) -> &[String] {
+        &self.missing
+    }
+
+    /// Groups whose loaded cipher cannot publish.
+    pub fn unavailable_groups(&self) -> &[String] {
+        &self.unavailable
+    }
+
+    /// Groups whose cipher does not declare its publication capability.
+    pub fn unknown_groups(&self) -> &[String] {
+        &self.unknown
+    }
+
+    /// Whether all required groups explicitly support publication.
+    pub fn is_ready(&self) -> bool {
+        self.missing.is_empty() && self.unavailable.is_empty() && self.unknown.is_empty()
+    }
+}
+
 /// Seals governed objects using the writer identity and group cipher material.
 ///
 /// No logging configuration or filesystem is required. Each call returns an
@@ -75,12 +123,72 @@ pub struct GovernedWriter<'a> {
 }
 
 impl<'a> GovernedWriter<'a> {
+    /// Identity that signs objects released by this writer.
+    pub fn did(&self) -> &str {
+        self.device.did()
+    }
     /// Use an existing signing identity.
     pub fn new(device: &'a DeviceKey) -> Self {
         Self {
             device,
             groups: BTreeMap::new(),
         }
+    }
+
+    /// Inspect every required output group without encrypting a trial payload.
+    /// `tn.agents` is always included, even when `names` is empty. Malformed or
+    /// reserved names return an error; missing and unusable material is listed
+    /// in the report so callers can fix the complete configuration at startup.
+    pub fn check_groups<I, S>(&self, names: I) -> Result<PublicationReport>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut required = BTreeSet::from([GOVERNANCE_GROUP.to_owned()]);
+        for name in names {
+            let name = name.as_ref();
+            validate_group(name)?;
+            required.insert(name.to_owned());
+        }
+        let mut report = PublicationReport {
+            required: required.into_iter().collect(),
+            supported: Vec::new(),
+            missing: Vec::new(),
+            unavailable: Vec::new(),
+            unknown: Vec::new(),
+        };
+        for name in &report.required {
+            let Some(group) = self.groups.get(name) else {
+                report.missing.push(name.clone());
+                continue;
+            };
+            match group.cipher.publication_capability() {
+                PublicationCapability::Supported => report.supported.push(name.clone()),
+                PublicationCapability::Unsupported => report.unavailable.push(name.clone()),
+                PublicationCapability::Unknown => report.unknown.push(name.clone()),
+            }
+        }
+        Ok(report)
+    }
+
+    /// Require known publication material for every named group and `tn.agents`.
+    ///
+    /// This explicit startup check rejects missing, unavailable, and unknown
+    /// material together. Existing custom ciphers with unknown capability can
+    /// still be attached and used by [`Self::seal`] without this strict check.
+    pub fn require_groups<I, S>(&self, names: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let report = self.check_groups(names)?;
+        if report.is_ready() {
+            return Ok(());
+        }
+        Err(crate::Error::InvalidConfig(format!(
+            "publication preflight failed: missing={:?}; unavailable={:?}; unknown={:?}",
+            report.missing, report.unavailable, report.unknown
+        )))
     }
 
     /// Attach a group's encryption cipher and its separate derived index key.
@@ -149,6 +257,28 @@ impl<'a> GovernedWriter<'a> {
                 serde_json::to_string(&GroupPayload {
                     ciphertext,
                     field_hashes,
+                })?,
+            );
+            markers.insert(name, marker.clone());
+        }
+        // A mutable object carries unopened groups under its unchanged primary
+        // governance marker. Their bytes are included in the new row signature.
+        for (name, block) in draft.retained {
+            if inputs.contains_key(&name) || name == GOVERNANCE_GROUP {
+                return Err(invalid("retained and plaintext groups must be distinct"));
+            }
+            inputs.insert(
+                name.clone(),
+                GroupInput {
+                    ciphertext: block.ciphertext.clone(),
+                    field_hashes: block.field_hashes.clone(),
+                },
+            );
+            payloads.insert(
+                name.clone(),
+                serde_json::to_string(&GroupPayload {
+                    ciphertext: block.ciphertext,
+                    field_hashes: block.field_hashes,
                 })?,
             );
             markers.insert(name, marker.clone());
