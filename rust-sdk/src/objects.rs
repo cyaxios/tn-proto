@@ -4,10 +4,14 @@
 use std::path::Path;
 
 pub use tn_core::governed::{
-    AdmissionContext, AdmittedObject, AttachmentContext, DataObject, Governance, GovernanceView,
-    GovernedDraft, GovernedObject, GovernedReader, GovernedWriter, OpenedObject, PolicyDag,
-    PolicyParent, PolicyRelation, PolicyRevision, PolicyRevisionDraft, PublicationReport,
-    ReleaseContext, SourceReference, GOVERNANCE_GROUP, POLICY_REVISION_GROUP, POLICY_REVISION_TYPE,
+    AdmissionContext, AdmittedObject, AttachmentContext, ContractBinding, DataObject,
+    DatasetBinding, DatasetCatalog, DatasetEdition, DatasetEditionDraft, DatasetSelection,
+    EvaluatorArtifactSet, Governance, GovernanceView, GovernedDraft, GovernedObject,
+    GovernedReader, GovernedWriter, LineageVerifier, OpenedObject, OwnedAdmissionContext,
+    PolicyDag, PolicyParent, PolicyRelation, PolicyRevision, PolicyRevisionDraft,
+    PublicationReport, ReleaseContext, SourceReference, UseContext, VerifiedLineage,
+    DATASET_EDITION_GROUP, DATASET_EDITION_TYPE, GOVERNANCE_GROUP, POLICY_REVISION_GROUP,
+    POLICY_REVISION_TYPE,
 };
 #[cfg(feature = "fs")]
 pub use tn_core::runtime::{ObjectRegisters, Objects};
