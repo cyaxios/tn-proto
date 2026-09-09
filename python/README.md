@@ -65,6 +65,9 @@ Transport retries reuse the retained bytes.
 Fresh sessions own in-memory material. `tn.Session.from_config("service/tn.yaml")`
 loads an existing service identity, policy, and group material. Optional creation
 and release registers are configured per session through environment variables.
+For separate input and output identities or keys, use
+`publisher.release(data, use=..., to=..., decide=...)`; it publishes the same
+native working object through that session and preserves its inherited governance.
 
 See the [governed workflow guide](GOVERNED_WORKFLOW.md) for receiving sources,
 signed dataset editions, authority-approved attachment, multiple inputs, snapshots,

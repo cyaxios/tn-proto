@@ -436,6 +436,80 @@ impl PyData {
         }
         f(&mut data).map_err(to_py)
     }
+
+    fn release_with_session(
+        &self,
+        py: Python<'_>,
+        publisher: &SessionState,
+        use_context: Option<UseContext>,
+        purpose: Option<&str>,
+        to: &str,
+        decide: &Bound<'_, PyAny>,
+        object_type: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let context = session(publisher)?;
+        let mut candidate = self.read()?;
+        let revision = candidate.revision();
+        let object_type = object_type.unwrap_or(candidate.object_type()).to_owned();
+        let callback = decide.clone().unbind();
+        let mut callback_error = None;
+        let result = py.allow_threads(|| {
+            // Hold no object lock during application code. Once its decision is
+            // current, keep the original locked through sealing and installation.
+            let mut accepted_data = None;
+            let decide_native = |native: &tn_core::governed::ReleaseContext<'_>| {
+                native_decision(&mut callback_error, || {
+                    let allow = Python::with_gil(|py| {
+                        let allow = decision(
+                            callback.bind(py),
+                            Py::new(py, PyRelease::from_native(native))?.into_any(),
+                        )?;
+                        session(publisher)?;
+                        Ok::<_, PyErr>(allow)
+                    })?;
+                    if allow {
+                        let data = self
+                            .inner
+                            .lock()
+                            .map_err(|_| GovernedError::new_err("data lock poisoned"))?;
+                        if data.revision() != revision {
+                            return Err(GovernedError::new_err(
+                                "object changed during governance decision; evaluate its current state again",
+                            ));
+                        }
+                        accepted_data = Some(data);
+                    }
+                    Ok(allow)
+                })
+            };
+            let result = match use_context.as_ref() {
+                Some(use_context) => context.release_for(
+                    &mut candidate,
+                    &object_type,
+                    use_context,
+                    to,
+                    decide_native,
+                ),
+                None => context.release(
+                    &mut candidate,
+                    &object_type,
+                    purpose.unwrap_or_default(),
+                    to,
+                    decide_native,
+                ),
+            };
+            if result.is_ok() {
+                if let Some(mut data) = accepted_data {
+                    *data = candidate;
+                }
+            }
+            result
+        });
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        result.map(|inner| PyObject { inner }).map_err(to_py)
+    }
 }
 #[pymethods]
 impl PyData {
@@ -755,48 +829,15 @@ impl PyData {
     ) -> PyResult<PyObject> {
         guard(|| {
             let use_context = requested_use(purpose, r#use)?;
-            let context = session(&self.session)?;
-            let mut candidate = self.read()?;
-            let revision = candidate.revision();
-            let object_type = object_type.unwrap_or(candidate.object_type()).to_owned();
-            let callback = decide.clone().unbind();
-            let mut callback_error = None;
-            let result = py.allow_threads(|| {
-                // The original object is locked only after Python has finished
-                // deciding. Retain that lock through signing and installation.
-                let mut accepted_data = None;
-                let decide_native = |native: &tn_core::governed::ReleaseContext<'_>| {
-                    native_decision(&mut callback_error, || {
-                        let allow = Python::with_gil(|py| {
-                            let allow = decision(callback.bind(py), Py::new(py, PyRelease::from_native(native))?.into_any())?;
-                            session(&self.session)?;
-                            Ok::<_, PyErr>(allow)
-                        })?;
-                        if allow {
-                            let data = self.inner.lock().map_err(|_| GovernedError::new_err("data lock poisoned"))?;
-                            if data.revision() != revision {
-                                return Err(GovernedError::new_err("object changed during governance decision; evaluate its current state again"));
-                            }
-                            accepted_data = Some(data);
-                        }
-                        Ok(allow)
-                    })
-                };
-                let result = match use_context.as_ref() {
-                    Some(use_context) => context.release_for(&mut candidate, &object_type, use_context, to, decide_native),
-                    None => context.release(&mut candidate, &object_type, purpose.unwrap_or_default(), to, decide_native),
-                };
-                if result.is_ok() {
-                    if let Some(mut data) = accepted_data {
-                        *data = candidate;
-                    }
-                }
-                result
-            });
-            if let Some(error) = callback_error {
-                return Err(error);
-            }
-            result.map(|inner| PyObject { inner }).map_err(to_py)
+            self.release_with_session(
+                py,
+                &self.session,
+                use_context,
+                purpose,
+                to,
+                decide,
+                object_type,
+            )
         })
     }
     fn __repr__(&self) -> PyResult<String> {
@@ -806,6 +847,28 @@ impl PyData {
             self.revision()?
         ))
     }
+}
+
+pub(super) fn release(
+    publisher: &PySession,
+    data: &PyData,
+    py: Python<'_>,
+    use_context: &PyUseContext,
+    to: &str,
+    decide: &Bound<'_, PyAny>,
+    object_type: Option<&str>,
+) -> PyResult<PyObject> {
+    guard(|| {
+        data.release_with_session(
+            py,
+            &publisher.context,
+            Some(use_context.inner.clone()),
+            None,
+            to,
+            decide,
+            object_type,
+        )
+    })
 }
 
 pub(super) fn create(

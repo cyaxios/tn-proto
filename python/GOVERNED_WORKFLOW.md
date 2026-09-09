@@ -254,6 +254,38 @@ service with this API. It commits the inbox, credit, signed receipt, and outbox
 together, reuses the exact receipt after reopening the database, and applies a
 separate uniqueness rule to the business sale ID.
 
+## A separate publisher releases received data
+
+`data.release(...)` uses the session that created or received the working object.
+When input reading and output publishing use separate identities or group keys,
+call `publisher.release(data, ...)` with the existing native object:
+
+```python
+with tn.Session.from_config("input/tn.yaml") as receiver:
+    data = receiver.receive(
+        source_wire, use=analysis_use, groups=["finance"],
+        selection=selection, decide=accept_source,
+    )
+    data.groups["default"] = {"report_html": "<p>Approved result.</p>"}
+    data.retain_groups(["default"])
+
+with tn.Session.from_config("output/tn.yaml") as publisher:
+    report = publisher.release(
+        data, use=tn.UseContext("reporting", "portfolio_analysis", "publish_report"),
+        to="recipient", decide=accept_report_release, object_type="report.generated",
+    )
+```
+
+Rust retains every contract, dataset binding, and source reference. The publishing
+session supplies its identity, keys, and optional release register; it does not
+need the input decryption keys. Successful release updates `data.snapshot` and
+`data.history`. Refusal or a callback error leaves that signed state unchanged.
+Mutation during the decision invalidates the candidate before signing.
+
+Explicit publication can use retained data after the receiving session closes.
+It does not change which session `data.release(...)` uses for later calls. The
+selected publishing session must remain open through its decision and release.
+
 ## Adapters own admission and release decisions
 
 A governed Polars helper holds the `DataObject` while dataframe operations update

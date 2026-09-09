@@ -113,6 +113,18 @@ impl PySession {
             decide,
         )
     }
+    #[pyo3(signature=(data, *, r#use, to, decide, object_type=None))]
+    fn release(
+        &self,
+        py: Python<'_>,
+        data: &super::data::PyData,
+        r#use: &PyUseContext,
+        to: &str,
+        decide: &Bound<'_, PyAny>,
+        object_type: Option<&str>,
+    ) -> PyResult<PyObject> {
+        super::data::release(self, data, py, r#use, to, decide, object_type)
+    }
     fn check_groups(
         &self,
         py: Python<'_>,
