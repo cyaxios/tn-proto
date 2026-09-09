@@ -67,6 +67,18 @@ impl PyGovernance {
             })
             .map_err(to_py)
     }
+    #[getter]
+    fn dataset_bindings(&self) -> PyResult<Vec<super::dataset::PyDatasetBinding>> {
+        self.inner
+            .dataset_bindings()
+            .map(|bindings| {
+                bindings
+                    .into_iter()
+                    .map(|inner| super::dataset::PyDatasetBinding { inner })
+                    .collect()
+            })
+            .map_err(to_py)
+    }
 }
 
 /// An immutable draft; adding a business group returns a new draft.

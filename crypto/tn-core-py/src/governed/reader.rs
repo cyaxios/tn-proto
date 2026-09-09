@@ -5,7 +5,9 @@ use serde_json::Value;
 use std::sync::Arc;
 use tn_core::governed::{AdmittedObject, GovernanceView, GovernedReader, OpenedObject};
 
+use super::data::{decision, native_decision, PyAdmission};
 use super::objects::{PyDraft, PyGovernance, PyObject};
+use super::use_context::PyUseContext;
 use super::{codec, guard, to_py};
 
 /// Independent snapshot of the explicitly supplied group-reading capability.
@@ -45,6 +47,38 @@ pub(super) struct PyGovernanceView {
 
 #[pymethods]
 impl PyGovernanceView {
+    /// Let Rust validate and pin complete use and selected groups before deciding.
+    #[pyo3(signature = (*, r#use, groups, decide))]
+    fn accept(
+        &self,
+        py: Python<'_>,
+        r#use: &PyUseContext,
+        groups: Vec<String>,
+        decide: &Bound<'_, PyAny>,
+    ) -> PyResult<PyAdmitted> {
+        guard(|| {
+            let callback = decide.clone().unbind();
+            let use_context = r#use.inner.clone();
+            let view = self.inner.clone();
+            let mut callback_error = None;
+            let result = py.allow_threads(|| {
+                view.accept(use_context, groups, |context| {
+                    native_decision(&mut callback_error, || {
+                        Python::with_gil(|py| {
+                            decision(
+                                callback.bind(py),
+                                Py::new(py, PyAdmission::from_native(context))?.into_any(),
+                            )
+                        })
+                    })
+                })
+            });
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
+            result.map(|inner| PyAdmitted { inner }).map_err(to_py)
+        })
+    }
     #[getter]
     fn governance(&self) -> PyGovernance {
         PyGovernance {
@@ -88,6 +122,17 @@ pub(super) struct PyAdmitted {
 #[pymethods]
 impl PyAdmitted {
     #[getter]
+    fn use_context(&self) -> Option<PyUseContext> {
+        self.inner
+            .use_context()
+            .cloned()
+            .map(|inner| PyUseContext { inner })
+    }
+    #[getter]
+    fn selected_groups(&self) -> Option<Vec<String>> {
+        self.inner.selected_groups().map(<[String]>::to_vec)
+    }
+    #[getter]
     fn operation(&self) -> &str {
         self.inner.operation()
     }
@@ -113,6 +158,13 @@ pub(super) struct PyOpened {
 
 #[pymethods]
 impl PyOpened {
+    #[getter]
+    fn use_context(&self) -> Option<PyUseContext> {
+        self.inner
+            .use_context()
+            .cloned()
+            .map(|inner| PyUseContext { inner })
+    }
     #[getter]
     fn groups<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         guard(|| {

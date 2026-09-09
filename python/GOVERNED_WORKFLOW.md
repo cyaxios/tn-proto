@@ -4,6 +4,13 @@ TN-Proto moves data and a use contract together. Keys control which groups open.
 Signatures authenticate the object. Applications check permitted use at admission
 and release. The Python SDK uses the Rust core for that whole object lifecycle.
 
+Python applications call native types through PyO3. Rust owns contract parsing,
+edition selection, admission, policy accumulation, lineage verification, and
+signing. Both languages read and write the same TN wire. The executable
+[Python workflow](examples/governed_workflow.py) and
+[Rust workflow](../crypto/tn-core/examples/governed_workflow.rs) perform the same
+calculation and exchange signed publications in the interoperability tests.
+
 ## A service originates data with its policy
 
 ```python
@@ -67,17 +74,21 @@ optional creation entry. The existing single-group `create_obj` stays available.
 ```python
 accepted_writer = session.did
 expected_policy = policy
+analysis_use = tn.UseContext("analytics", "portfolio_analysis", "calculate")
 
 def admit(context):
     return (
         context.writer == accepted_writer
         and context.object_type == "finance.account"
-        and context.purpose == "analysis"
+        and context.use_context == analysis_use
+        and context.groups == ["default"]
         and len(context.policies) == 1
         and context.governance.matches_contract(expected_policy)
     )
 
-account = session.receive(wire, purpose="analysis", decide=admit)
+account = session.receive(
+    wire, use=analysis_use, groups=["default"], decide=admit,
+)
 ```
 
 `receive` accepts a sealed object, UTF-8 wire text, or bytes. It verifies the
@@ -86,12 +97,58 @@ selected business groups after approval. `groups=["observations"]` selects a
 named group; the default is `["default"]`. Production receiving sessions load
 their own assigned material with `Session.from_config(...)`.
 
+`UseContext` keeps application, purpose, and operation together. Strict acceptance
+binds that use and the selected groups to this receiving session. The explicit
+two-step interface is `session.governance(object).accept(use=..., groups=...,
+decide=...)`, followed by `session.open(admitted, groups)`. An admitted value
+cannot open an additional group or move to another session. Endpoint configuration
+or authenticated request handling supplies the application identity.
+
 The context includes the verified object, writer, type, requested operation,
 primary governance, all attached contracts, and typed source references. A
 contract match compares authority, content reference, optional revision, and all
 five standard rule fields. Applications additionally evaluate machine-readable
 extensions and every attached policy. Normalized policy content determines the
 policy hash; Markdown formatting is not part of that identity.
+
+## Dataset editions select an exact source publication
+
+A signed `DatasetEdition` names the dataset, edition, exact source object,
+source groups, policy revision bindings, eligible use tuples, grant reference,
+and evaluator artifact digests. It travels as an ordinary TN object with its own
+governance. A `PolicyDag` retains accepted signed revisions. A `DatasetCatalog`
+admits edition records against those revisions and the catalog authority decision.
+
+```python
+# The registry adapter has opened these signed metadata records through TN.
+policy_dag.admit(revision, accept_revision_authority)
+catalog.admit(edition_record, policy_dag, accept_catalog_authority)
+selection = catalog.select(
+    "market.prices", "close-2026-09-08", edition_record.id, analysis_use,
+)
+prices = session.receive(
+    source_wire, use=analysis_use, groups=["finance"],
+    selection=selection, decide=accept_source,
+)
+assert prices.dataset_bindings[0].source_object_id == selection.source_object_id
+```
+
+Rust compares the selected source, complete contracts, use, and groups before
+opening business data. Equal values in another publication still have a different
+identity. Each eligible use is a complete tuple; applications cannot combine an
+application from one tuple with an operation from another. Previously accepted
+editions remain independently selectable under their assigned uses and keys.
+
+`DatasetSelection` is returned by the accepted native catalog. Python cannot
+construct one from a dictionary. The working object carries its dataset bindings
+through mutation, inclusion, release, and subsequent receipt.
+
+For downstream computation, use `catalog.accepts(context, policy_dag)` in the
+admission decision to check every carried binding and contract against the current
+use. `LineageVerifier().verify(view, catalog, policy_dag, resolve)` checks retained
+parent publications back to the selected origins. The resolver returns
+writer-accepted governance views for exact retained bytes. Ancestor inspection
+opens governance only. The result lists verified publication and source identities.
 
 ## Ordinary data edits retain governance
 
@@ -139,6 +196,8 @@ For computations with multiple admitted inputs, call `account.include(other)`.
 It retains the other input's contracts and causal references. The application
 assigns computed values normally. Source references identify data inputs;
 policy-revision DAG parents identify policy history.
+Dataset bindings merge with those contracts. `account.copy()` makes an independent
+working object for a second calculation while retaining the same accepted inputs.
 For a pending request, `source.references_with_policy(request, accepted_policy)`
 also compares the selected revision with the policy already accepted from that
 request. `references(request)` checks identity and the public governance marker.
@@ -151,13 +210,14 @@ correlation.
 def admit_release(context):
     return (
         context.destination == "llm"
-        and context.purpose == "analysis"
+        and context.use_context == report_use
         and context.data.groups["default"]["total"] == 30
         and all(p.matches_contract(expected_policy) for p in context.policies)
     )
 
+report_use = tn.UseContext("analytics", "portfolio_analysis", "release_calculation")
 result = account.release(
-    to="llm", purpose="analysis", decide=admit_release,
+    to="llm", use=report_use, decide=admit_release,
     object_type="finance.summary",
 )
 outbox_bytes = bytes(result)
@@ -165,10 +225,12 @@ assert account.snapshot.wire == result.wire
 ```
 
 `ReleaseContext` contains current data, all policies, causal sources, writer,
-output type, purpose, and destination. Approval seals the current state and
+output type, use, and destination. Approval seals the current state and
 retains the signed version. Its governance records the immediate source
 references and release context. Refusal or a sealing error preserves the prior
 snapshot. The caller never copies policy or calls `derive()`.
+The signed `release_context` records application, purpose, operation, and
+destination. Earlier contexts remain in their retained signed publications.
 
 Unopened groups retain their exact ciphertext under the continuing primary AAD
 marker. Explicitly deleting a business group removes it from the next output;

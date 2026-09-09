@@ -1,8 +1,8 @@
 //! Mutable data with retained contracts and immutable signed versions.
 use super::{
-    invalid, validate_group, validate_name, AttachmentContext, Governance, GovernedDraft,
-    GovernedObject, GovernedWriter, OpenedObject, ReleaseContext, SourceReference,
-    GOVERNANCE_GROUP,
+    invalid, validate_group, validate_name, AttachmentContext, DatasetBinding, DatasetSelection,
+    Governance, GovernedDraft, GovernedObject, GovernedWriter, OpenedObject, ReleaseContext,
+    SourceReference, UseContext, GOVERNANCE_GROUP,
 };
 use crate::sealed_object::GroupBlock;
 use crate::{Error, Result};
@@ -25,6 +25,20 @@ pub struct DataObject {
 }
 
 impl DataObject {
+    /// Exact selected dataset origins retained through mutation and inclusion.
+    pub fn dataset_bindings(&self) -> Result<Vec<DatasetBinding>> {
+        self.governance.dataset_bindings()
+    }
+
+    /// Receipt has already verified this private accepted selection against the source.
+    pub(crate) fn bind_selection(&mut self, selection: &DatasetSelection) -> Result<()> {
+        let mut candidate = self.governance.clone();
+        merge_bindings(&mut candidate, [selection.binding()])?;
+        self.governance = candidate;
+        self.changed();
+        Ok(())
+    }
+
     /// Originate a mutable object with its required contract and first business group.
     pub fn new(
         object_type: &str,
@@ -48,6 +62,7 @@ impl DataObject {
     {
         validate_name(object_type)?;
         policy.policies()?;
+        policy.dataset_bindings()?;
         let sources = policy.source_references()?;
         let mut data = Self {
             object_type: object_type.to_owned(),
@@ -356,6 +371,7 @@ impl DataObject {
         for policy in other.policies()? {
             append_policy(&mut candidate, &policy)?;
         }
+        merge_bindings(&mut candidate, other.dataset_bindings()?)?;
         let mut sources = self.sources.clone();
         for source in &other.sources {
             if !sources.contains(source) {
@@ -443,9 +459,14 @@ fn descend<'a>(mut node: &'a mut Value, path: &[Value]) -> Result<&'a mut Value>
     }
     Ok(node)
 }
-fn base_contract(policy: &Governance) -> Governance {
+pub(super) fn base_contract(policy: &Governance) -> Governance {
     let mut policy = policy.clone();
-    for name in ["attached_policies", "source_lineage", "release_context"] {
+    for name in [
+        "attached_policies",
+        "source_lineage",
+        "release_context",
+        "dataset_bindings",
+    ] {
         policy.fields.remove(name);
     }
     policy
@@ -470,6 +491,33 @@ fn append_policy(target: &mut Governance, additional: &Governance) -> Result<()>
     Ok(())
 }
 impl Governance {
+    /// Validated selected origins. These are carried facts; the catalog admits their use.
+    pub fn dataset_bindings(&self) -> Result<Vec<DatasetBinding>> {
+        let Some(value) = self.get("dataset_bindings") else {
+            return Ok(Vec::new());
+        };
+        let values = value
+            .as_array()
+            .ok_or_else(|| invalid("dataset bindings require an array"))?;
+        if values.len() > 1024 {
+            return Err(invalid("object supports at most 1024 dataset bindings"));
+        }
+        let bindings: Vec<DatasetBinding> = serde_json::from_value(value.clone())
+            .map_err(|error| invalid(format!("dataset bindings: {error}")))?;
+        for (index, binding) in bindings.iter().enumerate() {
+            binding.validate()?;
+            if bindings[..index]
+                .iter()
+                .any(|existing| existing.edition_record_id() == binding.edition_record_id())
+            {
+                return Err(invalid(
+                    "each edition record must have exactly one dataset binding",
+                ));
+            }
+        }
+        Ok(bindings)
+    }
+
     /// Primary and appended contracts, each retaining its own authority and revision.
     pub fn policies(&self) -> Result<Vec<Governance>> {
         let mut policies = vec![base_contract(self)];
@@ -594,6 +642,7 @@ impl GovernedWriter<'_> {
             object_type,
             purpose,
             destination,
+            use_context: None,
         };
         if !decide(&context)? {
             return Err(Error::UseDenied {
@@ -604,4 +653,75 @@ impl GovernedWriter<'_> {
         data.record_snapshot(sealed.clone(), purpose)?;
         Ok(sealed)
     }
+
+    /// Release under an explicit application, purpose and operation.
+    pub fn release_for<F>(
+        &self,
+        data: &mut DataObject,
+        object_type: &str,
+        use_context: &UseContext,
+        destination: &str,
+        decide: F,
+    ) -> Result<GovernedObject>
+    where
+        F: FnOnce(&ReleaseContext<'_>) -> Result<bool>,
+    {
+        validate_name(object_type)?;
+        if destination.trim().is_empty() {
+            return Err(invalid("release requires a destination"));
+        }
+        let context = ReleaseContext {
+            writer: self.did(),
+            data,
+            object_type,
+            purpose: use_context.purpose(),
+            destination,
+            use_context: Some(use_context),
+        };
+        if !decide(&context)? {
+            return Err(Error::UseDenied {
+                operation: use_context.operation().to_owned(),
+            });
+        }
+        let mut draft = data.draft(object_type, use_context.purpose(), destination)?;
+        draft.governance.fields.insert(
+            "release_context".into(),
+            json!({
+                "application": use_context.application(), "purpose": use_context.purpose(),
+                "operation": use_context.operation(), "destination": destination,
+            }),
+        );
+        let sealed = self.seal(draft)?;
+        data.record_snapshot(sealed.clone(), use_context.operation())?;
+        Ok(sealed)
+    }
+}
+
+fn merge_bindings(
+    governance: &mut Governance,
+    additions: impl IntoIterator<Item = DatasetBinding>,
+) -> Result<()> {
+    let mut bindings = governance.dataset_bindings()?;
+    for binding in additions {
+        binding.validate()?;
+        if bindings.iter().any(|existing| {
+            existing.edition_record_id() == binding.edition_record_id() && existing != &binding
+        }) {
+            return Err(invalid(
+                "a selected edition record cannot acquire a different binding",
+            ));
+        }
+        if !bindings.contains(&binding) {
+            if bindings.len() >= 1024 {
+                return Err(invalid("object supports at most 1024 dataset bindings"));
+            }
+            bindings.push(binding);
+        }
+    }
+    if !bindings.is_empty() {
+        governance
+            .fields
+            .insert("dataset_bindings".into(), serde_json::to_value(bindings)?);
+    }
+    Ok(())
 }

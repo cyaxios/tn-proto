@@ -1,4 +1,4 @@
-"""Pure secure-default policy resolution and per-record read decisions."""
+"""Read-policy compatibility types backed by the canonical Rust evaluator."""
 
 from __future__ import annotations
 
@@ -133,86 +133,47 @@ class ReadTrustPolicy:
         )
 
     def evaluate(self, record: ReadRecordState, context: ReadContext) -> ReadDecision:
-        """Evaluate one already-scanned record without reading mutable state."""
+        """Delegate already-scanned facts to Rust without reading mutable trust state."""
 
-        reasons: list[ReadRejectReason] = []
+        from ._native.core import read_policy_evaluate
 
-        def reject(reason: ReadRejectReason) -> None:
-            if reason not in reasons:
-                reasons.append(reason)
-
-        if not record.record_valid:
-            reject(ReadRejectReason.RECORD_INVALID)
-            return ReadDecision(
-                accepted=False,
-                reasons=reasons,
-                writer_authenticated=False,
-                writer_authorized=False,
-            )
-
-        chain_required = not (
-            context.active
-            and context.local_log
-            and not context.detached
-            and context.profile_chain is False
+        decision = read_policy_evaluate(
+            {
+                "verify": self.mode,
+                "require_signature": self.require_signature,
+                "allow_unauthenticated": self.allow_unauthenticated,
+                "trusted_writers": sorted(self.trusted_writers),
+                # This is the already-resolved trust snapshot, not a new override.
+                "trusted_writers_supplied": False,
+                "allow_unknown_writers": self.allow_unknown_writers,
+            },
+            {
+                "record_valid": record.record_valid,
+                "row_hash_present": record.row_hash_present,
+                "row_hash_valid": record.row_hash_valid,
+                "chain_valid": record.chain_valid,
+                "signature_present": record.signature_present,
+                "signature_valid": record.signature_valid,
+                "writer_did": record.writer_did,
+                "aad_valid": record.aad_valid,
+                "recipient_groups": sorted(record.recipient_groups),
+            },
+            {
+                "active": context.active,
+                "local_log": context.local_log,
+                "detached": context.detached,
+                "writable": context.writable,
+                "profile_sign": context.profile_sign,
+                "profile_chain": context.profile_chain,
+                "local_device_did": context.local_device_did,
+                "required_group": context.required_group,
+            },
         )
-        row_hash_valid = not chain_required or (record.row_hash_present and record.row_hash_valid)
-        if not row_hash_valid:
-            reject(ReadRejectReason.ROW_HASH_INVALID)
-        chain_valid = not chain_required or record.chain_valid
-        if not chain_valid:
-            reject(ReadRejectReason.CHAIN_INVALID)
-
-        writer_authenticated = record.signature_present and record.signature_valid
-        if not record.signature_present:
-            if self.require_signature:
-                reject(ReadRejectReason.SIGNATURE_REQUIRED)
-        elif not record.signature_valid:
-            reject(ReadRejectReason.SIGNATURE_INVALID)
-
-        writer_trusted = record.writer_did in self.trusted_writers
-        if not writer_trusted and not self.allow_unknown_writers:
-            reject(ReadRejectReason.WRITER_UNTRUSTED)
-
-        if not record.aad_valid:
-            reject(ReadRejectReason.AAD_INVALID)
-        if (
-            context.required_group is not None
-            and context.required_group not in record.recipient_groups
-        ):
-            reject(ReadRejectReason.NOT_A_RECIPIENT)
-
-        integrity_valid = row_hash_valid and chain_valid
-        writer_authorized = writer_authenticated and writer_trusted and integrity_valid
-
-        ignored: frozenset[ReadRejectReason]
-        if self.mode == "disabled":
-            ignored = frozenset(
-                {
-                    ReadRejectReason.ROW_HASH_INVALID,
-                    ReadRejectReason.CHAIN_INVALID,
-                    ReadRejectReason.SIGNATURE_REQUIRED,
-                    ReadRejectReason.SIGNATURE_INVALID,
-                    ReadRejectReason.WRITER_UNTRUSTED,
-                },
-            )
-            writer_authenticated = False
-            writer_authorized = False
-        elif self.allow_unauthenticated:
-            ignored = frozenset(
-                {
-                    ReadRejectReason.SIGNATURE_REQUIRED,
-                },
-            )
-        else:
-            ignored = frozenset()
-
-        accepted = all(reason in ignored for reason in reasons)
         return ReadDecision(
-            accepted=accepted,
-            reasons=reasons,
-            writer_authenticated=writer_authenticated,
-            writer_authorized=writer_authorized,
+            accepted=decision["accepted"],
+            reasons=[ReadRejectReason(reason) for reason in decision["reasons"]],
+            writer_authenticated=decision["writer_authenticated"],
+            writer_authorized=decision["writer_authorized"],
         )
 
 

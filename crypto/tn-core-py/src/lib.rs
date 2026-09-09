@@ -8,6 +8,7 @@
 
 mod admin;
 pub mod governed;
+mod read_policy;
 
 use pyo3::exceptions::{PyException, PyIOError, PyValueError};
 use pyo3::prelude::*;
@@ -1112,6 +1113,7 @@ pub fn populate(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tnpkg_read, m)?)?;
     m.add_function(wrap_pyfunction!(tnpkg_write, m)?)?;
     m.add_function(wrap_pyfunction!(config_load_summary, m)?)?;
+    m.add_function(wrap_pyfunction!(read_policy::read_policy_evaluate, m)?)?;
     crate::admin::register(m)?;
     Ok(())
 }

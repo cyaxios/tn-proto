@@ -1,13 +1,17 @@
 //! Mutable governed values. Python callbacks run against detached state snapshots.
+use super::dataset::{PyDatasetBinding, PyDatasetSelection};
 use super::objects::{PyGovernance, PyObject};
 use super::session::PySession;
+use super::use_context::PyUseContext;
 use super::{codec, guard, to_py, GovernedError, SessionClosed};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
-use tn_core::governed::{DataObject, Governance, PublicationReport, SourceReference};
+use tn_core::governed::{
+    DataObject, Governance, OwnedAdmissionContext, PublicationReport, SourceReference, UseContext,
+};
 use tn_core::runtime::Objects;
 
 type SessionState = Arc<Mutex<Option<Arc<Objects<'static>>>>>;
@@ -19,12 +23,36 @@ fn session(state: &SessionState) -> PyResult<Arc<Objects<'static>>> {
         .clone()
         .ok_or_else(|| SessionClosed::new_err("this governed session is closed"))
 }
-fn decision(callback: &Bound<'_, PyAny>, context: Py<PyAny>) -> PyResult<bool> {
+pub(super) fn decision(callback: &Bound<'_, PyAny>, context: Py<PyAny>) -> PyResult<bool> {
     let answer = callback.call1((context,))?;
     if !answer.is_instance_of::<PyBool>() {
         return Err(PyTypeError::new_err("governance decision must return bool"));
     }
     answer.extract()
+}
+pub(super) fn native_decision(
+    error: &mut Option<PyErr>,
+    callback: impl FnOnce() -> PyResult<bool>,
+) -> tn_core::Result<bool> {
+    callback().map_err(|failure| {
+        *error = Some(failure);
+        tn_core::Error::InvalidConfig("Python governance decision failed".to_owned())
+    })
+}
+fn requested_use(
+    purpose: Option<&str>,
+    use_context: Option<&PyUseContext>,
+) -> PyResult<Option<UseContext>> {
+    match (purpose, use_context) {
+        (Some(_), Some(_)) => Err(PyTypeError::new_err(
+            "specify use or legacy purpose, not both",
+        )),
+        (None, None) => Err(PyTypeError::new_err(
+            "receive and release require use or legacy purpose",
+        )),
+        (_, Some(context)) => Ok(Some(context.inner.clone())),
+        (Some(_), None) => Ok(None),
+    }
 }
 fn path(value: &Bound<'_, PyAny>) -> PyResult<Vec<Value>> {
     codec::to_json(value, 0)?
@@ -105,6 +133,18 @@ pub(super) struct PyDataState {
 #[pymethods]
 impl PyDataState {
     #[getter]
+    fn dataset_bindings(&self) -> PyResult<Vec<PyDatasetBinding>> {
+        self.inner
+            .dataset_bindings()
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|inner| PyDatasetBinding { inner })
+                    .collect()
+            })
+            .map_err(to_py)
+    }
+    #[getter]
     fn hidden_groups(&self) -> Vec<String> {
         self.inner
             .hidden_groups()
@@ -153,43 +193,66 @@ impl PyDataState {
 
 #[pyclass(frozen, module = "tn.governed", name = "AdmissionContext")]
 pub(super) struct PyAdmission {
-    object: tn_core::governed::GovernedObject,
-    governance: Governance,
-    operation: String,
+    pub inner: OwnedAdmissionContext,
+}
+impl PyAdmission {
+    pub(super) fn from_native(context: &tn_core::governed::AdmissionContext<'_>) -> Self {
+        Self {
+            inner: context.to_owned(),
+        }
+    }
 }
 #[pymethods]
 impl PyAdmission {
     #[getter]
     fn object(&self) -> PyObject {
         PyObject {
-            inner: self.object.clone(),
+            inner: self.inner.context().object().clone(),
         }
     }
     #[getter]
-    fn writer(&self) -> &str {
-        self.object.writer()
+    fn writer(&self) -> String {
+        self.inner.context().object().writer().to_owned()
     }
     #[getter]
-    fn object_type(&self) -> &str {
-        self.object.object_type()
+    fn object_type(&self) -> String {
+        self.inner.context().object().object_type().to_owned()
     }
     #[getter]
     fn governance(&self) -> PyGovernance {
         PyGovernance {
-            inner: self.governance.clone(),
+            inner: self.inner.context().governance().clone(),
         }
     }
     #[getter]
-    fn operation(&self) -> &str {
-        &self.operation
+    fn operation(&self) -> String {
+        self.inner.context().operation().to_owned()
     }
     #[getter]
-    fn purpose(&self) -> &str {
-        &self.operation
+    fn purpose(&self) -> String {
+        let context = self.inner.context();
+        context
+            .use_context()
+            .map(UseContext::purpose)
+            .unwrap_or(context.operation())
+            .to_owned()
+    }
+    #[getter]
+    fn use_context(&self) -> Option<PyUseContext> {
+        self.inner
+            .context()
+            .use_context()
+            .cloned()
+            .map(|inner| PyUseContext { inner })
+    }
+    #[getter]
+    fn groups(&self) -> Option<Vec<String>> {
+        self.inner.context().groups().map(<[String]>::to_vec)
     }
     #[getter]
     fn policies(&self) -> PyResult<Vec<PyGovernance>> {
-        self.governance
+        self.inner
+            .context()
             .policies()
             .map(|items| {
                 items
@@ -201,8 +264,9 @@ impl PyAdmission {
     }
     #[getter]
     fn sources(&self) -> PyResult<Vec<PySource>> {
-        self.governance
-            .source_references()
+        self.inner
+            .context()
+            .sources()
             .map(|items| items.into_iter().map(|inner| PySource { inner }).collect())
             .map_err(to_py)
     }
@@ -245,9 +309,26 @@ pub(super) struct PyRelease {
     object_type: String,
     purpose: String,
     destination: String,
+    use_context: Option<UseContext>,
+}
+impl PyRelease {
+    fn from_native(context: &tn_core::governed::ReleaseContext<'_>) -> Self {
+        Self {
+            writer: context.writer().to_owned(),
+            data: context.data().clone(),
+            object_type: context.object_type().to_owned(),
+            purpose: context.purpose().to_owned(),
+            destination: context.destination().to_owned(),
+            use_context: context.use_context().cloned(),
+        }
+    }
 }
 #[pymethods]
 impl PyRelease {
+    #[getter]
+    fn use_context(&self) -> Option<PyUseContext> {
+        self.use_context.clone().map(|inner| PyUseContext { inner })
+    }
     #[getter]
     fn writer(&self) -> &str {
         &self.writer
@@ -358,6 +439,27 @@ impl PyData {
 }
 #[pymethods]
 impl PyData {
+    fn copy(&self) -> PyResult<Self> {
+        guard(|| {
+            Ok(Self::new(
+                self.read()?,
+                self.session.clone(),
+                self.default_group.clone(),
+            ))
+        })
+    }
+    #[getter]
+    fn dataset_bindings(&self) -> PyResult<Vec<PyDatasetBinding>> {
+        self.read()?
+            .dataset_bindings()
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|inner| PyDatasetBinding { inner })
+                    .collect()
+            })
+            .map_err(to_py)
+    }
     fn retain_groups(&self, groups: Vec<String>) -> PyResult<()> {
         guard(|| self.mutate(|data| data.retain_groups(groups)))
     }
@@ -641,46 +743,60 @@ impl PyData {
             })
         })
     }
-    #[pyo3(signature=(*, to, purpose, decide, object_type=None))]
+    #[pyo3(signature=(*, to, decide, purpose=None, r#use=None, object_type=None))]
     fn release(
         &self,
         py: Python<'_>,
         to: &str,
-        purpose: &str,
         decide: &Bound<'_, PyAny>,
+        purpose: Option<&str>,
+        r#use: Option<&PyUseContext>,
         object_type: Option<&str>,
     ) -> PyResult<PyObject> {
         guard(|| {
-            if to.trim().is_empty() || purpose.trim().is_empty() {
-                return Err(PyValueError::new_err(
-                    "release requires purpose and destination",
-                ));
-            }
+            let use_context = requested_use(purpose, r#use)?;
             let context = session(&self.session)?;
-            let before = self.read()?;
-            let revision = before.revision();
-            let object_type = object_type.unwrap_or(before.object_type()).to_owned();
-            let allow = decision(
-                decide,
-                Py::new(
-                    py,
-                    PyRelease {
-                        writer: context.did().to_owned(),
-                        data: before,
-                        object_type: object_type.clone(),
-                        purpose: purpose.to_owned(),
-                        destination: to.to_owned(),
-                    },
-                )?
-                .into_any(),
-            )?;
-            session(&self.session)?;
-            py.allow_threads(|| {
-                self.checked(revision, |data| {
-                    context.release(data, &object_type, purpose, to, |_| Ok(allow))
-                })
-            })
-            .map(|inner| PyObject { inner })
+            let mut candidate = self.read()?;
+            let revision = candidate.revision();
+            let object_type = object_type.unwrap_or(candidate.object_type()).to_owned();
+            let callback = decide.clone().unbind();
+            let mut callback_error = None;
+            let result = py.allow_threads(|| {
+                // The original object is locked only after Python has finished
+                // deciding. Retain that lock through signing and installation.
+                let mut accepted_data = None;
+                let decide_native = |native: &tn_core::governed::ReleaseContext<'_>| {
+                    native_decision(&mut callback_error, || {
+                        let allow = Python::with_gil(|py| {
+                            let allow = decision(callback.bind(py), Py::new(py, PyRelease::from_native(native))?.into_any())?;
+                            session(&self.session)?;
+                            Ok::<_, PyErr>(allow)
+                        })?;
+                        if allow {
+                            let data = self.inner.lock().map_err(|_| GovernedError::new_err("data lock poisoned"))?;
+                            if data.revision() != revision {
+                                return Err(GovernedError::new_err("object changed during governance decision; evaluate its current state again"));
+                            }
+                            accepted_data = Some(data);
+                        }
+                        Ok(allow)
+                    })
+                };
+                let result = match use_context.as_ref() {
+                    Some(use_context) => context.release_for(&mut candidate, &object_type, use_context, to, decide_native),
+                    None => context.release(&mut candidate, &object_type, purpose.unwrap_or_default(), to, decide_native),
+                };
+                if result.is_ok() {
+                    if let Some(mut data) = accepted_data {
+                        *data = candidate;
+                    }
+                }
+                result
+            });
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
+            result.map(|inner| PyObject { inner }).map_err(to_py)
         })
     }
     fn __repr__(&self) -> PyResult<String> {
@@ -745,13 +861,18 @@ pub(super) fn receive(
     session: &PySession,
     py: Python<'_>,
     wire: &Bound<'_, PyAny>,
-    purpose: &str,
+    purpose: Option<&str>,
+    use_context: Option<&PyUseContext>,
     groups: Vec<String>,
+    selection: Option<&PyDatasetSelection>,
     decide: &Bound<'_, PyAny>,
 ) -> PyResult<PyData> {
     guard(|| {
-        if purpose.trim().is_empty() {
-            return Err(PyValueError::new_err("purpose must be nonempty"));
+        let use_context = requested_use(purpose, use_context)?;
+        if selection.is_some() && use_context.is_none() {
+            return Err(PyTypeError::new_err(
+                "dataset selection requires a complete use",
+            ));
         }
         let context = session.context()?;
         let wire = if let Ok(object) = wire.extract::<PyRef<'_, PyObject>>() {
@@ -759,37 +880,41 @@ pub(super) fn receive(
         } else {
             codec::wire(wire)?
         };
-        let (reader, view) = py
-            .allow_threads(|| {
-                let object = tn_core::governed::GovernedObject::parse(&wire)?;
-                let reader = context.reader()?;
-                let view = reader.governance(&object)?;
-                Ok::<_, tn_core::Error>((reader, view))
-            })
-            .map_err(to_py)?;
-        let allow = decision(
-            decide,
-            Py::new(
-                py,
-                PyAdmission {
-                    object: view.object().clone(),
-                    governance: view.governance().clone(),
-                    operation: purpose.to_owned(),
-                },
-            )?
-            .into_any(),
-        )?;
-        session.context()?;
         let default_group = groups
             .first()
             .cloned()
             .unwrap_or_else(|| "default".to_owned());
-        let inner = py
-            .allow_threads(|| {
-                let admitted = view.authorize_with(purpose, |_| Ok(allow))?;
-                DataObject::from_opened(reader.open(&admitted, &groups)?)
-            })
-            .map_err(to_py)?;
+        let callback = decide.clone().unbind();
+        let selection = selection.map(|selection| selection.inner.clone());
+        let mut callback_error = None;
+        let result = py.allow_threads(|| {
+            let decide_native = |native: &tn_core::governed::AdmissionContext<'_>| {
+                native_decision(&mut callback_error, || {
+                    Python::with_gil(|py| {
+                        let allow = decision(
+                            callback.bind(py),
+                            Py::new(py, PyAdmission::from_native(native))?.into_any(),
+                        )?;
+                        session.context()?;
+                        Ok(allow)
+                    })
+                })
+            };
+            match use_context.as_ref() {
+                Some(use_context) => context.receive_for(
+                    &wire,
+                    use_context,
+                    &groups,
+                    selection.as_ref(),
+                    decide_native,
+                ),
+                None => context.receive(&wire, purpose.unwrap_or_default(), &groups, decide_native),
+            }
+        });
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        let inner = result.map_err(to_py)?;
         Ok(PyData::new(inner, session.context.clone(), default_group))
     })
 }

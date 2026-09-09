@@ -2,9 +2,13 @@
 
 mod codec;
 mod data;
+mod dataset;
+mod lineage;
 mod objects;
 mod reader;
+mod revision;
 mod session;
+mod use_context;
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyOSError, PyValueError};
@@ -46,6 +50,7 @@ fn guard<T>(f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
 /// Register the governed interface in the combined Python wheel.
 pub fn populate(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<session::PySession>()?;
+    m.add_class::<use_context::PyUseContext>()?;
     m.add_class::<objects::PyGovernance>()?;
     m.add_class::<objects::PyDraft>()?;
     m.add_class::<objects::PyObject>()?;
@@ -53,6 +58,20 @@ pub fn populate(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<reader::PyGovernanceView>()?;
     m.add_class::<reader::PyAdmitted>()?;
     m.add_class::<reader::PyOpened>()?;
+    m.add_class::<revision::PyPolicyRevisionDraft>()?;
+    m.add_class::<revision::PyPolicyRevision>()?;
+    m.add_class::<revision::PyPolicyParent>()?;
+    m.add_class::<revision::PyPolicyRelation>()?;
+    m.add_class::<revision::PyPolicyDag>()?;
+    m.add_class::<dataset::PyContractBinding>()?;
+    m.add_class::<dataset::PyEvaluatorArtifactSet>()?;
+    m.add_class::<dataset::PyDatasetBinding>()?;
+    m.add_class::<dataset::PyDatasetEditionDraft>()?;
+    m.add_class::<dataset::PyDatasetEdition>()?;
+    m.add_class::<dataset::PyDatasetCatalog>()?;
+    m.add_class::<dataset::PyDatasetSelection>()?;
+    m.add_class::<lineage::PyLineageVerifier>()?;
+    m.add_class::<lineage::PyVerifiedLineage>()?;
     data::populate(m)?;
     for (name, exception) in [
         ("GovernedError", py.get_type::<GovernedError>()),

@@ -1,11 +1,13 @@
 use pyo3::prelude::*;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tn_core::governed::{GovernedDraft, GovernedObject};
+use tn_core::governed::{GovernedDraft, GovernedObject, GovernedReader};
 use tn_core::runtime::Objects;
 
+use super::dataset::PyDatasetSelection;
 use super::objects::{PyDraft, PyGovernance, PyObject};
 use super::reader::{PyAdmitted, PyGovernanceView, PyOpened, PyReader};
+use super::use_context::PyUseContext;
 use super::{codec, guard, to_py, GovernedError, SessionClosed};
 
 /// Independent governed session. Construction creates in-memory BTN material;
@@ -13,18 +15,29 @@ use super::{codec, guard, to_py, GovernedError, SessionClosed};
 #[pyclass(frozen, module = "tn.governed", name = "Session")]
 pub(super) struct PySession {
     pub(super) context: Arc<Mutex<Option<Arc<Objects<'static>>>>>,
+    reader: Mutex<Option<Arc<GovernedReader>>>,
 }
 
 impl PySession {
-    fn from_context(context: Objects<'static>) -> Self {
-        Self {
+    fn from_context(context: Objects<'static>) -> tn_core::Result<Self> {
+        let reader = context.reader()?;
+        Ok(Self {
             context: Arc::new(Mutex::new(Some(Arc::new(context)))),
-        }
+            reader: Mutex::new(Some(Arc::new(reader))),
+        })
     }
     pub(super) fn context(&self) -> PyResult<Arc<Objects<'static>>> {
         self.context
             .lock()
             .map_err(|_| GovernedError::new_err("session lock poisoned"))?
+            .clone()
+            .ok_or_else(|| SessionClosed::new_err("this governed session is closed"))
+    }
+    fn cached_reader(&self) -> PyResult<Arc<GovernedReader>> {
+        self.context()?;
+        self.reader
+            .lock()
+            .map_err(|_| GovernedError::new_err("session reader lock poisoned"))?
             .clone()
             .ok_or_else(|| SessionClosed::new_err("this governed session is closed"))
     }
@@ -44,7 +57,7 @@ impl PySession {
             let groups = groups.unwrap_or_else(|| vec!["default".to_owned()]);
             let names: Vec<_> = groups.iter().map(String::as_str).collect();
             py.allow_threads(|| Objects::ephemeral(policy, policy_id, &names))
-                .map(Self::from_context)
+                .and_then(Self::from_context)
                 .map_err(to_py)
         })
     }
@@ -52,7 +65,7 @@ impl PySession {
     fn from_config(py: Python<'_>, path: PathBuf) -> PyResult<Self> {
         guard(|| {
             py.allow_threads(|| Objects::open(&path))
-                .map(Self::from_context)
+                .and_then(Self::from_context)
                 .map_err(to_py)
         })
     }
@@ -78,21 +91,25 @@ impl PySession {
     ) -> PyResult<super::data::PyData> {
         super::data::create_with_groups(self, py, groups, policy, object_type, primary_group)
     }
-    #[pyo3(signature=(sealed, *, purpose, decide, groups=None))]
+    #[pyo3(signature=(sealed, *, decide, purpose=None, r#use=None, groups=None, selection=None))]
     fn receive(
         &self,
         py: Python<'_>,
         sealed: &Bound<'_, PyAny>,
-        purpose: &str,
         decide: &Bound<'_, PyAny>,
+        purpose: Option<&str>,
+        r#use: Option<&PyUseContext>,
         groups: Option<Vec<String>>,
+        selection: Option<&PyDatasetSelection>,
     ) -> PyResult<super::data::PyData> {
         super::data::receive(
             self,
             py,
             sealed,
             purpose,
+            r#use,
             groups.unwrap_or_else(|| vec!["default".to_owned()]),
+            selection,
             decide,
         )
     }
@@ -134,6 +151,10 @@ impl PySession {
             .map_err(|_| GovernedError::new_err("session lock poisoned"))?
             .take();
         drop(context);
+        self.reader
+            .lock()
+            .map_err(|_| GovernedError::new_err("session reader lock poisoned"))?
+            .take();
         Ok(())
     }
     fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
@@ -205,8 +226,8 @@ impl PySession {
     }
     fn governance(&self, py: Python<'_>, object: &PyObject) -> PyResult<PyGovernanceView> {
         guard(|| {
-            let context = self.context()?;
-            py.allow_threads(|| context.reader_for(["tn.agents"])?.governance(&object.inner))
+            let reader = self.cached_reader()?;
+            py.allow_threads(|| reader.governance(&object.inner))
                 .map(|inner| PyGovernanceView { inner })
                 .map_err(to_py)
         })
@@ -218,8 +239,8 @@ impl PySession {
         groups: Vec<String>,
     ) -> PyResult<PyOpened> {
         guard(|| {
-            let context = self.context()?;
-            py.allow_threads(|| context.reader_for(&groups)?.open(&admitted.inner, &groups))
+            let reader = self.cached_reader()?;
+            py.allow_threads(|| reader.open(&admitted.inner, &groups))
                 .map(|inner| PyOpened { inner })
                 .map_err(to_py)
         })

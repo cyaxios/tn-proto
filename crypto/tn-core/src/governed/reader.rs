@@ -9,17 +9,22 @@ use crate::{Error, Result};
 
 use super::object::parse_json;
 use super::policy::string_field;
-use super::{invalid, validate_group, Governance, GovernedDraft, GovernedObject, GOVERNANCE_GROUP};
+use super::{
+    invalid, validate_group, DatasetSelection, Governance, GovernedDraft, GovernedObject,
+    UseContext, GOVERNANCE_GROUP,
+};
 
 /// Reader material indexed by group. Multiple candidates support retained
 /// historical keys and objects from different publishers.
 #[derive(Default)]
 pub struct GovernedReader {
     groups: BTreeMap<String, Vec<Arc<dyn GroupCipher>>>,
+    identity: Arc<()>,
 }
 
 impl GovernedReader {
-    /// Verify a source, admit its full contract and identity, then open selected data.
+    /// Legacy operation-only receipt. Use [`Self::receive_for`] to bind the
+    /// complete use, reader context and selected groups before opening data.
     pub fn receive<I, S, F>(
         &self,
         wire: &str,
@@ -39,6 +44,40 @@ impl GovernedReader {
         super::DataObject::from_opened(self.open(&admitted, groups)?)
     }
 
+    /// Verify the exact source and optional edition selection, admit its complete
+    /// use and selected groups, then open business data under this reader.
+    pub fn receive_for<I, S, F>(
+        &self,
+        wire: &str,
+        use_context: &UseContext,
+        groups: I,
+        selection: Option<&DatasetSelection>,
+        decide: F,
+    ) -> Result<super::DataObject>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        F: FnOnce(&super::AdmissionContext<'_>) -> Result<bool>,
+    {
+        let object = GovernedObject::parse(wire)?;
+        let view = self.governance(&object)?;
+        let selected = selected_groups(&object, groups)?;
+        if selected.is_empty() {
+            return Err(invalid(
+                "strict admission requires at least one business group",
+            ));
+        }
+        if let Some(selection) = selection {
+            selection.verify_source(&view, use_context, &selected)?;
+        }
+        let admitted = view.accept(use_context.clone(), &selected, decide)?;
+        let mut data = super::DataObject::from_opened(self.open(&admitted, &selected)?)?;
+        if let Some(selection) = selection {
+            data.bind_selection(selection)?;
+        }
+        Ok(data)
+    }
+
     /// Start a reader with no group material.
     pub fn new() -> Self {
         Self::default()
@@ -48,6 +87,8 @@ impl GovernedReader {
     pub fn with_group(mut self, name: &str, cipher: Arc<dyn GroupCipher>) -> Result<Self> {
         validate_group(name)?;
         self.groups.entry(name.to_owned()).or_default().push(cipher);
+        // A changed capability snapshot must obtain a new strict acceptance.
+        self.identity = Arc::new(());
         Ok(self)
     }
 
@@ -57,6 +98,7 @@ impl GovernedReader {
         let governance = Governance::from_body(string_field(&object.marker, "governed_by")?, body)?;
         governance.policies()?;
         governance.source_references()?;
+        governance.dataset_bindings()?;
         if governance.policy_ref() != string_field(&object.marker, "policy")? {
             return Err(invalid(
                 "opened policy must match its authenticated AAD reference",
@@ -65,6 +107,7 @@ impl GovernedReader {
         Ok(GovernanceView {
             object: object.clone(),
             governance,
+            reader_identity: Arc::clone(&self.identity),
         })
     }
 
@@ -75,16 +118,20 @@ impl GovernedReader {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let mut selected = BTreeSet::new();
-        for name in groups {
-            let name = name.as_ref();
-            if name == GOVERNANCE_GROUP
-                || !admitted.view.object.groups.contains_key(name)
-                || !selected.insert(name.to_owned())
+        let selected = selected_groups(&admitted.view.object, groups)?;
+        if let Some(accepted) = &admitted.strict {
+            if !Arc::ptr_eq(&self.identity, &admitted.view.reader_identity) {
+                return Err(invalid(
+                    "strict acceptance belongs to a different reader context",
+                ));
+            }
+            if selected
+                .iter()
+                .any(|name| accepted.groups.binary_search(name).is_err())
             {
-                return Err(invalid(format!(
-                    "select each present business group once: {name:?}"
-                )));
+                return Err(invalid(
+                    "opening cannot expand the strictly accepted business groups",
+                ));
             }
         }
         let mut plaintext = BTreeMap::new();
@@ -142,10 +189,54 @@ impl GovernedReader {
 pub struct GovernanceView {
     object: GovernedObject,
     governance: Governance,
+    reader_identity: Arc<()>,
 }
 
 impl GovernanceView {
-    /// Admit use with verified writer, object type, contract and source context together.
+    /// Accept a complete use and immutable group set under this reader context.
+    /// All structural checks precede the application decision; no business group
+    /// is opened until the resulting admission is passed to the same reader.
+    pub fn accept<I, S, F>(
+        self,
+        use_context: UseContext,
+        groups: I,
+        decide: F,
+    ) -> Result<AdmittedObject>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        F: FnOnce(&super::AdmissionContext<'_>) -> Result<bool>,
+    {
+        let groups = selected_groups(&self.object, groups)?;
+        if groups.is_empty() {
+            return Err(invalid(
+                "strict admission requires at least one business group",
+            ));
+        }
+        let context = super::AdmissionContext {
+            object: &self.object,
+            governance: &self.governance,
+            operation: use_context.operation(),
+            use_context: Some(&use_context),
+            groups: Some(&groups),
+        };
+        if !decide(&context)? {
+            return Err(Error::UseDenied {
+                operation: use_context.operation().to_owned(),
+            });
+        }
+        Ok(AdmittedObject {
+            view: self,
+            operation: use_context.operation().to_owned(),
+            strict: Some(AcceptedUse {
+                use_context,
+                groups,
+            }),
+        })
+    }
+
+    /// Legacy operation-only admission with verified source context. Use
+    /// [`Self::accept`] for complete use and immutable selected-group admission.
     pub fn authorize_with<F>(self, operation: &str, decide: F) -> Result<AdmittedObject>
     where
         F: FnOnce(&super::AdmissionContext<'_>) -> Result<bool>,
@@ -157,6 +248,8 @@ impl GovernanceView {
             object: &self.object,
             governance: &self.governance,
             operation,
+            use_context: None,
+            groups: None,
         };
         if !decide(&context)? {
             return Err(Error::UseDenied {
@@ -166,6 +259,7 @@ impl GovernanceView {
         Ok(AdmittedObject {
             view: self,
             operation: operation.to_owned(),
+            strict: None,
         })
     }
     /// The authenticated contract the application is to evaluate.
@@ -177,7 +271,8 @@ impl GovernanceView {
         &self.object
     }
 
-    /// Apply the application's permitted-use decision for a named operation.
+    /// Legacy contract-and-operation decision. Use [`Self::accept`] to bind
+    /// complete use and selected groups under this reader context.
     /// The callback returns `true` for approval; its errors propagate. Reader
     /// keys remain the separate requirement for opening the admitted groups.
     pub fn authorize<F>(self, operation: &str, decide: F) -> Result<AdmittedObject>
@@ -195,18 +290,36 @@ impl GovernanceView {
         Ok(AdmittedObject {
             view: self,
             operation: operation.to_owned(),
+            strict: None,
         })
     }
 }
 
-/// An object admitted by the application for a particular operation.
+/// An object admitted for a complete use, or a legacy operation-only decision.
 #[derive(Clone)]
 pub struct AdmittedObject {
     view: GovernanceView,
     operation: String,
+    strict: Option<AcceptedUse>,
+}
+
+#[derive(Clone)]
+struct AcceptedUse {
+    use_context: UseContext,
+    groups: Vec<String>,
 }
 
 impl AdmittedObject {
+    /// Complete accepted use, absent only for the legacy operation-only path.
+    pub fn use_context(&self) -> Option<&UseContext> {
+        self.strict.as_ref().map(|accepted| &accepted.use_context)
+    }
+    /// Maximum business group set accepted on the strict path.
+    pub fn selected_groups(&self) -> Option<&[String]> {
+        self.strict
+            .as_ref()
+            .map(|accepted| accepted.groups.as_slice())
+    }
     /// Operation accepted by the application callback.
     pub fn operation(&self) -> &str {
         &self.operation
@@ -229,6 +342,10 @@ pub struct OpenedObject {
 }
 
 impl OpenedObject {
+    /// Complete use accepted before opening these groups, when the strict path was used.
+    pub fn use_context(&self) -> Option<&UseContext> {
+        self.admitted.use_context()
+    }
     /// Application operation for which these source groups were opened.
     pub fn operation(&self) -> &str {
         self.admitted.operation()
@@ -276,4 +393,24 @@ impl OpenedObject {
             .insert("source_lineage".to_owned(), json!([source]));
         GovernedDraft::new(object_type, governance)
     }
+}
+
+fn selected_groups<I, S>(object: &GovernedObject, groups: I) -> Result<Vec<String>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut selected = BTreeSet::new();
+    for name in groups {
+        let name = name.as_ref();
+        if name == GOVERNANCE_GROUP
+            || !object.groups.contains_key(name)
+            || !selected.insert(name.to_owned())
+        {
+            return Err(invalid(format!(
+                "select each present business group once: {name:?}"
+            )));
+        }
+    }
+    Ok(selected.into_iter().collect())
 }

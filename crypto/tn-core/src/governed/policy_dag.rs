@@ -16,7 +16,7 @@ use super::{Governance, PolicyParent, PolicyRevision};
 /// parents preserves a DAG by construction without recursion or implicit
 /// version selection. Rebuild history by reopening retained signed revision
 /// objects and admitting them in parent-first order under current trust rules.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PolicyDag {
     revisions: BTreeMap<String, PolicyRevision>,
 }

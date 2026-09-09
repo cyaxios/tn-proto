@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -89,26 +89,9 @@ def evaluate_case(case: dict[str, Any]) -> ReadDecision:
     return policy.evaluate(record, context)
 
 
-# The secure read pipeline ties the row-hash requirement to the chain
-# profile: under `profile_chain=False`, an absent row_hash is no longer a
-# rejection (it mirrors the sibling `chain_disabled` case, where a signed but
-# unchained record is accepted). The frozen cross-SDK trust fixture predates
-# that and still marks this one case as rejected, so we correct its expectation
-# here rather than mutate the shared `tn.trust-fixtures/v1` contract.
-_EXPECTED_OVERRIDES: dict[str, dict[str, Any]] = {
-    "signed_row_hash_absent_rejected": {
-        "accepted": True,
-        "reasons": [],
-        "resolved_mode": "raise",
-        "writer_authenticated": True,
-        "writer_authorized": True,
-    },
-}
-
-
 @pytest.mark.parametrize("case", READ_POLICY_CASES, ids=lambda case: case["id"])
 def test_read_policy_matrix(case: dict[str, Any]) -> None:
-    expected = _EXPECTED_OVERRIDES.get(case["id"], case["expected"])
+    expected = case["expected"]
     if expected.get("parameter_error"):
         with pytest.raises(ValueError):
             resolve_case(case)
@@ -121,6 +104,22 @@ def test_read_policy_matrix(case: dict[str, Any]) -> None:
     assert decision.reasons == expected.get("reasons", [])
     assert decision.writer_authenticated is expected["writer_authenticated"]
     assert decision.writer_authorized is expected["writer_authorized"]
+
+
+def test_signed_unchained_record_still_requires_its_signed_row_hash() -> None:
+    baseline = next(item for item in READ_POLICY_CASES if item["id"] == "auto_local_signed")
+    context = replace(_context_for(baseline), profile_chain=False)
+    policy = resolve_case(baseline)
+    record = ReadRecordState(
+        record_valid=True, row_hash_present=False, row_hash_valid=False,
+        chain_valid=True, signature_present=True, signature_valid=True,
+        writer_did=context.local_device_did, aad_valid=True,
+        recipient_groups=frozenset({"default"}),
+    )
+    decision = policy.evaluate(record, context)
+    assert decision.accepted is False
+    assert decision.reasons == [ReadRejectReason.ROW_HASH_INVALID]
+    assert decision.writer_authorized is False
 
 
 def test_reject_reasons_have_frozen_wire_values_and_order() -> None:

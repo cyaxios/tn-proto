@@ -1268,16 +1268,32 @@ def _read_policy_matrix(materials: JsonObject) -> JsonObject:
 
     row_hash_absent_input = _read_input(materials, "auto")
     row_hash_absent_input["context"]["profile_chain"] = False
+    row_hash_absent_input["context"]["profile_sign"] = False
     row_hash_absent_input["record"]["row_hash_present"] = False
+    row_hash_absent_input["record"]["row_hash_valid"] = False
+    row_hash_absent_input["record"]["signature_present"] = False
+    row_hash_absent_input["record"]["signature_valid"] = False
     row_hash_absent = _read_case(
         "row_hash_absent_not_required",
         row_hash_absent_input,
+        writer_authenticated=False,
+        writer_authorized=False,
     )
 
     chain_disabled_input = _read_input(materials, "auto")
     chain_disabled_input["context"]["profile_chain"] = False
     chain_disabled_input["record"]["chain_valid"] = False
     chain_disabled = _read_case("chain_disabled", chain_disabled_input)
+    # Vary one scanned fact: even a claimed valid signature cannot authorize
+    # a signed record whose row hash is absent when chaining is disabled.
+    signed_hash_absent = _read_reject(
+        chain_disabled,
+        "signed_row_hash_absent_rejected",
+        ["row_hash_invalid"],
+        lambda value: value["record"].__setitem__("row_hash_present", False),
+        writer_authenticated=True,
+        writer_authorized=False,
+    )
 
     trusted_override_input = copy.deepcopy(foreign_input)
     trusted_override_input["context"]["trusted_writer_dids"] = [
@@ -1311,6 +1327,7 @@ def _read_policy_matrix(materials: JsonObject) -> JsonObject:
         explicit_unsigned,
         allow_unknown,
         row_hash_absent,
+        signed_hash_absent,
         chain_disabled,
         trusted_override,
         disabled_unknown,

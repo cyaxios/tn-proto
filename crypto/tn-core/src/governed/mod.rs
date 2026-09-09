@@ -7,16 +7,24 @@
 
 mod admission;
 mod data;
+mod dataset;
+mod lineage;
 mod object;
 mod policy;
 mod policy_dag;
 mod reader;
 mod revision;
 mod source;
+mod use_context;
 mod writer;
 
-pub use admission::{AdmissionContext, AttachmentContext, ReleaseContext};
+pub use admission::{AdmissionContext, AttachmentContext, OwnedAdmissionContext, ReleaseContext};
 pub use data::DataObject;
+pub use dataset::{
+    ContractBinding, DatasetBinding, DatasetCatalog, DatasetEdition, DatasetEditionDraft,
+    DatasetSelection, EvaluatorArtifactSet, DATASET_EDITION_GROUP, DATASET_EDITION_TYPE,
+};
+pub use lineage::{LineageVerifier, VerifiedLineage};
 pub use object::GovernedObject;
 pub use policy::Governance;
 pub use policy_dag::PolicyDag;
@@ -26,6 +34,7 @@ pub use revision::{
     POLICY_REVISION_TYPE,
 };
 pub use source::SourceReference;
+pub use use_context::UseContext;
 pub use writer::{GovernedDraft, GovernedWriter, PublicationReport};
 
 /// Reserved encrypted group carrying the use contract.

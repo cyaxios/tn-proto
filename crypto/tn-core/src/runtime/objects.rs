@@ -10,7 +10,9 @@ use crate::{DeviceKey, Error, Result};
 
 use super::material::Material;
 use super::{GroupState, ObjectRegisters, Runtime};
-use crate::governed::{AdmissionContext, AttachmentContext, DataObject, ReleaseContext};
+use crate::governed::{
+    AdmissionContext, AttachmentContext, DataObject, DatasetSelection, ReleaseContext, UseContext,
+};
 
 enum Identity<'a> {
     Owned(Box<DeviceKey>),
@@ -142,7 +144,8 @@ impl Objects<'_> {
         self.record(&mut data, "create", "create", "origin");
         Ok(data)
     }
-    /// Verify, admit and open a source directly into a mutable governed object.
+    /// Legacy operation-only receipt into a mutable governed object. Use
+    /// [`Self::receive_for`] for complete use and selected-group admission.
     pub fn receive<I, S, F>(
         &self,
         wire: &str,
@@ -156,6 +159,23 @@ impl Objects<'_> {
         F: FnOnce(&AdmissionContext<'_>) -> Result<bool>,
     {
         self.reader()?.receive(wire, operation, groups, decide)
+    }
+    /// Admit a complete use and optional exact edition before opening selected data.
+    pub fn receive_for<I, S, F>(
+        &self,
+        wire: &str,
+        use_context: &UseContext,
+        groups: I,
+        selection: Option<&DatasetSelection>,
+        decide: F,
+    ) -> Result<DataObject>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        F: FnOnce(&AdmissionContext<'_>) -> Result<bool>,
+    {
+        self.reader()?
+            .receive_for(wire, use_context, groups, selection, decide)
     }
     /// Add an authority-approved policy while retaining the existing policy set.
     pub fn attach<F>(&self, data: &mut DataObject, policy: Governance, decide: F) -> Result<()>
@@ -180,6 +200,24 @@ impl Objects<'_> {
             .writer()?
             .release(data, object_type, purpose, destination, decide)?;
         self.record(data, "release", purpose, destination);
+        Ok(sealed)
+    }
+    /// Decide and sign a release carrying the complete application use.
+    pub fn release_for<F>(
+        &self,
+        data: &mut DataObject,
+        object_type: &str,
+        use_context: &UseContext,
+        destination: &str,
+        decide: F,
+    ) -> Result<GovernedObject>
+    where
+        F: FnOnce(&ReleaseContext<'_>) -> Result<bool>,
+    {
+        let sealed =
+            self.writer()?
+                .release_for(data, object_type, use_context, destination, decide)?;
+        self.record(data, "release", use_context.operation(), destination);
         Ok(sealed)
     }
     /// Choose this service's optional creation and release registers explicitly.

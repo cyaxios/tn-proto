@@ -47,7 +47,7 @@ with tn.Session(Path("agents.md").read_text(encoding="utf-8")) as session:
     data.data["total"] = sum(data.data["counts"])
     del data.data["counts"]
     result = data.release(
-        to="reports", purpose="aggregate",
+        to="reports", use=tn.UseContext("analytics", "research", "aggregate"),
         decide=lambda ctx: (
             ctx.destination == "reports"
             and all(p.matches_contract(policy) for p in ctx.policies)
@@ -67,9 +67,11 @@ loads an existing service identity, policy, and group material. Optional creatio
 and release registers are configured per session through environment variables.
 
 See the [governed workflow guide](GOVERNED_WORKFLOW.md) for receiving sources,
-authority-approved attachment, multiple inputs, snapshots, and service registers.
-Run [the mutable-object example](examples/governed_data.py) for a complete local
-workflow. Native classes and typing stubs are also exported from `tn.governed`.
+signed dataset editions, authority-approved attachment, multiple inputs, snapshots,
+and service registers. Run [the governed workflow](examples/governed_workflow.py)
+for a complete local example. Its [Rust counterpart](../crypto/tn-core/examples/governed_workflow.rs)
+uses the same implementation and exchanges the same signed wire. Native classes
+and typing stubs are also exported from `tn.governed`.
 
 ## Event streams use the same protocol
 

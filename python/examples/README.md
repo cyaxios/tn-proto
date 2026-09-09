@@ -1,5 +1,22 @@
 # Examples
 
+## Governed application workflows
+
+Python calls the canonical Rust object implementation through PyO3.
+
+| File | Demonstrates |
+| --- | --- |
+| [governed_workflow.py](governed_workflow.py) | Create, release, accept for an application and operation, calculate, and release. The [Rust example](../../crypto/tn-core/examples/governed_workflow.rs) performs the same calculation. |
+| [governed_data.py](governed_data.py) | Mutable working data with additive policy, inclusion, and retained signed snapshots. |
+| [governed_sessions.py](governed_sessions.py) | Independent session identities and assigned group material. |
+| [governed_outbox.py](governed_outbox.py) | Retain exact signed replies with business and inbox/outbox transactions. |
+
+Run `python python/examples/governed_workflow.py` from the repository root after
+installing the governed wheel. See the [workflow guide](../GOVERNED_WORKFLOW.md)
+for accepted dataset editions and native ancestry verification.
+
+## Event stream examples
+
 Progressive scenarios that teach the `tn.*` SDK from "hello world" to
 rotation, fan-out, and revocation. Each `ex0*.py` file is self-contained:
 it creates its own ceremony in a temporary directory and tears it down at

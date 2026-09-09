@@ -321,6 +321,17 @@ def test_vectors_cover_downstream_enrollment_and_read_contracts() -> None:
     for case_id in ("row_hash_invalid", "chain_invalid", "row_then_chain_invalid"):
         assert read_by_id[case_id]["expected"]["writer_authorized"] is False
     assert read_by_id["row_hash_absent_not_required"]["expected"]["accepted"] is True
+    unsigned_no_hash = read_by_id["row_hash_absent_not_required"]
+    assert unsigned_no_hash["input"]["context"]["profile_sign"] is False
+    assert unsigned_no_hash["input"]["record"]["signature_present"] is False
+    assert unsigned_no_hash["expected"]["writer_authenticated"] is False
+    assert unsigned_no_hash["expected"]["writer_authorized"] is False
+    signed_no_hash = read_by_id["signed_row_hash_absent_rejected"]
+    assert signed_no_hash["input"]["context"]["profile_chain"] is False
+    assert signed_no_hash["input"]["record"]["signature_present"] is True
+    assert signed_no_hash["expected"]["accepted"] is False
+    assert signed_no_hash["expected"]["reasons"] == ["row_hash_invalid"]
+    assert signed_no_hash["expected"]["writer_authorized"] is False
     assert read_by_id["chain_disabled"]["expected"]["accepted"] is True
     assert read_by_id["explicit_trusted_writers_override"]["expected"]["accepted"] is True
 
