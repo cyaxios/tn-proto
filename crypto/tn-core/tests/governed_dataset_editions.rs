@@ -578,6 +578,73 @@ fn required_extra_altered_and_machine_contracts_are_refused_before_decrypt() {
 }
 
 #[test]
+fn native_callback_editions_explicitly_omit_external_evaluators() {
+    let fixture = Fixture::new();
+    let (dag, first, _) = history(&fixture);
+    let source = fixture.source(fixture.policy(&dag, &first));
+    let draft = DatasetEditionDraft::new(
+        "market.prices",
+        "native-callbacks",
+        &source,
+        ["finance"],
+        vec![ContractBinding::new(&first, "market.prices").unwrap()],
+        vec![approved_use(), later_use()],
+        "grant:approved",
+        vec![],
+    )
+    .unwrap();
+    let object = fixture
+        .writer()
+        .seal(draft.into_draft(fixture.governance()).unwrap())
+        .unwrap();
+    let opened = fixture.open(&object, DATASET_EDITION_GROUP);
+    assert_eq!(
+        opened.groups()[DATASET_EDITION_GROUP]["evaluator_artifacts"],
+        json!([])
+    );
+    let record = DatasetEdition::from_opened(&opened).unwrap();
+    assert!(record.evaluator_artifacts().is_empty());
+    let mut catalog = DatasetCatalog::new();
+    catalog
+        .admit(record.clone(), &dag, |candidate| {
+            Ok(candidate.writer() == fixture.device.did())
+        })
+        .unwrap();
+    let selection = catalog
+        .select("market.prices", "native-callbacks", record.id(), &approved_use())
+        .unwrap();
+    fixture.assert_refused_before_business(&source, &selection, &later_use(), &["finance"]);
+    let mut data = fixture
+        .reader()
+        .receive_for(
+            source.wire(),
+            &approved_use(),
+            ["finance"],
+            Some(&selection),
+            |context| Ok(context.object().writer() == fixture.device.did()),
+        )
+        .unwrap();
+    assert_eq!(fixture.business.count(), 1);
+    assert_eq!(data.dataset_bindings().unwrap(), [selection.binding()]);
+    let released = fixture
+        .writer()
+        .release_for(
+            &mut data, "market.result", &approved_use(), "deepvest", |_| Ok(true),
+        )
+        .unwrap();
+    fixture
+        .reader()
+        .receive_for(
+            released.wire(),
+            &later_use(),
+            ["finance"],
+            None,
+            |context| catalog.accepts(context, &dag),
+        )
+        .unwrap();
+}
+
+#[test]
 fn signed_record_schema_digests_keys_and_cardinality_are_validated() {
     let fixture = Fixture::new();
     let (dag, first, _) = history(&fixture);
@@ -594,7 +661,8 @@ fn signed_record_schema_digests_keys_and_cardinality_are_validated() {
         ("contracts", json!([])),
         ("eligible_uses", json!([])),
         ("grant_ref", json!("\u{0000}")),
-        ("evaluator_artifacts", json!([])),
+        ("evaluator_artifacts", json!(null)),
+        ("evaluator_artifacts", json!({})),
     ] {
         assert!(
             fixture
@@ -604,6 +672,11 @@ fn signed_record_schema_digests_keys_and_cardinality_are_validated() {
         );
     }
     assert!(fixture
+        .rewrite_edition(&record, &fixture.device, |body| {
+            body.as_object_mut().unwrap().remove("evaluator_artifacts");
+        })
+        .is_err());
+    assert!(fixture
         .rewrite_edition(&record, &fixture.device, |body| body
             ["evaluator_artifacts"][0]["wasm_sha256"] =
             json!("A".repeat(64)))
@@ -611,6 +684,36 @@ fn signed_record_schema_digests_keys_and_cardinality_are_validated() {
     assert!(fixture
         .rewrite_edition(&record, &fixture.device, |body| body["eligible_uses"] =
             json!([approved_use(), approved_use()]))
+        .is_err());
+}
+
+#[test]
+fn nonempty_evaluator_artifacts_cover_every_contract_exactly_once() {
+    let fixture = Fixture::new();
+    let (dag, first, second) = history(&fixture);
+    let source = fixture.source(fixture.policy(&dag, &first));
+    let record = fixture.edition("external-evaluation", &source, &[first, second]);
+    assert_eq!(record.evaluator_artifacts().len(), 2);
+    assert!(fixture
+        .rewrite_edition(&record, &fixture.device, |body| {
+            body["evaluator_artifacts"].as_array_mut().unwrap().pop();
+        })
+        .is_err());
+    assert!(fixture
+        .rewrite_edition(&record, &fixture.device, |body| {
+            body["evaluator_artifacts"][1] = body["evaluator_artifacts"][0].clone();
+        })
+        .is_err());
+    assert!(fixture
+        .rewrite_edition(&record, &fixture.device, |body| {
+            body["evaluator_artifacts"][0]["policy_revision"] =
+                json!(format!("sha256:{}", "e".repeat(64)));
+        })
+        .is_err());
+    assert!(fixture
+        .rewrite_edition(&record, &fixture.device, |body| {
+            body["evaluator_artifacts"] = json!(vec![body["evaluator_artifacts"][0].clone(); 257]);
+        })
         .is_err());
 }
 

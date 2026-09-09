@@ -330,7 +330,9 @@ impl EditionBody {
                 "grant reference requires 1 to 2048 bytes without control characters",
             ));
         }
-        bounded_nonempty(&self.evaluator_artifacts, MAX_ITEMS, "evaluator artifacts")?;
+        if self.evaluator_artifacts.len() > MAX_ITEMS {
+            return Err(invalid("evaluator artifacts exceeds 256 entries"));
+        }
         let revisions: BTreeSet<_> = self
             .contracts
             .iter()
@@ -346,7 +348,7 @@ impl EditionBody {
                 ));
             }
         }
-        if artifacts != revisions {
+        if !artifacts.is_empty() && artifacts != revisions {
             return Err(invalid(
                 "every required contract needs exactly one evaluator artifact set",
             ));
@@ -503,7 +505,9 @@ impl DatasetEdition {
     pub fn grant_ref(&self) -> &str {
         &self.body.grant_ref
     }
-    /// Per-revision artifact digests to verify before evaluator loading.
+    /// Per-revision artifact digests to verify before external evaluator loading.
+    /// An explicitly empty list supports consumers that use native callbacks.
+    /// A nonempty list covers every required contract revision exactly once.
     pub fn evaluator_artifacts(&self) -> &[EvaluatorArtifactSet] {
         &self.body.evaluator_artifacts
     }
