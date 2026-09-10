@@ -4,15 +4,15 @@ use serde_json::{json, Value};
 use tn_proto::{ReadOptions, Tn};
 
 #[test]
-fn default_read_verifies_and_flags_valid_entries() -> tn_proto::Result<()> {
+fn verify_true_flags_valid_entries() -> tn_proto::Result<()> {
     let tn = Tn::ephemeral()?;
     tn.info("verify.valid", json!({ "marker": "valid-row" }))?;
 
-    // The automatic secure default performs full verification and attaches
-    // the validity metadata; no explicit flag is required anymore.
+    // `verify: true` performs full verification and attaches the validity
+    // metadata. The default read no longer verifies.
     let entries = tn.read(ReadOptions {
         all_runs: true,
-        ..ReadOptions::default()
+        verify: true,
     })?;
     let entry = common::find_event(&entries, "verify.valid");
     assert_eq!(common::valid_flags(entry), (true, true, true));
@@ -29,7 +29,7 @@ fn default_read_verifies_and_flags_valid_entries() -> tn_proto::Result<()> {
 }
 
 #[test]
-fn default_read_raises_on_tampered_rows() -> tn_proto::Result<()> {
+fn verify_true_raises_on_tampered_rows() -> tn_proto::Result<()> {
     let tn = Tn::ephemeral()?;
     tn.info("verify.original", json!({ "marker": "tamper-row" }))?;
 
@@ -44,9 +44,9 @@ fn default_read_raises_on_tampered_rows() -> tn_proto::Result<()> {
     let error = tn
         .read(ReadOptions {
             all_runs: true,
-            ..ReadOptions::default()
+            verify: true,
         })
-        .expect_err("auto verification must reject the tampered row");
+        .expect_err("verification must reject the tampered row");
     assert!(error.to_string().contains("row_hash_invalid"), "{error}");
 
     Ok(())

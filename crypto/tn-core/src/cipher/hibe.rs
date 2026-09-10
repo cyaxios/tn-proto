@@ -21,6 +21,10 @@ use crate::{Error, Result};
 pub struct HibePlaceholder;
 
 impl super::GroupCipher for HibePlaceholder {
+    fn publication_capability(&self) -> super::PublicationCapability {
+        super::PublicationCapability::Unsupported
+    }
+
     fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>> {
         Err(Error::NotImplemented(
             "HIBE support is not built into this tn-core (the `hibe` feature is off)",
@@ -312,6 +316,18 @@ mod real {
     }
 
     impl crate::cipher::GroupCipher for HibeCipher {
+        fn publication_capability(&self) -> crate::cipher::PublicationCapability {
+            // HIBE publication uses public parameters, not a reader or master
+            // secret. The configured identity must fit those parameters.
+            if validate_identity_path(&self.id_path)
+                .is_ok_and(|identity| identity.depth() <= self.pp.max_depth())
+            {
+                crate::cipher::PublicationCapability::Supported
+            } else {
+                crate::cipher::PublicationCapability::Unsupported
+            }
+        }
+
         fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
             self.encrypt_with_aad(plaintext, &[])
         }

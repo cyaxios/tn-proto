@@ -35,6 +35,8 @@ sys.path.insert(0, str(HERE.parent))
 import tn
 import tn.reader
 from tn import _hibe
+from tn.security_audit import TnSecurityWarning
+from tn.signing import DeviceKey
 
 
 def _hibe_available() -> bool:
@@ -86,7 +88,14 @@ def main() -> int:
         tn.init(a_yaml, log_path=a_log, cipher="hibe")
         assert tn.current_config().cipher_name == "hibe"
         tn.info("oba.filed", note="quarterly OBA", aad={"policy": "finra-oba", "v": "1"})
-        tn.admin.grant_reader("default", reader_did="did:key:z6Mk-aad-r1", out_path=kit)
+        reader_did = DeviceKey.generate().device_identity
+        with pytest.warns(TnSecurityWarning):
+            tn.admin.grant_reader(
+                "default",
+                reader_did=reader_did,
+                out_path=kit,
+                unsafe_plaintext=True,
+            )
         tn.flush_and_close()
 
         tn.init(a_yaml, log_path=a_log, cipher="hibe")

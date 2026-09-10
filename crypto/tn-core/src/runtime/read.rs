@@ -30,24 +30,25 @@ pub(crate) use projection::{apply_schema_defaults, merge_envelope};
 pub use source::{canonical_file_source_id, canonical_source_id, file_source_id};
 
 impl Runtime {
-    /// Read verified current-run entries in the flat SDK shape.
+    /// Read current-run entries in the flat SDK shape with no verification —
+    /// a plain read returns the values. Use [`Runtime::secure_read`] to verify.
     pub fn read(&self) -> Result<Vec<FlatEntry>> {
         Ok(self
-            .read_verified_flat()?
+            .read_flat()?
             .into_iter()
             .filter(|entry| flat_in_current_run(entry, &self.run_id))
             .collect())
     }
 
-    /// Read verified entries from every run in the flat SDK shape.
+    /// Read entries from every run in the flat SDK shape with no verification.
     pub fn read_all_runs(&self) -> Result<Vec<FlatEntry>> {
-        self.read_verified_flat()
+        self.read_flat()
     }
 
-    fn read_verified_flat(&self) -> Result<Vec<FlatEntry>> {
+    fn read_flat(&self) -> Result<Vec<FlatEntry>> {
         let options = SecureReadOptions::default();
         let context = self.read_context_for_path(&self.log_path, None);
-        let policy = self.default_read_policy(VerifyMode::Auto)?;
+        let policy = self.default_read_policy(VerifyMode::Disabled)?;
         let mut entries = self
             .read_with_policy(&options, &policy, &context, None)?
             .entries;
@@ -256,15 +257,22 @@ fn envelope_string<'a>(entry: &'a ReadEntry, name: &str) -> &'a str {
 }
 
 pub(super) fn read_rejection_error(entry: &ReadEntry, decision: &ReadDecision) -> Error {
-    let reason = decision
-        .first_reason()
-        .map_or("record_invalid", ReadRejectReason::as_str);
-    Error::Malformed {
-        kind: "verification",
-        reason: format!(
-            "tn.read_with_policy: envelope event_type={:?} event_id={:?} rejected: {reason}",
-            envelope_string(entry, "event_type"),
-            envelope_string(entry, "event_id")
-        ),
+    let failed_checks = collect_reject_reasons(decision);
+    Error::ReadRejected {
+        failed_checks,
+        event_type: envelope_string(entry, "event_type").to_string(),
     }
+}
+
+/// Stable snake-case reject reasons for a rejected decision, never empty
+/// (an unexplained rejection reports `record_invalid`).
+fn collect_reject_reasons(decision: &ReadDecision) -> Vec<String> {
+    if decision.reasons.is_empty() {
+        return vec![ReadRejectReason::RecordInvalid.as_str().to_string()];
+    }
+    decision
+        .reasons
+        .iter()
+        .map(|&reason| reason.as_str().to_string())
+        .collect()
 }

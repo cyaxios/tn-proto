@@ -87,9 +87,19 @@ def read_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return SimpleNamespace(device=device, cfg=cfg, rows=rows)
 
 
-def test_read_default_is_auto_and_preserves_iterator_and_entry_shape(read_harness) -> None:
+def test_read_default_is_no_verify_and_preserves_iterator_and_entry_shape(read_harness) -> None:
     parameter = inspect.signature(tn.read).parameters["verify"]
-    assert parameter.default == "auto"
+    assert parameter.default is False
+
+    # New default: a plain read performs NO verification. Even a row whose
+    # signature / row_hash / chain are all invalid is decrypted and returned
+    # unchanged — the default never enforces the read policy.
+    read_harness.rows[:] = [
+        _triple(
+            read_harness.device,
+            valid={"signature": False, "row_hash": False, "chain": False},
+        ),
+    ]
 
     result = tn.read()
     assert isinstance(result, _ReadIterator)
@@ -103,7 +113,7 @@ def test_read_default_is_auto_and_preserves_iterator_and_entry_shape(read_harnes
     assert result.stats.yielded == 1
 
 
-def test_default_raise_uses_stable_primary_and_full_reasons(read_harness) -> None:
+def test_raise_uses_stable_primary_and_full_reasons(read_harness) -> None:
     read_harness.rows[:] = [
         _triple(
             read_harness.device,
@@ -111,7 +121,7 @@ def test_default_raise_uses_stable_primary_and_full_reasons(read_harness) -> Non
         ),
     ]
 
-    result = tn.read()
+    result = tn.read(verify="raise")
     with pytest.raises(VerifyError) as raised:
         list(result)
 
@@ -174,6 +184,7 @@ def test_invalid_present_signature_is_not_excused_by_unauthenticated_override(
     with pytest.raises(VerifyError) as raised:
         list(
             tn.read(
+                verify="raise",
                 require_signature=False,
                 allow_unauthenticated=True,
             ),
@@ -193,7 +204,7 @@ def test_absent_signature_under_signed_local_profile_is_signature_required(
     ]
 
     with pytest.raises(VerifyError) as raised:
-        list(tn.read())
+        list(tn.read(verify="raise"))
     assert raised.value.reason == "signature_required"
     assert raised.value.reasons == ["signature_required"]
 
@@ -295,5 +306,5 @@ def test_security_rejection_happens_before_group_decrypt(
     monkeypatch.setattr(tn, "current_config", lambda: cfg)
 
     with pytest.raises(VerifyError):
-        list(tn.read())
+        list(tn.read(verify="raise"))
     assert cipher.calls == 0

@@ -268,6 +268,45 @@ function _checkVerifyKwarg(v: unknown): asserts v is VerifyMode {
   throw new Error(`verify must be false | true | 'skip' | 'raise'; got ${JSON.stringify(v)}`);
 }
 
+// The core's ReadReject reasons are snake-case-with-suffix (`signature_invalid`,
+// `row_hash_invalid`, `chain_invalid`, `signature_required`); the TS reader and
+// every TS caller speak the shorter `signature` / `row_hash` / `chain` names
+// (see `_finishReadRow`). Map the core's vocabulary onto the TS one so a raise
+// gate throws the SAME `failed_checks` the pure-TS path would. Reasons without a
+// short form (`writer_untrusted`, `aad_invalid`, `not_a_recipient`) pass through.
+const _CORE_REJECT_REASON_TO_TS: Record<string, string> = {
+  signature_invalid: "signature",
+  signature_required: "signature",
+  row_hash_invalid: "row_hash",
+  chain_invalid: "chain",
+};
+
+// Rebuild a VerifyError from the wasm core's ReadRejected error. The wasm
+// binding surfaces the Rust `Error` Display: `entry event="<type>" rejected:
+// <check>, <check>`. Parsing the event type + reject reasons back out lets an
+// enforcing read throw the same typed VerifyError the pure-TS path throws
+// rather than a raw wasm Error. Sequence is 0 — ReadRejected carries only the
+// checks and event type, matching the rust-sdk + FFI, which also promote it
+// with sequence 0.
+function _verifyErrorFromWasm(err: unknown): VerifyError {
+  const msg = err instanceof Error ? err.message : String(err);
+  const m = /entry event=(?:"([^"]*)"|(\S+)) rejected:\s*(.*)$/.exec(msg);
+  if (m) {
+    const eventType = m[1] ?? m[2] ?? "";
+    const reasons = [
+      ...new Set(
+        (m[3] ?? "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((r) => _CORE_REJECT_REASON_TO_TS[r] ?? r),
+      ),
+    ];
+    return new VerifyError(0, eventType, reasons.length > 0 ? reasons : ["verify"]);
+  }
+  return new VerifyError(0, "", ["verify"]);
+}
+
 /** Sentinel receipt returned when a level-filtered emit short-circuits. */
 function _nullReceipt(): EmitReceipt {
   return {
@@ -1475,6 +1514,22 @@ export class Tn {
       }
     }.call(this);
 
+    // Writer-trust gate for enforcing local reads. The pure-TS reader above
+    // checks signature/row_hash/chain but not the writer-trust allowlist; the
+    // wasm core's secureRead is the single source of truth for that. Under
+    // `verify: true | "raise"` a row an untrusted writer authored (or any
+    // tampered row) fails the whole read closed here, before the first yield.
+    // Recipient/foreign-log reads cross publishers and carry their own
+    // verify handling, so the local-only gate does not apply to them.
+    if (!usingRecipient && (verify === true || verify === "raise")) {
+      try {
+        rt.secureRead("raise");
+      } catch (err) {
+        throw _verifyErrorFromWasm(err);
+      }
+    }
+
+    const untrustedWriters = usingRecipient ? null : this._untrustedWriters(verify);
     for (const r of safeIter) {
       const out = this._finishReadRow(r, usingRecipient, {
         allRuns,
@@ -1483,6 +1538,7 @@ export class Tn {
         where,
         selector,
         filter,
+        untrustedWriters,
       });
       if (out !== undefined) yield out;
     }
@@ -1536,6 +1592,19 @@ export class Tn {
       source = this._rt.readAsync(opts.log, expectGenesis);
     }
 
+    // Writer-trust gate for enforcing local reads — see `read()` for the
+    // rationale. The wasm core's secureRead owns the writer-trust allowlist;
+    // under `verify: true | "raise"` an untrusted-writer (or tampered) row
+    // fails the whole read closed before the first yield.
+    if (!usingRecipient && (verify === true || verify === "raise")) {
+      try {
+        this._rt.secureRead("raise");
+      } catch (err) {
+        throw _verifyErrorFromWasm(err);
+      }
+    }
+
+    const untrustedWriters = usingRecipient ? null : this._untrustedWriters(verify);
     for await (const r of source) {
       const out = this._finishReadRow(r, usingRecipient, {
         allRuns,
@@ -1544,6 +1613,7 @@ export class Tn {
         where,
         selector,
         filter,
+        untrustedWriters,
       });
       if (out !== undefined) yield out;
     }
@@ -1600,6 +1670,34 @@ export class Tn {
     return typeof envRid === "string" && envRid === this._runId;
   }
 
+  /** The writer DIDs an enforcing `verify:"skip"` local read must drop rows
+   *  from. The wasm core's `secureRead("forensic")` keeps every row and marks
+   *  the ones outside the writer-trust allowlist with `writer_untrusted`; this
+   *  collects their `device_identity`. Writer-trust is a per-DID property in the
+   *  core (`trusted_writers.contains(did)`), so a DID-keyed set is exact and
+   *  survives the main/admin log merge the pure-TS reader does. Returns null for
+   *  every non-skip mode — `true`/`"raise"` use the fail-closed pre-gate, and a
+   *  no-verify read enforces nothing. Degrades to null (sig/chain-only skip) if
+   *  the core is unavailable rather than crashing a lenient read. */
+  private _untrustedWriters(verify: ReadOptions["verify"]): Set<string> | null {
+    if (verify !== "skip") return null;
+    let rows: Array<Record<string, unknown>>;
+    try {
+      rows = this._rt.secureRead("forensic");
+    } catch {
+      return null;
+    }
+    const untrusted = new Set<string>();
+    for (const row of rows) {
+      const reasons = row["_invalid_reasons"];
+      const did = row["device_identity"];
+      if (Array.isArray(reasons) && reasons.includes("writer_untrusted") && typeof did === "string") {
+        untrusted.add(did);
+      }
+    }
+    return untrusted;
+  }
+
   /** Shared per-row post-processing for `read` / `readAsync`. Everything after a
    *  row is decrypted is synchronous and identical: run-id filter, selector +
    *  filter gate, the verify policy (raise / skip / off), and raw-vs-Entry
@@ -1615,6 +1713,7 @@ export class Tn {
       where: ReadOptions["where"];
       selector: ReadOptions["selector"];
       filter: ReadOptions["filter"];
+      untrustedWriters?: Set<string> | null;
     },
   ): Entry | Record<string, unknown> | undefined {
     // run_id filter — only on local reads. Recipient-mode reads cross
@@ -1626,12 +1725,22 @@ export class Tn {
     if (!_passesSelectorFilter(r.envelope, o.selector, o.filter)) return undefined;
 
     const v = r.valid;
-    const allValid = Boolean(v.signature) && Boolean(v.rowHash) && Boolean(v.chain);
+    // Writer-trust for `verify:"skip"`: `o.untrustedWriters` holds the DIDs the
+    // wasm core rejects as outside the allowlist (own DID + trust.writers +
+    // verified publishers). The pure-TS reader has no allowlist of its own, so
+    // it drops rows those DIDs authored. `raise`/`true` never populate the set
+    // (their fail-closed pre-gate already ran), so this term is skip-only.
+    const writerUntrusted =
+      o.untrustedWriters != null &&
+      o.untrustedWriters.has(String(r.envelope["device_identity"] ?? ""));
+    const allValid =
+      Boolean(v.signature) && Boolean(v.rowHash) && Boolean(v.chain) && !writerUntrusted;
     if (!allValid && o.verify !== false) {
       const reasons: string[] = [];
       if (!v.signature) reasons.push("signature");
       if (!v.rowHash) reasons.push("row_hash");
       if (!v.chain) reasons.push("chain");
+      if (writerUntrusted) reasons.push("writer_untrusted");
       if (o.verify === true || o.verify === "raise") {
         throw new VerifyError(
           Number(r.envelope["sequence"] ?? 0),

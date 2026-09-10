@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { AdminNamespace } from "../src/admin/index.js";
+import { DeviceKey } from "../src/core/signing.js";
 import { PkgNamespace } from "../src/pkg/index.js";
 import { readAsRecipientAsync } from "../src/read_as_recipient.js";
 import { NodeRuntime } from "../src/runtime/node_runtime.js";
@@ -277,7 +278,7 @@ test("raw JWE registration is explicit, warned, audited, and unverified", async 
   const dir = mkdtempSync(join(tmpdir(), "tn-jwe-raw-"));
   const rt = NodeRuntime.init(join(dir, "tn.yaml"), { cipher: "jwe" });
   const admin = new AdminNamespace(rt);
-  const rawDid = "did:key:z6MkRawUnverifiedReader00000000000000000000";
+  const rawDid = DeviceKey.generate().did;
   const rawPub = new Uint8Array(32).fill(7);
   const recipientsFile = join(rt.config.keystorePath, "default.jwe.recipients");
 

@@ -247,7 +247,9 @@ test("reader grants require proofs, seal by default, and gate ancestor paths", a
   const challenge = await adminAuth.issueHibeReaderChallenge(GROUP, rtReader.did, 5 * 60_000);
   assert.equal(challenge.publisher_did, rtAuth.did);
   assert.equal(challenge.group, GROUP);
-  const proof = await createHibeReaderProof(challenge, rtReader.keystore.device);
+  const proof = await createHibeReaderProof(challenge, rtReader.keystore.device, {
+    expectedAuthorityDid: rtAuth.did,
+  });
   assert.equal(proof.purpose, "hibe-reader");
   assert.equal(proof.binding["delivery"], "recipient-seal-v1");
 
@@ -287,7 +289,9 @@ test("reader grants require proofs, seal by default, and gate ancestor paths", a
   const otherReaderDir = mkdtempSync(join(tmpdir(), "tn-hibe-other-"));
   const rtOther = NodeRuntime.init(join(otherReaderDir, "tn.yaml"));
   const otherChallenge = await adminAuth.issueHibeReaderChallenge(GROUP, rtOther.did, 5 * 60_000);
-  const otherProof = await createHibeReaderProof(otherChallenge, rtOther.keystore.device);
+  const otherProof = await createHibeReaderProof(otherChallenge, rtOther.keystore.device, {
+    expectedAuthorityDid: rtAuth.did,
+  });
   assert.equal(
     await reasonOfAsync(
       adminAuth.grantReader(GROUP, {
@@ -303,6 +307,7 @@ test("reader grants require proofs, seal by default, and gate ancestor paths", a
   const ancestorProofDenied = await createHibeReaderProof(
     await adminAuth.issueHibeReaderChallenge(GROUP, rtReader.did, 5 * 60_000),
     rtReader.keystore.device,
+    { expectedAuthorityDid: rtAuth.did },
   );
   await assert.rejects(
     () =>
@@ -317,6 +322,7 @@ test("reader grants require proofs, seal by default, and gate ancestor paths", a
   const ancestorProof = await createHibeReaderProof(
     await adminAuth.issueHibeReaderChallenge(GROUP, rtReader.did, 5 * 60_000),
     rtReader.keystore.device,
+    { expectedAuthorityDid: rtAuth.did },
   );
   const subtree = await adminAuth.grantReader(GROUP, {
     readerDid: rtReader.did,
@@ -342,44 +348,52 @@ test("plaintext grant delivery is a hard error unless unsafePlaintext is explici
     const readerDir = mkdtempSync(join(tmpdir(), "tn-hibe-unsafe-"));
     const rtReader = NodeRuntime.init(join(readerDir, "tn.yaml"));
 
-    // Compatibility: a proof-less grant to a REAL resolvable DID still seals,
-    // but is recorded as an unverified key binding.
-    const compat = await adminAuth.grantReader(GROUP, {
-      readerDid: rtReader.did,
-      outPath: join(readerDir, "compat.tnpkg"),
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(compat.verified, false);
-    assert.equal(compat.sealed, true);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0]!.message, /"operation":"hibe_grant"/);
-    assert.match(warnings[0]!.message, /"relaxations":\["unverified_key_binding"\]/);
-
-    // There is NO implicit plaintext fallback: a grant that cannot be
-    // recipient-sealed (synthetic DID with no embedded key) is a hard error
-    // that writes no kit file and emits no warning/audit.
-    const syntheticDid = "did:key:z6Mk-plaintext-gate-reader";
-    const deniedKit = join(readerDir, "denied.tnpkg");
+    // The old proof-less compatibility seal path was removed. A proof-less
+    // grant to a REAL resolvable did:key with no unsafePlaintext flag now
+    // fails closed as an untrusted principal: no kit is written and no
+    // warning is emitted.
+    const prooflessKit = join(readerDir, "proofless.tnpkg");
     assert.equal(
       await reasonOfAsync(
-        adminAuth.grantReader(GROUP, { readerDid: syntheticDid, outPath: deniedKit }),
+        adminAuth.grantReader(GROUP, { readerDid: rtReader.did, outPath: prooflessKit }),
       ),
-      "binding_invalid",
+      "untrusted_principal",
     );
-    assert.equal(existsSync(deniedKit), false, "a rejected grant must not write a kit file");
-    // A did-less grant is the same hard error.
-    await assert.rejects(
-      () => adminAuth.grantReader(GROUP, { outPath: join(readerDir, "didless.tnpkg") }),
-      (err: unknown) => err instanceof TrustError && err.reason === "binding_invalid",
-    );
-    assert.equal(existsSync(join(readerDir, "didless.tnpkg")), false);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(warnings.length, 1, "a rejected grant must not warn");
+    assert.equal(existsSync(prooflessKit), false, "a rejected grant must not write a kit file");
 
-    // unsafePlaintext: true is the only plaintext path — labeled, warned,
-    // audited, and available for exactly the DID that just failed closed.
+    // A malformed/synthetic DID is a did_invalid hard error even when the
+    // caller opts into unsafePlaintext — the DID must be a complete real
+    // Ed25519 did:key before any relaxation applies.
+    const syntheticKit = join(readerDir, "synthetic.tnpkg");
+    assert.equal(
+      await reasonOfAsync(
+        adminAuth.grantReader(GROUP, {
+          readerDid: "did:key:z6Mk-not-a-real-key",
+          outPath: syntheticKit,
+          unsafePlaintext: true,
+        }),
+      ),
+      "did_invalid",
+    );
+    assert.equal(existsSync(syntheticKit), false, "a rejected grant must not write a kit file");
+
+    // A did-less grant is an untrusted principal — there is no anonymous
+    // reader to seal or label a bearer kit to.
+    const didlessKit = join(readerDir, "didless.tnpkg");
+    assert.equal(
+      await reasonOfAsync(adminAuth.grantReader(GROUP, { outPath: didlessKit })),
+      "untrusted_principal",
+    );
+    assert.equal(existsSync(didlessKit), false, "a rejected grant must not write a kit file");
+
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(warnings.length, 0, "rejected grants must not warn");
+    assert.equal(auditOperations(rtAuth).length, 0, "rejected grants must not audit");
+
+    // unsafePlaintext: true against a real did:key is the only plaintext
+    // path — the kit is delivered unsealed, labeled, warned, and audited.
     const plaintext = await adminAuth.grantReader(GROUP, {
-      readerDid: syntheticDid,
+      readerDid: rtReader.did,
       outPath: join(readerDir, "plaintext.tnpkg"),
       unsafePlaintext: true,
     });
@@ -389,11 +403,12 @@ test("plaintext grant delivery is a hard error unless unsafePlaintext is explici
     const state = (plainKit.manifest.state ?? {}) as Record<string, unknown>;
     assert.equal(state["body_encryption"], undefined, "unsafePlaintext must not seal");
     assert.equal(state["unsafe_plaintext_delivery"], true, "plaintext kit must be labeled");
-    assert.equal(warnings.length, 2);
-    assert.match(warnings[1]!.message, /plaintext_bearer_delivery/);
+    assert.equal(warnings.length, 1, "the single unsafe grant emits exactly one warning");
+    assert.match(warnings[0]!.message, /plaintext_bearer_delivery/);
+    assert.match(warnings[0]!.message, /unverified_key_binding/);
 
     const audits = auditOperations(rtAuth);
-    assert.equal(audits.length, 2, "each unsafe grant emits exactly one audit event");
+    assert.equal(audits.length, 1, "the single unsafe grant emits exactly one audit event");
   } finally {
     process.removeListener("warning", handler);
   }

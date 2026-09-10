@@ -941,7 +941,7 @@ impl Admin<'_> {
 
 - [ ] **Step 1: Add failing shared-vector tests**
 
-Load `../../tests/fixtures/trust/v1/did_key_vectors.json`, `signed_statements.json`, `enrollment_lifecycle.json`, and `state_transitions.json`. Reconstruct canonical bytes independently and assert exact decision/reason for every key binding, challenge, and accepted response. At the Rust SDK surface run challenge, offer, atomic approval/reconcile, accepted response, and artifact absorption/interop; retain the established documented native JWE `NotImplemented` sentinel. Run native HIBE assertion pin/update, fail-closed grant, unsafe warning/audit capture, reader challenge/proof, signed path rotation, and ancestor opt-in. Python, TypeScript, and C# managed JWE tests own first decrypt.
+Load `../../tests/fixtures/trust/v1/did_key_vectors.json`, `signed_statements.json`, `enrollment_lifecycle.json`, and `state_transitions.json`. Reconstruct canonical bytes independently and assert exact decision/reason for every key binding, challenge, and accepted response. At the Rust SDK surface run challenge, offer, atomic approval/reconcile, accepted response, artifact absorption/interop, and native JWE first decrypt. Run native HIBE assertion pin/update, fail-closed grant, unsafe warning/audit capture, reader challenge/proof, signed path rotation, and ancestor opt-in. Python, Rust, and C# fixture tests prove the shared JWE wire.
 
 - [ ] **Step 2: Run RED**
 

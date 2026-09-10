@@ -1,5 +1,6 @@
-//! [`Runtime`] is the crate's primary interface: the front door behind
-//! the `tn.*` SDK verbs and the `tn` CLI.
+//! [`Runtime`] composes TN event streams, administration, and package workflows.
+//! [`Runtime::objects`] exposes governed objects using the same loaded groups;
+//! [`Objects::open`] loads object material directly.
 //!
 //! A `Runtime` is a stateful composition of one ceremony's config,
 //! device identity, per-group ciphers, the per-event_type hash chain,
@@ -47,12 +48,17 @@ mod cipher_build;
 mod emit;
 mod init;
 mod log_rotation;
+mod material;
+mod objects;
+mod object_registers;
 mod read;
 mod seal;
 mod types;
 mod util;
 
 pub use admin::{EnsureGroupResult, GrantReaderResult, RotateIdPathResult};
+pub use objects::Objects;
+pub use object_registers::ObjectRegisters;
 pub use seal::{unseal_as_recipient, SealOptions, SealedGroupInfo, UnsealOptions, UnsealOutcome};
 pub use types::{
     AdminCeremony, AdminCoupon, AdminEnrolment, AdminGroupRecord, AdminRecipientRecord,
@@ -81,7 +87,7 @@ pub(crate) struct GroupState {
     pub(crate) aad_default: serde_json::Map<String, serde_json::Value>,
 }
 
-/// The crate's primary interface: one stateful runtime per ceremony.
+/// One stateful event and administration runtime per ceremony.
 ///
 /// A `Runtime` ties together a ceremony's loaded config, device
 /// identity, per-group ciphers, the per-event_type hash chain, and an

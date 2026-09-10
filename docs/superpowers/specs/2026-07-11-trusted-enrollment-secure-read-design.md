@@ -712,12 +712,11 @@ registration, HIBE assertion pin/update, and fail-closed HIBE grant controls.
 Cross-SDK lifecycle tests rotate producer/consumer roles so the complete JWE
 ceremony and first decrypt do not depend on one language's private state format.
 
-The established JWE architecture remains library-per-language and outside the
-Rust native runtime/wasm cipher dispatch. Python, TypeScript, and C#'s managed
-JWE layer participate in first-decrypt tests. Rust participates in canonical
-statement, package, replay/epoch, approval, and enrollment-artifact interop but
-keeps its documented JWE runtime `NotImplemented` sentinel; this milestone does
-not add a hand-rolled JOSE implementation to `tn-core`.
+The enrollment architecture remains language-neutral. Python and TypeScript use
+their JOSE libraries, C# provides a managed reader fallback, and Rust native
+builds implement the fixed RFC 7516 profile described in `JWE-cipher-spec.md`.
+The wasm cipher dispatch continues to use the TypeScript JOSE path. All native
+implementations participate in first-decrypt interoperability tests.
 
 ## Testing strategy
 

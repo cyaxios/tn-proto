@@ -22,6 +22,7 @@ sys.path.insert(0, str(HERE.parent))
 import tn
 import tn.reader
 from tn import _hibe
+from tn.cipher import HibeGroupCipher
 from tn.recipient_seal import recipient_key_is_resolvable
 
 
@@ -41,7 +42,7 @@ def part1_key_model() -> None:
 
     # An authority runs Setup once. It produces a keypair for the WHOLE
     # system: one public master key (mpk) and one master secret (msk).
-    mpk, msk = _hibe.setup(2)  # max_depth=2: paths up to 2 labels deep
+    mpk, msk = _hibe.setup(3)  # max_depth=3: paths up to 3 labels deep
     print(f"mpk (master public key, SHAREABLE) : {h(mpk)}")
     print(f"msk (master secret, AUTHORITY ONLY): {h(msk)}")
     print(
@@ -114,7 +115,8 @@ def part3_product_workflow() -> None:
     # Alice creates her device identity first and authenticates this complete
     # Ed25519 did:key to the authority out of band.
     tn.init(reader_yaml, log_path=reader_log)
-    alice_did = tn.current_config().device.device_identity
+    reader_cfg = tn.current_config()
+    alice_did = reader_cfg.device.device_identity
     assert recipient_key_is_resolvable(alice_did)
     tn.flush_and_close()
 
@@ -123,6 +125,13 @@ def part3_product_workflow() -> None:
     #    a decryption root.
     tn.init(authority_yaml, log_path=authority_log, cipher="hibe")
     cfg = tn.current_config()
+    cfg.groups["default"].cipher = HibeGroupCipher.create(
+        cfg.keystore,
+        "default",
+        id_path="org/fraud/case-17",
+        max_depth=3,
+    )
+    tn.admin._reload_native_group_cipher("default")
     print(f"authority ceremony cipher: {cfg.cipher_name}")
     keyfiles = sorted(p.name for p in cfg.keystore.glob("default.hibe.*"))
     print(f"key files written: {keyfiles}")
@@ -132,10 +141,30 @@ def part3_product_workflow() -> None:
     tn.info("decision.recorded", subject="loan-4822", outcome="declined")
     print("logged 2 entries under the 'default' hibe group")
 
+    authority_assertion = tn.admin.issue_authority_assertion(
+        "default",
+        audience_did=alice_did,
+        cfg=cfg,
+    )
+    assert authority_assertion.binding["max_depth"] == 3
+    assert authority_assertion.binding["id_path"] == "org/fraud/case-17"
+    print("issued a writer-scoped signed authority assertion for max_depth=3")
+
     # 3. Grant a reader. This mints their key and packages it as a .tnpkg
     #    recipient-sealed kit. The HIBE sk inside remains a bearer capability.
     kit = ws / "alice.tnpkg"
-    tn.admin.grant_reader("default", reader_did=alice_did, out_path=kit)
+    challenge = tn.admin.issue_hibe_reader_challenge("default", alice_did, cfg=cfg)
+    proof = tn.admin.create_hibe_reader_proof(
+        challenge,
+        expected_authority_did=cfg.device.device_identity,
+        cfg=reader_cfg,
+    )
+    tn.admin.grant_reader(
+        "default",
+        reader_did=alice_did,
+        out_path=kit,
+        proof=proof,
+    )
     print(f"granted reader; kit written to: {kit.name}")
 
     import zipfile
@@ -176,22 +205,45 @@ def part4_remove_reader() -> None:
     alice_yaml = ws / "alice" / "tn.yaml"
     alice_log = ws / "alice" / "log.ndjson"
     tn.init(alice_yaml, log_path=alice_log)
-    alice_did = tn.current_config().device.device_identity
+    alice_cfg = tn.current_config()
+    alice_did = alice_cfg.device.device_identity
     assert recipient_key_is_resolvable(alice_did)
     tn.flush_and_close()
 
     bob_yaml = ws / "bob" / "tn.yaml"
     bob_log = ws / "bob" / "log.ndjson"
     tn.init(bob_yaml, log_path=bob_log)
-    bob_did = tn.current_config().device.device_identity
+    bob_cfg = tn.current_config()
+    bob_did = bob_cfg.device.device_identity
     assert recipient_key_is_resolvable(bob_did)
     tn.flush_and_close()
 
     tn.init(a_yaml, log_path=a_log, cipher="hibe")
+    authority_cfg = tn.current_config()
     tn.info("memo", text="visible to both readers")
     alice_kit, bob_kit = ws / "alice.tnpkg", ws / "bob.tnpkg"
-    tn.admin.grant_reader("default", reader_did=alice_did, out_path=alice_kit)
-    tn.admin.grant_reader("default", reader_did=bob_did, out_path=bob_kit)
+    alice_challenge = tn.admin.issue_hibe_reader_challenge(
+        "default", alice_did, cfg=authority_cfg
+    )
+    alice_proof = tn.admin.create_hibe_reader_proof(
+        alice_challenge,
+        expected_authority_did=authority_cfg.device.device_identity,
+        cfg=alice_cfg,
+    )
+    bob_challenge = tn.admin.issue_hibe_reader_challenge(
+        "default", bob_did, cfg=authority_cfg
+    )
+    bob_proof = tn.admin.create_hibe_reader_proof(
+        bob_challenge,
+        expected_authority_did=authority_cfg.device.device_identity,
+        cfg=bob_cfg,
+    )
+    tn.admin.grant_reader(
+        "default", reader_did=alice_did, out_path=alice_kit, proof=alice_proof
+    )
+    tn.admin.grant_reader(
+        "default", reader_did=bob_did, out_path=bob_kit, proof=bob_proof
+    )
     print("granted alice and bob")
 
     # Remove bob. The path rotates and every SURVIVOR gets a re-issued kit.

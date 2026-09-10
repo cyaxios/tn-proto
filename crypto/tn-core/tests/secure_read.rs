@@ -112,7 +112,7 @@ fn secure_read_raise_returns_err_on_first_failure() {
         on_invalid: OnInvalid::Raise,
         log_path: None,
     });
-    assert!(matches!(res, Err(Error::Malformed { .. })));
+    assert!(matches!(res, Err(Error::ReadRejected { .. })));
 }
 
 #[test]
@@ -230,10 +230,10 @@ fn secure_read_explicit_foreign_btn_rejects_untrusted_writer() {
     assert!(
         matches!(
             error,
-            Error::Malformed {
-                kind: "verification",
-                ref reason,
-            } if reason.contains("writer_untrusted")
+            Error::ReadRejected {
+                ref failed_checks,
+                ..
+            } if failed_checks.iter().any(|check| check == "writer_untrusted")
         ),
         "{error}"
     );

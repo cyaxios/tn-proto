@@ -92,9 +92,9 @@ def _append_entry_shape_invalid_row(log_path: Path) -> None:
         handle.write(json.dumps(envelope, separators=(",", ":")) + "\n")
 
 
-def test_watch_defaults_to_auto_and_exposes_read_policy_controls() -> None:
+def test_watch_defaults_to_no_verify_and_exposes_read_policy_controls() -> None:
     parameters = inspect.signature(tn.watch).parameters
-    assert parameters["verify"].default == "auto"
+    assert parameters["verify"].default is False
     assert parameters["require_signature"].default is None
     assert parameters["allow_unauthenticated"].default is None
     assert parameters["trusted_writers"].default is None
@@ -109,10 +109,10 @@ def test_watch_initial_drain_uses_read_decisions_and_full_reasons(tmp_path: Path
     _tamper_signature(log_path, "watch.bad")
 
     with pytest.raises(VerifyError) as read_error:
-        list(tn.read())
+        list(tn.read(verify="raise"))
 
     async def drain() -> None:
-        async for _ in tn.watch(since="start", poll_interval=0.01):
+        async for _ in tn.watch(since="start", verify="raise", poll_interval=0.01):
             pass
 
     with pytest.raises(VerifyError) as watch_error:
@@ -127,7 +127,7 @@ def test_watch_post_gate_entry_shape_failure_is_record_invalid(tmp_path: Path) -
     _append_entry_shape_invalid_row(tn.current_config().resolve_log_path())
 
     async def first() -> Any:
-        return await anext(tn.watch(since="start", poll_interval=0.01))
+        return await anext(tn.watch(since="start", verify="raise", poll_interval=0.01))
 
     with pytest.raises(VerifyError) as raised:
         asyncio.run(asyncio.wait_for(first(), timeout=2.0))
@@ -178,7 +178,7 @@ def test_watch_later_poll_uses_read_decisions_and_reasons(tmp_path: Path) -> Non
     log_path = tn.current_config().resolve_log_path()
 
     async def later_rejection() -> None:
-        stream = tn.watch(poll_interval=0.2)
+        stream = tn.watch(verify="raise", poll_interval=0.2)
         pending = asyncio.create_task(anext(stream))
         await asyncio.sleep(0.05)
         tn.info("watch.bad.later")
@@ -188,7 +188,7 @@ def test_watch_later_poll_uses_read_decisions_and_reasons(tmp_path: Path) -> Non
     with pytest.raises(VerifyError) as watch_error:
         asyncio.run(asyncio.wait_for(later_rejection(), timeout=2.0))
     with pytest.raises(VerifyError) as read_error:
-        list(tn.read())
+        list(tn.read(verify="raise"))
 
     assert watch_error.value.reason == read_error.value.reason == "signature_invalid"
     assert watch_error.value.reasons == read_error.value.reasons == ["signature_invalid"]
@@ -303,7 +303,7 @@ def test_watch_rejects_before_group_decrypt(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(cipher_type, "decrypt", spy_decrypt)
 
     async def first() -> Any:
-        return await anext(tn.watch(since="start", poll_interval=0.01))
+        return await anext(tn.watch(since="start", verify="raise", poll_interval=0.01))
 
     with pytest.raises(VerifyError):
         asyncio.run(asyncio.wait_for(first(), timeout=2.0))
@@ -316,7 +316,7 @@ def test_watch_raw_includes_read_validity_metadata(tmp_path: Path) -> None:
 
     async def first() -> dict[str, Any]:
         return await anext(
-            tn.watch(since="start", raw=True, poll_interval=0.01),
+            tn.watch(since="start", verify="raise", raw=True, poll_interval=0.01),
         )
 
     row = asyncio.run(first())

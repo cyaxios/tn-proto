@@ -4,8 +4,8 @@
 //! Rust wheels (`tn-core` exposing `tn_core._core`, `tn-btn` exposing
 //! `tn_btn._core`). They always shipped on the same version axis, so we
 //! fold the native pieces into one extension here: `tn._native` with `core`,
-//! `btn`, and `hibe` submodules. One `pip install tn-proto` now carries the
-//! Rust runtime and cipher bindings in a single wheel.
+//! `governed`, `btn`, and `hibe` submodules. One `pip install tn-proto` carries
+//! the Rust governed workflow, event runtime, and cipher bindings in one wheel.
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -17,6 +17,10 @@ fn native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let core = PyModule::new(py, "core")?;
     tn_core_py::populate(py, &core)?;
     m.add_submodule(&core)?;
+
+    let governed = PyModule::new(py, "governed")?;
+    tn_core_py::governed::populate(py, &governed)?;
+    m.add_submodule(&governed)?;
 
     // btn submodule = former tn_btn._core
     let btn = PyModule::new(py, "btn")?;
@@ -34,6 +38,7 @@ fn native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // `from tn._native.core.admin import reduce` resolve.
     let modules = py.import("sys")?.getattr("modules")?;
     modules.set_item("tn._native.core", &core)?;
+    modules.set_item("tn._native.governed", &governed)?;
     modules.set_item("tn._native.btn", &btn)?;
     modules.set_item("tn._native.hibe", &hibe)?;
     if let Ok(admin) = core.getattr("admin") {

@@ -967,16 +967,18 @@ pub unsafe extern "C" fn tn_runtime_emit_with_aad(
     }
 }
 
-/// Render a sealed-object verb error into the machine-parseable
-/// `tn_last_error` channel:
+/// Render a verb error into the machine-parseable `tn_last_error`
+/// channel. Shared by `unseal` and `read` so both surface one typed
+/// verification failure:
 ///
-/// - failed verification (the SDK's `Error::Verify`) becomes
-///   `VerifyError:` + a JSON object `{"failed_checks": [...],
-///   "sequence": n, "event_type": "..."}`;
+/// - failed verification (the SDK's `Error::Verify`, from a rejected
+///   `unseal` *or* a rejected `read` record) becomes `VerifyError:` + a
+///   JSON object `{"failed_checks": [...], "sequence": n,
+///   "event_type": "..."}`;
 /// - malformed unseal input (`tn_core::Error::Malformed` for a sealed
 ///   object) becomes `UnsealError: ` + the reason;
 /// - everything else stays a plain message.
-fn sealed_object_error_message(err: &tn_proto::Error) -> String {
+fn verify_error_message(err: &tn_proto::Error) -> String {
     match err {
         tn_proto::Error::Verify {
             failed_checks,
@@ -1119,7 +1121,7 @@ pub unsafe extern "C" fn tn_runtime_seal(
         let sealed = handle_ref(handle)?
             .tn()?
             .seal(&object_type, Value::Object(fields), opts)
-            .map_err(|err| sealed_object_error_message(&err))?;
+            .map_err(|err| verify_error_message(&err))?;
         Ok(sealed.wire)
     }) {
         Ok(value) => into_c_string_ptr(value),
@@ -1168,7 +1170,7 @@ pub unsafe extern "C" fn tn_runtime_unseal(
         let outcome = handle_ref(handle)?
             .tn()?
             .unseal(&source, opts)
-            .map_err(|err| sealed_object_error_message(&err))?;
+            .map_err(|err| verify_error_message(&err))?;
         unseal_outcome_json(outcome)
     }) {
         Ok(value) => into_c_string_ptr(value),
@@ -1199,7 +1201,7 @@ pub unsafe extern "C" fn tn_runtime_read(
                 all_runs: all_runs != 0,
                 verify: verify != 0,
             })
-            .map_err(|err| err.to_string())?;
+            .map_err(|err| verify_error_message(&err))?;
         let flat_entries: Vec<_> = entries.into_iter().map(|entry| entry.into_map()).collect();
         serde_json::to_string(&flat_entries).map_err(|err| err.to_string())
     }) {
@@ -2765,6 +2767,58 @@ mod tests {
                 message.starts_with("UnsealError: "),
                 "unexpected error: {message}"
             );
+
+            assert_eq!(tn_runtime_close(handle), 0);
+        }
+    }
+
+    /// A verified read (`verify=1`) that rejects a record surfaces the
+    /// same machine-parseable `VerifyError:` channel as a rejected
+    /// unseal, so the C# SDK maps both to one typed exception.
+    #[test]
+    fn ffi_read_rejection_verifyerror_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            let handle = open_project(dir.path(), "ffi_read_verify");
+            emit_json(handle, "user.event", r#"{"amount":1}"#);
+
+            // A verified read of the untampered log returns the row.
+            let ok: Value = serde_json::from_str(&consume(tn_runtime_read(handle, 0, 1)))
+                .expect("verified read is not JSON");
+            assert_eq!(ok.as_array().expect("array").len(), 1);
+
+            // Tamper a public header field on disk: the recomputed
+            // row_hash no longer matches the signed row_hash, so a
+            // verified read rejects the row (the signature over the
+            // unchanged row_hash string still verifies).
+            let log_path = consume(tn_runtime_log_path(handle));
+            let contents = std::fs::read_to_string(&log_path).expect("log readable");
+            let tampered = contents.replace("\"level\":\"info\"", "\"level\":\"warn\"");
+            assert_ne!(contents, tampered, "log must carry the level field to tamper");
+            std::fs::write(&log_path, tampered).expect("log writable");
+
+            let result = tn_runtime_read(handle, 0, 1);
+            assert!(result.is_null(), "tampered row must fail a verified read");
+            let message =
+                last_error_message().expect("verified read failure must set tn_last_error");
+            let payload = message
+                .strip_prefix("VerifyError:")
+                .unwrap_or_else(|| panic!("expected VerifyError: prefix, got: {message}"));
+            let parsed: Value =
+                serde_json::from_str(payload).expect("VerifyError payload is not JSON");
+            let checks = parsed["failed_checks"]
+                .as_array()
+                .expect("failed_checks array");
+            assert!(
+                checks.iter().any(|check| check == "row_hash_invalid"),
+                "expected row_hash_invalid in failed_checks, got: {parsed}"
+            );
+            assert_eq!(parsed["event_type"], json!("user.event"));
+
+            // verify=0 returns the tampered row without raising.
+            let permissive: Value = serde_json::from_str(&consume(tn_runtime_read(handle, 0, 0)))
+                .expect("permissive read is not JSON");
+            assert_eq!(permissive.as_array().expect("array").len(), 1);
 
             assert_eq!(tn_runtime_close(handle), 0);
         }

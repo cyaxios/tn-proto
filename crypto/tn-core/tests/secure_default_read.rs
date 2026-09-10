@@ -973,10 +973,10 @@ fn foreign_peek_uses_snapshot_reader_without_whole_source_read() {
     assert!(
         matches!(
             error,
-            Error::Malformed {
-                kind: "verification",
-                ref reason,
-            } if reason.contains("writer_untrusted")
+            Error::ReadRejected {
+                ref failed_checks,
+                ..
+            } if failed_checks.iter().any(|check| check == "writer_untrusted")
         ),
         "{error}"
     );

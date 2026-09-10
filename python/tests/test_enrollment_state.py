@@ -29,6 +29,7 @@ from tn.trust import TrustError, TrustReason
 
 
 UTC = timezone.utc
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _digest(value: bytes) -> str:
@@ -479,6 +480,70 @@ def test_expired_challenge_rejects_without_mutating_pending_state(tmp_path: Path
 
     assert raised.value.reason is TrustReason.CHALLENGE_EXPIRED
     assert _state_files(state_root) == before
+
+
+def test_expired_challenge_precedes_expired_proof_reason(tmp_path: Path) -> None:
+    cfg, store, reader, state_root = _store(tmp_path)
+    challenge = store.issue_challenge(reader.device_identity, "default", timedelta(seconds=1))
+    artifact, _ = _make_offer_artifact(
+        tmp_path,
+        cfg,
+        reader,
+        challenge=challenge,
+        expires_at=challenge.expires_at,
+    )
+    before = _state_files(state_root)
+
+    with pytest.raises(TrustError) as raised:
+        store.stage_offer(
+            artifact,
+            cfg.device.device_identity,
+            challenge.expires_at + timedelta(seconds=1),
+        )
+
+    assert raised.value.reason is TrustReason.CHALLENGE_EXPIRED
+    assert _state_files(state_root) == before
+
+
+def test_consumed_marker_accepts_frozen_fixture_challenge_id(tmp_path: Path) -> None:
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/trust/v1/enrollment_lifecycle.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    issue_case = next(case for case in fixture["cases"] if case["id"] == "issue_signed_challenge")
+    challenge_id = issue_case["input"]["challenge"]["challenge_id"]
+    _cfg, store, _reader, state_root = _store(tmp_path)
+
+    path = store._consumed_path(challenge_id)
+
+    assert path == state_root / "consumed" / f"{challenge_id}.json"
+
+
+@pytest.mark.parametrize(
+    "challenge_id",
+    [
+        "",
+        "x" * 129,
+        "../escape",
+        "slash/value",
+        r"backslash\value",
+        "colon:value",
+        "space value",
+        "non-ascii-\N{SNOWMAN}",
+        "line\nfeed",
+    ],
+)
+def test_consumed_marker_rejects_nonportable_challenge_ids(
+    tmp_path: Path,
+    challenge_id: str,
+) -> None:
+    _cfg, store, _reader, _state_root = _store(tmp_path)
+
+    with pytest.raises(TrustError) as raised:
+        store._consumed_path(challenge_id)
+
+    assert raised.value.reason is TrustReason.STATEMENT_INVALID
 
 
 def test_malformed_offer_does_not_create_enrollment_state(tmp_path: Path) -> None:
@@ -1166,37 +1231,34 @@ def test_same_reader_in_two_groups_has_distinct_retained_paths(tmp_path: Path) -
     assert {pending.group for pending in pendings} == {"default", "finance"}
 
 
-def test_signed_separator_components_cannot_escape_the_private_state_root(
+@pytest.mark.parametrize(
+    "malicious_group",
+    [
+        "../outside",
+        r"..\outside",
+        "/absolute",
+        r"C:\absolute",
+        " leading",
+        "trailing ",
+        ".",
+        "..",
+        "CON",
+        "com1",
+    ],
+)
+def test_state_store_rejects_nonportable_group_without_mutation(
     tmp_path: Path,
+    malicious_group: str,
 ) -> None:
     cfg, _, reader, state_root = _store(tmp_path)
-    malicious_group = "../outside\\nested"
     cfg.groups[malicious_group] = cfg.groups["default"]
     store = EnrollmentStore(cfg, cfg.device, state_root)
-    store.preauthorize(reader.device_identity, malicious_group)
-    challenge = store.issue_challenge(
-        reader.device_identity,
-        malicious_group,
-        timedelta(minutes=5),
-    )
-    artifact, _ = _make_offer_artifact(
-        tmp_path,
-        cfg,
-        reader,
-        challenge=challenge,
-        group=malicious_group,
-    )
 
-    pending = store.stage_offer(
-        artifact,
-        cfg.device.device_identity,
-        challenge.issued_at + timedelta(seconds=1),
-    )
+    with pytest.raises(TrustError) as raised:
+        store.preauthorize(reader.device_identity, malicious_group)
 
-    relative = pending.artifact_path.relative_to(state_root)
-    assert ".." not in relative.parts
-    assert all("/" not in part and "\\" not in part for part in relative.parts)
-    assert not (tmp_path / "outside").exists()
+    assert raised.value.reason is TrustReason.SCOPE_MISMATCH
+    assert not state_root.exists()
 
 
 @pytest.mark.parametrize(
@@ -1219,12 +1281,11 @@ def test_signed_scope_components_use_fixed_lowercase_hashes(
 ) -> None:
     cfg, _, reader, state_root = _store(tmp_path)
     cfg.ceremony_id = dangerous_scope
-    cfg.groups[dangerous_scope] = cfg.groups["default"]
     store = EnrollmentStore(cfg, cfg.device, state_root)
-    store.preauthorize(reader.device_identity, dangerous_scope)
+    store.preauthorize(reader.device_identity, "default")
     challenge = store.issue_challenge(
         reader.device_identity,
-        dangerous_scope,
+        "default",
         timedelta(minutes=5),
     )
     artifact, _ = _make_offer_artifact(
@@ -1232,7 +1293,7 @@ def test_signed_scope_components_use_fixed_lowercase_hashes(
         cfg,
         reader,
         challenge=challenge,
-        group=dangerous_scope,
+        group="default",
     )
 
     pending = store.stage_offer(
@@ -1241,11 +1302,14 @@ def test_signed_scope_components_use_fixed_lowercase_hashes(
         challenge.issued_at + timedelta(seconds=1),
     )
 
-    expected = "sha256-" + hashlib.sha256(dangerous_scope.encode("utf-8")).hexdigest()
+    expected_ceremony = "sha256-" + hashlib.sha256(
+        dangerous_scope.encode("utf-8")
+    ).hexdigest()
+    expected_group = "sha256-" + hashlib.sha256(b"default").hexdigest()
     relative = pending.artifact_path.relative_to(state_root)
-    assert relative.parts[1:3] == (expected, expected)
-    assert expected == expected.lower()
-    assert len(expected) == 71
+    assert relative.parts[1:3] == (expected_ceremony, expected_group)
+    assert expected_ceremony == expected_ceremony.lower()
+    assert len(expected_ceremony) == 71
 
 
 def test_case_distinct_scope_components_do_not_alias_on_windows(tmp_path: Path) -> None:

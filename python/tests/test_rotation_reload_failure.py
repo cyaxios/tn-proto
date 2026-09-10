@@ -22,6 +22,8 @@ sys.path.insert(0, str(_HERE.parent))
 
 import tn
 import tn.reader
+from tn.security_audit import TnSecurityWarning
+from tn.signing import DeviceKey
 
 
 @pytest.fixture(autouse=True)
@@ -62,7 +64,14 @@ def test_rotate_reader_path_raises_when_native_reload_fails(
     tn.init(a_yaml, log_path=a_log, cipher="hibe")
     tn.info("epoch.a", body="sealed before rotation")
     kit = tmp_path / "reader.tnpkg"
-    tn.admin.grant_reader("default", reader_did="did:key:z6Mk-r", out_path=kit)
+    reader_did = DeviceKey.generate().device_identity
+    with pytest.warns(TnSecurityWarning):
+        tn.admin.grant_reader(
+            "default",
+            reader_did=reader_did,
+            out_path=kit,
+            unsafe_plaintext=True,
+        )
 
     rt = tn._dispatch_rt
     assert rt is not None and rt.using_rust

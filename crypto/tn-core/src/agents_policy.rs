@@ -1,8 +1,8 @@
-//! Markdown loader for `.tn/config/agents.md` policy files. Internal
-//! primitive: most readers want the high-level API instead — see
-//! [`crate::Runtime`], which loads and enforces agent policy as part of the
-//! write path (behind `tn.info()` / `tn log`). Reach here directly only to
-//! parse an `agents.md` file on its own.
+//! Markdown loader for `.tn/config/agents.md` use contracts.
+//!
+//! [`crate::governed::Governance`] selects a typed contract from this parser.
+//! The governed writer encrypts it with the data and binds it through AAD and
+//! the row signature. The receiving application applies permitted-use rules.
 //!
 //! Mirrors `tn_proto/python/tn/_agents_policy.py` byte-for-byte. Each
 //! event type is a `## <event_type>` section; each section MUST have all
@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -32,7 +33,11 @@ pub const REQUIRED_FIELDS: [&str; 5] = [
 /// Repository-relative path callers should write the policy file to.
 pub const POLICY_RELATIVE_PATH: &str = ".tn/config/agents.md";
 
-/// One event type's worth of policy text.
+/// One event type's worth of policy text, bound to its parsed document.
+///
+/// Public fields remain readable and cloneable for existing callers. Changing
+/// them invalidates this template for governed construction; parse revised
+/// Markdown to obtain a template bound to the new normalized document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyTemplate {
     /// The event_type this template applies to.
@@ -47,14 +52,126 @@ pub struct PolicyTemplate {
     pub consequences: String,
     /// Body of `### on_violation_or_error`.
     pub on_violation_or_error: String,
-    /// `sha256:<hex>` of canonical-bytes(per_event_dict). Same value for
-    /// every template loaded from the same file (file-level signature).
+    /// `sha256:<hex>` of canonical version, schema, and per-event payloads.
+    /// Every template from the same parsed policy document shares this hash.
     pub content_hash: String,
     /// Top-level `version` from frontmatter.
     pub version: String,
     /// Repository-relative path label used in the wire `policy` field
     /// (e.g. `.tn/config/agents.md`).
     pub path: String,
+    selected_event: String,
+    normalized_document: Arc<NormalizedPolicyWitness>,
+}
+
+/// Shared immutable provenance for the templates of one normalized document.
+/// Only this module constructs it, after validating the complete event map and
+/// computing its canonical hash. Public `PolicyDocument` edits cannot change it.
+#[derive(Debug, PartialEq, Eq)]
+struct NormalizedPolicyWitness {
+    events: BTreeMap<String, BTreeMap<String, String>>,
+    version: String,
+    path: String,
+    content_hash: String,
+}
+
+impl NormalizedPolicyWitness {
+    fn new(
+        version: &str,
+        schema: &str,
+        events: BTreeMap<String, BTreeMap<String, String>>,
+        path: &str,
+    ) -> Result<Self> {
+        for (event, fields) in &events {
+            if event.trim().is_empty()
+                || fields.len() != REQUIRED_FIELDS.len()
+                || REQUIRED_FIELDS.iter().any(|name| {
+                    fields
+                        .get(*name)
+                        .is_none_or(|value| value.trim().is_empty())
+                })
+            {
+                return Err(Error::Malformed {
+                    kind: "agents policy",
+                    reason: "each policy event requires exactly five nonempty contract fields"
+                        .into(),
+                });
+            }
+        }
+        let digest = Sha256::digest(canonical_bytes_for_hash(version, schema, &events));
+        Ok(Self {
+            events,
+            version: version.to_owned(),
+            path: path.to_owned(),
+            content_hash: format!("sha256:{}", hex::encode(digest)),
+        })
+    }
+}
+
+impl PolicyTemplate {
+    /// Construct a selected template from the complete normalized document.
+    /// Revision decoding uses this path so its reconstructed templates receive
+    /// the same validated binding as Markdown-parsed templates.
+    pub(crate) fn from_normalized_document(
+        event_type: &str,
+        version: &str,
+        schema: &str,
+        events: BTreeMap<String, BTreeMap<String, String>>,
+        path: &str,
+    ) -> Result<Self> {
+        Self::from_witness(
+            event_type,
+            Arc::new(NormalizedPolicyWitness::new(version, schema, events, path)?),
+        )
+    }
+
+    fn from_witness(
+        event_type: &str,
+        normalized_document: Arc<NormalizedPolicyWitness>,
+    ) -> Result<Self> {
+        let fields =
+            normalized_document
+                .events
+                .get(event_type)
+                .ok_or_else(|| Error::Malformed {
+                    kind: "agents policy",
+                    reason: "selected policy event must occur in the normalized document".into(),
+                })?;
+        Ok(Self {
+            event_type: event_type.to_owned(),
+            instruction: fields["instruction"].clone(),
+            use_for: fields["use_for"].clone(),
+            do_not_use_for: fields["do_not_use_for"].clone(),
+            consequences: fields["consequences"].clone(),
+            on_violation_or_error: fields["on_violation_or_error"].clone(),
+            content_hash: normalized_document.content_hash.clone(),
+            version: normalized_document.version.clone(),
+            path: normalized_document.path.clone(),
+            selected_event: event_type.to_owned(),
+            normalized_document,
+        })
+    }
+
+    pub(crate) fn validate_binding(&self) -> Result<()> {
+        let document = &self.normalized_document;
+        let fields = &document.events[&self.selected_event];
+        if self.event_type != self.selected_event
+            || self.content_hash != document.content_hash
+            || self.version != document.version
+            || self.path != document.path
+            || self.instruction != fields["instruction"]
+            || self.use_for != fields["use_for"]
+            || self.do_not_use_for != fields["do_not_use_for"]
+            || self.consequences != fields["consequences"]
+            || self.on_violation_or_error != fields["on_violation_or_error"]
+        {
+            return Err(Error::Malformed {
+                kind: "agents policy",
+                reason: "policy template differs from its validated normalized document".into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Top-level shape returned by [`load_policy_file`].
@@ -68,7 +185,7 @@ pub struct PolicyDocument {
     pub schema: String,
     /// Repository-relative path (`POLICY_RELATIVE_PATH`).
     pub path: String,
-    /// Raw markdown text (after frontmatter).
+    /// Original Markdown text, including frontmatter.
     pub body: String,
     /// `sha256:<hex>` covering version+schema+per-event payloads.
     pub content_hash: String,
@@ -78,7 +195,7 @@ pub struct PolicyDocument {
 ///
 /// Matches Python `_canonical_bytes` in `tn/_agents_policy.py`:
 /// `json.dumps(obj, sort_keys=True, separators=(",", ":"))`.
-fn canonical_bytes_for_hash(
+pub(crate) fn canonical_bytes_for_hash(
     version: &str,
     schema: &str,
     events: &BTreeMap<String, BTreeMap<String, String>>,
@@ -319,26 +436,16 @@ pub fn parse_policy_text(text: &str, path: &str) -> Result<PolicyDocument> {
         per_event.insert(event_type, payload);
     }
 
-    let canonical = canonical_bytes_for_hash(&version, &schema, &per_event);
-    let mut hasher = Sha256::new();
-    hasher.update(&canonical);
-    let content_hash = format!("sha256:{}", hex::encode(hasher.finalize()));
+    let normalized_document = Arc::new(NormalizedPolicyWitness::new(
+        &version, &schema, per_event, path,
+    )?);
+    let content_hash = normalized_document.content_hash.clone();
 
     let mut templates: BTreeMap<String, PolicyTemplate> = BTreeMap::new();
-    for (event_type, payload) in &per_event {
+    for event_type in normalized_document.events.keys() {
         templates.insert(
             event_type.clone(),
-            PolicyTemplate {
-                event_type: event_type.clone(),
-                instruction: payload["instruction"].clone(),
-                use_for: payload["use_for"].clone(),
-                do_not_use_for: payload["do_not_use_for"].clone(),
-                consequences: payload["consequences"].clone(),
-                on_violation_or_error: payload["on_violation_or_error"].clone(),
-                content_hash: content_hash.clone(),
-                version: version.clone(),
-                path: path.to_string(),
-            },
+            PolicyTemplate::from_witness(event_type, normalized_document.clone())?,
         );
     }
 

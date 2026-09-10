@@ -13,10 +13,7 @@ from tn import _hibe
 REQUIRED_READ_STAGES = {
     "read:_TOTAL",
     "read:line_parse",
-    "read:row_hash_verify",
-    "read:signature_verify",
-    "read:chain_verify",
-    "read:group_decode",
+    "read:pre_decrypt_verify",
     "read:group_decrypt",
     "read:group_decrypt.cipher",
     "read:group_plaintext_parse",
@@ -64,7 +61,13 @@ def test_verified_read_records_required_stage_vocabulary(
         tn.flush_and_close()
 
     assert len(entries) == 1
-    assert entries[0]["valid"] == {"signature": True, "row_hash": True, "chain": True}
+    assert entries[0]["valid"] == {
+        "record": True,
+        "signature": True,
+        "row_hash": True,
+        "chain": True,
+        "aad": True,
+    }
     assert entries[0]["plaintext"]["default"]["payload"] == f"{cipher}-payload"
 
     snapshot = _snapshot_by_stage(perf)

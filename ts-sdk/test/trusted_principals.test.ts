@@ -503,7 +503,10 @@ test("createHibeReaderProof answers a hibe reader challenge verifiably", async (
   const reader = deviceFor("reader");
   const now = String(caseValidation(c)["now"]);
 
-  const proof = await createHibeReaderProof(challenge, reader, { now });
+  const proof = await createHibeReaderProof(challenge, reader, {
+    now,
+    expectedAuthorityDid: challenge.publisher_did,
+  });
   assert.equal(proof.purpose, "hibe-reader");
   assert.equal(proof.subject_did, reader.did);
   assert.equal(proof.audience_did, challenge.publisher_did);
@@ -519,7 +522,11 @@ test("createHibeReaderProof answers a hibe reader challenge verifiably", async (
 
   const publisher = deviceFor("publisher");
   await assert.rejects(
-    () => createHibeReaderProof(challenge, publisher, { now }),
+    () =>
+      createHibeReaderProof(challenge, publisher, {
+        now,
+        expectedAuthorityDid: challenge.publisher_did,
+      }),
     (err: unknown) => err instanceof TrustError && err.reason === "wrong_recipient",
   );
 });

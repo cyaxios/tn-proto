@@ -24,10 +24,12 @@ ceremony. Rotation creates a fresh cipher of the same kind.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import time
 import warnings
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -35,6 +37,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from ._perf import time_stage as _perf_stage
+from .trust import TrustError, TrustReason
 
 
 class CipherError(RuntimeError):
@@ -205,21 +208,10 @@ def _validate_jwe_general_json_shape(obj: Any) -> None:
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
-    """Write `content` to `path` via write-to-temp-then-rename.
+    """Durably replace UTF-8 state without Windows newline translation."""
+    from ._keystore_backend import atomic_write_bytes
 
-    Path.replace is atomic on POSIX; on Windows it's not guaranteed atomic
-    but is far safer than a truncating write. Acceptable for a local
-    keystore file, where corruption is the only concern we guard against.
-
-    newline="" keeps the on-disk bytes identical across platforms: the Rust
-    runtime parses some of these files (the hibe idpath history) and rejects
-    CR, so Windows "\n" -> "\r\n" translation would break re-init after a
-    hibe rotation.
-    """
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="") as fh:
-        fh.write(content)
-    tmp.replace(path)
+    atomic_write_bytes(path, content.encode("utf-8"))
 
 
 def _atomic_write_secret_bytes(path: Path, data: bytes) -> None:
@@ -560,6 +552,23 @@ class JWEGroupCipher:
 # ---------------------------------------------------------------------------
 
 _HIBE_HISTORY_ROOT_SENTINEL = "\troot"
+_HIBE_AUTHORITY_STATE_FIELDS = frozenset(
+    (
+        "version",
+        "authority_did",
+        "audience_did",
+        "mpk_sha256",
+        "max_depth",
+        "id_path",
+        "path_epoch",
+        "assertion_digest",
+        "expires_at",
+    )
+)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _native_hibe() -> Any:
@@ -637,6 +646,74 @@ def _hibe_root_marker_path(keystore: Path, group_name: str) -> Path:
     return keystore / f"{group_name}.hibe.idpath.root"
 
 
+def _hibe_path_epoch_path(keystore: Path, group_name: str) -> Path:
+    return keystore / f"{group_name}.hibe.path_epoch"
+
+
+def _hibe_authority_state_path(keystore: Path, group_name: str) -> Path:
+    return keystore / f"{group_name}.hibe.authority.json"
+
+
+def _read_hibe_path_epoch(keystore: Path, group_name: str) -> int:
+    path = _hibe_path_epoch_path(keystore, group_name)
+    if not path.exists():
+        return 0
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        epoch = int(raw)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            f"HIBE: {path.name} is not a valid path epoch",
+        ) from exc
+    if epoch < 0 or str(epoch) != raw:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            f"HIBE: {path.name} is not a canonical non-negative path epoch",
+        )
+    return epoch
+
+
+def _load_hibe_authority_state(keystore: Path, group_name: str) -> dict[str, Any] | None:
+    path = _hibe_authority_state_path(keystore, group_name)
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            f"HIBE: {path.name} is unreadable",
+        ) from exc
+    if not isinstance(value, dict) or set(value) != _HIBE_AUTHORITY_STATE_FIELDS:
+        raise TrustError(
+            TrustReason.STATEMENT_INVALID,
+            f"HIBE: {path.name} has an invalid shape",
+        )
+    if value.get("version") != 1:
+        raise TrustError(TrustReason.STATEMENT_INVALID, "HIBE: unsupported authority pin version")
+    for key in (
+        "authority_did",
+        "audience_did",
+        "mpk_sha256",
+        "id_path",
+        "assertion_digest",
+        "expires_at",
+    ):
+        if not isinstance(value.get(key), str) or not value[key]:
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                f"HIBE: authority pin {key} must be a non-empty string",
+            )
+    for key in ("max_depth", "path_epoch"):
+        if type(value.get(key)) is not int or value[key] < 0:
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                f"HIBE: authority pin {key} must be a non-negative integer",
+            )
+    return value
+
+
 def _encode_hibe_history_path(path: str) -> str:
     """Encode one validated path for the line-oriented idpath history file."""
     return _HIBE_HISTORY_ROOT_SENTINEL if path == "" else path
@@ -653,8 +730,9 @@ def _decode_hibe_history_line(line: str, *, what: str) -> str:
 class HibeGroupCipher:
     """Ceremony/group cipher backed by BBG HIBE (constant-size ciphertext).
 
-    Writing needs only the authority's master public key plus the group's
-    identity path — no per-recipient key exchange at write time. Reading
+    Cryptographically, writing uses the authority master public key plus the
+    group's identity path. Operational external writers additionally require
+    a valid pinned authority assertion before every new seal. Reading
     needs a delegated key on that exact path; a key for an ancestor path
     derives down locally (no msk, no re-keying). Delegated keys are
     permanent: no forward revocation of an admitted reader — groups that
@@ -677,6 +755,7 @@ class HibeGroupCipher:
     _keystore: Path | None = field(default=None, repr=False)
     _group_name: str = ""
     _allow_root_path: bool = field(default=False, repr=False)
+    _path_epoch: int = field(default=0, repr=False)
     # Paths this group sealed to before rotations, newest first. Lets the
     # authority (msk holder) open pre-rotation entries; persisted in
     # ``<group>.hibe.idpath.history``, one path per line.
@@ -700,9 +779,9 @@ class HibeGroupCipher:
     ) -> HibeGroupCipher:
         """Mint a fresh hibe group.
 
-        With ``authority_mpk`` (and ``id_path``): seal to an EXTERNAL
-        authority's path. No read key is written — this keystore can write
-        but cannot read until a delegated key arrives via grant/absorb.
+        With ``authority_mpk`` (and ``id_path``): stage an EXTERNAL authority's
+        public material. No read key is written, and sealing stays fenced until
+        ``tn.admin.install_authority_assertion`` authenticates and pins it.
 
         Without ``authority_mpk`` (the solo-ceremony default, matching
         jwe/btn create semantics): this keystore becomes its own authority
@@ -715,6 +794,7 @@ class HibeGroupCipher:
         """
         hibe = _native_hibe()
         keystore.mkdir(parents=True, exist_ok=True)
+        authority_state_path = _hibe_authority_state_path(keystore, group_name)
         sk: bytes | None = None
         msk: bytes | None = None
         if authority_mpk is None:
@@ -734,9 +814,32 @@ class HibeGroupCipher:
         else:
             path = _normalize_hibe_path(id_path, allow_root=allow_root_path)
             mpk = authority_mpk
-            hibe.mpk_fingerprint(mpk)  # parse now: reject malformed mpk at mint
-        (keystore / f"{group_name}.hibe.mpk").write_bytes(mpk)
+            encoded_depth = hibe.mpk_max_depth(mpk)  # parse now: reject malformed mpk
+            if len(path.split("/")) > encoded_depth:
+                raise ValueError(
+                    f"HIBE: id_path depth exceeds authority mpk max_depth {encoded_depth}"
+                )
+            # A fresh external staging operation must not inherit authority or
+            # reader capabilities from an earlier local-authority incarnation
+            # of the same group. In particular, a stale MSK would make a later
+            # load classify this writer as an authority and bypass the pin.
+            for stale_secret in (
+                keystore / f"{group_name}.hibe.msk",
+                keystore / f"{group_name}.hibe.sk",
+                *keystore.glob(f"{group_name}.hibe.sk.previous.*"),
+            ):
+                stale_secret.unlink(missing_ok=True)
+            (keystore / f"{group_name}.hibe.idpath.history").unlink(missing_ok=True)
+        if authority_state_path.exists():
+            # Raw setup/reconfiguration is never allowed to inherit a prior
+            # authenticated writer pin for different bytes or scope. All
+            # caller-controlled inputs have been validated before this delete.
+            authority_state_path.unlink()
+        from ._keystore_backend import atomic_write_bytes
+
+        atomic_write_bytes(keystore / f"{group_name}.hibe.mpk", mpk)
         _atomic_write_text(keystore / f"{group_name}.hibe.idpath", path)
+        _atomic_write_text(_hibe_path_epoch_path(keystore, group_name), "0\n")
         root_marker = _hibe_root_marker_path(keystore, group_name)
         if path == "":
             _atomic_write_text(root_marker, "root\n")
@@ -750,6 +853,7 @@ class HibeGroupCipher:
             _keystore=keystore,
             _group_name=group_name,
             _allow_root_path=allow_root_path and path == "",
+            _path_epoch=0,
         )
 
     @classmethod
@@ -792,6 +896,7 @@ class HibeGroupCipher:
             _keystore=keystore,
             _group_name=group_name,
             _allow_root_path=allow_root_path and id_path == "",
+            _path_epoch=_read_hibe_path_epoch(keystore, group_name),
             _prior_paths=prior,
             _prior_sks=prior_sks,
         )
@@ -808,9 +913,67 @@ class HibeGroupCipher:
         """SHA-256 fingerprint of the authority mpk (manifest ``mpk_fp``)."""
         return _native_hibe().mpk_fingerprint(self._mpk)
 
+    def max_depth(self) -> int:
+        """Maximum identity depth encoded into this authority MPK."""
+        return int(_native_hibe().mpk_max_depth(self._mpk))
+
+    def path_epoch(self) -> int:
+        """Monotonic authority path epoch persisted with this group."""
+        return self._path_epoch
+
+    def is_authority(self) -> bool:
+        """Whether this keystore holds the HIBE master secret."""
+        return self._msk is not None
+
+    def _require_authority_pin_for_seal(self) -> None:
+        if self._msk is not None:
+            return
+        if self._keystore is None or not self._group_name:
+            raise TrustError(
+                TrustReason.UNTRUSTED_PRINCIPAL,
+                "HIBE: external writer has no persisted authority assertion",
+            )
+        state = _load_hibe_authority_state(self._keystore, self._group_name)
+        if state is None:
+            raise TrustError(
+                TrustReason.UNTRUSTED_PRINCIPAL,
+                "HIBE: external writer must install a valid authority assertion before sealing",
+            )
+        expected_mpk = "sha256:" + hashlib.sha256(self._mpk).hexdigest()
+        encoded_depth = self.max_depth()
+        if (
+            state["mpk_sha256"] != expected_mpk
+            or state["max_depth"] != encoded_depth
+            or state["id_path"] != self._id_path
+            or state["path_epoch"] != self._path_epoch
+        ):
+            raise TrustError(
+                TrustReason.UNTRUSTED_PRINCIPAL,
+                "HIBE: public material or path does not match the installed authority assertion",
+            )
+        try:
+            expires_at = datetime.fromisoformat(str(state["expires_at"]).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                "HIBE: authority pin expires_at is not RFC 3339",
+            ) from exc
+        if expires_at.tzinfo is None or expires_at.utcoffset() is None:
+            raise TrustError(
+                TrustReason.STATEMENT_INVALID,
+                "HIBE: authority pin expires_at must include a UTC offset",
+            )
+        if _utc_now() >= expires_at.astimezone(timezone.utc):
+            raise TrustError(
+                TrustReason.STATEMENT_EXPIRED,
+                "HIBE: installed authority assertion has expired; "
+                "install a fresh authority assertion/update",
+            )
+
     def encrypt(self, plaintext: bytes, aad: bytes = b"") -> bytes:
         if not self._mpk:
             raise NotAPublisherError("HIBE: no authority mpk in this keystore")
+        self._require_authority_pin_for_seal()
         self._id_path = _normalize_hibe_path(
             self._id_path,
             what="id_path",
@@ -984,6 +1147,11 @@ class HibeGroupCipher:
             )
         _atomic_write_secret_bytes(self._keystore / f"{self._group_name}.hibe.sk", sk)
         _atomic_write_text(self._keystore / f"{self._group_name}.hibe.idpath", new_path)
+        next_epoch = self._path_epoch + 1
+        _atomic_write_text(
+            _hibe_path_epoch_path(self._keystore, self._group_name),
+            f"{next_epoch}\n",
+        )
         root_marker = _hibe_root_marker_path(self._keystore, self._group_name)
         if new_path == "":
             _atomic_write_text(root_marker, "root\n")
@@ -997,6 +1165,7 @@ class HibeGroupCipher:
         self._sk = sk
         self._id_path = new_path
         self._allow_root_path = allow_root_path and new_path == ""
+        self._path_epoch = next_epoch
 
 
 # ---------------------------------------------------------------------------
@@ -1232,6 +1401,12 @@ class BtnGroupCipher:
         kits = [kit for kit in (self._self_kit, *self._prior_kits) if kit]
         if not kits:
             raise NotARecipientError("btn: no self-kit in this keystore")
+        # BTN ciphertexts have an unambiguous 0xB7 wire magic. A key bag can
+        # hold BTN and HIBE material for the same group name; a HIBE v1 frame
+        # starts with 0x01 and is another candidate's ciphertext, not evidence
+        # that the BTN frame was authentically opened and corrupted.
+        if not ciphertext or ciphertext[0] != 0xB7:
+            raise NotARecipientError("btn: ciphertext belongs to another cipher frame")
         not_entitled: Exception | None = None
         malformed: Exception | None = None
         with _perf_stage("read:group_decrypt.cipher"):

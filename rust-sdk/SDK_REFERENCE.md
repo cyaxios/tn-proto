@@ -30,7 +30,30 @@ use tn_proto::{ReadOptions, Tn};
 - `async`: reserved for future async watch support.
 - `cli`: builds the small `tn-proto` binary and enables `http`.
 
-## Main Handle
+## Governed Objects
+
+The [governed-object guide](GOVERNED_OBJECTS.md) explains the protocol flow and
+contains complete construction, admission, opening, and release examples.
+
+- `Tn::open_objects(path) -> Objects<'static>` loads an object context without event initialization.
+- `tn.objects() -> Objects<'_>` adapts the active runtime's configured groups.
+- `objects.draft(object_type)` selects a contract from the loaded policy tree.
+- `Governance::from_markdown(authority, text, policy_id, object_type)` selects an explicit contract.
+- `GovernedDraft::new(object_type, contract).group(name, fields)` assigns encrypted data groups.
+- `objects.seal(draft)` constructs `tn.agents`, common governance AAD, and the signed envelope.
+- `GovernedObject::parse(wire)` verifies the governed shape, row hash, and signature.
+- `objects.reader()?.governance(&object)` opens only the carried contract.
+- `view.authorize(operation, decision)` records application admission.
+- `reader.open(&admitted, groups)` opens exactly the named business groups.
+- `opened.derive(object_type)` carries the contract and immediate source reference.
+- `opened.derive_under(object_type, contract)` selects an explicit output contract.
+- `object.wire()` returns the exact received or constructed envelope for forwarding.
+
+`GovernedWriter` and `GovernedReader` expose the same core operations with
+caller-supplied material. They require no configured runtime. All governed
+objects are signed, independently of the event profile catalog below.
+
+## Event and Project Handle
 
 The central type is `Tn`, which wraps one loaded TN ceremony/runtime.
 

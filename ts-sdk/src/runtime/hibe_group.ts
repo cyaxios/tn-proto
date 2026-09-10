@@ -35,7 +35,17 @@ import {
   hibeSeal,
   hibeSetup,
 } from "../raw.js";
-import { TrustError } from "../core/trust.js";
+import {
+  TrustError,
+  parseEd25519DidKey,
+  parseTrustTimestamp,
+  sha256Digest,
+} from "../core/trust.js";
+import {
+  durableAtomicWrite,
+  durableUnlink,
+  withDurableFileLock,
+} from "./durable_state.js";
 
 /** All on-disk hibe material for one (keystore, group). */
 export interface HibeGroupMaterial {
@@ -68,7 +78,7 @@ function validateHibeGroupName(group: string): string {
   return group;
 }
 
-function validateHibeIdentityPath(path: string, subject = "identity path"): string {
+export function validateHibeIdentityPath(path: string, subject = "identity path"): string {
   if (path.length === 0) {
     throw new Error(`HIBE: invalid ${subject}: empty identity path`);
   }
@@ -137,6 +147,8 @@ function _atomicWriteSecret(path: string, data: Uint8Array): void {
  * (mirrors Python `HibeGroupCipher.load`'s CipherError). */
 export function loadHibeGroup(keystorePath: string, group: string): HibeGroupMaterial | null {
   validateHibeGroupName(group);
+  recoverHibeAuthorityInstall(keystorePath, group);
+  recoverHibeRotation(keystorePath, group);
   const mpkPath = join(keystorePath, `${group}.hibe.mpk`);
   if (!existsSync(mpkPath)) return null;
   const idpathPath = join(keystorePath, `${group}.hibe.idpath`);
@@ -317,6 +329,75 @@ export function hibeMintReaderKey(mat: HibeGroupMaterial, idPath: string): Uint8
   return hibeKeygen(mat.mpk, mat.msk, validateHibeIdentityPath(idPath));
 }
 
+interface HibeRotationTransaction {
+  version: 1;
+  group: string;
+  mpk_sha256: string;
+  new_path: string;
+  prior_paths: string[];
+  sk_b64: string;
+}
+
+function hibeRotationPath(keystorePath: string, group: string): string {
+  return join(keystorePath, `${group}.hibe.rotation.v1.json`);
+}
+
+function recoverHibeRotationUnlocked(keystorePath: string, group: string): boolean {
+  const marker = hibeRotationPath(keystorePath, group);
+  if (!existsSync(marker)) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(marker, "utf8"));
+  } catch {
+    throw new Error("HIBE: rotation transaction is unreadable");
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("HIBE: rotation transaction is malformed");
+  }
+  const tx = value as Partial<HibeRotationTransaction>;
+  if (
+    tx.version !== 1 ||
+    tx.group !== group ||
+    typeof tx.mpk_sha256 !== "string" ||
+    typeof tx.new_path !== "string" ||
+    !Array.isArray(tx.prior_paths) ||
+    !tx.prior_paths.every((path) => typeof path === "string") ||
+    typeof tx.sk_b64 !== "string"
+  ) {
+    throw new Error("HIBE: rotation transaction is malformed");
+  }
+  const mpkPath = join(keystorePath, `${group}.hibe.mpk`);
+  if (!existsSync(mpkPath) || sha256Digest(new Uint8Array(readFileSync(mpkPath))) !== tx.mpk_sha256) {
+    throw new Error("HIBE: rotation transaction belongs to different authority material");
+  }
+  const newPath = validateHibeIdentityPath(tx.new_path, "rotation target path");
+  const priorPaths = tx.prior_paths.map((path) =>
+    validateHibeIdentityPath(path, "rotation prior path"),
+  );
+  const skBytes = Buffer.from(tx.sk_b64, "base64");
+  if (skBytes.toString("base64") !== tx.sk_b64 || skBytes.length === 0) {
+    throw new Error("HIBE: rotation transaction contains an invalid identity key");
+  }
+  durableAtomicWrite(
+    join(keystorePath, `${group}.hibe.idpath.history`),
+    priorPaths.join("\n") + "\n",
+  );
+  durableAtomicWrite(join(keystorePath, `${group}.hibe.sk`), new Uint8Array(skBytes));
+  durableAtomicWrite(join(keystorePath, `${group}.hibe.idpath`), newPath);
+  durableUnlink(marker);
+  return true;
+}
+
+/** Complete a crash-interrupted authority identity-path rotation. */
+export function recoverHibeRotation(keystorePath: string, group: string): boolean {
+  validateHibeGroupName(group);
+  const marker = hibeRotationPath(keystorePath, group);
+  if (!existsSync(marker)) return false;
+  return withDurableFileLock(`${marker}.lock`, () =>
+    recoverHibeRotationUnlocked(keystorePath, group),
+  );
+}
+
 /** Point future seals at `newPath` (admission rotation, not revocation).
  * Authority-only: mints this keystore's own fresh key for the new path,
  * records the outgoing path in `.idpath.history` (newest first), and
@@ -328,31 +409,33 @@ export function hibeRotateIdPath(
   newPath: string,
 ): void {
   validateHibeGroupName(group);
-  const currentPath = validateHibeIdentityPath(mat.idPath, "current identity path");
-  newPath = validateHibeIdentityPath(newPath, "new identity path");
-  if (mat.msk === undefined) {
-    throw new Error("HIBE: only the authority (msk holder) can rotate the identity path");
-  }
-  if (newPath === currentPath) {
-    throw new Error(`HIBE: new path equals the current path ${JSON.stringify(newPath)}`);
-  }
-  const sk = hibeKeygen(mat.mpk, mat.msk, newPath);
-  const nextPriorPaths = [currentPath, ...mat.priorPaths];
-  _atomicWrite(
-    join(keystorePath, `${group}.hibe.idpath.history`),
-    nextPriorPaths.join("\n") + "\n",
-  );
-  const skPath = join(keystorePath, `${group}.hibe.sk`);
-  const idpathPath = join(keystorePath, `${group}.hibe.idpath`);
-  const skPending = `${skPath}.pending`;
-  const idpathPending = `${idpathPath}.pending`;
-  _atomicWriteSecret(skPending, sk);
-  _atomicWrite(idpathPending, newPath);
-  renameSync(skPending, skPath);
-  renameSync(idpathPending, idpathPath);
-  mat.priorPaths = nextPriorPaths;
-  mat.sk = sk;
-  mat.idPath = newPath;
+  const marker = hibeRotationPath(keystorePath, group);
+  withDurableFileLock(`${marker}.lock`, () => {
+    recoverHibeRotationUnlocked(keystorePath, group);
+    const currentPath = validateHibeIdentityPath(mat.idPath, "current identity path");
+    newPath = validateHibeIdentityPath(newPath, "new identity path");
+    if (mat.msk === undefined) {
+      throw new Error("HIBE: only the authority (msk holder) can rotate the identity path");
+    }
+    if (newPath === currentPath) {
+      throw new Error(`HIBE: new path equals the current path ${JSON.stringify(newPath)}`);
+    }
+    const sk = hibeKeygen(mat.mpk, mat.msk, newPath);
+    const nextPriorPaths = [currentPath, ...mat.priorPaths];
+    const tx: HibeRotationTransaction = {
+      version: 1,
+      group,
+      mpk_sha256: sha256Digest(mat.mpk),
+      new_path: newPath,
+      prior_paths: nextPriorPaths,
+      sk_b64: Buffer.from(sk).toString("base64"),
+    };
+    durableAtomicWrite(marker, JSON.stringify(tx, null, 2) + "\n");
+    recoverHibeRotationUnlocked(keystorePath, group);
+    mat.priorPaths = nextPriorPaths;
+    mat.sk = sk;
+    mat.idPath = newPath;
+  });
 }
 
 /** SHA-256 fingerprint of the authority mpk. */
@@ -383,6 +466,7 @@ export function hibeAuthorityEpoch(mat: HibeGroupMaterial): number {
 /** One pinned authority record for a hibe group. */
 export interface PinnedHibeAuthority {
   authorityDid: string;
+  audienceDid: string;
   ceremonyId: string;
   group: string;
   mpkSha256: string;
@@ -390,6 +474,103 @@ export interface PinnedHibeAuthority {
   idPath: string;
   pathEpoch: number;
   assertionDigest: string;
+  issuedAt: string;
+  expiresAt: string;
+}
+
+function validatePinnedHibeAuthorityRecord(
+  group: string,
+  record: PinnedHibeAuthority,
+): void {
+  validateHibeGroupName(group);
+  if (record.group !== group) {
+    throw new TrustError("scope_mismatch", "pinned authority record names a different group");
+  }
+  parseEd25519DidKey(record.authorityDid);
+  parseEd25519DidKey(record.audienceDid);
+  validateHibeIdentityPath(record.idPath, "pinned identity path");
+  if (!Number.isSafeInteger(record.maxDepth) || record.maxDepth <= 0) {
+    throw new TrustError("statement_invalid", "pinned authority max depth must be positive");
+  }
+  if (!Number.isSafeInteger(record.pathEpoch) || record.pathEpoch < 0) {
+    throw new TrustError("statement_invalid", "pinned authority path epoch must be non-negative");
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(record.mpkSha256)) {
+    throw new TrustError("statement_invalid", "pinned authority MPK digest is malformed");
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(record.assertionDigest)) {
+    throw new TrustError("statement_invalid", "pinned authority assertion digest is malformed");
+  }
+  const issued = parseTrustTimestamp(record.issuedAt, "issued_at");
+  const expires = parseTrustTimestamp(record.expiresAt, "expires_at");
+  if (expires <= issued) {
+    throw new TrustError("statement_invalid", "pinned authority expiry must follow issuance");
+  }
+}
+
+function assertHibePinTransition(
+  pinned: PinnedHibeAuthority | null,
+  record: PinnedHibeAuthority,
+): void {
+  if (pinned === null) return;
+  if (pinned.authorityDid !== record.authorityDid) {
+    throw new TrustError("untrusted_principal", "assertion is not from the pinned authority DID");
+  }
+  if (
+    pinned.audienceDid !== record.audienceDid ||
+    pinned.ceremonyId !== record.ceremonyId ||
+    pinned.group !== record.group
+  ) {
+    throw new TrustError("scope_mismatch", "authority assertion scope differs from the pinned scope");
+  }
+  if (record.pathEpoch < pinned.pathEpoch) {
+    throw new TrustError("epoch_rollback", "assertion path epoch is lower than the pinned epoch");
+  }
+  if (record.pathEpoch !== pinned.pathEpoch) return;
+  const sameMaterial =
+    pinned.mpkSha256 === record.mpkSha256 &&
+    pinned.idPath === record.idPath &&
+    pinned.maxDepth === record.maxDepth;
+  if (!sameMaterial) {
+    throw new TrustError("epoch_conflict", "conflicting authority material at the pinned epoch");
+  }
+  if (
+    parseTrustTimestamp(record.issuedAt, "issued_at") <
+    parseTrustTimestamp(pinned.issuedAt, "issued_at")
+  ) {
+    throw new TrustError("epoch_rollback", "same-epoch assertion renewal predates the pinned assertion");
+  }
+}
+
+function writePinnedHibeAuthorityRecord(
+  keystorePath: string,
+  group: string,
+  record: PinnedHibeAuthority,
+): void {
+  const doc = readAuthoritiesDoc(keystorePath);
+  const authorities =
+    doc["authorities"] !== null &&
+    typeof doc["authorities"] === "object" &&
+    !Array.isArray(doc["authorities"])
+      ? { ...(doc["authorities"] as Record<string, unknown>) }
+      : {};
+  authorities[group] = {
+    authority_did: record.authorityDid,
+    audience_did: record.audienceDid,
+    ceremony_id: record.ceremonyId,
+    group: record.group,
+    mpk_sha256: record.mpkSha256,
+    max_depth: record.maxDepth,
+    id_path: record.idPath,
+    path_epoch: record.pathEpoch,
+    assertion_digest: record.assertionDigest,
+    issued_at: record.issuedAt,
+    expires_at: record.expiresAt,
+  };
+  durableAtomicWrite(
+    hibeAuthoritiesPath(keystorePath),
+    JSON.stringify({ version: 1, authorities }, null, 1),
+  );
 }
 
 /** Path of the pinned-authority trust records. */
@@ -444,6 +625,7 @@ export function loadPinnedHibeAuthority(
   };
   return {
     authorityDid: str("authority_did"),
+    audienceDid: str("audience_did"),
     ceremonyId: str("ceremony_id"),
     group: str("group"),
     mpkSha256: str("mpk_sha256"),
@@ -451,6 +633,8 @@ export function loadPinnedHibeAuthority(
     idPath: str("id_path"),
     pathEpoch: int("path_epoch"),
     assertionDigest: str("assertion_digest"),
+    issuedAt: str("issued_at"),
+    expiresAt: str("expires_at"),
   };
 }
 
@@ -467,45 +651,198 @@ export function pinHibeAuthority(
   group: string,
   record: PinnedHibeAuthority,
 ): void {
-  const pinned = loadPinnedHibeAuthority(keystorePath, group);
-  if (pinned !== null) {
-    if (pinned.authorityDid !== record.authorityDid) {
-      throw new TrustError("untrusted_principal", "assertion is not from the pinned authority DID");
-    }
-    if (record.pathEpoch < pinned.pathEpoch) {
-      throw new TrustError("epoch_rollback", "assertion path epoch is lower than the pinned epoch");
-    }
-    if (record.pathEpoch === pinned.pathEpoch) {
-      const identical =
-        pinned.mpkSha256 === record.mpkSha256 &&
-        pinned.idPath === record.idPath &&
-        pinned.maxDepth === record.maxDepth &&
-        pinned.ceremonyId === record.ceremonyId &&
-        pinned.assertionDigest === record.assertionDigest;
-      if (!identical) {
-        throw new TrustError("epoch_conflict", "conflicting assertion at the already pinned epoch");
-      }
-      return; // exact idempotent repeat
-    }
+  validatePinnedHibeAuthorityRecord(group, record);
+  const lockPath = join(keystorePath, "trust", "hibe_authorities.lock");
+  withDurableFileLock(lockPath, () => {
+    const pinned = loadPinnedHibeAuthority(keystorePath, group);
+    assertHibePinTransition(pinned, record);
+    writePinnedHibeAuthorityRecord(keystorePath, group, record);
+  });
+}
+
+interface HibeAuthorityInstallTransaction {
+  version: 1;
+  group: string;
+  mpk_b64: string;
+  id_path: string;
+  record: PinnedHibeAuthority;
+}
+
+function hibeAuthorityInstallPath(keystorePath: string, group: string): string {
+  return join(keystorePath, `${group}.hibe.authority-install.v1.json`);
+}
+
+function readHibeAuthorityInstall(
+  keystorePath: string,
+  group: string,
+): { mpk: Uint8Array; idPath: string; record: PinnedHibeAuthority } {
+  const path = hibeAuthorityInstallPath(keystorePath, group);
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new TrustError("statement_invalid", "HIBE authority install transaction is unreadable");
   }
-  const doc = readAuthoritiesDoc(keystorePath);
-  const authorities =
-    doc["authorities"] !== null && typeof doc["authorities"] === "object" && !Array.isArray(doc["authorities"])
-      ? (doc["authorities"] as Record<string, unknown>)
-      : {};
-  authorities[group] = {
-    authority_did: record.authorityDid,
-    ceremony_id: record.ceremonyId,
-    group: record.group,
-    mpk_sha256: record.mpkSha256,
-    max_depth: record.maxDepth,
-    id_path: record.idPath,
-    path_epoch: record.pathEpoch,
-    assertion_digest: record.assertionDigest,
-  };
-  const path = hibeAuthoritiesPath(keystorePath);
-  mkdirSync(join(keystorePath, "trust"), { recursive: true });
-  _atomicWrite(path, JSON.stringify({ version: 1, authorities }, null, 1));
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TrustError("statement_invalid", "HIBE authority install transaction is malformed");
+  }
+  const tx = value as Partial<HibeAuthorityInstallTransaction>;
+  if (
+    tx.version !== 1 ||
+    tx.group !== group ||
+    typeof tx.mpk_b64 !== "string" ||
+    typeof tx.id_path !== "string" ||
+    tx.record === null ||
+    typeof tx.record !== "object" ||
+    Array.isArray(tx.record)
+  ) {
+    throw new TrustError("statement_invalid", "HIBE authority install transaction is malformed");
+  }
+  const record = tx.record;
+  validatePinnedHibeAuthorityRecord(group, record);
+  const idPath = validateHibeIdentityPath(tx.id_path, "authority install identity path");
+  const decoded = Buffer.from(tx.mpk_b64, "base64");
+  if (decoded.toString("base64") !== tx.mpk_b64) {
+    throw new TrustError("statement_invalid", "HIBE authority install MPK encoding is malformed");
+  }
+  const mpk = new Uint8Array(decoded);
+  if (
+    idPath !== record.idPath ||
+    sha256Digest(mpk) !== record.mpkSha256 ||
+    hibeGroupMpkMaxDepth(mpk) !== record.maxDepth
+  ) {
+    throw new TrustError(
+      "binding_invalid",
+      "HIBE authority install material differs from its pinned assertion",
+    );
+  }
+  return { mpk, idPath, record };
+}
+
+function recoverHibeAuthorityInstallUnlocked(keystorePath: string, group: string): boolean {
+  const transactionPath = hibeAuthorityInstallPath(keystorePath, group);
+  if (!existsSync(transactionPath)) return false;
+  const { mpk, idPath, record } = readHibeAuthorityInstall(keystorePath, group);
+  const trustLock = join(keystorePath, "trust", "hibe_authorities.lock");
+  withDurableFileLock(trustLock, () => {
+    const pinned = loadPinnedHibeAuthority(keystorePath, group);
+    try {
+      assertHibePinTransition(pinned, record);
+    } catch (err) {
+      // A rejected transition (epoch rollback/conflict) is terminal, not a
+      // recoverable crash — discard the marker so it cannot poison the next
+      // install's recovery pass. A write failure below is different: it leaves
+      // the marker so the transaction completes on the next load.
+      durableUnlink(transactionPath);
+      throw err;
+    }
+    // Promote public material before the pin. A crash in between fails closed
+    // because seal-time binding checks see the old pin; the durable marker
+    // completes this exact transaction on the next load.
+    durableAtomicWrite(join(keystorePath, `${group}.hibe.mpk`), mpk);
+    durableAtomicWrite(join(keystorePath, `${group}.hibe.idpath`), idPath);
+    writePinnedHibeAuthorityRecord(keystorePath, group, record);
+  });
+  durableUnlink(transactionPath);
+  return true;
+}
+
+/** Complete a crash-interrupted external-authority material/pin promotion. */
+export function recoverHibeAuthorityInstall(keystorePath: string, group: string): boolean {
+  validateHibeGroupName(group);
+  const transactionPath = hibeAuthorityInstallPath(keystorePath, group);
+  if (!existsSync(transactionPath)) return false;
+  const installLock = `${transactionPath}.lock`;
+  return withDurableFileLock(installLock, () =>
+    recoverHibeAuthorityInstallUnlocked(keystorePath, group),
+  );
+}
+
+/**
+ * Crash-recoverable promotion of authenticated external-authority material.
+ * The marker makes the multi-file update idempotent; the pin never advances
+ * unless both MPK and identity path have been durably installed.
+ */
+export function installPinnedHibeAuthorityMaterial(
+  keystorePath: string,
+  group: string,
+  mpk: Uint8Array,
+  idPath: string,
+  record: PinnedHibeAuthority,
+): void {
+  validatePinnedHibeAuthorityRecord(group, record);
+  validateHibeIdentityPath(idPath, "authority install identity path");
+  if (
+    idPath !== record.idPath ||
+    sha256Digest(mpk) !== record.mpkSha256 ||
+    hibeGroupMpkMaxDepth(mpk) !== record.maxDepth
+  ) {
+    throw new TrustError(
+      "binding_invalid",
+      "HIBE authority install material differs from its pinned assertion",
+    );
+  }
+  const transactionPath = hibeAuthorityInstallPath(keystorePath, group);
+  const installLock = `${transactionPath}.lock`;
+  withDurableFileLock(installLock, () => {
+    recoverHibeAuthorityInstallUnlocked(keystorePath, group);
+    const tx: HibeAuthorityInstallTransaction = {
+      version: 1,
+      group,
+      mpk_b64: Buffer.from(mpk).toString("base64"),
+      id_path: idPath,
+      record,
+    };
+    durableAtomicWrite(transactionPath, JSON.stringify(tx, null, 2) + "\n");
+    recoverHibeAuthorityInstallUnlocked(keystorePath, group);
+  });
+}
+
+/**
+ * Fail-closed writer-side authorization immediately before every HIBE seal.
+ * Local authorities are authorized by possession of the matching MSK. A
+ * write-only external group must match a live, audience-addressed pin exactly.
+ */
+export function assertHibeSealAuthorized(
+  keystorePath: string,
+  group: string,
+  mat: HibeGroupMaterial,
+  writerDid: string,
+  now: string,
+): void {
+  parseEd25519DidKey(writerDid);
+  if (mat.msk !== undefined) return;
+  const pinned = loadPinnedHibeAuthority(keystorePath, group);
+  if (pinned === null) {
+    throw new TrustError(
+      "untrusted_principal",
+      "external HIBE writer has no authenticated authority assertion pin",
+    );
+  }
+  if (pinned.audienceDid !== writerDid) {
+    throw new TrustError("wrong_recipient", "authority assertion pin names a different writer");
+  }
+  const at = parseTrustTimestamp(now, "now");
+  if (at < parseTrustTimestamp(pinned.issuedAt, "issued_at")) {
+    throw new TrustError("statement_invalid", "authority assertion is not yet valid");
+  }
+  if (at >= parseTrustTimestamp(pinned.expiresAt, "expires_at")) {
+    throw new TrustError("statement_expired", "authority assertion pin has expired");
+  }
+  let encodedDepth: number;
+  try {
+    encodedDepth = hibeGroupMpkMaxDepth(mat.mpk);
+  } catch {
+    throw new TrustError("binding_invalid", "installed HIBE MPK is malformed");
+  }
+  if (
+    pinned.group !== group ||
+    pinned.mpkSha256 !== sha256Digest(mat.mpk) ||
+    pinned.maxDepth !== encodedDepth ||
+    pinned.idPath !== mat.idPath
+  ) {
+    throw new TrustError("binding_invalid", "installed HIBE material differs from the authenticated pin");
+  }
 }
 
 /** Sibling successor of `path`: bump a `~r<n>` counter on the last label

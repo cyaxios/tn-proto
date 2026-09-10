@@ -21,7 +21,7 @@ Maintain a straightforward, developer-friendly voice. Avoid parameter-heavy expl
 [![Keys](https://img.shields.io/badge/keys-non--custodial%20vault-brightgreen.svg?style=flat-square)](#non-custodial-vault-backup)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](#license)
 
-**`tn-proto` keeps every record readable only by the people you've authorized - and leaves cryptographic proof that it did.** Fields are encrypted per reader, so the wrong people simply can't decrypt them; each entry is signed by your device and hash-chained, so anyone can verify offline - from the log file alone - who was allowed to read what, and that nothing was altered after the fact.
+**TN-Proto moves data and a use-contract together.** Group keys control access, signatures authenticate the object, and applications decide permitted use. The governed Python SDK carries that binding through creation, selective opening, computation, and signed release.
 
 ## Installation
 
@@ -29,7 +29,54 @@ Maintain a straightforward, developer-friendly voice. Avoid parameter-heavy expl
 pip install tn-proto
 ```
 
-## Quickstart
+## Governed sessions own their context
+
+`tn.Session` is an independent native Rust context. Several sessions can work in
+one Python process, each with its own identity, policy, and groups. The governed
+workflow is `create_obj → receive → mutate / attach / include → release`.
+
+```python
+from pathlib import Path
+import tn
+
+with tn.Session(Path("agents.md").read_text(encoding="utf-8")) as session:
+    policy = session.policy("research.sample")
+    data = session.create_obj(
+        {"counts": [12, 18]}, policy, object_type="research.sample"
+    )
+    data.data["total"] = sum(data.data["counts"])
+    del data.data["counts"]
+    result = data.release(
+        to="reports", use=tn.UseContext("analytics", "research", "aggregate"),
+        decide=lambda ctx: (
+            ctx.destination == "reports"
+            and all(p.matches_contract(policy) for p in ctx.policies)
+        ),
+    )
+    outbox_bytes = bytes(result)
+```
+
+The working object retains its policies and causal inputs. Release encrypts the
+current data and `tn.agents`, binds every group with governance AAD, signs the
+complete object, and retains the sealed version. The application's callback
+admits the current result; governed adapters can provide that decision internally.
+Transport retries reuse the retained bytes.
+
+Fresh sessions own in-memory material. `tn.Session.from_config("service/tn.yaml")`
+loads an existing service identity, policy, and group material. Optional creation
+and release registers are configured per session through environment variables.
+For separate input and output identities or keys, use
+`publisher.release(data, use=..., to=..., decide=...)`; it publishes the same
+native working object through that session and preserves its inherited governance.
+
+See the [governed workflow guide](GOVERNED_WORKFLOW.md) for receiving sources,
+signed dataset editions, authority-approved attachment, multiple inputs, snapshots,
+and service registers. Run [the governed workflow](examples/governed_workflow.py)
+for a complete local example. Its [Rust counterpart](../crypto/tn-core/examples/governed_workflow.rs)
+uses the same implementation and exchanges the same signed wire. Native classes
+and typing stubs are also exported from `tn.governed`.
+
+## Event streams use the same protocol
 
 The first run mints a ceremony under `./.tn/` - nothing to configure.
 
@@ -87,7 +134,7 @@ TN does two jobs at once: it keeps each record from reaching the wrong eyes, and
 
 **Control who can read what**
 - **Private by default** - field values are encrypted on disk. The wrong people don't get a redacted view; they get ciphertext they can't open.
-- **Per-reader** - one entry can be sealed for several named parties, each with their own key, so each sees only what they're authorized to.
+- **Group access** - fields are routed into encryption groups. Assigned reader material opens the corresponding groups, so one object can carry data for several authorized audiences.
 - **Revocable** - cut a reader off and the next entry is already beyond their reach; everyone else keeps reading, no rekeying.
 
 **Prove you did**

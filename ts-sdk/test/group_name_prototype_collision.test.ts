@@ -24,6 +24,7 @@ import { parse as parseYaml } from "yaml";
 
 import { AdminNamespace } from "../src/admin/index.js";
 import { jweDecrypt, okpPrivateJwk } from "../src/core/jwe.js";
+import { DeviceKey } from "../src/core/signing.js";
 import { loadConfig } from "../src/runtime/config.js";
 import { NodeRuntime } from "../src/runtime/node_runtime.js";
 
@@ -74,7 +75,7 @@ test('ensureGroup("toString") persists, survives re-init, routes addRecipient + 
   const bobPriv = x25519.utils.randomPrivateKey();
   const bobPub = x25519.getPublicKey(bobPriv);
   const bobJwk = okpPrivateJwk(bobPub, bobPriv);
-  const bobDid = "did:key:z6MkBobProtoNameGroupTest000000000000000000";
+  const bobDid = DeviceKey.generate().did;
   const added = await admin2.addRecipient("toString", {
     recipientDid: bobDid,
     publicKey: bobPub,

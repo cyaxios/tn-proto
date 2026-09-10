@@ -1,11 +1,17 @@
-//! Secure-default read behavior of the Rust SDK surface.
+//! Read behavior of the Rust SDK surface under the no-verify default.
 //!
-//! Covers the `ReadOptions` secure defaults, the raise-on-first-rejection
-//! automatic mode, receiver-local trust loading through
-//! `ConfigReadTrustProvider` (config `trust.writers`, verified-publisher
-//! records, and the local device), per-`Tn` provider injection, and the
-//! one-warning-plus-one-audit observability contract for every explicit
-//! weakening.
+//! `ReadOptions::default()` performs no verification: a plain `read` decrypts
+//! and returns values with no signature, chain, or writer-trust checks. Passing
+//! `verify: true` opts into fail-closed verification, which raises on the first
+//! rejected row and enforces the receiver-local writer-trust allowlist.
+//!
+//! Covers the no-verify default, explicit `verify: true` enforcement
+//! (raise-on-first-rejection, unknown-writer rejection), receiver-local trust
+//! loading through `ConfigReadTrustProvider` (config `trust.writers`,
+//! verified-publisher records, and the local device), per-`Tn` provider
+//! injection, and the observability contract for every explicit weakening: a
+//! single stderr warning, profile-gated for the no-verify relaxation, with no
+//! administrative log audit event.
 
 mod common;
 
@@ -96,10 +102,19 @@ fn all_runs() -> ReadOptions {
     }
 }
 
-/// Count `tn.security.unsafe_operation` rows the runtime attested this run.
-fn audit_events(tn: &Tn) -> tn_proto::Result<Vec<tn_proto::Entry>> {
+/// Read every row of the log under a real secure read (`verify: true`) and
+/// return any `tn.security.unsafe_operation` rows. Under the current model the
+/// weakening warning is stderr-only, so this always returns an empty vec; it
+/// exists to prove no administrative audit event is written to the log.
+///
+/// It intentionally uses `verify: true` so this probe itself never emits a
+/// no-verify weakening warning that would perturb per-test warning counts.
+fn audit_events_in_log(tn: &Tn) -> tn_proto::Result<Vec<tn_proto::Entry>> {
     Ok(tn
-        .read(ReadOptions::default())?
+        .read(ReadOptions {
+            all_runs: true,
+            verify: true,
+        })?
         .into_iter()
         .filter(|entry| entry.event_type() == Some("tn.security.unsafe_operation"))
         .collect())
@@ -143,16 +158,55 @@ fn append_trust_writers(yaml_path: &Path, writers: &[&str]) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn read_options_default_is_secure_auto() {
+fn read_options_default_is_no_verify() -> tn_proto::Result<()> {
+    // The simple read default performs no verification.
     let options = ReadOptions::default();
-    assert!(options.verify);
+    assert!(!options.verify);
     assert!(!options.all_runs);
+
+    // The advanced policy surface keeps a fail-closed `Auto` default and
+    // leaves every relaxation unset.
     let policy = ReadPolicyOptions::default();
     assert_eq!(policy.verify, VerifyMode::Auto);
     assert_eq!(policy.require_signature, None);
     assert_eq!(policy.allow_unauthenticated, None);
     assert_eq!(policy.trusted_writers, None);
     assert!(!policy.allow_unknown_writers);
+
+    // A default read of a signing ceremony with a tampered row returns it
+    // rather than raising: no signature, chain, or writer-trust check runs.
+    let tn = Tn::ephemeral()?;
+    tn.info("plain.ok", json!({ "marker": "fine" }))?;
+    tn.info("plain.tampered", json!({ "secret": "returned-anyway" }))?;
+
+    let log_path = tn.log_path().to_path_buf();
+    let text = fs::read_to_string(&log_path)?;
+    let mut lines: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("envelope json"))
+        .collect();
+    lines
+        .last_mut()
+        .expect("at least one row")
+        .as_object_mut()
+        .expect("envelope object")
+        .insert("signature".into(), Value::String("invalid-signature".into()));
+    let rewritten = lines
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&log_path, rewritten)?;
+
+    let entries = tn.read(all_runs())?;
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.event_type() == Some("plain.tampered")),
+        "no-verify default must return the tampered row"
+    );
+    Ok(())
 }
 
 #[test]
@@ -184,17 +238,25 @@ fn auto_read_raises_on_first_rejection_without_leaking_plaintext() -> tn_proto::
         + "\n";
     fs::write(&log_path, rewritten)?;
 
-    // The secure automatic default raises on the first rejected row.
-    let error = tn.read(all_runs()).expect_err("auto must raise");
+    // An explicit `verify: true` read raises on the first rejected row.
+    let error = tn
+        .read(ReadOptions {
+            all_runs: true,
+            verify: true,
+        })
+        .expect_err("verify: true must raise");
     let message = error.to_string();
     assert!(message.contains("signature_invalid"), "{message}");
     assert!(!message.contains("never-return-this"), "{message}");
 
-    // The run filter never bypasses the security gate: the default
+    // The run filter never bypasses the security gate: a verifying
     // current-run read scans (and rejects) the same tampered row.
     let error = tn
-        .read(ReadOptions::default())
-        .expect_err("default read must raise too");
+        .read(ReadOptions {
+            all_runs: false,
+            verify: true,
+        })
+        .expect_err("verifying current-run read must raise too");
     assert!(error.to_string().contains("signature_invalid"), "{error}");
 
     // verify="skip" keeps verified continuity and reports the rejection.
@@ -278,8 +340,11 @@ fn unknown_writers_are_rejected_by_default() -> tn_proto::Result<()> {
     fs::write(tn.log_path(), log)?;
 
     let error = tn
-        .read(all_runs())
-        .expect_err("a cryptographically valid but unknown writer is rejected");
+        .read(ReadOptions {
+            all_runs: true,
+            verify: true,
+        })
+        .expect_err("a cryptographically valid but unknown writer is rejected under verify");
     assert!(error.to_string().contains("writer_untrusted"), "{error}");
     Ok(())
 }
@@ -302,7 +367,10 @@ fn config_trust_writers_authorize_an_exact_foreign_did() -> tn_proto::Result<()>
     log.push('\n');
     fs::write(tn.log_path(), log)?;
 
-    let entries = tn.read(all_runs())?;
+    let entries = tn.read(ReadOptions {
+        all_runs: true,
+        verify: true,
+    })?;
     let entry = common::find_event(&entries, "foreign.event");
     let valid = entry
         .get("_valid")
@@ -380,9 +448,14 @@ fn config_provider_loads_verified_publisher_records() -> tn_proto::Result<()> {
 
 #[test]
 fn injected_provider_overrides_config_trust_per_tn() -> tn_proto::Result<()> {
+    // Writer-trust enforcement runs only under verification.
+    let verify_all = ReadOptions {
+        all_runs: true,
+        verify: true,
+    };
     let mut tn = Tn::ephemeral()?;
     tn.info("own.row", json!({ "marker": "mine" }))?;
-    assert!(!tn.read(all_runs())?.is_empty());
+    assert!(!tn.read(verify_all)?.is_empty());
 
     // A provider that does not trust the local device rejects its own rows.
     let stranger = tn_core::DeviceKey::generate().did().to_string();
@@ -390,7 +463,7 @@ fn injected_provider_overrides_config_trust_per_tn() -> tn_proto::Result<()> {
         stranger,
         TrustSource::ExplicitConfig,
     )])?));
-    let error = tn.read(all_runs()).expect_err("injected provider wins");
+    let error = tn.read(verify_all).expect_err("injected provider wins");
     assert!(error.to_string().contains("writer_untrusted"), "{error}");
 
     // Trusting the local device again restores acceptance.
@@ -398,12 +471,12 @@ fn injected_provider_overrides_config_trust_per_tn() -> tn_proto::Result<()> {
         tn.did().to_string(),
         TrustSource::ExplicitConfig,
     )])?));
-    assert!(!tn.read(all_runs())?.is_empty());
+    assert!(!tn.read(verify_all)?.is_empty());
 
     // Injection is scoped to one handle: a fresh Tn keeps its own defaults.
     let other = Tn::ephemeral()?;
     other.info("other.row", json!({}))?;
-    assert!(!other.read(all_runs())?.is_empty());
+    assert!(!other.read(verify_all)?.is_empty());
     Ok(())
 }
 
@@ -486,26 +559,28 @@ fn invalid_trust_config_is_rejected_at_init() -> tn_proto::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// weakening observability: one warning + one audit event per weakening
+// weakening observability: one stderr warning per weakening, no log audit event
 // ---------------------------------------------------------------------------
 
 #[test]
-fn weakened_read_warns_once_and_audits_once_per_weakening() -> tn_proto::Result<()> {
+fn weakened_read_warns_once_per_weakening() -> tn_proto::Result<()> {
     install_recorder();
     let tn = Tn::ephemeral()?;
     tn.info("weaken.row", json!({}))?;
 
-    // Secure defaults emit nothing.
+    // A real secure read (verify: true) emits nothing.
     let baseline = my_security_warnings().len();
-    tn.read(all_runs())?;
+    tn.read(ReadOptions {
+        all_runs: true,
+        verify: true,
+    })?;
     assert_eq!(my_security_warnings().len(), baseline);
-    assert_eq!(audit_events(&tn)?.len(), 0);
 
-    // First weakening: exactly one warning and one audit event.
+    // First weakening (no-verify under a signing profile): exactly one stderr
+    // warning and no administrative audit event in the log.
     let entries = tn.read(ReadOptions {
         all_runs: true,
         verify: false,
-        ..ReadOptions::default()
     })?;
     assert!(!entries.is_empty());
     let warnings = my_security_warnings();
@@ -514,28 +589,16 @@ fn weakened_read_warns_once_and_audits_once_per_weakening() -> tn_proto::Result<
     assert!(message.contains("\"operation\":\"read\""), "{message}");
     assert!(message.contains("verification_disabled"), "{message}");
 
-    let audits = audit_events(&tn)?;
-    assert_eq!(audits.len(), 1);
-    assert_eq!(
-        audits[0].get("operation").and_then(Value::as_str),
-        Some("read")
-    );
-    assert_eq!(
-        audits[0].get("relaxations"),
-        Some(&json!(["verification_disabled"]))
-    );
-    assert_eq!(audits[0].get("group"), Some(&Value::Null));
-    assert_eq!(audits[0].get("subject_did"), Some(&Value::Null));
-    assert_eq!(audits[0].get("artifact_digest"), Some(&Value::Null));
+    // The weakening warning is stderr-only: nothing is written to the log.
+    assert_eq!(audit_events_in_log(&tn)?.len(), 0);
 
-    // Each weakening emits its own pair.
+    // Each weakening emits its own warning.
     tn.read(ReadOptions {
         all_runs: true,
         verify: false,
-        ..ReadOptions::default()
     })?;
     assert_eq!(my_security_warnings().len(), baseline + 2);
-    assert_eq!(audit_events(&tn)?.len(), 2);
+    assert_eq!(audit_events_in_log(&tn)?.len(), 0);
     Ok(())
 }
 
@@ -554,18 +617,20 @@ fn combined_relaxations_are_sorted_and_deduplicated() -> tn_proto::Result<()> {
         ..ReadPolicyOptions::default()
     })?;
 
+    // The combined weakening fires exactly one stderr warning whose JSON lists
+    // the relaxations in sorted, de-duplicated order.
     let warnings = my_security_warnings();
     assert_eq!(warnings.len(), baseline + 1, "{warnings:?}");
-    let audits = audit_events(&tn)?;
-    assert_eq!(audits.len(), 1);
-    assert_eq!(
-        audits[0].get("relaxations"),
-        Some(&json!([
-            "signature_not_required",
-            "unauthenticated_allowed",
-            "unknown_writer_allowed",
-        ]))
+    let message = warnings.last().expect("one warning");
+    assert!(
+        message.contains(
+            "\"relaxations\":[\"signature_not_required\",\"unauthenticated_allowed\",\"unknown_writer_allowed\"]"
+        ),
+        "{message}"
     );
+
+    // No administrative audit event is written to the log.
+    assert_eq!(audit_events_in_log(&tn)?.len(), 0);
     Ok(())
 }
 
@@ -584,6 +649,8 @@ fn weakened_watch_warns_once_at_construction_not_per_poll() -> tn_proto::Result<
         ..tn_proto::WatchOptions::default()
     })?;
 
+    // Construction emits exactly one stderr warning tagged as a watch, and no
+    // administrative audit event reaches the log.
     let warnings = my_security_warnings();
     assert_eq!(warnings.len(), baseline + 1, "{warnings:?}");
     assert!(
@@ -593,20 +660,15 @@ fn weakened_watch_warns_once_at_construction_not_per_poll() -> tn_proto::Result<
             .contains("\"operation\":\"watch\""),
         "{warnings:?}"
     );
-    assert_eq!(audit_events(&tn)?.len(), 1);
-    assert_eq!(
-        audit_events(&tn)?[0]
-            .get("operation")
-            .and_then(Value::as_str),
-        Some("watch")
-    );
+    assert_eq!(audit_events_in_log(&tn)?.len(), 0);
 
     tn.info("watch.one", json!({}))?;
     watch.poll()?;
     tn.info("watch.two", json!({}))?;
     watch.poll()?;
 
+    // Polling reuses the non-warning read path: the warning count stays put.
     assert_eq!(my_security_warnings().len(), baseline + 1);
-    assert_eq!(audit_events(&tn)?.len(), 1);
+    assert_eq!(audit_events_in_log(&tn)?.len(), 0);
     Ok(())
 }

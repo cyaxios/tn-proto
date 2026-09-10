@@ -39,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -331,6 +332,32 @@ def _build_kit_bundle_body(
         },
     }
     return body, extras
+
+
+def _merge_manifest_state(
+    current: Mapping[str, Any] | None,
+    augmentation: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Add trusted producer metadata without permitting silent replacement.
+
+    This is intentionally a shallow, top-level merge: a kind-specific caller
+    owns one unique state key and cannot overwrite the kit builder's existing
+    ``kind``/``kits`` fields or recipient encryption state.
+    """
+    merged = dict(current or {})
+    if augmentation is None:
+        return merged
+    if not isinstance(augmentation, Mapping) or not all(
+        isinstance(key, str) and key for key in augmentation
+    ):
+        raise ValueError("manifest state augmentation must be an object with non-empty keys")
+    collisions = sorted(set(merged).intersection(augmentation))
+    if collisions:
+        raise ValueError(
+            "manifest state augmentation collision: " + ", ".join(repr(key) for key in collisions)
+        )
+    merged.update(dict(augmentation))
+    return merged
 
 
 def _build_project_seed_body(
@@ -823,6 +850,7 @@ def export(
     ceremony_id_stub: str | None = None,
     seal_for_recipient: bool = False,
     to_dids: list[str] | None = None,
+    _manifest_state: Mapping[str, Any] | None = None,
 ) -> Path:
     """Pack a `.tnpkg` from local ceremony state.
 
@@ -938,6 +966,8 @@ def export(
         nickname=nickname,
         confirm_includes_secrets=confirm_includes_secrets,
     )
+    if _manifest_state is not None:
+        extras["state"] = _merge_manifest_state(extras.get("state"), _manifest_state)
 
     # 3. Resolve the manifest signer (cfg.device for most kinds; the
     #    bundled device key for identity_seed).

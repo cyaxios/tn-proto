@@ -12,6 +12,7 @@ import { test } from "node:test";
 import { x25519 } from "@noble/curves/ed25519";
 
 import { AdminNamespace } from "../src/admin/index.js";
+import { DeviceKey } from "../src/core/signing.js";
 import { readAsRecipientAsync } from "../src/read_as_recipient.js";
 import { NodeRuntime } from "../src/runtime/node_runtime.js";
 
@@ -22,8 +23,9 @@ test("recipient reads a publisher's jwe log via readAsRecipientAsync", async () 
   // A mints B's recipient keypair and enrolls B by public key (the raw
   // DID-plus-key path, which is explicitly unverified).
   const bPriv = x25519.utils.randomPrivateKey();
+  const bobDid = DeviceKey.generate().did;
   await new AdminNamespace(rtA).addRecipient("default", {
-    recipientDid: "did:key:z6MkBobForeignRead000000000000000000000000",
+    recipientDid: bobDid,
     publicKey: x25519.getPublicKey(bPriv),
     unsafeUnverified: true,
   });

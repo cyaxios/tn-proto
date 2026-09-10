@@ -141,6 +141,7 @@ mod native {
             reader_private_keys: Vec<Zeroizing<[u8; 32]>>,
         ) -> Result<Self> {
             validate_key_counts(recipient_public_keys.len(), reader_private_keys.len())?;
+            validate_recipient_public_keys(recipient_public_keys)?;
             Ok(Self {
                 group: group.into(),
                 recipient_public_keys: recipient_public_keys.to_vec(),
@@ -156,6 +157,14 @@ mod native {
     }
 
     impl super::super::GroupCipher for JweCipher {
+        fn publication_capability(&self) -> super::super::PublicationCapability {
+            if self.recipient_public_keys.is_empty() {
+                super::super::PublicationCapability::Unsupported
+            } else {
+                super::super::PublicationCapability::Supported
+            }
+        }
+
         fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
             self.encrypt_with_aad(plaintext, &[])
         }
@@ -255,6 +264,22 @@ mod native {
         let mut bytes = Zeroizing::new([0_u8; 32]);
         rand_core::OsRng.fill_bytes(&mut bytes[..]);
         bytes
+    }
+
+    fn validate_recipient_public_keys(public_keys: &[[u8; 32]]) -> Result<()> {
+        for (index, public) in public_keys.iter().enumerate() {
+            // Clamping this fixed public scalar gives 2^254. Multiplication
+            // removes all low-order components while retaining every nonzero
+            // prime-order component on Curve25519 or its twist. This uses the
+            // same X25519 decoding as publication (including high-bit masking
+            // and noncanonical encodings), without randomness or encryption.
+            if shared_secret(&MontgomeryPoint(*public), &[0; 32]).is_none() {
+                return Err(Error::InvalidConfig(format!(
+                    "JWE recipient {index} has a noncontributory X25519 public key"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn wrap_for_recipient(public: &[u8; 32], cek: &[u8; 32]) -> Result<Recipient> {
@@ -907,6 +932,10 @@ mod unavailable {
     }
 
     impl GroupCipher for JweCipher {
+        fn publication_capability(&self) -> crate::cipher::PublicationCapability {
+            crate::cipher::PublicationCapability::Unsupported
+        }
+
         fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>> {
             Err(unavailable())
         }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -104,6 +104,22 @@ def test_read_policy_matrix(case: dict[str, Any]) -> None:
     assert decision.reasons == expected.get("reasons", [])
     assert decision.writer_authenticated is expected["writer_authenticated"]
     assert decision.writer_authorized is expected["writer_authorized"]
+
+
+def test_signed_unchained_record_still_requires_its_signed_row_hash() -> None:
+    baseline = next(item for item in READ_POLICY_CASES if item["id"] == "auto_local_signed")
+    context = replace(_context_for(baseline), profile_chain=False)
+    policy = resolve_case(baseline)
+    record = ReadRecordState(
+        record_valid=True, row_hash_present=False, row_hash_valid=False,
+        chain_valid=True, signature_present=True, signature_valid=True,
+        writer_did=context.local_device_did, aad_valid=True,
+        recipient_groups=frozenset({"default"}),
+    )
+    decision = policy.evaluate(record, context)
+    assert decision.accepted is False
+    assert decision.reasons == [ReadRejectReason.ROW_HASH_INVALID]
+    assert decision.writer_authorized is False
 
 
 def test_reject_reasons_have_frozen_wire_values_and_order() -> None:

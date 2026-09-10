@@ -38,16 +38,17 @@ def test_canonical_bytes_excludes_signature():
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tn.packaging import sign, verify
+from tn.signing import DeviceKey
 
 
-def _mk_pkg():
+def _mk_pkg(device_identity: str = "did:key:alice"):
     return Package(
         package_version=1,
         package_kind="enrolment",
         ceremony_id="c",
         group="g",
         group_epoch=1,
-        device_identity="did:key:alice",
+        device_identity=device_identity,
         signer_verify_pub_b64="",
         recipient_identity="did:key:bob",
         payload={"k": "v"},
@@ -62,13 +63,13 @@ def test_sign_fills_sig_and_pub():
 
 
 def test_verify_accepts_good_sig():
-    sk = Ed25519PrivateKey.generate()
-    assert verify(sign(_mk_pkg(), sk)) is True
+    signer = DeviceKey.generate()
+    assert verify(sign(_mk_pkg(signer.did), signer.signing_key())) is True
 
 
 def test_verify_rejects_tampered_payload():
-    sk = Ed25519PrivateKey.generate()
-    pkg = sign(_mk_pkg(), sk)
+    signer = DeviceKey.generate()
+    pkg = sign(_mk_pkg(signer.did), signer.signing_key())
     pkg.payload["k"] = "TAMPERED"
     assert verify(pkg) is False
 
@@ -83,8 +84,8 @@ from tn.packaging import dump_tnpkg, load_tnpkg
 
 
 def test_tnpkg_round_trip(tmp_path: Path):
-    sk = Ed25519PrivateKey.generate()
-    pkg = sign(_mk_pkg(), sk)
+    signer = DeviceKey.generate()
+    pkg = sign(_mk_pkg(signer.did), signer.signing_key())
     path = tmp_path / "p.tnpkg"
     dump_tnpkg(pkg, path)
     loaded = load_tnpkg(path)

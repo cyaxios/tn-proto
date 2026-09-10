@@ -151,12 +151,31 @@ impl LogFileWriter {
     /// walker) tolerates that.
     pub fn read_tail(&self, max_bytes: usize) -> Result<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
+        // Fallback for backends whose `std::fs::OpenOptions::read` is a no-op
+        // shim (wasm32-unknown-unknown, in-memory adapters): once we learn real
+        // fs reads are unavailable, serve every call from `storage.read_bytes_tail`.
+        // Mirrors `read_tail_if_grown` — without it this method traps on wasm.
+        if self
+            .pinned_read_unavailable
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(self.storage.read_bytes_tail(&self.path, max_bytes)?);
+        }
         let mut guard = self.reader.lock().expect("log_file reader mutex poisoned");
         if guard.is_none() {
-            // Lazy open. Errors propagate; if the file doesn't
-            // exist yet, NotFound is the right return.
-            let f = std::fs::OpenOptions::new().read(true).open(&self.path)?;
-            *guard = Some(f);
+            // Lazy open. NotFound propagates (the file doesn't exist yet); a
+            // non-fs backend error means std::fs reads are unsupported here, so
+            // pin that and serve this call — and every later one — from storage.
+            match std::fs::OpenOptions::new().read(true).open(&self.path) {
+                Ok(f) => *guard = Some(f),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+                Err(_) => {
+                    drop(guard);
+                    self.pinned_read_unavailable
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(self.storage.read_bytes_tail(&self.path, max_bytes)?);
+                }
+            }
         }
         let f = guard.as_mut().expect("just inserted");
         let len = f.metadata()?.len();

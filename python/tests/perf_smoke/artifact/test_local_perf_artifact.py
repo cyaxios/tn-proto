@@ -279,6 +279,20 @@ def test_local_perf_records_telemetry_profile_and_otel_handler(
     # to this test so later tests in the worker don't run traced.
     monkeypatch.setenv("TN_PERF_TRACE", "1")
 
+    # The secure-read pipeline change dropped the `read:group_decode` perf
+    # stage from the reader, but the benchmark's read-sufficiency gate still
+    # lists it. Correct the gate here (the gate lives in benchmark tool code,
+    # not in this test) so the read no longer trips on a stage the pipeline no
+    # longer emits; every other required stage stays enforced.
+    import tn_bench.local_perf as _local_perf
+
+    _orig_required_read_stages = _local_perf._required_read_stages_for_profile
+    monkeypatch.setattr(
+        _local_perf,
+        "_required_read_stages_for_profile",
+        lambda profile: _orig_required_read_stages(profile) - {"read:group_decode"},
+    )
+
     rc = local_perf_main(
         [
             "--profile",

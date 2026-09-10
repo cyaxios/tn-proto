@@ -52,6 +52,12 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// retry) — see the module docs for the pattern.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// The application refused the named use of an authenticated contract.
+    #[error("application refused operation {operation:?}")]
+    UseDenied {
+        /// Operation evaluated by the application's policy callback.
+        operation: String,
+    },
     /// Configuration value is missing or invalid.
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
@@ -157,6 +163,20 @@ pub enum Error {
         /// The envelope's `sequence` (always 0 for sealed objects).
         sequence: u64,
         /// The envelope's `event_type`.
+        event_type: String,
+    },
+
+    /// A log record was rejected by the read policy under an enforcing
+    /// verify setting. Carries the stable snake-case reject reasons
+    /// (`"signature_invalid"`, `"row_hash_invalid"`, `"writer_untrusted"`,
+    /// `"signature_required"`, `"chain_invalid"`, ...). The rust-sdk
+    /// promotes this to `Error::Verify`, so FFI and SDK consumers see one
+    /// typed verification failure across both `read` and `unseal`.
+    #[error("entry event={event_type:?} rejected: {}", failed_checks.join(", "))]
+    ReadRejected {
+        /// Which read-policy checks rejected the record.
+        failed_checks: Vec<String>,
+        /// The record's `event_type`.
         event_type: String,
     },
 

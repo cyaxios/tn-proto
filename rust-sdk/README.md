@@ -1,17 +1,27 @@
 # tn-proto
 
-Idiomatic Rust SDK for `tn-proto` attested logging.
+Rust interface for signed data objects carrying encrypted use contracts.
 
 `tn-proto` is the Rust-facing wrapper around the shared `tn-core` runtime used by
-the Python and TypeScript SDKs. It provides a compact Rust API for creating TN
-projects, writing signed events, reading verified entries, managing recipients,
-exchanging `.tnpkg` artifacts, and syncing project bodies with a TN vault.
+the Python and TypeScript SDKs. The governed flow creates an object from policy
+and explicitly assigned data groups, seals and signs it, opens governance for
+application review, and opens selected plaintext. Mutable data retains its
+contracts and causal inputs; release signs each resulting version.
+
+Start with the [governed-object guide](GOVERNED_OBJECTS.md) and the runnable
+[example](examples/governed_objects.rs). Group material is supplied through the
+shared cipher interface or loaded from an existing configuration.
 
 > Status: this crate is developed in-repo and is not published to crates.io yet.
 > `Cargo.toml` currently has `publish = false` while the public API settles.
 
 ## Features
 
+- Governed objects: `Governance`, mutable `DataObject`, signed `GovernedObject`
+- Configured creation: `Tn::open_objects`, `tn.objects`, `create_obj`
+- Governed use: `receive`, full admission context, selected data mutation
+- Governed release: `attach`, `include`, `release`, exact `wire` and retained snapshots
+- Service startup: publisher `check_groups` / `require_groups`; optional local registers
 - Project lifecycle: `Tn::init_project`, `Tn::init`, `Tn::ephemeral`, `Tn::close`
 - Event writing: `log`, `debug`, `info`, `warning`, `error`
 - Event reading: stable `Entry` values with optional verification
@@ -43,7 +53,30 @@ tn-proto = { path = "rust-sdk", features = ["http"] }
 
 The crate name is `tn-proto`; the Rust module path is `tn_proto`.
 
-## Quickstart
+## Governed objects
+
+```rust
+use serde_json::json;
+use tn_proto::{DataObject, Governance, Objects};
+
+fn get_data(objects: &Objects<'_>, policy: Governance) -> tn_core::Result<DataObject> {
+    objects.create_obj(
+        "research.sample", policy, "observations", json!({"counts": [12, 18]})
+    )
+}
+```
+
+The origin supplies the policy selected for its context and purpose. The object
+context supplies identity and group material, fills `tn.agents`, binds every
+group with governance AAD, and retains the first signed snapshot.
+`Tn::open_objects("tn.yaml")` loads an existing context. The guide shows receiving,
+mutating, attaching policy, and releasing. The example runs directly with ciphers:
+
+```sh
+cargo run -p tn-proto --example governed_objects
+```
+
+## Event streams and project setup
 
 ```rust
 use serde_json::json;

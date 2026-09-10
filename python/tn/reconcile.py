@@ -141,10 +141,28 @@ def _reconcile(cfg: LoadedConfig) -> ReconcileResult:
             )
     for pending in pending_offers:
         try:
-            result.accepted_offers.append(store.reconcile(pending, now=now))
+            accepted = store.reconcile(pending, now=now)
         except TrustError as exc:
             if exc.reason is not TrustReason.UNTRUSTED_PRINCIPAL:
                 result.conflicts.append(
                     f"_reconcile: trusted offer {pending.offer_digest} rejected: {exc}"
                 )
+            continue
+        result.accepted_offers.append(accepted)
+        # Wire the reader's verified pubkey into the group's yaml recipients, so
+        # the publisher can actually encrypt to them. The legacy Path A above
+        # does this for DID-only offers; the trusted-offer path must too, or a
+        # reconciled recipient stays keyless. `store.reconcile` only returns for
+        # a challenged + preauthorized binding whose KeyBindingProof verified, so
+        # the pubkey is reader-proven — this completes the trusted enrollment, it
+        # does not weaken it.
+        principal = accepted.binding.principal
+        res = _admin.add_recipient(
+            principal.group,
+            recipient_did=principal.did,
+            public_key=accepted.binding.public_key,
+            cfg=cfg,
+        )
+        if res.updated_cfg is not None:
+            cfg = res.updated_cfg
     return result

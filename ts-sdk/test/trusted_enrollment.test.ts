@@ -549,10 +549,13 @@ test("fixture: install_hibe_assertion epoch transitions match the frozen table",
     const keystoreDir = mkdtempSync(join(tmpdir(), "tn-hibe-pin-"));
     const base = {
       authorityDid: String(input["authority_did"]),
+      audienceDid: DeviceKey.generate().did,
       ceremonyId: "trust-fixture-ceremony-2026-07-11",
       group: "default",
       maxDepth: 3,
       idPath: "org/fraud/case-17",
+      issuedAt: "2026-07-11T00:00:00Z",
+      expiresAt: "2026-07-11T00:10:00Z",
     };
     pinHibeAuthority(keystoreDir, "default", {
       ...base,

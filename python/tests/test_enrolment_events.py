@@ -11,8 +11,8 @@ import os as _cipher_os
 def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
-import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest  # type: ignore[import-not-found]
@@ -24,8 +24,11 @@ import tn
 from tn import admin
 from tn.absorb import absorb
 from tn.compile import compile_enrolment, emit_to_outbox
-from tn.config import load_or_create
-from tn.offer import _ensure_mykey
+from tn.config import LoadedConfig, load_or_create
+from tn.conventions import outbox_dir
+from tn.enrollment import EnrollmentStore
+from tn.offer import _ensure_mykey, offer
+from tn.trust import AcceptedOffer
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +38,32 @@ def _clean_tn():
         tn.flush_and_close()
     except Exception:
         pass
+
+
+# add_recipient no longer auto-emits an enrolment (its internal call to the old
+# 3-arg compile_enrolment is dead), and compile_enrolment now requires a
+# durably reconciled AcceptedOffer obtained through the real trusted-offer
+# ceremony (a hand-built one is rejected with TrustReason.UNTRUSTED_PRINCIPAL).
+# These helpers drive that ceremony end to end so the tests can compile a real
+# enrolment against a real reader, mirroring
+# tests/test_jwe_trusted_enrollment_e2e.py.
+def _only_outbox_artifact(cfg: LoadedConfig) -> Path:
+    artifacts = list(outbox_dir(cfg.yaml_path).glob("*.tnpkg"))
+    assert len(artifacts) == 1
+    return artifacts[0]
+
+
+def _accepted_flow(
+    publisher: LoadedConfig, reader: LoadedConfig, group: str = "default"
+) -> AcceptedOffer:
+    store = EnrollmentStore(publisher, publisher.device)
+    store.preauthorize(reader.device.did, group)
+    challenge = store.issue_challenge(reader.device.did, group, timedelta(minutes=10))
+    offer(reader, publisher.device.did, challenge=challenge, group=group)
+    receipt = absorb(publisher, _only_outbox_artifact(reader))
+    assert receipt.offer_digest is not None
+    now = datetime.now(timezone.utc)
+    return store.reconcile(store.pending_offer(receipt.offer_digest, now=now), now=now)
 
 
 def _enrolments_from_admin_log(yaml_path, *, event_type="tn.enrolment.compiled"):
@@ -65,15 +94,23 @@ def _enrolments_from_admin_log(yaml_path, *, event_type="tn.enrolment.compiled")
 
 def test_compile_enrolment_emits_event(tmp_path):
     """compile_enrolment emits tn.enrolment.compiled with all catalog fields."""
+    # The peer is a real DeviceKey-backed reader who enrolls through the real
+    # trusted-offer ceremony; add_recipient wires the reader's key into the
+    # cipher and compile_enrolment (run with the publisher runtime live) emits
+    # the attestation.
+    reader_cfg = load_or_create(
+        tmp_path / "reader" / "tn.yaml", cipher=_workflow_cipher("jwe")
+    )
+    peer_did = reader_cfg.device.device_identity
+    peer_pub = _ensure_mykey(reader_cfg, "default")
+
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher=_workflow_cipher("jwe"))
 
     cfg = tn.current_config()
-    peer_did = "did:key:zBob"
-    # add_recipient (with a pub key) is the normal caller of compile_enrolment;
-    # calling compile_enrolment directly is also valid and exercises the emit.
-    peer_pub = os.urandom(32)
+    accepted = _accepted_flow(cfg, reader_cfg)
     admin._add_recipient_jwe_impl(cfg, "default", peer_did, peer_pub)
+    compile_enrolment(cfg, "default", peer_did, accepted_offer=accepted)
     tn.flush_and_close()
 
     tn.init(yaml)
@@ -93,12 +130,19 @@ def test_compile_enrolment_emits_event(tmp_path):
 
 def test_compile_enrolment_all_catalog_fields_present(tmp_path):
     """All 4 required catalog fields must appear in the emitted event."""
+    reader_cfg = load_or_create(
+        tmp_path / "reader" / "tn.yaml", cipher=_workflow_cipher("jwe")
+    )
+    peer_did = reader_cfg.device.device_identity
+    peer_pub = _ensure_mykey(reader_cfg, "default")
+
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher=_workflow_cipher("jwe"))
 
     cfg = tn.current_config()
-    peer_did = "did:key:zCarol"
-    admin._add_recipient_jwe_impl(cfg, "default", peer_did, os.urandom(32))
+    accepted = _accepted_flow(cfg, reader_cfg)
+    admin._add_recipient_jwe_impl(cfg, "default", peer_did, peer_pub)
+    compile_enrolment(cfg, "default", peer_did, accepted_offer=accepted)
     tn.flush_and_close()
 
     tn.init(yaml)
@@ -120,23 +164,29 @@ def test_compile_enrolment_all_catalog_fields_present(tmp_path):
 
 def test_compile_enrolment_direct_call_emits_event(tmp_path):
     """Calling compile_enrolment directly while tn is init'd emits the event."""
+    reader_cfg = load_or_create(
+        tmp_path / "reader" / "tn.yaml", cipher=_workflow_cipher("jwe")
+    )
+    peer_did = reader_cfg.device.device_identity
+    peer_pub = _ensure_mykey(reader_cfg, "default")
+
     yaml = tmp_path / "tn.yaml"
     tn.init(yaml, cipher=_workflow_cipher("jwe"))
 
     cfg = tn.current_config()
-    peer_did = "did:key:zDave"
-    admin._add_recipient_jwe_impl(cfg, "default", peer_did, os.urandom(32))
-    # add_recipient already compiled once; call directly for a second compile.
-    pkg = compile_enrolment(cfg, "default", peer_did)
+    accepted = _accepted_flow(cfg, reader_cfg)
+    admin._add_recipient_jwe_impl(cfg, "default", peer_did, peer_pub)
+    # A direct compile against the reconciled offer emits tn.enrolment.compiled.
+    pkg = compile_enrolment(cfg, "default", peer_did, accepted_offer=accepted)
     assert pkg is not None
     tn.flush_and_close()
 
     tn.init(yaml)
     state = tn.admin.state()
     matches = [r for r in state["enrolments"] if r.get("peer_identity") == peer_did]
-    # Reducer dedupes per (group, peer_did) so only one entry, but the on-disk
-    # log holds both compile events. Verify both: the reduced state, and the
-    # raw envelopes.
+    # Reducer dedupes per (group, peer_did) so only one entry; the on-disk log
+    # holds the compile event. Verify both: the reduced state and the raw
+    # envelopes.
     assert len(matches) >= 1, (
         f"expected >=1 enrolment for to_did={peer_did!r}, got {state['enrolments']}"
     )
@@ -150,13 +200,16 @@ def test_compile_enrolment_direct_call_emits_event(tmp_path):
 
 def test_compile_enrolment_no_emit_without_runtime(tmp_path):
     """compile_enrolment must not raise if called without tn.init() (no runtime)."""
-    from tn.config import load_or_create
-
-    cfg = load_or_create(tmp_path / "tn.yaml", cipher=_workflow_cipher("jwe"))
-    peer_did = "did:key:zEve"
-    admin._add_recipient_jwe_impl(cfg, "default", peer_did, os.urandom(32))
+    cfg = load_or_create(tmp_path / "publisher" / "tn.yaml", cipher=_workflow_cipher("jwe"))
+    reader_cfg = load_or_create(
+        tmp_path / "reader" / "tn.yaml", cipher=_workflow_cipher("jwe")
+    )
+    peer_did = reader_cfg.device.device_identity
+    peer_pub = _ensure_mykey(reader_cfg, "default")
+    accepted = _accepted_flow(cfg, reader_cfg)
+    admin._add_recipient_jwe_impl(cfg, "default", peer_did, peer_pub)
     # tn is not init'd — _runtime is None; compile should succeed silently.
-    pkg = compile_enrolment(cfg, "default", peer_did)
+    pkg = compile_enrolment(cfg, "default", peer_did, accepted_offer=accepted)
     assert pkg is not None, "compile_enrolment should return a Package even without runtime"
 
 
@@ -181,8 +234,13 @@ def test_absorb_emits_event(tmp_path):
     bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     bob_pub = _ensure_mykey(bob_cfg, "default")
 
+    # Bob enrolls through the real trusted-offer ceremony; his retained
+    # outbound offer is what makes the enrolment response absorb cleanly.
+    accepted = _accepted_flow(alice_cfg, bob_cfg)
     admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity, bob_pub)
-    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.device_identity)
+    pkg = compile_enrolment(
+        alice_cfg, "default", bob_cfg.device.device_identity, accepted_offer=accepted
+    )
     pkg_path = emit_to_outbox(alice_cfg, pkg)
 
     # Bob: init TN against his workspace so _runtime is live, then absorb.
@@ -202,6 +260,16 @@ def test_absorb_emits_event(tmp_path):
     )
     tn.flush_and_close()
 
+    # BLOCKED (design decision): the modern trusted enrolment absorb path
+    # (absorb._absorb_enrolment_kind -> enrollment.install_enrollment_response)
+    # does NOT emit tn.enrolment.absorbed — enrollment.py has no emit at all, and
+    # the only surviving emitter is the legacy absorb._apply_enrolment branch,
+    # unreachable once a package carries an enrollment_response (compile_enrolment
+    # always attaches one). The setup below is fully migrated to the real
+    # trusted-offer ceremony and the absorb SUCCEEDS (see the enrolment_applied
+    # assertion above); only this event-emission assertion cannot hold until the
+    # response-install path re-emits the attestation. Not editing source to add
+    # that emit; left red and reported rather than hacked green.
     assert events, "tn.enrolment.absorbed must appear in Bob's admin log after absorb"
     e = events[0]
 
@@ -227,8 +295,11 @@ def test_absorb_no_emit_without_runtime(tmp_path):
     bob_cfg = load_or_create(bob_dir / "tn.yaml", cipher=_workflow_cipher("jwe"))
     bob_pub = _ensure_mykey(bob_cfg, "default")
 
+    accepted = _accepted_flow(alice_cfg, bob_cfg)
     admin._add_recipient_jwe_impl(alice_cfg, "default", bob_cfg.device.device_identity, bob_pub)
-    pkg = compile_enrolment(alice_cfg, "default", bob_cfg.device.device_identity)
+    pkg = compile_enrolment(
+        alice_cfg, "default", bob_cfg.device.device_identity, accepted_offer=accepted
+    )
     pkg_path = emit_to_outbox(alice_cfg, pkg)
 
     # tn is NOT init'd for bob — _runtime is None; absorb must succeed silently.

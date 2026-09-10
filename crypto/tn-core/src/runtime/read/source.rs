@@ -426,7 +426,14 @@ pub fn file_source_id(path: &Path) -> Result<String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir().map_err(Error::Io)?.join(path)
+        // wasm has no working directory: `current_dir()` returns
+        // `Unsupported`, and on that target a Windows-style absolute path
+        // (`C:\...`) is not recognised as absolute either, so this branch is
+        // reached and must not trap the whole read. Fall back to the path as
+        // given — the source id only needs to be stable per source, which it
+        // is. Native targets still absolutize via cwd for cross-invocation
+        // cursor identity. Mirrors `paths_equivalent` below.
+        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
     };
     let normalized = lexical_normalize(&absolute);
     let rendered = normalized

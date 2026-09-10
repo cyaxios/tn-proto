@@ -168,5 +168,11 @@ def test_pytest_fixture_round_trip(pytester):
             assert tn_session.did.startswith("did:key:")
         """
     )
-    res = pytester.runpytest("-q")
+    # Disable pytest-playwright for the inner run. That plugin keeps a
+    # module-global "soft assertion scope" across ``pytest_runtest_call``;
+    # because ``runpytest`` executes in-process, the inner test would nest
+    # inside the outer test's already-open scope and abort with "nested soft
+    # assertion scopes are not supported". The round-trip has nothing to do
+    # with Playwright, so exclude that unrelated plugin from the sub-run.
+    res = pytester.runpytest("-q", "-p", "no:playwright")
     res.assert_outcomes(passed=1)

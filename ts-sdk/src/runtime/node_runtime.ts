@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve as pathResolve } from "node:path";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 import { DeviceKey } from "../core/signing.js";
 
@@ -83,6 +84,7 @@ import { deriveGroupKey, indexTokenFor } from "../core/indexing.js";
 import {
   createHibeGroup,
   hibeBumpPath,
+  assertHibeSealAuthorized,
   hibeCandidateKeys,
   hibeEncrypt,
   hibeGroupMpkMaxDepth,
@@ -91,7 +93,8 @@ import {
   hibeRotateIdPath,
   loadHibeGroup,
   loadPinnedHibeAuthority,
-  pinHibeAuthority,
+  installPinnedHibeAuthorityMaterial,
+  validateHibeIdentityPath,
   type HibeGroupMaterial,
 } from "./hibe_group.js";
 import {
@@ -105,6 +108,7 @@ import {
   TrustError,
   formatTrustTimestamp,
   parseKeyBindingProof,
+  parseEd25519DidKey,
   sha256Digest,
   signKeyBindingProof,
   verifyKeyBindingProof,
@@ -140,6 +144,31 @@ import { createRequire } from "node:module";
 import type { WasmRuntime } from "tn-wasm";
 import { nodeStorageAdapter } from "./storage_node.js";
 import { lastEmitReceipt, receiptFromLine } from "./wasm_shim.js";
+import {
+  durableAtomicWrite,
+  durableUnlink,
+  withDurableFileLock,
+} from "./durable_state.js";
+
+interface HibeGrantRecord {
+  reader_did: string;
+  id_path: string;
+  verified?: boolean;
+  proof_digest?: string;
+  proof_expires_at?: string;
+  subtree_delegation?: boolean;
+}
+
+interface HibeRevokeTransaction {
+  version: 1;
+  group: string;
+  reader_did: string;
+  old_path: string;
+  new_path: string;
+  out_dir: string;
+  audience_did: string;
+  survivors: HibeGrantRecord[];
+}
 
 // ── tn-wasm lazy loader (SDK never crashes user space) ──────────────────────
 // The nodejs-target tn-wasm module self-instantiates its .wasm on require,
@@ -830,6 +859,10 @@ export class NodeRuntime {
         ct =
           pre !== undefined ? pre : this._sealGroupTs(gname, gcfg.cipher, plaintextBytes, aadBytes);
       } catch (e) {
+        // Trust failures are security-policy decisions, not evidence that this
+        // runtime merely lacks publisher material.  Swallowing one here would
+        // silently emit a record with the protected group omitted.
+        if (e instanceof TrustError) throw e;
         // Not a publisher for this group — skip it, exactly like Python's
         // NotAPublisherError branch (warn, drop the group, keep the emit).
         process.emitWarning(
@@ -954,6 +987,13 @@ export class NodeRuntime {
       if (!mat) {
         throw new Error("HIBE: no authority mpk / identity path in this keystore");
       }
+      assertHibeSealAuthorized(
+        this.config.keystorePath,
+        gname,
+        mat,
+        this.did,
+        formatTrustTimestamp(Date.now() * 1000),
+      );
       return hibeEncrypt(mat, plaintext, aad);
     }
     if (cipher === "btn") {
@@ -1100,7 +1140,8 @@ export class NodeRuntime {
       : "";
 
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
-    jweRotateGroup(keystore, group, this.did, ts);
+    const previousEpoch = this.config.groups.get(group)?.indexEpoch ?? 0;
+    jweRotateGroup(keystore, group, this.did, ts, previousEpoch);
 
     // Refresh the in-memory keystore + bump the group epoch. loadJweKeys
     // picks up the fresh mykey plus the just-archived `.revoked.<ts>` keys,
@@ -1111,7 +1152,7 @@ export class NodeRuntime {
     gk.jweKeys = loadJweKeys(keystore, group);
     this.keystore.groups.set(group, gk);
     const gcfg = this.config.groups.get(group);
-    const generation = (gcfg?.indexEpoch ?? 0) + 1;
+    const generation = previousEpoch + 1;
     if (gcfg) gcfg.indexEpoch = generation;
 
     // Mirror the fresh (self-only) recipients + new epoch into the yaml.
@@ -1258,18 +1299,26 @@ export class NodeRuntime {
     return join(this.config.keystorePath, `${group}.hibe.grants`);
   }
 
-  private _hibeGrantsLoad(group: string): Array<{ reader_did: string; id_path: string }> {
+  private _hibeGrantsLoad(group: string): HibeGrantRecord[] {
     const p = this._hibeGrantsPath(group);
     if (!existsSync(p)) return [];
-    return JSON.parse(readFileSync(p, "utf8")) as Array<{ reader_did: string; id_path: string }>;
+    return JSON.parse(readFileSync(p, "utf8")) as HibeGrantRecord[];
   }
 
-  private _hibeGrantsWrite(
-    group: string,
-    grants: Array<{ reader_did: string; id_path: string }>,
-  ): void {
+  private _hibeGrantsWrite(group: string, grants: HibeGrantRecord[]): void {
     // indent=1 matches Python's `json.dumps(grants, indent=1)` byte layout.
-    writeFileSync(this._hibeGrantsPath(group), JSON.stringify(grants, null, 1), "utf8");
+    durableAtomicWrite(this._hibeGrantsPath(group), JSON.stringify(grants, null, 1));
+  }
+
+  private _recordHibeGrant(group: string, entry: HibeGrantRecord): void {
+    const lockPath = `${this._hibeGrantsPath(group)}.lock`;
+    withDurableFileLock(lockPath, () => {
+      const grants = this._hibeGrantsLoad(group).filter(
+        (candidate) => candidate.reader_did !== entry.reader_did,
+      );
+      grants.push(entry);
+      this._hibeGrantsWrite(group, grants);
+    });
   }
 
   /**
@@ -1280,7 +1329,7 @@ export class NodeRuntime {
    * NEVER rides a kit. Records the grant in the `<group>.hibe.grants`
    * registry when `readerDid` is given.
    */
-  grantReader(
+  async grantReader(
     group: string,
     opts: {
       readerDid?: string;
@@ -1289,14 +1338,66 @@ export class NodeRuntime {
       /** Required to mint an ANCESTOR of the group's current sealing path —
        * such a key delegates the whole subtree below it. */
       allowSubauthority?: boolean;
-      /** Trust metadata recorded with the grant registry entry. */
-      grantTrust?: { verified: boolean; proofDigest?: string; proofExpiresAt?: string };
-      /** Label the kit manifest as explicit unsafe plaintext delivery. */
-      unsafePlaintextLabel?: boolean;
+      /** Verified response to this authority's scoped reader challenge. */
+      proof?: KeyBindingProofV1;
+      /** The sole opt-in path for an unverified plaintext bearer kit. */
+      unsafePlaintext?: boolean;
     } = {},
-  ): { kitPath: string; idPath: string; subtreeDelegation: boolean } {
+  ): Promise<{
+    kitPath: string;
+    idPath: string;
+    subtreeDelegation: boolean;
+    verified: boolean;
+    proofDigest: string | null;
+    sealed: boolean;
+  }> {
+    if (opts.readerDid === undefined) {
+      throw new TrustError(
+        "untrusted_principal",
+        "HIBE grant requires the reader's real Ed25519 did:key",
+      );
+    }
+    parseEd25519DidKey(opts.readerDid);
+
+    let verified = false;
+    let proofDigest: string | null = null;
+    let proofExpiresAt: string | undefined;
+    if (opts.proof !== undefined) {
+      if (opts.proof.subject_did !== opts.readerDid) {
+        throw new TrustError(
+          "did_signer_mismatch",
+          "proof subject does not match the grant's readerDid",
+        );
+      }
+      const principal = this.enrollmentStore().consumeHibeGrantProof(opts.proof, {
+        audienceDid: this.did,
+        group,
+      });
+      verified = true;
+      proofDigest = principal.proofDigest;
+      proofExpiresAt = principal.expiresAt;
+    } else {
+      const retained = this.retainedVerifiedGrant(group, opts.readerDid);
+      if (retained !== null) {
+        verified = true;
+        proofDigest = retained.proofDigest;
+      }
+    }
+    if (!verified && opts.unsafePlaintext !== true) {
+      throw new TrustError(
+        "untrusted_principal",
+        "normal HIBE grants require a consumed reader challenge proof or retained verified grant",
+      );
+    }
+    if (opts.unsafePlaintext !== true && !recipientKeyIsResolvable(opts.readerDid)) {
+      throw new TrustError(
+        "binding_invalid",
+        "grant delivery requires a resolvable Ed25519 did:key to seal to",
+      );
+    }
+
     const mat = this._requireHibeGroup("grantReader", group);
-    const safeStem = (opts.readerDid ?? "reader")
+    const safeStem = opts.readerDid
       .split(":")
       .pop()!
       .replace(/[^A-Za-z0-9._-]/g, "_");
@@ -1320,7 +1421,7 @@ export class NodeRuntime {
     const sk = hibeMintReaderKey(mat, targetPath);
 
     const files: Array<[string, Uint8Array]> = [
-      [`${group}.hibe.idpath`, new Uint8Array(Buffer.from(mat.idPath, "utf8"))],
+      [`${group}.hibe.idpath`, new Uint8Array(Buffer.from(targetPath, "utf8"))],
       [`${group}.hibe.mpk`, mat.mpk],
       [`${group}.hibe.sk`, sk],
     ];
@@ -1346,30 +1447,57 @@ export class NodeRuntime {
       ceremonyId: this.config.ceremonyId,
       scope: "kit_bundle",
     };
-    if (opts.readerDid !== undefined) manifestArgs.toDid = opts.readerDid;
+    manifestArgs.toDid = opts.readerDid;
     const manifest = newManifest(manifestArgs);
     const manifestState: Record<string, unknown> = { kits: kitsMeta, kind: "readers-only" };
     if (isProperAncestor) manifestState["subtree_delegation"] = true;
-    if (opts.unsafePlaintextLabel === true) manifestState["unsafe_plaintext_delivery"] = true;
+    if (opts.unsafePlaintext === true) manifestState["unsafe_plaintext_delivery"] = true;
     manifest.state = manifestState;
     signManifestWithBody(manifest, body, this.keystore.device);
     writeTnpkg(outPath, manifest, body);
 
-    if (opts.readerDid) {
-      const grants = this._hibeGrantsLoad(group).filter((g) => g.reader_did !== opts.readerDid);
-      const entry: Record<string, unknown> = { reader_did: opts.readerDid, id_path: targetPath };
-      if (opts.grantTrust !== undefined) {
-        entry["verified"] = opts.grantTrust.verified;
-        if (opts.grantTrust.proofDigest !== undefined) entry["proof_digest"] = opts.grantTrust.proofDigest;
-        if (opts.grantTrust.proofExpiresAt !== undefined) {
-          entry["proof_expires_at"] = opts.grantTrust.proofExpiresAt;
+    let sealed = false;
+    if (opts.unsafePlaintext === true) {
+      await this.recordUnsafeOperation({
+        operation: "hibe_grant",
+        relaxations: verified
+          ? ["plaintext_bearer_delivery"]
+          : ["plaintext_bearer_delivery", "unverified_key_binding"],
+        group,
+        subject_did: opts.readerDid,
+        artifact_digest: null,
+      });
+    } else {
+      sealed = await this.sealKitForRecipient(outPath, opts.readerDid);
+      if (!sealed) {
+        try {
+          rmSync(outPath, { force: true });
+        } catch {
+          // The trust failure below is the primary signal.
         }
+        throw new TrustError(
+          "binding_invalid",
+          "grant delivery could not be recipient-sealed; no plaintext kit was retained",
+        );
       }
-      if (isProperAncestor) entry["subtree_delegation"] = true;
-      grants.push(entry as { reader_did: string; id_path: string });
-      this._hibeGrantsWrite(group, grants);
     }
-    return { kitPath: outPath, idPath: targetPath, subtreeDelegation: isProperAncestor };
+
+    this._recordHibeGrant(group, {
+      reader_did: opts.readerDid,
+      id_path: targetPath,
+      verified,
+      ...(proofDigest === null ? {} : { proof_digest: proofDigest }),
+      ...(proofExpiresAt === undefined ? {} : { proof_expires_at: proofExpiresAt }),
+      ...(isProperAncestor ? { subtree_delegation: true } : {}),
+    });
+    return {
+      kitPath: outPath,
+      idPath: targetPath,
+      subtreeDelegation: isProperAncestor,
+      verified,
+      proofDigest,
+      sealed,
+    };
   }
 
   /**
@@ -1393,8 +1521,8 @@ export class NodeRuntime {
     return new EnrollmentStore(enrollmentCeremonyFromConfig(this.config), this.keystore.device);
   }
 
-  /** Guards {@link recordUnsafeOperation} against audit-emission recursion. */
-  private _unsafeOperationActive = false;
+  /** Guards only the current async audit call-chain against recursion. */
+  private readonly _unsafeOperationContext = new AsyncLocalStorage<boolean>();
 
   /**
    * Emit the common unsafe-operation observability pair: exactly one
@@ -1407,32 +1535,25 @@ export class NodeRuntime {
    * stay best-effort.
    */
   recordUnsafeOperation(notice: UnsafeOperationNotice): Promise<void> {
-    if (this._unsafeOperationActive) return Promise.resolve();
-    this._unsafeOperationActive = true;
-    let normalized: UnsafeOperationNotice;
-    try {
-      normalized = normalizeUnsafeOperationNotice(notice);
-      process.emitWarning(
-        `explicit TN security weakening requested: ${canonicalUnsafeOperationPayload(normalized)}`,
-        "TnSecurityWarning",
-      );
-    } catch (err) {
-      this._unsafeOperationActive = false;
-      throw err;
-    }
-    const audit = this.emitAsync("warning", UNSAFE_OPERATION_EVENT_TYPE, {
-      artifact_digest: normalized.artifact_digest,
-      group: normalized.group,
-      operation: normalized.operation,
-      relaxations: [...normalized.relaxations],
-      subject_did: normalized.subject_did,
-    })
-      .then(() => undefined)
-      .catch(() => undefined) // audit observability is deliberately best effort
-      .finally(() => {
-        this._unsafeOperationActive = false;
-      });
-    return audit;
+    if (this._unsafeOperationContext.getStore() === true) return Promise.resolve();
+    const normalized = normalizeUnsafeOperationNotice(notice);
+    process.emitWarning(
+      `explicit TN security weakening requested: ${canonicalUnsafeOperationPayload(normalized)}`,
+      "TnSecurityWarning",
+    );
+    return this._unsafeOperationContext.run(true, async () => {
+      try {
+        await this.emitAsync("warning", UNSAFE_OPERATION_EVENT_TYPE, {
+          artifact_digest: normalized.artifact_digest,
+          group: normalized.group,
+          operation: normalized.operation,
+          relaxations: [...normalized.relaxations],
+          subject_did: normalized.subject_did,
+        });
+      } catch {
+        // Audit observability is deliberately best effort.
+      }
+    });
   }
 
   /**
@@ -1541,9 +1662,9 @@ export class NodeRuntime {
     const idPath = String(assertion.binding["id_path"]);
     const pathEpoch = Number(assertion.binding["path_epoch"]);
 
-    // Pin first (fails closed on rollback/conflict), then install material.
-    pinHibeAuthority(this.config.keystorePath, opts.group, {
+    const pinRecord = {
       authorityDid: principal.did,
+      audienceDid: assertion.audience_did,
       ceremonyId: assertion.ceremony_id,
       group: opts.group,
       mpkSha256: sha256Digest(mpk),
@@ -1551,25 +1672,14 @@ export class NodeRuntime {
       idPath,
       pathEpoch,
       assertionDigest: principal.proofDigest,
-    });
+      issuedAt: assertion.issued_at,
+      expiresAt: assertion.expires_at,
+    };
 
     const keystore = this.config.keystorePath;
-    const existing = loadHibeGroup(keystore, opts.group);
-    if (existing === null) {
-      createHibeGroup(keystore, opts.group, { idPath, authorityMpk: mpk });
-      this._registerHibeGroupInYaml(opts.group);
-    } else {
-      // Update both public sealing files via pending + rename so a crash
-      // mid-update never leaves a torn mpk or idpath behind.
-      const mpkPath = join(keystore, `${opts.group}.hibe.mpk`);
-      const mpkPending = `${mpkPath}.pending`;
-      writeFileSync(mpkPending, Buffer.from(mpk));
-      renameSync(mpkPending, mpkPath);
-      const idpathPath = join(keystore, `${opts.group}.hibe.idpath`);
-      const idpathPending = `${idpathPath}.pending`;
-      writeFileSync(idpathPending, idPath, "utf8");
-      renameSync(idpathPending, idpathPath);
-    }
+    const groupWasRegistered = this.config.groups.has(opts.group);
+    installPinnedHibeAuthorityMaterial(keystore, opts.group, mpk, idPath, pinRecord);
+    if (!groupWasRegistered) this._registerHibeGroupInYaml(opts.group);
     this._refreshHibeKeystore(opts.group);
   }
 
@@ -1626,10 +1736,10 @@ export class NodeRuntime {
     readerDid: string,
     now?: string,
   ): { proofDigest: string | null } | null {
-    const grants = this._hibeGrantsLoad(group) as Array<Record<string, unknown>>;
-    const entry = grants.find((g) => g["reader_did"] === readerDid);
-    if (entry === undefined || entry["verified"] !== true) return null;
-    const expiresAt = entry["proof_expires_at"];
+    const grants = this._hibeGrantsLoad(group);
+    const entry = grants.find((grant) => grant.reader_did === readerDid);
+    if (entry === undefined || entry.verified !== true) return null;
+    const expiresAt = entry.proof_expires_at;
     if (typeof expiresAt === "string") {
       const nowText = now ?? formatTrustTimestamp(Date.now() * 1000);
       try {
@@ -1640,7 +1750,7 @@ export class NodeRuntime {
         return null;
       }
     }
-    const proofDigest = entry["proof_digest"];
+    const proofDigest = entry.proof_digest;
     return { proofDigest: typeof proofDigest === "string" ? proofDigest : null };
   }
 
@@ -1651,50 +1761,188 @@ export class NodeRuntime {
    * sealed before the revocation — delegated keys are permanent; what this
    * guarantees is that entries sealed AFTER it are closed to them.
    */
-  revokeReader(
+  async revokeReader(
     group: string,
     readerDid: string,
-    opts: { newPath?: string; outDir?: string } = {},
-  ): { revoked: boolean; newPath: string; kitPaths: string[]; remaining: string[] } {
-    const mat = this._requireHibeGroup("revokeReader", group);
-    const grants = this._hibeGrantsLoad(group);
-    if (!grants.some((g) => g.reader_did === readerDid)) {
-      throw new Error(
-        `tn.admin.revokeReader: ${JSON.stringify(readerDid)} has no recorded grant on ` +
-          `group ${JSON.stringify(group)}. Grants made through tn.admin.grantReader are ` +
-          `recorded in ${group}.hibe.grants.`,
+    opts: { newPath?: string; outDir?: string; audienceDid?: string } = {},
+  ): Promise<{
+    revoked: boolean;
+    newPath: string;
+    kitPaths: string[];
+    remaining: string[];
+    pathEpoch: number;
+    authorityAssertion: KeyBindingProofV1;
+  }> {
+    parseEd25519DidKey(readerDid);
+    const markerPath = join(this.config.keystorePath, `${group}.hibe.revoke.v1.json`);
+    let transaction: HibeRevokeTransaction;
+    if (existsSync(markerPath)) {
+      let value: unknown;
+      try {
+        value = JSON.parse(readFileSync(markerPath, "utf8"));
+      } catch {
+        throw new TrustError("statement_invalid", "HIBE revocation transaction is unreadable");
+      }
+      if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        throw new TrustError("statement_invalid", "HIBE revocation transaction is malformed");
+      }
+      transaction = value as HibeRevokeTransaction;
+      if (
+        transaction.version !== 1 ||
+        transaction.group !== group ||
+        transaction.reader_did !== readerDid ||
+        typeof transaction.old_path !== "string" ||
+        typeof transaction.new_path !== "string" ||
+        typeof transaction.out_dir !== "string" ||
+        typeof transaction.audience_did !== "string" ||
+        !Array.isArray(transaction.survivors)
+      ) {
+        throw new TrustError("statement_invalid", "HIBE revocation transaction is malformed");
+      }
+      parseEd25519DidKey(transaction.audience_did);
+      validateHibeIdentityPath(transaction.old_path, "revocation old path");
+      validateHibeIdentityPath(transaction.new_path, "revocation new path");
+      for (const survivor of transaction.survivors) {
+        parseEd25519DidKey(survivor.reader_did);
+        validateHibeIdentityPath(survivor.id_path, "survivor grant path");
+      }
+      if (
+        (opts.newPath !== undefined && opts.newPath !== transaction.new_path) ||
+        (opts.outDir !== undefined && pathResolve(opts.outDir) !== transaction.out_dir) ||
+        (opts.audienceDid !== undefined && opts.audienceDid !== transaction.audience_did)
+      ) {
+        throw new TrustError(
+          "epoch_conflict",
+          "retry parameters differ from the durable HIBE revocation transaction",
+        );
+      }
+    } else {
+      const mat = this._requireHibeGroup("revokeReader", group);
+      const grants = this._hibeGrantsLoad(group);
+      const revokedGrant = grants.find((grant) => grant.reader_did === readerDid);
+      if (revokedGrant === undefined) {
+        throw new Error(
+          `tn.admin.revokeReader: ${JSON.stringify(readerDid)} has no recorded grant on ` +
+            `group ${JSON.stringify(group)}. Grants made through tn.admin.grantReader are ` +
+            `recorded in ${group}.hibe.grants.`,
+        );
+      }
+      const newPath = validateHibeIdentityPath(
+        opts.newPath ?? hibeBumpPath(mat.idPath),
+        "revocation target path",
+      );
+      const grantLabels = validateHibeIdentityPath(
+        revokedGrant.id_path,
+        "revoked grant path",
+      ).split("/");
+      const targetLabels = newPath.split("/");
+      const stillDelegatesTarget =
+        grantLabels.length < targetLabels.length &&
+        grantLabels.every((label, index) => label === targetLabels[index]);
+      const audienceDid = opts.audienceDid ?? this.did;
+      parseEd25519DidKey(audienceDid);
+      if (stillDelegatesTarget) {
+        const authorityAssertion = this.issueHibeAuthorityAssertion(group, 10 * 60_000, {
+          audienceDid,
+        });
+        return {
+          revoked: false,
+          newPath: mat.idPath,
+          kitPaths: [],
+          remaining: grants.map((grant) => grant.reader_did),
+          pathEpoch: hibeAuthorityEpoch(mat),
+          authorityAssertion,
+        };
+      }
+
+      const survivors = grants.filter((grant) => grant.reader_did !== readerDid);
+      for (const survivor of survivors) {
+        parseEd25519DidKey(survivor.reader_did);
+        if (!recipientKeyIsResolvable(survivor.reader_did)) {
+          throw new TrustError(
+            "binding_invalid",
+            `survivor ${JSON.stringify(survivor.reader_did)} cannot receive a sealed reissue`,
+          );
+        }
+        if (this.retainedVerifiedGrant(group, survivor.reader_did) === null) {
+          throw new TrustError(
+            "untrusted_principal",
+            `survivor ${JSON.stringify(survivor.reader_did)} has no live verified grant provenance`,
+          );
+        }
+      }
+      const ts = new Date()
+        .toISOString()
+        .replace(/[-:]/g, "")
+        .replace(/\.\d+Z$/, "Z");
+      const outDir = pathResolve(opts.outDir ?? join(process.cwd(), `hibe_regrant_${ts}`));
+      transaction = {
+        version: 1,
+        group,
+        reader_did: readerDid,
+        old_path: mat.idPath,
+        new_path: newPath,
+        out_dir: outDir,
+        audience_did: audienceDid,
+        survivors,
+      };
+      durableAtomicWrite(markerPath, JSON.stringify(transaction, null, 2) + "\n");
+    }
+
+    mkdirSync(transaction.out_dir, { recursive: true });
+    let mat = this._requireHibeGroup("revokeReader", group);
+    if (mat.idPath === transaction.old_path) {
+      hibeRotateIdPath(this.config.keystorePath, group, mat, transaction.new_path);
+      this._refreshHibeKeystore(group);
+      mat = this._requireHibeGroup("revokeReader", group);
+    } else if (mat.idPath !== transaction.new_path) {
+      throw new TrustError(
+        "epoch_conflict",
+        "authority path differs from the durable HIBE revocation transaction",
       );
     }
-    const remaining = grants.filter((g) => g.reader_did !== readerDid);
-
-    const target = opts.newPath ?? hibeBumpPath(mat.idPath);
-    hibeRotateIdPath(this.config.keystorePath, group, mat, target);
-    this._hibeGrantsWrite(group, remaining);
-    this._refreshHibeKeystore(group);
-
-    const ts = new Date()
-      .toISOString()
-      .replace(/[-:]/g, "")
-      .replace(/\.\d+Z$/, "Z");
-    const outDir = pathResolve(opts.outDir ?? join(process.cwd(), `hibe_regrant_${ts}`));
-    mkdirSync(outDir, { recursive: true });
 
     const kitPaths: string[] = [];
-    for (const g of remaining) {
-      const safeStem = g.reader_did
+    for (const survivor of transaction.survivors) {
+      const safeStem = survivor.reader_did
         .split(":")
         .pop()!
         .replace(/[^A-Za-z0-9._-]/g, "_");
-      const kit = join(outDir, `${safeStem}.tnpkg`);
-      this.grantReader(group, { readerDid: g.reader_did, outPath: kit });
+      const kit = join(transaction.out_dir, `${safeStem}.tnpkg`);
+      await this.grantReader(group, { readerDid: survivor.reader_did, outPath: kit });
       kitPaths.push(kit);
     }
 
+    const survivorDids = new Set(transaction.survivors.map((grant) => grant.reader_did));
+    withDurableFileLock(`${this._hibeGrantsPath(group)}.lock`, () => {
+      const current = this._hibeGrantsLoad(group);
+      const unexpected = current.filter(
+        (grant) => grant.reader_did !== readerDid && !survivorDids.has(grant.reader_did),
+      );
+      if (unexpected.length > 0) {
+        throw new TrustError(
+          "epoch_conflict",
+          "HIBE grant registry changed while revocation was in progress",
+        );
+      }
+      const final = current.filter((grant) => survivorDids.has(grant.reader_did));
+      if (final.length !== transaction.survivors.length) {
+        throw new TrustError("statement_invalid", "not every survivor was durably reissued");
+      }
+      this._hibeGrantsWrite(group, final);
+    });
+
+    const authorityAssertion = this.issueHibeAuthorityAssertion(group, 10 * 60_000, {
+      audienceDid: transaction.audience_did,
+    });
+    durableUnlink(markerPath);
     return {
       revoked: true,
-      newPath: target,
+      newPath: transaction.new_path,
       kitPaths,
-      remaining: remaining.map((g) => g.reader_did),
+      remaining: transaction.survivors.map((grant) => grant.reader_did),
+      pathEpoch: hibeAuthorityEpoch(mat),
+      authorityAssertion,
     };
   }
 
@@ -2974,6 +3222,26 @@ export class NodeRuntime {
     }
 
     const kind = manifest.kind;
+    const manifestState = manifest.state as Record<string, unknown> | undefined;
+    const bodyEncryption = manifestState?.["body_encryption"] as
+      | Record<string, unknown>
+      | undefined;
+    const recipientSealed =
+      bodyEncryption !== undefined &&
+      (bodyEncryption["recipient_wraps"] !== undefined ||
+        bodyEncryption["recipient_wrap"] !== undefined);
+    if (recipientSealed && (kind === "kit_bundle" || kind === "full_keystore")) {
+      return {
+        kind,
+        acceptedCount: 0,
+        dedupedCount: 0,
+        noop: false,
+        derivedState: null,
+        conflicts: [],
+        rejectedReason:
+          "recipient-sealed package requires absorbPkgAsync (or the async tn.pkg.absorb surface)",
+      };
+    }
     let receipt: AbsorbReceipt;
     if (kind === "admin_log_snapshot") {
       receipt = this._absorbAdminLogSnapshot(manifest, body);
@@ -3246,6 +3514,11 @@ export class NodeRuntime {
     outPath: string,
     opts: { groups?: string[] } = {},
   ): string {
+    // Note: no recipient-DID validation here. A BTN kit_bundle's
+    // `recipient_identity` is attestation-only metadata (the body is unsealed
+    // and matched by the absorbed group kit, not by DID), so a shaped-but-keyless
+    // or synthetic label is allowed. The seal path validates independently via
+    // `recipientKeyIsResolvable` before wrapping a BEK to the recipient key.
     const cfg = this.config;
     let requested: string[];
     if (opts.groups === undefined) {
@@ -3269,23 +3542,17 @@ export class NodeRuntime {
           `this ceremony declares ${JSON.stringify([...cfg.groups.keys()].sort())}.`,
       );
     }
+    const nonBtn = requested.filter((group) => cfg.groups.get(group)?.cipher !== "btn");
+    if (nonBtn.length > 0) {
+      throw new Error(
+        `bundleForRecipient: reader packages are BTN-only; use authenticated JWE enrollment or ` +
+          `a challenged HIBE grant for ${JSON.stringify(nonBtn)}.`,
+      );
+    }
 
     const td = mkdtempSync(join(tmpdir(), "tn-bundle-"));
     try {
       for (const gname of requested) {
-        if (cfg.groups.get(gname)?.cipher === "hibe") {
-          // hibe grant: stage the reader-kit files (mpk + idpath + a fresh
-          // delegated key) — same file set grantReader packages.
-          const mat = this._requireHibeGroup("addRecipient", gname);
-          const sk = hibeMintReaderKey(mat, mat.idPath);
-          writeFileSync(join(td, `${gname}.hibe.mpk`), Buffer.from(mat.mpk));
-          writeFileSync(join(td, `${gname}.hibe.idpath`), mat.idPath, "utf8");
-          writeFileSync(join(td, `${gname}.hibe.sk`), Buffer.from(sk));
-          const grants = this._hibeGrantsLoad(gname).filter((g) => g.reader_did !== recipientDid);
-          grants.push({ reader_did: recipientDid, id_path: mat.idPath });
-          this._hibeGrantsWrite(gname, grants);
-          continue;
-        }
         const kitPath = join(td, `${gname}.btn.mykit`);
         this.addRecipient(gname, kitPath, recipientDid);
       }
@@ -3308,23 +3575,39 @@ export class NodeRuntime {
   ): string {
     const body: Record<string, Uint8Array> = {};
     const kitsMeta: Array<{ name: string; sha256: string; bytes: number }> = [];
+    const keystore = this.config.keystorePath;
+    const pack = (name: string, data: Uint8Array): void => {
+      body[`body/${name}`] = data;
+      kitsMeta.push({
+        name,
+        sha256: "sha256:" + createHash("sha256").update(Buffer.from(data)).digest("hex"),
+        bytes: data.length,
+      });
+    };
     for (const gname of [...groups].sort()) {
-      const names = [
+      // Freshly minted reader leaf + hibe kits from the temp mint dir. The btn
+      // kit is a per-recipient capability, never the publisher's own kit.
+      for (const name of [
         `${gname}.btn.mykit`,
         `${gname}.hibe.idpath`,
         `${gname}.hibe.mpk`,
         `${gname}.hibe.sk`,
-      ];
-      for (const name of names) {
+      ]) {
         const p = join(kitsDir, name);
-        if (!existsSync(p)) continue;
-        const data = new Uint8Array(readFileSync(p));
-        body[`body/${name}`] = data;
-        kitsMeta.push({
-          name,
-          sha256: "sha256:" + createHash("sha256").update(Buffer.from(data)).digest("hex"),
-          bytes: data.length,
-        });
+        if (existsSync(p)) pack(name, new Uint8Array(readFileSync(p)));
+      }
+      // Retired rotation archives copied from the publisher's keystore, so a
+      // recipient granted before a rotation keeps reading pre-rotation rows.
+      // These are read-only bearer kits for already-rotated-out epochs; the
+      // current kit above is a minted leaf, so no forward publisher capability
+      // is exported.
+      for (const entry of readdirSync(keystore).sort()) {
+        if (
+          entry.startsWith(`${gname}.btn.mykit.revoked.`) ||
+          entry.startsWith(`${gname}.btn.mykit.retired.`)
+        ) {
+          pack(entry, new Uint8Array(readFileSync(join(keystore, entry))));
+        }
       }
     }
     if (kitsMeta.length === 0) {
@@ -4522,6 +4805,26 @@ export class NodeRuntime {
         }
       }
     }
+  }
+
+  /**
+   * Verified read routed through the wasm core. The wasm `secureRead` applies
+   * the full signature + row_hash + chain checks AND the writer-trust
+   * allowlist (own DID + `trust.writers` + verified publishers). The pure-TS
+   * `read()` below has neither the allowlist nor a place to apply it, so an
+   * enforcing `tn.read({verify: true})` uses this as a fail-closed gate:
+   * `onInvalid: "raise"` throws on the first row an untrusted writer authored
+   * (or any tampered row) before the reader yields anything.
+   *
+   * `onInvalid` mirrors the read verb's enforcing verify modes — "raise"
+   * throws, "skip" returns only the rows that passed, "forensic" keeps every
+   * row with validity markers. Returns the flat rows the core produced.
+   * Throws when the wasm core is unavailable: an enforcing read must fail
+   * closed rather than silently return unverified data.
+   */
+  secureRead(onInvalid: "raise" | "skip" | "forensic"): Array<Record<string, unknown>> {
+    const rows = this.attachWasm().secureRead(onInvalid);
+    return Array.isArray(rows) ? (rows as Array<Record<string, unknown>>) : [];
   }
 
   /**

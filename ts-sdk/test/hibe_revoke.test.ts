@@ -9,6 +9,10 @@
 //     rotation (the superseded key is retained for old entries)
 //   - grants are recorded in the authority-side registry; the registry and
 //     the msk never ride a kit
+//
+// Both readers are enrolled through the verified challenge->proof->grant flow
+// (no unsafe plaintext), so the survivor set stays resolvable and verified —
+// which revoke now requires before it will rotate and re-issue.
 
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
@@ -19,9 +23,13 @@ import { join } from "node:path";
 import { Tn } from "../src/tn.js";
 import { readAsRecipient } from "../src/read_as_recipient.js";
 import { readTnpkg } from "../src/tnpkg_io.js";
+import { createHibeReaderProof } from "../src/core/trust.js";
+import { DeviceKey } from "../src/core/signing.js";
+import type { NodeRuntime } from "../src/runtime/node_runtime.js";
 
-const ALICE = "did:key:z6Mk-alice";
-const BOB = "did:key:z6Mk-bob";
+function rt(a: Tn): NodeRuntime {
+  return (a as unknown as { _rt: NodeRuntime })._rt;
+}
 
 function byType(logPath: string, keystore: string): Record<string, Record<string, unknown>> {
   const out: Record<string, Record<string, unknown>> = {};
@@ -34,7 +42,21 @@ function byType(logPath: string, keystore: string): Record<string, Record<string
 test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit", async () => {
   const ws = mkdtempSync(join(tmpdir(), "ts-hibe-revoke-"));
   const aYaml = join(ws, "authority", "tn.yaml");
+  const aliceYaml = join(ws, "alice", "tn.yaml");
+  const bobYaml = join(ws, "bob", "tn.yaml");
   try {
+    // Reader runtimes are created up front so their real did:key and device
+    // key are on hand for the verified grant; each is reopened later to
+    // absorb its kit (the device key persists in the keystore).
+    const aliceRt = await Tn.init(aliceYaml, { stdout: false, link: false });
+    const ALICE = aliceRt.did;
+    const aliceDevice = rt(aliceRt).keystore.device;
+    await aliceRt.close();
+    const bobRt = await Tn.init(bobYaml, { stdout: false, link: false });
+    const BOB = bobRt.did;
+    const bobDevice = rt(bobRt).keystore.device;
+    await bobRt.close();
+
     // --- Add two readers, seal epoch 1.
     let a = await Tn.init(aYaml, { cipher: "hibe", stdout: false, link: false });
     const aLog = (a.config() as { logPath: string }).logPath;
@@ -42,13 +64,13 @@ test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit",
     a.info("e1", { note: "both readers admitted" });
     const aliceKit = join(ws, "alice.tnpkg");
     const bobKit = join(ws, "bob.tnpkg");
-    // Synthetic DIDs with no embedded key: plaintext delivery must be explicit.
-    await a.admin.grantReader("default", {
-      readerDid: ALICE,
-      outPath: aliceKit,
-      unsafePlaintext: true,
-    });
-    await a.admin.grantReader("default", { readerDid: BOB, outPath: bobKit, unsafePlaintext: true });
+    // Verified challenge -> proof -> sealed grant for each reader.
+    const aliceCh = await a.admin.issueHibeReaderChallenge("default", ALICE, 60_000);
+    const aliceProof = await createHibeReaderProof(aliceCh, aliceDevice, { expectedAuthorityDid: a.did });
+    await a.admin.grantReader("default", { readerDid: ALICE, proof: aliceProof, outPath: aliceKit });
+    const bobCh = await a.admin.issueHibeReaderChallenge("default", BOB, 60_000);
+    const bobProof = await createHibeReaderProof(bobCh, bobDevice, { expectedAuthorityDid: a.did });
+    await a.admin.grantReader("default", { readerDid: BOB, proof: bobProof, outPath: bobKit });
     let grants = JSON.parse(readFileSync(join(aKeystore, "default.hibe.grants"), "utf8")) as Array<{
       reader_did: string;
     }>;
@@ -78,7 +100,7 @@ test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit",
     }
 
     // --- Bob: keeps e1 (honest limit), locked out of e2.
-    const bob = await Tn.init(join(ws, "bob", "tn.yaml"), { stdout: false, link: false });
+    const bob = await Tn.init(bobYaml, { stdout: false, link: false });
     const bobKs = (bob.config() as { keystorePath: string }).keystorePath;
     await bob.pkg.absorb(bobKit);
     await bob.close();
@@ -88,7 +110,7 @@ test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit",
 
     // --- Alice: absorbs original + re-issued kit, reads across the
     // rotation without any special handling.
-    const alice = await Tn.init(join(ws, "alice", "tn.yaml"), { stdout: false, link: false });
+    const alice = await Tn.init(aliceYaml, { stdout: false, link: false });
     const aliceKs = (alice.config() as { keystorePath: string }).keystorePath;
     await alice.pkg.absorb(aliceKit);
     await alice.pkg.absorb(res.kitPaths[0]!);
@@ -99,8 +121,10 @@ test("hibe revoke: rotate + survivor re-kit; registry and msk never ride a kit",
 
     // --- Guardrails + the generic verb.
     a = await Tn.init(aYaml, { cipher: "hibe", stdout: false, link: false });
+    // A real did:key that was never granted: the format is valid, so the
+    // rejection is the honest "no recorded grant", not a did-shape error.
     await assert.rejects(
-      () => a.admin.revokeReader("default", "did:key:z6Mk-nobody"),
+      () => a.admin.revokeReader("default", DeviceKey.generate().did),
       /no recorded grant/,
       "revoking an unknown did must raise",
     );

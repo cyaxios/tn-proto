@@ -1,4 +1,4 @@
-//! PyO3 wrapper for tn_core::Runtime.
+//! PyO3 bindings for governed objects, independent sessions, and the event runtime.
 
 // Migrated to the pyo3 0.24 bound API: the 0.21-era `*_bound` constructors and
 // the `IntoPy`/`ToPyObject` conversions are gone in favor of the plain
@@ -7,6 +7,8 @@
 // overflow.)
 
 mod admin;
+pub mod governed;
+mod read_policy;
 
 use pyo3::exceptions::{PyException, PyIOError, PyValueError};
 use pyo3::prelude::*;
@@ -1111,6 +1113,7 @@ pub fn populate(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tnpkg_read, m)?)?;
     m.add_function(wrap_pyfunction!(tnpkg_write, m)?)?;
     m.add_function(wrap_pyfunction!(config_load_summary, m)?)?;
+    m.add_function(wrap_pyfunction!(read_policy::read_policy_evaluate, m)?)?;
     crate::admin::register(m)?;
     Ok(())
 }

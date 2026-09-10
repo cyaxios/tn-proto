@@ -29,6 +29,7 @@ import {
   type SealedTriple,
 } from "../src/index.browser.js";
 import type { Entry } from "../src/Entry.js";
+import { DeviceKey } from "../src/core/signing.js";
 import { Tn as NodeTn } from "../src/tn.js";
 import { unsealWithRuntime } from "../src/seal.js";
 import type { MemoryStorageAdapter } from "../src/runtime/storage_memory.js";
@@ -103,7 +104,7 @@ test("a node-sealed jwe object opens in the browser as a bag recipient", async (
   try {
     const pair = generateX25519KeyPair();
     await node.admin.addRecipient("default", {
-      recipientDid: "did:key:z6MkBrowserBagRecipient00000000000000000000",
+      recipientDid: DeviceKey.generate().did,
       publicKey: pair.publicKey,
       unsafeUnverified: true, // raw DID-plus-key path (no enrollment proof)
     });

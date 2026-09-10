@@ -45,6 +45,7 @@ import {
   type EnrollmentChallengeV1,
   type EnrollmentResponseV1,
   type KeyBindingProofV1,
+  type VerifiedPrincipal,
   type VerifiedJweBinding,
   TrustError,
   enrollmentChallengeDigest,
@@ -64,10 +65,12 @@ import {
   verifyEnrollmentChallenge,
   verifyEnrollmentResponse,
   verifyJweKeyBinding,
+  verifyKeyBindingProof,
 } from "../core/trust.js";
 import { sha256HexBytes } from "../core/chain.js";
 import { packTnpkgBytes, readTnpkgVerified } from "../tnpkg_io.js";
 import type { CeremonyConfig } from "./config.js";
+import { withDurableFileLock } from "./durable_state.js";
 
 /** The common cross-SDK audit event type for explicit security weakening. */
 export const UNSAFE_OPERATION_EVENT_TYPE = "tn.security.unsafe_operation";
@@ -612,6 +615,67 @@ export class EnrollmentStore {
     throw error("challenge_missing", "challenge digest is not retained");
   }
 
+  /**
+   * Verify and consume one HIBE reader challenge under the same durable lock
+   * used by JWE enrollment. Exact proof retry is recoverable; a different
+   * proof for the consumed challenge is a replay conflict.
+   */
+  consumeHibeGrantProof(
+    proof: KeyBindingProofV1,
+    expected: { audienceDid: string; group: string; now?: string },
+  ): VerifiedPrincipal {
+    const challengeDigest = proof.binding["challenge_digest"];
+    if (typeof challengeDigest !== "string") {
+      throw error("challenge_missing", "HIBE reader grant requires a retained authority challenge");
+    }
+    const at = expected.now ?? nowTimestamp();
+    const verify = (): { principal: VerifiedPrincipal; challenge: EnrollmentChallengeV1 } => {
+      const challenge = this.challengeForDigest(challengeDigest);
+      const principal = verifyKeyBindingProof(proof, {
+        purpose: "hibe-reader",
+        audienceDid: expected.audienceDid,
+        ceremonyId: this.ceremony.ceremonyId,
+        group: expected.group,
+        now: at,
+        challenge,
+      });
+      return { principal, challenge };
+    };
+    verify();
+    return this._lock(() => {
+      const { principal, challenge } = verify();
+      const path = this._consumedPath(challenge.challenge_id);
+      if (existsSync(path)) {
+        const record = readJsonObject(path, "consumed HIBE reader challenge");
+        if (
+          record["version"] === 1 &&
+          record["challenge_id"] === challenge.challenge_id &&
+          record["purpose"] === "hibe-reader-grant" &&
+          record["proof_digest"] === principal.proofDigest &&
+          record["subject_did"] === principal.did &&
+          record["ceremony_id"] === principal.ceremonyId &&
+          record["group"] === principal.group
+        ) {
+          return principal;
+        }
+        throw error("replay_conflict", "HIBE reader challenge was consumed by a different proof");
+      }
+      atomicWriteBytes(
+        path,
+        canonicalJsonBytes({
+          version: 1,
+          challenge_id: challenge.challenge_id,
+          purpose: "hibe-reader-grant",
+          proof_digest: principal.proofDigest,
+          subject_did: principal.did,
+          ceremony_id: principal.ceremonyId,
+          group: principal.group,
+        }),
+      );
+      return principal;
+    });
+  }
+
   private _offerPath(ceremonyId: string, group: string, readerDid: string, offerDigest: string): string {
     return join(
       this.offersDir,
@@ -1127,6 +1191,64 @@ export class EnrollmentStore {
     };
   }
 
+  /**
+   * Resolve a caller-supplied AcceptedOffer back to this store's retained,
+   * signed artifact and durable accepted record. TypeScript interfaces are
+   * structural, so possession of an object with the right fields is never
+   * provenance by itself.
+   */
+  validateAcceptedOffer(candidate: AcceptedOffer, now?: string): AcceptedOffer {
+    if (candidate === null || typeof candidate !== "object") {
+      throw error("untrusted_principal", "accepted offer must come from retained enrollment state");
+    }
+    const offerDigest = requireDigest(candidate.offerDigest, "accepted offer digest");
+    const artifactDigest = requireDigest(candidate.artifactDigest, "accepted artifact digest");
+    const at = now ?? nowTimestamp();
+    parseTrustTimestamp(at, "now");
+    if (!existsSync(this.offersDir)) {
+      throw error("untrusted_principal", "accepted offer is not retained by this publisher");
+    }
+    return this._lock(() => {
+      let path: string;
+      try {
+        path = this._findPendingPath(offerDigest);
+      } catch (err) {
+        if (err instanceof TrustError && err.reason === "untrusted_principal") {
+          throw error("untrusted_principal", "accepted offer is not retained by this publisher");
+        }
+        throw err;
+      }
+      const verified = this._pendingFromPath(path, at);
+      if (!this._isAcceptedExact(verified)) {
+        throw error("untrusted_principal", "offer has not been durably accepted");
+      }
+      const canonical = this._accepted(verified);
+      const candidateBinding = candidate.binding;
+      if (candidateBinding === null || typeof candidateBinding !== "object") {
+        throw error("binding_invalid", "accepted offer binding is malformed");
+      }
+      const sameKey =
+        candidateBinding.publicKey instanceof Uint8Array &&
+        bytesEqual(candidateBinding.publicKey, canonical.binding.publicKey);
+      const samePrincipal =
+        candidateBinding.principal !== null &&
+        typeof candidateBinding.principal === "object" &&
+        JSON.stringify(candidateBinding.principal) === JSON.stringify(canonical.binding.principal);
+      if (
+        candidate.offerDigest !== canonical.offerDigest ||
+        artifactDigest !== canonical.artifactDigest ||
+        !sameKey ||
+        candidateBinding.publicKeySha256 !== canonical.binding.publicKeySha256 ||
+        candidateBinding.proofDigest !== canonical.binding.proofDigest ||
+        candidateBinding.challengeDigest !== canonical.binding.challengeDigest ||
+        !samePrincipal
+      ) {
+        throw error("binding_invalid", "accepted offer differs from retained verified state");
+      }
+      return canonical;
+    });
+  }
+
   private _promoteLocked(verified: VerifiedArtifact): AcceptedOffer {
     const consumedExact = this._assertChallengeAvailable(verified);
     const acceptedExact = this._isAcceptedExact(verified);
@@ -1337,17 +1459,19 @@ function validateGroupFileName(group: string): string {
 export function ensureJweReaderKey(keystoreDir: string, group: string): Uint8Array {
   validateGroupFileName(group);
   const path = join(keystoreDir, `${group}.jwe.mykey`);
-  let priv: Uint8Array;
-  if (existsSync(path)) {
-    priv = new Uint8Array(readFileSync(path));
-    if (priv.length !== 32) {
-      throw error("binding_invalid", `reader key at ${path} must be 32 bytes, got ${priv.length}`);
+  return withDurableFileLock(`${path}.lock`, () => {
+    let priv: Uint8Array;
+    if (existsSync(path)) {
+      priv = new Uint8Array(readFileSync(path));
+      if (priv.length !== 32) {
+        throw error("binding_invalid", `reader key at ${path} must be 32 bytes, got ${priv.length}`);
+      }
+    } else {
+      priv = x25519.utils.randomSecretKey();
+      atomicWriteBytes(path, priv);
     }
-  } else {
-    priv = x25519.utils.randomSecretKey();
-    atomicWriteBytes(path, priv);
-  }
-  return x25519.getPublicKey(priv);
+    return x25519.getPublicKey(priv);
+  });
 }
 
 const SENT_OFFERS_FILENAME = "enrollment_offers.v1.json";
