@@ -19,7 +19,7 @@ exclude = ["tn/**/*.md"]
 
 [project]
 name            = "tn-proto"
-version         = "0.6.11"
+version         = "2026.9.10b1"
 description     = "TN protocol: signed data, encrypted groups, and governed workflows"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -27,7 +27,7 @@ license         = { text = "Apache-2.0" }
 authors         = [{ name = "cyaxios contributors", email = "dev@cyaxios.com" }]
 keywords        = ["cryptography", "broadcast-encryption", "attestation", "governance"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",

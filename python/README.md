@@ -26,8 +26,15 @@ Maintain a straightforward, developer-friendly voice. Avoid parameter-heavy expl
 ## Installation
 
 ```bash
-pip install tn-proto
+pip install "tn-proto==2026.9.10b1"
 ```
+
+This governed beta uses calendar versioning: `YYYY.M.DbN` identifies the release
+date and beta number. It packages the canonical Rust implementation and its PyO3
+interface together. The beta wheels support Linux x86-64 and Windows x64 with
+Python 3.10 or later. The wire format has its own version, independent of the
+package release date. Compatibility changes are described in the changelog;
+applications should pin the beta version they have tested.
 
 ## Governed sessions own their context
 

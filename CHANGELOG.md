@@ -3,7 +3,40 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+with calendar versions for the Python governed SDK beginning in September 2026.
+Python releases use `YYYY.M.D` with `bN` for beta revisions on that release date.
+Release notes describe API compatibility; the package version does not change
+the TN wire-format version. Other SDK and internal build-crate versions remain
+independent.
+
+## [2026.9.10b1] - 2026-09-10 - Governed Python SDK beta
+
+The Python distribution packages the governed workflow implemented in Rust and
+exposed through PyO3. This is a new distribution version for the governed
+implementation previously exercised in content-pinned local 0.6.11 builds.
+
+- Independent `Session` instances own publisher and reader contexts.
+- Governed objects support creation, contract admission before selected business
+  groups open, mutable work, additive policy attachment, contributing-source
+  inclusion, and signed release.
+- Signed policy revisions, dataset editions, complete use contexts and lineage
+  verification bind applications to selected source publications.
+- An explicit publisher session can release received work while preserving its
+  contributing contracts and dataset bindings.
+- Read verification checks signed content and the configured reader policy.
+- Optional creation/release registers are separate from object transport.
+- GitHub Actions builds Linux x86-64 and Windows x64 wheels and validates the
+  installed governed lifecycle before publishing to PyPI.
+
+Install with `pip install "tn-proto==2026.9.10b1"`. Consumers using a dependency
+ceiling such as `<0.7` must update that constraint to select the calendar beta.
+Existing logging entry points remain available. The TypeScript package and
+internal Rust crate version numbers are unchanged by this Python release.
+
+Beta follow-up work includes validating assembled plaintext depth, making Python
+mapping `update()` atomic across all keys, and recording the strict release's
+purpose rather than operation in optional register metadata. These remain open
+SDK audit items; changing the distribution version does not change those paths.
 
 ## [0.6.11] - 2026-07-10 -- C# JWE opening + HIBE admin verbs
 
