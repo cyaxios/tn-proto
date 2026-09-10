@@ -120,7 +120,10 @@ release intentionally creates another signed version.
 
 `has_unreleased_changes()` reports successful mutation since the last signed
 snapshot, including policy attachment or additional inputs. It is false after
-creation, receipt or successful release; refusal preserves its current value.
+creation, receipt without an added dataset binding, or successful release.
+`receive_for` with an accepted dataset selection installs that binding in the
+working object and marks it changed; the received signed snapshot stays intact.
+Refusal preserves the flag's current value.
 It describes local working state. A successful signature and a committed business
 transaction are separately recorded facts. For delivery, persist the explicit
 successful release return with the application's business changes.

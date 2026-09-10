@@ -239,7 +239,9 @@ next working version's immediate source.
 
 `account.has_unreleased_changes` is true after successful mutation, attachment
 or inclusion since the last signed snapshot. It is false after creation, receipt
-and successful release. Refusal preserves the current flag and prior snapshot.
+without an added dataset binding, and successful release. Receipt with an accepted
+dataset selection adds that binding to the working object and sets the flag while
+preserving the received signed snapshot. Refusal preserves the current flag and prior snapshot.
 The same property is available on `DataState` inside release decisions. It tracks
 local edits; database commitment and delivery are application-owned facts.
 
