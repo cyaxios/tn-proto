@@ -1,10 +1,12 @@
 # Governed Python API
 
-This guide describes `tn-proto==2026.9.13b3` on Python 3.10 or newer. The distribution includes native Rust-backed governed objects, independent sessions, provider interfaces, and Python business-data views. Linux x86-64 and Windows x64 wheels are the supported release targets.
+This guide describes `tn-proto==2026.9.13b4` on Python 3.10 or newer. The distribution includes native Rust-backed governed objects, independent sessions, provider interfaces, and Python business-data views. Linux x86-64 and Windows x64 wheels are the supported release targets.
 
 Start with the [step-by-step README walkthrough](../README.md#1-start-a-session), the [bank/vendor program](../python/examples/bank_vendor.py), or the [enterprise pattern examples](../python/examples/enterprise/README.md). The [governed type signatures](../python/tn/governed/__init__.pyi) and [provider type signatures](../python/tn/providers/__init__.pyi) describe every argument and return type.
 
 ## The three controls
+
+Key possession can be the application's entire access rule. With `decide=lambda _: True`, governed receipt verifies the publication and requires the appropriate group keys without adding an application policy restriction. Evaluators can add further checks to that baseline.
 
 Group encryption determines which business groups a reader has the capability to decrypt. A signature authenticates a publication under its writer's signing key. Admission is the application's decision that the verified writer, carried contracts, selected groups, and complete requested use are acceptable.
 

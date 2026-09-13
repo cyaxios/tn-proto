@@ -1,20 +1,32 @@
 # TN-Proto
 
-Create encrypted, signed data objects in Python. Each object carries a use contract and retains the sources your application records as it works with the data.
+**Key access is access to encrypted data.** If your session has the required decryption keys, it can open the data. Application rules can add further restrictions when you need them.
 
-Start with a greeting. The examples below build on one another, one operation at a time.
+With keys already loaded in `session` and a publication in `sealed`:
+
+```python
+data = session.unseal(
+    sealed, purpose="read", decide=lambda _: True
+)
+```
+
+`decide=lambda _: True` adds no application permission check. Decryption still requires the matching keys, and signature verification still runs. `purpose="read"` labels the operation; it does not grant access.
+
+Keys control **groups of fields**. Put fields in separate groups when their access should be independent. The governed session also uses its governance-group key, which the sample session setup supplies automatically.
+
+The wire protocol supplies encrypted groups and authenticated data. Checks for an approved writer, purpose, or contract are additional application policies. They are optional layers on top of key-based access.
 
 ## Install
 
 ```bash
-python -m pip install "tn-proto==2026.9.13b3"
+python -m pip install "tn-proto==2026.9.13b4"
 ```
 
 Python 3.10 or newer. Linux x86-64 and Windows x64 wheels include the Rust implementation.
 
 ## 1. Start a session
 
-Save the sample [agents.md](python/examples/getting_started/agents.md) in your working folder. It contains a contract named `hello.message` for displaying greetings.
+For a complete example, save the sample [agents.md](python/examples/getting_started/agents.md) in your working folder. It supplies the contract metadata used when creating the greeting object. This walkthrough carries that metadata without evaluating additional contract rules.
 
 Run the following Python snippets in order, in the same process:
 
@@ -54,38 +66,19 @@ Hello again!
 
 The working data has changed. The previous signed copy still contains the original greeting.
 
-## 4. Define the approval rule
+## 4. Seal the changed object
 
-Before opening or publishing data, the application makes a decision. For this example, accept our own writer and exactly the contract we selected:
-
-```python
-def trusted_message(context):
-    return (
-        context.writer == session.did
-        and len(context.policies) == 1
-        and context.policies[0].matches_contract(policy)
-    )
-```
-
-TN supplies the writer and carried contracts to this function. The application provides the rule; the text in `agents.md` does not execute itself.
-
-## 5. Seal the changed object
-
-Name the application, purpose, and operation with `UseContext`. Then approve this publication for its intended destination:
+The creating session has the publishing capabilities needed to seal its changes:
 
 ```python
-publish_use = tn.UseContext("hello", "greeting", "publish")
 publication = message.seal(
-    use=publish_use, to="local-reader",
-    decide=lambda context: trusted_message(context)
-    and context.use_context == publish_use
-    and context.destination == "local-reader",
+    purpose="send", to="local-reader", decide=lambda _: True
 )
 ```
 
-`seal` evaluates the decision and creates a new encrypted, signed publication. It keeps the contract and the reference to the preceding version. The destination is part of the approval; your application chooses how to deliver the bytes.
+`seal` creates a new encrypted, signed publication, keeping the contract and the reference to the preceding version. Here, the callback adds no application restriction. `to` records an intended destination; it does not distribute keys or deliver the bytes.
 
-## 6. Save and read the publication
+## 5. Save and read the publication
 
 ```python
 publication.write("greeting.tn")
@@ -94,16 +87,13 @@ saved = tn.GovernedObject.read("greeting.tn")
 
 `write` saves the signed bytes. `read` verifies the saved publication; its business fields remain encrypted.
 
-## 7. Unseal it for an approved use
+## 6. Unseal with the keys
 
-The same session can open its saved publication. Approve the writer, contract, and requested reading use:
+The same session already holds the keys for its saved publication:
 
 ```python
-read_use = tn.UseContext("hello", "greeting", "read")
 received = session.unseal(
-    saved, use=read_use,
-    decide=lambda context: trusted_message(context)
-    and context.use_context == read_use,
+    saved, purpose="read", decide=lambda _: True
 )
 print(received.get("message"))
 ```
@@ -112,7 +102,7 @@ print(received.get("message"))
 Hello again!
 ```
 
-`unseal` verifies the publication, runs the approval rule, and decrypts the message using the session's keys. A refused decision or a missing key stops it from returning the business data.
+`unseal` verifies the publication and decrypts the message. A session without the required keys cannot open it, even with `decide=lambda _: True`.
 
 Close the session when finished:
 
@@ -122,9 +112,23 @@ session.close()
 
 The complete walkthrough is available as [hello.py](python/examples/getting_started/hello.py), alongside its policy file.
 
+## Optional application rules
+
+In the governed SDK, TN enforces **when a governance decision is made and what contract context is supplied**: receipt presents the authenticated writer, carried contracts, and requested use before opening selected business groups. The receiving application retains authority over the decision's substantive judgment.
+
+An application may also require a particular writer, an approved purpose, or an accepted contract. Supply those checks through `decide`, or configure them once in a [workflow](docs/GOVERNED_PYTHON_API.md#configure-input-output-and-attachment).
+
+Those checks are application policy. They can refuse a use even when a key is available; they cannot open data without a key. The wire format carries contracts and provenance, but it does not execute policy prose.
+
+## Revocation, evidence, and key services
+
+**Revocation must not destroy required evidence.** That requirement motivates BTN's forward-only exclusion: a revoked reader is excluded from future ciphertexts produced with the updated publisher state, while retained keys can still open historical publications they covered. Keeping those publications and keys lets an application preserve readable evidence for audit and review. TN does not itself impose a retention policy or erase copies already held by a reader.
+
+Decryption authority can be transferred through provisioned group capabilities **without requiring an online key-release service**. Applications can also use key stores and live authorization services through the [provider interfaces](docs/GOVERNED_PROVIDERS.md): `KeyProvider.resolve` supplies a session's key capabilities, and `GovernanceProvider.accept` can consult current service decisions on each governed receipt. A key provider is resolved during session setup; it is not automatically called again for every unseal. `FileKeyStore` supplies the built-in persistent local option.
+
 ## Build on this example
 
-- **Reuse the same rules:** configure a [workflow](docs/GOVERNED_PYTHON_API.md#configure-input-output-and-attachment) once, then call `work.unseal(...)` and `work.seal(...)` in application code.
+- **Add application governance:** the [decision-context guide](docs/GOVERNED_PYTHON_API.md#decision-contexts) shows what an evaluator can check, and [workflows](docs/GOVERNED_PYTHON_API.md#configure-input-output-and-attachment) let you reuse those rules.
 - **Use separate senders and readers:** the [bank/vendor example](python/examples/bank_vendor.py) separates identities and group keys, adds inputs totaling 35, and returns a report with the bank and vendor contracts.
 - **Keep keys between runs:** the [persistent-key examples](python/examples/persistent_keys/README.md) cover separate setup, publishing, and reading processes. [Providers](docs/GOVERNED_PYTHON_API.md#providers) connect application identity, keys, and governance.
 - **Apply enterprise patterns:** the [15 examples from the book](python/examples/enterprise/README.md) cover request/reply, aggregation, outbox/inbox, pipelines, caches, and more.

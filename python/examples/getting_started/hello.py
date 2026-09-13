@@ -14,29 +14,15 @@ def main():
     message.set("message", "Hello again!")
     print(message.get("message"))
 
-    def trusted_message(context):
-        return (
-            context.writer == session.did
-            and len(context.policies) == 1
-            and context.policies[0].matches_contract(policy)
-        )
-
-    publish_use = tn.UseContext("hello", "greeting", "publish")
     publication = message.seal(
-        use=publish_use, to="local-reader",
-        decide=lambda context: trusted_message(context)
-        and context.use_context == publish_use
-        and context.destination == "local-reader",
+        purpose="send", to="local-reader", decide=lambda _: True
     )
 
     publication.write("greeting.tn")
     saved = tn.GovernedObject.read("greeting.tn")
 
-    read_use = tn.UseContext("hello", "greeting", "read")
     received = session.unseal(
-        saved, use=read_use,
-        decide=lambda context: trusted_message(context)
-        and context.use_context == read_use,
+        saved, purpose="read", decide=lambda _: True
     )
     print(received.get("message"))
 

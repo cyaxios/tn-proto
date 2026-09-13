@@ -100,18 +100,25 @@ def verify_getting_started(checkout, root, environment):
     pattern = r"```python\r?\n(.*?)```"
     blocks = re.findall(pattern, (checkout / "README.md").read_text(encoding="utf-8"), re.S)
     pypi_blocks = re.findall(pattern, (checkout / "python/README.md").read_text(encoding="utf-8"), re.S)
-    assert blocks and blocks == pypi_blocks, "README walkthroughs differ"
+    assert len(blocks) > 1 and blocks == pypi_blocks, "README walkthroughs differ"
     example = root / "python/examples/getting_started"
     shutil.copy2(example / "agents.md", root / "agents.md")
     expected = ["Hello, world!", "Hello again!", "Hello again!"]
-    for command in (
-        [sys.executable, "-c", "\n\n".join(blocks)],
-        [sys.executable, str(example / "hello.py")],
+    key_access_setup = '''from pathlib import Path
+import tn
+session = tn.Session(Path("agents.md").read_text(encoding="utf-8"))
+sealed = session.create({"message": "Hello, world!"}, session.policy("hello.message")).snapshot
+'''
+    key_access_check = '\nassert data.get("message") == "Hello, world!"\nsession.close()\n'
+    for command, output in (
+        ([sys.executable, "-c", key_access_setup + blocks[0] + key_access_check], []),
+        ([sys.executable, "-c", "\n\n".join(blocks[1:])], expected),
+        ([sys.executable, str(example / "hello.py")], expected),
     ):
         result = subprocess.run(command, cwd=root, env=environment, text=True,
                                 capture_output=True, check=True)
-        assert result.stdout.splitlines() == expected, result.stdout
-    print("README snippets and complete greeting example passed")
+        assert result.stdout.splitlines() == output, result.stdout
+    print("README key-access snippet and complete greeting walkthrough passed")
 
 
 if __name__ == "__main__":

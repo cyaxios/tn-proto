@@ -9,6 +9,13 @@ Release notes describe API compatibility; the package version does not change
 the TN wire-format version. Other SDK and internal build-crate versions remain
 independent.
 
+## [2026.9.13b4] - 2026-09-13 - Key-based access first
+
+- Lead the README with key-based access and a minimal unseal call; introduce application rules after the greeting walkthrough.
+- Explain the governed decision boundary, evidence-preserving forward-only BTN exclusion, and optional key-store and live authorization integrations.
+- Simplify the complete greeting example and verify both the opening snippet and the walkthrough against installed release wheels.
+- Documentation, examples, and release verification only; the SDK API and native implementation are unchanged.
+
 ## [2026.9.13b3] - 2026-09-13 - Step-by-step Python introduction
 
 - Replace the README with a greeting walkthrough: create, get, set, approve, seal, save, and unseal. Each step introduces one operation.
