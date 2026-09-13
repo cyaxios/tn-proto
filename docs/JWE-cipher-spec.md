@@ -60,7 +60,7 @@ then covers that stored hash. In an unsigned and unchained profile both fields
 are empty sentinels. **No sibling group-dict keys, ever** — a wrapped key, iv, or
 tag hoisted beside `ciphertext` would fall outside the group ciphertext input, a
 strip/swap vector whenever envelope integrity is enabled. This matches
-protocol.md §3's opacity rule.
+the [protocol reference's group-cipher opacity rule](guide/protocol.md#3-group-ciphers).
 
 **D3. Crypto profile — ECDH-ES+A256KW / A256GCM / X25519, ephemeral sender.**
 Per recipient: `alg: ECDH-ES+A256KW` (ephemeral-static ECDH-ES derives a KEK,
@@ -108,10 +108,11 @@ group is jwe, btn, or hibe.
 btn and hibe are TN-original schemes — TN owns both ends, so cross-impl parity
 needs bespoke golden vectors of a format TN defines. JWE is the opposite: an
 **IETF standard** with independent, maintained implementations in every
-language. So this cipher leans on them and lets the standard carry interop —
-per-language libraries rather than one shared Rust impl, off the
-native/wasm runtime (Constraint 4), and cross-impl correctness gated by a
-**Python↔TS round-trip conformance test**, not golden vectors.
+language. Python and TypeScript use the JOSE libraries listed in D1; native
+Rust implements the fixed profile described in Constraint 4. The wasm runtime
+leaves `native-jwe` disabled, so TypeScript retains its JOSE path. Cross-impl
+correctness is gated by **Python↔TS round-trip conformance tests** and
+[Rust/Python interoperability tests](../crypto/tn-core/tests/cipher_jwe.rs).
 
 **When to choose jwe:** the audience is small and enumerated at seal time; you
 want a standards-compliant, externally-inspectable envelope; recipients already
@@ -197,7 +198,8 @@ A JWE group's on-disk material:
   Recipient-key rotation is the mitigation.
 - **Forward-only revocation.** `revoke` is an O(1) recipient-list edit; the next
   seal omits that block. Pre-revocation records the reader already holds stay
-  open. For retroactive lockout, use btn.
+  open. [BTN also preserves access to pre-revocation ciphertext](../crypto/tn-btn/tests/compressed_cover.rs);
+  neither cipher retroactively invalidates retained keys and ciphertext.
 - **Rotation requires re-enrollment.** Rotation archives the active JWE files
   and recreates the group with only the publisher self-recipient. Every other
   reader must be re-enrolled before it appears in post-rotation seals.

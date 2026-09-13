@@ -156,12 +156,10 @@ No SDK default changes in this pass. After it:
   Python/Rust fail-closed). That remaining inconsistency is intentional and
   isolated to a single decision.
 
-When the posture decision lands, flipping a default becomes a one-line change per
-SDK, backed by the conformance harness. One provisional option, if a consistent
-default is wanted before the philosophy is settled, is **compute-and-attach
-honest validity but do not raise** (inspectable everywhere, breaks no caller,
-reversible toward either telemetry-skip or transaction-raise). Recorded as an
-option only; not adopted here.
+A future change to SDK defaults would be checked against the conformance
+harness. An alternative outside this design is **compute-and-attach honest
+validity but do not raise**, with a later choice of telemetry-skip or
+transaction-raise. This option is recorded but not adopted here.
 
 ## 7. `seal`/`unseal` boundary and the chain invariant (unchanged, guarded)
 

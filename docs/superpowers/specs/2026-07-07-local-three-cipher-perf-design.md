@@ -1,5 +1,8 @@
 # Local three-cipher performance suite design
 
+**Status:** Design snapshot, 2026-07-07. Proposed filenames are retained below;
+the current smoke-test location is identified in the [test plan](#test-plan).
+
 ## Goal
 
 Build a Windows-local performance smoke suite for TN-Proto that runs from the
@@ -22,9 +25,11 @@ statistics are sufficient before running the AWS benchmark profiles.
 
 ## Local execution target
 
-The planned command runs from the repository root:
+The benchmark tool is outside the installed `tn` package. From the repository
+root, add its source directory to `PYTHONPATH` before running the local profile:
 
 ```powershell
+$env:PYTHONPATH = (Resolve-Path .\tools\bench_artifact_py).Path
 .\.venv\Scripts\python.exe -m tn_bench.local_perf --profile local-smoke
 ```
 
@@ -99,8 +104,7 @@ The emit pass creates the log records. It measures:
 ### Read/decrypt pass
 
 The read pass reads and decrypts the records produced by the emit pass. Local
-smoke uses verified read by default because the paper runbook requires fully
-verified read. It measures:
+smoke requires fully verified read. It measures:
 
 - wall-clock read latency
 - verified-read latency where enabled
@@ -485,17 +489,19 @@ Payload tests:
 - Generate `64 B`, `256 B`, and `1024 B` canonical payload bodies.
 - Assert exact canonical byte length and stable SHA-256.
 
-Runner smoke:
+The proposed test files were `python/tests/test_perf_instrumentation.py` and
+`python/tests/test_bench_artifact.py`. The current suite is under
+[`python/tests/perf_smoke/`](../../../python/tests/perf_smoke/). From the repository
+root, with the benchmark import path configured above:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest python\tests\test_perf_instrumentation.py
-.\.venv\Scripts\python.exe -m pytest python\tests\test_bench_artifact.py
+.\.venv\Scripts\python.exe -m pytest python\tests\perf_smoke
 .\.venv\Scripts\python.exe -m tn_bench.local_perf --profile local-smoke --trials 1 --ops 5
 ```
 
 ## Implementation placement
 
-Recommended files:
+Proposed files at the design date:
 
 ```text
 python/tn/_perf.py

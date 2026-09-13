@@ -11,7 +11,7 @@ Two ways in:
 `tn init` is the universal entry point for both. A ceremony lives under
 `./.tn/<project>/`.
 
-The examples here run the module form against a checkout:
+Run the examples from the SDK repository root using the module form:
 
 ```bash
 PYTHONPATH=python python -m tn.cli <command> [args]
@@ -593,11 +593,18 @@ ceremony. Requires an existing ceremony to absorb into.
 usage: tn absorb [-h] [--yaml YAML] [--allow-self-absorb] package
 ```
 
+Continue from the SDK repository root, where the earlier `add_recipient`
+example wrote `alice.tnpkg`. Create Bob's recipient ceremony with a separate
+demo identity so it does not reuse the publisher's identity:
+
 ```bash
-# In a fresh recipient project (after `tn init bob --no-link`):
-PYTHONPATH=python python -m tn.cli absorb ../cli_demo/alice.tnpkg \
-  --yaml .tn/bob/tn.yaml
+TN_IDENTITY_DIR="$PWD/.tn/identities/bob" PYTHONPATH=python \
+  python -m tn.cli init bob --no-link --skip-confirm
+TN_IDENTITY_DIR="$PWD/.tn/identities/bob" PYTHONPATH=python \
+  python -m tn.cli absorb ./alice.tnpkg --yaml .tn/bob/tn.yaml
 ```
+
+Absorb output:
 
 ```
 [tn absorb] kind=kit_bundle accepted=1 skipped=0
@@ -610,7 +617,8 @@ PYTHONPATH=python python -m tn.cli absorb ../cli_demo/alice.tnpkg \
 itself minted (refused by default, since it would overwrite the publisher's
 own keystore with a reader-kit copy).
 
-**Code equivalent:** `tn.absorb("./alice.tnpkg")` (after `tn.init`).
+**Code equivalent:** `tn.absorb("./alice.tnpkg")`, after
+`tn.init(".tn/bob/tn.yaml")` with Bob's `TN_IDENTITY_DIR`.
 
 ### tn rotate
 

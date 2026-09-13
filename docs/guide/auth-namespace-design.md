@@ -1,9 +1,9 @@
-# `tn.auth` namespace — design spec (Python + TypeScript)
+# `tn.auth` namespace — design record (Python + TypeScript)
 
-Status: design, ready to implement. Applies to **both** SDKs in lockstep —
-every symbol below has a Python and a TypeScript form, and the parity
-checklist at the end is the acceptance gate. No item here is "phase 2": the
-build order at the bottom lists everything required for this to ship complete.
+This record preserves the proposed Python and TypeScript contract, design
+decisions, and implementation order. Status labels describe the design stage;
+the parity checklist defines the shared requirements. For supported usage, see
+[Authentication & accounts](auth.md).
 
 ## Principles
 
@@ -12,13 +12,13 @@ build order at the bottom lists everything required for this to ship complete.
    is a thin printer over it. No `cli_*` implementation modules.
 2. **No printing in the library.** Every verb returns an `AuthState` (or
    raises a typed `AuthError`). All human I/O happens in the CLI layer.
-3. **Contained by the no-crash law.** Read verbs (`status`, `whoami`) and
+3. **Error containment.** Read verbs (`status`, `whoami`) and
    local-mutation verbs (`use`, `logout`) NEVER raise. Action verbs
    (`login`, `connect`) raise `AuthError` ONLY for the failures the caller
    explicitly asked about (bad code, headless-without-credentials) — never a
    stray stack trace.
-4. **Parity is the gate.** A verb is not done until the Python and TS
-   signatures match in shape and the parity row is green.
+4. **Parity.** Python and TypeScript signatures must match in shape and
+   pass the shared parity checks.
 
 ## Single source of truth: the three layers
 
@@ -79,39 +79,37 @@ the two tables byte-identical (a cross-impl golden test asserts this).
 
 ---
 
-## Cross-cutting decisions (the 3 gaps — resolved, not deferred)
+## Cross-cutting design decisions (3 gaps)
 
 ### G1 — `TN_API_KEY` cold-start stays in the init/runtime layer (REVISED)
 Original plan was to wire cold-start into `login`. Implementing it revealed
 `bootstrap_from_api_key(yaml_path, keystore_path, vault_did, api_key)` is
 **ceremony-scoped** (it populates a *project keystore* and needs a yaml +
 keystore dir + the vault's DID). Account-level `auth.login()` has no ceremony
-context, so cramming it in would be wrong-layering and would drift from the
-handler-builder copy. Decision: cold-start remains where the ceremony context
-lives (init / handler-builder, already wired). `auth.login()` covers
+context. Cold-start therefore remains in init / handler-builder, where those
+inputs are available. `auth.login()` covers
 `TN_VAULT_SESSION_TOKEN` > `code` > `account_passphrase`. Browser sign-in is
 interactive I/O and lives in the CLI, not the library. This split is documented
 in `tn/auth.py`'s module docstring and mirrored in TS.
 
 ### G2 — `TN_VAULT_SESSION_TOKEN` passthrough
-The session token lets a non-interactive caller skip the DID challenge. Decision: the vault client accepts it; every auth verb reads
+The session token lets a non-interactive caller skip the DID challenge. The vault client accepts it; every auth verb reads
 it from the env once and passes it through.
 - Python: add `session_token: str | None = None` to
   `VaultClient.for_identity(...)`; when set (arg or `TN_VAULT_SESSION_TOKEN`),
-  seed `self.token` and skip `authenticate()`. (`for_identity` currently has no
-  token param — this is the change.)
+  seed `self.token` and skip `authenticate()`.
 - TS: `VaultClient.forIdentity(...)` already accepts `token?` on the private
   constructor — surface it on `forIdentity` opts and read the env in the auth
   layer.
 
 ### G3 — `TN_IDENTITY_PASSPHRASE` is removed from the catalog
 It has **no consumer in either impl** (device key is plaintext-at-rest;
-`device_priv_enc_method: "none"` in both). Shipping a documented-but-dead var
-is exactly the wallpaper we're avoiding. Decision: **remove it from the env
-catalog now** (Python `cli.py` catalog + the env-vars doc). Sealed-identity-
-at-rest is a separate, real feature; it gets its own spec when wanted, not a
-placeholder var. (The `device_priv_enc_method` field already anticipates it, so
-no schema change is needed later.)
+`device_priv_enc_method: "none"` in both). The design removes this unused
+variable from the [Python environment catalog](../../python/tn/cli_show.py) and
+[environment-variable reference](environment-variables.md). Encrypting the
+device identity at rest requires a separate design.
+The `device_priv_enc_method` field already anticipates it, so no schema change
+is needed for that field.
 
 ---
 
@@ -140,8 +138,8 @@ transition. CLI mapping is one line. Every verb reuses the shared core helpers
 ### `login`
 - **Py:** `def login(*, vault: str | None = None, code: str | None = None, account_passphrase: str | None = None, interactive: bool | None = None) -> AuthState`
 - **TS:** `login(opts?: { vault?: string; code?: string; accountPassphrase?: string; interactive?: boolean }): Promise<AuthState>`
-- **Env:** `TN_VAULT_URL`, `TN_API_KEY` (G1), `TN_VAULT_SESSION_TOKEN` (G2), `TN_ACCOUNT_PASSPHRASE`, `TN_DEV_AUTH_BYPASS` (dev browser path), `TN_IDENTITY_DIR`.
-- **Credential precedence (decided):** `TN_VAULT_SESSION_TOKEN` > `code` (connect code) > `TN_API_KEY` cold-start > browser (interactive). `account_passphrase` (arg or env) is orthogonal — it caches the backup key whenever an account is established.
+- **Env:** `TN_VAULT_URL`, `TN_VAULT_SESSION_TOKEN` (G2), `TN_ACCOUNT_PASSPHRASE`, `TN_IDENTITY_DIR`. API-key cold-start stays in init/runtime (G1); `TN_DEV_AUTH_BYPASS` belongs to the CLI's dev browser path.
+- **Credential separation (G1):** the account-level inputs are `TN_VAULT_SESSION_TOKEN`, `code` (connect code), and `account_passphrase` (arg or env). The passphrase caches the backup key when an account is established. API-key cold-start remains in init/runtime; browser sign-in remains in the CLI.
 - **Steps:** load-or-mint identity → resolve vault → establish/confirm enrollment by the highest-precedence credential available → if an account results and a passphrase is available, cache the AWK → return state.
 - **Interactivity:** `interactive` defaults to "is this a TTY". Non-interactive + no usable credential → **raise** `AuthError("no credential and no browser")`. Never opens a browser or blocks in non-interactive mode.
 - **Returns:** `AuthState` (ideally `backed_up`). **Raises:** `AuthError` only for headless-without-credential or a rejected `code`. Vault-unreachable is contained (returns a state whose `message` says so).
@@ -198,8 +196,8 @@ path and the legacy `tn account connect`:
 | `connect` | — | bad / expired / consumed code |
 
 `AuthError` is a single typed exception in both impls (`tn.auth.AuthError` /
-`AuthError` exported from `tn-proto`). It is the only exception these verbs
-raise — the "exception the caller explicitly asked for" under the no-crash law.
+`AuthError` exported from `@cyaxios/tn-proto`). It is the only exception these
+verbs raise, for the explicit action failures listed above.
 
 ---
 
@@ -214,17 +212,17 @@ raise — the "exception the caller explicitly asked for" under the no-crash law
 | `connect` | wraps `redeem_connect_code` | wraps `AccountNamespace.connect` | both |
 | `use` / `logout` | new | new | both |
 | session-token env passthrough (G2) | add to `for_identity` | add to `forIdentity` opts | both |
-| `TN_API_KEY` cold-start in login (G1) | wire `bootstrap_from_api_key` | wire `bootstrapFromApiKey` | both |
-| drop `TN_IDENTITY_PASSPHRASE` (G3) | remove from `cli.py` catalog + doc | (TS never had it) | both |
+| `TN_API_KEY` cold-start in init/runtime (G1) | retain `bootstrap_from_api_key` in init/handler-builder | retain `bootstrapFromApiKey` in init/runtime | both |
+| drop `TN_IDENTITY_PASSPHRASE` (G3) | remove from [environment catalog](../../python/tn/cli_show.py) + doc | (TS never had it) | both |
 | CLI verbs call the namespace | `cmd_auth_*` thin | `bin/tn-js.mjs` thin | both |
 | legacy `tn account connect` → `auth.connect` | delegate | delegate | both |
 
-## Build order (all required — no "next pass")
+## Proposed implementation order
 
 1. `AuthState` + `verdict` enum + `message` table — Py and TS, with a cross-impl golden test asserting equal verdict→message mapping.
 2. Shared core helpers (table above) — Py and TS.
 3. G2: session-token passthrough in both vault clients.
-4. G1: `bootstrap_from_api_key` / `bootstrapFromApiKey` invoked from `login`.
+4. G1: retain `bootstrap_from_api_key` / `bootstrapFromApiKey` in init/runtime, where ceremony context is available.
 5. The six verbs — Py `tn/auth.py`, TS `src/auth/index.ts`, exposed as `tn.auth`.
 6. Thin CLI: `cmd_auth_*` (Py) and `bin/tn-js.mjs` (TS) call the namespace; legacy `account connect` delegates to `auth.connect`.
 7. G3: remove `TN_IDENTITY_PASSPHRASE` from the catalog + env doc.

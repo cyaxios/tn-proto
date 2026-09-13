@@ -1089,7 +1089,7 @@ Same release in Python (`tn-protocol` 0.4.0a3) and TS (`@tnproto/sdk`
 
 - README and CLI top-of-file docstrings updated to cover the new
   verbs and CI-shaped behavior.
-- `docs/sdk-parity.md` gains a CLI parity table.
+- CLI parity documentation gained a comparison table.
 
 ## [0.4.0a2] - 2026-05-08
 

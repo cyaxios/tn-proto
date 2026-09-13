@@ -64,11 +64,11 @@ tn init my-project --no-link
 | `--keep-mnemonic` | Persist the recovery phrase into `identity.json` (treat that file as a secret). |
 | `--skip-confirm` | Don't pause for Enter after showing the phrase. |
 | `--version-name <name>` | Per-instance nickname inside the project (e.g. `laptop-dev`, `ci`, `prod`). |
-| `--json` | Print a JSON receipt instead of the human summary. |
+| `--json` (TypeScript only) | `tn-js init` prints a JSON receipt instead of the human summary. |
 
 > On a fresh identity in an interactive terminal, `tn init` prints your BIP-39
 > recovery phrase **once** and waits for Enter. In a non-interactive context
-> (CI, containers, `--json`), it skips the prompt and persists the phrase into
+> (CI, containers, or `tn-js init --json`), it skips the prompt and persists the phrase into
 > `identity.json` so it's recoverable — re-display it later with
 > `tn wallet export-mnemonic`.
 
@@ -79,7 +79,7 @@ when it detects a serverless runtime (Vercel, AWS Lambda, Netlify, Cloud Run,
 Azure Functions). The URL is printed to logs and returned on the instance:
 
 ```ts
-import { init } from "tn-proto";
+import { init } from "@cyaxios/tn-proto";
 
 const tn = await init();              // or init("my-project")
 if (tn.claimUrl) {
@@ -306,7 +306,7 @@ tn.auth.logout()
 ```
 
 ```ts
-import { tn } from "tn-proto";
+import { tn } from "@cyaxios/tn-proto";
 
 const st = await tn.auth.status();    // async in TS
 console.log(st.verdict, st.message);

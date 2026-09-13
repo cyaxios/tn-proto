@@ -86,7 +86,7 @@ llm_classifier:
 ```
 
 A minimal ephemeral ceremony (the shape `Runtime::ephemeral` mints in
-`crypto/tn-core/src/runtime/helpers.rs::write_fresh_btn_ceremony`) carries
+`crypto/tn-core/src/runtime/cipher_build.rs::write_fresh_btn_ceremony`) carries
 far less:
 
 ```yaml

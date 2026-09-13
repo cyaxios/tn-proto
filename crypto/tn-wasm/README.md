@@ -22,13 +22,16 @@ Cipher support is intentionally split:
 - `WasmRuntime` supports BTN runtime groups through tn-core.
 - HIBE is available in wasm as low-level primitive exports. The default
   wasm runtime build does not enable tn-core's native HIBE group runtime.
-- JWE is not implemented in tn-core or this wasm bundle. The TypeScript
-  SDK uses the pure JS JOSE pipeline for `cipher: jwe`.
+- Native tn-core supports JWE; this WASM runtime does not enable its
+  `native-jwe` feature. The TypeScript SDK uses the JS JOSE pipeline for
+  `cipher: jwe`.
 
 Every export uses a camelCase `js_name` so the generated `.d.ts` reads
 like idiomatic TypeScript; internal Rust names stay snake_case.
 
 ## Build
+
+Run the build commands from the repository's `crypto/tn-wasm/` directory:
 
 ```
 wasm-pack build --target nodejs --release
@@ -60,11 +63,16 @@ should use the `js_to_json` / `json_to_js` helpers in `lib.rs`.
 
 ## Interop test
 
-```
-node test/node_smoke.mjs
-.venv/Scripts/python.exe test/py_cross_check.py
+After building the Node target, run the conformance check from the repository root:
+
+```shell
+node crypto/tn-wasm/test/conformance_golden.mjs
 ```
 
-Node exercises the WASM surface; Python runs the same fixtures through
-the PyO3 binding and diffs the JSON key by key, sorted, so whitespace and
-ordering cannot hide drift. `test/run_interop.sh` runs both.
+This is the [CI check](../../.github/workflows/ci.yml) for the shared
+[conformance vectors](../tn-core/tests/fixtures/README.md). It compares WASM
+results with the retained Rust/Python vectors.
+
+The older `test/py_cross_check.py` expects the former `tn_core.admin` package.
+The current combined Python wheel exposes `tn._native.core.admin`, so that
+script requires updating before it can run against the current wheel.

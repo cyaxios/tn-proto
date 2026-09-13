@@ -714,7 +714,8 @@ ceremony and first decrypt do not depend on one language's private state format.
 
 The enrollment architecture remains language-neutral. Python and TypeScript use
 their JOSE libraries, C# provides a managed reader fallback, and Rust native
-builds implement the fixed RFC 7516 profile described in `JWE-cipher-spec.md`.
+builds implement the fixed RFC 7516 profile described in the
+[JWE cipher specification](../../JWE-cipher-spec.md).
 The wasm cipher dispatch continues to use the TypeScript JOSE path. All native
 implementations participate in first-decrypt interoperability tests.
 

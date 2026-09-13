@@ -1,15 +1,14 @@
 # TN environment-variable schema (Python SDK)
 
-> First-pass canonical inventory of every env var the TN protocol Python SDK
-> reads — or could meaningfully accept — at process start. Scope: anything
-> under `tn/` plus the YAML knobs an operator would realistically want to
-> override at deploy time.
+> Inventory of current and proposed Python SDK environment settings, including
+> settings used by `tn/` and proposed overrides for YAML configuration.
+> Source paths below are relative to the repository's `python/` directory.
 >
-> This file is the source of truth that backs the reflective `tn show env`
-> verb. Keep them in sync: when you add a new env-var read, add a row here
-> and an entry in `_ENV_SCHEMA` in `tn/cli.py`.
+> `tn show env` reads `_ENV_SCHEMA` in [cli_show.py](../tn/cli_show.py).
+> Keep that table and this inventory in sync when adding an environment setting.
+> For deployment examples, see the [environment-variable guide](../../docs/guide/environment-variables.md).
 >
-> **First pass is reflective only.** Rows whose `read_today` is `no` are
+> Rows whose `read_today` is `no` are
 > *proposals* — they describe a YAML field an operator typically wants to
 > pin from the environment, not behavior wired in code yet. The `tn show env`
 > output marks them with `(proposed)` so nobody mistakes a proposal for
@@ -23,7 +22,7 @@
 - `read_today = yes` means there is a live `os.environ` / `os.getenv` /
   `os.environ.get` site in `tn/`. The `file:line` reference points at the
   authoritative read.
-- `read_today = no` rows are *first-pass proposals*: the operator concept
+- `read_today = no` rows are *proposals*: the operator concept
   exists (e.g. ceremony id, log path, linked vault) but currently lives in
   YAML only. They are listed here to make the canonical surface complete
   even before they have direct env-var bindings.
@@ -41,7 +40,6 @@
 | `XDG_DATA_HOME` | POSIX user-data root; TN appends `/tn` for identity storage. | yes — `tn/identity.py:100` | `~/.local/share` | no | TN_IDENTITY_DIR > env > home fallback |
 | `APPDATA` | Windows roaming profile root; TN appends `\tn` when XDG isn't set. | yes — `tn/identity.py:104` | `~/AppData/Roaming` | no | TN_IDENTITY_DIR > XDG_DATA_HOME > env > home fallback |
 | `TN_IDENTITY_DID` *(proposed)* | Pin which DID this process should use when multiple identities are on disk. | no | first/only identity in `TN_IDENTITY_DIR` | no | env > implicit-single-identity |
-| `TN_IDENTITY_PASSPHRASE` *(proposed)* | Unlock a passphrase-sealed `identity.json` non-interactively. | no | prompt on TTY | yes | env > prompt |
 
 ## Vault
 
@@ -50,7 +48,9 @@
 | `TN_VAULT_URL` | Base URL for the TN cloud vault (auth, project CRUD, sealed blobs). | yes — `tn/vault_client.py:49` | `https://vault.tn-proto.org` | no | explicit arg > env > default |
 | `TN_VAULT_DEFAULT_BASE` | Base for did:web identity vault discovery (separate from CRUD vault). | yes — `tn/identity.py:410` | `https://vault.tn-proto.org` | no | env > default |
 | `TN_VAULT_PROJECT_ID` *(proposed)* | Pin the linked vault project id (currently `Config.linked_project_id` in YAML). | no | resolved from `tn.yaml` (`linked_project_id`) | no | env > yaml > unset |
-| `TN_VAULT_JWT` *(proposed)* | Pre-auth JWT for non-interactive vault calls (CI). | no | unauthenticated; challenge/verify on demand | yes | env > interactive challenge |
+| `TN_VAULT_SESSION_TOKEN` | Pre-authenticated session token for vault calls; `TN_VAULT_JWT` is a legacy alias. | yes — `tn/vault_client.py:for_identity` | challenge/verify on demand | yes | explicit arg > TN_VAULT_SESSION_TOKEN > TN_VAULT_JWT > challenge |
+| `TN_API_KEY` | Bootstrap a fresh node with its keystore from a sealed vault bundle. | yes — `tn/bootstrap.py` | unset | yes | env at cold start |
+| `TN_ACCOUNT_PASSPHRASE` | Account recovery passphrase used to derive the key that wraps the keystore backup. | yes — account, wallet, and auth commands | unset (flag or prompt) | yes | --account-passphrase > env |
 | `TN_VAULT_TIMEOUT` *(proposed)* | HTTP timeout (seconds) for the vault client. | no | `30.0` (`vault_client.DEFAULT_TIMEOUT`) | no | env > default |
 
 ## Ceremony / Config
@@ -119,6 +119,6 @@ slots most operators want are catalogued below.
 
 When you add a new env-var read:
 1. Add a row here in the appropriate category.
-2. Add a matching entry in `_ENV_SCHEMA` in `tn/cli.py` so `tn show env`
+2. Add a matching entry in `_ENV_SCHEMA` in `tn/cli_show.py` so `tn show env`
    surfaces it.
 3. Add or extend a test in `tests/test_cli_show_env.py`.

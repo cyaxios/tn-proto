@@ -163,7 +163,7 @@ Both are async — the jwe cipher seals and opens through an async JOSE
 library.
 
 ```typescript
-import { tn } from "tn-proto";
+import { tn } from "@cyaxios/tn-proto";
 
 await tn.init("demo");
 
@@ -569,7 +569,7 @@ tn-js verify   ndjson envelope line -> {ok, ...} on stdout
 ```
 
 Recomputes the row hash from public envelope fields and checks the signature.
-Feeding it the `seal` output above:
+Save the `seal` output above as `env.ndjson`, then verify it:
 
 ```bash
 cat env.ndjson | node bin/tn-js.mjs verify
@@ -829,6 +829,9 @@ tn-js absorb <package> [--yaml <path>] [--allow-self-absorb]
 Installs a `.tnpkg` into the active ceremony's keystore. Absorbing a package the
 same ceremony minted is refused unless `--allow-self-absorb` is passed (used in
 tests and recovery flows):
+
+Here, `for_rcpt.tnpkg` is a delivered package and `.tn/rcpt/tn.yaml` is an
+existing recipient ceremony. Replace both paths with your own inputs.
 
 ```bash
 node bin/tn-js.mjs absorb for_rcpt.tnpkg --yaml .tn/rcpt/tn.yaml --allow-self-absorb

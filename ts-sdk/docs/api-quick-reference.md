@@ -1,4 +1,4 @@
-# tn-proto — API quick reference
+# @cyaxios/tn-proto — API quick reference
 
 **For LLM coders + humans skimming.** One-line summaries, signatures,
 one-line examples. The authoritative contract lives in the TSDoc on
@@ -9,12 +9,12 @@ Two entry shapes:
 
 ```ts
 // Node (server-side, CLI, tests):
-import { Tn } from "tn-proto";
-import * as tn from "tn-proto";
+import { Tn } from "@cyaxios/tn-proto";
+import * as tn from "@cyaxios/tn-proto";
 
 // Browser (single-page apps, extensions, witness-style harnesses):
-import { Tn } from "tn-proto/browser";
-import * as tn from "tn-proto/browser";
+import { Tn } from "@cyaxios/tn-proto/browser";
+import * as tn from "@cyaxios/tn-proto/browser";
 ```
 
 The verb surface is identical between the two; only the runtime layer

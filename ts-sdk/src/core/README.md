@@ -1,4 +1,4 @@
-# tn-proto/core
+# @cyaxios/tn-proto/core
 
 Layer 1 of the TN TypeScript SDK. Pure functions over wasm-backed crypto.
 Browser-safe — no `node:*` imports allowed (enforced by ESLint and a
@@ -6,15 +6,14 @@ runtime test in `test/core_no_node_imports.test.ts`).
 
 ## Consumers
 
-- `tn-proto` (Layer 2; Node entry) wraps this.
+- `@cyaxios/tn-proto` (Layer 2; Node entry) wraps this.
 - `extensions/tn-decrypt/` (Chrome MV3) is the canonical browser consumer
   and the reason this layer exists. Anything the extension needs to
   decrypt or render envelopes lives here.
 
 ## What's in here
 
-- `branded.ts` — branded type helpers (`Did`, `RowHash`, `SignatureB64`)
-- `types.ts` — shared structural types (envelopes, admin state, read entries)
+- `types.ts` — branded type helpers (`Did`, `RowHash`, `SignatureB64`) and shared structural types (envelopes, admin state, read entries)
 - `canonical.ts` — canonical-bytes serialization (matches Python byte-for-byte)
 - `chain.ts` — `rowHash`, `ZERO_HASH`, `sha256Hex` (over `@noble/hashes`)
 - `signing.ts` — Ed25519 sign/verify
@@ -25,7 +24,7 @@ runtime test in `test/core_no_node_imports.test.ts`).
 - `tnpkg_archive.ts` — zip pack/parse over `Uint8Array` (uses `fflate`)
 - `agents_policy.ts` — markdown parser for `.tn/config/agents.md`
 - `read_shape.ts` — flatten `ReadEntry` → flat dict (the default `tn.read()` shape)
-- `decrypt.ts` — cipher-aware envelope decrypt (`btn` today, `jwe` ready to wire)
+- `decrypt.ts` — envelope decryption (BTN/HIBE synchronously; JWE through the asynchronous path)
 - `errors.ts` — Error subclasses (`VerificationError`, `ChainConflictError`, …)
 - `admin/state.ts` — `AdminStateReducer` (pure event-fold; the persistence + log-tailing wrapper is `../admin/cache.ts` in Layer 2)
 - `admin/catalog.ts` — wasm-backed admin catalog (`reduce`, `catalogKinds`, `validateEmit`)

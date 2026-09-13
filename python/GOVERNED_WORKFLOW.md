@@ -40,10 +40,11 @@ wire = bytes(account.snapshot)
 ```
 
 `create_obj` requires an explicit `Governance` contract and retains the initial
-signed snapshot. At a service origin, a Unity adapter supplies the applicable
-contract for the service context and purpose. The runnable local example selects
-it from the session's parsed policy tree. `Governance.from_markdown(authority,
-text, policy_id, object_type)` is also available to policy adapters.
+signed snapshot. This example selects the contract from the session's parsed
+policy tree. Applications can instead obtain contracts through a
+[policy provider](../docs/MANAGEMENT_SYSTEMS.md#use-an-existing-service).
+`Governance.from_markdown(authority, text, policy_id, object_type)` is also
+available to policy adapters.
 
 Rust fills the reserved encrypted `tn.agents` group with the contract. It binds
 each group through the governance AAD marker, encrypts the assigned fields,
@@ -290,12 +291,12 @@ selected publishing session must remain open through its decision and release.
 
 ## Adapters own admission and release decisions
 
-A governed Polars helper holds the `DataObject` while dataframe operations update
-selected data. Its `release(to=..., purpose=...)` puts the dataframe result back
-into that object and invokes the application's policy decision. A governed LLM
-wrapper admits the input for its request, opens the selected prompt data, and
-releases the model result with the retained contracts. These adapters encapsulate
-the decision callbacks; application callers work with data and destinations.
+An application can build a dataframe adapter that receives a `DataObject` through
+the configured admission check, updates selected data with Polars, then releases
+the result through the configured release check. An LLM adapter can follow the
+same sequence: admit the input for its request, open the selected prompt data,
+then release the model result with the retained contracts. Both adapters would
+encapsulate the decision callbacks so their callers work with data and destinations.
 
 The SDK supplies the object lifecycle and callback contexts. Unity resolution,
 OPA decisions, Polars operations, and LLM transport belong to their adapters.
