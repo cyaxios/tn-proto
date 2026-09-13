@@ -1,8 +1,6 @@
 # tn-proto Rust SDK Reference
 
-Temporary working docs for the in-repo Rust SDK. This file is meant to be a
-high-signal map of what the library currently exposes while the public API is
-still settling.
+Reference for the in-repo Rust SDK while its public API is still settling.
 
 The package name is `tn-proto`. The Rust import path is `tn_proto`.
 

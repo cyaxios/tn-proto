@@ -1,6 +1,6 @@
 # Enterprise consumer experience
 
-The companion `tn-enterprise-patterns` corpus evaluates the governed-object API through fifteen enterprise architecture patterns. Each assignment produces running code, fault tests, a chapter and concrete consumer feedback. The corpus retains separate source pins and evidence for the mutable API and its subsequent complaint remedies. Its `PATTERNS-BOOK.md` connects those results to ownership, coupling, transactions, delivery, change and recovery.
+This note records consumer findings from the separate `tn-enterprise-patterns` corpus, which evaluates the governed-object API through fifteen enterprise architecture patterns. The corpus contains running code, fault tests, and consumer feedback, with separate source pins and evidence for the mutable API and its subsequent complaint remedies. It is not bundled with this SDK; reproducing its baseline requires a separately supplied checkout. The SDK includes [application examples](../python/examples/enterprise/README.md) that can be run from this repository.
 
 The original six-pattern consumer check remains a historical baseline: corpus commit `9e8a0d2`, original SDK commit `243b3d2bd1b6f55ad1149c562b7bdbf6be8e77d3`, fourteen complaints, and 72 compatibility checks. The baseline harness below takes that corpus version. The fifteen-pattern rounds use the corpus's `scripts/evaluate_round.py` and separate `rounds/01` and `rounds/02` records.
 
@@ -17,13 +17,14 @@ The original six-pattern consumer check remains a historical baseline: corpus co
 The mutable path is `create_obj` or `create_obj_with_groups`, `receive`, ordinary
 data changes, optional policy attachment or input inclusion, and `release`.
 Callers retain policy automatically. The following recipes place business
-transactions and recovery around that path. The Rust workflow guide and Python
-`GOVERNED_WORKFLOW.md` document the convenience methods; the native Python
-example `governed_data.py` executes them together.
+transactions and recovery around that path. The [Rust workflow guide](GOVERNED_OBJECTS.md)
+and [Python workflow guide](../python/GOVERNED_WORKFLOW.md) document the convenience
+methods; the native Python example [governed_data.py](../python/examples/governed_data.py)
+executes them together.
 
 ## Reproduce the six-pattern baseline
 
-Run from the SDK repository with Python 3.11 or later, Cargo, and a populated Cargo dependency cache:
+With a separate `tn-enterprise-patterns` checkout at commit `9e8a0d2`, run from the SDK repository with Python 3.11 or later, Cargo, and a populated Cargo dependency cache:
 
 ```text
 python scripts/check_enterprise_patterns.py --corpus /path/to/tn-enterprise-patterns --target-dir /path/to/cargo-target --report /path/to/enterprise-sdk-regression.json

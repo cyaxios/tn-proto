@@ -1,6 +1,6 @@
 # Rust Read Modularization Design
 
-**Status:** Approved in conversation
+**Status:** Design snapshot, 2026-07-12.
 
 **Date:** 2026-07-12
 

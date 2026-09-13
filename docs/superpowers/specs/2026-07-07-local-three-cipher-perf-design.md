@@ -3,39 +3,37 @@
 ## Goal
 
 Build a Windows-local performance smoke suite for TN-Proto that runs from the
-repo venv in `C:\codex\tn\tn_proto`, measures BTN, JWE, and HIBE on the same
+repository's `.venv`, measures BTN, JWE, and HIBE on the same
 machine with the same payloads and metrics, and produces raw artifacts that can
 graduate to the AWS paper run without changing the metric contract.
 
 The suite is not allowed to produce paper numbers. It is a local rehearsal for
 the paper artifact: it proves the runner, instrumentation, raw schema, and
-statistics are sufficient before we pay for AWS time or fill paper
-`[MEASURE:*]` slots.
+statistics are sufficient before running the AWS benchmark profiles.
 
 ## Non-goals
 
-- Do not fill `tn-paper` measurement slots from local Windows output.
+- Do not use local Windows output as AWS benchmark measurements.
 - Do not compare BTN totals from Rust against JWE/HIBE totals from an
   uninstrumented Python path.
 - Do not report any number that cannot be recomputed from raw artifacts.
 - Do not use per-cipher bespoke runners that produce different schemas.
-- Do not rely on a remote branch; the local checkout is the source of truth.
+- Record the exact source revision and include any uncommitted changes in the run's provenance.
 
 ## Local execution target
 
-Run from:
+The planned command runs from the repository root:
 
 ```powershell
-cd C:\codex\tn\tn_proto
 .\.venv\Scripts\python.exe -m tn_bench.local_perf --profile local-smoke
 ```
 
-Verified local environment on 2026-07-07:
+Environment recorded on 2026-07-07:
 
-- `.venv` exists at `C:\codex\tn\tn_proto\.venv`.
+- A repository-local `.venv` was used.
 - Python is `3.12.4`.
 - `pip` is available.
-- `tn` imports from `C:\codex\tn\tn_proto\python\tn\__init__.py`.
+- `tn` imported from the repository's `python/tn/__init__.py`.
 - `pytest` is available in the venv.
 
 The runner records the venv path, Python version, platform, CPU count, memory,
@@ -514,7 +512,7 @@ tools/bench_artifact_py/tn_bench/sufficiency.py
 The tool package can be imported by adding `tools/bench_artifact_py` to
 `PYTHONPATH` from the runner command, or by making it an editable dev dependency
 inside the repo venv. The first implementation should prefer a direct
-`PYTHONPATH` wrapper to avoid mutating the user venv more than necessary.
+`PYTHONPATH` wrapper to limit changes to the development environment.
 
 ## Open implementation question
 

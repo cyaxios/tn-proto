@@ -1,16 +1,3 @@
-<!--
-[DOCUMENTATION-SPEC: LOCKED]
-This README follows the tn-proto documentation guidelines.
-DO NOT simplify this document into generic summaries.
-DO NOT remove:
-  - The Shields.io badges or the ASCII architecture diagrams.
-  - The side-by-side TypeScript + Python quickstart examples (with output).
-  - The full CLI reference, the "How log sharing works" section, or the
-    "AI coding agents - tn-skills" section.
-  - The non-custodial vault section, including key recovery and how to disable it.
-Maintain a straightforward, developer-friendly voice. Avoid parameter-heavy explanations.
--->
-
 # @cyaxios/tn-proto
 
 ---
@@ -440,18 +427,6 @@ Everything has a sensible default; these override it. `tn-js show env` prints th
 | `TN_YAML` | Explicit path to `tn.yaml` for init / discovery. |
 | `TN_HOME` | Root for shared TN state. Default: `~/.tn`. |
 | `TN_STRICT=1` | Disable ceremony auto-discovery; `init()` must be given an explicit project. |
-
-## AI coding agents - tn-skills
-
-[`tn-skills`](https://github.com/cyaxios/tn-skills) teaches your AI coding agent to use TN correctly. With it installed, the agent routes PII into the right encrypted group, calls `tn.init` once at startup (not inside a request handler), never logs a secret like a CVV, and cites the right regulation when a file's domain matches one of its built-in industry kits - so agent-written code doesn't quietly tell the wrong thing to the wrong people.
-
-Install it in Claude Code:
-```text
-/plugin marketplace add cyaxios/tn-skills
-/plugin install tn-logging@tn-skills
-```
-
-For other AI tools, drop the repo's `AGENTS.md` into your agent. The bundled skills and industry kits are documented at <https://github.com/cyaxios/tn-skills>.
 
 ## One core, every language
 

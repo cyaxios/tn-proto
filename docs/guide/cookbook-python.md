@@ -246,7 +246,8 @@ front; put the value in a group, or pass it as a string or `Decimal`.
 ## CLI command reference
 
 Each subsection shows the `--help` synopsis, an invocation with its
-output, and the code-level equivalent where one exists.
+output, and the code-level equivalent where one exists. Paths and the
+recovery phrase in the sample output use placeholders.
 
 ### tn init
 
@@ -265,12 +266,12 @@ PYTHONPATH=python python -m tn.cli init demo --no-link --skip-confirm
 ```
 
 ```
-[tn init] Reusing identity at C:\Users\gilsa\AppData\Roaming\tn\identity.json
+[tn init] Reusing identity at <identity-directory>/identity.json
 [tn init]   DID: did:key:z6MksPsDhwFCy8Cho6xM83iE2b21oqutKef2KmBdWDAbnSQS
-[tn init] Ceremony local_813e241b created at C:\codex\tn\tn_proto_doctmp\cli_demo\.tn\demo\tn.yaml
+[tn init] Ceremony local_813e241b created at <project-directory>/.tn/demo/tn.yaml
 [tn init]   project: demo
 [tn init]   cipher: btn
-[tn init]   keystore: C:\codex\tn\tn_proto_doctmp\cli_demo\.tn\demo\keys
+[tn init]   keystore: <project-directory>/.tn/demo/keys
 ```
 
 By default `tn init <name>` backs the project up to the vault and prints a
@@ -305,12 +306,12 @@ PYTHONPATH=python python -m tn.cli wallet status .tn/demo/tn.yaml
 
 ```
 Identity: did:key:z6MksPsDhwFCy8Cho6xM83iE2b21oqutKef2KmBdWDAbnSQS
-  file:    C:\Users\gilsa\AppData\Roaming\tn\identity.json
+  file:    <identity-directory>/identity.json
   linked:  https://vault.tn-proto.org
   prefs:   default_new_ceremony_mode=local
            prefs_version=0
 Ceremony: local_813e241b
-  yaml:            C:\codex\tn\tn_proto_doctmp\cli_demo\.tn\demo\tn.yaml
+  yaml:            <project-directory>/.tn/demo/tn.yaml
   mode:            local
   cipher:          btn
   linked_vault:    (none)
@@ -417,7 +418,7 @@ PYTHONPATH=python python -m tn.cli wallet export-mnemonic --yes
   your TN identity if this machine is lost.
 ============================================================================
 
-  jump replace museum accuse dilemma engage distance nature peanut drum source lock
+  <12-word recovery phrase>
 
 ============================================================================
 ```
@@ -468,7 +469,7 @@ PYTHONPATH=python python -m tn.cli bundle \
 ```
 
 ```
-[tn bundle] wrote C:\codex\tn\tn_proto_doctmp\cli_demo\bob.tnpkg
+[tn bundle] wrote <project-directory>/bob.tnpkg
 [tn bundle]   recipient: did:key:z6MkBundleTestRecipient000000000000000000000000
 [tn bundle]   ceremony:  local_813e241b  (cipher=btn)
 [tn bundle]   groups:    ['default']
@@ -497,7 +498,7 @@ PYTHONPATH=python python -m tn.cli add_recipient default alice \
 ```
 
 ```
-[tn add_recipient] wrote C:\codex\tn\tn_proto_doctmp\cli_demo\alice.tnpkg
+[tn add_recipient] wrote <project-directory>/alice.tnpkg
 [tn add_recipient]   group:     default
 [tn add_recipient]   recipient: did:key:zLabel-alice
 ```
@@ -533,7 +534,7 @@ PYTHONPATH=python python -m tn.cli invite carol ./tn-invite-carol.zip \
 ```
 
 ```
-[tn invite] wrote C:\codex\tn\tn_proto_doctmp\cli_demo\tn-invite-carol.zip
+[tn invite] wrote <project-directory>/tn-invite-carol.zip
 [tn invite]   group:     default
 [tn invite]   recipient: did:key:zLabel-carol
 [tn invite]   leaf:      3
@@ -601,7 +602,7 @@ PYTHONPATH=python python -m tn.cli absorb ../cli_demo/alice.tnpkg \
 ```
 [tn absorb] kind=kit_bundle accepted=1 skipped=0
 [tn absorb] WARN: overwrote 1 existing kit file(s):
-             C:\codex\tn\tn_proto_doctmp\recipient\.tn\bob\keys\default.btn.mykit
+             <recipient-directory>/.tn/bob/keys/default.btn.mykit
 [tn absorb] prior bytes preserved at <name>.previous.<UTC_TS> in the same directory.
 ```
 
@@ -626,7 +627,7 @@ PYTHONPATH=python python -m tn.cli rotate default \
 ```
 
 ```
-[tn rotate] rotated 1 group(s); emitted 3 .tnpkg artifact(s) into C:\codex\tn\tn_proto_doctmp\cli_demo\rotated
+[tn rotate] rotated 1 group(s); emitted 3 .tnpkg artifact(s) into <project-directory>/rotated
              default: epoch=1
              -> did_key_zLabel-alice.tnpkg
              -> did_key_z6MkBundleTestRecipient000000000000000000000000.tnpkg
@@ -680,7 +681,7 @@ PYTHONPATH=python python -m tn.cli streams
 ```
 NAME  PROFILE      YAML
 ----  -----------  ----
-demo  transaction  C:\codex\tn\tn_proto_doctmp\cli_demo\.tn\demo\tn.yaml
+demo  transaction  <project-directory>/.tn/demo/tn.yaml
 ```
 
 ```bash
@@ -692,7 +693,7 @@ PYTHONPATH=python python -m tn.cli streams --format json
   {
     "name": "demo",
     "profile": "transaction",
-    "yaml_path": "C:\\codex\\tn\\tn_proto_doctmp\\cli_demo\\.tn\\demo\\tn.yaml"
+    "yaml_path": "<project-directory>/.tn/demo/tn.yaml"
   }
 ]
 ```
@@ -904,7 +905,7 @@ PYTHONPATH=python python -m tn.cli compile \
 ```
 
 ```json
-{"ok": true, "out": "C:\\codex\\tn\\tn_proto_doctmp\\cli_demo\\compiled.tnpkg", "kits": ["default.btn.mykit"], "kind": "readers-only", "label": null}
+{"ok": true, "out": "<project-directory>/compiled.tnpkg", "kits": ["default.btn.mykit"], "kind": "readers-only", "label": null}
 ```
 
 `--kit` is repeatable (default: every group). `--label` is persisted into

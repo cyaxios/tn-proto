@@ -218,7 +218,7 @@ tn init mybackuptest
 
 [tn init] Attached to your vault account (no browser needed).
 [tn init]   project:  mybackuptest
-[tn init]   linked:   https://vault.tn-proto.org/projects/01KTMC5A5J3RQ17CK5230TV558
+[tn init]   linked:   https://vault.tn-proto.org/projects/<project-id>
 [tn init]   uploaded: 0 file(s)
 ```
 

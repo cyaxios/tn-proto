@@ -1,6 +1,6 @@
 # Trusted Enrollment and Secure-Default Read Design
 
-**Status:** Approved in conversation; written-spec review complete
+**Status:** Design snapshot, 2026-07-11. Read defaults may differ in later releases; consult the SDK reference for the version in use.
 
 **Date:** 2026-07-11
 
@@ -769,27 +769,6 @@ Tests assert that plaintext is never returned before all required checks pass.
 - Malformed packages and records have bounded input sizes and stable failures.
 - Performance gates compare secure-default reads against the existing verified
   read path, not against the intentionally insecure `verify=False` path.
-
-## Parallel delivery
-
-After the written spec and implementation plan are approved:
-
-- **Foundation:** freeze canonical statement/DID interfaces, reason mappings,
-  the deterministic fixture generator, all shared fixture files, the common
-  unsafe-operation catalog event, and language-level warning payload/event
-  surfaces;
-- **Track A1:** DID-bound package verification and cross-SDK trust adapters;
-- **Track A2:** complete JWE enrollment lifecycle and state machine;
-- **Track A3:** HIBE authority assertions and fail-closed grants; and
-- **Track B:** secure-default `read()` and writer policy.
-
-The Foundation is a short contract-freeze barrier. Immediately after it lands,
-Track B starts in parallel with A1-A3 and does not wait for enrollment state or
-package APIs. A2 and A3 share A1's verifier contract. After Rust/core and
-TypeScript track-local APIs for A and B pass, one joint bridge integration task
-adds all FFI functions, C# native declarations, and SDK root exports before
-C# lifecycle/read GREEN gates run. One later joint documentation/verification
-task owns shared guides/readmes. No other task edits those shared paths.
 
 ## Success criteria
 

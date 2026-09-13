@@ -1,9 +1,9 @@
 # tn-proto C# SDK Reference
 
-Temporary reference for the in-repo C# SDK preview.
+Reference for the in-repo C# SDK preview.
 
-The C# SDK is in early preview. The first chunks establish the .NET workspace
-and a low-level native bridge over the shared Rust core:
+The C# SDK is in early preview. It includes a .NET workspace and a low-level
+native bridge over the shared Rust core:
 
 ```csharp
 using TnProto;

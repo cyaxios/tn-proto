@@ -1,15 +1,15 @@
 # Persistent BTN and JWE examples
 
-The SDK must expose `tn.providers.FileKeyStore`. Each command starts a separate process:
+Install an SDK version that exposes `tn.providers.FileKeyStore`, then run these commands from the repository root. Each command starts a separate process; the generated installations go beside the checkout:
 
 ```shell
-python -B setup.py btn-demo --cipher btn
-python -B hello_btn.py btn-demo publish
-python -B hello_btn.py btn-demo read
+python -B python/examples/persistent_keys/setup.py ../tn-btn-demo --cipher btn
+python -B python/examples/persistent_keys/hello_btn.py ../tn-btn-demo publish
+python -B python/examples/persistent_keys/hello_btn.py ../tn-btn-demo read
 
-python -B setup.py jwe-demo --cipher jwe
-python -B hello_jwe.py jwe-demo publish
-python -B hello_jwe.py jwe-demo read
+python -B python/examples/persistent_keys/setup.py ../tn-jwe-demo --cipher jwe
+python -B python/examples/persistent_keys/hello_jwe.py ../tn-jwe-demo publish
+python -B python/examples/persistent_keys/hello_jwe.py ../tn-jwe-demo read
 ```
 
 Both readers print `Hello, world!`. Setup refuses to replace an existing installation. Publication and reading reopen the saved credentials; they never generate them.
@@ -21,10 +21,10 @@ Each installation contains `config.json`, `agents.md`, `keys/keystore.json`, `he
 ## HIBE
 
 ```shell
-python -B setup.py hibe-demo --cipher hibe
-python -B hello_hibe.py hibe-demo publish
-python -B hello_hibe.py hibe-demo read
-python -B hibe_delegation.py
+python -B python/examples/persistent_keys/setup.py ../tn-hibe-demo --cipher hibe
+python -B python/examples/persistent_keys/hello_hibe.py ../tn-hibe-demo publish
+python -B python/examples/persistent_keys/hello_hibe.py ../tn-hibe-demo read
+python -B python/examples/persistent_keys/hibe_delegation.py
 ```
 
 The persistent example saves scoped keys and public parameters. The delegation example uses the Rust-backed HIBE primitives to issue a parent grant, delegate a child, and assign it through the native group provider.

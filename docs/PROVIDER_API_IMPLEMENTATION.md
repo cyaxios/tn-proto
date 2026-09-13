@@ -63,7 +63,7 @@ The Rust SDK exports providers through `tn_proto::providers`, and governed types
 
 ## Verification snapshot
 
-Validated locally on 2026-09-10: 41 focused Rust integration tests and 118 installed-wheel Python tests passed. `cargo check -p tn-core-py -p tn-proto --locked` passed without compiler warnings. Native and Python provider examples and the Python edition-catalog example ran successfully. The signature comparison reads the stub shipped inside the installed wheel and checks its compiled extension classes and methods.
+Validation recorded on 2026-09-10: 41 focused Rust integration tests and 118 installed-wheel Python tests passed. `cargo check -p tn-core-py -p tn-proto --locked` passed without compiler warnings. Native and Python provider examples and the Python edition-catalog example ran successfully. The signature comparison reads the stub shipped inside the installed wheel and checks its compiled extension classes and methods.
 
 
-Persistent-provider validation on 2026-09-10: 53 Rust integration tests passed, including the explicit Rust-to-joserfc test. The installed-wheel suite passed 123 tests. The book suite passed 45 tests, including its exact executable source excerpts and separate-process BTN/JWE examples. Generated keystores are not included in book source downloads.
+Persistent-provider validation on 2026-09-10: 53 Rust integration tests passed, including the explicit Rust-to-joserfc test. The installed-wheel suite passed 123 tests. A separate companion-example suite recorded 45 passes, including executable source excerpts and separate-process BTN/JWE examples. That suite is outside this repository's test count.

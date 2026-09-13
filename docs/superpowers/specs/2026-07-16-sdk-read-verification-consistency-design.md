@@ -1,9 +1,9 @@
 # SDK read-path verification consistency (TypeScript + C#)
 
-- **Status:** design, awaiting review
+- **Status:** design snapshot, 2026-07-16
 - **Date:** 2026-07-16
-- **Supersedes:** the 2026-07-15 "fail-closed parity" draft, which flipped SDK
-  defaults. This version deliberately does **not** change any default — see §2.
+- **Scope:** align verification behavior while preserving the SDK defaults
+  recorded in this design snapshot — see §2.
 
 ## 1. Context & problem
 
@@ -33,9 +33,8 @@ The SDKs are inconsistent along **two independent axes**:
 2. **The no-arg default diverges.** TS/C# default to not-enforcing; Python/Rust
    default to fail-closed (`verify="auto"` → raise).
 
-This spec fixes **axis 1 only**. Axis 2 (which posture is the default) is a
-product decision — telemetry-first vs. transaction/audit-first — that is being
-deliberated separately and is **out of scope here** (§2).
+This spec addresses **axis 1 only**. It preserves each SDK's default behavior;
+changing those defaults is **out of scope** (§2).
 
 ## 2. Goals / non-goals
 
@@ -52,9 +51,8 @@ Concretely:
 - A cross-SDK conformance harness that pins identical per-setting behavior.
 
 **Explicit non-goals.**
-- **No default is changed.** Each SDK keeps its current no-arg default; nothing
-  breaks. The default-posture decision (telemetry vs transaction/audit) is a
-  separate, later, one-line switch once the machinery agrees (§6).
+- **No default is changed.** Each SDK keeps the no-arg default recorded in this
+  design snapshot (§6).
 - The `telemetry` / `transaction` / `audit` / `governed` profile taxonomy — a
   separate design track.
 - `seal`/`unseal` trust semantics (deliberately trust-free — §7).
@@ -244,6 +242,6 @@ the machinery cannot silently drift again, independent of what any default is.
   through the core enriches its `_valid` metadata to include the writer-trust
   result TS never computed. This is additive metadata with no enforcement change;
   confirm no consumer keys off the *absence* of that field.
-- **Posture default (out of scope, tracked):** telemetry-first vs
-  transaction/audit-first, and the `governed` targeting axis — resolved
-  elsewhere; this spec is designed so that decision is a later one-line switch.
+- **SDK defaults (out of scope):** this design preserves each SDK's no-arg
+  default. Any future change must be checked against the shared conformance
+  harness.

@@ -1,15 +1,15 @@
 # Paper reproducibility review
 
-Reviewed on 2026-09-13. This note separates the supplied paper, its historical experiment artifact, and Python release `2026.9.13b2`. It does not replace the paper or relabel its measurements as results for the current SDK.
+This review, dated 2026-09-13, compares the paper revision identified below, its historical experiment artifact, and Python release `2026.9.13b2`. The paper's measurements describe its pinned implementation.
 
 ## Reviewed material and availability
 
-- Supplied PDF: `TN_Proto__Confidential_and_Verifiable_Objects_for_Governed_Data_Processing.pdf`, SHA-256 `0d0be7e55ba932b4e221cd22fe6673c692e9ac016e30e627a26a25ea144409d3`.
-- Separate local experiment artifact: `tn-paper/icissp27`, including `configs/validation.json`, `results/validation-01/`, `native/`, `python/tn_icissp/`, and `tests/`.
+- Reviewed PDF: `TN_Proto__Confidential_and_Verifiable_Objects_for_Governed_Data_Processing.pdf`, SHA-256 `0d0be7e55ba932b4e221cd22fe6673c692e9ac016e30e627a26a25ea144409d3`.
+- Historical ICISSP experiment package, maintained separately from this SDK, including `configs/validation.json`, `results/validation-01/`, `native/`, `python/tn_icissp/`, and `tests/`.
 - The validation environment pins clean SDK revision `c83a46a57310fcaccc832e50d6dbd75bd477b5b5`, Python extension SHA-256 `8aad86d55761014e17e8fce78c0c1d829f48832685a85a4abc0dabed198d2979`, and benchmark executable SHA-256 `e5d4ce5fb4707d5f8f571e6db0753832549881cb75b15f7bf8697560f933c5c7`. Its summary records raw-data SHA-256 `fec259bd01182ad262112430238942916a4db0883c1e1a085b0a57cf67d2b2f0`.
-- Newer local manuscript: `tn-proto-icissp27-revised/main.tex`, SHA-256 `d45525e94437b669f131da6055afeaa1e0ef322fa4aa0203805516a75c807ef3` at review.
+- Later LaTeX manuscript source (`main.tex`), SHA-256 `d45525e94437b669f131da6055afeaa1e0ef322fa4aa0203805516a75c807ef3` at review.
 
-The experiment and manuscript names above identify inspected local material. This repository does not claim they are a publicly archived, immutable artifact, and these names are not public download links. A public reproduction package still needs a versioned artifact location, its source manifest, pinned SDK/native installation instructions, configurations, and retained results. An SDK revision alone does not identify every separately maintained experiment source.
+At review, no public immutable archive was identified for the separate experiment package or manuscript source. Reproducing the historical results requires that package, a source manifest, pinned SDK/native installation instructions, configurations, and retained results. Artifact paths below are relative to the experiment package's root; they are not files shipped with this SDK. The SDK revision alone does not identify the separately maintained experiment sources.
 
 ## Test counts and executable claims
 
@@ -37,7 +37,7 @@ The artifact's native integration suite contains **ten named tests in two files*
 | Boolean/string equality | `boolean_true_and_string_true_match_the_same_expected_preimage` creates distinct JSON `true` and `"True"` values, then checks both hashes against the same explicit NUL-delimited preimage ending in `x=True`. This demonstrates the general public-value encoder's non-injectivity; it is not a claim that arbitrary JSON types are safe in the governed public domain. |
 | Total 35, two contracts, two sources | `examples/governed_workflow.py` and `native/examples/governed_workflow.rs` have corresponding retained outputs in `docs/inspection/python-example.txt` and `docs/inspection/native/example.txt`. |
 
-During this review, the retained prebuilt native test executables were run again and passed all ten tests. A fresh Python run of the measurement, runner, and workload tests excluding the two workload-adapter cases passed **22 tests**. Full historical Python execution was not re-established in that audit environment: its available default TN installation lacked the required governed module. The historical 34-pass log and source inspection must not be described as a new clean rebuild or full fresh pass.
+During the 2026-09-13 review, the retained prebuilt native test executables were run again and passed all ten tests. A fresh Python run of the measurement, runner, and workload tests excluding the two workload-adapter cases passed **22 tests**. Full historical Python execution was not re-established in that audit environment: its available default TN installation lacked the required governed module. The historical 34-pass log and source inspection must not be described as a new clean rebuild or full fresh pass.
 
 ## Reproduction commands and measurement scope
 
@@ -59,7 +59,7 @@ The reported validation uses 30 trials, one Windows host, and one workload offer
 
 ## HIBE and JWE assumptions
 
-**HIBE depth four is an experiment setting.** `native/src/lib.rs` calls `tn_hibe::setup(4, ...)` and targets `bench/group`, an identity of depth two. It creates independent reader keys for that same identity. Increasing the experiment's recipient count affects setup, not ciphertext recipient fanout. It does not establish a global runtime maximum of four. The general [HIBE parameter API](../crypto/tn-bbg/src/params.rs) accepts a chosen maximum depth; the existing [Python HIBE initializer](../python/tn/cipher.py) defaults to two, while this release's [FileKeyStore provisioning](../crypto/tn-core/src/providers/file.rs) creates independent depth-one group authorities. The newer local manuscript explicitly calls four the evaluated authority setting; the supplied PDF's wording should be narrowed in a replacement manuscript.
+**HIBE depth four is an experiment setting.** `native/src/lib.rs` calls `tn_hibe::setup(4, ...)` and targets `bench/group`, an identity of depth two. It creates independent reader keys for that same identity. Increasing the experiment's recipient count affects setup, not ciphertext recipient fanout. It does not establish a global runtime maximum of four. The general [HIBE parameter API](../crypto/tn-bbg/src/params.rs) accepts a chosen maximum depth; the existing [Python HIBE initializer](../python/tn/cipher.py) defaults to two, while this release's [FileKeyStore provisioning](../crypto/tn-core/src/providers/file.rs) creates independent depth-one group authorities. The later manuscript source explicitly calls four the evaluated authority setting; the reviewed PDF needs that qualification.
 
 **The JWE length formula is encoder-specific.** Table 5 states sizes before embedding in a TN envelope. For the benchmark's compact General JSON JWE encoder, X25519 `ECDH-ES+A256KW`, `A256GCM`, at least one recipient, and its fixed header layout:
 
@@ -72,11 +72,11 @@ Here `s` is recipient count, `m` plaintext bytes, and `a` caller-AAD bytes. Addi
 
 ## Figure, listing, and disclosure
 
-The supplied PDF's Figure 1 shows separate `amounts` and `identity` groups, while Listing 1 uses one `default` business group with an `amounts` field. **The caption already states this distinction.** The listing illustrates working-object behavior; it does not by itself demonstrate separate bank/vendor signing identities or the illustrated missing identity-group key. The [release's bank/vendor example](../python/examples/bank_vendor.py) now supplies that complete boundary, including a vendor result returned to the bank, unavailable identity data, refused marketing use, and retained two-contract/two-source provenance. Its [tests](../python/tests/test_bank_vendor_example.py) provide current release evidence; they do not change the historical listing.
+The reviewed PDF's Figure 1 shows separate `amounts` and `identity` groups, while Listing 1 uses one `default` business group with an `amounts` field. **The caption already states this distinction.** The listing illustrates working-object behavior; it does not by itself demonstrate separate bank/vendor signing identities or the illustrated missing identity-group key. The [release's bank/vendor example](../python/examples/bank_vendor.py) now supplies that complete boundary, including a vendor result returned to the bank, unavailable identity data, refused marketing use, and retained two-contract/two-source provenance. Its [tests](../python/tests/test_bank_vendor_example.py) provide current release evidence; they do not change the historical listing.
 
-The supplied PDF ends with an empty **Generative AI Disclosure** heading. The newer local LaTeX contains substantive disclosure identifying Codex and Claude assistance and author responsibility. A filled local source does not repair the supplied PDF. The authors should verify that disclosure against actual use, rebuild and inspect the manuscript, and replace or resubmit the appropriate PDF. This review did not modify the old paper.
+The reviewed PDF ends with an empty **Generative AI Disclosure** heading. The later LaTeX manuscript contains a disclosure identifying Codex and Claude assistance and author responsibility. That disclosure must match the assistance used and appear in a rebuilt, inspected PDF before replacement or resubmission. The reviewed PDF was unchanged by this SDK release.
 
-## What changed in this release
+## SDK changes recorded by the review
 
 The [governed Python guide](GOVERNED_PYTHON_API.md), [bank/vendor example](../python/examples/bank_vendor.py), and [fifteen enterprise patterns](../python/examples/enterprise/README.md) turn the intended application boundaries into current, inspectable code. Governed receipt decides the use before selected business opening; application calculations, retained contributors, additional contracts, and output approval remain explicit.
 

@@ -32,8 +32,8 @@ p50 microseconds per event, 240 readers minted, 0 revoked:
 |  16384 B |  11 µs  |   218 µs   |     66 µs        |  **161 µs**     |        **6,211**    |
 |  65536 B |  67 µs  | 1,079 µs   |    323 µs        |  **410 µs**     |        **2,439**    |
 
-**events/s ingest** is the number you asked about — how many full verified
-logs per second a subscriber can consume.
+**events/s ingest** is derived from the median time per event:
+`1,000,000 / p50_microseconds` for full verified ingest.
 
 ## Quick comparison — 225 revocations stress test
 

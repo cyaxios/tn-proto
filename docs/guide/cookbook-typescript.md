@@ -334,7 +334,7 @@ node bin/tn-js.mjs wallet link https://vault.tn-proto.org --yaml .tn/demo/tn.yam
 ```
 
 ```json
-{"ok":true,"verb":"wallet.link","project_id":"01KTKXN7GWT21PPNVFS04695JJ","project_name":"cookbook-demo","vault_base_url":"https://vault.tn-proto.org","newly_linked":true}
+{"ok":true,"verb":"wallet.link","project_id":"<project-id>","project_name":"cookbook-demo","vault_base_url":"https://vault.tn-proto.org","newly_linked":true}
 ```
 
 ### wallet unlink

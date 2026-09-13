@@ -65,4 +65,4 @@ unit whenever regenerating.
 The calculation is synthetic fixture arithmetic (`max_drawdown = 0.25` for
 `[100, 120, 90, 135]`), not a DeepVest-engine or model execution claim. The edition
 artifact digests are structural placeholders, not downloadable OPA modules.
-Connected execution and actual evaluator-artifact loading are later milestones.
+The fixture does not exercise a live service or load evaluator artifacts.

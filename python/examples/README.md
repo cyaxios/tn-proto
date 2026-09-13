@@ -23,16 +23,16 @@ it creates its own ceremony in a temporary directory and tears it down at
 the end, so there are no prerequisites. You do not need to run `tn init`
 first, and nothing is written outside the temp dir.
 
-Run any one of them directly:
+Run any one of them directly from the `python/` directory:
 
 ```
 python examples/ex01_hello.py
 ```
 
 The `ex0*` files are also executed by
-[`tests/test_examples.py`](../tests/test_examples.py) on every commit, so
-the numbers and output strings the primer cites stay current. For the
-narrative version, see [`docs/primer.md`](../docs/primer.md).
+[`tests/test_examples.py`](../tests/test_examples.py) on every commit. For
+installation, configuration, and CLI examples, see the
+[getting started guide](../../docs/guide/getting-started.md).
 
 ## Walkthrough examples
 

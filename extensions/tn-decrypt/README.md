@@ -52,7 +52,7 @@ build tooling required.
    `extensions/tn-decrypt/` directory from your clone.
 
 3. Click the extension icon → **Manage keystore** → import a plaintext
-   keystore bundle (from tnproto-org's "Coming from another device?"
+   keystore bundle (from the TN vault's "Coming from another device?"
    step, or any `*.keystore.json` file you produced with `tn-js` or
    the Python SDK). Pick a passphrase for this extension's stored copy.
 

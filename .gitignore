@@ -73,7 +73,8 @@ artifacts/
 *.key
 identity.json
 
-#superpowers
+# Internal implementation plans and agent handoff files.
+.superpowers/
 docs/superpowers/*/
 
 # Internal-only notes (critic logs, parity audits, design drafts) —

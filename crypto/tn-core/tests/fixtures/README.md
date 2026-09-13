@@ -22,8 +22,8 @@ The original `generate_rust_fixtures.py` that produced the first six
 files is gone; those fixtures are stable and stay committed as-is.
 
 `sealed_object_vectors.json` and the container-public cases appended to
-`row_hash_vectors.json` come from a dedicated generator. Run from
-`tn_proto/python`:
+`row_hash_vectors.json` come from a [dedicated generator](../../../../python/tools/gen_sealed_object_vectors.py).
+Run from the repository's `python/` directory:
 
 ```
 python tools/gen_sealed_object_vectors.py

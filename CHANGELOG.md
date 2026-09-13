@@ -61,7 +61,7 @@ governed application interface; other SDKs retain their own release schedules.
 
 - Add five native provider interfaces for identity, assigned group keys, governance, edition catalogs and optional registers, with typed PyO3 bridges and executable local adapters. Provider setup preserves the fifteen object verbs.
 
-- Expose the agreed object verbs through Rust and PyO3, including atomic field selection and exact-byte publication IO. Add explicit per-session ObjectRegisters configuration.
+- Expose the object verbs through Rust and PyO3, including atomic field selection and exact-byte publication IO. Add explicit per-session ObjectRegisters configuration.
 
 - Add native bound Workflow input/output configuration with PyO3 receive, attach and release operations; preserve live authorization and request-specific release checks.
 
@@ -288,7 +288,7 @@ runtime strings, and the Rust/Python/TS cores ship from one history.
   pull -> absorb -> push; absorbing a revoked-leaf reuse distinguishes
   concurrent from informed conflicts via the snapshot vector clock.
   Warm init attach: `tn.init` syncs an existing wallet ceremony and
-  caches the AWK credential (gh/claude-style credential store).
+  caches the AWK credential in the local credential store.
 * **Crash-safe btn rotation (py+ts).** A crash inside the rotation
   promote dance can no longer strand a publisher: recovery rolls the
   surviving pending key material forward instead of deleting it, and
@@ -356,8 +356,8 @@ A large CLI-parity and vault-sync release, all verified against a live dev vault
   bundle to a recipient DID for real: the named recipient decrypts, a different
   recipient cannot (mutation-proven cryptographic binding). Previously they
   refused it; one path silently shipped an unsealed bundle.
-* **Bug fixes.** TS `seal`/`verify` were broken at HEAD (the device_identity
-  naming flip missed the CLI); `tn bundle` arg name; `inbox accept` kit entry
+* **Bug fixes.** TS `seal`/`verify` were broken after the device_identity
+  rename missed the CLI; `tn bundle` arg name; `inbox accept` kit entry
   name (`<group>.btn.mykit`); `compile --label` persistence; `cli_info` `_sign`
   type; `wallet pull-prefs --help` crash; `pushCeremonyBody` missing `nonce_b64`.
 * **Tests.** Real round-trip + tamper coverage: real `seal -> verify` chain,
@@ -415,7 +415,7 @@ slice, and makes the TypeScript runtime surface report itself honestly.
 - Parity-gate self-tests and allowlist reasons updated for the implemented
   `setLinkState`, so no allowlist reason describes a shipped verb as a stub.
 - New docs: Python<->TypeScript round-trip gap analysis, an opinionated
-  adversarial audit playbook, and the SDK unification (Direction A) roadmap.
+  adversarial audit playbook, and the SDK unification roadmap.
 
 ### Packaging
 
@@ -523,9 +523,8 @@ flipping the canonical vocabulary from `did` / role-suffixed
 logs and yamls are not loadable in this release; the project has
 no production data to preserve so no migration tool ships.
 
-The 0.4.3 btn cipher rotation (separate spec) was originally
-queued as its own release; that work is still pending and will
-land on this same branch before tag.
+The separately planned 0.4.3 btn cipher-rotation work remained
+pending in the recorded status for this release.
 
 ### Wire format
 
@@ -534,8 +533,7 @@ land on this same branch before tag.
   byte-identical across the rename (the hasher consumes field
   *values*, not field *names*) so pre-rename signed logs remain
   signature-verifiable — only the envelope JSON shape changes.
-  This contradicts handover land-mine #1 but is provable from
-  `chain_golden` passing byte-identically after the flip.
+  `chain_golden` passes byte-identically after the flip.
 - **`compute_row_hash` parameter** (Python + Rust) renamed
   `did=` → `device_identity=`. All four Python call sites
   (`logger.py`, `reader.py` ×2, `_dispatch.py`) updated.
@@ -573,35 +571,33 @@ envelope_did    → envelope_device_identity (tn.read.tampered_row_skipped)
   continues to work indefinitely; new code should reach for
   `cfg.device.device_identity`.
 - `RotateGroupResult.cipher_actually_rotated` (shipped in
-  0.4.2a10) is still `False` for btn until the cipher rotation
-  spec lands on this branch; flips to `True` then.
+  0.4.2a10) remained `False` for btn. Returning `True` depended
+  on the pending cipher-rotation implementation.
 
 ### `LooseRotationWarning` (0.4.2a10 stopgap)
 
-Still raised on btn `tn.admin.rotate(...)`. Removal is bundled
-with the cipher rotation work, pending land on this
-branch before tag.
+`LooseRotationWarning` remained enabled for btn `tn.admin.rotate(...)`.
+Its removal depended on the pending cipher-rotation implementation.
 
-### Cascade still in flight on this branch
+### Pending compatibility updates at release
 
-- TS SDK + wasm envelope/admin reads — Phase G of the handover;
-  not yet committed. Until landed, the
+- TS SDK and wasm envelope/admin read updates remained pending. The
   `secure_read_interop::{python,ts}_admin_events_byte_compare`
-  Rust tests fail (they compare against TS/Python committed
-  reference output that doesn't yet carry the new shape).
+  Rust tests failed because the committed TS/Python reference
+  output did not yet carry the new shape.
 - tnpkg manifest field rename
   (`signer_did`/`from_did`/`to_did` on the kit_bundle /
-  enrolment / offer / identity_seed manifest wire format) —
-  not in this commit; queued as a follow-on.
-- tn_proto_web mongo schema + API column rename — cross-repo;
-  Phase H of the handover, not yet committed.
-- Python maturin wheels need rebuild (`nox -s build_core
-  build_btn`) before `pip install` picks up the new
-  `tn_core` / `tn_btn` field shapes; otherwise tests that
-  import the extension fail with `ModuleNotFoundError` cleanup.
+  enrolment / offer / identity_seed manifest wire format)
+  remained queued as a follow-up.
+- The web service's MongoDB schema and API column rename remained
+  pending in its separate repository.
+- Python maturin wheels required a rebuild (`nox -s build_core
+  build_btn`) for `pip install` to pick up the new
+  `tn_core` / `tn_btn` field shapes. Without rebuilt extensions,
+  tests importing them could fail with `ModuleNotFoundError`.
 
-Status at tag time: 44/47 Rust test suites green; remaining 3
-are scoped to phases G + tnpkg manifest follow-on.
+Recorded status at tag time: 44/47 Rust test suites passed; the remaining 3
+involved the TS/wasm read updates and tnpkg manifest changes.
 
 ## [0.4.2a6] - 2026-05-19
 
@@ -796,9 +792,9 @@ parity.
 - `python/tests/test_concurrent_emit_chain.py` (3 cases): 4 workers
   × 50 emits, 8 workers × 25 emits, and 5-iteration stress all yield
   every entry with `tn.read(verify=True)` succeeding. 2000/2000
-  rows across 10 iterations on the development box.
+  rows across 10 iterations in the recorded validation run.
 - `python/tests/test_read_parse_resilience.py` (3 cases): pin the
-  spec the tester filed — clean entries before and after a
+  required behavior — clean entries before and after a
   parse-failing row both surface; `stats.skipped_parse=1`;
   `on_skip` fires once with a `parse:`-prefixed reason.
 - `crypto/tn-core/src/chain.rs` `chain_tip_tests` (3 cases): unit
@@ -810,8 +806,7 @@ parity.
 DX review batch — 10 numbered findings closed (criticals through nits)
 plus the profile-catalog audit and matrix tests. The papercut cycle
 that started in 0.4.2a1 continues; the install / verify / read /
-ceremony create paths are noticeably less surprising. See `DX_FIXES.md`
-in the repo for per-finding root cause + verify command + risks.
+ceremony create paths are noticeably less surprising.
 
 Released in Python as `tn-protocol 0.4.2a2` and in TS as
 `@tnproto/sdk 0.4.2-alpha.2`.
@@ -862,9 +857,9 @@ Released in Python as `tn-protocol 0.4.2a2` and in TS as
   deployments. `link=True` / `link=None` preserve the linked
   default.
 
-- **DX_FIXES.md at repo root** — patch notes for testers with root
-  cause, copy-pasteable verify commands, and risks/regressions per
-  finding.
+- **Per-finding patch notes** were recorded in `DX_FIXES.md` with root
+  causes, verification commands, and risks/regressions. That release-era
+  document is no longer included in the repository.
 
 ### Changed
 
@@ -916,7 +911,7 @@ Released in Python as `tn-protocol 0.4.2a2` and in TS as
   want a truly self-contained ceremony.
 
 - **`tn-protocol` base deps now declare `pydantic>=2` explicitly.**
-  `tn._entry.Entry` is a pydantic `BaseModel`; today this dep
+  `tn._entry.Entry` is a pydantic `BaseModel`; this dependency previously
   arrived transitively via `mcp`. Declared directly to keep the
   install working regardless of what pulls in pydantic.
 
@@ -993,7 +988,7 @@ Released in Python as `tn-protocol 0.4.2a1` and in TS as
   reproducible in this build.
 
 - JWE CLI surface (offer / enrolment handshake) is intentionally
-  deferred to a later release. Today's JWE recipient onboarding still
+  deferred to a later release. In this release, JWE recipient onboarding
   flows through the Python `tn.offer(...)` + `tn.admin.add_recipient(
   ..., public_key=...)` path.
 
@@ -1017,8 +1012,8 @@ Released in Python as `tn-protocol 0.4.1a3` and in TS as
 - **`tn.absorb()` auto-creates a ceremony when none exists.** Calling
   `tn.absorb(<bundle>)` as the very first verb no longer raises
   `RuntimeError` for kit_bundle and similar non-bootstrap kinds. The
-  standard autoinit banner fires (the same one `tn.info(...)` triggers
-  today) so the caller sees that a fresh identity was minted in the
+  standard autoinit banner fires (the same one `tn.info(...)` triggers)
+  so the caller sees that a fresh identity was minted in the
   cwd. Set `TN_AUTOINIT_QUIET=1` to silence.
 
 ### Notes on TS parity

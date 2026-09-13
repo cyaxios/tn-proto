@@ -312,7 +312,7 @@ input errors — populates `receipt.rejectedReason` instead.
 | `TN_YAML` | Explicit yaml path for `Tn.init()` discovery chain. |
 | `TN_HOME` | Fallback `~/.tn/tn.yaml` discovery dir. |
 | `TN_STRICT` | When truthy (`{1,true,yes,on}`), block fresh-mint. |
-| `TN_RUN_ID` | Stamped by us at first `Tn` construction; wasm reads. |
+| `TN_RUN_ID` | Set by the SDK at first `Tn` construction; read by WASM. |
 | `TN_NO_STDOUT` | When `=1`, silences the stdout handler. |
 | `TN_STDOUT_FORMAT` | `"pretty"` (default) or `"json"`. |
 | `TN_STDOUT_INCLUDE_ADMIN` | When `=1`, allow `tn.*` admin events on stdout. |

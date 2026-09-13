@@ -56,7 +56,8 @@ extends:
 
 1. `<tn.yaml dir>/industry-agents/<id>.yaml`
 2. `<tn.yaml dir>/packs/<id>.yaml`
-3. Sibling-repo dev fallback: walks upward from the `tn.yaml` dir (and from this source file) looking for `tn_proto_web/static/industry-agents/<id>.yaml` or `tn-proto-org/static/industry-agents/<id>.yaml`. Local clones may use either directory name.
+
+The resolver also checks optional development pack locations defined in [config.py](config.py). Industry packs are not included in this repository. For portable setups, supply each pack in one of the two directories above or use an explicit path in `extends:`.
 
 ### Merge semantics
 
@@ -72,11 +73,13 @@ correlation_id, request_id, event_id, level, timestamp, event_type
 
 ## Tests
 
-```bash
-.venv/Scripts/python.exe -m pytest tn_proto/python/tn/lint/tests/
-```
+The fixtures under [tests/fixtures/](tests/fixtures/) cover one violation per active rule plus a clean baseline. Their `tn.yaml` extends `pci-cardholder`, so the tests require that pack, including its `forbidden_post_auth` declarations, under `tests/fixtures/packs/pci-cardholder.yaml` or another documented search location.
 
-The fixtures under `tests/fixtures/` cover one violation per active rule plus a clean baseline. The fixture `tn.yaml` extends the real `pci-cardholder` pack from the repo, so R3 exercises the actual `forbidden_post_auth` set.
+Run from the repository root:
+
+```bash
+python -m pytest python/tn/lint/tests/
+```
 
 ## Architecture
 

@@ -102,9 +102,9 @@ The selected policy type is local construction metadata retained by `Governance:
 
 ## Adapter and application responsibilities
 
-The book's configured companion has two inputs with the same valuation purpose. Session setup maps `market.observation` to the prices group and its source checks, and `client.position` to holdings and its checks. The adapter calls `receive` with the same purpose for both. It performs the calculation, includes the second input, attaches the configured supervision requirement and releases for inference.
+A valuation adapter can receive two input types under the same purpose. Session setup maps `market.observation` to the prices group and its source checks, and `client.position` to holdings and its checks. The adapter calls `receive` with the same purpose for both. It performs the calculation, includes the second input, attaches the configured supervision requirement and releases for inference.
 
-Calculation correctness, grant eligibility and exact source selection are application decisions. The configured release evaluator checks persistent rules; a request check compares the particular result with its calculation and selected sources. Both must accept. Callers of the frame and model adapters do not supply those callbacks.
+Calculation correctness, grant eligibility and exact source selection are application decisions. The configured release evaluator checks persistent rules; a request check compares the particular result with its calculation and selected sources. Both must accept. Configure these callbacks when constructing the adapter.
 
 `data.sources` identifies inputs for its next release. After release it refers to the just-published version. To inspect the inputs carried by a particular publication, verify/open its governance and read `governance.sources`. This distinction preserves each version's exact ancestry.
 
@@ -118,4 +118,4 @@ Python: `python/examples/governed_hello.py`.
 
 Rust: `cargo run -p tn-core --example governed_hello`.
 
-This API is in development version `2026.9.10b2.dev2`; the published `2026.9.10b1` predates it.
+Version history: this API was available in development version `2026.9.10b2.dev2`; `2026.9.10b1` predates it.

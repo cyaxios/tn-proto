@@ -47,7 +47,7 @@
 
 | name | purpose | read_today | default | secret | precedence |
 |---|---|---|---|---|---|
-| `TN_VAULT_URL` | Base URL for the tnproto-org cloud vault (auth, project CRUD, sealed blobs). | yes — `tn/vault_client.py:49` | `https://vault.tn-proto.org` | no | explicit arg > env > default |
+| `TN_VAULT_URL` | Base URL for the TN cloud vault (auth, project CRUD, sealed blobs). | yes — `tn/vault_client.py:49` | `https://vault.tn-proto.org` | no | explicit arg > env > default |
 | `TN_VAULT_DEFAULT_BASE` | Base for did:web identity vault discovery (separate from CRUD vault). | yes — `tn/identity.py:410` | `https://vault.tn-proto.org` | no | env > default |
 | `TN_VAULT_PROJECT_ID` *(proposed)* | Pin the linked vault project id (currently `Config.linked_project_id` in YAML). | no | resolved from `tn.yaml` (`linked_project_id`) | no | env > yaml > unset |
 | `TN_VAULT_JWT` *(proposed)* | Pre-auth JWT for non-interactive vault calls (CI). | no | unauthenticated; challenge/verify on demand | yes | env > interactive challenge |
@@ -69,7 +69,7 @@
 | name | purpose | read_today | default | secret | precedence |
 |---|---|---|---|---|---|
 | `TN_FORCE_PYTHON` | Disable the Rust extension; pure-Python `emit`/`read` paths. Useful for debugging parity bugs. | yes — `tn/_dispatch.py:43` | unset (Rust if available) | no | env > available-extension |
-| `TN_READER_LEGACY` | Revert `tn.read` to legacy flat-tuple shape (pre-Workstream-G). | yes — `tn/reader.py:42,47` | unset (new shape) | no | env > default |
+| `TN_READER_LEGACY` | Revert `tn.read` to legacy flat-tuple shape. | yes — `tn/reader.py:42,47` | unset (new shape) | no | env > default |
 | `TN_CLAIM_ON_MISSING_IDENTITY` | Auto-claim a fresh identity when `tn.init()` runs against a yaml whose DID isn't on disk. | yes — `tn/logger.py:430` | unset (raise IdentityError) | no | explicit arg > env > default |
 | `TN_WALLET_AUTOSYNC` | After every emit, push the new envelope to the linked vault. | yes — `tn/admin/__init__.py:537` | unset (manual `tn wallet sync`) | no | env > default |
 

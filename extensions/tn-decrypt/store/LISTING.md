@@ -3,7 +3,7 @@
 Everything needed to fill out the Web Store developer dashboard, plus the
 final packaging and smoke-test steps. Visibility target: **Public**.
 
-## Developer account (one-time, you do this)
+## Developer account (one-time setup)
 
 1. Go to https://chrome.google.com/webstore/devconsole and sign in with the
    Google account that should own the listing.
@@ -45,8 +45,8 @@ final packaging and smoke-test steps. Visibility target: **Public**.
 > (compiled to WebAssembly) used by the TN SDKs. There is no JavaScript
 > reimplementation of any crypto primitive.
 
-**Privacy policy URL:** host `store/PRIVACY.md` and put the URL here.
-Suggested: https://tn-proto.org/extension-privacy (or a GitHub raw/Pages URL).
+**Privacy policy URL:** publish [PRIVACY.md](PRIVACY.md) at a public HTTPS
+URL and enter that URL in the dashboard.
 
 **Homepage / support URL:** https://tn-proto.org  ·  support: gil@cyaxios.com
 
@@ -109,8 +109,8 @@ pwsh tools/package.ps1       # writes extensions/tn-decrypt-<version>.zip (store
 ```
 
 The zip contains only the runtime payload (manifest at root, scripts, icons
-16/48/etc., vendor/, wasm/). Verified excluded: test/, tools/, store/,
-package.json, README.md, test-page.html, icon512.png.
+16/48/etc., vendor/, wasm/). The packaging script excludes test/, tools/,
+store/, package.json, README.md, test-page.html, and icon512.png.
 
 Then load-unpacked and smoke test in real Chrome (the Node tests cannot
 exercise the manifest/injection wiring):
