@@ -8,7 +8,7 @@ calculations and database transactions.
 Install the release and its test tools, then run from the repository root:
 
 ```shell
-python -m pip install "tn-proto[test]==2026.9.13b2"
+python -m pip install "tn-proto[test]==2026.9.13b3"
 python -m pytest python/examples/enterprise -q
 ```
 

@@ -2,6 +2,7 @@
 import importlib.metadata
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -87,11 +88,30 @@ def verify_examples_and_tests(checkout):
         environment.pop("PYTHONPATH", None)
         environment.update(TN_NO_STDOUT="1", TN_NO_LINK="1", TN_VAULT_URL="http://127.0.0.1:9",
                            TN_STATE_DIR=str(root / "state"))
+        verify_getting_started(checkout, root, environment)
         subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
              str(tests), str(root / "python/examples/enterprise")],
             cwd=root, env=environment, check=True,
         )
+
+
+def verify_getting_started(checkout, root, environment):
+    pattern = r"```python\r?\n(.*?)```"
+    blocks = re.findall(pattern, (checkout / "README.md").read_text(encoding="utf-8"), re.S)
+    pypi_blocks = re.findall(pattern, (checkout / "python/README.md").read_text(encoding="utf-8"), re.S)
+    assert blocks and blocks == pypi_blocks, "README walkthroughs differ"
+    example = root / "python/examples/getting_started"
+    shutil.copy2(example / "agents.md", root / "agents.md")
+    expected = ["Hello, world!", "Hello again!", "Hello again!"]
+    for command in (
+        [sys.executable, "-c", "\n\n".join(blocks)],
+        [sys.executable, str(example / "hello.py")],
+    ):
+        result = subprocess.run(command, cwd=root, env=environment, text=True,
+                                capture_output=True, check=True)
+        assert result.stdout.splitlines() == expected, result.stdout
+    print("README snippets and complete greeting example passed")
 
 
 if __name__ == "__main__":

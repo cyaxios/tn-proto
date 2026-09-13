@@ -89,4 +89,4 @@ tn init myproject --no-link          # never talks to a vault
 export TN_NO_LINK=1                   # env-level hard kill switch for auto-link
 ```
 
-Or point at your own vault with `--link <url>` or the `TN_VAULT_URL` environment variable. See the [package README](https://github.com/cyaxios/tn-proto/blob/main/python/README.md#vault-backup-and-recovery-optional).
+Or point at your own vault with `--link <url>` or the `TN_VAULT_URL` environment variable. See the [account backup guide](auth.md).

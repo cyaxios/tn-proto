@@ -1,8 +1,8 @@
 # Governed Python API
 
-This guide describes `tn-proto==2026.9.13b2` on Python 3.10 or newer. The distribution includes native Rust-backed governed objects, independent sessions, provider interfaces, and Python business-data views. Linux x86-64 and Windows x64 wheels are the supported release targets.
+This guide describes `tn-proto==2026.9.13b3` on Python 3.10 or newer. The distribution includes native Rust-backed governed objects, independent sessions, provider interfaces, and Python business-data views. Linux x86-64 and Windows x64 wheels are the supported release targets.
 
-Start with the [runnable README example](../README.md#create-unseal-compute-and-seal), the [bank/vendor program](../python/examples/bank_vendor.py), or the [enterprise pattern examples](../python/examples/enterprise/README.md). The [governed type signatures](../python/tn/governed/__init__.pyi) and [provider type signatures](../python/tn/providers/__init__.pyi) describe every argument and return type.
+Start with the [step-by-step README walkthrough](../README.md#1-start-a-session), the [bank/vendor program](../python/examples/bank_vendor.py), or the [enterprise pattern examples](../python/examples/enterprise/README.md). The [governed type signatures](../python/tn/governed/__init__.pyi) and [provider type signatures](../python/tn/providers/__init__.pyi) describe every argument and return type.
 
 ## The three controls
 
