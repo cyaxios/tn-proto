@@ -180,6 +180,83 @@ impl DataObject {
         self.unreleased_changes = true;
     }
 
+    /// Inspect a detached snapshot of the current working state.
+    pub fn inspect(&self) -> Self {
+        self.clone()
+    }
+    /// Read a business field, or the complete opened group when field is None.
+    pub fn get(&self, group: &str, field: Option<&str>) -> Result<Value> {
+        business_group(group)?;
+        let fields = self
+            .groups
+            .get(group)
+            .ok_or_else(|| invalid(format!("no opened group {group:?}")))?;
+        match field {
+            Some(name) => fields
+                .get(name)
+                .cloned()
+                .ok_or_else(|| invalid(format!("no field {name:?} in {group:?}"))),
+            None => Ok(Value::Object(fields.clone())),
+        }
+    }
+    /// Change a business field or replace a group; contracts remain attached.
+    pub fn set(&mut self, group: &str, field: Option<&str>, value: Value) -> Result<()> {
+        match field {
+            Some(name) => self.set_field(group, name, value),
+            None => self.set_group(group, value),
+        }
+    }
+    /// Select retained groups and optionally fields within opened groups, atomically.
+    /// A field projection must name a retained, opened group and existing fields.
+    pub fn select<I, S>(
+        &mut self,
+        groups: I,
+        fields: Option<&BTreeMap<String, Vec<String>>>,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut candidate = self.clone();
+        candidate.retain_groups(groups)?;
+        if let Some(projections) = fields {
+            for (group, names) in projections {
+                business_group(group)?;
+                let original = candidate.groups.get(group).ok_or_else(|| {
+                    invalid(format!(
+                        "field selection requires retained opened group {group:?}"
+                    ))
+                })?;
+                let mut selected = Map::new();
+                for name in names {
+                    let value = original
+                        .get(name)
+                        .ok_or_else(|| invalid(format!("no field {name:?} in {group:?}")))?;
+                    if selected.insert(name.clone(), value.clone()).is_some() {
+                        return Err(invalid(format!("duplicate selected field {name:?}")));
+                    }
+                }
+                candidate.set_group(group, selected)?;
+            }
+        }
+        *self = candidate;
+        Ok(())
+    }
+    /// Forward only a current signed publication, never stale working data.
+    pub fn forward(&self) -> Result<&[u8]> {
+        if self.has_unreleased_changes() {
+            return Err(invalid("release working changes before forwarding"));
+        }
+        Ok(self
+            .snapshot()
+            .ok_or_else(|| invalid("object has no signed publication"))?
+            .forward())
+    }
+    /// Write the current signed publication; pending edits must be released first.
+    pub fn write(&self, mut destination: impl std::io::Write) -> Result<()> {
+        destination.write_all(self.forward()?)?;
+        Ok(())
+    }
     /// Set a complete plaintext group. Governance names are reserved.
     pub fn set_group(&mut self, name: &str, fields: impl Serialize) -> Result<()> {
         business_group(name)?;

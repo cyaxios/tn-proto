@@ -24,6 +24,25 @@ pub struct GovernedObject {
 }
 
 impl GovernedObject {
+    /// Read and integrity-verify an exact publication from a byte stream.
+    pub fn read(mut source: impl std::io::Read) -> Result<Self> {
+        let mut wire = String::new();
+        source.read_to_string(&mut wire)?;
+        Self::parse(&wire)
+    }
+    /// Write the retained signed bytes without resealing or serialization.
+    pub fn write(&self, mut destination: impl std::io::Write) -> Result<()> {
+        destination.write_all(self.forward())?;
+        Ok(())
+    }
+    /// Exact signed bytes for the application's transport.
+    pub fn forward(&self) -> &[u8] {
+        self.wire.as_bytes()
+    }
+    /// Inspect authenticated envelope metadata and encrypted group blocks.
+    pub fn inspect(&self) -> &Map<String, Value> {
+        self.envelope()
+    }
     /// Verify a standalone object or signed emitted row and its governance AAD.
     /// The source is retained unchanged for subsequent forwarding.
     pub fn parse(wire: &str) -> Result<Self> {

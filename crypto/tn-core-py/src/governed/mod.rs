@@ -1,6 +1,7 @@
 //! PyO3 governed objects and independent, instance-owned sessions.
 
 mod codec;
+mod providers;
 mod data;
 mod dataset;
 mod lineage;
@@ -50,6 +51,7 @@ fn guard<T>(f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
 /// Register the governed interface in the combined Python wheel.
 pub fn populate(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<session::PySession>()?;
+    m.add_class::<session::PyRegisters>()?;
     m.add_class::<use_context::PyUseContext>()?;
     m.add_class::<objects::PyGovernance>()?;
     m.add_class::<objects::PyDraft>()?;
@@ -73,6 +75,7 @@ pub fn populate(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<lineage::PyLineageVerifier>()?;
     m.add_class::<lineage::PyVerifiedLineage>()?;
     data::populate(m)?;
+    providers::populate(m)?;
     for (name, exception) in [
         ("GovernedError", py.get_type::<GovernedError>()),
         ("NotEntitled", py.get_type::<NotEntitled>()),

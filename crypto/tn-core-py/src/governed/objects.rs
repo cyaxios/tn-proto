@@ -123,6 +123,31 @@ pub(super) struct PyObject {
 #[pymethods]
 impl PyObject {
     #[staticmethod]
+    fn read(py: Python<'_>, source: &Bound<'_, PyAny>) -> PyResult<Self> {
+        guard(|| {
+            let inner = if source.hasattr("read")? {
+                let value = source.call_method0("read")?;
+                let bytes = value.downcast::<PyBytes>()?.as_bytes().to_vec();
+                py.allow_threads(|| GovernedObject::read(bytes.as_slice()))
+                    .map_err(to_py)?
+            } else {
+                let path: std::path::PathBuf = source.extract()?;
+                py.allow_threads(|| GovernedObject::read(std::fs::File::open(path)?))
+                    .map_err(to_py)?
+            };
+            Ok(Self { inner })
+        })
+    }
+    fn write(&self, py: Python<'_>, destination: &Bound<'_, PyAny>) -> PyResult<()> {
+        guard(|| write_publication(py, &self.inner, destination))
+    }
+    fn forward<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.inner.forward())
+    }
+    fn inspect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        guard(|| codec::to_python(py, &Value::Object(self.inner.inspect().clone())))
+    }
+    #[staticmethod]
     fn parse(py: Python<'_>, wire: &Bound<'_, PyAny>) -> PyResult<Self> {
         guard(|| {
             let wire = codec::wire(wire)?;
@@ -171,5 +196,57 @@ impl PyObject {
             self.inner.object_type(),
             self.inner.id()
         )
+    }
+}
+
+/// Adapt Python binary streams while preserving exact Rust publication bytes.
+pub(super) fn write_publication(
+    py: Python<'_>,
+    publication: &GovernedObject,
+    destination: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    if destination.hasattr("write")? {
+        let mut stream = PythonWriter {
+            destination,
+            error: None,
+        };
+        let result = publication.write(&mut stream);
+        if let Some(error) = stream.error {
+            return Err(error);
+        }
+        result.map_err(to_py)
+    } else {
+        let path: std::path::PathBuf = destination.extract()?;
+        py.allow_threads(|| publication.write(std::fs::File::create(path)?))
+            .map_err(to_py)
+    }
+}
+
+// Only language conversion belongs here. Rust's write_all handles partial writes.
+struct PythonWriter<'a, 'py> {
+    destination: &'a Bound<'py, PyAny>,
+    error: Option<PyErr>,
+}
+impl std::io::Write for PythonWriter<'_, '_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let result = (|| -> PyResult<usize> {
+            let count: usize = self
+                .destination
+                .call_method1("write", (PyBytes::new(self.destination.py(), bytes),))?
+                .extract()?;
+            if count > bytes.len() {
+                return Err(pyo3::exceptions::PyOSError::new_err(
+                    "binary stream reported an invalid write count",
+                ));
+            }
+            Ok(count)
+        })();
+        result.map_err(|error| {
+            self.error = Some(error);
+            std::io::Error::other("Python binary stream write failed")
+        })
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }

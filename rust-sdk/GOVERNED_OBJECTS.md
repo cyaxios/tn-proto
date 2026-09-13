@@ -16,6 +16,23 @@ create_obj(data, policy) → receive → mutate / attach / include → release
 immutable signed version. Edits preserve earlier versions through `history()`
 and `snapshot()`. Callers never copy policies or invoke `derive()` in this flow.
 
+## Application sessions configure receipt once
+
+`tn_proto::Session` wraps an object context with receiving purposes configured
+at startup. `session.policy(name)` selects a contract, and
+`session.create_obj(fields, policy)` infers its object type.
+`session.receive(&object, "greeting")` verifies and opens the publication through
+the evaluator and groups registered for that purpose. The Python session calls
+the same Rust implementation.
+
+`configure_receive(UseContext::new("hello", "greeting", "read")?, ["default"], admit)`
+registers the application decision once. A purpose must be configured before it
+can be used. The evaluator sees the complete carried contract set before data
+opens. Working changes require release before another receipt.
+
+The executable Rust example is `crypto/tn-core/examples/governed_hello.rs`.
+Use `session.objects()` for the explicit integration operations below.
+
 ## Applications mutate data and release signed versions
 
 ```rust,no_run

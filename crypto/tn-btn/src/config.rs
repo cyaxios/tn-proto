@@ -1,11 +1,8 @@
 //! Runtime configuration.
 //!
-//! v0.1 hard-codes tree height at 10 (1024 leaves). This keeps per-user
-//! storage under 2 KB without Asano layered optimization, lets the
-//! compiler potentially unroll tree walks, and makes every unit test
-//! exhaustively verifiable. The hardcode will be lifted in a later
-//! version; the wire format already accommodates variable heights, so
-//! only the configuration layer changes.
+//! v0.1 fixes the tree height at 8 (256 leaves), keeping serialized
+//! reader kits under 2 KB. Geometry tests exhaustively enumerate
+//! revocation sets in smaller trees and sample height-eight trees.
 
 use crate::error::{Error, Result};
 

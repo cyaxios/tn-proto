@@ -9,10 +9,17 @@ use super::invalid;
 ///
 /// The writer inserts these fields into `tn.agents` and derives every group's
 /// AAD from the same contract. Accessors borrow the original values.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Governance {
     governed_by: String,
     pub(super) fields: Map<String, Value>,
+    selected_object_type: Option<String>,
+}
+
+impl PartialEq for Governance {
+    fn eq(&self, other: &Self) -> bool {
+        self.governed_by == other.governed_by && self.fields == other.fields
+    }
 }
 
 impl Governance {
@@ -45,7 +52,9 @@ impl Governance {
             "policy": format!("{}#{}@{}#{}", template.path, template.event_type, template.version, template.content_hash),
         });
         let fields: Map<String, Value> = serde_json::from_value(fields)?;
-        Self::from_body(governed_by, fields)
+        let mut governance = Self::from_body(governed_by, fields)?;
+        governance.selected_object_type = Some(template.event_type.clone());
+        Ok(governance)
     }
 
     pub(super) fn from_body(governed_by: &str, fields: Map<String, Value>) -> Result<Self> {
@@ -59,7 +68,15 @@ impl Governance {
         Ok(Self {
             governed_by: governed_by.to_owned(),
             fields,
+            selected_object_type: None,
         })
+    }
+
+    /// Object type selected by the policy loader, including an external authority's policy.
+    /// This local construction hint is not a carried contract field or part of equality.
+    /// Contracts decoded from wire require an explicit output type for new origination.
+    pub fn selected_object_type(&self) -> Option<&str> {
+        self.selected_object_type.as_deref()
     }
 
     /// Governing authority declared by this contract.

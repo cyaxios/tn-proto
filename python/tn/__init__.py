@@ -3,12 +3,13 @@
 Governed workflow:
     Session(policy, groups=[...])  # independent in-memory identity and groups
     Session.from_config(path)     # load existing identity, policy, and keys
-    session.draft(type).group(...) # assign fields to encryption groups
-    session.seal(draft)            # bind encrypted tn.agents and sign
-    session.governance(object)     # authenticate and open the contract
-    view.authorize(op, decision)   # application admits permitted use
-    session.open(admitted, groups) # open selected business groups
-    opened.derive(type)            # carry contract and lineage into a draft
+    session.create(fields, policy) # create signed governed data
+    session.unseal(source, ...)    # verify, admit use, and open selected groups
+    data.get(name) / data.set(...) # inspect and change business values
+    data.include(other)            # retain contributing contracts and sources
+    data.attach(policy, ...)       # add an authorized contract
+    data.seal(...)                 # check release and sign the result
+    publication.forward()         # transport the exact signed bytes
 
 Several Session instances can operate and close independently. Native immutable
 types are exported through ``tn.governed``. See ``GOVERNED_WORKFLOW.md`` for the
@@ -66,7 +67,7 @@ from .governed import (
     ContractBinding, DataObject, DatasetBinding, DatasetCatalog, DatasetEdition,
     DatasetEditionDraft, DatasetSelection, EvaluatorArtifactSet, Governance,
     GovernedDraft, GovernedObject, LineageVerifier, PolicyDag, PolicyParent,
-    PolicyRelation, PolicyRevision, PolicyRevisionDraft, Session, UseContext, VerifiedLineage,
+    PolicyRelation, PolicyRevision, PolicyRevisionDraft, ObjectRegisters, Session, Workflow, UseContext, VerifiedLineage,
 )
 
 from . import (
@@ -1458,6 +1459,8 @@ def scope_to(*dids: str) -> ScopeBuilder:
 
 __all__ = [  # noqa: RUF022 — intentional category grouping (see inline comments)
     "Session",
+    "ObjectRegisters",
+    "Workflow",
     "UseContext",
     "ContractBinding",
     "DatasetBinding",

@@ -10,13 +10,13 @@ use pyo3::types::{PyBool, PyDict};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tn_core::governed::{
-    DataObject, Governance, OwnedAdmissionContext, PublicationReport, SourceReference, UseContext,
+    DataObject, OwnedAdmissionContext, PublicationReport, SourceReference, UseContext,
 };
-use tn_core::runtime::Objects;
+use tn_core::runtime::{Publication, Session};
 
-type SessionState = Arc<Mutex<Option<Arc<Objects<'static>>>>>;
+type SessionState = Arc<Mutex<Option<Arc<Session<'static>>>>>;
 
-fn session(state: &SessionState) -> PyResult<Arc<Objects<'static>>> {
+fn session(state: &SessionState) -> PyResult<Arc<Session<'static>>> {
     state
         .lock()
         .map_err(|_| GovernedError::new_err("session lock poisoned"))?
@@ -274,52 +274,47 @@ impl PyAdmission {
 
 #[pyclass(frozen, module = "tn.governed", name = "AttachmentContext")]
 pub(super) struct PyAttachment {
-    authority: String,
-    data: DataObject,
-    policy: Governance,
+    pub inner: tn_core::governed::OwnedAttachmentContext,
+}
+impl PyAttachment {
+    pub(super) fn from_native(context: &tn_core::governed::AttachmentContext<'_>) -> Self {
+        Self {
+            inner: context.to_owned(),
+        }
+    }
 }
 #[pymethods]
 impl PyAttachment {
     #[getter]
-    fn authority(&self) -> &str {
-        &self.authority
+    fn authority(&self) -> String {
+        self.inner.context().authority().to_owned()
     }
     #[getter]
     fn data(&self) -> PyDataState {
         PyDataState {
-            inner: self.data.clone(),
+            inner: self.inner.context().data().clone(),
         }
     }
     #[getter]
     fn policy(&self) -> PyGovernance {
         PyGovernance {
-            inner: self.policy.clone(),
+            inner: self.inner.context().policy().clone(),
         }
     }
     #[getter]
     fn policies(&self) -> PyResult<Vec<PyGovernance>> {
-        policies(&self.data)
+        policies(self.inner.context().data())
     }
 }
 
 #[pyclass(frozen, module = "tn.governed", name = "ReleaseContext")]
 pub(super) struct PyRelease {
-    writer: String,
-    data: DataObject,
-    object_type: String,
-    purpose: String,
-    destination: String,
-    use_context: Option<UseContext>,
+    pub inner: tn_core::governed::OwnedReleaseContext,
 }
 impl PyRelease {
-    fn from_native(context: &tn_core::governed::ReleaseContext<'_>) -> Self {
+    pub(super) fn from_native(context: &tn_core::governed::ReleaseContext<'_>) -> Self {
         Self {
-            writer: context.writer().to_owned(),
-            data: context.data().clone(),
-            object_type: context.object_type().to_owned(),
-            purpose: context.purpose().to_owned(),
-            destination: context.destination().to_owned(),
-            use_context: context.use_context().cloned(),
+            inner: context.to_owned(),
         }
     }
 }
@@ -327,37 +322,41 @@ impl PyRelease {
 impl PyRelease {
     #[getter]
     fn use_context(&self) -> Option<PyUseContext> {
-        self.use_context.clone().map(|inner| PyUseContext { inner })
+        self.inner
+            .context()
+            .use_context()
+            .cloned()
+            .map(|inner| PyUseContext { inner })
     }
     #[getter]
-    fn writer(&self) -> &str {
-        &self.writer
+    fn writer(&self) -> String {
+        self.inner.context().writer().to_owned()
     }
     #[getter]
     fn data(&self) -> PyDataState {
         PyDataState {
-            inner: self.data.clone(),
+            inner: self.inner.context().data().clone(),
         }
     }
     #[getter]
-    fn object_type(&self) -> &str {
-        &self.object_type
+    fn object_type(&self) -> String {
+        self.inner.context().object_type().to_owned()
     }
     #[getter]
-    fn purpose(&self) -> &str {
-        &self.purpose
+    fn purpose(&self) -> String {
+        self.inner.context().purpose().to_owned()
     }
     #[getter]
-    fn destination(&self) -> &str {
-        &self.destination
+    fn destination(&self) -> String {
+        self.inner.context().destination().to_owned()
     }
     #[getter]
     fn policies(&self) -> PyResult<Vec<PyGovernance>> {
-        policies(&self.data)
+        policies(self.inner.context().data())
     }
     #[getter]
     fn sources(&self) -> Vec<PySource> {
-        sources(&self.data)
+        sources(self.inner.context().data())
     }
 }
 
@@ -408,16 +407,14 @@ impl PyData {
         }
     }
     fn read(&self) -> PyResult<DataObject> {
-        self.inner
-            .lock()
-            .map(|v| v.clone())
-            .map_err(|_| GovernedError::new_err("data lock poisoned"))
+        self.inner.try_lock().map(|v| v.clone()).map_err(|_| {
+            GovernedError::new_err("object is busy publishing or its data lock is poisoned")
+        })
     }
     fn mutate<T>(&self, f: impl FnOnce(&mut DataObject) -> tn_core::Result<T>) -> PyResult<T> {
-        let mut data = self
-            .inner
-            .lock()
-            .map_err(|_| GovernedError::new_err("data lock poisoned"))?;
+        let mut data = self.inner.try_lock().map_err(|_| {
+            GovernedError::new_err("object is busy publishing or its data lock is poisoned")
+        })?;
         f(&mut data).map_err(to_py)
     }
     fn checked<T>(
@@ -425,10 +422,9 @@ impl PyData {
         revision: u64,
         f: impl FnOnce(&mut DataObject) -> tn_core::Result<T>,
     ) -> PyResult<T> {
-        let mut data = self
-            .inner
-            .lock()
-            .map_err(|_| GovernedError::new_err("data lock poisoned"))?;
+        let mut data = self.inner.try_lock().map_err(|_| {
+            GovernedError::new_err("object is busy publishing or its data lock is poisoned")
+        })?;
         if data.revision() != revision {
             return Err(GovernedError::new_err(
                 "object changed during governance decision; evaluate its current state again",
@@ -444,26 +440,40 @@ impl PyData {
         use_context: Option<UseContext>,
         purpose: Option<&str>,
         to: &str,
-        decide: &Bound<'_, PyAny>,
+        decide: Option<&Bound<'_, PyAny>>,
         object_type: Option<&str>,
+        plan: Option<Arc<tn_core::runtime::ReleasePlan>>,
     ) -> PyResult<PyObject> {
         let context = session(publisher)?;
         let mut candidate = self.read()?;
         let revision = candidate.revision();
-        let object_type = object_type.unwrap_or(candidate.object_type()).to_owned();
-        let callback = decide.clone().unbind();
+        let object_type = plan
+            .as_ref()
+            .map(|p| p.object_type())
+            .or(object_type)
+            .unwrap_or(candidate.object_type())
+            .to_owned();
+        let use_context = plan
+            .as_ref()
+            .map(|p| p.use_context().clone())
+            .or(use_context);
+        let to = plan.as_ref().map(|p| p.destination()).unwrap_or(to);
+        let callback = decide.map(|v| v.clone().unbind());
         let mut callback_error = None;
         let result = py.allow_threads(|| {
             // Hold no object lock during application code. Once its decision is
             // current, keep the original locked through sealing and installation.
             let mut accepted_data = None;
             let decide_native = |native: &tn_core::governed::ReleaseContext<'_>| {
+                if let Some(plan) = &plan {
+                    if !plan.authorize(native)? { return Ok(false); }
+                }
                 native_decision(&mut callback_error, || {
                     let allow = Python::with_gil(|py| {
-                        let allow = decision(
-                            callback.bind(py),
-                            Py::new(py, PyRelease::from_native(native))?.into_any(),
-                        )?;
+                        let allow = match &callback {
+                            Some(callback) => decision(callback.bind(py), Py::new(py, PyRelease::from_native(native))?.into_any())?,
+                            None => true,
+                        };
                         session(publisher)?;
                         Ok::<_, PyErr>(allow)
                     })?;
@@ -490,7 +500,7 @@ impl PyData {
                     to,
                     decide_native,
                 ),
-                None => context.release(
+                None => context.objects().release(
                     &mut candidate,
                     &object_type,
                     purpose.unwrap_or_default(),
@@ -513,6 +523,65 @@ impl PyData {
 }
 #[pymethods]
 impl PyData {
+    fn inspect(&self) -> PyResult<PyDataState> {
+        guard(|| {
+            Ok(PyDataState {
+                inner: self.read()?.inspect(),
+            })
+        })
+    }
+    #[pyo3(signature = (name=None, *, group=None))]
+    fn get<'py>(
+        &self,
+        py: Python<'py>,
+        name: Option<&str>,
+        group: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        guard(|| {
+            codec::to_python(
+                py,
+                &self
+                    .read()?
+                    .get(group.unwrap_or(&self.default_group), name)
+                    .map_err(to_py)?,
+            )
+        })
+    }
+    #[pyo3(signature = (name, value, *, group=None))]
+    fn set(
+        &self,
+        name: Option<&str>,
+        value: &Bound<'_, PyAny>,
+        group: Option<&str>,
+    ) -> PyResult<()> {
+        guard(|| {
+            let value = codec::to_json(value, 0)?;
+            self.mutate(|data| data.set(group.unwrap_or(&self.default_group), name, value))
+        })
+    }
+    #[pyo3(signature = (groups, *, fields=None))]
+    fn select(
+        &self,
+        groups: Vec<String>,
+        fields: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    ) -> PyResult<()> {
+        guard(|| self.mutate(|data| data.select(groups, fields.as_ref())))
+    }
+    fn forward<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        guard(|| {
+            Ok(pyo3::types::PyBytes::new(
+                py,
+                self.read()?.forward().map_err(to_py)?,
+            ))
+        })
+    }
+    fn write(&self, py: Python<'_>, destination: &Bound<'_, PyAny>) -> PyResult<()> {
+        guard(|| {
+            let data = self.read()?;
+            let publication = data.publication().map_err(to_py)?;
+            super::objects::write_publication(py, publication, destination)
+        })
+    }
     fn copy(&self) -> PyResult<Self> {
         guard(|| {
             Ok(Self::new(
@@ -787,53 +856,67 @@ impl PyData {
             self.mutate(|data| data.include(&other))
         })
     }
-    #[pyo3(signature=(policy, *, decide))]
+    #[pyo3(signature=(policy, *, decide=None))]
     fn attach(
         &self,
         py: Python<'_>,
         policy: &PyGovernance,
-        decide: &Bound<'_, PyAny>,
+        decide: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         guard(|| {
             let context = session(&self.session)?;
             let before = self.read()?;
             let revision = before.revision();
             let policy = policy.inner.clone();
-            let allow = decision(
-                decide,
-                Py::new(
-                    py,
-                    PyAttachment {
-                        authority: context.did().to_owned(),
-                        data: before,
-                        policy: policy.clone(),
-                    },
-                )?
-                .into_any(),
-            )?;
+            if decide.is_none() {
+                let mut candidate = before;
+                py.allow_threads(|| context.attach(&mut candidate, policy))
+                    .map_err(to_py)?;
+                session(&self.session)?;
+                return self.checked(revision, |data| {
+                    *data = candidate;
+                    Ok(())
+                });
+            }
+            let mut candidate = before;
+            let mut callback_error = None;
+            let result = context.objects().attach(&mut candidate, policy, |native| {
+                native_decision(&mut callback_error, || {
+                    decision(
+                        decide.expect("explicit decision"),
+                        Py::new(py, PyAttachment::from_native(native))?.into_any(),
+                    )
+                })
+            });
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
+            result.map_err(to_py)?;
             session(&self.session)?;
-            py.allow_threads(|| {
-                self.checked(revision, |data| context.attach(data, policy, |_| Ok(allow)))
+            self.checked(revision, |data| {
+                *data = candidate;
+                Ok(())
             })
         })
     }
-    #[pyo3(signature=(*, to, decide, purpose=None, r#use=None, object_type=None))]
+    #[pyo3(signature=(*, to=None, decide=None, purpose=None, r#use=None, object_type=None))]
+    #[pyo3(text_signature="($self, *, to=None, decide=None, purpose=None, use=None, object_type=None)")]
     fn release(
         &self,
         py: Python<'_>,
-        to: &str,
-        decide: &Bound<'_, PyAny>,
+        to: Option<&str>,
+        decide: Option<&Bound<'_, PyAny>>,
         purpose: Option<&str>,
         r#use: Option<&PyUseContext>,
         object_type: Option<&str>,
     ) -> PyResult<PyObject> {
         guard(|| {
-            let use_context = requested_use(purpose, r#use)?;
-            self.release_with_session(
+            release_requested(
+                self,
                 py,
                 &self.session,
-                use_context,
                 purpose,
+                r#use,
                 to,
                 decide,
                 object_type,
@@ -853,22 +936,65 @@ pub(super) fn release(
     publisher: &PySession,
     data: &PyData,
     py: Python<'_>,
-    use_context: &PyUseContext,
-    to: &str,
-    decide: &Bound<'_, PyAny>,
+    use_context: Option<&PyUseContext>,
+    purpose: Option<&str>,
+    to: Option<&str>,
+    decide: Option<&Bound<'_, PyAny>>,
     object_type: Option<&str>,
 ) -> PyResult<PyObject> {
     guard(|| {
-        data.release_with_session(
+        release_requested(
+            data,
             py,
             &publisher.context,
-            Some(use_context.inner.clone()),
-            None,
+            purpose,
+            use_context,
             to,
             decide,
             object_type,
         )
     })
+}
+fn release_requested(
+    data: &PyData,
+    py: Python<'_>,
+    publisher: &SessionState,
+    purpose: Option<&str>,
+    r#use: Option<&PyUseContext>,
+    to: Option<&str>,
+    decide: Option<&Bound<'_, PyAny>>,
+    object_type: Option<&str>,
+) -> PyResult<PyObject> {
+    let plan = if to.is_none() {
+        if r#use.is_some() || object_type.is_some() {
+            return Err(PyTypeError::new_err(
+                "configured release takes purpose; explicit use/type requires to and decide",
+            ));
+        }
+        Some(
+            session(publisher)?
+                .release_plan(
+                    purpose.ok_or_else(|| PyTypeError::new_err("release requires purpose"))?,
+                )
+                .map_err(to_py)?,
+        )
+    } else {
+        if decide.is_none() {
+            return Err(PyTypeError::new_err("explicit release requires decide"));
+        }
+        None
+    };
+    let use_context = requested_use(purpose, r#use)?;
+    data.release_with_session(
+        py,
+        publisher,
+        use_context,
+        purpose,
+        to.unwrap_or_default(),
+        decide,
+        object_type,
+        plan,
+    )
 }
 
 pub(super) fn create(
@@ -876,7 +1002,7 @@ pub(super) fn create(
     py: Python<'_>,
     fields: &Bound<'_, PyDict>,
     policy: &PyGovernance,
-    object_type: &str,
+    object_type: Option<&str>,
     group: &str,
 ) -> PyResult<PyData> {
     guard(|| {
@@ -884,7 +1010,11 @@ pub(super) fn create(
         let fields = codec::fields(fields)?;
         let policy = policy.inner.clone();
         let inner = py
-            .allow_threads(|| context.create_obj(object_type, policy, group, fields))
+            .allow_threads(|| match object_type {
+                Some(name) => context.objects().create_obj(name, policy, group, fields),
+                None if group == "default" => context.create(fields, policy),
+                None => context.create_selected(fields, policy, group),
+            })
             .map_err(to_py)?;
         Ok(PyData::new(
             inner,
@@ -898,7 +1028,7 @@ pub(super) fn create_with_groups(
     py: Python<'_>,
     groups: &Bound<'_, PyDict>,
     policy: &PyGovernance,
-    object_type: &str,
+    object_type: Option<&str>,
     primary_group: &str,
 ) -> PyResult<PyData> {
     guard(|| {
@@ -911,7 +1041,10 @@ pub(super) fn create_with_groups(
         }
         let policy = policy.inner.clone();
         let inner = py
-            .allow_threads(|| context.create_obj_with_groups(object_type, policy, groups))
+            .allow_threads(|| match object_type {
+                Some(name) => context.create_obj_with_groups(name, policy, groups),
+                None => context.create_selected_groups(groups, policy),
+            })
             .map_err(to_py)?;
         Ok(PyData::new(
             inner,
@@ -938,7 +1071,9 @@ pub(super) fn receive(
             ));
         }
         let context = session.context()?;
-        let wire = if let Ok(object) = wire.extract::<PyRef<'_, PyObject>>() {
+        let wire = if let Ok(data) = wire.extract::<PyRef<'_, PyData>>() {
+            data.read()?.publication().map_err(to_py)?.wire().to_owned()
+        } else if let Ok(object) = wire.extract::<PyRef<'_, PyObject>>() {
             object.inner.wire().to_owned()
         } else {
             codec::wire(wire)?
@@ -971,7 +1106,12 @@ pub(super) fn receive(
                     selection.as_ref(),
                     decide_native,
                 ),
-                None => context.receive(&wire, purpose.unwrap_or_default(), &groups, decide_native),
+                None => context.objects().receive(
+                    &wire,
+                    purpose.unwrap_or_default(),
+                    &groups,
+                    decide_native,
+                ),
             }
         });
         if let Some(error) = callback_error {
@@ -981,7 +1121,114 @@ pub(super) fn receive(
         Ok(PyData::new(inner, session.context.clone(), default_group))
     })
 }
+pub(super) fn receive_configured(
+    session: &PySession,
+    py: Python<'_>,
+    source: &Bound<'_, PyAny>,
+    purpose: &str,
+    selection: Option<&PyDatasetSelection>,
+) -> PyResult<PyData> {
+    guard(|| {
+        let context = session.context()?;
+        let object = if let Ok(data) = source.extract::<PyRef<'_, PyData>>() {
+            data.read()?.publication().map_err(to_py)?.clone()
+        } else if let Ok(object) = source.extract::<PyRef<'_, PyObject>>() {
+            object.inner.clone()
+        } else {
+            tn_core::governed::GovernedObject::parse(&codec::wire(source)?).map_err(to_py)?
+        };
+        let selection = selection.map(|s| s.inner.clone());
+        let inner = py
+            .allow_threads(|| context.receive_selected(&object, purpose, selection.as_ref()))
+            .map_err(to_py)?;
+        let primary = context
+            .primary_group(purpose, object.object_type())
+            .map_err(to_py)?;
+        Ok(PyData::new(inner, session.context.clone(), primary))
+    })
+}
+/// Python owns a native workflow and the originating session lifecycle.
+#[pyclass(frozen, module = "tn.governed", name = "Workflow")]
+pub(super) struct PyWorkflow {
+    native: Arc<tn_core::runtime::Workflow<'static>>,
+    state: SessionState,
+}
+impl PyWorkflow {
+    pub(super) fn bind(owner: &PySession, receive: &str, release: &str) -> PyResult<Self> {
+        Ok(Self {
+            native: Arc::new(owner.context()?.workflow(receive, release).map_err(to_py)?),
+            state: owner.context.clone(),
+        })
+    }
+}
+#[pymethods]
+impl PyWorkflow {
+    #[pyo3(signature = (source, *, selection=None))]
+    fn receive(
+        &self,
+        py: Python<'_>,
+        source: &Bound<'_, PyAny>,
+        selection: Option<&PyDatasetSelection>,
+    ) -> PyResult<PyData> {
+        guard(|| {
+            session(&self.state)?;
+            let object = if let Ok(data) = source.extract::<PyRef<'_, PyData>>() {
+                data.read()?.publication().map_err(to_py)?.clone()
+            } else if let Ok(object) = source.extract::<PyRef<'_, PyObject>>() {
+                object.inner.clone()
+            } else {
+                tn_core::governed::GovernedObject::parse(&codec::wire(source)?).map_err(to_py)?
+            };
+            let selection = selection.map(|s| s.inner.clone());
+            let inner = py
+                .allow_threads(|| self.native.receive_selected(&object, selection.as_ref()))
+                .map_err(to_py)?;
+            session(&self.state)?;
+            let primary = self
+                .native
+                .primary_group(object.object_type())
+                .map_err(to_py)?
+                .to_owned();
+            Ok(PyData::new(inner, self.state.clone(), primary))
+        })
+    }
+    fn attach(&self, py: Python<'_>, data: &PyData, policy: &PyGovernance) -> PyResult<()> {
+        guard(|| {
+            session(&self.state)?;
+            let mut candidate = data.read()?;
+            let revision = candidate.revision();
+            py.allow_threads(|| self.native.attach(&mut candidate, policy.inner.clone()))
+                .map_err(to_py)?;
+            session(&self.state)?;
+            data.checked(revision, |current| {
+                *current = candidate;
+                Ok(())
+            })
+        })
+    }
+    #[pyo3(signature = (data, *, decide=None))]
+    fn release(
+        &self,
+        py: Python<'_>,
+        data: &PyData,
+        decide: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyObject> {
+        guard(|| {
+            data.release_with_session(
+                py,
+                &self.state,
+                None,
+                None,
+                "",
+                decide,
+                None,
+                Some(self.native.release_plan()),
+            )
+        })
+    }
+}
 pub(super) fn populate(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyWorkflow>()?;
     m.add_class::<PyData>()?;
     m.add_class::<PyDataState>()?;
     m.add_class::<PySource>()?;

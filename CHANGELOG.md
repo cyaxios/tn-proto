@@ -9,6 +9,47 @@ Release notes describe API compatibility; the package version does not change
 the TN wire-format version. Other SDK and internal build-crate versions remain
 independent.
 
+## [2026.9.13b1] - 2026-09-13 - Governed Python application API
+
+Install with `pip install "tn-proto==2026.9.13b1"` on Python 3.10 or newer.
+The release targets Linux x86-64 and Windows x64 wheels. It updates the Python
+governed application interface; other SDKs retain their own release schedules.
+
+- Compress BTN recipient covers along maximal unary paths using existing
+  subset-difference labels and reader material. A single revoked leaf in a
+  height-eight tree now uses one wrapped-key entry instead of eight, reducing
+  ciphertext overhead from 545 to 132 bytes above the payload. Wire format and
+  reader kits are unchanged; existing ciphertexts retain their reading behavior.
+  This is a cover-size improvement, not an eightfold runtime claim. Historical
+  paper measurements remain pinned to their original implementation.
+- Document the three separate controls: group encryption supplies decryption
+  capability, signatures authenticate publications, and application admission
+  decides the permitted use before selected business groups open.
+- Add governed `Session.unseal` and `Workflow.unseal` as receipt operations, and
+  `DataObject.seal` and `Workflow.seal` as release operations. `Session.seal(draft)`
+  continues to originate a draft. The module-level `tn.unseal` remains the
+  independent sealed-object API and does not run governed admission.
+- Replace the Python and repository README introductions with runnable governed
+  usage, the fifteen object verbs, setup guidance, and a full Python API guide.
+- Add all fifteen enterprise pattern examples with their startup configuration,
+  transaction helpers, dataset fixture, and executable behavior/key-access tests.
+- Add a bank/vendor example with separate signing identities and group grants,
+  selective opening, an application decision, and an authenticated result.
+
+- Add a persistent FileKeyStore provider and native JWE capability loading through PyO3, with separate-process BTN and JWE examples.
+
+- Add five native provider interfaces for identity, assigned group keys, governance, edition catalogs and optional registers, with typed PyO3 bridges and executable local adapters. Provider setup preserves the fifteen object verbs.
+
+- Expose the agreed object verbs through Rust and PyO3, including atomic field selection and exact-byte publication IO. Add explicit per-session ObjectRegisters configuration.
+
+- Add native bound Workflow input/output configuration with PyO3 receive, attach and release operations; preserve live authorization and request-specific release checks.
+
+- Added the Rust application `Session` API with reusable receiving-purpose configuration and object-to-object receipt.
+- Python `create_obj(fields, policy)` now infers the type from the selected session policy. `receive(object, purpose=...)` calls the Rust session's configured admission workflow.
+- Receiving a working object with unpublished changes requires release first. Existing explicit group, dataset and evaluator APIs remain available.
+- Added matching executable Rust and Python hello-world examples and the governed session API reference.
+- Added input-type routing for a shared purpose, configured release and attachment, and exact dataset selection through configured receipt. Policy loader selections now support type inference for external authorities and grouped creation.
+
 ## [2026.9.10b1] - 2026-09-10 - Governed Python SDK beta
 
 The Python distribution packages the governed workflow implemented in Rust and

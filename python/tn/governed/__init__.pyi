@@ -1,3 +1,4 @@
+from typing import BinaryIO
 from collections.abc import Callable, MutableMapping, MutableSequence, Sequence
 from os import PathLike
 from types import TracebackType
@@ -180,6 +181,12 @@ class PublicationReport:
     def is_ready(self) -> bool: ...
 
 class DataObject:
+    def inspect(self) -> DataState: ...
+    def get(self, name: str | None = None, *, group: str | None = None) -> _Json: ...
+    def set(self, name: str | None, value: _JsonInput, *, group: str | None = None) -> None: ...
+    def select(self, groups: Sequence[str], *, fields: dict[str, list[str]] | None = None) -> None: ...
+    def forward(self) -> bytes: ...
+    def write(self, destination: str | PathLike[str] | BinaryIO) -> None: ...
     def __init__(self, _native: NoReturn) -> None: ...
     def copy(self) -> DataObject: ...
     @property
@@ -211,15 +218,24 @@ class DataObject:
     @property
     def register_error(self) -> str | None: ...
     def attach(
-        self, policy: Governance, *, decide: Callable[[AttachmentContext], bool]
+        self, policy: Governance, *, decide: Callable[[AttachmentContext], bool] | None = None
     ) -> None: ...
     def include(self, other: DataObject) -> None: ...
     def retain_groups(self, groups: Sequence[str]) -> None: ...
     def release(
         self,
         *,
-        to: str,
-        decide: Callable[[ReleaseContext], bool],
+        to: str | None = None,
+        decide: Callable[[ReleaseContext], bool] | None = None,
+        purpose: str | None = None,
+        use: UseContext | None = None,
+        object_type: str | None = None,
+    ) -> GovernedObject: ...
+    def seal(
+        self,
+        *,
+        to: str | None = None,
+        decide: Callable[[ReleaseContext], bool] | None = None,
         purpose: str | None = None,
         use: UseContext | None = None,
         object_type: str | None = None,
@@ -232,6 +248,11 @@ class GovernedDraft:
     def governance(self) -> Governance: ...
 
 class GovernedObject:
+    @staticmethod
+    def read(source: str | PathLike[str] | BinaryIO) -> GovernedObject: ...
+    def write(self, destination: str | PathLike[str] | BinaryIO) -> None: ...
+    def forward(self) -> bytes: ...
+    def inspect(self) -> dict[str, _Json]: ...
     def __init__(self, _native: NoReturn) -> None: ...
     @staticmethod
     def parse(wire: str | bytes) -> GovernedObject: ...
@@ -296,18 +317,31 @@ class GovernedReader:
     def governance(self, object: GovernedObject) -> GovernanceView: ...
     def open(self, admitted: AdmittedObject, groups: Sequence[str]) -> OpenedObject: ...
 
+class Workflow:
+    """Bound native input/output rules; decisions run for every operation."""
+    def receive(self, source: GovernedObject | DataObject | str | bytes, *, selection: DatasetSelection | None = None) -> DataObject: ...
+    def unseal(self, source: GovernedObject | DataObject | str | bytes, *, selection: DatasetSelection | None = None) -> DataObject: ...
+    def attach(self, data: DataObject, policy: Governance) -> None: ...
+    def release(self, data: DataObject, *, decide: Callable[[ReleaseContext], bool] | None = None) -> GovernedObject: ...
+    def seal(self, data: DataObject, *, decide: Callable[[ReleaseContext], bool] | None = None) -> GovernedObject: ...
+
+class ObjectRegisters:
+    def __init__(self, *, creation: str | PathLike[str] | None = None, release: str | PathLike[str] | None = None) -> None: ...
+
 class Session:
+    def create(self, fields: dict[str, _JsonInput], policy: Governance, *, object_type: str | None = None, group: str = "default") -> DataObject: ...
+    def workflow(self, *, receive: str, release: str) -> Workflow: ...
     def __init__(
-        self, policy: str, *, groups: Sequence[str] | None = None, policy_id: str = "agents.md"
+        self, policy: str, *, groups: Sequence[str] | None = None, policy_id: str = "agents.md", registers: ObjectRegisters | None = None
     ) -> None: ...
     @staticmethod
-    def from_config(path: str | PathLike[str]) -> Session: ...
+    def from_config(path: str | PathLike[str], *, registers: ObjectRegisters | None = None) -> Session: ...
     def create_obj(
         self,
         fields: dict[str, _JsonInput],
         policy: Governance,
         *,
-        object_type: str,
+        object_type: str | None = None,
         group: str = "default",
     ) -> DataObject: ...
     def create_obj_with_groups(
@@ -315,27 +349,47 @@ class Session:
         groups: dict[str, dict[str, _JsonInput]],
         policy: Governance,
         *,
-        object_type: str,
+        object_type: str | None = None,
         primary_group: str = "default",
     ) -> DataObject: ...
     def receive(
         self,
-        sealed: str | bytes | GovernedObject,
+        sealed: str | bytes | GovernedObject | DataObject,
         *,
-        decide: Callable[[AdmissionContext], bool],
+        decide: Callable[[AdmissionContext], bool] | None = None,
         purpose: str | None = None,
         use: UseContext | None = None,
         groups: Sequence[str] | None = None,
         selection: DatasetSelection | None = None,
     ) -> DataObject: ...
+    def unseal(
+        self,
+        sealed: str | bytes | GovernedObject | DataObject,
+        *,
+        decide: Callable[[AdmissionContext], bool] | None = None,
+        purpose: str | None = None,
+        use: UseContext | None = None,
+        groups: Sequence[str] | None = None,
+        selection: DatasetSelection | None = None,
+    ) -> DataObject: ...
+    def configure_receive(
+        self, *, use: UseContext, decide: Callable[[AdmissionContext], bool],
+        groups: Sequence[str] | None = None, object_type: str | None = None,
+    ) -> None: ...
+    def configure_release(
+        self, *, use: UseContext, to: str, object_type: str,
+        decide: Callable[[ReleaseContext], bool],
+    ) -> None: ...
+    def configure_attach(self, *, decide: Callable[[AttachmentContext], bool]) -> None: ...
     def check_groups(self, groups: Sequence[str]) -> PublicationReport: ...
     def release(
         self,
         data: DataObject,
         *,
-        use: UseContext,
-        to: str,
-        decide: Callable[[ReleaseContext], bool],
+        use: UseContext | None = None,
+        purpose: str | None = None,
+        to: str | None = None,
+        decide: Callable[[ReleaseContext], bool] | None = None,
         object_type: str | None = None,
     ) -> GovernedObject: ...
     def require_groups(self, groups: Sequence[str]) -> None: ...

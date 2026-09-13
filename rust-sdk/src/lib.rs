@@ -179,7 +179,7 @@ pub use watch::{NativeWatch, NativeWatchOptions};
 pub use watch::{PollingWatch, PollingWatchOptions, Watch, WatchIter, WatchOptions, WatchStart};
 
 #[cfg(feature = "fs")]
-pub use objects::{ObjectRegisters, Objects};
+pub use objects::{ObjectRegisters, Objects, Publication, ReleasePlan, Session, Workflow};
 
 /// Common imports for applications that want a compact `use` line.
 pub mod prelude {
@@ -240,5 +240,8 @@ pub mod prelude {
     #[cfg(feature = "fs")]
     pub use crate::{NativeWatch, NativeWatchOptions};
     #[cfg(feature = "fs")]
-    pub use crate::{ObjectRegisters, Objects};
+    pub use crate::{ObjectRegisters, Objects, Publication, ReleasePlan, Session, Workflow};
 }
+
+/// Typed native provider contracts and first adapters.
+pub use tn_core::providers;

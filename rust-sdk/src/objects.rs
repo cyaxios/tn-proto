@@ -8,13 +8,13 @@ pub use tn_core::governed::{
     DatasetBinding, DatasetCatalog, DatasetEdition, DatasetEditionDraft, DatasetSelection,
     EvaluatorArtifactSet, Governance, GovernanceView, GovernedDraft, GovernedObject,
     GovernedReader, GovernedWriter, LineageVerifier, OpenedObject, OwnedAdmissionContext,
-    PolicyDag, PolicyParent, PolicyRelation, PolicyRevision, PolicyRevisionDraft,
-    PublicationReport, ReleaseContext, SourceReference, UseContext, VerifiedLineage,
-    DATASET_EDITION_GROUP, DATASET_EDITION_TYPE, GOVERNANCE_GROUP, POLICY_REVISION_GROUP,
-    POLICY_REVISION_TYPE,
+    OwnedAttachmentContext, OwnedReleaseContext, PolicyDag, PolicyParent, PolicyRelation,
+    PolicyRevision, PolicyRevisionDraft, PublicationReport, ReleaseContext, SourceReference,
+    UseContext, VerifiedLineage, DATASET_EDITION_GROUP, DATASET_EDITION_TYPE, GOVERNANCE_GROUP,
+    POLICY_REVISION_GROUP, POLICY_REVISION_TYPE,
 };
 #[cfg(feature = "fs")]
-pub use tn_core::runtime::{ObjectRegisters, Objects};
+pub use tn_core::runtime::{ObjectRegisters, Objects, Publication, ReleasePlan, Session, Workflow};
 
 #[cfg(feature = "fs")]
 use crate::{Result, Tn};

@@ -43,6 +43,8 @@ jobs:
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
+      - name: Verify BTN covers and existing reader compatibility
+        run: cargo test --locked -p tn-btn
       - name: Check version and tag
         id: version
         shell: python
@@ -75,7 +77,7 @@ jobs:
           root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'governed-wheel-check'
           venv.create(root, with_pip=True)
           python = root / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
-          subprocess.run([str(python), '-m', 'pip', 'install', str(wheels[0])], check=True)
+          subprocess.run([str(python), '-m', 'pip', 'install', str(wheels[0]) + '[test]'], check=True)
           script = pathlib.Path('scripts/verify_governed_wheel.py').resolve()
           subprocess.run([str(python), str(script), os.environ['RELEASE_VERSION']], cwd=root, check=True)
       - uses: actions/upload-artifact@v5

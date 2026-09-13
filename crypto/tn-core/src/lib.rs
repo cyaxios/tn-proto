@@ -100,3 +100,6 @@ pub use runtime_export::{AbsorbReceipt, AbsorbSource, ExportOptions};
 pub use tnpkg::{Manifest, ManifestKind, VectorClock};
 pub use trust::{AcceptedOffer, TrustError, TrustReason, VerifiedJweBinding, VerifiedPrincipal};
 pub use unsafe_operation::{UnsafeOperation, UnsafeOperationNotice, UnsafeRelaxation};
+
+/// Application identity, keys, governance, catalog and register adapters.
+pub mod providers;

@@ -10,7 +10,7 @@ build-backend = "maturin"
 module-name = "tn._native"
 python-source = "."
 manifest-path = "../crypto/tn-py/Cargo.toml"
-include = ["tn/py.typed", "tn/governed/*.pyi", "tn/mcp/exhaust/kits_index.json"]
+include = ["tn/py.typed", "tn/governed/*.pyi", "tn/providers/*.pyi", "tn/mcp/exhaust/kits_index.json"]
 # Keep docs out of the runtime wheel: markdown that lives inside the
 # package tree (e.g. tn/lint/README.md) is developer documentation, not
 # shipped code. The project README is still embedded as wheel METADATA
@@ -19,7 +19,7 @@ exclude = ["tn/**/*.md"]
 
 [project]
 name            = "tn-proto"
-version         = "2026.9.10b1"
+version         = "2026.9.13b1"
 description     = "TN protocol: signed data, encrypted groups, and governed workflows"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -117,12 +117,8 @@ tn            = "tn.cli:main"
 tn-mcp-server = "tn.mcp:main"
 
 # ---------------------------------------------------------------------------
-# Pure-Python wheel. The Rust-backed cipher + runtime extensions (btn,
-# tn_core) are their own maturin-built wheels shipped separately; see
-# ../crypto/btn-py/pyproject.toml and ../crypto/tn-core-py/pyproject.toml.
-# Workstream G (2026-04-24) consolidated distribution to this three-wheel
-# model so consumers get `pip install tn-proto` and the install pulls
-# all three pieces without any C toolchain / OpenSSL / vcpkg setup.
+# Package discovery metadata. Maturin builds the combined Python and
+# native extension wheel configured above.
 # ---------------------------------------------------------------------------
 
 [tool.setuptools.packages.find]

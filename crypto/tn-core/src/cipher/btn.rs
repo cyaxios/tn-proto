@@ -218,6 +218,10 @@ impl super::GroupCipher for BtnReaderCipher {
         })
     }
 
+    fn encrypt_with_aad(&self, plaintext: &[u8], _aad: &[u8]) -> Result<Vec<u8>> {
+        self.encrypt(plaintext)
+    }
+
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         self.decrypt_with_aad(ciphertext, &[])
     }

@@ -1,87 +1,180 @@
-<!--
-[DOCUMENTATION-SPEC: LOCKED]
-This README follows the tn-proto documentation guidelines.
-DO NOT simplify this document into generic summaries.
-DO NOT remove:
-  - The Shields.io badges or the ASCII architecture diagrams.
-  - The side-by-side Python + TypeScript quickstart examples (with output).
-  - The full CLI reference, the "How log sharing works" section, or the
-    "AI coding agents - tn-skills" section.
-  - The non-custodial vault section, including key recovery and how to disable it.
-Maintain a straightforward, developer-friendly voice. Avoid parameter-heavy explanations.
--->
-
-# tn-proto
-
----
+# TN-Proto
 
 [![PyPI](https://img.shields.io/pypi/v/tn-proto?style=flat-square&color=orange&label=pypi)](https://pypi.org/project/tn-proto/)
-[![Python](https://img.shields.io/pypi/pyversions/tn-proto?style=flat-square)](https://pypi.org/project/tn-proto/)
-[![Runtimes](https://img.shields.io/badge/also-Node%20%7C%20Browser%20%7C%20WASM-3178c6.svg?style=flat-square)](#one-core-every-language)
-[![Keys](https://img.shields.io/badge/keys-non--custodial%20vault-brightgreen.svg?style=flat-square)](#non-custodial-vault-backup)
-[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](#license)
+[![npm](https://img.shields.io/npm/v/@cyaxios/tn-proto?style=flat-square&color=cb3837&label=npm)](https://www.npmjs.com/package/@cyaxios/tn-proto)
+[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/README.md#license)
 
-**TN-Proto moves data and a use-contract together.** Group keys control access, signatures authenticate the object, and applications decide permitted use. The governed Python SDK carries that binding through creation, selective opening, computation, and signed release.
+**TN-Proto carries encrypted data, authenticated provenance, and use contracts through an application's work.** Three controls have separate jobs:
 
-## Installation
+| Control | What it establishes |
+| --- | --- |
+| Group encryption | A reader can decrypt the groups covered by its key capabilities. Different readers can open different groups of one publication. |
+| Object signature | The verified signing identity authenticated the publication's signed content, including its encrypted groups and carried governance. |
+| Application admission | The receiving application accepts the writer, complete contract set, requested use, and selected groups before opening business data. |
+
+The Python governed API follows `create → receive → compute → release`. Applications can also call governed receipt `unseal` and governed release `seal`. Working objects retain contributing source identities and accumulated contracts when released as new signed publications. A signature establishes authenticity; the application's evaluator decides whether a use is acceptable. TN does not interpret policy prose automatically or control a program after it has obtained plaintext.
+
+## Install the Python governed SDK
 
 ```bash
-pip install "tn-proto==2026.9.10b1"
+python -m pip install "tn-proto==2026.9.13b1"
 ```
 
-This governed beta uses calendar versioning: `YYYY.M.DbN` identifies the release
-date and beta number. It packages the canonical Rust implementation and its PyO3
-interface together. The beta wheels support Linux x86-64 and Windows x64 with
-Python 3.10 or later. The wire format has its own version, independent of the
-package release date. Compatibility changes are described in the changelog;
-applications should pin the beta version they have tested.
+Python **3.10 or newer**, with wheels for **Linux x86-64** and **Windows x64**. These wheels include the native Rust implementation, so their installation does not require a Rust toolchain. This is a beta release of the Python governed application API. See the [release notes](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/CHANGELOG.md) and [complete Python guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/GOVERNED_PYTHON_API.md).
 
-## Governed sessions own their context
+Node and browser packages have their own interfaces and release schedules. Their event-stream and sealed-object interoperability does not imply that this Python governed lifecycle is available in those runtimes.
 
-`tn.Session` is an independent native Rust context. Several sessions can work in
-one Python process, each with its own identity, policy, and groups. The governed
-workflow is `create_obj → receive → mutate / attach / include → release`.
+## Create, unseal, compute, and seal
+
+This complete example creates an invoice, admits its use, calculates a total, and publishes the result. Setup checks an exact writer and contract; the release decision also checks the calculation.
 
 ```python
-from pathlib import Path
 import tn
 
-with tn.Session(Path("agents.md").read_text(encoding="utf-8")) as session:
-    policy = session.policy("research.sample")
-    data = session.create_obj(
-        {"counts": [12, 18]}, policy, object_type="research.sample"
+POLICY = """## invoice
+### instruction
+Calculate the total of the supplied amounts.
+### use_for
+Internal accounting and reporting.
+### do_not_use_for
+External distribution.
+### consequences
+Reject an unapproved use.
+### on_violation_or_error
+Stop and request review.
+"""
+
+with tn.Session(POLICY) as session:
+    policy = session.policy("invoice")
+
+    def accepted(context):
+        return (
+            context.writer == session.did
+            and len(context.policies) == 1
+            and context.policies[0].matches_contract(policy)
+        )
+
+    def releasable(context):
+        values = context.data.groups["default"]
+        return accepted(context) and values["total"] == sum(values["amounts"])
+
+    session.configure_receive(
+        use=tn.UseContext("invoice-app", "accounting", "read"),
+        object_type="invoice", groups=["default"], decide=accepted,
     )
-    data.data["total"] = sum(data.data["counts"])
-    del data.data["counts"]
-    result = data.release(
-        to="reports", use=tn.UseContext("analytics", "research", "aggregate"),
-        decide=lambda ctx: (
-            ctx.destination == "reports"
-            and all(p.matches_contract(policy) for p in ctx.policies)
-        ),
+    session.configure_release(
+        use=tn.UseContext("invoice-app", "reporting", "publish"),
+        to="internal-report", object_type="invoice", decide=releasable,
     )
-    outbox_bytes = bytes(result)
+    work = session.workflow(receive="accounting", release="reporting")
+
+    invoice = session.create({"amounts": [20, 15]}, policy)
+    data = work.unseal(invoice)                 # also work.receive(invoice)
+    data.set("total", sum(data.get("amounts")))
+    result = work.seal(data)                    # also work.release(data)
+    result.write("invoice.tn")
+    print(data.get("total"))                    # 35
 ```
 
-The working object retains its policies and causal inputs. Release encrypts the
-current data and `tn.agents`, binds every group with governance AAD, signs the
-complete object, and retains the sealed version. The application's callback
-admits the current result; governed adapters can provide that decision internally.
-Transport retries reuse the retained bytes.
+`create` returns a working object with an initial signed snapshot. Receipt accepts that publication; edits remain local until release signs a new version. `write` saves the exact signed bytes. The destination named in release is decision context: the application still chooses its file, queue, HTTP client, or object store for delivery.
 
-Fresh sessions own in-memory material. `tn.Session.from_config("service/tn.yaml")`
-loads an existing service identity, policy, and group material. Optional creation
-and release registers are configured per session through environment variables.
-For separate input and output identities or keys, use
-`publisher.release(data, use=..., to=..., decide=...)`; it publishes the same
-native working object through that session and preserves its inherited governance.
+The [bank/vendor example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/bank_vendor.py) shows separate identities, separate group grants, and selective business access. The [hello example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/governed_hello.py) isolates a minimal configured receive operation.
 
-See the [governed workflow guide](GOVERNED_WORKFLOW.md) for receiving sources,
-signed dataset editions, authority-approved attachment, multiple inputs, snapshots,
-and service registers. Run [the governed workflow](examples/governed_workflow.py)
-for a complete local example. Its [Rust counterpart](../crypto/tn-core/examples/governed_workflow.rs)
-uses the same implementation and exchanges the same signed wire. Native classes
-and typing stubs are also exported from `tn.governed`.
+## The fifteen object verbs
+
+| Verb | Python call | Result |
+| --- | --- | --- |
+| create | `session.create(fields, policy, group="default")` | Initial signed publication and mutable `DataObject`. |
+| receive | `work.receive(source, selection=None)` | Verify, admit the configured use, and open selected business groups. |
+| inspect | `data.inspect()` or `publication.inspect()` | Detached working state, or the authenticated envelope with encrypted blocks. |
+| get | `data.get(name=None, group=None)` | Read an opened field or complete opened group. |
+| set | `data.set(name, value, group=None)` | Change a field; `name=None` replaces the group's fields. |
+| select | `data.select(groups, fields=None)` | Retain groups and optional field projections atomically. |
+| include | `data.include(other)` | Add contributing sources and contracts without copying business fields. |
+| attach | `work.attach(data, policy)` | Add an authorized contract while retaining existing contracts. |
+| release | `work.release(data, decide=None)` | Evaluate and sign the current state. An extra decision must also approve. |
+| read | `tn.GovernedObject.read(path_or_binary_stream)` | Read and verify an exact publication. |
+| write | `publication.write(path_or_binary_stream)` | Store the exact publication bytes. |
+| forward | `publication.forward()` | Return those bytes for application transport. |
+| verify | `session.verify(wire)` | Verify a publication without opening business data. |
+| accept | `view.accept(use=use, groups=groups, decide=rule)` | Bind the verified object, reader, complete use, and selected groups. |
+| open | `session.open(admitted, groups)` | Open groups allowed by that admission and the reader's capabilities. |
+
+Obtain `view` with `session.governance(publication)`. `group=None` uses the working object's primary group. Transport methods on a working object refuse pending edits; release first. Reading or verifying authenticates bytes but does not grant a requested use. See the [full signatures and semantics](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/GOVERNED_PYTHON_API.md#object-operations).
+
+### Seal and unseal
+
+| Call | Meaning |
+| --- | --- |
+| `session.unseal(source, purpose="accounting")` | Governed `session.receive`, including configured admission. |
+| `work.unseal(source, selection=None)` | Governed `work.receive` under its bound input rules. |
+| `data.seal(purpose="reporting")` | Governed `data.release` with its session's output rules. |
+| `work.seal(data, decide=None)` | Governed `work.release`, including configured and optional request decisions. |
+| `session.seal(draft)` | Originate a `GovernedDraft` as a signed publication. |
+| Module-level `tn.seal(...)` / `tn.unseal(...)` | The independent sealed-object API. `tn.unseal` verifies and decrypts available groups; it does **not** run governed use admission. |
+
+## Configure an application
+
+A `Session` owns its identity, policy, and key capabilities independently. `tn.Session(policy_text)` creates fresh in-memory material for examples and tests. A deployed service loads persisted material with `tn.Session.from_config("service.yaml")` or composes providers. Closing one session does not close another.
+
+| Provider | Responsibility | Included implementation |
+| --- | --- | --- |
+| Identity | Resolve an application to its signing identity. | `LocalIdentity`, `FileKeyStore` |
+| Keys | Supply the group's assigned reader and publisher capabilities. | `LocalKeys`, `FileKeyStore` |
+| Governance | Select policies and input/output rules; evaluate receive, attach, and release. | `PolicyDirectory` |
+| Catalog | Resolve an admitted dataset edition and its exact source publication. | `EditionCatalog` |
+| Registers | Optionally retain signed creation/release metadata. | `FileRegisters` |
+
+The [provider examples](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/providers/README.md) show complete composition with `Providers`, `PolicyRequest`, `WorkflowRequest`, `InputRule`, and `WorkflowPolicy`. The [Python guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/GOVERNED_PYTHON_API.md#providers) explains the interfaces. Workflow bindings capture configuration; their evaluators run again for each receive, attachment, and release.
+
+### Persist keys across processes
+
+```python
+from tn.providers import FileKeyStore
+
+# Provision once in the service's private storage.
+store = FileKeyStore.create(
+    "private/service-keys.json", "invoice-app", ["default"], cipher="btn"
+)
+# On subsequent starts, load the same identity and capabilities.
+store = FileKeyStore.open("private/service-keys.json")
+identity = store.resolve("invoice-app")
+```
+
+The store supplies both identity and keys to `Providers(store, store, governance, ...)`. Supported choices are `btn`, `jwe`, and `hibe`; the [separate-process examples](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/persistent_keys/README.md) include setup, policy configuration, publication, and reading. `FileKeyStore` retains secret key material **without encrypting the file at rest**. Protect it with the service's storage permissions. Creation refuses to overwrite an existing store; opening does not generate replacement keys.
+
+### Keep optional object registers
+
+```python
+registers = tn.ObjectRegisters(
+    creation="created.jsonl", release="released.jsonl"
+)
+session = tn.Session.from_config("service.yaml", registers=registers)
+```
+
+Registers record signed object metadata separately from transport. Passing an empty `tn.ObjectRegisters()` disables both; omitting the setting uses the native register environment configuration. Register failure is exposed through `data.register_error`, and the signed publication remains available. A register is not an application's transactional outbox or a receipt from the destination.
+
+## Apply the API to enterprise patterns
+
+Use `receive` at a trust or use boundary, retain every contributing publication with `include`, and evaluate the result at `release`. The application still supplies computation, transaction boundaries, authorization rules, and recovery state.
+
+| Application pattern | TN operation and application responsibility |
+| --- | --- |
+| Gateway or client-specific view | Admit the audience's use; select permitted groups/fields; approve the output. |
+| Request/reply, outbox, and publish/subscribe | Retain the exact signed result and correlation identity; retry delivery with `forward`; handle duplicates transactionally. |
+| Pipeline or aggregation | Admit each input; perform the calculation; `include` all contributors; check completeness before release. |
+| Dataset product or reusable cache | Bind the requested edition and complete use to the exact source; reevaluate each use. |
+| Tenant repository, durable workflow, or migration | Retain accepted source/version identities and checkpoints; recover committed outputs instead of silently recomputing them. |
+
+The [fifteen executable enterprise patterns](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/enterprise/README.md), [application-pattern guidance](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/GOVERNED_PYTHON_API.md#application-patterns), [dataset/catalog example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/providers/catalog.py), and [bank/vendor example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/bank_vendor.py) connect these decisions to executable API calls. OPA, dataframe libraries, and model-serving adapters are separate integrations; installing `tn-proto` does not install or configure them.
+
+The ICISSP experiment used a separate artifact pinned to SDK commit `c83a46a57310fcaccc832e50d6dbd75bd477b5b5`. Its benchmark results and artifact-specific test counts are not performance or suite-size claims for this release. The [paper reproducibility review](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/PAPER_REPRODUCIBILITY.md) records the evidence and remaining manuscript corrections.
+
+## BTN recipient covers
+
+BTN encrypts a group's body once and wraps its content key for the eligible subset cover. This release compresses uninterrupted paths in that cover using the existing subset-difference labels and reader keys. For a height-eight tree, one revoked leaf now needs one difference entry: ciphertext is `m + 132` bytes for an `m`-byte payload, compared with `m + 114` without revocation. The earlier uncompressed walker used eight entries and `m + 545` bytes for that case. The change saves 413 bytes of wrapping overhead; it is not a measured eightfold runtime improvement.
+
+For a nonempty set of `r` revoked leaves in the height-eight tree, the compressed cover has at most `min(2r - 1, 256 - r)` entries. The wire format and 1,881-byte height-eight reader kits are unchanged, and retained earlier ciphertexts remain readable with their applicable keys. The separately pinned ICISSP results describe the earlier walker. See [cover construction, byte counts, and compatibility tests](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/BTN_COVER.md).
 
 ## Event streams use the same protocol
 
@@ -123,7 +216,7 @@ warning order.flagged {'order_id': 'A100', 'reason': 'hold'}
 
 `order_id` and `amount` appear nowhere in the clear: only the `ciphertext` sealed to the `default` group, plus equality-search hashes. Anyone without a reader key sees exactly this.
 
-**TypeScript / Node** - byte-identical records:
+**TypeScript / Node** — event-stream interface:
 ```ts
 import * as tn from "@cyaxios/tn-proto";
 
@@ -133,37 +226,24 @@ for (const entry of tn.read()) console.log(entry.level, entry.event_type, entry.
 await tn.close();
 ```
 
-Set `TN_NO_STDOUT=1` to silence the stdout echo. There's no explicit flush in Python - the SDK drains on interpreter exit (`tn.flush_and_close()` if you want to force it).
+Set `TN_NO_STDOUT=1` to silence the stdout echo. In Python the SDK drains on interpreter exit (`tn.flush_and_close()` to force it); in Node always `await tn.close()` on shutdown.
 
-## What you get
+## Event-stream verification
 
-TN does two jobs at once: it keeps each record from reaching the wrong eyes, and it leaves a verifiable receipt that you kept it that way.
+With the default signed, chained profile, readers can verify the content and predecessor links of observed entries. Verification authenticates the signing key; the application decides which writers to trust. Detecting a missing suffix requires an independently known expected head. Encryption protects fields assigned to encrypted groups; configured public metadata and equality tokens remain visible.
 
-**Control who can read what**
-- **Private by default** - field values are encrypted on disk. The wrong people don't get a redacted view; they get ciphertext they can't open.
-- **Group access** - fields are routed into encryption groups. Assigned reader material opens the corresponding groups, so one object can carry data for several authorized audiences.
-- **Revocable** - cut a reader off and the next entry is already beyond their reach; everyone else keeps reading, no rekeying.
+## Event-stream verbs
 
-**Prove you did**
-- **Signed** - each entry carries an Ed25519 signature from the device that wrote it: who wrote it, provably.
-- **Tamper-evident** - entries are hash-chained, so altering, reordering, or deleting one fails verification.
-
-You confirm all of it offline, from the log file and a public key alone - no server to trust, no vendor's word to take.
-
-## The verbs
-
-| Verb | What it does |
+| Verb (Python · TypeScript) | What it does |
 |---|---|
-| `tn.init()` / `tn.init("name")` | resolve or create a ceremony and bind it as the module runtime |
-| `tn.use("name")` | open or create a named ceremony as a standalone handle (`t = tn.use("billing"); t.info(...)`); unlike `init` it doesn't rebind the module default, so you can write to several projects in one process |
+| `tn.init()` / `await tn.init()` | resolve or create a ceremony and bind it as the module runtime |
+| `tn.use("name")` / `await tn.use("name")` | open or create a named ceremony as a standalone handle for juggling several projects in one process; unlike `init` it does not rebind the module default |
 | `tn.info` / `.warning` / `.error` / `.debug` | one signed, encrypted entry at that level |
-| `tn.log("evt", level="trace")` | severity-less entry (`level=` sets a custom level). Unlike the level verbs, it **returns the written entry** - the signed, encrypted envelope - as a dict whose `str()` is valid JSON, so you can forward it straight to a downstream path (a POST, a queue, a webhook): `requests.post(url, json=tn.log("evt", k=v))` or `data=str(tn.log(...))`. The level verbs are fire-and-forget and return nothing. |
+| `tn.log(...)` | emits regardless of the level threshold, so it always writes; in Python it returns the written envelope as a dict, in Node it returns an `EmitReceipt`. Reach for it when you need a level outside debug/info/warning/error |
 | `tn.read()` | iterate decoded `Entry` objects |
 | `tn.watch()` | tail the log live |
 | `tn.export` / `tn.absorb` | produce or install a `.tnpkg` bundle |
-| `with tn.scope(request_id="r-42"):` | layer request-context fields onto every entry inside the block (metadata that rides along; this is not a group) |
-
-`tn.log` is **not** an alias of `tn.info` - it emits with whatever `level=` you pass (default `""`), and it ignores the level threshold, so it always emits. Reach for it when you need a level outside debug/info/warning/error.
+| `tn.scope(...)` | layer request-context fields onto every entry inside the block (Python: `with tn.scope(k=v):`; Node: `tn.scope({k:v}, () => …)`); metadata that rides along, not a group |
 
 ### Reading: all entries, this run, admin
 
@@ -175,16 +255,12 @@ for e in tn.read(all_runs=False):    # only what THIS process emitted
 for e in tn.read(log="admin"):       # the admin log (ceremony lifecycle: tn.* events)
     print(e.level, e.event_type)
 ```
-```text
-info tn.ceremony.init
-info tn.group.added
-```
 
-`tn.read(verify=True)` re-checks every signature and the full hash chain as it reads, and raises the moment something doesn't add up.
+`tn.read(verify=True)` (Node: `tn.read({ verify: true })`) checks signatures and predecessor links under the reader configuration and raises on a verification failure. Select a signed, chained profile when these checks are required.
 
-## The CLI
+## Event-stream CLI
 
-Installing the package gives you a `tn` command (`tn-js` for the TypeScript build). It's non-interactive by default - safe to drop straight into CI and containers.
+Each package installs a CLI - `tn` for Python, `tn-js` for Node. It's non-interactive by default - safe to drop straight into CI and containers.
 
 | Command | What it does |
 |---|---|
@@ -208,17 +284,16 @@ Installing the package gives you a `tn` command (`tn-js` for the TypeScript buil
 tn init                                   # provision in ./.tn/
 tn info --event order.created --field order_id=A100 --field amount=4999
 tn read --all-runs                        # include entries from prior runs
-python -m tn.watch ./tn.yaml | jq .       # follow the log live
 ```
 
 ## How log sharing works
 
-You never share a password or a private key. Access is cryptographic:
+Share scoped reader capabilities through recipient packages. Keep signing keys and publisher authority private:
 
-- **Identity (DID).** Every device has its own identity - a public `did:key:z6Mk…` derived from its Ed25519 key. Private keys never leave the machine.
-- **Groups.** Events land in named groups (default: `default`); each group is its own encrypted domain with its own reader list. Readers of `payments` can decrypt `payments` events, and only those.
-- **Reader kits.** To let someone read a group, you mint a kit addressed to their DID and send it. They absorb it and can decrypt that group - and nothing else.
-- **Revocation.** Revoke a reader and future entries are encrypted to exclude them; every other reader keeps working, no rekeying.
+- **Identity (DID).** Every device has its own identity - a public `did:key:z6Mk…` derived from its Ed25519 key. Signing keys are private credentials; encrypted recovery bundles can retain them for restoration.
+- **Groups.** Events land in named groups (default: `default`); each group is its own encrypted domain with its own reader list. A `payments` grant supplies access to the covered `payments` group; other group access requires its own capabilities.
+- **Reader kits.** To let someone read a group, you mint a kit addressed to their DID and send it. They absorb it and can decrypt the group generations covered by that kit.
+- **BTN revocation.** Future publications under the updated publisher state exclude the revoked reader. Existing publications and retained plaintext remain accessible under the earlier capabilities. Other ciphers use their own grant and rotation operations.
 
 Grant access (Python):
 ```python
@@ -229,7 +304,7 @@ result = tn.admin.add_recipient(
     recipient_did="did:key:z6Mk…",           # the reader's real Ed25519 DID
     out_path="./alice.btn.mykit",
 )
-print(result.leaf_index, result.kit_path)   # -> 1 alice.btn.mykit
+print(result.leaf_index, result.kit_path)
 ```
 
 Or one-shot from the CLI (mints the kit and wraps a `.tnpkg`):
@@ -249,26 +324,25 @@ tn.admin.revoke_recipient(group="default", leaf_index=1)
 
 ## Groups and field routing
 
-A **group** is an encrypted domain with its own reader list; **routing** a field into it means that field's value is sealed to that group's readers and to no one else. One command creates the group and routes fields in a single step:
+A **group** is an encrypted domain with its own reader list; **routing** a field into it means that field's value is sealed to that group's readers and to no one else. One command creates the group and routes fields in a single step, identical in both runtimes:
 
 ```bash
-tn group add payments --fields order_id,amount,card_last4    # creates the group + routes the fields
+tn group add payments --fields order_id,amount,card_last4       # Python
+tn-js group add payments --fields order_id,amount,card_last4    # TypeScript
 ```
 
-From then on, any `tn.info(...)` carrying `order_id`, `amount`, or `card_last4` seals those into `payments`; every other field stays in `default`. The same in-process:
+From then on, any `tn.info(...)` carrying `order_id`, `amount`, or `card_last4` seals those into `payments`; every other field stays in `default`.
 
 ```python
-import tn
-tn.init()
-tn.ensure_group(tn.current_config(), "payments",
-                fields=["order_id", "amount", "card_last4"])
-
-tn.info("order.created", order_id="A100", amount=4999, note="ship today")
-# order_id + amount  ->  sealed to 'payments'
-# note               ->  'default'
+# Python, in-process
+tn.ensure_group(tn.current_config(), "payments", fields=["order_id", "amount", "card_last4"])
+```
+```ts
+// TypeScript, in-process
+await tn.admin.ensureGroup("payments", { fields: ["order_id", "amount", "card_last4"] });
 ```
 
-You can also hand-edit the `groups:` and `fields:` blocks in `tn.yaml` (see [Configuration](#configuration-tnyaml)); the SDK picks up the change in the same process.
+Or hand-edit the `groups:` and `fields:` blocks in `tn.yaml` (see [Configuration](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/README.md#configuration-tnyaml)); the SDK picks up the change in the same process.
 
 ## Bundles (`.tnpkg`)
 
@@ -297,7 +371,7 @@ $ tn rotate
 
 ## Non-custodial vault backup
 
-Your keys live on your machine and nowhere else - so nobody, us included, can read your data. The optional vault at `vault.tn-proto.org` is the safety net for when that machine dies.
+The optional vault at `vault.tn-proto.org` stores encrypted recovery material for the event-stream runtime. The recovery secret controls access to that backup. Protect both the local keystore and the recovery phrase.
 
 ```text
     ┌────────────────────────────────────────────────────┐
@@ -312,16 +386,16 @@ Your keys live on your machine and nowhere else - so nobody, us included, can re
     ┌────────────────────────────────────────────────────┐
     │ your machine                                       │
     │ .tn/<project>/keys/   ->  backed up to the vault   │
-    │ .tn/<project>/logs/   ->  100% local, never sent   │
+    │ .tn/<project>/logs/   ->  excluded from key backup   │
     └────────────────────────────────────────────────────┘
 ```
 
-- **Keys & config only.** Your `tn.yaml` and encrypted group keys are backed up. Your `.ndjson` log files are **100% local** and never uploaded.
-- **Zero-knowledge.** The vault holds ciphertext it cannot read; recovery is gated by a mnemonic phrase only you hold.
+- **Keys and configuration.** Automatic vault key backup excludes application `.ndjson` logs. Application-configured transports and handlers determine where publications or logs are sent.
+- **Encrypted recovery.** Retain the mnemonic recovery phrase separately from the encrypted backup. Anyone holding the recovery secret must be treated as having access to that backup.
 
 ### Your first init prints a claim link
 
-Unless you pass `--no-link`, the first `tn init` mints your device identity, pushes the encrypted keys + config, and prints a **claim link**:
+Unless you pass `--no-link`, the first `tn init` (`tn-js init` prints the same) mints your device identity, pushes the encrypted keys + config, and prints a **claim link**:
 
 ```text
 $ tn init demoproj
@@ -363,16 +437,19 @@ export TN_NO_LINK=1                         # same, as an environment switch
 export TN_VAULT_URL="https://my-vault…"     # or point at your own
 ```
 
-## Profiles
+## Event-stream profiles
 
-A profile is a named bundle of three independent guarantees - pick the trade-off, not the knobs:
+An event-stream profile selects encryption, signing, and chaining settings:
 
-- **Encryption - always on.** Field values are encrypted into their groups in every profile. There is no plaintext mode; this is the floor.
+- **Group encryption.** These profiles retain encryption for fields assigned to encrypted groups. Explicit public fields remain visible.
 - **Signing** - an Ed25519 signature from the writing device on each entry, proving authorship. The evidence profiles keep it; the lightweight ones drop it for speed.
 - **Chaining (verification)** - the hash link from each entry to the one before it. This is what makes the log tamper-evident and ordered, and what `read(verify=True)` checks. The evidence profiles keep it.
 
 ```python
-tn.init(profile="audit")
+tn.init(profile="audit")                       # Python
+```
+```ts
+await tn.init(undefined, { profile: "audit" }); // TypeScript
 ```
 
 | Profile | Encrypt | Sign | Chain | Use it for |
@@ -380,12 +457,12 @@ tn.init(profile="audit")
 | `transaction` *(default)* | ✓ | ✓ | ✓ | grants, payments, agent actions, security events - full evidence |
 | `audit` | ✓ | ✓ | ✓ | normal business events; same evidence, buffered for throughput |
 | `secure_log` | ✓ | ✓ | - | signed app logs where authorship matters more than ordering |
-| `telemetry` | ✓ | - | - | high-volume traces / metrics; near-zero overhead, stdout |
-| `stdout` | ✓ | - | - | dev / notebook scratchpad, encryption still on |
+| `telemetry` | ✓ | - | - | high-volume traces / metrics; unsigned traces / metrics |
+| `stdout` | ✓ | - | - | development output |
 
 ## Configuration (`tn.yaml`)
 
-`tn.yaml` is **generated by `tn init`**, and the CLI and SDK keep it in sync for you (`tn group add`, `tn.ensure_group`, the vault verbs all write it). **You normally never edit it by hand - reach for a verb instead.** It is plain YAML, so you *can* hand-edit it once you know the schema, but a malformed file can break loading or field routing, so treat that as an advanced path. It is shown here in full (comments are explanatory; the emitted file has none) so you can see what the tools manage:
+`tn.yaml` is **generated by `tn init`** (`tn-js init` in Node), and the CLI and SDK keep it in sync for you (`tn group add`, the ensure-group + vault verbs all write it). **You normally never edit it by hand - reach for a verb instead.** It is plain YAML, so you *can* hand-edit it once you know the schema, but a malformed file can break loading or field routing, so treat that as an advanced path. It is shown here in full (comments are explanatory; the emitted file has none) so you can see what the tools manage:
 
 ```yaml
 ceremony:
@@ -393,7 +470,7 @@ ceremony:
   mode: local                    # local | linked  (linked = backed by a vault)
   linked_vault: ''               # vault URL; empty when offline
   linked_project_id: ''          # vault-side project id; filled by `tn wallet link`
-  sync_logs: false               # also sync ndjson logs to the vault
+  sync_logs: false               # legacy setting; key backup excludes app logs
   cipher: btn                    # ceremony-wide cipher
   sign: true                     # Ed25519-sign every row
   admin_log_location: ./admin/default.ndjson   # tn.* admin events; read via tn.read(log="admin")
@@ -457,21 +534,11 @@ llm_classifier:                  # optional auto-classification of fields into g
 
 A single `tn.info(...)` can fan one event into several groups, each encrypted to that group's readers only. Log and admin paths also accept **templated paths** (`{event_class}`, `{date}`, `{event_id}`, …) so events sort themselves on disk. Calling `tn.init("billing")` against a project creates a named **stream** that shares the project's identity (`.tn/default/keys`) while owning its own log.
 
-> **Every `tn.yaml` field - groups, field routing, ciphers, handlers, profiles, ceremony/link state - is documented in the [`tn.yaml` reference](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/yaml-reference.md).**
-
-## Scoped lifecycle
-
-For tests and short-lived processes that shouldn't leave a `./.tn/` behind:
-```python
-with tn.session() as s:
-    s.info("order.created", order_id="A100")
-# block exit: the ephemeral ceremony is torn down; the global runtime is restored
-```
-For long-running services, call `tn.init()` once at startup; the runtime lives for the process and drains on exit.
+> **Every `tn.yaml` field - groups, field routing, ciphers, handlers, profiles, ceremony/link state - is documented in the [`tn.yaml` reference](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/yaml-reference.md).**
 
 ## Containers & CI
 
-No home directory, no baking keys into an image. Set one secret - `TN_API_KEY` - and the container trades it with the vault for its keystore on first boot, then runs normally. If a keystore already exists on disk, that wins and the env var is ignored. Full guide: [running in containers and CI](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/deploy-containers.md).
+No home directory, no baking keys into an image. Set one secret - `TN_API_KEY` - and the container trades it with the vault for its keystore on first boot, then runs normally. If a keystore already exists on disk, that wins and the env var is ignored. Full guide: [running in containers and CI](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/deploy-containers.md).
 
 ## Environment variables
 
@@ -490,7 +557,7 @@ Everything has a sensible default; these override it. `tn show env` prints the f
 
 ## AI coding agents - tn-skills
 
-[`tn-skills`](https://github.com/cyaxios/tn-skills) teaches your AI coding agent to use TN correctly. With it installed, the agent routes PII into the right encrypted group, calls `tn.init` once at startup (not inside a request handler), never logs a secret like a CVV, and cites the right regulation when a file's domain matches one of its built-in industry kits - so agent-written code doesn't quietly tell the wrong thing to the wrong people.
+[`tn-skills`](https://github.com/cyaxios/tn-skills) teaches your AI coding agent to use `tn-proto` correctly. It provides event-stream setup, field-routing guidance, and industry-oriented examples for coding assistants. Review generated code and policy assignments as part of the application.
 
 Install it in Claude Code:
 ```text
@@ -500,9 +567,9 @@ Install it in Claude Code:
 
 For other AI tools, drop the repo's `AGENTS.md` into your agent. The bundled skills and industry kits are documented at <https://github.com/cyaxios/tn-skills>.
 
-## One core, every language
+## Other runtimes
 
-The wire format is identical across Python, Node, and the browser, checked on every change - write in one, read in another.
+The repository contains shared protocol code and interoperability fixtures for supported event-stream and sealed-object operations. Consult each SDK for its implemented operations. The governed Python API documented above has its own release and validation surface.
 
 | Runtime | Install |
 |---|---|
@@ -510,20 +577,12 @@ The wire format is identical across Python, Node, and the browser, checked on ev
 | Node / TypeScript | `npm install @cyaxios/tn-proto` |
 | Browser | the `@cyaxios/tn-proto/core` subpath (no Node deps) |
 
-## Troubleshooting
-
-| Symptom | Likely cause |
-|---|---|
-| `tn.read()` shows entries from previous runs | the default is `all_runs=True`; pass `all_runs=False` to scope to this run |
-| `tn.watch` shows no `tn.*` events | by design - pass `log="admin"` for ceremony events |
-| `no ceremony found` on `tn.absorb` | absorb merges into an existing ceremony; run `tn.init()` first |
-| `KeystoreConflict: state … diverged` | another process mutated the same ceremony; re-run the admin verb to pick up fresh state |
-
 ## Documentation
 
-- [Getting started](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/getting-started.md) · [Python cookbook](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/cookbook-python.md) · [TypeScript cookbook](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/cookbook-typescript.md)
-- [Groups, readers, bundles, rotation](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/groups-readers-rotation.md) · [JWE and HIBE key ceremonies](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/jwe-hibe-key-ceremonies.md) · [Running in containers and CI](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/deploy-containers.md)
-- [Profiles](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/profiles.md) · [tn.yaml reference](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/yaml-reference.md) · [protocol spec](https://github.com/cyaxios/tn-proto/blob/main/docs/guide/protocol.md)
+- [Getting started](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/getting-started.md) · [Python cookbook](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/cookbook-python.md) · [TypeScript cookbook](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/cookbook-typescript.md)
+- [Groups, readers, bundles, rotation](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/groups-readers-rotation.md) · [JWE and HIBE key ceremonies](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/jwe-hibe-key-ceremonies.md) · [Running in containers and CI](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/deploy-containers.md)
+- [Profiles](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/profiles.md) · [tn.yaml reference](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/yaml-reference.md) · [protocol spec](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/protocol.md)
+- [Authentication & accounts](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/auth.md) · [Environment variables](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/environment-variables.md)
 
 ## License
 

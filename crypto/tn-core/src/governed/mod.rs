@@ -18,7 +18,10 @@ mod source;
 mod use_context;
 mod writer;
 
-pub use admission::{AdmissionContext, AttachmentContext, OwnedAdmissionContext, ReleaseContext};
+pub use admission::{
+    AdmissionContext, AttachmentContext, OwnedAdmissionContext, OwnedAttachmentContext,
+    OwnedReleaseContext, ReleaseContext,
+};
 pub use data::DataObject;
 pub use dataset::{
     ContractBinding, DatasetBinding, DatasetCatalog, DatasetEdition, DatasetEditionDraft,

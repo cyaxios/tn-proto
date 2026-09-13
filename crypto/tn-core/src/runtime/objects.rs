@@ -16,6 +16,7 @@ use crate::governed::{
 
 enum Identity<'a> {
     Owned(Box<DeviceKey>),
+    Shared(Arc<DeviceKey>),
     Borrowed(&'a DeviceKey),
 }
 
@@ -32,9 +33,46 @@ pub struct Objects<'a> {
     private_groups: BTreeSet<String>,
     policies: Option<PolicyDocument>,
     registers: ObjectRegisters,
+    register_provider: Option<Arc<dyn crate::providers::RegisterProvider>>,
 }
 
 impl Objects<'static> {
+    /// Construct an independent object context from assigned native capabilities.
+    pub fn from_capabilities(
+        identity: crate::providers::ApplicationIdentity,
+        keys: crate::providers::KeySet,
+        register_provider: Option<Arc<dyn crate::providers::RegisterProvider>>,
+    ) -> Result<Self> {
+        if keys.owner() != identity.did() {
+            return Err(Error::InvalidConfig(
+                "capabilities belong to another identity".into(),
+            ));
+        }
+        let mut groups = BTreeMap::new();
+        for capability in keys.groups {
+            groups.insert(
+                capability.group,
+                Arc::new(RwLock::new(GroupState {
+                    cipher: capability.cipher,
+                    hmac_template: crate::indexing::build_hmac_template(&capability.index)?,
+                    aad_default: serde_json::Map::new(),
+                })),
+            );
+        }
+        Ok(Self {
+            identity: Identity::Shared(identity.signer),
+            private_groups: groups.keys().cloned().collect(),
+            groups,
+            policies: None,
+            registers: if register_provider.is_some() {
+                ObjectRegisters::default()
+            } else {
+                ObjectRegisters::from_env()?
+            },
+            register_provider,
+        })
+    }
+
     /// Create an independent in-memory identity, policy, and BTN group context.
     /// The governance group is supplied automatically. No files are created.
     pub fn ephemeral(policy: &str, policy_id: &str, business_groups: &[&str]) -> Result<Self> {
@@ -77,6 +115,7 @@ impl Objects<'static> {
             private_groups: names,
             policies: Some(policies),
             registers: ObjectRegisters::from_env()?,
+            register_provider: None,
         })
     }
 
@@ -111,11 +150,52 @@ impl Objects<'static> {
             private_groups,
             policies,
             registers: ObjectRegisters::from_env()?,
+            register_provider: None,
         })
     }
 }
 
 impl Objects<'_> {
+    /// Resolve the type chosen by a policy loader or a matching local template.
+    pub fn selected_type(&self, policy: &Governance) -> Result<String> {
+        if let Some(name) = policy.selected_object_type() {
+            return Ok(name.to_owned());
+        }
+        if let Some(document) = &self.policies {
+            for (name, template) in &document.templates {
+                if &Governance::from_template(self.did(), template)? == policy {
+                    return Ok(name.clone());
+                }
+            }
+        }
+        Err(Error::InvalidConfig(
+            "object_type is required for a contract without a selected type".into(),
+        ))
+    }
+    /// Create signed data using the policy loader's selected object type.
+    pub fn create_selected(
+        &self,
+        fields: impl serde::Serialize,
+        policy: Governance,
+        group: &str,
+    ) -> Result<DataObject> {
+        let name = self.selected_type(&policy)?;
+        self.create_obj(&name, policy, group, fields)
+    }
+    /// Create all initial groups in one signed object using a selected policy.
+    pub fn create_selected_groups<I, S, V>(
+        &self,
+        groups: I,
+        policy: Governance,
+    ) -> Result<DataObject>
+    where
+        I: IntoIterator<Item = (S, V)>,
+        S: AsRef<str>,
+        V: serde::Serialize,
+    {
+        let name = self.selected_type(&policy)?;
+        self.create_obj_with_groups(&name, policy, groups)
+    }
     /// Originate governed data and its initial signed snapshot from a required policy.
     pub fn create_obj(
         &self,
@@ -223,6 +303,7 @@ impl Objects<'_> {
     /// Choose this service's optional creation and release registers explicitly.
     pub fn with_registers(mut self, registers: ObjectRegisters) -> Self {
         self.registers = registers;
+        self.register_provider = None;
         self
     }
     fn record(&self, data: &mut DataObject, action: &str, purpose: &str, destination: &str) {
@@ -231,8 +312,20 @@ impl Objects<'_> {
                 .iter()
                 .map(|policy| policy.policy_ref().to_owned())
                 .collect::<Vec<_>>();
-            match data.snapshot() {
-                Some(object) => self.registers.record(
+            match (data.snapshot(), self.register_provider.as_ref()) {
+                (Some(object), Some(provider)) => provider
+                    .record(
+                        self.device(),
+                        &crate::providers::RegisterEvent {
+                            action: action.into(),
+                            publication: object.clone(),
+                            purpose: purpose.into(),
+                            destination: destination.into(),
+                            policy_refs: refs,
+                        },
+                    )
+                    .map(|_| true),
+                (Some(object), None) => self.registers.record(
                     self.device(),
                     action,
                     object,
@@ -240,7 +333,7 @@ impl Objects<'_> {
                     destination,
                     &refs,
                 ),
-                None => Err(Error::InvalidConfig(
+                (None, _) => Err(Error::InvalidConfig(
                     "registration requires a sealed snapshot".into(),
                 )),
             }
@@ -266,6 +359,7 @@ impl Objects<'_> {
     fn device(&self) -> &DeviceKey {
         match &self.identity {
             Identity::Owned(key) => key,
+            Identity::Shared(key) => key,
             Identity::Borrowed(key) => key,
         }
     }
@@ -364,6 +458,7 @@ impl Runtime {
                 .collect(),
             policies: self.agent_policies.clone(),
             registers: ObjectRegisters::from_env().unwrap_or_default(),
+            register_provider: None,
         }
     }
 }

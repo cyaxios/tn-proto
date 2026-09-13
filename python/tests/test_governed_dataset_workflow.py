@@ -225,3 +225,31 @@ def test_final_callback_error_preserves_exception_and_source(workflow):
     assert caught.value is error
     assert source.wire == original_wire
     assert receive(session, source, selection).data["last_price"] == 100
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_configured_receipt_keeps_exact_dataset_selection(workflow, bound):
+    session, dag, catalog, entries = workflow
+    _, source, _, selection = entries[0]
+    _, other_source, _, other_selection = entries[1]
+    calls = []
+    def admit(context):
+        calls.append(context)
+        return True
+    session.configure_receive(use=approved_use(), object_type="market.prices", groups=["finance"], decide=admit)
+    if bound:
+        session.configure_release(use=approved_use(), to="analytics", object_type="market.prices", decide=lambda _: True)
+        work = session.workflow(receive="portfolio_analysis", release="portfolio_analysis")
+        receive_selected = lambda source, selection: work.receive(source, selection=selection)
+    else:
+        receive_selected = lambda source, selection: session.receive(source, purpose="portfolio_analysis", selection=selection)
+    received = receive_selected(source, selection)
+    assert received.dataset_bindings == [selection.binding]
+    assert len(calls) == 1
+    with pytest.raises(ValueError):
+        receive_selected(source, other_selection)
+    assert len(calls) == 1
+    policy = dag.select(entries[0][0].id, "market.prices", lambda _: True)
+    created = session.create_obj({"last_price": 42}, policy, group="finance")
+    assert created.object_type == "market.prices"
+    assert created.governance.revision_id == policy.revision_id

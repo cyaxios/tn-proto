@@ -80,7 +80,33 @@ pub struct AttachmentContext<'a> {
     pub(crate) data: &'a DataObject,
     pub(crate) policy: &'a Governance,
 }
+/// Owned snapshot of a policy attachment decision.
+#[derive(Clone)]
+pub struct OwnedAttachmentContext {
+    authority: String,
+    data: DataObject,
+    policy: Governance,
+}
+impl OwnedAttachmentContext {
+    /// Borrow the original authority, data and proposed additional contract.
+    pub fn context(&self) -> AttachmentContext<'_> {
+        AttachmentContext {
+            authority: &self.authority,
+            data: &self.data,
+            policy: &self.policy,
+        }
+    }
+}
 impl AttachmentContext<'_> {
+    /// Retain this decision context independently of the callback lifetime.
+    pub fn to_owned(&self) -> OwnedAttachmentContext {
+        OwnedAttachmentContext {
+            authority: self.authority.into(),
+            data: self.data.clone(),
+            policy: self.policy.clone(),
+        }
+    }
+
     /// Session identity requesting the attachment; the application checks delegation.
     pub fn authority(&self) -> &str {
         self.authority
@@ -104,7 +130,42 @@ pub struct ReleaseContext<'a> {
     pub(crate) destination: &'a str,
     pub(crate) use_context: Option<&'a UseContext>,
 }
+/// Owned snapshot of a publication decision.
+#[derive(Clone)]
+pub struct OwnedReleaseContext {
+    writer: String,
+    data: DataObject,
+    object_type: String,
+    purpose: String,
+    destination: String,
+    use_context: Option<UseContext>,
+}
+impl OwnedReleaseContext {
+    /// Borrow the original result, destination and requested use.
+    pub fn context(&self) -> ReleaseContext<'_> {
+        ReleaseContext {
+            writer: &self.writer,
+            data: &self.data,
+            object_type: &self.object_type,
+            purpose: &self.purpose,
+            destination: &self.destination,
+            use_context: self.use_context.as_ref(),
+        }
+    }
+}
 impl ReleaseContext<'_> {
+    /// Retain this decision context independently of the callback lifetime.
+    pub fn to_owned(&self) -> OwnedReleaseContext {
+        OwnedReleaseContext {
+            writer: self.writer.into(),
+            data: self.data.clone(),
+            object_type: self.object_type.into(),
+            purpose: self.purpose.into(),
+            destination: self.destination.into(),
+            use_context: self.use_context.cloned(),
+        }
+    }
+
     /// Identity that will sign the released version.
     pub fn writer(&self) -> &str {
         self.writer

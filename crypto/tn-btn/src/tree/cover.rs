@@ -1,7 +1,7 @@
 //! Subset-difference cover algorithm (Naor-Naor-Lotspiech 2001 §4).
 //!
 //! Given a set of revoked leaves `R` in a complete binary tree, produce
-//! a minimal set of subsets `S(v_i, v_j)` whose union equals
+//! a disjoint set of subsets `S(v_i, v_j)` whose union equals
 //! `leaves \ R`.
 //!
 //! A subset `S(v_i, v_j)` is defined as: "all leaves in the subtree
@@ -10,27 +10,18 @@
 //!
 //! ## Algorithm outline
 //!
-//! 1. Build the **Steiner tree** `ST(R ∪ {root})` — the minimal subtree
-//!    of the full tree that contains the root and every revoked leaf.
-//!    Nodes in `ST` are either (a) revoked leaves, (b) the root, or
-//!    (c) internal nodes where `ST` branches (i.e., have two children
-//!    in `ST`).
+//! 1. Build the **Steiner tree** `ST(R ∪ {root})`: every node on a
+//!    root-to-revoked-leaf path, including nodes with only one child in `ST`.
+//! 2. From an outer node, follow the sole child in `ST` until reaching a
+//!    branch or revoked leaf. Emit one difference from the outer node to
+//!    that inner node when the path is nonempty. This covers all surviving
+//!    sibling subtrees along the maximal unary path.
+//! 3. At a branch, recurse into both children. At a revoked leaf, stop.
 //!
-//! 2. Repeatedly find two leaves `l_i`, `l_j` of `ST` such that their
-//!    least common ancestor `v` in `ST` has no other `ST`-leaves
-//!    on the paths from `v` to `l_i` or `v` to `l_j`. Emit subsets
-//!    `S(u_i, l_i)` and `S(u_j, l_j)` where `u_i`, `u_j` are the
-//!    children of `v` on the respective paths (in the **original
-//!    tree**, not in `ST`). Then remove `l_i` and `l_j` from `ST` and
-//!    replace them with `v` as a new `ST`-leaf.
-//!
-//! 3. When `ST` has only the root: if the root is revoked, output no
-//!    subsets (empty cover, every leaf is revoked). If the root is not
-//!    revoked and is the sole `ST`-leaf: emit one "full subtree" cover
-//!    for the entire tree.
-//!
-//! 4. If `ST` has exactly one non-root leaf `l`: emit `S(root, l)`
-//!    (all leaves except those below `l`).
+//! The emitted differences partition the surviving leaves. There are
+//! `r - 1` branches for `r > 0` revoked leaves, hence at most `2r - 1`
+//! chain starts (the root and two children per branch). Empty chains emit
+//! nothing. The cover therefore has at most `min(2r - 1, 2^h - r)` labels.
 //!
 //! ## Edge cases handled explicitly
 //!
@@ -42,9 +33,7 @@
 //!   encrypted with this cover has an empty header and is trivially
 //!   undecryptable.
 //!
-//! - **Single leaf revoked** — walk up the path and emit one subset
-//!   per level, peeling off the off-path subtree each time. For a tree
-//!   of height `h`, this produces exactly `h` subsets.
+//! - **Single leaf revoked** — emit one `S(root, revoked_leaf)` label.
 
 use crate::tree::{is_ancestor, LeafIndex, NodePos};
 use std::collections::BTreeSet;
@@ -107,15 +96,11 @@ pub fn subset_difference_cover(tree_height: u8, revoked: &[LeafIndex]) -> Vec<Su
     // the root and every revoked leaf.
     let steiner = build_steiner_tree(tree_height, &revoked_set);
 
-    // Now walk the Steiner tree and emit cover subsets. Upper bound:
-    // ~2r subsets for r revoked leaves (NNL §4 analysis). Preallocate
+    // Walk maximal unary paths. Upper bound: 2r - 1 subsets. Preallocate
     // to avoid repeated reallocation during recursion.
-    let capacity = revoked_set
-        .len()
-        .saturating_mul(2)
-        .max(usize::from(tree_height));
+    let capacity = revoked_set.len().saturating_mul(2).saturating_sub(1);
     let mut cover = Vec::with_capacity(capacity);
-    emit_cover(tree_height, &steiner, &revoked_set, &mut cover);
+    walk_steiner_node(NodePos::ROOT, tree_height, &steiner, &mut cover);
     cover
 }
 
@@ -135,122 +120,34 @@ fn build_steiner_tree(tree_height: u8, revoked: &BTreeSet<LeafIndex>) -> BTreeSe
     steiner
 }
 
-/// Recursively walk the Steiner tree and emit cover subsets for nodes
-/// not on any revoked-leaf path.
-///
-/// Invariant: at each node `v` in the Steiner tree we examine whether
-/// each child subtree is fully revoked (in Steiner tree), fully alive
-/// (not in Steiner tree), or mixed (some leaves revoked, some alive).
-/// For alive children, we emit a cover that includes that subtree.
-/// For mixed children we recurse.
-fn emit_cover(
-    tree_height: u8,
-    steiner: &BTreeSet<NodePos>,
-    revoked: &BTreeSet<LeafIndex>,
-    cover: &mut Vec<SubsetLabel>,
-) {
-    // Walk the Steiner tree top-down from root.
-    walk_steiner_node(NodePos::ROOT, tree_height, steiner, revoked, cover);
-}
-
-/// Walk the Steiner tree rooted at `node`, emitting cover subsets for
-/// alive children and recursing into mixed children.
+/// Compress a maximal unary path, then recurse below its terminal branch.
+/// The emitted difference is disjoint from both recursive covers because
+/// those contain only leaves under `inner`, which the difference excludes.
 fn walk_steiner_node(
-    node: NodePos,
+    outer: NodePos,
     tree_height: u8,
     steiner: &BTreeSet<NodePos>,
-    revoked: &BTreeSet<LeafIndex>,
     cover: &mut Vec<SubsetLabel>,
 ) {
-    if node.is_leaf(tree_height) {
-        // Steiner-tree leaves are always revoked leaves. Emit nothing.
-        debug_assert!(revoked.contains(&LeafIndex(node.index)));
-        return;
+    let mut inner = outer;
+    while !inner.is_leaf(tree_height) {
+        let left = inner.left_child();
+        let right = inner.right_child();
+        let left_in = steiner.contains(&left);
+        let right_in = steiner.contains(&right);
+        debug_assert!(left_in || right_in, "internal Steiner node has no child");
+        if left_in && right_in {
+            break;
+        }
+        inner = if left_in { left } else { right };
     }
-
-    let left = node.left_child();
-    let right = node.right_child();
-    let left_in = steiner.contains(&left);
-    let right_in = steiner.contains(&right);
-
-    match (left_in, right_in) {
-        // Both children are in the Steiner tree: each contains at least
-        // one revoked leaf. We need to cover alive-descendants inside
-        // each. Recurse on both.
-        (true, true) => {
-            // For each child, emit a Difference subset that says
-            // "everything under this child except the revoked portion".
-            // If the child itself is a revoked leaf, nothing to emit.
-            // Otherwise we find the "excluded inner" that fully covers
-            // all revoked leaves under this child.
-            emit_child_cover(left, tree_height, steiner, revoked, cover);
-            emit_child_cover(right, tree_height, steiner, revoked, cover);
-        }
-        // Only one child is in the Steiner tree. The other child is
-        // alive and requires one FullSubtree-style cover (encoded as
-        // S(alive_child, impossible_descendant) — but we can be
-        // cleverer: at the top level we'd emit S(root, steiner_child).
-        // Recursively, we want S(node, steiner_child) if node is the
-        // "outer" and we exclude the steiner_child's subtree. That
-        // doesn't work either because the alive sibling then needs its
-        // own cover.
-        //
-        // Correct treatment: emit S(node, steiner_child). This covers
-        // leaves_under(node) \\ leaves_under(steiner_child) = the
-        // alive child's full subtree + any alive portions of
-        // steiner_child's subtree. Then we ALSO recurse into
-        // steiner_child to cover anything alive under it.
-        //
-        // Wait — that double-covers. Let me think again.
-        //
-        // Actually: if only left is in steiner, then right's entire
-        // subtree is alive. We want to cover it. The right subtree is
-        // covered by S(right, none) = leaves_under(right). That's a
-        // "full subtree" within `right`. Encode as S(node, left): this
-        // covers node's subtree minus left's subtree = right's subtree.
-        // Good — that covers all alive leaves in right's subtree.
-        //
-        // Then we must recurse into left to cover any alive leaves
-        // there. Left alone may have alive leaves (if it's not a leaf
-        // itself).
-        (true, false) => {
-            emit_subtree_exclusion(node, left, cover);
-            walk_steiner_node(left, tree_height, steiner, revoked, cover);
-        }
-        (false, true) => {
-            emit_subtree_exclusion(node, right, cover);
-            walk_steiner_node(right, tree_height, steiner, revoked, cover);
-        }
-        // Neither child is in Steiner tree: this should never happen
-        // for an internal Steiner-tree node (it's in the tree because
-        // at least one revoked leaf is below it, which means at least
-        // one child must also be in the Steiner tree).
-        (false, false) => {
-            debug_assert!(
-                false,
-                "Steiner-tree internal node {node:?} has no Steiner children; \
-                 this is a bug in build_steiner_tree"
-            );
-        }
+    if inner != outer {
+        emit_subtree_exclusion(outer, inner, cover);
     }
-}
-
-/// Emit cover for the given child, which IS in the Steiner tree (so it
-/// contains at least one revoked leaf). If the child is itself a
-/// revoked leaf, emit nothing. Otherwise recurse.
-fn emit_child_cover(
-    child: NodePos,
-    tree_height: u8,
-    steiner: &BTreeSet<NodePos>,
-    revoked: &BTreeSet<LeafIndex>,
-    cover: &mut Vec<SubsetLabel>,
-) {
-    if child.is_leaf(tree_height) {
-        // This IS a revoked leaf. Nothing to cover here.
-        debug_assert!(revoked.contains(&LeafIndex(child.index)));
-        return;
+    if !inner.is_leaf(tree_height) {
+        walk_steiner_node(inner.left_child(), tree_height, steiner, cover);
+        walk_steiner_node(inner.right_child(), tree_height, steiner, cover);
     }
-    walk_steiner_node(child, tree_height, steiner, revoked, cover);
 }
 
 /// Emit the subset `S(outer, inner) = leaves_under(outer) \\ leaves_under(inner)`.
@@ -328,6 +225,18 @@ mod tests {
                 );
             }
         }
+        let n = 1usize << tree_height;
+        let r = revoked
+            .iter()
+            .filter(|leaf| leaf.0 < n as u64)
+            .collect::<BTreeSet<_>>()
+            .len();
+        if r > 0 {
+            assert!(
+                cover.len() <= (2 * r - 1).min(n - r),
+                "NNL bound exceeded: h={tree_height}, r={r}, cover={cover:?}"
+            );
+        }
     }
 
     #[test]
@@ -345,11 +254,15 @@ mod tests {
 
     #[test]
     fn one_revoked_at_h3() {
-        // Revoke leaf 5 (binary 101) in a tree of height 3. The cover
-        // should contain exactly h=3 subsets peeling off siblings of
-        // nodes on the path from root to leaf 5.
+        // A maximal unary path is one root-minus-leaf difference.
         let c = subset_difference_cover(3, &[LeafIndex(5)]);
-        assert_eq!(c.len(), 3);
+        assert_eq!(
+            c,
+            vec![SubsetLabel::Difference {
+                outer: NodePos::ROOT,
+                inner: NodePos { depth: 3, index: 5 },
+            }]
+        );
         check_cover_exactly_covers(3, &[LeafIndex(5)]);
     }
 
@@ -406,16 +319,86 @@ mod tests {
     }
 
     #[test]
-    fn exhaustive_h4_covers_are_correct() {
-        // For every subset of a height-4 tree's 16 leaves, verify the
-        // cover is correct. 2^16 cases — cheap, ~64k iterations.
-        for mask in 0u32..(1 << 16) {
-            let revoked: Vec<_> = (0u32..16)
-                .filter(|i| mask & (1u32 << i) != 0)
-                .map(|i| LeafIndex(u64::from(i)))
-                .collect();
-            check_cover_exactly_covers(4, &revoked);
+    fn exhaustive_h0_through_h4_partition_and_nnl_bound() {
+        let mut cases = 0;
+        for height in 0..=4 {
+            let leaves = 1u32 << height;
+            for mask in 0u32..(1 << leaves) {
+                let revoked: Vec<_> = (0..leaves)
+                    .filter(|i| mask & (1u32 << i) != 0)
+                    .map(|i| LeafIndex(u64::from(i)))
+                    .collect();
+                check_cover_exactly_covers(height, &revoked);
+                cases += 1;
+            }
         }
+        assert_eq!(cases, 65814);
+    }
+
+    #[test]
+    fn h8_single_leaves_and_aligned_subtrees_compress_to_one_label() {
+        for depth in 1..=8 {
+            for index in 0..1u64 << depth {
+                let inner = NodePos { depth, index };
+                let revoked = leaves_under(inner, 8);
+                assert_eq!(
+                    subset_difference_cover(8, &revoked),
+                    vec![SubsetLabel::Difference {
+                        outer: NodePos::ROOT,
+                        inner
+                    }]
+                );
+                check_cover_exactly_covers(8, &revoked);
+            }
+        }
+    }
+
+    #[test]
+    fn h8_sampled_and_adversarial_sets_partition_within_nnl_bound() {
+        check_cover_exactly_covers(8, &[]);
+        check_cover_exactly_covers(8, &(0..256).map(LeafIndex).collect::<Vec<_>>());
+        for survivor in [0, 1, 127, 128, 254, 255] {
+            let revoked = (0..256)
+                .filter(|i| *i != survivor)
+                .map(LeafIndex)
+                .collect::<Vec<_>>();
+            check_cover_exactly_covers(8, &revoked);
+        }
+        for step in [2, 3, 7, 31, 127] {
+            let revoked = (0..256).step_by(step).map(LeafIndex).collect::<Vec<_>>();
+            check_cover_exactly_covers(8, &revoked);
+        }
+        // Seeded xorshift sampling is for reproducible geometry, never key generation.
+        let mut state = 0x7c0a_5b19_238d_ef61u64;
+        for sample in 0..1000 {
+            let threshold = [1, 8, 32, 64, 128, 192, 224, 255][sample % 8];
+            let revoked: Vec<_> = (0..256)
+                .filter(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state & 255 < threshold
+                })
+                .map(LeafIndex)
+                .collect();
+            check_cover_exactly_covers(8, &revoked);
+        }
+    }
+
+    #[test]
+    fn duplicate_and_out_of_range_revocations_do_not_change_compressed_cover() {
+        assert_eq!(
+            subset_difference_cover(
+                8,
+                &[
+                    LeafIndex(7),
+                    LeafIndex(7),
+                    LeafIndex(256),
+                    LeafIndex(u64::MAX)
+                ]
+            ),
+            subset_difference_cover(8, &[LeafIndex(7)])
+        );
     }
 
     #[test]
