@@ -10,6 +10,13 @@ import tempfile
 
 import tn
 
+README_EXAMPLE_COUNTS = {
+    "key-access": 1,
+    "greeting": 7,
+    "bank-vendor": 1,
+    "optional-rule": 1,
+}
+
 POLICY = """## research.sample
 ### instruction
 Prepare aggregate research.
@@ -96,29 +103,58 @@ def verify_examples_and_tests(checkout):
         )
 
 
+def read_readme_examples(path):
+    markdown = path.read_text(encoding="utf-8")
+    pattern = r"^(`{3,}|~{3,})(python|python3|py)[ \t]*\n(.*?)^\1[ \t]*$"
+    matches = list(re.finditer(pattern, markdown, re.M | re.S | re.I))
+    openings = re.findall(r"^[ \t]*(?:`{3,}|~{3,})[ \t]*(?:python|python3|py)\b",
+                          markdown, re.M | re.I)
+    assert len(matches) == len(openings), f"{path}: unsupported or unclosed Python fence"
+    blocks = []
+    for match in matches:
+        preceding = markdown[:match.start()].rstrip().splitlines()
+        marker = re.fullmatch(r"<!-- tn-example: ([a-z0-9-]+) -->",
+                              preceding[-1] if preceding else "")
+        assert marker is not None, f"{path}: Python fence is missing its tn-example marker"
+        name = marker.group(1)
+        assert name in README_EXAMPLE_COUNTS, f"{path}: unknown tn-example group {name!r}"
+        blocks.append((name, match.group(3)))
+    for name, expected in README_EXAMPLE_COUNTS.items():
+        actual = sum(group == name for group, _ in blocks)
+        assert actual == expected, f"{path}: expected {expected} {name!r} blocks, found {actual}"
+    return blocks
+
+
 def verify_getting_started(checkout, root, environment):
-    pattern = r"```python\r?\n(.*?)```"
-    blocks = re.findall(pattern, (checkout / "README.md").read_text(encoding="utf-8"), re.S)
-    pypi_blocks = re.findall(pattern, (checkout / "python/README.md").read_text(encoding="utf-8"), re.S)
-    assert len(blocks) > 1 and blocks == pypi_blocks, "README walkthroughs differ"
+    blocks = read_readme_examples(checkout / "README.md")
+    pypi_blocks = read_readme_examples(checkout / "python/README.md")
+    assert blocks == pypi_blocks, "README executable examples or group order differ"
     example = root / "python/examples/getting_started"
     shutil.copy2(example / "agents.md", root / "agents.md")
-    expected = ["Hello, world!", "Hello again!", "Hello again!"]
+    outputs = {
+        "key-access": [],
+        "greeting": ["Hello, world!", "Hello again!", "Hello again!"],
+        "bank-vendor": ["35", "2", "2"],
+        "optional-rule": ["Hello, world!"],
+    }
     key_access_setup = '''from pathlib import Path
 import tn
 session = tn.Session(Path("agents.md").read_text(encoding="utf-8"))
 sealed = session.create({"message": "Hello, world!"}, session.policy("hello.message")).snapshot
 '''
     key_access_check = '\nassert data.get("message") == "Hello, world!"\nsession.close()\n'
-    for command, output in (
-        ([sys.executable, "-c", key_access_setup + blocks[0] + key_access_check], []),
-        ([sys.executable, "-c", "\n\n".join(blocks[1:])], expected),
-        ([sys.executable, str(example / "hello.py")], expected),
-    ):
+    commands = []
+    for name, output in outputs.items():
+        code = "\n\n".join(code for group, code in blocks if group == name)
+        if name == "key-access":
+            code = key_access_setup + code + key_access_check
+        commands.append((name, [sys.executable, "-c", code], output))
+    commands.append(("hello.py", [sys.executable, str(example / "hello.py")], outputs["greeting"]))
+    for name, command, output in commands:
         result = subprocess.run(command, cwd=root, env=environment, text=True,
                                 capture_output=True, check=True)
-        assert result.stdout.splitlines() == output, result.stdout
-    print("README key-access snippet and complete greeting walkthrough passed")
+        assert result.stdout.splitlines() == output, f"{name}: unexpected output {result.stdout!r}"
+    print("README key-access, greeting, bank-vendor, optional-rule and standalone hello.py passed")
 
 
 if __name__ == "__main__":

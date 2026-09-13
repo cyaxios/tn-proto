@@ -9,6 +9,13 @@ Release notes describe API compatibility; the package version does not change
 the TN wire-format version. Other SDK and internal build-crate versions remain
 independent.
 
+## [2026.9.13b5] - 2026-09-13 - Python guide, examples, and evidence
+
+- Restore the README's rationale, bank/vendor story, inline Python API guide, provider integration, and enterprise pattern context while keeping key-based access first.
+- Link concrete behavior claims to executable evidence and distinguish the paper's historical experiment from current SDK checks.
+- Execute every Python README block, including the bank/vendor calculation and optional application rule, against both release wheels.
+- Documentation and release verification only; the SDK API and native implementation are unchanged.
+
 ## [2026.9.13b4] - 2026-09-13 - Key-based access first
 
 - Lead the README with key-based access and a minimal unseal call; introduce application rules after the greeting walkthrough.
