@@ -7,3 +7,5 @@ Run `python python/examples/providers/catalog.py` to create an admitted policy r
 `identity.py`, `keys.py`, `governance.py`, `catalog.py` and `register.py` contain the first implementations. `hello.calculate` is application code. The setup modules are administrative examples and may call the specialist policy-revision and edition APIs; application code uses the agreed object verbs.
 
 See [provider interfaces](../../../docs/GOVERNED_PROVIDERS.md) for signatures, configuration behavior and service-adapter responsibilities.
+
+The [management systems guide](../../../docs/MANAGEMENT_SYSTEMS.md) walks through the setup modules and explains how to connect existing services. The [Unity Catalog guide](../../../docs/UNITY_CATALOG.md) uses [unity_catalog.py](unity_catalog.py) to prepare an encrypted greeting and read it after resolving a volume's storage location.

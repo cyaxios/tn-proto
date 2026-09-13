@@ -27,6 +27,8 @@ The bank may also supply terms describing how the data can be used. TN carries t
 
 The examples start with a greeting, then build this bank/vendor exchange using the same object operations.
 
+For applications with existing identity, key, or policy services, see the [management systems guide](https://github.com/cyaxios/tn-proto/blob/main/docs/MANAGEMENT_SYSTEMS.md). The [Unity Catalog guide](https://github.com/cyaxios/tn-proto/blob/main/docs/UNITY_CATALOG.md) shows how to locate and open a stored TN object.
+
 ## Install
 
 ```bash

@@ -1,5 +1,7 @@
 # Providers configure governed TN workflows
 
+For a walkthrough, start with [management systems](MANAGEMENT_SYSTEMS.md) or [Unity Catalog](UNITY_CATALOG.md).
+
 Providers connect application infrastructure to TN's existing object operations. Rust defines the contracts, validates provider results and executes the protocol. Python adapters implement service calls and return native typed values through PyO3.
 
 An application creates a session from its configured providers, then uses the same fifteen verbs. Identity generation, key assignment and policy administration belong in setup. They are separate from the calculation that consumes and releases data.
@@ -95,7 +97,7 @@ Pass the store to both provider slots: `Providers(store, store, governance, regi
 
 The keystore JSON is a secret raw credential bundle, protected by local file permissions (0600 on Unix, containing-directory ACL on Windows). It contains the Ed25519 seed and per-group index keys, plus BTN publisher state and reader kit or X25519 private/public recipient keys. This provider creates a fixed enrollment for one application; it does not perform multi-application grant administration.
 
-`GroupCapability::jwe` / `GroupCapability.jwe(group, recipients, readers, index)` also accepts externally supplied native X25519 capabilities. Rust performs JWE content encryption and recipient key wrapping. The persistent examples in `python/examples/persistent_keys/` run creation, publication and reading in separate processes. Generated secrets are kept outside book and source directories.
+`GroupCapability::jwe` / `GroupCapability.jwe(group, recipients, readers, index)` also accepts externally supplied native X25519 capabilities. Rust performs JWE content encryption and recipient key wrapping. The persistent examples in `python/examples/persistent_keys/` run creation, publication and reading in separate processes. Generated secrets are kept outside source directories.
 
 ## HIBE group capabilities
 
