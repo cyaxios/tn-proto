@@ -17,7 +17,7 @@ The Python governed API follows `create → receive → compute → release`. Ap
 ## Install the Python governed SDK
 
 ```bash
-python -m pip install "tn-proto==2026.9.13b1"
+python -m pip install "tn-proto==2026.9.13b2"
 ```
 
 Python **3.10 or newer**, with wheels for **Linux x86-64** and **Windows x64**. These wheels include the native Rust implementation, so their installation does not require a Rust toolchain. This is a beta release of the Python governed application API. See the [release notes](CHANGELOG.md) and [complete Python guide](docs/GOVERNED_PYTHON_API.md).

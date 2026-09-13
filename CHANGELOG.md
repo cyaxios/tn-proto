@@ -9,9 +9,9 @@ Release notes describe API compatibility; the package version does not change
 the TN wire-format version. Other SDK and internal build-crate versions remain
 independent.
 
-## [2026.9.13b1] - 2026-09-13 - Governed Python application API
+## [2026.9.13b2] - 2026-09-13 - Governed Python application API
 
-Install with `pip install "tn-proto==2026.9.13b1"` on Python 3.10 or newer.
+Install with `pip install "tn-proto==2026.9.13b2"` on Python 3.10 or newer.
 The release targets Linux x86-64 and Windows x64 wheels. It updates the Python
 governed application interface; other SDKs retain their own release schedules.
 

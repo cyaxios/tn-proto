@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/tn-proto?style=flat-square&color=orange&label=pypi)](https://pypi.org/project/tn-proto/)
 [![npm](https://img.shields.io/npm/v/@cyaxios/tn-proto?style=flat-square&color=cb3837&label=npm)](https://www.npmjs.com/package/@cyaxios/tn-proto)
-[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/README.md#license)
+[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/python/README.md#license)
 
 **TN-Proto carries encrypted data, authenticated provenance, and use contracts through an application's work.** Three controls have separate jobs:
 
@@ -17,10 +17,10 @@ The Python governed API follows `create → receive → compute → release`. Ap
 ## Install the Python governed SDK
 
 ```bash
-python -m pip install "tn-proto==2026.9.13b1"
+python -m pip install "tn-proto==2026.9.13b2"
 ```
 
-Python **3.10 or newer**, with wheels for **Linux x86-64** and **Windows x64**. These wheels include the native Rust implementation, so their installation does not require a Rust toolchain. This is a beta release of the Python governed application API. See the [release notes](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/CHANGELOG.md) and [complete Python guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/GOVERNED_PYTHON_API.md).
+Python **3.10 or newer**, with wheels for **Linux x86-64** and **Windows x64**. These wheels include the native Rust implementation, so their installation does not require a Rust toolchain. This is a beta release of the Python governed application API. See the [release notes](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/CHANGELOG.md) and [complete Python guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/GOVERNED_PYTHON_API.md).
 
 Node and browser packages have their own interfaces and release schedules. Their event-stream and sealed-object interoperability does not imply that this Python governed lifecycle is available in those runtimes.
 
@@ -78,7 +78,7 @@ with tn.Session(POLICY) as session:
 
 `create` returns a working object with an initial signed snapshot. Receipt accepts that publication; edits remain local until release signs a new version. `write` saves the exact signed bytes. The destination named in release is decision context: the application still chooses its file, queue, HTTP client, or object store for delivery.
 
-The [bank/vendor example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/bank_vendor.py) shows separate identities, separate group grants, and selective business access. The [hello example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/governed_hello.py) isolates a minimal configured receive operation.
+The [bank/vendor example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/python/examples/bank_vendor.py) shows separate identities, separate group grants, and selective business access. The [hello example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/python/examples/governed_hello.py) isolates a minimal configured receive operation.
 
 ## The fifteen object verbs
 
@@ -100,7 +100,7 @@ The [bank/vendor example](https://github.com/cyaxios/tn-proto/blob/python-v2026.
 | accept | `view.accept(use=use, groups=groups, decide=rule)` | Bind the verified object, reader, complete use, and selected groups. |
 | open | `session.open(admitted, groups)` | Open groups allowed by that admission and the reader's capabilities. |
 
-Obtain `view` with `session.governance(publication)`. `group=None` uses the working object's primary group. Transport methods on a working object refuse pending edits; release first. Reading or verifying authenticates bytes but does not grant a requested use. See the [full signatures and semantics](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/GOVERNED_PYTHON_API.md#object-operations).
+Obtain `view` with `session.governance(publication)`. `group=None` uses the working object's primary group. Transport methods on a working object refuse pending edits; release first. Reading or verifying authenticates bytes but does not grant a requested use. See the [full signatures and semantics](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/GOVERNED_PYTHON_API.md#object-operations).
 
 ### Seal and unseal
 
@@ -125,7 +125,7 @@ A `Session` owns its identity, policy, and key capabilities independently. `tn.S
 | Catalog | Resolve an admitted dataset edition and its exact source publication. | `EditionCatalog` |
 | Registers | Optionally retain signed creation/release metadata. | `FileRegisters` |
 
-The [provider examples](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/providers/README.md) show complete composition with `Providers`, `PolicyRequest`, `WorkflowRequest`, `InputRule`, and `WorkflowPolicy`. The [Python guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/GOVERNED_PYTHON_API.md#providers) explains the interfaces. Workflow bindings capture configuration; their evaluators run again for each receive, attachment, and release.
+The [provider examples](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/python/examples/providers/README.md) show complete composition with `Providers`, `PolicyRequest`, `WorkflowRequest`, `InputRule`, and `WorkflowPolicy`. The [Python guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/GOVERNED_PYTHON_API.md#providers) explains the interfaces. Workflow bindings capture configuration; their evaluators run again for each receive, attachment, and release.
 
 ### Persist keys across processes
 
@@ -141,7 +141,7 @@ store = FileKeyStore.open("private/service-keys.json")
 identity = store.resolve("invoice-app")
 ```
 
-The store supplies both identity and keys to `Providers(store, store, governance, ...)`. Supported choices are `btn`, `jwe`, and `hibe`; the [separate-process examples](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/persistent_keys/README.md) include setup, policy configuration, publication, and reading. `FileKeyStore` retains secret key material **without encrypting the file at rest**. Protect it with the service's storage permissions. Creation refuses to overwrite an existing store; opening does not generate replacement keys.
+The store supplies both identity and keys to `Providers(store, store, governance, ...)`. Supported choices are `btn`, `jwe`, and `hibe`; the [separate-process examples](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/python/examples/persistent_keys/README.md) include setup, policy configuration, publication, and reading. `FileKeyStore` retains secret key material **without encrypting the file at rest**. Protect it with the service's storage permissions. Creation refuses to overwrite an existing store; opening does not generate replacement keys.
 
 ### Keep optional object registers
 
@@ -166,15 +166,15 @@ Use `receive` at a trust or use boundary, retain every contributing publication 
 | Dataset product or reusable cache | Bind the requested edition and complete use to the exact source; reevaluate each use. |
 | Tenant repository, durable workflow, or migration | Retain accepted source/version identities and checkpoints; recover committed outputs instead of silently recomputing them. |
 
-The [fifteen executable enterprise patterns](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/enterprise/README.md), [application-pattern guidance](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/GOVERNED_PYTHON_API.md#application-patterns), [dataset/catalog example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/providers/catalog.py), and [bank/vendor example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/examples/bank_vendor.py) connect these decisions to executable API calls. OPA, dataframe libraries, and model-serving adapters are separate integrations; installing `tn-proto` does not install or configure them.
+The [fifteen executable enterprise patterns](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/python/examples/enterprise/README.md), [application-pattern guidance](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/GOVERNED_PYTHON_API.md#application-patterns), [dataset/catalog example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/python/examples/providers/catalog.py), and [bank/vendor example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/python/examples/bank_vendor.py) connect these decisions to executable API calls. OPA, dataframe libraries, and model-serving adapters are separate integrations; installing `tn-proto` does not install or configure them.
 
-The ICISSP experiment used a separate artifact pinned to SDK commit `c83a46a57310fcaccc832e50d6dbd75bd477b5b5`. Its benchmark results and artifact-specific test counts are not performance or suite-size claims for this release. The [paper reproducibility review](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/PAPER_REPRODUCIBILITY.md) records the evidence and remaining manuscript corrections.
+The ICISSP experiment used a separate artifact pinned to SDK commit `c83a46a57310fcaccc832e50d6dbd75bd477b5b5`. Its benchmark results and artifact-specific test counts are not performance or suite-size claims for this release. The [paper reproducibility review](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/PAPER_REPRODUCIBILITY.md) records the evidence and remaining manuscript corrections.
 
 ## BTN recipient covers
 
 BTN encrypts a group's body once and wraps its content key for the eligible subset cover. This release compresses uninterrupted paths in that cover using the existing subset-difference labels and reader keys. For a height-eight tree, one revoked leaf now needs one difference entry: ciphertext is `m + 132` bytes for an `m`-byte payload, compared with `m + 114` without revocation. The earlier uncompressed walker used eight entries and `m + 545` bytes for that case. The change saves 413 bytes of wrapping overhead; it is not a measured eightfold runtime improvement.
 
-For a nonempty set of `r` revoked leaves in the height-eight tree, the compressed cover has at most `min(2r - 1, 256 - r)` entries. The wire format and 1,881-byte height-eight reader kits are unchanged, and retained earlier ciphertexts remain readable with their applicable keys. The separately pinned ICISSP results describe the earlier walker. See [cover construction, byte counts, and compatibility tests](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/BTN_COVER.md).
+For a nonempty set of `r` revoked leaves in the height-eight tree, the compressed cover has at most `min(2r - 1, 256 - r)` entries. The wire format and 1,881-byte height-eight reader kits are unchanged, and retained earlier ciphertexts remain readable with their applicable keys. The separately pinned ICISSP results describe the earlier walker. See [cover construction, byte counts, and compatibility tests](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/BTN_COVER.md).
 
 ## Event streams use the same protocol
 
@@ -342,7 +342,7 @@ tn.ensure_group(tn.current_config(), "payments", fields=["order_id", "amount", "
 await tn.admin.ensureGroup("payments", { fields: ["order_id", "amount", "card_last4"] });
 ```
 
-Or hand-edit the `groups:` and `fields:` blocks in `tn.yaml` (see [Configuration](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/python/README.md#configuration-tnyaml)); the SDK picks up the change in the same process.
+Or hand-edit the `groups:` and `fields:` blocks in `tn.yaml` (see [Configuration](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/python/README.md#configuration-tnyaml)); the SDK picks up the change in the same process.
 
 ## Bundles (`.tnpkg`)
 
@@ -534,11 +534,11 @@ llm_classifier:                  # optional auto-classification of fields into g
 
 A single `tn.info(...)` can fan one event into several groups, each encrypted to that group's readers only. Log and admin paths also accept **templated paths** (`{event_class}`, `{date}`, `{event_id}`, …) so events sort themselves on disk. Calling `tn.init("billing")` against a project creates a named **stream** that shares the project's identity (`.tn/default/keys`) while owning its own log.
 
-> **Every `tn.yaml` field - groups, field routing, ciphers, handlers, profiles, ceremony/link state - is documented in the [`tn.yaml` reference](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/yaml-reference.md).**
+> **Every `tn.yaml` field - groups, field routing, ciphers, handlers, profiles, ceremony/link state - is documented in the [`tn.yaml` reference](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/yaml-reference.md).**
 
 ## Containers & CI
 
-No home directory, no baking keys into an image. Set one secret - `TN_API_KEY` - and the container trades it with the vault for its keystore on first boot, then runs normally. If a keystore already exists on disk, that wins and the env var is ignored. Full guide: [running in containers and CI](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/deploy-containers.md).
+No home directory, no baking keys into an image. Set one secret - `TN_API_KEY` - and the container trades it with the vault for its keystore on first boot, then runs normally. If a keystore already exists on disk, that wins and the env var is ignored. Full guide: [running in containers and CI](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/deploy-containers.md).
 
 ## Environment variables
 
@@ -579,10 +579,10 @@ The repository contains shared protocol code and interoperability fixtures for s
 
 ## Documentation
 
-- [Getting started](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/getting-started.md) · [Python cookbook](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/cookbook-python.md) · [TypeScript cookbook](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/cookbook-typescript.md)
-- [Groups, readers, bundles, rotation](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/groups-readers-rotation.md) · [JWE and HIBE key ceremonies](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/jwe-hibe-key-ceremonies.md) · [Running in containers and CI](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/deploy-containers.md)
-- [Profiles](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/profiles.md) · [tn.yaml reference](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/yaml-reference.md) · [protocol spec](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/protocol.md)
-- [Authentication & accounts](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/auth.md) · [Environment variables](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b1/docs/guide/environment-variables.md)
+- [Getting started](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/getting-started.md) · [Python cookbook](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/cookbook-python.md) · [TypeScript cookbook](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/cookbook-typescript.md)
+- [Groups, readers, bundles, rotation](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/groups-readers-rotation.md) · [JWE and HIBE key ceremonies](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/jwe-hibe-key-ceremonies.md) · [Running in containers and CI](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/deploy-containers.md)
+- [Profiles](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/profiles.md) · [tn.yaml reference](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/yaml-reference.md) · [protocol spec](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/protocol.md)
+- [Authentication & accounts](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/auth.md) · [Environment variables](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b2/docs/guide/environment-variables.md)
 
 ## License
 

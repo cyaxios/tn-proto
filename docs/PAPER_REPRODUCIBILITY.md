@@ -1,6 +1,6 @@
 # Paper reproducibility review
 
-Reviewed on 2026-09-13. This note separates the supplied paper, its historical experiment artifact, and Python release `2026.9.13b1`. It does not replace the paper or relabel its measurements as results for the current SDK.
+Reviewed on 2026-09-13. This note separates the supplied paper, its historical experiment artifact, and Python release `2026.9.13b2`. It does not replace the paper or relabel its measurements as results for the current SDK.
 
 ## Reviewed material and availability
 

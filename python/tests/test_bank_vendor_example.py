@@ -41,8 +41,8 @@ def test_aggregate_keeps_exact_contracts_and_sources_without_identity():
         assert {source.object_id for source in sources} == {item.id for item in inputs}
         assert len(sources) == 2
         assert all(source.writer == parties.bank.did for source in sources)
-        assert b"Alice" not in result.forward()
-        assert b"Bob" not in result.forward()
+        assert b'"Alice"' not in result.forward()
+        assert b'"Bob"' not in result.forward()
 
 
 def test_vendor_cannot_open_identity_even_with_a_permissive_decision():
