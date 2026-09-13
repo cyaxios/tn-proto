@@ -102,6 +102,25 @@ def test_catalog_mismatch_is_refused_before_publication_file_read(example, prepa
         example["read"](prepared, url=catalog.url, volume=VOLUME)
 
 
+@pytest.mark.parametrize("advertise_target", [False, True])
+def test_redirected_publication_directory_is_refused_even_with_valid_signed_file(
+    example, prepared, catalog, advertise_target,
+):
+    publications = prepared / "publications"
+    redirected = prepared / "redirected-publications"
+    publications.rename(redirected)
+    try:
+        publications.symlink_to(redirected, target_is_directory=True)
+    except OSError as error:
+        if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires an unavailable privilege")
+        raise
+    if advertise_target:
+        catalog.state["body"]["storage_location"] = redirected.as_uri()
+    with pytest.raises(ValueError, match="storage_location|fixed"):
+        example["read"](prepared, url=catalog.url, volume=VOLUME)
+
+
 def test_another_valid_publication_cannot_replace_the_pinned_one(example, prepared, catalog):
     session, policy = example["configure"](prepared / "private", "btn")
     with session:
@@ -131,6 +150,17 @@ def test_catalog_location_and_publication_id_do_not_replace_decryption_keys(
     )
     with pytest.raises(tn.governed.NotEntitled):
         example["read"](prepared, url=catalog.url, volume=VOLUME)
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_shared_reader_rejects_publication_names_outside_the_volume(example, prepared, absolute):
+    original = prepared / "publications/greeting.tn"
+    outside = prepared / "outside.tn"
+    outside.write_bytes(original.read_bytes())
+    expected_id = tn.GovernedObject.read(original).id
+    filename = str(outside) if absolute else "../outside.tn"
+    with pytest.raises(ValueError, match="filename|fixed"):
+        example["read_publication"](original.parent, filename, expected_id)
 
 
 def test_prepare_refuses_to_replace_an_existing_workspace(example, tmp_path):

@@ -87,6 +87,7 @@ def verify_examples_and_tests(checkout):
                 shutil.copy2(source, tests / source.name)
         shutil.copy2(checkout / "python/tests/test_bank_vendor_example.py", tests)
         shutil.copy2(checkout / "python/tests/test_unity_catalog_example.py", tests)
+        shutil.copy2(checkout / "python/tests/test_unity_edition_example.py", tests)
         shutil.copytree(
             checkout / "python/examples", root / "python/examples",
             ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.pyc"),

@@ -1,10 +1,15 @@
-# Find and open a TN object with Unity Catalog
+# Use TN objects with Unity Catalog
 
 Unity Catalog can give applications a name and storage location for a directory of encrypted TN objects. The application retrieves an object from that directory, verifies its signature, and opens its fields with its TN keys. Catalog access and the keys needed to decrypt the data are configured separately.
 
-This walkthrough uses an open-source Unity Catalog server and local files. An external volume points to a directory containing one encrypted, signed greeting, called a publication. Volumes organize files that are not represented as database tables; see the [Unity Catalog volume guide](https://docs.unitycatalog.io/usage/volumes/).
+These examples use an open-source Unity Catalog server and local files. An external volume points to a directory containing encrypted, signed TN objects, called publications. Volumes organize files that are not represented as database tables; see the [Unity Catalog volume guide](https://docs.unitycatalog.io/usage/volumes/).
 
-The executable is [unity_catalog.py](../python/examples/providers/unity_catalog.py). It uses the Python standard library for the catalog request and the installed TN SDK for signing and encryption.
+Start with a greeting, then use a named dataset edition to calculate an invoice total. Both examples use the installed TN SDK and Python's standard library.
+
+| Example | Application code | Preparation |
+| --- | --- | --- |
+| Open a greeting | [unity_catalog.py](../python/examples/providers/unity_catalog.py) | Its `prepare` command creates the greeting and persistent keys. |
+| Calculate from an exact dataset edition | [unity_edition.py](../python/examples/providers/unity_edition.py) | [unity_edition_setup.py](../python/examples/providers/unity_edition_setup.py) creates keys, data, a signed policy revision, and a signed edition. |
 
 ## Prepare the greeting
 
@@ -66,11 +71,56 @@ The reader requests `/api/2.1/unity-catalog/volumes/unity.default.tn_messages` a
 
 The expected publication identifier prevents a different, validly signed publication from silently replacing the greeting. In an application, this identifier can come from an approved job request or an accepted dataset edition. Catalog metadata supplies a location; the application's trust in a particular publication needs its own source.
 
-## Connect it to a larger application
+## Calculate from a dataset edition
+
+A volume locates files. A TN dataset edition also names the exact source publication, its contracts, and the uses for which it is available. This lets an application request a particular edition and check it before opening the data.
+
+Prepare a second workspace from the TN repository root:
+
+```bash
+python python/examples/providers/unity_edition_setup.py ../tn-unity-invoice
+```
+
+This creates an invoice containing amounts `12`, `18`, and `5`. It seals the source, then signs an edition record that refers to that publication. The edition is named `closing` in the `invoices` dataset, with the permitted use `tn.UseContext("invoice-service", "accounting", "total")`.
+
+The shared `publications` directory contains `source.tn`, `revision.tn`, and `edition.tn`. The revision records a signed version of the use contract; the edition associates that revision with the source. Keys and the identifiers the reader expects remain in `private`.
+
+Register the printed directory URI from the Unity checkout:
+
+```bash
+bin/uc volume create --full_name unity.default.tn_invoice --storage_location "PUBLICATIONS_URI"
+```
+
+Return to the TN repository and calculate the total:
+
+```bash
+python python/examples/providers/unity_edition.py ../tn-unity-invoice --url http://localhost:8080 --volume unity.default.tn_invoice
+```
+
+```text
+35
+```
+
+The reader opens its configured session and calls `resolve` to verify and admit the revision and edition. That returns `entry`, containing the exact source and a selection for the permitted use. The calculation in `unity_edition.py` is:
+
+```python
+work = session.workflow(receive="accounting", release="reporting")
+data = work.unseal(entry.publication, selection=entry.selection)
+total = sum(data.get("amounts"))
+data.set("total", total)
+data.select(["default"], fields={"default": ["total"]})
+report = work.seal(data)
+```
+
+Only the total remains in the report's business data. Sealing preserves the source reference, contract, and the dataset edition used. The application saves the signed report under its publication identifier in `private/reports/` and prints the total.
+
+`unity_edition_setup.py` contains both the preparation command and the helper functions the reader calls for configuration and admission. These checks run again when the reader runs. Shared [Unity transport helpers](../python/examples/providers/unity_client.py) handle HTTP requests, location checks, and publication identifiers for both examples.
+
+## Use your own storage and services
 
 The example opens a local file after checking the volume metadata. To use remote storage, retrieve the stored TN bytes with your storage client and pass them to `tn.GovernedObject.parse`. The session still performs the same unseal operation. Share encrypted publications, and provision each reader's TN keys through your chosen key provider.
 
-For datasets with named editions and approved uses, the [dataset catalog example](../python/examples/providers/catalog.py) builds an accepted `DatasetSelection` and a `CatalogEntry`. A provider that combines this selection with Unity metadata can return the exact publication for a `CatalogRequest`. The volume lookup in this walkthrough does not construct an edition selection.
+The edition example returns a native `CatalogEntry` with its accepted `DatasetSelection`. The [local catalog example](../python/examples/providers/catalog.py) shows the same types without Unity. A `CatalogProvider` can use this flow to resolve a `CatalogRequest` for an application.
 
 See [management systems](MANAGEMENT_SYSTEMS.md) for identity, key, governance, and recording providers, and the [provider reference](GOVERNED_PROVIDERS.md) for their interfaces.
 
@@ -79,7 +129,7 @@ See [management systems](MANAGEMENT_SYSTEMS.md) for identity, key, governance, a
 Install `pytest` in your development environment, then run from the repository root:
 
 ```bash
-python -m pytest python/tests/test_unity_catalog_example.py -q
+python -m pytest python/tests/test_unity_catalog_example.py python/tests/test_unity_edition_example.py -q
 ```
 
-The tests use a local HTTP fixture for catalog responses and real TN signatures and keys. They check the successful read, rejected metadata changes, publication substitution, tampering, and credential handling. They do not start or validate a live Unity Catalog deployment; use the registration and read steps above to check your server.
+The tests use a local HTTP fixture for catalog responses and real TN signatures and keys. They cover reading and calculation, refused uses, changed metadata, substituted publications, tampering, and credential handling. Use the registration and read steps above to check your Unity deployment.
