@@ -1,8 +1,10 @@
 # TN-Proto
 
-TN-Proto lets applications exchange encrypted data together with authenticated provenance and use contracts. Applications can open selected fields, calculate a result, and publish a new object that retains its contributing sources and contracts. The Python SDK uses the canonical Rust implementation through PyO3.
+TN-Proto is a Python SDK for sharing encrypted data between applications. You put data fields into a TN object, encrypt and sign it, then save it to a file or send it to another application.
 
-**Key access is access to encrypted data.** Group keys determine which fields a reader can open. Application rules can add restrictions when needed. With the required keys already loaded in `session` and a publication in `sealed`:
+Fields are organized into named groups. Each group can have different readers: a reader needs the matching key to open that group's fields. This makes key possession the basis of access to the encrypted data.
+
+The SDK keeps an application's identity and keys in a `Session`. If `session` already holds the required keys and `sealed` is an encrypted TN object, this call opens it:
 
 <!-- tn-example: key-access -->
 ```python
@@ -11,19 +13,19 @@ data = session.unseal(
 )
 ```
 
-The callback adds no application permission check. TN still verifies the publication and requires the matching keys. `purpose="read"` labels the operation; it does not grant access. Keys cover groups of fields, so fields that need independent access belong in separate groups.
+`unseal` verifies the object's signature and decrypts its data. `decide` lets the application add an access check; returning `True` adds no further restriction. `purpose="read"` names the operation. The walkthrough below creates the session and object needed for this call.
 
-[Why TN exists](#why-tn-exists) · [Install](#install) · [First object](#your-first-object) · [Bank and vendor](#from-a-greeting-to-a-bank-report) · [Application rules](#optional-application-rules) · [Python API](#python-api) · [Keys and providers](#keys-providers-and-revocation) · [Book examples](#enterprise-patterns-from-the-book) · [Evidence](#evidence-and-paper-reproducibility)
+[Why TN exists](#why-tn-exists) · [Install](#install) · [First object](#your-first-object) · [Bank and vendor](#from-a-greeting-to-a-bank-report) · [Application rules](#optional-application-rules) · [Python API](#python-api) · [Keys and providers](#keys-providers-and-revocation) · [Application examples](python/examples/enterprise/README.md)
 
 ## Why TN exists
 
-A bank asks a vendor to total transaction amounts. The vendor needs the amounts, while customer identities must stay private. The bank also needs to recognize the returned report, identify its inputs, and keep the conditions under which those inputs were supplied.
+A bank asks a vendor to total transaction amounts. The records also contain customer names, which the vendor does not need. The bank puts amounts and names in separate groups and gives the vendor the key for the amounts. The vendor can then calculate the total while the names remain encrypted.
 
-That problem continues after the first handoff. Another service may combine the report with licensed data, a cache may serve it later, and an archive may need the exact version used in an earlier decision. Encryption, source identity, and use context need to survive those steps together.
+When the vendor returns the total, the bank needs to know which records contributed to it. A TN result can retain references to those input objects. Signing the result lets the bank verify which identity published it and whether its signed content has changed.
 
-TN puts encrypted field groups and authenticated governance in a signed object that an application can store or send through its existing transport. Different readers can open different groups of the same object. When an application produces a result, it can retain references to the contributing publications and their contracts as part of that new signed publication.
+The bank may also supply terms describing how the data can be used. TN carries this text as a use contract alongside the data. The result can keep the input contracts so the application receiving it can decide whether its intended use is allowed.
 
-This is useful for selective data sharing, licensed-data processing, derived reports, and work that must remain explainable across services. The application supplies the calculation, chooses its recipients, and owns its database transactions and delivery. TN supplies the object operations used inside that work.
+The examples start with a greeting, then build this bank/vendor exchange using the same object operations.
 
 ## Install
 
@@ -31,13 +33,13 @@ This is useful for selective data sharing, licensed-data processing, derived rep
 python -m pip install "tn-proto==2026.9.13b5"
 ```
 
-Python 3.10 or newer. Linux x86-64 and Windows x64 wheels include Rust and require no Rust toolchain to install. This is a beta of the Python SDK; see the [release notes](CHANGELOG.md) for changes. Other language packages have separate interfaces and release schedules.
+Python 3.10 or newer. Linux x86-64 and Windows x64 wheels include the native implementation and require no Rust toolchain to install. This is a beta of the Python SDK; see the [release notes](CHANGELOG.md) for changes.
 
 ## Your first object
 
 ### 1. Start a session
 
-For a complete example, save the sample [agents.md](python/examples/getting_started/agents.md) in your working folder. It supplies the contract metadata used when creating the greeting object. This walkthrough carries that metadata without evaluating additional contract rules.
+Save the sample [agents.md](python/examples/getting_started/agents.md) in your working folder. Its `## hello.message` section contains the greeting's use contract. The session loads this file, and `session.policy("hello.message")` selects that contract for the object you will create.
 
 Run the following Python snippets in order, in the same process:
 
@@ -50,7 +52,7 @@ session = tn.Session(Path("agents.md").read_text(encoding="utf-8"))
 policy = session.policy("hello.message")
 ```
 
-The session has its own identity and encryption keys. This example creates fresh keys and uses them for the whole walkthrough.
+This session creates a fresh signing identity and keys for the data and its contract metadata. The example uses this session for the whole walkthrough.
 
 ### 2. Create an object and read a field
 
@@ -64,7 +66,7 @@ print(message.get("message"))
 Hello, world!
 ```
 
-`create` returns a data object with an initial signed copy. `get` reads a field.
+`create` returns an editable data object and also makes an encrypted, signed copy called a publication. `get` reads the message from the editable object.
 
 ### 3. Change the field
 
@@ -78,11 +80,11 @@ print(message.get("message"))
 Hello again!
 ```
 
-The working data has changed. The previous signed copy still contains the original greeting.
+`set` changes the editable object. Its existing publication still contains `Hello, world!`.
 
 ### 4. Seal the changed object
 
-The creating session has the publishing capabilities needed to seal its changes:
+Call `seal` to encrypt and sign a new publication containing the changed message:
 
 <!-- tn-example: greeting -->
 ```python
@@ -91,7 +93,7 @@ publication = message.seal(
 )
 ```
 
-`seal` creates a new encrypted, signed publication, keeping the contract and the reference to the preceding version. Here, the callback adds no application restriction. `to` records an intended destination; it does not distribute keys or deliver the bytes.
+The new publication keeps the contract and a reference to the preceding version. `to` names its intended destination. In this example, the same session acts as the local reader, and the next step saves the publication to a file.
 
 ### 5. Save and read the publication
 
@@ -101,11 +103,11 @@ publication.write("greeting.tn")
 saved = tn.GovernedObject.read("greeting.tn")
 ```
 
-`write` saves the signed bytes. `read` verifies the saved publication; its business fields remain encrypted.
+`write` saves the exact signed bytes. `read` verifies the saved publication; the message remains encrypted.
 
 ### 6. Unseal with the keys
 
-The same session already holds the keys for its saved publication:
+This session can decrypt the saved message because it holds the matching keys:
 
 <!-- tn-example: greeting -->
 ```python
@@ -119,7 +121,7 @@ print(received.get("message"))
 Hello again!
 ```
 
-`unseal` verifies the publication and decrypts the message. A session without the required keys cannot open it, even with `decide=lambda _: True`.
+`received` is a new editable data object containing the decrypted message.
 
 Close the session when finished:
 
@@ -128,11 +130,11 @@ Close the session when finished:
 session.close()
 ```
 
-The complete walkthrough is available as [hello.py](python/examples/getting_started/hello.py), alongside its policy file.
+The complete walkthrough is available as [hello.py](python/examples/getting_started/hello.py), alongside its `agents.md` file.
 
 ## From a greeting to a bank report
 
-The [bank/vendor program](python/examples/bank_vendor.py) extends these operations to two applications. Its setup creates separate signing identities and assigns their group capabilities explicitly:
+The [bank/vendor program](python/examples/bank_vendor.py) implements the exchange described above. Its setup gives the bank and vendor separate signing identities, then assigns the groups each can read and publish. The use contract is stored in an encrypted governance group that both applications can read:
 
 | Application | Can open | Can publish |
 | --- | --- | --- |
@@ -177,7 +179,7 @@ Run `python python/examples/bank_vendor.py` for the complete demonstration, incl
 
 ## Optional application rules
 
-TN's governed SDK enforces when a governance decision happens and what contract context is supplied. On receipt, it presents the authenticated writer, carried contracts, requested use, and selected groups before opening business data. The receiving application decides whether that use is allowed.
+The bank/vendor setup checks who signed the object and its requested use as well as the keys. For these checks, the SDK supplies the signer's verified identity (`context.writer`), the object's contracts, the requested use, and the selected groups before decrypting their data. The receiving application decides whether to allow the operation.
 
 Key possession can be the application's entire access rule, as in the greeting. An application can also require a specific writer or an accepted contract. This separate example uses the same `agents.md` file:
 
@@ -211,7 +213,7 @@ For repeated work, configure decisions with `session.configure_receive`, `config
 | Attach | Requesting authority, proposed contract, existing contracts, and working data |
 | Release | Publishing writer, current result, contracts, sources, purpose, optional complete `UseContext`, and destination |
 
-The wire format carries contracts and provenance. Applications interpret those contracts and decide permitted use; TN does not execute policy prose. Applications also control what they do with plaintext after opening it. A signature authenticates a publication and its declared sources. Checking the calculation requires application evidence beyond that signature.
+The contract text is input to the application's decision. The SDK calls the decision function at the receive, attach, or release step; the application supplies the interpretation of the contract and the decision itself.
 
 ## Python API
 
@@ -269,6 +271,8 @@ The [complete Python API guide](docs/GOVERNED_PYTHON_API.md) documents signature
 
 ### Policy revisions, datasets, and lineage
 
+If an application tracks dataset editions or changes to use contracts, these APIs identify the exact versions used by a result:
+
 | API | Use |
 | --- | --- |
 | `PolicyRevisionDraft`, `PolicyRevision`, `PolicyDag` | Publish, admit, and select exact contract revisions with explicit parent and authority decisions |
@@ -277,7 +281,7 @@ The [complete Python API guide](docs/GOVERNED_PYTHON_API.md) documents signature
 | `LineageVerifier` | Verify retained source publications through an application-supplied resolver |
 | `ObjectRegisters` | Configure optional signed creation and release metadata records |
 
-Edition names and source references need accepted records behind them. The [catalog example](python/examples/providers/catalog.py) constructs those records; the [dataset and lineage guide](docs/GOVERNED_PYTHON_API.md#policy-revisions-dataset-editions-and-lineage) explains how receipt binds them to the requested source and use.
+The [catalog example](python/examples/providers/catalog.py) creates a contract revision and dataset edition, then selects the corresponding source object. The [dataset and lineage guide](docs/GOVERNED_PYTHON_API.md#policy-revisions-dataset-editions-and-lineage) covers selection and following a result's references back to its inputs.
 
 Common failures are `VerificationError` for invalid publications, `NotEntitled` for missing group capabilities, `UseDenied` for a refused decision, and `NotAPublisher` for missing publication capabilities. The [error reference](docs/GOVERNED_PYTHON_API.md#errors-and-integration-checks) covers callback failures, closed sessions, and register errors as well.
 
@@ -285,7 +289,7 @@ Common failures are `VerificationError` for invalid publications, `NotEntitled` 
 
 A fresh session is convenient for a first run. Deployed applications need identities and keys that survive restarts, plus explicit assignments for other readers. `FileKeyStore.create(...)` provisions a local store once; `FileKeyStore.open(path)` reopens it. It implements both identity and key resolution. The store contains unencrypted credentials protected by filesystem access controls. Keep it in private application storage.
 
-The [persistent-key examples](python/examples/persistent_keys/README.md) run setup, publication, and reading in separate processes. They cover BTN, JWE, and HIBE. BTN uses reader kits and publisher state; JWE uses recipient keys; HIBE uses scoped hierarchical keys. The [capability constructors](docs/GOVERNED_PYTHON_API.md#cipher-capabilities) accept existing material through the same session interfaces.
+The [persistent-key examples](python/examples/persistent_keys/README.md) run setup, publication, and reading in separate processes. They cover three encryption options: BTN for a group of readers with revocation, JWE for encryption to specified recipients, and HIBE for keys assigned within a hierarchy. The [capability constructors](docs/GOVERNED_PYTHON_API.md#cipher-capabilities) accept existing key material for these options.
 
 Applications can connect their own infrastructure through five provider contracts:
 
@@ -303,13 +307,13 @@ Giving a reader the relevant group capabilities gives it decryption authority wi
 
 ### Preserve evidence when excluding future access
 
-**Revocation must not destroy required evidence.** That requirement motivates BTN's forward-only exclusion. A revoked reader is excluded from future ciphertexts produced with the updated publisher state. Retained keys still open historical publications they covered. An application can therefore retain the publications and capabilities needed to inspect earlier work while changing who receives new data.
+Suppose the bank stops sending new data to a vendor but needs to keep the earlier reports readable for review. With BTN, the bank can revoke that reader for future publications created with the updated publisher state. Retained keys still open the historical publications they covered. This is forward-only revocation: access to new data changes while earlier records remain readable with their keys.
 
-The application must retain that evidence and set its retention policy. Revocation cannot recall plaintext or keys already copied by a reader. Current BTN cover compression preserves existing wire formats and reader kits; the [BTN guide](docs/BTN_COVER.md) explains its bounds, byte costs, and compatibility tests.
+Keep the publications and keys needed for later review. Revocation cannot recall plaintext or keys already copied by a reader. The [BTN guide](docs/BTN_COVER.md) describes revocation coverage and compatibility.
 
-## Enterprise patterns from the book
+## Application examples
 
-The TN Enterprise Patterns book follows portfolio reporting across data suppliers, analytics, model operations, review, and records management. The SDK includes all [15 executable patterns](python/examples/enterprise/README.md). Each combines the object API with a concrete application responsibility:
+The repository contains [15 application examples](python/examples/enterprise/README.md) covering common service and storage patterns. Each uses the object API to handle a specific task:
 
 | Application need | Patterns and worked behavior |
 | --- | --- |
@@ -321,19 +325,9 @@ The TN Enterprise Patterns book follows portfolio reporting across data supplier
 
 The examples use SQLite for their application records. They show where to commit business state, how to handle duplicates, and what to retain for recovery. TN operations supply signed objects within those transactions; application code owns the transaction and transport behavior.
 
-## Evidence and paper reproducibility
+## Testing
 
 The release checks execute every Python block in this README, the standalone greeting, and the governed API, provider, persistent-key, bank/vendor, and enterprise tests against installed wheels. The [release workflow](.github/workflows/release-python.yml) builds and verifies Linux and Windows wheels before publication.
-
-| Claim to inspect | Executable evidence |
-| --- | --- |
-| Invalid signatures and altered signed content are refused before admission | [Python signature tests](python/tests/test_governed_seal_unseal.py) and [native content-integrity tests](crypto/tn-core/tests/governed_objects.rs) |
-| A vendor opens amounts while identity data stays unavailable | [Bank/vendor example and assertions](python/tests/test_bank_vendor_example.py) |
-| A result retains the bank and vendor contracts and both source references | [Bank/vendor result checks](python/tests/test_bank_vendor_example.py) |
-| Refusal and evaluator failure precede business decryption | [Instrumented native receipt tests](crypto/tn-core/tests/governed_use_context.rs) |
-| Compressed BTN covers exclude revoked readers and preserve covered historical access | [Real-key compression tests](crypto/tn-btn/tests/compressed_cover.rs) |
-| Cover geometry and serialized costs match the implementation | [BTN derivation, scoped tests, and encoding arithmetic](docs/BTN_COVER.md) |
-| Paper test counts and measurements have a defined artifact scope | [Paper reproducibility review](docs/PAPER_REPRODUCIBILITY.md) |
 
 From a checkout of this release, install the test dependencies and run the example checks. The Rust command also requires a Rust toolchain:
 
@@ -344,14 +338,8 @@ python -m pytest python/tests/test_bank_vendor_example.py python/examples/enterp
 cargo test --locked -p tn-btn
 ```
 
-The paper's historical experiment pins SDK revision `c83a46a57310fcaccc832e50d6dbd75bd477b5b5`. Its 34 Python cases and ten native tests describe the separate experiment suite. Current SDK release checks have their own scope. The September 13 [paper review](docs/PAPER_REPRODUCIBILITY.md) records the inspected artifacts and the changes present in beta 2; this documentation release does not rerun or replace those historical measurements.
-
-For example, the current BTN implementation uses one difference entry for a single revoked leaf in a height-eight tree, reducing overhead from 545 to 132 bytes. The paper's retained tables measured the earlier walker. This comparison measures serialized overhead; it includes no new latency measurements. The separate experiment still needs an identified public, immutable archive; this SDK checkout alone does not reproduce every paper result.
-
-The [Python guide's security boundaries](docs/GOVERNED_PYTHON_API.md#the-three-controls) describe visible envelope metadata, equality leakage, and the external information needed to check history completeness. Signatures authenticate declared provenance; applications remain responsible for checking calculations, required inputs, and permitted disclosure.
-
 ## Source, support, and license
 
-The implementation is in [crypto/tn-core](crypto/tn-core), the PyO3 bindings in [crypto/tn-core-py](crypto/tn-core-py), and the Python package in [python](python). Use [GitHub issues](https://github.com/cyaxios/tn-proto/issues) for reproducible bugs and documentation corrections, including the package version and a minimal example with private data removed.
+The Python SDK calls the Rust implementation in [crypto/tn-core](crypto/tn-core) through the [PyO3 bindings](crypto/tn-core-py). The Python package is in [python](python). Use [GitHub issues](https://github.com/cyaxios/tn-proto/issues) for reproducible bugs and documentation corrections, including the package version and a minimal example with private data removed.
 
 Dual-licensed under the MIT License or the Apache License, Version 2.0.

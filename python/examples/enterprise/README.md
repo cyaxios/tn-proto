@@ -1,7 +1,7 @@
 # Enterprise application patterns
 
-These fifteen executable patterns come from the TN Enterprise Patterns book.
-They use the public TN object API with native sessions, assigned group keys,
+These fifteen examples show how to use TN in common service and storage patterns.
+They use the public object API with native sessions, assigned group keys,
 configured governance decisions, and signed publications. Application code owns
 calculations and database transactions.
 
@@ -56,8 +56,8 @@ For persistent deployment material, see [persistent keys](../persistent_keys/REA
 | Durable workflow | `finish` | Pinned checkpoint and conditional completion |
 | Migration | `execute` | Accepted request/result continuity across calculations |
 
-The functions in [verb_patterns.py](verb_patterns.py) are copied from the book's
-chapter examples. [verb_support.py](verb_support.py) implements business request
+The pattern functions are in [verb_patterns.py](verb_patterns.py).
+[verb_support.py](verb_support.py) implements business request
 types and SQLite storage. [pattern_environment.py](pattern_environment.py)
 configures providers; [verb_edition_fixture.py](verb_edition_fixture.py) supplies
 the dataset test's signed policy revisions and catalog selection.
