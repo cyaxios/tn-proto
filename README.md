@@ -1,10 +1,16 @@
 # TN-Proto
 
-TN-Proto is a Python SDK for sharing encrypted data between applications. You put data fields into a TN object, encrypt and sign it, then save it to a file or send it to another application.
+When one application sends a record to another, the receiving application needs to know who can open its fields, what they may be used for, and where they came from. Those details often live in separate access controls, agreements, and application records.
 
-Fields are organized into named groups. Each group can have different readers: a reader needs the matching key to open that group's fields. This makes key possession the basis of access to the encrypted data.
+TN-Proto carries encrypted fields, use contracts, and source references together in a signed object. Applications can verify who published the object, open the fields they have keys for, and retain the contracts and sources when they publish a result.
 
-The SDK keeps an application's identity and keys in a `Session`. If `session` already holds the required keys and `sealed` is an encrypted TN object, this call opens it:
+A bank needs a vendor to add up transaction amounts. The records also contain customer names. The bank puts amounts and names into two separately encrypted parts of one object and gives the vendor only the key for amounts. Each part is a group. The vendor can add the numbers while the names remain encrypted.
+
+The bank can also include a use contract describing what the amounts may be used for. The vendor's application can check that contract before opening the data, allowing accounting and refusing marketing. The application supplies that decision.
+
+When the vendor returns a signed total, it retains the bank's contract and references to the input publications. These source references let the bank identify the records that contributed to the result. The [bank/vendor program](python/examples/bank_vendor.py) shows the exchange with separate identities and group keys.
+
+Key possession is the basis of access to a group's data. In Python, a `Session` holds the application's identity and keys. If `session` has the matching keys and `sealed` is a signed TN publication, this opens it:
 
 <!-- tn-example: key-access -->
 ```python
@@ -13,21 +19,11 @@ data = session.unseal(
 )
 ```
 
-`unseal` verifies the object's signature and decrypts its data. `decide` lets the application add an access check; returning `True` adds no further restriction. `purpose="read"` names the operation. The walkthrough below creates the session and object needed for this call.
+`unseal` verifies the publication and decrypts the selected groups. Returning `True` from `decide` adds no application restriction beyond key access. `purpose="read"` names the requested use. The walkthrough below creates the session and object for this call.
 
-[Why TN exists](#why-tn-exists) · [Install](#install) · [First object](#your-first-object) · [Bank and vendor](#from-a-greeting-to-a-bank-report) · [Application rules](#optional-application-rules) · [Python API](#python-api) · [Keys and providers](#keys-and-providers) · [Application examples](python/examples/enterprise/README.md)
+Python, TypeScript, and Rust use the same object format. This README walks through the Python API. For existing identity, key, or policy services, see the [management systems guide](docs/MANAGEMENT_SYSTEMS.md). The [Unity Catalog guide](docs/UNITY_CATALOG.md) shows how to locate and open a stored TN object.
 
-## Why TN exists
-
-A bank asks a vendor to total transaction amounts. The records also contain customer names, which the vendor does not need. The bank puts amounts and names in separate groups and gives the vendor the key for the amounts. The vendor can then calculate the total while the names remain encrypted.
-
-When the vendor returns the total, the bank needs to know which records contributed to it. A TN result can retain references to those input objects. Signing the result lets the bank verify which identity published it and whether its signed content has changed.
-
-The bank may also supply terms describing how the data can be used. TN carries this text as a use contract alongside the data. The result can keep the input contracts so the application receiving it can decide whether its intended use is allowed.
-
-The examples start with a greeting, then build this bank/vendor exchange using the same object operations.
-
-For applications with existing identity, key, or policy services, see the [management systems guide](docs/MANAGEMENT_SYSTEMS.md). The [Unity Catalog guide](docs/UNITY_CATALOG.md) shows how to locate and open a stored TN object.
+[Install](#install) · [First object](#your-first-object) · [Bank and vendor](#from-a-greeting-to-a-bank-report) · [Application rules](#optional-application-rules) · [Python API](#python-api) · [Keys and providers](#keys-and-providers) · [Application examples](python/examples/enterprise/README.md)
 
 ## Install
 
@@ -35,9 +31,11 @@ For applications with existing identity, key, or policy services, see the [manag
 python -m pip install "tn-proto==2026.9.14b1"
 ```
 
-Python 3.10 or newer. Linux x86-64 and Windows x64 wheels include the native implementation. Install the wheel with pip; use the [Rust SDK](rust-sdk/README.md) for Rust applications.
+Python 3.10 or newer. Linux x86-64 and Windows x64 wheels include the Rust implementation. These examples are checked against `tn-proto==2026.9.14b1`. For other languages, see the [TypeScript SDK](ts-sdk/README.md) and [Rust SDK](rust-sdk/README.md).
 
 ## Your first object
+
+Start with a greeting in one application. It uses one field and one session to show how to create, edit, seal, save, and unseal an object. The bank/vendor example then applies those steps across two applications.
 
 ### 1. Start a session
 
@@ -54,7 +52,7 @@ session = tn.Session(Path("agents.md").read_text(encoding="utf-8"))
 policy = session.policy("hello.message")
 ```
 
-This session creates a fresh signing identity and keys for the data and its contract metadata. The example uses this session for the whole walkthrough.
+This creates a new signing identity and keys, and selects the `hello.message` use contract. Every snippet below uses this session.
 
 ### 2. Create an object and read a field
 
@@ -68,7 +66,7 @@ print(message.get("message"))
 Hello, world!
 ```
 
-`create` returns an editable data object and also makes an encrypted, signed copy called a publication. `get` reads the message from the editable object.
+`create` returns an editable object bound to the selected contract, with an initial encrypted, signed snapshot. That snapshot is a publication: the bytes you can save or send. `get` reads a field from the editable object.
 
 ### 3. Change the field
 
@@ -95,7 +93,7 @@ publication = message.seal(
 )
 ```
 
-The new publication keeps the contract and a reference to the preceding version. `to` names its intended destination. In this example, the same session acts as the local reader, and the next step saves the publication to a file.
+`purpose` names the operation, and `to` names the intended destination. Returning `True` from `decide` allows this release. The new publication keeps the contract and a reference to the preceding version. This example uses the same session as the local reader; the next step saves the publication to a file.
 
 ### 5. Save and read the publication
 
@@ -123,7 +121,7 @@ print(received.get("message"))
 Hello again!
 ```
 
-`received` is a new editable data object containing the decrypted message.
+`unseal` verifies the publication, runs the application decision, and decrypts the selected groups with this session's keys. `received` is a new editable object containing the plaintext.
 
 Close the session when finished:
 
@@ -136,7 +134,7 @@ The complete walkthrough is available as [hello.py](python/examples/getting_star
 
 ## From a greeting to a bank report
 
-The [bank/vendor program](python/examples/bank_vendor.py) implements the exchange described above. Its setup gives the bank and vendor separate signing identities, then assigns the groups each can read and publish. The use contract is stored in an encrypted governance group that both applications can read:
+The greeting used one application and one field. The [bank/vendor program](python/examples/bank_vendor.py) uses two applications with separate identities and keys. Amounts and customer names go into separate groups. The use contract goes into an encrypted governance group that both applications can read:
 
 | Application | Can open | Can publish |
 | --- | --- | --- |
@@ -181,9 +179,9 @@ Run `python python/examples/bank_vendor.py` for the complete demonstration, incl
 
 ## Optional application rules
 
-The bank/vendor setup checks who signed the object and its requested use as well as the keys. For these checks, the SDK supplies the signer's verified identity (`context.writer`), the object's contracts, the requested use, and the selected groups before decrypting their data. The receiving application decides whether to allow the operation.
+In the greeting, the application accepted the operation with `decide=lambda _: True`, so the matching keys were enough. The bank/vendor example adds checks on the writer and requested use.
 
-Key possession can be the application's entire access rule, as in the greeting. An application can also require a specific writer or an accepted contract. This separate example uses the same `agents.md` file:
+Before decrypting business data, the SDK gives the application the signer's verified identity (`context.writer`), the object's contracts, the requested use, and the selected groups. The application returns `True` or `False`. This example requires a specific writer and contract, using the same `agents.md` file as the greeting:
 
 <!-- tn-example: optional-rule -->
 ```python
@@ -231,7 +229,7 @@ The contract text is input to the application's decision. The SDK calls the deci
 | `Workflow` | Binds configured input and output purposes for repeated operations |
 | `GovernanceView`, `AdmittedObject`, `OpenedObject` | Expose the separate governance, acceptance, and opening stages |
 
-The full set of types is in `tn.governed`; common types such as `Session` and `DataObject` are also exported from `tn`. Provider interfaces are in `tn.providers`. `Session(policy_text, groups=...)` creates fresh local material. `Session.from_config(path)` loads an existing configuration. A context manager or `close()` ends the session independently of other sessions.
+The full set of types is in `tn.governed`; common types such as `Session` and `DataObject` are also exported from `tn`. Provider interfaces are in `tn.providers`. `Session(policy_text, groups=...)` creates a new local identity and keys. `Session.from_config(path)` loads an existing configuration. A context manager or `close()` ends the session independently of other sessions.
 
 | Setup call | Configures |
 | --- | --- |
@@ -289,11 +287,11 @@ Common failures are `VerificationError` for invalid publications, `NotEntitled` 
 
 ## Keys and providers
 
-A fresh session is convenient for a first run. Deployed applications can load identities and keys from persistent storage and assign them to their readers. `FileKeyStore.create(...)` provisions a local store once; `FileKeyStore.open(path)` reopens it. It implements both identity and key resolution. Store its files in private application storage.
+The greeting creates a new session in memory. A deployed application can load identities and keys from storage and assign them to its readers. `FileKeyStore.create(...)` provisions a local store once; `FileKeyStore.open(path)` reopens it. It implements both identity and key resolution. Store its files in private application storage.
 
 The [persistent-key examples](python/examples/persistent_keys/README.md) run setup, publication, and reading in separate processes. They cover three encryption options: BTN for shared reader groups, JWE for specified recipients, and HIBE for keys assigned within a hierarchy. The [capability constructors](docs/GOVERNED_PYTHON_API.md#cipher-capabilities) accept existing key material for these options.
 
-Applications can connect their own infrastructure through five provider contracts:
+Applications with existing identity, key, catalog, or policy services can connect them through these interfaces:
 
 | Interface | Method and responsibility |
 | --- | --- |
@@ -319,7 +317,7 @@ The repository contains [15 application examples](python/examples/enterprise/REA
 | Reuse historical data for a current request | Cache, CQRS, and data product retain source identities and evaluate the selected use |
 | Coordinate publication and change | Monolith, publish/subscribe, saga, archive, and migration separate decisions from transaction and delivery state |
 
-The examples use SQLite for their application records. They show where to commit business state, how to handle duplicates, and what to retain for recovery. TN operations supply signed objects within those transactions; application code owns the transaction and transport behavior.
+The examples use SQLite for their application records. They show where to commit business state, how to handle duplicates, and what to retain for recovery. TN operations supply signed objects inside those transactions. Application code commits business state and chooses how to send the bytes.
 
 ## Testing
 
