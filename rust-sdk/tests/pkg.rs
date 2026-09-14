@@ -1287,7 +1287,8 @@ fn bootstrap_seed_absorb_is_stashed_on_active_runtime() -> tn_proto::Result<()> 
     assert_eq!(receipt.legacy_status, "stashed");
     assert!(receipt.stashed());
     assert_eq!(receipt.accepted_count, 0);
-    assert!(receipt.legacy_reason.contains("no bootstrap handler yet"));
+    assert!(receipt.legacy_reason.contains("for identity bootstrap"));
+    assert_ne!(consumer.did(), producer.did());
 
     Ok(())
 }

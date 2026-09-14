@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -13,6 +13,9 @@ sys.path.insert(0, str(HERE.parent))
 
 from tn import cipher as cipher_mod
 from tn.cipher import BtnGroupCipher, HibeGroupCipher, NotARecipientError
+
+
+UTC = timezone.utc
 
 
 def _load_hibe_with_native(native: types.ModuleType):

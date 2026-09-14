@@ -4,7 +4,7 @@ import base64
 import hashlib
 import json
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,9 @@ from tn.cipher import HibeGroupCipher
 from tn.key_binding import verify_key_binding_proof
 from tn.signing import DeviceKey
 from tn.trust import TrustError, TrustReason
+
+
+UTC = timezone.utc
 
 
 @pytest.fixture(autouse=True)

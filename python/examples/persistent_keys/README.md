@@ -1,6 +1,6 @@
 # Persistent BTN, JWE, and HIBE examples
 
-Install `tn-proto==2026.9.13b5`, then run these commands from the repository root. Each command starts a separate process; the generated installations go beside the checkout:
+Install `tn-proto==2026.9.14b1`, then run these commands from the repository root. Each command starts a separate process; the generated installations go beside the checkout:
 
 ```shell
 python -B python/examples/persistent_keys/setup.py ../tn-btn-demo --cipher btn

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 import zipfile
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -20,6 +20,9 @@ sys.path.insert(0, str(HERE.parent))
 
 import tn
 import tn.reader
+
+
+UTC = timezone.utc
 
 
 @pytest.fixture(autouse=True)

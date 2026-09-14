@@ -203,9 +203,12 @@ def _otel_extra_handlers(mode: str):
     if mode == "none":
         return None
     if mode == "null":
+        from logging import NullHandler
+
         from tn.handlers.otel import OpenTelemetryHandler
 
-        return [OpenTelemetryHandler("otel")]
+        # Measure adapter overhead with an explicit sink that discards records.
+        return [OpenTelemetryHandler("otel", NullHandler())]
     raise ValueError(f"unknown otel handler mode {mode!r}")
 
 

@@ -11,7 +11,7 @@ This guide uses the SDK's local providers, persistent key store, Python callback
 Install the SDK and run these commands from a checkout of this repository:
 
 ```bash
-python -m pip install "tn-proto==2026.9.13b5"
+python -m pip install "tn-proto==2026.9.14b1"
 python python/examples/providers/hello.py
 ```
 

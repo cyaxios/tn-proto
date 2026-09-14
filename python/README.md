@@ -32,7 +32,7 @@ For applications with existing identity, key, or policy services, see the [manag
 ## Install
 
 ```bash
-python -m pip install "tn-proto==2026.9.13b5"
+python -m pip install "tn-proto==2026.9.14b1"
 ```
 
 Python 3.10 or newer. Linux x86-64 and Windows x64 wheels include the native implementation. Install the wheel with pip; use the [Rust SDK](https://github.com/cyaxios/tn-proto/blob/main/rust-sdk/README.md) for Rust applications.
@@ -328,7 +328,7 @@ The release checks execute every Python block in this README, the standalone gre
 From a checkout of this release, install the test dependencies and run the example checks. The Rust command also requires a Rust toolchain:
 
 ```bash
-python -m pip install "tn-proto[test]==2026.9.13b5"
+python -m pip install "tn-proto[test]==2026.9.14b1"
 python python/examples/bank_vendor.py
 python -m pytest python/tests/test_bank_vendor_example.py python/examples/enterprise -q
 cargo test --locked -p tn-btn

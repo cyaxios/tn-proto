@@ -23,6 +23,7 @@ def test_kinds_returns_full_catalog():
         # 2026-04-25 read-ergonomics + agents-group spec.
         "tn.agents.policy_published",
         "tn.read.tampered_row_skipped",
+        "tn.security.unsafe_operation",
     }
     assert len(kinds) == len(event_types)
 

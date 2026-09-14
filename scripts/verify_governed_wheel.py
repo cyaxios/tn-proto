@@ -1,5 +1,7 @@
 """Exercise an installed release wheel outside the source checkout."""
 import importlib.metadata
+import asyncio
+from datetime import timedelta
 import os
 from pathlib import Path
 import re
@@ -37,6 +39,7 @@ def main():
     checkout = Path(__file__).resolve().parents[1]
     assert not Path(tn.__file__).resolve().is_relative_to(checkout)
     assert tn._native.__file__.endswith((".pyd", ".so"))
+    verify_mcp(expected)
     for name in ("Session", "UseContext", "DatasetCatalog", "PolicyDag", "LineageVerifier", "ObjectRegisters", "Workflow"):
         assert hasattr(tn, name), name
     with tempfile.TemporaryDirectory() as temporary:
@@ -74,7 +77,51 @@ def main():
         finally:
             os.chdir(previous)
     verify_examples_and_tests(checkout)
-    print(f"Installed tn-proto {expected}: governed API, providers, persistent keys and enterprise examples passed")
+    print(f"Installed tn-proto {expected}: MCP, governed API, providers, persistent keys and enterprise examples passed")
+
+
+def verify_mcp(expected):
+    with tempfile.TemporaryDirectory(prefix="tn-wheel-mcp-") as temporary:
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        environment.pop("TN_YAML", None)
+        environment.update(TN_NO_STDOUT="1", TN_NO_LINK="1", TN_STATE_DIR=temporary)
+        script = Path(sys.executable).with_name(
+            "tn-mcp-server.exe" if os.name == "nt" else "tn-mcp-server"
+        )
+        assert script.is_file(), f"Missing installed MCP entry point: {script}"
+        for command in ([sys.executable, "-m", "tn.mcp", "--version"],
+                        [str(script), "--version"]):
+            result = subprocess.run(command, cwd=temporary, env=environment,
+                                    text=True, capture_output=True, timeout=30)
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == expected, result.stdout
+
+        async def converse():
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+
+            parameters = StdioServerParameters(
+                command=sys.executable, args=["-m", "tn.mcp"],
+                cwd=temporary, env=environment,
+            )
+            async with stdio_client(parameters) as (read_stream, write_stream):
+                async with ClientSession(
+                    read_stream, write_stream,
+                    read_timeout_seconds=timedelta(seconds=10),
+                ) as session:
+                    initialized = await session.initialize()
+                    assert initialized.serverInfo.name == "tn-mcp-server"
+                    available = await session.list_tools()
+                    assert {"tn_status", "tn_read", "tn_decrypt"} <= {
+                        tool.name for tool in available.tools
+                    }
+
+        async def run():
+            await asyncio.wait_for(converse(), timeout=30)
+
+        asyncio.run(run())
+    print("Installed MCP module, console entry point, and stdio startup passed")
 
 
 def verify_examples_and_tests(checkout):

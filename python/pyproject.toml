@@ -19,7 +19,7 @@ exclude = ["tn/**/*.md"]
 
 [project]
 name            = "tn-proto"
-version         = "2026.9.13b5"
+version         = "2026.9.14b1"
 description     = "TN protocol: signed data, encrypted groups, and governed workflows"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -59,7 +59,7 @@ dependencies = [
     # pure-Python deps; bundling them in core keeps `import tn` clean.
     "mnemonic>=0.21",           # BIP-39 recovery phrase
     "httpx>=0.27",              # vault_client HTTP
-    "mcp>=1.0",                 # Model Context Protocol SDK (tn-mcp-server)
+    "mcp>=1.30,<2",             # Model Context Protocol SDK (tn-mcp-server)
     "base58>=2.1",              # did:key / base58 encoding
     # libsodium bindings used for the Ed25519 -> X25519 key derivation in
     # tn.recipient_seal (sealed-box recipient wrap on encrypted

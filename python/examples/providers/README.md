@@ -1,6 +1,6 @@
 # Provider examples
 
-Install `tn-proto==2026.9.13b5` and run these commands from the repository root:
+Install `tn-proto==2026.9.14b1` and run these commands from the repository root:
 
 ```shell
 python python/examples/providers/hello.py

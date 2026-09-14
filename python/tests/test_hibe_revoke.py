@@ -21,7 +21,7 @@ import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -35,6 +35,9 @@ from tn.canonical import _canonical_bytes
 from tn.cipher import HibeGroupCipher
 from tn.key_binding import KeyBindingProofV1
 from tn.signing import DeviceKey
+
+
+UTC = timezone.utc
 
 
 def _new_cfg(tmp_path: Path, name: str, *, cipher: str = "btn"):

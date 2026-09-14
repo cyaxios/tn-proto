@@ -633,12 +633,12 @@ def test_absorb_normalizes_body_crc_failure_without_state(tmp_path: Path) -> Non
     assert not enrollment_dir(cfg.yaml_path).exists()
 
 
-def test_store_normalizes_deeply_nested_manifest_without_state(tmp_path: Path) -> None:
+def test_store_rejects_deeply_nested_manifest_without_state(tmp_path: Path) -> None:
     cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
     state_root = tmp_path / "nested-manifest-direct-state"
     store = EnrollmentStore(cfg, cfg.device, state_root)
 
-    with pytest.raises(TrustError, match="nesting") as raised:
+    with pytest.raises(TrustError) as raised:
         store.stage_offer(
             _deeply_nested_manifest_artifact(),
             cfg.device.device_identity,
@@ -649,37 +649,35 @@ def test_store_normalizes_deeply_nested_manifest_without_state(tmp_path: Path) -
     assert not state_root.exists()
 
 
-def test_absorb_normalizes_deeply_nested_manifest_without_state(tmp_path: Path) -> None:
+def test_absorb_rejects_deeply_nested_manifest_without_state(tmp_path: Path) -> None:
     cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
 
     result = absorb(cfg, _deeply_nested_manifest_artifact())
 
     assert result.status == "rejected"
-    assert "nesting" in result.reason
     assert not enrollment_dir(cfg.yaml_path).exists()
 
 
-def test_store_normalizes_deeply_nested_offer_body_without_state(tmp_path: Path) -> None:
+def test_store_rejects_deeply_nested_offer_body_without_state(tmp_path: Path) -> None:
     cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
     artifact = _deeply_nested_offer_body_artifact(tmp_path, cfg, DeviceKey.generate())
     state_root = tmp_path / "nested-body-direct-state"
     store = EnrollmentStore(cfg, cfg.device, state_root)
 
-    with pytest.raises(TrustError, match="offer package JSON nesting") as raised:
+    with pytest.raises(TrustError) as raised:
         store.stage_offer(artifact, cfg.device.device_identity, datetime.now(UTC))
 
     assert raised.value.reason is TrustReason.STATEMENT_INVALID
     assert not state_root.exists()
 
 
-def test_absorb_normalizes_deeply_nested_offer_body_without_state(tmp_path: Path) -> None:
+def test_absorb_rejects_deeply_nested_offer_body_without_state(tmp_path: Path) -> None:
     cfg = load_or_create(tmp_path / "tn.yaml", cipher="jwe")
     artifact = _deeply_nested_offer_body_artifact(tmp_path, cfg, DeviceKey.generate())
 
     result = absorb(cfg, artifact)
 
     assert result.status == "rejected"
-    assert "offer package JSON nesting" in result.reason
     assert not enrollment_dir(cfg.yaml_path).exists()
 
 

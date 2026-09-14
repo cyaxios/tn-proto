@@ -209,7 +209,7 @@ public sealed class EmitReadTests
     }
 
     [Fact]
-    public async Task ReadAsyncVerifyFlagsTamperedRows()
+    public async Task ReadAsyncVerifyRejectsTamperedRows()
     {
         var projectDir = Path.Combine(Path.GetTempPath(), "tn-csharp-" + Guid.NewGuid().ToString("N"));
         string logPath;
@@ -231,11 +231,10 @@ public sealed class EmitReadTests
             rawLog.Replace("verify.original", "verify.tampered", StringComparison.Ordinal));
 
         await using var reopened = await Tn.InitAsync(yamlPath);
-        var entries = await reopened.ReadAsync(new ReadOptions { AllRuns = true, Verify = true });
-        var entry = Assert.Single(entries.Where(e => e.EventType == "verify.tampered"));
+        var error = await Assert.ThrowsAsync<TnVerifyException>(() =>
+            reopened.ReadAsync(new ReadOptions { AllRuns = true, Verify = true }));
 
-        Assert.NotNull(entry.Validity);
-        Assert.False(entry.Validity.IsValid);
-        Assert.Equal("tamper-row", entry.GetString("marker"));
+        Assert.Contains("row_hash_invalid", error.FailedChecks);
+        Assert.Equal("verify.tampered", error.EventType);
     }
 }
