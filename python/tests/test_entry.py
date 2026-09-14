@@ -10,6 +10,7 @@ import os as _cipher_os
 def _workflow_cipher(default: str) -> str:
     return _cipher_os.environ.get("TN_TEST_CIPHER", default)
 
+import base64
 import json
 import sys
 from datetime import datetime
@@ -226,8 +227,11 @@ def test_verify_true_raises_on_tampered_ciphertext(tmp_path):
     lines = log.read_text(encoding="utf-8").splitlines(keepends=True)
     victim_idx = next(i for i, ln in enumerate(lines) if "v.x" in ln)
     obj = json.loads(lines[victim_idx])
-    ct = obj["default"]["ciphertext"]
-    obj["default"]["ciphertext"] = ct[:-2] + ("Z" if ct[-2] != "Z" else "Y") + ct[-1]
+    original_ct = base64.b64decode(obj["default"]["ciphertext"])
+    tampered_ct = bytearray(original_ct)
+    tampered_ct[-1] ^= 1
+    obj["default"]["ciphertext"] = base64.b64encode(tampered_ct).decode("ascii")
+    assert base64.b64decode(obj["default"]["ciphertext"]) != original_ct
     lines[victim_idx] = json.dumps(obj, separators=(",", ":")) + "\n"
     log.write_text("".join(lines), encoding="utf-8")
 

@@ -3,3 +3,6 @@
 # otherwise rewrite them to CRLF, which breaks tools/release.sh and any other
 # bash script ("$'\r': command not found"). eol=lf overrides autocrlf.
 *.sh text eol=lf
+
+# Trust fixtures are checked as exact canonical JSON bytes.
+tests/fixtures/trust/v1/*.json text eol=lf
