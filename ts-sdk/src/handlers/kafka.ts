@@ -6,9 +6,8 @@
 // the message key is the envelope's `event_id`, so all rows for one envelope
 // land on the same partition in chain order.
 //
-// Gated behind an OPTIONAL `kafkajs` dependency (lazy-imported, like the
-// firehose handler's optional `ws`). The base wheel/package stays lean; users
-// who declare `kind: kafka` install `kafkajs` themselves.
+// Install the optional `kafkajs` dependency for handlers with `kind: kafka`.
+// The handler imports the client library when it starts.
 //
 // YAML:
 //   - kind: kafka

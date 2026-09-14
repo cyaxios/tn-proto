@@ -13,14 +13,10 @@ array), which becomes the group's opaque `ciphertext`. When row hashing is
 enabled it covers that complete object; a non-empty record signature covers the
 stored hash. Unsigned and unchained profiles use empty hash/signature sentinels.
 
-**When to reach for `jwe`:** the audience is small and enumerated at seal time;
-you want an externally-inspectable, standards-compliant envelope; recipients
-already hold X25519 keys. **When not to:** you need cheap forward revocation of
-an already-admitted reader at scale (use `btn` — jwe revocation is forward-only,
-below), or you seal to someone who holds no key yet (HIBE can model that, but
-its TN scheme/pairing implementation is unaudited and evaluation-only pending
-external cryptographic review; see
-[the security warning](jwe-hibe-key-ceremonies.md#choose-the-cipher-first)).
+**Use `jwe`** for an explicit audience whose X25519 public keys are available
+at seal time. Each reader receives a recipient block in the standard JWE
+object. BTN manages audiences through a broadcast tree; HIBE seals to an
+authority path and lets the authority issue reader keys later.
 
 The cipher is produced by JOSE libraries — **Authlib/joserfc**
 (BSD-3) in Python, **panva/jose** (MIT) in TypeScript/JS. TN does not hand-roll
@@ -192,11 +188,9 @@ included.
 
 ## Notes and limits
 
-- **Revocation is forward-only.** `revoke_recipient` drops a reader from the
-  list so the *next* seal omits their block — but a record they already hold
-  stays open to them (shown above: bob opens the pre-revocation seal, not the
-  post-revocation one). For retroactive lockout of an admitted reader, use
-  `btn`.
+- **Remove a reader.** `revoke_recipient` removes the reader from the recipient
+  list, so subsequent seals omit that block. The example above shows Bob
+  opening the earlier record and being excluded from the subsequent seal.
 - **Group rotation resets the audience.** Rotation archives the active JWE
   files and recreates the group with only the publisher's self-recipient.
   Every external reader must re-enroll an authenticated X25519 public key

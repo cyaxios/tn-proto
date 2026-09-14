@@ -116,7 +116,7 @@ from .offer import offer
 
 # tn.auth namespace - account / session / device enrollment. Library-first
 # (mirrors tn.agents); the CLI is a thin printer over these verbs. See
-# docs/guide/auth-namespace-design.md.
+# docs/guide/auth.md.
 from .auth import AuthError, AuthState, Verdict, auth
 
 
@@ -243,7 +243,6 @@ def _init_impl(
     yaml_path=None,
     *,
     log_path=None,
-    pool_size: int = 4,
     cipher: str = "btn",
     identity=None,
     extra_handlers=None,
@@ -340,7 +339,6 @@ def _init_impl(
         _logger_build_runtime(
             yaml_path,
             log_path=log_path,
-            pool_size=pool_size,
             cipher=cipher,
             identity=identity,
             extra_handlers=extra_handlers,
@@ -1149,7 +1147,6 @@ def __dir__() -> list[str]:
 from . import emit as _emit_module  # noqa: E402
 from ._handle import (  # noqa: E402
     TN,
-    MultiCeremonyEmitNotImplemented,
 )
 
 # --------------------------------------------------------------------------
@@ -1491,7 +1488,6 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "KeystoreConflictError",
     "is_keystore_diverged",
     "LeafReuseAttempt",
-    "MultiCeremonyEmitNotImplemented",
     "PolicyDocument",
     "PolicyTemplate",
     "RotationConflict",
@@ -1516,7 +1512,7 @@ __all__ = [  # noqa: RUF022 — intentional category grouping (see inline commen
     "pkg",
     # vault subpackage (link, unlink)
     "vault",
-    # LLM classifier stub (PRD §6.4)
+    # Application-supplied field routing
     "classifier",
     "clear_context",
     "compile_enrolment",

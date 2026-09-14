@@ -7,9 +7,7 @@ Each rule is a class with:
     check(call) - given a TNCall record, yield Findings.
 
 Rule R1 inspects the first positional arg (event_type literal) for PII
-patterns. Rules R2 and R3 inspect kwarg names. R4 and R5 are stubs --
-they appear in --rules listings but never fire (documented as future
-work in the README).
+patterns. Rules R2 and R3 inspect kwarg names.
 """
 
 from __future__ import annotations
@@ -164,31 +162,6 @@ class R3ForbiddenPostAuth:
 
 
 # --------------------------------------------------------------------------- #
-# R4, R5 - documented future work, never fire
-# --------------------------------------------------------------------------- #
-
-
-class R4PlainLoggingInSensitivePaths:
-    id = "R4"
-    name = "plain logging in sensitive paths (stub)"
-    severity = "warning"
-
-    def check(self, call: TNCall, cfg: LintConfig) -> Iterator[Finding]:
-        del call, cfg  # stub: future-work rule, never fires today
-        return iter(())
-
-
-class R5GroupPolicyDisagreement:
-    id = "R5"
-    name = "project group policy disagrees with pack policy (stub)"
-    severity = "warning"
-
-    def check(self, call: TNCall, cfg: LintConfig) -> Iterator[Finding]:
-        del call, cfg  # stub: future-work rule, never fires today
-        return iter(())
-
-
-# --------------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------------- #
 
@@ -197,8 +170,6 @@ ALL_RULES: tuple[Rule, ...] = (
     R1PiiInEventType(),
     R2UndeclaredField(),
     R3ForbiddenPostAuth(),
-    R4PlainLoggingInSensitivePaths(),
-    R5GroupPolicyDisagreement(),
 )
 
 

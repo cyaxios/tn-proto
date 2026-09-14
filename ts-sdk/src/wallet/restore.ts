@@ -1,11 +1,8 @@
 // Port of tn_proto/python/tn/wallet_restore.py — multi-device restore
 // (account-bound flow).
 //
-// PHASE 2a (this file): the "given a BEK, fetch + decrypt + unpack"
-// core. The full WebAuthn-PRF loopback (TransferToken from
-// wallet_restore_loopback.py) is NOT ported here — that lands as a
-// follow-up. With this MVP a caller who obtained the BEK out-of-band
-// (e.g. via the browser publisher) can hydrate a fresh device.
+// Fetch, decrypt, and unpack account-bound backups using a supplied BEK.
+// Loopback key transfer is implemented in wallet/restore_loopback.ts.
 //
 // Wire shape:
 //   GET /api/v1/projects/{id}/encrypted-blob -> {ciphertext_b64}

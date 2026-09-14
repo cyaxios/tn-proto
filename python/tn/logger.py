@@ -267,12 +267,7 @@ class TNRuntime:
                     continue
                 gnames = self.cfg.field_to_groups.get(k)
                 if not gnames:
-                    # Field has no declared route. Try the LLM classifier (which
-                    # is a stub today and returns "default"). If that yields a
-                    # known group, use it. Otherwise fall back to the default
-                    # group when one exists. As a last resort raise — the silent
-                    # fall-through that hid typos is exactly what multi-group
-                    # routing was meant to fix.
+                    # Route undeclared fields through the registered callback.
                     guess = _classifier._classify(k, v, list(self.cfg.groups))
                     if guess in self.cfg.groups:
                         gnames = [guess]
@@ -502,7 +497,6 @@ def build_runtime(
     log_path: str | os.PathLike[str] | None = None,  # back-compat: forces
     # default_file handler
     # at this exact path
-    pool_size: int = 4,
     cipher: str = "btn",  # only affects fresh ceremonies
     identity=None,  # tn.identity.Identity or None
     extra_handlers: list[TNHandler] | None = None,  # for tests / programmatic
@@ -571,7 +565,7 @@ def build_runtime(
                     flush=True,
                 )
 
-        create_kwargs: dict = {"pool_size": pool_size, "cipher": cipher}
+        create_kwargs: dict = {"cipher": cipher}
         if identity is not None:
             create_kwargs["device_private_bytes"] = identity.device_private_key_bytes()
         elif device_private_bytes is not None:

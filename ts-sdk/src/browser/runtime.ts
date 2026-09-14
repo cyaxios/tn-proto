@@ -123,10 +123,8 @@ export interface BrowserRuntimeFromSeedOptions extends CreateFromSeedOptions {
  * `new BrowserRuntime` directly.
  *
  * Most consumers should use the higher-level {@link Tn} class instead
- * — it adds context-stack merging, level filters, run-id stamping, and
- * the namespaced `tn.admin` / `tn.pkg` / `tn.vault` / `tn.agents` /
- * `tn.handlers` placeholders. `BrowserRuntime` is the low-level
- * runtime layer underneath.
+ * for context-stack merging, level filters, run-id stamping, and
+ * sealed objects.
  *
  * @example
  * ```ts

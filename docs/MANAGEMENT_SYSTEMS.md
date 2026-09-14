@@ -1,10 +1,10 @@
 # Connect TN to management systems
 
-An application may already use an identity directory, a key store, or a service that approves data use. TN's provider interfaces let that application obtain its configuration from those systems and use it in a `Session`.
+TN's provider interfaces load an application's identity, group capabilities, contracts, and workflow settings into a `Session`. Providers also supply the application's decisions when data is accepted, a contract is attached, or a result is published.
 
 The group keys still determine which encrypted fields the session can open. A governance provider adds application decisions about accepting an object, attaching a contract, and publishing a result. These decisions can use the application's current rules.
 
-This guide starts with the SDK's local provider examples, then explains what an adapter for an existing service needs to return. See the [provider reference](GOVERNED_PROVIDERS.md) for the complete interfaces.
+This guide uses the SDK's local providers, persistent key store, Python callbacks, and Unity Catalog examples. See [keys and providers](../README.md#keys-and-providers) for an overview and the [provider reference](GOVERNED_PROVIDERS.md) for complete interfaces.
 
 ## Run the composed example
 
@@ -67,7 +67,7 @@ print(sorted(keys.resolve(vendor).groups))
 
 `tn.agents` holds contract metadata. `LocalKeys` includes access to that metadata when assigning business groups. The vendor has no capability for the `identity` group and no publication capability in this assignment. The [complete bank/vendor example](../python/examples/bank_vendor.py) also gives the vendor a group in which to publish its report.
 
-`LocalKeys` creates fresh group material using BTN, the SDK's broadcast-encryption option. Its assignments share that material, so this helper does not give each identity a separately revocable enrollment. BTN also supports individual reader enrollments, each with a reader kit containing its decryption material. An administrator that manages those enrollments can load their kits through `GroupCapability.btn_reader`.
+`LocalKeys` assigns shared BTN group material. For individually revocable readers, load each reader's BTN enrollment through `GroupCapability.btn_reader(group, kits, index)`. The [provider reference](GOVERNED_PROVIDERS.md#load-provisioned-identities-and-keys) lists the constructors for existing reader and publisher material.
 
 ## Reuse keys across processes
 
@@ -83,9 +83,9 @@ The final command prints `Hello, world!`. Setup requires a new directory and ref
 
 The directory contains private credentials. Keep it under the application's account permissions and outside shared publication storage. [`configuration.py`](../python/examples/persistent_keys/configuration.py) opens the store and passes it to both the identity and key provider slots. The same examples include [JWE and HIBE configurations](../python/examples/persistent_keys/README.md).
 
-## Use an existing service
+## Provider values and callbacks
 
-Replace a local provider with a Python object implementing the corresponding interface. Its methods can call your service's client and convert the response to the native TN types listed here:
+Pass a Python object implementing the corresponding interface to `Providers`. Its methods return the native TN values listed here:
 
 | Integration | Python method | Required result |
 | --- | --- | --- |
@@ -97,19 +97,34 @@ Replace a local provider with a Python object implementing the corresponding int
 | Dataset lookup | `resolve(request)` | `CatalogEntry` containing an accepted edition selection and its exact publication. |
 | Event recording | `record(event)` | Record the supplied event; no return value. |
 
-The SDK includes the local adapters used above. A client for your identity directory, cloud key service, or policy engine belongs in the adapter you supply. The [Python signatures](../python/tn/providers/__init__.pyi) and [provider tests](../python/tests/test_governed_providers.py) show the accepted values and how Python adapters compose with native operations.
+The [provider tests](../python/tests/test_governed_providers.py) exercise Python identity, key, governance, catalog, and recording callbacks alongside the local adapters. The [Python signatures](../python/tn/providers/__init__.pyi) give their argument and return types.
 
-For existing encryption material, `GroupCapability` has BTN reader and publisher constructors, plus `jwe` and `hibe` constructors. These accept the cipher-specific key material and group index key; a service's arbitrary key identifier is not a TN capability. Rust validates the supplied material and performs encryption and decryption. The [HIBE delegation example](../python/examples/persistent_keys/hibe_delegation.py) shows provisioning from an external authority.
+For a provisioned identity, `LocalIdentity.from_private_bytes(application, seed)` loads a 32-byte Ed25519 seed into the native signer. `GroupCapability` loads BTN state and reader kits, JWE X25519 keys, or HIBE public parameters and scoped reader keys, together with a group index key. Rust validates this material and performs signing, encryption, and decryption in the TN process. The [imported-material test](../python/tests/test_governed_providers.py) runs a complete workflow with an existing seed and BTN capabilities; the [HIBE delegation example](../python/examples/persistent_keys/hibe_delegation.py) loads a delegated reader grant.
 
-The identity interface currently supplies a native signer with a local private seed. Using a nonexportable signing key in an HSM would require an additional signing interface.
+`FileKeyStore` provides the same identity and key values from a saved application installation, as shown above. Applications supply identity and key callbacks during session construction, and governance callbacks at each decision point.
+
+## Key loading, credential caching, and S3 encryption
+
+The SDK supplies these paths for application key material and storage credentials:
+
+| Path | Implemented operation | Where it is used |
+| --- | --- | --- |
+| Provisioned signing seed | `LocalIdentity.from_private_bytes(application, seed)` loads the Ed25519 seed; Rust signs with the resulting `DeviceKey`. | Governed session identity. |
+| Assigned group material | `KeyProvider.resolve(identity)` returns a `KeySet` of validated `GroupCapability` values. | Native group encryption and decryption in the session. |
+| Saved application installation | `FileKeyStore.create` and `open` persist and reload the signing identity and group capabilities. | The [persistent examples](../python/examples/persistent_keys/README.md). |
+| Current application decisions | `GovernanceProvider.accept`, `attach`, and `release` return a Boolean for each operation. | Governed receipt, attachment, and publication. |
+| Account wrapping-key cache | [`default_credential_store`](../python/tn/credential_store.py) selects a usable OS `keyring` backend or `FileCredentialStore`; both expose `get`, `set`, and `delete`. | Account initialization and wallet key pickup. |
+| S3 server-side encryption | [`S3Handler`](../python/tn/handlers/s3.py) passes `sse="aws:kms"` and `sse_kms_key_id` as `ServerSideEncryption` and `SSEKMSKeyId` in `put_object`. | Storage encryption for uploaded log batches; install the `tn-proto[s3]` extra. |
+
+The account credential cache stores the account wrapping key used by initialization and wallet operations. The governed examples load their signing and group material through `FileKeyStore` or the provider constructors. S3 encryption is applied by the storage service to the uploaded batch.
 
 ## Check current rules when opening or publishing
 
-A session resolves its keys and workflow configuration during setup. Changing a key provider's assignments later does not update an existing session's capabilities.
+A session resolves its keys and workflow configuration during setup and retains that capability snapshot. Create a new session to use changed key assignments.
 
-The session calls governance methods again for each acceptance, attachment, and release. An adapter can therefore consult a policy service or key-management service at those points to check whether the requested use is still approved. It should return `False` when approval is refused and propagate service failures so the operation stops. TN supplies the operation's context; the application supplies the judgment.
+The session calls governance methods again for each acceptance, attachment, and release. Each callback receives the operation's context and returns the application's current decision. Return `False` to refuse; a callback exception stops the operation.
 
-The `test_live_python_decision_and_strict_bool` case in the [provider tests](../python/tests/test_governed_providers.py) changes a decision after session creation and verifies that subsequent operations are refused. An online refusal cannot erase plaintext or keys already held by an application. To exclude a reader from future publications cryptographically, use the cipher's revocation/provisioning operations described in [keys and revocation](../README.md#keys-providers-and-revocation).
+The `test_live_python_decision_and_strict_bool` case in the [provider tests](../python/tests/test_governed_providers.py) changes a decision after session creation and verifies that subsequent operations are refused.
 
 ## Catalogs and records
 

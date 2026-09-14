@@ -1,7 +1,6 @@
 //! `.tnpkg` producer / consumer: [`Runtime::export`] and [`Runtime::absorb`].
 //!
-//! The universal package path (Section 3.2 of the 2026-04-24 admin log
-//! architecture plan), behind the `tn export` / `tn absorb` CLI verbs.
+//! Package export and import for the `tn export` / `tn absorb` CLI verbs.
 //! [`Runtime::export`] packs local ceremony state into a signed `.tnpkg`
 //! described by [`ExportOptions`]; [`Runtime::absorb`] reads one back, verifies
 //! its manifest, applies it, and returns an [`AbsorbReceipt`]. The wire format
@@ -158,8 +157,8 @@ impl Runtime {
     /// `confirm_includes_secrets = true` (the foot-gun gate on exporting raw
     /// private keys), or when a kind's required inputs are missing (e.g. an
     /// `Offer` without `package_body`, or a kit bundle over an empty keystore).
-    /// Returns [`crate::Error::NotImplemented`] for kinds Rust does not yet
-    /// produce (`RecipientInvite`, `ContactUpdate`). Filesystem and zip failures
+    /// Returns [`crate::Error::NotImplemented`] for kinds outside this exporter
+    /// (`RecipientInvite`, `ContactUpdate`, `GroupKeys`). Filesystem and zip failures
     /// surface as their underlying [`crate::Error`] variants.
     ///
     /// # Examples
@@ -271,12 +270,12 @@ impl Runtime {
             }
             ManifestKind::RecipientInvite => {
                 return Err(Error::NotImplemented(
-                    "export(kind=RecipientInvite) not yet wired in Rust",
+                    "Runtime::export does not produce recipient_invite packages",
                 ));
             }
             ManifestKind::ContactUpdate => {
                 return Err(Error::NotImplemented(
-                    "export(kind=ContactUpdate) not yet wired in Rust",
+                    "Runtime::export does not produce contact_update packages",
                 ));
             }
             ManifestKind::GroupKeys => {
@@ -284,7 +283,7 @@ impl Runtime {
                 // with scope="group_keys" (Python export_group_keys / TS
                 // wallet sync); Rust has no dedicated producer.
                 return Err(Error::NotImplemented(
-                    "export(kind=GroupKeys) not yet wired in Rust; \
+                    "Runtime::export requires full_keystore for group-key snapshots; \
                      export full_keystore with scope=\"group_keys\" instead",
                 ));
             }
@@ -611,7 +610,7 @@ impl Runtime {
                 // for the caller to route however they want.
                 legacy_status: "stashed".into(),
                 legacy_reason: format!(
-                    "Rust runtime does not yet apply {} packages locally; \
+                    "Runtime::absorb returns {} packages for caller dispatch; \
                      decode body/package.json to act on it.",
                     manifest.kind.as_str()
                 ),
@@ -625,10 +624,7 @@ impl Runtime {
                 derived_state: None,
                 conflicts: Vec::new(),
                 legacy_status: "rejected".into(),
-                legacy_reason: format!(
-                    "absorb: kind {:?} is reserved but not implemented in Rust",
-                    manifest.kind.as_str()
-                ),
+                legacy_reason: format!("Runtime::absorb rejects kind {:?}", manifest.kind.as_str()),
                 replaced_kit_paths: Vec::new(),
             }),
             ManifestKind::ContactUpdate => Ok(AbsorbReceipt {
@@ -640,9 +636,8 @@ impl Runtime {
                 conflicts: Vec::new(),
                 legacy_status: "stashed".into(),
                 legacy_reason: format!(
-                    "absorb: kind {:?} round-trips through read_manifest but \
-                     Rust runtime has no handler yet (per spec §4.6). \
-                     Decode body/package.json on the Python side to act on it.",
+                    "Runtime::absorb leaves kind {:?} for application dispatch; \
+                     use the Rust SDK contact-update parser and receiver.",
                     manifest.kind.as_str()
                 ),
                 replaced_kit_paths: Vec::new(),
@@ -656,8 +651,8 @@ impl Runtime {
                 conflicts: Vec::new(),
                 legacy_status: "stashed".into(),
                 legacy_reason: format!(
-                    "absorb: kind {:?} round-trips through read_manifest but \
-                     Rust runtime has no bootstrap handler yet.",
+                    "Runtime::absorb leaves kind {:?} for identity bootstrap; \
+                     initialize the identity before opening a ceremony runtime.",
                     manifest.kind.as_str()
                 ),
                 replaced_kit_paths: Vec::new(),
@@ -672,11 +667,8 @@ impl Runtime {
                 conflicts: Vec::new(),
                 legacy_status: "stashed".into(),
                 legacy_reason: format!(
-                    "absorb: kind {:?} round-trips through read_manifest but \
-                     the Rust runtime has no group-key install handler yet. \
-                     On the wire group_keys rides `full_keystore` with \
-                     scope=\"group_keys\" and is applied by the Python/TS \
-                     absorb paths.",
+                    "Runtime::absorb leaves kind {:?} for application dispatch; \
+                     group-key snapshots use full_keystore with scope=\"group_keys\".",
                     manifest.kind.as_str()
                 ),
                 replaced_kit_paths: Vec::new(),

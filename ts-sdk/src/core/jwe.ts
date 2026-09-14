@@ -4,7 +4,7 @@
 // body, the TN marker bound as the native JWE `aad` member. Output is a JWE
 // General JSON Serialization object — the same standard the Python side emits,
 // so a record sealed by either impl opens in the other (see
-// docs/JWE-cipher-spec.md).
+// docs/guide/jwe-howto.md).
 //
 // Runtime: panva/jose leans on the WebCrypto global (`globalThis.crypto`),
 // which is present in browsers, Deno, Cloudflare Workers, and Node >= 20 (the
@@ -12,7 +12,7 @@
 // absent and these calls throw `crypto is not defined`; run on a supported Node.
 //
 // TypeScript JWE uses panva/jose. The native Rust SDK now has its own RFC 7516
-// implementation; only the wasm path lacks a Rust JOSE surface. These calls are
+// implementation. These calls are
 // ASYNC (they use WebCrypto), which is why jwe seals/opens ride the async
 // emit/read path
 // (`emitAsync` / `readAsync` / `decryptGroupAsync`) rather than the synchronous

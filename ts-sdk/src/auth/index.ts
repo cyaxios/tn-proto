@@ -4,8 +4,7 @@
  * Library-first, mirroring python tn/auth.py: every verb returns an AuthState
  * (or throws AuthError); the CLI (bin/tn-js.mjs) is a thin printer over this.
  * The shared identity-load / vault-resolve / key-cache / enroll logic lives
- * here once. Design:
- * docs/guide/auth-namespace-design.md
+ * here. See docs/guide/auth.md.
  *
  * G1 note (mirrors Python): TN_API_KEY cold-start is keystore-population and
  * ceremony-scoped, so it lives in the init/runtime layer, not account-level

@@ -165,7 +165,7 @@ export class WalletNamespace {
    *
    * Idempotent: if the ceremony is already linked to the same vault, returns
    * the existing state untouched. If linked to a *different* vault, throws
-   * VaultError (the user must `wallet.unlink` first — not yet ported).
+   * VaultError. Call `tn.wallet.unlink` to remove the existing link first.
    *
    * If `createProject` returns 409, the method falls back to `listProjects`
    * and reuses the matching project (the same recovery path Python takes).

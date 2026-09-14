@@ -515,13 +515,6 @@ class _DeviceKeyIdentity:
     def device_private_key_bytes(self) -> bytes:
         return self._device.private_bytes
 
-    def vault_wrap_key(self) -> bytes:
-        raise NotImplementedError(
-            "vault.pull handler does not expose a wrap key — sealed file "
-            "download is not part of the snapshot pull path."
-        )
-
-
 __all__ = ["VaultPullHandler", "pull_inbox"]
 
 # Keep imports stable; lint shouldn't complain.

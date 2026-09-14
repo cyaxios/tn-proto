@@ -18,6 +18,13 @@ from tn.lint.rules import ALL_RULES
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
+def test_cli_advertises_only_rules_that_check_calls() -> None:
+    from tn.lint.cli import _build_parser
+
+    help_text = " ".join(_build_parser().format_help().split())
+    assert "Available: R1,R2,R3." in help_text
+
+
 @pytest.fixture(scope="module")
 def cfg():
     return load_config(FIXTURES / "tn.yaml", cwd=FIXTURES)
@@ -27,8 +34,8 @@ def _findings_for(cfg, fixture_name: str):
     return lint_paths([FIXTURES / fixture_name], cfg, ALL_RULES, relative_to=FIXTURES)
 
 
-def test_extends_resolves_to_repo_pack(cfg) -> None:
-    assert "pci-cardholder" in cfg.extends_loaded
+def test_extends_resolves_to_fixture_pack(cfg) -> None:
+    assert "test-policy" in cfg.extends_loaded
     assert "cvv" in cfg.forbidden_post_auth
     assert "pin" in cfg.forbidden_post_auth
 

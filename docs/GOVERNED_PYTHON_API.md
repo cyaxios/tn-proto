@@ -10,7 +10,7 @@ Key possession can be the application's entire access rule. With `decide=lambda 
 
 Group encryption determines which business groups a reader has the capability to decrypt. A signature authenticates a publication under its writer's signing key. Admission is the application's decision that the verified writer, carried contracts, selected groups, and complete requested use are acceptable.
 
-Those checks answer different questions. A valid signature does not establish permission to use data. Possession of a reader key does not approve every use. Within governed receipt, the decision runs before selected business-group plaintext is returned. Applications supply their decision procedures; TN does not execute the prose of a contract as a policy language or prevent arbitrary programs from using plaintext they already possess.
+The matching group key opens the encrypted data. Within governed receipt, an application can add a decision before selected business-group plaintext is returned. The SDK supplies the verified writer, contract, and requested use to that decision.
 
 Public envelope metadata and ciphertext lengths remain visible. Equality tokens reveal equality within their configured key domain. A signed chain can establish the observed predecessor relationships; an independently known expected head is needed to detect a missing suffix. Retain publications and expected identities when completeness matters.
 
@@ -86,7 +86,7 @@ The names `accept_invoice`, `accept_report`, and `accept_additional_contract` ar
 
 `session.workflow(*, receive, release)` requires both purposes to exist and captures their settings. Later registration does not change an existing workflow. The captured evaluators execute for every operation and may consult current application authorization state. Binding selects configuration; it does not approve future data in advance.
 
-The release destination is part of the decision context. Release returns a signed object; it does not send an HTTP request, enqueue a message, or establish a destination's receipt.
+The release destination is part of the decision context. Release returns a signed object that the application can save, enqueue, or send through its chosen transport.
 
 ## Object operations
 
@@ -212,7 +212,7 @@ print(opened.groups["amounts"])
 
 Verification authenticates the publication and validates its governed shape and bindings. Obtaining its governance view opens the governance available to that reader, not the business groups. `accept` binds the verified object, accepting reader, requested complete use, and selected groups. `open` requires that binding and the corresponding key capabilities; requesting a wider selection is refused.
 
-`session.reader(*, groups=None)` makes a reader with selected capabilities. Its `.governance(publication)` and `.open(admitted, groups)` expose the same explicit stages. A permissive evaluator cannot supply a missing decryption key.
+`session.reader(*, groups=None)` makes a reader with selected capabilities. Its `.governance(publication)` and `.open(admitted, groups)` expose the same explicit stages. Opening uses the corresponding group keys.
 
 `OpenedObject` exposes `.groups`, `.hidden_groups`, `.governance`, `.object`, and `.use_context`. `.derive(object_type)` creates a draft under inherited governance; `.derive_under(object_type, governance)` supplies an explicit derivation contract. Ordinary mutable application work generally uses `receive` instead.
 
@@ -290,9 +290,9 @@ Custom key providers return `KeySet(identity, capabilities)` using the following
 | `GroupCapability.jwe(group, recipients, readers, index)` | X25519 public recipient keys, private reader keys, and index key. |
 | `GroupCapability.hibe(group, public, path, readers, index)` | HIBE public parameters, target identity path, scoped reader keys, and index key. |
 
-Constructors validate serialized material in Rust. Retained reader capabilities can cover historical generations. Assign only the groups needed by an application; supplying a permissive policy decision does not manufacture a missing key. Revocation or rotation governs future ciphertext according to the chosen cipher and key schedule; it cannot retract plaintext or keys a reader already retained.
+Constructors validate serialized material in Rust. Assign each application the group capabilities it needs. Providers load that material into the session for signing and opening objects.
 
-The BTN implementation compresses maximal unary paths in its subset-difference cover. In the height-eight tree, one revoked leaf uses one difference label and a ciphertext length of `payload_bytes + 132`; no revocation uses the full-tree label and `payload_bytes + 114`. For a nonempty revoked set of size `r`, the cover has at most `min(2r - 1, 256 - r)` entries. The existing label format and 1,881-byte reader kits are unchanged. The earlier paper implementation used eight entries for one revoked leaf; those measurements remain historical evidence for its pinned SDK revision. See the [BTN cover guide](BTN_COVER.md) for construction and compatibility evidence.
+The [BTN cover reference](BTN_COVER.md) describes the subset-difference labels, tree configuration, and ciphertext encoding.
 
 ## Persistent identities and keys
 
@@ -311,7 +311,7 @@ providers = Providers(store, store, governance)
 
 `create` enrolls that application as reader and publisher for the named groups and `tn.agents`. It refuses an existing path. `open` validates the existing store and does not replace missing or malformed material with a new identity. Properties are `application`, `cipher`, `path`, and `groups`.
 
-The store contains a signing seed and key capabilities and is **not encrypted at rest** by this provider. Unix creation uses mode `0600`; Windows protection depends on the containing directory's access controls. Put it in private application storage and distribute publications separately. For another application's narrower grants, use assigned capabilities through a key provider rather than copying a publisher's complete secret store.
+Store the signing seed and key capabilities in private application storage. Unix creation uses mode `0600`; Windows uses the containing directory's access controls. Assign each application its own capabilities through a key provider.
 
 Supported file-store cipher choices are `btn`, `jwe`, and `hibe`. JWE uses native content encryption and recipient wrapping. HIBE file-store creation generates separate depth-one group authorities and retains the resulting public parameters and scoped reader keys, not authority master secrets. Hierarchical authority provisioning/delegation is a separate operation illustrated in [hibe_delegation.py](../python/examples/persistent_keys/hibe_delegation.py).
 
@@ -326,13 +326,13 @@ session = tn.Session.from_config("service.yaml", registers=registers)
 
 Use `ObjectRegisters()` to explicitly disable both registers. When omitted, native session setup captures `TN_OBJECT_CREATION_REGISTER` and `TN_OBJECT_RELEASE_REGISTER`. Explicit configuration overrides those paths.
 
-Registers record signed metadata about creation and release. A failed register write is exposed as `data.register_error`; the signed publication remains available. Configure the application response to that failure explicitly. These files do not supply atomic commitment with an application's database update or guarantee message delivery.
+Registers record signed metadata about creation and release. A failed register write is exposed as `data.register_error`; the signed publication remains available. Configure the application's transaction and recovery behavior around those results.
 
 Provider-backed applications pass `FileRegisters(registers)` or their own `RegisterProvider`. A Python `RegisterEvent` exposes `action`, the signed `publication`, `purpose`, `destination`, and `policy_refs`. The Python callback does not receive the private signing key.
 
 ## Policy revisions, dataset editions, and lineage
 
-These APIs bind accepted policy revisions and dataset purchases to exact signed publications. They do not infer permission from an edition name alone.
+These APIs bind accepted policy revisions and dataset editions to exact signed publications and their selected uses.
 
 1. Build a `PolicyRevisionDraft.from_markdown(...)`, add any parents with `.parent(revision_id, relation)`, convert it with `.into_draft(administration_contract)`, and seal it as an administrative publication.
 2. Verify and admit that record before constructing `PolicyRevision.from_opened(opened)`. `PolicyDag.admit(revision, decide)` applies the authority/parent decision. `dag.select(revision_id, scope, decide)` returns the selected contract.
@@ -348,7 +348,7 @@ These APIs bind accepted policy revisions and dataset purchases to exact signed 
 
 ## Application patterns
 
-The [fifteen enterprise examples](../python/examples/enterprise/README.md) apply the object verbs to the following application responsibilities. Their calculations and database transactions belong to the examples, not to an automatic TN service.
+The [fifteen enterprise examples](../python/examples/enterprise/README.md) combine the object verbs with application calculations and database transactions.
 
 | Pattern | Application decision and retained state |
 | --- | --- |
@@ -368,7 +368,7 @@ The [fifteen enterprise examples](../python/examples/enterprise/README.md) apply
 | Durable workflow | Resume from accepted source identities/checkpoints and recover committed outputs. |
 | Strangler migration | Share accepted request/reply state across old and replacement implementations. |
 
-For dataframe or model integrations, admit data before handing plaintext to the library, record contributors with `include`, and release through the configured application boundary. OPA, Polars, and model-serving adapters are separate dependencies and integrations. TN carries evaluator bindings and contracts; it does not install those systems or establish regulatory compliance by itself.
+For dataframe or model integrations, admit data before passing it to the library, record contributors with `include`, and release through the configured application decision. TN carries the evaluator bindings and contracts with the result.
 
 ## Errors and integration checks
 
@@ -382,6 +382,4 @@ For dataframe or model integrations, admit data before handing plaintext to the 
 | `ValueError` / `TypeError` | Invalid arguments, incompatible bindings, or evaluator failure; inspect the error. |
 | `data.register_error` | Publication exists but optional recording failed; apply the application's recovery rule. |
 
-Do not assume all failures use one exception class. Configured callback failures may surface as `ValueError` with the original description. Test acceptance, refusal, missing-key behavior, exact source identity, and retry handling for each integration.
-
-The repository's SDK suites and these executable examples validate the release's interfaces. The ICISSP experiment used a separate artifact pinned to `c83a46a57310fcaccc832e50d6dbd75bd477b5b5`; its 34 Python cases, ten native cases, and benchmark tables are artifact-specific historical results, not current SDK suite counts or release performance claims. The [paper reproducibility review](PAPER_REPRODUCIBILITY.md) records the source evidence, reproduction prerequisites, and PDF corrections.
+Configured callback failures may surface as `ValueError` with the original description. Test acceptance, refusal, missing-key behavior, exact source identity, and retry handling for each integration.

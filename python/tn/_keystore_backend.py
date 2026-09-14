@@ -1,9 +1,8 @@
-"""Keystore persistence backend.
+"""Atomic writes and compare-and-swap persistence for cipher state.
 
-Owns the atomic-write primitive plus the CAS protocol for multi-writer
-safety. The cipher layer used to do ``path.write_bytes(...)`` directly;
-that pattern has no tear-resistance and no concurrency story. Enrollment
-state also reuses this primitive for its durable local records.
+The local backend serializes concurrent updates with file locks and checks
+the previous state before replacing it. Enrollment records also use the
+atomic-write primitive.
 """
 from __future__ import annotations
 
@@ -26,11 +25,10 @@ class KeystoreConflictError(Exception):
 
 
 class KeystoreBackend(Protocol):
-    """Pluggable persistence for cipher state.
+    """Read cipher state and update it with compare-and-swap writes.
 
-    Today: one Local backend (filesystem). Future: remote backends
-    (database, vault, KV with conditional writes) plug in without
-    touching cipher callers.
+    ``LocalFileKeystoreBackend`` implements this protocol with per-group
+    files and advisory locks.
     """
 
     def read_state(self, group_name: str) -> bytes | None:

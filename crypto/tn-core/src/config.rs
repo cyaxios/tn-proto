@@ -156,10 +156,6 @@ pub struct Ceremony {
     /// Project id for linked-mode ceremonies.
     #[serde(default)]
     pub linked_project_id: Option<String>,
-    /// Legacy/ignored sync logs flag. Vault sync never includes
-    /// application logs.
-    #[serde(default)]
-    pub sync_logs: bool,
     /// Where to route `tn.*` admin events: `"main_log"` or path template.
     ///
     /// Yaml key: `admin_log_location` (preferred) or legacy
@@ -175,9 +171,7 @@ pub struct Ceremony {
     /// Whether each emitted entry is signed by the publisher's Ed25519
     /// device key. `true` (default) produces fully attested logs. `false`
     /// skips the signature step — entries still carry row_hash + prev_hash
-    /// for chain integrity, but lack identity attestation. Useful for
-    /// high-throughput observability flows where batch-signing (RFC
-    /// `2026-04-22-tn-transaction-protocol`) is not yet implemented.
+    /// for chain integrity, but lack identity attestation.
     #[serde(default = "default_sign")]
     pub sign: bool,
     /// Whether to maintain a per-event_type hash chain (sequence +
@@ -336,10 +330,6 @@ pub struct GroupSpec {
     /// Declared recipients (used at ceremony setup; run-time cipher loads its own state files).
     #[serde(default)]
     pub recipients: Vec<GroupRecipient>,
-    /// Recipient pool size. Written into ceremony yamls and admin events
-    /// for schema stability; no current cipher consumes it.
-    #[serde(default)]
-    pub pool_size: Option<u32>,
     /// Incremented when keys rotate; feeds into HKDF info for index-key derivation.
     #[serde(default)]
     pub index_epoch: u64,
@@ -362,20 +352,6 @@ pub struct GroupSpec {
 pub struct FieldRoute {
     /// Group name to route this field into.
     pub group: String,
-}
-
-/// LLM classifier block (stubbed on the Rust side — classification stays Python).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LlmClassifier {
-    /// Whether the classifier is on.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Provider identifier.
-    #[serde(default)]
-    pub provider: String,
-    /// Model identifier.
-    #[serde(default)]
-    pub model: String,
 }
 
 /// Receiver-local writer trust configured for secure reads.
@@ -423,9 +399,6 @@ pub struct Config {
     /// Optional per-field group routing.
     #[serde(default)]
     pub fields: BTreeMap<String, FieldRoute>,
-    /// Optional LLM classifier config.
-    #[serde(default)]
-    pub llm_classifier: LlmClassifier,
     /// Handler specs (opaque for the Rust side — left to the host to interpret).
     #[serde(default)]
     pub handlers: Vec<serde_yml::Value>,
@@ -652,7 +625,7 @@ fn apply_vault_block_defaults(vault: &mut Vault, yaml: &str) {
 //
 // Merge rules (must stay in lockstep with the Python + TS implementations):
 //   - parent-owned keys (me, keystore, groups, fields, public_fields,
-//     default_policy, llm_classifier): parent wins; child override is
+//     default_policy): parent wins; child override is
 //     dropped silently in Rust (Python logs a warning — Rust doesn't
 //     have an equivalent ergonomic logger plumbed through here, so we
 //     stay silent and match the on-disk merged shape).
@@ -676,7 +649,6 @@ const PARENT_OWNED_KEYS: &[&str] = &[
     "fields",
     "public_fields",
     "default_policy",
-    "llm_classifier",
 ];
 
 /// Maximum depth of an `extends:` chain. Belt-and-suspenders alongside

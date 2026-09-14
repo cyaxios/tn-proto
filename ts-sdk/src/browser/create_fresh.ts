@@ -19,7 +19,7 @@
  * - No `Buffer`. Hex and UTF-8 are pure JS.
  *
  * The yaml literal mirrors `createFreshCeremony`'s byte-for-byte —
- * public-fields list, group block, `llm_classifier` defaults — so a
+ * public-fields list and group block — so a
  * yaml minted in the browser can be diffed against a Python-minted one
  * and only the ceremony id + DID differ.
  *

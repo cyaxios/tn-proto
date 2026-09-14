@@ -842,11 +842,7 @@ fn write_project_ceremony(
          \x20     - recipient_identity: \"{did}\"\n\
          \x20   index_epoch: 0\n\
          \x20   fields: [instruction, use_for, do_not_use_for, consequences, on_violation_or_error, policy]\n\
-         fields: {{}}\n\
-         llm_classifier:\n\
-         \x20 enabled: false\n\
-         \x20 provider: \"\"\n\
-         \x20 model: \"\"\n",
+         fields: {{}}\n",
     );
     atomic_write_bytes(&project_root.join("tn.yaml"), yaml.as_bytes())?;
     Ok(())

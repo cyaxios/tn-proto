@@ -1,9 +1,7 @@
 # tn-proto C# SDK Reference
 
-Reference for the in-repo C# SDK preview.
-
-The C# SDK is in early preview. It includes a .NET workspace and a low-level
-native bridge over the shared Rust core:
+The C# SDK provides a .NET interface and a native bridge over the shared Rust
+core:
 
 ```csharp
 using TnProto;
@@ -25,7 +23,7 @@ await using var tn = await Tn.InitProjectAsync(
 await using var reopened = await Tn.InitAsync(tn.YamlPath);
 ```
 
-Currently exposed:
+Public APIs:
 
 - `Tn.InitAsync(yamlPath)`
 - `Tn.InitProjectAsync(project, options)`
@@ -390,7 +388,7 @@ Primary API namespaces:
 
 ## Native Bridge Foundation
 
-The preview now includes a low-level native bridge namespace:
+The native bridge namespace exposes the shared Rust core:
 
 ```csharp
 using TnProto.Native;
@@ -398,7 +396,7 @@ using TnProto.Native;
 var version = NativeBridge.Version();
 ```
 
-Currently bridged:
+Native operations:
 
 - native bridge version
 - last native error
@@ -450,6 +448,6 @@ cargo build -p tn-core-ffi
 dotnet test csharp-sdk/TnProto.sln
 ```
 
-Watch APIs are v0 polling/read-backed APIs. `EventType` and
+Watch APIs poll the readable entry set. `EventType` and
 `EventTypePrefix` are conjunctive when both are set, and `PollingWatch` resets
 its cursor if the visible entry count shrinks between polls.

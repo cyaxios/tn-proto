@@ -27,7 +27,6 @@ from typing import Any
 import yaml
 
 from . import cipher as _cipher
-from . import classifier as _classifier
 from . import indexing as _indexing
 from ._keystore_backend import atomic_write_bytes
 from .signing import DeviceKey
@@ -167,7 +166,6 @@ def _validate_pel_template(template: str, yaml_dir: Path) -> None:
     _validate_path_template(template, yaml_dir, key_name="protocol_events_location")
 
 
-DEFAULT_POOL_SIZE = 4
 DEFAULT_PUBLIC_FIELDS = [
     # Envelope-routing fields every request handler sets.
     "timestamp",
@@ -232,8 +230,7 @@ class GroupConfig:
 
     `cipher` is the GroupCipher instance for this group — the ceremony
     picks one at create_fresh() time and it's stored in the YAML at
-    `ceremony.cipher`. `pool_size` is recorded for schema stability;
-    no current cipher consumes it.
+    `ceremony.cipher`.
 
     `index_key` is the HKDF-derived HMAC key for this group's equality
     index tokens. Derived from the ceremony master secret bound to
@@ -242,7 +239,6 @@ class GroupConfig:
 
     name: str
     cipher: _cipher.GroupCipher
-    pool_size: int = 4
     unissued_slots: list[int] = field(default_factory=list)
     index_key: bytes = b""
     index_epoch: int = 0
@@ -490,7 +486,6 @@ def _create_group(
     master_index_key: bytes,
     ceremony_id: str,
     cipher_name: str,
-    pool_size: int = 4,
     epoch: int = 0,
     recipient_dids: list[str] | None = None,
     recipient_pubs: dict[str, bytes] | None = None,
@@ -533,7 +528,6 @@ def _create_group(
     return GroupConfig(
         name=name,
         cipher=inst,
-        pool_size=pool_size,
         unissued_slots=unissued,
         index_key=_indexing._derive_group_index_key(master_index_key, ceremony_id, name, epoch),
         index_epoch=epoch,
@@ -543,7 +537,6 @@ def _create_group(
 def create_fresh(
     yaml_path: Path,
     *,
-    pool_size: int = DEFAULT_POOL_SIZE,
     cipher: str = "btn",
     device_private_bytes: bytes | None = None,
     keystore_dir: Path | None = None,
@@ -661,7 +654,6 @@ def create_fresh(
         master_index_key=master_index_key,
         ceremony_id=ceremony_id,
         cipher_name=cipher,
-        pool_size=pool_size,
         recipient_dids=[device.device_identity],
     )
 
@@ -688,7 +680,6 @@ def create_fresh(
         master_index_key=master_index_key,
         ceremony_id=ceremony_id,
         cipher_name="btn",
-        pool_size=pool_size,
     )
     agents_block: dict[str, Any] = {
         "policy": "private",
@@ -803,15 +794,6 @@ def create_fresh(
         "default_policy": "private",
         "groups": {"default": group_block, "tn.agents": agents_block},
         "fields": {},
-        # LLM field classifier — STUBBED out per PRD §6.4. When an unknown
-        # field appears the SDK currently puts it in `default`. Flip
-        # `enabled: true` and call `tn.classifier._register(fn)` to wire a
-        # real model once that feature is built.
-        "llm_classifier": {
-            "enabled": False,
-            "provider": "",
-            "model": "",
-        },
     }
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     with open(yaml_path, "w", encoding="utf-8") as f:
@@ -1011,7 +993,6 @@ _PARENT_OWNED_KEYS = (
     "fields",
     "public_fields",
     "default_policy",
-    "llm_classifier",
 )
 
 # Fields that the child can fully override (no merge with parent's value).
@@ -1584,7 +1565,6 @@ def _load_group(
     derives the equality-index key (only when this kit holds the master
     secret), and returns the assembled record.
     """
-    pool = int(spec.get("pool_size", DEFAULT_POOL_SIZE))
     epoch = int(spec.get("index_epoch", 0))
     raw_cipher = spec.get("cipher") or ceremony_cipher
     if raw_cipher not in ("jwe", "btn", "hibe"):
@@ -1609,7 +1589,6 @@ def _load_group(
     return GroupConfig(
         name=name,
         cipher=inst,
-        pool_size=pool,
         unissued_slots=[],
         index_key=derived_index_key,
         index_epoch=epoch,
@@ -1629,8 +1608,7 @@ def load(yaml_path: Path) -> LoadedConfig:
     4. Resolve the admin-log location with legacy-key migration.
     5. Resolve keystore dir + device key + optional master index key.
     6. Instantiate every group's cipher and derive its index key.
-    7. Build the field→groups routing table and configure the LLM
-       classifier stub.
+    7. Build the field→groups routing table.
     """
     yaml_path = yaml_path.resolve()
     doc = _read_yaml_doc(yaml_path)
@@ -1670,10 +1648,6 @@ def load(yaml_path: Path) -> LoadedConfig:
         )
         for name, spec in doc["groups"].items()
     }
-
-    # Hand the LLM classifier its config so the stub knows if it's
-    # "enabled" (it currently does nothing either way).
-    _classifier._configure(doc.get("llm_classifier"))
 
     return LoadedConfig(
         yaml_path=yaml_path,

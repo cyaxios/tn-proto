@@ -42,7 +42,7 @@ wire = bytes(account.snapshot)
 `create_obj` requires an explicit `Governance` contract and retains the initial
 signed snapshot. This example selects the contract from the session's parsed
 policy tree. Applications can instead obtain contracts through a
-[policy provider](../docs/MANAGEMENT_SYSTEMS.md#use-an-existing-service).
+[policy provider](../docs/MANAGEMENT_SYSTEMS.md#provider-values-and-callbacks).
 `Governance.from_markdown(authority, text, policy_id, object_type)` is also
 available to policy adapters.
 
@@ -249,7 +249,7 @@ local edits; database commitment and delivery are application-owned facts.
 Transport retries use the stored `outbox_bytes`. Another `release()` intentionally
 creates another signed version. Application transactions store business effects,
 source identity, and response/outbox bytes together. The
-[enterprise recipes](../rust-sdk/ENTERPRISE_EXPERIENCE.md) describe this for
+[enterprise examples](examples/enterprise/README.md) demonstrate this for
 request/reply, saga, outbox, and projection consumers.
 
 [governed_outbox.py](examples/governed_outbox.py) implements a small SQLite
@@ -346,7 +346,7 @@ JSON values support strings, booleans, `None`, finite floats, integers from
 `-2**63` through `2**64 - 1`, lists, tuples, and string-keyed dictionaries.
 Tuples become JSON lists. Invalid values are rejected before state mutation.
 
-The native classes and typing stubs are exported through `tn.governed`.
+The native classes and type signatures are exported through `tn.governed`.
 `Session`, `DataObject`, `Governance`, `GovernedDraft`, and `GovernedObject` also
 have top-level `tn` names. Workflow exceptions are `GovernedError` subclasses:
 `UseDenied`, `NotEntitled`, `NotAPublisher`, `VerificationError`, and

@@ -1,38 +1,8 @@
-"""``TN``: the public ceremony handle.
+"""Public handles for named TN ceremonies.
 
-A ``TN`` instance is the in-process representation of a single
-ceremony. It owns the ceremony's registry name and yaml path; the
-heavy lifting (chain, signing, vault, handlers) still routes through
-the SDK's existing module-level singleton runtime.
-
-Why singleton-routing during this sprint
-----------------------------------------
-The current SDK keeps the active ceremony's runtime in module-level
-globals (``_dispatch_rt``, ``logger._runtime``, ``_run_id``,
-``_agent_policy_doc``, ``_cached_admin_state``). Splitting that state
-per-ceremony so two ``TN`` instances can emit in parallel is a deeper
-refactor than this sprint targets.
-
-Concretely, this sprint lands:
-
-- the ``TN`` class and the registry, so multi-ceremony is *named* and
-  *enumerable* in code;
-- the ``.tn/<name>/`` directory layout, so multi-ceremony is *visible*
-  on disk;
-- the safe-defaults auto-create flow, so ``tn.use(name)`` is friendly;
-- the legacy-layout migration.
-
-It does *not* land:
-
-- emit/read on a non-default named ceremony. A ``TN`` whose name is
-  not ``"default"`` raises ``MultiCeremonyEmitNotImplemented`` from
-  any verb that would route through the singleton. The ceremony's
-  on-disk state and config are still real and inspectable.
-
-The next sprint will replace the singleton-wrapping below with real
-per-instance dispatch. The class surface here is the surface that
-the new dispatch will plug into; callers updated to use ``TN`` today
-will not need to change when that lands.
+Each handle owns its registry name and YAML path. Named ceremonies use
+independent runtimes; the default handle uses the module-level runtime.
+All tracked runtimes close through ``tn.flush_and_close()``.
 """
 
 from __future__ import annotations
@@ -47,7 +17,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "TN",
-    "MultiCeremonyEmitNotImplemented",
     "_close_per_tn_runtimes",
 ]
 
@@ -79,24 +48,6 @@ def _close_per_tn_runtimes(*, timeout: float = 30.0) -> None:
             pass
 
 
-class MultiCeremonyEmitNotImplemented(NotImplementedError):
-    """Raised when a non-default ``TN`` is asked to emit or read.
-
-    The directory and config exist on disk; only the in-process
-    singleton-routing for non-default ceremonies is staged.
-    """
-
-    def __init__(self, name: str, verb: str):
-        self.name = name
-        self.verb = verb
-        super().__init__(
-            f"TN(name={name!r}).{verb}(...) is not yet wired in this "
-            "sprint. Multi-ceremony emit and read land in the next "
-            "sprint, when the module-level dispatch singleton is "
-            "factored per-instance. Until then, only the 'default' "
-            f"ceremony can emit. The directory .tn/{name}/ and its "
-            "tn.yaml are real and can be inspected."
-        )
 
 
 class TN:

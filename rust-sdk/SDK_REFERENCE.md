@@ -1,6 +1,6 @@
 # tn-proto Rust SDK Reference
 
-Reference for the in-repo Rust SDK while its public API is still settling.
+Reference for the Rust SDK.
 
 The package name is `tn-proto`. The Rust import path is `tn_proto`.
 
@@ -25,7 +25,6 @@ use tn_proto::{ReadOptions, Tn};
 - `fs`: enabled by default; filesystem-backed `tn-core` runtime.
 - `http`: enables blocking vault HTTP APIs through `reqwest`.
 - `watch`: enables synchronous native file notification support.
-- `async`: reserved for future async watch support.
 - `cli`: builds the small `tn-proto` binary and enables `http`.
 
 ## Governed Objects
@@ -495,7 +494,7 @@ cargo run -p tn-proto --features http --example vault_passphrase
 `vault_claim` targets `https://vault.tn-proto.org` by default and prints a
 secret claim URL. Treat that URL like a password.
 
-## CLI Preview
+## CLI
 
 The optional `cli` feature builds a small developer/user binary around the SDK.
 Current commands:
@@ -834,13 +833,3 @@ cargo run -p tn-proto --features cli --bin tn-proto -- pkg absorb ./handoff/read
 - Supports `--vault <url>`, `--project-id <id>`, `--reason <text>`, and
   `--no-audit-event`.
 - Clears the same local vault link-state.
-
-## Current Limits
-
-- The crate is still developed in-repo and is not published to crates.io.
-- `http` APIs are blocking.
-- Polling watch is read-backed.
-- Native file notification support is available behind the `watch` feature.
-- Async watch APIs are reserved but not implemented.
-- The vault claim URL flow works, but browser login/account UI is intentionally
-  outside the library.

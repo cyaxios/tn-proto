@@ -12,9 +12,6 @@ Start with the [governed-object guide](GOVERNED_OBJECTS.md) and the runnable
 [example](examples/governed_objects.rs). Group material is supplied through the
 shared cipher interface or loaded from an existing configuration.
 
-> Status: this crate is developed in-repo and is not published to crates.io yet.
-> `Cargo.toml` currently has `publish = false` while the public API settles.
-
 ## Features
 
 - Governed objects: `Governance`, mutable `DataObject`, signed `GovernedObject`
@@ -651,10 +648,6 @@ flow, use the `wallet()` namespace.
 - `fs` is enabled by default and activates filesystem-backed `tn-core`
 - `http` enables the blocking vault HTTP client
 - `watch` enables synchronous native file notification support through `notify`
-- `async` is reserved for future async watch support
-
-The `async` flag is reserved and does not add dependencies or public async APIs
-yet.
 
 ## Examples
 
@@ -679,7 +672,7 @@ claim example targets `https://vault.tn-proto.org` by default and accepts
 `TN_RESTORE_DIR`, `TN_VAULT_CREDENTIAL_ID`, `TN_VAULT_SESSION_TOKEN`, and
 `TN_VAULT_JWT`.
 
-## CLI Preview
+## CLI
 
 The optional `cli` feature builds a small `tn-proto` binary. It currently
 covers project init, vault claim-link onboarding, local invite inbox commands,
@@ -922,23 +915,13 @@ cargo test -p tn-proto --features http
 cargo doc -p tn-proto --no-deps
 ```
 
-Python and TypeScript interop tests are present but ignored by default until
-their local SDK/native-extension setup is available:
+Python and TypeScript interop tests use the local SDK and native extension.
+Run them after building those bindings:
 
 ```bash
 cargo test -p tn-proto --test interop_python -- --ignored
 cargo test -p tn-proto --test interop_typescript -- --ignored
 ```
-
-## Current Limits
-
-- The crate is in-repo only and not published to crates.io yet
-- Polling watch is read-backed; native file notifications require the `watch`
-  feature
-- Async watch is not implemented yet
-- Vault HTTP support is currently blocking, not async
-- Browser login/account UI remains outside the library; use the CLI claim-link
-  and connect-code commands to bridge local projects to the hosted vault
 
 ## License
 

@@ -43,13 +43,12 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from ._defaults import DEFAULT_CEREMONY_NAME
 from .config import LoadedConfig
 from .packaging import Package
 from .tnpkg import (
-    KNOWN_KINDS,
     TnpkgManifest,
     _validate_tnpkg_body_name,
     _write_tnpkg,
@@ -57,17 +56,13 @@ from .tnpkg import (
     sign_manifest_with_body,
 )
 
-# All kinds the producer side knows how to build a body for. ``recipient_invite``
-# is reserved in KNOWN_KINDS but not yet wired up; calling it raises
-# NotImplementedError so absorb-side tests can still reference the dispatcher
-# cleanly.
+# Package kinds supported by this producer.
 ExportKind = Literal[
     "admin_log_snapshot",
     "offer",
     "enrolment",
     "kit_bundle",
     "full_keystore",
-    "recipient_invite",
     "identity_seed",
     "project_seed",
 ]
@@ -573,8 +568,9 @@ def _validate_export_args(
     bundles the publisher's raw private keys (``local.private`` +
     ``index_master.key``) and is for self-backup only.
     """
-    if kind not in KNOWN_KINDS:
-        raise ValueError(f"export: unknown kind {kind!r}; expected one of {sorted(KNOWN_KINDS)}")
+    supported_kinds = get_args(ExportKind)
+    if kind not in supported_kinds:
+        raise ValueError(f"export: unknown kind {kind!r}; expected one of {sorted(supported_kinds)}")
     if kind == "full_keystore" and not confirm_includes_secrets:
         raise ValueError(
             "export(kind='full_keystore') writes the publisher's raw private keys "
@@ -615,10 +611,7 @@ def _build_export_body(
 ) -> tuple[dict[str, bytes], dict[str, Any]]:
     """Per-kind body construction. Returns ``(body, extras)``.
 
-    Dispatches to the right ``_build_*_body`` helper based on ``kind``.
-    Kinds without a body (``recipient_invite``) raise
-    :class:`NotImplementedError` so callers can't silently produce an
-    empty zip.
+    Dispatches to the ``_build_*_body`` helper for the selected package kind.
     """
     if kind == "admin_log_snapshot":
         if cfg is None:  # pragma: no cover - guarded by _validate_export_args
@@ -658,11 +651,6 @@ def _build_export_body(
             raise ValueError("export(kind='project_seed') requires cfg=...")
         ks = Path(keystore).resolve() if keystore is not None else Path(cfg.keystore).resolve()
         return _build_project_seed_body(cfg, ks, groups_filter=groups)
-    if kind == "recipient_invite":
-        raise NotImplementedError(
-            f"export(kind={kind!r}) is reserved in the manifest schema but not "
-            f"implemented in this Python session — see the plan doc for next steps."
-        )
     # Unreachable: _validate_export_args already screened kind.
     raise ValueError(f"export: unhandled kind {kind!r}")
 
@@ -927,8 +915,6 @@ def export(
             ``encrypt_body_with=`` not 32 bytes,
             ``seal_for_recipient=True`` on a kind that doesn't
             support it).
-        NotImplementedError: For reserved-but-unwired kinds (e.g.
-            ``"recipient_invite"``).
 
     Example:
         >>> from tn.export import export

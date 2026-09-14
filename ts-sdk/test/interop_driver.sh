@@ -5,7 +5,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SDK_DIR="$(cd "${HERE}/.." && pwd)"
-REPO_ROOT="$(cd "${SDK_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd "${SDK_DIR}/.." && pwd)"
 
 PYTHON="${REPO_ROOT}/.venv/Scripts/python.exe"
 if [[ ! -x "${PYTHON}" ]]; then
@@ -18,12 +18,11 @@ echo "== ts-sdk unit tests =="
 
 echo ""
 echo "== wasm admin + crypto interop =="
-node "${REPO_ROOT}/tn_proto/crypto/tn-wasm/test/node_smoke.mjs"
-"${PYTHON}" "${REPO_ROOT}/tn_proto/crypto/tn-wasm/test/py_cross_check.py"
+node "${REPO_ROOT}/crypto/tn-wasm/test/conformance_golden.mjs"
 
 echo ""
 echo "== btn interop =="
-bash "${REPO_ROOT}/tn_proto/crypto/tn-wasm/test/run_btn_interop.sh"
+bash "${REPO_ROOT}/crypto/tn-wasm/test/run_btn_interop.sh"
 
 echo ""
 echo "== public-only CLI interop =="

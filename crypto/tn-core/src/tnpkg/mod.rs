@@ -75,9 +75,8 @@ pub type VectorClock = BTreeMap<String, BTreeMap<String, u64>>;
 /// Serializes snake-case to match Python's `KNOWN_KINDS` set exactly (the kind
 /// is a manifest field, so the wire spelling is load-bearing). Use
 /// [`as_str`](Self::as_str) for the wire string and [`from_wire`](Self::from_wire)
-/// to parse one back. Several kinds are recognized for round-tripping but not yet
-/// applied by the Rust runtime — see the per-variant notes and
-/// [`crate::Runtime::absorb`].
+/// to parse one back. The kind identifies the wire payload; each consumer
+/// selects the kinds it applies. See [`crate::Runtime::absorb`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManifestKind {
@@ -92,8 +91,7 @@ pub enum ManifestKind {
     /// Enrolment package (counterpart to [`Offer`](Self::Offer)). Stashed by
     /// Rust absorb; applied on the Python side today.
     Enrolment,
-    /// Point-to-point recipient invite. Reserved in the kind catalog; export
-    /// and absorb are not yet wired in Rust.
+    /// Point-to-point recipient invite.
     RecipientInvite,
     /// Bundle of reader kits (`*.btn.mykit`) — no private signing material.
     /// Absorb writes the kits into the local keystore (existing files are
@@ -103,10 +101,8 @@ pub enum ManifestKind {
     /// export requires `confirm_includes_secrets = true`. Absorbs like a
     /// [`KitBundle`](Self::KitBundle).
     FullKeystore,
-    /// Vault-emitted notification that a
-    /// counterparty claimed a share-link or backup-link. Rust core
-    /// recognizes the kind so manifests round-trip through
-    /// `read_manifest`; absorb is not implemented yet.
+    /// Vault-emitted notification that a counterparty claimed a share-link
+    /// or backup-link.
     ContactUpdate,
     /// Minimal identity/capability bootstrap bundle.
     IdentitySeed,

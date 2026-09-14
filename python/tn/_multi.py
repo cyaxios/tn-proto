@@ -952,7 +952,6 @@ def _stamp_project_labels(
 def _build_legacy_kwargs(
     *,
     log_path: str | Path | None,
-    pool_size: int,
     cipher: str,
     identity: Any,
     extra_handlers: Any,
@@ -970,8 +969,6 @@ def _build_legacy_kwargs(
     out: dict[str, Any] = {}
     if log_path is not None:
         out["log_path"] = log_path
-    if pool_size != 4:
-        out["pool_size"] = pool_size
     if cipher != "btn":
         out["cipher"] = cipher
     if identity is not None:
@@ -1294,7 +1291,6 @@ def init(
     project_dir: str | Path | None = None,
     # ── lifted out of **legacy_kwargs (now first-class) ──────────
     log_path: str | Path | None = None,
-    pool_size: int = 4,
     cipher: str = "btn",
     identity: Any = None,
     extra_handlers: Any = None,
@@ -1304,7 +1300,7 @@ def init(
     device_private_bytes: bytes | None = None,
     keystore_dir: str | Path | None = None,
     admin_log_path: str | Path | None = None,
-    # ── new name slots reserved for future behavior ──────────────
+    # ── project labels, stream selection, and aliases ────────────
     project: str | None = None,
     version: str | None = None,
     stream: str | None = None,
@@ -1376,10 +1372,6 @@ def init(
         AND synthesize a single ``file.rotating`` handler at that
         path when the yaml has no ``handlers:`` block.
 
-    pool_size :
-        BTN broadcast tree pool size at fresh-mint time. Defaults to
-        4. Btn-only; ignored for JWE ceremonies.
-
     cipher :
         Group-sealing cipher for a fresh ceremony: ``"btn"``
         (default) or ``"jwe"``. Ignored when loading an existing
@@ -1429,11 +1421,10 @@ def init(
         audit volume). Ignored when loading.
 
     project :
-        Vault project tag. Currently stored as informational metadata
-        on the runtime; future releases will wire it to vault
-        auto-attach + pending-claim flows. Pass to tag this runtime
-        with a project name now so the future behavior picks it up
-        without a code change.
+        Project name used for the on-disk layout and recorded in YAML.
+
+    version :
+        Per-instance label recorded as ``ceremony.version_name``.
 
     stream :
         Optional named stream. If set, after the ceremony runtime is
@@ -1478,7 +1469,6 @@ def init(
     _store_project_tag(project)
     legacy_kwargs = _build_legacy_kwargs(
         log_path=log_path,
-        pool_size=pool_size,
         cipher=cipher,
         identity=identity,
         extra_handlers=extra_handlers,
@@ -1685,7 +1675,7 @@ def list_ceremonies() -> list[str]:
 # ---------------------------------------------------------------------------
 # Default-ceremony singleton bridge
 #
-# During this sprint, the default ceremony's emit/read still goes
+# The default ceremony's emit/read goes
 # through the existing module-level singleton runtime (built by
 # ``tn._init_impl``). The bridge below ensures that calling
 # ``tn.init()`` (no args) or ``tn.init("default")`` also binds the

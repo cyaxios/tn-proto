@@ -1,39 +1,8 @@
 /**
- * `tn-proto` — browser-native `Tn` class.
+ * Browser TN client with localStorage or injected storage.
  *
- * Same verb surface as the Node `Tn` class (`src/tn.ts`), same names,
- * same call shapes. Only the runtime differs: this version wraps a
- * browser-local {@link BrowserRuntime} (which in turn wraps the wasm
- * `WasmRuntime`) using a localStorage-backed storage adapter by
- * default.
- *
- * Python verb parity is the hard contract:
- *
- * ```ts
- * const tn = await Tn.init();
- * tn.info("hello.world", { who: "alice" });
- * for (const e of tn.read()) console.log(e);
- * await tn.close();
- * ```
- *
- * reads identically in Python, Node, and the browser.
- *
- * ## Surface NOT yet wired
- *
- * Placeholders throw {@link NotYetWiredForBrowserError} so the shape
- * stays intact and the error is unambiguous:
- *
- * - `tn.admin.*`, `tn.pkg.*`, `tn.vault.*`, `tn.agents.*`,
- *   `tn.handlers.*` — namespace ports follow once the underlying
- *   modules go browser-pure.
- * - {@link Tn.watch} — async iter; needs a localStorage-aware tail walker.
- * - {@link Tn.use} / {@link Tn.listCeremonies} — multi-ceremony.
- * - {@link Tn.absorb} — needs a browser-pure tnpkg reader.
- * - {@link Tn.ephemeral} — Node-only (tempdir lifetime).
- *
- * All of those throw at call time, not at module load, so the surface
- * inspection (`typeof tn.admin === "object"`,
- * `typeof Tn.init === "function"`) stays honest.
+ * Supports ceremony creation, server-provisioned credentials, logging,
+ * context, reads, sealed objects, and HTTP delivery.
  *
  * @packageDocumentation
  */
@@ -99,69 +68,6 @@ export type LogLevel = keyof typeof _LOG_LEVELS;
 /** Process-wide level threshold. Default: debug (10). */
 let _tnLogLevelThreshold: number = _LOG_LEVELS.debug;
 
-/** Module-level strict mode. Currently unused on browser but kept so
- *  the static `Tn.setStrict` verb has somewhere to land. */
-let _strictMode = false;
-
-// ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
-
-/**
- * Thrown when a Python/Node-side `Tn` verb hasn't yet been wired up in
- * the browser. The surface shape is preserved (the property exists,
- * the method is callable) but calling it throws this error rather
- * than silently no-op'ing.
- *
- * Use this in `instanceof` checks to distinguish "not implemented yet"
- * from real errors:
- *
- * @example
- * ```ts
- * import { Tn, NotYetWiredForBrowserError } from "tn-proto/browser";
- *
- * const tn = await Tn.init();
- * try {
- *   tn.admin.addRecipient("default", "did:key:zRecipient");
- * } catch (err) {
- *   if (err instanceof NotYetWiredForBrowserError) {
- *     // Verb name is on the error for diagnostics.
- *     console.warn(`browser TN: ${err.verb} not implemented yet`);
- *   } else {
- *     throw err;
- *   }
- * }
- * ```
- *
- * @public
- */
-export class NotYetWiredForBrowserError extends Error {
-  /** The verb name that isn't implemented — e.g. `"admin.addRecipient"`. */
-  readonly verb: string;
-  constructor(verb: string) {
-    super(
-      `Tn.${verb} is not yet wired up for the browser. ` +
-        `The Python/Node surface is the reference — see src/tn.ts. ` +
-        `Track progress in the tn-proto browser-surface plan.`,
-    );
-    this.name = "NotYetWiredForBrowserError";
-    this.verb = verb;
-  }
-}
-
-function _stubFn(verb: string): (...args: unknown[]) => never {
-  return () => {
-    throw new NotYetWiredForBrowserError(verb);
-  };
-}
-
-/** Build a namespace object whose every property is a stub. */
-function _stubNamespace<T extends Record<string, unknown>>(name: string, keys: readonly string[]): T {
-  const out: Record<string, unknown> = {};
-  for (const k of keys) out[k] = _stubFn(`${name}.${k}`);
-  return out as T;
-}
-
 // ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
@@ -195,9 +101,7 @@ export type TnInitFromSeedOptions = BrowserRuntimeFromSeedOptions;
 /**
  * Browser-side TN client.
  *
- * The public verb surface mirrors Python's `tn` module and the Node
- * SDK's `Tn` class byte-for-byte where the language allows. Construct
- * via the static factories — never `new Tn()` directly:
+ * Construct a client through the static factories:
  *
  * - {@link Tn.init} — load from localStorage, mint fresh on first call.
  * - {@link Tn.initFromSeed} — adopt server-provisioned credentials.
@@ -240,52 +144,6 @@ export class Tn {
   private readonly _rt: BrowserRuntime;
   private readonly _runId: string;
   private _contextStack: Array<Record<string, unknown>> = [{}];
-
-  /**
-   * Admin namespace (`tn.admin.addRecipient` etc.). Placeholder — every
-   * method throws `NotYetWiredForBrowserError` until the admin module
-   * goes browser-pure. The property exists so `typeof tn.admin` matches
-   * Node.
-   */
-  readonly admin = _stubNamespace<{
-    addRecipient: (group: string, recipientDid: string) => never;
-    revokeRecipient: (group: string, leafIndex: number) => never;
-    ensureGroup: (group: string) => never;
-    cachedAdminState: () => never;
-    state: (group?: string | null) => never;
-  }>("admin", ["addRecipient", "revokeRecipient", "ensureGroup", "cachedAdminState", "state"]);
-
-  /**
-   * Package namespace (`tn.pkg.absorb` / `tn.pkg.export`). Placeholder.
-   */
-  readonly pkg = _stubNamespace<{
-    absorb: (source: string) => never;
-    export: (opts: unknown) => never;
-  }>("pkg", ["absorb", "export"]);
-
-  /**
-   * Vault namespace (`tn.vault.link` / `tn.vault.unlink`). Placeholder.
-   */
-  readonly vault = _stubNamespace<{
-    link: (vaultDid: string, projectId: string) => never;
-    unlink: (vaultDid: string, projectId: string, reason?: string) => never;
-  }>("vault", ["link", "unlink"]);
-
-  /**
-   * Agents namespace (`tn.agents.loadPolicy` etc.). Placeholder.
-   */
-  readonly agents = _stubNamespace<{
-    loadPolicy: () => never;
-  }>("agents", ["loadPolicy"]);
-
-  /**
-   * Handlers namespace (`tn.handlers.add` / `tn.handlers.remove`).
-   * Placeholder.
-   */
-  readonly handlers = _stubNamespace<{
-    add: (h: unknown) => never;
-    remove: (name: string) => never;
-  }>("handlers", ["add", "remove"]);
 
   private constructor(rt: BrowserRuntime) {
     this._rt = rt;
@@ -404,49 +262,6 @@ export class Tn {
   static async initFromSeed(opts: TnInitFromSeedOptions): Promise<Tn> {
     const rt = BrowserRuntime.initFromSeed(opts);
     return new Tn(rt);
-  }
-
-  /**
-   * `Tn.use(name, opts)` — multi-ceremony. Not yet wired for browser;
-   * default `Tn.init()` covers single-ceremony usage. Mirrors
-   * Python `tn.use`.
-   */
-  static async use(_name: string, _opts?: unknown): Promise<Tn> {
-    throw new NotYetWiredForBrowserError("use");
-  }
-
-  /**
-   * `Tn.absorb(source)` — install a `.tnpkg`. Not yet wired for browser.
-   * The shared WASM tnpkg reader exists; the remaining browser work is
-   * applying package body members into the configured storage adapter
-   * without Node filesystem assumptions.
-   */
-  static async absorb(_source: string): Promise<Tn> {
-    throw new NotYetWiredForBrowserError("absorb");
-  }
-
-  /**
-   * `Tn.ephemeral(opts)` — Node-only (lifetime tied to a tempdir).
-   * The browser equivalent is "use a different `keyPrefix` on the
-   * storage adapter," which is `Tn.init({ storage: ... })`.
-   */
-  static async ephemeral(_opts?: unknown): Promise<Tn> {
-    throw new NotYetWiredForBrowserError("ephemeral");
-  }
-
-  /** List ceremony names on disk. Multi-ceremony placeholder. */
-  static listCeremonies(): string[] {
-    throw new NotYetWiredForBrowserError("listCeremonies");
-  }
-
-  /** Toggle strict mode (no fresh-mint on missing yaml). */
-  static setStrict(enabled: boolean): void {
-    _strictMode = enabled;
-  }
-
-  /** Whether strict mode is on. */
-  static isStrict(): boolean {
-    return _strictMode;
   }
 
   /**
@@ -788,10 +603,6 @@ export class Tn {
    * @see {@link Tn.readRaw} - audit-grade variant with full envelope +
    *   per-group plaintext map.
    *
-   * @remarks
-   * Sync return. Once the wasm side grows an iterator surface this
-   * will match Python's `_ReadIterator` more closely.
-   *
    * @public
    */
   read(): Array<Record<string, unknown>> {
@@ -855,25 +666,12 @@ export class Tn {
     return unsealWithBrowserRuntime(this._rt, source, opts);
   }
 
-  /**
-   * Tail the log live. Not yet wired for browser — throws
-   * {@link NotYetWiredForBrowserError}.
-   *
-   * @throws NotYetWiredForBrowserError - always (placeholder).
-   * @see {@link Tn.read} - synchronous all-entries variant available today.
-   * @public
-   */
-  watch(_opts?: unknown): AsyncIterable<Record<string, unknown>> {
-    throw new NotYetWiredForBrowserError("watch");
-  }
-
   // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
 
   /**
-   * Drain any pending out-of-process handlers (the HTTP queue, future
-   * fan-out targets) without closing the runtime. Use before
+   * Flush the HTTP delivery queue without closing the runtime. Use before
    * navigating away if you want every queued envelope to land — the
    * `pagehide` listener does this automatically when
    * `http.flushOnUnload !== false`, but explicit `await tn.flush()`

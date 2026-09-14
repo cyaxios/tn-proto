@@ -113,7 +113,6 @@ def synthesize(report: dict) -> tuple[str, str, list[str]]:
         lines.append(f"  # {note}")
         lines.append(f"  {grp}:")
         lines.append(f"    policy: {policy}")
-        lines.append("    pool_size: 8")
         lines.append("    cipher: btn")
         lines.append(f"    fields: [{', '.join(_quote(x) for x in group_fields[grp])}]")
     lines.append("")

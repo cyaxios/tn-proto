@@ -2,11 +2,6 @@
 and the underlying ``_handle``, ``_registry``, ``_layout``, ``_defaults``
 modules.
 
-This sprint lands the API surface and the on-disk layout. Multi-ceremony
-*emit* against non-default names is staged for the next sprint and is
-asserted to raise ``MultiCeremonyEmitNotImplemented`` here so the
-contract is discoverable from tests.
-
 Coverage:
   * Layout helpers: name validation, directory paths, on-disk listing.
   * Migration: .tn/tn/ -> .tn/default/ rename, idempotence,
@@ -21,7 +16,7 @@ Coverage:
     valid names.
   * tn.list_ceremonies(): in-process registry only.
   * Conflict: init kwargs disagreeing with on-disk yaml -> TNConfigConflict.
-  * Non-default emit: raises MultiCeremonyEmitNotImplemented.
+  * Named handles: independent emit and read.
 """
 
 from __future__ import annotations
@@ -46,7 +41,6 @@ sys.path.insert(0, str(_HERE.parent))
 
 import tn
 from tn import (
-    MultiCeremonyEmitNotImplemented,
     TN,
     TNConfigConflict,
     TNInvalidName,
@@ -572,7 +566,7 @@ class TestInitMigration:
 
 
 # ---------------------------------------------------------------------------
-# Multi-ceremony emit not yet implemented
+# Named-ceremony emit and read
 # ---------------------------------------------------------------------------
 
 

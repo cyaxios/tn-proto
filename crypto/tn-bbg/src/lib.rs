@@ -30,11 +30,6 @@
 //! - `PrivateKey { a0:G2, a1:G1, bs:Vec<G2>, id }`
 //! - `raw::Ciphertext { a:GT, b:G1, c:G2 }` (constant 3 elements)
 //!
-//! # Security status
-//!
-//! The `tn-bbg` scheme implementation and `bls12_381_plus` pairing library are
-//! unaudited. External cryptographic review is required before production use.
-//!
 //! # Key lifecycle
 //!
 //! BBG delegated keys are permanent: there is no forward revocation of an

@@ -14,17 +14,8 @@
 //     identity.json, then prints the three confirmation lines.
 //   - Returns 0 on success.
 //
-// SDK GAP (flagged, not faked): the TS VaultClient does not yet expose a
-// `getPrefs()` / `close()` pair (Python's `client.get_prefs()` /
-// `client.close()`), and the TS `Identity` exposes `prefs` / `prefsVersion`
-// as READ-ONLY getters with no setters or `ensure_written`. So this verb
-// (a) reuses the SDK's real auth via `VaultClient.forIdentity` and then
-// issues the single `GET /account/prefs` with the client's own bearer token
-// — the same raw-fetch pattern `src/account/index.ts` uses for endpoints not
-// yet wrapped (no HTTP/crypto re-implemented), and (b) persists the two pref
-// fields by re-reading and rewriting identity.json in the exact field shape
-// of Python's `Identity.ensure_written`. When `VaultClient.getPrefs` and an
-// `Identity` pref-setter land, this file should delegate to them.
+// Authenticates with VaultClient, fetches account preferences, and writes
+// the updated preferences to identity.json.
 
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";

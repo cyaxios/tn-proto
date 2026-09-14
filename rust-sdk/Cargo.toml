@@ -15,7 +15,6 @@ include = [
     "README.md",
     "SDK_REFERENCE.md",
     "GOVERNED_OBJECTS.md",
-    "ENTERPRISE_EXPERIENCE.md",
     "src/**/*.rs",
     "examples/**/*.rs",
     "tests/**/*.rs",
@@ -55,9 +54,6 @@ fs-locking = ["fs", "tn-core/fs-locking"]
 hibe = ["tn-core/hibe"]
 # Enable native file notification support for the sync watcher.
 watch = ["fs", "dep:notify"]
-# Reserved for future async watch support. Empty until an async public API is
-# added with concrete runtime/cancellation/backpressure decisions.
-async = []
 # Enable the blocking HTTP vault project client.
 http = ["fs", "dep:reqwest"]
 # Build the small developer/user CLI. The first CLI commands include hosted

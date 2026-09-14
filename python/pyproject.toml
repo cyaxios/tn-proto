@@ -48,7 +48,7 @@ dependencies = [
     # RFC 7516 JWE for `cipher: jwe` groups. joserfc (Authlib's standalone
     # JOSE library) is BSD-3-Clause and built on `cryptography`; it produces
     # standards-compliant General JSON Serialization that interoperates with
-    # the TS SDK's panva/jose. See docs/JWE-cipher-spec.md.
+    # the TS SDK's panva/jose. See docs/guide/jwe-howto.md.
     "joserfc>=1.0",
     "typing_extensions>=4.0",
     # Handler infrastructure
@@ -107,7 +107,6 @@ all      = [
 Homepage   = "https://github.com/cyaxios/tn-proto"
 Repository = "https://github.com/cyaxios/tn-proto"
 Issues     = "https://github.com/cyaxios/tn-proto/issues"
-Changelog  = "https://github.com/cyaxios/tn-proto/blob/main/CHANGELOG.md"
 
 [project.scripts]
 # The top-level CLI. Use as `tn rotate`, `tn init`, `tn bundle`, etc. —

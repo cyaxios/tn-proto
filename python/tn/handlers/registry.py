@@ -281,22 +281,6 @@ def build_handlers(
                     filter_spec=filter_spec,
                 )
             )
-        elif kind == "tn.firehose":
-            # Streaming firehose handler. Sends encrypted log frames over
-            # a long-lived WebSocket to the TN vault, which forwards to
-            # the CF firehose Worker for archival in R2.
-            from .firehose import TnFirehoseHandler
-
-            out.append(
-                TnFirehoseHandler(
-                    name=name,
-                    outbox_path=_outbox_path(yaml_dir, name),
-                    endpoint=raw["endpoint"],
-                    project_id=raw["project_id"],
-                    key_id=raw.get("key_id"),
-                    filter_spec=filter_spec,
-                )
-            )
         elif kind == "fs.drop":
             from .fs_drop import DEFAULT_FILENAME_TEMPLATE, FsDropHandler
 
@@ -358,26 +342,6 @@ def build_handlers(
             # instead). Removing the attribute is a separate cleanup.
             handler._tn_default = True  # type: ignore[attr-defined]
             out.append(handler)
-        elif kind in ("otel", "opentelemetry"):
-            from .otel import NullOtelLogger, OpenTelemetryHandler
-
-            # The OTel logger must be wired programmatically after init
-            # (pass it via tn.init(extra_handlers=[...])). When declared in
-            # YAML only, we use the no-op logger and log a warning so the
-            # operator knows they need to wire up the provider themselves.
-            _log.warning(
-                "handler %r: kind=%r in YAML uses NullOtelLogger. "
-                "For real export, pass an OpenTelemetryHandler via extra_handlers=.",
-                name,
-                kind,
-            )
-            out.append(
-                OpenTelemetryHandler(
-                    name=name,
-                    otel_logger=NullOtelLogger(),
-                    filter_spec=filter_spec,
-                )
-            )
         else:
             raise ValueError(f"tn.yaml: unknown handler kind {kind!r} on handler {name!r}")
     return out

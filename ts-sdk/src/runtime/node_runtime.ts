@@ -832,9 +832,9 @@ export class NodeRuntime {
         // this as a "not a publisher" skip). The wasm btn path can't bind
         // aad; fail loudly, identical to the native-btn limitation.
         throw new Error(
-          "per-emit aad is not yet wired through the native (btn) runtime; " +
-            "use a hibe/jwe ceremony, a group-level aad in config is likewise " +
-            "native-limited, or bind at the group-cipher level.",
+          "the WASM BTN runtime does not accept per-emit aad; " +
+            "use a HIBE/JWE ceremony. Group-level aad in config has the same " +
+            "WASM BTN restriction.",
         );
       }
       const aadBytes = hasAad ? canonicalBytes(effectiveAad) : new Uint8Array(0);
@@ -1008,9 +1008,9 @@ export class NodeRuntime {
         // the native-btn limitation raised for btn-only ceremonies and the
         // Python pure-pipeline btn guard.
         throw new Error(
-          "per-emit aad is not yet wired through the native (btn) runtime; " +
-            "use a hibe/jwe ceremony, a group-level aad in config is likewise " +
-            "native-limited, or bind at the group-cipher level.",
+          "the WASM BTN runtime does not accept per-emit aad; " +
+            "use a HIBE/JWE ceremony. Group-level aad in config has the same " +
+            "WASM BTN restriction.",
         );
       }
       return pub.encrypt(plaintext);
@@ -2987,10 +2987,10 @@ export class NodeRuntime {
   /** Pack a `.tnpkg` from local ceremony state. Mirrors Python `tn.export`. */
   exportPkg(opts: ExportPkgOptions, outPath: string): string {
     const { kind } = opts;
-    if (!KNOWN_KINDS.has(kind as ManifestKind)) {
+    if (!EXPORT_PKG_KINDS.some((supported) => supported === kind)) {
       throw new Error(
-        `export: unknown kind ${JSON.stringify(kind)}; expected one of ` +
-          JSON.stringify([...KNOWN_KINDS].sort()),
+        `export: unsupported kind ${JSON.stringify(kind)}; expected one of ` +
+          JSON.stringify(EXPORT_PKG_KINDS),
       );
     }
     if ((kind === "full_keystore" || kind === "project_seed") && !opts.confirmIncludesSecrets) {
@@ -2998,9 +2998,6 @@ export class NodeRuntime {
         `export(kind='${kind}') writes the publisher's raw private keys. ` +
           "Pass confirmIncludesSecrets=true to acknowledge.",
       );
-    }
-    if (kind === "recipient_invite") {
-      throw new Error(`export(kind=${JSON.stringify(kind)}) is reserved but not implemented yet.`);
     }
 
     let body: Record<string, Uint8Array> = {};
@@ -5288,8 +5285,22 @@ function rotateLogOnSessionStart(logPath: string, handlers: Array<Record<string,
 // ExportPkgOptions — public type for NodeRuntime.exportPkg
 // ---------------------------------------------------------------------------
 
+const EXPORT_PKG_KINDS = [
+  "admin_log_snapshot",
+  "offer",
+  "enrolment",
+  "kit_bundle",
+  "full_keystore",
+  "project_seed",
+  "identity_seed",
+  "contact_update",
+] as const;
+
+/** Package kinds produced by NodeRuntime.exportPkg. */
+export type ExportPkgKind = (typeof EXPORT_PKG_KINDS)[number];
+
 export interface ExportPkgOptions {
-  kind: ManifestKind;
+  kind: ExportPkgKind;
   toDid?: string;
   scope?: string;
   confirmIncludesSecrets?: boolean;
@@ -5925,10 +5936,6 @@ groups:
     - policy
     auto_populated_by_policy: true
 fields: {}
-llm_classifier:
-  enabled: false
-  provider: ''
-  model: ''
 `;
   writeFileSync(yamlPath, yaml, "utf8");
 }

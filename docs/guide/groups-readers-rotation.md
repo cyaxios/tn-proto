@@ -148,10 +148,6 @@ self-recipient private key as a substitute.
 
 ## HIBE groups
 
-> **Security status:** `tn-bbg` and the underlying `bls12_381_plus` pairing
-> library are unaudited. External cryptographic review is required before
-> production use. Treat HIBE as evaluation-only until that review is complete.
-
 `hibe` is a third cipher option, peer to `btn` (the default) and `jwe`, selected per group the same way:
 
 ```yaml
@@ -169,11 +165,11 @@ A hibe group encrypts to an **identity path** (like `reader-did/policy-hash`) un
 - **No key exchange at write time.** Anyone holding the authority's public key can seal to a path — including a reader who doesn't hold any key yet.
 - **Hierarchical delegation.** A key for a parent path can derive keys for paths below it, locally, with no re-keying and no authority involvement.
 
-The ceremony that mints a hibe group becomes its own authority (it runs setup and keeps its own master secret). Nothing tn-hosted ever holds a decryption root.
+The ceremony that mints a hibe group becomes its own authority (it runs setup and keeps its own master secret). Reader grants contain a delegated key; the authority retains its master secret.
 
 ### Granting readers
 
-`grant_reader` is hibe's `add_recipient` — the generic `add_recipient` verb also routes here for hibe groups:
+`grant_reader` mints a HIBE reader key; the generic `add_recipient` verb also routes here for HIBE groups. First exchange a scoped challenge and reader proof as shown in the [HIBE enrollment workflow](jwe-hibe-key-ceremonies.md#hibe-reader-enrollment). The authority then passes that returned `reader_proof` to the grant:
 
 ```python
 from tn.recipient_seal import recipient_key_is_resolvable
@@ -185,29 +181,22 @@ if not recipient_key_is_resolvable(reader_did):
 result = tn.admin.grant_reader(
     "governed",
     reader_did=reader_did,
+    proof=reader_proof,
     out_path="./alice.tnpkg",
 )
 ```
 
-The bundle carries the authority's public key, the group's identity path, and a freshly minted identity key. Each grant gets independently randomized key material for the same path, and every grantee decrypts the same entries. The `.hibe.sk` is a bearer capability, not a key bound to `reader_did`; when the DID is not a complete resolvable Ed25519 `did:key`, `grant_reader` silently falls back to a plaintext package. The reader absorbs the securely delivered kit with `tn.absorb`. The authority's master secret never rides a reader bundle; it only appears in a self-addressed full-keystore backup.
+The bundle carries the authority's public key, the group's identity path, and a freshly minted identity key. Each grant gets independently randomized key material for the same path, and every grantee decrypts the same entries. The `.hibe.sk` is a bearer capability. Normal delivery requires a complete Ed25519 `did:key` and a valid scoped proof of reader key possession, then recipient-seals the package. Plaintext delivery requires the explicit `unsafe_plaintext=True` option. The reader absorbs the securely delivered kit with `tn.absorb`. The authority's master secret never rides a reader bundle; it only appears in a self-addressed full-keystore backup.
 
-### Revocation: the honest tradeoff
+### Rotating reader access
 
-Choose the cipher by its revocation story. **btn revokes forward**: drop a reader and the next write already excludes them. **hibe cannot do that**: a delegated key is a permanent trapdoor for its path — once admitted, a reader opens everything ever sealed to that path, past and future. What hibe offers instead is **path rotation**:
+`revoke_reader` changes the group's sealing path and issues new kits to the surviving readers:
 
 ```python
-tn.admin.rotate_reader_path("governed", "policy-b")
+result = tn.admin.revoke_reader(
+    "governed", reader_did, new_path="policy-b", out_dir="regrant"
+)
+print(result.new_path, result.kit_paths)
 ```
 
-Future seals from the updated authority target the new path, so holders of exact old-path keys stop reading those new entries; everything sealed before the rotation stays open to them forever. External writers keep their own local path and must receive, authenticate, and pin the new sibling path before sealing again, or the old exact-path reader still opens their output. A grantee holding an *ancestor* key is a delegated subauthority for that subtree and cannot be cut off by rotation beneath it. Grant exact paths when rotation must cut access; if an ancestor capability has already escaped, move to a fresh authority MPK or use BTN. If a group genuinely needs routine per-reader forward revocation, use BTN for that group. That's what the default is for.
-
-### If the authority's master secret leaks
-
-The master secret can mint a key for any path under its public key, which means whoever holds it can read every entry ever sealed by that group. There is no partial fix:
-
-1. Stop sealing under the compromised authority immediately.
-2. Run a fresh setup (a new authority) and point the group at it — this is a new cipher domain, equivalent to minting the group fresh.
-3. Re-grant every legitimate reader under the new authority.
-4. Treat everything sealed under the old authority as readable by the attacker. Rotation cannot claw it back; that history's confidentiality is bounded by whatever the attacker captured.
-
-Because each ceremony is its own authority, the blast radius of a leak is that one ceremony's hibe groups — never anyone else's.
+Future seals use the new sibling path. Deliver that path to external writers and distribute the new kits to surviving readers. A parent-path key can derive keys for descendants within its depth budget; use exact-path grants for readers whose access you plan to rotate.

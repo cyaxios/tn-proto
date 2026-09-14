@@ -4,41 +4,14 @@
 //! native runtime seals and opens hibe groups directly through the `tn-hibe`
 //! crate — the same BBG scheme, encodings, and CEK KEM the Python and wasm
 //! surfaces use — so a hibe ceremony runs the whole assembly line (classify,
-//! index, chain, row_hash, sign) in Rust at full speed. When the feature is
-//! off (an Apache-only `tn-core` without the LGPL scheme), a hibe group
-//! yields a clear `NotImplemented` from the runtime.
+//! index, chain, row_hash, sign) in Rust. Configured HIBE groups require
+//! the `hibe` feature.
 //!
 //! Wire compatibility: the group `ciphertext` blob format and the
 //! candidate-key decrypt order match `tn/cipher.py::HibeGroupCipher`, so
 //! records written by the native runtime and Python pipeline are mutually
 //! readable. Ciphertext bytes are randomized and are not expected to match
 //! for the same plaintext.
-
-use crate::{Error, Result};
-
-/// Sentinel used when the `hibe` feature is off: a hibe group yields a clear
-/// `NotImplemented` from the Rust runtime rather than a build error.
-pub struct HibePlaceholder;
-
-impl super::GroupCipher for HibePlaceholder {
-    fn publication_capability(&self) -> super::PublicationCapability {
-        super::PublicationCapability::Unsupported
-    }
-
-    fn encrypt(&self, _plaintext: &[u8]) -> Result<Vec<u8>> {
-        Err(Error::NotImplemented(
-            "HIBE support is not built into this tn-core (the `hibe` feature is off)",
-        ))
-    }
-    fn decrypt(&self, _ciphertext: &[u8]) -> Result<Vec<u8>> {
-        Err(Error::NotImplemented(
-            "HIBE support is not built into this tn-core (the `hibe` feature is off)",
-        ))
-    }
-    fn kind(&self) -> &'static str {
-        "hibe"
-    }
-}
 
 #[cfg(feature = "hibe")]
 pub use real::HibeCipher;

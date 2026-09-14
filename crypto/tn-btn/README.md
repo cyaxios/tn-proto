@@ -25,12 +25,10 @@ a reader holding any covered leaf can decrypt, a revoked reader cannot.
   (`cover`, `kdt`, `subset`) for the lower-level cover machinery.
 - `Error` / `Result`: the public error taxonomy.
 
-## Status and constraints
+## Capacity
 
-Pre-1.0; the API may shift across minor versions until 1.0. Tree height
-is hard-coded at 8 (256 leaves) to keep per-user storage near 1.9 KB.
-That is a configuration choice, not a wire-format limit: bumping the
-constant and re-running the tests is the only change needed.
+The tree has height 8 and 256 reader leaves. Each serialized reader kit
+occupies 1,881 bytes.
 
 ## How it is consumed
 

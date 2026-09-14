@@ -31,9 +31,8 @@ Usage::
     import tn
     tn.init("tn.yaml", extra_handlers=[OpenTelemetryHandler("otel", otel_logger)])
 
-If ``opentelemetry-api`` is not installed, the handler falls back to a
-:class:`NullOtelLogger` no-op.  This keeps ceremonies that don't need OTel
-from failing on import.
+Supply a logger explicitly. If the OpenTelemetry SDK is unavailable,
+records are passed to that logger as dictionaries.
 """
 
 from __future__ import annotations
@@ -80,13 +79,6 @@ _ATTR_FIELDS = frozenset(
 @runtime_checkable
 class OtelLogger(Protocol):
     def emit(self, record: Any) -> None: ...
-
-
-class NullOtelLogger:
-    """Drop-in no-op when opentelemetry-api is not installed."""
-
-    def emit(self, record: Any) -> None:
-        pass
 
 
 def _make_log_record(
@@ -164,8 +156,7 @@ class OpenTelemetryHandler(SyncHandler):
         Handler name (for logging and filter registration).
     otel_logger
         Any object with ``emit(record)`` — typically obtained from
-        ``LoggerProvider.get_logger("tn-proto")``.  Pass ``None`` or omit
-        to use the :class:`NullOtelLogger` no-op.
+        ``LoggerProvider.get_logger("tn-proto")``.
     filter_spec
         Optional RFC §3.2 filter dict (same shape as other handlers).
 
@@ -179,12 +170,14 @@ class OpenTelemetryHandler(SyncHandler):
     def __init__(
         self,
         name: str,
-        otel_logger: OtelLogger | None = None,
+        otel_logger: OtelLogger,
         *,
         filter_spec: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(name, filter_spec)
-        self._otel_logger: OtelLogger = otel_logger if otel_logger is not None else NullOtelLogger()
+        if not isinstance(otel_logger, OtelLogger):
+            raise TypeError("otel_logger must provide emit(record)")
+        self._otel_logger = otel_logger
 
     def emit(self, envelope: dict[str, Any], raw_line: bytes) -> None:
         level = str(envelope.get("level", "info")).lower()

@@ -51,7 +51,7 @@ def test_tnlog_roundtrip(tmp_path, cipher):
     yaml_path = tmp_path / "tn.yaml"
     log_path = tmp_path / ".tn/tn/logs" / "tn.ndjson"
 
-    tn.init(yaml_path, log_path=log_path, pool_size=4, cipher=cipher)
+    tn.init(yaml_path, log_path=log_path, cipher=cipher)
     cfg = tn.current_config()
     assert cfg.cipher_name == cipher
 
@@ -72,7 +72,7 @@ def test_tnlog_roundtrip(tmp_path, cipher):
     tn.flush_and_close()
 
     # Reopen the ceremony to exercise the load() path.
-    tn.init(yaml_path, log_path=log_path, pool_size=4, cipher=cipher)
+    tn.init(yaml_path, log_path=log_path, cipher=cipher)
     cfg = tn.current_config()
     assert cfg.cipher_name == cipher
 

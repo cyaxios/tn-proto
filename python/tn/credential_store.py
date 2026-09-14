@@ -1,29 +1,16 @@
-"""Machine credential store — cache a derived key, never the master secret.
+"""Machine credential storage for account wrapping keys.
 
-The same shape ``gh`` and the ``claude`` CLI use: after a one-time unlock,
-a derived credential is cached so later commands run non-interactively. The
-cached value is the account **AWK** (the account-scoped wrapping key), never
-the passphrase — "token, not password." See ``_init_attach`` for how it's
-used at init.
+Account initialization and wallet pickup cache the account-scoped wrapping
+key (AWK) so later commands can reuse it. Callers use ``get``, ``set``, and
+``delete`` with a stable account key name.
 
-Two backends behind one interface so wallet code is storage-agnostic:
+``KeyringCredentialStore`` stores values through the OS ``keyring`` package.
+``FileCredentialStore`` stores base64-encoded values in a JSON file, using
+mode ``0600`` on Unix and the containing directory's ACL on Windows.
 
-  * ``KeyringCredentialStore`` — the OS secret store (Windows Credential
-    Manager / macOS Keychain / Linux Secret Service) via the ``keyring``
-    package. Preferred when available.
-  * ``FileCredentialStore`` — a single ``0600`` JSON file next to
-    ``identity.json``. The graceful fallback for headless / CI / container
-    contexts with no keychain (exactly ``gh``'s ``hosts.yml`` fallback).
-
-``default_credential_store()`` returns the keychain backend when ``keyring``
-is importable and a round-trip probe succeeds, else the file backend. Wallet
-code calls the interface (``get`` / ``set`` / ``delete``) and never learns
-which backend it got.
-
-Security posture: the file backend is the SAME posture as the device key
-that already sits in ``identity.json`` (plaintext-at-rest, an unencrypted
-SSH-key equivalent). Moving BOTH behind the keychain is the single hardening
-that lifts the whole machine, tracked separately.
+``default_credential_store()`` selects the keyring backend when its
+set/get/delete probe succeeds. Otherwise it selects the file backend,
+whose default location is ``credentials.json`` beside ``identity.json``.
 """
 
 from __future__ import annotations

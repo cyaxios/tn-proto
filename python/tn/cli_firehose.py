@@ -21,8 +21,6 @@ Tenant -> DID mapping:
     chars); the /api/v1/inbox/* routes require a ``did:key:<...>`` shape and
     check it against the bearer token's bound DID. Callers can override with
     ``--did`` on list/get if their tenant id is not the literal DID.
-    TODO: project-id-based tenants once routes_account_projects' DID binding
-    is the public mapping.
 """
 
 from __future__ import annotations

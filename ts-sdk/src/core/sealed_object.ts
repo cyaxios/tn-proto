@@ -377,9 +377,9 @@ export async function sealObjectCore(
       // BtnPublisher.encrypt has no aad parameter, so binding would
       // silently drop the marker.
       throw new Error(
-        "per-emit aad is not yet wired through the native (btn) runtime; " +
-          "use a hibe/jwe ceremony, a group-level aad in config is likewise " +
-          "native-limited, or bind at the group-cipher level.",
+        "the WASM BTN runtime does not accept per-emit aad; " +
+          "use a HIBE/JWE ceremony. Group-level aad in config has the same " +
+          "WASM BTN restriction.",
       );
     }
     const aadBytes = hasAad ? canonicalBytes(effectiveAad) : new Uint8Array(0);

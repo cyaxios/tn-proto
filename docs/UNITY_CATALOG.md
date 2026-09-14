@@ -51,7 +51,7 @@ bin/uc volume get --full_name unity.default.tn_messages
 
 These commands create an external volume and display its metadata. Check that `storage_location` points to `tn-unity-demo/publications`. The [Unity CLI reference](https://docs.unitycatalog.io/usage/cli/) describes server selection and authentication options if your server uses different settings.
 
-This example uses local files, so run the TN reader where it can access the prepared workspace. For a local Unity deployment, use a directory location that is valid in that deployment as well. Container paths and host paths need to agree. Cloud object storage requires a storage client and credentials in the application; the example only reads the prepared local file.
+Run the TN reader where it can access the prepared local workspace. Use the same directory location in the Unity deployment; container and host paths need to agree.
 
 ## Resolve the volume and unseal the greeting
 
@@ -116,11 +116,11 @@ Only the total remains in the report's business data. Sealing preserves the sour
 
 `unity_edition_setup.py` contains both the preparation command and the helper functions the reader calls for configuration and admission. These checks run again when the reader runs. Shared [Unity transport helpers](../python/examples/providers/unity_client.py) handle HTTP requests, location checks, and publication identifiers for both examples.
 
-## Use your own storage and services
+## Catalog and publication APIs
 
-The example opens a local file after checking the volume metadata. To use remote storage, retrieve the stored TN bytes with your storage client and pass them to `tn.GovernedObject.parse`. The session still performs the same unseal operation. Share encrypted publications, and provision each reader's TN keys through your chosen key provider.
+The shared [unity_client.py](../python/examples/providers/unity_client.py) performs three operations: `lookup_volume` fetches metadata, `volume_directory` checks the requested name and prepared directory URI, and `read_publication` verifies the fixed local file and expected publication identifier. Both examples pass the resulting `GovernedObject` to the configured session.
 
-The edition example returns a native `CatalogEntry` with its accepted `DatasetSelection`. The [local catalog example](../python/examples/providers/catalog.py) shows the same types without Unity. A `CatalogProvider` can use this flow to resolve a `CatalogRequest` for an application.
+The edition example returns a native `CatalogEntry` with its accepted `DatasetSelection`. The [local catalog example](../python/examples/providers/catalog.py) stores accepted entries in `EditionCatalog` and resolves them through `Providers.resolve(CatalogRequest(...))`. Both paths check the exact source publication and requested use before business opening.
 
 See [management systems](MANAGEMENT_SYSTEMS.md) for identity, key, governance, and recording providers, and the [provider reference](GOVERNED_PROVIDERS.md) for their interfaces.
 

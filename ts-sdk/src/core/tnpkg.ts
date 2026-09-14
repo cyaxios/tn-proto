@@ -39,7 +39,7 @@ export type ManifestKind =
   | "kit_bundle"
   | "full_keystore"
   // Vault-emitted notification that a counterparty claimed a share-link
-  // or backup-link. Mirror only - TS absorb is not implemented yet.
+  // or backup-link.
   | "contact_update"
   // Two-device group sync (DAY-1): carries a ceremony's group KEY material
   // (`<group>.btn.state` + `<group>.btn.mykit`) PLUS each group's yaml

@@ -1,0 +1,10 @@
+groups:
+  payment:
+    policy: private
+fields:
+  cvv:
+    group: payment
+    forbidden_post_auth: true
+  pin:
+    group: payment
+    forbidden_post_auth: true

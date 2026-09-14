@@ -42,7 +42,7 @@ installation, configuration, and CLI examples, see the
 | `ex02_reading.py` | Envelope shape, `tn.read(raw=True)`, signature and chain verification, tamper detection. | `python examples/ex02_reading.py` |
 | `ex03_groups.py` | Routing fields into groups so PII and finance stay encrypted; reading as publisher vs as a partner holding only the `default` kit. | `python examples/ex03_groups.py` |
 | `ex05_rotate.py` | Mint a recipient kit, then revoke it: old ciphertexts stay decryptable, new ones do not. | `python examples/ex05_rotate.py` |
-| `ex06_multi_handler.py` | The `handlers:` fan-out in `tn.yaml`: rotating file, HTTP webhook (in-process stub), and object storage, each with its own filter and outbox. | `python examples/ex06_multi_handler.py` |
+| `ex06_multi_handler.py` | The `handlers:` fan-out in `tn.yaml`: size-rotated and daily files, with separate filters for auth and page events. | `python examples/ex06_multi_handler.py` |
 | `ex07_context.py` | `tn.set_context(**kwargs)` under concurrent asyncio load: per-task isolation, fields picked up automatically downstream. | `python examples/ex07_context.py` |
 | `ex08_stdout.py` | The default stdout handler: every emit prints the canonical envelope JSON, plus the `TN_NO_STDOUT=1` and `stdout=False` opt-outs. | `python examples/ex08_stdout.py` |
 

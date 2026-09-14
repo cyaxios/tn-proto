@@ -30,11 +30,6 @@
 //! Direct BBG encryption over GT, [`Ciphertext`], and GT byte codecs live under
 //! [`raw`] for golden-vector fixtures and advanced interop checks.
 //!
-//! # Security status
-//!
-//! `bls12_381_plus` and the `tn_bbg` scheme code are unaudited. External
-//! cryptographic review is required before production use.
-//!
 //! # Key lifecycle
 //!
 //! BBG delegated keys are permanent: there is no forward revocation of an

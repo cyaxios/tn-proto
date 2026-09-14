@@ -62,7 +62,5 @@ types and SQLite storage. [pattern_environment.py](pattern_environment.py)
 configures providers; [verb_edition_fixture.py](verb_edition_fixture.py) supplies
 the dataset test's signed policy revisions and catalog selection.
 
-These examples demonstrate application controls under their configured rules.
-A signature authenticates a publication and its declared sources; it does not
-attest to arbitrary application execution. Database commits and transport
-acknowledgements remain application responsibilities.
+These examples combine signed publications and source references with
+application decisions, database commits, and transport acknowledgements.

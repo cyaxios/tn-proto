@@ -15,7 +15,7 @@ data = session.unseal(
 
 `unseal` verifies the object's signature and decrypts its data. `decide` lets the application add an access check; returning `True` adds no further restriction. `purpose="read"` names the operation. The walkthrough below creates the session and object needed for this call.
 
-[Why TN exists](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/README.md#why-tn-exists) · [Install](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/README.md#install) · [First object](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/README.md#your-first-object) · [Bank and vendor](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/README.md#from-a-greeting-to-a-bank-report) · [Application rules](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/README.md#optional-application-rules) · [Python API](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/README.md#python-api) · [Keys and providers](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/README.md#keys-providers-and-revocation) · [Application examples](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/examples/enterprise/README.md)
+[Why TN exists](https://github.com/cyaxios/tn-proto/blob/main/README.md#why-tn-exists) · [Install](https://github.com/cyaxios/tn-proto/blob/main/README.md#install) · [First object](https://github.com/cyaxios/tn-proto/blob/main/README.md#your-first-object) · [Bank and vendor](https://github.com/cyaxios/tn-proto/blob/main/README.md#from-a-greeting-to-a-bank-report) · [Application rules](https://github.com/cyaxios/tn-proto/blob/main/README.md#optional-application-rules) · [Python API](https://github.com/cyaxios/tn-proto/blob/main/README.md#python-api) · [Keys and providers](https://github.com/cyaxios/tn-proto/blob/main/README.md#keys-and-providers) · [Application examples](https://github.com/cyaxios/tn-proto/blob/main/python/examples/enterprise/README.md)
 
 ## Why TN exists
 
@@ -35,13 +35,13 @@ For applications with existing identity, key, or policy services, see the [manag
 python -m pip install "tn-proto==2026.9.13b5"
 ```
 
-Python 3.10 or newer. Linux x86-64 and Windows x64 wheels include the native implementation and require no Rust toolchain to install. This is a beta of the Python SDK; see the [release notes](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/CHANGELOG.md) for changes.
+Python 3.10 or newer. Linux x86-64 and Windows x64 wheels include the native implementation. Install the wheel with pip; use the [Rust SDK](https://github.com/cyaxios/tn-proto/blob/main/rust-sdk/README.md) for Rust applications.
 
 ## Your first object
 
 ### 1. Start a session
 
-Save the sample [agents.md](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/examples/getting_started/agents.md) in your working folder. Its `## hello.message` section contains the greeting's use contract. The session loads this file, and `session.policy("hello.message")` selects that contract for the object you will create.
+Save the sample [agents.md](https://github.com/cyaxios/tn-proto/blob/main/python/examples/getting_started/agents.md) in your working folder. Its `## hello.message` section contains the greeting's use contract. The session loads this file, and `session.policy("hello.message")` selects that contract for the object you will create.
 
 Run the following Python snippets in order, in the same process:
 
@@ -132,11 +132,11 @@ Close the session when finished:
 session.close()
 ```
 
-The complete walkthrough is available as [hello.py](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/examples/getting_started/hello.py), alongside its `agents.md` file.
+The complete walkthrough is available as [hello.py](https://github.com/cyaxios/tn-proto/blob/main/python/examples/getting_started/hello.py), alongside its `agents.md` file.
 
 ## From a greeting to a bank report
 
-The [bank/vendor program](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/examples/bank_vendor.py) implements the exchange described above. Its setup gives the bank and vendor separate signing identities, then assigns the groups each can read and publish. The use contract is stored in an encrypted governance group that both applications can read:
+The [bank/vendor program](https://github.com/cyaxios/tn-proto/blob/main/python/examples/bank_vendor.py) implements the exchange described above. Its setup gives the bank and vendor separate signing identities, then assigns the groups each can read and publish. The use contract is stored in an encrypted governance group that both applications can read:
 
 | Application | Can open | Can publish |
 | --- | --- | --- |
@@ -175,9 +175,9 @@ with configured() as parties:
 2
 ```
 
-Python computes the total. `include` records the second input and its contract; it does not merge business values. `select` keeps only the aggregate and removes the original values and unopened identity ciphertext from the output. `attach` adds the vendor's reporting contract while retaining the bank's contract. The bank receives a result with two contracts and references to both source publications.
+Python computes the total. `include` records the second input and its contract. `select` keeps only the aggregate and removes the original values and unopened identity ciphertext from the output. `attach` adds the vendor's reporting contract while retaining the bank's contract. The bank receives a result with two contracts and references to both source publications.
 
-Run `python python/examples/bank_vendor.py` for the complete demonstration, including refused identity access and a refused marketing use. Its [tests](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/tests/test_bank_vendor_example.py) check the result, group boundary, contracts, and sources.
+Run `python python/examples/bank_vendor.py` for the complete demonstration, including refused identity access and a refused marketing use. Its [tests](https://github.com/cyaxios/tn-proto/blob/main/python/tests/test_bank_vendor_example.py) check the result, group boundary, contracts, and sources.
 
 ## Optional application rules
 
@@ -205,9 +205,9 @@ with tn.Session(Path("agents.md").read_text(encoding="utf-8")) as session:
     print(data.get("message"))
 ```
 
-The decision returns a boolean. False refuses the operation; errors also stop it. The contract check compares the exact contract, including its authority. Comparing only a policy name would not establish that match.
+The decision returns a boolean. False refuses the operation; errors also stop it. The contract check compares the exact contract, including its authority.
 
-For repeated work, configure decisions with `session.configure_receive`, `configure_attach`, and `configure_release`, then bind them with `session.workflow(receive=..., release=...)`. A workflow runs its configured decisions on every operation. The [configuration guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/docs/GOVERNED_PYTHON_API.md#configure-input-output-and-attachment) shows the arguments and routing behavior.
+For repeated work, configure decisions with `session.configure_receive`, `configure_attach`, and `configure_release`, then bind them with `session.workflow(receive=..., release=...)`. A workflow runs its configured decisions on every operation. The [configuration guide](https://github.com/cyaxios/tn-proto/blob/main/docs/GOVERNED_PYTHON_API.md#configure-input-output-and-attachment) shows the arguments and routing behavior.
 
 | Decision | Context available to the application |
 | --- | --- |
@@ -269,7 +269,7 @@ When `group` is omitted, `get` and `set` use the working object's primary group.
 
 `Session.seal(draft)` originates a `GovernedDraft`, built with `session.draft(...)` and `draft.group(...)`. Use `DataObject.seal` or `Workflow.seal` to publish working data. Module-level `tn.seal` and `tn.unseal` belong to the separate portable-envelope API; the governed lifecycle described here uses session and workflow methods.
 
-The [complete Python API guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/docs/GOVERNED_PYTHON_API.md) documents signatures, defaults, callbacks, group selection, publication history, and transport. The [object-operation reference](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/docs/TN_VERBS_API.md) maps the verbs to their native operations. [Type signatures](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/tn/governed/__init__.pyi) describe the exposed Python types.
+The [complete Python API guide](https://github.com/cyaxios/tn-proto/blob/main/docs/GOVERNED_PYTHON_API.md) documents signatures, defaults, callbacks, group selection, publication history, and transport. The [object-operation reference](https://github.com/cyaxios/tn-proto/blob/main/docs/TN_VERBS_API.md) maps the verbs to their native operations. [Type signatures](https://github.com/cyaxios/tn-proto/blob/main/python/tn/governed/__init__.pyi) describe the exposed Python types.
 
 ### Policy revisions, datasets, and lineage
 
@@ -283,15 +283,15 @@ If an application tracks dataset editions or changes to use contracts, these API
 | `LineageVerifier` | Verify retained source publications through an application-supplied resolver |
 | `ObjectRegisters` | Configure optional signed creation and release metadata records |
 
-The [catalog example](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/examples/providers/catalog.py) creates a contract revision and dataset edition, then selects the corresponding source object. The [dataset and lineage guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/docs/GOVERNED_PYTHON_API.md#policy-revisions-dataset-editions-and-lineage) covers selection and following a result's references back to its inputs.
+The [catalog example](https://github.com/cyaxios/tn-proto/blob/main/python/examples/providers/catalog.py) creates a contract revision and dataset edition, then selects the corresponding source object. The [dataset and lineage guide](https://github.com/cyaxios/tn-proto/blob/main/docs/GOVERNED_PYTHON_API.md#policy-revisions-dataset-editions-and-lineage) covers selection and following a result's references back to its inputs.
 
-Common failures are `VerificationError` for invalid publications, `NotEntitled` for missing group capabilities, `UseDenied` for a refused decision, and `NotAPublisher` for missing publication capabilities. The [error reference](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/docs/GOVERNED_PYTHON_API.md#errors-and-integration-checks) covers callback failures, closed sessions, and register errors as well.
+Common failures are `VerificationError` for invalid publications, `NotEntitled` for missing group capabilities, `UseDenied` for a refused decision, and `NotAPublisher` for missing publication capabilities. The [error reference](https://github.com/cyaxios/tn-proto/blob/main/docs/GOVERNED_PYTHON_API.md#errors-and-integration-checks) covers callback failures, closed sessions, and register errors as well.
 
-## Keys, providers, and revocation
+## Keys and providers
 
-A fresh session is convenient for a first run. Deployed applications need identities and keys that survive restarts, plus explicit assignments for other readers. `FileKeyStore.create(...)` provisions a local store once; `FileKeyStore.open(path)` reopens it. It implements both identity and key resolution. The store contains unencrypted credentials protected by filesystem access controls. Keep it in private application storage.
+A fresh session is convenient for a first run. Deployed applications can load identities and keys from persistent storage and assign them to their readers. `FileKeyStore.create(...)` provisions a local store once; `FileKeyStore.open(path)` reopens it. It implements both identity and key resolution. Store its files in private application storage.
 
-The [persistent-key examples](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/examples/persistent_keys/README.md) run setup, publication, and reading in separate processes. They cover three encryption options: BTN for a group of readers with revocation, JWE for encryption to specified recipients, and HIBE for keys assigned within a hierarchy. The [capability constructors](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/docs/GOVERNED_PYTHON_API.md#cipher-capabilities) accept existing key material for these options.
+The [persistent-key examples](https://github.com/cyaxios/tn-proto/blob/main/python/examples/persistent_keys/README.md) run setup, publication, and reading in separate processes. They cover three encryption options: BTN for shared reader groups, JWE for specified recipients, and HIBE for keys assigned within a hierarchy. The [capability constructors](https://github.com/cyaxios/tn-proto/blob/main/docs/GOVERNED_PYTHON_API.md#cipher-capabilities) accept existing key material for these options.
 
 Applications can connect their own infrastructure through five provider contracts:
 
@@ -303,19 +303,13 @@ Applications can connect their own infrastructure through five provider contract
 | `CatalogProvider` | `resolve(request)` supplies an accepted edition selection and its exact publication |
 | `RegisterProvider` | `record(event)` retains an already signed publication and event metadata |
 
-`Providers(identity, keys, governance, catalog=..., registers=...)` composes these interfaces. Its `session(application, workflows=...)` method creates a session with the assigned capabilities. The [provider guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/docs/GOVERNED_PROVIDERS.md), [type signatures](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/tn/providers/__init__.pyi), and [executable setup examples](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/examples/providers/README.md) cover each contract.
+`Providers(identity, keys, governance, catalog=..., registers=...)` composes these interfaces. Its `session(application, workflows=...)` method creates a session with the assigned capabilities. The [provider guide](https://github.com/cyaxios/tn-proto/blob/main/docs/GOVERNED_PROVIDERS.md), [type signatures](https://github.com/cyaxios/tn-proto/blob/main/python/tn/providers/__init__.pyi), and [executable setup examples](https://github.com/cyaxios/tn-proto/blob/main/python/examples/providers/README.md) cover each contract.
 
-Giving a reader the relevant group capabilities gives it decryption authority without requiring an online key-release service for each read. Key stores and live authorization services are also supported through providers. Key resolution happens at session setup; the session retains that capability snapshot. An adapter can consult a live authorization service whenever a configured receive, attach, or release decision runs.
-
-### Preserve evidence when excluding future access
-
-Suppose the bank stops sending new data to a vendor but needs to keep the earlier reports readable for review. With BTN, the bank can revoke that reader for future publications created with the updated publisher state. Retained keys still open the historical publications they covered. This is forward-only revocation: access to new data changes while earlier records remain readable with their keys.
-
-Keep the publications and keys needed for later review. Revocation cannot recall plaintext or keys already copied by a reader. The [BTN guide](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/docs/BTN_COVER.md) describes revocation coverage and compatibility.
+Key resolution happens at session setup; the session retains those capabilities for its operations. Applications choose how to obtain that material. An adapter can also consult a live authorization service whenever a configured receive, attach, or release decision runs. The [management systems guide](https://github.com/cyaxios/tn-proto/blob/main/docs/MANAGEMENT_SYSTEMS.md) shows the supported integration points.
 
 ## Application examples
 
-The repository contains [15 application examples](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python/examples/enterprise/README.md) covering common service and storage patterns. Each uses the object API to handle a specific task:
+The repository contains [15 application examples](https://github.com/cyaxios/tn-proto/blob/main/python/examples/enterprise/README.md) covering common service and storage patterns. Each uses the object API to handle a specific task:
 
 | Application need | Patterns and worked behavior |
 | --- | --- |
@@ -329,7 +323,7 @@ The examples use SQLite for their application records. They show where to commit
 
 ## Testing
 
-The release checks execute every Python block in this README, the standalone greeting, and the governed API, provider, persistent-key, bank/vendor, and enterprise tests against installed wheels. The [release workflow](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/.github/workflows/release-python.yml) builds and verifies Linux and Windows wheels before publication.
+The release checks execute every Python block in this README, the standalone greeting, and the governed API, provider, persistent-key, bank/vendor, and enterprise tests against installed wheels. The [release workflow](https://github.com/cyaxios/tn-proto/blob/main/.github/workflows/release-python.yml) builds and verifies Linux and Windows wheels before publication.
 
 From a checkout of this release, install the test dependencies and run the example checks. The Rust command also requires a Rust toolchain:
 
@@ -342,6 +336,6 @@ cargo test --locked -p tn-btn
 
 ## Source, support, and license
 
-The Python SDK calls the Rust implementation in [crypto/tn-core](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/crypto/tn-core) through the [PyO3 bindings](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/crypto/tn-core-py). The Python package is in [python](https://github.com/cyaxios/tn-proto/blob/python-v2026.9.13b5/python). Use [GitHub issues](https://github.com/cyaxios/tn-proto/issues) for reproducible bugs and documentation corrections, including the package version and a minimal example with private data removed.
+The Python SDK calls the Rust implementation in [crypto/tn-core](https://github.com/cyaxios/tn-proto/blob/main/crypto/tn-core) through the [PyO3 bindings](https://github.com/cyaxios/tn-proto/blob/main/crypto/tn-core-py). The Python package is in [python](https://github.com/cyaxios/tn-proto/blob/main/python). Use [GitHub issues](https://github.com/cyaxios/tn-proto/issues) for reproducible bugs and documentation corrections, including the package version and a minimal example with private data removed.
 
 Dual-licensed under the MIT License or the Apache License, Version 2.0.

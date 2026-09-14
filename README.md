@@ -15,7 +15,7 @@ data = session.unseal(
 
 `unseal` verifies the object's signature and decrypts its data. `decide` lets the application add an access check; returning `True` adds no further restriction. `purpose="read"` names the operation. The walkthrough below creates the session and object needed for this call.
 
-[Why TN exists](#why-tn-exists) · [Install](#install) · [First object](#your-first-object) · [Bank and vendor](#from-a-greeting-to-a-bank-report) · [Application rules](#optional-application-rules) · [Python API](#python-api) · [Keys and providers](#keys-providers-and-revocation) · [Application examples](python/examples/enterprise/README.md)
+[Why TN exists](#why-tn-exists) · [Install](#install) · [First object](#your-first-object) · [Bank and vendor](#from-a-greeting-to-a-bank-report) · [Application rules](#optional-application-rules) · [Python API](#python-api) · [Keys and providers](#keys-and-providers) · [Application examples](python/examples/enterprise/README.md)
 
 ## Why TN exists
 
@@ -35,7 +35,7 @@ For applications with existing identity, key, or policy services, see the [manag
 python -m pip install "tn-proto==2026.9.13b5"
 ```
 
-Python 3.10 or newer. Linux x86-64 and Windows x64 wheels include the native implementation and require no Rust toolchain to install. This is a beta of the Python SDK; see the [release notes](CHANGELOG.md) for changes.
+Python 3.10 or newer. Linux x86-64 and Windows x64 wheels include the native implementation. Install the wheel with pip; use the [Rust SDK](rust-sdk/README.md) for Rust applications.
 
 ## Your first object
 
@@ -175,7 +175,7 @@ with configured() as parties:
 2
 ```
 
-Python computes the total. `include` records the second input and its contract; it does not merge business values. `select` keeps only the aggregate and removes the original values and unopened identity ciphertext from the output. `attach` adds the vendor's reporting contract while retaining the bank's contract. The bank receives a result with two contracts and references to both source publications.
+Python computes the total. `include` records the second input and its contract. `select` keeps only the aggregate and removes the original values and unopened identity ciphertext from the output. `attach` adds the vendor's reporting contract while retaining the bank's contract. The bank receives a result with two contracts and references to both source publications.
 
 Run `python python/examples/bank_vendor.py` for the complete demonstration, including refused identity access and a refused marketing use. Its [tests](python/tests/test_bank_vendor_example.py) check the result, group boundary, contracts, and sources.
 
@@ -205,7 +205,7 @@ with tn.Session(Path("agents.md").read_text(encoding="utf-8")) as session:
     print(data.get("message"))
 ```
 
-The decision returns a boolean. False refuses the operation; errors also stop it. The contract check compares the exact contract, including its authority. Comparing only a policy name would not establish that match.
+The decision returns a boolean. False refuses the operation; errors also stop it. The contract check compares the exact contract, including its authority.
 
 For repeated work, configure decisions with `session.configure_receive`, `configure_attach`, and `configure_release`, then bind them with `session.workflow(receive=..., release=...)`. A workflow runs its configured decisions on every operation. The [configuration guide](docs/GOVERNED_PYTHON_API.md#configure-input-output-and-attachment) shows the arguments and routing behavior.
 
@@ -287,11 +287,11 @@ The [catalog example](python/examples/providers/catalog.py) creates a contract r
 
 Common failures are `VerificationError` for invalid publications, `NotEntitled` for missing group capabilities, `UseDenied` for a refused decision, and `NotAPublisher` for missing publication capabilities. The [error reference](docs/GOVERNED_PYTHON_API.md#errors-and-integration-checks) covers callback failures, closed sessions, and register errors as well.
 
-## Keys, providers, and revocation
+## Keys and providers
 
-A fresh session is convenient for a first run. Deployed applications need identities and keys that survive restarts, plus explicit assignments for other readers. `FileKeyStore.create(...)` provisions a local store once; `FileKeyStore.open(path)` reopens it. It implements both identity and key resolution. The store contains unencrypted credentials protected by filesystem access controls. Keep it in private application storage.
+A fresh session is convenient for a first run. Deployed applications can load identities and keys from persistent storage and assign them to their readers. `FileKeyStore.create(...)` provisions a local store once; `FileKeyStore.open(path)` reopens it. It implements both identity and key resolution. Store its files in private application storage.
 
-The [persistent-key examples](python/examples/persistent_keys/README.md) run setup, publication, and reading in separate processes. They cover three encryption options: BTN for a group of readers with revocation, JWE for encryption to specified recipients, and HIBE for keys assigned within a hierarchy. The [capability constructors](docs/GOVERNED_PYTHON_API.md#cipher-capabilities) accept existing key material for these options.
+The [persistent-key examples](python/examples/persistent_keys/README.md) run setup, publication, and reading in separate processes. They cover three encryption options: BTN for shared reader groups, JWE for specified recipients, and HIBE for keys assigned within a hierarchy. The [capability constructors](docs/GOVERNED_PYTHON_API.md#cipher-capabilities) accept existing key material for these options.
 
 Applications can connect their own infrastructure through five provider contracts:
 
@@ -305,13 +305,7 @@ Applications can connect their own infrastructure through five provider contract
 
 `Providers(identity, keys, governance, catalog=..., registers=...)` composes these interfaces. Its `session(application, workflows=...)` method creates a session with the assigned capabilities. The [provider guide](docs/GOVERNED_PROVIDERS.md), [type signatures](python/tn/providers/__init__.pyi), and [executable setup examples](python/examples/providers/README.md) cover each contract.
 
-Giving a reader the relevant group capabilities gives it decryption authority without requiring an online key-release service for each read. Key stores and live authorization services are also supported through providers. Key resolution happens at session setup; the session retains that capability snapshot. An adapter can consult a live authorization service whenever a configured receive, attach, or release decision runs.
-
-### Preserve evidence when excluding future access
-
-Suppose the bank stops sending new data to a vendor but needs to keep the earlier reports readable for review. With BTN, the bank can revoke that reader for future publications created with the updated publisher state. Retained keys still open the historical publications they covered. This is forward-only revocation: access to new data changes while earlier records remain readable with their keys.
-
-Keep the publications and keys needed for later review. Revocation cannot recall plaintext or keys already copied by a reader. The [BTN guide](docs/BTN_COVER.md) describes revocation coverage and compatibility.
+Key resolution happens at session setup; the session retains those capabilities for its operations. Applications choose how to obtain that material. An adapter can also consult a live authorization service whenever a configured receive, attach, or release decision runs. The [management systems guide](docs/MANAGEMENT_SYSTEMS.md) shows the supported integration points.
 
 ## Application examples
 

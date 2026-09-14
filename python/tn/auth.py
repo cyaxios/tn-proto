@@ -8,7 +8,7 @@ implementation of each piece.
 Parity: this mirrors ``ts-sdk/src/auth/``. The :class:`Verdict` values and the
 ``VERDICT_MESSAGE`` table are IDENTICAL across both SDKs and are asserted equal
 by a cross-impl parity test. Design:
-``docs/guide/auth-namespace-design.md``.
+``docs/guide/auth.md``.
 
 State machine (the resting state is BACKED_UP), keyed on three layers:
     linked      - the local file claims an account

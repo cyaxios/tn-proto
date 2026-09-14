@@ -49,7 +49,7 @@ The public programming types have separate jobs:
 | `Workflow::primary_group(&self, object_type: &str) -> Result<&str>` | Used by the native binding | Identifies the first configured business group for an input type. |
 | `Workflow::release_plan(&self) -> Arc<ReleasePlan>` | Used by the native binding | Exposes the immutable native output plan to integrations. |
 
-Combining inputs remains `data.include(other)`. Mutating fields remains a `DataObject` operation. Neither action needs an additional workflow synonym. Creation remains `session.create_obj(fields, policy)`, since an originator need not configure receipt.
+Combine inputs with `data.include(other)`, mutate fields through `DataObject`, and create objects with `session.create_obj(fields, policy)`.
 
 Python calls the native workflow for receipt and attachment. Release reuses the Rust release plan and native object operation through the existing revision-safe PyO3 bridge. Callbacks run without the object lock; a changed object cannot be published using a decision about its previous state. Closing the Python session closes access through its bound workflows.
 

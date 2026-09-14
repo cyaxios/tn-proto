@@ -848,9 +848,8 @@ class _SnapshotPostingClient:
 class _DeviceKeyIdentity:
     """Minimal Identity surface so VaultClient.authenticate() works.
 
-    ``VaultClient`` only needs ``did`` and ``device_private_key_bytes``
-    for the DID challenge / verify auth flow. We don't ship the wrap
-    key because snapshot push doesn't seal blobs.
+    Provides ``did`` and ``device_private_key_bytes`` for the DID
+    challenge / verify authentication flow.
     """
 
     def __init__(self, device: Any) -> None:
@@ -862,16 +861,6 @@ class _DeviceKeyIdentity:
 
     def device_private_key_bytes(self) -> bytes:
         return self._device.private_bytes
-
-    def vault_wrap_key(self) -> bytes:
-        # Snapshot push doesn't seal blobs — but VaultClient never reaches
-        # for this attribute on the auth path. Provide a safe fallback so
-        # mistakes raise loudly rather than silently corrupt state.
-        raise NotImplementedError(
-            "vault.push handler does not expose a wrap key — sealed file "
-            "upload is not part of the snapshot path."
-        )
-
 
 __all__ = ["VaultPushHandler", "init_upload", "push_snapshot"]
 

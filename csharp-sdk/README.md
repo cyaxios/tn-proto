@@ -2,16 +2,11 @@
 
 [![.NET](https://img.shields.io/badge/.NET-8.0-512BD4.svg?style=flat-square)](https://dotnet.microsoft.com/)
 [![Core](https://img.shields.io/badge/core-shared%20Rust%20runtime-orange.svg?style=flat-square)](../crypto/tn-core)
-[![Status](https://img.shields.io/badge/status-preview-yellow.svg?style=flat-square)](#status)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg?style=flat-square)](#license)
 
 **`TnProto` for .NET writes encrypted, signed, tamper-evident records using the same tn-proto wire format as Python, TypeScript, and Rust.** It is a C# wrapper over the shared Rust core, so cryptography, canonicalization, `.tnpkg` handling, recipient sealing, and vault body encryption stay byte-compatible across languages.
 
-## Status
-
-The C# SDK is currently an in-repo preview. It is not published to NuGet yet.
-
-Ready today:
+## Features
 
 - Project creation/opening under `.tn/<project>/tn.yaml`
 - Emit/read/verify, canonical JSON, envelope sealing, and identity helpers
@@ -20,19 +15,14 @@ Ready today:
 - Vault claim-link, account connect-code, wallet sync, and restore helpers
 - API-key bootstrap for container/CI cold starts
 - Firehose diagnostic client and gated CLI commands
-- Preview `tn-dotnet` CLI
+- `tn-dotnet` CLI
 
-Preview limits:
-
-- Native binaries are built from this repo during development.
-- NuGet runtime asset packaging is not finalized.
-- Watch is polling-backed.
-- Browser login/account UI is outside the SDK.
-- Firehose commands are diagnostic and opt-in behind `TN_FIREHOSE_ENABLED=1`.
+`WatchAsync` polls for new entries. Firehose diagnostic commands require
+`TN_FIREHOSE_ENABLED=1`.
 
 ## Installation
 
-Use from source for now:
+Build from source:
 
 ```powershell
 git clone https://github.com/cyaxios/tn-proto.git
@@ -221,7 +211,7 @@ var bootstrap = await TnApiKeyBootstrap.BootstrapAsync(new TnApiKeyBootstrapOpti
 
 ## CLI
 
-Run the preview CLI from the repo root:
+Run the CLI from the repo root:
 
 ```powershell
 dotnet run --project csharp-sdk/src/TnProto.Cli -- --help
@@ -315,15 +305,17 @@ cargo build -p tn-core-ffi
 dotnet test csharp-sdk/TnProto.sln
 ```
 
-The normal suite uses temporary projects and local fake vault/firehose servers. Hosted vault behavior should still be checked manually before release because account UI, connect codes, and hosted bootstrap minting depend on the deployed vault environment.
+The normal suite uses temporary projects and local vault/firehose test servers.
+Hosted account UI, connect codes, and bootstrap minting depend on the deployed
+vault environment.
 
 ## Project Layout
 
 - `src/TnProto`: public C# library
-- `src/TnProto.Cli`: preview CLI wrapper
+- `src/TnProto.Cli`: CLI wrapper
 - `tests/TnProto.Tests`: library tests
 - `tests/TnProto.Cli.Tests`: CLI tests
-- `SDK_REFERENCE.md`: temporary API reference while the SDK is in preview
+- `SDK_REFERENCE.md`: API reference
 
 ## License
 

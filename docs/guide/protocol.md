@@ -320,7 +320,6 @@ as public and folded into the `row_hash` recompute. That is what lets a
 holder verify a sealed object from a ceremony whose yaml they have never
 seen.
 
-
 ---
 
 ## 2. Integrity layer (canonical bytes, hash chain, signing, index tokens)
@@ -568,7 +567,6 @@ line-addressable: a reader can stream it line by line, and the reverse-scan tip
 helpers can walk it backward from the end. The exact per-field on-the-wire shape
 of one line is documented in [§1, the record](#1-the-record-on-the-wire-envelope).
 
-
 ---
 
 ## 3. Group ciphers
@@ -588,7 +586,7 @@ Three ciphers are defined. A group selects exactly one:
 |---|---|---|---|
 | `btn` (default) | Broadcast: one sealed block, N readers, subset-difference cover | Cheap forward revocation of an admitted reader (§3, rotation and revocation) | the audience is a set that shrinks over time |
 | `jwe` | Per-recipient wrap: one wrapped key per reader | Drop the recipient from the list; next seal omits them | the audience is small and enumerated at seal time |
-| `hibe` (**evaluation only; unaudited — see [§3.1](#31-hibe-the-identity-path-cipher)**) | Identity-path: seal to a named path under an authority's public key | For exact-path keys, authenticate a sibling path to every writer and re-issue; ancestor capabilities survive rotation below them | you seal to someone who holds no key yet, or want hierarchical delegation |
+| `hibe` | Identity-path: seal to a named path under an authority's public key | For exact-path keys, authenticate a sibling path to every writer and re-issue; ancestor capabilities survive rotation below them | you seal to someone who holds no key yet, or want hierarchical delegation |
 
 An implementation MUST treat `ciphertext` as opaque outside the selected cipher.
 It MUST NOT hoist any cipher-internal field (a wrapped key, a nonce, a cover
@@ -643,10 +641,8 @@ master seed and all derived key material:
   master seed via HKDF. Stable across restarts; copied into every ciphertext so
   readers can reject foreign content up-front.
 - `epoch` — starts at 0, bumps on each rotation.
-- `master_seed` — a 32-byte secret, held in `Zeroizing` so it is wiped on drop.
-  Loss means the publisher can no longer encrypt; leak is catastrophic (the
-  holder can mint arbitrary kits and decrypt everything this publisher ever
-  produced).
+- `master_seed` — a 32-byte secret held in `Zeroizing`, which wipes it on drop.
+  The publisher derives the key tree and reader kits from this seed.
 - `node_key_cache` — every internal node's primary key, eagerly populated at
   setup so repeated encrypts reuse the tree walk. Not serialized; rebuilt from
   the seed on load.
@@ -816,11 +812,6 @@ a **named identity path** using only a public key. A writer needs no key for the
 recipient: knowing the authority's master public key and the path is enough to
 seal. Reader keys are handed out later, or never.
 
-> **Security status:** the `tn-bbg` scheme implementation and underlying
-> `bls12_381_plus` pairing library are **unaudited**. External cryptographic
-> review is required before production use. Treat this cipher as
-> evaluation-only until that review is complete.
-
 A hibe group's on-wire payload is the same shape as any other group (§1):
 `{ "ciphertext": <base64>, "field_hashes": { ... } }`. Everything the cipher
 needs is inside `ciphertext`; there is no sibling key and no envelope-schema
@@ -920,9 +911,9 @@ The readable output of a grant is a **reader key for a path**, delivered inside
 the standard `.tnpkg` kit bundle — the same private-reader-kit ceremony BTN uses.
 Python JWE instead uses reader-generated private keys plus public offer/enrollment
 packages; it does not export `.jwe.mykey` in an ordinary reader kit. A HIBE kit
-carries the `mpk`, identity path, and exactly one bearer reader key. Its body is
-recipient-sealed only when the addressed DID is a complete resolvable Ed25519
-`did:key`; otherwise current `grant_reader` behavior falls back to plaintext. A
+carries the `mpk`, identity path, and exactly one bearer reader key. Normal `grant_reader` delivery requires a complete Ed25519 `did:key` and an
+unexpired, exact-scope `hibe-reader` proof, then recipient-seals the body.
+Plaintext delivery requires the explicit `unsafe_plaintext=True` option. A
 kit **MUST NOT** carry the master secret. An implementation **MUST** refuse to
 install a master secret from any package that is not a self-addressed backup; the
 `msk` appears only in its own authority's keystore (or a full-keystore restore of
@@ -930,25 +921,18 @@ that same identity).
 
 #### Revocation semantics
 
-Stated plainly: **a delegated reader key is permanent for its path.** There is no
-forward revocation of an already-admitted reader. "Removing" a reader means
-**rotating the group's sealing path forward** to a new sibling path and re-issuing
-keys to the survivors. `revoke_reader` changes the authority ceremony's local
-path; every external writer retains its own path and must authenticate and adopt
-the new sibling before its next seal. Forward cutoff for an exact-path reader
-begins only after all writers update. A holder of an ancestor key can derive the
-new descendant key without the `msk`, so rotation beneath that ancestor cannot
-revoke it. Entries sealed before a successful cutoff remain readable by prior
-grantees. A group that needs routine BTN-grade forward revocation uses `btn`.
+`revoke_reader` changes the authority ceremony's sealing path to a sibling and
+issues replacement kits to the surviving readers. External writers adopt that
+new path before their next seal. Exact-path keys open their assigned path;
+parent-path keys can also derive descendants within the remaining depth budget.
 
 ### 3.2 AAD binding: welding a marker to a group body
 
-The current JWE and HIBE group ciphers MAY bind an
-**additional-authenticated-data (AAD)** string to the ciphertext. AAD is
-authenticated by the body encryption and is **NOT encrypted**. HIBE does not
-store it inside its ciphertext, while JWE stores it in the RFC 7516 `aad` member
-inside the opaque JWE object. The current BTN product surface rejects `aad=`
-rather than silently dropping it.
+BTN, JWE, and HIBE group ciphers bind additional authenticated data (AAD) to
+the body. The Python runtime accepts a per-emit `aad=` mapping and per-group
+`aad:` defaults. The native BTN runtime binds those same canonical marker
+bytes. JWE stores AAD in its RFC 7516 `aad` member; HIBE reconstructs it from
+the record's public `tn_aad` echo.
 
 The integrity property: opening with a different AAD, or with absent (empty) AAD
 when a non-empty AAD was bound, fails the tag and the read is rejected — the same
@@ -994,7 +978,6 @@ are empty sentinels and body AEAD is the applicable check. An implementation MUS
 bind the group's canonical marker bytes as the body AAD and MUST echo the
 effective markers as the canonical string under `tn_aad`; the two MUST be derived
 from the same marker so a faithful reader always reconstructs a matching AAD.
-
 
 ---
 

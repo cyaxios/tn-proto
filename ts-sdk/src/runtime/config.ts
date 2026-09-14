@@ -173,7 +173,7 @@ export function substituteEnvVars(text: string, sourcePath: string): string {
 //
 // Merge rules (must stay in lockstep with the Python implementation):
 //   - parent-owned keys (device, keystore, groups, fields, public_fields,
-//     default_policy, llm_classifier): parent wins; child override warns.
+//     default_policy): parent wins; child override warns.
 //   - ``ceremony``: shallow-merged per subfield, child wins.
 //   - ``handlers``: child replaces parent when declared, including [].
 //   - ``logs``: child wins outright if set.
@@ -192,7 +192,6 @@ const PARENT_OWNED_KEYS: ReadonlyArray<string> = [
   "fields",
   "public_fields",
   "default_policy",
-  "llm_classifier",
 ];
 
 function absolutizePath(p: string, base: string): string {

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use serde_json::json;
 use tn_core::cipher::{
     btn::{BtnPublisherCipher, BtnReaderCipher},
-    hibe::HibePlaceholder,
     GroupCipher, PublicationCapability,
 };
 use tn_core::governed::{Governance, GovernedDraft, GovernedReader, GovernedWriter};
@@ -83,15 +82,13 @@ fn preflight_reports_every_failure_category_without_trial_encryption() {
         .unwrap()
         .with_group("reader", Arc::new(reader), &[2; 32])
         .unwrap()
-        .with_group("disabled", Arc::new(HibePlaceholder), &[3; 32])
-        .unwrap()
         .with_group("legacy", legacy.clone(), &[4; 32])
         .unwrap();
-    let names = ["missing_b", "reader", "legacy", "missing_a", "disabled"];
+    let names = ["missing_b", "reader", "legacy", "missing_a"];
     let report = writer.check_groups(names).unwrap();
     assert_eq!(report.supported_groups(), ["tn.agents"]);
     assert_eq!(report.missing_groups(), ["missing_a", "missing_b"]);
-    assert_eq!(report.unavailable_groups(), ["disabled", "reader"]);
+    assert_eq!(report.unavailable_groups(), ["reader"]);
     assert_eq!(report.unknown_groups(), ["legacy"]);
     assert!(!report.is_ready());
     let error = writer.require_groups(names).unwrap_err();

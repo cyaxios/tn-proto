@@ -61,9 +61,7 @@ class FsDropHandler(TNHandler):
     scope
         ``scope`` field passed to ``tn.export``.
     trigger
-        ``"on_emit"`` (default) — drop on each accepted emit.
-        ``"on_schedule"`` reserved; not implemented yet (would mirror
-        ``vault.push`` scheduler).
+        ``"on_emit"`` — drop on each accepted emit.
     filename_template
         Python ``str.format`` template. Available placeholders:
 
@@ -95,9 +93,8 @@ class FsDropHandler(TNHandler):
     ) -> None:
         super().__init__(name, filter_spec)
         if trigger != "on_emit":
-            # Reserved value — keep the API stable for the future.
             raise ValueError(
-                f"fs.drop: trigger={trigger!r} not supported yet; only 'on_emit' is implemented."
+                f"fs.drop: trigger must be 'on_emit', got {trigger!r}."
             )
         self._out_dir = Path(out_dir)
         self._on_types: set[str] | None = set(on) if on else None

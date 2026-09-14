@@ -41,6 +41,14 @@ from tn.tnpkg import _read_manifest, _verify_manifest_signature
 from tn.trust import AcceptedOffer
 
 
+@pytest.mark.parametrize("kind", ["recipient_invite", "contact_update", "group_keys"])
+def test_export_rejects_kinds_without_a_producer(tmp_path: Path, kind: str):
+    destination = tmp_path / "output.tnpkg"
+    with pytest.raises(ValueError, match="unknown kind"):
+        export(destination, kind=kind)
+    assert not destination.exists()
+
+
 @pytest.fixture(autouse=True)
 def fresh_runtime():
     tn.flush_and_close()

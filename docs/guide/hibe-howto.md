@@ -9,17 +9,9 @@ Every code block below is real code, and every output block is its actual
 stdout. The byte values (hex previews) are random per run; the sizes and
 structure are stable.
 
-> **Security status — evaluation only.** The `tn-bbg` scheme implementation
-> and its `bls12_381_plus` pairing library are **unaudited**. External
-> cryptographic review is required before production use. Correctness and
-> interoperability tests are not a substitute for that review. See
-> [The HIBE primitive library](hibe-library.md#security-status).
-
-> **When should you reach for HIBE instead of btn?** Use HIBE when you want
-> to encrypt to *someone who does not hold a key yet* — you seal to a named
-> identity path using only a public key, and hand out reader keys later or
-> not at all. Use btn (the default) when you need cheap forward revocation
-> of an already-admitted reader. The tradeoff is spelled out at the end.
+> HIBE seals to a named identity path using an authority's public key. The
+> authority can issue reader keys before or after records are sealed. BTN
+> manages reader admission and revocation through a broadcast tree.
 
 ---
 
@@ -164,32 +156,46 @@ default.hibe.idpath├─ grant_reader ──┐
                                       │                default.hibe.sk
 ```
 
-Only the **kit** crosses the wire, and a kit never contains the msk. Its
-`.hibe.sk` is nevertheless a bearer capability, not a key cryptographically
-bound to the reader DID. `grant_reader` recipient-seals the body only for a
-complete, resolvable Ed25519 `did:key`; otherwise it silently writes the key
-material in plaintext. Authenticate the complete DID and fail closed before
-minting a sensitive grant.
+The reader kit contains a delegated `.hibe.sk` bearer capability and public
+authority material. `grant_reader` requires a complete Ed25519 `did:key` and a
+valid scoped proof of reader key possession, then recipient-seals the kit.
+Plaintext delivery requires the explicit `unsafe_plaintext=True` option.
+
+The following local walkthrough retains separate reader and authority
+configurations. In separate processes, exchange the challenge and proof as
+shown in the [HIBE enrollment workflow](jwe-hibe-key-ceremonies.md#hibe-reader-enrollment).
 
 ```python
 from tn.recipient_seal import recipient_key_is_resolvable
 
+# Alice creates her own ceremony and retains its signing identity.
+tn.init(reader_yaml, log_path=ws / "alice" / "log.ndjson")
+reader_cfg = tn.current_config()
+alice_did = reader_cfg.device.device_identity
+tn.flush_and_close()
+
 # 1. The authority starts a hibe ceremony. It becomes its OWN authority:
 #    Setup runs, the msk stays in this keystore.
 tn.init(authority_yaml, log_path=authority_log, cipher="hibe")
+authority_cfg = tn.current_config()
 
 # 2. Log some governed entries.
 tn.info("decision.recorded", subject="loan-4821", outcome="approved")
 tn.info("decision.recorded", subject="loan-4822", outcome="declined")
 
-# 3. Grant a reader. This mints their key and packages it as a .tnpkg
-#    kit. authenticated_alice_did is the complete Ed25519 did:key obtained
-#    from Alice through an authenticated channel; never abbreviate it.
-alice_did = authenticated_alice_did
+# 3. The authority challenges Alice; Alice signs using her own ceremony.
 if not recipient_key_is_resolvable(alice_did):
     raise ValueError("Alice DID cannot receive a recipient-sealed HIBE kit")
+challenge = tn.admin.issue_hibe_reader_challenge("default", alice_did)
+alice_proof = tn.admin.create_hibe_reader_proof(
+    challenge,
+    expected_authority_did=authority_cfg.device.device_identity,
+    cfg=reader_cfg,
+)
 kit = ws / "alice.tnpkg"
-tn.admin.grant_reader("default", reader_did=alice_did, out_path=kit)
+tn.admin.grant_reader(
+    "default", reader_did=alice_did, proof=alice_proof, out_path=kit
+)
 tn.flush_and_close()
 
 # 4. The reader is a separate person with their own ceremony. They
@@ -242,26 +248,25 @@ absorb remains the capability.
 grant mints independent key material for the same path, and each grantee
 decrypts the same entries.
 
-**Removing** is where HIBE differs from btn, and the difference is worth
-understanding. A HIBE reader key is a *permanent* key for its path: you
-cannot reach back and un-issue it. So "revoke" means **rotate the sealing
-path forward and re-issue kits to everyone who stays**. The removed reader
-keeps whatever they could already read. An exact-path reader is locked out
-of later records only after every writer has adopted the authenticated new
-sibling path; an ancestor-key holder remains a delegated subauthority and can
-derive below that ancestor.
+`revoke_reader` rotates the sealing path and issues replacement kits to the
+surviving readers. Each writer must adopt the new path before its next seal:
 
 ```python
-# alice_did and bob_did are complete Ed25519 did:key values authenticated
-# to the authority. Fail rather than accepting grant_reader's plaintext fallback.
+# alice_did and bob_did are complete Ed25519 did:key values.
+# alice_proof and bob_proof are their fresh scoped challenge responses,
+# obtained through the enrollment exchange above for this authority and path.
 for reader_did in (alice_did, bob_did):
     if not recipient_key_is_resolvable(reader_did):
         raise ValueError("reader DID cannot receive a sealed HIBE grant")
 
 tn.init(a_yaml, log_path=a_log, cipher="hibe")
 tn.info("memo", text="visible to both readers")
-tn.admin.grant_reader("default", reader_did=alice_did, out_path=alice_kit)
-tn.admin.grant_reader("default", reader_did=bob_did, out_path=bob_kit)
+tn.admin.grant_reader(
+    "default", reader_did=alice_did, proof=alice_proof, out_path=alice_kit
+)
+tn.admin.grant_reader(
+    "default", reader_did=bob_did, proof=bob_proof, out_path=bob_kit
+)
 
 # Remove bob. The path rotates and every SURVIVOR gets a re-issued kit.
 res = tn.admin.revoke_reader("default", bob_did, out_dir=ws / "regrant")
@@ -294,23 +299,10 @@ What happened:
 - Bob still opens `seq 1` (sealed before the rotation) and gets
   `{'$no_read_key': True}` for `seq 2` (sealed to the new path he was never
   given) in this local-authority example.
-- Separate external writers retain their own `.hibe.idpath`. Deliver and
-  authenticate the new sibling path to every writer, pin the unchanged MPK,
-  and fence writers that have not acknowledged it before they seal again.
-  Otherwise Bob still opens their stale-path output.
-- A holder of an ancestor key can derive the new child key without the `msk`.
-  Rotation below that ancestor cannot revoke it; use a fresh authority MPK
-  outside that capability domain or BTN.
-
-`tn.admin.revoke_recipient("default", recipient_did=...)` — the same verb
-you use for btn/jwe — routes hibe groups through this exact flow.
-
-> **The honest limit:** bob keeping `seq 1` is not a bug you can fix — a
-> HIBE reader key is a permanent trapdoor for its path. If you need to cut
-> an already-admitted reader off from *past* entries too, HIBE is the wrong
-> cipher; use btn, which does O(1) forward revocation. Sibling rotation gives
-> an exact-path reader a forward cutoff only after every writer updates; it is
-> neither retroactive lockout nor a way to revoke an ancestor capability.
+- Separate external writers retain their own `.hibe.idpath`. Deliver the
+  authenticated sibling path to each writer and reload its configuration.
+- A parent-path key can derive descendants within its depth budget. Use
+  exact-path grants for the readers in this rotation flow.
 
 ---
 
@@ -374,9 +366,9 @@ How it works:
       aad: { policy: "finra-oba" }
   ```
 
-**Limitation:** binding an `aad` at emit is available on hibe and jwe
-groups. Passing `aad=` on a btn group raises a clear error rather than
-silently dropping the marker.
+The Python emit pipeline accepts `aad=` on BTN, JWE, and HIBE groups. The
+native BTN runtime and the Python cipher implementations bind the supplied
+marker bytes and check them when opening the body.
 
 ---
 

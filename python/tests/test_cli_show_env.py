@@ -40,7 +40,7 @@ def _isolated_tn_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_schema_is_non_empty_and_well_shaped() -> None:
     """Catch a typo / accidental drop in ``_ENV_SCHEMA``."""
-    assert len(_ENV_SCHEMA) >= 30, "expected a sizeable canonical inventory"
+    assert {"TN_IDENTITY_DIR", "TN_YAML", "TN_API_KEY", "TN_VAULT_URL"} <= {row["name"] for row in _ENV_SCHEMA}
     seen: set[str] = set()
     for entry in _ENV_SCHEMA:
         # Required keys.
@@ -141,6 +141,19 @@ def test_show_env_format_choices_are_enforced() -> None:
     parser = build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["show", "env", "--format=bogus"])
+
+
+def test_env_catalog_ignores_unimplemented_settings(monkeypatch) -> None:
+    monkeypatch.setenv("TN_LOG_PATH", "not-an-active-override")
+    monkeypatch.setenv("TN_VAULT_URL", "https://vault.example")
+    env = dict(__import__("os").environ)
+    for renderer in (_render_human, _render_env_format):
+        output = renderer(_ENV_SCHEMA, env, {})
+        assert "TN_LOG_PATH" not in output
+        assert "https://vault.example" in output
+    entries = json.loads(_render_json(_ENV_SCHEMA, env, {}, redact_secrets=True))["entries"]
+    assert all(row["read_today"] for row in entries)
+    assert all("proposed" not in row for row in entries)
 
 
 def test_cmd_show_env_prints_to_stdout(

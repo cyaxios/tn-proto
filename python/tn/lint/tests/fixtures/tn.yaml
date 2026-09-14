@@ -10,7 +10,7 @@ me:
   did: did:key:z6MkTestFixtureDoNotUseInProduction0000000000000000
 
 extends:
-  - pci-cardholder
+  - test-policy
 
 public_fields:
   - timestamp
@@ -22,7 +22,6 @@ default_policy: private
 groups:
   default:
     policy: private
-    pool_size: 4
     recipients:
       - did: did:key:z6MkTestFixtureDoNotUseInProduction0000000000000000
 

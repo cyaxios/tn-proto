@@ -6,7 +6,6 @@ The MCP protocol uses JSON-RPC 2.0 error codes. The reserved range
     -32000  TN_VERIFICATION_ERROR  -- secure_read forensic / chain mismatch
     -32001  TN_VERIFY_ERROR        -- lower-level signature/chain failure
     -32006  TN_RUNTIME_ERROR       -- strict-mode + general tn runtime errors
-    -32099  TN_UNKNOWN             -- reserved for future tn-specific
 
 The standard JSON-RPC -32603 (Internal error) is used for non-tn
 exceptions that escape the tool body.

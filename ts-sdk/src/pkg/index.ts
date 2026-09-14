@@ -386,10 +386,8 @@ export class PkgNamespace {
    *      records the offer (mirrors Python `offer.py`'s emit_to_outbox).
    *   4. Return `OfferReceipt` with status="offered".
    *
-   * Note: Python's `offer.py` emits a Package with package_kind="offer"
-   * to an outbox file via emit_to_outbox. The TS equivalent emits
-   * a `tn.offer.compiled` info event to the ceremony log instead
-   * (the outbox pattern is not yet implemented in the TS SDK).
+   * The compiled offer is recorded as a `tn.offer.compiled` event in
+   * the ceremony log.
    */
   async offer(opts: OfferOptions): Promise<OfferReceipt> {
     // Trusted JWE enrollment offer: answer the publisher's signed challenge

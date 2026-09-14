@@ -216,7 +216,6 @@ def _capture_public_fields(ws: Path) -> None:
     doc["fields"]["ip"] = {"group": "pii"}
     doc.setdefault("groups", {})["pii"] = {
         "policy": "private",
-        "pool_size": 4,
         "recipients": [],
     }
     (ws / "tn.yaml").write_text(_yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")

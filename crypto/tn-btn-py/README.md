@@ -30,7 +30,4 @@ struct.
   envelope `pipeline` helper.
 - Typed exceptions: `NotEntitled`, `BtnRuntimeError`.
 
-## Not published
-
-There is no `pip install tn-btn`. The only published wheel is
-`tn-proto`; this crate exists only to feed the umbrella extension.
+Install these bindings through the `tn-proto` Python wheel.

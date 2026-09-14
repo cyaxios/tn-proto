@@ -435,8 +435,6 @@ export interface WatchOptions {
   raw?: boolean;
   /** Override the log path. Defaults to the bound ceremony's log. */
   log?: string;
-  /** Recipient mode is not yet supported on `Tn.watch`. */
-  asRecipient?: string;
   /** Group whose plaintext to surface. Default: `"default"`. */
   group?: string;
   /** Starting point. Default: `"now"`. */
@@ -1783,15 +1781,14 @@ export class Tn {
    * - `since`        — `"now"` (default) | `"start"` | sequence number | ISO timestamp
    * - `pollIntervalMs` — fallback poll interval (default 300ms)
    *
-   * Recipient-mode watch (`asRecipient`) is not yet supported. Use
-   * `Tn.read({asRecipient})` for one-shot foreign-log reads.
+   * Use `Tn.read({asRecipient})` to read with a foreign keystore.
    */
   async *watch(opts: WatchOptions = {}): AsyncIterableIterator<Entry | Record<string, unknown>> {
     if (!this._hasReplaySurface()) return;
 
-    if (opts.asRecipient !== undefined) {
+    if ("asRecipient" in opts && opts.asRecipient !== undefined) {
       throw new Error(
-        "Tn.watch with asRecipient is not yet supported. Use Tn.read for foreign-keystore reads.",
+        "Tn.watch uses the ceremony keystore. Use Tn.read for foreign-keystore reads.",
       );
     }
 

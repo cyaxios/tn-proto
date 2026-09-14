@@ -79,10 +79,6 @@ groups:
 
 fields: {}                       # field routing overrides; groups carry their own
 
-llm_classifier:
-  enabled: false
-  provider: ''
-  model: ''
 ```
 
 A minimal ephemeral ceremony (the shape `Runtime::ephemeral` mints in
@@ -110,7 +106,7 @@ groups:
     index_epoch: 0
     fields: [instruction, use_for, do_not_use_for, consequences, on_violation_or_error, policy]
 fields: {}
-llm_classifier: {enabled: false, provider: "", model: ""}
+
 ```
 
 ## Top-level keys
@@ -124,7 +120,6 @@ llm_classifier: {enabled: false, provider: "", model: ""}
 | `logs` | mapping | no | `{path: ./.tn/logs/tn.ndjson}` | Main user-log destination. See [logs](#logs). |
 | `public_fields` | list of string | no | a 47-field catalog | Fields emitted in the clear. See [public_fields](#public_fields). |
 | `default_policy` | string | no | `private` | Policy for fields not routed to any group. |
-| `llm_classifier` | mapping | no | `{enabled: false, provider: "", model: ""}` | Classifier stub config. See [llm_classifier](#llm_classifier). |
 | `handlers` | list of mapping | no | implicit default file sink | Output sinks. See [handlers](#handlers). |
 | `extends` | string | no | — | Relative path to a parent yaml to inherit from. See [extends](#extends). |
 
@@ -151,10 +146,8 @@ any is missing.
 | `ceremony.version_name` | string | no | `null` | Per-instance nickname inside the project (e.g. `laptop-dev`, `ci`, `prod`). Falls back to `project_name` when unset. |
 | `ceremony.profile` | string | no | `transaction` | Evidence profile (`transaction` / `audit` / `secure_log` / `telemetry` / `stdout`). Sets `sign` / `chain` / sink at init. See [profiles.md](profiles.md). |
 
-What to write for a project name vs a project binding: to give the project a
-human label use `ceremony.project_name`; to bind to a vault project use
-`ceremony.linked_project_id` (set by `tn vault link`). Never write a top-level
-`project_id` key - no loader reads it.
+Use `ceremony.project_name` for a human-readable project label and
+`ceremony.linked_project_id` for the vault project binding.
 
 ### keystore
 
@@ -190,10 +183,9 @@ Defaulting differs across loaders, and this is intentional:
   that full catalog into the file, so the on-disk default is the 47-field
   list, de-duplicated, with any yaml additions appended in order.
 
-The `DEFAULT_PUBLIC_FIELDS` catalog includes the string `project_id`, but
-that is a **payload field name** kept public so the vault reducer can read
-it without a reader kit. It is unrelated to the top-level `project_id` key,
-which no loader reads.
+`project_id` is a public payload field in the default catalog, so the vault
+reducer can read it. Configure the vault binding with
+`ceremony.linked_project_id`.
 
 ### groups
 
@@ -214,7 +206,6 @@ Per-group fields:
 | `groups.<name>.recipients` | list of mapping | no | `[]` | Declared recipients (used at ceremony setup; the runtime cipher loads its own state files). See [recipient entries](#recipient-entries). |
 | `groups.<name>.fields` | list of string | no | `[]` | Field names this group encrypts. Canonical multi-group routing source of truth: a field listed under N groups is encrypted into all N groups' payloads. Omitted-when-empty on serialize (round-trip stable). |
 | `groups.<name>.index_epoch` | integer (u64) | no | `0` | Incremented when keys rotate; feeds HKDF info for index-key derivation. |
-| `groups.<name>.pool_size` | integer | no | `4` | Recipient pool size recorded for schema stability; no current cipher consumes it. |
 | `groups.<name>.auto_populated_by_policy` | bool | no | — | Marker on the `tn.agents` group recording that its fields are policy-driven. Informational. |
 
 #### recipient entries
@@ -235,14 +226,6 @@ both `public_fields` and a group's `fields:` list.
 A field's effective policy is its group's `policy` if it is routed to a group,
 otherwise `default_policy`. A `public` policy puts the field as plaintext on the
 envelope root; a `private` policy encrypts it into the group.
-
-### llm_classifier
-
-| path | type | required | default | description |
-|------|------|----------|---------|-------------|
-| `llm_classifier.enabled` | bool | no | `false` | Whether the classifier is on. Currently a stub; classification stays Python-side. |
-| `llm_classifier.provider` | string | no | `""` | Provider identifier. |
-| `llm_classifier.model` | string | no | `""` | Model identifier. |
 
 ### handlers
 
@@ -275,10 +258,11 @@ their per-kind options:
 | `vault.sync` / `vault` | `vault_identity`, `project_id` (required), `keystore_path`, `batch_interval_ms`, `batch_max_events` |
 | `vault.push` | `endpoint`, `project_id` (required), `trigger`, `poll_interval`, `scope` |
 | `vault.pull` | `endpoint`, `project_id` (required), `poll_interval`, `on_absorb_error` |
-| `tn.firehose` | `endpoint`, `project_id` (required), `key_id` |
 | `fs.drop` | `out_dir`, `on`, `scope`, `trigger`, `filename_template` |
 | `fs.scan` | `in_dir` (required), `archive_dir`, `poll_interval`, `on_processed` |
-| `otel` / `opentelemetry` | wired programmatically via `extra_handlers`; YAML-only declares a no-op logger |
+
+For OpenTelemetry, construct an `OpenTelemetryHandler` with an explicit logger
+and pass it to `tn.init(extra_handlers=[handler])`.
 
 `poll_interval` and similar duration fields accept a number (seconds) or a
 string like `"60s"`, `"5m"`, `"1h"`, `"500ms"`.
@@ -297,7 +281,7 @@ root.
 Merge rules (identical across Rust, Python, TS):
 
 - **Parent-owned keys** — `device`, `keystore`, `groups`, `fields`,
-  `public_fields`, `default_policy`, `llm_classifier`: parent wins. A child
+  `public_fields`, `default_policy`: parent wins. A child
   override is dropped (Python/TS warn; Rust is silent). These belong at the
   chain root only.
 - `ceremony`: shallow-merged per subfield, child wins.

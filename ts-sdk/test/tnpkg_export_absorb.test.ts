@@ -25,6 +25,7 @@ import {
 } from "../src/index.js";
 import { Tn } from "../src/tn.js";
 import type { CeremonyConfig } from "../src/runtime/config.js";
+import { NodeRuntime } from "../src/runtime/node_runtime.js";
 import { BtnPublisher } from "../src/raw.js";
 
 function makeCeremony(): { yamlPath: string; tmpDir: string; cleanup: () => void } {
@@ -532,3 +533,18 @@ test("absorb rejects a tampered manifest", async () => {
     b.cleanup();
   }
 });
+
+for (const kind of ["group_keys", "recipient_invite", "unknown_kind"]) {
+  test(`export rejects ${kind} before writing a package`, () => {
+    const ceremony = makeCeremony();
+    const runtime = NodeRuntime.init(ceremony.yamlPath);
+    const out = join(ceremony.tmpDir, "unsupported.tnpkg");
+    try {
+      assert.throws(() => runtime.exportPkg({ kind: kind as never }, out));
+      assert.equal(existsSync(out), false);
+    } finally {
+      runtime.close();
+      ceremony.cleanup();
+    }
+  });
+}

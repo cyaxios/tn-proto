@@ -1,6 +1,6 @@
-# Persistent BTN and JWE examples
+# Persistent BTN, JWE, and HIBE examples
 
-Install an SDK version that exposes `tn.providers.FileKeyStore`, then run these commands from the repository root. Each command starts a separate process; the generated installations go beside the checkout:
+Install `tn-proto==2026.9.13b5`, then run these commands from the repository root. Each command starts a separate process; the generated installations go beside the checkout:
 
 ```shell
 python -B python/examples/persistent_keys/setup.py ../tn-btn-demo --cipher btn
@@ -12,11 +12,13 @@ python -B python/examples/persistent_keys/hello_jwe.py ../tn-jwe-demo publish
 python -B python/examples/persistent_keys/hello_jwe.py ../tn-jwe-demo read
 ```
 
-Both readers print `Hello, world!`. Setup refuses to replace an existing installation. Publication and reading reopen the saved credentials; they never generate them.
+Both readers print `Hello, world!`. Use a new directory for setup. Publication and reading reopen the saved identity and group capabilities.
 
 Source files: [setup.py](setup.py), [configuration.py](configuration.py), [workflow.py](workflow.py), [hello_btn.py](hello_btn.py), [hello_jwe.py](hello_jwe.py), and [agents.md](agents.md).
 
-Each installation contains `config.json`, `agents.md`, `keys/keystore.json`, `hello.tn`, `creations.jsonl` and `releases.jsonl`. The keystore holds secret raw credentials. Unix mode is 0600; Windows uses the containing directory ACL. Keep generated installations outside published source folders.
+Each installation contains `config.json`, `agents.md`, `keys/keystore.json`, `hello.tn`, `creations.jsonl` and `releases.jsonl`. Store the installation in a private application directory: Unix keystore creation uses mode `0600`, and Windows uses the containing directory's ACL. Share `hello.tn` with its intended readers.
+
+`FileKeyStore` supplies both identity and key resolution. [configuration.py](configuration.py) calls `FileKeyStore.open`, checks the saved cipher and groups, and passes the store to both slots in `Providers(store, store, governance, registers=registers)`. The session signs and opens publications with that material in Rust.
 
 ## HIBE
 
@@ -27,4 +29,4 @@ python -B python/examples/persistent_keys/hello_hibe.py ../tn-hibe-demo read
 python -B python/examples/persistent_keys/hibe_delegation.py
 ```
 
-The persistent example saves scoped keys and public parameters. The delegation example uses the Rust-backed HIBE primitives to issue a parent grant, delegate a child, and assign it through the native group provider.
+The HIBE reader also prints `Hello, world!`. Its persistent store saves scoped keys and public parameters. The delegation example uses the Rust-backed HIBE primitives to issue a parent grant, delegate a child, and assign it through `GroupCapability.hibe`. It opens the greeting with the child grant and checks that a sibling grant is refused.

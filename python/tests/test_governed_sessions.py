@@ -303,7 +303,6 @@ def configured_session_files(root):
         "public_fields": [],
         "default_policy": "private",
         "fields": {},
-        "llm_classifier": {"enabled": False, "provider": "", "model": ""},
     }
     path = root / "tn.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")

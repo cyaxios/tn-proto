@@ -3,9 +3,7 @@
 //! challenges and proofs, and the fail-closed reader-grant gate with its
 //! explicit unsafe plaintext escape hatch.
 //!
-//! HIBE stays evaluation-only (`tn-bbg` and its pairing stack are unaudited);
-//! these tests exercise fail-closed trust behavior, not new primitives. The
-//! synthetic MPK below is structurally valid (`version | depth | points`) so
+//! The synthetic MPK below is structurally valid (`version | depth | points`) so
 //! depth/digest binding checks run without minting pairing material.
 
 use std::fs;

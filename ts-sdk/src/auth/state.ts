@@ -2,8 +2,7 @@
  * tn.auth shared contract layer - mirrors python tn/auth.py.
  *
  * The Verdict values and VERDICT_MESSAGE table MUST stay byte-identical to the
- * Python ones (asserted by a cross-impl parity test). Design:
- * docs/guide/auth-namespace-design.md
+ * Python ones (asserted by a cross-impl parity test). See docs/guide/auth.md.
  *
  * State machine (resting state is "backed_up"), keyed on three layers:
  *   linked     - the local file claims an account

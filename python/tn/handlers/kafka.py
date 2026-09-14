@@ -132,24 +132,7 @@ class KafkaHandler(AsyncHandler):
             raise RuntimeError(f"kafka delivery: {err['v']}")
 
     # ------------------------------------------------------------------
-    # Read-side contract
-    #
-    # INTENT (not yet wired into tn.read / tn.watch):
-    #   tn.read() should auto-select its source from the active session's
-    #   handler list, preferring a local file handler when one exists and
-    #   falling back to this reader otherwise.  The caller never specifies
-    #   a source; the session configuration decides.
-    #
-    #   When wired in:
-    #     - resolved_address() is the identity key (file path for file
-    #       handlers, kafka URI here) used by tn.read() to pick the source.
-    #     - reader() yields raw sealed-envelope bytes, identical in shape
-    #       to a line from the local .tn/logs/tn.ndjson file.  The decrypt
-    #       + verify + key-matching layer above it is source-agnostic and
-    #       unchanged.  Keys discovered via tn.absorb() automatically apply.
-    #
-    #   Same contract must land in the TS SDK (ts-sdk/src/handlers/kafka.ts)
-    #   before tn.read() can be made source-aware end-to-end.
+    # Read-side address and sealed-envelope iteration.
     # ------------------------------------------------------------------
 
     def resolved_address(self) -> str:

@@ -103,8 +103,8 @@ session = tn.Session.from_config("service.yaml", registers=registers)
 
 When `registers` is omitted, native configuration captures `TN_OBJECT_CREATION_REGISTER` and `TN_OBJECT_RELEASE_REGISTER`. Explicit register settings override those paths. Registers contain signed object metadata. Registration errors are exposed through `data.register_error`; the signed publication remains available.
 
-Rust setup uses `Session::ephemeral(policy)` or `Session::open(path)`. For explicit registers, construct `Session::new(Objects::open(path)?.with_registers(ObjectRegisters::new(creation, release)))`. This loads existing keys; it does not replace them with generated test material.
+Rust setup uses `Session::ephemeral(policy)` or `Session::open(path)`. For explicit registers, construct `Session::new(Objects::open(path)?.with_registers(ObjectRegisters::new(creation, release)))`. `Objects::open` loads the existing keys.
 
 ## Other object entry points
 
-`create_obj`, `retain_groups`, draft publication, and the explicit admission steps remain available. Mutable mapping views are optional Python conveniences over native mutation operations. They do not contain a separate policy implementation.
+`create_obj`, `retain_groups`, draft publication, and the explicit admission steps are also available. Mutable mapping views expose the native mutation operations in Python.

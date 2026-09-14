@@ -30,7 +30,4 @@ A `guard()` wrapper converts any Rust panic escaping the core into a
 catchable `TnRuntimeError` so a panic never crosses the FFI boundary as
 an uncatchable `BaseException`.
 
-## Not published
-
-There is no `pip install tn-core`. The only published wheel is
-`tn-proto`; this crate exists only to feed the umbrella extension.
+Install these bindings through the `tn-proto` Python wheel.

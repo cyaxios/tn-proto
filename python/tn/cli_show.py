@@ -23,8 +23,6 @@ from .cli_common import _die
 #
 # Source of truth is ``_ENV_SCHEMA`` below — what the CLI reflects at
 # runtime. Adding a new env-var read in ``tn/`` means adding a row here.
-# The ``read_today`` field controls whether a row shows up as a
-# live environment knob or a *(proposed)* future binding.
 #
 # Reflective-only by design: this verb does NOT install any new env-var
 # behavior. It reads what's already wired and prints. YAML-sourced rows
@@ -50,7 +48,7 @@ _ENV_CATEGORIES: tuple[str, ...] = (
 # whose authoritative value lives in tn.yaml today.
 #
 # ``read_today`` carries the file:line of the first authoritative read
-# when wired, or ``None`` when this is a *(proposed)* future binding.
+# in the SDK.
 _ENV_SCHEMA: tuple[dict[str, Any], ...] = (
     # -- identity -----------------------------------------------------
     {
@@ -80,15 +78,6 @@ _ENV_SCHEMA: tuple[dict[str, Any], ...] = (
         "secret": False,
         "precedence": "TN_IDENTITY_DIR > XDG_DATA_HOME > env > home",
     },
-    {
-        "name": "TN_IDENTITY_DID",
-        "category": "identity",
-        "purpose": "Pin which DID this process uses when multiple identities are on disk.",
-        "read_today": None,
-        "default": "first identity in TN_IDENTITY_DIR",
-        "secret": False,
-        "precedence": "env > implicit-single-identity",
-    },
     # -- vault --------------------------------------------------------
     {
         "name": "TN_VAULT_URL",
@@ -107,16 +96,6 @@ _ENV_SCHEMA: tuple[dict[str, Any], ...] = (
         "default": "https://vault.tn-proto.org",
         "secret": False,
         "precedence": "env > default",
-    },
-    {
-        "name": "TN_VAULT_PROJECT_ID",
-        "category": "vault",
-        "purpose": "Pin the linked vault project id.",
-        "read_today": None,
-        "default": "from yaml: linked_project_id",
-        "secret": False,
-        "precedence": "env > yaml > unset",
-        "yaml_field": "linked_project_id",
     },
     {
         "name": "TN_VAULT_SESSION_TOKEN",
@@ -147,15 +126,6 @@ _ENV_SCHEMA: tuple[dict[str, Any], ...] = (
         "default": "unset (else --account-passphrase or prompt)",
         "secret": True,
         "precedence": "flag (--account-passphrase) > env",
-    },
-    {
-        "name": "TN_VAULT_TIMEOUT",
-        "category": "vault",
-        "purpose": "HTTP timeout (seconds) for the vault client.",
-        "read_today": None,
-        "default": "30.0",
-        "secret": False,
-        "precedence": "env > default",
     },
     # -- ceremony / config -------------------------------------------
     {
@@ -202,16 +172,6 @@ _ENV_SCHEMA: tuple[dict[str, Any], ...] = (
         "default": "unset (banner on)",
         "secret": False,
         "precedence": "env > default",
-    },
-    {
-        "name": "TN_CEREMONY_ID",
-        "category": "ceremony",
-        "purpose": "Pin the ceremony id without round-tripping through tn.yaml.",
-        "read_today": None,
-        "default": "from yaml: ceremony.id",
-        "secret": False,
-        "precedence": "env > yaml",
-        "yaml_field": "ceremony_id",
     },
     # -- runtime / dispatch ------------------------------------------
     {
@@ -269,44 +229,6 @@ _ENV_SCHEMA: tuple[dict[str, Any], ...] = (
         "secret": False,
         "precedence": "env > default",
     },
-    {
-        "name": "TN_LOG_PATH",
-        "category": "logging",
-        "purpose": "Override logs.path (main log file destination).",
-        "read_today": None,
-        "default": "from yaml: logs.path",
-        "secret": False,
-        "precedence": "env > yaml > default",
-        "yaml_field": "log_path",
-    },
-    {
-        "name": "TN_ADMIN_LOG_PATH",
-        "category": "logging",
-        "purpose": "Override admin.log path (admin / state ndjson).",
-        "read_today": None,
-        "default": "./.tn/<stem>/admin/default.ndjson",
-        "secret": False,
-        "precedence": "env > yaml > default",
-        "yaml_field": "admin_log_location",
-    },
-    {
-        "name": "TN_LOG_LEVEL",
-        "category": "logging",
-        "purpose": "Surface logger verbosity (info / debug / trace).",
-        "read_today": None,
-        "default": "info",
-        "secret": False,
-        "precedence": "env > default",
-    },
-    {
-        "name": "TN_DEBUG",
-        "category": "logging",
-        "purpose": "Master debug switch — enable verbose internal traces.",
-        "read_today": None,
-        "default": "unset",
-        "secret": False,
-        "precedence": "env > default",
-    },
     # -- deployment / storage ---------------------------------------
     {
         "name": "TN_STATE_DIR",
@@ -326,116 +248,7 @@ _ENV_SCHEMA: tuple[dict[str, Any], ...] = (
         "secret": False,
         "precedence": "TN_STATE_DIR > env > home",
     },
-    {
-        "name": "TN_CACHE_DIR",
-        "category": "deployment",
-        "purpose": "Override cache root (admin state cache, manifest cache).",
-        "read_today": None,
-        "default": "derived from yaml dir",
-        "secret": False,
-        "precedence": "env > yaml > default",
-    },
-    {
-        "name": "TN_KEYS_DIR",
-        "category": "deployment",
-        "purpose": "Override keys/ path (per-group keys).",
-        "read_today": None,
-        "default": "from yaml: ./keys/",
-        "secret": False,
-        "precedence": "env > yaml > default",
-        "yaml_field": "keystore",
-    },
-    {
-        "name": "TN_OUTBOX_DIR",
-        "category": "deployment",
-        "purpose": "Override durable outbox root (durable handler queue).",
-        "read_today": None,
-        "default": "./.tn/outbox/durable",
-        "secret": False,
-        "precedence": "env > yaml > default",
-    },
     # -- handlers (env:NAME indirection) -----------------------------
-    {
-        "name": "TN_KAFKA_BOOTSTRAP",
-        "category": "handlers",
-        "purpose": "Kafka handler bootstrap.servers.",
-        "read_today": "tn/handlers/kafka.py:26 (indirect)",
-        "default": "none",
-        "secret": False,
-        "precedence": "yaml > env-indirect",
-    },
-    {
-        "name": "TN_KAFKA_USERNAME",
-        "category": "handlers",
-        "purpose": "SASL username for Kafka handler.",
-        "read_today": "tn/handlers/kafka.py:26 (indirect)",
-        "default": "none",
-        "secret": False,
-        "precedence": "yaml > env-indirect",
-    },
-    {
-        "name": "TN_KAFKA_PASSWORD",
-        "category": "handlers",
-        "purpose": "SASL password for Kafka handler.",
-        "read_today": "tn/handlers/kafka.py:26 (indirect)",
-        "default": "none",
-        "secret": True,
-        "precedence": "yaml > env-indirect",
-    },
-    {
-        "name": "TN_S3_ENDPOINT",
-        "category": "handlers",
-        "purpose": "S3 handler endpoint URL (e.g. MinIO / R2).",
-        "read_today": "tn/handlers/s3.py:46 (indirect)",
-        "default": "AWS default",
-        "secret": False,
-        "precedence": "yaml > env-indirect",
-    },
-    {
-        "name": "TN_S3_BUCKET",
-        "category": "handlers",
-        "purpose": "Destination bucket for the S3 handler.",
-        "read_today": "tn/handlers/s3.py:46 (indirect)",
-        "default": "none",
-        "secret": False,
-        "precedence": "yaml > env-indirect",
-    },
-    {
-        "name": "TN_S3_ACCESS_KEY_ID",
-        "category": "handlers",
-        "purpose": "S3 access key id.",
-        "read_today": "tn/handlers/s3.py:46 (indirect)",
-        "default": "AWS default chain",
-        "secret": False,
-        "precedence": "yaml > env-indirect",
-    },
-    {
-        "name": "TN_S3_SECRET_ACCESS_KEY",
-        "category": "handlers",
-        "purpose": "S3 secret access key.",
-        "read_today": "tn/handlers/s3.py:46 (indirect)",
-        "default": "AWS default chain",
-        "secret": True,
-        "precedence": "yaml > env-indirect",
-    },
-    {
-        "name": "TN_DELTA_TOKEN",
-        "category": "handlers",
-        "purpose": "Databricks Delta personal access token.",
-        "read_today": "tn/handlers/delta.py:63 (indirect)",
-        "default": "none",
-        "secret": True,
-        "precedence": "yaml > env-indirect",
-    },
-    {
-        "name": "TN_DELTA_HOST",
-        "category": "handlers",
-        "purpose": "Databricks workspace host.",
-        "read_today": "tn/handlers/delta.py:63 (indirect)",
-        "default": "none",
-        "secret": False,
-        "precedence": "yaml > env-indirect",
-    },
 )
 
 
@@ -520,7 +333,6 @@ def _render_human(
         lines.append("")
         for entry in rows:
             value, source = _resolve_entry_value(entry, env, yaml_vals)
-            proposed = entry.get("read_today") is None
             if source == "unset":
                 shown = "(unset)"
                 tail = f"  default: {entry['default']}"
@@ -533,12 +345,11 @@ def _render_human(
                     tail = f"  (from yaml: {entry.get('yaml_field')})"
                 else:
                     tail = ""
-            tags = " (proposed)" if proposed else ""
             lines.append(
                 f"  {entry['name']:<{name_w}}  {shown:<{val_w}}{tail}"
             )
             lines.append(
-                f"  {'':<{name_w}}  {entry['purpose']}{tags}"
+                f"  {'':<{name_w}}  {entry['purpose']}"
             )
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -592,7 +403,6 @@ def _render_json(
                 "default": entry["default"],
                 "precedence": entry.get("precedence"),
                 "yaml_field": entry.get("yaml_field"),
-                "proposed": entry.get("read_today") is None,
             }
         )
     return json.dumps({"entries": rows}, indent=2, sort_keys=False) + "\n"
@@ -680,10 +490,5 @@ def cmd_show_profiles(args: argparse.Namespace) -> int:
 
 
 def cmd_show(args: argparse.Namespace) -> int:
-    """DX review #21: ``tn show`` with no subverb dispatches to the
-    most-useful default rather than spitting an argparse usage error.
-    Today that default is ``env``; if a future ``show`` verb becomes
-    the obvious entrypoint, repoint here. Explicit subverbs
-    (``tn show env``, ``tn show profiles``) take precedence.
-    """
+    """Show environment settings when ``tn show`` has no subverb."""
     return cmd_show_env(args)

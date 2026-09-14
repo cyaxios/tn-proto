@@ -6,8 +6,6 @@
 // authoritative contract. This module returns exactly that object,
 // wrapping `node:fs` *Sync calls.
 //
-// Browser-side `IndexedDbStorageAdapter` is not yet implemented and only
-// stubbed here.
 
 import {
   appendFileSync,
@@ -208,18 +206,4 @@ export function nodeStorageAdapter(): JsStorageCallbacks {
       }
     },
   };
-}
-
-/**
- * Browser-side `IndexedDbStorageAdapter` placeholder.
- *
- * **Not implemented.** IndexedDB is async and the `JsStorageCallbacks`
- * contract is synchronous; bridging that needs either a preload-into-
- * memory-cache step or `SharedArrayBuffer + Atomics.wait`.
- */
-export function indexedDbStorageAdapter(): JsStorageCallbacks {
-  throw new Error(
-    "indexedDbStorageAdapter: not yet implemented. " +
-      "Browser-side wasm storage needs a sync shim over async IndexedDB.",
-  );
 }

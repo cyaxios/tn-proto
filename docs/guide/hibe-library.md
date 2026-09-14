@@ -259,13 +259,8 @@ already-trusted identity, then compare it with `mpk_fingerprint(mpk)`.
 
 ---
 
-## Security status
-
-The scheme (`tn-bbg`) and the underlying `bls12_381_plus` pairing library are
-**unaudited**. External cryptographic review is required before production use.
-
 ## Key lifecycle
 
-Delegated keys are permanent for their path. Removing a reader rotates the
-identity path for future seals; entries sealed before that rotation remain
-available to prior grantees.
+Reader keys open their assigned path and can derive descendants within the
+remaining depth. `revoke_reader` moves future seals to a sibling path and
+issues replacement kits to surviving readers.

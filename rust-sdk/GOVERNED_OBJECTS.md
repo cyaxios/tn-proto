@@ -164,9 +164,6 @@ register write failure while preserving the completed signed snapshot. Each
 service owns its registers; business inbox/outbox transactions retain their own
 atomicity contract.
 
-The [enterprise experience](ENTERPRISE_EXPERIENCE.md) maps the consumer complaints
-to these APIs and gives transaction and replay recipes.
-
 ## Envelope primitives support adapters and policy publications
 
 The following sections retain the lower-level draft/seal/admit/open interface

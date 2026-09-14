@@ -2,24 +2,30 @@
 
 For a walkthrough, start with [management systems](MANAGEMENT_SYSTEMS.md) or [Unity Catalog](UNITY_CATALOG.md).
 
-Providers connect application infrastructure to TN's existing object operations. Rust defines the contracts, validates provider results and executes the protocol. Python adapters implement service calls and return native typed values through PyO3.
+Providers supply the signing identity, group capabilities, contracts, decisions, and catalog entries used by a TN session. Rust validates provider results and executes the object operations. Python providers return native typed values through PyO3.
 
 An application creates a session from its configured providers, then uses the same fifteen verbs. Identity generation, key assignment and policy administration belong in setup. They are separate from the calculation that consumes and releases data.
 
+From `python/examples/providers`, run this calculation with the supplied setup:
+
 ```python
-session = providers.session(application, workflows=[workflow])
-source = session.create({"value": 7}, providers.policy(policy_request))
-work = session.workflow(receive="analysis", release="report")
-data = work.receive(source)
-data.set("value", data.get("value") + 1)
-result = work.release(data)
+from hello import configured
+
+providers, session, request = configured()
+with session:
+    source = session.create({"value": 7}, providers.policy(request))
+    work = session.workflow(receive="analysis", release="report")
+    data = work.unseal(source)
+    data.set("value", data.get("value") + 1)
+    result = work.seal(data)
+    print(session.unseal(result, purpose="analysis").get("value"))
 ```
 
-The complete executable is `python/examples/providers/hello.py`. Its setup modules resolve the application's DID and native capabilities. Application names, purpose names and group names describe the requested work; cryptographic identities and policy references come from the providers.
+It prints `8`. The complete executable is [hello.py](../python/examples/providers/hello.py). Its setup modules resolve the application's DID and native capabilities. Application names, purpose names and group names describe the requested work; cryptographic identities and policy references come from the providers.
 
 ## Five provider contracts
 
-| Provider | Rust signature | Result and responsibility | First adapter |
+| Provider | Rust signature | Result and responsibility | Included adapter |
 | --- | --- | --- | --- |
 | Identity | `resolve(&self, application: &str) -> Result<ApplicationIdentity>` | Application name and native signing identity. The bundle rejects an identity for another application. | `LocalIdentity` generates a fresh identity. Rust also accepts an existing `DeviceKey`. |
 | Keys | `resolve(&self, identity: &ApplicationIdentity) -> Result<KeySet>` | Assigned encrypted-group capabilities. The bundle checks their owner against the resolved identity. | `LocalKeys` generates BTN groups and explicitly assigns read and publish capabilities. |
@@ -35,7 +41,7 @@ Python uses the same method names with exceptions in place of Rust `Result`. Its
 
 The Rust files are in `crypto/tn-core/src/providers/`. Corresponding Python `Protocol` files are in `python/tn/providers/`. PyO3 implementations are in `crypto/tn-core-py/src/governed/providers/`. The Python signature reference is `python/tn/providers/__init__.pyi`.
 
-See [the implementation map](PROVIDER_API_IMPLEMENTATION.md) for each Rust implementation and PyO3 binding.
+See the [Rust provider implementations](../crypto/tn-core/src/providers/) and [PyO3 bindings](../crypto/tn-core-py/src/governed/providers/) for the native operations behind these interfaces.
 
 ## Typed requests carry the application decision
 
@@ -51,11 +57,11 @@ See [the implementation map](PROVIDER_API_IMPLEMENTATION.md) for each Rust imple
 
 `UseContext` contains application, purpose and operation. Provider request constructors call native validation. Empty identifiers, empty or duplicate business groups, the reserved governance group in an input route, duplicate routes and workflow uses assigned to different applications are rejected at construction. Provider composition requires both workflow uses to belong to the application's resolved identity. Session routes reject duplicate purpose/type entries; release settings reject duplicate purposes. A session's workflow settings are fixed at construction. Acceptance, attachment and release call the provider again at each boundary, so a service-backed provider can evaluate its current decisions.
 
-## First adapters separate provisioning from application code
+## Configure local providers
 
-`LocalIdentity(application)` owns a generated signer. `LocalIdentity.from_private_bytes(application, seed)` loads an existing signing seed. A key-service adapter can construct `GroupCapability.btn_reader(group, kits, index)` or `GroupCapability.btn_publisher(group, state, kits, index)`, then return `KeySet(identity, capabilities)`. These helpers parse and validate the supplied BTN material in Rust; retained reader kits can cover historical generations. `LocalKeys(groups)` creates fresh BTN material. `assign(identity, read=[...], publish=[...])` grants selected capabilities. Governance read is included; governance publication must be assigned explicitly. Publisher capabilities in this local adapter include reading. A session retains its assigned capability snapshot independently of later assignments or another session closing.
+`LocalIdentity(application)` owns a generated signer. `LocalIdentity.from_private_bytes(application, seed)` loads an existing 32-byte Ed25519 signing seed. `LocalKeys(groups)` creates fresh BTN material. `assign(identity, read=[...], publish=[...])` grants selected capabilities. Governance read is included; governance publication must be assigned explicitly. Publisher capabilities in this local adapter include reading. A session retains its assigned capability snapshot independently of later assignments or another session closing.
 
-`PolicyDirectory.add_policy(request, contract)` sets the origination default and approves the contract for that use. `approve_contract(request, contract)` accepts another exact contract, such as a reviewed policy revision carried by an edition, while preserving that default. Every carried contract must be approved for the requested use. The directory evaluates these explicit assignments. A governance service adapter can provide its own decision evaluation through the same interface.
+`PolicyDirectory.add_policy(request, contract)` sets the origination default and approves the contract for that use. `approve_contract(request, contract)` accepts another exact contract, such as a reviewed policy revision carried by an edition, while preserving that default. Every carried contract must be approved for the requested use. The directory evaluates these explicit assignments. Python governance providers implement the same `accept`, `attach`, and `release` methods for application decisions.
 
 `EditionCatalog.insert(entry)` requires a native accepted `DatasetSelection`. The example in `python/examples/providers/catalog.py` creates and admits a signed policy revision and edition record before inserting the selection. A catalog result is received with its selection:
 
@@ -68,11 +74,21 @@ data = work.receive(entry.publication, selection=entry.selection)
 
 Leaving `registers` absent uses the existing environment-configured registers. An explicit file-register adapter takes precedence. An empty `ObjectRegisters()` explicitly selects no files.
 
-## Service adapters implement the contracts
+## Load provisioned identities and keys
 
-A Python identity or key adapter returns native `ApplicationIdentity` or `KeySet` values obtained from its provisioning integration. Governance returns native contracts and workflow settings, then explicit Boolean decisions. Catalog adapters return accepted native selections with exact publications. Invalid return types and provider exceptions stop the requested operation. Register errors follow the separate recording behavior described above.
+An identity provider returns an `ApplicationIdentity`; a key provider returns `KeySet(identity, capabilities)`. The following constructors load provisioned material into the native TN process, where signing, encryption, and decryption run:
 
-Unity integration belongs in implementations of these contracts. The shipped first adapters use local provisioning and the native policy DAG and dataset catalog. They make no Unity network requests. Rust identity integration currently supplies a native `DeviceKey`; a remote signing service would require a signing-capability implementation beyond this interface.
+| Constructor | Supplied material |
+| --- | --- |
+| `LocalIdentity.from_private_bytes(application, seed)` | A 32-byte Ed25519 seed. |
+| `GroupCapability.btn_reader(group, kits, index)` | Serialized BTN reader kits and a 32-byte group index key. |
+| `GroupCapability.btn_publisher(group, state, kits, index)` | Serialized BTN publisher state, reader kits, and index key. |
+| `GroupCapability.jwe(group, recipients, readers, index)` | X25519 public recipient keys, private reader keys, and index key. |
+| `GroupCapability.hibe(group, public, path, readers, index)` | HIBE public parameters, target path, scoped reader keys, and index key. |
+
+The constructors parse and validate the supplied material in Rust. Retained BTN reader kits can cover historical generations. [`test_existing_identity_and_btn_material_can_be_loaded`](../python/tests/test_governed_providers.py) demonstrates an imported identity and capabilities used by a Python provider in a complete calculation.
+
+Governance providers return native contracts and workflow settings, then explicit Boolean decisions. Catalog providers return accepted native selections with exact publications. Invalid return types and provider exceptions stop the requested operation. Register errors follow the separate recording behavior described above. The [Unity examples](UNITY_CATALOG.md) supply an HTTP volume lookup and verify stored publications before using these native catalog types.
 
 ## Executable examples
 
@@ -95,7 +111,7 @@ Run the Python examples against the built wheel. Run the native example with `ca
 
 Pass the store to both provider slots: `Providers(store, store, governance, registers=registers)`. `store.resolve(application)` returns its identity; `store.resolve(identity)` returns the saved key set. `application`, `cipher`, `path` and `groups` expose metadata without exposing credentials. Rust uses the separate `IdentityProvider` and `KeyProvider` trait methods on the same store.
 
-The keystore JSON is a secret raw credential bundle, protected by local file permissions (0600 on Unix, containing-directory ACL on Windows). It contains the Ed25519 seed and per-group index keys, plus BTN publisher state and reader kit or X25519 private/public recipient keys. This provider creates a fixed enrollment for one application; it does not perform multi-application grant administration.
+Each store holds one application's signing seed, group index keys, and cipher capabilities. Place it in private application storage: Unix creation uses mode `0600`, and Windows uses the containing directory's ACL. Distribute encrypted publications separately. Use `KeySet` and the capability constructors above to assign provisioned material to other applications.
 
 `GroupCapability::jwe` / `GroupCapability.jwe(group, recipients, readers, index)` also accepts externally supplied native X25519 capabilities. Rust performs JWE content encryption and recipient key wrapping. The persistent examples in `python/examples/persistent_keys/` run creation, publication and reading in separate processes. Generated secrets are kept outside source directories.
 
@@ -103,4 +119,4 @@ The keystore JSON is a secret raw credential bundle, protected by local file per
 
 `GroupCapability.hibe(group, public, path, readers, index)` loads serialized HIBE public parameters and reader keys into the Rust HibeCipher. Python exposes the same constructor through PyO3. Empty readers permit public-parameter encryption. Assigned reader keys supply decryption for the target path.
 
-`FileKeyStore.create(..., cipher="hibe")` creates independent depth-one authorities per group and saves public parameters and scoped reader keys, without retaining authority master secrets. Use an external authority and the existing Rust-backed `tn._hibe.setup`, `keygen`, and `delegate` functions for hierarchical provisioning. See `python/examples/persistent_keys/hibe_delegation.py`.
+`FileKeyStore.create(..., cipher="hibe")` creates independent depth-one authorities per group and saves public parameters and scoped reader keys. The Rust-backed `tn._hibe.setup`, `keygen`, and `delegate` functions provide hierarchical authority provisioning. [hibe_delegation.py](../python/examples/persistent_keys/hibe_delegation.py) issues a parent grant, delegates a child, and opens a governed object with the child's capability.

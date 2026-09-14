@@ -609,9 +609,7 @@ class DispatchRuntime:
                 raise RuntimeError("DispatchRuntime: Rust runtime not initialized")
             return self._rt.add_recipient(group, str(out_path), recipient_did)
         raise NotImplementedError(
-            "add_recipient_btn via DispatchRuntime requires the Rust path "
-            "(btn ceremony + tn_core extension). For non-btn ceremonies use "
-            "tn.admin.issue_key / tn.admin.issue_coupon directly."
+            "add_recipient_btn requires an initialized native BTN runtime."
         )
 
     def revoke_recipient_btn(self, group: str, leaf_index: int) -> None:

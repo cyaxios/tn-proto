@@ -1,9 +1,7 @@
 # @cyaxios/tn-proto — API quick reference
 
-**For LLM coders + humans skimming.** One-line summaries, signatures,
-one-line examples. The authoritative contract lives in the TSDoc on
-each symbol; this file is the discovery map. Find a verb here, then
-hover or read the TSDoc for the full contract.
+Signatures and examples for the TypeScript SDK. See each symbol's TSDoc
+for its full contract.
 
 Two entry shapes:
 
@@ -17,22 +15,33 @@ import { Tn } from "@cyaxios/tn-proto/browser";
 import * as tn from "@cyaxios/tn-proto/browser";
 ```
 
-The verb surface is identical between the two; only the runtime layer
-differs (Node uses fs + the wasm pkg target; browser uses localStorage
-+ the wasm pkg-web target).
+The Node entry uses filesystem storage and supports project, admin, package,
+account, vault, and watch operations. The browser entry uses localStorage or
+an injected storage adapter.
+
+| Capability | Entry |
+| --- | --- |
+| Logging, context, reads, seal/unseal, flush/close | Node and browser |
+| Server-provisioned `initFromSeed` | Browser |
+| Console and HTTP browser delivery | Browser |
+| Multi-project `use`, `absorb`, `ephemeral`, strict initialization | Node |
+| Admin, packages, vault, agents, handler namespaces, live watch | Node |
 
 ---
 
 ## Start a client
 
-### `Tn.init(opts?)`  /  `tn.init(opts?)`
-Mint a fresh ceremony in storage (first call) or load the existing
-one. Default storage: localStorage in browser, fs under
-`./.tn/<stem>/` in Node.
+### `Tn.init` / `tn.init`
+Create a ceremony or load an existing one.
 
 ```ts
-const tn = await Tn.init();                       // default
-const tn = await Tn.init({ http: INGEST_URL });   // ship envelopes
+// Node: path followed by options.
+const client = await Tn.init("./tn.yaml", { stdout: false });
+```
+
+```ts
+// Browser: storage and delivery options.
+const client = await Tn.init({ http: INGEST_URL });
 ```
 
 ### `Tn.initFromSeed(opts)`  /  `tn.initFromSeed(opts)`  *(browser only)*
@@ -48,10 +57,10 @@ await tn.initFromSeed({
 });
 ```
 
-### `Tn.use(name, opts?)`  *(Node only; multi-ceremony)*
+### `Tn.use(name, opts?)`  *(Node; multi-ceremony)*
 Open or auto-mint the ceremony at `.tn/<name>/tn.yaml`.
 
-### `Tn.absorb(source)`  *(Node only today)*
+### `Tn.absorb(source)`  *(Node)*
 Install an `identity_seed` / `project_seed` `.tnpkg` from a file path
 or bytes.
 
@@ -110,9 +119,8 @@ Audit-grade variant. Returns the full on-disk envelope (with
 signatures, hashes, group ciphertext metadata) alongside per-group
 plaintext maps.
 
-### `tn.watch(opts?)`  *(Node only today)*
-Tail the log live. Async iterable. Throws `NotYetWiredForBrowserError`
-on browser.
+### `tn.watch(opts?)`  *(Node)*
+Tail the log as an async iterable.
 
 ---
 
@@ -132,7 +140,7 @@ Read the active threshold.
 ### `Tn.isEnabledFor(level)` → `boolean`
 Cheap pre-check before constructing an expensive emit payload.
 
-### `Tn.setStrict(enabled)` / `Tn.clearStrict()` / `Tn.isStrict()`
+### `Tn.setStrict(enabled)` / `Tn.clearStrict()` / `Tn.isStrict()` *(Node)*
 Control the no-yaml-found-throws behavior. Override > `TN_STRICT` env >
 default false.
 
@@ -210,8 +218,7 @@ page load to re-bootstrap from server-supplied credentials.
 ## Lifecycle
 
 ### `tn.flush()`
-Drain pending out-of-process handlers (HTTP queue, future sinks)
-without closing the runtime.
+Flush pending handler deliveries without closing the runtime.
 
 ### `tn.close()`
 Flush + close. Idempotent. `await tn.close()` before tab unload to make
@@ -319,17 +326,12 @@ input errors — populates `receipt.rejectedReason` instead.
 | `TN_AUTOINIT_QUIET` | When `=1`, silences the auto-init banner. |
 | `TN_VAULT_URL` | Vault base URL (default `https://vault.tn-proto.org`). |
 | `TN_VAULT_DEFAULT_BASE` | `did:key:` vault hint (same default). |
-| `TN_NO_LINK` | When `=1`, skip future auto-link paths. |
+| `TN_NO_LINK` | When `=1`, skip automatic vault linking. |
 | `TN_API_KEY` | Bearer for the cold-start vault redeem. |
 
 ---
 
 ## Error types
-
-### `NotYetWiredForBrowserError`
-Thrown by placeholder browser verbs (`tn.admin.*`, `tn.watch`,
-`Tn.use`, `Tn.absorb`, `Tn.ephemeral`). `instanceof`-check to
-distinguish "not implemented yet" from real errors.
 
 ### `UnsealError`
 Thrown by `unsealBekFromWrap` on any unseal failure (wrong recipient,

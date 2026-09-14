@@ -1886,7 +1886,7 @@ mod tests {
              \x20     - {{recipient_identity: \"{did}\"}}\n\
              \x20   index_epoch: 0\n\
              fields: {{}}\n\
-             llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
+             ",
         );
         let yaml_path = root.join("tn.yaml");
         std::fs::write(&yaml_path, yaml).unwrap();

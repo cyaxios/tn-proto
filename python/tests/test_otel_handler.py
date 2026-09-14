@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import pytest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -143,13 +144,12 @@ def test_otel_handler_severity_mapping():
     print("otel: severity mapping all correct ✓")
 
 
-def test_otel_handler_null_logger_is_noop():
-    """NullOtelLogger (default) swallows everything without raising."""
+def test_otel_handler_requires_an_explicit_logger():
+    """Configuration cannot silently discard every record."""
     from tn.handlers.otel import OpenTelemetryHandler
 
-    h = OpenTelemetryHandler(name="noop")  # no otel_logger -> NullOtelLogger
-    h.emit({"event_type": "x", "level": "info"}, b"")
-    print("otel: null logger no-op ✓")
+    with pytest.raises(TypeError):
+        OpenTelemetryHandler(name="missing-logger")
 
 
 def test_otel_handler_filter_respected():
@@ -216,7 +216,7 @@ def main() -> int:
     test_otel_handler_forwards_full_envelope()
     test_otel_handler_attributes_are_flat_queryable_fields()
     test_otel_handler_severity_mapping()
-    test_otel_handler_null_logger_is_noop()
+    test_otel_handler_requires_an_explicit_logger()
     test_otel_handler_filter_respected()
     test_otel_handler_wired_into_tn_runtime()
     print("\nall OTel handler tests passed")

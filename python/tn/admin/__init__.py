@@ -26,7 +26,6 @@ import yaml
 
 from ..canonical import _canonical_bytes
 from ..config import (
-    DEFAULT_POOL_SIZE,
     LoadedConfig,
     _create_group,
 )
@@ -115,7 +114,6 @@ def ensure_group(
     cfg: LoadedConfig,
     group: str,
     *,
-    pool_size: int = DEFAULT_POOL_SIZE,
     fields: list[str] | None = None,
     cipher: str | None = None,
 ) -> LoadedConfig:
@@ -123,7 +121,7 @@ def ensure_group(
 
     `cipher` is "jwe" or "btn". If omitted, falls back to the ceremony's
     default cipher. If `group` already exists (keys present + in YAML),
-    return unchanged. Otherwise generate a fresh cipher instance + pool,
+    return unchanged. Otherwise generate a fresh cipher instance,
     write key files, and add `groups:` + `fields:` entries to tn.yaml.
 
     Hot-reload behaviour: when the in-process logger runtime is bound,
@@ -165,7 +163,6 @@ def ensure_group(
         master_index_key=cfg.master_index_key,
         ceremony_id=cfg.ceremony_id,
         cipher_name=internal_cipher,
-        pool_size=pool_size,
         recipient_dids=[cfg.device.device_identity],
     )
     cfg.groups[group] = new_group
@@ -175,7 +172,6 @@ def ensure_group(
         lambda doc: _yaml_add_group(
             doc,
             group,
-            pool_size,
             cfg.device.device_identity,
             fields,
             cipher_name=internal_cipher,
@@ -245,7 +241,6 @@ def ensure_group(
 def _yaml_add_group(
     doc: dict[str, Any],
     group: str,
-    pool_size: int,
     me_did: str,
     fields: list[str] | None,
     *,
@@ -258,7 +253,6 @@ def _yaml_add_group(
         # recipient entry only needs the DID.
         groups[group] = {
             "policy": "private",
-            "pool_size": pool_size,
             "cipher": cipher_name,
             "recipients": [{"recipient_identity": me_did}],
         }
@@ -303,7 +297,6 @@ def _rotate_impl(
     group: str,
     *,
     revoke_did: str | None = None,
-    pool_size: int | None = None,
     cfg: LoadedConfig | None = None,
     btn_cipher_result: Any | None = None,
     renewed_recipients: list[str] | None = None,
@@ -342,7 +335,6 @@ def _rotate_impl(
 
     cfg = cfg if cfg is not None else current_config()
     old = cfg.groups[group]
-    pool = int(pool_size or old.pool_size)
     ts = int(time.time())
 
     # Capture the best-effort SHA-256 of the pre-rotation key material BEFORE
@@ -410,7 +402,6 @@ def _rotate_impl(
             master_index_key=cfg.master_index_key,
             ceremony_id=cfg.ceremony_id,
             cipher_name=cfg.cipher_name,
-            pool_size=pool,
             epoch=old.index_epoch + 1,
             recipient_dids=[cfg.device.device_identity],
         )
@@ -422,7 +413,6 @@ def _rotate_impl(
         lambda doc: _yaml_rotate_group(
             doc,
             group,
-            pool,
             cfg.device.device_identity,
             revoke_did,
             new_epoch=new_index_epoch,
@@ -1013,14 +1003,12 @@ def set_link_state(
 def _yaml_rotate_group(
     doc: dict[str, Any],
     group: str,
-    pool_size: int,
     me_did: str,
     revoke_did: str | None,
     *,
     new_epoch: int,
 ) -> None:
     g = doc.setdefault("groups", {}).setdefault(group, {})
-    g["pool_size"] = pool_size
     g["index_epoch"] = new_epoch
 
     # YAML recipient entry shape.
@@ -1360,7 +1348,7 @@ def add_recipient(
 
     else:
         raise NotImplementedError(
-            f"tn.admin.add_recipient: cipher {cipher!r} not yet supported."
+            f"tn.admin.add_recipient: cipher {cipher!r} not supported."
         )
 
 
@@ -1442,7 +1430,7 @@ def issue_authority_assertion(
     cfg: LoadedConfig | None = None,
     now: datetime | None = None,
 ) -> KeyBindingProofV1:
-    """Sign the current evaluation-only HIBE authority/path state.
+    """Sign the current HIBE authority/path state.
 
     Assertions are audience-specific. Omitting ``audience_did`` is only a
     self-authority convenience; an external writer's complete Ed25519 DID must
@@ -3576,20 +3564,13 @@ def revoke_reader(
 def rotate_reader_path(group: str, new_path: str, *, cfg: Any | None = None) -> str:
     """Rotate a hibe group's identity path so FUTURE seals use ``new_path``.
 
-    This is the hibe cipher's admission rotation, not btn-grade revocation:
+    Updates this ceremony's sealing path and returns the new path. External
+    writers install the corresponding authority assertion before their next
+    seal. Use ``revoke_reader`` to also remove a reader from the grant registry
+    and issue replacement kits to survivors.
 
-    - Pre-rotation entries stay open forever for prior grantees (delegated
-      keys are permanent).
-    - A grantee holding a key for the exact old path loses access only to
-      seals made by this updated ceremony (and external writers after they
-      authenticate/adopt the new sibling path); one holding a key for an
-      ANCESTOR of the new path keeps access.
-    - Pick a sibling path (typically: bump the policy-hash leaf) — rotating
-      to a DESCENDANT of the old path cuts off nobody, because old keys
-      delegate down.
-
-    Groups that need real forward revocation of an admitted reader should
-    use btn (the default cipher). Returns the new path.
+    Exact-path reader keys open their assigned path; ancestor keys can derive
+    descendants within their remaining depth budget.
     """
     if cfg is None:
         from .. import current_config
@@ -3773,7 +3754,7 @@ def revoke_recipient(
 
     else:
         raise NotImplementedError(
-            f"tn.admin.revoke_recipient: cipher {cipher!r} not yet supported."
+            f"tn.admin.revoke_recipient: cipher {cipher!r} not supported."
         )
 
 
@@ -3935,7 +3916,6 @@ def rotate(
     group: str,
     *,
     revoke_did: str | None = None,
-    pool_size: int | None = None,
     cfg: Any | None = None,
 ) -> RotateGroupResult:
     """Rotate group keys.
@@ -3954,7 +3934,7 @@ def rotate(
         the new state into place. Pre-rotation recipient kits fail
         to decrypt post-rotation ciphertexts (publisher_id mismatch).
 
-    `revoke_did` + `pool_size` are JWE-only.
+    `revoke_did` is JWE-only.
     """
     if cfg is None:
         from .. import current_config
@@ -3967,9 +3947,9 @@ def rotate(
     cipher = group_spec.cipher.name
 
     if cipher == "btn":
-        if revoke_did is not None or pool_size is not None:
+        if revoke_did is not None:
             raise ValueError(
-                "tn.admin.rotate: revoke_did and pool_size are JWE-only. "
+                "tn.admin.rotate: revoke_did is JWE-only. "
                 "For btn, call tn.admin.revoke_recipient(group, "
                 "recipient_did=...) first, then tn.admin.rotate(group)."
             )
@@ -4015,7 +3995,7 @@ def rotate(
 
     elif cipher == "jwe":
         updated_cfg = _rotate_impl(
-            group, revoke_did=revoke_did, pool_size=pool_size, cfg=cfg,
+            group, revoke_did=revoke_did, cfg=cfg,
         )
         return RotateGroupResult(
             cipher="jwe",

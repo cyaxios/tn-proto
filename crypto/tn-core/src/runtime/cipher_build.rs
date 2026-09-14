@@ -705,7 +705,7 @@ pub(crate) fn write_fresh_btn_ceremony(
          \x20   index_epoch: 0\n\
          \x20   fields: [instruction, use_for, do_not_use_for, consequences, on_violation_or_error, policy]\n\
          fields: {{}}\n\
-         llm_classifier: {{enabled: false, provider: \"\", model: \"\"}}\n",
+         ",
     );
     crate::keystore_backend::atomic_write_bytes(&yaml_path, yaml.as_bytes())?;
     Ok(yaml_path)

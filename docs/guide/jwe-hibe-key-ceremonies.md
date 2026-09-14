@@ -10,20 +10,12 @@ It is intentionally higher level than the cipher references:
 - [hibe-howto.md](hibe-howto.md) shows HIBE key material with worked output.
 - [protocol.md](protocol.md) defines the record wire format.
 
-> **HIBE security status — not production-ready without review.** The
-> `tn-bbg` scheme implementation and its `bls12_381_plus` pairing library are
-> **unaudited**. External cryptographic review is required before production use.
-> Treat `cipher: hibe` as experimental/evaluation-only until that review
-> is complete; correctness, hardening, and interoperability tests are not a
-> substitute for an independent cryptographic audit. See
-> [The HIBE primitive library](hibe-library.md#security-status).
-
 ## Choose the cipher first
 
 | Cipher | Use it when | What has to exist before sealing | How readers are admitted |
 |---|---|---|---|
 | `jwe` | You want standards-defined per-recipient encryption for a small, explicit audience, such as web/API request records, callbacks, partner handoffs, or support shares with no durable audience lifecycle. | Each reader has a 32-byte X25519 public key registered in the group's recipient list. | The publisher registers the reader's X25519 public key. The next seal includes a recipient block for that key. |
-| `hibe` | For evaluation only, you want role separation: a writer can seal to a path using only the authority public key. | The writer has an authenticated, pinned authority master public key (`mpk`) and the group identity path. | The authority mints an exact-path key, or deliberately grants an ancestor key. An ancestor grantee becomes a delegated subauthority for descendants within the remaining `max_depth`. |
+| `hibe` | You want role separation: a writer can seal to a path using only the authority public key. | The writer has an authenticated, pinned authority master public key (`mpk`) and the group identity path. | The authority mints an exact-path key, or deliberately grants an ancestor key. An ancestor grantee becomes a delegated subauthority for descendants within the remaining `max_depth`. |
 
 `btn` remains the default when TN controls both seal and open and wants
 bounded-audience lifecycle semantics. JWE is included when standards-defined
@@ -436,7 +428,11 @@ That setup writes `default.hibe.mpk`, `default.hibe.msk`,
 `default.hibe.idpath`, and a local `default.hibe.sk` so the authority can also
 read its own records.
 
-Grant a reader:
+### HIBE reader enrollment
+
+The authority issues a challenge scoped to the reader and group. Here,
+`authenticated_reader_identity` is the reader's complete Ed25519 DID obtained
+through your identity-verification channel:
 
 ```python
 from tn.recipient_seal import recipient_key_is_resolvable
@@ -447,21 +443,36 @@ reader_did = authenticated_reader_identity
 if not recipient_key_is_resolvable(reader_did):
     raise ValueError("reader DID cannot receive a recipient-sealed HIBE kit")
 
+challenge = tn.admin.issue_hibe_reader_challenge("default", reader_did)
+```
+
+Send the challenge to the reader. In the reader's own initialized ceremony,
+create a proof after checking the authority DID against the identity obtained
+through that same trusted channel:
+
+```python
+reader_proof = tn.admin.create_hibe_reader_proof(
+    challenge, expected_authority_did=authenticated_authority_identity
+)
+```
+
+Return the proof to the authority. In the authority ceremony, grant the key:
+
+```python
 kit = tn.admin.grant_reader(
     "default",
     reader_did=reader_did,
+    proof=reader_proof,
     out_path="reader.tnpkg",
 )
 ```
 
 The kit contains the `mpk`, the group `idpath`, and one randomized delegated
 reader key for that path. A `.hibe.sk` is a bearer capability, not a secret key
-cryptographically bound to `reader_did`. `grant_reader` recipient-seals the
-package only when `recipient_key_is_resolvable(reader_did)` recognizes a
-complete Ed25519 `did:key`; otherwise it silently falls back to a plaintext
-package. Placeholder, abbreviated, non-`did:key`, and non-Ed25519 identifiers
-take that plaintext path. For a sensitive grant, fail as shown above rather
-than relying on the fallback.
+cryptographically bound to `reader_did`. `grant_reader` validates the complete
+Ed25519 DID and the unexpired, exact-scope `hibe-reader` proof before
+recipient-sealing the package. Plaintext delivery requires the explicit
+`unsafe_plaintext=True` option; it still requires a valid DID.
 
 The reader installs the delivered kit:
 
@@ -552,9 +563,8 @@ writer authorization remains a separate policy decision.
 
 ### HIBE revocation and rotation
 
-A HIBE path key is permanent for its path. You cannot un-mint it. Removing a
-reader means rotating future seals to a new path and issuing new kits to the
-survivors:
+`revoke_reader` moves future seals to a sibling path and issues new kits to
+the surviving readers:
 
 ```python
 result = tn.admin.revoke_reader(
@@ -567,28 +577,14 @@ print(result.new_path)
 print(result.kit_paths)
 ```
 
-The removed exact-path reader keeps records sealed before the path rotation.
 `revoke_reader` changes the authority ceremony's local path and reissues
-survivor kits; it does not update separate external writers. Each external
-writer retains its own `.hibe.idpath` and will keep sealing to the old path until
-it is updated. A revoked reader can still open those stale-writer ciphertexts.
+survivor kits. Distribute each kit to its reader for `tn.absorb`. Before their
+next seal, external writers install the authority's signed path assertion with
+`tn.admin.install_authority_assertion`. The assertion names the new sibling path
+and its epoch.
 
-Before the next external seal, deliver a signed/versioned path update to every
-writer, require it to verify the pinned MPK is unchanged and the target is the
-new sibling path, then reload/reconfigure that writer. Pause or fence writers
-that have not acknowledged the update. Forward cutoff begins only after every
-writer that can publish has adopted the authenticated sibling path.
-
-An ancestor grant is stronger: its holder can derive the exact child key for
-any new path inside that subtree, without the `msk`. Rotation below that
-ancestor cannot revoke it. If such a capability has already been issued, move
-to a fresh authority MPK outside that capability domain (and re-enroll everyone)
-or use BTN. For rotatable HIBE admission, issue exact-path grants and rotate to
-a sibling, never a descendant of the old path.
-
-Use HIBE when the authority/writer split is the important property. Use BTN when
-routine reader removal without re-issuing survivor keys is the important
-property.
+A parent-path key can derive descendants within its remaining depth. For this
+reader-rotation workflow, issue exact-path grants and rotate to a sibling path.
 
 ## Package and absorb rules
 
@@ -605,8 +601,8 @@ containing `.hibe.msk` is treated like a full self-addressed backup, not like a
 reader grant.
 
 For HIBE, the `.hibe.sk` remains a bearer capability even when its surrounding
-package names a reader. When recipient sealing is possible, use it. A plaintext
-kit is a bearer token: whoever receives it can absorb and use it.
+package names a reader. Normal grant delivery recipient-seals that capability
+to the reader whose key possession was verified.
 
 ## Operator checklist
 
@@ -625,15 +621,14 @@ For JWE:
 
 For HIBE:
 
-1. Do not use HIBE in production before the required external review.
-2. Decide who is the authority and authenticate/pin its MPK fingerprint.
-3. Protect the authority's `<group>.hibe.msk`; it can mint every path key.
-4. Budget `max_depth` and pick the group identity path deliberately.
-5. Use exact-path grants unless you intend to delegate subauthority.
-6. Require a complete resolvable Ed25519 DID before recipient-sealing a grant.
-7. For removal, rotate to a sibling, reissue survivor kits, and update every
+1. Decide who is the authority and authenticate/pin its MPK fingerprint.
+2. Protect the authority's `<group>.hibe.msk`; it can mint every path key.
+3. Budget `max_depth` and pick the group identity path deliberately.
+4. Use exact-path grants unless you intend to delegate subauthority.
+5. Verify the reader's scoped proof and complete Ed25519 DID before granting a key.
+6. For removal, rotate to a sibling, reissue survivor kits, and update every
    external writer before it seals again.
-8. Enforce signature verification and a writer-authorization policy separately.
+7. Enforce signature verification and a writer-authorization policy separately.
 
 ## Troubleshooting
 
@@ -643,5 +638,5 @@ For HIBE:
 | JWE reader gets no plaintext. | Reader did not generate/retain the matching `<group>.jwe.mykey`, was not re-enrolled after rotation, or is using the synchronous TS read path. | Restore the reader's own key or re-enroll its authenticated public key; use `readAsync` in TypeScript. |
 | HIBE writer cannot seal. | The writer lacks `<group>.hibe.mpk`/`<group>.hibe.idpath`, the MPK pin fails, or the path exceeds `max_depth`. | Authenticate and pin the authority MPK, then configure a path within its encoded depth. |
 | HIBE reader cannot open. | The reader lacks `<group>.hibe.sk`, has a key for a sibling path, or the AAD marker changed. | Absorb the correct grant and verify the `tn_aad` echo was not changed. |
-| HIBE grant package is plaintext. | The reader identifier was not a complete resolvable Ed25519 `did:key`. | Stop delivery, obtain the complete DID, require `recipient_key_is_resolvable(...)`, and mint a new grant. |
-| HIBE removal did not block new records from one writer. | That external writer still pins the old path, or the reader held an ancestor key. | Authenticate and deploy the sibling path to every writer; an ancestor leak requires a fresh authority MPK or BTN. |
+| HIBE grant rejects the reader identity or proof. | The DID is invalid, or the proof is expired or scoped to another authority, group, or path. | Obtain the complete Ed25519 DID and exchange a fresh scoped challenge and proof. |
+| HIBE external writer still uses the old path. | It has not installed the authority's path assertion. | Install the signed assertion and acknowledge its path epoch before the next seal. |

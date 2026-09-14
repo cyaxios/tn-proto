@@ -89,7 +89,6 @@ groups:
     auto_populated_by_policy: true
   pii:
     policy: private
-    pool_size: 4
     cipher: jwe
     recipients:
     - recipient_identity: did:key:z6MkezhbxkbqTCGqqzB6ENQ4sd33hRWKBPx54nprfmeHehFU
@@ -108,7 +107,3 @@ fields:
     group: pii
   user_agent:
     group: pii
-llm_classifier:
-  enabled: false
-  provider: ''
-  model: ''

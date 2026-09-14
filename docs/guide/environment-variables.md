@@ -50,7 +50,6 @@ See [Authentication & accounts](auth.md) for how these flow through `tn init`,
 |---|---|---|
 | `TN_IDENTITY_DIR` | Directory holding `identity.json` | `%APPDATA%\tn` (Windows) · `~/.local/share/tn` (POSIX) |
 | `XDG_DATA_HOME` | POSIX data root; TN appends `/tn` | `~/.local/share` |
-| `TN_IDENTITY_DID` | Pin which DID to use when several identities are on disk | the only identity present |
 
 Precedence for the identity directory: `TN_IDENTITY_DIR` > `XDG_DATA_HOME` >
 platform default. Isolating tests/CI is as simple as pointing `TN_IDENTITY_DIR`
@@ -68,9 +67,7 @@ export TN_IDENTITY_DIR="$PWD/.tn-identity"   # sandbox this run's identity
 |---|---|---|---|
 | `TN_VAULT_URL` | Base URL for the cloud vault (auth, sealed blobs, projects) | `https://vault.tn-proto.org` | no |
 | `TN_VAULT_DEFAULT_BASE` | Base for `did:web` identity-vault discovery | `https://vault.tn-proto.org` | no |
-| `TN_VAULT_PROJECT_ID` | Pin the linked vault project id | from yaml `linked_project_id` | no |
 | `TN_VAULT_SESSION_TOKEN` | Pre-auth session token (legacy alias: `TN_VAULT_JWT`) | challenge/verify on demand | **yes** |
-| `TN_VAULT_TIMEOUT` | HTTP timeout (seconds) for the vault client | `30.0` | no |
 | `TN_API_KEY` | Cold-start bootstrap bearer (see above) | unset | **yes** |
 | `TN_VAULT_API_KEY` | Warm-attach signal in the TS SDK (alias of `TN_API_KEY` for the link path) | unset | **yes** |
 | `TN_ACCOUNT_PASSPHRASE` | Account recovery passphrase → backup key (AWK) | unset (`--account-passphrase` or prompt) | **yes** |
@@ -114,11 +111,10 @@ export TN_NO_LINK=1     # offline-only; tn.init() never reaches the vault
 | `TN_STDOUT_FORMAT` | `json` or `pretty` for the stdout handler | `json` |
 | `TN_STDOUT_INCLUDE_ADMIN` | Include `tn.*` admin events in the stdout echo | unset |
 | `TN_AUTOINIT_QUIET` | Suppress the "minted a fresh ceremony" notice on auto-init | unset |
-| `TN_DEBUG` | Emit internal diagnostics to stderr | unset |
 
-Subsystem-specific variables (firehose `TN_FIREHOSE_*`, Kafka `TN_KAFKA_*`, S3,
-Delta exporter, …) live with their own features and are out of scope for this
-page; `tn show env` lists them under their own categories.
+Configure Kafka, S3, and Delta connection settings in handler YAML. Their
+`env:NAME` values resolve the environment variables you name there; see the
+[handler reference](yaml-reference.md#handlers).
 
 ---
 
