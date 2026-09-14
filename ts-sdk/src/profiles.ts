@@ -1,37 +1,16 @@
-/**
- * TN evidence profiles — fixed, SDK-tuned types.
- *
- * Mirrors python/tn/_profiles.py exactly. Profiles are SDK-fixed —
- * users pick one per stream; they do not compose, extend, or invent
- * their own. The catalog below is the source of truth for both
- * Python and TypeScript SDKs; any change here MUST land in lockstep
- * with the Python catalog.
- *
- * Always-on floor: encryption is the unconditional guarantee across
- * the catalog. Signing, chaining, durability, and sink choice vary
- * per profile.
- */
+/** Named defaults for event signing, chaining, and output sinks. */
 
 export type ProfileName = "transaction" | "audit" | "secure_log" | "telemetry";
 
 /** Sink kind a profile declares as its baseline output target. */
 export type SinkKind = "file_rotating" | "stdout";
 
-/**
- * Flush semantics:
- *   - ``fsync``    — write + fsync after every entry; max durability.
- *   - ``buffered`` — write to OS buffer, flush at batch boundary.
- *   - ``async``    — handler accepts entry, returns immediately;
- *                    background drains.
- */
-export type FlushPolicy = "fsync" | "buffered" | "async";
 
 export interface Profile {
   readonly name: ProfileName;
   readonly encrypts: boolean; // Always true. Floor.
   readonly signs: boolean;
   readonly chains: boolean;
-  readonly flush: FlushPolicy;
   readonly default_sink: SinkKind;
   readonly intended_use: string;
 }
@@ -42,61 +21,40 @@ const _CATALOG: Record<ProfileName, Profile> = {
     encrypts: true,
     signs: true,
     chains: true,
-    flush: "fsync",
     default_sink: "file_rotating",
     intended_use:
-      "Grants, revokes, payments, agent actions, security events. " +
-      "Maximum evidence: signed, chained, durable. Use when " +
-      "reconstruction and non-repudiation matter.",
+      "Signed and chained events for grants, payments, and application actions.",
   },
   audit: {
     name: "audit",
     encrypts: true,
     signs: true,
     chains: true,
-    flush: "buffered",
     default_sink: "file_rotating",
     intended_use:
-      "Normal business events where reconstruction matters but " +
-      "you can afford a small flush window. Same evidence as " +
-      "transaction; weaker durability.",
+      "Signed and chained business events with a rotating file sink.",
   },
   secure_log: {
     name: "secure_log",
     encrypts: true,
     signs: true,
     chains: false,
-    flush: "buffered",
     default_sink: "file_rotating",
     intended_use:
-      "Sensitive application logs where signing matters more than " +
-      "sequence. No chain — each entry stands alone. Cheaper to " +
-      "scale than audit/transaction.",
+      "Sensitive application logs with independently signed entries.",
   },
   telemetry: {
     name: "telemetry",
     encrypts: true,
     signs: false,
     chains: false,
-    flush: "async",
     default_sink: "stdout",
     intended_use:
-      "Fast-as-stdlib-logger profile. Encryption still applies; " +
-      "signing is dropped to approach zero overhead. Intended for " +
-      "high-volume traces, metrics, debug noise where evidence is " +
-      "overkill. Will be regression-tested for near-zero perf " +
-      "impact vs Python's logging.Logger.",
+      "Encrypted traces, metrics, and debug events written to stdout with signing and chaining disabled.",
   },
 };
 
-/**
- * The default profile picked when ``Tn.init(name)`` is called
- * without an explicit ``profile`` option. Conservative on every
- * axis: signed, chained, durable, file-sink. Onboarding-as-trust
- * means the bare default carries every guarantee.
- *
- * Users opt *down* explicitly. Never silently degrade evidence.
- */
+/** Default profile for signed, chained events in a file. */
 export const DEFAULT_PROFILE: ProfileName = "transaction";
 
 /** Return all profile names in a stable order. */

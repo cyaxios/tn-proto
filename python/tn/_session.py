@@ -48,9 +48,9 @@ def set_signing(enabled: bool | None) -> None:
     - ``tn.set_signing(None)``  — revert to the ceremony's yaml ``ceremony.sign``
       default.
 
-    Only takes effect on Rust-routed btn ceremonies (the default for btn).
-    JWE ceremonies always sign — the feature is a Rust-path-only flag
-    until the legacy logger gains it.
+    Native BTN/HIBE ceremonies accept both signing settings. The Python
+    fallback signs every event and rejects an effective False override
+    before writing.
     """
     global _sign_override
     _surface.info("tn.set_signing(%r) prior=%r", enabled, _sign_override)

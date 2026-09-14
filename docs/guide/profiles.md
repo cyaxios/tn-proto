@@ -2,37 +2,44 @@
 
 A profile is a named preset that decides how much ceremony each log entry
 carries: whether it is signed, whether it is hash-chained to the entry
-before it, how aggressively it is flushed to disk, and where it is written.
-You pick a profile when you create a ceremony. Encryption is always on; a
-profile dials everything else between "maximum evidence" and "fast logger".
+before it, and where it is written. You pick a profile when you create a
+ceremony. Fields routed to private groups are encrypted under every profile;
+fields explicitly routed as public remain visible.
 
-## The five profiles
+## The Python profiles
 
-| Profile | Encrypts | Signs | Chains | Flush | Sink | Use for |
-|---|---|---|---|---|---|---|
-| `transaction` (default) | yes | yes | yes | fsync | rotating file | Grants, revokes, payments, agent actions, security events. Maximum evidence: signed, chained, durable. |
-| `audit` | yes | yes | yes | buffered | rotating file | Business events where reconstruction matters but a small flush window is acceptable. Same evidence as `transaction`, weaker durability. |
-| `secure_log` | yes | yes | no | buffered | rotating file | Sensitive application logs where signing matters but sequence does not. Each entry stands alone; cheaper to scale. |
-| `telemetry` | yes | no | no | async | rotating file + stdout | High-volume traces, metrics, and debug output. Signing and chaining are dropped for near-zero overhead. |
-| `stdout` | yes | no | no | async | stdout | Local dev and notebooks. Writes the same encrypted NDJSON envelope to the console instead of a file. |
+| Profile | Encrypts private groups | Signs | Chains | Sink | Use for |
+|---|---|---|---|---|---|
+| `transaction` (default) | yes | yes | yes | rotating file | Grants, payments, agent actions, and security events requiring signed history. |
+| `audit` | yes | yes | yes | rotating file | Business events requiring signed history; the current write path matches `transaction`. |
+| `secure_log` | yes | yes | no | rotating file | Sensitive application logs where signing matters but chain order does not. |
+| `telemetry` | yes | no | no | rotating file + stdout | Traces, metrics, and debug output with signing and chaining disabled. |
+| `stdout` | yes | no | no | stdout | Local development and notebooks with console output. |
+
+The TypeScript catalog has `transaction`, `audit`, `secure_log`, and
+`telemetry`. Its `telemetry` preset selects stdout and has no default replay
+surface. Use a file-backed profile when the application needs `read()` history.
 
 ## What the columns mean
 
-- **Encrypts**: per-group field encryption. On for every profile. This is the protocol floor and cannot be turned off.
+- **Encrypts private groups**: per-group field encryption, retained by every profile. Public field routing is a separate configuration choice.
 - **Signs**: each entry carries an Ed25519 signature over its row hash, so a reader can prove who wrote it. An unsigned entry carries an empty `signature`, and a reader skips the Ed25519 check on it; the trade-off is the loss of authorship proof.
 - **Chains**: each entry's `prev_hash` links it to the previous entry of the same event type, making gaps and reordering detectable. Without chaining, entries are independent and sequence is informational only.
-- **Flush**: the durability of a write is a property of the handler, not a top-level profile field; there is no `flush:` yaml key. `fsync` syncs every write to disk before returning (survives a crash). `buffered` leaves the write in the OS buffer. `async` hands the write to a background path for the lowest latency.
-- **Sink**: `rotating file` writes to `logs/tn.ndjson` and rolls it over by size. `stdout` writes the encrypted envelope to the console instead of a file; you still use `tn.read()` to see decoded fields. `telemetry` does both, so `tn.read()` still works while you also see console output.
+- **Sink**: `rotating file` writes to the configured log path and rolls it over by size. Python stdout defaults to a readable summary; set `TN_STDOUT_FORMAT=json` for the full encrypted NDJSON envelope. Without a file sink, ordinary `tn.read()` has no backlog. Python's `telemetry` preset writes both file and console output.
+
+The native file writer appends before returning and calls `Write::flush`.
+Durability and remote delivery depend on the selected storage and handlers.
+Call `tn.flush_and_close()` in Python, or `await tn.close()`
+in TypeScript, to drain handlers at shutdown.
 
 ## Choosing a profile
 
 Pick by the question you need the log to answer later:
 
-- Need to prove what happened and in what order, and survive a crash: `transaction`.
-- Same proof, can tolerate a small loss window on crash: `audit`.
+- Need signed, chained history: `transaction` or `audit`.
 - Need to prove authorship but not order: `secure_log`.
-- Just want fast, encrypted, high-volume logging: `telemetry`.
-- Just want the encrypted envelope written to the console during development: `stdout`.
+- Want encrypted traces and metrics: `telemetry`.
+- Want console output during development: Python's `stdout`.
 
 ## Setting a profile in code
 
@@ -118,12 +125,11 @@ The same `info("order.created", ...)` call produces different records under
 different profiles:
 
 - Under `transaction`, the record has a populated `signature` and a
-  `prev_hash` that links it into its event-type chain, and the write is
-  fsynced before the call returns.
+  `prev_hash` that links it into its event-type chain.
 - Under `telemetry`, the same record has an empty `signature` and an empty
-  `prev_hash`, the write returns without waiting on disk, and the entry is
-  also printed to stdout.
+  `prev_hash`, and the entry is printed to stdout. Python also writes its file
+  sink before returning.
 
-The fields you logged and the per-group ciphertext are identical either way.
-Only the evidence and delivery around them change. The on-the-wire record
-format is documented in [protocol.md](protocol.md).
+The same fields route to the same groups under either profile. Encryption uses
+fresh randomness, so separate writes produce different ciphertext. The
+on-the-wire record format is documented in [protocol.md](protocol.md).

@@ -13,8 +13,7 @@ Migration flag:
     ``_READ_FLAT_DEFAULT`` (module-level constant) — when ``True`` (the
     default), ``tn.read()`` yields flat dicts. Set to ``False`` (or set
     the ``TN_READER_LEGACY=1`` environment variable) to revert to the
-    legacy ``{envelope, plaintext, valid}`` shape during the migration
-    period. Removed in a future release.
+    legacy ``{envelope, plaintext, valid}`` shape.
 """
 
 from __future__ import annotations

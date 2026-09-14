@@ -232,8 +232,10 @@ A fresh `cipher="hibe"` ceremony becomes **its own authority** — it runs
 Setup and keeps the msk locally. That is the recommended trust model: no
 tn-hosted service ever holds a decryption root, and a compromise is bounded
 to that one ceremony. (To seal to an *external* authority's path instead,
-pass `authority_mpk=` and `id_path=` to the group's `create` — the keystore
-can then write but cannot read until a granted key arrives.)
+  pass `authority_mpk=` and `id_path=` to the group's `create`, then install
+  the signed, writer-addressed authority assertion. The
+  [external-writer setup](jwe-hibe-key-ceremonies.md#external-authority-writer)
+  shows both steps. Reading requires a granted key.)
 
 Note the kit carries three files and no msk. `accepted=3` in the absorb
 receipt is exactly those three files landing in the reader's keystore. The

@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
-"""Single source of truth for the TN release version.
+"""Propagate and check the TypeScript SDK release version.
 
-The repo-root ``VERSION`` file holds the one semver string a human edits.
-This script propagates it into every place that must agree:
+The repo-root ``VERSION`` file holds the TypeScript semver string.
+This script propagates it into the package and generated runtime constant:
 
     VERSION                     (canonical)
-    python/pyproject.toml       project.version
     ts-sdk/package.json         version
     ts-sdk/src/version.ts       SDK_VERSION  (also regenerated at TS build time
                                 by ts-sdk/scripts/gen-version.mjs)
 
 Usage:
-    python tools/bump.py 0.6.3     # set the version everywhere
-    python tools/bump.py           # propagate the current VERSION everywhere
-    python tools/bump.py --check   # verify everything already agrees (exit 1 if not)
+    python tools/bump.py 0.6.3     # set the TypeScript version
+    python tools/bump.py           # propagate the current VERSION
+    python tools/bump.py --check   # verify the TypeScript targets agree
 
-``--check`` is the release-gate guard: it makes Python/npm version drift a hard
-failure instead of something a human notices days later.
+Python's calendar version is set in ``python/pyproject.toml`` and checked
+against its ``python-v*`` tag by the Python release workflow.
 """
 from __future__ import annotations
 
@@ -27,7 +26,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT / "VERSION"
-PYPROJECT = ROOT / "python" / "pyproject.toml"
 PACKAGE_JSON = ROOT / "ts-sdk" / "package.json"
 VERSION_TS = ROOT / "ts-sdk" / "src" / "version.ts"
 
@@ -37,7 +35,6 @@ SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-.]?(?:a|b|rc|alpha|beta)\d*)?$")
 # the opening quote (so we can splice the new version in without disturbing
 # surrounding formatting); group 2 captures the current value (for --check).
 TARGETS = [
-    (PYPROJECT, re.compile(r'(?m)^(version\s*=\s*)"([^"]*)"'), "pyproject.toml"),
     (PACKAGE_JSON, re.compile(r'(?m)^(\s*"version"\s*:\s*)"([^"]*)"'), "package.json"),
     (VERSION_TS, re.compile(r'(?m)^(export const SDK_VERSION\s*=\s*)"([^"]*)"'), "version.ts"),
 ]
@@ -77,14 +74,14 @@ def check() -> int:
     if drift:
         print("version drift detected:", file=sys.stderr)
         print("\n".join(drift), file=sys.stderr)
-        print("run `python tools/bump.py` to propagate VERSION everywhere.", file=sys.stderr)
+        print("run `python tools/bump.py` to propagate the TypeScript VERSION.", file=sys.stderr)
         return 1
-    print(f"version OK: {canonical} everywhere")
+    print(f"TypeScript version OK: {canonical}")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Set/propagate/verify the TN release version.")
+    p = argparse.ArgumentParser(description="Set/propagate/verify the TypeScript SDK version.")
     p.add_argument("version", nargs="?", help="new semver to set (omit to propagate current VERSION)")
     p.add_argument("--check", action="store_true", help="verify all targets agree with VERSION; exit 1 on drift")
     args = p.parse_args(argv)

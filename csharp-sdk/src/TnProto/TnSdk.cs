@@ -1,12 +1,12 @@
 namespace TnProto;
 
 /// <summary>
-/// Static metadata for the in-repo tn-proto C# SDK preview.
+/// Static metadata for the tn-proto C# SDK.
 /// </summary>
 public static class TnSdk
 {
     /// <summary>
-    /// NuGet/package identity reserved for the C# SDK.
+    /// Package identity for the C# SDK.
     /// </summary>
     public const string PackageName = "TnProto";
 

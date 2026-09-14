@@ -6,7 +6,6 @@ import { Buffer } from "node:buffer";
 import type { NodeRuntime } from "../runtime/node_runtime.js";
 import type { CeremonyConfig } from "../runtime/config.js";
 import { sha256HexBytes } from "../core/chain.js";
-import { compileKitBundleToFile } from "../compile.js";
 import { mintAndSealBundle, recipientKeyIsResolvable } from "../seal_bundle_producer.js";
 import type { AcceptedOffer, EnrollmentChallengeV1 } from "../core/trust.js";
 import {
@@ -280,9 +279,7 @@ export class PkgNamespace {
   }
 
   /**
-   * Compile a kit bundle for a single recipient/group into a `.tnpkg` file.
-   * Uses the standalone `compileKitBundleToFile` helper from `compile.ts`,
-   * which reads kits from the keystore directory directly (no minting).
+   * Compile a recipient bundle or an accepted enrollment offer into a `.tnpkg` file.
    *
    * Returns `CompiledPackage` with the resolved output path and manifest sha256.
    */

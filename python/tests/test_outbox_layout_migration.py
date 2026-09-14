@@ -25,7 +25,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 from tn.conventions import (
-    admin_inbox_dir,
     admin_outbox_dir,
     handler_outbox_dir,
     legacy_admin_outbox_dir,
@@ -44,12 +43,6 @@ def test_admin_outbox_dir_uses_per_stem_layout(tmp_path: Path):
     yaml_path = tmp_path / "register.yaml"
     expected = tmp_path / ".tn" / "register" / "admin" / "outbox"
     assert admin_outbox_dir(yaml_path) == expected
-
-
-def test_admin_inbox_dir_uses_per_stem_layout(tmp_path: Path):
-    yaml_path = tmp_path / "register.yaml"
-    expected = tmp_path / ".tn" / "register" / "admin" / "inbox"
-    assert admin_inbox_dir(yaml_path) == expected
 
 
 def test_handler_outbox_dir_uses_per_stem_layout(tmp_path: Path):

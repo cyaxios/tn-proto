@@ -1,9 +1,8 @@
 // `vault.push` handler — POST `.tnpkg` admin snapshots to a TN vault.
 //
 // Mirrors `python/tn/handlers/vault_push.py`. The HTTP transport is
-// abstracted via [`VaultPostClient`] so tests can capture POSTs without
-// speaking real HTTP. The default client is [`makeFetchVaultPostClient`]
-// which uses Node 20+'s built-in `fetch` and a static bearer token.
+// supplied through `VaultPostClient`. Use `makeFetchVaultPostClient` for
+// Node 20+'s built-in `fetch` with an optional static bearer token.
 //
 // On schedule (default) or on each accepted emit, build a snapshot via
 // the host-supplied builder, then POST to:
@@ -35,8 +34,8 @@ export interface VaultPushHandlerOptions {
   endpoint: string;
   projectId: string;
   builder: SnapshotBuilder;
-  /** HTTP client. Default: NullClient that errors on every call. */
-  client?: VaultPostClient;
+  /** HTTP client, such as `makeFetchVaultPostClient({...})`. */
+  client: VaultPostClient;
   /** Output directory for staged snapshots. Default: `<cwd>/.tn/admin/outbox`. */
   outboxDir?: string;
   /**
@@ -80,7 +79,10 @@ export class VaultPushHandler extends BaseTNHandler {
     this.endpoint = opts.endpoint.replace(/\/$/, "");
     this.projectId = opts.projectId;
     this.builder = opts.builder;
-    this.client = opts.client ?? new NullVaultPostClient();
+    if (opts.client == null) {
+      throw new Error("vault.push requires a client; pass makeFetchVaultPostClient({...}).");
+    }
+    this.client = opts.client;
     this.outboxDir = opts.outboxDir ?? join(process.cwd(), ".tn", "admin", "outbox");
     this.yamlPath = opts.yamlPath ?? null;
     this.trigger = opts.trigger ?? "on_schedule";
@@ -171,16 +173,6 @@ export class VaultPushHandler extends BaseTNHandler {
       setLastPushedAdminHead(this.yamlPath, head);
     }
     return true;
-  }
-}
-
-/** Default no-op client; errors on every call. Hosts must inject a real one. */
-export class NullVaultPostClient implements VaultPostClient {
-  async postSnapshot(_path: string, _query: QueryParams, _body: Uint8Array): Promise<void> {
-    throw new Error(
-      "vault.push: no HTTP client wired (NullVaultPostClient). " +
-        "Pass `client: makeFetchVaultPostClient({...})` in handler options.",
-    );
   }
 }
 

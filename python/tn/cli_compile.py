@@ -26,9 +26,8 @@ Label persistence
 ``manifest.state.label`` (the same ``state`` dict that already carries
 ``kits`` + ``kind``). This mirrors the TS legacy manifest's top-level
 ``label`` field — a re-read of the ``.tnpkg`` recovers the label. The
-SDK ``export``/``compile_kit_bundle`` producer doesn't yet carry a label
-through its own signature, so we inject the label here and re-sign the
-manifest with the ceremony's device key. The printed ``label`` therefore
+CLI adds the label after ``compile_kit_bundle`` writes the archive, then
+re-signs the manifest with the ceremony's device key. The printed ``label`` therefore
 reflects exactly what is stored on disk, not a display-only echo.
 """
 
@@ -65,14 +64,9 @@ def _discover_yaml(keystore: Path) -> Path | None:
 def _persist_label(out_path: Path, label: str, yaml_path: Path | None) -> None:
     """Inject ``label`` into the produced ``.tnpkg`` manifest and re-sign.
 
-    The SDK ``compile_kit_bundle`` / ``export`` producer accepts a
-    ``label`` parameter but does not yet route it into the signed
-    manifest, so a label passed to ``--label`` would otherwise be
-    silently dropped. We close that gap here: re-read the manifest, set
-    ``manifest.state["label"]`` (the same ``state`` dict that already
-    carries ``kits`` + ``kind``), re-sign with the ceremony device key,
-    and rewrite the archive. A re-read of the ``.tnpkg`` then recovers
-    the label, matching the printed result.
+    Re-read the manifest, set ``manifest.state["label"]``, re-sign with
+    the ceremony device key, and rewrite the archive. The stored label
+    matches the printed result.
 
     The label lives under ``state`` so it rides inside the manifest's
     signature domain — a tampered label fails verification, same as any
@@ -139,7 +133,6 @@ def cmd_compile(args: argparse.Namespace) -> int:
             out_path=out,
             yaml_path=yaml_path,
             groups=groups,
-            label=label,
             full=full,
             # --full is the explicit opt-in; pass the secret gate through
             # so the SDK's foot-gun guard doesn't reject the deliberate
@@ -155,9 +148,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
         return 2
 
     # Persist the label into the manifest so it survives a re-read.
-    # compile_kit_bundle/export don't carry a label through their own
-    # signature yet, so we inject + re-sign here. Done before the summary
-    # read below so the printed label reflects on-disk reality.
+    # Re-sign before reading the summary so the printed label matches
+    # the stored manifest.
     if label is not None:
         try:
             _persist_label(Path(out_path), label, yaml_path)

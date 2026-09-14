@@ -48,15 +48,12 @@ def test_tn_force_python_env_var_overrides(tmp_path, monkeypatch):
     tn.flush_and_close()
 
 
-def test_python_fallback_emits_deprecation_warning(tmp_path, monkeypatch):
-    """When tn_core is unavailable, should_use_rust() must emit a
-    DeprecationWarning to nudge users off the soon-to-be-removed
-    pure-Python fallback.
-    """
+def test_python_fallback_warns_when_native_is_unavailable(tmp_path, monkeypatch):
+    """A missing native extension selects Python and reports that choice."""
     monkeypatch.setattr(_dispatch, "_RUST_OK", False)
     yaml = tmp_path / "tn.yaml"
     yaml.write_text("groups: {default: {cipher: btn}}\n", encoding="utf-8")
-    with pytest.warns(DeprecationWarning, match="pure-Python runtime"):
+    with pytest.warns(RuntimeWarning, match="pure-Python runtime"):
         assert _dispatch.should_use_rust(yaml) is False
 
 
@@ -124,3 +121,27 @@ def test_close_drains_python_handlers_on_rust_path():
 
     assert rt._py_rt.closed, "Python handlers were not drained on the rust path"
     assert rt._rt.closed, "Rust runtime was not closed"
+
+
+@pytest.mark.parametrize("override", ["call", "session"])
+def test_python_fallback_rejects_disabled_signing_before_writing(
+    tmp_path: Path, override: str
+):
+    log_path = tmp_path / "events.ndjson"
+    tn.set_signing(None)
+    tn.init(tmp_path / "tn.yaml", cipher="jwe", log_path=log_path)
+    try:
+        assert not tn.using_rust()
+        before = log_path.read_bytes() if log_path.exists() else None
+        if override == "session":
+            tn.set_signing(False)
+        with pytest.raises(ValueError, match="Python runtime requires signing"):
+            if override == "call":
+                tn.info("signing.disabled", value=1, _sign=False)
+            else:
+                tn.info("signing.disabled", value=1)
+        after = log_path.read_bytes() if log_path.exists() else None
+        assert after == before
+    finally:
+        tn.set_signing(None)
+        tn.flush_and_close()

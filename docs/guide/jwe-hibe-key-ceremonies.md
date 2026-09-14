@@ -20,8 +20,7 @@ It is intentionally higher level than the cipher references:
 `btn` remains the default when TN controls both seal and open and wants
 bounded-audience lifecycle semantics. JWE is included when standards-defined
 per-recipient encryption is valuable. HIBE is included when writers and grant
-authorities need to be separate. A BTN-in-JOSE encoding is possible, but it
-would be a TN profile rather than ordinary JWE interoperability.
+authorities need to be separate.
 
 ## Shared ceremony shape
 
@@ -502,19 +501,20 @@ with an explicit depth budget:
 ```python
 from pathlib import Path
 
-from tn import _hibe
+from tn import _hibe, config
 from tn.cipher import HibeGroupCipher
 
 target_path = "org/fraud/case-17"
-authority_keystore = Path("authority/keys")
+authority_cfg = config.create_fresh(Path("authority/tn.yaml"), cipher="hibe", link=False)
 handoff_dir = Path("outbound")
 handoff_dir.mkdir(parents=True, exist_ok=True)
 authority = HibeGroupCipher.create(
-    authority_keystore,
-    "governed_cases",
+    authority_cfg.keystore,
+    "default",
     id_path=target_path,
     max_depth=3,
 )
+authority_cfg.groups["default"].cipher = authority
 (handoff_dir / "authority.mpk").write_bytes(authority.mpk())
 (handoff_dir / "authority.mpk.sha256").write_text(
     _hibe.mpk_fingerprint(authority.mpk()).hex(),
@@ -531,11 +531,11 @@ the external-authority cipher:
 from hmac import compare_digest
 from pathlib import Path
 
-from tn import _hibe
+from tn import _hibe, config
 from tn.cipher import HibeGroupCipher
 
 target_path = "org/fraud/case-17"
-writer_keystore = Path("writer/keys")
+writer_cfg = config.create_fresh(Path("writer/tn.yaml"), cipher="hibe", link=False)
 authenticated_dir = Path("authenticated")
 authority_mpk_bytes = (authenticated_dir / "authority.mpk").read_bytes()
 expected_mpk_fingerprint = (
@@ -549,17 +549,40 @@ if len(target_path.split("/")) > _hibe.mpk_max_depth(authority_mpk_bytes):
     raise ValueError("target path exceeds the authority MPK max_depth")
 
 cipher = HibeGroupCipher.create(
-    writer_keystore,
-    "governed_cases",
+    writer_cfg.keystore,
+    "default",
     authority_mpk=authority_mpk_bytes,
     id_path=target_path,
 )
+writer_cfg.groups["default"].cipher = cipher
 ```
 
-The fingerprint identifies the exact MPK bytes; it does not authenticate them
-by itself. The authenticated delivery/signature establishes the trust root, and
-the comparison pins it. Application writers then seal with public material;
-writer authorization remains a separate policy decision.
+This stages public material. Before sealing, the writer must install a signed
+authority assertion addressed to its DID. In this local example, both loaded
+configurations remain available; bind the writer configuration to the authority's
+ceremony scope, then issue and install the assertion:
+
+```python
+from tn import admin
+
+writer_cfg.ceremony_id = authority_cfg.ceremony_id
+assertion = admin.issue_authority_assertion(
+    "default", audience_did=writer_cfg.device.device_identity, cfg=authority_cfg,
+)
+admin.install_authority_assertion(
+    "default", mpk=authority_mpk_bytes, assertion=assertion,
+    expected_authority_did=authority_cfg.device.device_identity, cfg=writer_cfg,
+)
+blob = writer_cfg.groups["default"].cipher.encrypt(b"case summary")
+assert authority.decrypt(blob) == b"case summary"
+```
+
+For separate deployments, provision the agreed ceremony/group scope and obtain
+the expected authority DID through an authenticated channel. Exchange the signed
+assertion and MPK, then install them in the writer's configuration. The assertion
+binds its audience, MPK, depth, path, epoch, and expiry. New seals check the
+installed assertion; renew it before expiry. A matching fingerprint alone does
+not authorize the external writer's sealing operation.
 
 ### HIBE revocation and rotation
 

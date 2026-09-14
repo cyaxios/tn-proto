@@ -45,7 +45,6 @@ class TestTransactionProfile:
         p = _profiles.get("transaction")
         assert p.signs is True
         assert p.chains is True
-        assert p.flush == "fsync"
         assert p.default_sink == "file_rotating"
         assert p.has_replay_surface() is True
 
@@ -55,7 +54,6 @@ class TestAuditProfile:
         p = _profiles.get("audit")
         assert p.signs is True
         assert p.chains is True
-        assert p.flush == "buffered"
         assert p.default_sink == "file_rotating"
         assert p.has_replay_surface() is True
 
@@ -65,7 +63,6 @@ class TestSecureLogProfile:
         p = _profiles.get("secure_log")
         assert p.signs is True
         assert p.chains is False  # entries stand alone
-        assert p.flush == "buffered"
         assert p.default_sink == "file_rotating"
         assert p.has_replay_surface() is True
 
@@ -80,7 +77,6 @@ class TestTelemetryProfile:
         # file" profile is `stdout`.
         assert p.signs is False
         assert p.chains is False
-        assert p.flush == "async"
         assert p.default_sink == "file_rotating"
 
     def test_telemetry_has_replay_surface(self):

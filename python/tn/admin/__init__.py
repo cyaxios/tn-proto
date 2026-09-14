@@ -193,8 +193,12 @@ def ensure_group(
             from datetime import datetime
             from datetime import timezone as _tz
 
-            group_cipher = cfg.groups[group].cipher.name  # "jwe" or "btn"
-            _lg._require_init().emit(
+            from .. import _dispatch_rt
+
+            group_cipher = cfg.groups[group].cipher.name
+            # Continue the active writer's chain, including native bootstrap events.
+            emitter = _dispatch_rt if _dispatch_rt is not None else _lg._require_init()
+            emitter.emit(
                 "info",
                 "tn.group.added",
                 {
@@ -3778,9 +3782,8 @@ class RotateGroupResult:
     generation: int | None = None
     updated_cfg: LoadedConfig | None = None
     cipher_actually_rotated: bool = False
-    # Truth-telling fields. Populated for btn rotations; jwe
-    # leaves them None for now (its own pubkey rename is a separate
-    # piece of work).
+    # BTN publisher identifiers and epochs. JWE rotations return their
+    # changed configuration through updated_cfg.
     prior_publisher_id: bytes | None = None
     new_publisher_id: bytes | None = None
     prior_epoch: int | None = None

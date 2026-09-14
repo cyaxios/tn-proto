@@ -10,10 +10,8 @@ on a single literal path. This module proves:
    into a single timestamp-ordered stream
 3. Schema validation rejects unknown tokens
 
-The Rust runtime doesn't yet support templated `logs.path`. The
-dispatch layer auto-routes templated ceremonies through Python
-(see `_dispatch._logs_path_is_templated`) so this feature works
-without breaking Rust acceleration for non-templated ceremonies.
+The native runtime renders templated paths for BTN/HIBE ceremonies. The
+Python file handler provides the same path routing for the Python pipeline.
 """
 from __future__ import annotations
 

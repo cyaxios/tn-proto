@@ -611,10 +611,7 @@ def _absorb_verified_package(
         return AbsorbReceipt(
             kind=kind,
             legacy_status="rejected",
-            legacy_reason=(
-                f"absorb: kind {kind!r} is reserved in the manifest schema but "
-                f"this Python version does not yet implement absorb for it."
-            ),
+            legacy_reason=f"absorb: unsupported manifest kind {kind!r}",
         )
     return AbsorbReceipt(
         kind=kind,

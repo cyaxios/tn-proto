@@ -13,11 +13,10 @@ What this shows
     location: a device key (Ed25519), a did:key identity, a default
     btn group, and the .tn/ directory under cwd or $TN_HOME.
   - `tn.info(event, **fields)` emits an attested log line.
-  - `tn.read()` (no args) reads them back as flat dicts — the same
-    shape you'd write yourself: ``{event_type, timestamp, ...your fields}``.
-    Each entry has been decrypted; crypto plumbing is invisible.
+  - `tn.read()` yields Entry objects with event metadata and decrypted
+    values in ``entry.fields``.
 
-For the audit-grade view (signatures, chain hashes, ciphertext bytes),
+For signatures, chain hashes, and ciphertext bytes,
 see ``ex02_reading.py`` which uses ``tn.read_raw()`` to demo the
 envelope shape under the friendly surface.
 

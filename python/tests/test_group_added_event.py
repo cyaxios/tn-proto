@@ -85,3 +85,21 @@ def test_ensure_group_idempotent_no_duplicate_emit(tmp_path):
     assert len(added) <= 1, (
         f"ensure_group should not emit duplicate group.added events: saw {len(added)} for group=pii"
     )
+
+
+def test_ensure_group_continues_verified_admin_chain(tmp_path):
+    """Added groups continue the active runtime's signed admin history."""
+    tn.init(tmp_path / "tn.yaml", cipher=_workflow_cipher("btn"))
+    cfg = tn.current_config()
+    initial_groups = set(cfg.groups)
+    tn.ensure_group(cfg, "pii", fields=["email"])
+    tn.ensure_group(cfg, "internal", fields=["debug_trace"])
+    tn.ensure_group(cfg, "pii", fields=["email"])
+
+    rows = list(tn.read(log="admin", verify=True))
+    added = [row for row in rows if row.event_type == "tn.group.added"]
+    assert {row.fields["group"] for row in added} == initial_groups | {"pii", "internal"}
+    assert len(added) == len(initial_groups) + 2
+    assert [row.sequence for row in added] == list(range(1, len(added) + 1))
+    for previous, current in zip(added, added[1:]):
+        assert current.prev_hash == previous.row_hash

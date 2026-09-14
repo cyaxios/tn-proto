@@ -37,7 +37,6 @@ export interface LoginOptions {
   vault?: string;
   code?: string;
   accountPassphrase?: string;
-  interactive?: boolean; // reserved for the CLI browser path
 }
 
 export interface ConnectOptions {

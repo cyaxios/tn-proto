@@ -183,7 +183,12 @@ export function buildHandlers(
           `tn.yaml: handler ${JSON.stringify(name)} of kind "vault.push" requires adapters.snapshotBuilder.`,
         );
       }
-      const client = adapters.makeVaultPostClient?.(endpoint);
+      if (!adapters.makeVaultPostClient) {
+        throw new Error(
+          `tn.yaml: handler ${JSON.stringify(name)} of kind "vault.push" requires adapters.makeVaultPostClient.`,
+        );
+      }
+      const client = adapters.makeVaultPostClient(endpoint);
       out.push(
         new VaultPushHandler(name, {
           endpoint,

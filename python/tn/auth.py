@@ -327,7 +327,6 @@ class _AuthNamespace:
         vault: str | None = None,
         code: str | None = None,
         account_passphrase: str | None = None,
-        interactive: bool | None = None,  # reserved for the CLI browser path
     ) -> AuthState:
         identity = _load_or_mint_identity()
         vault_url = _resolve_vault(identity, vault)

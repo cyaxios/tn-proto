@@ -768,8 +768,7 @@ present); `--format json` is for programmatic use.
 
 #### tn show profiles
 
-Print the profile catalog and its encrypts / signs / chains / flush /
-sink matrix.
+Print the profile catalog and its encryption, signing, chaining, and sink matrix.
 
 ```bash
 usage: tn show profiles [-h] [--format {human,json}]
@@ -780,21 +779,21 @@ PYTHONPATH=python python -m tn.cli show profiles
 ```
 
 ```
-NAME          ENCRYPTS  SIGNS  CHAINS  FLUSH     SINK
-------------  --------  -----  ------  --------  --------------
-transaction*  yes       yes    yes     fsync     file_rotating
-audit         yes       yes    yes     buffered  file_rotating
-secure_log    yes       yes    no      buffered  file_rotating
-telemetry     yes       no     no      async     file_rotating
-stdout        yes       no     no      async     stdout
+NAME          ENCRYPTS  SIGNS  CHAINS  SINK
+------------  --------  -----  ------  --------------
+transaction*  yes       yes    yes     file_rotating
+audit         yes       yes    yes     file_rotating
+secure_log    yes       yes    no      file_rotating
+telemetry     yes       no     no      file_rotating
+stdout        yes       no     no      stdout
 
 * = catalog default (used when tn.init() is called with no profile=).
 
 transaction: Grants, revokes, payments, agent actions, security events. ...
-audit: Normal business events where reconstruction matters ...
+audit: Business events where reconstruction matters. ...
 secure_log: Sensitive application logs where signing matters more than sequence. ...
-telemetry: Fast-as-stdlib-logger profile. ...
-stdout: Dev-friendly default. ...
+telemetry: Encrypted traces, metrics, and debug events. ...
+stdout: Console output for local development, notebooks, and demos. ...
 ```
 
 ### tn seal

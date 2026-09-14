@@ -1,22 +1,4 @@
-// `tn show profiles` — print the curated profile catalog.
-//
-// TypeScript port of Python's `tn.cli.cmd_show_profiles`
-// (python/tn/cli.py) + its `p_show_profiles` parser. Mirrors the verb's
-// behaviour, flags, stdout, and exit code:
-//
-//     tn show profiles [--format human|json]
-//
-// DX review #22 (Python): the curated profile bundle (encrypts / signs /
-// chains / flush / default_sink / intended_use) is the right metadata to
-// expose for "what should I init with?" decisions. The catalog has lived
-// in the SDK since 0.3.0 but had no CLI surface — users were reaching into
-// the private module to discover the bundles. This verb is the proper
-// public reflection.
-//
-// The catalog is sourced from the existing TS SDK profile registry
-// (`../profiles.js`) — `allProfileNames` / `getProfile` / `DEFAULT_PROFILE`
-// — never hardcoded here, exactly as the Python handler reads
-// `tn._profiles`.
+// Print the profile catalog as a table or JSON.
 
 import {
   allProfileNames,
@@ -46,7 +28,6 @@ const COLS: ReadonlyArray<Column> = [
   { label: "ENCRYPTS", width: 8 },
   { label: "SIGNS", width: 5 },
   { label: "CHAINS", width: 6 },
-  { label: "FLUSH", width: 8 },
   { label: "SINK", width: 14 },
 ];
 
@@ -73,7 +54,6 @@ export async function showProfilesCmd(opts: ShowProfilesOptions): Promise<number
       encrypts: p.encrypts,
       signs: p.signs,
       chains: p.chains,
-      flush: p.flush,
       default_sink: p.default_sink,
       intended_use: p.intended_use,
       default: p.name === DEFAULT_PROFILE,
@@ -96,7 +76,6 @@ export async function showProfilesCmd(opts: ShowProfilesOptions): Promise<number
         `${ljust(p.encrypts ? "yes" : "no", 8)}  ` +
         `${ljust(p.signs ? "yes" : "no", 5)}  ` +
         `${ljust(p.chains ? "yes" : "no", 6)}  ` +
-        `${ljust(p.flush, 8)}  ` +
         `${ljust(p.default_sink, 14)}\n`,
     );
   }

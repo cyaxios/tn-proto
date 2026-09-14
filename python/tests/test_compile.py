@@ -156,3 +156,15 @@ def test_compile_kit_bundle_readers_only_skips_secret_marker(tmp_path: Path):
         names = zf.namelist()
         assert "WARNING_CONTAINS_PRIVATE_KEYS" not in names
         assert "body/WARNING_CONTAINS_PRIVATE_KEYS" not in names
+
+
+@pytest.mark.parametrize("option", ["label", "note"])
+def test_compile_rejects_unused_metadata_before_writing(tmp_path: Path, option: str):
+    keystore = _bootstrap_btn_keystore(tmp_path)
+    out = tmp_path / "bundle.tnpkg"
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        compile_kit_bundle(
+            keystore, out_path=out, yaml_path=tmp_path / "tn.yaml",
+            **{option: "metadata"},
+        )
+    assert not out.exists()

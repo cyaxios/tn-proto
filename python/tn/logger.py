@@ -189,8 +189,10 @@ class TNRuntime:
         default_log_dir: Path,
         *,
         extra_handlers: list[TNHandler] | None = None,
+        stdout: bool | None = None,
     ):
         self.cfg = cfg
+        self._stdout_override = stdout
         self.default_log_dir = default_log_dir
         self.chain = ChainState()
         # Reentrant lock around the emit critical section
@@ -217,6 +219,14 @@ class TNRuntime:
         )
         if extra_handlers:
             self.handlers.extend(extra_handlers)
+        stdout_enabled = (
+            stdout if stdout is not None
+            else os.environ.get("TN_NO_STDOUT", "").strip() != "1"
+        )
+        if not stdout_enabled:
+            from .handlers.stdout import StdoutHandler
+
+            self.handlers = [h for h in self.handlers if not isinstance(h, StdoutHandler)]
 
     def emit(
         self,
@@ -678,6 +688,7 @@ def build_runtime(
         # default-on behavior applies (auto-add stdout). When the yaml
         # DOES declare handlers, the list is authoritative — auto-add
         # only fires if stdout is explicitly listed.
+        stdout_override = stdout
         if stdout is None:
             stdout = os.environ.get("TN_NO_STDOUT", "").strip() != "1"
         handler_specs = cfg.handler_specs
@@ -688,7 +699,13 @@ def build_runtime(
         # (silencing stdout means removing the entry; double-add would
         # ignore that intent). Legacy yamls with no handlers block fall
         # through to the default-on auto-stdout for back-compat.
-        if stdout and not yaml_declares_handlers:
+        yaml_declares_stdout = any(
+            str(spec.get("kind", "")).lower() == "stdout" for spec in (handler_specs or [])
+        )
+        if (
+            stdout and not yaml_declares_stdout
+            and (stdout_override is True or not yaml_declares_handlers)
+        ):
             from .handlers.stdout import StdoutHandler
 
             stdout_handler = StdoutHandler()
@@ -710,7 +727,9 @@ def build_runtime(
         # to discover the main log location; TNRuntime wants the directory.
         default_log_path = cfg.resolve_log_path()
         default_log_dir = default_log_path.parent
-        _runtime = TNRuntime(cfg, default_log_dir, extra_handlers=extra_handlers)
+        _runtime = TNRuntime(
+            cfg, default_log_dir, extra_handlers=extra_handlers, stdout=stdout_override
+        )
         if synthesized_default:
             for h in _runtime.handlers:
                 # Mark every handler in the synthesized list as default so

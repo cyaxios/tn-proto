@@ -18,9 +18,9 @@ at seal time. Each reader receives a recipient block in the standard JWE
 object. BTN manages audiences through a broadcast tree; HIBE seals to an
 authority path and lets the authority issue reader keys later.
 
-The cipher is produced by JOSE libraries — **Authlib/joserfc**
-(BSD-3) in Python, **panva/jose** (MIT) in TypeScript/JS. TN does not hand-roll
-the crypto.
+The Python `JWEGroupCipher` uses **Authlib/joserfc** (BSD-3), and the
+TypeScript/JS cipher uses **panva/jose** (MIT). Native sessions use the Rust
+[JWE implementation](../../crypto/tn-core/src/cipher/jwe.rs).
 
 ---
 
@@ -196,8 +196,7 @@ included.
   Every external reader must re-enroll an authenticated X25519 public key
   before receiving a post-rotation recipient block.
 - **Fail-closed.** A wrong marker, a non-recipient key, or a tampered/garbage
-  blob yields an error (Python) or `null` (TS) — never wrong plaintext, and the
-  SDK never throws into host space.
+  blob yields an error from the Python cipher or `null` from TS `jweDecrypt`.
 - **Marker is public-inspectable.** The marker is authenticated but not
   encrypted; a proxy can read and check it (via the record's `tn_aad` echo)
   without decrypting the body.

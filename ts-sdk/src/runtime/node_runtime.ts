@@ -38,7 +38,6 @@ import { DeviceKey } from "../core/signing.js";
 
 import { loadPolicyFile, type PolicyDocument } from "../agents_policy.js";
 import {
-  KNOWN_KINDS,
   clockDominates,
   reuseIsInformed,
   isManifestSignatureValid,
@@ -136,7 +135,6 @@ import {
   authoritativeYamlFor,
   loadConfig,
   type CeremonyConfig,
-  type GroupConfig,
 } from "./config.js";
 import { commitGroupKeys, loadJweKeys, loadKeystore, type LoadedKeystore } from "./keystore.js";
 import { scanAttestedEventRecords, yamlRecipientDids } from "./reconcile.js";
@@ -5216,10 +5214,6 @@ function validateEventType(et: string): void {
   if (!/^[a-z0-9][a-z0-9._-]*$/i.test(et)) {
     throw new Error(`invalid event_type: ${et}`);
   }
-}
-
-export function groupForField(_cfg: CeremonyConfig, _fieldName: string): GroupConfig | undefined {
-  return undefined; // reserved for future classifier integration
 }
 
 /**

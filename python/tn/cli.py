@@ -861,7 +861,7 @@ def build_parser() -> argparse.ArgumentParser:
     # DX review #22: profile-catalog reflection.
     p_show_profiles = show_sub.add_parser(
         "profiles",
-        help="Print the profile catalog (transaction / audit / secure_log / telemetry / stdout) with their encrypts/signs/chains/flush/sink matrices and intended-use blurbs.",
+        help="Print the profile catalog (transaction / audit / secure_log / telemetry / stdout) with their encryption/signing/chaining/sink settings and usage descriptions.",
     )
     p_show_profiles.add_argument(
         "--format",

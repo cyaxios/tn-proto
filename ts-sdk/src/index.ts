@@ -216,7 +216,6 @@ export {
   bootstrapFromApiKey,
   challengeVerify,
   parseBearer,
-  UnsealNotWiredError,
   type ApiKeyFetchResult,
   type ParsedBearer,
 } from "./runtime/bootstrap_api_key.js";

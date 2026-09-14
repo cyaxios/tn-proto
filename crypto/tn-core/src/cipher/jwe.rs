@@ -909,7 +909,7 @@ mod unavailable {
     use crate::cipher::GroupCipher;
     use crate::{Error, Result};
 
-    /// Placeholder used where native JWE support is absent.
+    /// Build guard for configurations without native JWE support.
     pub struct JweCipher;
 
     impl JweCipher {

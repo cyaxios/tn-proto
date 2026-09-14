@@ -29,8 +29,6 @@ Convergence rules:
 All three conflict types appear in ``cache.head_conflicts``. The reducer
 itself never raises on them — they are informational signals for
 dashboards / strict callers (``cache.diverged()``).
-
-This module is Python-only for now. Rust + TS parity is not yet implemented.
 """
 
 from __future__ import annotations

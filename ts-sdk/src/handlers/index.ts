@@ -31,7 +31,6 @@ export type {
 } from "./fs_scan.js";
 export {
   VaultPushHandler,
-  NullVaultPostClient,
   makeFetchVaultPostClient,
 } from "./vault_push.js";
 export type {

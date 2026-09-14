@@ -1,16 +1,4 @@
-"""End-to-end audit of every profile in tn._profiles against every
-catalog axis (signs / chains / flush / default_sink).
-
-Pinned ground truth: what the catalog *claims* each profile does
-(``tn._profiles._CATALOG``), and what the runtime *actually delivers*
-today. Where the two diverge, the test pins the gap with a clear
-xfail-style assertion so we can't lose track of it.
-
-DX review #4 wired ``signs`` into ``ceremony.sign``. The other three
-axes are still no-ops at the runtime level today. This file is the
-single place to flip from "documented gap" to "actually wired" once
-the Rust runtime grows the matching switches.
-"""
+"""Check each profile's signing, chaining, and output configuration."""
 from __future__ import annotations
 
 import json
@@ -60,12 +48,14 @@ def _emit_and_inspect(tmp_path: Path, profile: str) -> dict:
     body = textwrap.dedent(f"""
         import os, json, pathlib
         os.environ["TN_NO_STDOUT"] = "1"
+        os.environ["TN_NO_LINK"] = "1"
         import tn
         tn.init(profile={profile!r})
         cfg = tn.current_config()
         yaml_path = pathlib.Path(cfg.yaml_path)
         log = pathlib.Path(cfg.resolve_log_path())
         tn.info("matrix.evt", x=1, message="hello")
+        tn.info("matrix.evt", x=2, message="again")
         tn.flush_and_close()
         import yaml
         cer = (yaml.safe_load(yaml_path.read_text()) or {{}}).get("ceremony", {{}})
@@ -92,14 +82,13 @@ def _emit_and_inspect(tmp_path: Path, profile: str) -> dict:
 
 
 # --------------------------------------------------------------------
-# Wired axes (assertions that MUST pass — gaps if they fail)
+# Signing settings and emitted signatures.
 # --------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("profile", PROFILE_NAMES)
 def test_signs_axis_wired_in_yaml(tmp_path: Path, profile: str):
-    """yaml.ceremony.sign reflects the catalog's signs bit.
-    DX review #4 wired this axis."""
+    """yaml.ceremony.sign reflects the catalog's signs bit."""
     sub = tmp_path / profile
     sub.mkdir()
     result = _emit_and_inspect(sub, profile)
@@ -116,11 +105,6 @@ def test_signs_axis_wired_in_emit(tmp_path: Path, profile: str):
     sub.mkdir()
     result = _emit_and_inspect(sub, profile)
     last = result["last_entry"]
-    if CATALOG[profile].default_sink == "stdout":
-        # Profiles whose default sink is stdout currently STILL emit
-        # to the file too (see test_default_sink_axis_GAP). When the
-        # default_sink axis is wired, last may be None.
-        pass
     if last is None:
         pytest.skip(
             f"profile={profile} produced no on-disk entry "
@@ -138,7 +122,7 @@ def test_signs_axis_wired_in_emit(tmp_path: Path, profile: str):
 
 
 # --------------------------------------------------------------------
-# Gap axes (currently NOT wired — the assertions document the gap)
+# Chaining and output settings.
 # --------------------------------------------------------------------
 
 
@@ -146,12 +130,8 @@ def test_signs_axis_wired_in_emit(tmp_path: Path, profile: str):
     "profile",
     [name for name, p in CATALOG.items() if not p.chains],
 )
-def test_chains_axis_GAP(tmp_path: Path, profile: str):
-    """Profiles with chains=False (secure_log, telemetry, stdout) should
-    emit entries without ``prev_hash`` / ``sequence``. Today the Rust
-    runtime always chains. This test pins the gap: it XFAILS until
-    the chains axis is wired in ``crypto/tn-core/src/chain.rs``.
-    """
+def test_unchained_profiles_keep_sequence_without_hash_link(tmp_path: Path, profile: str):
+    """Independent entries retain a sequence counter and an empty prev_hash."""
     sub = tmp_path / profile
     sub.mkdir()
     result = _emit_and_inspect(sub, profile)
@@ -161,78 +141,27 @@ def test_chains_axis_GAP(tmp_path: Path, profile: str):
             f"profile={profile} produced no on-disk entry; "
             "chains check is moot"
         )
-    has_chain_fields = (
-        "prev_hash" in last
-        or "sequence" in last
-    )
-    if has_chain_fields:
-        pytest.xfail(
-            f"GAP: profile={profile} catalog says chains=False but "
-            f"runtime still emits prev_hash + sequence. Awaiting Rust "
-            f"runtime support (crypto/tn-core/src/chain.rs)."
-        )
-    else:
-        # Already fixed — assert the gap really is closed.
-        assert "prev_hash" not in last
-        assert "sequence" not in last
+    assert result["yaml_ceremony"]["chain"] is False
+    assert last["prev_hash"] == ""
+    assert last["sequence"] == 2
 
 
 @pytest.mark.parametrize(
     "profile",
     [name for name, p in CATALOG.items() if p.default_sink == "stdout"],
 )
-def test_default_sink_axis_GAP(tmp_path: Path, profile: str):
-    """Profiles whose default_sink is 'stdout' (telemetry, stdout) should
-    NOT have a file.rotating handler in the default-ceremony yaml.
-    Today ``config.create_fresh`` always declares both. Stream yamls
-    DO honour default_sink (verified separately in
-    test_stream_yaml_honors_default_sink); only the default ceremony
-    has the gap.
-    """
+def test_stdout_profile_selects_stdout_handler(tmp_path: Path, profile: str):
+    """The stdout profile declares its console handler in the YAML."""
     sub = tmp_path / profile
     sub.mkdir()
     result = _emit_and_inspect(sub, profile)
     sinks = set(result["yaml_handlers_sink_kinds"])
-    if "file.rotating" in sinks:
-        pytest.xfail(
-            f"GAP: profile={profile} catalog says default_sink=stdout "
-            f"but default-ceremony yaml still declares a file.rotating "
-            f"handler. config.create_fresh's baseline yaml needs a "
-            f"profile-aware handler list."
-        )
-    else:
-        assert "file.rotating" not in sinks
-
-
-@pytest.mark.parametrize("profile", PROFILE_NAMES)
-def test_flush_axis_GAP(tmp_path: Path, profile: str):
-    """``profile.flush`` (fsync / buffered / async) should drive the
-    handler's flush policy in yaml. Currently neither the default
-    nor stream-yaml writers consult this field.
-    """
-    sub = tmp_path / profile
-    sub.mkdir()
-    result = _emit_and_inspect(sub, profile)
-    handlers = [h for h in result.get("yaml_handlers", []) if isinstance(h, dict)]
-    # Self-checking like its siblings: if a flush policy field ever ships
-    # on the handler dicts, this test flips to a genuine pass/assert
-    # instead of masking the fix as an eternal expected-failure.
-    flushed = [h for h in handlers if "flush" in h]
-    if not flushed:
-        pytest.xfail(
-            f"GAP: profile.flush={CATALOG[profile].flush!r} is not "
-            f"reflected in yaml handlers (no flush policy field on the "
-            f"handler dict). handlers={json.dumps(handlers)}"
-        )
-    for h in flushed:
-        assert h["flush"] == CATALOG[profile].flush, (
-            f"handler {h.get('kind')} carries flush={h['flush']!r}, "
-            f"expected profile.flush={CATALOG[profile].flush!r}"
-        )
+    assert "file.rotating" not in sinks
+    assert "stdout" in sinks
 
 
 # --------------------------------------------------------------------
-# Stream-yaml honouring of default_sink (the path that DOES work)
+# Stream output configuration.
 # --------------------------------------------------------------------
 
 
@@ -241,11 +170,7 @@ def test_flush_axis_GAP(tmp_path: Path, profile: str):
     [name for name, p in CATALOG.items() if p.default_sink == "stdout"],
 )
 def test_stream_yaml_honors_default_sink_stdout(tmp_path: Path, profile: str):
-    """Per-stream yamls written by ``_create_stream_yaml`` DO consult
-    profile.default_sink today (line 414-426 in tn/_multi.py). Pin
-    this so the default-ceremony fix later doesn't accidentally
-    regress streams.
-    """
+    """Named streams apply their profile's output setting."""
     body = textwrap.dedent(f"""
         import os, json, pathlib
         os.environ["TN_NO_STDOUT"] = "1"

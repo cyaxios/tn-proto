@@ -363,3 +363,143 @@ fn init_seeds_chain_from_existing_log() {
     let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
     assert_eq!(rt.did(), cer.device_identity);
 }
+
+
+#[test]
+fn reload_preserves_separate_admin_chains() {
+    for location in [
+        "./.tn/admin/admin.ndjson",
+        "./.tn/admin/{event_type}.ndjson",
+        "./.tn/admin/{date}/{event_type}/{event_id}.ndjson",
+    ] {
+        let td = tempfile::tempdir().unwrap();
+        let cer = common::setup_minimal_btn_ceremony(td.path());
+        let yaml = std::fs::read_to_string(&cer.yaml_path).unwrap().replace(
+            "protocol_events_location: main_log",
+            &format!("protocol_events_location: \"{location}\""),
+        );
+        std::fs::write(&cer.yaml_path, yaml).unwrap();
+        let mut prior_hash = tn_core::chain::ZERO_HASH.to_string();
+        for sequence in 1..=3 {
+            let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
+            rt.emit("info", "tn.group.added", serde_json::json!({"group": "pii", "cipher": "btn", "publisher_identity": cer.device_identity, "added_at": "2026-09-13T00:00:00Z"}).as_object().unwrap().clone()).unwrap();
+            rt.close().unwrap();
+            let mut rows = Vec::new();
+            collect_admin_test_rows(&td.path().join(".tn/admin"), &mut rows);
+            let added: Vec<_> = rows
+                .iter()
+                .filter(|row| row["event_type"] == "tn.group.added")
+                .collect();
+            assert_eq!(added.len(), sequence as usize, "{location}");
+            let newest = added
+                .iter()
+                .max_by_key(|row| row["timestamp"].as_str())
+                .unwrap();
+            assert_eq!(newest["sequence"], sequence, "{location}");
+            assert_eq!(newest["prev_hash"], prior_hash, "{location}");
+            prior_hash = newest["row_hash"].as_str().unwrap().to_string();
+        }
+    }
+}
+
+fn collect_admin_test_rows(directory: &std::path::Path, rows: &mut Vec<serde_json::Value>) {
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_admin_test_rows(&path, rows);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("ndjson") {
+            for line in std::fs::read_to_string(path).unwrap().lines() {
+                rows.push(serde_json::from_str(line).unwrap());
+            }
+        }
+    }
+}
+
+
+#[test]
+fn split_admin_seed_ignores_foreign_rows_and_keeps_newest_local_tip() {
+    use serde_json::{json, Value};
+    for location in [
+        "./.tn/admin/admin.ndjson",
+        "./.tn/admin/{event_type}.ndjson",
+        "./.tn/admin/{date}/{event_type}.ndjson",
+    ] {
+        let td = tempfile::tempdir().unwrap();
+        let cer = common::setup_minimal_btn_ceremony(td.path());
+        let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
+        let fields = json!({
+            "group": "pii", "cipher": "btn",
+            "publisher_identity": cer.device_identity,
+            "added_at": "2026-09-13T00:00:00Z",
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        rt.emit("info", "tn.group.added", fields.clone()).unwrap();
+        rt.emit("info", "tn.group.added", fields.clone()).unwrap();
+        let rows = rt.read_raw().unwrap();
+        let added: Vec<_> = rows
+            .iter()
+            .filter(|row| row.envelope["event_type"] == "tn.group.added")
+            .collect();
+        let older = added[0].envelope.clone();
+        let newest = added[1].envelope.clone();
+        rt.close().unwrap();
+
+        let yaml = std::fs::read_to_string(&cer.yaml_path).unwrap().replace(
+            "protocol_events_location: main_log",
+            &format!("protocol_events_location: \"{location}\""),
+        );
+        std::fs::write(&cer.yaml_path, yaml).unwrap();
+        let template = tn_core::path_template::PathTemplate::parse(
+            location,
+            td.path(),
+            "cer_test",
+            &cer.device_identity,
+        )
+        .unwrap();
+        let admin_path = template.render("tn.group.added", "");
+        std::fs::create_dir_all(admin_path.parent().unwrap()).unwrap();
+        let mut foreign = older.clone();
+        foreign["device_identity"] = json!(tn_core::DeviceKey::generate().did());
+        foreign["sequence"] = json!(99);
+        let mut business = older.clone();
+        business["event_type"] = json!("business.created");
+        business["sequence"] = json!(100);
+        let mut malformed = older.clone();
+        malformed["timestamp"] = json!("{unknown}x");
+        malformed["sequence"] = json!(101);
+        let mut seed_rows = vec![&older, &foreign, &business];
+        if location.contains("{date}") {
+            seed_rows.push(&malformed);
+        }
+        let lines: Vec<_> = seed_rows
+            .iter()
+            .map(|row| serde_json::to_string(row).unwrap())
+            .collect();
+        std::fs::write(&admin_path, format!("{}\n", lines.join("\n"))).unwrap();
+        let mut unrelated = older.clone();
+        unrelated["sequence"] = json!(200);
+        std::fs::write(
+            admin_path.parent().unwrap().join("unrelated.ndjson"),
+            format!("{}\n", serde_json::to_string(&unrelated).unwrap()),
+        )
+        .unwrap();
+
+        let rt = tn_core::Runtime::init(&cer.yaml_path).unwrap();
+        rt.emit("info", "tn.group.added", fields).unwrap();
+        rt.emit("info", "business.created", serde_json::Map::new())
+            .unwrap();
+        let business_rows = rt.read_raw().unwrap();
+        assert_eq!(
+            business_rows.last().unwrap().envelope["sequence"],
+            1,
+            "{location}"
+        );
+        rt.close().unwrap();
+        let content = std::fs::read_to_string(&admin_path).unwrap();
+        let appended: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
+        assert_eq!(appended["sequence"], 3, "{location}");
+        assert_eq!(appended["prev_hash"], newest["row_hash"], "{location}");
+    }
+}

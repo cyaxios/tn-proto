@@ -1,4 +1,4 @@
-"""Final performance bench — `tn.info` and `tn.read` through the Python skin.
+"""Measure `tn.info` and `tn.read` through the Python API.
 
 Measures what a TN user actually sees: the public `import tn` API, called
 from Python, across a sweep of message sizes and under both runtime paths:
@@ -6,14 +6,12 @@ from Python, across a sweep of message sizes and under both runtime paths:
     - Rust (default on btn ceremonies)
     - Pure Python (TN_FORCE_PYTHON=1)
 
-Run (overnight capture):
+Run from the repository root:
 
-    .venv/Scripts/python.exe tn_proto/python/examples/bench_info_read.py
+    python python/examples/bench_info_read.py
 
 Writes a markdown summary to
-tn_proto/python/examples/bench_info_read.results.md and prints it to
-stdout. Prefer running the Rust-path build with `maturin develop --release`
-first so the tn_core extension is optimised.
+python/examples/bench_info_read.results.md and prints it to stdout.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))  # tn_proto/python on sys.path
+sys.path.insert(0, str(HERE.parent))
 
 MSG_SIZES = [64, 256, 1_024, 4_096, 16_384, 65_536]
 EMIT_ITERS = 200

@@ -428,15 +428,7 @@ def cmd_show_env(args: argparse.Namespace) -> int:
 
 
 def cmd_show_profiles(args: argparse.Namespace) -> int:
-    """Print the profile catalog.
-
-    DX review #22: the curated profile bundle (encrypts / signs /
-    chains / flush / default_sink / intended_use) is the right
-    metadata to expose for "what should I init with?" decisions.
-    The data has lived in ``tn._profiles._CATALOG`` since 0.3.0 but
-    had no CLI surface — users were reaching into the private module
-    to discover the bundles. This verb is the proper public reflection.
-    """
+    """Print signing, chaining, and output defaults for each profile."""
     fmt = getattr(args, "format", "human") or "human"
     names = list(_profiles.all_profile_names())
     profiles = [_profiles.get(n) for n in names]
@@ -448,7 +440,6 @@ def cmd_show_profiles(args: argparse.Namespace) -> int:
                 "encrypts": p.encrypts,
                 "signs": p.signs,
                 "chains": p.chains,
-                "flush": p.flush,
                 "default_sink": p.default_sink,
                 "intended_use": p.intended_use,
                 "default": p.name == _profiles.DEFAULT_PROFILE,
@@ -464,7 +455,6 @@ def cmd_show_profiles(args: argparse.Namespace) -> int:
         ("ENCRYPTS", 8),
         ("SIGNS", 5),
         ("CHAINS", 6),
-        ("FLUSH", 8),
         ("SINK", 14),
     ]
     header = "  ".join(f"{name:<{w}}" for name, w in cols)
@@ -479,7 +469,6 @@ def cmd_show_profiles(args: argparse.Namespace) -> int:
             f"{'yes' if p.encrypts else 'no':<8}  "
             f"{'yes' if p.signs else 'no':<5}  "
             f"{'yes' if p.chains else 'no':<6}  "
-            f"{p.flush:<8}  "
             f"{p.default_sink:<14}\n"
         )
     sys.stdout.write("\n* = catalog default (used when tn.init() is called with no profile=).\n\n")

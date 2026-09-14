@@ -710,6 +710,7 @@ fn runtime_init_options(options: TnInitOptions) -> tn_core::RuntimeInitOptions {
     tn_core::RuntimeInitOptions {
         skip_ceremony_init_emit: options.skip_ceremony_init_emit,
         skip_policy_published_emit: options.skip_policy_published_emit,
+        ..Default::default()
     }
 }
 

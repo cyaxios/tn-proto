@@ -1,92 +1,98 @@
 # Running TN in containers and CI
 
-On your laptop, `tn init` writes an identity to your home directory and you are done. In a container or a CI job there is no home directory to persist, and you must not bake an identity into the image: anyone who pulls the image would have your keys.
+Provision the application's identity and group keys once, then mount its
+configuration and keystore into the running container. Later processes open
+the same material, so their signing identity and decryption capabilities persist
+across restarts.
 
-The way TN gets an identity onto a fresh container is the **API key bootstrap**. Set it up once per project and forget about it.
+For governed objects, the [persistent-key examples](../../python/examples/persistent_keys/README.md)
+show preparation, publication, and reading in separate processes. The steps
+below use the event-stream runtime and its `tn.yaml` configuration.
 
-The mental model: `TN_API_KEY` is a single string you paste into your platform's secret store. When your container boots, it trades that string with the vault for its keystore, then runs normally. No keys in the image, no identity files in the repo, no startup script.
+## Prepare the application configuration
 
-`TN_API_KEY` is a bearer credential that authorizes fetching this project's keystore from the vault. Treat it as a secret: anyone holding it can pull the keystore. It is not itself your device private key, and only `TN_API_KEY` (never the keystore) belongs in the image env.
-
----
-
-## 1. Mint an API key
-
-Sign in at <https://vault.tn-proto.org/account>, open the project this deploy will write to, click **API keys -> Generate persistent key**, and copy the result. The key looks like:
-
-```text
-tn_apikey_<43-char block>_<22-char block>
-```
-
-That single string is everything your container needs. It is reusable across deploys; you do not regenerate it per build.
-
----
-
-## 2. Hand it to your platform as a secret
-
-Put the key in your platform's secret store. The container reads it from the `TN_API_KEY` environment variable.
-
-| Platform | Where the secret goes |
-|---|---|
-| Cloudflare Workers / Containers | `wrangler secret put TN_API_KEY`, or the Secrets Store |
-| GitHub Actions | Repository or org secret `TN_API_KEY` |
-| AWS | Secrets Manager or SSM Parameter, exposed as an env var |
-| GCP | Secret Manager, exposed as an env var |
-| Azure | Key Vault, exposed as an env var |
-| Plain Docker | `-e TN_API_KEY=...` (never commit it) |
-
----
-
-## 3. Deploy
-
-Your container boots, sees `TN_API_KEY`, fetches its keystore from the vault, and starts serving. The first boot has one extra round trip to the vault; subsequent restarts reuse the local cache and skip it.
-
-That is the entire setup.
-
----
-
-## Disk wins over env
-
-If a project keystore already exists at `<keystore>/local.private`, TN uses it and ignores `TN_API_KEY` entirely. The bootstrap only runs when there is no local keystore yet. This means:
-
-- On your laptop, after `tn init`, your local keystore takes precedence even if `TN_API_KEY` is set in your shell.
-- In a container with persistent storage (a Cloudflare Containers R2-backed volume, a mounted EBS, etc.), the keystore survives across cold starts; only the very first boot does the bootstrap round trip.
-
-Persistent storage here means a **runtime volume**, never a build-time `COPY`. Do not add the keystore or `local.private` to your image or build context; only `TN_API_KEY` belongs in the image env, supplied via the secret store. Anyone who pulls an image with a baked-in keystore has your keys.
-
-To force a re-bootstrap, delete the keystore directory and restart.
-
----
-
-## Where the identity lives
-
-The on-disk project paths are the same on every OS. The only thing that varies is where the per-user identity file lives:
-
-| OS | Per-user identity file |
-|---|---|
-| macOS / Linux | `~/.local/share/tn/identity.json` |
-| Windows | `%APPDATA%\tn\identity.json` |
-
-Resolution precedence is `TN_IDENTITY_DIR` > `XDG_DATA_HOME` > `APPDATA` > home. Set `TN_IDENTITY_DIR` to put the identity file somewhere non-default. The per-project keystore is always under `.tn/<ceremony>/keys/` relative to wherever your project lives.
-
----
-
-## Rotating the key
-
-Generate a new key in the vault UI, update the secret in your platform, redeploy. Running containers keep working until they restart; new ones come up with the new key.
-
----
-
-## Opting out of the vault entirely
-
-The bootstrap is only relevant if you want the vault. To run fully offline:
+Create an offline project in a private provisioning directory:
 
 ```bash
-tn init myproject --no-link          # never talks to a vault
+tn init myproject --no-link
 ```
+
+This creates `.tn/myproject/tn.yaml` and its `keys/` directory. Keep the complete
+project directory in private application storage. The keystore contains the
+signing seed and group capabilities; the YAML's relative paths resolve from
+the directory containing the file.
+
+## Mount the project at runtime
+
+For example, mount the provisioned project at `/run/tn` in your application
+image. Run from the provisioning directory and replace `my-application` with
+your image name:
 
 ```bash
-export TN_NO_LINK=1                   # env-level hard kill switch for auto-link
+docker run --mount "type=bind,src=$PWD/.tn/myproject,dst=/run/tn" my-application
 ```
 
-Or point at your own vault with `--link <url>` or the `TN_VAULT_URL` environment variable. See the [account backup guide](auth.md).
+Give the application account access to the mounted directory. The runtime
+writes logs and administrative state, so the configured destinations must be
+writable. Mount secrets at runtime rather than adding them to an image layer
+or build context.
+
+## Open the existing project
+
+Python application startup and shutdown:
+
+```python
+import tn
+
+tn.init("/run/tn/tn.yaml", link=False)
+tn.info("service.started", component="worker")
+tn.flush_and_close()
+```
+
+TypeScript:
+
+```typescript
+import { tn } from "@cyaxios/tn-proto";
+
+await tn.init("/run/tn/tn.yaml", { link: false });
+tn.info("service.started", { component: "worker" });
+await tn.close();
+```
+
+In a service, initialize once at startup and close during shutdown. Reuse the
+mount on later starts. Each separately provisioned application receives its
+own identity and assigned group capabilities.
+
+## CI and temporary storage
+
+A CI job can restore its provisioned project through the platform's secret
+storage before opening `tn.yaml`. Use a private writable directory, and retain
+the state needed by later runs in the application's storage.
+
+For independent test identities, set `TN_IDENTITY_DIR` to a temporary directory
+before creating a test project. Existing projects load their signing material
+from their configured keystore. Losing a temporary directory loses the keys
+stored there; retain or restore the provisioned material when identity must
+survive a cold start.
+
+## Vault credentials
+
+TypeScript's `bootstrapFromApiKey` helper consumes `TN_API_KEY`, which carries a
+bootstrap signing seed and a bundle identifier. With a credential issued by
+your vault and a private writable installation directory:
+
+```typescript
+import { bootstrapFromApiKey } from "@cyaxios/tn-proto";
+
+const result = await bootstrapFromApiKey({
+  vaultDid: "did:web:vault.tn-proto.org", cwd: "/run/tn-install",
+});
+if (result === null || result.receipt.rejectedReason) {
+  throw new Error("Vault bootstrap did not install the project");
+}
+```
+
+On success, open the installed project's `tn.yaml`. Replace the vault DID with
+your configured service identity. The [account guide](auth.md) covers login,
+backup, and restore; the [environment reference](environment-variables.md)
+describes the credentials these operations consume.

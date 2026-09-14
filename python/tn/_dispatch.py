@@ -1,7 +1,6 @@
 """Runtime dispatch: Rust tn_core for btn-only ceremonies, pure-Python otherwise.
 
-Import-time safe: if the tn_core extension is unavailable, we silently fall back
-to the pure-Python implementation (current behavior unchanged).
+If the native extension is unavailable, warn and select the Python pipeline.
 """
 
 from __future__ import annotations
@@ -27,11 +26,9 @@ except ImportError:
     import warnings
 
     warnings.warn(
-        "tn_core extension not found. The pure-Python runtime fallback is "
-        "deprecated and will be removed in tn-proto 0.5.0. "
-        "Install tn-core: pip install tn-core (or `pip install tn-proto` "
-        "which now requires it).",
-        DeprecationWarning,
+        "Native extension unavailable; using the pure-Python runtime. "
+        "Install a tn-proto wheel containing the native extension for Rust dispatch.",
+        RuntimeWarning,
         stacklevel=2,
     )
 
@@ -71,35 +68,6 @@ def _ceremony_is_btn_only(yaml_path: Path) -> bool:
     return True
 
 
-def _logs_path_is_templated(yaml_path: Path) -> bool:
-    """True iff the ceremony's ``logs.path`` contains template tokens.
-
-    The Rust runtime opens a single log file at init; per-event-type
-    fan-out via templated paths is currently Python-only. When a
-    ceremony asks for templated routing, we route emit/read through
-    the Python path so the feature works without breaking the Rust
-    acceleration for non-templated ceremonies.
-
-    A follow-up issue tracks adding a writer pool to the Rust runtime
-    so this check can be dropped.
-    """
-    from . import config as _config
-
-    try:
-        doc = _config._read_yaml_doc(yaml_path)
-    except (OSError, ValueError):
-        return False
-    try:
-        doc = _config._resolve_extends(yaml_path, doc)
-    except ValueError:
-        return False
-    if not isinstance(doc, dict):
-        return False
-    logs = doc.get("logs") or {}
-    path = logs.get("path") if isinstance(logs, dict) else None
-    return isinstance(path, str) and "{" in path
-
-
 def should_use_rust(yaml_path: Path) -> bool:
     if os.environ.get("TN_FORCE_PYTHON"):
         return False
@@ -108,10 +76,9 @@ def should_use_rust(yaml_path: Path) -> bool:
 
         warnings.warn(
             f"Ceremony {yaml_path}: falling back to pure-Python runtime "
-            "because tn_core is not installed. This fallback is deprecated; "
-            "install tn_core to remove this warning. See tn-proto 0.5.0 "
-            "release notes for details.",
-            DeprecationWarning,
+            "because tn_core is not installed. Install the native extension "
+            "to use the Rust runtime.",
+            RuntimeWarning,
             stacklevel=3,
         )
         return False
@@ -279,7 +246,10 @@ class DispatchRuntime:
             # via a sibling ``.resolved.yaml`` file. The source stays
             # minimal; the resolved file is regenerated on every
             # init so it can't drift.
-            self._rt = _RustRuntime.init(str(self._yaml_for_rust()))
+            self._rt = _RustRuntime.init(
+                str(self._yaml_for_rust()),
+                stdout=getattr(self._py_rt, "_stdout_override", None),
+            )
         else:
             self._rt = None
 
@@ -390,7 +360,10 @@ class DispatchRuntime:
         """
         if not self._use_rust:
             return
-        self._rt = _RustRuntime.init(str(self._yaml_for_rust()))
+        self._rt = _RustRuntime.init(
+            str(self._yaml_for_rust()),
+            stdout=getattr(self._py_rt, "_stdout_override", None),
+        )
         # Yaml-driven config may have shifted (log path moved, handlers
         # re-rendered). Rebuild the invariant cache.
         self._invalidate_caches()
@@ -457,10 +430,8 @@ class DispatchRuntime:
             return None
         if self._py_rt is None:
             raise RuntimeError("DispatchRuntime: Python runtime not set")
-        # Python path doesn't support per-call sign override yet (JWE path
-        # always signs). The yaml ceremony.sign flag is a Rust-only feature
-        # until the legacy logger gains it. Ignore sign on the Python path
-        # for now; document in set_signing() docstring.
+        if sign is False:
+            raise ValueError("Python runtime requires signing; sign=False is unsupported")
         return self._py_rt.emit(level, event_type, fields, aad)
 
     def _fan_out_python_handlers(self, raw_line: bytes) -> None:

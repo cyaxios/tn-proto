@@ -216,22 +216,26 @@ def test_opt_out_via_env_var(tmp_path, capfd, monkeypatch):
     )
 
 
-def test_opt_out_via_kwarg(tmp_path, capfd, monkeypatch):
-    """tn.init(stdout=False) disables the default Python handler.
-
-    Note: tn.init(stdout=False) only suppresses the Python-side StdoutHandler.
-    On btn ceremonies that route through the Rust runtime, Rust's native
-    StdoutHandler reads TN_NO_STDOUT itself, not the Python kwarg — so we set
-    the env var to ensure the Rust handler is also silenced.
-    """
-    monkeypatch.setenv("TN_NO_STDOUT", "1")
-    tn.init(tmp_path / "tn.yaml", stdout=False)
+@pytest.mark.parametrize("cipher", ["btn", "jwe"])
+@pytest.mark.parametrize("warm", [False, True])
+def test_opt_out_via_kwarg(tmp_path, capfd, monkeypatch, cipher, warm):
+    """An explicit opt-out silences both runtimes without changing the YAML."""
+    monkeypatch.delenv("TN_NO_STDOUT", raising=False)
+    yaml_path = tmp_path / "tn.yaml"
+    before = None
+    if warm:
+        tn.init(yaml_path, cipher=cipher)
+        tn.info("evt.visible", x=1)
+        tn.flush_and_close()
+        before = yaml_path.read_bytes()
+        capfd.readouterr()
+    tn.init(yaml_path, cipher=cipher, stdout=False)
     tn.info("evt.opted_out_kwarg", x=1)
     tn.flush_and_close()
     out = capfd.readouterr().out
-    assert "evt.opted_out_kwarg" not in out, (
-        f"stdout opt-out should suppress stdout output, got: {out!r}"
-    )
+    assert "evt.opted_out_kwarg" not in out
+    if before is not None:
+        assert yaml_path.read_bytes() == before
 
 
 def test_stdout_does_not_break_file_handler(tmp_path, capfd, monkeypatch):
@@ -296,3 +300,37 @@ def test_registry_recognizes_kind_stdout():
     )
     assert len(handlers) == 1
     assert isinstance(handlers[0], StdoutHandler)
+
+
+@pytest.mark.parametrize("cipher", ["btn", "jwe"])
+@pytest.mark.parametrize("disabled_by", ["environment", "yaml"])
+def test_stdout_true_overrides_disabled_default(tmp_path, capfd, monkeypatch, cipher, disabled_by):
+    import yaml
+
+    yaml_path = tmp_path / "tn.yaml"
+    tn.init(yaml_path, cipher=cipher, stdout=False)
+    tn.flush_and_close()
+    if disabled_by == "environment":
+        monkeypatch.setenv("TN_NO_STDOUT", "1")
+    else:
+        monkeypatch.delenv("TN_NO_STDOUT", raising=False)
+        doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+        doc["handlers"] = [spec for spec in doc["handlers"] if spec["kind"] != "stdout"]
+        yaml_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    capfd.readouterr()
+    tn.init(yaml_path, stdout=True)
+    tn.info("evt.forced_stdout", x=1)
+    tn.flush_and_close()
+    assert "evt.forced_stdout" in capfd.readouterr().out
+
+
+def test_stdout_false_survives_native_group_reload(tmp_path, capfd, monkeypatch):
+    monkeypatch.delenv("TN_NO_STDOUT", raising=False)
+    tn.init(tmp_path / "tn.yaml", cipher="btn", stdout=False)
+    try:
+        tn.admin.ensure_group(tn.current_config(), "payments", fields=["amount"])
+        capfd.readouterr()
+        tn.info("evt.quiet_after_reload", amount=10)
+        assert "evt.quiet_after_reload" not in capfd.readouterr().out
+    finally:
+        tn.flush_and_close()

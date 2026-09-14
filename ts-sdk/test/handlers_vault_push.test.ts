@@ -24,6 +24,7 @@ import {
   readTnpkg,
 } from "../src/index.js";
 import { Tn } from "../src/tn.js";
+import { buildHandlers } from "../src/handlers/registry.js";
 
 /** Thin adapter: wraps a Tn instance as the interface makePackageSnapshotBuilder expects. */
 function tnAsExporter(tn: Tn): { export: (opts: { kind: string; scope?: string }, outPath: string) => string } {
@@ -177,6 +178,50 @@ test("vault.push is idempotent when head_row_hash is unchanged", async () => {
     await tn.close();
   } finally {
     await vault.close();
+    cer.cleanup();
+  }
+});
+
+test("vault.push requires an HTTP client before starting", async () => {
+  const cer = makeCeremony();
+  const tn = await Tn.init(cer.yamlPath);
+  try {
+    const builder = makePackageSnapshotBuilder(tnAsExporter(tn));
+    assert.throws(
+      () => new VaultPushHandler("push", {
+        endpoint: "http://127.0.0.1:1",
+        projectId: "proj_xxx",
+        builder,
+        client: undefined as never,
+        autostart: false,
+      }),
+      /vault\.push.*requires.*client/i,
+    );
+  } finally {
+    await tn.close();
+    cer.cleanup();
+  }
+});
+
+test("vault.push registry requires its HTTP adapter", async () => {
+  const cer = makeCeremony();
+  const tn = await Tn.init(cer.yamlPath);
+  try {
+    const builder = makePackageSnapshotBuilder(tnAsExporter(tn));
+    assert.throws(
+      () => buildHandlers([
+        {
+          kind: "vault.push",
+          name: "push",
+          endpoint: "http://127.0.0.1:1",
+          project_id: "proj_xxx",
+          trigger: "on_emit",
+        },
+      ], { snapshotBuilder: builder }, cer.tmpDir),
+      /vault\.push.*requires adapters\.makeVaultPostClient/,
+    );
+  } finally {
+    await tn.close();
     cer.cleanup();
   }
 });

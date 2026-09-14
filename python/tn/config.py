@@ -284,7 +284,7 @@ class LoadedConfig:
     vault_linked_project_id: str | None = None
     vault_autosync: bool = False
     vault_sync_interval_seconds: int = 600
-    # Legacy parsed field. Vault sync never includes application logs.
+    # Include application logs in wallet body backups when enabled.
     sync_logs: bool = False
     # DX review #6: ``ceremony.sign`` mirrored on the loaded config so
     # readers can decide whether to verify signatures. False means the
@@ -914,8 +914,7 @@ def _invert_field_routing(
             f"{yaml_path}: the flat top-level `fields:` block is "
             "deprecated; declare field membership inside each group "
             "as `groups[<name>].fields: [...]`. The flat form "
-            "supports only one group per field and will be removed "
-            "in a future release.",
+            "supports only one group per field.",
             DeprecationWarning,
             stacklevel=4,
         )
@@ -1238,7 +1237,7 @@ class _CeremonySettings:
     mode: str  # "local" | "linked"
     linked_vault: str | None
     linked_project_id: str | None
-    sync_logs: bool  # legacy/ignored; vault sync never includes app logs
+    sync_logs: bool  # include application logs in wallet body backups
     # DX review #6: surface ``ceremony.sign`` on the loaded config so
     # ``tn.read(verify=True)`` can consult it. Yamls written with
     # ``sign: false`` ship empty signatures; the reader skips the

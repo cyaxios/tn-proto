@@ -1,7 +1,7 @@
 """Persisted sync state for vault interactions.
 
 Tracks state that needs to survive process restarts so that one-shot
-CLI invocations (the future ``tn sync`` verb) and long-lived handlers
+CLI invocations and long-lived handlers
 agree on what's been shipped to the vault.
 
 State file location: ``<yaml_dir>/.tn/sync/state.json``.
@@ -10,13 +10,8 @@ Schema (all fields optional; presence-based):
 
 ```json
 {
-    "vault_endpoint": "https://vault.tn-proto.org",
     "last_pushed_admin_head": "sha256:...",
-    "last_pushed_yaml_sha": "sha256:...",
-    "last_synced_generation": 7,
     "inbox_cursor": "...",
-    "contacts_cursor": "...",
-    "pending_claims_cursor": "...",
 
     "account_id": "01J...",
     "account_bound": false,
@@ -29,11 +24,9 @@ Schema (all fields optional; presence-based):
 }
 ```
 
-This module implements the push-side idempotency tracking
-(``last_pushed_admin_head``); the other fields are reserved for the
-``tn sync`` verb expansion and ``marked-for-merge`` CLI reconcile on
-the client side. They have no readers in this module; just write-through
-is supported via :func:`update_sync_state`.
+The push handler uses ``last_pushed_admin_head`` to avoid repeated uploads.
+The pull handler reads and updates ``inbox_cursor`` to resume inbox polling.
+:func:`update_sync_state` preserves other fields while applying updates.
 
 Init-upload mode fields (``account_id``, ``account_bound``,
 ``pending_claim``) are read by the ``vault.push`` handler to decide

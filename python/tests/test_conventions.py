@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from tn.conventions import (
-    ensure_dirs,
     inbox_dir,
     outbox_dir,
     pending_offers_dir,
@@ -27,18 +26,3 @@ def test_tnpkg_filename_is_safe():
     assert name.endswith(".tnpkg")
     assert "/" not in name and "\\" not in name
     assert ":" not in name
-
-
-def test_ensure_dirs_is_idempotent(tmp_path: Path):
-    """``ensure_dirs`` is a deprecated no-op (kept source-compatible).
-
-    The eager-create-everything pattern produced ghost directories
-    visible to operators (FINDINGS S0.2). Each write site now creates
-    only the dirs it actually uses, on demand. This test now just
-    verifies ``ensure_dirs`` runs idempotently without raising.
-    """
-    ensure_dirs(tmp_path)
-    ensure_dirs(tmp_path)
-    # Intentionally no .is_dir() assertion — the function is documented
-    # as a no-op. The directory-shape assertions live in
-    # test_directory_paths above.

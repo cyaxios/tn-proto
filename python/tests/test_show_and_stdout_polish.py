@@ -77,7 +77,8 @@ def test_tn_show_profiles_json_format():
         "transaction", "audit", "secure_log", "telemetry", "stdout",
     }
     for p in payload["profiles"]:
-        for key in ("encrypts", "signs", "chains", "flush", "default_sink", "intended_use"):
+        assert "flush" not in p
+        for key in ("encrypts", "signs", "chains", "default_sink", "intended_use"):
             assert key in p, f"profile {p['name']!r} missing key {key!r}"
 
 

@@ -7,11 +7,11 @@ Runs the same tn.info loop three ways across a sweep of message sizes:
   2. unsigned   (tn.set_signing(False) at session level)
   3. per-call   (_sign=False kwarg; identical to #2, sanity check)
 
-Writes to tn_proto/python/examples/bench_signing_cost.results.md.
+Writes to python/examples/bench_signing_cost.results.md.
 
 Run:
 
-    .venv/Scripts/python.exe tn_proto/python/examples/bench_signing_cost.py
+    python python/examples/bench_signing_cost.py
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def main() -> int:
         f"- {N_EMIT} iterations per cell",
         "- Measured through `tn.info(...)` — the public Python API",
         "- signed = default; unsigned = `tn.set_signing(False)` for the session; per-call = `_sign=False` kwarg",
-        "- Delta column = signed p50 minus unsigned p50 = cost of the Ed25519 signature",
+        "- Delta column = signed p50 minus unsigned p50",
         "",
         "| msg_size | signed p50 us | unsigned p50 us | per-call p50 us | delta us | saved % | signed events/s | unsigned events/s |",
         "|---------:|--------------:|----------------:|----------------:|---------:|--------:|----------------:|------------------:|",
@@ -106,21 +106,6 @@ def main() -> int:
             f"{r['percall_p50']:>15.1f} | {r['delta']:>+8.1f} | {r['pct']:>6.1f}% | "
             f"{r['signed_eps']:>15} | {r['unsigned_eps']:>17} |"
         )
-    lines.append("")
-    lines.append("## Notes")
-    lines.append("")
-    lines.append(
-        "- Per-call `_sign=False` matches session-level `tn.set_signing(False)` within noise — they route to the same Rust code path."
-    )
-    lines.append(
-        "- Absolute savings hold roughly constant across sizes (signing is fixed-cost, size-independent)."
-    )
-    lines.append(
-        "- Relative savings shrink as payloads grow because AEAD + JSON serialize start to dominate."
-    )
-    lines.append(
-        "- Small events (<256 B) see the biggest proportional win — exactly the OTEL/tracing sweet spot."
-    )
     (HERE / "bench_signing_cost.results.md").write_text("\n".join(lines), encoding="utf-8")
     print(f"\nResults: {out}")
     return 0

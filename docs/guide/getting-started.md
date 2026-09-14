@@ -1,10 +1,10 @@
 # TN protocol: getting started
 
-TN is an attested logging protocol. Every entry you write is encrypted,
-hash-chained, and signed, so that later anyone holding the right key can read
-it back and prove it was not altered. There are two implementations that
-produce identical records: a Python SDK with the `tn` command, and a
-TypeScript SDK with the `tn-js` command.
+TN is an attested logging protocol. The default profile encrypts private-group
+fields, hash-chains records, and signs them, so readers with the matching keys
+can verify and open them. Public field routing and other profiles select
+different behavior. The Python SDK's `tn` command and TypeScript SDK's `tn-js`
+command use the same record format.
 
 ## Glossary
 
@@ -45,15 +45,13 @@ gives you the same `tn.*` surface as Python.
 
 ## Deploy on Vercel, Lovable, and other serverless hosts
 
-Serverless and edge runtimes (Vercel, AWS Lambda, Netlify, Cloud Run, Azure
-Functions, and AI app builders like Lovable / v0 / Bolt that deploy onto them)
-have an **ephemeral, mostly read-only filesystem** and a **fresh container per
-cold start**. Two adjustments make TN work there:
+For Python or Node serverless functions, choose a writable state directory and
+arrange how the application retains its keys across cold starts:
 
-1. Point TN's state at a writable directory — `/tmp` on every major platform.
+1. Point TN's state at a writable directory, such as `/tmp` on Linux function hosts.
 2. Connect the deploy to your account. `tn.init()` detects a serverless runtime
    and, by default, backs the project up and returns a **claim link** you open
-   once in a browser. For fully unattended deploys, provide a credential instead.
+   once in a browser. For fully unattended deploys, restore provisioned keys and configuration.
 
 ### Parameters
 
@@ -62,15 +60,15 @@ cold start**. Two adjustments make TN work there:
 | `TN_IDENTITY_DIR` | where the device identity (`identity.json`) is written | `/tmp/tn` |
 | `TN_HOME` | shared TN state root | `/tmp/tn` |
 | `TN_VAULT_URL` | vault base URL (optional) | unset → hosted vault |
-| `TN_API_KEY` | unattended cold-start credential (no browser) | your key, in the host's env / secrets |
-| `TN_NO_LINK` | set to `1` to stay fully offline (no vault contact) | unset |
+| `TN_API_KEY` | credential consumed by explicit bootstrap integrations | your key, in the host's env / secrets |
+| `TN_NO_LINK` | set to `1` to disable automatic vault linking | unset |
 
-### Option A — claim link (a person attaches the deploy, once)
+### Option A — claim link (a person attaches the deploy)
 
 On a serverless runtime `tn.init()` auto-links by default: it backs the project
 up and exposes a claim URL on the returned instance as `tn.claimUrl`. Surface
-it, open it once, sign in — the deploy is now attached to your account. Later
-cold starts authenticate with the device key and need no human step.
+it, open it, and sign in to attach that identity to your account. Later starts
+reuse that enrollment when they retain or restore the same device key.
 
 ```ts
 // app/api/tn/route.ts  (Vercel route handler) — copy/paste
@@ -102,18 +100,10 @@ def handler(event, context):
 
 ### Option B — no browser (CI and fully unattended deploys)
 
-When no human will ever open a link, provision with a credential. Set
-`TN_API_KEY` in the host's environment (the durable cold-start credential — it
-provisions the keystore from a sealed bundle on first run), or enroll the deploy
-once with a connect code:
-
-```bash
-# In your host's environment / secret store:
-export TN_API_KEY="tn_apikey_…"
-export TN_IDENTITY_DIR="/tmp/tn"
-export TN_HOME="/tmp/tn"
-# …then tn.init() runs unattended, no claim link needed.
-```
+Provision the application's configuration and keystore, then mount or restore
+them before startup. The [container guide](deploy-containers.md) shows this
+flow and TypeScript's explicit `bootstrapFromApiKey` alternative. An existing
+device can also enroll with a connect code:
 
 ```bash
 # Or enroll a running deploy from your terminal with a connect code:
@@ -340,7 +330,7 @@ without looking anything up: they decode the key straight out of the string.
 
 When you run `tn init`, TN generates an Ed25519 keypair for the device and
 derives your DID from the public half. The private half stays in
-`.tn/<project>/keys/local.private` and never leaves your machine. The DID is
+`.tn/<project>/keys/local.private`; encrypted backups can retain it for restoration. The DID is
 the part you share: it is how others address a log entry to you as a
 recipient, and how readers verify that an entry you wrote is yours.
 
@@ -540,12 +530,12 @@ function each verb calls.
 | vault unlink (event) | `tn vault unlink <vault-did> <project-id>` | `tn-js vault unlink <vault-did> <project-id>` | Append a `tn.vault.unlinked` entry to the log. | `tn.vault.unlink(...)` | `tn.vault.unlink(...)` |
 | firehose | `tn firehose stats\|list\|get` | `tn-js firehose stats\|list\|get` | Firehose tenant stats / list / fetch. Gated by env. | (CLI) | (CLI) |
 
-`wallet sync`, `wallet link`, `wallet restore`, `account connect`, `firehose`,
-and `inbox accept` against a vault need a running vault server. Everything
-else works against a local project with no network.
+Vault login, backup, restore, synchronization, and remote inbox/firehose commands
+need a running vault server. Local creation with `--no-link`, logging, reading,
+and package operations work with provisioned local material.
 
-Profiles (`transaction`, `audit`, `secure_log`, `telemetry`, `stdout`) decide
-how much signing, chaining, and durability each entry carries. See
+Python profiles (`transaction`, `audit`, `secure_log`, `telemetry`, `stdout`)
+select signing, chaining, and output settings. See
 [profiles.md](profiles.md).
 
 ## How it works
@@ -593,5 +583,5 @@ log.
 - [protocol.md](protocol.md) - the on-the-wire record format and the BTN cipher.
 - [groups-readers-rotation.md](groups-readers-rotation.md) - encrypted groups, granting/revoking readers, `.tnpkg` bundles, and key rotation.
 - [jwe-hibe-key-ceremonies.md](jwe-hibe-key-ceremonies.md) - how JWE and HIBE keys enter a ceremony, how grants work, and what each important key can do.
-- [deploy-containers.md](deploy-containers.md) - the `TN_API_KEY` bootstrap for containers/CI, disk-wins-over-env, and identity paths.
+- [deploy-containers.md](deploy-containers.md) - provisioned configuration and mounted keys for containers/CI, plus explicit TypeScript API-key bootstrap.
 - [advanced-usage.md](advanced-usage.md) - reading modes (`all_runs`), scoped lifecycles (`tn.session`), templated log paths, and the cross-language guarantee.

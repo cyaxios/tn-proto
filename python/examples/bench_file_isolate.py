@@ -1,15 +1,7 @@
-"""Isolate the file-handler cost inside tn.info.
+"""Compare tn.info timing with a synthetic Python file-write workload.
 
-Each `tn.info` includes an ndjson append + flush on the log file. To answer
-"what would I see without the file handler?" we measure:
-
-  (a) full tn.info through the Rust path (everything)
-  (b) same bytes, just the file write the runtime does (open once, then
-      write_all + flush per call)
-
-Subtracting (b) from (a) gives the upper-bound estimate of the crypto +
-envelope + PyO3 cost with no file I/O. (Upper bound because the runtime's
-file write in Rust avoids the Python-side write syscall.)
+Measure the full Rust-backed emit call and a separate append-and-flush
+loop using generated lines. The table reports both observed timings.
 """
 
 from __future__ import annotations
@@ -50,13 +42,7 @@ def time_tn_info(size: int) -> float:
 
 
 def time_bare_file_write(size: int) -> float:
-    # Estimate the bytes per envelope line. Ciphertext + base64 + envelope
-    # header overhead. From the perf matrix: ~1569 bytes of ciphertext for
-    # a 1 KB plaintext at 1 revocation; at 0 revocations the ct is smaller.
-    # Pad to a reasonable estimate of ndjson line size.
-    # We'll use: 400 header bytes + 4/3 * plaintext_size for base64 of ct.
-    # For raw_size the line is base64 of ct + ~400 bytes of JSON scaffold.
-    # The actual runtime writes exactly one line per emit so match that shape.
+    # Generate a JSON line with fixed metadata and a size-dependent payload.
     header = (
         b'{"did":"did:key:zABC","timestamp":"2026-04-21T12:00:00.000000Z",'
         b'"event_id":"00000000-0000-0000-0000-00000000000a",'
@@ -88,24 +74,15 @@ def time_bare_file_write(size: int) -> float:
 
 
 def main() -> int:
-    print("\n=== Isolating file-handler cost inside tn.info ===")
+    print("\n=== tn.info and synthetic file-write timing ===")
     print(
-        f"{'size':>6} | {'tn.info µs':>11} | {'file µs':>9} | {'no-file est µs':>15} | {'no-file events/s':>17}"
+        f"{'size':>6} | {'tn.info µs':>11} | {'synthetic file µs':>17}"
     )
     print("-" * 70)
     for size in MSG_SIZES:
         info_us = time_tn_info(size)
         file_us = time_bare_file_write(size)
-        est_no_file = max(info_us - file_us, 0.1)
-        eps = int(1_000_000 / est_no_file)
-        print(f"{size:>6} | {info_us:>11.1f} | {file_us:>9.1f} | {est_no_file:>15.1f} | {eps:>17}")
-
-    print(
-        "\nnote: 'file µs' is a Python write_all + flush on a line shaped like\n"
-        "the ndjson envelope. The Rust runtime does the same syscalls from\n"
-        "Rust, so this is a reasonable proxy for the file-handler cost inside\n"
-        "the emit path. 'no-file est' = tn.info - file."
-    )
+        print(f"{size:>6} | {info_us:>11.1f} | {file_us:>17.1f}")
     return 0
 
 

@@ -181,7 +181,7 @@ Other release forms:
 - `session.release(data, *, use=None, purpose=None, to=None, decide=None, object_type=None)` explicitly chooses the publisher session.
 - Configured `purpose=` obtains destination and output type from setup; explicit `use=`, destination, type, and decision support integrations.
 
-An explicit publisher needs the capabilities to publish the retained groups. `session.check_groups(groups)` returns a `PublicationReport` with `required_groups`, `supported_groups`, `missing_groups`, `unavailable_groups`, `unknown_groups`, and `is_ready`. `session.require_groups(groups)` refuses if the required publication capabilities are absent.
+An explicit publisher needs publication capabilities for the opened groups it re-encrypts and for `tn.agents`. Unopened groups can retain their existing ciphertext without those group keys. `session.check_groups(groups)` returns a `PublicationReport` with `required_groups`, `supported_groups`, `missing_groups`, `unavailable_groups`, `unknown_groups`, and `is_ready`. `session.require_groups(groups)` refuses if the required publication capabilities are absent.
 
 After release, `data.sources` refers to the just-published version for subsequent work. To inspect the inputs carried by a particular publication, read `session.governance(result).governance.sources`. This distinguishes the ancestry of that publication from the sources of a future release.
 

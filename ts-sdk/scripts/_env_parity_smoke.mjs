@@ -177,10 +177,8 @@ process.env.TN_API_KEY = "not_a_bearer";
   assert(r === null, "malformed TN_API_KEY -> null");
 }
 
-// End-to-end with a fake fetch. We stub `globalThis.fetch` to capture
-// the auth + sealed-bundle round-trip and confirm the function gets
-// all the way to UnsealNotWiredError (proving every env-var-honoring
-// step ran).
+// A fake fetch captures environment-selected authentication and sealed-bundle
+// delivery. The malformed archive is then rejected during absorb.
 {
   const seed = new Uint8Array(32);
   const kid = new Uint8Array(16);
@@ -201,8 +199,7 @@ process.env.TN_API_KEY = "not_a_bearer";
       return new Response(JSON.stringify({ token: "fake-jwt" }), { status: 200 });
     }
     if (String(url).includes("/sealed-bundle")) {
-      // Return a placeholder "sealed bundle". Real bytes don't matter
-      // here; we just need the function to reach the throw point.
+      // Return an invalid archive to exercise the absorb rejection receipt.
       return new Response(JSON.stringify({
         sealed_bundle_b64: Buffer.from("fake-sealed-bundle-bytes").toString("base64"),
         kind: "project_seed",

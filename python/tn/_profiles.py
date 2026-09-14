@@ -1,71 +1,8 @@
-"""TN evidence profiles — fixed, SDK-tuned types.
+"""Named defaults for event signing, chaining, and output sinks.
 
-A profile bundles (signing, chaining, flush behavior, default sink) into
-a single named type. The catalog below is the source of truth: do not
-add a new profile or change a property of an existing one without a
-written rationale in the docstring of the affected entry. These are
-pre-alpha defaults intended to evolve under regression testing across
-hardware/configurations, but the *shape* of the catalog is stable.
-
-Why profiles are fixed
-----------------------
-A "profile" is the SDK's curated bundle of evidence guarantees. Users
-*pick* a profile per stream; they do not compose, extend, or invent
-profiles. The reason: profiles encode the security/perf/governance
-contract the SDK promises. Letting a user assemble their own bundle
-of "signing on, chain off, flush async" puts the contract in their
-hands and undermines the protocol guarantees.
-
-Anyone wanting different evidence behavior creates a different stream
-with a different profile. If no existing profile fits, that is a
-signal for SDK work — propose a new entry here, justify the bundle,
-land the regression suite.
-
-Always-on floor
----------------
-**Encryption is the unconditional floor.** Every profile encrypts
-events to the project's default private group. That guarantee does
-not vary across profiles. What varies is *evidence* (signing,
-chaining), *durability* (flush), and *sink* (where bytes go).
-
-A profile may turn off signing for performance. The events are still
-private; what's missing is non-repudiation and tamper-evidence on
-that stream. The marketing line: "every event is private by default."
-
-Catalog (alpha — to be regression-tested across hardware)
----------------------------------------------------------
-``transaction`` — signed, chained, file (rotating), fsync.
-    The conservative default. Use for grants, revokes, payments,
-    agent actions, security events — anything where reconstruction
-    and non-repudiation matter.
-
-``audit`` — signed, chained, file (rotating), buffered.
-    Normal business events where reconstruction matters but you can
-    afford a small flush window for throughput. Same evidence
-    guarantee as ``transaction``, weaker durability.
-
-``secure_log`` — signed, no chain, file (rotating), buffered.
-    Sensitive application logs where authenticity (signing) matters
-    more than sequence (chain). Fewer ordering guarantees, fewer
-    chain-coordination costs. Each entry stands alone.
-
-``telemetry`` — unsigned, no chain, stdout, async batch.
-    Fast-as-stdlib-logger profile. Encryption still applies but
-    signing is dropped to approach zero overhead vs Python's
-    builtin ``logging.Logger``. Intended for high-volume traces,
-    metrics, and debug noise where evidence is overkill.
-
-    TARGET: near-zero performance impact relative to stdlib logger.
-    Will be regression-tested across hardware to validate.
-
-Default profile selection
--------------------------
-When ``tn.init(name)`` is called without a ``profile`` kwarg, the
-default is ``transaction`` — the same conservative shape today's
-single-ceremony SDK uses. Strong defaults; you opt down explicitly.
-
-The bare project default (``tn.init()`` -> ``"default"``) gets the
-``transaction`` profile too, unless the user picks otherwise.
+Ceremony creation applies a selected profile's sign, chain, and sink settings
+to its YAML. ``transaction`` is the default; callers select another catalog
+entry with ``profile=``. Explicit ceremony settings can override those defaults.
 """
 
 from __future__ import annotations
@@ -97,35 +34,16 @@ def all_profile_names() -> tuple[str, ...]:
 # that comes with the profile.
 SinkKind = Literal["file_rotating", "stdout"]
 
-# Flush semantics. Maps to the runtime's flush behavior on each emit.
-#   ``fsync``    — write + fsync after every entry. Maximum durability,
-#                  highest per-emit latency.
-#   ``buffered`` — write to OS buffer, flush at batch boundaries (size
-#                  or time triggered).
-#   ``async``    — handler accepts the entry and returns immediately;
-#                  background worker drains.
-FlushPolicy = Literal["fsync", "buffered", "async"]
 
 
 @dataclass(frozen=True)
 class Profile:
-    """A single profile entry. Fields are deliberately minimal — every
-    behavior the SDK consults at emit time should derive from these
-    five booleans/enums. Adding a sixth means the catalog is growing
-    a new axis; pause and reason about whether that axis really is
-    profile-shaped before adding it.
-
-    ``encrypts`` is here for symmetry but will always be ``True`` in
-    every catalog entry. Listed so the contract is visible at the
-    type-system level — anyone proposing a profile with
-    ``encrypts=False`` should fail review on the spot.
-    """
+    """One catalog entry with ceremony defaults and a usage description."""
 
     name: ProfileName
     encrypts: bool   # Always True. Floor of the protocol.
     signs: bool      # Ed25519 sign each row_hash.
     chains: bool     # Maintain prev_hash → row_hash chain per event_type.
-    flush: FlushPolicy
     default_sink: SinkKind
     intended_use: str
 
@@ -154,11 +72,10 @@ _CATALOG: dict[str, Profile] = {
         encrypts=True,
         signs=True,
         chains=True,
-        flush="fsync",
         default_sink="file_rotating",
         intended_use=(
             "Grants, revokes, payments, agent actions, security events. "
-            "Maximum evidence: signed, chained, durable. Use when "
+            "Signed and chained. Use when "
             "reconstruction and non-repudiation matter."
         ),
     ),
@@ -167,12 +84,10 @@ _CATALOG: dict[str, Profile] = {
         encrypts=True,
         signs=True,
         chains=True,
-        flush="buffered",
         default_sink="file_rotating",
         intended_use=(
-            "Normal business events where reconstruction matters but "
-            "you can afford a small flush window. Same evidence as "
-            "transaction; weaker durability."
+            "Business events where reconstruction matters. "
+            "Signed and chained, with a rotating file sink."
         ),
     ),
     "secure_log": Profile(
@@ -180,12 +95,10 @@ _CATALOG: dict[str, Profile] = {
         encrypts=True,
         signs=True,
         chains=False,
-        flush="buffered",
         default_sink="file_rotating",
         intended_use=(
             "Sensitive application logs where signing matters more "
-            "than sequence. No chain — each entry stands alone. "
-            "Cheaper to scale than audit/transaction."
+            "than sequence. Each entry is signed independently."
         ),
     ),
     "telemetry": Profile(
@@ -193,26 +106,10 @@ _CATALOG: dict[str, Profile] = {
         encrypts=True,
         signs=False,
         chains=False,
-        flush="async",
-        # `default_sink="file_rotating"` matches what the runtime
-        # actually does: every emit writes to `logs.path` regardless
-        # of profile, so telemetry's bytes hit disk like audit's and
-        # transaction's. The 0.4.2a8 catalog labelled this `stdout`,
-        # which made `has_replay_surface()` return False and silently
-        # broke `h.read()` on the very file the engine just wrote.
-        # If you want truly forward-only "print and forget", reach for
-        # the `stdout` profile.
         default_sink="file_rotating",
         intended_use=(
-            "Fast-as-stdlib-logger profile. Encryption still applies; "
-            "signing and chain linkage are dropped to approach zero "
-            "overhead. Writes a file (so `read()` works) AND stdout; "
-            "sequence still increments in-process. Use for high-volume "
-            "traces, metrics, debug noise where evidence is overkill. "
-            "Volume bench (0.4.2a8, 256B emit, release): ~57 us/emit "
-            "in-process via PyO3 — comparable to Python's stdlib logger "
-            "on a chained sink, an order of magnitude faster than the "
-            "signed/chained profiles."
+            "Encrypted traces, metrics, and debug events. "
+            "Writes to a file and stdout with signing and chaining disabled."
         ),
     ),
     "stdout": Profile(
@@ -220,17 +117,10 @@ _CATALOG: dict[str, Profile] = {
         encrypts=True,
         signs=False,
         chains=False,
-        flush="async",
         default_sink="stdout",
         intended_use=(
-            "Dev-friendly default. The profile users reach for when "
-            "they just want a logger that prints — no on-disk file, "
-            "no signing/chain ceremony, the same shape as Python's "
-            "``print()``. Encryption is still on (the protocol floor); "
-            "everything else is dialed back. Use for local dev, "
-            "notebook scratchpads, demos, and any context where the "
-            "user wants ``tn.use(name, profile='stdout')`` to behave "
-            "like a familiar logger."
+            "Console output for local development, notebooks, and demos. "
+            "Private groups stay encrypted; signing and chaining are disabled."
         ),
     ),
 }
@@ -241,13 +131,7 @@ _CATALOG: dict[str, Profile] = {
 # ---------------------------------------------------------------------------
 
 DEFAULT_PROFILE: ProfileName = "transaction"
-"""The profile picked when ``tn.init(name)`` is called without an
-explicit ``profile`` kwarg. Conservative on every axis: signed,
-chained, durable, file-sink. Onboarding-as-trust means the bare
-default carries every guarantee.
-
-Users opt *down* (telemetry for speed, secure_log for less chain
-overhead) explicitly. Never silently degrade evidence."""
+"""Default profile for signed, chained events in a file."""
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +157,6 @@ def is_known(name: str) -> bool:
 
 __all__ = [
     "DEFAULT_PROFILE",
-    "FlushPolicy",
     "Profile",
     "ProfileName",
     "SinkKind",

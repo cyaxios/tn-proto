@@ -1,4 +1,4 @@
-"""Run every example end-to-end and check its output.
+"""Run the event stream examples end-to-end and check their output.
 
 Each example is also a pytest-style test: it prints a few markers that
 prove the scenario worked. The test harness runs each as a subprocess
@@ -10,19 +10,16 @@ marker, the whole suite fails.
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PY_PKG = HERE.parent
 EXAMPLES_DIR = PY_PKG / "examples"
-
-# ex03 + ex05 demonstrate btn-cipher recipient management and need the
-# Rust extension (tn_core / tn_btn). When the extension isn't built they
-# print a SKIP marker and exit 0 — so we recognize that as "skipped" rather
-# than a failure.
-sys.path.insert(0, str(PY_PKG))
 
 _EXPECTATIONS: list[tuple[str, list[str]]] = [
     # (filename, [substrings that MUST appear in the captured stdout])
@@ -33,8 +30,6 @@ _EXPECTATIONS: list[tuple[str, list[str]]] = [
             "app.booted",
             "page.view",
             "auth.retry",
-            # ex01 now uses tn.read() flat shape; check for the friendly
-            # printout instead of the audit-grade `sig=ok`.
             "[info   ]",
             "fields=",
         ],
@@ -44,10 +39,7 @@ _EXPECTATIONS: list[tuple[str, list[str]]] = [
         [
             "envelope shape",
             "event_type=page.view",
-            # 0.4.0a1: per-row sig/chain/row_hash flags are gone; ex02
-            # uses tn.read(verify=True) for an integrity sweep instead.
-            # Row count matches the user emits (the multi-ceremony layout
-            # writes admin events to a separate per-stream admin log, not the main log).
+            # The main log contains the four application events.
             "all 4 rows pass: signature, row_hash, chain",
             "verify   = True",
         ],
@@ -55,8 +47,6 @@ _EXPECTATIONS: list[tuple[str, list[str]]] = [
     (
         "ex03_groups.py",
         [
-            # Either the SKIP marker (no Rust ext) or the full success markers.
-            # We check for ONE of these alternatives via _check_markers below.
             "groups now defined:",
             "as publisher",
             "alice@example.com",
@@ -94,38 +84,58 @@ _EXPECTATIONS: list[tuple[str, list[str]]] = [
             "context isolation works across concurrent tasks.",
         ],
     ),
+    (
+        "ex08_stdout.py",
+        ["default-on:", "stdout=False:", "file contains 4 event(s)"],
+    ),
 ]
 
 
-def _run_example(name: str) -> tuple[int, str]:
+def _run_example(name: str, *, stdout_format: str = "pretty") -> tuple[int, str]:
     # Run in a fresh interpreter with PY_PKG on sys.path so `import tn`
     # resolves to this project (not any system-installed tn package).
-    proc = subprocess.run(
-        [sys.executable, str(EXAMPLES_DIR / name)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=60,
-        env={
-            **__import__("os").environ,
+    with tempfile.TemporaryDirectory(prefix="tn-example-state-") as state_dir:
+        env = {
+            **os.environ,
             "PYTHONPATH": str(PY_PKG),
             "PYTHONIOENCODING": "utf-8",
-        },
-    )
+            "TN_STATE_DIR": state_dir,
+            "TN_IDENTITY_DIR": str(Path(state_dir) / "identity"),
+            "TN_NO_LINK": "1",
+            "TN_STDOUT_FORMAT": stdout_format,
+            "TN_STDOUT_INCLUDE_ADMIN": "0",
+        }
+        env.pop("TN_NO_STDOUT", None)
+        proc = subprocess.run(
+            [sys.executable, str(EXAMPLES_DIR / name)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+            env=env,
+        )
+    if name == "ex08_stdout.py" and proc.returncode == 0:
+        assert "silent.event" not in proc.stdout
+        if stdout_format == "json":
+            envelopes = [json.loads(line) for line in proc.stdout.splitlines() if line.startswith("{")]
+            events = [item["event_type"] for item in envelopes]
+            assert events == ["app.booted", "order.created", "auth.retry"]
+        else:
+            for event in ("app.booted", "order.created", "auth.retry"):
+                assert event in proc.stdout
     return proc.returncode, proc.stdout + ("\n[stderr]\n" + proc.stderr if proc.stderr else "")
 
 
-_RUST_EXAMPLES: frozenset[str] = frozenset({"ex03_groups.py", "ex05_rotate.py"})
+def test_stdout_json():
+    rc, output = _run_example("ex08_stdout.py", stdout_format="json")
+    assert rc == 0, output
+    assert "file contains 4 event(s)" in output
 
 
 def test_all_examples():
     failures: list[str] = []
     for name, markers in _EXPECTATIONS:
         rc, output = _run_example(name)
-        if rc == 0 and name in _RUST_EXAMPLES and "SKIP:" in output:
-            # Example self-skipped because the Rust extension isn't built.
-            print(f"  [skip] {name} — Rust ext not built (SKIP marker)")
-            continue
         missing = [m for m in markers if m not in output]
         status = "ok" if rc == 0 and not missing else "FAIL"
         print(f"  [{status}] {name}")

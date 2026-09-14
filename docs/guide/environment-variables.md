@@ -1,8 +1,7 @@
 # Environment variables
 
-The `TN_*` parameters that control identity, the vault, which ceremony you're
-in, and headless/CI behaviour. Every value here has a sensible default — you
-only set these to override.
+The `TN_*` variables configure identity storage, vault credentials, ceremony
+selection, and output. The tables show each variable's purpose and default.
 
 > Tip: `tn show env` prints the variables this install reads right now, with
 > their current values and where each one resolves from.
@@ -11,18 +10,17 @@ only set these to override.
 
 ## Headless / CI credentials
 
-The single most confused area. There are **three** different credentials, at
-three different lifetimes — they are not interchangeable:
+TN uses these credentials for bundle installation, account enrollment, and
+authenticated vault requests:
 
 | Credential | Env var | Lifetime | What it does |
 |---|---|---|---|
-| API key | `TN_API_KEY` | durable | **Cold-starts a fresh node.** Carries a device seed (`tn_apikey_<seed>_<key_id>`); derives the DID, mints a session, pulls the sealed keystore bundle, and absorbs it. One env var → a fully provisioned machine. **The CI default.** |
+| API key | `TN_API_KEY` | durable or single-pickup, as issued | Carries a bootstrap signing seed (`tn_apikey_<seed>_<key_id>`) and bundle identifier. TypeScript's `bootstrapFromApiKey` helper uses it to authenticate and fetch a sealed bundle. |
 | Connect code | *(CLI arg, not an env var)* | one-shot | Enrolls an **already-existing** device's DID into an account: `tn auth connect tn_connect_<code>`. Works once, then it's spent. |
 | Session token | `TN_VAULT_SESSION_TOKEN` *(legacy alias `TN_VAULT_JWT`)* | ephemeral | A pre-authenticated session token that **skips the challenge** on vault calls. Carries no seed, bootstraps nothing. An escape hatch. |
 
-The API key mints the session token (`TN_API_KEY → challenge/verify → session
-token`). AWS analogy: `TN_API_KEY` ≈ an access key / service principal,
-`TN_VAULT_SESSION_TOKEN` ≈ a session token.
+The bootstrap helper uses the API key's signing seed to complete a
+challenge/verify exchange and obtain a session token.
 
 **The account passphrase.** `TN_ACCOUNT_PASSPHRASE` is the *account recovery
 passphrase*; it derives the account wrap key (AWK) that encrypts your keystore
@@ -30,9 +28,8 @@ passphrase*; it derives the account wrap key (AWK) that encrypts your keystore
 stored plaintext-at-rest today (`device_priv_enc_method: "none"`).
 
 ```bash
-# Cold-start a fresh machine from one durable credential:
+# Supply a credential to a configured bootstrap integration:
 export TN_API_KEY="tn_apikey_…"
-tn init my-project
 
 # Already enrolled — cache the backup key so backups run unattended:
 export TN_ACCOUNT_PASSPHRASE="correct horse battery staple"
@@ -41,6 +38,9 @@ tn auth login
 
 See [Authentication & accounts](auth.md) for how these flow through `tn init`,
 `tn auth`, and `tn account connect`.
+
+The [container guide](deploy-containers.md) shows mounted configuration and
+keys, and the explicit TypeScript bootstrap call.
 
 ---
 
@@ -85,7 +85,7 @@ remembered `linked_vault` > `TN_VAULT_URL` > the hosted default.
 | `TN_HOME` | Root for shared TN state | `~/.tn` |
 | `TN_RUN_ID` | Group emits from one run together (set automatically per process) | a fresh id per process |
 | `TN_STRICT` | Block ceremony auto-discovery; `init()` requires an explicit yaml (CI safety) | unset (auto-discover) |
-| `TN_NO_LINK` | Never contact the vault — offline-only ceremonies, and the env form of `link=false` | unset (link where appropriate) |
+| `TN_NO_LINK` | Disable automatic vault linking during initialization | unset (link where appropriate) |
 
 Discovery chain when `TN_YAML` is unset: `./tn.yaml` → `./.tn/default/tn.yaml` →
 a sole `./.tn/<project>/tn.yaml`. CLI verbs error rather than minting; library
@@ -98,7 +98,7 @@ detects a serverless runtime (Vercel, AWS Lambda, Netlify, Cloud Run, Azure
 Functions). `TN_NO_LINK=1` turns that off everywhere:
 
 ```bash
-export TN_NO_LINK=1     # offline-only; tn.init() never reaches the vault
+export TN_NO_LINK=1     # disable automatic linking during initialization
 ```
 
 ---
@@ -107,8 +107,8 @@ export TN_NO_LINK=1     # offline-only; tn.init() never reaches the vault
 
 | Var | Role | Default |
 |---|---|---|
-| `TN_NO_STDOUT` | Silence the stdout handler (the per-emit JSON echo) | unset (echo on) |
-| `TN_STDOUT_FORMAT` | `json` or `pretty` for the stdout handler | `json` |
+| `TN_NO_STDOUT` | Silence the stdout handler's per-emit console output | unset (echo on) |
+| `TN_STDOUT_FORMAT` | `json` or `pretty` for the stdout handler | `pretty` |
 | `TN_STDOUT_INCLUDE_ADMIN` | Include `tn.*` admin events in the stdout echo | unset |
 | `TN_AUTOINIT_QUIET` | Suppress the "minted a fresh ceremony" notice on auto-init | unset |
 

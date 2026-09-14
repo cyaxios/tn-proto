@@ -449,8 +449,8 @@ export interface EmitOpts {
   /** Additional-authenticated-data: a flat mapping of string -> scalar bound
    * (authenticated, not encrypted) to every group sealed on this row, merged
    * OVER any yaml per-group `aad` default and echoed into the public `tn_aad`
-   * block. Not yet wired through the native (btn) runtime — passing it on a
-   * btn ceremony throws. Omit (or empty) to bind nothing. */
+   * block. HIBE and JWE ceremonies support AAD; BTN ceremonies reject
+   * nonempty AAD. Omit (or empty) to bind nothing. */
   aad?: Record<string, unknown>;
 }
 

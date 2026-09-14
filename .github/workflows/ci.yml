@@ -30,8 +30,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      # Fails if VERSION, pyproject.toml, package.json, and version.ts disagree.
-      # The single-source guard that makes 0.6.1-vs-0.6.2 drift impossible.
+      # Check the TypeScript package and runtime version against VERSION.
+      # The Python release workflow checks its independent calendar version and tag.
       - run: python tools/bump.py --check
 
   python-tests:

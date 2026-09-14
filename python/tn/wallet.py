@@ -9,10 +9,8 @@ High-level verbs that operate on a LoadedConfig + VaultClient pair:
 These wrap the sealing + upload + manifest dance so the CLI and
 scenario code don't each re-invent it.
 
-Not wired into admin verbs (rotate, ensure_group, etc.) in V1 —
-callers must invoke sync explicitly after a state change. That keeps
-network I/O explicit and testable. A future pass may add an opt-in
-autosync flag inside admin.
+Call ``sync_ceremony`` for an explicit sync. Admin operations also invoke it
+when the ceremony has vault autosync enabled.
 """
 
 from __future__ import annotations

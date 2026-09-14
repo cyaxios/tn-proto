@@ -1,8 +1,7 @@
 // Re-export of the raw tn-wasm surface.
 //
-// The rest of the SDK wraps these with idiomatic TypeScript types. If
-// you need something the SDK does not yet expose, pull from here rather
-// than reimplementing the primitive.
+// The main SDK wraps these primitives with TypeScript types. Import
+// this module to use the low-level WASM API directly.
 
 export {
   adminReduce,

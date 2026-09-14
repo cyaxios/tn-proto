@@ -2,7 +2,7 @@
 
 Every TN-managed directory lives under
 ``<yaml_dir>/.tn/<yaml-stem>/`` so two yamls in one project don't
-collide on the same paths (FINDINGS #2). For a yaml at
+collide on the same paths. For a yaml at
 ``./_register.yaml`` the layout is::
 
     <yaml_dir>/_register.yaml                    ceremony config
@@ -94,13 +94,6 @@ def admin_outbox_dir(yaml_path: Path) -> Path:
     return _stem_dir(yaml_path) / "admin" / "outbox"
 
 
-def admin_inbox_dir(yaml_path: Path) -> Path:
-    """Reserved companion to :func:`admin_outbox_dir` — inbound admin
-    snapshots (vault → SDK) land here once that flow is implemented.
-    Created by :func:`admin_outbox_dir`-aware code paths only on demand."""
-    return _stem_dir(yaml_path) / "admin" / "inbox"
-
-
 def handler_outbox_dir(yaml_path: Path, handler_name: str) -> Path:
     """Per-network-handler durable retry queue path.
 
@@ -140,12 +133,3 @@ def tnpkg_filename(peer_did: str | None, kind: str, version: int) -> str:
     # here so callers can pass the dataclass field directly.
     safe = _DID_SAFE.sub("_", peer_did or "broadcast")
     return f"{safe}__{kind}__v{version}.tnpkg"
-
-
-def ensure_dirs(_yaml_path: Path) -> None:
-    """Deprecated. The eager-create-everything pattern produced ghost
-    directories visible to operators (FINDINGS S0.2). Each write site
-    now creates only the directories it actually uses, on demand. This
-    function is intentionally a no-op so legacy callers remain
-    source-compatible while the cleanup migrates."""
-    return

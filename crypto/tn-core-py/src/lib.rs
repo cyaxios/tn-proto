@@ -73,9 +73,20 @@ pub struct PyRuntime {
 #[pymethods]
 impl PyRuntime {
     #[staticmethod]
-    fn init(yaml_path: &str) -> PyResult<Self> {
+    #[pyo3(signature = (yaml_path, *, stdout=None))]
+    fn init(yaml_path: &str, stdout: Option<bool>) -> PyResult<Self> {
         guard(|| {
-            let rt = Runtime::init(Path::new(yaml_path)).map_err(err_to_py)?;
+            ::tn_core::perf::init_from_env();
+            let storage = Arc::new(::tn_core::storage::FsStorage::new());
+            let rt = Runtime::init_with_options(
+                Path::new(yaml_path),
+                storage,
+                ::tn_core::RuntimeInitOptions {
+                    stdout,
+                    ..Default::default()
+                },
+            )
+            .map_err(err_to_py)?;
             Ok(Self {
                 inner: Arc::new(rt),
             })

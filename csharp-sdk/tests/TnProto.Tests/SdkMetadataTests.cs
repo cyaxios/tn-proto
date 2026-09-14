@@ -5,7 +5,7 @@ namespace TnProto.Tests;
 public sealed class SdkMetadataTests
 {
     [Fact]
-    public void SdkMetadataUsesReservedPackageName()
+    public void SdkMetadataUsesPackageName()
     {
         Assert.Equal("TnProto", TnSdk.PackageName);
         Assert.Equal("preview", TnSdk.Status);

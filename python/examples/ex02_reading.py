@@ -4,15 +4,15 @@ Story
 -----
 Jamie's logs now exist (see ``ex01_hello.py``), but someone asks: "how
 do I know these are really from your production server and not something
-you wrote yesterday to cover your tracks?" Jamie opens the audit-grade
-view of the log and walks through what each entry carries.
+you wrote yesterday to cover your tracks?" Jamie inspects the signed
+envelopes and walks through what each entry carries.
 
 What this shows
 ---------------
   - ``tn.read()`` (the friendly form, ex01) yields :class:`tn.Entry`
     instances with typed attribute access — ``e.event_type``,
     ``e.fields``, ``e.row_hash``. ``tn.read(raw=True)`` exposes the
-    audit-grade shape: the on-disk envelope dict per line, with the
+    on-disk envelope dict per line, with the
     group-keyed ciphertext blocks intact.
   - The envelope holds public fields anyone can read + encrypted
     per-group payloads only holders of the right kit can decrypt.
@@ -22,8 +22,8 @@ What this shows
     re-checks signature/row_hash/chain, and raises
     :class:`tn.VerifyError` on the first failure.
   - Chains are per-event_type. Each event_type is an independent log.
-  - Anyone can verify a signature using only the ``did`` in the entry.
-    No network lookup, no central authority.
+  - The ``device_identity`` DID carries the public key used to verify
+    the entry's signature over its row hash.
 
 Run it
 ------
@@ -55,13 +55,6 @@ def main() -> int:
         # never hardcode `.tn/logs/tn.ndjson` in your own code.
         cfg = tn.current_config()
         log_path = cfg.resolve_log_path()
-        # NOTE: the example used to do `flush_and_close()` + `init()`
-        # here purely for narrative effect — "show what an auditor
-        # sees when they pick up the log later." Now that session-start
-        # rotation rolls the prior log to `<name>.1`, that flush+init
-        # would move the just-written entries into the backup file and
-        # leave the current file empty. Read in the same session
-        # instead; the demo is just as clear.
 
         # -------- anatomy of one entry (raw envelope on disk) -------------
         # tn.read(raw=True) yields the on-disk envelope dict for each
@@ -129,7 +122,6 @@ def main() -> int:
         ok = DeviceKey.verify(
             first_env["device_identity"], first_env["row_hash"].encode("ascii"), sig,
         )
-        # 0.4.3a1: the envelope's signer-identity key is `device_identity`.
         print(f"  DID      = {first_env['device_identity']}")
         print(f"  row_hash = {first_env['row_hash']}")
         print(f"  verify   = {ok}")

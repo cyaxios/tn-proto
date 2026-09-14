@@ -515,12 +515,12 @@ node bin/tn-js.mjs show profiles
 ```
 
 ```text
-NAME          ENCRYPTS  SIGNS  CHAINS  FLUSH     SINK
-------------  --------  -----  ------  --------  --------------
-transaction*  yes       yes    yes     fsync     file_rotating
-audit         yes       yes    yes     buffered  file_rotating
-secure_log    yes       yes    no      buffered  file_rotating
-telemetry     yes       no     no      async     stdout
+NAME          ENCRYPTS  SIGNS  CHAINS  SINK
+------------  --------  -----  ------  --------------
+transaction*  yes       yes    yes     file_rotating
+audit         yes       yes    yes     file_rotating
+secure_log    yes       yes    no      file_rotating
+telemetry     yes       no     no      stdout
 
 * = catalog default (used when tn.init() is called with no profile=).
 ```
@@ -535,9 +535,8 @@ telemetry     yes       no     no      async     stdout
       "encrypts": true,
       "signs": true,
       "chains": true,
-      "flush": "fsync",
       "default_sink": "file_rotating",
-      "intended_use": "Grants, revokes, payments, agent actions, security events. Maximum evidence: signed, chained, durable. Use when reconstruction and non-repudiation matter.",
+      "intended_use": "Signed and chained events for grants, payments, and application actions.",
       "default": true
     }
   ]

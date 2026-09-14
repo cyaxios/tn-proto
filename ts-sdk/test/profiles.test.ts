@@ -41,7 +41,6 @@ test("transaction profile properties", () => {
   const p = getProfile("transaction");
   assert.equal(p.signs, true);
   assert.equal(p.chains, true);
-  assert.equal(p.flush, "fsync");
   assert.equal(p.default_sink, "file_rotating");
   assert.equal(hasReplaySurface(p), true);
 });
@@ -50,7 +49,6 @@ test("audit profile properties", () => {
   const p = getProfile("audit");
   assert.equal(p.signs, true);
   assert.equal(p.chains, true);
-  assert.equal(p.flush, "buffered");
   assert.equal(p.default_sink, "file_rotating");
   assert.equal(hasReplaySurface(p), true);
 });
@@ -59,7 +57,6 @@ test("secure_log profile properties", () => {
   const p = getProfile("secure_log");
   assert.equal(p.signs, true);
   assert.equal(p.chains, false); // entries stand alone
-  assert.equal(p.flush, "buffered");
   assert.equal(p.default_sink, "file_rotating");
   assert.equal(hasReplaySurface(p), true);
 });
@@ -70,7 +67,6 @@ test("telemetry profile properties", () => {
   const p = getProfile("telemetry");
   assert.equal(p.signs, false);
   assert.equal(p.chains, false);
-  assert.equal(p.flush, "async");
   assert.equal(p.default_sink, "stdout");
 });
 

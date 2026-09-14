@@ -1,9 +1,9 @@
 # TN protocol reference
 
 This is the on-the-wire definition of the TN protocol, derived from the
-Rust core (the `tn-core` and `tn-btn` crates), which is the engine both
-the Python and TypeScript SDKs run through. Every record both SDKs write is
-byte-identical because both call this core.
+Rust core (the `tn-core` and `tn-btn` crates), used by the Python and
+TypeScript SDKs. Both SDKs use the same record format; separate writes include
+fresh identifiers and encryption randomness.
 
 A TN log is append-only NDJSON: one JSON record per line. Each record is a
 small public header plus one encrypted block per group, with the header
@@ -13,9 +13,8 @@ then decrypting the groups for which you hold a reader kit.
 
 > This document is a reference for what the SDK produces - useful for readers
 > and verifiers. For consistent, verifiable records, write them with the
-> top-level verbs (`tn.log`, `tn.info`, `tn.read`, ...); the shared Rust core
-> keeps every binding byte-identical, so you never need to build your own
-> record serializer.
+> top-level verbs (`tn.log`, `tn.info`, `tn.read`, ...), which handle record
+> construction and serialization.
 
 This reference has four parts:
 
@@ -550,11 +549,10 @@ amount   -> hmac-sha256:v1:30a3cfa3ce704cc7d8e1ea3943c5f8d2c5650c31f1a5a35b724c0
 currency -> hmac-sha256:v1:dd404179c2144de51be831edf3d4096c7a3bec61c2918fc367bb125ebad5915d
 ```
 
-A search service holding the per-group key can compute the token for a query
-value and match it against `field_hashes` to find records with that value,
-without ever decrypting the ciphertext or learning the plaintext of
-non-matching records. It learns only equality (which records share a value), not
-the values themselves.
+A search service holding the per-group index key can compute the token for a
+query value and match it against `field_hashes` without decrypting the body.
+A match identifies that queried value. Observers without the index key can
+compare tokens for equality within the same field and index-key domain.
 
 ### NDJSON log framing
 
@@ -827,14 +825,13 @@ master public key (`mpk`) and a master secret (`msk`); the authority holds the
 freshly generated `mpk`, or under an external authority's published `mpk`.
 
 The **SHA-256 fingerprint of the `mpk` identifies exact MPK bytes; it does not
-authenticate the authority**. The current external-writer setup accepts raw MPK
-bytes and validates their encoding, but does not know an expected fingerprint.
-Before sealing, a writer must obtain the expected fingerprint through an
-authenticated channel or verify a signed authority statement against an
-already-trusted signer, then compare it with the loaded MPK. A package manifest
-or self-consistent signature is not an authority trust root unless its signer is
-authenticated separately. A compromise of an authenticated authority root is
-then bounded to groups that deliberately trust that MPK.
+authenticate the authority**. Python's external-writer setup stages MPK bytes
+and validates their encoding. Before sealing, the writer installs a signed
+authority assertion using `tn.admin.install_authority_assertion` and an
+independently accepted authority DID. The assertion binds the writer, ceremony,
+group, MPK, depth, path, epoch, and expiry; subsequent seals check the installed
+pin. See the [external-writer setup](jwe-hibe-key-ceremonies.md#external-authority-writer).
+The low-level HIBE primitive still encrypts with public parameters alone.
 
 #### Identity paths
 
@@ -989,9 +986,11 @@ data is, what it is for, what it must not be used for, what it is authoritative
 for, and what to do on violation or error - sealed and signed onto every record
 of that type, so a reader gets the rules from the same record as the data.
 
-Two properties shape it. First, it **declares; it does not enforce.** The core
-only splices the fields onto the record and seals them; acting on the
-declaration is the job of a consuming policy engine. Second, a record carries
+The event-stream runtime splices the declarations onto the record and seals
+them. The consuming application evaluates their meaning. The
+[governed object API](../GOVERNED_PYTHON_API.md#decision-contexts) supplies the
+authenticated contract and requested use to its admission callback before
+opening business data. A record carries
 **exactly one** `tn.agents` block - the governance of the data is the governance
 of the data, addressed to every entitled reader alike. Reader-specific content
 is an ordinary group, not a second policy.

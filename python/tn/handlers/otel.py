@@ -90,7 +90,7 @@ def _make_log_record(
 ) -> Any:
     """Build an OTel LogRecord using the installed SDK if available.
 
-    Returns a duck-typed object if the SDK is absent (no-ops downstream).
+    Returns a dictionary record for the supplied logger if the SDK is absent.
     """
     try:
         # Probe for the LogData symbol that was renamed/removed in newer OTel
@@ -118,8 +118,7 @@ def _make_log_record(
             attributes=attributes,
         )
     except ImportError:
-        # SDK not available — return a plain dict so callers can still
-        # inspect it in tests without a real OTel install.
+        # A supplied logger can consume dictionary records without the SDK.
         return {
             "severity_number": severity_number,
             "severity_text": severity_text,

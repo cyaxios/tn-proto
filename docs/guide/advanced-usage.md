@@ -47,7 +47,7 @@ with tn.session() as s:
 
 `tn.session()` creates an isolated tmpdir ceremony for the duration of the block. The handle's verbs (`s.info`, `s.read`, ...) match the module-level ones, and `s.log` returns the written envelope just like `tn.log`. Use it for tests and short-lived processes that should not leave a `./.tn/` on disk.
 
-For the long-running-process case, just call `tn.init()` once at startup; the global runtime stays for the life of the interpreter and drains on exit (there is no explicit flush).
+For a long-running process, call `tn.init()` once at startup and `tn.flush_and_close()` at shutdown to drain handlers and release the runtime. Interpreter exit also attempts that cleanup.
 
 ---
 

@@ -1,7 +1,6 @@
 """Frank s01 — cross-machine decrypt.
 
-THE central property check the user asked for:
-"If I have the read file, I can read my log on another machine."
+Restore ceremony keys on a second machine and decrypt a transferred log.
 
 Flow:
 1. Laptop A: fresh identity, fresh ceremony, link to vault, log 100 entries.

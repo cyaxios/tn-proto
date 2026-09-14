@@ -17,11 +17,10 @@ for accepted dataset editions and native ancestry verification.
 
 ## Event stream examples
 
-Progressive scenarios that teach the `tn.*` SDK from "hello world" to
-rotation, fan-out, and revocation. Each `ex0*.py` file is self-contained:
-it creates its own ceremony in a temporary directory and tears it down at
-the end, so there are no prerequisites. You do not need to run `tn init`
-first, and nothing is written outside the temp dir.
+These examples cover writing and reading events, sharing encrypted groups,
+managing recipient keys, and configuring output handlers. Install `tn-proto`
+first. Each `ex0*.py` file creates a ceremony in a temporary directory and
+cleans it up on exit.
 
 Run any one of them directly from the `python/` directory:
 
@@ -30,7 +29,7 @@ python examples/ex01_hello.py
 ```
 
 The `ex0*` files are also executed by
-[`tests/test_examples.py`](../tests/test_examples.py) on every commit. For
+[`tests/test_examples.py`](../tests/test_examples.py). For
 installation, configuration, and CLI examples, see the
 [getting started guide](../../docs/guide/getting-started.md).
 
@@ -38,24 +37,16 @@ installation, configuration, and CLI examples, see the
 
 | File | Demonstrates | Run |
 |---|---|---|
-| `ex01_hello.py` | First `tn.init()`, three `tn.info()` entries, `tn.read()` them back as flat dicts. | `python examples/ex01_hello.py` |
-| `ex02_reading.py` | Envelope shape, `tn.read(raw=True)`, signature and chain verification, tamper detection. | `python examples/ex02_reading.py` |
-| `ex03_groups.py` | Routing fields into groups so PII and finance stay encrypted; reading as publisher vs as a partner holding only the `default` kit. | `python examples/ex03_groups.py` |
+| `ex01_hello.py` | Initialize a ceremony, write three events, and read them as `Entry` objects with decrypted fields. | `python examples/ex01_hello.py` |
+| `ex02_reading.py` | Inspect envelopes with `tn.read(raw=True)`, verify the log's signatures and chains, and verify a signature using its public key. | `python examples/ex02_reading.py` |
+| `ex03_groups.py` | Keep customer details and internal diagnostics encrypted while a partner reads with only the `default` kit. | `python examples/ex03_groups.py` |
 | `ex05_rotate.py` | Mint a recipient kit, then revoke it: old ciphertexts stay decryptable, new ones do not. | `python examples/ex05_rotate.py` |
 | `ex06_multi_handler.py` | The `handlers:` fan-out in `tn.yaml`: size-rotated and daily files, with separate filters for auth and page events. | `python examples/ex06_multi_handler.py` |
 | `ex07_context.py` | `tn.set_context(**kwargs)` under concurrent asyncio load: per-task isolation, fields picked up automatically downstream. | `python examples/ex07_context.py` |
-| `ex08_stdout.py` | The default stdout handler: every emit prints the canonical envelope JSON, plus the `TN_NO_STDOUT=1` and `stdout=False` opt-outs. | `python examples/ex08_stdout.py` |
-
-## Standalone demo
-
-| File | Demonstrates | Run |
-|---|---|---|
-| `demo_revocation.py` | btn add/revoke through the Python skin on the Rust runtime, with a verbose printout. Pass `--legacy` for the pre-Rust comparison path. | `python examples/demo_revocation.py` |
+| `ex08_stdout.py` | Readable stdout output, `TN_STDOUT_FORMAT=json` for envelope JSON, and `stdout=False` for file-only output. | `python examples/ex08_stdout.py` |
 
 ## Benchmarks
 
-The `bench_*.py` files are perf harnesses, not teaching examples: 1 KB
-emit breakdown, info/read timing, signing cost, and file-isolate
-microbench. Each writes a sibling `*.results.md`. They are dev tooling,
-not part of the `tn` package, and are not exercised by the example test
-suite.
+The `bench_*.py` scripts measure emit/read timing, signing cost, and file
+writes. They print results; the emit/read and signing scripts also save a
+sibling `*.results.md` file.

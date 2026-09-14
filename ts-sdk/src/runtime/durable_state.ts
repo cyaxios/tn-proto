@@ -131,7 +131,7 @@ export function withDurableFileLock<T>(lockPath: string, fn: () => T): T {
         }
       }
       if (Date.now() >= deadline) {
-        throw new Error(`state lock timeout: ${lockPath} is still held`);
+        throw new Error(`state lock timeout: ${lockPath} is still held`, { cause: err });
       }
       sleepSync(LOCK_RETRY_MS);
     }

@@ -122,6 +122,7 @@ impl WasmRuntime {
         let init_opts = RuntimeInitOptions {
             skip_ceremony_init_emit,
             skip_policy_published_emit,
+            ..Default::default()
         };
         let rt = Runtime::init_with_options(Path::new(&normalized), storage, init_opts)
             .map_err(|e| JsError::new(&e.to_string()))?;

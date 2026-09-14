@@ -42,8 +42,8 @@ test("show profiles: default format (no --format) renders the human table", asyn
   assert.equal(code, 0);
 
   // Header + separator rule.
-  assert.match(out, /^NAME {10}ENCRYPTS {2}SIGNS {2}CHAINS {2}FLUSH {5}SINK {10}\n/);
-  assert.match(out, /\n-{12} {2}-{8} {2}-{5} {2}-{6} {2}-{8} {2}-{14}\n/);
+  assert.match(out, /^NAME {10}ENCRYPTS {2}SIGNS {2}CHAINS {2}SINK {10}\n/);
+  assert.match(out, /\n-{12} {2}-{8} {2}-{5} {2}-{6} {2}-{14}\n/);
 
   // Footer marker legend.
   assert.match(
@@ -80,19 +80,18 @@ test("show profiles: human format marks the default profile with '*'", async () 
   );
 });
 
-test("show profiles: human rows render yes/no booleans and flush/sink", async () => {
+test("show profiles: human rows render yes/no booleans and sink", async () => {
   const { out } = await capture({ format: "human" });
   const lines = out.split("\n");
 
   for (const name of allProfileNames()) {
     const p = getProfile(name);
     // Find the table row for this profile (starts with the name).
-    const row = lines.find((l) => l.startsWith(name) && l.includes(p.flush));
+    const row = lines.find((l) => l.startsWith(name) && l.includes(p.default_sink));
     assert.ok(row, `no table row for ${name}`);
     assert.ok(row.includes(p.encrypts ? "yes" : "no"));
     assert.ok(row.includes(p.signs ? "yes" : "no"));
     assert.ok(row.includes(p.chains ? "yes" : "no"));
-    assert.ok(row.includes(p.flush));
     assert.ok(row.includes(p.default_sink));
   }
 });
@@ -108,7 +107,6 @@ test("show profiles: --format json emits the full catalog payload", async () => 
       encrypts: boolean;
       signs: boolean;
       chains: boolean;
-      flush: string;
       default_sink: string;
       intended_use: string;
       default: boolean;
@@ -125,7 +123,7 @@ test("show profiles: --format json emits the full catalog payload", async () => 
     assert.equal(j.encrypts, p.encrypts);
     assert.equal(j.signs, p.signs);
     assert.equal(j.chains, p.chains);
-    assert.equal(j.flush, p.flush);
+    assert.ok(!Object.hasOwn(j, "flush"));
     assert.equal(j.default_sink, p.default_sink);
     assert.equal(j.intended_use, p.intended_use);
     assert.equal(j.default, p.name === DEFAULT_PROFILE);

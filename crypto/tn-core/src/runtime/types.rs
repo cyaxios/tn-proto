@@ -308,11 +308,8 @@ pub struct SecureReadOptions {
 /// [`SecureReadOptions`] pattern: a small `Default`-able struct that
 /// extends the load path without bloating the function signature.
 ///
-/// The single knob today is the `tn.ceremony.init` auto-emit. SDK
-/// wrappers that already initialized the ceremony out-of-band (e.g.
-/// the TS `NodeRuntime` lazily attaching a `WasmRuntime` mid-process)
-/// need to skip the auto-emit so they don't double-attest the
-/// ceremony from two runtimes.
+/// SDK wrappers can control stdout and skip lifecycle events they have
+/// already emitted while initializing the ceremony.
 #[derive(Default, Clone, Debug)]
 pub struct RuntimeInitOptions {
     /// If true, skip the auto-emit of `tn.ceremony.init` even when no
@@ -328,6 +325,8 @@ pub struct RuntimeInitOptions {
     /// log ends up with a duplicate event. SDK wrappers that own the
     /// policy-published lifecycle on their side set this flag.
     pub skip_policy_published_emit: bool,
+    /// Override the stdout handler for this runtime. None uses YAML and environment settings.
+    pub stdout: Option<bool>,
 }
 
 /// Six writer-authored policy fields surfaced as a separate concern by

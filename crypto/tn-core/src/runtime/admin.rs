@@ -157,6 +157,7 @@ impl Runtime {
                 RuntimeInitOptions {
                     skip_ceremony_init_emit: true,
                     skip_policy_published_emit: true,
+                    ..Default::default()
                 },
             )?;
         }

@@ -138,6 +138,7 @@ pub(crate) struct GroupState {
 pub struct Runtime {
     pub(crate) yaml_path: PathBuf,
     pub(crate) cfg: Config,
+    pub(crate) stdout_override: Option<bool>,
     pub(crate) device: DeviceKey,
     pub(crate) chain: ChainState,
     /// Per-group state wrapped in RwLock so admin verbs can swap the cipher

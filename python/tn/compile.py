@@ -212,22 +212,19 @@ def compile_kit_bundle(
     cfg: LoadedConfig | None = None,
     yaml_path: Path | str | None = None,
     groups: list[str] | None = None,
-    label: str | None = None,
-    note: str | None = None,
     full: bool = False,
     confirm_includes_secrets: bool = False,
 ) -> Path:
     """Build a `.tnpkg` archive containing the keystore's reader kits.
 
-    This is now a thin wrapper around ``tn.export(kind="kit_bundle")`` /
+    This wraps ``tn.export(kind="kit_bundle")`` /
     ``tn.export(kind="full_keystore")`` — every produced archive carries
     the universal signed manifest header. The kits themselves still live
     inside the zip body at ``body/<group>.btn.mykit`` so chrome-ext /
     tn-js consumers can scan them.
 
     Provide either ``keystore_dir`` or ``yaml_path`` (or an already
-    loaded ``cfg``). The body shape is the same as before; the manifest
-    header is new.
+    loaded ``cfg``). The configuration supplies the manifest signer.
     """
     if full and not confirm_includes_secrets:
         raise ValueError(

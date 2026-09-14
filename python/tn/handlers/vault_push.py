@@ -447,8 +447,6 @@ class VaultPushHandler(TNHandler):
         ``manifest.recipient_identity`` to be present so the snapshot lands in that
         DID's per-recipient inbox. Leaving this ``None`` produces an
         unaddressed snapshot that the vault will reject with HTTP 422.
-        Future versions may auto-derive this from the active group's
-        recipient roster; for now it's an explicit config knob.
     filter_spec
         Optional standard handler filter dict.
     """

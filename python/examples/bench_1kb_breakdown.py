@@ -1,12 +1,10 @@
 """Where does the time go for a 1 KB message, through the Python skin?
 
-Times each phase of tn.info / tn.read independently so you can see what the
-18-19k events/s `tn.info` number and the 5k events/s `tn.read` number are
-actually made of.
+Times the public Python and direct PyO3 emit/read calls with 1 KB payloads.
 
 Run:
 
-    .venv/Scripts/python.exe tn_proto/python/examples/bench_1kb_breakdown.py
+    python python/examples/bench_1kb_breakdown.py
 """
 
 from __future__ import annotations
@@ -77,16 +75,11 @@ def main() -> int:
             direct_emit_us.append((time.perf_counter() - t0) * 1e6)
         results.append(("PyRuntime.emit (no tn.info wrapper)", direct_emit_us))
 
-        # Step 3: Python tn.info when FORCE_PYTHON - proxy for Python pipeline.
-        # We can't flip that in-process after init, so skip; the earlier bench
-        # already captured this (~164 us at 1 KB). Note it for comparison.
-
         # ================================================================
         # READ BREAKDOWN
         # ================================================================
 
-        # Make sure the log has exactly N_EMIT events (it has warmups too).
-        # We'll time reads as "total_us / entries_count" so count doesn't matter.
+        # Divide each read duration by the number of returned entries.
 
         # Phase R1: full tn.read(raw=True) — through the skin
         # (PyRuntime.read -> PyO3 convert to Py list of dicts -> _rust_entries_with_valid -> yield loop)
@@ -112,11 +105,6 @@ def main() -> int:
         # Phase R3: How big was the overhead between R1 and R2?
         # That's the `_rust_entries_with_valid` cost (chain walk + adds `valid` dict per entry).
         # Derived, not measured directly below.
-
-        # Phase R4: PyO3-level cost WITHOUT plaintext construction.
-        # We don't have a knob to skip plaintext; but we can time the same pass
-        # and include an assertion that decodes were done.
-        # Use this as reference: the actual decrypt+PyO3 conversion per entry.
 
         # ================================================================
         # ISOLATE PyO3 BOUNDARY COST

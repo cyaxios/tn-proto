@@ -363,26 +363,6 @@ export interface ApiKeyFetchResult {
 }
 
 /**
- * Thrown when the unseal+install bridge isn't available — i.e. the
- * caller is on an older TS SDK that hasn't been rebuilt against the
- * sealed-bundle absorb path. Today's `bootstrapFromApiKey` always
- * completes the install in-process, so this is unreachable on this
- * branch; kept exported for type compatibility with the previous shape.
- *
- * @deprecated Reachable on older branches only; this branch lands the
- * unseal+install integration so the success path returns an
- * `ApiKeyFetchResult` directly.
- */
-export class UnsealNotWiredError extends Error {
-  readonly result: ApiKeyFetchResult | { sealedBytes: Uint8Array; vaultBase: string; did: string };
-  constructor(result: ApiKeyFetchResult | { sealedBytes: Uint8Array; vaultBase: string; did: string }) {
-    super(`UnsealNotWiredError (deprecated): unseal+install is now wired in absorbSealedBootstrap.`);
-    this.name = "UnsealNotWiredError";
-    this.result = result;
-  }
-}
-
-/**
  * Run the full cold-start from a `TN_API_KEY` bearer.
  *
  * 1. Read `TN_API_KEY` from env (or accept `opts.apiKey` for explicit
@@ -563,21 +543,3 @@ export async function bootstrapFromApiKey(opts: {
     receipt,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Wired-in: the unseal+install bridge.
-// ---------------------------------------------------------------------------
-//
-// The success path now calls `absorbSealedBootstrap(sealedBytes,
-// {seed, cwd})` from `runtime/absorb_bootstrap.ts`. That function
-// reads the tnpkg, picks the recipient wrap whose `recipient_identity`
-// matches the seed-derived DID, unseals the BEK with `unsealBekFromWrap`
-// (from `core/recipient_seal.ts`), decrypts `body/encrypted.bin` with
-// `decryptBodyBlob` (from `core/body_encryption.ts`), and dispatches
-// to the existing `_bootstrapProjectSeed` / `_bootstrapIdentitySeed`
-// installers. Returns an `AbsorbReceipt` exactly like the rest of the
-// absorb surface — `rejectedReason` populated on any failure path.
-//
-// The `UnsealNotWiredError` class above is retained as a deprecated
-// no-op export for type compatibility with callers of older SDK
-// versions; it is no longer thrown by this file.

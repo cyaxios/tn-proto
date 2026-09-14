@@ -329,9 +329,8 @@ For unattended runs there are **three** distinct credentials — see
 the full table. The short version:
 
 ```bash
-# Cold-start a fresh machine from one durable credential (the CI default):
+# Supply the credential to an explicit bootstrap integration:
 export TN_API_KEY="tn_apikey_…"
-tn init my-project --no-link        # keystore is provisioned from the sealed bundle
 
 # Already enrolled — just cache the backup key non-interactively:
 export TN_ACCOUNT_PASSPHRASE="…"
@@ -340,9 +339,13 @@ tn auth login
 
 | Credential | Env var | Lifetime |
 |---|---|---|
-| API key (cold-start a node) | `TN_API_KEY` | durable |
+| API key (explicit bootstrap) | `TN_API_KEY` | durable or single-pickup, as issued |
 | Connect code (enroll a device) | *CLI arg* `tn auth connect <code>` | one-shot |
 | Session token (skip the challenge) | `TN_VAULT_SESSION_TOKEN` | ephemeral |
+
+The [container guide](deploy-containers.md) shows provisioned configuration and
+keys mounted at runtime, plus TypeScript's explicit `bootstrapFromApiKey` call.
+Check the bootstrap result before opening the installed project.
 
 ---
 

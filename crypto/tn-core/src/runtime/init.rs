@@ -283,7 +283,9 @@ impl Runtime {
         // moved off the Python emit path — without it, chained
         // templated ceremonies reset every event_type's
         // (sequence, prev_hash) to (1, ZERO) on each restart.
-        let mut saw_ceremony_init = if log_path_template.is_templated() {
+        let mut saw_ceremony_init = if cfg.ceremony.protocol_events_location != "main_log" {
+            seed_split_log_chains(&cfg, &yaml_dir, device.did(), &chain, &storage)?
+        } else if log_path_template.is_templated() {
             seed_chain_from_template(&log_path_template, &chain, &storage)?
         } else {
             seed_chain_from_log(&log_path, &chain, &storage)?
@@ -410,6 +412,7 @@ impl Runtime {
             owned_tempdir: None,
             agent_policies,
             handlers: Mutex::new(Vec::new()),
+            stdout_override: opts.stdout,
             storage,
             // Honor $TN_RUN_ID if the host (e.g. the Python wrapper) has
             // already minted one for this process. Otherwise mint a fresh
@@ -445,8 +448,11 @@ impl Runtime {
     pub fn reload_with_options(
         &mut self,
         storage: Arc<dyn crate::storage::Storage>,
-        opts: RuntimeInitOptions,
+        mut opts: RuntimeInitOptions,
     ) -> Result<()> {
+        if opts.stdout.is_none() {
+            opts.stdout = self.stdout_override;
+        }
         let yaml_path = self.yaml_path.clone();
         let owned_tempdir = self.owned_tempdir.take();
         let mut next = Self::init_with_options(&yaml_path, storage, opts)?;
@@ -484,7 +490,10 @@ impl Runtime {
             .iter()
             .find(|h| h.get("kind").and_then(|v| v.as_str()) == Some("stdout"));
         let yaml_silences_stdout = !self.cfg.handlers.is_empty() && stdout_entry.is_none();
-        if std::env::var("TN_NO_STDOUT").as_deref() != Ok("1") && !yaml_silences_stdout {
+        let stdout_enabled = opts.stdout.unwrap_or_else(|| {
+            std::env::var("TN_NO_STDOUT").as_deref() != Ok("1") && !yaml_silences_stdout
+        });
+        if stdout_enabled {
             // Honour an explicit ``format:`` on the yaml stdout entry so a
             // yaml that asks for json gets json by default. The
             // ``TN_STDOUT_FORMAT`` env var still wins (resolved per-emit
@@ -839,4 +848,126 @@ impl Runtime {
             yaml_dir_path.join(p)
         }
     }
+}
+
+// Restore split logs together so older admin tips cannot overwrite newer
+// main-log tips. Imported admin rows belong to their signer's own chain.
+fn seed_split_log_chains(
+    cfg: &crate::config::Config,
+    yaml_dir: &Path,
+    did: &str,
+    chain: &ChainState,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Result<bool> {
+    let mut latest = std::collections::HashMap::<String, (u64, String)>::new();
+    let mut saw_ceremony_init = false;
+    for (raw, admin_only) in [
+        (cfg.logs.path.as_str(), false),
+        (cfg.ceremony.protocol_events_location.as_str(), true),
+    ] {
+        let template =
+            crate::path_template::PathTemplate::parse(raw, yaml_dir, &cfg.ceremony.id, did)?;
+        for path in matching_log_paths(&template, yaml_dir, storage) {
+            let reader = match crate::log_file::LogFileReader::open(&path, storage) {
+                Ok(reader) => reader,
+                Err(error) if !template.is_templated() => return Err(error),
+                Err(_) => continue,
+            };
+            for envelope in reader.flatten() {
+                let Some(event_type) = envelope.get("event_type").and_then(Value::as_str) else {
+                    continue;
+                };
+                let is_admin = event_type.starts_with("tn.");
+                if admin_only && !is_admin {
+                    continue;
+                }
+                // Validate the row against its configured path, including old dates.
+                let date = envelope
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.get(..10))
+                    .unwrap_or("");
+                let Ok(row_template) = crate::path_template::PathTemplate::parse(
+                    &raw.replace("{date}", date),
+                    yaml_dir,
+                    &cfg.ceremony.id,
+                    did,
+                ) else {
+                    continue;
+                };
+                let event_id = envelope
+                    .get("event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if row_template.render(event_type, event_id) != path {
+                    continue;
+                }
+                saw_ceremony_init |= event_type == "tn.ceremony.init";
+                if is_admin && envelope.get("device_identity").and_then(Value::as_str) != Some(did)
+                {
+                    continue;
+                }
+                let Some(sequence) = envelope.get("sequence").and_then(Value::as_u64) else {
+                    continue;
+                };
+                let Some(row_hash) = envelope.get("row_hash").and_then(Value::as_str) else {
+                    continue;
+                };
+                if latest
+                    .get(event_type)
+                    .map_or(true, |(prior, _)| sequence > *prior)
+                {
+                    latest.insert(event_type.to_owned(), (sequence, row_hash.to_owned()));
+                }
+            }
+        }
+    }
+    chain.seed(latest);
+    Ok(saw_ceremony_init)
+}
+
+// Expand only the configured template's path components through Storage.
+fn matching_log_paths(
+    template: &crate::path_template::PathTemplate,
+    yaml_dir: &Path,
+    storage: &Arc<dyn crate::storage::Storage>,
+) -> Vec<PathBuf> {
+    let pattern = crate::pathutil::resolve(yaml_dir, Path::new(&template.glob_pattern()));
+    let mut paths = vec![PathBuf::new()];
+    for component in pattern.components() {
+        let name = component.as_os_str().to_string_lossy();
+        if name.contains('*') {
+            paths = paths
+                .into_iter()
+                .flat_map(|parent| storage.list(&parent).unwrap_or_default())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .is_some_and(|file| matches_log_component(&name, &file.to_string_lossy()))
+                })
+                .collect();
+        } else {
+            for path in &mut paths {
+                path.push(component.as_os_str());
+            }
+        }
+    }
+    paths
+        .into_iter()
+        .filter(|path| storage.exists(path))
+        .collect()
+}
+
+fn matches_log_component(pattern: &str, name: &str) -> bool {
+    let parts: Vec<_> = pattern.split('*').collect();
+    let Some(mut rest) = name.strip_prefix(parts[0]) else {
+        return false;
+    };
+    for part in &parts[1..parts.len() - 1] {
+        let Some(offset) = rest.find(part) else {
+            return false;
+        };
+        rest = &rest[offset + part.len()..];
+    }
+    rest.ends_with(parts[parts.len() - 1])
 }

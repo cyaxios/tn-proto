@@ -147,7 +147,8 @@ Args:
     _sign: Per-call override for envelope signing. ``None`` (the
         default) falls through to the session-level / yaml-level
         ``sign`` flag; ``True`` forces a signature on this row;
-        ``False`` skips signing.
+        ``False`` skips signing on the native runtime; the Python fallback
+        rejects it before writing.
     aad: Optional additional-authenticated-data. A flat mapping of
         string -> scalar bound (authenticated, not encrypted) to every
         group sealed on this row, merged OVER any per-group ``aad``
@@ -330,12 +331,13 @@ def log(
             foreign logger's level name (``loguru_record["level"]``).
         _sign: Per-call signing override. ``None`` falls through to
             the session/yaml default; ``True`` forces signing;
-            ``False`` skips it.
+            ``False`` skips it on the native runtime; the Python fallback
+            rejects it before writing.
         aad: Optional additional-authenticated-data mapping bound to
             every group sealed on this row (authenticated, not
             encrypted), merged over any yaml per-group ``aad`` default
-            and echoed into the public ``tn_aad`` block. Native-runtime
-            (btn) limited — raises on btn ceremonies. Default ``None``.
+            and echoed into the public ``tn_aad`` block. BTN, HIBE, and JWE
+            bind these markers when sealing. Default ``None``.
         **fields: Plaintext fields to encrypt into the configured
             groups and chain into the log. JSON-shaped values plus
             TN sentinels (bytes -> ``$b64``, Decimal -> string,
